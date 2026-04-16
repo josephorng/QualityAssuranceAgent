@@ -1,0 +1,23 @@
+[project]
+name = "computer-use-agent"
+version = "0.1.0"
+description = "Local-first computer use agent scaffold with Eye/Brain/Hand architecture."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pyautogui>=0.9.54",
+  "pillow>=11.0.0",
+]
+
+[project.scripts]
+computer-use-agent = "computer_use_agent.main:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,13 @@
+{
+  "screenshot_interval_seconds": 2,
+  "similarity_threshold": 0.985,
+  "brain_memory_max_chars": 16000,
+  "folder_name_model": "gemma4-e2b",
+  "brain_model": "gemma4-e2b",
+  "context_summarizer_model": "gemma4-e2b",
+  "max_cycles": 8,
+  "default_retrieve_tools": [
+    "get_running_programs",
+    "mock_ocr"
+  ]
+}

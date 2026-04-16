@@ -1,0 +1,20 @@
+{
+  "summarize_context": [
+    {
+      "prompt": "Summarize the following memory while preserving unresolved tasks and critical observations.",
+      "models": ["gemma4-e2b"]
+    }
+  ],
+  "describe_screenshot": [
+    {
+      "prompt": "Describe the active window, key text, visible controls, and what changed from prior state.",
+      "models": ["gemma4-e2b"]
+    }
+  ],
+  "brain_next_action": [
+    {
+      "prompt": "Given screenshot context and memory, choose one next tool call or mark task done.",
+      "models": ["gemma4-e2b"]
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+fastapi>=0.115.5
+# Starlette 1.x removed Router(on_startup=...); keep <1 until FastAPI pins a compatible pair.
+starlette>=0.40.0,<1.0.0
+uvicorn
+httpx
+pydantic
+pydantic-settings
+python-dotenv
+Pillow
+numpy
+scikit-image
+mss
+pyautogui
+pytest

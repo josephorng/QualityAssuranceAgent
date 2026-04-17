@@ -1,0 +1,32 @@
+{
+  "summarize_context": [
+    {
+      "prompt": "Summarize the following long-term memory into concise actionable context while preserving goals, constraints, and pending tasks.",
+      "models": ["gemma4:e2b", "gemma3:4b"]
+    }
+  ],
+  "describe_screenshot": [
+    {
+      "prompt": "Describe the current desktop screenshot. Include active app/window, visible UI elements, key text, warnings/dialogs, and suggested immediate interaction targets.",
+      "models": ["gemma4:e2b", "gemma3:4b"]
+    }
+  ],
+  "verify_change_requires_thinking": [
+    {
+      "prompt": "Given previous and current screenshot descriptions, answer if this is a meaningful state change requiring new reasoning. Return only JSON with keys: requires_thinking (bool), reason (string).",
+      "models": ["gemma4:e2b", "gemma3:4b"]
+    }
+  ],
+  "brain_decide_action": [
+    {
+      "prompt": "Given task objective, screenshot context, recent memory, previous action result, and available tools, decide the single best next tool call. Return strict JSON with action, args, and rationale.",
+      "models": ["gemma4:e2b", "gemma3:4b"]
+    }
+  ],
+  "classify_interruption": [
+    {
+      "prompt": "Determine whether the newly arrived state interrupts current reasoning. Return strict JSON with interruption (bool), replace_state (bool), and reason.",
+      "models": ["gemma4:e2b", "gemma3:4b"]
+    }
+  ]
+}

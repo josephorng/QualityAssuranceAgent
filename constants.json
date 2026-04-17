@@ -1,0 +1,14 @@
+{
+  "eye_vlm": "gemma4:e2b",
+  "brain_lm": "gemma4:e2b",
+  "ollama_host": "http://localhost:11434",
+  "screenshot_interval_seconds": 2,
+  "screenshot_similarity_threshold": 0.985,
+  "brain_memory_max_chars": 16000,
+  "ports": {
+    "eye": 8001,
+    "brain": 8002,
+    "hand": 8003
+  },
+  "debug": true
+}

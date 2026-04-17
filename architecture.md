@@ -57,9 +57,12 @@ This is a computer use agent project. We will use python and interactive cli to 
 
 ### Brain Server:
 
-- If the brain retrieve a new screenshot description from Eye when it is still thinking. Ask the {model in the constant} if the new screenshot is an interruption or not. 
-  - If it is an interruption then put the current processing subtask in a stack. 
+- If the brain retrieves a new screenshot description from Eye when it is still thinking. Ask the {model in the constant} if the new screenshot is an interruption or not. 
+  - If it is an interruption then put the current processing subtask in a stack.
   - If it is a new state that replace the previous one, then stop the previous thinking and start the new thinking on the new arrived screenshot.
+- If the brain retrieves a new screenshot in idle state, check if the screenshot is similar to any of the screenshot image in the stack.
+  - If there is a screenshot in the stack highly similar to the new screenshot, then take out this unfinished thinking process, and proceed with it.
+  - If there is no screenshot found matching in the stack, then start a new one.
 - Based on the input description of the image, the Brain will decide the new action with {model in the constant.json} provided with MCP tools and the "previous action" from the "Hand Server" if it exists.
 - There are two kinds of MCP tools:
   - Interact with the computer: open the cmd window, click a target, type something, moving mouse... 
@@ -104,8 +107,8 @@ Each server hosts a lightweight FastAPI instance on a dedicated local port. This
 This architecture is specifically designed to handle the **Interrupt Logic** required for dynamic UI elements like warning dialogues:
 
 1. **The Eye** detects a new dialogue box and sends a request to `localhost:8002/new_event`.
-2. **The Brain's** FastAPI endpoint sets an internal `interrupt_flag`.
-3. The **Brain's** logic loop checks this flag; if `True`, it kills the current thinking process, logs the interruption in `brain.txt`, and starts a new inference based on the latest screenshot.
+2. **The Brain's** FastAPI endpoint run the llm to check if it is truly an interruption and then sets an internal `interrupt_flag` if it is an interruption.
+3. The **Brain's** logic loop checks this flag; if `True`, it put the current thinking process in a stack, logs the interruption in `brain.txt`, and starts a new inference based on the latest screenshot.
 
 ### 4. Data Consistency
 

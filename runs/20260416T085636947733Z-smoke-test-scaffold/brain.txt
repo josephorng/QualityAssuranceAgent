@@ -1,1 +1,0 @@
-[20260416T085637011283Z.png] description=Mock description: screenshot captured from desktop; file=20260416T085637011283Z.png. Integrate real Gemma call here. thought=Stopping because max cycle limit reached.

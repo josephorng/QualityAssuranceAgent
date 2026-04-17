@@ -92,12 +92,13 @@ class RunStateManager:
 
     def write_thinking_record(self, screenshot_name: str, thought: str, decision: dict[str, Any]) -> Path:
         paths = self.require_paths()
-        out = paths.thinking_dir / f"{ts_name()}_{screenshot_name}.json"
+        image_name = Path(screenshot_name).name
+        out = paths.thinking_dir / Path(image_name).with_suffix(".json").name
         write_json(
             out,
             {
                 "timestamp": datetime.utcnow().isoformat(),
-                "screenshot_name": screenshot_name,
+                "screenshot_name": image_name,
                 "thought": thought,
                 "decision": decision,
             },

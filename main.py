@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from src.common.run_state import RunStateManager
@@ -38,9 +39,30 @@ def build_server_command(module: str, port: int) -> list[str]:
     ]
 
 
-def launch_service(name: str, module: str, port: int, env: dict[str, str]) -> subprocess.Popen:
-    cmd = build_server_command(module, port)
-    print(f"[master] launching {name} on {port}")
+@dataclass(frozen=True)
+class ServiceConfig:
+    name: str
+    launch_mode: str  # uvicorn | module
+    module: str
+    port: int | None = None
+
+
+def build_module_command(module: str) -> list[str]:
+    return [sys.executable, "-m", module]
+
+
+def launch_service(service: ServiceConfig, env: dict[str, str]) -> subprocess.Popen:
+    if service.launch_mode == "uvicorn":
+        if service.port is None:
+            raise ValueError(f"port is required for uvicorn service: {service.name}")
+        cmd = build_server_command(service.module, service.port)
+        display = f"{service.name} on {service.port}"
+    elif service.launch_mode == "module":
+        cmd = build_module_command(service.module)
+        display = service.name
+    else:
+        raise ValueError(f"unknown launch mode {service.launch_mode!r}")
+    print(f"[master] launching {display}")
     return subprocess.Popen(cmd, cwd=str(ROOT_DIR), env=env)
 
 
@@ -81,12 +103,32 @@ def main() -> None:
     env = with_suppressed_debugpy_warning(env)
 
     services = {
-        "eye": ("src.eye.server", settings.eye_port),
-        "brain": ("src.brain.server", settings.brain_port),
-        "hand": ("src.hand.server", settings.hand_port),
+        "eye": ServiceConfig(
+            name="eye",
+            launch_mode="uvicorn",
+            module="src.eye.server",
+            port=settings.eye_port,
+        ),
+        "brain": ServiceConfig(
+            name="brain",
+            launch_mode="uvicorn",
+            module="src.brain.server",
+            port=settings.brain_port,
+        ),
+        "hand": ServiceConfig(
+            name="hand",
+            launch_mode="uvicorn",
+            module="src.hand.server",
+            port=settings.hand_port,
+        ),
+        "mcp": ServiceConfig(
+            name="mcp",
+            launch_mode="module",
+            module="cua_mcp.tools",
+        ),
     }
     procs: dict[str, subprocess.Popen] = {
-        name: launch_service(name, module, port, env) for name, (module, port) in services.items()
+        name: launch_service(service, env) for name, service in services.items()
     }
 
     manager.log_debug("Master started all services")
@@ -98,8 +140,7 @@ def main() -> None:
                 code = proc.poll()
                 if code is not None:
                     manager.log_debug(f"{name} exited with code {code}. restarting.")
-                    module, port = services[name]
-                    procs[name] = launch_service(name, module, port, env)
+                    procs[name] = launch_service(services[name], env)
     except KeyboardInterrupt:
         manager.log_debug("KeyboardInterrupt received. shutting down services.")
     finally:

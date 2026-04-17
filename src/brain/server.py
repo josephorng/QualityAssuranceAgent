@@ -71,7 +71,7 @@ async def _dispatch_to_hand(command: ToolCommand) -> None:
         )
 
 
-async def _decide_action(event: EyeEvent) -> tuple[str, ToolCommand]:
+async def _decide_action(event: EyeEvent) -> tuple[str, ToolCommand, dict]:
     prompt = get_prompt("brain_decide_action")
     prev_action_text = runtime.previous_action.model_dump_json() if runtime.previous_action else "none"
     memory = manager.require_paths().brain_txt.read_text(encoding="utf-8")
@@ -89,6 +89,7 @@ async def _decide_action(event: EyeEvent) -> tuple[str, ToolCommand]:
     out = await ollama.generate_json(
         settings.brain_lm,
         full_prompt,
+        use_tools=True,
         fallback={"action": "wait", "args": {"seconds": 1.0}, "reason": "fallback"},
     )
     reason = str(out.get("reason", ""))
@@ -98,7 +99,7 @@ async def _decide_action(event: EyeEvent) -> tuple[str, ToolCommand]:
         screenshot_name=event.screenshot_name,
         reason=reason,
     )
-    return reason, cmd
+    return reason, cmd, out
 
 
 async def _brain_loop() -> None:
@@ -124,13 +125,13 @@ async def _brain_loop() -> None:
             else:
                 runtime.active = BrainTaskState(event=event)
 
-        thought, command = await _decide_action(event)
+        thought, command, raw_response = await _decide_action(event)
         reason_preview = (thought[:160] + "…") if len(thought) > 160 else thought
         print(
             f"[brain] decide screenshot={event.screenshot_name!r} "
             f"action={command.action!r} args={command.args!r} reason={reason_preview!r}"
         )
-        manager.write_thinking_record(event.screenshot_name, thought, command.model_dump(mode="json"))
+        manager.write_thinking_record(event.screenshot_name, thought, raw_response)
         manager.append_brain_memory(f"[{datetime.utcnow().isoformat()}] {thought}")
         await _dispatch_to_hand(command)
         runtime.active = None

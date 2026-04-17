@@ -6,6 +6,8 @@ from typing import Any
 
 from ollama import AsyncClient
 
+from cua_mcp.tools import get_ollama_tools
+
 
 class OllamaClient:
     def __init__(self, host: str, timeout_seconds: int = 60) -> None:
@@ -18,18 +20,23 @@ class OllamaClient:
         model: str,
         prompt: str,
         image_paths: list[str] | None = None,
+        use_tools: bool = False,
         interrupt_checker: Callable[[], bool] | None = None,
     ) -> tuple[str, bool]:
         chunks: list[str] = []
         message: dict[str, Any] = {"role": "user", "content": prompt}
         if image_paths:
             message["images"] = image_paths
-        stream = await self.client.chat(
-            model=model,
-            messages=[message],
-            stream=True,
-            options={"num_ctx": 4096},
-        )
+        chat_kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": [message],
+            "stream": True,
+            "options": {"num_ctx": 4096},
+        }
+        if use_tools:
+            chat_kwargs["tools"] = get_ollama_tools()
+
+        stream = await self.client.chat(**chat_kwargs)
         async for part in stream:
             if interrupt_checker and interrupt_checker():
                 return "INTERRUPTED", True
@@ -41,8 +48,19 @@ class OllamaClient:
             print()
         return "".join(chunks).strip(), False
 
-    async def generate(self, model: str, prompt: str, image_paths: list[str] | None = None) -> str:
-        text, _ = await self._stream_chat(model=model, prompt=prompt, image_paths=image_paths)
+    async def generate(
+        self,
+        model: str,
+        prompt: str,
+        image_paths: list[str] | None = None,
+        use_tools: bool = False,
+    ) -> str:
+        text, _ = await self._stream_chat(
+            model=model,
+            prompt=prompt,
+            image_paths=image_paths,
+            use_tools=use_tools,
+        )
         return text
 
     async def generate_json(
@@ -51,8 +69,14 @@ class OllamaClient:
         prompt: str,
         fallback: dict[str, Any],
         image_paths: list[str] | None = None,
+        use_tools: bool = False,
     ) -> dict[str, Any]:
-        text = await self.generate(model=model, prompt=prompt, image_paths=image_paths)
+        text = await self.generate(
+            model=model,
+            prompt=prompt,
+            image_paths=image_paths,
+            use_tools=use_tools,
+        )
         try:
             return json.loads(text)
         except json.JSONDecodeError:

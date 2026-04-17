@@ -5,6 +5,7 @@ uvicorn
 httpx
 pydantic
 pydantic-settings
+mcp
 python-dotenv
 Pillow
 numpy

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -35,13 +37,12 @@ print(
 print(f"[eye] task: {task_input[:200]}{'…' if len(task_input) > 200 else ''}")
 
 
-def _grab_screenshot(path: Path) -> np.ndarray:
+def _grab_screenshot() -> tuple[np.ndarray, Image.Image]:
     with mss.mss() as sct:
         monitor = sct.monitors[1]
         shot = sct.grab(monitor)
         img = Image.frombytes("RGB", shot.size, shot.rgb)
-        img.save(path)
-        return np.array(img.convert("L"))
+        return np.array(img.convert("L")), img
 
 
 def _similarity(prev: np.ndarray, curr: np.ndarray) -> float:
@@ -96,9 +97,7 @@ async def eye_loop() -> None:
             await asyncio.sleep(0.3)
             continue
         paths = manager.require_paths()
-        image_name = f"{ts_name()}.png"
-        image_path = paths.eye_dir / image_name
-        curr = _grab_screenshot(image_path)
+        curr, screenshot_img = _grab_screenshot()
 
         similarity = None
         changed = True
@@ -108,21 +107,32 @@ async def eye_loop() -> None:
         _last_image = curr
 
         if (not _first_sent and changed) or _first_sent and changed:
-            desc = await _describe_image(image_name, image_path)
-            if (not _first_sent) or await _should_send(prev_desc, desc):
-                event = EyeEvent(
-                    screenshot_name=image_name,
-                    screenshot_path=str(image_path),
-                    description=desc,
-                    similarity_to_previous=similarity,
-                )
-                await _send_event(event)
-                sim_txt = f"{similarity:.4f}" if similarity is not None else "n/a"
-                desc_preview = (desc[:120] + "…") if len(desc) > 120 else desc
-                print(f"[eye] -> brain {image_name} similarity={sim_txt} desc={desc_preview!r}")
-                manager.log_debug(f"Eye sent event for {image_name}")
-                prev_desc = desc
-                _first_sent = True
+            image_name = f"{ts_name()}.png"
+            image_path = paths.eye_dir / image_name
+            temp_path = Path(tempfile.gettempdir()) / f"eye-{uuid.uuid4().hex}.png"
+            keep_screenshot = False
+            try:
+                screenshot_img.save(temp_path)
+                desc = await _describe_image(image_name, temp_path)
+                if (not _first_sent) or await _should_send(prev_desc, desc):
+                    temp_path.replace(image_path)
+                    keep_screenshot = True
+                    event = EyeEvent(
+                        screenshot_name=image_name,
+                        screenshot_path=str(image_path),
+                        description=desc,
+                        similarity_to_previous=similarity,
+                    )
+                    await _send_event(event)
+                    sim_txt = f"{similarity:.4f}" if similarity is not None else "n/a"
+                    desc_preview = (desc[:120] + "…") if len(desc) > 120 else desc
+                    print(f"[eye] -> brain {image_name} similarity={sim_txt} desc={desc_preview!r}")
+                    manager.log_debug(f"Eye sent event for {image_name}")
+                    prev_desc = desc
+                    _first_sent = True
+            finally:
+                if not keep_screenshot and temp_path.exists():
+                    temp_path.unlink()
         await asyncio.sleep(settings.screenshot_interval_seconds)
 
 

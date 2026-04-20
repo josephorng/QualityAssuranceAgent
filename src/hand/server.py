@@ -22,7 +22,14 @@ async def lifespan(_app: FastAPI):
         f"port={settings.hand_port} brain={settings.brain_port}"
     )
     print(f"[hand] task: {task_input[:200]}{'…' if len(task_input) > 200 else ''}")
-    yield
+    manager.log_debug(
+        f"Hand server initialized run_id={_run_id} "
+        f"port={settings.hand_port} brain={settings.brain_port}"
+    )
+    try:
+        yield
+    finally:
+        manager.log_debug("Hand lifespan shutdown")
 
 
 app = FastAPI(title="Hand Server", lifespan=lifespan)
@@ -40,7 +47,7 @@ def _exec_action(cmd: ToolCommand) -> HandExecutionResult:
     try:
         if action == "click":
             pyautogui.click(x=args["x"], y=args["y"], button=args.get("button", "left"))
-        elif action == "type":
+        elif action == "type_text":
             pyautogui.typewrite(args["text"], interval=args.get("interval", 0.02))
         elif action == "hotkey":
             keys = args.get("keys", [])
@@ -74,11 +81,19 @@ def _exec_action(cmd: ToolCommand) -> HandExecutionResult:
 
 
 async def _callback_brain(result: HandExecutionResult) -> None:
+    manager.log_debug(
+        f"Hand callback -> brain action={result.action} ok={result.ok} "
+        f"screenshot={result.screenshot_name}"
+    )
     async with httpx.AsyncClient(timeout=20) as client:
         await client.post(
             f"http://127.0.0.1:{settings.brain_port}/action_done",
             json=result.model_dump(mode="json"),
         )
+    manager.log_debug(
+        f"Hand callback sent action={result.action} ok={result.ok} "
+        f"screenshot={result.screenshot_name}"
+    )
 
 
 @app.get("/state")
@@ -90,6 +105,9 @@ async def state() -> dict[str, bool]:
 async def execute(cmd: ToolCommand) -> dict[str, str]:
     global _busy
     async with _lock:
+        manager.log_debug(
+            f"Hand received execute action={cmd.action} screenshot={cmd.screenshot_name}"
+        )
         _busy = True
         result = _exec_action(cmd)
         append_csv_row(
@@ -113,6 +131,10 @@ async def execute(cmd: ToolCommand) -> dict[str, str]:
             await _callback_brain(result)
         finally:
             _busy = False
+            manager.log_debug(
+                f"Hand finished execute action={result.action} ok={result.ok} "
+                f"screenshot={cmd.screenshot_name}"
+            )
     return {"status": "done"}
 
 

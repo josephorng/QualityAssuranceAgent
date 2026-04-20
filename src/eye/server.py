@@ -22,9 +22,9 @@ from src.common.runtime_context import get_runtime_env
 from src.common.settings import load_settings
 
 settings = load_settings()
-ollama = OllamaClient(settings.ollama_host)
 run_root, task_input, _run_id = get_runtime_env()
 manager = RunStateManager(run_root.parent, settings.brain_memory_max_chars)
+ollama = OllamaClient(settings.ollama_host, log_manager=manager)
 manager.init_run(task_input, run_root.name)
 _last_image: np.ndarray | None = None
 _first_sent = False
@@ -35,6 +35,10 @@ print(
     f"ollama={settings.ollama_host} vlm={settings.eye_vlm}"
 )
 print(f"[eye] task: {task_input[:200]}{'…' if len(task_input) > 200 else ''}")
+manager.log_debug(
+    f"Eye server initialized run_id={_run_id} "
+    f"ports eye={settings.eye_port} brain={settings.brain_port} hand={settings.hand_port}"
+)
 
 
 def _grab_screenshot() -> tuple[np.ndarray, Image.Image]:
@@ -42,6 +46,7 @@ def _grab_screenshot() -> tuple[np.ndarray, Image.Image]:
         monitor = sct.monitors[1]
         shot = sct.grab(monitor)
         img = Image.frombytes("RGB", shot.size, shot.rgb)
+        manager.log_debug(f"Eye grabbed screenshot size={img.size}")
         return np.array(img.convert("L")), img
 
 
@@ -50,6 +55,7 @@ def _similarity(prev: np.ndarray, curr: np.ndarray) -> float:
     min_w = min(prev.shape[1], curr.shape[1])
     p = prev[:min_h, :min_w]
     c = curr[:min_h, :min_w]
+    manager.log_debug(f"Eye calculated similarity={float(structural_similarity(p, c))}")
     return float(structural_similarity(p, c))
 
 
@@ -63,37 +69,47 @@ async def _hand_busy() -> bool:
         return False
 
 
-async def _describe_image(image_name: str, image_path: Path) -> str:
+async def _describe_image(image_path: Path) -> str:
     prompt = get_prompt("describe_screenshot")
-    full_prompt = f"{prompt}\n\nTask:\n{task_input}\n\nImage file name: {image_name}\nTimestamp: {datetime.utcnow().isoformat()}"
-    return await ollama.generate(settings.eye_vlm, full_prompt, image_paths=[str(image_path)])
+    text, _tool_calls = await ollama.generate(settings.eye_vlm, prompt, image_paths=[str(image_path)])
+    return text
 
 
-async def _should_send(prev_desc: str, curr_desc: str) -> bool:
+async def _should_send(prev_image_path: Path, curr_image_path: Path) -> bool:
     prompt = get_prompt("verify_change_requires_thinking")
-    full_prompt = f"{prompt}\n\nPrevious:\n{prev_desc}\n\nCurrent:\n{curr_desc}"
-    out = await ollama.generate_json(
+    full_prompt = (
+        f"{prompt}\n\n"
+        "The first image is the previous screenshot and the second image is the current screenshot."
+    )
+    out, _tool_calls = await ollama.generate_json(
         settings.eye_vlm,
         full_prompt,
         fallback={"requires_thinking": True, "reason": "fallback"},
+        image_paths=[str(prev_image_path), str(curr_image_path)],
     )
     return bool(out.get("requires_thinking", True))
 
 
 async def _send_event(event: EyeEvent) -> None:
+    manager.log_debug(
+        f"Eye posting event screenshot={event.screenshot_name} "
+        f"similarity={event.similarity_to_previous}"
+    )
     async with httpx.AsyncClient(timeout=15) as client:
         await client.post(
             f"http://127.0.0.1:{settings.brain_port}/new_event",
             json=event.model_dump(mode="json"),
         )
+    manager.log_debug(f"Eye posted event screenshot={event.screenshot_name}")
 
 
 async def eye_loop() -> None:
     global _last_image
     global _first_sent
-    prev_desc = ""
+    prev_sent_image_path: Path | None = None
     while True:
         if await _hand_busy():
+            manager.log_debug("Eye waiting because hand is busy")
             await asyncio.sleep(0.3)
             continue
         paths = manager.require_paths()
@@ -113,8 +129,13 @@ async def eye_loop() -> None:
             keep_screenshot = False
             try:
                 screenshot_img.save(temp_path)
-                desc = await _describe_image(image_name, temp_path)
-                if (not _first_sent) or await _should_send(prev_desc, desc):
+                desc = await _describe_image(temp_path)
+                should_send = (
+                    not _first_sent
+                    or prev_sent_image_path is None
+                    or await _should_send(prev_sent_image_path, temp_path)
+                )
+                if should_send:
                     temp_path.replace(image_path)
                     keep_screenshot = True
                     event = EyeEvent(
@@ -128,21 +149,27 @@ async def eye_loop() -> None:
                     desc_preview = (desc[:120] + "…") if len(desc) > 120 else desc
                     print(f"[eye] -> brain {image_name} similarity={sim_txt} desc={desc_preview!r}")
                     manager.log_debug(f"Eye sent event for {image_name}")
-                    prev_desc = desc
+                    prev_sent_image_path = image_path
                     _first_sent = True
+                else:
+                    manager.log_debug(f"Eye dropped screenshot={image_name} after verification")
             finally:
                 if not keep_screenshot and temp_path.exists():
                     temp_path.unlink()
+        else:
+            manager.log_debug("Eye skipped frame due to high similarity")
         await asyncio.sleep(settings.screenshot_interval_seconds)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     print(f"[eye] startup eye_loop interval_s={settings.screenshot_interval_seconds}")
+    manager.log_debug(f"Eye lifespan startup interval={settings.screenshot_interval_seconds}")
     task = asyncio.create_task(eye_loop())
     try:
         yield
     finally:
+        manager.log_debug("Eye lifespan shutdown")
         task.cancel()
         try:
             await task

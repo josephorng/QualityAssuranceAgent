@@ -25,7 +25,7 @@ class RunPaths:
     thinking_dir: Path
     storage_dir: Path
     hand_csv: Path
-    brain_txt: Path
+    long_term_memory_txt: Path
     storage_json: Path
     debug_log: Path
 
@@ -44,15 +44,15 @@ class RunStateManager:
         thinking_dir = root / "thinking"
         storage_dir = root / "storage"
         hand_csv = root / "hand.csv"
-        brain_txt = root / "brain.txt"
+        long_term_memory_txt = root / "long_term_memory.txt"
         storage_json = root / "storage.json"
         debug_log = root / "run.log"
 
         eye_dir.mkdir(parents=True, exist_ok=True)
         thinking_dir.mkdir(parents=True, exist_ok=True)
         storage_dir.mkdir(parents=True, exist_ok=True)
-        if not brain_txt.exists():
-            brain_txt.write_text("", encoding="utf-8")
+        if not long_term_memory_txt.exists():
+            long_term_memory_txt.write_text("", encoding="utf-8")
         if not hand_csv.exists():
             hand_csv.write_text("", encoding="utf-8")
         if not storage_json.exists():
@@ -66,7 +66,7 @@ class RunStateManager:
             thinking_dir=thinking_dir,
             storage_dir=storage_dir,
             hand_csv=hand_csv,
-            brain_txt=brain_txt,
+            long_term_memory_txt=long_term_memory_txt,
             storage_json=storage_json,
             debug_log=debug_log,
         )
@@ -84,11 +84,11 @@ class RunStateManager:
 
     def append_brain_memory(self, text: str) -> None:
         paths = self.require_paths()
-        append_text(paths.brain_txt, text + "\n")
-        current = read_text(paths.brain_txt)
+        append_text(paths.long_term_memory_txt, text + "\n")
+        current = read_text(paths.long_term_memory_txt)
         if len(current) > self.memory_max_chars:
             compact = current[-self.memory_max_chars :]
-            paths.brain_txt.write_text(compact, encoding="utf-8")
+            paths.long_term_memory_txt.write_text(compact, encoding="utf-8")
 
     def write_thinking_record(self, screenshot_name: str, thought: str, decision: dict[str, Any]) -> Path:
         paths = self.require_paths()

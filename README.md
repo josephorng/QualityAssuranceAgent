@@ -45,7 +45,7 @@ This creates a run session under `runs/<task_slug>_<timestamp>/` with:
 - `thinking/` decision records
 - `storage/` user-storage files
 - `hand.csv` action history
-- `brain.txt` long-term memory (capped)
+- `long_term_memory.txt` long-term memory (capped)
 - `storage.json` storage index
 - `run.log` debug log
 

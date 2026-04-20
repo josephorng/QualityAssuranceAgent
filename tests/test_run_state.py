@@ -9,7 +9,7 @@ def test_init_run_creates_expected_paths(tmp_path: Path) -> None:
     assert paths.eye_dir.exists()
     assert paths.thinking_dir.exists()
     assert paths.storage_dir.exists()
-    assert paths.brain_txt.exists()
+    assert paths.long_term_memory_txt.exists()
     assert paths.hand_csv.exists()
     assert paths.storage_json.exists()
     assert paths.debug_log.exists()
@@ -19,5 +19,5 @@ def test_brain_memory_capped(tmp_path: Path) -> None:
     mgr = RunStateManager(tmp_path, memory_max_chars=20)
     mgr.init_run("task", "run")
     mgr.append_brain_memory("a" * 50)
-    text = mgr.require_paths().brain_txt.read_text(encoding="utf-8")
+    text = mgr.require_paths().long_term_memory_txt.read_text(encoding="utf-8")
     assert len(text) <= 20

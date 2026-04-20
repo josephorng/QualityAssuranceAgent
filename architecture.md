@@ -35,7 +35,7 @@ This is a computer use agent project. We will use python and interactive cli to 
 - Use gemma4 e2b to generate a folder name and then add a new folder under the runs folder, everything about this task will be stored in this folder.
   - Add a folder named "eye" to store the first and every different screenshot and their descriptions sent to the Brain. Use timestamp to name files.
   - Add a csv file called "hand.csv" to record every action made by the Hand. Add the image name to each action that it reacts to and the timestamp that the action is executed.
-  - Add a text file named "brain.txt" to store the long term memory. This context will be kept under {constant default to 16k} length. When the file exceed the threshold, ask {model in constant.json} to summarize/shorten the file.
+  - Add a text file named "long_term_memory.txt" to store the long term memory. This context will be kept under {constant default to 16k} length. When the file exceed the threshold, ask {model in constant.json} to summarize/shorten the file.
   - Add a folder called "thinking" to store the retrieved image name, thinking process and the final decision/result for each screenshot sent to the Brain.
   - Add a folder named "storage" to store data information that the user want to store in the process.
   - Add a storage.json to store the summary of each file in the storage folder and the timestamp that it is stored.
@@ -108,13 +108,13 @@ This architecture is specifically designed to handle the **Interrupt Logic** req
 
 1. **The Eye** detects a new dialogue box and sends a request to `localhost:8002/new_event`.
 2. **The Brain's** FastAPI endpoint run the llm to check if it is truly an interruption and then sets an internal `interrupt_flag` if it is an interruption.
-3. The **Brain's** logic loop checks this flag; if `True`, it put the current thinking process in a stack, logs the interruption in `brain.txt`, and starts a new inference based on the latest screenshot.
+3. The **Brain's** logic loop checks this flag; if `True`, it put the current thinking process in a stack, logs the interruption in `long_term_memory.txt`, and starts a new inference based on the latest screenshot.
 
 ### 4. Data Consistency
 
 All processes maintain access to the shared `runs` directory.
 
-- **Eye** writes to `eye/` and `runs/brain.txt`.
-- **Brain** reads from `eye/` and writes to `thinking/` and `storage.json`.
+- **Eye** writes to `eye/`.
+- **Brain** reads from `eye/`, writes to `long_term_memory.txt`, `thinking/`, and `storage.json`.
 - **Hand** reads commands from the Brain and appends results to `hand.csv`.
 

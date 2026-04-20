@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 
 class ToolCommand(BaseModel):
-    action: Literal["click", "type", "hotkey", "move", "wait"]
+    action: Literal["click", "type_text", "hotkey", "move", "wait"]
     args: dict[str, Any] = Field(default_factory=dict)
     screenshot_name: str | None = None
     reason: str = ""

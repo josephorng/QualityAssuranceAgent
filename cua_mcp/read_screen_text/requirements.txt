@@ -1,0 +1,6 @@
+# OCR stack: inference.py + ocr_image.py (MCP read_screen_text)
+torch>=2.0
+opencv-python>=4.5
+numpy>=1.20
+Pillow>=9.0
+ultralytics>=8.0

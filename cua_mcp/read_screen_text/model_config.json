@@ -1,0 +1,19 @@
+{
+    "nclass": 10000,
+    "cnn_type": "CNN_32_Residual_bn",
+    "imgH": 32,
+    "nc": 1,
+    "leakyRelu": true,
+    "nh": 512,
+    "rnn_type": "CFC",
+    "n_rnn": 1,
+    "timespan_mode": "cosine",
+    "return_sequences": true,
+    "forget_ratio": 0.1,
+    "backbone_units": 128,
+    "backbone_layers": 1,
+    "backbone_dropout": 0.5,
+    "lr": 0.0005,
+    "min_lr": 0.00005,
+    "optimizer": "AdaBelief"
+}

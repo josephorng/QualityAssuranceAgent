@@ -1,0 +1,85 @@
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import pytest
+
+from cua_mcp.read_screen_text.ocr_image import read_text_from_image_path
+from cua_mcp.tools import read_screen_text
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+# Extend this registry as new function folders are added under `cua_mcp/`.
+FUNCTION_FOLDERS: dict[str, dict[str, object]] = {
+    "read_screen_text": {
+        "path": ROOT / "cua_mcp" / "read_screen_text",
+        "required_files": [
+            "ocr_image.py",
+            "inference.py",
+            "yolo_best.pt",
+            "crnn_cfc_model.pt",
+            "char_dict.json",
+            "char_decode_dict.json",
+            "model_config.json",
+        ],
+        "image_dir": ROOT / "cua_mcp" / "read_screen_text" / "images",
+    }
+}
+
+OCR_LINE_RE = re.compile(r"^\[(\d+),(\d+),(\d+),(\d+)\]\s?.*$")
+
+
+def _sample_images(image_dir: Path) -> list[Path]:
+    return sorted([p for p in image_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}])
+
+
+@pytest.mark.parametrize("folder_name,meta", FUNCTION_FOLDERS.items())
+def test_function_folder_required_files_exist(folder_name: str, meta: dict[str, object]) -> None:
+    base_path = meta["path"]
+    assert isinstance(base_path, Path), f"{folder_name}: invalid path metadata"
+    assert base_path.exists(), f"{folder_name}: folder missing: {base_path}"
+
+    required_files = meta["required_files"]
+    assert isinstance(required_files, list), f"{folder_name}: required_files must be a list"
+    for rel in required_files:
+        assert (base_path / str(rel)).exists(), f"{folder_name}: missing required file: {rel}"
+
+
+def test_read_screen_text_has_sample_images() -> None:
+    image_dir = FUNCTION_FOLDERS["read_screen_text"]["image_dir"]
+    assert isinstance(image_dir, Path)
+    assert image_dir.exists(), f"images folder missing: {image_dir}"
+    images = _sample_images(image_dir)
+    assert images, "No sample images found for read_screen_text tests"
+
+
+@pytest.mark.parametrize(
+    "image_path",
+    _sample_images(FUNCTION_FOLDERS["read_screen_text"]["image_dir"]),  # type: ignore[arg-type]
+    ids=lambda p: Path(p).name,
+)
+def test_read_screen_text_tool_returns_bbox_lines(image_path: Path) -> None:
+    output = read_screen_text(str(image_path))
+    assert isinstance(output, str)
+    assert output, f"OCR returned empty output for {image_path.name}"
+    assert not output.startswith("[error]"), f"OCR error for {image_path.name}: {output}"
+
+    lines = [line for line in output.splitlines() if line.strip()]
+    assert lines, f"No OCR lines returned for {image_path.name}"
+    for line in lines:
+        assert OCR_LINE_RE.match(line), f"Line does not match '[x,y,w,h] text' format: {line}"
+
+
+@pytest.mark.parametrize(
+    "image_path",
+    _sample_images(FUNCTION_FOLDERS["read_screen_text"]["image_dir"]),  # type: ignore[arg-type]
+    ids=lambda p: Path(p).name,
+)
+def test_read_screen_text_helper_matches_tool_type(image_path: Path) -> None:
+    helper_output = read_text_from_image_path(str(image_path))
+    tool_output = read_screen_text(str(image_path))
+    assert isinstance(helper_output, str)
+    assert isinstance(tool_output, str)
+

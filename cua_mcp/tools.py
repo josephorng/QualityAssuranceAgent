@@ -5,6 +5,9 @@ from typing import Any, Callable
 
 from mcp.server.fastmcp import FastMCP
 
+from cua_mcp import hand_tools
+from cua_mcp.read_screen_text.ocr_image import read_text_from_image_path
+
 # 1. Initialize the MCP server
 mcp = FastMCP("ComputerUseAgent")
 
@@ -13,49 +16,43 @@ mcp = FastMCP("ComputerUseAgent")
 @mcp.tool()
 def detect_objects(image_path: str) -> dict[str, Any]:
     """Run object detection on the given image path."""
-    # Placeholder implementation until detector integration is added.
-    return {"status": "success", "image_path": image_path, "detected": []}
+    return hand_tools.detect_objects(image_path)
 
 
 @mcp.tool()
-def read_screen_text(region: list[int]) -> str:
-    """Run OCR on a screen region [x, y, w, h]."""
-    if len(region) != 4:
-        raise ValueError("region must be [x, y, w, h]")
-    # Placeholder implementation until OCR integration is added.
-    return ""
+def read_screen_text(image_path: str) -> str:
+    """Run OCR on the given image path and return recognized text."""
+    return read_text_from_image_path(image_path)
 
 
 @mcp.tool()
 def click(x: int, y: int, button: str = "left") -> dict[str, Any]:
     """Click a screen coordinate."""
-    return {"x": x, "y": y, "button": button}
+    return hand_tools.click(x=x, y=y, button=button)
 
 
 @mcp.tool()
 def type_text(text: str, interval: float = 0.0) -> dict[str, Any]:
     """Type text with an optional key interval in seconds."""
-    return {"text": text, "interval": interval}
+    return hand_tools.type_text(text=text, interval=interval)
 
 
 @mcp.tool()
-def hotkey(keys: list[str]) -> dict[str, Any]:
+def hotkey(keys: list[str] | str) -> dict[str, Any]:
     """Press a key combination."""
-    if not keys:
-        raise ValueError("keys must contain at least one key")
-    return {"keys": keys}
+    return hand_tools.hotkey(keys=keys)
 
 
 @mcp.tool()
 def move(x: int, y: int, duration: float = 0.0) -> dict[str, Any]:
     """Move mouse to a screen coordinate."""
-    return {"x": x, "y": y, "duration": duration}
+    return hand_tools.move(x=x, y=y, duration=duration)
 
 
 @mcp.tool()
 def wait(seconds: float) -> dict[str, Any]:
     """Pause execution for the specified number of seconds."""
-    return {"seconds": seconds}
+    return hand_tools.wait(seconds=seconds)
 
 
 OLLAMA_TOOL_FUNCTIONS: list[Callable[..., Any]] = [
@@ -68,7 +65,7 @@ OLLAMA_TOOL_FUNCTIONS: list[Callable[..., Any]] = [
     wait,
 ]
 
-ACTION_TOOL_NAMES: set[str] = {"click", "type_text", "hotkey", "move", "wait"}
+HAND_TOOL_NAMES: set[str] = {"click", "type_text", "hotkey", "move", "wait"}
 
 
 def get_ollama_tools() -> list[Callable[..., Any]]:

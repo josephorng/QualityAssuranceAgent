@@ -71,6 +71,9 @@ async def _hand_busy() -> bool:
 
 async def _describe_image(image_path: Path) -> str:
     prompt = get_prompt("describe_screenshot")
+    with Image.open(image_path) as img:
+        width, height = img.size
+    prompt = f"{prompt}\n\nImage size: {width}x{height} pixels (width x height)."
     text, _tool_calls = await ollama.generate(settings.eye_vlm, prompt, image_paths=[str(image_path)])
     return text
 

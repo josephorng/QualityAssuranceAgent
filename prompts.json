@@ -7,7 +7,7 @@
   ],
   "describe_screenshot": [
     {
-      "prompt": "Describe the current desktop screenshot. Include active app/window, visible UI elements, key text, warnings/dialogs, and suggested immediate interaction targets.",
+      "prompt": "Describe the current desktop screenshot. Include active app/window, visible UI elements, key text, warnings/dialogs, and interactable UI targets.",
       "models": ["gemma4:e2b", "gemma3:4b"]
     }
   ],

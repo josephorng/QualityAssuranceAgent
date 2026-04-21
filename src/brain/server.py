@@ -11,7 +11,7 @@ import httpx
 from fastapi import FastAPI
 
 from cua_mcp.tools import (
-    ACTION_TOOL_NAMES,
+    HAND_TOOL_NAMES,
     execute_tool_call,
 )
 from src.common.models import BrainTaskState, EyeEvent, HandExecutionResult, ToolCommand
@@ -108,7 +108,7 @@ async def _decide_action(event: EyeEvent) -> tuple[str, ToolCommand, dict]:
         
         manager.log_debug(f"Brain generated assistant_message={assistant_message} tool_calls={tool_calls}")
 
-        if not tool_calls:
+        if len(tool_calls) == 0:
             raise ValueError("No tool calls returned")
 
         for call in tool_calls:
@@ -125,7 +125,7 @@ async def _decide_action(event: EyeEvent) -> tuple[str, ToolCommand, dict]:
             else:
                 arguments = {}
 
-            if tool_name in ACTION_TOOL_NAMES:
+            if tool_name in HAND_TOOL_NAMES:
                 reason = assistant_message
                 cmd = ToolCommand(
                     action=tool_name,

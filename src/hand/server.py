@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI
@@ -41,17 +42,25 @@ _busy = False
 _lock = asyncio.Lock()
 
 
+def _resolve_screenshot_path(screenshot_name: str | None) -> str | None:
+    if not screenshot_name:
+        return None
+    candidate = Path(screenshot_name)
+    return str(manager.require_paths().eye_dir / candidate.name)
+
+
 def _exec_action(cmd: ToolCommand) -> HandExecutionResult:
     action = cmd.action
     args = cmd.args
+    screenshot_path = _resolve_screenshot_path(cmd.screenshot_name)
     try:
-        executed_args = execute_tool_call(action, args)
+        executed_args = execute_tool_call(action, args, screenshot_path or "")
         return HandExecutionResult(
             ok=True,
             action=action,
             args=executed_args if isinstance(executed_args, dict) else args,
             timestamp=datetime.utcnow(),
-            screenshot_name=cmd.screenshot_name,
+            screenshot_name=screenshot_path,
             message=cmd.reason or "executed",
         )
     except Exception as exc:
@@ -60,7 +69,7 @@ def _exec_action(cmd: ToolCommand) -> HandExecutionResult:
             action=action,
             args=args,
             timestamp=datetime.utcnow(),
-            screenshot_name=cmd.screenshot_name,
+            screenshot_name=screenshot_path,
             message=str(exc),
         )
 
@@ -107,7 +116,12 @@ async def execute(cmd: ToolCommand) -> dict[str, str]:
                 "message": result.message,
             },
         )
-        manager.log_info(f"Hand action: {result.action}, ok={result.ok}")
+        if result.ok:
+            manager.log_info(f"Hand action: {result.action}, ok={result.ok}")
+        else:
+            manager.log_info(
+                f"Hand action failed: {result.action}, ok={result.ok}, error={result.message}"
+            )
         print(
             f"[hand] execute action={result.action} ok={result.ok} "
             f"screenshot={cmd.screenshot_name!r} message={result.message!r}"

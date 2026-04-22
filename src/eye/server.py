@@ -94,7 +94,7 @@ async def _should_send(prev_image_path: Path, curr_image_path: Path) -> bool:
         f"Eye verify_change result same_state={same_state} reason={reason_preview!r} "
         f"tool_calls={len(tool_calls) if tool_calls else 0}"
     )
-    return same_state
+    return not same_state
 
 
 async def _send_event(event: EyeEvent) -> None:

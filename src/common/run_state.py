@@ -23,6 +23,7 @@ class RunPaths:
     root: Path
     eye_dir: Path
     thinking_dir: Path
+    yolo_ocr_dir: Path
     storage_dir: Path
     hand_csv: Path
     long_term_memory_txt: Path
@@ -42,6 +43,7 @@ class RunStateManager:
         root = self.runs_root / folder_name
         eye_dir = root / "eye"
         thinking_dir = root / "thinking"
+        yolo_ocr_dir = root / "yolo_ocr"
         storage_dir = root / "storage"
         hand_csv = root / "hand.csv"
         long_term_memory_txt = root / "long_term_memory.txt"
@@ -50,6 +52,7 @@ class RunStateManager:
 
         eye_dir.mkdir(parents=True, exist_ok=True)
         thinking_dir.mkdir(parents=True, exist_ok=True)
+        yolo_ocr_dir.mkdir(parents=True, exist_ok=True)
         storage_dir.mkdir(parents=True, exist_ok=True)
         if not long_term_memory_txt.exists():
             long_term_memory_txt.write_text("", encoding="utf-8")
@@ -64,6 +67,7 @@ class RunStateManager:
             root=root,
             eye_dir=eye_dir,
             thinking_dir=thinking_dir,
+            yolo_ocr_dir=yolo_ocr_dir,
             storage_dir=storage_dir,
             hand_csv=hand_csv,
             long_term_memory_txt=long_term_memory_txt,

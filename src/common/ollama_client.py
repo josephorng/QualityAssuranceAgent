@@ -120,7 +120,7 @@ class OllamaClient:
         use_tools: bool = True,
     ) -> tuple[str, list[ToolCall]]:
         get_run_state_manager().log_info(
-            f"Ollama generating with tool-capable chat for model={model} prompt=\n{prompt}\n"
+            f"Ollama generating chat for model={model} prompt=\n{prompt}\n"
             f"image_paths={image_paths} store_messages={store_messages} use_tools={use_tools}"
         )
         message: dict[str, Any] = {"role": "user", "content": prompt}
@@ -134,6 +134,7 @@ class OllamaClient:
             "options": {"num_ctx": 4096},
         }
         if use_tools:
+            get_run_state_manager().log_info(f"Ollama using tools=\n{get_ollama_tools()}")    
             chat_kwargs["tools"] = get_ollama_tools()
         response = await self.client.chat(
             **chat_kwargs,

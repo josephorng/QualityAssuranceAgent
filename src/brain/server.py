@@ -10,10 +10,7 @@ from datetime import datetime
 import httpx
 from fastapi import FastAPI
 
-from cua_mcp.tools import (
-    HAND_TOOL_NAMES,
-    execute_tool_call,
-)
+from cua_mcp.tools import HAND_TOOL_NAMES
 from src.common.models import BrainTaskState, EyeEvent, HandExecutionResult, ToolCommand
 from src.common.ollama_client import OllamaClient
 from src.common.prompting import render_prompt_with_skills
@@ -108,10 +105,7 @@ async def _decide_action(event: EyeEvent) -> tuple[str, ToolCommand, dict]:
     prompt = render_prompt_with_skills("brain_decide_action")
     prev_action_text = runtime.previous_action.model_dump_json() if runtime.previous_action else "none"
     memory = manager.require_paths().long_term_memory_txt.read_text(encoding="utf-8")
-    full_prompt = (
-        f"{prompt}\n\nTask:\n{task_input}\n\n"
-        "Use the provided screenshot to decide the next move.\n\n"
-    )
+    full_prompt = f"{prompt}\n\nTask:\n{task_input}\n\n"
     if prev_action_text != "none":
         full_prompt += f"PreviousAction:\n{prev_action_text}\n\n"
     if memory != "":
@@ -157,31 +151,25 @@ async def _decide_action(event: EyeEvent) -> tuple[str, ToolCommand, dict]:
 
             arguments = _with_default_image_path(tool_name, arguments, event.screenshot_path)
 
-            if tool_name in HAND_TOOL_NAMES:
-                manager.log_info(
-                    f"Brain selected hand action={tool_name} screenshot={event.screenshot_name}"
+            if tool_name not in HAND_TOOL_NAMES:
+                manager.log_info(f"Brain received unknown tool {tool_name}")
+                full_prompt += (
+                    f"\n\nToolResult from {tool_name}:\n"
+                    f"{json.dumps({'error': f'unknown tool: {tool_name}'}, ensure_ascii=False)}"
                 )
-                reason = assistant_message
-                cmd = ToolCommand(
-                    action=tool_name,
-                    args=arguments,
-                    screenshot_name=event.screenshot_name,
-                    reason=reason,
-                )
-                return reason, cmd, {"message": assistant_message}
+                continue
 
-            try:
-                manager.log_info(f"Brain executing tool {tool_name} with arguments {arguments}")
-                tool_result = execute_tool_call(tool_name, arguments)
-            except Exception as exc:
-                tool_result = {"error": str(exc)}
-                manager.log_info(f"Brain tool {tool_name} failed error={exc}")
-            else:
-                manager.log_info(
-                    f"Brain tool {tool_name} succeeded keys={list(tool_result)[:8]}"
-                )
-
-            full_prompt += f"\n\nToolResult from {tool_name}:\n{json.dumps(tool_result, ensure_ascii=False)}"
+            manager.log_info(
+                f"Brain selected hand action={tool_name} screenshot={event.screenshot_name}"
+            )
+            reason = assistant_message
+            cmd = ToolCommand(
+                action=tool_name,
+                args=arguments,
+                screenshot_name=event.screenshot_name,
+                reason=reason,
+            )
+            return reason, cmd, {"message": assistant_message}
 
     ollama.clear_message_history()
     manager.log_info(f"Brain tool-loop exhausted screenshot={event.screenshot_name}")
@@ -227,8 +215,8 @@ async def _brain_loop() -> None:
         manager.log_info(f"Brain starting decision for screenshot={event.screenshot_name}")
         thought, command, raw_response = await _decide_action(event)
         reason_preview = (thought[:160] + "…") if len(thought) > 160 else thought
-        print(
-            f"[brain] decide screenshot={event.screenshot_name!r} "
+        manager.log_info(
+            f"Brain decided action screenshot={event.screenshot_name!r} "
             f"action={command.action!r} args={command.args!r} reason={reason_preview!r}"
         )
         manager.write_thinking_record(event.screenshot_name, thought, raw_response)

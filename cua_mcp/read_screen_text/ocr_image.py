@@ -3,22 +3,68 @@ OCR pipeline: YOLO text-region detection + CRNN recognition.
 
 Reads an image from disk, detects text regions with ``yolo_best.pt``,
 runs CRNN directly on each detected crop using ``crnn_cfc_model.pt``, and
-returns reading-order lines formatted as ``[x,y,w,h] text``.
+returns reading-order lines formatted as ``[center_x,center_y] text``.
 """
 
 from __future__ import annotations
 
 import os
+import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import cv2
 import numpy as np
 
 from .inference import TextPredictor
+from src.common.run_state import get_run_state_manager
+from src.common.io_utils import write_json
 
 _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 _YOLO_MODEL: object | None = None
 _CRNN_PREDICTOR: TextPredictor | None = None
+
+
+def _log_info(text: str) -> None:
+    """Write an info log when run state is available."""
+    try:
+        get_run_state_manager().log_info(text)
+    except RuntimeError:
+        # OCR helpers can run in isolation before run state is initialized.
+        pass
+
+
+def _persist_ocr_result(
+    image_path: str,
+    line_height: int,
+    all_lines: list[tuple[tuple[int, int, int, int], str]],
+    formatted: list[str],
+    yolo_elapsed_ms: float | None = None,
+    ocr_elapsed_ms: float | None = None,
+) -> None:
+    """Persist OCR output under this run's yolo_ocr folder."""
+    try:
+        paths = get_run_state_manager().require_paths()
+    except RuntimeError:
+        return
+
+    image_name = Path(image_path).name
+    out_path = paths.yolo_ocr_dir / Path(image_name).with_suffix(".json").name
+    write_json(
+        out_path,
+        {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "image_path": image_path,
+            "image_name": image_name,
+            "line_height": line_height,
+            "yolo_elapsed_ms": yolo_elapsed_ms,
+            "ocr_elapsed_ms": ocr_elapsed_ms,
+            "lines": all_lines,
+            "text": "\n".join(formatted),
+        },
+    )
+    _log_info(f"OCR result persisted path={out_path}")
 
 
 def _default_crnn_path() -> str:
@@ -38,6 +84,7 @@ def _get_crnn_predictor(model_path: Optional[str] = None) -> TextPredictor:
     if _CRNN_PREDICTOR is None:
         if not os.path.isfile(path):
             raise FileNotFoundError(f"CRNN model not found: {path}")
+        _log_info(f"OCR initializing CRNN predictor model_path={path}")
         _CRNN_PREDICTOR = TextPredictor(path)
     return _CRNN_PREDICTOR
 
@@ -56,6 +103,7 @@ def _get_yolo() -> object:
         yolo_path = _default_yolo_path()
         if not os.path.isfile(yolo_path):
             raise FileNotFoundError(f"YOLO model not found: {yolo_path}")
+        _log_info(f"OCR initializing YOLO detector model_path={yolo_path}")
         _YOLO_MODEL = YOLO(yolo_path)
     return _YOLO_MODEL
 
@@ -73,7 +121,8 @@ def _yolo_text_boxes(bgr: np.ndarray) -> list[tuple[int, int, int, int]]:
     """Return list of (x, y, w, h) in image coordinates, or empty if unavailable."""
     try:
         model = _get_yolo()
-    except (RuntimeError, FileNotFoundError, OSError):
+    except (RuntimeError, FileNotFoundError, OSError) as exc:
+        _log_info(f"OCR YOLO unavailable: {type(exc).__name__}: {exc}")
         return []
 
     h, w = bgr.shape[:2]
@@ -87,7 +136,8 @@ def _yolo_text_boxes(bgr: np.ndarray) -> list[tuple[int, int, int, int]]:
             conf=0.25,
             imgsz=imgsz,
         )
-    except Exception:
+    except Exception as exc:
+        _log_info(f"OCR YOLO predict failed: {type(exc).__name__}: {exc}")
         return []
 
     if not results:
@@ -167,55 +217,81 @@ def _ocr_crop(
         return ""
 
 
-def read_text_from_image_path(
+def get_coordinates(
     image_path: str,
     *,
     line_height: int = 32,
     crnn_model_path: Optional[str] = None,
-    use_yolo: bool = True,
 ) -> str:
     """
     Run YOLO + CRNN OCR on the image at ``image_path``.
 
     Returns one string with one line per detection:
-    ``[x,y,w,h] <recognized text>`` (reading order). On error, returns a line
+    ``[center_x,center_y] <recognized text>`` (reading order). On error, returns a line
     starting with ``[error]``.
     """
+    _log_info(
+        f"OCR get_coordinates start image_path={image_path} line_height={line_height}"
+    )
     if not image_path or not isinstance(image_path, str):
+        _log_info("OCR invalid image_path argument")
         return "[error] invalid image_path"
     if not os.path.isfile(image_path):
+        _log_info(f"OCR image file not found path={image_path}")
         return f"[error] file not found: {image_path}"
 
     bgr = cv2.imread(image_path)
     if bgr is None:
+        _log_info(f"OCR could not read image path={image_path}")
         return f"[error] could not read image: {image_path}"
 
     try:
         predictor = _get_crnn_predictor(crnn_model_path)
     except FileNotFoundError as e:
+        _log_info(f"OCR CRNN model missing: {e}")
         return f"[error] {e}"
 
     img_h, img_w = bgr.shape[:2]
     boxes: list[tuple[int, int, int, int]] = []
-    if use_yolo:
-        boxes = _yolo_text_boxes(bgr)
+    yolo_elapsed_ms: float | None = None
+    yolo_start = time.perf_counter()
+    boxes = _yolo_text_boxes(bgr)
+    yolo_elapsed_ms = (time.perf_counter() - yolo_start) * 1000.0
+    _log_info(f"OCR YOLO detected_boxes={len(boxes)}")
 
     if not boxes:
         # Full-frame fallback when detection is unavailable.
+        _log_info("OCR using full-frame fallback box")
         boxes = [(0, 0, img_w, img_h)]
 
     boxes = _sort_boxes_reading_order(boxes)
 
     all_lines: list[tuple[tuple[int, int, int, int], str]] = []
+    ocr_elapsed_ms = 0.0
     for x, y, w, h in boxes:
         crop = bgr[y : y + h, x : x + w]
         if crop.size == 0:
             continue
+        ocr_start = time.perf_counter()
         text = _ocr_crop(crop, predictor, line_height)
+        ocr_elapsed_ms += (time.perf_counter() - ocr_start) * 1000.0
         all_lines.append(((x, y, w, h), text))
 
     # Global reading order: top to bottom, left to right.
     all_lines.sort(key=lambda item: (item[0][1], item[0][0]))
 
-    formatted = [f"[{r[0]},{r[1]},{r[2]},{r[3]}] {txt}" for r, txt in all_lines]
+    formatted = [
+        f"[{r[0] + (r[2] // 2)},{r[1] + (r[3] // 2)}] {txt}"
+        for r, txt in all_lines
+    ]
+    _persist_ocr_result(
+        image_path=image_path,
+        line_height=line_height,
+        all_lines=all_lines,
+        formatted=formatted,
+        yolo_elapsed_ms=yolo_elapsed_ms,
+        ocr_elapsed_ms=ocr_elapsed_ms,
+    )
+    _log_info(f"OCR get_coordinates done lines={len(formatted)}")
+    _log_info(f"OCR get_coordinates formatted={formatted}")
     return "\n".join(formatted)

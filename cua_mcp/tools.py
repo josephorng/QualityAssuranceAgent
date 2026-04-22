@@ -7,18 +7,23 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 from cua_mcp import hand_tools
-from cua_mcp.read_screen_text.ocr_image import read_text_from_image_path
+from cua_mcp.read_screen_text.ocr_image import get_coordinates
 from cua_mcp.storage import store_image as _store_image
 from cua_mcp.storage import store_text as _store_text
+from src.common.run_state import get_run_state_manager
 from src.common.settings import load_settings
 
 # 1. Initialize the MCP server
 mcp = FastMCP("ComputerUseAgent")
 settings = load_settings()
+logger = get_run_state_manager()
 
 
 def _select_coordinate(instruction: str, coordinate_text: str) -> tuple[int, int]:
     """Select one [x, y] target using instruction and detected coordinate text."""
+    logger.log_info(
+        f"Selecting coordinate from OCR text (instruction_len={len(instruction)}, coordinate_text_len={len(coordinate_text)})"
+    )
     prompt = (
         "Choose one target coordinate based on user instruction and screen coordinates text.\n"
         "Return JSON only in this exact shape: {\"x\": <int>, \"y\": <int>}.\n\n"
@@ -39,8 +44,11 @@ def _select_coordinate(instruction: str, coordinate_text: str) -> tuple[int, int
     content = response.json().get("message", {}).get("content", "").strip()
     try:
         out = json.loads(content)
-        return int(out["x"]), int(out["y"])
+        x, y = int(out["x"]), int(out["y"])
+        logger.log_info(f"Selected coordinate x={x} y={y}")
+        return x, y
     except Exception as exc:
+        logger.log_info(f"Failed to parse coordinate selection response: {content}")
         raise ValueError(f"failed to parse coordinate selection: {content}") from exc
 
 
@@ -51,9 +59,9 @@ def detect_objects(image_path: str) -> dict[str, Any]:
     return hand_tools.detect_objects(image_path)
 
 
-def get_coordinates(image_path: str) -> str:
-    """Run Yolo and OCR to get the coordinates and the contents of the detected objects in the given image path."""
-    return read_text_from_image_path(image_path)
+# def get_coordinates(image_path: str) -> str:
+#     """Run Yolo and OCR to get the coordinates and the contents of the detected objects in the given image path."""
+#     return get_coordinates(image_path)
 
 
 @mcp.tool()
@@ -61,12 +69,14 @@ def click(
     instruction: str,
     image_path: str,
     button: str = "left",
-    **_: Any,
 ) -> dict[str, Any]:
-    """Click a screen target resolved from instruction + screenshot."""
+    """Use instruction and Yolo model and OCR to find the target on the screenshot. Then click the target."""
+    logger.log_info(f"Tool click start (button={button}), image_path={image_path}")
     coordinate_text = get_coordinates(image_path)
     x, y = _select_coordinate(instruction=instruction, coordinate_text=coordinate_text)
-    return hand_tools.click(x=x, y=y, button=button)
+    result = hand_tools.click(x=x, y=y, button=button)
+    logger.log_info("Tool click done")
+    return result
 
 
 @mcp.tool()
@@ -75,19 +85,26 @@ def type_text(
     instruction: str,
     image_path: str,
     interval: float = 0.0,
-    **_: Any,
 ) -> dict[str, Any]:
-    """Focus target resolved from instruction + screenshot, then type text."""
+    """Use instruction and Yolo model and OCR to find the target on the screenshot. Click to focus on the target and then type text into the target."""
+    logger.log_info(
+        f"Tool type_text start (text_len={len(text)}, interval={interval}), image_path={image_path}"
+    )
     coordinate_text = get_coordinates(image_path)
     x, y = _select_coordinate(instruction=instruction, coordinate_text=coordinate_text)
     coordinate = [x, y]
-    return hand_tools.type_text(text=text, coordinate=coordinate, interval=interval)
+    result = hand_tools.type_text(text=text, coordinate=coordinate, interval=interval)
+    logger.log_info("Tool type_text done")
+    return result
 
 
 @mcp.tool()
 def hotkey(keys: list[str] | str, instruction: str = "") -> dict[str, Any]:
     """Press a key combination."""
-    return hand_tools.hotkey(keys=keys)
+    logger.log_info("Tool hotkey start")
+    result = hand_tools.hotkey(keys=keys)
+    logger.log_info("Tool hotkey done")
+    return result
 
 
 @mcp.tool()
@@ -95,18 +112,23 @@ def move(
     instruction: str,
     image_path: str,
     duration: float = 0.0,
-    **_: Any,
 ) -> dict[str, Any]:
-    """Move mouse to a target resolved from instruction + screenshot."""
+    """Use instruction and Yolo model and OCR to find the target on the screenshot. Move mouse to the target."""
+    logger.log_info(f"Tool move start (duration={duration}), image_path={image_path}")
     coordinate_text = get_coordinates(image_path)
     x, y = _select_coordinate(instruction=instruction, coordinate_text=coordinate_text)
-    return hand_tools.move(x=x, y=y, duration=duration)
+    result = hand_tools.move(x=x, y=y, duration=duration)
+    logger.log_info("Tool move done")
+    return result
 
 
 @mcp.tool()
 def wait(seconds: float, instruction: str = "") -> dict[str, Any]:
     """Pause execution for the specified number of seconds."""
-    return hand_tools.wait(seconds=seconds)
+    logger.log_info(f"Tool wait start (seconds={seconds})")
+    result = hand_tools.wait(seconds=seconds)
+    logger.log_info("Tool wait done")
+    return result
 
 
 @mcp.tool()
@@ -116,7 +138,12 @@ def store_text(
     tags: list[str] | None = None,
 ) -> dict[str, Any]:
     """Store text context to this run's storage.json index."""
-    return _store_text(text=text, title=title, tags=tags)
+    logger.log_info(
+        f"Tool store_text start (text_len={len(text)}, title_present={bool(title)}, tags_count={len(tags or [])}"
+    )
+    result = _store_text(text=text, title=title, tags=tags)
+    logger.log_info("Tool store_text done")
+    return result
 
 
 @mcp.tool()
@@ -127,7 +154,12 @@ def store_image(
     tags: list[str] | None = None,
 ) -> dict[str, Any]:
     """Copy an image to this run's storage folder and index it."""
-    return _store_image(image_path=image_path, summary=summary, alias=alias, tags=tags)
+    logger.log_info(
+        f"Tool store_image start (summary_present={bool(summary)}, alias_present={bool(alias)}, tags_count={len(tags or [])}), image_path={image_path}"
+    )
+    result = _store_image(image_path=image_path, summary=summary, alias=alias, tags=tags)
+    logger.log_info("Tool store_image done")
+    return result
 
 
 OLLAMA_TOOL_FUNCTIONS: list[Callable[..., Any]] = [
@@ -141,7 +173,7 @@ OLLAMA_TOOL_FUNCTIONS: list[Callable[..., Any]] = [
     wait,
 ]
 
-HAND_TOOL_NAMES: set[str] = {"click", "type_text", "hotkey", "move", "wait"}
+HAND_TOOL_NAMES: set[str] = {tool.__name__ for tool in OLLAMA_TOOL_FUNCTIONS}
 
 
 def get_ollama_tools() -> list[Callable[..., Any]]:
@@ -154,70 +186,19 @@ def get_tool_function_map() -> dict[str, Callable[..., Any]]:
     return {tool.__name__: tool for tool in OLLAMA_TOOL_FUNCTIONS}
 
 
-def execute_tool_call(tool_name: str, arguments: dict[str, Any]) -> Any:
+def execute_tool_call(tool_name: str, arguments: dict[str, Any], image_path: str) -> Any:
     """Execute a local MCP tool callable by name."""
+    logger.log_info(f"Executing tool call '{tool_name}' with argument keys: {sorted(arguments.keys())}")
+    if "image_path" in arguments:
+        arguments["image_path"] = image_path
     function_map = get_tool_function_map()
     function = function_map.get(tool_name)
     if function is None:
+        logger.log_info(f"Unknown tool requested: {tool_name}")
         raise ValueError(f"unknown tool: {tool_name}")
-    return function(**arguments)
-
-
-# def get_available_actions_text() -> str:
-#     """Return the action list text used in the brain prompt."""
-#     action_lines: list[str] = []
-#     for tool in mcp_to_llm_tools(OLLAMA_TOOL_FUNCTIONS):
-#         function = tool.get("function", {})
-#         name = str(function.get("name", ""))
-#         if name not in ACTION_TOOL_NAMES:
-#             continue
-#         parameters = function.get("parameters", {})
-#         properties = parameters.get("properties", {}) if isinstance(parameters, dict) else {}
-#         required = set(parameters.get("required", [])) if isinstance(parameters, dict) else set()
-#         args: list[str] = []
-#         for prop_name, schema in properties.items():
-#             if not isinstance(schema, dict):
-#                 continue
-#             json_type = str(schema.get("type", "any"))
-#             is_required = prop_name in required
-#             suffix = "" if is_required else "?"
-#             if json_type == "array":
-#                 item_type = "any"
-#                 items = schema.get("items")
-#                 if isinstance(items, dict):
-#                     item_type = str(items.get("type", "any"))
-#                 json_type = f"[{item_type},...]"
-#             args.append(f"{prop_name}{suffix}:{json_type}")
-#         action_lines.append(f"- {name}: {{{','.join(args)}}}")
-#     return "\n".join(action_lines)
-
-
-# def mcp_to_llm_tools(mcp_tools: Any) -> list[dict[str, Any]]:
-#     """Convert MCP tools metadata into LLM function-tool format."""
-#     tools: Iterable[Any] = getattr(mcp_tools, "tools", mcp_tools)
-#     llm_tools: list[dict[str, Any]] = []
-
-#     for tool in tools:
-#         name = getattr(tool, "name", None)
-#         description = getattr(tool, "description", "") or ""
-#         parameters = (
-#             getattr(tool, "inputSchema", None)
-#             or getattr(tool, "input_schema", None)
-#             or {"type": "object", "properties": {}}
-#         )
-#         if not name:
-#             continue
-#         llm_tools.append(
-#             {
-#                 "type": "function",
-#                 "function": {
-#                     "name": name,
-#                     "description": description,
-#                     "parameters": parameters,
-#                 },
-#             }
-#         )
-#     return llm_tools
+    result = function(**arguments)
+    logger.log_info(f"Completed tool call '{tool_name}'")
+    return result
 
 
 if __name__ == "__main__":

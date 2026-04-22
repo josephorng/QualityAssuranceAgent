@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -86,6 +87,15 @@ def resolve_task(cli_task: str | None) -> str:
         print("Task cannot be empty.")
 
 
+def clear_runs_folder(runs_root: Path) -> None:
+    runs_root.mkdir(parents=True, exist_ok=True)
+    for item in runs_root.iterdir():
+        if item.is_dir():
+            shutil.rmtree(item)
+        else:
+            item.unlink()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Computer Use Agent master process")
     parser.add_argument("--task", help="Initial user task text")
@@ -94,6 +104,7 @@ def main() -> None:
 
     settings = load_settings()
     runs_root = Path(settings.runs_dir)
+    clear_runs_folder(runs_root)
     manager = RunStateManager(runs_root=runs_root, memory_max_chars=settings.brain_memory_max_chars)
     paths = manager.init_run(task)
     run_id = paths.root.name

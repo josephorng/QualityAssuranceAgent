@@ -37,9 +37,7 @@
     {
       "prompt": "Given task objective, screenshot context, recent memory, previous action result, and available tools, decide the single best next tool call.",
       "skills": [
-        "Get coordinates of the target UI element if needed",
         "You might need to divide the task into multiple steps first and choose the best tool call for the next step.",
-        "Do not assume you have UI elements coordinates.",
         "Plan one step ahead but execute only one best next action.",
         "Prefer information-gathering tools when uncertain."
       ],

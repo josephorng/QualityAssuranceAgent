@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from cua_mcp.read_screen_text.ocr_image import read_text_from_image_path
+from cua_mcp.read_screen_text.ocr_image import get_coordinates
 from cua_mcp.tools import get_coordinates
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -78,7 +78,7 @@ def test_get_coordinates_tool_returns_bbox_lines(image_path: Path) -> None:
     ids=lambda p: Path(p).name,
 )
 def test_get_coordinates_helper_matches_tool_type(image_path: Path) -> None:
-    helper_output = read_text_from_image_path(str(image_path))
+    helper_output = get_coordinates(str(image_path))
     tool_output = get_coordinates(str(image_path))
     assert isinstance(helper_output, str)
     assert isinstance(tool_output, str)

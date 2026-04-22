@@ -52,15 +52,10 @@ runtime = BrainRuntime()
 
 
 async def _is_interruption(active: BrainTaskState, new_event: EyeEvent) -> bool:
-    prompt = get_prompt("classify_interruption")
-    full_prompt = (
-        f"{prompt}\n\nTask:\n{task_input}\n\n"
-        "Image 1 is the active screenshot. Image 2 is the new screenshot. "
-        "Decide if Image 2 is an interruption requiring a new action."
-    )
-    out = await ollama.generate_json(
+    manager.log_info(f"Brain classifying interruption active={active.event.screenshot_name} new={new_event.screenshot_name}")
+    out, _ = await ollama.generate_json(
         settings.brain_lm,
-        full_prompt,
+        prompt=get_prompt("classify_interruption"),
         fallback={"interruption": True, "replace_state": False, "reason": "fallback"},
         image_paths=[active.event.screenshot_path, new_event.screenshot_path],
     )

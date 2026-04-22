@@ -22,7 +22,7 @@ def detect_objects(image_path: str) -> dict[str, Any]:
 
 @mcp.tool()
 def get_coordinates(image_path: str) -> str:
-    """Run OCR on the given image path and return recognized text."""
+    """Run Yolo and OCR to get the coordinates and the contents of the detected objects in the given image path."""
     return read_text_from_image_path(image_path)
 
 
@@ -33,9 +33,9 @@ def click(x: int, y: int, button: str = "left") -> dict[str, Any]:
 
 
 @mcp.tool()
-def type_text(text: str, interval: float = 0.0) -> dict[str, Any]:
-    """Type text with an optional key interval in seconds."""
-    return hand_tools.type_text(text=text, interval=interval)
+def type_text(text: str, coordinate: list[int], interval: float = 0.0) -> dict[str, Any]:
+    """Click a coordinate to focus, then type text with an optional key interval."""
+    return hand_tools.type_text(text=text, coordinate=coordinate, interval=interval)
 
 
 @mcp.tool()

@@ -20,10 +20,20 @@ def click(x: int, y: int, button: str = "left") -> dict[str, Any]:
     return {"x": x, "y": y, "button": button}
 
 
-def type_text(text: str, interval: float = 0.0) -> dict[str, Any]:
-    """Type text with an optional interval."""
+def type_text(
+    text: str,
+    coordinate: list[int],
+    interval: float = 0.0,
+) -> dict[str, Any]:
+    """Click a coordinate to focus, then type text."""
+    if len(coordinate) != 2:
+        raise ValueError("coordinate must be [x, y]")
+    x, y = coordinate
+    pyautogui.click(x=x, y=y, button="left")
+    click_result = {"x": x, "y": y, "button": "left"}
+
     pyautogui.typewrite(text, interval=interval)
-    return {"text": text, "interval": interval}
+    return {"text": text, "interval": interval, "clicked_coordinate": click_result}
 
 
 def hotkey(keys: list[str] | str) -> dict[str, Any]:

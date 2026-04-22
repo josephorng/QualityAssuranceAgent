@@ -19,13 +19,13 @@
   ],
   "brain_decide_action": [
     {
-      "prompt": "Given task objective, screenshot context, recent memory, previous action result, and available tools, decide the single best next tool call.",
+      "prompt": "Given task objective, screenshot context, recent memory, previous action result, and available tools, decide the single best next tool call. You might need to divide the task into multiple steps first and choose the best tool call for the next step.\n(Get coordinates of the target UI element if needed)",
       "models": ["gemma4:e2b", "gemma3:4b"]
     }
   ],
   "classify_interruption": [
     {
-      "prompt": "Determine whether the newly arrived state interrupts current reasoning. Return strict JSON with interruption (bool), replace_state (bool), and reason.",
+      "prompt": "We are doing a task. Determine whether the newly arrived screenshot interrupts the first screenshot during the task. Return strict JSON with interruption (bool), replace_state (bool), and reason.",
       "models": ["gemma4:e2b", "gemma3:4b"]
     }
   ]

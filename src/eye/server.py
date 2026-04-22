@@ -16,7 +16,7 @@ from skimage.metrics import structural_similarity
 
 from src.common.models import EyeEvent
 from src.common.ollama_client import OllamaClient
-from src.common.prompting import get_prompt
+from src.common.prompting import render_prompt_with_skills
 from src.common.run_state import get_run_state_manager, ts_name
 from src.common.runtime_context import get_runtime_env
 from src.common.settings import load_settings
@@ -83,7 +83,7 @@ async def _should_send(prev_image_path: Path, curr_image_path: Path) -> bool:
     )
     out, tool_calls = await ollama.generate_json(
         settings.eye_vlm,
-        prompt=get_prompt("verify_change_requires_thinking"),
+        prompt=render_prompt_with_skills("verify_change_requires_thinking"),
         fallback={"same_state": True, "reason": "fallback"},
         image_paths=[str(prev_image_path), str(curr_image_path)],
     )

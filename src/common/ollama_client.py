@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -194,8 +195,14 @@ class OllamaClient:
             use_tools=use_tools,
             store_messages=store_messages,
         )
+        normalized_text = text.strip()
+        if normalized_text.startswith("```"):
+            # Accept common LLM formatting: fenced JSON blocks.
+            fenced_match = re.match(r"^```(?:json)?\s*(.*?)\s*```$", normalized_text, flags=re.DOTALL)
+            if fenced_match:
+                normalized_text = fenced_match.group(1).strip()
         try:
-            return json.loads(text), tool_calls
+            return json.loads(normalized_text), tool_calls
         except json.JSONDecodeError:
             get_run_state_manager().log_info(f"Ollama returned invalid JSON: {text}")
             return fallback, tool_calls

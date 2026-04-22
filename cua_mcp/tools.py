@@ -1,16 +1,47 @@
 from __future__ import annotations
 
+import json
 from typing import Any, Callable
 
+import httpx
 from mcp.server.fastmcp import FastMCP
 
 from cua_mcp import hand_tools
 from cua_mcp.read_screen_text.ocr_image import read_text_from_image_path
 from cua_mcp.storage import store_image as _store_image
 from cua_mcp.storage import store_text as _store_text
+from src.common.settings import load_settings
 
 # 1. Initialize the MCP server
 mcp = FastMCP("ComputerUseAgent")
+settings = load_settings()
+
+
+def _select_coordinate(instruction: str, coordinate_text: str) -> tuple[int, int]:
+    """Select one [x, y] target using instruction and detected coordinate text."""
+    prompt = (
+        "Choose one target coordinate based on user instruction and screen coordinates text.\n"
+        "Return JSON only in this exact shape: {\"x\": <int>, \"y\": <int>}.\n\n"
+        f"Instruction:\n{instruction}\n\n"
+        f"CoordinatesText:\n{coordinate_text}\n"
+    )
+    response = httpx.post(
+        f"{settings.ollama_host.rstrip('/')}/api/chat",
+        json={
+            "model": settings.brain_lm,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "options": {"num_ctx": 4096},
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    content = response.json().get("message", {}).get("content", "").strip()
+    try:
+        out = json.loads(content)
+        return int(out["x"]), int(out["y"])
+    except Exception as exc:
+        raise ValueError(f"failed to parse coordinate selection: {content}") from exc
 
 
 # 2. Define tools
@@ -20,38 +51,60 @@ def detect_objects(image_path: str) -> dict[str, Any]:
     return hand_tools.detect_objects(image_path)
 
 
-@mcp.tool()
 def get_coordinates(image_path: str) -> str:
     """Run Yolo and OCR to get the coordinates and the contents of the detected objects in the given image path."""
     return read_text_from_image_path(image_path)
 
 
 @mcp.tool()
-def click(x: int, y: int, button: str = "left") -> dict[str, Any]:
-    """Click a screen coordinate."""
+def click(
+    instruction: str,
+    image_path: str,
+    button: str = "left",
+    **_: Any,
+) -> dict[str, Any]:
+    """Click a screen target resolved from instruction + screenshot."""
+    coordinate_text = get_coordinates(image_path)
+    x, y = _select_coordinate(instruction=instruction, coordinate_text=coordinate_text)
     return hand_tools.click(x=x, y=y, button=button)
 
 
 @mcp.tool()
-def type_text(text: str, coordinate: list[int], interval: float = 0.0) -> dict[str, Any]:
-    """Click a coordinate to focus, then type text with an optional key interval."""
+def type_text(
+    text: str,
+    instruction: str,
+    image_path: str,
+    interval: float = 0.0,
+    **_: Any,
+) -> dict[str, Any]:
+    """Focus target resolved from instruction + screenshot, then type text."""
+    coordinate_text = get_coordinates(image_path)
+    x, y = _select_coordinate(instruction=instruction, coordinate_text=coordinate_text)
+    coordinate = [x, y]
     return hand_tools.type_text(text=text, coordinate=coordinate, interval=interval)
 
 
 @mcp.tool()
-def hotkey(keys: list[str] | str) -> dict[str, Any]:
+def hotkey(keys: list[str] | str, instruction: str = "") -> dict[str, Any]:
     """Press a key combination."""
     return hand_tools.hotkey(keys=keys)
 
 
 @mcp.tool()
-def move(x: int, y: int, duration: float = 0.0) -> dict[str, Any]:
-    """Move mouse to a screen coordinate."""
+def move(
+    instruction: str,
+    image_path: str,
+    duration: float = 0.0,
+    **_: Any,
+) -> dict[str, Any]:
+    """Move mouse to a target resolved from instruction + screenshot."""
+    coordinate_text = get_coordinates(image_path)
+    x, y = _select_coordinate(instruction=instruction, coordinate_text=coordinate_text)
     return hand_tools.move(x=x, y=y, duration=duration)
 
 
 @mcp.tool()
-def wait(seconds: float) -> dict[str, Any]:
+def wait(seconds: float, instruction: str = "") -> dict[str, Any]:
     """Pause execution for the specified number of seconds."""
     return hand_tools.wait(seconds=seconds)
 
@@ -79,7 +132,6 @@ def store_image(
 
 OLLAMA_TOOL_FUNCTIONS: list[Callable[..., Any]] = [
     detect_objects,
-    get_coordinates,
     store_text,
     store_image,
     click,

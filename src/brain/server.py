@@ -16,7 +16,7 @@ from cua_mcp.tools import (
 )
 from src.common.models import BrainTaskState, EyeEvent, HandExecutionResult, ToolCommand
 from src.common.ollama_client import OllamaClient
-from src.common.prompting import get_prompt
+from src.common.prompting import render_prompt_with_skills
 from src.common.run_state import get_run_state_manager
 from src.common.runtime_context import get_runtime_env
 from src.common.settings import load_settings
@@ -51,11 +51,26 @@ class BrainRuntime:
 runtime = BrainRuntime()
 
 
+def _with_default_image_path(tool_name: str, arguments: dict, screenshot_path: str) -> dict:
+    """
+    Ensure vision tools always receive the current screenshot path.
+
+    Models sometimes emit placeholders like `screen.png`. When that happens,
+    fall back to the real screenshot path from the current event.
+    """
+    if tool_name not in {"get_coordinates", "detect_objects"}:
+        return arguments
+
+    patched = dict(arguments)
+    patched["image_path"] = screenshot_path
+    return patched
+
+
 async def _is_interruption(active: BrainTaskState, new_event: EyeEvent) -> bool:
     manager.log_info(f"Brain classifying interruption active={active.event.screenshot_name} new={new_event.screenshot_name}")
     out, _ = await ollama.generate_json(
         settings.brain_lm,
-        prompt=get_prompt("classify_interruption"),
+        prompt=render_prompt_with_skills("classify_interruption"),
         fallback={"interruption": True, "replace_state": False, "reason": "fallback"},
         image_paths=[active.event.screenshot_path, new_event.screenshot_path],
     )
@@ -90,7 +105,7 @@ async def _dispatch_to_hand(command: ToolCommand) -> None:
 
 
 async def _decide_action(event: EyeEvent) -> tuple[str, ToolCommand, dict]:
-    prompt = get_prompt("brain_decide_action")
+    prompt = render_prompt_with_skills("brain_decide_action")
     prev_action_text = runtime.previous_action.model_dump_json() if runtime.previous_action else "none"
     memory = manager.require_paths().long_term_memory_txt.read_text(encoding="utf-8")
     full_prompt = (
@@ -140,6 +155,8 @@ async def _decide_action(event: EyeEvent) -> tuple[str, ToolCommand, dict]:
             else:
                 arguments = {}
 
+            arguments = _with_default_image_path(tool_name, arguments, event.screenshot_path)
+
             if tool_name in HAND_TOOL_NAMES:
                 manager.log_info(
                     f"Brain selected hand action={tool_name} screenshot={event.screenshot_name}"
@@ -164,7 +181,7 @@ async def _decide_action(event: EyeEvent) -> tuple[str, ToolCommand, dict]:
                     f"Brain tool {tool_name} succeeded keys={list(tool_result)[:8]}"
                 )
 
-            full_prompt += f"\n\nToolResult from {tool_name}:\n{json.dumps(tool_result, ensure_ascii=True)}"
+            full_prompt += f"\n\nToolResult from {tool_name}:\n{json.dumps(tool_result, ensure_ascii=False)}"
 
     ollama.clear_message_history()
     manager.log_info(f"Brain tool-loop exhausted screenshot={event.screenshot_name}")

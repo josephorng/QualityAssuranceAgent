@@ -1,6 +1,6 @@
 {
-  "eye_vlm": "gemma4:e2b",
-  "brain_lm": "gemma4:e2b",
+  "eye_vlm": "gemma4:e4b",
+  "brain_lm": "gemma4:e4b",
   "ollama_host": "http://localhost:11434",
   "screenshot_interval_seconds": 2,
   "screenshot_similarity_threshold": 0.985,

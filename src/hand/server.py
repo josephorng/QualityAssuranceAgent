@@ -5,9 +5,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 import httpx
-import pyautogui
 from fastapi import FastAPI
 
+from cua_mcp.tools import execute_tool_call
 from src.common.io_utils import append_csv_row
 from src.common.models import HandExecutionResult, ToolCommand
 from src.common.run_state import get_run_state_manager
@@ -45,26 +45,11 @@ def _exec_action(cmd: ToolCommand) -> HandExecutionResult:
     action = cmd.action
     args = cmd.args
     try:
-        if action == "click":
-            pyautogui.click(x=args["x"], y=args["y"], button=args.get("button", "left"))
-        elif action == "type_text":
-            pyautogui.typewrite(args["text"], interval=args.get("interval", 0.02))
-        elif action == "hotkey":
-            keys = args.get("keys", [])
-            if not keys:
-                raise ValueError("hotkey requires keys")
-            pyautogui.hotkey(*keys)
-        elif action == "move":
-            pyautogui.moveTo(x=args["x"], y=args["y"], duration=args.get("duration", 0.2))
-        elif action == "wait":
-            seconds = float(args.get("seconds", 1.0))
-            pyautogui.sleep(seconds)
-        else:
-            raise ValueError(f"unsupported action: {action}")
+        executed_args = execute_tool_call(action, args)
         return HandExecutionResult(
             ok=True,
             action=action,
-            args=args,
+            args=executed_args if isinstance(executed_args, dict) else args,
             timestamp=datetime.utcnow(),
             screenshot_name=cmd.screenshot_name,
             message=cmd.reason or "executed",

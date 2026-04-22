@@ -25,7 +25,6 @@ class HandExecutionResult(BaseModel):
 class EyeEvent(BaseModel):
     screenshot_name: str
     screenshot_path: str
-    description: str
     similarity_to_previous: float | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 

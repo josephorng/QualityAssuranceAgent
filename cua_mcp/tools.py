@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
 from typing import Any, Callable
 
 from mcp.server.fastmcp import FastMCP
 
 from cua_mcp import hand_tools
 from cua_mcp.read_screen_text.ocr_image import read_text_from_image_path
+from cua_mcp.storage import store_image as _store_image
+from cua_mcp.storage import store_text as _store_text
 
 # 1. Initialize the MCP server
 mcp = FastMCP("ComputerUseAgent")
@@ -20,7 +21,7 @@ def detect_objects(image_path: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def read_screen_text(image_path: str) -> str:
+def get_coordinates(image_path: str) -> str:
     """Run OCR on the given image path and return recognized text."""
     return read_text_from_image_path(image_path)
 
@@ -55,9 +56,32 @@ def wait(seconds: float) -> dict[str, Any]:
     return hand_tools.wait(seconds=seconds)
 
 
+@mcp.tool()
+def store_text(
+    text: str,
+    title: str = "",
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Store text context to this run's storage.json index."""
+    return _store_text(text=text, title=title, tags=tags)
+
+
+@mcp.tool()
+def store_image(
+    image_path: str,
+    summary: str = "",
+    alias: str = "",
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Copy an image to this run's storage folder and index it."""
+    return _store_image(image_path=image_path, summary=summary, alias=alias, tags=tags)
+
+
 OLLAMA_TOOL_FUNCTIONS: list[Callable[..., Any]] = [
     detect_objects,
-    read_screen_text,
+    get_coordinates,
+    store_text,
+    store_image,
     click,
     type_text,
     hotkey,

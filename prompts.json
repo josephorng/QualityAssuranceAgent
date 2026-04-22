@@ -13,13 +13,13 @@
   ],
   "verify_change_requires_thinking": [
     {
-      "prompt": "Given previous and current screenshot descriptions, answer if this is a meaningful state change requiring new reasoning. Return only JSON with keys: requires_thinking (bool), reason (string).",
+      "prompt": "Given previous and current screenshots, answer if these two screenshots are about the same UI state. Return only JSON with keys: same_state (bool), reason (string).",
       "models": ["gemma4:e2b", "gemma3:4b"]
     }
   ],
   "brain_decide_action": [
     {
-      "prompt": "Given task objective, screenshot context, recent memory, previous action result, and available tools, decide the single best next tool call. Return strict JSON with action, args, and rationale.",
+      "prompt": "Given task objective, screenshot context, recent memory, previous action result, and available tools, decide the single best next tool call.",
       "models": ["gemma4:e2b", "gemma3:4b"]
     }
   ],

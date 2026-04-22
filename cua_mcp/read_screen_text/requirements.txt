@@ -1,4 +1,4 @@
-# OCR stack: inference.py + ocr_image.py (MCP read_screen_text)
+# OCR stack: inference.py + ocr_image.py (MCP get_coordinates)
 torch>=2.0
 opencv-python>=4.5
 numpy>=1.20

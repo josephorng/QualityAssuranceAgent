@@ -12,7 +12,7 @@ def test_init_run_creates_expected_paths(tmp_path: Path) -> None:
     assert paths.long_term_memory_txt.exists()
     assert paths.hand_csv.exists()
     assert paths.storage_json.exists()
-    assert paths.debug_log.exists()
+    assert paths.info_log.exists()
 
 
 def test_brain_memory_capped(tmp_path: Path) -> None:

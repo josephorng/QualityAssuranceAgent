@@ -10,7 +10,7 @@ from fastapi import FastAPI
 
 from src.common.io_utils import append_csv_row
 from src.common.models import HandExecutionResult, ToolCommand
-from src.common.run_state import RunStateManager
+from src.common.run_state import get_run_state_manager
 from src.common.runtime_context import get_runtime_env
 from src.common.settings import load_settings
 
@@ -22,20 +22,20 @@ async def lifespan(_app: FastAPI):
         f"port={settings.hand_port} brain={settings.brain_port}"
     )
     print(f"[hand] task: {task_input[:200]}{'…' if len(task_input) > 200 else ''}")
-    manager.log_debug(
+    manager.log_info(
         f"Hand server initialized run_id={_run_id} "
         f"port={settings.hand_port} brain={settings.brain_port}"
     )
     try:
         yield
     finally:
-        manager.log_debug("Hand lifespan shutdown")
+        manager.log_info("Hand lifespan shutdown")
 
 
 app = FastAPI(title="Hand Server", lifespan=lifespan)
 settings = load_settings()
 run_root, task_input, _run_id = get_runtime_env()
-manager = RunStateManager(run_root.parent, settings.brain_memory_max_chars)
+manager = get_run_state_manager()
 manager.init_run(task_input, run_root.name)
 _busy = False
 _lock = asyncio.Lock()
@@ -81,7 +81,7 @@ def _exec_action(cmd: ToolCommand) -> HandExecutionResult:
 
 
 async def _callback_brain(result: HandExecutionResult) -> None:
-    manager.log_debug(
+    manager.log_info(
         f"Hand callback -> brain action={result.action} ok={result.ok} "
         f"screenshot={result.screenshot_name}"
     )
@@ -90,7 +90,7 @@ async def _callback_brain(result: HandExecutionResult) -> None:
             f"http://127.0.0.1:{settings.brain_port}/action_done",
             json=result.model_dump(mode="json"),
         )
-    manager.log_debug(
+    manager.log_info(
         f"Hand callback sent action={result.action} ok={result.ok} "
         f"screenshot={result.screenshot_name}"
     )
@@ -105,7 +105,7 @@ async def state() -> dict[str, bool]:
 async def execute(cmd: ToolCommand) -> dict[str, str]:
     global _busy
     async with _lock:
-        manager.log_debug(
+        manager.log_info(
             f"Hand received execute action={cmd.action} screenshot={cmd.screenshot_name}"
         )
         _busy = True
@@ -122,7 +122,7 @@ async def execute(cmd: ToolCommand) -> dict[str, str]:
                 "message": result.message,
             },
         )
-        manager.log_debug(f"Hand action: {result.action}, ok={result.ok}")
+        manager.log_info(f"Hand action: {result.action}, ok={result.ok}")
         print(
             f"[hand] execute action={result.action} ok={result.ok} "
             f"screenshot={cmd.screenshot_name!r} message={result.message!r}"
@@ -131,7 +131,7 @@ async def execute(cmd: ToolCommand) -> dict[str, str]:
             await _callback_brain(result)
         finally:
             _busy = False
-            manager.log_debug(
+            manager.log_info(
                 f"Hand finished execute action={result.action} ok={result.ok} "
                 f"screenshot={cmd.screenshot_name}"
             )

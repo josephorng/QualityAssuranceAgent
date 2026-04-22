@@ -131,7 +131,7 @@ def main() -> None:
         name: launch_service(service, env) for name, service in services.items()
     }
 
-    manager.log_debug("Master started all services")
+    manager.log_info("Master started all services")
 
     try:
         while True:
@@ -139,14 +139,14 @@ def main() -> None:
             for name, proc in list(procs.items()):
                 code = proc.poll()
                 if code is not None:
-                    manager.log_debug(f"{name} exited with code {code}. restarting.")
+                    manager.log_info(f"{name} exited with code {code}. restarting.")
                     procs[name] = launch_service(services[name], env)
     except KeyboardInterrupt:
-        manager.log_debug("KeyboardInterrupt received. shutting down services.")
+        manager.log_info("KeyboardInterrupt received. shutting down services.")
     finally:
         for proc in procs.values():
             terminate_process(proc)
-        manager.log_debug("Master stopped.")
+        manager.log_info("Master stopped.")
 
 
 if __name__ == "__main__":

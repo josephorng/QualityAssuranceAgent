@@ -6,14 +6,14 @@ from pathlib import Path
 import pytest
 
 from cua_mcp.read_screen_text.ocr_image import read_text_from_image_path
-from cua_mcp.tools import read_screen_text
+from cua_mcp.tools import get_coordinates
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 # Extend this registry as new function folders are added under `cua_mcp/`.
 FUNCTION_FOLDERS: dict[str, dict[str, object]] = {
-    "read_screen_text": {
+    "get_coordinates": {
         "path": ROOT / "cua_mcp" / "read_screen_text",
         "required_files": [
             "ocr_image.py",
@@ -47,21 +47,21 @@ def test_function_folder_required_files_exist(folder_name: str, meta: dict[str, 
         assert (base_path / str(rel)).exists(), f"{folder_name}: missing required file: {rel}"
 
 
-def test_read_screen_text_has_sample_images() -> None:
-    image_dir = FUNCTION_FOLDERS["read_screen_text"]["image_dir"]
+def test_get_coordinates_has_sample_images() -> None:
+    image_dir = FUNCTION_FOLDERS["get_coordinates"]["image_dir"]
     assert isinstance(image_dir, Path)
     assert image_dir.exists(), f"images folder missing: {image_dir}"
     images = _sample_images(image_dir)
-    assert images, "No sample images found for read_screen_text tests"
+    assert images, "No sample images found for get_coordinates tests"
 
 
 @pytest.mark.parametrize(
     "image_path",
-    _sample_images(FUNCTION_FOLDERS["read_screen_text"]["image_dir"]),  # type: ignore[arg-type]
+    _sample_images(FUNCTION_FOLDERS["get_coordinates"]["image_dir"]),  # type: ignore[arg-type]
     ids=lambda p: Path(p).name,
 )
-def test_read_screen_text_tool_returns_bbox_lines(image_path: Path) -> None:
-    output = read_screen_text(str(image_path))
+def test_get_coordinates_tool_returns_bbox_lines(image_path: Path) -> None:
+    output = get_coordinates(str(image_path))
     assert isinstance(output, str)
     assert output, f"OCR returned empty output for {image_path.name}"
     assert not output.startswith("[error]"), f"OCR error for {image_path.name}: {output}"
@@ -74,12 +74,12 @@ def test_read_screen_text_tool_returns_bbox_lines(image_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "image_path",
-    _sample_images(FUNCTION_FOLDERS["read_screen_text"]["image_dir"]),  # type: ignore[arg-type]
+    _sample_images(FUNCTION_FOLDERS["get_coordinates"]["image_dir"]),  # type: ignore[arg-type]
     ids=lambda p: Path(p).name,
 )
-def test_read_screen_text_helper_matches_tool_type(image_path: Path) -> None:
+def test_get_coordinates_helper_matches_tool_type(image_path: Path) -> None:
     helper_output = read_text_from_image_path(str(image_path))
-    tool_output = read_screen_text(str(image_path))
+    tool_output = get_coordinates(str(image_path))
     assert isinstance(helper_output, str)
     assert isinstance(tool_output, str)
 

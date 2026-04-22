@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +15,7 @@ def slugify(text: str) -> str:
 
 
 def ts_name() -> str:
-    return datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
 
 
 @dataclass
@@ -27,7 +27,7 @@ class RunPaths:
     hand_csv: Path
     long_term_memory_txt: Path
     storage_json: Path
-    debug_log: Path
+    info_log: Path
 
 
 class RunStateManager:
@@ -46,7 +46,7 @@ class RunStateManager:
         hand_csv = root / "hand.csv"
         long_term_memory_txt = root / "long_term_memory.txt"
         storage_json = root / "storage.json"
-        debug_log = root / "run.log"
+        info_log = root / "run.log"
 
         eye_dir.mkdir(parents=True, exist_ok=True)
         thinking_dir.mkdir(parents=True, exist_ok=True)
@@ -57,8 +57,8 @@ class RunStateManager:
             hand_csv.write_text("", encoding="utf-8")
         if not storage_json.exists():
             write_json(storage_json, [])
-        if not debug_log.exists():
-            debug_log.write_text("", encoding="utf-8")
+        if not info_log.exists():
+            info_log.write_text("", encoding="utf-8")
 
         self.paths = RunPaths(
             root=root,
@@ -68,9 +68,9 @@ class RunStateManager:
             hand_csv=hand_csv,
             long_term_memory_txt=long_term_memory_txt,
             storage_json=storage_json,
-            debug_log=debug_log,
+            info_log=info_log,
         )
-        self.log_debug(f"Run initialized for task: {task_input}")
+        self.log_info(f"Run initialized for task: {task_input}")
         return self.paths
 
     def require_paths(self) -> RunPaths:
@@ -78,9 +78,11 @@ class RunStateManager:
             raise RuntimeError("Run state not initialized")
         return self.paths
 
-    def log_debug(self, text: str) -> None:
+    def log_info(self, text: str) -> None:
         paths = self.require_paths()
-        append_text(paths.debug_log, f"[{datetime.utcnow().isoformat()}] {text}\n")
+        ts = datetime.now(timezone.utc).isoformat()
+        print(f"[{ts}] {text}")
+        append_text(paths.info_log, f"[{ts}] {text}\n")
 
     def append_brain_memory(self, text: str) -> None:
         paths = self.require_paths()
@@ -97,10 +99,26 @@ class RunStateManager:
         write_json(
             out,
             {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "screenshot_name": image_name,
                 "thought": thought,
                 "decision": decision,
             },
         )
         return out
+
+
+_manager: RunStateManager | None = None
+
+
+def get_run_state_manager() -> RunStateManager:
+    """Return the process-wide manager used by brain, eye, hand, and ollama client."""
+    global _manager
+    if _manager is None:
+        from src.common.runtime_context import get_runtime_env
+        from src.common.settings import load_settings
+
+        settings = load_settings()
+        run_root, _, _ = get_runtime_env()
+        _manager = RunStateManager(run_root.parent, settings.brain_memory_max_chars)
+    return _manager

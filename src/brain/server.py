@@ -17,14 +17,14 @@ from cua_mcp.tools import (
 from src.common.models import BrainTaskState, EyeEvent, HandExecutionResult, ToolCommand
 from src.common.ollama_client import OllamaClient
 from src.common.prompting import get_prompt
-from src.common.run_state import RunStateManager
+from src.common.run_state import get_run_state_manager
 from src.common.runtime_context import get_runtime_env
 from src.common.settings import load_settings
 
 settings = load_settings()
 ollama = OllamaClient(settings.ollama_host)
 run_root, task_input, _run_id = get_runtime_env()
-manager = RunStateManager(run_root.parent, settings.brain_memory_max_chars)
+manager = get_run_state_manager()
 manager.init_run(task_input, run_root.name)
 
 print(
@@ -33,7 +33,7 @@ print(
     f"ollama={settings.ollama_host} lm={settings.brain_lm}"
 )
 print(f"[brain] task: {task_input[:200]}{'…' if len(task_input) > 200 else ''}")
-manager.log_debug(
+manager.log_info(
     f"Brain server initialized run_id={_run_id} "
     f"ports brain={settings.brain_port} hand={settings.hand_port} eye={settings.eye_port}"
 )
@@ -54,15 +54,23 @@ runtime = BrainRuntime()
 async def _is_interruption(active: BrainTaskState, new_event: EyeEvent) -> bool:
     prompt = get_prompt("classify_interruption")
     full_prompt = (
-        f"{prompt}\n\nActive:\n{active.event.description}\n\n"
-        f"New:\n{new_event.description}\n\nTask:\n{task_input}"
+        f"{prompt}\n\nTask:\n{task_input}\n\n"
+        "Image 1 is the active screenshot. Image 2 is the new screenshot. "
+        "Decide if Image 2 is an interruption requiring a new action."
     )
     out = await ollama.generate_json(
         settings.brain_lm,
         full_prompt,
         fallback={"interruption": True, "replace_state": False, "reason": "fallback"},
+        image_paths=[active.event.screenshot_path, new_event.screenshot_path],
     )
-    return bool(out.get("interruption", True))
+    decision = bool(out.get("interruption", True))
+    manager.log_info(
+        f"Brain interruption classified decision={decision} "
+        f"active={active.event.screenshot_name} new={new_event.screenshot_name} "
+        f"reason={out.get('reason', 'n/a')}"
+    )
+    return decision
 
 
 def _best_stack_match(new_event: EyeEvent) -> BrainTaskState | None:
@@ -73,7 +81,7 @@ def _best_stack_match(new_event: EyeEvent) -> BrainTaskState | None:
 
 
 async def _dispatch_to_hand(command: ToolCommand) -> None:
-    manager.log_debug(
+    manager.log_info(
         f"Brain dispatching to hand action={command.action} screenshot={command.screenshot_name}"
     )
     async with httpx.AsyncClient(timeout=20) as client:
@@ -81,7 +89,7 @@ async def _dispatch_to_hand(command: ToolCommand) -> None:
             f"http://127.0.0.1:{settings.hand_port}/execute",
             json=command.model_dump(mode="json"),
         )
-    manager.log_debug(
+    manager.log_info(
         f"Brain dispatch complete action={command.action} screenshot={command.screenshot_name}"
     )
 
@@ -91,24 +99,36 @@ async def _decide_action(event: EyeEvent) -> tuple[str, ToolCommand, dict]:
     prev_action_text = runtime.previous_action.model_dump_json() if runtime.previous_action else "none"
     memory = manager.require_paths().long_term_memory_txt.read_text(encoding="utf-8")
     full_prompt = (
-        f"{prompt}\n\nTask:\n{task_input}\n\nDescription:\n{event.description}\n\n"
-        f"PreviousAction:\n{prev_action_text}\n\nMemory:\n{memory}\n\n"
-        "Use tool calls only. Keep calling tools as needed. "
-        "When ready to execute a UI action, call one of the available action tools."
+        f"{prompt}\n\nTask:\n{task_input}\n\n"
+        "Use the provided screenshot to decide the next move.\n\n"
     )
+    if prev_action_text != "none":
+        full_prompt += f"PreviousAction:\n{prev_action_text}\n\n"
+    if memory != "":
+        full_prompt += f"Memory:\n{memory}"
     max_iterations = 8
+    manager.log_info(
+        f"Brain deciding action screenshot={event.screenshot_name} "
+        f"has_previous_action={prev_action_text != 'none'} memory_chars={len(memory)}"
+    )
 
-    for _ in range(max_iterations):
+    for idx in range(max_iterations):
+        manager.log_info(
+            f"Brain tool-loop iteration={idx + 1}/{max_iterations} "
+            f"screenshot={event.screenshot_name}"
+        )
         assistant_message, tool_calls = await ollama.generate(
             settings.brain_lm,
             prompt=full_prompt,
+            image_paths=[event.screenshot_path],
             use_tools=True,
             store_messages=True,
         )
         
-        manager.log_debug(f"Brain generated assistant_message={assistant_message} tool_calls={tool_calls}")
+        manager.log_info(f"Brain generated assistant_message={assistant_message} tool_calls={tool_calls}")
 
         if len(tool_calls) == 0:
+            manager.log_info("Brain no tool calls returned")
             raise ValueError("No tool calls returned")
 
         for call in tool_calls:
@@ -126,6 +146,9 @@ async def _decide_action(event: EyeEvent) -> tuple[str, ToolCommand, dict]:
                 arguments = {}
 
             if tool_name in HAND_TOOL_NAMES:
+                manager.log_info(
+                    f"Brain selected hand action={tool_name} screenshot={event.screenshot_name}"
+                )
                 reason = assistant_message
                 cmd = ToolCommand(
                     action=tool_name,
@@ -136,24 +159,34 @@ async def _decide_action(event: EyeEvent) -> tuple[str, ToolCommand, dict]:
                 return reason, cmd, {"message": assistant_message}
 
             try:
+                manager.log_info(f"Brain executing tool {tool_name} with arguments {arguments}")
                 tool_result = execute_tool_call(tool_name, arguments)
             except Exception as exc:
                 tool_result = {"error": str(exc)}
+                manager.log_info(f"Brain tool {tool_name} failed error={exc}")
+            else:
+                manager.log_info(
+                    f"Brain tool {tool_name} succeeded keys={list(tool_result)[:8]}"
+                )
 
             full_prompt += f"\n\nToolResult from {tool_name}:\n{json.dumps(tool_result, ensure_ascii=True)}"
 
     ollama.clear_message_history()
+    manager.log_info(f"Brain tool-loop exhausted screenshot={event.screenshot_name}")
     raise ValueError("Tool loop failed")
 
 async def _brain_loop() -> None:
     while True:
         event = await runtime.queue.get()
-        manager.log_debug(f"Brain dequeued event screenshot={event.screenshot_name}")
+        manager.log_info(
+            f"Brain dequeued event screenshot={event.screenshot_name} "
+            f"queue_size={runtime.queue.qsize()} stack_size={len(runtime.stack)}"
+        )
         runtime.processing = True
         active = runtime.active
         if active is not None:
             if await _is_interruption(active, event):
-                manager.log_debug(
+                manager.log_info(
                     f"Brain interruption accepted active={active.event.screenshot_name} "
                     f"new={event.screenshot_name}"
                 )
@@ -163,7 +196,7 @@ async def _brain_loop() -> None:
                 )
                 runtime.active = BrainTaskState(event=event)
             else:
-                manager.log_debug(
+                manager.log_info(
                     f"Brain ignored event screenshot={event.screenshot_name} while active="
                     f"{active.event.screenshot_name}"
                 )
@@ -174,11 +207,12 @@ async def _brain_loop() -> None:
             if match is not None:
                 runtime.stack.remove(match)
                 runtime.active = match
-                manager.log_debug(f"Brain resumed stacked state screenshot={match.event.screenshot_name}")
+                manager.log_info(f"Brain resumed stacked state screenshot={match.event.screenshot_name}")
             else:
                 runtime.active = BrainTaskState(event=event)
-                manager.log_debug(f"Brain created active state screenshot={event.screenshot_name}")
+                manager.log_info(f"Brain created active state screenshot={event.screenshot_name}")
 
+        manager.log_info(f"Brain starting decision for screenshot={event.screenshot_name}")
         thought, command, raw_response = await _decide_action(event)
         reason_preview = (thought[:160] + "…") if len(thought) > 160 else thought
         print(
@@ -190,18 +224,18 @@ async def _brain_loop() -> None:
         await _dispatch_to_hand(command)
         runtime.active = None
         runtime.processing = False
-        manager.log_debug(f"Brain finished processing screenshot={event.screenshot_name}")
+        manager.log_info(f"Brain finished processing screenshot={event.screenshot_name}")
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     print("[brain] lifespan: starting _brain_loop")
-    manager.log_debug("Brain lifespan startup")
+    manager.log_info("Brain lifespan startup")
     task = asyncio.create_task(_brain_loop())
     try:
         yield
     finally:
-        manager.log_debug("Brain lifespan shutdown")
+        manager.log_info("Brain lifespan shutdown")
         task.cancel()
         try:
             await task
@@ -214,10 +248,19 @@ app = FastAPI(title="Brain Server", lifespan=lifespan)
 
 @app.post("/new_event")
 async def new_event(event: EyeEvent) -> dict[str, str]:
-    preview = (event.description[:120] + "…") if len(event.description) > 120 else event.description
-    print(f"[brain] new_event queued screenshot={event.screenshot_name!r} description={preview!r}")
-    manager.log_debug(f"Brain queued new_event screenshot={event.screenshot_name}")
+    print(
+        f"[brain] new_event queued screenshot={event.screenshot_name!r} "
+        f"path={event.screenshot_path!r}"
+    )
+    manager.log_info(
+        f"Brain queued new_event screenshot={event.screenshot_name} "
+        f"processing={runtime.processing} queue_size_before_put={runtime.queue.qsize()}"
+    )
     await runtime.queue.put(event)
+    manager.log_info(
+        f"Brain queued new_event screenshot={event.screenshot_name} "
+        f"queue_size_after_put={runtime.queue.qsize()}"
+    )
     return {"status": "queued"}
 
 
@@ -228,7 +271,7 @@ async def action_done(result: HandExecutionResult) -> dict[str, str]:
         f"screenshot={result.screenshot_name!r} message={result.message!r}"
     )
     runtime.previous_action = result
-    manager.log_debug(
+    manager.log_info(
         f"Brain received action_done action={result.action} ok={result.ok} "
         f"screenshot={result.screenshot_name}"
     )

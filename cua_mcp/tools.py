@@ -89,18 +89,6 @@ def _select_coordinate(instruction: str, coordinate_text: str) -> tuple[int, int
         raise ValueError(f"failed to parse coordinate selection: {content}") from exc
 
 
-# 2. Define tools
-@mcp.tool()
-def detect_objects(image_path: str) -> dict[str, Any]:
-    """Run object detection on the given image path."""
-    return hand_tools.detect_objects(image_path)
-
-
-# def get_coordinates(image_path: str) -> str:
-#     """Run Yolo and OCR to get the coordinates and the contents of the detected objects in the given image path."""
-#     return get_coordinates(image_path)
-
-
 @mcp.tool()
 def click(
     instruction: str,
@@ -203,7 +191,6 @@ def store_image(
 
 
 OLLAMA_TOOL_FUNCTIONS: list[Callable[..., Any]] = [
-    detect_objects,
     store_text,
     store_image,
     click,

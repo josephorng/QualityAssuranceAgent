@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from src.common.monitor_prompt import prompt_eye_monitor_index
 from src.common.run_state import RunStateManager
 from src.common.runtime_context import set_runtime_env
 from src.common.settings import ROOT_DIR, load_settings
@@ -112,6 +113,11 @@ def main() -> None:
     set_runtime_env(paths.root, task, run_id)
     env = os.environ.copy()
     env = with_suppressed_debugpy_warning(env)
+
+    eye_monitor_index = prompt_eye_monitor_index()
+    env["EYE_MONITOR_INDEX"] = str(eye_monitor_index)
+    print(f"[master] Eye capture monitor index: {eye_monitor_index} (0 = all screens)")
+    manager.log_info(f"Eye capture monitor index set to {eye_monitor_index}")
 
     services = {
         "eye": ServiceConfig(

@@ -48,19 +48,19 @@ class BrainRuntime:
 runtime = BrainRuntime()
 
 
-def _with_default_image_path(tool_name: str, arguments: dict, screenshot_path: str) -> dict:
+def _with_default_image_path(arguments: dict, screenshot_path: str) -> dict:
     """
     Ensure vision tools always receive the current screenshot path.
 
     Models sometimes emit placeholders like `screen.png`. When that happens,
     fall back to the real screenshot path from the current event.
     """
-    if tool_name not in {"get_coordinates", "detect_objects"}:
+    if "image_path" in arguments:
+        patched = dict(arguments)
+        patched["image_path"] = screenshot_path
+        return patched
+    else:
         return arguments
-
-    patched = dict(arguments)
-    patched["image_path"] = screenshot_path
-    return patched
 
 
 async def _is_interruption(active: BrainTaskState, new_event: EyeEvent) -> bool:
@@ -131,45 +131,26 @@ async def _decide_action(event: EyeEvent) -> tuple[str, ToolCommand, dict]:
         
         manager.log_info(f"Brain generated assistant_message={assistant_message} tool_calls={tool_calls}")
 
-        if len(tool_calls) == 0:
+        if len(tool_calls) == 0 :
             manager.log_info("Brain no tool calls returned")
             raise ValueError("No tool calls returned")
+        if len(tool_calls) > 1:
+            manager.log_info(f"Brain multiple tool calls returned: {tool_calls}")
+            raise ValueError("Multiple tool calls returned")
 
-        for call in tool_calls:
-            tool_name = call.name
-            arguments_raw = call.arguments
-
-            if isinstance(arguments_raw, str):
-                try:
-                    arguments: dict = json.loads(arguments_raw)
-                except json.JSONDecodeError:
-                    arguments = {}
-            elif isinstance(arguments_raw, dict):
-                arguments = arguments_raw
-            else:
-                arguments = {}
-
-            arguments = _with_default_image_path(tool_name, arguments, event.screenshot_path)
-
-            if tool_name not in HAND_TOOL_NAMES:
-                manager.log_info(f"Brain received unknown tool {tool_name}")
-                full_prompt += (
-                    f"\n\nToolResult from {tool_name}:\n"
-                    f"{json.dumps({'error': f'unknown tool: {tool_name}'}, ensure_ascii=False)}"
-                )
-                continue
-
-            manager.log_info(
-                f"Brain selected hand action={tool_name} screenshot={event.screenshot_name}"
-            )
-            reason = assistant_message
-            cmd = ToolCommand(
-                action=tool_name,
-                args=arguments,
-                screenshot_name=event.screenshot_name,
-                reason=reason,
-            )
-            return reason, cmd, {"message": assistant_message}
+        tool_name, arguments = tool_calls[0].name, tool_calls[0].arguments
+        arguments = _with_default_image_path(arguments, event.screenshot_path)
+        manager.log_info(
+            f"Brain selected hand action={tool_name} screenshot={event.screenshot_name}"
+        )
+        reason = assistant_message
+        cmd = ToolCommand(
+            action=tool_name,
+            args=arguments,
+            screenshot_name=event.screenshot_name,
+            reason=assistant_message,
+        )
+        return reason, cmd, {"message": assistant_message}
 
     ollama.clear_message_history()
     manager.log_info(f"Brain tool-loop exhausted screenshot={event.screenshot_name}")
@@ -284,3 +265,11 @@ async def action_done(result: HandExecutionResult) -> dict[str, str]:
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/runtime_status")
+async def runtime_status() -> dict[str, bool]:
+    return {
+        "has_active": runtime.active is not None,
+        "processing": runtime.processing,
+    }

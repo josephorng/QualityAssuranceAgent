@@ -120,6 +120,25 @@ async def _hand_busy() -> bool:
         return False
 
 
+async def _brain_idle() -> bool:
+    url = f"http://127.0.0.1:{settings.brain_port}/runtime_status"
+    try:
+        async with httpx.AsyncClient(timeout=2) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            body = r.json()
+            has_active = bool(body.get("has_active", False))
+            processing = bool(body.get("processing", False))
+            idle = not has_active and not processing
+            manager.log_info(
+                f"Eye brain /runtime_status has_active={has_active} processing={processing} idle={idle}"
+            )
+            return idle
+    except Exception as exc:
+        manager.log_info(f"Eye brain /runtime_status failed url={url} err={type(exc).__name__}: {exc}")
+        return False
+
+
 async def _should_send(prev_image_path: Path, curr_image_path: Path) -> bool:
     manager.log_info(
         f"Eye verify_change prev={prev_image_path.name} curr={curr_image_path.name} model={settings.eye_vlm}"
@@ -163,10 +182,11 @@ async def eye_loop() -> None:
             continue
         paths = manager.require_paths()
         curr, screenshot_img = _grab_screenshot()
+        brain_idle = await _brain_idle()
 
         similarity = None
-        changed = True
-        if _last_image is not None:
+        changed = brain_idle
+        if _last_image is not None and not brain_idle:
             similarity = _similarity(_last_image, curr)
             changed = similarity < settings.screenshot_similarity_threshold
         _last_image = curr
@@ -174,7 +194,7 @@ async def eye_loop() -> None:
         sim_dbg = f"{similarity:.6f}" if similarity is not None else "n/a"
         manager.log_info(
             f"Eye frame decision similarity={sim_dbg} threshold={settings.screenshot_similarity_threshold} "
-            f"changed={changed} first_sent={_first_sent}"
+            f"changed={changed} first_sent={_first_sent} brain_idle={brain_idle}"
         )
 
         if (not _first_sent and changed) or _first_sent and changed:

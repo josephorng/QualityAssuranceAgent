@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from time import sleep
 from typing import Any
+import tkinter as tk
 
 import pyautogui
 
@@ -25,15 +26,37 @@ def type_text(
     coordinate: list[int],
     interval: float = 0.0,
 ) -> dict[str, Any]:
-    """Click a coordinate to focus, then type text."""
+    """Click a coordinate to focus, then paste text from clipboard (Ctrl+V)."""
     if len(coordinate) != 2:
         raise ValueError("coordinate must be [x, y]")
     x, y = coordinate
     pyautogui.click(x=x, y=y, button="left")
     click_result = {"x": x, "y": y, "button": "left"}
 
-    pyautogui.typewrite(text, interval=interval)
-    return {"text": text, "interval": interval, "clicked_coordinate": click_result}
+    clipboard_before: str | None = None
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        try:
+            clipboard_before = root.clipboard_get()
+        except tk.TclError:
+            clipboard_before = None
+        root.clipboard_clear()
+        root.clipboard_append(text)
+        root.update()
+        pyautogui.hotkey("ctrl", "v")
+    finally:
+        root.clipboard_clear()
+        if clipboard_before is not None:
+            root.clipboard_append(clipboard_before)
+        root.update()
+        root.destroy()
+    return {
+        "text": text,
+        "interval": interval,
+        "clicked_coordinate": click_result,
+        "effective_mode": "paste",
+    }
 
 
 def hotkey(keys: list[str] | str) -> dict[str, Any]:

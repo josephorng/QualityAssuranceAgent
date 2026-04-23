@@ -1,0 +1,481 @@
+from __future__ import annotations
+
+import re
+import shutil
+import time
+import tkinter as tk
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from tkinter import ttk
+from typing import Any
+
+import cv2
+from PIL import Image, ImageDraw, ImageFont, ImageTk
+
+from cua_mcp.read_screen_text import ocr_image as ocr_image_mod
+from cua_mcp.read_screen_text.ocr_image import get_coordinates
+from src.common.io_utils import read_json, write_json
+from src.common.settings import ROOT_DIR
+
+SCREENSHOT_CREATOR_UNDONE_IMAGES = Path(
+    r"C:\Users\Joseph Hung\Documents\Repos\Git\ScreenshotCreator\real_screenshot\undone\images"
+)
+
+
+@dataclass(frozen=True)
+class OcrLine:
+    box: tuple[int, int, int, int]
+    text: str
+
+
+_STRING_LINE_RE = re.compile(r"^\[(\d+),(\d+),(\d+),(\d+)\]\s*(.*)$")
+_STRING_CENTER_RE = re.compile(r"^\[(\d+),(\d+)\]\s*(.*)$")
+
+
+def _parse_string_line(line: str) -> OcrLine | None:
+    raw = line.strip()
+    match = _STRING_LINE_RE.match(raw)
+    if match:
+        x, y, w, h = (int(match.group(i)) for i in range(1, 5))
+        return OcrLine(box=(x, y, w, h), text=match.group(5).strip())
+    center_match = _STRING_CENTER_RE.match(raw)
+    if center_match:
+        cx, cy = (int(center_match.group(i)) for i in range(1, 3))
+        # get_coordinates() returns center points only; render with a tiny marker box.
+        x = max(0, cx - 2)
+        y = max(0, cy - 2)
+        return OcrLine(box=(x, y, 4, 4), text=center_match.group(3).strip())
+    return None
+
+
+def _normalize_lines(raw_lines: Any) -> list[OcrLine]:
+    if not isinstance(raw_lines, list):
+        return []
+    parsed: list[OcrLine] = []
+    for item in raw_lines:
+        if isinstance(item, str):
+            line = _parse_string_line(item)
+            if line is not None:
+                parsed.append(line)
+            continue
+        if (
+            isinstance(item, (list, tuple))
+            and len(item) == 2
+            and isinstance(item[0], (list, tuple))
+            and len(item[0]) == 4
+        ):
+            try:
+                x, y, w, h = (int(v) for v in item[0])
+            except (TypeError, ValueError):
+                continue
+            text = str(item[1]).strip()
+            parsed.append(OcrLine(box=(x, y, w, h), text=text))
+            continue
+        if isinstance(item, dict):
+            box = item.get("box") or item.get("bbox") or item.get("rect")
+            if isinstance(box, (list, tuple)) and len(box) == 4:
+                try:
+                    x, y, w, h = (int(v) for v in box)
+                except (TypeError, ValueError):
+                    continue
+                parsed.append(OcrLine(box=(x, y, w, h), text=str(item.get("text", "")).strip()))
+    return parsed
+
+
+def load_ocr_lines(json_path: Path) -> tuple[list[OcrLine], str]:
+    if not json_path.exists():
+        return [], "Missing OCR JSON"
+    try:
+        data = read_json(json_path, default={})
+    except Exception as exc:
+        return [], f"JSON parse error: {exc}"
+    if not isinstance(data, dict):
+        return [], "Invalid JSON root"
+    lines = _normalize_lines(data.get("lines", []))
+    return lines, f"Loaded {len(lines)} OCR lines"
+
+
+def _discover_runs(runs_root: Path) -> list[Path]:
+    if not runs_root.exists():
+        return []
+    return sorted([p for p in runs_root.iterdir() if p.is_dir()], reverse=True)
+
+
+def _eye_images(run_dir: Path) -> list[Path]:
+    eye_dir = run_dir / "eye"
+    if not eye_dir.exists():
+        return []
+    return sorted([p for p in eye_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}])
+
+
+def _draw_overlays(
+    image: Image.Image,
+    lines: list[OcrLine],
+    show_boxes: bool,
+    show_labels: bool,
+    selected_idx: int | None = None,
+) -> Image.Image:
+    out = image.copy()
+    draw = ImageDraw.Draw(out)
+    font = ImageFont.load_default()
+    for idx, line in enumerate(lines):
+        x, y, w, h = line.box
+        x2, y2 = x + w, y + h
+        is_selected = selected_idx is not None and idx == selected_idx
+        if show_boxes:
+            outline = "red" if is_selected else "lime"
+            width = 4 if is_selected else 2
+            draw.rectangle([(x, y), (x2, y2)], outline=outline, width=width)
+        if show_labels and line.text:
+            text = line.text
+            text_bbox = draw.textbbox((x, y), text, font=font)
+            tx1, ty1, tx2, ty2 = text_bbox
+            pad = 2
+            draw.rectangle([(tx1 - pad, ty1 - pad), (tx2 + pad, ty2 + pad)], fill="black")
+            text_color = "red" if is_selected else "yellow"
+            draw.text((x, y), text, font=font, fill=text_color)
+    return out
+
+
+def _run_ocr_with_boxes(image_path: Path) -> tuple[list[OcrLine], float | None, float]:
+    """Run YOLO+OCR and return full rectangle boxes with timings."""
+    bgr = cv2.imread(str(image_path))
+    if bgr is None:
+        raise ValueError(f"could not read image: {image_path}")
+    img_h, img_w = bgr.shape[:2]
+    predictor = ocr_image_mod._get_crnn_predictor()  # noqa: SLF001
+
+    yolo_start = time.perf_counter()
+    boxes = ocr_image_mod._yolo_text_boxes(bgr)  # noqa: SLF001
+    yolo_elapsed_ms = (time.perf_counter() - yolo_start) * 1000.0
+    if not boxes:
+        boxes = [(0, 0, img_w, img_h)]
+    boxes = ocr_image_mod._merge_overlapping_boxes(boxes)  # noqa: SLF001
+    boxes = ocr_image_mod._sort_boxes_reading_order(boxes)  # noqa: SLF001
+
+    out_lines: list[OcrLine] = []
+    ocr_elapsed_ms = 0.0
+    for x, y, w, h in boxes:
+        crop = bgr[y : y + h, x : x + w]
+        if crop.size == 0:
+            continue
+        ocr_start = time.perf_counter()
+        text = ocr_image_mod._ocr_crop(crop, predictor, 32)  # noqa: SLF001
+        ocr_elapsed_ms += (time.perf_counter() - ocr_start) * 1000.0
+        out_lines.append(OcrLine(box=(x, y, w, h), text=text))
+    return out_lines, yolo_elapsed_ms, ocr_elapsed_ms
+
+
+class OcrViewerApp:
+    def __init__(self, root: tk.Tk, runs_root: Path):
+        self.root = root
+        self.runs_root = runs_root
+        self.run_dirs = _discover_runs(runs_root)
+        self.current_run_images: list[Path] = []
+        self.current_display: ImageTk.PhotoImage | None = None
+        self.current_image: Image.Image | None = None
+        self.current_lines: list[OcrLine] = []
+        self.selected_line_idx: int | None = None
+
+        self.show_boxes = tk.BooleanVar(value=True)
+        self.show_labels = tk.BooleanVar(value=True)
+        self.status_var = tk.StringVar(value="Ready")
+
+        self._view_zoom = 1.0
+        self._rmb_last_x: int | None = None
+
+        self._build_ui()
+        self._populate_runs()
+
+    def _build_ui(self) -> None:
+        self.root.title("OCR Overlay Viewer")
+        self.root.geometry("1280x840")
+        self.root.columnconfigure(1, weight=1)
+        self.root.rowconfigure(0, weight=1)
+
+        left = ttk.Frame(self.root, padding=8)
+        left.grid(row=0, column=0, sticky="ns")
+        left.columnconfigure(0, weight=1)
+
+        ttk.Label(left, text="Runs").grid(row=0, column=0, sticky="w")
+        self.run_list = tk.Listbox(left, exportselection=False, height=12, width=48)
+        self.run_list.grid(row=1, column=0, sticky="nsew")
+        self.run_list.bind("<<ListboxSelect>>", self._on_run_select)
+
+        ttk.Label(left, text="Images").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.image_list = tk.Listbox(left, exportselection=False, height=14, width=48)
+        self.image_list.grid(row=3, column=0, sticky="nsew")
+        self.image_list.bind("<<ListboxSelect>>", self._on_image_select)
+
+        ttk.Label(left, text="OCR Items").grid(row=4, column=0, sticky="w", pady=(8, 0))
+        self.item_list = tk.Listbox(left, exportselection=False, height=10, width=48)
+        self.item_list.grid(row=5, column=0, sticky="nsew")
+        self.item_list.bind("<<ListboxSelect>>", self._on_item_select)
+
+        controls = ttk.Frame(left)
+        controls.grid(row=6, column=0, sticky="ew", pady=(8, 0))
+        ttk.Checkbutton(controls, text="Boxes", variable=self.show_boxes, command=self._refresh_image).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(controls, text="Labels", variable=self.show_labels, command=self._refresh_image).grid(row=0, column=1, sticky="w")
+        ttk.Button(controls, text="Prev", command=self._prev_image).grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        ttk.Button(controls, text="Next", command=self._next_image).grid(row=1, column=1, sticky="ew", pady=(6, 0))
+        ttk.Button(controls, text="Run YOLO+OCR", command=self._run_ocr_current_image).grid(
+            row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0)
+        )
+        ttk.Button(controls, text="Copy to undone/images", command=self._copy_current_image_to_undone).grid(
+            row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0)
+        )
+
+        canvas_wrap = ttk.Frame(self.root, padding=8)
+        canvas_wrap.grid(row=0, column=1, sticky="nsew")
+        canvas_wrap.rowconfigure(0, weight=1)
+        canvas_wrap.columnconfigure(0, weight=1)
+        self.canvas = tk.Canvas(canvas_wrap, bg="#1e1e1e", highlightthickness=0)
+        self.v_scroll = ttk.Scrollbar(canvas_wrap, orient="vertical", command=self.canvas.yview)
+        self.h_scroll = ttk.Scrollbar(canvas_wrap, orient="horizontal", command=self.canvas.xview)
+        self.canvas.configure(yscrollcommand=self.v_scroll.set, xscrollcommand=self.h_scroll.set)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.v_scroll.grid(row=0, column=1, sticky="ns")
+        self.h_scroll.grid(row=1, column=0, sticky="ew")
+        self.canvas.bind("<ButtonPress-3>", self._on_rmb_press)
+        self.canvas.bind("<B3-Motion>", self._on_rmb_drag)
+        self.canvas.bind("<ButtonRelease-3>", self._on_rmb_release)
+        self.canvas.bind("<ButtonPress-2>", self._on_mmb_press)
+        self.canvas.bind("<B2-Motion>", self._on_mmb_drag)
+        self.canvas.bind("<MouseWheel>", self._on_canvas_mousewheel)
+
+        status = ttk.Label(self.root, textvariable=self.status_var, anchor="w")
+        status.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 8))
+
+        self.root.bind("<Left>", lambda _event: self._prev_image())
+        self.root.bind("<Right>", lambda _event: self._next_image())
+        self.root.bind("<Configure>", lambda _event: self._refresh_image())
+
+    def _populate_runs(self) -> None:
+        self.run_list.delete(0, tk.END)
+        for run in self.run_dirs:
+            self.run_list.insert(tk.END, run.name)
+        if self.run_dirs:
+            self.run_list.select_set(0)
+            self._on_run_select()
+        else:
+            self.status_var.set(f"No runs found at {self.runs_root}")
+
+    def _selected_run(self) -> Path | None:
+        selected = self.run_list.curselection()
+        if not selected:
+            return None
+        return self.run_dirs[selected[0]]
+
+    def _on_run_select(self, _event: object | None = None) -> None:
+        run = self._selected_run()
+        self.current_run_images = _eye_images(run) if run is not None else []
+        self.selected_line_idx = None
+        self.image_list.delete(0, tk.END)
+        for img in self.current_run_images:
+            self.image_list.insert(tk.END, img.name)
+        if self.current_run_images:
+            self.image_list.select_set(0)
+            self._on_image_select()
+        else:
+            self.current_image = None
+            self.current_lines = []
+            self.item_list.delete(0, tk.END)
+            self.canvas.delete("all")
+            self.status_var.set(f"No eye images in {run.name if run else '-'}")
+
+    def _selected_image_index(self) -> int | None:
+        selected = self.image_list.curselection()
+        if not selected:
+            return None
+        return selected[0]
+
+    def _current_image_path(self) -> Path | None:
+        idx = self._selected_image_index()
+        if idx is None or idx >= len(self.current_run_images):
+            return None
+        return self.current_run_images[idx]
+
+    def _on_image_select(self, _event: object | None = None) -> None:
+        image_path = self._current_image_path()
+        run = self._selected_run()
+        if image_path is None or run is None:
+            return
+        self.current_image = Image.open(image_path).convert("RGB")
+        self._view_zoom = 1.0
+        json_path = run / "yolo_ocr" / image_path.with_suffix(".json").name
+        self.current_lines, status = load_ocr_lines(json_path)
+        self.selected_line_idx = None
+        self._populate_item_list()
+        self.status_var.set(f"{image_path.name} - {status}")
+        self._refresh_image()
+
+    def _on_rmb_press(self, event: tk.Event[tk.Canvas]) -> None:
+        self._rmb_last_x = int(event.x)
+
+    def _on_rmb_drag(self, event: tk.Event[tk.Canvas]) -> None:
+        if self._rmb_last_x is None:
+            return
+        x = int(event.x)
+        dx = x - self._rmb_last_x
+        self._rmb_last_x = x
+        sens = 0.015
+        self._view_zoom = max(0.125, min(32.0, self._view_zoom + dx * sens))
+        self._refresh_image()
+
+    def _on_rmb_release(self, _event: tk.Event[tk.Canvas]) -> None:
+        self._rmb_last_x = None
+
+    def _on_mmb_press(self, event: tk.Event[tk.Canvas]) -> None:
+        self.canvas.scan_mark(int(event.x), int(event.y))
+
+    def _on_mmb_drag(self, event: tk.Event[tk.Canvas]) -> None:
+        self.canvas.scan_dragto(int(event.x), int(event.y), gain=1)
+
+    def _on_canvas_mousewheel(self, event: tk.Event[tk.Canvas]) -> None:
+        if event.state & 0x0001:
+            self.canvas.xview_scroll(int(-(event.delta / 120)), "units")
+        else:
+            self.canvas.yview_scroll(int(-(event.delta / 120)), "units")
+
+    def _populate_item_list(self) -> None:
+        self.item_list.delete(0, tk.END)
+        for idx, line in enumerate(self.current_lines):
+            text = line.text if line.text else "<empty>"
+            self.item_list.insert(tk.END, f"{idx + 1:03d}: {text}")
+
+    def _on_item_select(self, _event: object | None = None) -> None:
+        selected = self.item_list.curselection()
+        if not selected:
+            self.selected_line_idx = None
+            self._refresh_image()
+            return
+        self.selected_line_idx = selected[0]
+        self._refresh_image()
+
+    def _refresh_image(self) -> None:
+        if self.current_image is None:
+            return
+        rendered = _draw_overlays(
+            self.current_image,
+            self.current_lines,
+            show_boxes=self.show_boxes.get(),
+            show_labels=self.show_labels.get(),
+            selected_idx=self.selected_line_idx,
+        )
+
+        canvas_w = max(100, self.canvas.winfo_width())
+        canvas_h = max(100, self.canvas.winfo_height())
+        img_w, img_h = rendered.size
+        fit = min(canvas_w / img_w, canvas_h / img_h)
+        fit = min(1.0, fit)
+        scale = max(1e-6, fit * self._view_zoom)
+        new_size = (max(1, int(img_w * scale)), max(1, int(img_h * scale)))
+        if new_size != (img_w, img_h):
+            rendered = rendered.resize(new_size, Image.Resampling.LANCZOS)
+
+        self.current_display = ImageTk.PhotoImage(rendered)
+        self.canvas.delete("all")
+        self.canvas.create_image(0, 0, image=self.current_display, anchor="nw")
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _prev_image(self) -> None:
+        idx = self._selected_image_index()
+        if idx is None:
+            return
+        nxt = max(0, idx - 1)
+        self.image_list.select_clear(0, tk.END)
+        self.image_list.select_set(nxt)
+        self.image_list.see(nxt)
+        self._on_image_select()
+
+    def _next_image(self) -> None:
+        idx = self._selected_image_index()
+        if idx is None:
+            return
+        nxt = min(len(self.current_run_images) - 1, idx + 1)
+        self.image_list.select_clear(0, tk.END)
+        self.image_list.select_set(nxt)
+        self.image_list.see(nxt)
+        self._on_image_select()
+
+    def _copy_current_image_to_undone(self) -> None:
+        src = self._current_image_path()
+        if src is None or not src.is_file():
+            self.status_var.set("No image selected to copy")
+            return
+        dest_dir = SCREENSHOT_CREATOR_UNDONE_IMAGES
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest = dest_dir / src.name
+            shutil.copy2(src, dest)
+            self.status_var.set(f"Copied to {dest}")
+        except OSError as exc:
+            self.status_var.set(f"Copy failed: {exc}")
+
+    def _run_ocr_current_image(self) -> None:
+        src = self._current_image_path()
+        run = self._selected_run()
+        if src is None or not src.is_file():
+            self.status_var.set("No image selected for OCR")
+            return
+        if run is None:
+            self.status_var.set("No run selected for OCR output")
+            return
+        self.status_var.set("Running YOLO+OCR...")
+        self.root.update_idletasks()
+        try:
+            output = get_coordinates(str(src))
+        except Exception as exc:
+            self.status_var.set(f"YOLO+OCR failed: {type(exc).__name__}: {exc}")
+            return
+        if output.strip().startswith("[error]"):
+            self.status_var.set(f"YOLO+OCR error: {output.strip()}")
+            return
+        try:
+            out_dir = run / "yolo_ocr"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / src.with_suffix(".json").name
+            existing = read_json(out_path, default={}) if out_path.exists() else {}
+            existing_data = existing if isinstance(existing, dict) else {}
+            loaded_lines = _normalize_lines(existing_data.get("lines", []))
+            has_real_boxes = any(line.box[2] > 4 or line.box[3] > 4 for line in loaded_lines)
+            if loaded_lines and has_real_boxes:
+                self.current_lines = loaded_lines
+                yolo_elapsed_ms = existing_data.get("yolo_elapsed_ms")
+                ocr_elapsed_ms = existing_data.get("ocr_elapsed_ms")
+            else:
+                self.current_lines, yolo_elapsed_ms, ocr_elapsed_ms = _run_ocr_with_boxes(src)
+            line_pairs = [[list(line.box), line.text] for line in self.current_lines]
+            write_json(
+                out_path,
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "image_path": str(src),
+                    "image_name": src.name,
+                    "line_height": 32,
+                    "yolo_elapsed_ms": yolo_elapsed_ms,
+                    "ocr_elapsed_ms": ocr_elapsed_ms,
+                    "lines": line_pairs,
+                    "text": "\n".join(line.text for line in self.current_lines),
+                },
+            )
+            self.selected_line_idx = None
+            self._populate_item_list()
+            self._refresh_image()
+            self.status_var.set(f"YOLO+OCR complete: {len(self.current_lines)} lines (saved: {out_path.name})")
+        except Exception as exc:
+            self.status_var.set(
+                f"YOLO+OCR complete: {len(self.current_lines)} lines, but save failed: {type(exc).__name__}: {exc}"
+            )
+
+
+def run_app(runs_root: Path | None = None) -> None:
+    base = runs_root if runs_root is not None else ROOT_DIR / "runs"
+    root = tk.Tk()
+    OcrViewerApp(root, base)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    run_app()

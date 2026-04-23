@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -85,8 +86,20 @@ class RunStateManager:
     def log_info(self, text: str) -> None:
         paths = self.require_paths()
         ts = datetime.now(timezone.utc).isoformat()
-        print(f"[{ts}] {text}")
-        append_text(paths.info_log, f"[{ts}] {text}\n")
+        caller_label = "unknown"
+        frame = inspect.currentframe()
+        if frame is not None and frame.f_back is not None:
+            caller_file = Path(frame.f_back.f_code.co_filename)
+            caller_no_suffix = caller_file.with_suffix("")
+            parts = caller_no_suffix.parts
+            if "src" in parts:
+                src_index = parts.index("src")
+                caller_label = "/".join(parts[src_index + 1 :]) or caller_no_suffix.name
+            else:
+                caller_label = caller_no_suffix.name
+        line = f"[{ts}] [{caller_label}] {text}"
+        print(line)
+        append_text(paths.info_log, line + "\n")
 
     def append_brain_memory(self, text: str) -> None:
         paths = self.require_paths()

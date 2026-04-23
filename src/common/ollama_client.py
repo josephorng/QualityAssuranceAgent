@@ -134,7 +134,6 @@ class OllamaClient:
             "options": {"num_ctx": 4096},
         }
         if use_tools:
-            get_run_state_manager().log_info(f"Ollama using tools=\n{get_ollama_tools()}")    
             chat_kwargs["tools"] = get_ollama_tools()
         response = await self.client.chat(
             **chat_kwargs,

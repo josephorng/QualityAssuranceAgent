@@ -19,6 +19,43 @@ settings = load_settings()
 logger = get_run_state_manager()
 
 
+def _get_active_capture_offset() -> tuple[int, int]:
+    """Return (left, top) offset for the active Eye capture target."""
+    url = f"http://127.0.0.1:{settings.eye_port}/capture_targets"
+    try:
+        response = httpx.get(url, timeout=2)
+        response.raise_for_status()
+        payload = response.json()
+        active_index = int(payload.get("active_monitor_index", 0))
+        monitors = payload.get("monitors", [])
+        if not isinstance(monitors, list):
+            return 0, 0
+        for monitor in monitors:
+            if not isinstance(monitor, dict):
+                continue
+            if int(monitor.get("index", -1)) == active_index:
+                left = int(monitor.get("left", 0))
+                top = int(monitor.get("top", 0))
+                return left, top
+    except Exception as exc:
+        logger.log_info(
+            f"Failed to fetch active capture offset url={url} err={type(exc).__name__}: {exc}"
+        )
+    return 0, 0
+
+
+def _to_global_coordinate(local_x: int, local_y: int) -> tuple[int, int]:
+    """Convert screenshot-local coordinates to desktop-global coordinates."""
+    offset_left, offset_top = _get_active_capture_offset()
+    global_x = local_x + offset_left
+    global_y = local_y + offset_top
+    logger.log_info(
+        f"Coordinate converted local=({local_x},{local_y}) "
+        f"offset=({offset_left},{offset_top}) global=({global_x},{global_y})"
+    )
+    return global_x, global_y
+
+
 def _select_coordinate(instruction: str, coordinate_text: str) -> tuple[int, int]:
     """Select one [x, y] target using instruction and detected coordinate text."""
     logger.log_info(
@@ -73,7 +110,8 @@ def click(
     """Use instruction and Yolo model and OCR to find the target on the screenshot. Then click the target."""
     logger.log_info(f"Tool click start (button={button}), image_path={image_path}")
     coordinate_text = get_coordinates(image_path)
-    x, y = _select_coordinate(instruction=instruction, coordinate_text=coordinate_text)
+    local_x, local_y = _select_coordinate(instruction=instruction, coordinate_text=coordinate_text)
+    x, y = _to_global_coordinate(local_x, local_y)
     result = hand_tools.click(x=x, y=y, button=button)
     logger.log_info("Tool click done")
     return result
@@ -91,7 +129,8 @@ def type_text(
         f"Tool type_text start (text_len={len(text)}, interval={interval}), image_path={image_path}"
     )
     coordinate_text = get_coordinates(image_path)
-    x, y = _select_coordinate(instruction=instruction, coordinate_text=coordinate_text)
+    local_x, local_y = _select_coordinate(instruction=instruction, coordinate_text=coordinate_text)
+    x, y = _to_global_coordinate(local_x, local_y)
     coordinate = [x, y]
     result = hand_tools.type_text(text=text, coordinate=coordinate, interval=interval)
     logger.log_info("Tool type_text done")
@@ -116,7 +155,8 @@ def move(
     """Use instruction and Yolo model and OCR to find the target on the screenshot. Move mouse to the target."""
     logger.log_info(f"Tool move start (duration={duration}), image_path={image_path}")
     coordinate_text = get_coordinates(image_path)
-    x, y = _select_coordinate(instruction=instruction, coordinate_text=coordinate_text)
+    local_x, local_y = _select_coordinate(instruction=instruction, coordinate_text=coordinate_text)
+    x, y = _to_global_coordinate(local_x, local_y)
     result = hand_tools.move(x=x, y=y, duration=duration)
     logger.log_info("Tool move done")
     return result

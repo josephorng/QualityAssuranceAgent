@@ -189,6 +189,60 @@ def _sort_boxes_reading_order(boxes: list[tuple[int, int, int, int]]) -> list[tu
     return ordered
 
 
+def _boxes_overlap(
+    a: tuple[int, int, int, int],
+    b: tuple[int, int, int, int],
+) -> bool:
+    """Return True when two (x, y, w, h) boxes overlap by area."""
+    ax1, ay1, aw, ah = a
+    bx1, by1, bw, bh = b
+    ax2, ay2 = ax1 + aw, ay1 + ah
+    bx2, by2 = bx1 + bw, by1 + bh
+    return ax1 < bx2 and bx1 < ax2 and ay1 < by2 and by1 < ay2
+
+
+def _merge_two_boxes(
+    a: tuple[int, int, int, int],
+    b: tuple[int, int, int, int],
+) -> tuple[int, int, int, int]:
+    """Return the smallest box containing both boxes."""
+    ax1, ay1, aw, ah = a
+    bx1, by1, bw, bh = b
+    ax2, ay2 = ax1 + aw, ay1 + ah
+    bx2, by2 = bx1 + bw, by1 + bh
+    x1, y1 = min(ax1, bx1), min(ay1, by1)
+    x2, y2 = max(ax2, bx2), max(ay2, by2)
+    return x1, y1, x2 - x1, y2 - y1
+
+
+def _merge_overlapping_boxes(
+    boxes: list[tuple[int, int, int, int]],
+) -> list[tuple[int, int, int, int]]:
+    """Merge all transitive overlaps into single bounding boxes."""
+    if len(boxes) < 2:
+        return boxes
+    merged = list(boxes)
+    changed = True
+    while changed:
+        changed = False
+        next_boxes: list[tuple[int, int, int, int]] = []
+        while merged:
+            current = merged.pop()
+            merged_with_current = False
+            for i, other in enumerate(merged):
+                if _boxes_overlap(current, other):
+                    current = _merge_two_boxes(current, other)
+                    merged.pop(i)
+                    merged.append(current)
+                    changed = True
+                    merged_with_current = True
+                    break
+            if not merged_with_current:
+                next_boxes.append(current)
+        merged = next_boxes
+    return merged
+
+
 def _ocr_crop(
     bgr_crop: np.ndarray,
     predictor: TextPredictor,
@@ -264,6 +318,7 @@ def get_coordinates(
         _log_info("OCR using full-frame fallback box")
         boxes = [(0, 0, img_w, img_h)]
 
+    boxes = _merge_overlapping_boxes(boxes)
     boxes = _sort_boxes_reading_order(boxes)
 
     all_lines: list[tuple[tuple[int, int, int, int], str]] = []

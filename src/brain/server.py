@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from cua_mcp.tools import HAND_TOOL_NAMES
 from src.common.models import BrainTaskState, EyeEvent, HandExecutionResult, ToolCommand
 from src.common.ollama_client import OllamaClient
-from src.common.prompting import render_prompt_with_skills
+from src.common.prompting import render_prompt_with_instructions
 from src.common.run_state import get_run_state_manager
 from src.common.runtime_context import get_runtime_env
 from src.common.settings import load_settings
@@ -67,7 +67,7 @@ async def _is_interruption(active: BrainTaskState, new_event: EyeEvent) -> bool:
     manager.log_info(f"Brain classifying interruption active={active.event.screenshot_name} new={new_event.screenshot_name}")
     out, _ = await ollama.generate_json(
         settings.brain_lm,
-        prompt=render_prompt_with_skills("classify_interruption"),
+        prompt=render_prompt_with_instructions("classify_interruption"),
         fallback={"interruption": True, "replace_state": False, "reason": "fallback"},
         image_paths=[active.event.screenshot_path, new_event.screenshot_path],
     )
@@ -102,7 +102,7 @@ async def _dispatch_to_hand(command: ToolCommand) -> None:
 
 
 async def _decide_action(event: EyeEvent) -> tuple[str, ToolCommand, dict]:
-    prompt = render_prompt_with_skills("brain_decide_action")
+    prompt = render_prompt_with_instructions("brain_decide_action")
     prev_action_text = runtime.previous_action.model_dump_json() if runtime.previous_action else "none"
     memory = manager.require_paths().long_term_memory_txt.read_text(encoding="utf-8")
     full_prompt = f"{prompt}\n\nTask:\n{task_input}\n\n"

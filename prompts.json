@@ -2,7 +2,7 @@
   "summarize_context": [
     {
       "prompt": "Summarize the following long-term memory into concise actionable context while preserving goals, constraints, and pending tasks.",
-      "skills": [
+      "instructions": [
         "Keep output short and actionable.",
         "Preserve goals, constraints, blockers, and next steps.",
         "Do not invent details that are not in the input."
@@ -13,7 +13,7 @@
   "describe_screenshot": [
     {
       "prompt": "Describe the current desktop screenshot. Include active app/window, visible UI elements, key text, warnings/dialogs, and interactable UI targets.",
-      "skills": [
+      "instructions": [
         "Prioritize details that influence the next action.",
         "Mention coordinates only when clearly inferable.",
         "Separate confirmed observations from uncertain guesses."
@@ -24,7 +24,7 @@
   "verify_change_requires_thinking": [
     {
       "prompt": "Given previous and current screenshots, answer if these two screenshots are about the same UI state. Return only JSON with keys: same_state (bool), reason (string).",
-      "skills": [
+      "instructions": [
         "Focus on UI state changes, not tiny visual noise.",
         "Ignore loading indicators and other temporary UI elements.",
         "Treat dialogs, and navigation changes as meaningful.",
@@ -36,7 +36,7 @@
   "brain_decide_action": [
     {
       "prompt": "Given task objective, screenshot context, recent memory, previous action result, and available tools, decide the single best next tool call.",
-      "skills": [
+      "instructions": [
         "You might need to divide the task into multiple steps first and choose the best tool call for the next step.",
         "Plan one step ahead but execute only one best next action.",
         "Prefer information-gathering tools when uncertain."
@@ -47,7 +47,7 @@
   "classify_interruption": [
     {
       "prompt": "We are doing a task. Determine whether the newly arrived screenshot interrupts the first screenshot during the task. Return strict JSON with interruption (bool), replace_state (bool), and reason.",
-      "skills": [
+      "instructions": [
         "Classify interruption based on task impact, not only visual difference.",
         "Set replace_state true only when old state is obsolete.",
         "Return strict JSON only."

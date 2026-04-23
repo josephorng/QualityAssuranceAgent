@@ -11,14 +11,16 @@ import httpx
 import mss
 import numpy as np
 from fastapi import FastAPI
+from pydantic import BaseModel
 from PIL import Image
 from skimage.metrics import structural_similarity
 
 from src.common.models import EyeEvent
 from src.common.ollama_client import OllamaClient
-from src.common.prompting import render_prompt_with_skills
+from src.common.prompting import render_prompt_with_instructions
 from src.common.run_state import get_run_state_manager, ts_name
 from src.common.runtime_context import get_runtime_env
+from src.common.monitor_prompt import read_eye_monitor_index_from_env
 from src.common.settings import load_settings
 
 settings = load_settings()
@@ -28,11 +30,13 @@ ollama = OllamaClient(settings.ollama_host)
 manager.init_run(task_input, run_root.name)
 _last_image: np.ndarray | None = None
 _first_sent = False
+_active_monitor_index = read_eye_monitor_index_from_env(1)
 
 print(
     f"[eye] init run_root={run_root} run_id={_run_id} "
     f"ports eye={settings.eye_port} brain={settings.brain_port} hand={settings.hand_port} "
-    f"ollama={settings.ollama_host} vlm={settings.eye_vlm}"
+    f"ollama={settings.ollama_host} vlm={settings.eye_vlm} "
+    f"capture_monitor_index={_active_monitor_index}"
 )
 print(f"[eye] task: {task_input[:200]}{'…' if len(task_input) > 200 else ''}")
 manager.log_info(
@@ -41,12 +45,51 @@ manager.log_info(
 )
 
 
-def _grab_screenshot() -> tuple[np.ndarray, Image.Image]:
+class MonitorSelection(BaseModel):
+    monitor_index: int
+
+
+def _monitor_details() -> list[dict[str, int | str]]:
     with mss.mss() as sct:
-        monitor = sct.monitors[1]
+        details: list[dict[str, int | str]] = []
+        # mss index 0 is the virtual bounding monitor (all screens).
+        for idx in range(len(sct.monitors)):
+            monitor = sct.monitors[idx]
+            entry: dict[str, int | str] = {
+                "index": idx,
+                "left": int(monitor["left"]),
+                "top": int(monitor["top"]),
+                "width": int(monitor["width"]),
+                "height": int(monitor["height"]),
+            }
+            if idx == 0:
+                entry["name"] = "all_screens"
+            details.append(entry)
+        return details
+
+
+def _resolve_monitor_index(requested_index: int) -> int:
+    with mss.mss() as sct:
+        max_index = len(sct.monitors) - 1
+        if max_index < 0:
+            return 0
+        if requested_index < 0:
+            return 0
+        if requested_index > max_index:
+            return max_index
+        return requested_index
+
+
+def _grab_screenshot() -> tuple[np.ndarray, Image.Image]:
+    global _active_monitor_index
+    with mss.mss() as sct:
+        _active_monitor_index = _resolve_monitor_index(_active_monitor_index)
+        monitor = sct.monitors[_active_monitor_index]
         shot = sct.grab(monitor)
         img = Image.frombytes("RGB", shot.size, shot.rgb)
-        manager.log_info(f"Eye grabbed screenshot size={img.size}")
+        manager.log_info(
+            f"Eye grabbed screenshot monitor={_active_monitor_index} size={img.size}"
+        )
         return np.array(img.convert("L")), img
 
 
@@ -83,7 +126,7 @@ async def _should_send(prev_image_path: Path, curr_image_path: Path) -> bool:
     )
     out, tool_calls = await ollama.generate_json(
         settings.eye_vlm,
-        prompt=render_prompt_with_skills("verify_change_requires_thinking"),
+        prompt=render_prompt_with_instructions("verify_change_requires_thinking"),
         fallback={"same_state": True, "reason": "fallback"},
         image_paths=[str(prev_image_path), str(curr_image_path)],
     )
@@ -197,3 +240,16 @@ app = FastAPI(title="Eye Server", lifespan=lifespan)
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/capture_targets")
+async def capture_targets() -> dict[str, object]:
+    return {"active_monitor_index": _active_monitor_index, "monitors": _monitor_details()}
+
+
+@app.post("/capture_targets")
+async def set_capture_target(selection: MonitorSelection) -> dict[str, object]:
+    global _active_monitor_index
+    _active_monitor_index = _resolve_monitor_index(selection.monitor_index)
+    manager.log_info(f"Eye switched capture monitor={_active_monitor_index}")
+    return {"active_monitor_index": _active_monitor_index, "monitors": _monitor_details()}

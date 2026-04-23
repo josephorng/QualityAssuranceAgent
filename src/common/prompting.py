@@ -11,7 +11,7 @@ from src.common.settings import ROOT_DIR
 @dataclass(frozen=True)
 class PromptConfig:
     prompt: str
-    skills: list[str]
+    instructions: list[str]
     models: list[str]
 
 
@@ -30,20 +30,22 @@ def get_prompt_config(name: str) -> PromptConfig:
     prompts = load_prompts()
     variants = prompts.get(name, [])
     if not variants:
-        return PromptConfig(prompt="", skills=[], models=[])
+        return PromptConfig(prompt="", instructions=[], models=[])
 
     variant = variants[0]
     prompt = str(variant.get("prompt", ""))
-    raw_skills = variant.get("skills", [])
-    skills = [str(skill) for skill in raw_skills] if isinstance(raw_skills, list) else []
+    raw_instructions = variant.get("instructions", [])
+    instructions = (
+        [str(s) for s in raw_instructions] if isinstance(raw_instructions, list) else []
+    )
     raw_models = variant.get("models", [])
     models = [str(model) for model in raw_models] if isinstance(raw_models, list) else []
-    return PromptConfig(prompt=prompt, skills=skills, models=models)
+    return PromptConfig(prompt=prompt, instructions=instructions, models=models)
 
 
-def render_prompt_with_skills(name: str) -> str:
+def render_prompt_with_instructions(name: str) -> str:
     config = get_prompt_config(name)
-    if not config.skills:
+    if not config.instructions:
         return config.prompt
-    skills_text = "\n".join(f"- {skill}" for skill in config.skills)
-    return f"{config.prompt}\n\nSkills:\n{skills_text}"
+    block = "\n".join(f"- {line}" for line in config.instructions)
+    return f"{config.prompt}\n\nInstructions:\n{block}"

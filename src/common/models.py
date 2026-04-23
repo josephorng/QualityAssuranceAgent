@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from datetime import timezone
 
 class ToolCommand(BaseModel):
     action: Literal["click", "type_text", "hotkey", "move", "wait"]
@@ -17,7 +18,7 @@ class HandExecutionResult(BaseModel):
     ok: bool
     action: str
     args: dict[str, Any] = Field(default_factory=dict)
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=datetime.now(timezone.utc))
     screenshot_name: str | None = None
     message: str = ""
 
@@ -26,7 +27,7 @@ class EyeEvent(BaseModel):
     screenshot_name: str
     screenshot_path: str
     similarity_to_previous: float | None = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=datetime.now(timezone.utc))
 
 
 class InterruptionDecision(BaseModel):
@@ -44,5 +45,5 @@ class BrainDecision(BaseModel):
 
 class BrainTaskState(BaseModel):
     event: EyeEvent
-    started_at: datetime = Field(default_factory=datetime.utcnow)
+    started_at: datetime = Field(default_factory=datetime.now(timezone.utc))
     thought: str = ""

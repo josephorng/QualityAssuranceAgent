@@ -22,10 +22,6 @@ def load_prompts() -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def get_prompt(name: str) -> str:
-    return get_prompt_config(name).prompt
-
-
 def get_prompt_config(name: str) -> PromptConfig:
     prompts = load_prompts()
     variants = prompts.get(name, [])
@@ -43,7 +39,7 @@ def get_prompt_config(name: str) -> PromptConfig:
     return PromptConfig(prompt=prompt, instructions=instructions, models=models)
 
 
-def render_prompt_with_instructions(name: str) -> str:
+def get_prompt(name: str) -> str:
     config = get_prompt_config(name)
     if not config.instructions:
         return config.prompt

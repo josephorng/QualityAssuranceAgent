@@ -14,6 +14,7 @@ from src.common.models import HandExecutionResult, ToolCommand
 from src.common.run_state import get_run_state_manager
 from src.common.runtime_context import get_runtime_env
 from src.common.settings import load_settings
+from datetime import timezone
 
 
 @asynccontextmanager
@@ -59,7 +60,7 @@ def _exec_action(cmd: ToolCommand) -> HandExecutionResult:
             ok=True,
             action=action,
             args=executed_args if isinstance(executed_args, dict) else args,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             screenshot_name=screenshot_path,
             message=cmd.reason or "executed",
         )
@@ -68,7 +69,7 @@ def _exec_action(cmd: ToolCommand) -> HandExecutionResult:
             ok=False,
             action=action,
             args=args,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             screenshot_name=screenshot_path,
             message=str(exc),
         )

@@ -80,7 +80,7 @@ def _step_prompt_block(step: dict) -> str:
         "CurrentStep:\n"
         f"- goal: {step.get('goal', '')}\n"
         f"- instruction: {step.get('instruction', '')}\n"
-        f"- tool: {step.get('tool', '')}\n"
+        f"- tool: {step.get('tool')}\n" if step.get("tool") else ""
     )
 
 

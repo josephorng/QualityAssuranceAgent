@@ -7,6 +7,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 from cua_mcp import hand_tools
+from cua_mcp import steps as step_tools
 from cua_mcp.read_screen_text.ocr_image import get_coordinates
 from cua_mcp.storage import store_image as _store_image
 from cua_mcp.storage import store_text as _store_text
@@ -187,6 +188,24 @@ def store_image(
     )
     result = _store_image(image_path=image_path, summary=summary, alias=alias, tags=tags)
     logger.log_info("Tool store_image done")
+    return result
+
+
+@mcp.tool()
+def divide_step(path: str, new_steps: list[dict[str, Any]]) -> dict[str, Any]:
+    """Split one step into nested child steps."""
+    logger.log_info(f"Tool divide_step start path={path} count={len(new_steps)}")
+    result = step_tools.divide_step(path=path, new_steps=new_steps)
+    logger.log_info("Tool divide_step done")
+    return result
+
+
+@mcp.tool()
+def create_new_steps(target_path: str, new_steps: list[dict[str, Any]]) -> dict[str, Any]:
+    """Create one or more sibling steps at the target step level."""
+    logger.log_info(f"Tool create_new_steps start target_path={target_path} count={len(new_steps)}")
+    result = step_tools.create_new_steps(target_path=target_path, new_steps=new_steps)
+    logger.log_info("Tool create_new_steps done")
     return result
 
 

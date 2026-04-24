@@ -12,25 +12,26 @@ def _init_manager(tmp_path: Path) -> RunStateManager:
     return manager
 
 
-def test_create_new_steps_and_get_next_actionable(tmp_path: Path) -> None:
+def test_create_new_step_and_get_next_actionable(tmp_path: Path) -> None:
     _init_manager(tmp_path)
-    created = steps.create_new_steps(
+    created_first = steps.create_new_step(
         target_path="",
-        new_steps=[
-            {"goal": "step 1", "instruction": "do one", "result": ""},
-            {"goal": "step 2", "instruction": "do two", "result": ""},
-        ],
+        new_step={"goal": "step 1", "instruction": "do one", "result": ""},
     )
-    assert created["count"] == 2
-    assert created["created_paths"] == ["0", "1"]
+    created_second = steps.create_new_step(
+        target_path="",
+        new_step={"goal": "step 2", "instruction": "do two", "result": ""},
+    )
+    assert created_first["created_path"] == "0"
+    assert created_second["created_path"] == "1"
     assert steps.get_next_actionable_step_path() == "0"
 
 
 def test_divide_step_and_pending_lookup(tmp_path: Path) -> None:
     _init_manager(tmp_path)
-    steps.create_new_steps(
+    steps.create_new_step(
         target_path="",
-        new_steps=[{"goal": "parent", "instruction": "split me", "result": ""}],
+        new_step={"goal": "parent", "instruction": "split me", "result": ""},
     )
     split = steps.divide_step(
         path="0",
@@ -47,12 +48,13 @@ def test_divide_step_and_pending_lookup(tmp_path: Path) -> None:
 
 def test_check_task_complete_and_incomplete(tmp_path: Path) -> None:
     _init_manager(tmp_path)
-    steps.create_new_steps(
+    steps.create_new_step(
         target_path="",
-        new_steps=[
-            {"goal": "a", "instruction": "a", "result": "Done"},
-            {"goal": "b", "instruction": "b", "result": ""},
-        ],
+        new_step={"goal": "a", "instruction": "a", "result": "Done"},
+    )
+    steps.create_new_step(
+        target_path="",
+        new_step={"goal": "b", "instruction": "b", "result": ""},
     )
     summary = steps.check_task()
     assert summary["complete"] is False
@@ -67,9 +69,9 @@ def test_check_task_complete_and_incomplete(tmp_path: Path) -> None:
 
 def test_set_step_image(tmp_path: Path) -> None:
     _init_manager(tmp_path)
-    steps.create_new_steps(
+    steps.create_new_step(
         target_path="",
-        new_steps=[{"goal": "step", "instruction": "do step", "result": ""}],
+        new_step={"goal": "step", "instruction": "do step", "result": ""},
     )
     updated = steps.set_step_image("0", "20260424_000000_000000.png")
     assert updated["image"] == "20260424_000000_000000.png"

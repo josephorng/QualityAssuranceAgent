@@ -163,6 +163,7 @@ def wait(seconds: float, instruction: str = "") -> dict[str, Any]:
 @mcp.tool()
 def store_text(
     text: str,
+    instruction: str = "",
     title: str = "",
     tags: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -178,6 +179,7 @@ def store_text(
 @mcp.tool()
 def store_image(
     image_path: str,
+    instruction: str = "",
     summary: str = "",
     alias: str = "",
     tags: list[str] | None = None,
@@ -192,7 +194,7 @@ def store_image(
 
 
 @mcp.tool()
-def divide_step(path: str, new_steps: list[dict[str, Any]]) -> dict[str, Any]:
+def divide_step(path: str, new_steps: list[dict[str, Any]], instruction: str = "") -> dict[str, Any]:
     """Split one step into nested child steps."""
     logger.log_info(f"Tool divide_step start path={path} count={len(new_steps)}")
     result = step_tools.divide_step(path=path, new_steps=new_steps)
@@ -201,11 +203,15 @@ def divide_step(path: str, new_steps: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 @mcp.tool()
-def create_new_steps(target_path: str, new_steps: list[dict[str, Any]]) -> dict[str, Any]:
-    """Create one or more sibling steps at the target step level."""
-    logger.log_info(f"Tool create_new_steps start target_path={target_path} count={len(new_steps)}")
-    result = step_tools.create_new_steps(target_path=target_path, new_steps=new_steps)
-    logger.log_info("Tool create_new_steps done")
+def create_new_step(
+    target_path: str,
+    new_step: dict[str, Any],
+    instruction: str = "",
+) -> dict[str, Any]:
+    """Create one sibling step at the target step level."""
+    logger.log_info(f"Tool create_new_step start target_path={target_path}")
+    result = step_tools.create_new_step(target_path=target_path, new_step=new_step)
+    logger.log_info("Tool create_new_step done")
     return result
 
 

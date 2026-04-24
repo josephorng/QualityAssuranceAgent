@@ -39,7 +39,7 @@
       "instructions": [
         "You might need to divide the task into multiple steps first and choose the best tool call for the next step.",
         "Plan one step ahead but execute only one best next action.",
-        "Prefer information-gathering tools when uncertain."
+        "Create detailed tool instruction."
       ],
       "models": ["gemma4:e2b", "gemma3:4b"]
     }

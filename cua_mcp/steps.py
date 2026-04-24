@@ -132,6 +132,15 @@ def set_step_image(path: StepPath, image: str) -> dict[str, Any]:
     return node
 
 
+def set_step_instruction(path: StepPath, instruction: str) -> dict[str, Any]:
+    """Set one step's `instruction` field by path."""
+    tree = read_steps_tree()
+    node = _locate_step(tree, path)
+    node["instruction"] = str(instruction)
+    write_steps_tree(tree)
+    return node
+
+
 def divide_step(path: StepPath, new_steps: list[dict[str, Any]]) -> dict[str, Any]:
     """Replace a step with child steps and mark the parent as `splitted`."""
     tree = read_steps_tree()
@@ -149,8 +158,8 @@ def divide_step(path: StepPath, new_steps: list[dict[str, Any]]) -> dict[str, An
     }
 
 
-def create_new_steps(target_path: StepPath, new_steps: list[dict[str, Any]]) -> dict[str, Any]:
-    """Insert one or more sibling steps after `target_path` (or append at root)."""
+def create_new_step(target_path: StepPath, new_step: dict[str, Any]) -> dict[str, Any]:
+    """Insert exactly one sibling step after `target_path` (or append at root)."""
     tree = read_steps_tree()
     if target_path == "":
         siblings = tree.get("steps", [])
@@ -163,14 +172,11 @@ def create_new_steps(target_path: StepPath, new_steps: list[dict[str, Any]]) -> 
         _, siblings, index = _locate_parent(tree, target_path)
         insert_at = index + 1
         parent_prefix = ".".join(target_path.split(".")[:-1])
-    created_paths: list[str] = []
-    for offset, step in enumerate(new_steps):
-        normalized = _default_step(step)
-        siblings.insert(insert_at + offset, normalized)
-        created_index = insert_at + offset
-        created_paths.append(f"{parent_prefix}.{created_index}" if parent_prefix else str(created_index))
+    normalized = _default_step(new_step)
+    siblings.insert(insert_at, normalized)
+    created_path = f"{parent_prefix}.{insert_at}" if parent_prefix else str(insert_at)
     write_steps_tree(tree)
-    return {"status": "ok", "created_paths": created_paths, "count": len(created_paths)}
+    return {"status": "ok", "created_path": created_path}
 
 
 def _dfs_paths(node: dict[str, Any], prefix: str = "") -> list[str]:

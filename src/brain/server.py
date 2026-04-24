@@ -61,16 +61,14 @@ def _ensure_seed_step() -> None:
     summary = step_tools.check_task()
     if summary.get("leaf_count", 0) > 0:
         return
-    step_tools.create_new_steps(
+    step_tools.create_new_step(
         target_path="",
-        new_steps=[
-            {
-                "image": "",
-                "goal": task_input,
-                "instruction": task_input,
-                "result": "",
-            }
-        ],
+        new_step={
+            "image": "",
+            "goal": task_input,
+            "instruction": task_input,
+            "result": "",
+        },
     )
 
 
@@ -154,8 +152,8 @@ async def _check_task_and_expand(event: EyeEvent) -> bool:
         return False
     prompt = (
         "Decide whether the full user task is truly complete.\n"
-        'Return strict JSON: {"complete": <bool>, "reason": <string>, "steps": [{"goal":"...","instruction":"...","result":""}]}\n'
-        "If not complete, provide one or more additional executable steps in `steps`.\n\n"
+        'Return strict JSON: {"complete": <bool>, "reason": <string>, "step": {"goal":"...","instruction":"...","result":""}}\n'
+        "If not complete, provide one additional executable step in `step`.\n\n"
         f"Task:\n{task_input}\n"
     )
     out, _ = await ollama.generate_json(
@@ -168,10 +166,10 @@ async def _check_task_and_expand(event: EyeEvent) -> bool:
         runtime.finished = True
         manager.log_info(f"Brain task complete reason={out.get('reason', '')}")
         return True
-    raw_steps = out.get("steps", [])
-    if isinstance(raw_steps, list) and raw_steps:
-        created = step_tools.create_new_steps(target_path="", new_steps=[s for s in raw_steps if isinstance(s, dict)])
-        manager.log_info(f"Brain check_task created additional steps count={created.get('count', 0)}")
+    raw_step = out.get("step", {})
+    if isinstance(raw_step, dict) and raw_step:
+        step_tools.create_new_step(target_path="", new_step=raw_step)
+        manager.log_info(f"Brain check_task created additional step")
     return False
 
 
@@ -284,6 +282,12 @@ async def _decide_action(event: EyeEvent) -> tuple[str, ToolCommand, dict]:
             raise ValueError("Multiple tool calls returned")
 
         tool_name, arguments = tool_calls[0].name, tool_calls[0].arguments
+        if not isinstance(arguments, dict):
+            arguments = {}
+        tool_instruction = arguments.get("instruction")
+        if isinstance(tool_instruction, str) and tool_instruction.strip():
+            if runtime.active_step_path:
+                step_tools.set_step_instruction(runtime.active_step_path, tool_instruction.strip())
         arguments = _with_default_image_path(arguments, event.screenshot_path)
         manager.log_info(
             f"Brain selected hand action={tool_name} screenshot={event.screenshot_name}"
@@ -329,7 +333,8 @@ async def _brain_loop() -> None:
                 step_tools.mark_step_result(pending_path, "Failed", message="verification failed")
                 retry_steps = await _generate_retry_steps(failed_step, event)
                 if retry_steps:
-                    step_tools.create_new_steps(target_path=pending_path, new_steps=retry_steps)
+                    for retry_step in retry_steps:
+                        step_tools.create_new_step(target_path=pending_path, new_step=retry_step)
             runtime.previous_action = None
 
         if await _check_task_and_expand(event):

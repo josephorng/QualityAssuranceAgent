@@ -11,8 +11,8 @@ from src.hand.module import HandModule
 class RuntimeCoordinator:
     def __init__(self) -> None:
         self.eye = EyeModule()
-        self.brain = BrainModule()
         self.hand = HandModule()
+        self.brain = BrainModule(hand=self.hand)
         self.manager = get_run_state_manager()
 
     async def run(self) -> None:
@@ -23,10 +23,6 @@ class RuntimeCoordinator:
             if cycle.finished:
                 self.manager.log_info("Coordinator detected finished task")
                 break
-
-            for command in cycle.commands:
-                result = await self.hand.execute_tool_command(command)
-                await self.brain.on_action_done(result)
 
             if not cycle.request_capture and not cycle.commands:
                 await asyncio.sleep(1.0)

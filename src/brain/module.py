@@ -4,14 +4,21 @@ import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, cast
 
 from cua_mcp.tool_module import HAND_TOOL_NAMES
-from src.common.models import BrainTaskState, EyeEvent, HandExecutionResult, ToolCommand
+from src.common.io_utils import write_json
+from src.common.models import BrainTaskState, EyeEvent, HandExecutionResult, ToolCommand, ToolCommandAction
 from src.common.ollama_client import OllamaClient
 from src.common.prompting import get_prompt
 from src.common.run_state import get_run_state_manager
 from src.common.runtime_context import SCRIPT_LINES_ENV, get_runtime_env
 from src.common.settings import load_settings
+
+if TYPE_CHECKING:
+    from src.hand.module import HandModule
+
+_MAX_INNER_DECIDE_STEPS = 100
 
 
 @dataclass
@@ -33,7 +40,7 @@ class BrainCycleResult:
 
 
 class BrainModule:
-    def __init__(self) -> None:
+    def __init__(self, hand: HandModule | None = None) -> None:
         self.settings = load_settings()
         self.ollama = OllamaClient(self.settings.ollama_host)
         self.run_root, self.task_input, self.run_id = get_runtime_env()
@@ -41,7 +48,16 @@ class BrainModule:
         self.manager.init_run(self.task_input, self.run_root.name)
         self.runtime = BrainRuntime()
         self.script_lines = self._script_seed_steps()
+        self._hand = hand
+        self._step_transcript_counter = 0
         self.manager.log_info(f"Brain module initialized run_id={self.run_id}")
+
+    def _save_step_transcript(self, messages: list[dict[str, Any]]) -> None:
+        self._step_transcript_counter += 1
+        steps_dir = self.manager.require_paths().root / "steps"
+        steps_dir.mkdir(parents=True, exist_ok=True)
+        out_path = steps_dir / f"{self._step_transcript_counter}.json"
+        write_json(out_path, {"messages": messages})
 
     def _script_seed_steps(self) -> list[str]:
         raw = os.environ.get(SCRIPT_LINES_ENV, "")
@@ -98,7 +114,10 @@ class BrainModule:
                     return suffix
         return candidate
 
-    async def _decide_action(self, event: EyeEvent) -> tuple[str, list[ToolCommand], dict]:
+    async def _decide_action(self, event: EyeEvent) -> tuple[str, list[ToolCommand], dict[str, Any]]:
+        if self._hand is None:
+            raise RuntimeError("BrainModule requires hand=HandModule(...) for the decide/execute loop")
+
         prompt = get_prompt("brain_decide_action")
         prev_action_text = self._previous_action_text(self.runtime.previous_action)
         memory = self.manager.require_paths().long_term_memory_txt.read_text(encoding="utf-8")
@@ -109,31 +128,81 @@ class BrainModule:
         if memory:
             full_prompt += f"Memory:\n{memory}"
 
-        assistant_message, tool_calls = await self.ollama.generate(
-            self.settings.brain_lm,
-            prompt=full_prompt,
-            image_paths=[event.screenshot_path],
-            use_tools=True,
-            store_messages=True,
-        )
-        if not tool_calls:
-            raise ValueError("No tool calls returned")
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": full_prompt, "images": [event.screenshot_path]},
+        ]
+        transcript: list[dict[str, Any]] = [
+            {
+                "role": "user",
+                "content": full_prompt,
+                "images": [event.screenshot_name],
+            },
+        ]
 
-        commands: list[ToolCommand] = []
-        for tool_call in tool_calls:
-            arguments = tool_call.arguments if isinstance(tool_call.arguments, dict) else {}
-            normalized_name = self._normalize_tool_name(tool_call.name, arguments)
-            if normalized_name not in HAND_TOOL_NAMES:
-                raise ValueError(f"Unknown tool call returned: {tool_call.name}")
-            commands.append(
-                ToolCommand(
-                    action=normalized_name,
+        last_assistant = ""
+        for _ in range(_MAX_INNER_DECIDE_STEPS):
+            text, tool_calls, response_message = await self.ollama.chat_messages(
+                self.settings.brain_lm,
+                messages=messages,
+                use_tools=True,
+            )
+            last_assistant = text
+            asst_for_api = dict(response_message) if response_message else {"role": "assistant", "content": text}
+            if asst_for_api.get("role") not in ("assistant",):
+                asst_for_api = {**asst_for_api, "role": "assistant"}
+            messages.append(asst_for_api)
+
+            tc_serialized = [
+                {"name": tc.name, "arguments": dict(tc.arguments) if isinstance(tc.arguments, dict) else {}}
+                for tc in tool_calls
+            ]
+            transcript.append(
+                {
+                    "role": "assistant",
+                    "content": text,
+                    "tool_use": tc_serialized,
+                },
+            )
+
+            if not tool_calls:
+                self.runtime.finished = True
+                break
+
+            for tool_call in tool_calls:
+                arguments = tool_call.arguments if isinstance(tool_call.arguments, dict) else {}
+                normalized_name = self._normalize_tool_name(tool_call.name, arguments)
+                if normalized_name not in HAND_TOOL_NAMES:
+                    raise ValueError(f"Unknown tool call returned: {tool_call.name}")
+                cmd = ToolCommand(
+                    action=cast(ToolCommandAction, normalized_name),
                     args=arguments,
                     screenshot_name=event.screenshot_name,
-                    reason=assistant_message,
+                    reason=text,
                 )
+                result = await self._hand.execute_tool_command(cmd)
+                await self.on_action_done(result)
+                result_body = result.model_dump(mode="json")
+                transcript.append(
+                    {
+                        "role": "tool",
+                        "tool_name": normalized_name,
+                        "tool_arguments": arguments,
+                        "tool_result": result_body,
+                    },
+                )
+                tool_msg_api = {
+                    "role": "tool",
+                    "content": json.dumps(result_body, ensure_ascii=False),
+                }
+                messages.append(tool_msg_api)
+        else:
+            self.manager.log_info(
+                f"Brain inner loop reached max steps ({_MAX_INNER_DECIDE_STEPS}) without model completion"
             )
-        return assistant_message, commands, {"message": assistant_message}
+
+        self._save_step_transcript(transcript)
+        raw: dict[str, Any] = {"message": last_assistant, "messages": transcript}
+        return last_assistant, [], raw
 
     async def process_eye_event(self, event: EyeEvent) -> BrainCycleResult:
         self.runtime.latest_event = event
@@ -150,7 +219,7 @@ class BrainModule:
             commands=commands,
             thought=thought,
             raw_response=raw_response,
-            request_capture=bool(commands),
+            request_capture=not self.runtime.finished,
             finished=self.runtime.finished,
         )
 

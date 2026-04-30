@@ -163,6 +163,53 @@ class OllamaClient:
             self._message_history.append({"role": "assistant", "content": response_text, "tool_calls": raw_tool_calls})        
         return response_text, tool_calls
 
+    async def chat_messages(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        use_tools: bool = True,
+    ) -> tuple[str, list[ToolCall], dict[str, Any]]:
+        """
+        Run chat with an explicit message list (no merge with _message_history).
+        Used for multi-turn tool loops where the caller owns the full transcript.
+        """
+        get_run_state_manager().log_info(
+            f"Ollama chat_messages for model={model} n_messages={len(messages)} use_tools={use_tools}"
+        )
+        chat_kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "options": {"num_ctx": 4096},
+        }
+        if use_tools:
+            chat_kwargs["tools"] = get_ollama_tools()
+        response = await self.client.chat(**chat_kwargs)
+        get_run_state_manager().log_info(f"Ollama chat_messages response=\n{response}")
+        response_message = response.get("message", {})
+        if not isinstance(response_message, dict):
+            response_message = {}
+        response_text = response_message.get("content", "")
+        if not isinstance(response_text, str):
+            response_text = ""
+        response_text = response_text.strip()
+        raw_tool_calls_value = response_message.get("tool_calls", [])
+        raw_tool_calls: list[Any] = raw_tool_calls_value if isinstance(raw_tool_calls_value, list) else []
+        tool_calls: list[ToolCall] = []
+        for raw_call in raw_tool_calls:
+            parsed_call = self._extract_tool_call(raw_call)
+            if parsed_call is not None:
+                tool_calls.append(parsed_call)
+        if not response_text and not tool_calls:
+            get_run_state_manager().log_info("Ollama returned empty response with tools; retrying in 5 seconds.")
+            await asyncio.sleep(5)
+            return await self.chat_messages(
+                model=model,
+                messages=messages,
+                use_tools=use_tools,
+            )
+        return response_text, tool_calls, response_message
+
     async def generate(
         self,
         model: str,

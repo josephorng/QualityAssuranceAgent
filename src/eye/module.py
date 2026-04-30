@@ -16,9 +16,9 @@ from src.eye.capture import (
 class EyeModule:
     def __init__(self) -> None:
         self.settings = load_settings()
-        self.run_root, self.task_input, self.run_id = get_runtime_env()
+        self.run_root, self.run_id = get_runtime_env()
         self.manager = get_run_state_manager()
-        self.manager.init_run(self.task_input, self.run_root.name)
+        self.manager.init_run(self.run_id, self.run_root.name)
         self.active_monitor_index = active_monitor_index(1)
         self.manager.log_info(f"Eye module initialized run_id={self.run_id}")
 

@@ -65,7 +65,7 @@ def main() -> None:
     paths = manager.init_run(task)
     run_id = paths.root.name
 
-    set_runtime_env(paths.root, task, run_id)
+    set_runtime_env(paths.root, run_id)
     os.environ[SCRIPT_PATH_ENV] = str(selected_script_path)
     os.environ[SCRIPT_LINES_ENV] = json.dumps(script_steps, ensure_ascii=False)
     eye_monitor_index = prompt_eye_monitor_index()

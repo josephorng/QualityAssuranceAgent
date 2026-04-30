@@ -38,9 +38,9 @@ class BrainModule:
     def __init__(self, hand: HandModule | None = None) -> None:
         self.settings = load_settings()
         self.ollama = OllamaClient(self.settings.ollama_host)
-        self.run_root, self.task_input, self.run_id = get_runtime_env()
+        self.run_root, self.run_id = get_runtime_env()
         self.manager = get_run_state_manager()
-        self.manager.init_run(self.task_input, self.run_root.name)
+        self.manager.init_run(self.run_id, self.run_root.name)
         self.runtime = BrainRuntime()
         self.script_lines = self._script_seed_steps()
         self._script_step_index = 0
@@ -66,17 +66,17 @@ class BrainModule:
             except json.JSONDecodeError:
                 payload = None
         if payload is None:
-            payload = [self.task_input]
+            raise RuntimeError("No script steps found")
         lines: list[str] = []
         for item in payload:
             cleaned = item.strip()
             if cleaned:
                 lines.append(cleaned)
-        return lines or [self.task_input]
+        return lines
 
     def _current_goal(self) -> str:
         if not self.script_lines:
-            return self.task_input
+            raise RuntimeError("No script steps found")
         if self._script_step_index >= len(self.script_lines):
             return self.script_lines[-1]
         return self.script_lines[self._script_step_index]

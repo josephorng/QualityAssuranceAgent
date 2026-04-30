@@ -14,9 +14,9 @@ from src.common.settings import load_settings
 class HandModule:
     def __init__(self) -> None:
         self.settings = load_settings()
-        self.run_root, self.task_input, self.run_id = get_runtime_env()
+        self.run_root, self.run_id = get_runtime_env()
         self.manager = get_run_state_manager()
-        self.manager.init_run(self.task_input, self.run_root.name)
+        self.manager.init_run(self.run_id, self.run_root.name)
         self._busy = False
         self._lock = asyncio.Lock()
         self.manager.log_info(f"Hand module initialized run_id={self.run_id}")

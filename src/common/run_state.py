@@ -117,6 +117,6 @@ def get_run_state_manager() -> RunStateManager:
     if _manager is None:
         from src.common.runtime_context import get_runtime_env
 
-        run_root, _, _ = get_runtime_env()
+        run_root, _ = get_runtime_env()
         _manager = RunStateManager(run_root.parent)
     return _manager

@@ -10,7 +10,7 @@ from src.common.runtime_context import get_runtime_env
 
 
 def _current_run_paths() -> tuple[Path, Path]:
-    run_root, _, _ = get_runtime_env()
+    run_root, _ = get_runtime_env()
     storage_dir = run_root / "storage"
     storage_json = run_root / "storage.json"
     storage_dir.mkdir(parents=True, exist_ok=True)

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.common.io_utils import append_text, read_text, write_json
+from src.common.io_utils import append_text, write_json
 
 
 def slugify(text: str) -> str:
@@ -22,19 +22,16 @@ def ts_name() -> str:
 class RunPaths:
     root: Path
     eye_dir: Path
-    thinking_dir: Path
     yolo_ocr_dir: Path
     storage_dir: Path
     hand_csv: Path
-    long_term_memory_txt: Path
     storage_json: Path
     info_log: Path
 
 
 class RunStateManager:
-    def __init__(self, runs_root: Path, memory_max_chars: int = 16000) -> None:
+    def __init__(self, runs_root: Path) -> None:
         self.runs_root = runs_root
-        self.memory_max_chars = memory_max_chars
         self.paths: RunPaths | None = None
 
     def init_run(self, task_input: str, run_folder_name: str | None = None) -> RunPaths:
@@ -42,20 +39,15 @@ class RunStateManager:
         folder_name = run_folder_name or f"{slugify(task_input)[:40]}_{ts_name()}"
         root = self.runs_root / folder_name
         eye_dir = root / "eye"
-        thinking_dir = root / "thinking"
         yolo_ocr_dir = root / "yolo_ocr"
         storage_dir = root / "storage"
         hand_csv = root / "hand.csv"
-        long_term_memory_txt = root / "long_term_memory.txt"
         storage_json = root / "storage.json"
         info_log = root / "run.log"
 
         eye_dir.mkdir(parents=True, exist_ok=True)
-        thinking_dir.mkdir(parents=True, exist_ok=True)
         yolo_ocr_dir.mkdir(parents=True, exist_ok=True)
         storage_dir.mkdir(parents=True, exist_ok=True)
-        if not long_term_memory_txt.exists():
-            long_term_memory_txt.write_text("", encoding="utf-8")
         if not hand_csv.exists():
             hand_csv.write_text("", encoding="utf-8")
         if not storage_json.exists():
@@ -66,11 +58,9 @@ class RunStateManager:
         self.paths = RunPaths(
             root=root,
             eye_dir=eye_dir,
-            thinking_dir=thinking_dir,
             yolo_ocr_dir=yolo_ocr_dir,
             storage_dir=storage_dir,
             hand_csv=hand_csv,
-            long_term_memory_txt=long_term_memory_txt,
             storage_json=storage_json,
             info_log=info_log,
         )
@@ -100,28 +90,23 @@ class RunStateManager:
         print(line)
         append_text(paths.info_log, line + "\n")
 
-    def append_brain_memory(self, text: str) -> None:
+    def log_error(self, text: str) -> None:
         paths = self.require_paths()
-        append_text(paths.long_term_memory_txt, text + "\n")
-        current = read_text(paths.long_term_memory_txt)
-        if len(current) > self.memory_max_chars:
-            compact = current[-self.memory_max_chars :]
-            paths.long_term_memory_txt.write_text(compact, encoding="utf-8")
-
-    def write_thinking_record(self, screenshot_name: str, thought: str, decision: dict[str, Any]) -> Path:
-        paths = self.require_paths()
-        image_name = Path(screenshot_name).name
-        out = paths.thinking_dir / Path(image_name).with_suffix(".json").name
-        write_json(
-            out,
-            {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "screenshot_name": image_name,
-                "thought": thought,
-                "decision": decision,
-            },
-        )
-        return out
+        ts = datetime.now(timezone.utc).isoformat()
+        caller_label = "unknown"
+        frame = inspect.currentframe()
+        if frame is not None and frame.f_back is not None:
+            caller_file = Path(frame.f_back.f_code.co_filename)
+            caller_no_suffix = caller_file.with_suffix("")
+            parts = caller_no_suffix.parts
+            if "src" in parts:
+                src_index = parts.index("src")
+                caller_label = "/".join(parts[src_index + 1 :]) or caller_no_suffix.name
+            else:
+                caller_label = caller_no_suffix.name
+        line = f"[{ts}] [ERROR] [{caller_label}] {text}"
+        print(line)
+        append_text(paths.info_log, line + "\n")
 
 _manager: RunStateManager | None = None
 
@@ -131,9 +116,7 @@ def get_run_state_manager() -> RunStateManager:
     global _manager
     if _manager is None:
         from src.common.runtime_context import get_runtime_env
-        from src.common.settings import load_settings
 
-        settings = load_settings()
         run_root, _, _ = get_runtime_env()
-        _manager = RunStateManager(run_root.parent, settings.brain_memory_max_chars)
+        _manager = RunStateManager(run_root.parent)
     return _manager

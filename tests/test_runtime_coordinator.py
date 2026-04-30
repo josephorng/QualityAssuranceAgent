@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from src.common.models import EyeEvent, HandExecutionResult, ToolCommand
+from src.common.models import EyeEvent, ExecutionResult, ToolCommand
 from src.runtime.coordinator import RuntimeCoordinator
 
 
@@ -31,13 +31,13 @@ class _FakeBrain:
             return type("Cycle", (), {"finished": False, "commands": [ToolCommand(action="wait", args={"seconds": 0.0})], "request_capture": True})()
         return type("Cycle", (), {"finished": True, "commands": [], "request_capture": False})()
 
-    async def on_action_done(self, _result: HandExecutionResult) -> None:
+    async def on_action_done(self, _result: ExecutionResult) -> None:
         self.action_done_calls += 1
 
 
 class _FakeHand:
-    async def execute_tool_command(self, cmd: ToolCommand) -> HandExecutionResult:
-        return HandExecutionResult(ok=True, action=cmd.action, args=cmd.args, message="ok")
+    async def execute_tool_command(self, cmd: ToolCommand) -> ExecutionResult:
+        return ExecutionResult(ok=True, action=cmd.action, args=cmd.args, message="ok")
 
 
 def test_runtime_coordinator_basic_cycle() -> None:

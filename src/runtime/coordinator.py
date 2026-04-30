@@ -19,11 +19,12 @@ class RuntimeCoordinator:
         self.manager.log_info("Coordinator startup")
         while True:
             event = await self.eye.capture_once()
-            cycle = await self.brain.process_eye_event(event)
-            if cycle.finished:
+            step_result = await self.brain.process_step(event)
+            if step_result.finished:
                 self.manager.log_info("Coordinator detected finished task")
+            else:
                 break
 
-            if not cycle.request_capture and not cycle.commands:
-                await asyncio.sleep(1.0)
+            # if not cycle.request_capture and not cycle.commands:
+            #     await asyncio.sleep(1.0)
 

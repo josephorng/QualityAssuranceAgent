@@ -1,154 +1,143 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
 
 from cua_mcp.tool_module import (
-    click,
-    cursor_position,
-    double_click,
-    hold_key,
-    hotkey,
-    key as key_action,
-    left_click,
-    left_click_drag,
-    left_mouse_down,
-    left_mouse_up,
-    middle_click,
-    mouse_move,
-    move,
-    paste_text,
-    press_key,
-    right_click,
-    screenshot,
-    scroll,
-    store_image,
-    store_text,
-    triple_click,
-    type_chars,
-    wait,
-    zoom,
+    _click,
+    _cursor_position,
+    _double_click,
+    _hold_key,
+    _hotkey,
+    _key,
+    _left_click,
+    _left_click_drag,
+    _left_mouse_down,
+    _left_mouse_up,
+    _middle_click,
+    _mouse_move,
+    _move,
+    _type_text,
+    _press_key,
+    _right_click,
+    _screenshot,
+    _scroll,
+    _store_image,
+    _store_text,
+    _triple_click,
+    _wait,
+    _zoom,
 )
 
-mcp = FastMCP("ComputerUseAgent")
+mcp_server = FastMCP("ComputerUseAgent")
 
-
-@mcp.tool(
-    name="click",
+@mcp_server.tool(
     description=(
         "Click a UI element identified by natural-language instruction. Takes a fresh capture of the active monitor, "
         "runs OCR (artifacts under yolo_ocr/), and uses the brain LM to pick coordinates. Optional mouse button."
     ),
 )
-def click_tool(
+def click(
     instruction: Annotated[str, "Natural-language description of what to click on the screen."],
     button: Annotated[str, "Mouse button: typically 'left', 'right', or 'middle'."] = "left",
 ):
-    return click(instruction=instruction, button=button)
+    return _click(instruction=instruction, button=button)
 
 
-@mcp.tool(
-    name="paste_text",
+@mcp_server.tool(
     description=(
-        "Focus a field or region by clicking the resolved target, then paste text via the clipboard (Ctrl+V). "
-        "Use when typing must preserve Unicode or avoid key-by-key delays."
+        "Focus a field or region by clicking the resolved target, then input text via the keyboard."
     ),
 )
-def paste_text_tool(
+def type_text(
     text: Annotated[str, "Text to paste after focusing the target."],
     target_instruction: Annotated[str, "Natural-language description of the target to focus before pasting."],
     interval: Annotated[float, "Delay between keystrokes when typing fallback is used (default 0)."] = 0.0,
 ):
-    return paste_text(text=text, target_instruction=target_instruction, interval=interval)
+    return _type_text(text=text, target_instruction=target_instruction, interval=interval)
 
 
-@mcp.tool(
-    name="press_key",
+@mcp_server.tool(
     description=(
         "Send a single key press (e.g. Enter, Tab, Escape). Use for confirmations, navigation, or dialogs "
         "without composing a full shortcut."
     ),
 )
-def press_key_tool(
-    key: Annotated[str, "The name of the key to press, e.g., 'enter', 'tab', or 'esc'"],
+def press_key(
+    key: Annotated[str, "The key to press, e.g., 'enter', 'tab', or 'esc'"],
     instruction: Annotated[str, "Optional context for why this key is being pressed"] = "",
 ):
-    return press_key(key=key, instruction=instruction)
+    return _press_key(key=key, instruction=instruction)
 
 
-@mcp.tool(
-    name="hotkey",
+@mcp_server.tool(
     description=(
         "Chord multiple keys together (e.g. Ctrl+S, Alt+Tab). Pass keys in press order as understood by the OS."
     ),
 )
-def hotkey_tool(
+def hotkey(
     keys: Annotated[
         list[str] | str,
         "Key chord as a list of key names (e.g. ['ctrl','s']) or a single string token if your stack supports it.",
     ],
     instruction: Annotated[str, "Optional rationale or logging context for this shortcut."] = "",
 ):
-    return hotkey(keys=keys, instruction=instruction)
+    return _hotkey(keys=keys, instruction=instruction)
 
 
-@mcp.tool(
-    name="move",
+@mcp_server.tool(
     description=(
         "Move the mouse pointer to a target described by instruction using a fresh active-monitor capture and OCR "
         "under yolo_ocr/—without clicking; use before hover menus or tooltips."
     ),
 )
-def move_tool(
+def move(
     instruction: Annotated[str, "Natural-language description of where the cursor should end up."],
     duration: Annotated[float, "Seconds to animate the pointer move (0 = instant)."] = 0.0,
 ):
-    return move(instruction=instruction, duration=duration)
+    return _move(instruction=instruction, duration=duration)
 
 
-@mcp.tool(
-    name="wait",
+@mcp_server.tool(
     description=(
         "Pause execution for a fixed delay when the UI needs time to load, animate, or sync before the next action."
     ),
 )
-def wait_tool(
+def wait(
     seconds: Annotated[float, "Non-negative delay in seconds before continuing."],
     instruction: Annotated[str, "Optional note explaining why the wait is needed."] = "",
 ):
-    return wait(seconds=seconds, instruction=instruction)
+    return _wait(seconds=seconds, instruction=instruction)
 
 
-@mcp.tool(
-    name="store_text",
+@mcp_server.tool(
     description=(
         "Persist arbitrary text into run storage for later retrieval—notes, extracted values, or labels with optional tags."
     ),
 )
-def store_text_tool(
+def store_text(
     text: Annotated[str, "Body text to persist."],
     instruction: Annotated[str, "Optional context or provenance for this stored text."] = "",
     title: Annotated[str, "Short title or label for listing stored items."] = "",
     tags: Annotated[list[str] | None, "Optional taxonomy tags for retrieval."] = None,
 ):
-    return store_text(text=text, instruction=instruction, title=title, tags=tags)
+    return _store_text(text=text, instruction=instruction, title=title, tags=tags)
 
 
-@mcp.tool(
-    name="store_image",
+@mcp_server.tool(
     description=(
         "Register an image path with metadata (summary, alias, tags) so the agent can recall or cite it later."
     ),
 )
-def store_image_tool(
+def store_image(
     image_path: Annotated[str, "Path to the image file being registered."],
     instruction: Annotated[str, "Optional context for why this image is stored."] = "",
     summary: Annotated[str, "Human-readable summary of image contents or purpose."] = "",
     alias: Annotated[str, "Short memorable name to reference this image later."] = "",
     tags: Annotated[list[str] | None, "Optional tags for categorization."] = None,
 ):
-    return store_image(
+    return _store_image(
         image_path=image_path,
         instruction=instruction,
         summary=summary,
@@ -160,210 +149,207 @@ def store_image_tool(
 # --- CUA action vocabulary (see ToolCommand / agent schema) ---
 
 
-@mcp.tool(
-    name="key",
+@mcp_server.tool(
     description="Press and release one logical key via the keyboard driver—distinct from multi-key hotkeys.",
 )
-def key_tool(
+def key(
     key: Annotated[str, "Single key name as understood by pyautogui.press (e.g. 'a', 'enter')."],
     instruction: Annotated[str, "Optional context for logging."] = "",
 ):
-    return key_action(key=key, instruction=instruction)
+    return _key(key=key, instruction=instruction)
 
 
-@mcp.tool(
-    name="type",
-    description=(
-        "Click to focus using a fresh capture + OCR (yolo_ocr/), then type raw characters with optional per-key interval."
-    ),
-)
-def type_tool(
-    text: Annotated[str, "Characters to type after focusing."],
-    instruction: Annotated[str, "Natural-language description of where to click to focus."],
-    interval: Annotated[float, "Seconds between key events when using pyautogui.write."] = 0.0,
-):
-    return type_chars(text=text, instruction=instruction, interval=interval)
-
-
-@mcp.tool(
-    name="mouse_move",
+@mcp_server.tool(
     description=(
         "Synonym for move: relocate the cursor using a fresh active-monitor capture and yolo_ocr/, optionally animated."
     ),
 )
-def mouse_move_tool(
+def mouse_move(
     instruction: Annotated[str, "Natural-language description of the hover/move target."],
     duration: Annotated[float, "Seconds to animate the move (0 = instant)."] = 0.0,
 ):
-    return mouse_move(instruction=instruction, duration=duration)
+    return _mouse_move(instruction=instruction, duration=duration)
 
 
-@mcp.tool(
-    name="left_click",
+@mcp_server.tool(
     description=(
         "Primary click at the resolved target (fresh capture, yolo_ocr/)—default for buttons, links, and most controls."
     ),
 )
-def left_click_tool(
+def left_click(
     instruction: Annotated[str, "Natural-language description of the element to left-click."],
 ):
-    return left_click(instruction=instruction)
+    return _left_click(instruction=instruction)
 
 
-@mcp.tool(
-    name="left_click_drag",
+@mcp_server.tool(
     description=(
         "Press left at a start target and drag to an end target—each point uses a fresh capture (two yolo_ocr pairs)."
     ),
 )
-def left_click_drag_tool(
+def left_click_drag(
     instruction_start: Annotated[str, "Instruction for the drag start point (e.g. scrollbar thumb)."],
     instruction_end: Annotated[str, "Instruction for the drag end point."],
     duration: Annotated[float, "Duration of the drag motion in seconds."] = 0.5,
 ):
-    return left_click_drag(
+    return _left_click_drag(
         instruction_start=instruction_start,
         instruction_end=instruction_end,
         duration=duration,
     )
 
 
-@mcp.tool(
-    name="right_click",
+@mcp_server.tool(
     description=(
         "Open context menus, alternate actions, or “more options” UI at the resolved location."
     ),
 )
-def right_click_tool(
+def right_click(
     instruction: Annotated[str, "Natural-language description of where to right-click."],
 ):
-    return right_click(instruction=instruction)
+    return _right_click(instruction=instruction)
 
 
-@mcp.tool(
-    name="middle_click",
+@mcp_server.tool(
     description=(
         "Middle-click to open links in a new tab, close tabs in many browsers, or other app-specific middle-button behavior."
     ),
 )
-def middle_click_tool(
+def middle_click(
     instruction: Annotated[str, "Natural-language description of where to middle-click."],
 ):
-    return middle_click(instruction=instruction)
+    return _middle_click(instruction=instruction)
 
 
-@mcp.tool(
-    name="double_click",
+@mcp_server.tool(
     description=(
         "Double-click to open files, edit cells, or activate word selections depending on the target application."
     ),
 )
-def double_click_tool(
+def double_click(
     instruction: Annotated[str, "Natural-language description of what to double-click."],
 ):
-    return double_click(instruction=instruction)
+    return _double_click(instruction=instruction)
 
 
-@mcp.tool(
-    name="triple_click",
+@mcp_server.tool(
     description=(
         "Triple-clicking selects entire paragraphs in documents, full lines in code editors, or complete URLs in address bars."
     ),
 )
-def triple_click_tool(
+def triple_click(
     instruction: Annotated[str, "Natural-language description of where to triple-click."],
 ):
-    return triple_click(instruction=instruction)
+    return _triple_click(instruction=instruction)
 
 
-@mcp.tool(
-    name="screenshot",
+@mcp_server.tool(
     description=(
         "Capture the current screen to a PNG path (or a generated temp file) for evidence, diffing, or downstream OCR."
     ),
 )
-def screenshot_tool(
+def screenshot(
     path: Annotated[str, "Output PNG path; empty string lets the implementation pick a temp file."] = "",
     instruction: Annotated[str, "Optional note for why the screenshot is taken."] = "",
 ):
-    return screenshot(path=path, instruction=instruction)
+    return _screenshot(path=path, instruction=instruction)
 
 
-@mcp.tool(
-    name="cursor_position",
+@mcp_server.tool(
     description=(
         "Read the current mouse pointer coordinates in screen space—useful for debugging or confirming hover location."
     ),
 )
-def cursor_position_tool(
+def cursor_position(
     instruction: Annotated[str, "Optional; reserved for future context—currently unused by the implementation."] = "",
 ):
-    return cursor_position(instruction=instruction)
+    return _cursor_position(instruction=instruction)
 
 
-@mcp.tool(
-    name="left_mouse_down",
+@mcp_server.tool(
     description=(
         "Press the left button at the resolved point without releasing—start of a drag or marquee selection."
     ),
 )
-def left_mouse_down_tool(
+def left_mouse_down(
     instruction: Annotated[str, "Natural-language description of where to press the left button down."],
 ):
-    return left_mouse_down(instruction=instruction)
+    return _left_mouse_down(instruction=instruction)
 
 
-@mcp.tool(
-    name="left_mouse_up",
+@mcp_server.tool(
     description=(
         "Release the left button at the resolved point—typically paired with left_mouse_down after a drag."
     ),
 )
-def left_mouse_up_tool(
+def left_mouse_up(
     instruction: Annotated[str, "Natural-language description of where to release the left button."],
 ):
-    return left_mouse_up(instruction=instruction)
+    return _left_mouse_up(instruction=instruction)
 
 
-@mcp.tool(
-    name="scroll",
+@mcp_server.tool(
     description=(
         "Move the wheel at an instruction-resolved location—positive/negative clicks scroll direction per PyAutoGUI conventions."
     ),
 )
-def scroll_tool(
+def scroll(
     instruction: Annotated[str, "Natural-language description of the scroll focus region or control."],
     clicks: Annotated[int, "Wheel delta in clicks; sign maps to up/down per PyAutoGUI on this platform."],
 ):
-    return scroll(instruction=instruction, clicks=clicks)
+    return _scroll(instruction=instruction, clicks=clicks)
 
 
-@mcp.tool(
-    name="hold_key",
+@mcp_server.tool(
     description=(
         "Hold a key down for a duration then release—simulates long-press or gaming-style held inputs."
     ),
 )
-def hold_key_tool(
+def hold_key(
     key: Annotated[str, "Key name to hold (e.g. 'shift', 'w')."],
     seconds: Annotated[float, "How long to keep the key depressed before key-up."],
     instruction: Annotated[str, "Optional context for logging."] = "",
 ):
-    return hold_key(key=key, seconds=seconds, instruction=instruction)
+    return _hold_key(key=key, seconds=seconds, instruction=instruction)
 
 
-@mcp.tool(
-    name="zoom",
+@mcp_server.tool(
     description=(
         "Ctrl+scroll zoom at the resolved point—common for browser/page zoom or canvas zoom where supported."
     ),
 )
-def zoom_tool(
+def zoom(
     instruction: Annotated[str, "Natural-language description of where to apply Ctrl+wheel zoom."],
     scroll_clicks: Annotated[int, "Wheel clicks while Ctrl is held; sign controls zoom in/out."],
 ):
-    return zoom(instruction=instruction, scroll_clicks=scroll_clicks)
+    return _zoom(instruction=instruction, scroll_clicks=scroll_clicks)
 
+
+TOOL_FUNCTIONS: list[callable[..., Any]] = [
+    click,
+    type_text,
+    press_key,
+    hotkey,
+    move,
+    wait,
+    store_text,
+    store_image,
+    key,
+    mouse_move,
+    left_click,
+    left_click_drag,
+    right_click,
+    cursor_position,
+    left_mouse_down,
+    left_mouse_up,
+    scroll,
+    hold_key,
+    zoom,
+    triple_click,
+    middle_click,
+    double_click,
+    screenshot,
+]
 
 if __name__ == "__main__":
-    mcp.run(transport="stdio")
+    mcp_server.run(transport="stdio")

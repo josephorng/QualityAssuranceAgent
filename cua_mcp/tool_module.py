@@ -6,6 +6,7 @@ from typing import Any, Callable
 import httpx
 
 from cua_mcp import hand_tools
+# from cua_mcp.tools import mcp_server
 from cua_mcp.read_screen_text.ocr_image import get_coordinates
 from cua_mcp.storage import store_image as _store_image
 from cua_mcp.storage import store_text as _store_text
@@ -59,12 +60,12 @@ def _resolve_point(instruction: str) -> tuple[int, int]:
     return _to_global_coordinate(local_x, local_y)
 
 
-def click(instruction: str, button: str = "left") -> dict[str, Any]:
+def _click(instruction: str, button: str = "left") -> dict[str, Any]:
     x, y = _resolve_point(instruction)
     return hand_tools.click(x=x, y=y, button=button)
 
 
-def paste_text(
+def _type_text(
     text: str,
     target_instruction: str,
     interval: float = 0.0,
@@ -73,38 +74,29 @@ def paste_text(
     return hand_tools.type_text(text=text, coordinate=[x, y], interval=interval)
 
 
-def press_key(key: str, instruction: str = "") -> dict[str, Any]:
+def _press_key(key: str, instruction: str = "") -> dict[str, Any]:
     return hand_tools.hotkey(keys=key)
 
 
-def hotkey(keys: list[str] | str, instruction: str = "") -> dict[str, Any]:
+def _hotkey(keys: list[str] | str, instruction: str = "") -> dict[str, Any]:
     return hand_tools.hotkey(keys=keys)
 
 
-def move(instruction: str, duration: float = 0.0) -> dict[str, Any]:
+def _move(instruction: str, duration: float = 0.0) -> dict[str, Any]:
     x, y = _resolve_point(instruction)
     return hand_tools.move(x=x, y=y, duration=duration)
 
 
-def wait(seconds: float, instruction: str = "") -> dict[str, Any]:
+def _wait(seconds: float, instruction: str = "") -> dict[str, Any]:
     return hand_tools.wait(seconds=seconds)
 
 
-def key(key: str, instruction: str = "") -> dict[str, Any]:
+def _key(key: str, instruction: str = "") -> dict[str, Any]:
     return hand_tools.key_press(key)
 
 
-def type_chars(
-    text: str,
-    instruction: str,
-    interval: float = 0.0,
-) -> dict[str, Any]:
-    x, y = _resolve_point(instruction)
-    return hand_tools.write_text(text=text, coordinate=[x, y], interval=interval)
-
-
-def mouse_move(instruction: str, duration: float = 0.0) -> dict[str, Any]:
-    return move(instruction=instruction, duration=duration)
+def _mouse_move(instruction: str, duration: float = 0.0) -> dict[str, Any]:
+    return _move(instruction=instruction, duration=duration)
 
 
 def _click_at_instruction(instruction: str, **click_kw: Any) -> dict[str, Any]:
@@ -112,27 +104,27 @@ def _click_at_instruction(instruction: str, **click_kw: Any) -> dict[str, Any]:
     return hand_tools.click(x=x, y=y, **click_kw)
 
 
-def left_click(instruction: str) -> dict[str, Any]:
+def _left_click(instruction: str) -> dict[str, Any]:
     return _click_at_instruction(instruction, button="left", clicks=1)
 
 
-def right_click(instruction: str) -> dict[str, Any]:
+def _right_click(instruction: str) -> dict[str, Any]:
     return _click_at_instruction(instruction, button="right", clicks=1)
 
 
-def middle_click(instruction: str) -> dict[str, Any]:
+def _middle_click(instruction: str) -> dict[str, Any]:
     return _click_at_instruction(instruction, button="middle", clicks=1)
 
 
-def double_click(instruction: str) -> dict[str, Any]:
+def _double_click(instruction: str) -> dict[str, Any]:
     return _click_at_instruction(instruction, button="left", clicks=2, interval=0.1)
 
 
-def triple_click(instruction: str) -> dict[str, Any]:
+def _triple_click(instruction: str) -> dict[str, Any]:
     return _click_at_instruction(instruction, button="left", clicks=3, interval=0.1)
 
 
-def left_click_drag(
+def _left_click_drag(
     instruction_start: str,
     instruction_end: str,
     duration: float = 0.5,
@@ -142,40 +134,40 @@ def left_click_drag(
     return hand_tools.drag(x1, y1, x2, y2, duration=duration, button="left")
 
 
-def screenshot(path: str = "", instruction: str = "") -> dict[str, Any]:
+def _screenshot(path: str = "", instruction: str = "") -> dict[str, Any]:
     p = path.strip() if path else ""
     return hand_tools.screenshot_to_file(p or None)
 
 
-def cursor_position(instruction: str = "") -> dict[str, Any]:
+def _cursor_position(instruction: str = "") -> dict[str, Any]:
     return hand_tools.cursor_position()
 
 
-def left_mouse_down(instruction: str) -> dict[str, Any]:
+def _left_mouse_down(instruction: str) -> dict[str, Any]:
     x, y = _resolve_point(instruction)
     return hand_tools.mouse_down(x, y, button="left")
 
 
-def left_mouse_up(instruction: str) -> dict[str, Any]:
+def _left_mouse_up(instruction: str) -> dict[str, Any]:
     x, y = _resolve_point(instruction)
     return hand_tools.mouse_up(x, y, button="left")
 
 
-def scroll(instruction: str, clicks: int) -> dict[str, Any]:
+def _scroll(instruction: str, clicks: int) -> dict[str, Any]:
     x, y = _resolve_point(instruction)
     return hand_tools.scroll_at(clicks, x, y)
 
 
-def hold_key(key: str, seconds: float, instruction: str = "") -> dict[str, Any]:
+def _hold_key(key: str, seconds: float, instruction: str = "") -> dict[str, Any]:
     return hand_tools.hold_key_down(key, seconds)
 
 
-def zoom(instruction: str, scroll_clicks: int) -> dict[str, Any]:
+def _zoom(instruction: str, scroll_clicks: int) -> dict[str, Any]:
     x, y = _resolve_point(instruction)
     return hand_tools.zoom_scroll(scroll_clicks, x, y)
 
 
-def store_text(
+def _store_text(
     text: str,
     instruction: str = "",
     title: str = "",
@@ -184,7 +176,7 @@ def store_text(
     return _store_text(text=text, title=title, tags=tags)
 
 
-def store_image(
+def _store_image(
     image_path: str,
     instruction: str = "",
     summary: str = "",
@@ -194,55 +186,51 @@ def store_image(
     return _store_image(image_path=image_path, summary=summary, alias=alias, tags=tags)
 
 
-OLLAMA_TOOL_FUNCTIONS: list[Callable[..., Any]] = [
-    store_text,
-    store_image,
-    click,
-    paste_text,
-    press_key,
-    hotkey,
-    move,
-    wait,
-    key,
-    type_chars,
-    mouse_move,
-    left_click,
-    left_click_drag,
-    right_click,
-    middle_click,
-    double_click,
-    triple_click,
-    screenshot,
-    cursor_position,
-    left_mouse_down,
-    left_mouse_up,
-    scroll,
-    hold_key,
-    zoom,
-]
+# TOOL_FUNCTIONS: list[Callable[..., Any]] = [
+#     store_text,
+#     store_image,
+#     click,
+#     type_text,
+#     press_key,
+#     hotkey,
+#     move,
+#     wait,
+#     key,
+#     mouse_move,
+#     left_click,
+#     left_click_drag,
+#     right_click,
+#     middle_click,
+#     double_click,
+#     triple_click,
+#     screenshot,
+#     cursor_position,
+#     left_mouse_down,
+#     left_mouse_up,
+#     scroll,
+#     hold_key,
+#     zoom,
+# ]
 
-TOOL_NAME_ALIASES: dict[str, str] = {"type": "type_chars"}
+# TOOL_NAME_ALIASES: dict[str, str] = {"type": "type_text"}
 
-HAND_TOOL_NAMES: set[str] = {tool.__name__ for tool in OLLAMA_TOOL_FUNCTIONS} | set(TOOL_NAME_ALIASES.keys())
-
-
-def get_ollama_tools() -> list[Callable[..., Any]]:
-    return OLLAMA_TOOL_FUNCTIONS
+# TOOL_NAMES: set[str] = {tool.__name__ for tool in OLLAMA_TOOL_FUNCTIONS} | set(TOOL_NAME_ALIASES.keys())
 
 
-def get_tool_function_map() -> dict[str, Callable[..., Any]]:
-    mapping = {tool.__name__: tool for tool in OLLAMA_TOOL_FUNCTIONS}
-    for alias, target_name in TOOL_NAME_ALIASES.items():
-        mapping[alias] = mapping[target_name]
-    return mapping
+# def get_ollama_tools() -> list[Callable[..., Any]]:
+#     return OLLAMA_TOOL_FUNCTIONS
 
 
-def execute_tool_call(tool_name: str, arguments: dict[str, Any], image_path: str) -> Any:
-    args = dict(arguments)
-    args.pop("image_path", None)
-    args.pop("image_path_start", None)
-    args.pop("image_path_end", None)
-    function = get_tool_function_map().get(tool_name)
-    if function is None:
-        raise ValueError(f"unknown tool: {tool_name}")
-    return function(**args)
+# def get_tool_function_map() -> dict[str, Callable[..., Any]]:
+#     mapping = {tool.__name__: tool for tool in OLLAMA_TOOL_FUNCTIONS}
+#     for alias, target_name in TOOL_NAME_ALIASES.items():
+#         mapping[alias] = mapping[target_name]
+#     return mapping
+
+
+# def execute_tool_call(tool_name: str, arguments: dict[str, Any]) -> Any:
+#     args = dict(arguments)
+#     function = get_tool_function_map().get(tool_name)
+#     if function is None:
+#         raise ValueError(f"unknown tool: {tool_name}")
+#     return function(**args)

@@ -61,7 +61,7 @@ def main() -> None:
     settings = load_settings()
     runs_root = Path(settings.runs_dir)
     clear_runs_folder(runs_root)
-    manager = RunStateManager(runs_root=runs_root, memory_max_chars=settings.brain_memory_max_chars)
+    manager = RunStateManager(runs_root=runs_root)
     paths = manager.init_run(task)
     run_id = paths.root.name
 

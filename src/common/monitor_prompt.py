@@ -53,6 +53,18 @@ def _all_screens_entry() -> dict[str, Any]:
         }
 
 
+def _primary_monitor_index(physical: list[dict[str, Any]]) -> int | None:
+    """
+    Best-effort detection of the OS main display.
+
+    In typical virtual-desktop layouts, the primary display is anchored at (0, 0).
+    """
+    candidates = [m["index"] for m in physical if m["left"] == 0 and m["top"] == 0]
+    if len(candidates) == 1:
+        return int(candidates[0])
+    return None
+
+
 def prompt_eye_monitor_index() -> int:
     """
     Ask the user which mss monitor index to capture.
@@ -80,6 +92,7 @@ def prompt_eye_monitor_index() -> int:
     all_entry = _all_screens_entry()
     physical = _physical_monitors()
     physical_sorted = sorted(physical, key=lambda d: (d["left"], d["top"]))
+    primary_idx = _primary_monitor_index(physical)
     labels = _position_labels(len(physical_sorted))
     index_to_label: dict[int, str] = {}
     for mon, label in zip(physical_sorted, labels):
@@ -102,9 +115,10 @@ def prompt_eye_monitor_index() -> int:
     for mon in physical_sorted:
         idx = mon["index"]
         label = index_to_label.get(idx, "")
+        primary_note = "  [main screen]" if idx == primary_idx else ""
         print(
             f"  [{idx}]  {label:22}  {mon['width']}×{mon['height']}  "
-            f"at ({mon['left']}, {mon['top']})"
+            f"at ({mon['left']}, {mon['top']}){primary_note}"
         )
     print()
 

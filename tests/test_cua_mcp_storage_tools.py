@@ -3,13 +3,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from cua_mcp.tool_module import store_image, store_text
+from cua_mcp.tool_module import _store_image, _store_text
 from src.common.io_utils import read_json
 
 
 def test_store_text_writes_storage_json(tmp_path: Path) -> None:
     os.environ["CUA_RUN_ROOT"] = str(tmp_path / "run_a")
-    result = store_text("important context", title="ctx", tags=["main"])
+    result = _store_text("important context", title="ctx", tags=["main"])
     entry = result["entry"]
 
     storage_json = Path(os.environ["CUA_RUN_ROOT"]) / "storage.json"
@@ -27,7 +27,7 @@ def test_store_image_copies_file_and_indexes(tmp_path: Path) -> None:
     source_image = tmp_path / "source.png"
     source_image.write_bytes(b"fakepng")
 
-    result = store_image(str(source_image), summary="screen context", alias="context.png")
+    result = _store_image(str(source_image), summary="screen context", alias="context.png")
     entry = result["entry"]
 
     storage_root = Path(os.environ["CUA_RUN_ROOT"])

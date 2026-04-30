@@ -27,7 +27,6 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     screenshot_interval_seconds: int = 2
     screenshot_similarity_threshold: float = 0.985
-    brain_memory_max_chars: int = 16000
     debug: bool = True
 
 
@@ -39,7 +38,6 @@ def load_settings() -> Settings:
         "brain_lm": constants.get("brain_lm", "gemma4:e2b"),
         "screenshot_interval_seconds": constants.get("screenshot_interval_seconds", 2),
         "screenshot_similarity_threshold": constants.get("screenshot_similarity_threshold", 0.985),
-        "brain_memory_max_chars": constants.get("brain_memory_max_chars", 16000),
         "debug": constants.get("debug", True),
     }
     return Settings(**data)

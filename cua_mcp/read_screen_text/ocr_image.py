@@ -17,7 +17,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from cua_mcp.active_monitor_capture import capture_active_monitor_to_file
+from src.eye.capture import capture_active_monitor_to_file
 from .inference import TextPredictor
 from src.common.io_utils import write_json
 from src.common.run_state import get_run_state_manager, ts_name

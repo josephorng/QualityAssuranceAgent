@@ -6,12 +6,12 @@ from typing import Any, Callable
 import httpx
 
 from cua_mcp import hand_tools
-from cua_mcp.active_monitor_capture import active_monitor_offset
 from cua_mcp.read_screen_text.ocr_image import get_coordinates
 from cua_mcp.storage import store_image as _store_image
 from cua_mcp.storage import store_text as _store_text
 from src.common.run_state import get_run_state_manager
 from src.common.settings import load_settings
+from src.eye import active_monitor_offset
 
 settings = load_settings()
 logger = get_run_state_manager()

@@ -7,6 +7,7 @@ from typing import Any
 import tkinter as tk
 
 import pyautogui
+from src.eye.capture import capture_active_monitor_to_file
 
 
 def _normalize_hotkey_token(key: str) -> str:
@@ -138,12 +139,10 @@ def drag(
 
 
 def screenshot_to_file(path: str | None = None) -> dict[str, Any]:
-    """Capture the screen; saves PNG to path or a temp file."""
-    img = pyautogui.screenshot()
+    """Capture the active Eye monitor; saves PNG to path or a temp file."""
     if not path:
         path = str(Path(mkdtemp()) / "screenshot.png")
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    img.save(path)
+    capture_active_monitor_to_file(Path(path))
     return {"path": path}
 
 

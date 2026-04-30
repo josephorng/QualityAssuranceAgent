@@ -12,7 +12,6 @@ def test_init_run_creates_expected_paths(tmp_path: Path) -> None:
     assert paths.long_term_memory_txt.exists()
     assert paths.hand_csv.exists()
     assert paths.storage_json.exists()
-    assert paths.steps_json.exists()
     assert paths.info_log.exists()
 
 

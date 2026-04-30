@@ -86,7 +86,7 @@ To ensure the **Eye**, **Brain**, and **Hand** can operate asynchronously and su
 
 A central `main.py` script serves as the lifecycle manager. It initializes runtime state, then runs one coordinator loop that orchestrates eye capture, brain decisions, and hand execution.
 
-- **Resilience:** Per-step failures are captured in run logs and step state; orchestration remains centralized and debuggable.
+- **Resilience:** Runtime failures are captured in run logs; orchestration remains centralized and debuggable.
 - **Lifecycle:** On `KeyboardInterrupt`, the runtime exits cleanly and preserves run artifacts under `runs/`.
 
 ### 2. Communication Layer (Direct Module Calls)

@@ -37,8 +37,8 @@
     {
       "prompt": "Given task objective, screenshot context, recent memory, previous action result, and available tools, decide the single best next tool call.",
       "instructions": [
-        "You might need to divide the task into multiple steps first and choose the best tool call for the next step.",
-        "Plan one step ahead but execute only one best next action.",
+        "Choose the single best immediate tool call that advances the task objective.",
+        "Plan only one action ahead and execute that best next action.",
         "Create detailed tool instruction."
       ],
       "models": ["gemma4:e2b", "gemma3:4b"]

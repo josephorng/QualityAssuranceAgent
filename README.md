@@ -3,7 +3,7 @@
 This project implements a runnable MVP of a computer-use agent with a single in-process coordinator and three modules:
 
 - `Eye` module: captures screenshots from the selected monitor.
-- `Brain` module: reasons on events, updates step state, and decides actions.
+- `Brain` module: reasons on events and decides actions.
 - `Hand` module: executes desktop actions and records results.
 
 `main.py` acts as the runtime entrypoint and runs the coordinator loop directly (no subprocess server topology).

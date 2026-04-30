@@ -5,9 +5,8 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
-from src.common.io_utils import append_text, read_json, read_text, write_json
+from src.common.io_utils import append_text, read_text, write_json
 
 
 def slugify(text: str) -> str:
@@ -29,7 +28,6 @@ class RunPaths:
     hand_csv: Path
     long_term_memory_txt: Path
     storage_json: Path
-    steps_json: Path
     info_log: Path
 
 
@@ -50,7 +48,6 @@ class RunStateManager:
         hand_csv = root / "hand.csv"
         long_term_memory_txt = root / "long_term_memory.txt"
         storage_json = root / "storage.json"
-        steps_json = root / "steps.json"
         info_log = root / "run.log"
 
         eye_dir.mkdir(parents=True, exist_ok=True)
@@ -63,8 +60,6 @@ class RunStateManager:
             hand_csv.write_text("", encoding="utf-8")
         if not storage_json.exists():
             write_json(storage_json, [])
-        if not steps_json.exists():
-            write_json(steps_json, [])
         if not info_log.exists():
             info_log.write_text("", encoding="utf-8")
 
@@ -77,7 +72,6 @@ class RunStateManager:
             hand_csv=hand_csv,
             long_term_memory_txt=long_term_memory_txt,
             storage_json=storage_json,
-            steps_json=steps_json,
             info_log=info_log,
         )
         self.log_info(f"Run initialized for task: {task_input}")
@@ -128,25 +122,6 @@ class RunStateManager:
             },
         )
         return out
-
-    def read_steps_tree(self) -> list[dict[str, Any]]:
-        paths = self.require_paths()
-        data = read_json(paths.steps_json, [])
-        if isinstance(data, list):
-            return [item for item in data if isinstance(item, dict)]
-        # Backward compatibility for older object-root runs:
-        # { ..., "steps": [...] } -> [...]
-        if isinstance(data, dict):
-            root_steps = data.get("steps", [])
-            if isinstance(root_steps, list):
-                return [item for item in root_steps if isinstance(item, dict)]
-        return []
-
-    def write_steps_tree(self, tree: list[dict[str, Any]]) -> None:
-        paths = self.require_paths()
-        normalized = [item for item in tree if isinstance(item, dict)]
-        write_json(paths.steps_json, normalized)
-
 
 _manager: RunStateManager | None = None
 

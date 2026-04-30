@@ -4,7 +4,6 @@ from typing import Annotated
 
 from mcp.server.fastmcp import FastMCP
 
-from cua_mcp import step_module
 from cua_mcp.tool_module import (
     click,
     cursor_position,
@@ -156,34 +155,6 @@ def store_image_tool(
         alias=alias,
         tags=tags,
     )
-
-
-@mcp.tool(
-    name="divide_step",
-    description=(
-        "Replace a step in the task tree with multiple child steps—break down a goal into ordered sub-steps."
-    ),
-)
-def divide_step(
-    path: Annotated[str, "Dot-separated path of the step to split (e.g. '0' or '0.1')."],
-    new_steps: Annotated[list[dict], "Ordered list of child step dicts (goal, instruction, result, etc.)."],
-    instruction: Annotated[str, "Optional note for why the split was performed."] = "",
-):
-    return step_module.divide_step(path=path, new_steps=new_steps)
-
-
-@mcp.tool(
-    name="create_new_step",
-    description=(
-        "Append a new step node (goal, instruction, result) under the plan—expand the workflow without rewriting siblings."
-    ),
-)
-def create_new_step(
-    target_path: Annotated[str, "Parent path under which to add the step (empty string often means root policy per runtime)."],
-    new_step: Annotated[dict, "Step payload: fields like goal, instruction, result."],
-    instruction: Annotated[str, "Optional note for creating this step."] = "",
-):
-    return step_module.create_new_step(target_path=target_path, new_step=new_step)
 
 
 # --- CUA action vocabulary (see ToolCommand / agent schema) ---

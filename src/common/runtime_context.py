@@ -7,6 +7,8 @@ from pathlib import Path
 RUN_ROOT_ENV = "CUA_RUN_ROOT"
 TASK_INPUT_ENV = "CUA_TASK_INPUT"
 RUN_ID_ENV = "CUA_RUN_ID"
+SCRIPT_PATH_ENV = "CUA_SCRIPT_PATH"
+SCRIPT_LINES_ENV = "CUA_SCRIPT_LINES_JSON"
 
 
 def set_runtime_env(run_root: Path, task_input: str, run_id: str) -> None:

@@ -8,7 +8,7 @@ from typing import Any
 
 from ollama import AsyncClient
 
-from cua_mcp.tools import get_ollama_tools
+from cua_mcp.tool_module import get_ollama_tools
 from pydantic import BaseModel
 from src.common.run_state import get_run_state_manager
 

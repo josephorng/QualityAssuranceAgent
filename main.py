@@ -1,91 +1,22 @@
 from __future__ import annotations
 
-import argparse
+import json
 import os
 import signal
 import shutil
-import subprocess
-import sys
-import time
-from dataclasses import dataclass
+import asyncio
 from pathlib import Path
 
 from src.common.monitor_prompt import prompt_eye_monitor_index
 from src.common.run_state import RunStateManager
-from src.common.runtime_context import set_runtime_env
+from src.common.script_helper import list_script_files, parse_script_lines
+from src.runtime.coordinator import RuntimeCoordinator
+from src.common.runtime_context import (
+    SCRIPT_LINES_ENV,
+    SCRIPT_PATH_ENV,
+    set_runtime_env,
+)
 from src.common.settings import ROOT_DIR, load_settings
-
-
-def with_suppressed_debugpy_warning(env: dict[str, str]) -> dict[str, str]:
-    warning_filter = "ignore:incompatible copy of pydevd already imported:UserWarning"
-    current = env.get("PYTHONWARNINGS", "").strip()
-    if current:
-        env["PYTHONWARNINGS"] = f"{current},{warning_filter}"
-    else:
-        env["PYTHONWARNINGS"] = warning_filter
-    return env
-
-
-def build_server_command(module: str, port: int) -> list[str]:
-    return [
-        sys.executable,
-        "-m",
-        "uvicorn",
-        f"{module}:app",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        str(port),
-        "--log-level",
-        "warning",
-    ]
-
-
-@dataclass(frozen=True)
-class ServiceConfig:
-    name: str
-    launch_mode: str  # uvicorn | module
-    module: str
-    port: int | None = None
-
-
-def build_module_command(module: str) -> list[str]:
-    return [sys.executable, "-m", module]
-
-
-def launch_service(service: ServiceConfig, env: dict[str, str]) -> subprocess.Popen:
-    if service.launch_mode == "uvicorn":
-        if service.port is None:
-            raise ValueError(f"port is required for uvicorn service: {service.name}")
-        cmd = build_server_command(service.module, service.port)
-        display = f"{service.name} on {service.port}"
-    elif service.launch_mode == "module":
-        cmd = build_module_command(service.module)
-        display = service.name
-    else:
-        raise ValueError(f"unknown launch mode {service.launch_mode!r}")
-    print(f"[master] launching {display}")
-    return subprocess.Popen(cmd, cwd=str(ROOT_DIR), env=env)
-
-
-def terminate_process(proc: subprocess.Popen) -> None:
-    if proc.poll() is not None:
-        return
-    proc.terminate()
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-
-
-def resolve_task(cli_task: str | None) -> str:
-    if cli_task and cli_task.strip():
-        return cli_task.strip()
-    while True:
-        task = input("Enter task: ").strip()
-        if task:
-            return task
-        print("Task cannot be empty.")
 
 
 def clear_runs_folder(runs_root: Path) -> None:
@@ -97,11 +28,35 @@ def clear_runs_folder(runs_root: Path) -> None:
             item.unlink()
 
 
+def select_script_input(root_dir: Path) -> tuple[str, Path, list[str]]:
+    scripts_dir = root_dir / "scripts"
+    scripts = list_script_files(scripts_dir)
+    if not scripts:
+        raise RuntimeError("No .txt scripts found in scripts/ directory.")
+
+    while True:
+        print("Available scripts:")
+        for idx, script in enumerate(scripts, start=1):
+            print(f"  {idx}) {script.name}")
+        selected = input("Select script number: ").strip()
+        if not selected.isdigit():
+            print("Please enter a valid number.")
+            continue
+        selected_index = int(selected) - 1
+        if selected_index < 0 or selected_index >= len(scripts):
+            print("Selected number is out of range.")
+            continue
+        script_path = scripts[selected_index]
+        script_steps = parse_script_lines(script_path)
+        if not script_steps:
+            print("Selected script has no executable lines. Add steps and try again.")
+            continue
+        task = script_steps[0]
+        return task, script_path, script_steps
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Computer Use Agent master process")
-    parser.add_argument("--task", help="Initial user task text")
-    args = parser.parse_args()
-    task = resolve_task(args.task)
+    task, selected_script_path, script_steps = select_script_input(ROOT_DIR)
 
     settings = load_settings()
     runs_root = Path(settings.runs_dir)
@@ -111,58 +66,20 @@ def main() -> None:
     run_id = paths.root.name
 
     set_runtime_env(paths.root, task, run_id)
-    env = os.environ.copy()
-    env = with_suppressed_debugpy_warning(env)
-
+    os.environ[SCRIPT_PATH_ENV] = str(selected_script_path)
+    os.environ[SCRIPT_LINES_ENV] = json.dumps(script_steps, ensure_ascii=False)
     eye_monitor_index = prompt_eye_monitor_index()
-    env["EYE_MONITOR_INDEX"] = str(eye_monitor_index)
+    os.environ["EYE_MONITOR_INDEX"] = str(eye_monitor_index)
     print(f"[master] Eye capture monitor index: {eye_monitor_index} (0 = all screens)")
     manager.log_info(f"Eye capture monitor index set to {eye_monitor_index}")
 
-    services = {
-        "eye": ServiceConfig(
-            name="eye",
-            launch_mode="uvicorn",
-            module="src.eye.server",
-            port=settings.eye_port,
-        ),
-        "brain": ServiceConfig(
-            name="brain",
-            launch_mode="uvicorn",
-            module="src.brain.server",
-            port=settings.brain_port,
-        ),
-        "hand": ServiceConfig(
-            name="hand",
-            launch_mode="uvicorn",
-            module="src.hand.server",
-            port=settings.hand_port,
-        ),
-        "mcp": ServiceConfig(
-            name="mcp",
-            launch_mode="module",
-            module="cua_mcp.tools",
-        ),
-    }
-    procs: dict[str, subprocess.Popen] = {
-        name: launch_service(service, env) for name, service in services.items()
-    }
-
-    manager.log_info("Master started all services")
-
     try:
-        while True:
-            time.sleep(2)
-            for name, proc in list(procs.items()):
-                code = proc.poll()
-                if code is not None:
-                    manager.log_info(f"{name} exited with code {code}. restarting.")
-                    procs[name] = launch_service(services[name], env)
+        manager.log_info("Master starting coordinator module runtime")
+        coordinator = RuntimeCoordinator()
+        asyncio.run(coordinator.run())
     except KeyboardInterrupt:
-        manager.log_info("KeyboardInterrupt received. shutting down services.")
+        manager.log_info("KeyboardInterrupt received. shutting down coordinator.")
     finally:
-        for proc in procs.values():
-            terminate_process(proc)
         manager.log_info("Master stopped.")
 
 

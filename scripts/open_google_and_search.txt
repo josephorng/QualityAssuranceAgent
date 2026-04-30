@@ -1,0 +1,5 @@
+open chrome
+type google url in the address bar
+search "生日" in the google search bar
+copy all the text on the page
+scroll down to the bottom and save all the result.

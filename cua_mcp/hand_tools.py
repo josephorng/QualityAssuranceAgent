@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from tempfile import mkdtemp
 from time import sleep
 from typing import Any
 import tkinter as tk
@@ -15,10 +16,16 @@ def _normalize_hotkey_token(key: str) -> str:
     return cleaned.strip("\"'")
 
 
-def click(x: int, y: int, button: str = "left") -> dict[str, Any]:
+def click(
+    x: int,
+    y: int,
+    button: str = "left",
+    clicks: int = 1,
+    interval: float = 0.0,
+) -> dict[str, Any]:
     """Click a screen coordinate and return executed arguments."""
-    pyautogui.click(x=x, y=y, button=button)
-    return {"x": x, "y": y, "button": button}
+    pyautogui.click(x=x, y=y, button=button, clicks=clicks, interval=interval)
+    return {"x": x, "y": y, "button": button, "clicks": clicks, "interval": interval}
 
 
 def type_text(
@@ -81,6 +88,128 @@ def wait(seconds: float) -> dict[str, Any]:
     """Pause execution for a number of seconds."""
     sleep(seconds)
     return {"seconds": seconds}
+
+
+def key_press(key: str) -> dict[str, Any]:
+    """Press and release a single key."""
+    token = _normalize_hotkey_token(key)
+    pyautogui.press(token)
+    return {"key": token}
+
+
+def write_text(
+    text: str,
+    coordinate: list[int],
+    interval: float = 0.0,
+) -> dict[str, Any]:
+    """Click to focus, then type raw characters with pyautogui.write."""
+    if len(coordinate) != 2:
+        raise ValueError("coordinate must be [x, y]")
+    x, y = coordinate
+    pyautogui.click(x=x, y=y, button="left")
+    pyautogui.write(text, interval=interval)
+    return {
+        "text": text,
+        "interval": interval,
+        "clicked_coordinate": {"x": x, "y": y, "button": "left"},
+        "effective_mode": "write",
+    }
+
+
+def drag(
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    duration: float = 0.5,
+    button: str = "left",
+) -> dict[str, Any]:
+    """Drag from (x1,y1) to (x2,y2)."""
+    pyautogui.moveTo(x1, y1)
+    pyautogui.dragTo(x2, y2, duration=duration, button=button)
+    return {
+        "x1": x1,
+        "y1": y1,
+        "x2": x2,
+        "y2": y2,
+        "duration": duration,
+        "button": button,
+    }
+
+
+def screenshot_to_file(path: str | None = None) -> dict[str, Any]:
+    """Capture the screen; saves PNG to path or a temp file."""
+    img = pyautogui.screenshot()
+    if not path:
+        path = str(Path(mkdtemp()) / "screenshot.png")
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    img.save(path)
+    return {"path": path}
+
+
+def cursor_position() -> dict[str, Any]:
+    pos = pyautogui.position()
+    return {"x": int(pos.x), "y": int(pos.y)}
+
+
+def mouse_down(x: int | None = None, y: int | None = None, button: str = "left") -> dict[str, Any]:
+    if x is not None and y is not None:
+        pyautogui.moveTo(x, y)
+    pyautogui.mouseDown(button=button)
+    out: dict[str, Any] = {"button": button}
+    if x is not None:
+        out["x"] = x
+    if y is not None:
+        out["y"] = y
+    return out
+
+
+def mouse_up(x: int | None = None, y: int | None = None, button: str = "left") -> dict[str, Any]:
+    if x is not None and y is not None:
+        pyautogui.moveTo(x, y)
+    pyautogui.mouseUp(button=button)
+    out: dict[str, Any] = {"button": button}
+    if x is not None:
+        out["x"] = x
+    if y is not None:
+        out["y"] = y
+    return out
+
+
+def scroll_at(clicks: int, x: int | None = None, y: int | None = None) -> dict[str, Any]:
+    if x is not None and y is not None:
+        pyautogui.moveTo(x, y)
+    pyautogui.scroll(clicks)
+    out: dict[str, Any] = {"clicks": clicks}
+    if x is not None:
+        out["x"] = x
+    if y is not None:
+        out["y"] = y
+    return out
+
+
+def hold_key_down(key: str, seconds: float) -> dict[str, Any]:
+    token = _normalize_hotkey_token(key)
+    pyautogui.keyDown(token)
+    sleep(seconds)
+    pyautogui.keyUp(token)
+    return {"key": token, "seconds": seconds}
+
+
+def zoom_scroll(scroll_clicks: int, x: int | None = None, y: int | None = None) -> dict[str, Any]:
+    if x is not None and y is not None:
+        pyautogui.moveTo(x, y)
+    pyautogui.keyDown("ctrl")
+    try:
+        pyautogui.scroll(scroll_clicks)
+    finally:
+        pyautogui.keyUp("ctrl")
+    out: dict[str, Any] = {"scroll_clicks": scroll_clicks, "modifier": "ctrl"}
+    if x is not None:
+        out["x"] = x
+    if y is not None:
+        out["y"] = y
+    return out
 
 
 def detect_objects(image_path: str) -> dict[str, Any]:

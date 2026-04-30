@@ -28,7 +28,6 @@ class Settings(BaseSettings):
     screenshot_interval_seconds: int = 2
     screenshot_similarity_threshold: float = 0.985
     brain_memory_max_chars: int = 16000
-    eye_port: int = 8001
     brain_port: int = 8002
     hand_port: int = 8003
     debug: bool = True
@@ -44,7 +43,6 @@ def load_settings() -> Settings:
         "screenshot_interval_seconds": constants.get("screenshot_interval_seconds", 2),
         "screenshot_similarity_threshold": constants.get("screenshot_similarity_threshold", 0.985),
         "brain_memory_max_chars": constants.get("brain_memory_max_chars", 16000),
-        "eye_port": ports.get("eye", 8001),
         "brain_port": ports.get("brain", 8002),
         "hand_port": ports.get("hand", 8003),
         "debug": constants.get("debug", True),

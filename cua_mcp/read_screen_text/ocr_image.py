@@ -17,9 +17,10 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from cua_mcp.active_monitor_capture import capture_active_monitor_to_file
 from .inference import TextPredictor
-from src.common.run_state import get_run_state_manager
 from src.common.io_utils import write_json
+from src.common.run_state import get_run_state_manager, ts_name
 
 _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 _YOLO_MODEL: object | None = None
@@ -271,7 +272,7 @@ def _ocr_crop(
         return ""
 
 
-def get_coordinates(
+def get_coordinates_from_path(
     image_path: str,
     *,
     line_height: int = 32,
@@ -285,7 +286,7 @@ def get_coordinates(
     starting with ``[error]``.
     """
     _log_info(
-        f"OCR get_coordinates start image_path={image_path} line_height={line_height}"
+        f"OCR get_coordinates_from_path start image_path={image_path} line_height={line_height}"
     )
     if not image_path or not isinstance(image_path, str):
         _log_info("OCR invalid image_path argument")
@@ -347,6 +348,27 @@ def get_coordinates(
         yolo_elapsed_ms=yolo_elapsed_ms,
         ocr_elapsed_ms=ocr_elapsed_ms,
     )
-    _log_info(f"OCR get_coordinates done lines={len(formatted)}")
-    _log_info(f"OCR get_coordinates formatted={formatted}")
+    _log_info(f"OCR get_coordinates_from_path done lines={len(formatted)}")
+    _log_info(f"OCR get_coordinates_from_path formatted={formatted}")
     return "\n".join(formatted)
+
+
+def get_coordinates(
+    *,
+    line_height: int = 32,
+    crnn_model_path: Optional[str] = None,
+) -> str:
+    """
+    Capture the active monitor to this run's ``yolo_ocr/`` folder, then run YOLO + CRNN OCR.
+
+    Writes ``<timestamp>.png`` and persists OCR JSON with the same basename beside it.
+    """
+    paths = get_run_state_manager().require_paths()
+    name = f"{ts_name()}.png"
+    out = paths.yolo_ocr_dir / name
+    capture_active_monitor_to_file(out)
+    return get_coordinates_from_path(
+        str(out),
+        line_height=line_height,
+        crnn_model_path=crnn_model_path,
+    )

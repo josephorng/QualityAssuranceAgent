@@ -1,0 +1,3 @@
+Open a text editor
+type hello world
+save the file at the desktop

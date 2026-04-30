@@ -35,6 +35,8 @@ def _default_step(step: dict[str, Any] | None = None) -> dict[str, Any]:
         out["tool"] = str(src.get("tool"))
     if "arguments" in src and src.get("arguments") not in (None, ""):
         out["arguments"] = src.get("arguments")
+    if "tool_calls" in src and isinstance(src.get("tool_calls"), list):
+        out["tool_calls"] = src.get("tool_calls")
     if "steps" in src:
         raw_children = src.get("steps")
         if isinstance(raw_children, list):
@@ -49,10 +51,18 @@ def _path_parts(path: StepPath) -> list[int]:
     return [int(part) for part in path.split(".")]
 
 
-def _locate_step(tree: dict[str, Any], path: StepPath) -> dict[str, Any]:
+def _locate_step(tree: list[dict[str, Any]], path: StepPath) -> dict[str, Any]:
     """Resolve a step node from the task tree by dot-path."""
-    node = tree
-    for index in _path_parts(path):
+    parts = _path_parts(path)
+    if not parts:
+        raise ValueError("empty path does not resolve to a single step")
+    index = parts[0]
+    if index < 0 or index >= len(tree):
+        raise IndexError(f"invalid step path: {path}")
+    node = tree[index]
+    if not isinstance(node, dict):
+        raise ValueError(f"invalid step node at path: {path}")
+    for index in parts[1:]:
         children = node.get("steps", [])
         if not isinstance(children, list) or index < 0 or index >= len(children):
             raise IndexError(f"invalid step path: {path}")
@@ -63,24 +73,18 @@ def _locate_step(tree: dict[str, Any], path: StepPath) -> dict[str, Any]:
     return node
 
 
-def _locate_parent(tree: dict[str, Any], path: StepPath) -> tuple[dict[str, Any], list[dict[str, Any]], int]:
+def _locate_parent(tree: list[dict[str, Any]], path: StepPath) -> tuple[list[dict[str, Any]], int]:
     """Resolve parent node and sibling list for a non-root step path."""
     parts = _path_parts(path)
     if not parts:
         raise ValueError("root path has no parent")
-    parent = tree
-    for index in parts[:-1]:
-        children = parent.get("steps", [])
-        if not isinstance(children, list) or index < 0 or index >= len(children):
-            raise IndexError(f"invalid step path: {path}")
-        candidate = children[index]
-        if not isinstance(candidate, dict):
-            raise ValueError(f"invalid step node at path: {path}")
-        parent = candidate
+    if len(parts) == 1:
+        return tree, parts[0]
+    parent = _locate_step(tree, ".".join(str(p) for p in parts[:-1]))
     siblings = parent.get("steps", [])
     if not isinstance(siblings, list):
         raise ValueError(f"invalid siblings at path: {path}")
-    return parent, siblings, parts[-1]
+    return siblings, parts[-1]
 
 
 def _is_leaf(step: dict[str, Any]) -> bool:
@@ -89,25 +93,28 @@ def _is_leaf(step: dict[str, Any]) -> bool:
     return not isinstance(children, list) or len(children) == 0
 
 
-def init_root_task(goal: str, instruction: str = "", image: str = "") -> dict[str, Any]:
+def init_root_task(goals: list[str], instruction: str = "", image: str = "") -> list[dict[str, Any]]:
     """Initialize and persist a new root task tree in `steps.json`."""
-    tree = {
-        "image": image,
-        "goal": goal,
-        "instruction": instruction or goal,
-        "result": "splitted",
-        "steps": [],
-    }
+    tree = [
+        {
+            "image": image,
+            "goal": goal,
+            "instruction": instruction or goal,
+            "result": "",
+            "steps": [],
+        }
+        for goal in goals
+    ]
     _manager().write_steps_tree(tree)
     return tree
 
 
-def read_steps_tree() -> dict[str, Any]:
+def read_steps_tree() -> list[dict[str, Any]]:
     """Load the current step tree from run storage."""
     return _manager().read_steps_tree()
 
 
-def write_steps_tree(tree: dict[str, Any]) -> None:
+def write_steps_tree(tree: list[dict[str, Any]]) -> None:
     """Persist the full step tree to run storage."""
     _manager().write_steps_tree(tree)
 
@@ -141,6 +148,30 @@ def set_step_instruction(path: StepPath, instruction: str) -> dict[str, Any]:
     return node
 
 
+def set_step_tool_calls(path: StepPath, tool_calls: list[dict[str, Any]]) -> dict[str, Any]:
+    """Set one step's `tool_calls` field by path."""
+    tree = read_steps_tree()
+    node = _locate_step(tree, path)
+    normalized: list[dict[str, Any]] = []
+    for tool_call in tool_calls:
+        if not isinstance(tool_call, dict):
+            continue
+        action = str(tool_call.get("action", "")).strip()
+        if not action:
+            continue
+        args = tool_call.get("args", {})
+        normalized.append(
+            {
+                "action": action,
+                "args": args if isinstance(args, dict) else {},
+                "reason": str(tool_call.get("reason", "")),
+            }
+        )
+    node["tool_calls"] = normalized
+    write_steps_tree(tree)
+    return node
+
+
 def divide_step(path: StepPath, new_steps: list[dict[str, Any]]) -> dict[str, Any]:
     """Replace a step with child steps and mark the parent as `splitted`."""
     tree = read_steps_tree()
@@ -162,14 +193,11 @@ def create_new_step(target_path: StepPath, new_step: dict[str, Any]) -> dict[str
     """Insert exactly one sibling step after `target_path` (or append at root)."""
     tree = read_steps_tree()
     if target_path == "":
-        siblings = tree.get("steps", [])
-        if not isinstance(siblings, list):
-            siblings = []
-            tree["steps"] = siblings
+        siblings = tree
         insert_at = len(siblings)
         parent_prefix = ""
     else:
-        _, siblings, index = _locate_parent(tree, target_path)
+        siblings, index = _locate_parent(tree, target_path)
         insert_at = index + 1
         parent_prefix = ".".join(target_path.split(".")[:-1])
     normalized = _default_step(new_step)
@@ -179,9 +207,30 @@ def create_new_step(target_path: StepPath, new_step: dict[str, Any]) -> dict[str
     return {"status": "ok", "created_path": created_path}
 
 
-def _dfs_paths(node: dict[str, Any], prefix: str = "") -> list[str]:
-    """Collect all leaf step paths in depth-first order."""
+def create_root_steps(new_steps: list[dict[str, Any]]) -> dict[str, Any]:
+    """Append multiple normalized leaf steps at the root level in order."""
+    tree = read_steps_tree()
+    siblings = tree
+    created_paths: list[str] = []
+    for step in new_steps:
+        if not isinstance(step, dict):
+            continue
+        siblings.append(_default_step(step))
+        created_paths.append(str(len(siblings) - 1))
+    write_steps_tree(tree)
+    return {"status": "ok", "created_paths": created_paths, "count": len(created_paths)}
+
+
+def _dfs_paths(node: list[dict[str, Any]] | dict[str, Any], prefix: str = "") -> list[str]:
+    """Collect all leaf step paths in depth-first order from list-root trees."""
     paths: list[str] = []
+    if isinstance(node, list):
+        for idx, child in enumerate(node):
+            if not isinstance(child, dict):
+                continue
+            child_prefix = str(idx) if prefix == "" else f"{prefix}.{idx}"
+            paths.extend(_dfs_paths(child, child_prefix))
+        return paths
     children = node.get("steps", [])
     if not isinstance(children, list) or len(children) == 0:
         if prefix != "":

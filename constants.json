@@ -6,7 +6,6 @@
   "screenshot_similarity_threshold": 0.985,
   "brain_memory_max_chars": 16000,
   "ports": {
-    "eye": 8001,
     "brain": 8002,
     "hand": 8003
   },

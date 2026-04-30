@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from cua_mcp.tools import store_image, store_text
+from cua_mcp.tool_module import store_image, store_text
 from src.common.io_utils import read_json
 
 

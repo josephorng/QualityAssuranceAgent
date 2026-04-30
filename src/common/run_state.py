@@ -64,16 +64,7 @@ class RunStateManager:
         if not storage_json.exists():
             write_json(storage_json, [])
         if not steps_json.exists():
-            write_json(
-                steps_json,
-                {
-                    "image": "",
-                    "goal": task_input,
-                    "instruction": task_input,
-                    "result": "splitted",
-                    "steps": [],
-                },
-            )
+            write_json(steps_json, [])
         if not info_log.exists():
             info_log.write_text("", encoding="utf-8")
 
@@ -138,33 +129,23 @@ class RunStateManager:
         )
         return out
 
-    def read_steps_tree(self) -> dict[str, Any]:
+    def read_steps_tree(self) -> list[dict[str, Any]]:
         paths = self.require_paths()
-        data = read_json(
-            paths.steps_json,
-            {
-                "image": "",
-                "goal": "",
-                "instruction": "",
-                "result": "splitted",
-                "steps": [],
-            },
-        )
-        if not isinstance(data, dict):
-            return {
-                "image": "",
-                "goal": "",
-                "instruction": "",
-                "result": "splitted",
-                "steps": [],
-            }
-        if "steps" not in data or not isinstance(data.get("steps"), list):
-            data["steps"] = []
-        return data
+        data = read_json(paths.steps_json, [])
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+        # Backward compatibility for older object-root runs:
+        # { ..., "steps": [...] } -> [...]
+        if isinstance(data, dict):
+            root_steps = data.get("steps", [])
+            if isinstance(root_steps, list):
+                return [item for item in root_steps if isinstance(item, dict)]
+        return []
 
-    def write_steps_tree(self, tree: dict[str, Any]) -> None:
+    def write_steps_tree(self, tree: list[dict[str, Any]]) -> None:
         paths = self.require_paths()
-        write_json(paths.steps_json, tree)
+        normalized = [item for item in tree if isinstance(item, dict)]
+        write_json(paths.steps_json, normalized)
 
 
 _manager: RunStateManager | None = None

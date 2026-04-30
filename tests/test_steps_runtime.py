@@ -76,3 +76,19 @@ def test_set_step_image(tmp_path: Path) -> None:
     updated = steps.set_step_image("0", "20260424_000000_000000.png")
     assert updated["image"] == "20260424_000000_000000.png"
     assert steps.get_step("0")["image"] == "20260424_000000_000000.png"
+
+
+def test_create_root_steps_preserves_order(tmp_path: Path) -> None:
+    _init_manager(tmp_path)
+    result = steps.create_root_steps(
+        [
+            {"goal": "first", "instruction": "first", "result": ""},
+            {"goal": "second", "instruction": "second", "result": ""},
+            {"goal": "third", "instruction": "third", "result": ""},
+        ]
+    )
+    assert result["count"] == 3
+    assert result["created_paths"] == ["0", "1", "2"]
+    assert steps.get_step("0")["instruction"] == "first"
+    assert steps.get_step("1")["instruction"] == "second"
+    assert steps.get_step("2")["instruction"] == "third"

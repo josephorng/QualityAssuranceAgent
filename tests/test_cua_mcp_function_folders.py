@@ -5,8 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from cua_mcp.read_screen_text.ocr_image import get_coordinates
-from cua_mcp.tools import get_coordinates
+from cua_mcp.read_screen_text.ocr_image import get_coordinates_from_path
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -28,7 +27,7 @@ FUNCTION_FOLDERS: dict[str, dict[str, object]] = {
     }
 }
 
-OCR_LINE_RE = re.compile(r"^\[(\d+),(\d+),(\d+),(\d+)\]\s?.*$")
+OCR_LINE_RE = re.compile(r"^\[(\d+),(\d+)(?:,(\d+),(\d+))?\]\s?.*$")
 
 
 def _sample_images(image_dir: Path) -> list[Path]:
@@ -61,7 +60,7 @@ def test_get_coordinates_has_sample_images() -> None:
     ids=lambda p: Path(p).name,
 )
 def test_get_coordinates_tool_returns_bbox_lines(image_path: Path) -> None:
-    output = get_coordinates(str(image_path))
+    output = get_coordinates_from_path(str(image_path))
     assert isinstance(output, str)
     assert output, f"OCR returned empty output for {image_path.name}"
     assert not output.startswith("[error]"), f"OCR error for {image_path.name}: {output}"
@@ -69,7 +68,7 @@ def test_get_coordinates_tool_returns_bbox_lines(image_path: Path) -> None:
     lines = [line for line in output.splitlines() if line.strip()]
     assert lines, f"No OCR lines returned for {image_path.name}"
     for line in lines:
-        assert OCR_LINE_RE.match(line), f"Line does not match '[x,y,w,h] text' format: {line}"
+        assert OCR_LINE_RE.match(line), f"Line does not match expected coordinate format: {line}"
 
 
 @pytest.mark.parametrize(
@@ -78,8 +77,6 @@ def test_get_coordinates_tool_returns_bbox_lines(image_path: Path) -> None:
     ids=lambda p: Path(p).name,
 )
 def test_get_coordinates_helper_matches_tool_type(image_path: Path) -> None:
-    helper_output = get_coordinates(str(image_path))
-    tool_output = get_coordinates(str(image_path))
+    helper_output = get_coordinates_from_path(str(image_path))
     assert isinstance(helper_output, str)
-    assert isinstance(tool_output, str)
 

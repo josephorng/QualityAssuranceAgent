@@ -14,7 +14,7 @@ import cv2
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from cua_mcp.read_screen_text import ocr_image as ocr_image_mod
-from cua_mcp.read_screen_text.ocr_image import get_coordinates
+from cua_mcp.read_screen_text.ocr_image import get_coordinates_from_path
 from src.common.io_utils import read_json, write_json
 from src.common.settings import ROOT_DIR
 
@@ -42,7 +42,7 @@ def _parse_string_line(line: str) -> OcrLine | None:
     center_match = _STRING_CENTER_RE.match(raw)
     if center_match:
         cx, cy = (int(center_match.group(i)) for i in range(1, 3))
-        # get_coordinates() returns center points only; render with a tiny marker box.
+        # get_coordinates_from_path() returns center points only; render with a tiny marker box.
         x = max(0, cx - 2)
         y = max(0, cy - 2)
         return OcrLine(box=(x, y, 4, 4), text=center_match.group(3).strip())
@@ -425,7 +425,7 @@ class OcrViewerApp:
         self.status_var.set("Running YOLO+OCR...")
         self.root.update_idletasks()
         try:
-            output = get_coordinates(str(src))
+            output = get_coordinates_from_path(str(src))
         except Exception as exc:
             self.status_var.set(f"YOLO+OCR failed: {type(exc).__name__}: {exc}")
             return

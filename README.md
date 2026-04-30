@@ -1,12 +1,12 @@
 # Computer Use Agent MVP
 
-This project implements a runnable MVP of a computer-use agent with three asynchronous services:
+This project implements a runnable MVP of a computer-use agent with a single in-process coordinator and three modules:
 
-- `Eye` (`8001`): captures screenshots, detects meaningful changes, and emits events.
-- `Brain` (`8002`): reasons on events, handles interruptions, and decides next actions.
-- `Hand` (`8003`): executes desktop actions and reports results back to Brain.
+- `Eye` module: captures screenshots from the selected monitor.
+- `Brain` module: reasons on events, updates step state, and decides actions.
+- `Hand` module: executes desktop actions and records results.
 
-`main.py` acts as the subprocess manager that starts and monitors all services.
+`main.py` acts as the runtime entrypoint and runs the coordinator loop directly (no subprocess server topology).
 
 ## Requirements
 
@@ -31,12 +31,12 @@ Key values:
 - `eye_vlm`, `brain_lm`
 - `screenshot_interval_seconds`
 - `screenshot_similarity_threshold`
-- ports for each service
+- model/runtime settings
 
 ## Run
 
 ```bash
-python main.py --task "Your task description here"
+python main.py
 ```
 
 This creates a run session under `runs/<task_slug>_<timestamp>/` with:
@@ -53,12 +53,6 @@ This creates a run session under `runs/<task_slug>_<timestamp>/` with:
 
 ```bash
 pytest
-```
-
-## Integration Demo
-
-```bash
-python scripts/run_demo.py
 ```
 
 ## Troubleshooting

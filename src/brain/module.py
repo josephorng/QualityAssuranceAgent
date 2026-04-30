@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from cua_mcp.tools import mcp_server, TOOL_FUNCTIONS
+from ollama import Message
 from src.common.io_utils import write_json
 from src.common.models import BrainTaskState, EyeEvent, ToolCommand
 from src.common.ollama_client import OllamaClient
@@ -113,6 +114,15 @@ class BrainModule:
                     return suffix
         return candidate
 
+    
+    def sanitize_message(self, message: Message) -> dict[str, Any]:
+        message_dict = message.model_dump()
+        message_dict.pop("thinking")
+        for key, value in message_dict.items():
+            if not message_dict[key]:
+                message_dict.pop(key)
+        return message_dict
+
     async def loop(self, event: EyeEvent) -> bool:
         if self._hand is None:
             raise RuntimeError("BrainModule requires hand=HandModule(...) for the decide/execute loop")
@@ -135,7 +145,8 @@ class BrainModule:
             if not response_message:
                 self.manager.log_error("Ollama returned empty response")
                 break
-            messages.append(response_message.model_dump())
+            response_message_dict = self.sanitize_message(response_message)
+            messages.append(response_message_dict)
 
             if not response_message.tool_calls:
                 step_succeeded = True

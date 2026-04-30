@@ -43,6 +43,7 @@ class BrainModule:
         self.manager.init_run(self.task_input, self.run_root.name)
         self.runtime = BrainRuntime()
         self.script_lines = self._script_seed_steps()
+        self._script_step_index = 0
         self._hand = hand
         self._step_transcript_counter = 0
         self.manager.log_info(f"Brain module initialized run_id={self.run_id}")
@@ -52,7 +53,7 @@ class BrainModule:
         steps_dir = self.manager.require_paths().root / "steps"
         steps_dir.mkdir(parents=True, exist_ok=True)
         out_path = steps_dir / f"{self._step_transcript_counter}.json"
-        write_json(out_path, {"messages": dict(messages)})
+        write_json(out_path, {"messages": messages})
 
     def _script_seed_steps(self) -> list[str]:
         raw = os.environ.get(SCRIPT_LINES_ENV, "")
@@ -74,7 +75,11 @@ class BrainModule:
         return lines or [self.task_input]
 
     def _current_goal(self) -> str:
-        return self.script_lines[0] if self.script_lines else self.task_input
+        if not self.script_lines:
+            return self.task_input
+        if self._script_step_index >= len(self.script_lines):
+            return self.script_lines[-1]
+        return self.script_lines[self._script_step_index]
 
     async def _normalize_tool_name(self, tool_name: str, arguments: dict | None = None) -> str:
         """
@@ -130,10 +135,9 @@ class BrainModule:
             if not response_message:
                 self.manager.log_error("Ollama returned empty response")
                 break
-            messages.append(dict(response_message))
+            messages.append(response_message.model_dump())
 
             if not response_message.tool_calls:
-                self.runtime.finished = True
                 step_succeeded = True
                 break
 
@@ -145,7 +149,7 @@ class BrainModule:
                     self.manager.log_error(f"Error normalizing tool name: {e}")
                     step_succeeded = False
                     break
-                result = await mcp_server.call_tool(normalized_name, arguments)
+                result = await self._hand.execute_tool_command(ToolCommand(action=normalized_name, args=arguments))
                 result_body = result.model_dump(mode="json")
                 messages.append({
                     "role": "tool_response",
@@ -189,8 +193,20 @@ class BrainModule:
             return BrainStepResult(finished=True)
         self.runtime.processing = True
         self.runtime.active = BrainTaskState(event=event)
-        finished = await self.loop(event)
+        step_succeeded = await self.loop(event)
         self.runtime.active = None
         self.runtime.processing = False
-        return BrainStepResult(finished=finished)
+        if not step_succeeded:
+            return BrainStepResult(
+                reason=f"Script step {self._script_step_index + 1} failed",
+                finished=False,
+            )
+
+        self._script_step_index += 1
+        all_steps_done = self._script_step_index >= len(self.script_lines)
+        self.runtime.finished = all_steps_done
+        return BrainStepResult(
+            reason=f"Completed script step {self._script_step_index}/{len(self.script_lines)}",
+            finished=all_steps_done,
+        )
 

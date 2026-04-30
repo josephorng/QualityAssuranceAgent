@@ -58,7 +58,7 @@ class HandModule:
     async def execute_tool_command(self, cmd: ToolCommand) -> ExecutionResult:
         async with self._lock:
             self._busy = True
-            result = self._exec_action(cmd)
+            result = await self._exec_action(cmd)
             append_csv_row(
                 self.manager.require_paths().hand_csv,
                 fieldnames=["timestamp", "action", "args", "ok", "screenshot_name", "message"],

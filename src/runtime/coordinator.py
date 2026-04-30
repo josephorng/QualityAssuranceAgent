@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-
 from src.brain.module import BrainModule
 from src.common.run_state import get_run_state_manager
 from src.eye.module import EyeModule
@@ -22,8 +20,8 @@ class RuntimeCoordinator:
             step_result = await self.brain.process_step(event)
             if step_result.finished:
                 self.manager.log_info("Coordinator detected finished task")
-            else:
                 break
+            self.manager.log_info(step_result.reason or "Coordinator moving to next script step")
 
             # if not cycle.request_capture and not cycle.commands:
             #     await asyncio.sleep(1.0)

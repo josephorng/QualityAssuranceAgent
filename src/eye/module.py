@@ -17,10 +17,7 @@ class EyeModule:
         self.manager = get_run_state_manager()
         self.manager.init_run(self.task_input, self.run_root.name)
         self.active_monitor_index = read_eye_monitor_index_from_env(1)
-        self.manager.log_info(
-            f"Eye module initialized run_id={self.run_id} "
-            f"ports brain={self.settings.brain_port} hand={self.settings.hand_port}"
-        )
+        self.manager.log_info(f"Eye module initialized run_id={self.run_id}")
 
     def monitor_details(self) -> list[dict[str, int | str]]:
         with mss.mss() as sct:

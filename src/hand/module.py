@@ -20,10 +20,7 @@ class HandModule:
         self.manager.init_run(self.task_input, self.run_root.name)
         self._busy = False
         self._lock = asyncio.Lock()
-        self.manager.log_info(
-            f"Hand module initialized run_id={self.run_id} "
-            f"port={self.settings.hand_port} brain={self.settings.brain_port}"
-        )
+        self.manager.log_info(f"Hand module initialized run_id={self.run_id}")
 
     @property
     def busy(self) -> bool:

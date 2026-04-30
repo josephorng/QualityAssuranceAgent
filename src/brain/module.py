@@ -43,10 +43,7 @@ class BrainModule:
         self.manager.init_run(self.task_input, self.run_root.name)
         self.runtime = BrainRuntime()
         self.script_lines = self._script_seed_steps()
-        self.manager.log_info(
-            f"Brain module initialized run_id={self.run_id} "
-            f"ports brain={self.settings.brain_port} hand={self.settings.hand_port}"
-        )
+        self.manager.log_info(f"Brain module initialized run_id={self.run_id}")
 
     def _script_seed_steps(self) -> list[str]:
         raw = os.environ.get(SCRIPT_LINES_ENV, "")

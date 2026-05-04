@@ -68,10 +68,9 @@ def _click(instruction: str, button: str = "left") -> dict[str, Any]:
 def _type_text(
     text: str,
     target_instruction: str,
-    interval: float = 0.0,
 ) -> dict[str, Any]:
     x, y = _resolve_point(target_instruction)
-    return hand_tools.type_text(text=text, coordinate=[x, y], interval=interval)
+    return hand_tools.type_text(text=text, coordinate=[x, y])
 
 
 def _press_key(key: str, instruction: str = "") -> dict[str, Any]:

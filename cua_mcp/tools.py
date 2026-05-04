@@ -55,7 +55,6 @@ def click(
 def type_text(
     text: str,
     target_instruction: str,
-    interval: float = 0.0,
 ):
     '''
     Focus a target region using natural-language instruction, then input text using keyboard automation.
@@ -63,12 +62,11 @@ def type_text(
     Args:
         text: Text content to input after the target is focused.
         target_instruction: Natural-language description of the field or region to focus first.
-        interval: Delay between keystrokes when typing fallback is used.
 
     Returns:
         dict: A dictionary containing typing execution details.
     '''
-    return _type_text(text=text, target_instruction=target_instruction, interval=interval)
+    return _type_text(text=text, target_instruction=target_instruction)
 
 
 @mcp_server.tool()

@@ -32,7 +32,6 @@ def click(
 def type_text(
     text: str,
     coordinate: list[int],
-    interval: float = 0.0,
 ) -> dict[str, Any]:
     """Click a coordinate to focus, then paste text from clipboard (Ctrl+V)."""
     if len(coordinate) != 2:
@@ -61,7 +60,6 @@ def type_text(
         root.destroy()
     return {
         "text": text,
-        "interval": interval,
         "clicked_coordinate": click_result,
         "effective_mode": "paste",
     }

@@ -10,19 +10,14 @@ class RuntimeCoordinator:
     def __init__(self) -> None:
         self.eye = EyeModule()
         self.hand = HandModule()
-        self.brain = BrainModule(hand=self.hand)
+        self.brain = BrainModule(hand=self.hand, eye=self.eye)
         self.manager = get_run_state_manager()
 
     async def run(self) -> None:
         self.manager.log_info("Coordinator startup")
         while True:
-            event = await self.eye.capture_once()
-            step_result = await self.brain.process_step(event)
+            step_result = await self.brain.process_step()
             if step_result.finished:
                 self.manager.log_info("Coordinator detected finished task")
                 break
             self.manager.log_info(step_result.reason or "Coordinator moving to next script step")
-
-            # if not cycle.request_capture and not cycle.commands:
-            #     await asyncio.sleep(1.0)
-

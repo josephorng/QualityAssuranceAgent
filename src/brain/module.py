@@ -8,14 +8,21 @@ from typing import TYPE_CHECKING, Any
 from cua_mcp.tools import mcp_server, TOOL_FUNCTIONS
 from ollama import Message
 from src.common.io_utils import write_json
-from src.common.models import BrainTaskState, EyeEvent, ToolCommand
+from src.common.models import BrainTaskState, EyeEvent, ToolCommand, ExecutionResult
 from src.common.ollama_client import OllamaClient
 from src.common.prompting import get_prompt
 from src.common.run_state import get_run_state_manager
 from src.common.runtime_context import SCRIPT_LINES_ENV, get_runtime_env
 from src.common.settings import load_settings
 
+ROLE_USER = "user"
+ROLE_TOOL = "tool"
+ROLE_SYSTEM = "system"
+ROLE_ASSISTANT = "assistant"
+ROLE_THINKING = "thinking"
+
 if TYPE_CHECKING:
+    from src.eye.module import EyeModule
     from src.hand.module import HandModule
 
 _MAX_INNER_DECIDE_STEPS = 100
@@ -24,7 +31,6 @@ _MAX_INNER_DECIDE_STEPS = 100
 @dataclass
 class BrainRuntime:
     active: BrainTaskState | None = None
-    latest_event: EyeEvent | None = None
     finished: bool = False
     processing: bool = False
 
@@ -36,7 +42,11 @@ class BrainStepResult:
 
 
 class BrainModule:
-    def __init__(self, hand: HandModule | None = None) -> None:
+    def __init__(
+        self,
+        hand: HandModule | None = None,
+        eye: EyeModule | None = None,
+    ) -> None:
         self.settings = load_settings()
         self.ollama = OllamaClient(self.settings.ollama_host)
         self.run_root, self.run_id = get_runtime_env()
@@ -46,6 +56,7 @@ class BrainModule:
         self.script_lines = self._script_seed_steps()
         self._script_step_index = 0
         self._hand = hand
+        self._eye = eye
         self._step_transcript_counter = 0
         self.manager.log_info(f"Brain module initialized run_id={self.run_id}")
 
@@ -114,78 +125,7 @@ class BrainModule:
                     return suffix
         return candidate
 
-    
-    def sanitize_message(self, message: Message) -> dict[str, Any]:
-        message_dict = message.model_dump()
-        message_dict.pop("thinking")
-        for key, value in message_dict.items():
-            if not message_dict[key]:
-                message_dict.pop(key)
-        return message_dict
-
-    async def loop(self, event: EyeEvent) -> bool:
-        if self._hand is None:
-            raise RuntimeError("BrainModule requires hand=HandModule(...) for the decide/execute loop")
-
-        prompt = get_prompt("brain_decide_action")
-        goal = self._current_goal()
-        full_prompt = f"{prompt}\n\nCurrentTaskGoal:\n{goal}\n\n"
-
-        messages: list[dict[str, Any]] = [
-            {"role": "user", "content": full_prompt, "images": [event.screenshot_path]},
-        ]
-        step_succeeded = False
-
-        for _ in range(_MAX_INNER_DECIDE_STEPS):
-            response_message = await self.ollama.chat_messages(
-                self.settings.brain_lm,
-                messages=messages,
-                use_tools=True,
-            )
-            if not response_message:
-                self.manager.log_error("Ollama returned empty response")
-                break
-            response_message_dict = self.sanitize_message(response_message)
-            messages.append(response_message_dict)
-
-            if not response_message.tool_calls:
-                step_succeeded = True
-                break
-
-            for tool_call in response_message.tool_calls:
-                arguments = dict(tool_call.function.arguments)
-                try:
-                    normalized_name = await self._normalize_tool_name(tool_call.function.name, arguments)
-                except Exception as e:
-                    self.manager.log_error(f"Error normalizing tool name: {e}")
-                    step_succeeded = False
-                    break
-                result = await self._hand.execute_tool_command(ToolCommand(action=normalized_name, args=arguments))
-                result_body = result.model_dump(mode="json")
-                messages.append({
-                    "role": "tool_response",
-                    "content": json.dumps(result_body, ensure_ascii=False),
-                })
-                if not result.ok:
-                    step_succeeded = False
-                    break
-            else:
-                continue
-            break
-        else:
-            self.manager.log_info(
-                f"Brain inner loop reached max steps ({_MAX_INNER_DECIDE_STEPS}) without model completion"
-            )
-            step_succeeded = False
-
-        self._save_step_messages(messages)
-        return step_succeeded
-
-    async def process_step(self, event: EyeEvent) -> BrainStepResult:
-        _tools = await mcp_server.list_tools()
-        print(f"_tools: {_tools}")
-        print(f"_tools type: {type(_tools)}")
-        print(f"_tools[0]: {_tools[0]}")
+    async def _validate_tool_functions_match_mcp(self) -> None:
         tool_names = {tool.name for tool in await mcp_server.list_tools()}
         tool_functions = {tool_function.__name__ for tool_function in TOOL_FUNCTIONS}
         if tool_names != tool_functions:
@@ -197,15 +137,106 @@ class BrainModule:
                 f"Only in tool functions: {only_in_tool_functions}"
             )
             raise RuntimeError("Tool names and tool functions do not match")
-       
-        
-        self.runtime.latest_event = event
+
+    def sanitize_execution_result(self, result: ExecutionResult) -> dict[str, Any]:
+        result_dict = result.model_dump()
+        result_dict.pop("timestamp")
+        result_dict.pop("screenshot_name")
+        result_dict.pop("ok")
+        pop_list = []
+        for key, value in result_dict.items():
+            if not value:
+                pop_list.append(key)
+        for key in pop_list:
+            result_dict.pop(key)
+        return result_dict
+    
+    def sanitize_message(self, message: Message) -> dict[str, Any]:
+        message_dict = message.model_dump()
+        message_dict.pop(ROLE_THINKING)
+        pop_list = []
+        for key, value in message_dict.items():
+            if not value:
+                pop_list.append(key)
+        for key in pop_list:
+                message_dict.pop(key)
+        return message_dict
+
+    async def loop(self) -> bool:
+        if self._hand is None:
+            raise RuntimeError("BrainModule requires hand=HandModule(...) for the decide/execute loop")
+        if self._eye is None:
+            raise RuntimeError("BrainModule requires eye=EyeModule(...) to capture screenshots for the decide loop")
+
+        prompt = get_prompt("brain_decide_action")
+        goal = self._current_goal()
+        full_prompt = f"{prompt}\n\nCurrentTaskGoal:\n{goal}\n\n"
+
+        messages: list[dict[str, Any]] = []
+        step_succeeded = False
+
+        for _ in range(_MAX_INNER_DECIDE_STEPS):
+            try:
+                vision_event = await self._eye.capture_once()
+                user_content = full_prompt if not messages else "Current screen:"
+                messages.append(
+                    {
+                        "role": ROLE_USER,
+                        "content": user_content,
+                        "images": [vision_event.screenshot_path],
+                    }
+                )
+                response_message = await self.ollama.chat_messages(
+                    self.settings.brain_lm,
+                    messages=messages,
+                    use_tools=True,
+                )
+                if not response_message:
+                    self.manager.log_error("Ollama returned empty response")
+                    break
+                response_message_dict = self.sanitize_message(response_message)
+                messages.append(response_message_dict)
+
+                if not response_message.tool_calls:
+                    step_succeeded = True
+                    break
+
+                for tool_call in response_message.tool_calls:
+                    arguments = dict(tool_call.function.arguments)
+                    try:
+                        normalized_name = await self._normalize_tool_name(tool_call.function.name, arguments)
+                    except Exception as e:
+                        self.manager.log_error(f"Error normalizing tool name: {e}")
+                        step_succeeded = False
+                        break
+                    result = await self._hand.execute_tool_command(ToolCommand(action=normalized_name, args=arguments))
+                    messages.append({
+                        "role": ROLE_TOOL,
+                        "content": json.dumps(self.sanitize_execution_result(result), ensure_ascii=False),
+                    })
+                    if not result.ok:
+                        step_succeeded = False
+                        break
+                else:
+                    continue
+                break
+            finally:
+                self._save_step_messages(messages)
+        else:
+            self.manager.log_info(
+                f"Brain inner loop reached max steps ({_MAX_INNER_DECIDE_STEPS}) without model completion"
+            )
+            step_succeeded = False
+
+        return step_succeeded
+
+    async def process_step(self) -> BrainStepResult:
+        await self._validate_tool_functions_match_mcp()
+
         if self.runtime.finished:
             return BrainStepResult(finished=True)
         self.runtime.processing = True
-        self.runtime.active = BrainTaskState(event=event)
-        step_succeeded = await self.loop(event)
-        self.runtime.active = None
+        step_succeeded = await self.loop()
         self.runtime.processing = False
         if not step_succeeded:
             return BrainStepResult(

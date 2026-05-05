@@ -1,5 +1,10 @@
-open chrome
-type google url in the address bar
-search "生日" in the google search bar
-copy all the text on the page
-scroll down to the bottom and save all the result.
+按下Windows鍵，打開 windows 搜尋
+輸入 Chrome
+按下 Enter 鍵
+確認 Chrome 瀏覽器已經打開，如果沒有打開的話請回到前面的步驟再嘗試一遍。
+最大化 Chrome 瀏覽器
+點擊訪客模式（訪客模式）
+在網址列輸入 www.google.com
+在 Google 搜尋欄搜尋「生日」
+複製頁面上的所有文字
+向下滾動至底部並儲存所有結果。

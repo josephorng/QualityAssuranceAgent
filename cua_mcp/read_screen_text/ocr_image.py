@@ -3,7 +3,8 @@ OCR pipeline: YOLO text-region detection + CRNN recognition.
 
 Reads an image from disk, detects text regions with ``yolo_best.pt``,
 runs CRNN directly on each detected crop using ``crnn_cfc_model.pt``, and
-returns reading-order lines formatted as ``[center_x,center_y] text``.
+returns an offset plus reading-order regions ``(bbox, (center_x, center_y), predict_images)``.
+Use :func:`format_coordinate_text_from_regions` for ``[center_x,center_y] text`` hints.
 """
 
 from __future__ import annotations
@@ -39,8 +40,8 @@ def _log_info(text: str) -> None:
 def _persist_ocr_result(
     image_path: str,
     line_height: int,
-    all_lines: list[tuple[tuple[int, int, int, int], str]],
-    formatted: list[str],
+    all_regions: list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]],
+    # formatted: list[str],
     yolo_elapsed_ms: float | None = None,
     ocr_elapsed_ms: float | None = None,
 ) -> None:
@@ -61,8 +62,7 @@ def _persist_ocr_result(
             "line_height": line_height,
             "yolo_elapsed_ms": yolo_elapsed_ms,
             "ocr_elapsed_ms": ocr_elapsed_ms,
-            "lines": all_lines,
-            "text": "\n".join(formatted),
+            "lines": all_regions,
         },
     )
     _log_info(f"OCR result persisted path={out_path}")
@@ -244,14 +244,14 @@ def _merge_overlapping_boxes(
     return merged
 
 
-def _ocr_crop(
+def _ocr_crop_predicted_texts(
     bgr_crop: np.ndarray,
     predictor: TextPredictor,
     line_height: int,
-) -> str:
-    """Run CRNN OCR on a single crop."""
+) -> list[str]:
+    """Run CRNN OCR on a single crop; return raw ``predict_images`` token strings (same as line 269)."""
     if bgr_crop.size == 0 or bgr_crop.shape[0] < 2 or bgr_crop.shape[1] < 2:
-        return ""
+        return []
     if line_height < 2:
         line_height = 32
 
@@ -267,9 +267,20 @@ def _ocr_crop(
 
     try:
         predicted_texts, _pred_prob = predictor.predict_images(line_image, beam_search=False)
-        return "".join(predicted_texts).strip()
+        return list(predicted_texts) if predicted_texts else []
     except Exception:
-        return ""
+        return []
+
+
+def format_coordinate_text_from_regions(
+    regions: list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]],
+) -> str:
+    """Build ``[cx,cy] text`` lines for the coordinate-picker LM (one line per region, reading order)."""
+    lines: list[str] = []
+    for _box, (cx, cy), preds in regions:
+        t = "".join(preds).strip()
+        lines.append(f"[{cx},{cy}] {t}")
+    return "\n".join(lines)
 
 
 def get_coordinates_from_path(
@@ -277,34 +288,57 @@ def get_coordinates_from_path(
     *,
     line_height: int = 32,
     crnn_model_path: Optional[str] = None,
-) -> str:
+    crop_rect: tuple[int, int, int, int] | None = None,
+) -> tuple[tuple[int, int], list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]]]:
     """
     Run YOLO + CRNN OCR on the image at ``image_path``.
 
-    Returns one string with one line per detection:
-    ``[center_x,center_y] <recognized text>`` (reading order). On error, returns a line
-    starting with ``[error]``.
+    Optional ``crop_rect`` is ``(x, y, w, h)`` in image pixel coordinates; OCR runs only on
+    that region. Box coordinates in ``regions`` are relative to the cropped OCR image; add
+    the returned offset to map into the uncropped image.
+
+    Returns ``((offset_x, offset_y), regions)`` where each region is
+    ``((x, y, w, h), (center_x, center_y), predicted_texts)`` and ``predicted_texts`` is the raw list from
+    ``TextPredictor.predict_images(..., beam_search=False)`` (reading order). On failure,
+    returns ``((0, 0), [])``. Use :func:`format_coordinate_text_from_regions` when you need
+    the ``[cx,cy] text`` hint string for an LM.
     """
     _log_info(
         f"OCR get_coordinates_from_path start image_path={image_path} line_height={line_height}"
+        f" crop_rect={crop_rect}"
     )
     if not image_path or not isinstance(image_path, str):
         _log_info("OCR invalid image_path argument")
-        return "[error] invalid image_path"
+        return (0, 0), []
     if not os.path.isfile(image_path):
         _log_info(f"OCR image file not found path={image_path}")
-        return f"[error] file not found: {image_path}"
+        return (0, 0), []
 
     bgr = cv2.imread(image_path)
     if bgr is None:
         _log_info(f"OCR could not read image path={image_path}")
-        return f"[error] could not read image: {image_path}"
+        return (0, 0), []
+
+    img_h, img_w = bgr.shape[:2]
+    offset_x, offset_y = 0, 0
+    persist_path = image_path
+    if crop_rect is not None:
+        cx, cy, cw, ch = _clip_box(*crop_rect, img_w, img_h)
+        if cw < 2 or ch < 2:
+            _log_info("OCR crop_rect too small after clamp; using full image")
+        else:
+            offset_x, offset_y = cx, cy
+            bgr = bgr[cy : cy + ch, cx : cx + cw]
+            crop_name = f"{Path(image_path).stem}_crop.png"
+            persist_path = str(Path(image_path).parent / crop_name)
+            cv2.imwrite(persist_path, bgr)
+            _log_info(f"OCR cropped region offset=({offset_x},{offset_y}) size=({cw},{ch}) path={persist_path}")
 
     try:
         predictor = _get_crnn_predictor(crnn_model_path)
     except FileNotFoundError as e:
         _log_info(f"OCR CRNN model missing: {e}")
-        return f"[error] {e}"
+        return (0, 0), []
 
     img_h, img_w = bgr.shape[:2]
     boxes: list[tuple[int, int, int, int]] = []
@@ -322,46 +356,44 @@ def get_coordinates_from_path(
     boxes = _merge_overlapping_boxes(boxes)
     boxes = _sort_boxes_reading_order(boxes)
 
-    all_lines: list[tuple[tuple[int, int, int, int], str]] = []
+    all_regions: list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]] = []
     ocr_elapsed_ms = 0.0
     for x, y, w, h in boxes:
         crop = bgr[y : y + h, x : x + w]
         if crop.size == 0:
             continue
         ocr_start = time.perf_counter()
-        text = _ocr_crop(crop, predictor, line_height)
+        preds = _ocr_crop_predicted_texts(crop, predictor, line_height)
         ocr_elapsed_ms += (time.perf_counter() - ocr_start) * 1000.0
-        all_lines.append(((x, y, w, h), text))
+        all_regions.append(((x, y, w, h), (x + w // 2, y + h // 2), preds))
 
     # Global reading order: top to bottom, left to right.
-    all_lines.sort(key=lambda item: (item[0][1], item[0][0]))
+    all_regions.sort(key=lambda item: (item[1][1], item[1][0]))
 
-    formatted = [
-        f"[{r[0] + (r[2] // 2)},{r[1] + (r[3] // 2)}] {txt}"
-        for r, txt in all_lines
-    ]
     _persist_ocr_result(
-        image_path=image_path,
+        image_path=persist_path,
         line_height=line_height,
-        all_lines=all_lines,
-        formatted=formatted,
+        all_regions=all_regions,
         yolo_elapsed_ms=yolo_elapsed_ms,
         ocr_elapsed_ms=ocr_elapsed_ms,
     )
-    _log_info(f"OCR get_coordinates_from_path done lines={len(formatted)}")
-    _log_info(f"OCR get_coordinates_from_path formatted={formatted}")
-    return "\n".join(formatted)
+    _log_info(f"OCR get_coordinates_from_path done regions={len(all_regions)}")
+    _log_info(f"OCR get_coordinates_from_path regions={all_regions}")
+    return (offset_x, offset_y), all_regions
 
 
 def get_coordinates(
     *,
     line_height: int = 32,
     crnn_model_path: Optional[str] = None,
-) -> str:
+    crop_rect: tuple[int, int, int, int] | None = None,
+) -> tuple[tuple[int, int], list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]]]:
     """
     Capture the active monitor to this run's ``yolo_ocr/`` folder, then run YOLO + CRNN OCR.
 
     Writes ``<timestamp>.png`` and persists OCR JSON with the same basename beside it.
+    If ``crop_rect`` is set, OCR runs on that (x, y, w, h) region of the capture; see
+    :func:`get_coordinates_from_path` for offset and per-region ``(bbox, center, predicted_texts)`` tuples.
     """
     paths = get_run_state_manager().require_paths()
     name = f"{ts_name()}.png"
@@ -371,4 +403,5 @@ def get_coordinates(
         str(out),
         line_height=line_height,
         crnn_model_path=crnn_model_path,
+        crop_rect=crop_rect,
     )

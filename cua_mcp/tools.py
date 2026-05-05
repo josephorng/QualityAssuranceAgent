@@ -18,7 +18,7 @@ from cua_mcp.tool_module import (
     _middle_click,
     _mouse_move,
     _move,
-    _type_text,
+    _click_and_type,
     _press_key,
     _right_click,
     _screenshot,
@@ -28,6 +28,7 @@ from cua_mcp.tool_module import (
     _triple_click,
     _wait,
     _zoom,
+    _maximize_window,
 )
 
 mcp_server = FastMCP("ComputerUseAgent")
@@ -44,29 +45,23 @@ def click(
     Args:
         instruction: Natural-language description of what to click on the screen.
         button: Mouse button: typically 'left', 'right', or 'middle'.
-    
-    Returns:
-        dict: A dictionary containing the clicked coordinates and the button used.
     '''
     return _click(instruction=instruction, button=button)
 
 
 @mcp_server.tool()
-def type_text(
+def click_and_type(
     text: str,
     target_instruction: str,
 ):
     '''
-    Focus a target region using natural-language instruction, then input text using keyboard automation.
+    Click a target region using natural-language instruction, then input text using keyboard automation.
 
     Args:
         text: Text content to input after the target is focused.
         target_instruction: Natural-language description of the field or region to focus first.
-
-    Returns:
-        dict: A dictionary containing typing execution details.
     '''
-    return _type_text(text=text, target_instruction=target_instruction)
+    return _click_and_type(text=text, target_instruction=target_instruction)
 
 
 @mcp_server.tool()
@@ -80,9 +75,6 @@ def press_key(
     Args:
         key: Key name to press.
         instruction: Optional context describing why the key is pressed.
-
-    Returns:
-        dict: A dictionary containing key-press execution details.
     '''
     return _press_key(key=key, instruction=instruction)
 
@@ -98,9 +90,6 @@ def hotkey(
     Args:
         keys: Key chord provided as a list of key names or supported string token.
         instruction: Optional context or rationale for the shortcut.
-
-    Returns:
-        dict: A dictionary containing hotkey execution details.
     '''
     return _hotkey(keys=keys, instruction=instruction)
 
@@ -116,9 +105,6 @@ def move(
     Args:
         instruction: Natural-language description of where the cursor should move.
         duration: Seconds to animate the cursor movement.
-
-    Returns:
-        dict: A dictionary containing movement execution details.
     '''
     return _move(instruction=instruction, duration=duration)
 
@@ -134,9 +120,6 @@ def wait(
     Args:
         seconds: Delay duration in seconds.
         instruction: Optional context describing why the wait is needed.
-
-    Returns:
-        dict: A dictionary containing wait execution details.
     '''
     return _wait(seconds=seconds, instruction=instruction)
 
@@ -156,9 +139,6 @@ def store_text(
         instruction: Optional context or provenance for the stored text.
         title: Short title or label for listing stored entries.
         tags: Optional tags used for categorization.
-
-    Returns:
-        dict: A dictionary containing storage execution details.
     '''
     return _store_text(text=text, instruction=instruction, title=title, tags=tags)
 
@@ -180,9 +160,6 @@ def store_image(
         summary: Human-readable summary of the image contents or purpose.
         alias: Short memorable name to reference this image later.
         tags: Optional tags used for categorization.
-
-    Returns:
-        dict: A dictionary containing storage execution details.
     '''
     return _store_image(
         image_path=image_path,
@@ -207,9 +184,6 @@ def key(
     Args:
         key: Single key name to press.
         instruction: Optional context for logging.
-
-    Returns:
-        dict: A dictionary containing key execution details.
     '''
     return _key(key=key, instruction=instruction)
 
@@ -225,9 +199,6 @@ def mouse_move(
     Args:
         instruction: Natural-language description of where the cursor should move.
         duration: Seconds to animate the movement.
-
-    Returns:
-        dict: A dictionary containing movement execution details.
     '''
     return _mouse_move(instruction=instruction, duration=duration)
 
@@ -241,9 +212,6 @@ def left_click(
 
     Args:
         instruction: Natural-language description of the element to click.
-
-    Returns:
-        dict: A dictionary containing click execution details.
     '''
     return _left_click(instruction=instruction)
 
@@ -261,9 +229,6 @@ def left_click_drag(
         instruction_start: Natural-language instruction for the drag start point.
         instruction_end: Natural-language instruction for the drag end point.
         duration: Drag movement duration in seconds.
-
-    Returns:
-        dict: A dictionary containing drag execution details.
     '''
     return _left_click_drag(
         instruction_start=instruction_start,
@@ -281,9 +246,6 @@ def right_click(
 
     Args:
         instruction: Natural-language description of where to right-click.
-
-    Returns:
-        dict: A dictionary containing click execution details.
     '''
     return _right_click(instruction=instruction)
 
@@ -297,9 +259,6 @@ def middle_click(
 
     Args:
         instruction: Natural-language description of where to middle-click.
-
-    Returns:
-        dict: A dictionary containing click execution details.
     '''
     return _middle_click(instruction=instruction)
 
@@ -313,9 +272,6 @@ def double_click(
 
     Args:
         instruction: Natural-language description of what to double-click.
-
-    Returns:
-        dict: A dictionary containing click execution details.
     '''
     return _double_click(instruction=instruction)
 
@@ -329,9 +285,6 @@ def triple_click(
 
     Args:
         instruction: Natural-language description of where to triple-click.
-
-    Returns:
-        dict: A dictionary containing click execution details.
     '''
     return _triple_click(instruction=instruction)
 
@@ -345,11 +298,9 @@ def screenshot(
     Capture the current screen to a PNG path for evidence or downstream processing.
 
     Args:
-        path: Output PNG path. Empty string lets the implementation choose a temp file.
+        path: Output PNG path. Empty string uses the current run's storage/ folder with a timestamped name.
+              Relative paths are resolved under that storage folder (basename only).
         instruction: Optional note describing why the screenshot is taken.
-
-    Returns:
-        dict: A dictionary containing screenshot execution details.
     '''
     return _screenshot(path=path, instruction=instruction)
 
@@ -363,9 +314,6 @@ def cursor_position(
 
     Args:
         instruction: Optional context for logging.
-
-    Returns:
-        dict: A dictionary containing the current cursor coordinates.
     '''
     return _cursor_position(instruction=instruction)
 
@@ -379,9 +327,6 @@ def left_mouse_down(
 
     Args:
         instruction: Natural-language description of where to press down.
-
-    Returns:
-        dict: A dictionary containing mouse-down execution details.
     '''
     return _left_mouse_down(instruction=instruction)
 
@@ -395,9 +340,6 @@ def left_mouse_up(
 
     Args:
         instruction: Natural-language description of where to release the button.
-
-    Returns:
-        dict: A dictionary containing mouse-up execution details.
     '''
     return _left_mouse_up(instruction=instruction)
 
@@ -413,9 +355,6 @@ def scroll(
     Args:
         instruction: Natural-language description of the scroll focus region or control.
         clicks: Wheel delta in clicks; sign controls scroll direction.
-
-    Returns:
-        dict: A dictionary containing scroll execution details.
     '''
     return _scroll(instruction=instruction, clicks=clicks)
 
@@ -433,9 +372,6 @@ def hold_key(
         key: Key name to hold.
         seconds: How long to keep the key depressed.
         instruction: Optional context for logging.
-
-    Returns:
-        dict: A dictionary containing hold-key execution details.
     '''
     return _hold_key(key=key, seconds=seconds, instruction=instruction)
 
@@ -451,16 +387,34 @@ def zoom(
     Args:
         instruction: Natural-language description of where to apply zoom.
         scroll_clicks: Wheel clicks while Ctrl is held; sign controls zoom in or out.
-
-    Returns:
-        dict: A dictionary containing zoom execution details.
     '''
     return _zoom(instruction=instruction, scroll_clicks=scroll_clicks)
 
 
+@mcp_server.tool()
+def maximize_window(
+    window_title_contains: str,
+    instruction: str = "",
+):
+    '''
+    Maximize a top-level window whose title contains the given substring (case-insensitive).
+
+    If no windows match the substring, or several do, Ollama chooses among candidates;
+    supply instruction with extra natural-language context for that disambiguation.
+
+    Args:
+        window_title_contains: Non-empty substring to match against window titles.
+        instruction: Extra description used to disambiguate (0 or multiple substring matches).
+    '''
+    return _maximize_window(
+        window_title_contains=window_title_contains,
+        instruction=instruction,
+    )
+
+
 TOOL_FUNCTIONS: list[callable[..., Any]] = [
     click,
-    type_text,
+    click_and_type,
     press_key,
     hotkey,
     move,
@@ -478,6 +432,7 @@ TOOL_FUNCTIONS: list[callable[..., Any]] = [
     scroll,
     hold_key,
     zoom,
+    maximize_window,
     triple_click,
     middle_click,
     double_click,

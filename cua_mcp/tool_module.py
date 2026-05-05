@@ -1,21 +1,46 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Callable
-
-import httpx
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
 from cua_mcp import hand_tools
 # from cua_mcp.tools import mcp_server
-from cua_mcp.read_screen_text.ocr_image import get_coordinates
-from cua_mcp.storage import store_image as _store_image
-from cua_mcp.storage import store_text as _store_text
-from src.common.run_state import get_run_state_manager
+from cua_mcp.read_screen_text.ocr_image import (
+    format_coordinate_text_from_regions,
+    get_coordinates_from_path,
+)
+from cua_mcp.storage import store_image, store_text, _current_run_paths
+from src.common.run_state import get_run_state_manager, ts_name
+from src.common.ollama_client import OllamaClient
 from src.common.settings import load_settings
+from src.eye.capture import capture_active_monitor_to_file
 from src.eye import active_monitor_offset
 
 settings = load_settings()
 logger = get_run_state_manager()
+_ollama = OllamaClient(settings.ollama_host)
+
+
+# Ollama JSON mode: model names OCR text; we map back to region centers.
+_TARGET_TEXT_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "text": {"type": "string"},
+    },
+    "required": ["text"],
+}
+
+# Second round when the same OCR text matches multiple regions.
+_XY_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "x": {"type": "integer"},
+        "y": {"type": "integer"},
+    },
+    "required": ["x", "y"],
+}
 
 
 def _get_active_capture_offset() -> tuple[int, int]:
@@ -31,46 +56,288 @@ def _to_global_coordinate(local_x: int, local_y: int) -> tuple[int, int]:
     return local_x + left, local_y + top
 
 
-def _select_coordinate(instruction: str, coordinate_text: str) -> tuple[int, int]:
-    prompt = (
-        "Choose one target coordinate based on user instruction and screen coordinates text.\n"
-        "Return JSON only in this exact shape: {\"x\": <int>, \"y\": <int>}.\n\n"
-        f"Instruction:\n{instruction}\n\n"
-        f"CoordinatesText:\n{coordinate_text}\n"
+def _llm_text_to_json_object_string(raw: str) -> str:
+    """Extract the first JSON object from a possibly markdown-fenced string."""
+    text = (raw or "").strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return text[start : end + 1]
+    return text
+
+
+def _parse_target_text_from_llm_content(raw: str) -> str:
+    """Parse `{\"text\": str}` from model text; raises ValueError if missing or invalid."""
+    json_text = _llm_text_to_json_object_string(raw)
+    preview = (raw or "")[:240]
+    if not json_text:
+        raise ValueError(
+            'Ollama target picker returned empty or non-JSON content; expected {"text": string}'
+        )
+    try:
+        out = json.loads(json_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Ollama target picker returned invalid JSON ({exc}); preview={preview!r}"
+        ) from exc
+    if not isinstance(out, dict):
+        raise ValueError(f"Ollama target JSON must be an object, got {type(out).__name__}")
+    if "text" not in out:
+        raise ValueError(
+            f'Ollama target JSON must include "text"; got keys={list(out.keys())!r}; preview={preview!r}'
+        )
+    text = out["text"]
+    if not isinstance(text, str):
+        raise ValueError(f'Ollama "text" must be a string, got {type(text).__name__}')
+    return text.strip()
+
+
+def _normalize_match_key(s: str) -> str:
+    return " ".join(s.split()).casefold()
+
+
+def _extract_rows(
+    regions: list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]],
+) -> list[tuple[int, int, str]]:
+    rows: list[tuple[int, int, str]] = []
+    for _box, (cx, cy), preds in regions:
+        line = _predictions_to_str(preds)
+        if line:
+            rows.append((cx, cy, line))
+    return rows
+
+
+def _match_tiers_to_rows(
+    target: str,
+    rows: list[tuple[int, int, str]],
+) -> list[tuple[int, int, str]]:
+    """
+    Return every OCR row that matches ``target`` using the first applicable tier
+    (exact, casefold, substring target-in-line, substring line-in-target).
+    Raises ValueError if none match.
+    """
+    if not target.strip():
+        raise ValueError("Ollama returned empty target text")
+    if not rows:
+        raise ValueError("OCR regions contain no non-empty text")
+
+    target_key = _normalize_match_key(target)
+
+    exact = [(cx, cy, t) for cx, cy, t in rows if target.strip() == t]
+    if exact:
+        return exact
+
+    fold = [(cx, cy, t) for cx, cy, t in rows if target_key == _normalize_match_key(t)]
+    if fold:
+        return fold
+
+    in_line = [
+        (cx, cy, t)
+        for cx, cy, t in rows
+        if target_key and target_key in _normalize_match_key(t)
+    ]
+    if in_line:
+        return in_line
+
+    line_in_target = [
+        (cx, cy, t)
+        for cx, cy, t in rows
+        if _normalize_match_key(t) and _normalize_match_key(t) in target_key
+    ]
+    if line_in_target:
+        return line_in_target
+
+    preview = ", ".join(repr(t) for _x, _y, t in rows[:12])
+    if len(rows) > 12:
+        preview += ", ..."
+    raise ValueError(
+        f"could not map target text {target!r} to any OCR line; candidates={preview}"
     )
-    response = httpx.post(
-        f"{settings.ollama_host.rstrip('/')}/api/chat",
-        json={
-            "model": settings.brain_lm,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": False,
-            "options": {"num_ctx": 4096},
-        },
-        timeout=30,
-    )
-    response.raise_for_status()
-    content = response.json().get("message", {}).get("content", "").strip()
-    out = json.loads(content)
+
+
+def _parse_xy_from_llm_content(raw: str) -> tuple[int, int]:
+    """Parse ``{\"x\": int, \"y\": int}`` from model text; raises ValueError if invalid."""
+    json_text = _llm_text_to_json_object_string(raw)
+    preview = (raw or "")[:240]
+    if not json_text:
+        raise ValueError(
+            'expected {"x": int, "y": int}'
+        )
+    try:
+        out = json.loads(json_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON ({exc}); preview={preview!r}") from exc
+    if not isinstance(out, dict) or "x" not in out or "y" not in out:
+        raise ValueError(f'must include "x" and "y"; preview={preview!r}')
     return int(out["x"]), int(out["y"])
 
 
-def _resolve_point(instruction: str) -> tuple[int, int]:
-    coordinate_text = get_coordinates()
-    local_x, local_y = _select_coordinate(instruction=instruction, coordinate_text=coordinate_text)
-    return _to_global_coordinate(local_x, local_y)
+def _disambiguate_duplicate_centers(
+    instruction: str,
+    chosen_text: str,
+    matches: list[tuple[int, int, str]],
+    image_path: str,
+) -> tuple[int, int]:
+    """Second LLM round: pick one of several identical (or tier-equivalent) OCR locations."""
+    allowed = {(cx, cy) for cx, cy, _ in matches}
+    options_lines = "\n".join(f"[{cx},{cy}] {t}" for cx, cy, t in matches)
+    base = (
+        "The matching OCR text appears at MORE THAN ONE location on the image.\n"
+        "Pick ONE center (x, y) that best matches the Instruction.\n"
+        "(x, y) MUST be exactly one of the candidate centers listed below — same "
+        "coordinate space as CoordinatesText (image pixels).\n"
+        "Output NOTHING except valid JSON matching the server's schema.\n"
+        "Do not summarize, explain, or add prose.\n\n"
+        f"Instruction:\n{instruction}\n\n"
+        f"Matched text from the first step:\n{chosen_text}\n\n"
+        f"Candidate centers (choose exactly one):\n{options_lines}\n"
+    )
+    messages: list[dict[str, Any]] = [
+        {"role": "user", "content": base, "images": [image_path]},
+    ]
+    try:
+        reply = _ollama.chat_messages_sync(
+            settings.brain_lm,
+            messages=messages,
+            use_tools=False,
+            response_format=_XY_JSON_SCHEMA,
+        )
+        x, y = _parse_xy_from_llm_content(reply.content)
+    except ValueError as exc:
+        logger.log_info(f"_disambiguate_duplicate_centers: retry ({exc})")
+        messages[0]["content"] += (
+            '\nReply with ONLY: {"x": <integer>, "y": <integer>} equal to one candidate '
+            "[cx,cy] above. No text before or after the JSON.\n"
+        )
+        reply = _ollama.chat_messages_sync(
+            settings.brain_lm,
+            messages=messages,
+            use_tools=False,
+            response_format="json",
+        )
+        x, y = _parse_xy_from_llm_content(reply.content)
+    if (x, y) not in allowed:
+        raise ValueError(
+            f"disambiguation returned ({x},{y}) not in allowed {sorted(allowed)}"
+        )
+    return x, y
+
+
+def _select_coordinate(
+    instruction: str,
+    regions: list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]],
+    screenshot_path: str | Path,
+) -> tuple[int, int]:
+    path = Path(screenshot_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"screenshot not found: {path}")
+    image_path = str(path.resolve())
+    rows = _extract_rows(regions)
+    if not rows:
+        raise ValueError("OCR regions contain no non-empty text")
+
+    coordinate_text = format_coordinate_text_from_regions(regions)
+    base_instructions = (
+        "Choose ONE line from CoordinatesText that best matches Instruction.\n"
+        "CoordinatesText lines look like: [center_x,center_y] <OCR text for that region>.\n"
+        "Reply with the OCR text only (the part after the bracket), copied verbatim from "
+        "CoordinatesText when possible so it can be matched.\n"
+        "Output NOTHING except valid JSON matching the server's schema.\n"
+        "Do not summarize, classify, bullet-list, markdown, translate, explain, add keys, or add prose.\n\n"
+        f"Instruction:\n{instruction}\n\n"
+        f"CoordinatesText:\n{coordinate_text}\n"
+    )
+
+    messages: list[dict[str, Any]] = [
+        {"role": "user", "content": base_instructions, "images": [image_path]},
+    ]
+    try:
+        reply = _ollama.chat_messages_sync(
+            settings.brain_lm,
+            messages=messages,
+            use_tools=False,
+            response_format=_TARGET_TEXT_JSON_SCHEMA,
+        )
+        chosen = _parse_target_text_from_llm_content(reply.content)
+        matches = _match_tiers_to_rows(chosen, rows)
+    except ValueError as exc:
+        logger.log_info(
+            f"_select_coordinate: first attempt failed ({exc}); retrying with format=json."
+        )
+        messages[0]["content"] += (
+            '\nReply with ONLY: {"text": "<string>"} where "text" is the OCR line text from CoordinatesText '
+            "(after [cx,cy] ), as verbatim as possible. No text before or after the JSON.\n"
+        )
+        reply = _ollama.chat_messages_sync(
+            settings.brain_lm,
+            messages=messages,
+            use_tools=False,
+            response_format="json",
+        )
+        chosen = _parse_target_text_from_llm_content(reply.content)
+        matches = _match_tiers_to_rows(chosen, rows)
+
+    if len(matches) == 1:
+        cx, cy, _ = matches[0]
+        return cx, cy
+
+    return _disambiguate_duplicate_centers(instruction, chosen, matches, image_path)
+
+
+def _predictions_to_str(preds: list[str]) -> str:
+    return "".join(preds).strip()
+
+
+def _clicked_text_at_image_point(
+    img_x: int,
+    img_y: int,
+    regions: list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]],
+) -> str:
+    """OCR text for the region whose box contains (img_x, img_y), else nearest line by center."""
+    if not regions:
+        return ""
+    ix, iy = int(img_x), int(img_y)
+    for _box, (cx, cy), preds in regions:
+        t = _predictions_to_str(preds)
+        if cx == ix and cy == iy:
+            return t
+    raise ValueError(f"No text found at image point ({img_x}, {img_y})")
+
+
+def _with_clicked_text(result: dict[str, Any], clicked_text: str) -> dict[str, Any]:
+    merged = dict(result)
+    merged["clicked_text"] = clicked_text
+    return merged
+
+
+def _resolve_point(instruction: str) -> tuple[int, int, str]:
+    paths = logger.require_paths()
+    name = f"{ts_name()}.png"
+    out = paths.yolo_ocr_dir / name
+    capture_active_monitor_to_file(out)
+
+    (off_x, off_y), regions = get_coordinates_from_path(str(out))
+    local_x, local_y = _select_coordinate(
+        instruction=instruction,
+        regions=regions,
+        screenshot_path=out,
+    )
+    img_x, img_y = local_x + off_x, local_y + off_y
+    clicked = _clicked_text_at_image_point(img_x, img_y, regions)
+    gx, gy = _to_global_coordinate(img_x, img_y)
+    return gx, gy, clicked
 
 
 def _click(instruction: str, button: str = "left") -> dict[str, Any]:
-    x, y = _resolve_point(instruction)
-    return hand_tools.click(x=x, y=y, button=button)
+    x, y, clicked = _resolve_point(instruction)
+    return _with_clicked_text(hand_tools.click(x=x, y=y, button=button), clicked)
 
 
-def _type_text(
+def _click_and_type(
     text: str,
     target_instruction: str,
 ) -> dict[str, Any]:
-    x, y = _resolve_point(target_instruction)
-    return hand_tools.type_text(text=text, coordinate=[x, y])
+    x, y, clicked = _resolve_point(target_instruction)
+    return _with_clicked_text(hand_tools.type_text(text=text, coordinate=[x, y]), clicked)
 
 
 def _press_key(key: str, instruction: str = "") -> dict[str, Any]:
@@ -82,8 +349,8 @@ def _hotkey(keys: list[str] | str, instruction: str = "") -> dict[str, Any]:
 
 
 def _move(instruction: str, duration: float = 0.0) -> dict[str, Any]:
-    x, y = _resolve_point(instruction)
-    return hand_tools.move(x=x, y=y, duration=duration)
+    x, y, clicked = _resolve_point(instruction)
+    return _with_clicked_text(hand_tools.move(x=x, y=y, duration=duration), clicked)
 
 
 def _wait(seconds: float, instruction: str = "") -> dict[str, Any]:
@@ -99,8 +366,8 @@ def _mouse_move(instruction: str, duration: float = 0.0) -> dict[str, Any]:
 
 
 def _click_at_instruction(instruction: str, **click_kw: Any) -> dict[str, Any]:
-    x, y = _resolve_point(instruction)
-    return hand_tools.click(x=x, y=y, **click_kw)
+    x, y, clicked = _resolve_point(instruction)
+    return _with_clicked_text(hand_tools.click(x=x, y=y, **click_kw), clicked)
 
 
 def _left_click(instruction: str) -> dict[str, Any]:
@@ -128,14 +395,25 @@ def _left_click_drag(
     instruction_end: str,
     duration: float = 0.5,
 ) -> dict[str, Any]:
-    x1, y1 = _resolve_point(instruction_start)
-    x2, y2 = _resolve_point(instruction_end)
-    return hand_tools.drag(x1, y1, x2, y2, duration=duration, button="left")
+    x1, y1, t_start = _resolve_point(instruction_start)
+    x2, y2, t_end = _resolve_point(instruction_end)
+    out = dict(hand_tools.drag(x1, y1, x2, y2, duration=duration, button="left"))
+    out["clicked_text_start"] = t_start
+    out["clicked_text_end"] = t_end
+    return out
 
 
 def _screenshot(path: str = "", instruction: str = "") -> dict[str, Any]:
     p = path.strip() if path else ""
-    return hand_tools.screenshot_to_file(p or None)
+    storage_dir, _ = _current_run_paths()
+    if not p:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+        p = str(storage_dir / f"screenshot_{stamp}.png")
+    else:
+        candidate = Path(p)
+        if not candidate.is_absolute():
+            p = str(storage_dir / candidate.name)
+    return hand_tools.screenshot_to_file(p)
 
 
 def _cursor_position(instruction: str = "") -> dict[str, Any]:
@@ -143,18 +421,18 @@ def _cursor_position(instruction: str = "") -> dict[str, Any]:
 
 
 def _left_mouse_down(instruction: str) -> dict[str, Any]:
-    x, y = _resolve_point(instruction)
-    return hand_tools.mouse_down(x, y, button="left")
+    x, y, clicked = _resolve_point(instruction)
+    return _with_clicked_text(hand_tools.mouse_down(x, y, button="left"), clicked)
 
 
 def _left_mouse_up(instruction: str) -> dict[str, Any]:
-    x, y = _resolve_point(instruction)
-    return hand_tools.mouse_up(x, y, button="left")
+    x, y, clicked = _resolve_point(instruction)
+    return _with_clicked_text(hand_tools.mouse_up(x, y, button="left"), clicked)
 
 
 def _scroll(instruction: str, clicks: int) -> dict[str, Any]:
-    x, y = _resolve_point(instruction)
-    return hand_tools.scroll_at(clicks, x, y)
+    x, y, clicked = _resolve_point(instruction)
+    return _with_clicked_text(hand_tools.scroll_at(clicks, x, y), clicked)
 
 
 def _hold_key(key: str, seconds: float, instruction: str = "") -> dict[str, Any]:
@@ -162,8 +440,15 @@ def _hold_key(key: str, seconds: float, instruction: str = "") -> dict[str, Any]
 
 
 def _zoom(instruction: str, scroll_clicks: int) -> dict[str, Any]:
-    x, y = _resolve_point(instruction)
-    return hand_tools.zoom_scroll(scroll_clicks, x, y)
+    x, y, clicked = _resolve_point(instruction)
+    return _with_clicked_text(hand_tools.zoom_scroll(scroll_clicks, x, y), clicked)
+
+
+def _maximize_window(window_title_contains: str, instruction: str = "") -> dict[str, Any]:
+    return hand_tools.maximize_window(
+        window_title_contains=window_title_contains,
+        instruction=instruction,
+    )
 
 
 def _store_text(
@@ -172,7 +457,7 @@ def _store_text(
     title: str = "",
     tags: list[str] | None = None,
 ) -> dict[str, Any]:
-    return _store_text(text=text, title=title, tags=tags)
+    return store_text(text=text, title=title, tags=tags)
 
 
 def _store_image(
@@ -182,54 +467,4 @@ def _store_image(
     alias: str = "",
     tags: list[str] | None = None,
 ) -> dict[str, Any]:
-    return _store_image(image_path=image_path, summary=summary, alias=alias, tags=tags)
-
-
-# TOOL_FUNCTIONS: list[Callable[..., Any]] = [
-#     store_text,
-#     store_image,
-#     click,
-#     type_text,
-#     press_key,
-#     hotkey,
-#     move,
-#     wait,
-#     key,
-#     mouse_move,
-#     left_click,
-#     left_click_drag,
-#     right_click,
-#     middle_click,
-#     double_click,
-#     triple_click,
-#     screenshot,
-#     cursor_position,
-#     left_mouse_down,
-#     left_mouse_up,
-#     scroll,
-#     hold_key,
-#     zoom,
-# ]
-
-# TOOL_NAME_ALIASES: dict[str, str] = {"type": "type_text"}
-
-# TOOL_NAMES: set[str] = {tool.__name__ for tool in OLLAMA_TOOL_FUNCTIONS} | set(TOOL_NAME_ALIASES.keys())
-
-
-# def get_ollama_tools() -> list[Callable[..., Any]]:
-#     return OLLAMA_TOOL_FUNCTIONS
-
-
-# def get_tool_function_map() -> dict[str, Callable[..., Any]]:
-#     mapping = {tool.__name__: tool for tool in OLLAMA_TOOL_FUNCTIONS}
-#     for alias, target_name in TOOL_NAME_ALIASES.items():
-#         mapping[alias] = mapping[target_name]
-#     return mapping
-
-
-# def execute_tool_call(tool_name: str, arguments: dict[str, Any]) -> Any:
-#     args = dict(arguments)
-#     function = get_tool_function_map().get(tool_name)
-#     if function is None:
-#         raise ValueError(f"unknown tool: {tool_name}")
-#     return function(**args)
+    return store_image(image_path=image_path, summary=summary, alias=alias, tags=tags)

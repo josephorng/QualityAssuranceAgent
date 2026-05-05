@@ -35,11 +35,25 @@
   ],
   "brain_decide_action": [
     {
-      "prompt": "Given task objective, screenshot context, recent memory, previous action result, and available tools, decide the single best next tool call.",
+      "prompt": "Given task objective, screenshot context, and available tools, decide the best next sequence of tool calls.",
       "instructions": [
-        "Choose the single best immediate tool call that advances the task objective.",
-        "Plan only one action ahead and execute that best next action.",
-        "Create detailed tool instruction."
+        "Choose the best next sequence of tool calls that advances the task objective.",
+        "Create detailed tool instructions for each tool call."
+      ],
+      "models": ["gemma4:e2b", "gemma3:4b"]
+    }
+  ],
+  "brain_verify_script_step": [
+    {
+      "prompt": "You are verifying whether the current scripted task step is satisfied in the screenshot. You will see the full numbered script and which step is current.",
+      "instructions": [
+        "Decide if the current step goal is actually accomplished on screen based on visible UI and text.",
+        "Return strict JSON only (no markdown), single object with keys: accomplished (bool), branch (string), target_step (number or null), reason (string).",
+        "branch must be one of: advance, retry, skip, goto.",
+        "Use branch advance only when accomplished is true (move to next script line).",
+        "When accomplished is false: use retry to repeat the same step, skip to abandon this line and move to the next, or goto to jump to a specific script line (use target_step as the 1-based line number from the numbered list).",
+        "For goto, target_step must be the line number shown before each script line (1 to N). Set target_step to null for other branches.",
+        "Do not invent UI elements; base conclusions on the image and script text only."
       ],
       "models": ["gemma4:e2b", "gemma3:4b"]
     }

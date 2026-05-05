@@ -14,7 +14,10 @@ import cv2
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from cua_mcp.read_screen_text import ocr_image as ocr_image_mod
-from cua_mcp.read_screen_text.ocr_image import get_coordinates_from_path
+from cua_mcp.read_screen_text.ocr_image import (
+    format_coordinate_text_from_regions,
+    get_coordinates_from_path,
+)
 from src.common.io_utils import read_json, write_json
 from src.common.settings import ROOT_DIR
 
@@ -42,7 +45,7 @@ def _parse_string_line(line: str) -> OcrLine | None:
     center_match = _STRING_CENTER_RE.match(raw)
     if center_match:
         cx, cy = (int(center_match.group(i)) for i in range(1, 3))
-        # get_coordinates_from_path() returns center points only; render with a tiny marker box.
+        # format_coordinate_text_from_regions() uses center points; render with a tiny marker box.
         x = max(0, cx - 2)
         y = max(0, cy - 2)
         return OcrLine(box=(x, y, 4, 4), text=center_match.group(3).strip())
@@ -58,6 +61,25 @@ def _normalize_lines(raw_lines: Any) -> list[OcrLine]:
             line = _parse_string_line(item)
             if line is not None:
                 parsed.append(line)
+            continue
+        if (
+            isinstance(item, (list, tuple))
+            and len(item) == 3
+            and isinstance(item[0], (list, tuple))
+            and len(item[0]) == 4
+            and isinstance(item[1], (list, tuple))
+            and len(item[1]) == 2
+        ):
+            try:
+                x, y, w, h = (int(v) for v in item[0])
+            except (TypeError, ValueError):
+                continue
+            preds = item[2]
+            if isinstance(preds, list):
+                text = "".join(str(p) for p in preds).strip()
+            else:
+                text = str(preds).strip()
+            parsed.append(OcrLine(box=(x, y, w, h), text=text))
             continue
         if (
             isinstance(item, (list, tuple))
@@ -102,11 +124,18 @@ def _discover_runs(runs_root: Path) -> list[Path]:
     return sorted([p for p in runs_root.iterdir() if p.is_dir()], reverse=True)
 
 
-def _eye_images(run_dir: Path) -> list[Path]:
-    eye_dir = run_dir / "eye"
-    if not eye_dir.exists():
+def _yolo_ocr_paired_images(run_dir: Path) -> list[Path]:
+    """PNG/JPEG files in yolo_ocr/ that have a sibling JSON with the same stem."""
+    yolo_dir = run_dir / "yolo_ocr"
+    if not yolo_dir.exists():
         return []
-    return sorted([p for p in eye_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}])
+    out: list[Path] = []
+    for p in sorted(yolo_dir.iterdir()):
+        if p.suffix.lower() not in {".png", ".jpg", ".jpeg"}:
+            continue
+        if p.with_suffix(".json").is_file():
+            out.append(p)
+    return out
 
 
 def _draw_overlays(
@@ -161,7 +190,8 @@ def _run_ocr_with_boxes(image_path: Path) -> tuple[list[OcrLine], float | None, 
         if crop.size == 0:
             continue
         ocr_start = time.perf_counter()
-        text = ocr_image_mod._ocr_crop(crop, predictor, 32)  # noqa: SLF001
+        preds = ocr_image_mod._ocr_crop_predicted_texts(crop, predictor, 32)  # noqa: SLF001
+        text = "".join(preds).strip()
         ocr_elapsed_ms += (time.perf_counter() - ocr_start) * 1000.0
         out_lines.append(OcrLine(box=(x, y, w, h), text=text))
     return out_lines, yolo_elapsed_ms, ocr_elapsed_ms
@@ -203,7 +233,7 @@ class OcrViewerApp:
         self.run_list.grid(row=1, column=0, sticky="nsew")
         self.run_list.bind("<<ListboxSelect>>", self._on_run_select)
 
-        ttk.Label(left, text="Images").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(left, text="YOLO OCR (image + JSON)").grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.image_list = tk.Listbox(left, exportselection=False, height=14, width=48)
         self.image_list.grid(row=3, column=0, sticky="nsew")
         self.image_list.bind("<<ListboxSelect>>", self._on_image_select)
@@ -269,7 +299,7 @@ class OcrViewerApp:
 
     def _on_run_select(self, _event: object | None = None) -> None:
         run = self._selected_run()
-        self.current_run_images = _eye_images(run) if run is not None else []
+        self.current_run_images = _yolo_ocr_paired_images(run) if run is not None else []
         self.selected_line_idx = None
         self.image_list.delete(0, tk.END)
         for img in self.current_run_images:
@@ -282,7 +312,9 @@ class OcrViewerApp:
             self.current_lines = []
             self.item_list.delete(0, tk.END)
             self.canvas.delete("all")
-            self.status_var.set(f"No eye images in {run.name if run else '-'}")
+            self.status_var.set(
+                f"No paired image+JSON in yolo_ocr for {run.name if run else '-'}"
+            )
 
     def _selected_image_index(self) -> int | None:
         selected = self.image_list.curselection()
@@ -303,7 +335,7 @@ class OcrViewerApp:
             return
         self.current_image = Image.open(image_path).convert("RGB")
         self._view_zoom = 1.0
-        json_path = run / "yolo_ocr" / image_path.with_suffix(".json").name
+        json_path = image_path.with_suffix(".json")
         self.current_lines, status = load_ocr_lines(json_path)
         self.selected_line_idx = None
         self._populate_item_list()
@@ -425,17 +457,18 @@ class OcrViewerApp:
         self.status_var.set("Running YOLO+OCR...")
         self.root.update_idletasks()
         try:
-            output = get_coordinates_from_path(str(src))
+            _offset, regions = get_coordinates_from_path(str(src))
+            output = format_coordinate_text_from_regions(regions)
         except Exception as exc:
             self.status_var.set(f"YOLO+OCR failed: {type(exc).__name__}: {exc}")
             return
-        if output.strip().startswith("[error]"):
-            self.status_var.set(f"YOLO+OCR error: {output.strip()}")
+        if not regions:
+            self.status_var.set("YOLO+OCR returned no regions (empty or failed)")
             return
         try:
-            out_dir = run / "yolo_ocr"
+            out_dir = src.parent
             out_dir.mkdir(parents=True, exist_ok=True)
-            out_path = out_dir / src.with_suffix(".json").name
+            out_path = src.with_suffix(".json")
             existing = read_json(out_path, default={}) if out_path.exists() else {}
             existing_data = existing if isinstance(existing, dict) else {}
             loaded_lines = _normalize_lines(existing_data.get("lines", []))

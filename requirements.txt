@@ -12,4 +12,5 @@ numpy
 scikit-image
 mss
 pyautogui
+pygetwindow
 pytest

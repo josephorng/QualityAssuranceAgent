@@ -17,7 +17,10 @@ class RuntimeCoordinator:
         self.manager.log_info("Coordinator startup")
         while True:
             step_result = await self.brain.process_step()
-            if step_result.finished:
-                self.manager.log_info("Coordinator detected finished task")
+            if not step_result.step_finished:
+                self.manager.log_info(step_result.reason or "Coordinator failed to process step")
                 break
-            self.manager.log_info(step_result.reason or "Coordinator moving to next script step")
+            if step_result.run_complete:
+                self.manager.log_info(step_result.reason or "All script steps complete")
+                break
+            self.manager.log_info("Coordinator finished one step cycle")

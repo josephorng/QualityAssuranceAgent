@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from tempfile import mkdtemp
 from time import sleep
@@ -7,7 +8,13 @@ from typing import Any
 import tkinter as tk
 
 import pyautogui
+import pygetwindow as gw
+from src.common.ollama_client import OllamaClient
+from src.common.settings import load_settings
 from src.eye.capture import capture_active_monitor_to_file
+
+_settings = load_settings()
+_ollama = OllamaClient(_settings.ollama_host, timeout_seconds=60)
 
 
 def _normalize_hotkey_token(key: str) -> str:
@@ -33,29 +40,26 @@ def type_text(
     text: str,
     coordinate: list[int],
 ) -> dict[str, Any]:
-    """Click a coordinate to focus, then paste text from clipboard (Ctrl+V)."""
+    """Click a coordinate to focus, then paste text from clipboard (Ctrl+V).
+
+    Clears the clipboard afterward and does not restore previous contents.
+    """
     if len(coordinate) != 2:
         raise ValueError("coordinate must be [x, y]")
     x, y = coordinate
     pyautogui.click(x=x, y=y, button="left")
     click_result = {"x": x, "y": y, "button": "left"}
 
-    clipboard_before: str | None = None
     root = tk.Tk()
     root.withdraw()
     try:
-        try:
-            clipboard_before = root.clipboard_get()
-        except tk.TclError:
-            clipboard_before = None
         root.clipboard_clear()
         root.clipboard_append(text)
         root.update()
         pyautogui.hotkey("ctrl", "v")
+        sleep(0.05)
     finally:
         root.clipboard_clear()
-        if clipboard_before is not None:
-            root.clipboard_append(clipboard_before)
         root.update()
         root.destroy()
     return {
@@ -191,6 +195,130 @@ def hold_key_down(key: str, seconds: float) -> dict[str, Any]:
     sleep(seconds)
     pyautogui.keyUp(token)
     return {"key": token, "seconds": seconds}
+
+
+def _list_windows_with_titles() -> list[tuple[Any, str]]:
+    out: list[tuple[Any, str]] = []
+    for w in gw.getAllWindows():
+        title = (w.title or "").strip()
+        if title:
+            out.append((w, title))
+    return out
+
+
+def _parse_json_object_from_llm(content: str) -> dict[str, Any]:
+    text = content.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    return json.loads(text)
+
+
+def _ollama_pick_window_index(
+    user_query: str,
+    candidates: list[tuple[Any, str]],
+    instruction: str = "",
+) -> int:
+    if not candidates:
+        raise ValueError("no candidate windows to choose from")
+    lines = [f"{i}: {title}" for i, (_, title) in enumerate(candidates)]
+    extra = (instruction or "").strip()
+    context_block = (
+        f"Additional context from the operator (use to disambiguate):\n{extra}\n\n"
+        if extra
+        else ""
+    )
+    prompt = (
+        "You pick exactly one desktop window to maximize.\n"
+        "The user wants this window (natural-language or partial title):\n"
+        f"{user_query!r}\n\n"
+        f"{context_block}"
+        "From the numbered list, choose the single best match. "
+        "Prefer the main application window over tiny dialogs or tool windows when unclear.\n"
+        "Return JSON only in this exact shape: {\"index\": <int>}\n"
+        "Use the 0-based index from the list.\n\n"
+        "Windows:\n"
+        + "\n".join(lines)
+    )
+    msg = _ollama.chat_messages_sync(
+        model=_settings.brain_lm,
+        messages=[{"role": "user", "content": prompt}],
+        use_tools=False,
+    )
+    content = (msg.content or "").strip()
+    out = _parse_json_object_from_llm(content)
+    idx = int(out["index"])
+    if idx < 0 or idx >= len(candidates):
+        raise ValueError(
+            f"ollama returned index {idx} but valid range is 0..{len(candidates) - 1}"
+        )
+    return idx
+
+
+def maximize_window(
+    window_title_contains: str,
+    instruction: str = "",
+) -> dict[str, Any]:
+    """
+    Bring a top-level window to the foreground and maximize it.
+
+    First tries case-insensitive substring match on window titles. If exactly one
+    window matches, it is used. If none or several match, asks Ollama (brain_lm)
+    to pick the best index from the relevant candidate list. For those Ollama
+    calls, ``instruction`` (if non-empty) is included in the prompt as extra
+    disambiguation context.
+    """
+    needle = (window_title_contains or "").strip()
+    if not needle:
+        raise ValueError("window_title_contains must be a non-empty string")
+
+    nlow = needle.lower()
+    substring_matches: list[tuple[Any, str]] = []
+    for w in gw.getAllWindows():
+        title = (w.title or "").strip()
+        if not title or nlow not in title.lower():
+            continue
+        substring_matches.append((w, title))
+
+    selection_mode: str
+    w: Any
+    title: str
+
+    if len(substring_matches) == 1:
+        w, title = substring_matches[0]
+        selection_mode = "substring_unique"
+    elif len(substring_matches) == 0:
+        candidates = _list_windows_with_titles()
+        if not candidates:
+            raise ValueError("no windows with non-empty titles found")
+        idx = _ollama_pick_window_index(needle, candidates, instruction=instruction)
+        w, title = candidates[idx]
+        selection_mode = "ollama_no_substring_match"
+    else:
+        idx = _ollama_pick_window_index(needle, substring_matches, instruction=instruction)
+        w, title = substring_matches[idx]
+        selection_mode = "ollama_disambiguate"
+
+    try:
+        w.activate()
+    except Exception:
+        pass
+    if w.isMinimized:
+        w.restore()
+    w.maximize()
+    out: dict[str, Any] = {
+        "window_title_contains": needle,
+        "matched_title": title,
+        "status": "maximized",
+        "selection_mode": selection_mode,
+    }
+    if (instruction or "").strip():
+        out["instruction"] = instruction.strip()
+    return out
 
 
 def zoom_scroll(scroll_clicks: int, x: int | None = None, y: int | None = None) -> dict[str, Any]:

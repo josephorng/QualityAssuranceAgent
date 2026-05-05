@@ -5,7 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from cua_mcp.read_screen_text.ocr_image import get_coordinates_from_path
+from cua_mcp.read_screen_text.ocr_image import (
+    format_coordinate_text_from_regions,
+    get_coordinates_from_path,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -60,10 +63,11 @@ def test_get_coordinates_has_sample_images() -> None:
     ids=lambda p: Path(p).name,
 )
 def test_get_coordinates_tool_returns_bbox_lines(image_path: Path) -> None:
-    output = get_coordinates_from_path(str(image_path))
-    assert isinstance(output, str)
-    assert output, f"OCR returned empty output for {image_path.name}"
-    assert not output.startswith("[error]"), f"OCR error for {image_path.name}: {output}"
+    _offset, regions = get_coordinates_from_path(str(image_path))
+    assert isinstance(regions, list)
+    assert regions, f"OCR returned no regions for {image_path.name}"
+    output = format_coordinate_text_from_regions(regions)
+    assert output, f"OCR returned empty hint for {image_path.name}"
 
     lines = [line for line in output.splitlines() if line.strip()]
     assert lines, f"No OCR lines returned for {image_path.name}"
@@ -77,6 +81,7 @@ def test_get_coordinates_tool_returns_bbox_lines(image_path: Path) -> None:
     ids=lambda p: Path(p).name,
 )
 def test_get_coordinates_helper_matches_tool_type(image_path: Path) -> None:
-    helper_output = get_coordinates_from_path(str(image_path))
+    _offset, regions = get_coordinates_from_path(str(image_path))
+    helper_output = format_coordinate_text_from_regions(regions)
     assert isinstance(helper_output, str)
 

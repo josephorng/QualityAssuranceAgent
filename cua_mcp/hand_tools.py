@@ -22,7 +22,25 @@ def _normalize_hotkey_token(key: str) -> str:
     """Normalize odd wrappers that can appear in model output."""
     cleaned = key.strip()
     cleaned = cleaned.replace('<|"|>', "")
-    return cleaned.strip("\"'")
+    cleaned = cleaned.strip("\"'").strip()
+    # pyautogui key tokens are lowercase (e.g. "f6", "enter", "pagedown")
+    return cleaned.lower()
+
+
+KEY_ALIASES = {
+    "control": "ctrl",
+    "command": "win",
+    "cmd": "win",
+    "windows": "win",
+    "option": "alt",
+    "return": "enter",
+    "esc": "escape",
+}
+
+
+def _canonicalize_key(key: str) -> str:
+    token = _normalize_hotkey_token(key)
+    return KEY_ALIASES.get(token, token)
 
 
 def click(
@@ -65,11 +83,33 @@ def type_text(
 def hotkey(keys: list[str] | str) -> dict[str, Any]:
     """Press a key combination."""
     if isinstance(keys, str):
-        keys = [keys]
-    normalized_keys = [_normalize_hotkey_token(key) for key in keys]
-    normalized_keys = [key for key in normalized_keys if key]
+        raw = keys.strip()
+        parsed_keys: Any = None
+        if raw.startswith("[") and raw.endswith("]"):
+            try:
+                parsed_keys = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed_keys = None
+        if isinstance(parsed_keys, list):
+            keys = [str(item) for item in parsed_keys]
+        else:
+            keys = [keys]
+    normalized_keys: list[str] = []
+    for key in keys:
+        token = _canonicalize_key(key)
+        if not token:
+            continue
+        # Accept "ctrl+a" and similar compact chord syntax.
+        if "+" in token:
+            parts = [_canonicalize_key(part) for part in token.split("+") if part.strip()]
+            normalized_keys.extend(parts)
+        else:
+            normalized_keys.append(token)
     if not normalized_keys:
         raise ValueError("keys must contain at least one key")
+    invalid = [k for k in normalized_keys if k not in pyautogui.KEYBOARD_KEYS]
+    if invalid:
+        raise ValueError(f"Invalid hotkey keys: {invalid}")
     pyautogui.hotkey(*normalized_keys)
     return {"keys": normalized_keys}
 
@@ -86,14 +126,11 @@ def wait(seconds: float) -> dict[str, Any]:
     return {"seconds": seconds}
 
 
-keyboard_keys_map = {
-    "Windows": "win",
-}
+keyboard_keys_map = KEY_ALIASES
 
 def key_press(key: str) -> dict[str, Any]:
     """Press and release a single key."""
-    token = _normalize_hotkey_token(key)
-    token = keyboard_keys_map.get(token, token)
+    token = _canonicalize_key(key)
     if token not in pyautogui.KEYBOARD_KEYS:
         raise ValueError(f"Invalid key: {token}")
     pyautogui.press(token)
@@ -251,7 +288,7 @@ async def _ollama_pick_window_index(
     msg = await _ollama.chat_messages(
         model=_settings.brain_lm,
         messages=[{"role": "user", "content": prompt}],
-        use_tools=False,
+        tools=[],
     )
     content = (msg.content or "").strip()
     out = _parse_json_object_from_llm(content)

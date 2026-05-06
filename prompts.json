@@ -1,7 +1,7 @@
 {
   "brain_decide_action": [
     {
-      "prompt": "Given task objective, current screenshot(s), and available tools, decide the sequence of tool calls to take to achieve the task objective.\n\nCurrentTaskGoal:\n{task}",
+      "prompt": "Given task objective, current screenshot(s), and available tools, decide one or multiple tool calls to take to achieve the task objective.\n\nCurrentTaskGoal:\n{task}",
       "instructions": [
         "Tool calls should be in the correct order to achieve the task objective.",
         "Create detailed tool instructions for each tool call.",

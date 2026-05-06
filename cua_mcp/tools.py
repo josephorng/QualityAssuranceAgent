@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import webbrowser
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -14,10 +15,12 @@ from cua_mcp.tool_module import (
     _left_click_drag,
     _left_mouse_down,
     _left_mouse_up,
+    _list_storage_files,
     _middle_click,
     _move,
     _type_text,
     _press_key,
+    _read_storage_text,
     _right_click,
     _screenshot,
     _scroll,
@@ -416,6 +419,78 @@ def minimize_all_windows(
     return _minimize_all_windows().update({"instruction": instruction})
 
 
+@mcp_server.tool()
+def open_website(
+    url: str,
+    new: int = 0,
+    autoraise: bool = True,
+    instruction: str = "",
+):
+    '''
+    Open a website URL using the system default web browser.
+
+    Args:
+        url: The URL to open (e.g. "https://www.google.com").
+        new: 0 = same window if possible, 1 = new window, 2 = new tab.
+        autoraise: Whether to try to raise the browser window.
+        instruction: Optional note for logging only.
+    '''
+    normalized = (url or "").strip()
+    if not normalized:
+        raise ValueError("url must be a non-empty string")
+    if "://" not in normalized:
+        normalized = f"https://{normalized}"
+
+    ok = webbrowser.open(normalized, new=new, autoraise=autoraise)
+    return {
+        "status": "opened" if ok else "not_opened",
+        "url": normalized,
+        "new": new,
+        "autoraise": autoraise,
+        "instruction": instruction,
+    }
+
+
+@mcp_server.tool()
+def list_storage_files(
+    pattern: str = "*",
+    max_results: int = 200,
+    instruction: str = "",
+):
+    '''
+    List files in the current run's storage directory.
+
+    Args:
+        pattern: Glob-style pattern matched against file basenames (e.g. "*.txt", "screenshot_*.png").
+        max_results: Upper bound on number of results.
+        instruction: Optional note for logging only.
+    '''
+    return _list_storage_files(pattern=pattern, max_results=max_results).update({"instruction": instruction})
+
+
+@mcp_server.tool()
+def open_storage_text(
+    file_name: str,
+    max_chars: int = 20000,
+    encoding: str = "utf-8",
+    instruction: str = "",
+):
+    '''
+    Open (read) a text file from the current run's storage directory.
+
+    For safety, this tool only allows reading ``.txt`` files by basename and does not allow paths.
+
+    Args:
+        file_name: Basename of the text file in storage/ (e.g. "clipboard_20260101_000000_000000.txt").
+        max_chars: Max characters returned in content (longer files are truncated).
+        encoding: Text encoding used to decode the file.
+        instruction: Optional note for logging only.
+    '''
+    return _read_storage_text(file_name=file_name, max_chars=max_chars, encoding=encoding).update(
+        {"instruction": instruction}
+    )
+
+
 TOOL_FUNCTIONS: list[callable[..., Any]] = [
     click,
     type_text,
@@ -441,6 +516,12 @@ TOOL_FUNCTIONS: list[callable[..., Any]] = [
     middle_click,
     double_click,
     screenshot,
+    open_website,
+]
+
+VERIFICATION_TOOLS: list[callable[..., Any]] = [
+    list_storage_files,
+    open_storage_text,
 ]
 
 if __name__ == "__main__":

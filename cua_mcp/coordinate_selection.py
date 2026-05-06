@@ -192,7 +192,7 @@ async def _disambiguate_duplicate_centers(
         reply = await _ollama.chat_messages(
             settings.brain_lm,
             messages=messages,
-            use_tools=False,
+            tools=[],
             response_format=_XY_JSON_SCHEMA,
         )
         x, y = _parse_xy_from_llm_content(reply.content)
@@ -205,7 +205,7 @@ async def _disambiguate_duplicate_centers(
         reply = await _ollama.chat_messages(
             settings.brain_lm,
             messages=messages,
-            use_tools=False,
+            tools=[],
             response_format="json",
         )
         x, y = _parse_xy_from_llm_content(reply.content)
@@ -242,7 +242,7 @@ async def _select_coordinate(
         reply = await _ollama.chat_messages(
             settings.brain_lm,
             messages=messages,
-            use_tools=False,
+            tools=[],
             response_format=_TARGET_TEXT_JSON_SCHEMA,
         )
         chosen = _parse_target_text_from_llm_content(reply.content)
@@ -258,7 +258,7 @@ async def _select_coordinate(
         reply = await _ollama.chat_messages(
             settings.brain_lm,
             messages=messages,
-            use_tools=False,
+            tools=[],
             response_format="json",
         )
         chosen = _parse_target_text_from_llm_content(reply.content)

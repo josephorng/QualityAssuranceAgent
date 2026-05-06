@@ -32,12 +32,15 @@ class OllamaClient:
         self,
         model: str,
         messages: list[dict[str, Any]],
-        use_tools: bool = True,
+        tools: list[Any] | None = None,
         response_format: ResponseFormatParam = None,
     ) -> Message:
         """
         Run chat with an explicit message list (no merge with _message_history).
         Used for multi-turn tool loops where the caller owns the full transcript.
+
+        Args:
+            tools: Tool definitions to provide to the model. If None, uses the default tool set from ``cua_mcp.tools.TOOL_FUNCTIONS``. Pass an empty list to disable tools.
         
         Returns:
             Message: The response message.
@@ -50,8 +53,10 @@ class OllamaClient:
         }
         if response_format is not None:
             chat_kwargs["format"] = response_format
-        if use_tools:
-            chat_kwargs["tools"] = _tool_functions()
+
+        resolved_tools = _tool_functions() if tools is None else tools
+        if resolved_tools:
+            chat_kwargs["tools"] = resolved_tools
         
         last_assistant_idx = -1
         for idx in reversed(range(len(messages))):
@@ -60,7 +65,8 @@ class OllamaClient:
                 break
         get_run_state_manager().log_info(
             f"Ollama chat_messages for model={model} n_messages={len(messages)} "
-            f"use_tools={use_tools} response_format_set={response_format is not None}"
+            f"tools_count={len(resolved_tools) if resolved_tools else 0} "
+            f"response_format_set={response_format is not None}"
             f"last_assistant_messages=\n{messages[last_assistant_idx:]}"
         )
         response: ChatResponse = await self.client.chat(**chat_kwargs)
@@ -73,7 +79,7 @@ class OllamaClient:
             return await self.chat_messages(
                 model=model,
                 messages=messages,
-                use_tools=use_tools,
+                tools=tools,
                 response_format=response_format,
             )
         return response_message

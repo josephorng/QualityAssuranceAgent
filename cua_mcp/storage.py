@@ -21,6 +21,20 @@ def _current_run_paths() -> tuple[Path, Path]:
     return storage_dir, storage_json
 
 
+def _build_storage_text_path(storage_dir: Path, file_name: str = "", stem_hint: str = "text") -> Path:
+    now = datetime.now(timezone.utc)
+    stamp = now.strftime("%Y%m%d_%H%M%S_%f")
+    raw_name = (file_name or f"{stem_hint}_{stamp}").strip()
+    base = Path(raw_name).name
+    if not base.lower().endswith(".txt"):
+        base = f"{base}.txt"
+    dst_path = storage_dir / base
+    if dst_path.exists():
+        suffix = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+        dst_path = storage_dir / f"{dst_path.stem}_{suffix}{dst_path.suffix}"
+    return dst_path
+
+
 def _append_storage_entry(entry: dict[str, Any]) -> dict[str, Any]:
     _, storage_json = _current_run_paths()
     rows = read_json(storage_json, default=[])
@@ -32,13 +46,17 @@ def _append_storage_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def store_text(text: str, title: str = "", tags: list[str] | None = None) -> dict[str, Any]:
-    """Store text context to this run's storage.json index."""
+    """Store text to this run's storage folder and index metadata in storage.json."""
+    storage_dir, _ = _current_run_paths()
     now = datetime.now(timezone.utc).isoformat()
+    dst_path = _build_storage_text_path(storage_dir, stem_hint="text")
+    dst_path.write_text(text, encoding="utf-8")
     record = {
         "timestamp": now,
         "type": "text",
         "title": title,
-        "text": text,
+        "stored_path": str(dst_path),
+        "file_name": dst_path.name,
         "tags": tags or [],
     }
     _append_storage_entry(record)
@@ -58,15 +76,7 @@ def store_clipboard_text(
 
     storage_dir, _ = _current_run_paths()
     now = datetime.now(timezone.utc)
-    stamp = now.strftime("%Y%m%d_%H%M%S_%f")
-    raw_name = (file_name or f"clipboard_{stamp}").strip()
-    base = Path(raw_name).name
-    if not base.lower().endswith(".txt"):
-        base = f"{base}.txt"
-    dst_path = storage_dir / base
-    if dst_path.exists():
-        suffix = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
-        dst_path = storage_dir / f"{dst_path.stem}_{suffix}{dst_path.suffix}"
+    dst_path = _build_storage_text_path(storage_dir, file_name=file_name, stem_hint="clipboard")
 
     dst_path.write_text(text, encoding="utf-8")
 
@@ -75,7 +85,6 @@ def store_clipboard_text(
         "type": "text",
         "source": "clipboard",
         "title": title,
-        "text": text,
         "stored_path": str(dst_path),
         "file_name": dst_path.name,
         "tags": tags or [],

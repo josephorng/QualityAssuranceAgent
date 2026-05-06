@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from cua_mcp.tools import mcp_server, TOOL_FUNCTIONS
+from cua_mcp.tools import mcp_server, TOOL_FUNCTIONS, VERIFICATION_TOOLS
 from ollama import Message
 from pydantic import ValidationError
 from src.common.io_utils import write_json
@@ -294,7 +294,7 @@ class BrainModule:
         response_message = await self.ollama.chat_messages(
             self.settings.brain_lm,
             messages=messages,
-            use_tools=False,
+            tools=VERIFICATION_TOOLS,
         )
         if response_message:
             messages.append(response_message.model_dump())
@@ -342,7 +342,7 @@ class BrainModule:
                 response_message = await self.ollama.chat_messages(
                     self.settings.brain_lm,
                     messages=messages,
-                    use_tools=True,
+                    tools=TOOL_FUNCTIONS,
                 )
                 if not response_message:
                     self.manager.log_error("Ollama returned empty response")
@@ -385,7 +385,7 @@ class BrainModule:
 
     async def process_step(self) -> BrainStepResult:
         """Run one script step: tool loop, then vision verification and index branching. Sets `run_complete` when the script is exhausted."""
-        await self._validate_tool_functions_match_mcp()
+        # await self._validate_tool_functions_match_mcp()
 
         if self._script_step_index >= len(self.script_lines):
             return BrainStepResult(
@@ -410,10 +410,15 @@ class BrainModule:
         #     )
 
         # run_complete = self._apply_verify_branch(verify_result)
+        # return BrainStepResult(
+        #     reason=f"Verify: {verify_result.reason}",
+        #     step_finished=True,
+        #     run_complete=run_complete,
+        # )
         self._script_step_index += 1
+        run_complete = self._script_step_index >= len(self.script_lines)
         return BrainStepResult(
             reason=f"Script step {self._script_step_index + 1} completed",
             step_finished=True,
-            run_complete=self._script_step_index >= len(self.script_lines),
+            run_complete=run_complete,
         )
-

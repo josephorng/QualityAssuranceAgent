@@ -8,13 +8,6 @@ from pydantic import BaseModel
 
 from src.common.run_state import get_run_state_manager
 
-
-def _tool_functions() -> list[Any]:
-    """Deferred import so callers (e.g. cua_mcp.tool_module) avoid circular imports with cua_mcp.tools."""
-    from cua_mcp.tools import TOOL_FUNCTIONS
-
-    return TOOL_FUNCTIONS
-
 ResponseFormatParam = Literal["json"] | dict[str, Any] | None
 
 
@@ -54,9 +47,8 @@ class OllamaClient:
         if response_format is not None:
             chat_kwargs["format"] = response_format
 
-        resolved_tools = _tool_functions() if tools is None else tools
-        if resolved_tools:
-            chat_kwargs["tools"] = resolved_tools
+        if tools:
+            chat_kwargs["tools"] = tools
         
         last_assistant_idx = -1
         for idx in reversed(range(len(messages))):
@@ -65,7 +57,7 @@ class OllamaClient:
                 break
         get_run_state_manager().log_info(
             f"Ollama chat_messages for model={model} n_messages={len(messages)} "
-            f"tools_count={len(resolved_tools) if resolved_tools else 0} "
+            f"tools_count={len(tools) if tools else 0} "
             f"response_format_set={response_format is not None}"
             f"last_assistant_messages=\n{messages[last_assistant_idx:]}"
         )

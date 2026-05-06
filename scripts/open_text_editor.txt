@@ -1,3 +1,14 @@
-Open a text editor
-type hello world
-save the file at the desktop
+將所有視窗最小化，畫面直接顯示桌面。
+
+按下windows鍵，貼上"記事本"，按下enter。
+將記事本視窗最大化。
+按下ctrl+n開啟新的檔案。
+輸入"這是一個AI自動測試的里程碑!"
+按下ctrl+s，輸入"終極測試檔案.txt"。
+接著按下ctrl+l，輸入"C:\Users\Joseph Hung\Documents\Repos"，接著按下enter。
+再次按下enter並確認另存新檔的視窗已經消失，如果跳出確認另存新檔的小視窗則按Y確認。
+關閉記事本視窗。
+
+用win+e打開檔案總管，按下ctrl+l。
+輸入"C:\Users\Joseph Hung\Documents\Repos"，接著按下enter。
+將滑鼠移到"終極測試檔案.txt"，並雙點擊打開檔案。

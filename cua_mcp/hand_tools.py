@@ -263,6 +263,7 @@ async def _ollama_pick_window_index(
     user_query: str,
     candidates: list[tuple[Any, str]],
     instruction: str = "",
+    action: str = "maximize",
 ) -> int:
     if not candidates:
         raise ValueError("no candidate windows to choose from")
@@ -274,7 +275,7 @@ async def _ollama_pick_window_index(
         else ""
     )
     prompt = (
-        "You pick exactly one desktop window to maximize.\n"
+        f"You pick exactly one desktop window to {action}.\n"
         "The user wants this window (natural-language or partial title):\n"
         f"{user_query!r}\n\n"
         f"{context_block}"
@@ -336,11 +337,21 @@ async def maximize_window(
         candidates = _list_windows_with_titles()
         if not candidates:
             raise ValueError("no windows with non-empty titles found")
-        idx = await _ollama_pick_window_index(needle, candidates, instruction=instruction)
+        idx = await _ollama_pick_window_index(
+            needle,
+            candidates,
+            instruction=instruction,
+            action="maximize",
+        )
         w, title = candidates[idx]
         selection_mode = "ollama_no_substring_match"
     else:
-        idx = await _ollama_pick_window_index(needle, substring_matches, instruction=instruction)
+        idx = await _ollama_pick_window_index(
+            needle,
+            substring_matches,
+            instruction=instruction,
+            action="maximize",
+        )
         w, title = substring_matches[idx]
         selection_mode = "ollama_disambiguate"
 
@@ -355,6 +366,77 @@ async def maximize_window(
         "window_title_contains": needle,
         "matched_title": title,
         "status": "maximized",
+        "selection_mode": selection_mode,
+    }
+    if (instruction or "").strip():
+        out["instruction"] = instruction.strip()
+    return out
+
+
+async def close_window(
+    window_title_contains: str,
+    instruction: str = "",
+) -> dict[str, Any]:
+    """
+    Close a top-level window whose title best matches the query.
+
+    First tries case-insensitive substring match on window titles. If exactly one
+    window matches, it is used. If none or several match, asks Ollama (brain_lm)
+    to pick the best index from the relevant candidate list.
+    """
+    needle = (window_title_contains or "").strip()
+    if not needle:
+        raise ValueError("window_title_contains must be a non-empty string")
+
+    nlow = needle.lower()
+    substring_matches: list[tuple[Any, str]] = []
+    for w in gw.getAllWindows():
+        title = (w.title or "").strip()
+        if not title or nlow not in title.lower():
+            continue
+        substring_matches.append((w, title))
+
+    selection_mode: str
+    w: Any
+    title: str
+
+    if len(substring_matches) == 1:
+        w, title = substring_matches[0]
+        selection_mode = "substring_unique"
+    elif len(substring_matches) == 0:
+        candidates = _list_windows_with_titles()
+        if not candidates:
+            raise ValueError("no windows with non-empty titles found")
+        idx = await _ollama_pick_window_index(
+            needle,
+            candidates,
+            instruction=instruction,
+            action="close",
+        )
+        w, title = candidates[idx]
+        selection_mode = "ollama_no_substring_match"
+    else:
+        idx = await _ollama_pick_window_index(
+            needle,
+            substring_matches,
+            instruction=instruction,
+            action="close",
+        )
+        w, title = substring_matches[idx]
+        selection_mode = "ollama_disambiguate"
+
+    try:
+        w.activate()
+    except Exception:
+        pass
+    if w.isMinimized:
+        w.restore()
+    w.close()
+
+    out: dict[str, Any] = {
+        "window_title_contains": needle,
+        "matched_title": title,
+        "status": "closed",
         "selection_mode": selection_mode,
     }
     if (instruction or "").strip():

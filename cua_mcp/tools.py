@@ -31,6 +31,7 @@ from cua_mcp.tool_module import (
     _wait,
     _zoom,
     _maximize_window,
+    _close_window,
     _minimize_all_windows,
 )
 
@@ -407,6 +408,26 @@ async def maximize_window(
 
 
 @mcp_server.tool()
+async def close_window(
+    window_title_contains: str,
+    instruction: str = "",
+):
+    '''
+    Close a top-level window whose title contains the given substring (case-insensitive).
+
+    If no windows match the substring, or several do, Ollama chooses among candidates;
+    supply instruction with extra natural-language context for that disambiguation.
+
+    Args:
+        window_title_contains: Non-empty substring to match against window titles.
+        instruction: Extra description used to disambiguate (0 or multiple substring matches).
+    '''
+    return (await _close_window(
+        window_title_contains=window_title_contains,
+    )).update({"instruction": instruction})
+
+
+@mcp_server.tool()
 def minimize_all_windows(
     instruction: str = "",
 ):
@@ -511,6 +532,7 @@ TOOL_FUNCTIONS: list[callable[..., Any]] = [
     hold_key,
     zoom,
     maximize_window,
+    close_window,
     minimize_all_windows,
     triple_click,
     middle_click,

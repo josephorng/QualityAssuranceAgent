@@ -11,6 +11,7 @@ from mcp.types import TextContent
 from cua_mcp.tools import mcp_server
 from src.common.io_utils import append_csv_row
 from src.common.models import ExecutionResult, ToolCommand
+from src.common.ollama_client import OllamaClient
 from src.common.run_state import get_run_state_manager
 from src.common.runtime_context import get_runtime_env
 from src.common.settings import load_settings
@@ -51,6 +52,7 @@ def _merged_tool_args(original: dict[str, Any], tool_output: Any) -> dict[str, A
 class HandModule:
     def __init__(self) -> None:
         self.settings = load_settings()
+        self.ollama = OllamaClient(self.settings.ollama_host)
         self.run_root, self.run_id = get_runtime_env()
         self.manager = get_run_state_manager()
         self.manager.init_run(self.run_id, self.run_root.name)
@@ -68,6 +70,68 @@ class HandModule:
         candidate = Path(screenshot_name)
         return str(self.manager.require_paths().eye_dir / candidate.name)
 
+    async def _remap_unknown_action(
+        self,
+        action: str,
+        args: dict[str, Any],
+        error_message: str,
+    ) -> tuple[str, dict[str, Any]] | None:
+        try:
+            tools = await mcp_server.list_tools()
+        except Exception as exc:
+            self.manager.log_error(f"Unable to list tools for remap: {exc}")
+            return None
+
+        tool_names = sorted({tool.name for tool in tools if getattr(tool, "name", None)})
+        if not tool_names:
+            return None
+
+        prompt = (
+            "You are remapping a failed tool invocation to a valid MCP tool.\n"
+            f"Failed action: {action}\n"
+            f"Failed args JSON: {json.dumps(args, ensure_ascii=False)}\n"
+            f"Runtime error: {error_message}\n\n"
+            "Available tools:\n"
+            + "\n".join(f"- {name}" for name in tool_names)
+            + "\n\n"
+            "Return JSON only with this exact shape:\n"
+            '{"action":"<one available tool name>","args":{"...": "..."} }\n'
+            "If args do not need changes, return the original args."
+        )
+
+        try:
+            reply = await self.ollama.chat_messages(
+                model=self.settings.brain_lm,
+                messages=[{"role": "user", "content": prompt}],
+                tools=[],
+                response_format="json",
+            )
+        except Exception as exc:
+            self.manager.log_error(f"Ollama remap call failed: {exc}")
+            return None
+
+        if not reply or not reply.content:
+            return None
+        try:
+            payload = json.loads(reply.content)
+        except json.JSONDecodeError:
+            self.manager.log_error(f"Ollama remap returned non-JSON content: {reply.content}")
+            return None
+        if not isinstance(payload, dict):
+            return None
+
+        candidate_action = payload.get("action")
+        candidate_args = payload.get("args", args)
+        if not isinstance(candidate_action, str):
+            return None
+        candidate_action = candidate_action.strip()
+        if candidate_action not in tool_names:
+            self.manager.log_error(f"Ollama remap suggested invalid tool: {candidate_action}")
+            return None
+        if not isinstance(candidate_args, dict):
+            candidate_args = args
+        return candidate_action, candidate_args
+
     async def _exec_action(self, cmd: ToolCommand) -> ExecutionResult:
         action = cmd.action
         args = cmd.args
@@ -83,13 +147,32 @@ class HandModule:
                 message=cmd.reason or "executed",
             )
         except Exception as exc:
+            error_message = str(exc)
+            if "Unknown tool" in error_message:
+                remapped = await self._remap_unknown_action(action, args, error_message)
+                if remapped is not None:
+                    remapped_action, remapped_args = remapped
+                    try:
+                        tool_output = await mcp_server.call_tool(remapped_action, remapped_args)
+                        return ExecutionResult(
+                            ok=True,
+                            action=remapped_action,
+                            args=_merged_tool_args(remapped_args, tool_output),
+                            timestamp=datetime.now(timezone.utc),
+                            screenshot_name=screenshot_path,
+                            message=f"{cmd.reason or 'executed'} (remapped from {action})",
+                        )
+                    except Exception as remap_exc:
+                        error_message = (
+                            f"{error_message}; remap retry failed with {remapped_action}: {remap_exc}"
+                        )
             return ExecutionResult(
                 ok=False,
                 action=action,
                 args=args,
                 timestamp=datetime.now(timezone.utc),
                 screenshot_name=screenshot_path,
-                message=str(exc),
+                message=error_message,
             )
 
     async def execute_tool_command(self, cmd: ToolCommand) -> ExecutionResult:

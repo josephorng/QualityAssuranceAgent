@@ -105,6 +105,13 @@ async def _maximize_window(window_title_contains: str, instruction: str = "") ->
     )
 
 
+async def _close_window(window_title_contains: str, instruction: str = "") -> dict[str, Any]:
+    return await hand_tools.close_window(
+        window_title_contains=window_title_contains,
+        instruction=instruction,
+    )
+
+
 def _minimize_all_windows() -> dict[str, Any]:
     return hand_tools.minimize_all_windows()
 

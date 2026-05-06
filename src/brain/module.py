@@ -35,6 +35,12 @@ if TYPE_CHECKING:
 _MAX_INNER_DECIDE_STEPS = 100
 
 
+# Remove key-value pairs with None values in each message
+def prune_nulls(d):
+    if not isinstance(d, dict):
+        return d
+    return {k: v for k, v in d.items() if v is not None}
+
 @dataclass
 class BrainRuntime:
     """Lightweight flags for brain task lifecycle (reserved for future use)."""
@@ -110,7 +116,8 @@ class BrainModule:
                 merged_messages = []
                 payload = {}
 
-        merged_messages.extend(messages)
+        merged_messages.extend([prune_nulls(msg) for msg in messages])
+ 
         payload[attribute_name] = merged_messages
         write_json(out_path, payload)
 
@@ -193,16 +200,7 @@ class BrainModule:
         result_dict = result.model_dump()
         result_dict.pop("timestamp")
         result_dict.pop("screenshot_name")
-        result_dict.pop("ok")
-        pop_list = []
-        for key, value in result_dict.items():
-            # Keep numeric zeros (e.g. screen x/y) and False; only strip null-ish empties.
-            if value is None or value == "":
-                pop_list.append(key)
-            elif isinstance(value, (list, dict, set)) and len(value) == 0:
-                pop_list.append(key)
-        for key in pop_list:
-            result_dict.pop(key)
+        result_dict = prune_nulls(result_dict)       
         return result_dict
     
     def sanitize_message(self, message: Message) -> dict[str, Any]:
@@ -371,8 +369,7 @@ class BrainModule:
                     })
                     sleep(1)
                     if not result.ok:
-                        step_succeeded = False
-                        break
+                        self._append_step_messages(messages[-1], self._step_transcript_counter, self._script_step_index, attribute_name="failed_tool_calls")
                 else:
                     continue
                 break

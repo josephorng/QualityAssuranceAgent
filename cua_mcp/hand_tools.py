@@ -13,7 +13,6 @@ import pygetwindow as gw
 from src.common.ollama_client import OllamaClient
 from src.common.settings import load_settings
 from src.eye.capture import capture_active_monitor_to_file
-from pyautogui import keyboardMapping
 
 _settings = load_settings()
 _ollama = OllamaClient(_settings.ollama_host, timeout_seconds=60)
@@ -87,9 +86,14 @@ def wait(seconds: float) -> dict[str, Any]:
     return {"seconds": seconds}
 
 
+keyboard_keys_map = {
+    "Windows": "win",
+}
+
 def key_press(key: str) -> dict[str, Any]:
     """Press and release a single key."""
     token = _normalize_hotkey_token(key)
+    token = keyboard_keys_map.get(token, token)
     if token not in pyautogui.KEYBOARD_KEYS:
         raise ValueError(f"Invalid key: {token}")
     pyautogui.press(token)

@@ -44,4 +44,4 @@ def get_prompt(name: str) -> str:
     if not config.instructions:
         return config.prompt
     block = "\n".join(f"- {line}" for line in config.instructions)
-    return f"{config.prompt}\n\nInstructions:\n{block}"
+    return f"{config.prompt}\n\n{block}"

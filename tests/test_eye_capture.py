@@ -29,6 +29,24 @@ def test_hand_tools_screenshot_uses_eye_capture(monkeypatch, tmp_path: Path) -> 
     assert called["path"] == tmp_path / "shot.png"
 
 
+def test_hand_tools_screenshot_appends_png_when_path_has_no_extension(
+    monkeypatch, tmp_path: Path
+) -> None:
+    called: dict[str, object] = {}
+
+    def _fake_capture(path: Path, default_monitor_index: int = 1) -> int:
+        called["path"] = path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"fake-png")
+        return 1
+
+    monkeypatch.setattr(hand_tools, "capture_active_monitor_to_file", _fake_capture)
+
+    out = hand_tools.screenshot_to_file(str(tmp_path / "chrome_status_capture"))
+    assert out["path"].endswith("chrome_status_capture.png")
+    assert called["path"] == tmp_path / "chrome_status_capture.png"
+
+
 def test_capture_active_monitor_to_file_clamps_requested_index(monkeypatch, tmp_path: Path) -> None:
     class _FakeShot:
         size = (10, 8)

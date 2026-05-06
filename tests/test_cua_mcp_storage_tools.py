@@ -68,6 +68,28 @@ def test_screenshot_relative_path_writes_under_run_storage(tmp_path: Path, monke
     assert recorded["path"] == str(storage / "evidence.png")
 
 
+def test_screenshot_path_without_extension_gets_png_suffix(tmp_path: Path, monkeypatch) -> None:
+    run_root = tmp_path / "run_screenshot_noext"
+    monkeypatch.setenv("CUA_RUN_ROOT", str(run_root))
+    recorded: dict[str, Path] = {}
+
+    def fake_capture(dest: Path, default_monitor_index: int = 1) -> int:
+        recorded["dest"] = dest
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"fakepng")
+        return 1
+
+    monkeypatch.setattr(
+        "cua_mcp.hand_tools.capture_active_monitor_to_file",
+        fake_capture,
+    )
+
+    out = _screenshot(path="screenshot_checking_chrome_status")
+    storage = run_root / "storage"
+    assert Path(out["path"]) == storage / "screenshot_checking_chrome_status.png"
+    assert recorded["dest"] == storage / "screenshot_checking_chrome_status.png"
+
+
 def test_screenshot_empty_path_uses_timestamp_in_run_storage(tmp_path: Path, monkeypatch) -> None:
     run_root = tmp_path / "run_screenshot2"
     monkeypatch.setenv("CUA_RUN_ROOT", str(run_root))

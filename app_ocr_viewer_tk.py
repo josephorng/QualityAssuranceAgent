@@ -198,6 +198,10 @@ def _run_ocr_with_boxes(image_path: Path) -> tuple[list[OcrLine], float | None, 
 
 
 class OcrViewerApp:
+    _MIN_ZOOM = 0.125
+    _MAX_ZOOM = 32.0
+    _ZOOM_STEP = 1.15
+
     def __init__(self, root: tk.Tk, runs_root: Path):
         self.root = root
         self.runs_root = runs_root
@@ -255,6 +259,11 @@ class OcrViewerApp:
         ttk.Button(controls, text="Copy to undone/images", command=self._copy_current_image_to_undone).grid(
             row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0)
         )
+        ttk.Button(controls, text="Zoom +", command=self._zoom_in).grid(row=4, column=0, sticky="ew", pady=(6, 0))
+        ttk.Button(controls, text="Zoom -", command=self._zoom_out).grid(row=4, column=1, sticky="ew", pady=(6, 0))
+        ttk.Button(controls, text="Reset Zoom", command=self._reset_zoom).grid(
+            row=5, column=0, columnspan=2, sticky="ew", pady=(6, 0)
+        )
 
         canvas_wrap = ttk.Frame(self.root, padding=8)
         canvas_wrap.grid(row=0, column=1, sticky="nsew")
@@ -279,6 +288,10 @@ class OcrViewerApp:
 
         self.root.bind("<Left>", lambda _event: self._prev_image())
         self.root.bind("<Right>", lambda _event: self._next_image())
+        self.root.bind("<Control-plus>", self._on_zoom_in_hotkey)
+        self.root.bind("<Control-equal>", self._on_zoom_in_hotkey)
+        self.root.bind("<Control-minus>", self._on_zoom_out_hotkey)
+        self.root.bind("<Control-0>", self._on_reset_zoom_hotkey)
         self.root.bind("<Configure>", lambda _event: self._refresh_image())
 
     def _populate_runs(self) -> None:
@@ -352,7 +365,7 @@ class OcrViewerApp:
         dx = x - self._rmb_last_x
         self._rmb_last_x = x
         sens = 0.015
-        self._view_zoom = max(0.125, min(32.0, self._view_zoom + dx * sens))
+        self._view_zoom = max(self._MIN_ZOOM, min(self._MAX_ZOOM, self._view_zoom + dx * sens))
         self._refresh_image()
 
     def _on_rmb_release(self, _event: tk.Event[tk.Canvas]) -> None:
@@ -365,10 +378,44 @@ class OcrViewerApp:
         self.canvas.scan_dragto(int(event.x), int(event.y), gain=1)
 
     def _on_canvas_mousewheel(self, event: tk.Event[tk.Canvas]) -> None:
+        if event.state & 0x0004:
+            if event.delta > 0:
+                self._apply_zoom_factor(self._ZOOM_STEP)
+            elif event.delta < 0:
+                self._apply_zoom_factor(1.0 / self._ZOOM_STEP)
+            return
         if event.state & 0x0001:
             self.canvas.xview_scroll(int(-(event.delta / 120)), "units")
         else:
             self.canvas.yview_scroll(int(-(event.delta / 120)), "units")
+
+    def _set_zoom(self, zoom: float) -> None:
+        self._view_zoom = max(self._MIN_ZOOM, min(self._MAX_ZOOM, zoom))
+        self._refresh_image()
+
+    def _apply_zoom_factor(self, factor: float) -> None:
+        self._set_zoom(self._view_zoom * factor)
+
+    def _zoom_in(self) -> None:
+        self._apply_zoom_factor(self._ZOOM_STEP)
+
+    def _zoom_out(self) -> None:
+        self._apply_zoom_factor(1.0 / self._ZOOM_STEP)
+
+    def _reset_zoom(self) -> None:
+        self._set_zoom(1.0)
+
+    def _on_zoom_in_hotkey(self, _event: tk.Event[tk.Tk]) -> str:
+        self._zoom_in()
+        return "break"
+
+    def _on_zoom_out_hotkey(self, _event: tk.Event[tk.Tk]) -> str:
+        self._zoom_out()
+        return "break"
+
+    def _on_reset_zoom_hotkey(self, _event: tk.Event[tk.Tk]) -> str:
+        self._reset_zoom()
+        return "break"
 
     def _populate_item_list(self) -> None:
         self.item_list.delete(0, tk.END)

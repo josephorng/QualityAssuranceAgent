@@ -1,8 +1,6 @@
-按下Windows鍵，打開 windows 搜尋
-輸入 Chrome
-按下 Enter 鍵
-確認 Chrome 瀏覽器已經打開，如果沒有打開的話請回到前面的步驟再嘗試一遍。
-最大化 Chrome 瀏覽器
+關掉所有視窗，顯示出桌面的畫面。
+按下Windows鍵，並輸入"Chrome"，最後按下 Enter 鍵，打開Chrome瀏覽器。
+最大化 Chrome 瀏覽器。
 點擊訪客模式（訪客模式）
 在網址列輸入 www.google.com
 在 Google 搜尋欄搜尋「生日」

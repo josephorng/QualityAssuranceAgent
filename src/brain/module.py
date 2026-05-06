@@ -20,6 +20,7 @@ from src.common.prompting import get_prompt
 from src.common.run_state import get_run_state_manager
 from src.common.runtime_context import SCRIPT_LINES_ENV, get_runtime_env
 from src.common.settings import load_settings
+from time import sleep
 
 ROLE_USER = "user"
 ROLE_TOOL = "tool"
@@ -80,6 +81,38 @@ class BrainModule:
         steps_dir.mkdir(parents=True, exist_ok=True)
         out_path = steps_dir / f"{self._step_transcript_counter}_{self._script_step_index}.json"
         write_json(out_path, {"messages": messages})
+
+    def _append_step_messages(
+        self,
+        messages: list[dict[str, Any]],
+        transcript_counter: int,
+        script_step_index: int,
+        attribute_name: str = "messages",
+    ) -> None:
+        """Append messages under `attribute_name` in a step transcript file."""
+        steps_dir = self.manager.require_paths().root / "steps"
+        steps_dir.mkdir(parents=True, exist_ok=True)
+        out_path = steps_dir / f"{transcript_counter}_{script_step_index}.json"
+
+        merged_messages: list[dict[str, Any]] = []
+        payload: dict[str, Any] = {}
+        if out_path.exists():
+            try:
+                existing = json.loads(out_path.read_text(encoding="utf-8"))
+                if isinstance(existing, dict):
+                    payload = dict(existing)
+                    existing_messages = existing.get(attribute_name)
+                    if isinstance(existing_messages, list):
+                        merged_messages.extend(existing_messages)
+            except (OSError, ValueError, json.JSONDecodeError):
+                # If the existing transcript is malformed/unreadable, keep only new messages
+                # under the requested attribute.
+                merged_messages = []
+                payload = {}
+
+        merged_messages.extend(messages)
+        payload[attribute_name] = merged_messages
+        write_json(out_path, payload)
 
     def _script_seed_steps(self) -> list[str]:
         """Load non-empty script lines from `SCRIPT_LINES_ENV` (JSON array of strings)."""
@@ -229,7 +262,11 @@ class BrainModule:
         )
         return run_complete
 
-    async def _verify_script_step(self) -> ScriptStepVerifyResult | None:
+    async def _verify_script_step(
+        self,
+        transcript_counter: int,
+        script_step_index: int,
+    ) -> ScriptStepVerifyResult | None:
         """Capture a fresh screenshot and ask the LLM (no tools) for `ScriptStepVerifyResult` JSON, or None on failure."""
         if self._eye is None:
             raise RuntimeError("BrainModule requires eye=EyeModule(...) for step verification")
@@ -243,21 +280,31 @@ class BrainModule:
             f"NumberedScript:\n{numbered}\n\n"
             f"CurrentStepNumber (1-based): {current_1based}\n"
             f"CurrentStepGoal:\n{goal}\n\n"
+            f"All the monitor screenshot(s) are captured and will be provided to you.\n"
             "Respond with JSON only."
         )
 
-        vision_event = await self._eye.capture_once()
+        verification_image_paths = await self._eye.capture_separated_images()
+
         messages: list[dict[str, Any]] = [
             {
                 "role": ROLE_USER,
                 "content": body,
-                "images": [vision_event.screenshot_path],
+                "images": verification_image_paths,
             }
         ]
         response_message = await self.ollama.chat_messages(
             self.settings.brain_lm,
             messages=messages,
             use_tools=False,
+        )
+        if response_message:
+            messages.append(response_message.model_dump())
+        self._append_step_messages(
+            messages,
+            transcript_counter,
+            script_step_index,
+            attribute_name="verification",
         )
         if not response_message or not response_message.content:
             self.manager.log_error("Ollama verify step returned empty content")
@@ -276,22 +323,22 @@ class BrainModule:
         if self._eye is None:
             raise RuntimeError("BrainModule requires eye=EyeModule(...) to capture screenshots for the decide loop")
 
-        prompt = get_prompt("brain_decide_action")
         goal = self._current_goal()
-        full_prompt = f"{prompt}\n\nCurrentTaskGoal:\n{goal}\n\n"
+        first_prompt = get_prompt("brain_decide_action").format(task=goal)
+        second_prompt = get_prompt("brain_decide_action_2").format(task=goal)
 
         messages: list[dict[str, Any]] = []
         step_succeeded = False
 
         for _ in range(_MAX_INNER_DECIDE_STEPS):
             try:
-                vision_event = await self._eye.capture_once()
-                user_content = full_prompt if not messages else "Current screen:"
+                all_image_paths = await self._eye.capture_separated_images()
+                user_content = first_prompt if not messages else second_prompt
                 messages.append(
                     {
                         "role": ROLE_USER,
                         "content": user_content,
-                        "images": [vision_event.screenshot_path],
+                        "images": all_image_paths,
                     }
                 )
                 response_message = await self.ollama.chat_messages(
@@ -322,6 +369,7 @@ class BrainModule:
                         "role": ROLE_TOOL,
                         "content": json.dumps(self.sanitize_execution_result(result), ensure_ascii=False),
                     })
+                    sleep(1)
                     if not result.ok:
                         step_succeeded = False
                         break
@@ -350,14 +398,14 @@ class BrainModule:
             )
 
         step_succeeded = await self.loop()
-        self._step_transcript_counter += 1
         if not step_succeeded:
             return BrainStepResult(
                 reason=f"Script step {self._script_step_index + 1} failed",
                 step_finished=False,
             )
 
-        verify_result = await self._verify_script_step()
+        verify_result = await self._verify_script_step(self._step_transcript_counter, self._script_step_index)
+        self._step_transcript_counter += 1
         if verify_result is None:
             return BrainStepResult(
                 reason="Script step verification failed (parse or empty response)",

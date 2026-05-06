@@ -11,14 +11,12 @@ from cua_mcp.tool_module import (
     _hold_key,
     _hotkey,
     _key,
-    _left_click,
     _left_click_drag,
     _left_mouse_down,
     _left_mouse_up,
     _middle_click,
-    _mouse_move,
     _move,
-    _click_and_type,
+    _type_text,
     _press_key,
     _right_click,
     _screenshot,
@@ -29,39 +27,41 @@ from cua_mcp.tool_module import (
     _wait,
     _zoom,
     _maximize_window,
+    _minimize_all_windows,
 )
 
 mcp_server = FastMCP("ComputerUseAgent")
 
 @mcp_server.tool()
 def click(
-    instruction: str,
     button: str = "left",
+    instruction: str = "",
 ):
     '''
-    Click a UI element identified by natural-language instruction. Takes a fresh capture of the active monitor,
-    runs OCR (artifacts under yolo_ocr/), and uses the brain LM to pick coordinates. Optional mouse button.
-    
+    Click the mouse at the current cursor position (after using mouse_move to aim).
+
     Args:
-        instruction: Natural-language description of what to click on the screen.
         button: Mouse button: typically 'left', 'right', or 'middle'.
+        instruction: Optional note for logging only (does not affect targeting).
     '''
-    return _click(instruction=instruction, button=button)
+    return _click(button=button).update({"instruction": instruction})
 
 
 @mcp_server.tool()
-def click_and_type(
+def type_text(
     text: str,
-    target_instruction: str,
+    instruction: str = "",
 ):
     '''
-    Click a target region using natural-language instruction, then input text using keyboard automation.
+    Paste text at the current keyboard focus via clipboard (Ctrl+V).
+
+    Does not move or click the mouse.
 
     Args:
-        text: Text content to input after the target is focused.
-        target_instruction: Natural-language description of the field or region to focus first.
+        text: Text to paste.
+        instruction: Optional note for logging only.
     '''
-    return _click_and_type(text=text, target_instruction=target_instruction)
+    return _type_text(text=text).update({"instruction": instruction})
 
 
 @mcp_server.tool()
@@ -76,7 +76,7 @@ def press_key(
         key: Key name to press.
         instruction: Optional context describing why the key is pressed.
     '''
-    return _press_key(key=key, instruction=instruction)
+    return _press_key(key=key).update({"instruction": instruction})
 
 
 @mcp_server.tool()
@@ -91,22 +91,7 @@ def hotkey(
         keys: Key chord provided as a list of key names or supported string token.
         instruction: Optional context or rationale for the shortcut.
     '''
-    return _hotkey(keys=keys, instruction=instruction)
-
-
-@mcp_server.tool()
-def move(
-    instruction: str,
-    duration: float = 0.0,
-):
-    '''
-    Move the cursor to a target identified by natural-language instruction without clicking.
-
-    Args:
-        instruction: Natural-language description of where the cursor should move.
-        duration: Seconds to animate the cursor movement.
-    '''
-    return _move(instruction=instruction, duration=duration)
+    return _hotkey(keys=keys).update({"instruction": instruction})
 
 
 @mcp_server.tool()
@@ -121,7 +106,7 @@ def wait(
         seconds: Delay duration in seconds.
         instruction: Optional context describing why the wait is needed.
     '''
-    return _wait(seconds=seconds, instruction=instruction)
+    return _wait(seconds=seconds).update({"instruction": instruction})
 
 
 @mcp_server.tool()
@@ -140,7 +125,7 @@ def store_text(
         title: Short title or label for listing stored entries.
         tags: Optional tags used for categorization.
     '''
-    return _store_text(text=text, instruction=instruction, title=title, tags=tags)
+    return _store_text(text=text, title=title, tags=tags).update({"instruction": instruction})
 
 
 @mcp_server.tool()
@@ -163,11 +148,10 @@ def store_image(
     '''
     return _store_image(
         image_path=image_path,
-        instruction=instruction,
         summary=summary,
         alias=alias,
         tags=tags,
-    )
+    ).update({"instruction": instruction})
 
 
 # --- CUA action vocabulary (see ToolCommand / agent schema) ---
@@ -185,108 +169,95 @@ def key(
         key: Single key name to press.
         instruction: Optional context for logging.
     '''
-    return _key(key=key, instruction=instruction)
+    return _key(key=key).update({"instruction": instruction})
 
 
 @mcp_server.tool()
-def mouse_move(
+async def mouse_move(
     instruction: str,
     duration: float = 0.0,
 ):
     '''
-    Move the cursor to a target described by natural-language instruction.
+    Capture the screen, run YOLO+OCR, use the brain LM to pick a target, then move the cursor there.
+
+    This is the only tool that performs vision-based targeting; call it before click/scroll/etc.
 
     Args:
         instruction: Natural-language description of where the cursor should move.
         duration: Seconds to animate the movement.
     '''
-    return _mouse_move(instruction=instruction, duration=duration)
-
-
-@mcp_server.tool()
-def left_click(
-    instruction: str,
-):
-    '''
-    Left-click a UI element identified by natural-language instruction.
-
-    Args:
-        instruction: Natural-language description of the element to click.
-    '''
-    return _left_click(instruction=instruction)
+    return (await _move(instruction=instruction, duration=duration)).update({"instruction": instruction})
 
 
 @mcp_server.tool()
 def left_click_drag(
-    instruction_start: str,
-    instruction_end: str,
+    x2: int,
+    y2: int,
     duration: float = 0.5,
+    instruction: str = "",
 ):
     '''
-    Press and drag the left mouse button from a start target to an end target.
+    Left-button drag from the current cursor position to screen coordinates (x2, y2).
 
     Args:
-        instruction_start: Natural-language instruction for the drag start point.
-        instruction_end: Natural-language instruction for the drag end point.
+        x2: End x in screen pixels.
+        y2: End y in screen pixels.
         duration: Drag movement duration in seconds.
+        instruction: Optional note for logging only.
     '''
-    return _left_click_drag(
-        instruction_start=instruction_start,
-        instruction_end=instruction_end,
-        duration=duration,
-    )
+    return _left_click_drag(x2=x2, y2=y2, duration=duration).update({"instruction": instruction})
 
 
 @mcp_server.tool()
 def right_click(
-    instruction: str,
+    instruction: str = "",
 ):
     '''
-    Right-click a UI element identified by natural-language instruction.
+    Right-click at the current cursor position.
 
     Args:
-        instruction: Natural-language description of where to right-click.
+        instruction: Optional note for logging only.
     '''
-    return _right_click(instruction=instruction)
+    return _right_click().update({"instruction": instruction})
 
 
 @mcp_server.tool()
 def middle_click(
-    instruction: str,
+    instruction: str = "",
 ):
     '''
-    Middle-click a UI element identified by natural-language instruction.
+    Middle-click at the current cursor position.
 
     Args:
-        instruction: Natural-language description of where to middle-click.
+        instruction: Optional note for logging only.
     '''
-    return _middle_click(instruction=instruction)
+    return _middle_click().update({"instruction": instruction})
 
 
 @mcp_server.tool()
 def double_click(
-    instruction: str,
+    instruction: str = "",
 ):
     '''
-    Double-click a UI element identified by natural-language instruction.
+    Double-click (left) at the current cursor position.
 
     Args:
-        instruction: Natural-language description of what to double-click.
+        instruction: Optional note for logging only.
     '''
-    return _double_click(instruction=instruction)
+    return _double_click().update({"instruction": instruction})
 
 
 @mcp_server.tool()
 def triple_click(
-    instruction: str,
+    instruction: str = "",
 ):
     '''
-    Triple-click a UI element identified by natural-language instruction.
+    Triple-click (left) at the current cursor position.
 
     Args:
-        instruction: Natural-language description of where to triple-click.
+        instruction: Optional note for logging only.
     '''
-    return _triple_click(instruction=instruction)
+    return _triple_click().update({"instruction": instruction})
 
 
 @mcp_server.tool()
@@ -320,43 +291,43 @@ def cursor_position(
 
 @mcp_server.tool()
 def left_mouse_down(
-    instruction: str,
+    instruction: str = "",
 ):
     '''
-    Press the left mouse button down at a target without releasing it.
+    Press the left mouse button down without releasing (at the current cursor).
 
     Args:
-        instruction: Natural-language description of where to press down.
+        instruction: Optional note for logging only.
     '''
-    return _left_mouse_down(instruction=instruction)
+    return _left_mouse_down().update({"instruction": instruction})
 
 
 @mcp_server.tool()
 def left_mouse_up(
-    instruction: str,
+    instruction: str = "",
 ):
     '''
-    Release the left mouse button at a target location.
+    Release the left mouse button (at the current cursor).
 
     Args:
-        instruction: Natural-language description of where to release the button.
+        instruction: Optional note for logging only.
     '''
-    return _left_mouse_up(instruction=instruction)
+    return _left_mouse_up().update({"instruction": instruction})
 
 
 @mcp_server.tool()
 def scroll(
-    instruction: str,
     clicks: int,
+    instruction: str = "",
 ):
     '''
-    Scroll at a target region identified by natural-language instruction.
+    Scroll the mouse wheel at the current cursor position.
 
     Args:
-        instruction: Natural-language description of the scroll focus region or control.
         clicks: Wheel delta in clicks; sign controls scroll direction.
+        instruction: Optional note for logging only.
     '''
-    return _scroll(instruction=instruction, clicks=clicks)
+    return _scroll(clicks=clicks).update({"instruction": instruction})
 
 
 @mcp_server.tool()
@@ -373,26 +344,26 @@ def hold_key(
         seconds: How long to keep the key depressed.
         instruction: Optional context for logging.
     '''
-    return _hold_key(key=key, seconds=seconds, instruction=instruction)
+    return _hold_key(key=key, seconds=seconds).update({"instruction": instruction})
 
 
 @mcp_server.tool()
 def zoom(
-    instruction: str,
     scroll_clicks: int,
+    instruction: str = "",
 ):
     '''
-    Apply Ctrl+wheel zoom at a target identified by natural-language instruction.
+    Apply Ctrl+wheel zoom at the current cursor position.
 
     Args:
-        instruction: Natural-language description of where to apply zoom.
         scroll_clicks: Wheel clicks while Ctrl is held; sign controls zoom in or out.
+        instruction: Optional note for logging only.
     '''
-    return _zoom(instruction=instruction, scroll_clicks=scroll_clicks)
+    return _zoom(scroll_clicks=scroll_clicks).update({"instruction": instruction})
 
 
 @mcp_server.tool()
-def maximize_window(
+async def maximize_window(
     window_title_contains: str,
     instruction: str = "",
 ):
@@ -406,24 +377,34 @@ def maximize_window(
         window_title_contains: Non-empty substring to match against window titles.
         instruction: Extra description used to disambiguate (0 or multiple substring matches).
     '''
-    return _maximize_window(
+    return (await _maximize_window(
         window_title_contains=window_title_contains,
-        instruction=instruction,
-    )
+    )).update({"instruction": instruction})
+
+
+@mcp_server.tool()
+def minimize_all_windows(
+    instruction: str = "",
+):
+    '''
+    Minimize all top-level windows with visible titles.
+
+    Args:
+        instruction: Optional note for logging only.
+    '''
+    return _minimize_all_windows().update({"instruction": instruction})
 
 
 TOOL_FUNCTIONS: list[callable[..., Any]] = [
     click,
-    click_and_type,
+    type_text,
     press_key,
     hotkey,
-    move,
     wait,
     store_text,
     store_image,
     key,
     mouse_move,
-    left_click,
     left_click_drag,
     right_click,
     cursor_position,
@@ -433,6 +414,7 @@ TOOL_FUNCTIONS: list[callable[..., Any]] = [
     hold_key,
     zoom,
     maximize_window,
+    minimize_all_windows,
     triple_click,
     middle_click,
     double_click,

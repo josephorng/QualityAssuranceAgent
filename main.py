@@ -5,6 +5,7 @@ import os
 import signal
 import shutil
 import asyncio
+import ctypes
 from pathlib import Path
 
 from src.common.monitor_prompt import prompt_eye_monitor_index
@@ -55,6 +56,16 @@ def select_script_input(root_dir: Path) -> tuple[str, Path, list[str]]:
         return task, script_path, script_steps
 
 
+def show_completion_popup(message: str, title: str = "QualityAssuranceAgent") -> None:
+    if os.name == "nt":
+        try:
+            ctypes.windll.user32.MessageBoxW(0, message, title, 0)
+        except Exception:
+            print(f"[master] {title}: {message}")
+    else:
+        print(f"[master] {title}: {message}")
+
+
 def main() -> None:
     task, selected_script_path, script_steps = select_script_input(ROOT_DIR)
 
@@ -72,6 +83,7 @@ def main() -> None:
     os.environ["EYE_MONITOR_INDEX"] = str(eye_monitor_index)
     print(f"[master] Eye capture monitor index: {eye_monitor_index} (0 = all screens)")
     manager.log_info(f"Eye capture monitor index set to {eye_monitor_index}")
+    completion_message = f"Run {run_id} finished."
 
     try:
         manager.log_info("Master starting coordinator module runtime")
@@ -79,8 +91,10 @@ def main() -> None:
         asyncio.run(coordinator.run())
     except KeyboardInterrupt:
         manager.log_info("KeyboardInterrupt received. shutting down coordinator.")
+        completion_message = f"Run {run_id} interrupted by user."
     finally:
         manager.log_info("Master stopped.")
+        show_completion_popup(completion_message)
 
 
 if __name__ == "__main__":

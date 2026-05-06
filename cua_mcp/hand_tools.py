@@ -5,13 +5,15 @@ from pathlib import Path
 from tempfile import mkdtemp
 from time import sleep
 from typing import Any
-import tkinter as tk
+# import tkinter as tk
+import pyperclip
 
 import pyautogui
 import pygetwindow as gw
 from src.common.ollama_client import OllamaClient
 from src.common.settings import load_settings
 from src.eye.capture import capture_active_monitor_to_file
+from pyautogui import keyboardMapping
 
 _settings = load_settings()
 _ollama = OllamaClient(_settings.ollama_host, timeout_seconds=60)
@@ -25,46 +27,38 @@ def _normalize_hotkey_token(key: str) -> str:
 
 
 def click(
-    x: int,
-    y: int,
+    x: int | None = None,
+    y: int | None = None,
     button: str = "left",
     clicks: int = 1,
     interval: float = 0.0,
 ) -> dict[str, Any]:
-    """Click a screen coordinate and return executed arguments."""
-    pyautogui.click(x=x, y=y, button=button, clicks=clicks, interval=interval)
-    return {"x": x, "y": y, "button": button, "clicks": clicks, "interval": interval}
+    """Click a screen coordinate, or the current cursor if x and y are omitted."""
+    if x is not None and y is not None:
+        pyautogui.click(x=x, y=y, button=button, clicks=clicks, interval=interval)
+        rx, ry = x, y
+    else:
+        pyautogui.click(button=button, clicks=clicks, interval=interval)
+        pos = pyautogui.position()
+        rx, ry = int(pos.x), int(pos.y)
+    return {"x": rx, "y": ry, "button": button, "clicks": clicks, "interval": interval}
 
 
 def type_text(
     text: str,
-    coordinate: list[int],
 ) -> dict[str, Any]:
-    """Click a coordinate to focus, then paste text from clipboard (Ctrl+V).
+    """Paste text via clipboard (Ctrl+V) at the current keyboard focus.
 
-    Clears the clipboard afterward and does not restore previous contents.
+    Does not move or click the mouse. Clears the clipboard afterward and does
+    not restore previous contents.
     """
-    if len(coordinate) != 2:
-        raise ValueError("coordinate must be [x, y]")
-    x, y = coordinate
-    pyautogui.click(x=x, y=y, button="left")
-    click_result = {"x": x, "y": y, "button": "left"}
-
-    root = tk.Tk()
-    root.withdraw()
-    try:
-        root.clipboard_clear()
-        root.clipboard_append(text)
-        root.update()
-        pyautogui.hotkey("ctrl", "v")
-        sleep(0.05)
-    finally:
-        root.clipboard_clear()
-        root.update()
-        root.destroy()
+    # root = tk.Tk()
+    pyperclip.copy(text)
+    sleep(0.5)
+    pyautogui.hotkey("ctrl", "v")
+    sleep(0.05)
     return {
         "text": text,
-        "clicked_coordinate": click_result,
         "effective_mode": "paste",
     }
 
@@ -96,6 +90,8 @@ def wait(seconds: float) -> dict[str, Any]:
 def key_press(key: str) -> dict[str, Any]:
     """Press and release a single key."""
     token = _normalize_hotkey_token(key)
+    if token not in pyautogui.KEYBOARD_KEYS:
+        raise ValueError(f"Invalid key: {token}")
     pyautogui.press(token)
     return {"key": token}
 
@@ -143,9 +139,13 @@ def drag(
 def screenshot_to_file(path: str | None = None) -> dict[str, Any]:
     """Capture the active Eye monitor; saves PNG to path or a temp file."""
     if not path:
-        path = str(Path(mkdtemp()) / "screenshot.png")
-    capture_active_monitor_to_file(Path(path))
-    return {"path": path}
+        dest = Path(mkdtemp()) / "screenshot.png"
+    else:
+        dest = Path(path)
+        if not dest.suffix:
+            dest = dest.with_suffix(".png")
+    capture_active_monitor_to_file(dest)
+    return {"path": str(dest)}
 
 
 def cursor_position() -> dict[str, Any]:
@@ -218,7 +218,7 @@ def _parse_json_object_from_llm(content: str) -> dict[str, Any]:
     return json.loads(text)
 
 
-def _ollama_pick_window_index(
+async def _ollama_pick_window_index(
     user_query: str,
     candidates: list[tuple[Any, str]],
     instruction: str = "",
@@ -244,7 +244,7 @@ def _ollama_pick_window_index(
         "Windows:\n"
         + "\n".join(lines)
     )
-    msg = _ollama.chat_messages_sync(
+    msg = await _ollama.chat_messages(
         model=_settings.brain_lm,
         messages=[{"role": "user", "content": prompt}],
         use_tools=False,
@@ -259,7 +259,7 @@ def _ollama_pick_window_index(
     return idx
 
 
-def maximize_window(
+async def maximize_window(
     window_title_contains: str,
     instruction: str = "",
 ) -> dict[str, Any]:
@@ -295,11 +295,11 @@ def maximize_window(
         candidates = _list_windows_with_titles()
         if not candidates:
             raise ValueError("no windows with non-empty titles found")
-        idx = _ollama_pick_window_index(needle, candidates, instruction=instruction)
+        idx = await _ollama_pick_window_index(needle, candidates, instruction=instruction)
         w, title = candidates[idx]
         selection_mode = "ollama_no_substring_match"
     else:
-        idx = _ollama_pick_window_index(needle, substring_matches, instruction=instruction)
+        idx = await _ollama_pick_window_index(needle, substring_matches, instruction=instruction)
         w, title = substring_matches[idx]
         selection_mode = "ollama_disambiguate"
 
@@ -318,6 +318,40 @@ def maximize_window(
     }
     if (instruction or "").strip():
         out["instruction"] = instruction.strip()
+    return out
+
+
+def minimize_all_windows() -> dict[str, Any]:
+    """
+    Minimize all top-level windows that are currently not minimized.
+    """
+    total_with_titles = 0
+    minimized_titles: list[str] = []
+    errors: list[str] = []
+
+    for w in gw.getAllWindows():
+        title = (w.title or "").strip()
+        if not title:
+            continue
+        total_with_titles += 1
+        if w.isMinimized:
+            continue
+        try:
+            w.minimize()
+            minimized_titles.append(title)
+        except Exception as exc:
+            errors.append(f"{title}: {type(exc).__name__}: {exc}")
+
+    out: dict[str, Any] = {
+        "status": "success" if not errors else "partial_success",
+        "total_windows_with_titles": total_with_titles,
+        "minimized_count": len(minimized_titles),
+        "already_minimized_count": total_with_titles - len(minimized_titles) - len(errors),
+    }
+    if minimized_titles:
+        out["minimized_titles"] = minimized_titles
+    if errors:
+        out["errors"] = errors
     return out
 
 

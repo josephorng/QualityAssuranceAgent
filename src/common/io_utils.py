@@ -24,7 +24,7 @@ def read_text(path: Path) -> str:
 
 def write_json(path: Path, data: Any) -> None:
     ensure_parent(path)
-    path.write_text(json.dumps(dict(data), ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def read_json(path: Path, default: Any) -> Any:

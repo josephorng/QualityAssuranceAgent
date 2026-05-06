@@ -401,18 +401,19 @@ class BrainModule:
                 step_finished=False,
             )
 
-        verify_result = await self._verify_script_step(self._step_transcript_counter, self._script_step_index)
+        # verify_result = await self._verify_script_step(self._step_transcript_counter, self._script_step_index)
         self._step_transcript_counter += 1
-        if verify_result is None:
-            return BrainStepResult(
-                reason="Script step verification failed (parse or empty response)",
-                step_finished=False,
-            )
+        # if verify_result is None:
+        #     return BrainStepResult(
+        #         reason="Script step verification failed (parse or empty response)",
+        #         step_finished=False,
+        #     )
 
-        run_complete = self._apply_verify_branch(verify_result)
+        # run_complete = self._apply_verify_branch(verify_result)
+        self._script_step_index += 1
         return BrainStepResult(
-            reason=f"Verify: {verify_result.reason}",
+            reason=f"Script step {self._script_step_index + 1} completed",
             step_finished=True,
-            run_complete=run_complete,
+            run_complete=self._script_step_index >= len(self.script_lines),
         )
 

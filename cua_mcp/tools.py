@@ -22,6 +22,7 @@ from cua_mcp.tool_module import (
     _screenshot,
     _scroll,
     _store_image,
+    _store_clipboard_text,
     _store_text,
     _triple_click,
     _wait,
@@ -126,6 +127,26 @@ def store_text(
         tags: Optional tags used for categorization.
     '''
     return _store_text(text=text, title=title, tags=tags).update({"instruction": instruction})
+
+
+@mcp_server.tool()
+def store_clipboard_text(
+    instruction: str = "",
+    title: str = "",
+    tags: list[str] | None = None,
+    file_name: str = "",
+):
+    '''
+    Read the current OS clipboard as text and save it to this run's storage/ folder plus storage.json.
+
+    Args:
+        instruction: Optional context for logging only.
+        title: Short title or label for the stored entry.
+        tags: Optional tags for categorization.
+        file_name: Optional basename for the .txt file (defaults to clipboard_<utc_timestamp>.txt).
+                   Only the basename is used; paths are stripped for safety.
+    '''
+    return _store_clipboard_text(title=title, tags=tags, file_name=file_name).update({"instruction": instruction})
 
 
 @mcp_server.tool()
@@ -402,6 +423,7 @@ TOOL_FUNCTIONS: list[callable[..., Any]] = [
     hotkey,
     wait,
     store_text,
+    store_clipboard_text,
     store_image,
     key,
     mouse_move,

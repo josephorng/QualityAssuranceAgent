@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import pyperclip
+
 from src.common.io_utils import read_json, write_json
 from src.common.runtime_context import get_runtime_env
 
@@ -37,6 +39,45 @@ def store_text(text: str, title: str = "", tags: list[str] | None = None) -> dic
         "type": "text",
         "title": title,
         "text": text,
+        "tags": tags or [],
+    }
+    _append_storage_entry(record)
+    return {"status": "stored", "entry": record}
+
+
+def store_clipboard_text(
+    title: str = "",
+    tags: list[str] | None = None,
+    file_name: str = "",
+) -> dict[str, Any]:
+    """Read the OS clipboard as text, write it under this run's storage/ folder, and index it."""
+    raw = pyperclip.paste()
+    text = "" if raw is None else raw if isinstance(raw, str) else str(raw)
+    if not text.strip():
+        raise ValueError("clipboard is empty or has no usable text")
+
+    storage_dir, _ = _current_run_paths()
+    now = datetime.now(timezone.utc)
+    stamp = now.strftime("%Y%m%d_%H%M%S_%f")
+    raw_name = (file_name or f"clipboard_{stamp}").strip()
+    base = Path(raw_name).name
+    if not base.lower().endswith(".txt"):
+        base = f"{base}.txt"
+    dst_path = storage_dir / base
+    if dst_path.exists():
+        suffix = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+        dst_path = storage_dir / f"{dst_path.stem}_{suffix}{dst_path.suffix}"
+
+    dst_path.write_text(text, encoding="utf-8")
+
+    record = {
+        "timestamp": now.isoformat(),
+        "type": "text",
+        "source": "clipboard",
+        "title": title,
+        "text": text,
+        "stored_path": str(dst_path),
+        "file_name": dst_path.name,
         "tags": tags or [],
     }
     _append_storage_entry(record)

@@ -16,7 +16,8 @@
       "prompt": "Now you need to decide the next action to take. If the task is completed, return the reason why it is completed. Current task: {task}\n\nAll monitor screenshots have been captured and will be provided to you.",
  
       "instructions": [
-        "If the previous task is not executed, try new method to achieve the task."
+        "If the previous task is not executed, try new method to achieve the task.",
+        "If the tool failed to execute, do not assume the task is completed. Try new method to achieve the task."
       ],
       "models": ["gemma4:e2b", "gemma3:4b"]
     }

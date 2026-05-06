@@ -6,7 +6,7 @@ from typing import Any
 
 from cua_mcp import hand_tools
 from cua_mcp.coordinate_selection import _resolve_point, _with_clicked_text
-from cua_mcp.storage import store_image, store_text, _current_run_paths
+from cua_mcp.storage import store_clipboard_text, store_image, store_text, _current_run_paths
 
 
 def _click(button: str = "left") -> dict[str, Any]:
@@ -114,6 +114,14 @@ def _store_text(
     tags: list[str] | None = None,
 ) -> dict[str, Any]:
     return store_text(text=text, title=title, tags=tags)
+
+
+def _store_clipboard_text(
+    title: str = "",
+    tags: list[str] | None = None,
+    file_name: str = "",
+) -> dict[str, Any]:
+    return store_clipboard_text(title=title, tags=tags, file_name=file_name)
 
 
 def _store_image(

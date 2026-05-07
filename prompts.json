@@ -6,7 +6,8 @@
         "Tool calls should be in the correct order to achieve the task objective.",
         "Create detailed tool instructions for each tool call.",
         "All the monitor screenshot(s) are captured and will be provided to you.",
-        "Do not do anything outside of the task scope."
+        "Do not do anything outside of the task scope.",
+        "If task is 'click on the xxx' or '點選xxx', you should split it into move mouse to the xxx and click on the xxx."
       ],
       "models": ["gemma4:e2b", "gemma3:4b"]
     }

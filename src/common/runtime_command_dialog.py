@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+_last_runtime_command: str | None = None
+
 
 def _prompt_runtime_command_console_fallback() -> str | None:
     cmd = input("Runtime command (empty to stop): ").strip()
     return None if not cmd else cmd
 
 
-def _prompt_runtime_command_tk() -> str | None:
+def _prompt_runtime_command_tk(previous_command: str | None = None) -> str | None:
     import tkinter as tk
     from tkinter import messagebox, ttk
 
@@ -51,6 +53,14 @@ def _prompt_runtime_command_tk() -> str | None:
         result["action"] = "end"
         root.destroy()
 
+    def on_use_previous() -> None:
+        if not previous_command:
+            return
+        entry_var.set(previous_command)
+        entry.icursor(tk.END)
+        entry.focus_set()
+
+    ttk.Button(btn_row, text="Previous command", command=on_use_previous).pack(side=tk.LEFT, padx=(0, 8))
     ttk.Button(btn_row, text="Run step", command=on_run).pack(side=tk.LEFT, padx=(0, 8))
     ttk.Button(btn_row, text="End run", command=on_end).pack(side=tk.LEFT)
 
@@ -80,11 +90,19 @@ def prompt_runtime_command_popup() -> str | None:
 
     Uses a Tk window when available; falls back to stdin if Tk cannot be used.
     """
+    global _last_runtime_command
+
+    cmd: str | None
     try:
         import tkinter as tk  # noqa: PLC0415
     except ImportError:
-        return _prompt_runtime_command_console_fallback()
-    try:
-        return _prompt_runtime_command_tk()
-    except tk.TclError:
-        return _prompt_runtime_command_console_fallback()
+        cmd = _prompt_runtime_command_console_fallback()
+    else:
+        try:
+            cmd = _prompt_runtime_command_tk(previous_command=_last_runtime_command)
+        except tk.TclError:
+            cmd = _prompt_runtime_command_console_fallback()
+
+    if cmd:
+        _last_runtime_command = cmd
+    return cmd

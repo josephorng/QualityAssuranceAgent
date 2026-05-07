@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
+from difflib import SequenceMatcher
+try:
+    from opencc import OpenCC
+except Exception:  # pragma: no cover - optional dependency
+    OpenCC = None  # type: ignore[assignment]
 
 from cua_mcp.read_screen_text.ocr_image import (
     format_coordinate_text_from_regions,
@@ -18,6 +24,7 @@ from src.eye.capture import capture_active_monitor_to_file
 settings = load_settings()
 logger = get_run_state_manager()
 _ollama = OllamaClient(settings.ollama_host)
+_t2s_converter = OpenCC("t2s") if OpenCC else None
 
 # Ollama JSON mode: model names OCR text; we map back to region centers.
 _TARGET_TEXT_JSON_SCHEMA: dict[str, Any] = {
@@ -89,6 +96,109 @@ def _parse_target_text_from_llm_content(raw: str) -> str:
 
 def _normalize_match_key(s: str) -> str:
     return " ".join(s.split()).casefold()
+
+
+def _to_simplified_chinese(s: str) -> str:
+    """
+    Convert Traditional Chinese to Simplified Chinese when OpenCC is available.
+    Falls back to the original string if the converter is unavailable.
+    """
+    if not s or _t2s_converter is None:
+        return s
+    try:
+        return _t2s_converter.convert(s)
+    except Exception:
+        return s
+
+
+def _extract_matchable_text_candidates(instruction: str) -> list[str]:
+    """
+    Extract likely UI text snippets from an instruction that can be compared
+    against OCR row texts.
+    """
+    text = (instruction or "").strip()
+    if not text:
+        return []
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        v = " ".join(value.split()).strip()
+        if len(v) < 2:
+            return
+        key = v.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(v)
+
+    # Prefer explicitly quoted UI labels.
+    for quoted in re.findall(r'"([^"]+)"|\'([^\']+)\'', text):
+        add(quoted[0] or quoted[1])
+
+    # Also consider text after common action verbs.
+    verb_pattern = (
+        r"(?i)\b(?:click|tap|press|select|choose|open|launch|type|enter)\b\s+"
+        r"(?:on\s+|the\s+)?(.+?)(?:[.,;]|$)"
+    )
+    for m in re.finditer(verb_pattern, text):
+        add(m.group(1))
+
+    # Fallback to full instruction if nothing else was extracted.
+    if not candidates:
+        add(text)
+
+    return candidates
+
+
+def _pick_best_similarity_row(
+    candidates: list[str],
+    rows: list[tuple[int, int, str]],
+    *,
+    min_score: float = 0.55,
+    min_gap: float = 0.03,
+) -> tuple[int, int, str] | None:
+    """
+    Return a single best row by text similarity, or None when confidence is low
+    or when top rows are tied/too close.
+    """
+    if not candidates or not rows:
+        return None
+
+    scored: list[tuple[float, int, int, str]] = []
+    for cx, cy, row_text in rows:
+        row_key = _normalize_match_key(_to_simplified_chinese(row_text))
+        if not row_key:
+            continue
+        best_for_row = 0.0
+        for candidate in candidates:
+            cand_key = _normalize_match_key(_to_simplified_chinese(candidate))
+            if not cand_key:
+                continue
+            score = SequenceMatcher(None, cand_key, row_key).ratio()
+            if score > best_for_row:
+                best_for_row = score
+        scored.append((best_for_row, cx, cy, row_text))
+
+    if not scored:
+        return None
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    best_score, bx, by, btext = scored[0]
+    if best_score < min_score:
+        return None
+
+    same_best_count = sum(1 for score, *_ in scored if abs(score - best_score) < 1e-9)
+    if same_best_count > 1:
+        return None
+
+    if len(scored) > 1:
+        second_score = scored[1][0]
+        if (best_score - second_score) < min_gap:
+            return None
+
+    return bx, by, btext
 
 
 def _extract_rows(
@@ -228,6 +338,16 @@ async def _select_coordinate(
     rows = _extract_rows(regions)
     if not rows:
         raise ValueError("OCR regions contain no non-empty text")
+
+    # Fast path: pick a single high-confidence OCR row via instruction-text similarity.
+    extracted_texts = _extract_matchable_text_candidates(instruction)
+    best_similarity_match = _pick_best_similarity_row(extracted_texts, rows)
+    if best_similarity_match is not None:
+        cx, cy, matched_text = best_similarity_match
+        logger.log_info(
+            f"_select_coordinate: similarity pre-match picked ({cx},{cy}) from {matched_text!r}"
+        )
+        return cx, cy
 
     coordinate_text = format_coordinate_text_from_regions(regions)
     base_instructions = get_prompt("coordinate_selection").format(

@@ -18,7 +18,7 @@ from src.common.models import (
 from src.common.ollama_client import OllamaClient
 from src.common.prompting import get_prompt
 from src.common.run_state import get_run_state_manager
-from src.common.runtime_context import SCRIPT_LINES_ENV, get_runtime_env
+from src.common.runtime_context import SCRIPT_LINES_ENV, get_runtime_env, is_runtime_command_mode
 from src.common.settings import load_settings
 from time import sleep
 
@@ -74,7 +74,7 @@ class BrainModule:
         self.manager = get_run_state_manager()
         self.manager.init_run(self.run_id, self.run_root.name)
         self.runtime = BrainRuntime()
-        self.script_lines = self._script_seed_steps()
+        self.script_lines = [] if is_runtime_command_mode() else self._script_seed_steps()
         self._script_step_index = 0
         self._hand = hand
         self._eye = eye
@@ -140,6 +140,14 @@ class BrainModule:
             if cleaned:
                 lines.append(cleaned)
         return lines
+
+    def prepare_runtime_step(self, command: str) -> None:
+        """Set a single script line for the next `process_step()` (runtime command mode)."""
+        cleaned = command.strip()
+        if not cleaned:
+            raise ValueError("runtime step command must be non-empty")
+        self.script_lines = [cleaned]
+        self._script_step_index = 0
 
     def _current_goal(self) -> str:
         """Return the goal text for `_script_step_index`, or the last line if the index is past the end."""

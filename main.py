@@ -13,6 +13,7 @@ from src.common.run_state import RunStateManager
 from src.common.script_helper import list_script_files, parse_script_lines
 from src.runtime.coordinator import RuntimeCoordinator
 from src.common.runtime_context import (
+    RUNTIME_COMMAND_MODE_ENV,
     SCRIPT_LINES_ENV,
     SCRIPT_PATH_ENV,
     set_runtime_env,
@@ -56,6 +57,20 @@ def select_script_input(root_dir: Path) -> tuple[str, Path, list[str]]:
         return task, script_path, script_steps
 
 
+def prompt_run_mode() -> bool:
+    """Return True if the user chose runtime command mode (one command per coordinator step)."""
+    while True:
+        print("Choose run mode:")
+        print("  1) Script file (steps from scripts/*.txt)")
+        print("  2) Runtime command (enter one command per step)")
+        choice = input("Enter 1 or 2: ").strip()
+        if choice == "1":
+            return False
+        if choice == "2":
+            return True
+        print("Invalid choice. Please try again.")
+
+
 def show_completion_popup(message: str, title: str = "QualityAssuranceAgent") -> None:
     if os.name == "nt":
         try:
@@ -67,7 +82,11 @@ def show_completion_popup(message: str, title: str = "QualityAssuranceAgent") ->
 
 
 def main() -> None:
-    task, selected_script_path, script_steps = select_script_input(ROOT_DIR)
+    runtime_mode = prompt_run_mode()
+    if runtime_mode:
+        task = "runtime_command"
+    else:
+        task, selected_script_path, script_steps = select_script_input(ROOT_DIR)
 
     settings = load_settings()
     runs_root = Path(settings.runs_dir)
@@ -77,8 +96,12 @@ def main() -> None:
     run_id = paths.root.name
 
     set_runtime_env(paths.root, run_id)
-    os.environ[SCRIPT_PATH_ENV] = str(selected_script_path)
-    os.environ[SCRIPT_LINES_ENV] = json.dumps(script_steps, ensure_ascii=False)
+    if runtime_mode:
+        os.environ[RUNTIME_COMMAND_MODE_ENV] = "1"
+    else:
+        os.environ.pop(RUNTIME_COMMAND_MODE_ENV, None)
+        os.environ[SCRIPT_PATH_ENV] = str(selected_script_path)
+        os.environ[SCRIPT_LINES_ENV] = json.dumps(script_steps, ensure_ascii=False)
     eye_monitor_index = prompt_eye_monitor_index()
     os.environ["EYE_MONITOR_INDEX"] = str(eye_monitor_index)
     print(f"[master] Eye capture monitor index: {eye_monitor_index} (0 = all screens)")

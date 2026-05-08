@@ -29,10 +29,11 @@ from cua_mcp.tool_module import (
     _store_text,
     _triple_click,
     _wait,
+    _move_to_ui_element,
     _zoom,
-    _maximize_window,
-    _close_window,
-    _minimize_all_windows,
+    _maximize_windows,
+    _close_windows,
+    _minimize_windows,
 )
 
 mcp_server = FastMCP("ComputerUseAgent")
@@ -43,11 +44,7 @@ def click(
     instruction: str = "",
 ):
     '''
-    Click the mouse at the current cursor position (after using mouse_move to aim).
-
-    Args:
-        button: Mouse button: typically 'left', 'right', or 'middle'.
-        instruction: Optional note for logging only (does not affect targeting).
+    Click the selected mouse button.
     '''
     return _click(button=button).update({"instruction": instruction})
 
@@ -58,13 +55,7 @@ def type_text(
     instruction: str = "",
 ):
     '''
-    Paste text at the current keyboard focus via clipboard (Ctrl+V).
-
-    Does not move or click the mouse.
-
-    Args:
-        text: Text to paste.
-        instruction: Optional note for logging only.
+    Type or paste text into the focused input.
     '''
     return _type_text(text=text).update({"instruction": instruction})
 
@@ -75,11 +66,7 @@ def press_key(
     instruction: str = "",
 ):
     '''
-    Send a single key press such as Enter, Tab, or Escape.
-
-    Args:
-        key: Key name to press.
-        instruction: Optional context describing why the key is pressed.
+    Press a single keyboard key.
     '''
     return _press_key(key=key).update({"instruction": instruction})
 
@@ -90,11 +77,7 @@ def hotkey(
     instruction: str = "",
 ):
     '''
-    Press multiple keys together as a shortcut, such as Ctrl+S or Alt+Tab.
-
-    Args:
-        keys: Key chord provided as a list of key names or supported string token.
-        instruction: Optional context or rationale for the shortcut.
+    Press a keyboard shortcut combination.
     '''
     return _hotkey(keys=keys).update({"instruction": instruction})
 
@@ -105,11 +88,7 @@ def wait(
     instruction: str = "",
 ):
     '''
-    Pause execution for a fixed duration before continuing.
-
-    Args:
-        seconds: Delay duration in seconds.
-        instruction: Optional context describing why the wait is needed.
+    Pause execution for a number of seconds.
     '''
     return _wait(seconds=seconds).update({"instruction": instruction})
 
@@ -122,13 +101,7 @@ def store_text(
     tags: list[str] | None = None,
 ):
     '''
-    Persist text into run storage with optional metadata for later retrieval.
-
-    Args:
-        text: Body text to store.
-        instruction: Optional context or provenance for the stored text.
-        title: Short title or label for listing stored entries.
-        tags: Optional tags used for categorization.
+    Save text to run storage.
     '''
     return _store_text(text=text, title=title, tags=tags).update({"instruction": instruction})
 
@@ -141,14 +114,7 @@ def store_clipboard_text(
     file_name: str = "",
 ):
     '''
-    Read the current OS clipboard as text and save it to this run's storage/ folder plus storage.json.
-
-    Args:
-        instruction: Optional context for logging only.
-        title: Short title or label for the stored entry.
-        tags: Optional tags for categorization.
-        file_name: Optional basename for the .txt file (defaults to clipboard_<utc_timestamp>.txt).
-                   Only the basename is used; paths are stripped for safety.
+    Save current clipboard text to run storage.
     '''
     return _store_clipboard_text(title=title, tags=tags, file_name=file_name).update({"instruction": instruction})
 
@@ -162,14 +128,7 @@ def store_image(
     tags: list[str] | None = None,
 ):
     '''
-    Register an image path in run storage with optional metadata.
-
-    Args:
-        image_path: Path to the image file to store.
-        instruction: Optional context for why this image is stored.
-        summary: Human-readable summary of the image contents or purpose.
-        alias: Short memorable name to reference this image later.
-        tags: Optional tags used for categorization.
+    Save an image reference to run storage.
     '''
     return _store_image(
         image_path=image_path,
@@ -188,30 +147,29 @@ def key(
     instruction: str = "",
 ):
     '''
-    Press and release one logical key, distinct from multi-key shortcuts.
-
-    Args:
-        key: Single key name to press.
-        instruction: Optional context for logging.
+    Press and release one key.
     '''
     return _key(key=key).update({"instruction": instruction})
 
 
 @mcp_server.tool()
 async def mouse_move(
+    target_type: str,
+    target: str,
     instruction: str,
-    duration: float = 0.0,
 ):
     '''
-    Capture the screen, run YOLO+OCR, use the brain LM to pick a target, then move the cursor there.
-
-    This is the only tool that performs vision-based targeting; call it before click/scroll/etc.
-
-    Args:
-        instruction: Natural-language description of where the cursor should move.
-        duration: Seconds to animate the movement.
+    Move the mouse cursor based on the instruction.
+    target_type: "text" or "ui_element"
+    target: the target text or ui element to move to
     '''
-    return (await _move(instruction=instruction, duration=duration)).update({"instruction": instruction})
+    duration: float = 0.2
+    if target_type == "text":
+        return (await _move(target=target, instruction=instruction, duration=duration)).update({"instruction": instruction})
+    elif target_type == "ui_element":
+        return (await _move_to_ui_element(instruction=instruction, duration=duration)).update({"instruction": instruction})
+    else:
+        raise ValueError(f"Invalid target type: {target_type}")
 
 
 @mcp_server.tool()
@@ -222,13 +180,7 @@ def left_click_drag(
     instruction: str = "",
 ):
     '''
-    Left-button drag from the current cursor position to screen coordinates (x2, y2).
-
-    Args:
-        x2: End x in screen pixels.
-        y2: End y in screen pixels.
-        duration: Drag movement duration in seconds.
-        instruction: Optional note for logging only.
+    Drag from current cursor position to a target point.
     '''
     return _left_click_drag(x2=x2, y2=y2, duration=duration).update({"instruction": instruction})
 
@@ -239,9 +191,6 @@ def right_click(
 ):
     '''
     Right-click at the current cursor position.
-
-    Args:
-        instruction: Optional note for logging only.
     '''
     return _right_click().update({"instruction": instruction})
 
@@ -252,9 +201,6 @@ def middle_click(
 ):
     '''
     Middle-click at the current cursor position.
-
-    Args:
-        instruction: Optional note for logging only.
     '''
     return _middle_click().update({"instruction": instruction})
 
@@ -264,10 +210,7 @@ def double_click(
     instruction: str = "",
 ):
     '''
-    Double-click (left) at the current cursor position.
-
-    Args:
-        instruction: Optional note for logging only.
+    Double-click at the current cursor position.
     '''
     return _double_click().update({"instruction": instruction})
 
@@ -277,10 +220,7 @@ def triple_click(
     instruction: str = "",
 ):
     '''
-    Triple-click (left) at the current cursor position.
-
-    Args:
-        instruction: Optional note for logging only.
+    Triple-click at the current cursor position.
     '''
     return _triple_click().update({"instruction": instruction})
 
@@ -291,12 +231,7 @@ def screenshot(
     instruction: str = "",
 ):
     '''
-    Capture the current screen to a PNG path for evidence or downstream processing.
-
-    Args:
-        path: Output PNG path. Empty string uses the current run's storage/ folder with a timestamped name.
-              Relative paths are resolved under that storage folder (basename only).
-        instruction: Optional note describing why the screenshot is taken.
+    Capture a screenshot and save it.
     '''
     return _screenshot(path=path, instruction=instruction)
 
@@ -306,10 +241,7 @@ def cursor_position(
     instruction: str = "",
 ):
     '''
-    Read the current mouse cursor coordinates in screen space.
-
-    Args:
-        instruction: Optional context for logging.
+    Get the current mouse cursor coordinates.
     '''
     return _cursor_position(instruction=instruction)
 
@@ -319,10 +251,7 @@ def left_mouse_down(
     instruction: str = "",
 ):
     '''
-    Press the left mouse button down without releasing (at the current cursor).
-
-    Args:
-        instruction: Optional note for logging only.
+    Press and hold the left mouse button.
     '''
     return _left_mouse_down().update({"instruction": instruction})
 
@@ -332,10 +261,7 @@ def left_mouse_up(
     instruction: str = "",
 ):
     '''
-    Release the left mouse button (at the current cursor).
-
-    Args:
-        instruction: Optional note for logging only.
+    Release the left mouse button.
     '''
     return _left_mouse_up().update({"instruction": instruction})
 
@@ -346,11 +272,7 @@ def scroll(
     instruction: str = "",
 ):
     '''
-    Scroll the mouse wheel at the current cursor position.
-
-    Args:
-        clicks: Wheel delta in clicks; sign controls scroll direction.
-        instruction: Optional note for logging only.
+    Scroll the mouse wheel.
     '''
     return _scroll(clicks=clicks).update({"instruction": instruction})
 
@@ -362,12 +284,7 @@ def hold_key(
     instruction: str = "",
 ):
     '''
-    Hold a key down for a fixed duration, then release it.
-
-    Args:
-        key: Key name to hold.
-        seconds: How long to keep the key depressed.
-        instruction: Optional context for logging.
+    Hold a keyboard key for a duration.
     '''
     return _hold_key(key=key, seconds=seconds).update({"instruction": instruction})
 
@@ -378,66 +295,53 @@ def zoom(
     instruction: str = "",
 ):
     '''
-    Apply Ctrl+wheel zoom at the current cursor position.
-
-    Args:
-        scroll_clicks: Wheel clicks while Ctrl is held; sign controls zoom in or out.
-        instruction: Optional note for logging only.
+    Zoom in or out using mouse wheel input.
     '''
     return _zoom(scroll_clicks=scroll_clicks).update({"instruction": instruction})
 
 
 @mcp_server.tool()
-async def maximize_window(
+async def maximize_windows(
     window_title_contains: str,
     instruction: str = "",
 ):
     '''
-    Maximize a top-level window whose title contains the given substring (case-insensitive).
-
-    If no windows match the substring, or several do, Ollama chooses among candidates;
-    supply instruction with extra natural-language context for that disambiguation.
-
-    Args:
-        window_title_contains: Non-empty substring to match against window titles.
-        instruction: Extra description used to disambiguate (0 or multiple substring matches).
+    Maximize windows matching the title text. Set the window_title_contains
+    to "all" to maximize all windows.
     '''
-    return (await _maximize_window(
+    return (await _maximize_windows(
         window_title_contains=window_title_contains,
+        instruction=instruction,
     )).update({"instruction": instruction})
 
 
 @mcp_server.tool()
-async def close_window(
+async def close_windows(
     window_title_contains: str,
     instruction: str = "",
 ):
     '''
-    Close a top-level window whose title contains the given substring (case-insensitive).
-
-    If no windows match the substring, or several do, Ollama chooses among candidates;
-    supply instruction with extra natural-language context for that disambiguation.
-
-    Args:
-        window_title_contains: Non-empty substring to match against window titles.
-        instruction: Extra description used to disambiguate (0 or multiple substring matches).
+    Close windows matching the title text. Set the window_title_contains to "all" to close all windows.
     '''
-    return (await _close_window(
+    return (await _close_windows(
         window_title_contains=window_title_contains,
+        instruction=instruction,
     )).update({"instruction": instruction})
 
 
 @mcp_server.tool()
-def minimize_all_windows(
+async def minimize_windows(
+    window_title_contains: str,
     instruction: str = "",
 ):
     '''
-    Minimize all top-level windows with visible titles.
-
-    Args:
-        instruction: Optional note for logging only.
+    Minimize windows matching the title text. Set the window_title_contains
+    to "all" to minimize all windows.
     '''
-    return _minimize_all_windows().update({"instruction": instruction})
+    return (await _minimize_windows(
+        window_title_contains=window_title_contains,
+        instruction=instruction,
+    )).update({"instruction": instruction})
 
 
 @mcp_server.tool()
@@ -448,13 +352,7 @@ def open_website(
     instruction: str = "",
 ):
     '''
-    Open a website URL using the system default web browser.
-
-    Args:
-        url: The URL to open (e.g. "https://www.google.com").
-        new: 0 = same window if possible, 1 = new window, 2 = new tab.
-        autoraise: Whether to try to raise the browser window.
-        instruction: Optional note for logging only.
+    Open a URL in the default web browser.
     '''
     normalized = (url or "").strip()
     if not normalized:
@@ -479,12 +377,7 @@ def list_storage_files(
     instruction: str = "",
 ):
     '''
-    List files in the current run's storage directory.
-
-    Args:
-        pattern: Glob-style pattern matched against file basenames (e.g. "*.txt", "screenshot_*.png").
-        max_results: Upper bound on number of results.
-        instruction: Optional note for logging only.
+    List files in run storage.
     '''
     return _list_storage_files(pattern=pattern, max_results=max_results).update({"instruction": instruction})
 
@@ -497,15 +390,7 @@ def open_storage_text(
     instruction: str = "",
 ):
     '''
-    Open (read) a text file from the current run's storage directory.
-
-    For safety, this tool only allows reading ``.txt`` files by basename and does not allow paths.
-
-    Args:
-        file_name: Basename of the text file in storage/ (e.g. "clipboard_20260101_000000_000000.txt").
-        max_chars: Max characters returned in content (longer files are truncated).
-        encoding: Text encoding used to decode the file.
-        instruction: Optional note for logging only.
+    Read a text file from run storage.
     '''
     return _read_storage_text(file_name=file_name, max_chars=max_chars, encoding=encoding).update(
         {"instruction": instruction}
@@ -531,9 +416,9 @@ TOOL_FUNCTIONS: list[callable[..., Any]] = [
     scroll,
     hold_key,
     zoom,
-    maximize_window,
-    close_window,
-    minimize_all_windows,
+    maximize_windows,
+    close_windows,
+    minimize_windows,
     triple_click,
     middle_click,
     double_click,

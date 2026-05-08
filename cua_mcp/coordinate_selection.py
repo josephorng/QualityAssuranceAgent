@@ -155,16 +155,13 @@ def _extract_matchable_text_candidates(instruction: str) -> list[str]:
 def _pick_best_similarity_row(
     candidates: list[str],
     rows: list[tuple[int, int, str]],
-    *,
-    min_score: float = 0.55,
-    min_gap: float = 0.03,
-) -> tuple[int, int, str] | None:
+) -> list[tuple[int, int, str]]:
     """
-    Return a single best row by text similarity, or None when confidence is low
-    or when top rows are tied/too close.
+    Return every OCR row whose best similarity score (against any candidate) is
+    greater than zero, sorted by descending score.
     """
     if not candidates or not rows:
-        return None
+        return []
 
     scored: list[tuple[float, int, int, str]] = []
     for cx, cy, row_text in rows:
@@ -181,24 +178,9 @@ def _pick_best_similarity_row(
                 best_for_row = score
         scored.append((best_for_row, cx, cy, row_text))
 
-    if not scored:
-        return None
-
-    scored.sort(key=lambda item: item[0], reverse=True)
-    best_score, bx, by, btext = scored[0]
-    if best_score < min_score:
-        return None
-
-    same_best_count = sum(1 for score, *_ in scored if abs(score - best_score) < 1e-9)
-    if same_best_count > 1:
-        return None
-
-    if len(scored) > 1:
-        second_score = scored[1][0]
-        if (best_score - second_score) < min_gap:
-            return None
-
-    return bx, by, btext
+    positive = [(s, cx, cy, t) for s, cx, cy, t in scored if s > 0]
+    positive.sort(key=lambda item: item[0], reverse=True)
+    return [(cx, cy, t) for s, cx, cy, t in positive]
 
 
 def _extract_rows(
@@ -327,6 +309,7 @@ async def _disambiguate_duplicate_centers(
 
 
 async def _select_coordinate(
+    target: str,
     instruction: str,
     regions: list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]],
     screenshot_path: str | Path,
@@ -339,19 +322,29 @@ async def _select_coordinate(
     if not rows:
         raise ValueError("OCR regions contain no non-empty text")
 
-    # Fast path: pick a single high-confidence OCR row via instruction-text similarity.
-    extracted_texts = _extract_matchable_text_candidates(instruction)
-    best_similarity_match = _pick_best_similarity_row(extracted_texts, rows)
-    if best_similarity_match is not None:
-        cx, cy, matched_text = best_similarity_match
+    # Fast path: OCR rows with positive text similarity to instruction-derived candidates.
+    extracted_texts = _extract_matchable_text_candidates(target)
+    similarity_matches = _pick_best_similarity_row(extracted_texts, rows)
+    if len(similarity_matches) == 1:
+        cx, cy, matched_text = similarity_matches[0]
         logger.log_info(
             f"_select_coordinate: similarity pre-match picked ({cx},{cy}) from {matched_text!r}"
         )
         return cx, cy
+    if len(similarity_matches) > 1:
+        image_path = str(path.resolve())
+        x, y = await _disambiguate_duplicate_centers(
+            instruction, target, similarity_matches, image_path
+        )
+        logger.log_info(
+            f"_select_coordinate: similarity pre-match disambiguated to ({x},{y})"
+        )
+        return x, y
 
     coordinate_text = format_coordinate_text_from_regions(regions)
     base_instructions = get_prompt("coordinate_selection").format(
         instruction=instruction,
+        target=target,
         coordinate_text=coordinate_text,
     )
 
@@ -417,7 +410,7 @@ def _with_clicked_text(result: dict[str, Any], clicked_text: str) -> dict[str, A
     return merged
 
 
-async def _resolve_point(instruction: str) -> tuple[int, int, str]:
+async def _resolve_point(target: str, instruction: str) -> tuple[int, int, str]:
     paths = logger.require_paths()
     name = f"{ts_name()}.png"
     out = paths.yolo_ocr_dir / name
@@ -425,6 +418,7 @@ async def _resolve_point(instruction: str) -> tuple[int, int, str]:
 
     (off_x, off_y), regions = get_coordinates_from_path(str(out))
     local_x, local_y = await _select_coordinate(
+        target=target,
         instruction=instruction,
         regions=regions,
         screenshot_path=out,

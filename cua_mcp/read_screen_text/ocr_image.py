@@ -382,6 +382,30 @@ def get_coordinates_from_path(
     return (offset_x, offset_y), all_regions
 
 
+def get_text_boxes_from_path(image_path: str) -> list[tuple[int, int, int, int]]:
+    """
+    Return OCR detector YOLO text boxes only (x, y, w, h) for an image.
+
+    This skips CRNN text recognition and only runs the text-region detector.
+    """
+    _log_info(f"OCR get_text_boxes_from_path start image_path={image_path}")
+    if not image_path or not isinstance(image_path, str):
+        _log_info("OCR get_text_boxes_from_path invalid image_path argument")
+        return []
+    if not os.path.isfile(image_path):
+        _log_info(f"OCR get_text_boxes_from_path file not found path={image_path}")
+        return []
+
+    bgr = cv2.imread(image_path)
+    if bgr is None:
+        _log_info(f"OCR get_text_boxes_from_path could not read image path={image_path}")
+        return []
+
+    boxes = _yolo_text_boxes(bgr)
+    _log_info(f"OCR get_text_boxes_from_path boxes={len(boxes)}")
+    return boxes
+
+
 def get_coordinates(
     *,
     line_height: int = 32,

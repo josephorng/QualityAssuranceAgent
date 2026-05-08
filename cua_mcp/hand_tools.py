@@ -259,12 +259,12 @@ def _parse_json_object_from_llm(content: str) -> dict[str, Any]:
     return json.loads(text)
 
 
-async def _ollama_pick_window_index(
+async def _ollama_pick_window_indices(
     user_query: str,
     candidates: list[tuple[Any, str]],
     instruction: str = "",
     action: str = "maximize",
-) -> int:
+) -> list[int]:
     if not candidates:
         raise ValueError("no candidate windows to choose from")
     lines = [f"{i}: {title}" for i, (_, title) in enumerate(candidates)]
@@ -275,14 +275,15 @@ async def _ollama_pick_window_index(
         else ""
     )
     prompt = (
-        f"You pick exactly one desktop window to {action}.\n"
-        "The user wants this window (natural-language or partial title):\n"
+        f"You select one or more desktop windows to {action}.\n"
+        "The user wants these windows (natural-language or partial title):\n"
         f"{user_query!r}\n\n"
         f"{context_block}"
-        "From the numbered list, choose the single best match. "
-        "Prefer the main application window over tiny dialogs or tool windows when unclear.\n"
-        "Return JSON only in this exact shape: {\"index\": <int>}\n"
-        "Use the 0-based index from the list.\n\n"
+        "From the numbered list, choose every window that matches the user's intent. "
+        "Use a single-element list when only one window is appropriate. "
+        "Prefer main application windows over tiny dialogs or tool windows when unclear.\n"
+        "Return JSON only in this exact shape: {\"indices\": [<int>, ...]}\n"
+        "Use 0-based indices from the list.\n\n"
         "Windows:\n"
         + "\n".join(lines)
     )
@@ -293,188 +294,248 @@ async def _ollama_pick_window_index(
     )
     content = (msg.content or "").strip()
     out = _parse_json_object_from_llm(content)
-    idx = int(out["index"])
-    if idx < 0 or idx >= len(candidates):
-        raise ValueError(
-            f"ollama returned index {idx} but valid range is 0..{len(candidates) - 1}"
+    raw = out.get("indices")
+    if not isinstance(raw, list):
+        raise ValueError("ollama JSON must contain a non-empty list field \"indices\"")
+    indices: list[int] = []
+    seen: set[int] = set()
+    for item in raw:
+        idx = int(item)
+        if idx < 0 or idx >= len(candidates):
+            raise ValueError(
+                f"ollama returned index {idx} but valid range is 0..{len(candidates) - 1}"
+            )
+        if idx not in seen:
+            seen.add(idx)
+            indices.append(idx)
+    if not indices:
+        raise ValueError("ollama returned empty indices list")
+    return indices
+
+
+async def _select_target_windows(
+    window_title_contains: str,
+    instruction: str,
+    action: str,
+) -> tuple[list[tuple[Any, str]], str]:
+    """
+    Return windows to act on and how they were chosen.
+
+    Single substring match -> no LLM. Zero or multiple substring matches ->
+    Ollama returns one or more indices into the relevant candidate list.
+    """
+    needle = (window_title_contains or "").strip()
+    if not needle:
+        raise ValueError("window_title_contains must be a non-empty string")
+
+    nlow = needle.lower()
+    substring_matches: list[tuple[Any, str]] = []
+    for w in gw.getAllWindows():
+        title = (w.title or "").strip()
+        if (not title or nlow not in title.lower()) and nlow != "all":
+            continue
+        substring_matches.append((w, title))
+
+    if len(substring_matches) == 1:
+        return [substring_matches[0]], "substring_unique"
+    if len(substring_matches) == 0:
+        candidates = _list_windows_with_titles()
+        if not candidates:
+            raise ValueError("no windows with non-empty titles found")
+        idxs = await _ollama_pick_window_indices(
+            needle,
+            candidates,
+            instruction=instruction,
+            action=action,
         )
-    return idx
+        return [candidates[i] for i in idxs], "ollama_no_substring_match"
+    idxs = await _ollama_pick_window_indices(
+        needle,
+        substring_matches,
+        instruction=instruction,
+        action=action,
+    )
+    return [substring_matches[i] for i in idxs], "ollama_disambiguate"
 
 
-async def maximize_window(
+async def maximize_windows(
     window_title_contains: str,
     instruction: str = "",
 ) -> dict[str, Any]:
     """
-    Bring a top-level window to the foreground and maximize it.
+    Bring one or more top-level windows to the foreground and maximize them.
 
     First tries case-insensitive substring match on window titles. If exactly one
     window matches, it is used. If none or several match, asks Ollama (brain_lm)
-    to pick the best index from the relevant candidate list. For those Ollama
-    calls, ``instruction`` (if non-empty) is included in the prompt as extra
+    to pick one or more indices from the relevant candidate list. For those
+    Ollama calls, ``instruction`` (if non-empty) is included in the prompt as extra
     disambiguation context.
     """
     needle = (window_title_contains or "").strip()
     if not needle:
         raise ValueError("window_title_contains must be a non-empty string")
 
-    nlow = needle.lower()
-    substring_matches: list[tuple[Any, str]] = []
-    for w in gw.getAllWindows():
-        title = (w.title or "").strip()
-        if not title or nlow not in title.lower():
-            continue
-        substring_matches.append((w, title))
+    targets, selection_mode = await _select_target_windows(
+        window_title_contains,
+        instruction,
+        action="maximize",
+    )
 
-    selection_mode: str
-    w: Any
-    title: str
+    target_rows: list[dict[str, Any]] = []
+    succeeded = 0
+    failed = 0
+    for w, title in targets:
+        try:
+            try:
+                w.activate()
+            except Exception:
+                pass
+            if w.isMinimized:
+                w.restore()
+            w.maximize()
+            target_rows.append({"matched_title": title, "status": "maximized"})
+            succeeded += 1
+        except Exception as exc:
+            failed += 1
+            target_rows.append(
+                {
+                    "matched_title": title,
+                    "status": "error",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
 
-    if len(substring_matches) == 1:
-        w, title = substring_matches[0]
-        selection_mode = "substring_unique"
-    elif len(substring_matches) == 0:
-        candidates = _list_windows_with_titles()
-        if not candidates:
-            raise ValueError("no windows with non-empty titles found")
-        idx = await _ollama_pick_window_index(
-            needle,
-            candidates,
-            instruction=instruction,
-            action="maximize",
-        )
-        w, title = candidates[idx]
-        selection_mode = "ollama_no_substring_match"
-    else:
-        idx = await _ollama_pick_window_index(
-            needle,
-            substring_matches,
-            instruction=instruction,
-            action="maximize",
-        )
-        w, title = substring_matches[idx]
-        selection_mode = "ollama_disambiguate"
-
-    try:
-        w.activate()
-    except Exception:
-        pass
-    if w.isMinimized:
-        w.restore()
-    w.maximize()
     out: dict[str, Any] = {
         "window_title_contains": needle,
-        "matched_title": title,
-        "status": "maximized",
         "selection_mode": selection_mode,
+        "matched_count": len(targets),
+        "succeeded_count": succeeded,
+        "failed_count": failed,
+        "targets": target_rows,
+        "status": "success" if failed == 0 else "partial_success",
     }
     if (instruction or "").strip():
         out["instruction"] = instruction.strip()
     return out
 
 
-async def close_window(
+async def close_windows(
     window_title_contains: str,
     instruction: str = "",
 ) -> dict[str, Any]:
     """
-    Close a top-level window whose title best matches the query.
+    Close one or more top-level windows whose titles best match the query.
 
     First tries case-insensitive substring match on window titles. If exactly one
     window matches, it is used. If none or several match, asks Ollama (brain_lm)
-    to pick the best index from the relevant candidate list.
+    to pick one or more indices from the relevant candidate list.
     """
     needle = (window_title_contains or "").strip()
     if not needle:
         raise ValueError("window_title_contains must be a non-empty string")
 
-    nlow = needle.lower()
-    substring_matches: list[tuple[Any, str]] = []
-    for w in gw.getAllWindows():
-        title = (w.title or "").strip()
-        if not title or nlow not in title.lower():
-            continue
-        substring_matches.append((w, title))
+    targets, selection_mode = await _select_target_windows(
+        window_title_contains,
+        instruction,
+        action="close",
+    )
 
-    selection_mode: str
-    w: Any
-    title: str
-
-    if len(substring_matches) == 1:
-        w, title = substring_matches[0]
-        selection_mode = "substring_unique"
-    elif len(substring_matches) == 0:
-        candidates = _list_windows_with_titles()
-        if not candidates:
-            raise ValueError("no windows with non-empty titles found")
-        idx = await _ollama_pick_window_index(
-            needle,
-            candidates,
-            instruction=instruction,
-            action="close",
-        )
-        w, title = candidates[idx]
-        selection_mode = "ollama_no_substring_match"
-    else:
-        idx = await _ollama_pick_window_index(
-            needle,
-            substring_matches,
-            instruction=instruction,
-            action="close",
-        )
-        w, title = substring_matches[idx]
-        selection_mode = "ollama_disambiguate"
-
-    try:
-        w.activate()
-    except Exception:
-        pass
-    if w.isMinimized:
-        w.restore()
-    w.close()
+    target_rows: list[dict[str, Any]] = []
+    succeeded = 0
+    failed = 0
+    for w, title in targets:
+        try:
+            try:
+                w.activate()
+            except Exception:
+                pass
+            if w.isMinimized:
+                w.restore()
+            w.close()
+            target_rows.append({"matched_title": title, "status": "closed"})
+            succeeded += 1
+        except Exception as exc:
+            failed += 1
+            target_rows.append(
+                {
+                    "matched_title": title,
+                    "status": "error",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
 
     out: dict[str, Any] = {
         "window_title_contains": needle,
-        "matched_title": title,
-        "status": "closed",
         "selection_mode": selection_mode,
+        "matched_count": len(targets),
+        "succeeded_count": succeeded,
+        "failed_count": failed,
+        "targets": target_rows,
+        "status": "success" if failed == 0 else "partial_success",
     }
     if (instruction or "").strip():
         out["instruction"] = instruction.strip()
     return out
 
 
-def minimize_all_windows() -> dict[str, Any]:
+async def minimize_windows(
+    window_title_contains: str,
+    instruction: str = "",
+) -> dict[str, Any]:
     """
-    Minimize all top-level windows that are currently not minimized.
-    """
-    total_with_titles = 0
-    minimized_titles: list[str] = []
-    errors: list[str] = []
+    Minimize one or more top-level windows selected like maximize/close.
 
-    for w in gw.getAllWindows():
-        title = (w.title or "").strip()
-        if not title:
-            continue
-        total_with_titles += 1
+    Windows already minimized are skipped and reported separately.
+    """
+    needle = (window_title_contains or "").strip()
+    if not needle:
+        raise ValueError("window_title_contains must be a non-empty string")
+
+    targets, selection_mode = await _select_target_windows(
+        window_title_contains,
+        instruction,
+        action="minimize",
+    )
+
+    target_rows: list[dict[str, Any]] = []
+    succeeded = 0
+    failed = 0
+    already_minimized = 0
+    for w, title in targets:
         if w.isMinimized:
+            already_minimized += 1
+            target_rows.append({"matched_title": title, "status": "already_minimized"})
             continue
         try:
+            try:
+                w.activate()
+            except Exception:
+                pass
             w.minimize()
-            minimized_titles.append(title)
+            target_rows.append({"matched_title": title, "status": "minimized"})
+            succeeded += 1
         except Exception as exc:
-            errors.append(f"{title}: {type(exc).__name__}: {exc}")
+            failed += 1
+            target_rows.append(
+                {
+                    "matched_title": title,
+                    "status": "error",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
 
     out: dict[str, Any] = {
-        "status": "success" if not errors else "partial_success",
-        "total_windows_with_titles": total_with_titles,
-        "minimized_count": len(minimized_titles),
-        "already_minimized_count": total_with_titles - len(minimized_titles) - len(errors),
+        "window_title_contains": needle,
+        "selection_mode": selection_mode,
+        "matched_count": len(targets),
+        "succeeded_count": succeeded,
+        "failed_count": failed,
+        "already_minimized_count": already_minimized,
+        "targets": target_rows,
+        "status": "success" if failed == 0 else "partial_success",
     }
-    if minimized_titles:
-        out["minimized_titles"] = minimized_titles
-    if errors:
-        out["errors"] = errors
+    if (instruction or "").strip():
+        out["instruction"] = instruction.strip()
     return out
 
 

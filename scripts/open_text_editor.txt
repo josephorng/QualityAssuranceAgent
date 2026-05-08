@@ -12,3 +12,6 @@
 用win+e打開檔案總管，按下ctrl+l。
 輸入"C:\Users\Joseph Hung\Documents\Repos"，接著按下enter。
 將滑鼠移到"終極測試檔案.txt"，並雙點擊打開檔案。
+
+
+將滑鼠移到"筆記本名稱"下面的UI元件，並點擊。

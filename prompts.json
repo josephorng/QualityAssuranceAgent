@@ -18,7 +18,9 @@
  
       "instructions": [
         "If the previous task is not executed, try new method to achieve the task.",
-        "If the tool failed to execute, do not assume the task is completed. Try new method to achieve the task."
+        "If the tool failed to execute, do not assume the task is completed. Try new method to achieve the task.",
+        "If the task can be examined by screenshot, use the screenshot to examine if the task is completed.",
+        "If the task cannot be examined by screenshot, then assume the task is completed if the tool is executed successfully."
       ],
       "models": ["gemma4:e2b", "gemma3:4b"]
     }
@@ -40,13 +42,25 @@
   ],
   "coordinate_selection": [
     {
-      "prompt": "Choose ONE line from CoordinatesText that best matches Instruction.\nCoordinatesText lines look like: [center_x,center_y] <OCR text for that region>.\n\nInstruction:\n{instruction}\n\nCoordinatesText:\n{coordinate_text}\n",
+      "prompt": "Choose ONE line from CoordinatesText that best matches Target.\nCoordinatesText lines look like: [center_x,center_y] <OCR text for that region>.\n\nTarget:\n{target}\n\nInstruction:\n{instruction}\n\nCoordinatesText:\n{coordinate_text}\n",
       "instructions": [
         "OCR text might have typos and errors, so you need to be careful to match the text correctly.",
         "Reply with the OCR text only (the part after the bracket), copied verbatim from CoordinatesText when possible so it can be matched even if it contains typos and errors.",
         "Output NOTHING except valid JSON matching the server's schema.",
         "Do not summarize, classify, bullet-list, markdown, translate, explain, add keys, or add prose.",
         "Return strict JSON only."
+      ],
+      "models": ["gemma4:e2b", "gemma3:4b"]
+    }
+  ],
+  "ui_element_selection": [
+    {
+      "prompt": "Choose ONE index from the Candidates list that best matches the Instruction.\nEach line is: [index] class_name center=[cx,cy] conf=...\nIndices are 0-based. Use the image to disambiguate when several candidates have similar class names.\n\nInstruction:\n{instruction}\n\nCandidates:\n{candidates_text}\n",
+      "instructions": [
+        "Candidates are non-text UI detections; do not expect readable text labels.",
+        "Output NOTHING except valid JSON matching the server's schema.",
+        "Return strict JSON only: {{\"index\": <integer>}}.",
+        "Do not summarize, explain, or add prose."
       ],
       "models": ["gemma4:e2b", "gemma3:4b"]
     }

@@ -71,7 +71,12 @@ def _prompt_runtime_command_tk(previous_command: str | None = None) -> str | Non
     entry.bind("<Return>", on_return)
     root.protocol("WM_DELETE_WINDOW", on_end)
 
-    entry.focus_set()
+    def _focus_entry_when_shown() -> None:
+        root.lift()
+        entry.focus_force()
+        entry.icursor(tk.END)
+
+    root.after_idle(_focus_entry_when_shown)
     root.update_idletasks()
     w, h = root.winfo_reqwidth(), root.winfo_reqheight()
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()

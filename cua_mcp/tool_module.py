@@ -7,6 +7,7 @@ from typing import Any
 
 from cua_mcp import hand_tools
 from cua_mcp.coordinate_selection import _resolve_point, _with_clicked_text
+from cua_mcp.ui_element_selection import resolve_ui_element_point
 from cua_mcp.storage import store_clipboard_text, store_image, store_text, _current_run_paths
 
 
@@ -26,9 +27,18 @@ def _hotkey(keys: list[str] | str) -> dict[str, Any]:
     return hand_tools.hotkey(keys=keys)
 
 
-async def _move(instruction: str, duration: float = 0.0) -> dict[str, Any]:
-    x, y, clicked = await _resolve_point(instruction)
+async def _move(target: str, instruction: str, duration: float = 0.0) -> dict[str, Any]:
+    x, y, clicked = await _resolve_point(target=target, instruction=instruction)
     return _with_clicked_text(hand_tools.move(x=x, y=y, duration=duration), clicked)
+
+
+async def _move_to_ui_element(instruction: str, duration: float = 0.0) -> dict[str, Any]:
+    gx, gy, meta = await resolve_ui_element_point(instruction)
+    result = hand_tools.move(x=gx, y=gy, duration=duration)
+    merged: dict[str, Any] = dict(result)
+    merged.update(meta)
+    merged["instruction"] = instruction
+    return merged
 
 
 def _wait(seconds: float) -> dict[str, Any]:
@@ -98,22 +108,25 @@ def _zoom(scroll_clicks: int) -> dict[str, Any]:
     return hand_tools.zoom_scroll(scroll_clicks)
 
 
-async def _maximize_window(window_title_contains: str, instruction: str = "") -> dict[str, Any]:
-    return await hand_tools.maximize_window(
+async def _maximize_windows(window_title_contains: str, instruction: str = "") -> dict[str, Any]:
+    return await hand_tools.maximize_windows(
         window_title_contains=window_title_contains,
         instruction=instruction,
     )
 
 
-async def _close_window(window_title_contains: str, instruction: str = "") -> dict[str, Any]:
-    return await hand_tools.close_window(
+async def _close_windows(window_title_contains: str, instruction: str = "") -> dict[str, Any]:
+    return await hand_tools.close_windows(
         window_title_contains=window_title_contains,
         instruction=instruction,
     )
 
 
-def _minimize_all_windows() -> dict[str, Any]:
-    return hand_tools.minimize_all_windows()
+async def _minimize_windows(window_title_contains: str, instruction: str = "") -> dict[str, Any]:
+    return await hand_tools.minimize_windows(
+        window_title_contains=window_title_contains,
+        instruction=instruction,
+    )
 
 
 def _store_text(

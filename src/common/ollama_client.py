@@ -29,6 +29,8 @@ class OllamaClient:
         messages: list[dict[str, Any]],
         tools: list[Any] | None = None,
         response_format: ResponseFormatParam = None,
+        *,
+        append_image_sizes: bool = True,
     ) -> Message:
         """
         Run chat with an explicit message list (no merge with _message_history).
@@ -40,7 +42,11 @@ class OllamaClient:
         Returns:
             Message: The response message.
         """
-        prepared_messages = self._append_last_message_image_sizes(messages)
+        prepared_messages = (
+            self._append_last_message_image_sizes(messages)
+            if append_image_sizes
+            else messages
+        )
         chat_kwargs: dict[str, Any] = {
             "model": model,
             "messages": prepared_messages,
@@ -76,6 +82,7 @@ class OllamaClient:
                 messages=messages,
                 tools=tools,
                 response_format=response_format,
+                append_image_sizes=append_image_sizes,
             )
         return response_message
 

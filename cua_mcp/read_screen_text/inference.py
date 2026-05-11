@@ -15,7 +15,7 @@ class TextPredictor:
         if model_path is None:
             raise ValueError("You must provide a path to the TorchScript model.")
 
-        self.model = torch.jit.load(model_path, map_location=self.device)
+        self.model = torch.load(model_path, map_location=self.device)
         self.model.to(self.device)
         self.model.eval()
         print("TorchScript model loaded from", model_path)
@@ -107,7 +107,7 @@ def main():
     parser.add_argument("input_npy_path", help="Path to a .npy array used as CRNN input.")
     parser.add_argument(
         "--model-path",
-        default=os.path.join(os.path.dirname(__file__), "crnn_cfc_model.pt"),
+        default=os.path.join(os.path.dirname(__file__), "crnn_cfc_model.pth"),
         help="Path to the TorchScript CRNN model.",
     )
     args = parser.parse_args()
@@ -911,7 +911,7 @@ def main():
 
     text_extractor = TextExtractor(image_path, save_dir=None, debug=False, verbose=False, plot=False, rgb=True, height=32)
 
-    text_predictor = TextPredictor(os.path.join(os.path.dirname(__file__), 'crnn_cfc_model.pt'))
+    text_predictor = TextPredictor(os.path.join(os.path.dirname(__file__), 'crnn_cfc_model.pth'))
 
     images, rects = text_extractor.line_images(batched_np=False)
     results = zip(images, rects)

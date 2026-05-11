@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
 from cua_mcp.tools import mcp_server, TOOL_FUNCTIONS, VERIFICATION_TOOLS
@@ -82,11 +84,49 @@ class BrainModule:
         self.manager.log_info(f"Brain module initialized run_id={self.run_id}")
 
     def _save_step_messages(self, messages: list[dict[str, Any]]) -> None:
-        """Append the current decide-loop transcript to `steps/<n>.json` under the run root."""        
+        """Save or update the decide-loop transcript under `steps/<n>.json`."""        
         steps_dir = self.manager.require_paths().root / "steps"
         steps_dir.mkdir(parents=True, exist_ok=True)
         out_path = steps_dir / f"{self._step_transcript_counter}_{self._script_step_index}.json"
-        write_json(out_path, {"messages": messages})
+        payload: dict[str, Any] = {}
+        if out_path.exists():
+            try:
+                existing = json.loads(out_path.read_text(encoding="utf-8"))
+                if isinstance(existing, dict):
+                    payload = dict(existing)
+            except (OSError, ValueError, json.JSONDecodeError):
+                payload = {}
+        payload["messages"] = messages
+        write_json(out_path, payload)
+
+    def _update_step_metadata(
+        self,
+        transcript_counter: int,
+        script_step_index: int,
+        metadata: dict[str, Any],
+    ) -> None:
+        """Upsert `step_timing` metadata for one step transcript file."""
+        steps_dir = self.manager.require_paths().root / "steps"
+        steps_dir.mkdir(parents=True, exist_ok=True)
+        out_path = steps_dir / f"{transcript_counter}_{script_step_index}.json"
+
+        payload: dict[str, Any] = {}
+        existing_metadata: dict[str, Any] = {}
+        if out_path.exists():
+            try:
+                existing = json.loads(out_path.read_text(encoding="utf-8"))
+                if isinstance(existing, dict):
+                    payload = dict(existing)
+                    existing_timing = existing.get("step_timing")
+                    if isinstance(existing_timing, dict):
+                        existing_metadata = dict(existing_timing)
+            except (OSError, ValueError, json.JSONDecodeError):
+                payload = {}
+                existing_metadata = {}
+
+        existing_metadata.update(metadata)
+        payload["step_timing"] = existing_metadata
+        write_json(out_path, payload)
 
     def _append_step_messages(
         self,
@@ -402,8 +442,27 @@ class BrainModule:
                 run_complete=True,
             )
 
+        transcript_counter = self._step_transcript_counter
+        script_step_index = self._script_step_index
+        started_iso = datetime.now(timezone.utc).isoformat()
+        started_at = perf_counter()
+
         step_succeeded = await self.loop()
+        finished_iso = datetime.now(timezone.utc).isoformat()
+        duration_seconds = round(perf_counter() - started_at, 3)
+
         if not step_succeeded:
+            self._update_step_metadata(
+                transcript_counter,
+                script_step_index,
+                {
+                    "started_at_utc": started_iso,
+                    "finished_at_utc": finished_iso,
+                    "duration_seconds": duration_seconds,
+                    "status": "failed",
+                    "step_index": script_step_index,
+                },
+            )
             return BrainStepResult(
                 reason=f"Script step {self._script_step_index + 1} failed",
                 step_finished=False,
@@ -423,6 +482,17 @@ class BrainModule:
         #     step_finished=True,
         #     run_complete=run_complete,
         # )
+        self._update_step_metadata(
+            transcript_counter,
+            script_step_index,
+            {
+                "started_at_utc": started_iso,
+                "finished_at_utc": finished_iso,
+                "duration_seconds": duration_seconds,
+                "status": "completed",
+                "step_index": script_step_index,
+            },
+        )
         self._script_step_index += 1
         run_complete = self._script_step_index >= len(self.script_lines)
         return BrainStepResult(

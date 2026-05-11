@@ -155,17 +155,17 @@ def key(
 @mcp_server.tool()
 async def mouse_move(
     target_type: str,
-    target: str,
     instruction: str,
+    target_text: str = "",
 ):
     '''
     Move the mouse cursor based on the instruction.
     target_type: "text" or "ui_element"
-    target: the target text or ui element to move to
+    target: the target text if the target_type is "text", leave it blank if the target_type is "ui_element"
     '''
     duration: float = 0.2
     if target_type == "text":
-        return (await _move(target=target, instruction=instruction, duration=duration)).update({"instruction": instruction})
+        return (await _move(target=target_text, instruction=instruction, duration=duration)).update({"instruction": instruction})
     elif target_type == "ui_element":
         return (await _move_to_ui_element(instruction=instruction, duration=duration)).update({"instruction": instruction})
     else:

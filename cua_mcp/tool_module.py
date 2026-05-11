@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from cua_mcp import hand_tools
-from cua_mcp.coordinate_selection import _resolve_point, _with_clicked_text
-from cua_mcp.ui_element_selection import resolve_ui_element_point
+from cua_mcp.select_text import _resolve_point, _with_clicked_text
+from cua_mcp.select_ui_element import resolve_ui_element_point
 from cua_mcp.storage import store_clipboard_text, store_image, store_text, _current_run_paths
 
 

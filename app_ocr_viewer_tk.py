@@ -7,7 +7,7 @@ import tkinter as tk
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from tkinter import ttk
+from tkinter import filedialog, ttk
 from typing import Any
 
 import cv2
@@ -24,6 +24,7 @@ from src.common.settings import ROOT_DIR
 SCREENSHOT_CREATOR_UNDONE_IMAGES = Path(
     r"C:\Users\Joseph Hung\Documents\Repos\Git\ScreenshotCreator\real_screenshot\undone\images"
 )
+OCR_EXPORT_DEFAULT_DIR = Path(r"C:\Users\Joseph Hung\Documents\Repos\Git\crnn.pytorch\finetune\data")
 
 
 @dataclass(frozen=True)
@@ -154,8 +155,7 @@ def _draw_overlays(
         is_selected = selected_idx is not None and idx == selected_idx
         if show_boxes:
             outline = "red" if is_selected else "lime"
-            width = 4 if is_selected else 2
-            draw.rectangle([(x, y), (x2, y2)], outline=outline, width=width)
+            draw.rectangle([(x, y), (x2, y2)], outline=outline, width=1)
         if show_labels and line.text:
             text = line.text
             text_bbox = draw.textbbox((x, y), text, font=font)
@@ -218,6 +218,7 @@ class OcrViewerApp:
 
         self._view_zoom = 1.0
         self._rmb_last_x: int | None = None
+        self._render_scale = 1.0
 
         self._build_ui()
         self._populate_runs()
@@ -233,36 +234,46 @@ class OcrViewerApp:
         left.columnconfigure(0, weight=1)
 
         ttk.Label(left, text="Runs").grid(row=0, column=0, sticky="w")
-        self.run_list = tk.Listbox(left, exportselection=False, height=12, width=48)
+        self.run_list = tk.Listbox(left, exportselection=False, height=8, width=48)
         self.run_list.grid(row=1, column=0, sticky="nsew")
         self.run_list.bind("<<ListboxSelect>>", self._on_run_select)
 
         ttk.Label(left, text="YOLO OCR (image + JSON)").grid(row=2, column=0, sticky="w", pady=(8, 0))
-        self.image_list = tk.Listbox(left, exportselection=False, height=14, width=48)
+        self.image_list = tk.Listbox(left, exportselection=False, height=10, width=48)
         self.image_list.grid(row=3, column=0, sticky="nsew")
         self.image_list.bind("<<ListboxSelect>>", self._on_image_select)
 
         ttk.Label(left, text="OCR Items").grid(row=4, column=0, sticky="w", pady=(8, 0))
-        self.item_list = tk.Listbox(left, exportselection=False, height=10, width=48)
-        self.item_list.grid(row=5, column=0, sticky="nsew")
+        item_wrap = ttk.Frame(left)
+        item_wrap.grid(row=5, column=0, sticky="nsew")
+        item_wrap.columnconfigure(0, weight=1)
+        item_wrap.rowconfigure(0, weight=1)
+        self.item_list = tk.Listbox(item_wrap, exportselection=False, height=10, width=48)
+        self.item_list.grid(row=0, column=0, sticky="nsew")
+        self.item_scroll = ttk.Scrollbar(item_wrap, orient="vertical", command=self.item_list.yview)
+        self.item_scroll.grid(row=0, column=1, sticky="ns")
+        self.item_list.configure(yscrollcommand=self.item_scroll.set)
         self.item_list.bind("<<ListboxSelect>>", self._on_item_select)
+        self.item_list.bind("<Double-Button-1>", self._on_item_double_click)
 
         controls = ttk.Frame(left)
         controls.grid(row=6, column=0, sticky="ew", pady=(8, 0))
+        for col in range(4):
+            controls.columnconfigure(col, weight=1)
         ttk.Checkbutton(controls, text="Boxes", variable=self.show_boxes, command=self._refresh_image).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(controls, text="Labels", variable=self.show_labels, command=self._refresh_image).grid(row=0, column=1, sticky="w")
         ttk.Button(controls, text="Prev", command=self._prev_image).grid(row=1, column=0, sticky="ew", pady=(6, 0))
         ttk.Button(controls, text="Next", command=self._next_image).grid(row=1, column=1, sticky="ew", pady=(6, 0))
+        ttk.Button(controls, text="Zoom +", command=self._zoom_in).grid(row=1, column=2, sticky="ew", pady=(6, 0))
+        ttk.Button(controls, text="Zoom -", command=self._zoom_out).grid(row=1, column=3, sticky="ew", pady=(6, 0))
         ttk.Button(controls, text="Run YOLO+OCR", command=self._run_ocr_current_image).grid(
             row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0)
         )
         ttk.Button(controls, text="Copy to undone/images", command=self._copy_current_image_to_undone).grid(
-            row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0)
+            row=2, column=2, columnspan=2, sticky="ew", pady=(6, 0)
         )
-        ttk.Button(controls, text="Zoom +", command=self._zoom_in).grid(row=4, column=0, sticky="ew", pady=(6, 0))
-        ttk.Button(controls, text="Zoom -", command=self._zoom_out).grid(row=4, column=1, sticky="ew", pady=(6, 0))
         ttk.Button(controls, text="Reset Zoom", command=self._reset_zoom).grid(
-            row=5, column=0, columnspan=2, sticky="ew", pady=(6, 0)
+            row=3, column=0, columnspan=4, sticky="ew", pady=(6, 0)
         )
 
         canvas_wrap = ttk.Frame(self.root, padding=8)
@@ -279,6 +290,7 @@ class OcrViewerApp:
         self.canvas.bind("<ButtonPress-3>", self._on_rmb_press)
         self.canvas.bind("<B3-Motion>", self._on_rmb_drag)
         self.canvas.bind("<ButtonRelease-3>", self._on_rmb_release)
+        self.canvas.bind("<Button-1>", self._on_canvas_left_click)
         self.canvas.bind("<ButtonPress-2>", self._on_mmb_press)
         self.canvas.bind("<B2-Motion>", self._on_mmb_drag)
         self.canvas.bind("<MouseWheel>", self._on_canvas_mousewheel)
@@ -432,6 +444,145 @@ class OcrViewerApp:
         self.selected_line_idx = selected[0]
         self._refresh_image()
 
+    def _on_item_double_click(self, _event: object | None = None) -> None:
+        selected = self.item_list.curselection()
+        if not selected:
+            return
+        idx = selected[0]
+        if idx < 0 or idx >= len(self.current_lines):
+            return
+        self.selected_line_idx = idx
+        self._refresh_image()
+        self._open_item_edit_popup(idx)
+
+    def _open_item_edit_popup(self, idx: int) -> None:
+        line = self.current_lines[idx]
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Edit OCR Item #{idx + 1}")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.columnconfigure(1, weight=1)
+
+        ttk.Label(dialog, text="Corrected text").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 6))
+        text_var = tk.StringVar(value=line.text)
+        text_entry = ttk.Entry(dialog, textvariable=text_var, width=72)
+        text_entry.grid(row=0, column=1, columnspan=2, sticky="ew", padx=10, pady=(10, 6))
+
+        ttk.Label(dialog, text="Export folder").grid(row=1, column=0, sticky="w", padx=10, pady=(0, 6))
+        dest_var = tk.StringVar(value=str(OCR_EXPORT_DEFAULT_DIR))
+        dest_entry = ttk.Entry(dialog, textvariable=dest_var, width=72)
+        dest_entry.grid(row=1, column=1, sticky="ew", padx=10, pady=(0, 6))
+
+        def _browse_folder() -> None:
+            chosen = filedialog.askdirectory(initialdir=dest_var.get() or str(OCR_EXPORT_DEFAULT_DIR))
+            if chosen:
+                dest_var.set(chosen)
+
+        ttk.Button(dialog, text="Browse...", command=_browse_folder).grid(
+            row=1, column=2, sticky="ew", padx=(0, 10), pady=(0, 6)
+        )
+
+        button_bar = ttk.Frame(dialog)
+        button_bar.grid(row=2, column=0, columnspan=3, sticky="ew", padx=10, pady=(2, 10))
+        button_bar.columnconfigure(0, weight=1)
+        button_bar.columnconfigure(1, weight=1)
+        button_bar.columnconfigure(2, weight=1)
+
+        def _save_text() -> None:
+            new_text = text_var.get().strip()
+            self.current_lines[idx] = OcrLine(box=line.box, text=new_text)
+            self._populate_item_list()
+            self.item_list.select_clear(0, tk.END)
+            self.item_list.select_set(idx)
+            self.item_list.see(idx)
+            self.selected_line_idx = idx
+            self._refresh_image()
+            self.status_var.set(f"Updated OCR text for item #{idx + 1}")
+
+        def _export_current() -> None:
+            _save_text()
+            try:
+                saved = self._export_line_variants(idx, text_var.get().strip(), Path(dest_var.get().strip()))
+            except Exception as exc:
+                self.status_var.set(f"Export failed: {type(exc).__name__}: {exc}")
+                return
+            self.status_var.set(f"Exported {saved} files for item #{idx + 1}")
+
+        ttk.Button(button_bar, text="Save Text", command=_save_text).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        ttk.Button(button_bar, text="Export", command=_export_current).grid(row=0, column=1, sticky="ew", padx=4)
+        ttk.Button(button_bar, text="Close", command=dialog.destroy).grid(row=0, column=2, sticky="ew", padx=(4, 0))
+
+        text_entry.focus_set()
+        text_entry.selection_range(0, tk.END)
+        dialog.bind("<Return>", lambda _event: _save_text())
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+
+    def _variant_crop_boxes(
+        self, box: tuple[int, int, int, int], image_w: int, image_h: int
+    ) -> list[tuple[str, tuple[int, int, int, int]]]:
+        x, y, w, h = box
+        if w <= 0 or h <= 0:
+            raise ValueError("invalid OCR item box dimensions")
+        base_l = max(0, x)
+        base_t = max(0, y)
+        base_r = min(image_w, x + w)
+        base_b = min(image_h, y + h)
+        if base_r <= base_l or base_b <= base_t:
+            raise ValueError("OCR box is outside image bounds")
+
+        dx = max(1, int(round((base_r - base_l) * 0.05)))
+        dy = max(1, int(round((base_b - base_t) * 0.05)))
+        sx = max(1, int(round((base_r - base_l) * 0.02)))
+        sy = max(1, int(round((base_b - base_t) * 0.02)))
+
+        expanded_l = max(0, base_l - dx)
+        expanded_t = max(0, base_t - dy)
+        expanded_r = min(image_w, base_r + dx)
+        expanded_b = min(image_h, base_b + dy)
+
+        shrunk_l = min(base_r - 1, base_l + sx)
+        shrunk_t = min(base_b - 1, base_t + sy)
+        shrunk_r = max(shrunk_l + 1, base_r - sx)
+        shrunk_b = max(shrunk_t + 1, base_b - sy)
+        if shrunk_r <= shrunk_l or shrunk_b <= shrunk_t:
+            shrunk_l, shrunk_t, shrunk_r, shrunk_b = base_l, base_t, base_r, base_b
+
+        return [
+            ("orig", (base_l, base_t, base_r, base_b)),
+            ("expand5", (expanded_l, expanded_t, expanded_r, expanded_b)),
+            ("shrink2", (shrunk_l, shrunk_t, shrunk_r, shrunk_b)),
+        ]
+
+    def _export_line_variants(self, idx: int, corrected_text: str, dest_dir: Path) -> int:
+        if self.current_image is None:
+            raise ValueError("no image loaded")
+        if idx < 0 or idx >= len(self.current_lines):
+            raise ValueError("invalid OCR item index")
+        if not corrected_text:
+            raise ValueError("corrected text is empty")
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        src = self._current_image_path()
+        base_name = src.stem if src is not None else "image"
+        img_w, img_h = self.current_image.size
+        variants = self._variant_crop_boxes(self.current_lines[idx].box, img_w, img_h)
+        saved_files = 0
+        for suffix, crop_box in variants:
+            crop = self.current_image.crop(crop_box)
+            stem = f"{base_name}_item{idx + 1:03d}_{suffix}"
+            out_img = dest_dir / f"{stem}.png"
+            out_json = dest_dir / f"{stem}.json"
+            crop.save(out_img)
+            write_json(
+                out_json,
+                {
+                    "rec_text": corrected_text,
+                    "revised": True,
+                    "char": "",
+                },
+            )
+            saved_files += 2
+        return saved_files
+
     def _refresh_image(self) -> None:
         if self.current_image is None:
             return
@@ -449,6 +600,7 @@ class OcrViewerApp:
         fit = min(canvas_w / img_w, canvas_h / img_h)
         fit = min(1.0, fit)
         scale = max(1e-6, fit * self._view_zoom)
+        self._render_scale = scale
         new_size = (max(1, int(img_w * scale)), max(1, int(img_h * scale)))
         if new_size != (img_w, img_h):
             rendered = rendered.resize(new_size, Image.Resampling.LANCZOS)
@@ -457,6 +609,32 @@ class OcrViewerApp:
         self.canvas.delete("all")
         self.canvas.create_image(0, 0, image=self.current_display, anchor="nw")
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _on_canvas_left_click(self, event: tk.Event[tk.Canvas]) -> None:
+        if self.current_image is None or not self.current_lines:
+            return
+        canvas_x = self.canvas.canvasx(int(event.x))
+        canvas_y = self.canvas.canvasy(int(event.y))
+        img_x = int(canvas_x / max(self._render_scale, 1e-6))
+        img_y = int(canvas_y / max(self._render_scale, 1e-6))
+
+        selected_idx: int | None = None
+        for idx, line in enumerate(self.current_lines):
+            x, y, w, h = line.box
+            if x <= img_x <= x + w and y <= img_y <= y + h:
+                selected_idx = idx
+                break
+
+        self.item_list.select_clear(0, tk.END)
+        if selected_idx is None:
+            self.selected_line_idx = None
+            self._refresh_image()
+            return
+
+        self.selected_line_idx = selected_idx
+        self.item_list.select_set(selected_idx)
+        self.item_list.see(selected_idx)
+        self._refresh_image()
 
     def _prev_image(self) -> None:
         idx = self._selected_image_index()

@@ -76,6 +76,7 @@ class RunLogViewerApp:
         self.status_var = tk.StringVar(value="Ready")
         self.search_var = tk.StringVar(value="")
         self.auto_refresh_var = tk.BooleanVar(value=True)
+        self.font_size_var = tk.IntVar(value=10)
 
         self._build_ui()
         self.refresh_runs(select_first=True)
@@ -134,18 +135,29 @@ class RunLogViewerApp:
             command=self._on_auto_refresh_toggle,
         ).grid(row=0, column=2, sticky="w", padx=(10, 0))
 
+        ttk.Label(controls, text="Font size:").grid(row=0, column=3, sticky="w", padx=(10, 0))
+        font_size_spinbox = tk.Spinbox(
+            controls,
+            from_=8,
+            to=32,
+            width=4,
+            textvariable=self.font_size_var,
+            command=self._on_font_size_changed,
+        )
+        font_size_spinbox.grid(row=0, column=4, sticky="w", padx=(6, 0))
+        font_size_spinbox.bind("<Return>", self._on_font_size_changed)
+        font_size_spinbox.bind("<FocusOut>", self._on_font_size_changed)
+
         text_wrap = ttk.Frame(right)
         text_wrap.grid(row=1, column=0, sticky="nsew")
         text_wrap.rowconfigure(0, weight=1)
         text_wrap.columnconfigure(0, weight=1)
 
-        self.text = tk.Text(text_wrap, wrap="none", font=("Consolas", 10))
+        self.text = tk.Text(text_wrap, wrap="char", font=("Consolas", self.font_size_var.get()))
         y_scroll = ttk.Scrollbar(text_wrap, orient="vertical", command=self.text.yview)
-        x_scroll = ttk.Scrollbar(text_wrap, orient="horizontal", command=self.text.xview)
-        self.text.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        self.text.configure(yscrollcommand=y_scroll.set)
         self.text.grid(row=0, column=0, sticky="nsew")
         y_scroll.grid(row=0, column=1, sticky="ns")
-        x_scroll.grid(row=1, column=0, sticky="ew")
 
         status = ttk.Label(self.root, textvariable=self.status_var, anchor="w")
         status.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 8))
@@ -274,6 +286,15 @@ class RunLogViewerApp:
             self._start_auto_refresh()
         else:
             self._stop_auto_refresh()
+
+    def _on_font_size_changed(self, _event: object | None = None) -> None:
+        try:
+            font_size = int(self.font_size_var.get())
+        except (tk.TclError, ValueError):
+            font_size = 10
+        font_size = max(8, min(32, font_size))
+        self.font_size_var.set(font_size)
+        self.text.configure(font=("Consolas", font_size))
 
     def _start_auto_refresh(self) -> None:
         self._stop_auto_refresh()

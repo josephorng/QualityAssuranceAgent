@@ -17,7 +17,7 @@ from src.common.models import (
     ScriptStepVerifyResult,
     ToolCommand,
 )
-from src.common.ollama_client import OllamaClient
+from src.common.llm_factory import get_llm_client
 from src.common.prompting import get_prompt
 from src.common.run_state import get_run_state_manager
 from src.common.runtime_context import SCRIPT_LINES_ENV, get_runtime_env, is_runtime_command_mode
@@ -71,7 +71,7 @@ class BrainModule:
     ) -> None:
         """Initialize run state, load script lines from the environment, and retain hand/eye modules."""
         self.settings = load_settings()
-        self.ollama = OllamaClient(self.settings.ollama_host)
+        self.ollama = get_llm_client()
         self.run_root, self.run_id = get_runtime_env()
         self.manager = get_run_state_manager()
         self.manager.init_run(self.run_id, self.run_root.name)
@@ -444,14 +444,46 @@ class BrainModule:
 
         transcript_counter = self._step_transcript_counter
         script_step_index = self._script_step_index
-        started_iso = datetime.now(timezone.utc).isoformat()
-        started_at = perf_counter()
+        self.manager.set_step_log_context(transcript_counter, script_step_index)
+        try:
+            started_iso = datetime.now(timezone.utc).isoformat()
+            started_at = perf_counter()
 
-        step_succeeded = await self.loop()
-        finished_iso = datetime.now(timezone.utc).isoformat()
-        duration_seconds = round(perf_counter() - started_at, 3)
+            step_succeeded = await self.loop()
+            finished_iso = datetime.now(timezone.utc).isoformat()
+            duration_seconds = round(perf_counter() - started_at, 3)
 
-        if not step_succeeded:
+            if not step_succeeded:
+                self._update_step_metadata(
+                    transcript_counter,
+                    script_step_index,
+                    {
+                        "started_at_utc": started_iso,
+                        "finished_at_utc": finished_iso,
+                        "duration_seconds": duration_seconds,
+                        "status": "failed",
+                        "step_index": script_step_index,
+                    },
+                )
+                return BrainStepResult(
+                    reason=f"Script step {self._script_step_index + 1} failed",
+                    step_finished=False,
+                )
+
+            # verify_result = await self._verify_script_step(self._step_transcript_counter, self._script_step_index)
+            self._step_transcript_counter += 1
+            # if verify_result is None:
+            #     return BrainStepResult(
+            #         reason="Script step verification failed (parse or empty response)",
+            #         step_finished=False,
+            #     )
+
+            # run_complete = self._apply_verify_branch(verify_result)
+            # return BrainStepResult(
+            #     reason=f"Verify: {verify_result.reason}",
+            #     step_finished=True,
+            #     run_complete=run_complete,
+            # )
             self._update_step_metadata(
                 transcript_counter,
                 script_step_index,
@@ -459,44 +491,16 @@ class BrainModule:
                     "started_at_utc": started_iso,
                     "finished_at_utc": finished_iso,
                     "duration_seconds": duration_seconds,
-                    "status": "failed",
+                    "status": "completed",
                     "step_index": script_step_index,
                 },
             )
+            self._script_step_index += 1
+            run_complete = self._script_step_index >= len(self.script_lines)
             return BrainStepResult(
-                reason=f"Script step {self._script_step_index + 1} failed",
-                step_finished=False,
+                reason=f"Script step {self._script_step_index + 1} completed",
+                step_finished=True,
+                run_complete=run_complete,
             )
-
-        # verify_result = await self._verify_script_step(self._step_transcript_counter, self._script_step_index)
-        self._step_transcript_counter += 1
-        # if verify_result is None:
-        #     return BrainStepResult(
-        #         reason="Script step verification failed (parse or empty response)",
-        #         step_finished=False,
-        #     )
-
-        # run_complete = self._apply_verify_branch(verify_result)
-        # return BrainStepResult(
-        #     reason=f"Verify: {verify_result.reason}",
-        #     step_finished=True,
-        #     run_complete=run_complete,
-        # )
-        self._update_step_metadata(
-            transcript_counter,
-            script_step_index,
-            {
-                "started_at_utc": started_iso,
-                "finished_at_utc": finished_iso,
-                "duration_seconds": duration_seconds,
-                "status": "completed",
-                "step_index": script_step_index,
-            },
-        )
-        self._script_step_index += 1
-        run_complete = self._script_step_index >= len(self.script_lines)
-        return BrainStepResult(
-            reason=f"Script step {self._script_step_index + 1} completed",
-            step_finished=True,
-            run_complete=run_complete,
-        )
+        finally:
+            self.manager.clear_step_log_context()

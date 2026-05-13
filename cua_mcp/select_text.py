@@ -14,7 +14,7 @@ from cua_mcp.read_screen_text.ocr_image import (
     format_coordinate_text_from_regions,
     get_coordinates_from_path,
 )
-from src.common.ollama_client import OllamaClient
+from src.common.llm_factory import get_llm_client
 from src.common.prompting import get_prompt
 from src.common.run_state import get_run_state_manager, ts_name
 from src.common.settings import load_settings
@@ -23,7 +23,7 @@ from src.eye.capture import capture_active_monitor_to_file
 
 settings = load_settings()
 logger = get_run_state_manager()
-_ollama = OllamaClient(settings.ollama_host)
+_ollama = get_llm_client()
 _t2s_converter = OpenCC("t2s") if OpenCC else None
 
 # Ollama JSON mode: model names OCR text; we map back to region centers.

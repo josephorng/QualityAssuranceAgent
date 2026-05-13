@@ -17,7 +17,7 @@ import numpy as np
 
 from cua_mcp.select_text import _to_global_coordinate
 from cua_mcp.read_screen_text.ocr_image import get_coordinates_from_path, get_text_boxes_from_path
-from src.common.ollama_client import OllamaClient
+from src.common.llm_factory import get_llm_client
 from src.common.prompting import get_prompt
 from src.common.run_state import get_run_state_manager, ts_name
 from src.common.settings import load_settings
@@ -31,23 +31,22 @@ _YOLO_UI_MODEL: object | None = None
 
 settings = load_settings()
 logger = get_run_state_manager()
-_ollama = OllamaClient(settings.ollama_host)
+_ollama = get_llm_client()
 
 _INDEX_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "properties": {
-        "index": {"type": ["integer", "null"]},
-        "cx": {"type": ["integer", "null"]},
-        "cy": {"type": ["integer", "null"]},
-        "w": {"type": ["integer", "null"]},
-        "h": {"type": ["integer", "null"]},
-    },
-    "required": ["index", "cx", "cy", "w", "h"],
+    "properties": {"index": {"type": "integer"}},
+    "required": ["index"],
 }
-_TEXT_ANCHOR_JSON_SCHEMA: dict[str, Any] = {
+_INSTRUCTION_ANALYSIS_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "properties": {"need_text_anchor": {"type": "boolean"}},
-    "required": ["need_text_anchor"],
+    "properties": {
+        "need_text_anchor": {"type": "boolean"},
+        "ui_icon_description": {"type": "string"},
+        "location_description": {"type": "string"},
+        "ui_shape_description": {"type": "string"},
+    },
+    "required": ["need_text_anchor", "ui_icon_description", "location_description"],
 }
 _TEXT_FILTER_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -64,11 +63,8 @@ _CONFIRM_JSON_SCHEMA: dict[str, Any] = {
     "properties": {"confirmed": {"type": "boolean"}},
     "required": ["confirmed"],
 }
-
-# Max labeled icon crops for tournament picker groups.
-_MAX_LABELED_CROPS: int = 12
 # Max labeled icon crops attached to a single LLM request.
-_MAX_ICON_CROPS_PER_REQUEST: int = 12
+_MAX_ICON_CROPS_PER_REQUEST: int = 8
 
 
 @dataclass(frozen=True)
@@ -96,20 +92,13 @@ def _llm_text_to_json_object_string(raw: str) -> str:
     return text
 
 
-def _parse_pick_from_llm(raw: str) -> dict[str, int] | None:
-    """Parse the picker LLM reply.
-
-    Returns ``None`` when the model explicitly signals "no candidate matches"
-    (``index`` is ``null``). Otherwise returns a dict with ``index`` plus any
-    parseable ``cx/cy/w/h`` echoed by the model.
-    """
+def _parse_index_from_llm(raw: str, num_candidates: int) -> int:
+    """Parse the picker LLM reply; returns the chosen candidate index (0-based)."""
     json_text = _llm_text_to_json_object_string(raw)
     preview = (raw or "")[:240]
     if not json_text:
         raise ValueError(
-            'Ollama UI picker returned empty content; expected '
-            '{"index": int|null, "cx": int|null, "cy": int|null, '
-            '"w": int|null, "h": int|null}'
+            'Ollama UI picker returned empty content; expected {"index": <int>}'
         )
     try:
         out = json.loads(json_text)
@@ -117,22 +106,15 @@ def _parse_pick_from_llm(raw: str) -> dict[str, int] | None:
         raise ValueError(f"invalid JSON ({exc}); preview={preview!r}") from exc
     if not isinstance(out, dict) or "index" not in out:
         raise ValueError(f'must include "index"; preview={preview!r}')
-    raw_index = out["index"]
-    if raw_index is None:
-        return None
     try:
-        picked: dict[str, int] = {"index": int(raw_index)}
+        idx = int(out["index"])
     except (TypeError, ValueError) as exc:
+        raise ValueError(f'"index" must be an integer; got {out.get("index")!r}') from exc
+    if idx < 0 or idx >= num_candidates:
         raise ValueError(
-            f'"index" must be integer or null; got {raw_index!r}'
-        ) from exc
-    for key in ("cx", "cy", "w", "h"):
-        if key in out and out[key] is not None:
-            try:
-                picked[key] = int(out[key])
-            except (TypeError, ValueError):
-                pass
-    return picked
+            f'"index" out of range: {idx} (valid 0..{num_candidates - 1}); preview={preview!r}'
+        )
+    return idx
 
 
 def _parse_confirmed_from_llm(raw: str) -> bool:
@@ -151,20 +133,38 @@ def _parse_confirmed_from_llm(raw: str) -> bool:
     return bool(out["confirmed"])
 
 
-def _parse_need_text_anchor_from_llm(raw: str) -> bool:
+def _parse_instruction_analysis_from_llm(raw: str) -> tuple[bool, str, str, str]:
+    """Parse Ollama reply: text-anchor flag plus icon, location, and optional shape strings."""
     json_text = _llm_text_to_json_object_string(raw)
     preview = (raw or "")[:240]
     if not json_text:
         raise ValueError(
-            'Ollama anchor classifier returned empty content; expected {"need_text_anchor": bool}'
+            "Ollama instruction analysis returned empty content; expected "
+            '{"need_text_anchor": bool, "ui_icon_description": str, "location_description": str, '
+            '"ui_shape_description": str (optional)}'
         )
     try:
         out = json.loads(json_text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid JSON ({exc}); preview={preview!r}") from exc
-    if not isinstance(out, dict) or "need_text_anchor" not in out:
-        raise ValueError(f'must include "need_text_anchor"; preview={preview!r}')
-    return bool(out["need_text_anchor"])
+    if not isinstance(out, dict):
+        raise ValueError(f"expected object; preview={preview!r}")
+    if (
+        "need_text_anchor" not in out
+        or "ui_icon_description" not in out
+        or "location_description" not in out
+    ):
+        raise ValueError(
+            f'must include "need_text_anchor", "ui_icon_description", and '
+            f'"location_description"; preview={preview!r}'
+        )
+    need = bool(out["need_text_anchor"])
+    icon = str(out["ui_icon_description"] or "").strip()
+    loc = str(out["location_description"] or "").strip()
+    shape = str(out.get("ui_shape_description") or "").strip()
+    if not icon and not loc:
+        raise ValueError(f"both descriptions empty; preview={preview!r}")
+    return need, icon, loc, shape
 
 
 def _parse_keep_indices_from_llm(raw: str, max_len: int) -> list[int]:
@@ -400,12 +400,20 @@ def _chunked(items: list[Any], size: int) -> list[list[Any]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
-def _format_candidates_text(detections: list[UiDetection]) -> str:
+def _format_text_candidates_text(detections: list[UiDetection]) -> str:
     lines: list[str] = []
     for i, d in enumerate(detections):
         text = f" text={d.text!r}" if d.text else ""
         _bx, _by, bw, bh = d.bbox
-        lines.append(f"[{i}] center=[{d.cx},{d.cy}] w={bw} h={bh}{text}")
+        lines.append(f"[index {i}] center=[{d.cx},{d.cy}] w={bw} h={bh}{text}")
+    return "\n".join(lines)
+
+
+def _format_ui_candidates_text(detections: list[UiDetection]) -> str:
+    lines: list[str] = []
+    for i, d in enumerate(detections):
+        _bx, _by, bw, bh = d.bbox
+        lines.append(f"[{i}] center=[{d.cx},{d.cy}] w={bw} h={bh}")
     return "\n".join(lines)
 
 
@@ -525,38 +533,66 @@ async def _confirm_selection_bbox_with_ollama(instruction: str, crop_image_path:
         return _parse_confirmed_from_llm(reply.content)
 
 
-async def _need_text_anchors(instruction: str) -> bool:
-    prompt = (
-        "You decide whether selecting a UI element requires text as an anchor.\n"
-        "Return JSON only: {\"need_text_anchor\": true|false}.\n\n"
-        "Set true when the instruction refers to visible words/labels/content "
-        "(for example: click 'Sign in', click the item with text, select row by name).\n"
-        "Set false when the instruction is mostly non-text visual targetting "
-        "(for example: click icon, toggle, avatar, gear, unlabeled button, panel).\n\n"
-        f"Instruction: {instruction}"
-    )
+async def _analyze_instruction(instruction: str) -> tuple[bool, str, str, str]:
+    """Classify text-anchor need and split instruction for icon vs. location in one Ollama call.
+
+    Returns ``(need_text_anchor, ui_icon_description, location_description, ui_shape_description)``.
+    ``ui_shape_description`` may be empty when the model omits it or no shape hint applies.
+
+    On parse failure after retry, or on transport errors, returns ``(True, text, text, "")``
+    so downstream steps still run (conservative text-anchor path, full instruction
+    for icon/location prompts).
+    """
+    text = (instruction or "").strip()
+    if not text:
+        return False, "", "", ""
+
+    prompt = get_prompt("ui_instruction_icon_location_extract").replace("{instruction}", text)
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
     try:
         reply = await _ollama.chat_messages(
             settings.brain_lm,
             messages=messages,
             tools=[],
-            response_format=_TEXT_ANCHOR_JSON_SCHEMA,
+            response_format=_INSTRUCTION_ANALYSIS_JSON_SCHEMA,
         )
-        return _parse_need_text_anchor_from_llm(reply.content)
+        need, icon_llm, loc_llm, shape_llm = _parse_instruction_analysis_from_llm(reply.content)
     except ValueError as exc:
-        logger.log_info(f"_need_text_anchors: retry ({exc})")
+        _log_info(f"_need_text_anchors: retry ({exc})")
         messages[0]["content"] += (
-            '\nReply with ONLY: {"need_text_anchor": true|false}. '
+            '\nReply with ONLY: {"need_text_anchor": true|false, '
+            '"ui_icon_description": "...", "location_description": "...", '
+            '"ui_shape_description": "..."}. '
+            "need_text_anchor: true for visible words/labels/on-screen text; false for "
+            "mostly non-text targets (icon, toggle, gear, unlabeled control). "
+            "location_description: detailed positional language for picking among "
+            "candidates, or empty when there is no spatial clue. "
+            "ui_shape_description: optional short shape/size hint for the control, or empty. "
             "No text before or after the JSON.\n"
         )
-        reply = await _ollama.chat_messages(
-            settings.brain_lm,
-            messages=messages,
-            tools=[],
-            response_format="json",
+        try:
+            reply = await _ollama.chat_messages(
+                settings.brain_lm,
+                messages=messages,
+                tools=[],
+                response_format="json",
+            )
+            need, icon_llm, loc_llm, shape_llm = _parse_instruction_analysis_from_llm(
+                reply.content
+            )
+        except ValueError as retry_exc:
+            _log_info(f"_need_text_anchors: fallback full instruction ({retry_exc})")
+            return True, text, text, ""
+    except Exception as exc:
+        _log_info(
+            f"_need_text_anchors: fallback full instruction ({type(exc).__name__}: {exc})"
         )
-        return _parse_need_text_anchor_from_llm(reply.content)
+        return True, text, text, ""
+
+    icon_out = (icon_llm.strip() if icon_llm else "") or text
+    loc_out = loc_llm.strip()
+    shape_out = shape_llm.strip()
+    return need, icon_out, loc_out, shape_out
 
 
 async def _filter_text_detections(
@@ -566,7 +602,7 @@ async def _filter_text_detections(
     if not text_detections:
         return []
 
-    candidates_text = _format_candidates_text(text_detections)
+    candidates_text = _format_text_candidates_text(text_detections)
     prompt = (
         "Select ONLY text candidates that match the user instruction.\n"
         'Return JSON only: {"keep_indices": [<int>, ...]}.\n'
@@ -694,220 +730,103 @@ async def _filter_icon_detections_with_ollama(
     return sorted(keep_indices_set)
 
 
-async def _one_ollama_index_pick(
+async def _select_center_with_ollama(
     instruction: str,
     detections: list[UiDetection],
     image_path: str,
-) -> dict[str, int] | None:
-    """Ask Ollama to pick a candidate and echo its bbox metadata.
-
-    In addition to the full screenshot, this attaches one labeled crop per
-    candidate (up to ``_MAX_LABELED_CROPS``). Each crop has its ``[index]``
-    burned into a black header at the top, so the model can read the index
-    directly from pixels — eliminating the failure mode where it confuses a
-    coordinate with the index, or mis-attributes image ordering.
-
-    Returns:
-        ``None`` when the model signals that none of the candidates match the
-        instruction (it emits ``{"index": null, ...}``). Otherwise a dict with
-        keys ``index, cx, cy, w, h`` — echoing the bbox fields lets the caller
-        cross-check that the model's ``index`` is consistent with the bbox it
-        intended to choose.
-    """
-    candidates_text = _format_candidates_text(detections)
+    ui_shape_description: str = "",
+) -> int:
+    """Ask Ollama for the best candidate index; with thinking models, runs a second turn using ``thinking`` from the first reply."""
+    if not detections:
+        raise ValueError("no candidates to pick from")
+    candidates_text = _format_ui_candidates_text(detections)
     base_instructions = get_prompt("ui_element_selection").format(
         instruction=instruction,
         candidates_text=candidates_text,
     )
-
-    labeled_crops: list[str] = []
-    if 0 < len(detections) <= _MAX_LABELED_CROPS:
-        for i, d in enumerate(detections):
-            try:
-                labeled_crops.append(
-                    _write_labeled_bbox_crop(image_path, d.bbox, f"[{i}]")
-                )
-            except (RuntimeError, OSError, cv2.error) as exc:
-                _log_info(
-                    f"_one_ollama_index_pick: failed to write labeled crop for "
-                    f"index {i}: {exc}"
-                )
-    elif len(detections) > _MAX_LABELED_CROPS:
-        _log_info(
-            f"_one_ollama_index_pick: {len(detections)} candidates exceed "
-            f"_MAX_LABELED_CROPS={_MAX_LABELED_CROPS}; sending screenshot only"
+    screenshot_size_text = "unknown"
+    img = cv2.imread(image_path)
+    if img is not None:
+        img_h, img_w = img.shape[:2]
+        screenshot_size_text = f"{img_w}x{img_h}"
+    prompt = (
+        f"{base_instructions}\n\n"
+        f"Screenshot size: {screenshot_size_text} (width x height pixels)."
+    )
+    shape_hint = (ui_shape_description or "").strip()
+    if shape_hint:
+        prompt += (
+            "\n\nTarget shape/size hint (from instruction analysis; use with location "
+            f"to pick the best-matching candidate bbox proportions):\n{shape_hint}"
         )
 
     messages: list[dict[str, Any]] = [
         {
             "role": "user",
-            "content": base_instructions,
-            "images": [image_path, *labeled_crops],
+            "content": prompt,
         },
     ]
-    try:
-        try:
-            reply = await _ollama.chat_messages(
-                settings.brain_lm,
-                messages=messages,
-                tools=[],
-                response_format=_INDEX_JSON_SCHEMA,
-                append_image_sizes=False,
-            )
-            return _parse_pick_from_llm(reply.content)
-        except ValueError as exc:
-            logger.log_info(f"_one_ollama_index_pick: retry ({exc})")
-            messages[0]["content"] += (
-                '\nReply with ONLY: {"index": <integer>, "cx": <integer>, "cy": <integer>, '
-                '"w": <integer>, "h": <integer>} where every value is copied verbatim from '
-                "the same row of the Candidates list. "
-                'If NONE of the candidates match the instruction, reply with '
-                '{"index": null, "cx": null, "cy": null, "w": null, "h": null}. '
-                "No text before or after the JSON.\n"
-            )
-            reply = await _ollama.chat_messages(
-                settings.brain_lm,
-                messages=messages,
-                tools=[],
-                response_format="json",
-                append_image_sizes=False,
-            )
-            return _parse_pick_from_llm(reply.content)
-    finally:
-        for path in labeled_crops:
-            try:
-                Path(path).unlink(missing_ok=True)
-            except OSError:
-                pass
-
-
-async def _tournament_pick(
-    instruction: str,
-    detections: list[UiDetection],
-    image_path: str,
-) -> int | None:
-    """Tournament-style pick over arbitrarily many candidates.
-
-    Splits ``detections`` into groups of size ``_MAX_LABELED_CROPS`` and runs
-    ``_one_ollama_index_pick`` on each group. The winners from one round form
-    the candidate set of the next round, and the process repeats until a single
-    winner remains.
-
-    Returns the winner's index into the original ``detections`` list, or
-    ``None`` if the model signals that no candidate matches the instruction in
-    any group of any round.
-
-    Groups of size 1 are passed through automatically (no model call). The
-    function requires at least one detection.
-    """
-    if not detections:
-        raise ValueError("no candidates to pick from")
-
-    current_indices: list[int] = list(range(len(detections)))
-    round_no = 0
-    while len(current_indices) > 1:
-        round_no += 1
-        next_indices: list[int] = []
-        groups = _chunked(current_indices, _MAX_LABELED_CROPS)
-        _log_info(
-            f"_tournament_pick: round={round_no} candidates={len(current_indices)} "
-            f"groups={len(groups)} group_size_cap={_MAX_LABELED_CROPS}"
-        )
-        for group_no, group in enumerate(groups, start=1):
-            if len(group) == 1:
-                next_indices.append(group[0])
-                continue
-            group_subset = [detections[i] for i in group]
-            picked = await _one_ollama_index_pick(
-                instruction, group_subset, image_path
-            )
-            if picked is None:
-                _log_info(
-                    f"_tournament_pick: round={round_no} group={group_no} "
-                    f"size={len(group_subset)} no_match"
-                )
-                continue
-            local_idx = picked["index"]
-            if local_idx < 0 or local_idx >= len(group_subset):
-                raise ValueError(
-                    f"Ollama returned index {local_idx} but valid range is "
-                    f"0..{len(group_subset) - 1} (picked={picked}, "
-                    f"round={round_no}, group={group_no})"
-                )
-            winner_orig = group[local_idx]
-            next_indices.append(winner_orig)
-            _log_info(
-                f"_tournament_pick: round={round_no} group={group_no} "
-                f"size={len(group_subset)} local_idx={local_idx} "
-                f"winner_orig={winner_orig}"
-            )
-
-        if not next_indices:
-            _log_info(
-                f"_tournament_pick: round={round_no} produced no winners; "
-                "no candidate matched the instruction"
-            )
-            return None
-
-        if len(next_indices) >= len(current_indices):
-            # No reduction (e.g. cap=1 so every group is size 1). Bail out so we
-            # don't loop forever; return the first survivor as a best-effort.
-            _log_info(
-                f"_tournament_pick: round={round_no} produced no reduction "
-                f"({len(current_indices)} -> {len(next_indices)}); stopping"
-            )
-            return next_indices[0]
-        current_indices = next_indices
-
-    return current_indices[0]
-
-
-async def _select_index_with_ollama(
-    instruction: str,
-    detections: list[UiDetection],
-    image_path: str,
-) -> int:
-    candidates: list[tuple[int, UiDetection]] = list(enumerate(detections))
-    max_rounds = max(1, len(detections) * 2 + 4)
-    rounds = 0
-    while candidates:
-        rounds += 1
-        if rounds > max_rounds:
-            raise ValueError(
-                "UI bbox confirmation exhausted retries; remaining candidates could not be confirmed."
-            )
-        subset = [d for _orig, d in candidates]
-        idx = await _tournament_pick(instruction, subset, image_path)
-        if idx is None:
-            raise ValueError(
-                "No UI candidate matched the instruction (tournament returned no winner)."
-            )
-        if idx < 0 or idx >= len(subset):
-            raise ValueError(
-                f"Tournament returned index {idx} but valid range is 0..{len(subset) - 1}"
-            )
-        crop_path = _write_bbox_crop(image_path, subset[idx].bbox)
-        try:
-            confirmed = await _confirm_selection_bbox_with_ollama(instruction, crop_path)
-        finally:
-            try:
-                Path(crop_path).unlink(missing_ok=True)
-            except OSError:
-                pass
-
-        if confirmed:
-            orig_idx, _d = candidates[idx]
-            return orig_idx
-
-        _log_info(
-            f"_select_index_with_ollama: bbox not confirmed; dropping candidate "
-            f"orig_index={candidates[idx][0]} local_idx={idx}"
-        )
-        candidates.pop(idx)
-
-    raise ValueError(
-        "No UI candidate remained after bbox confirmation rejected all proposed picks."
+    n = len(detections)
+    reply1 = await _ollama.chat_messages(
+        settings.brain_lm,
+        messages=messages,
+        tools=[],
+        response_format=_INDEX_JSON_SCHEMA,
+        think=True,
     )
+    thinking = (getattr(reply1, "thinking", None) or "").strip()
+    pool_idx: int | None = None
+
+    if thinking:
+        refine = (
+            "Prior reasoning: "
+            f"{thinking}\n\n"
+            "Using your prior reasoning in context and the Candidates list below, output your "
+            f"final choice as JSON only: a single object with key \"index\" (integer 0..{n - 1}). "
+            "No markdown, no explanation.\n\n"
+        )
+        messages2 = [
+            {"role": "user", "content": refine},
+        ]
+        reply2 = await _ollama.chat_messages(
+            settings.brain_lm,
+            messages=messages2,
+            tools=[],
+            response_format=_INDEX_JSON_SCHEMA,
+        )
+        try:
+            pool_idx = _parse_index_from_llm(reply2.content, n)
+        except ValueError as exc:
+            _log_info(
+                f"_select_center_with_ollama: thinking-refine parse failed ({exc}); "
+                "trying first reply JSON"
+            )
+            try:
+                pool_idx = _parse_index_from_llm(reply1.content, n)
+            except ValueError:
+                pool_idx = None
+    else:
+        try:
+            pool_idx = _parse_index_from_llm(reply1.content, n)
+        except ValueError:
+            pool_idx = None
+
+    if pool_idx is not None:
+        return pool_idx
+
+    logger.log_info("_select_center_with_ollama: retry (invalid or missing index)")
+    messages[0]["content"] += (
+        '\nReply with ONLY: {"index": <integer>} — the [index] from the Candidates '
+        "list row that best matches the location instruction (0-based). "
+        "No other keys. No text before or after the JSON.\n"
+    )
+    reply = await _ollama.chat_messages(
+        settings.brain_lm,
+        messages=messages,
+        tools=[],
+        response_format="json",
+    )
+    return _parse_index_from_llm(reply.content, n)
 
 
 async def resolve_ui_element_point(instruction: str) -> tuple[int, int, dict[str, Any]]:
@@ -930,7 +849,7 @@ async def resolve_ui_element_point(instruction: str) -> tuple[int, int, dict[str
 
     raw = _predict_ui_elements_raw(bgr)
     pruned = _keep_smallest_non_overlapping(raw)
-    need_text_anchor = await _need_text_anchors(text)
+    need_text_anchor, icon_desc, loc_desc, shape_desc = await _analyze_instruction(text)
     _log_info(f"_resolve_ui_element: need_text_anchor={need_text_anchor}")
     if need_text_anchor:
         (_off_x, _off_y), regions = get_coordinates_from_path(image_path)
@@ -964,10 +883,13 @@ async def resolve_ui_element_point(instruction: str) -> tuple[int, int, dict[str
             )
         raise ValueError("UI YOLO detected no UI elements on the screen.")
 
+    icon_instruction = (icon_desc or "").strip() or text
+    location_instruction = (loc_desc or "").strip() or text
+
     candidate_pool: list[tuple[int, UiDetection]] = list(enumerate(detections))
     if len(candidate_pool) > 1:
         keep_local_indices = await _filter_icon_detections_with_ollama(
-            text, [d for _orig, d in candidate_pool], image_path
+            icon_instruction, [d for _orig, d in candidate_pool], image_path
         )
         if not keep_local_indices:
             raise ValueError(
@@ -981,12 +903,21 @@ async def resolve_ui_element_point(instruction: str) -> tuple[int, int, dict[str
     if len(candidate_pool) == 1:
         orig_idx, chosen = candidate_pool[0]
         idx = orig_idx
-        _log_info("_resolve_ui_element: single candidate; skipping Ollama index pick")
+        _log_info("_resolve_ui_element: single candidate; skipping Ollama center pick")
     else:
         filtered_detections = [d for _orig, d in candidate_pool]
-        pick_idx = await _select_index_with_ollama(text, filtered_detections, image_path)
-        orig_idx, chosen = candidate_pool[pick_idx]
+        pool_idx = await _select_center_with_ollama(
+            location_instruction,
+            filtered_detections,
+            image_path,
+            ui_shape_description=shape_desc,
+        )
+        orig_idx, chosen = candidate_pool[pool_idx]
         idx = orig_idx
+        _log_info(
+            f"_resolve_ui_element: Ollama returned index={pool_idx} "
+            f"(chosen center=[{chosen.cx},{chosen.cy}])"
+        )
 
     gx, gy = _to_global_coordinate(chosen.cx, chosen.cy)
     meta: dict[str, Any] = {

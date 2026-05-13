@@ -1,139 +1,35 @@
 import argparse
 import json
 import os
-
-import numpy as np
-import torch
-
-
-class TextPredictor:
-    def __init__(self, model_path):
-        """Load the TorchScript CRNN model and decode metadata."""
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        print("Using device:", self.device)
-
-        if model_path is None:
-            raise ValueError("You must provide a path to the TorchScript model.")
-
-        self.model = torch.load(model_path, map_location=self.device)
-        self.model.to(self.device)
-        self.model.eval()
-        print("TorchScript model loaded from", model_path)
-
-        with open(os.path.join(os.path.dirname(__file__), "char_dict.json"), "r", encoding="utf-8") as f:
-            self.char_dict = json.load(f)
-        with open(os.path.join(os.path.dirname(__file__), "char_decode_dict.json"), "r", encoding="utf-8") as f:
-            self.char_decode_dict = json.load(f)
-        with open(os.path.join(os.path.dirname(__file__), "model_config.json"), "r", encoding="utf-8") as f:
-            self.config_dict = json.load(f)
-
-    def decode_outputs(self, outputs):
-        """Greedy-decode model logits into text and average confidence."""
-        probs = torch.softmax(outputs, dim=-1)
-        pred_probs, pred_indices = torch.max(probs, dim=-1)
-
-        pred_chars = []
-        avg_probs = []
-        for seq_indices, seq_probs in zip(pred_indices, pred_probs):
-            chars = []
-            probs_list = []
-            prev_char = None
-            for idx, prob in zip(seq_indices, seq_probs):
-                idx = idx.item()
-                prob = prob.item()
-
-                if idx == self.config_dict["nclass"] - 1 or idx == prev_char:
-                    prev_char = idx
-                    continue
-
-                prev_char = idx
-                char = self.char_decode_dict.get(str(idx), "")
-                chars.append(char)
-                probs_list.append(prob)
-
-            avg_prob = sum(probs_list) / len(probs_list) if probs_list else 0.0
-            pred_chars.append("".join(chars))
-            avg_probs.append(avg_prob)
-
-        return pred_chars, avg_probs
-
-    def beam_search_decode_outputs(self, outputs):
-        """Decode beam-search token indices into text strings."""
-        pred_chars = []
-        for seq in outputs:
-            chars = []
-            prev_char = None
-            for idx in seq:
-                idx = idx.item()
-                if idx == self.config_dict["num_classes"] - 1 or idx == prev_char:
-                    prev_char = idx
-                    continue
-                char = self.char_decode_dict.get(str(idx), "")
-                chars.append(char)
-                prev_char = idx
-            pred_chars.append("".join(chars))
-        return pred_chars
-
-    def predict_images(self, images, hxs=None, beam_search=True, beam_width=2):
-        """Run CRNN inference on image tensors and return decoded text."""
-        self.model.eval()
-        if isinstance(images, np.ndarray):
-            images = torch.from_numpy(images).float()
-        images = images.to(self.device)
-
-        if len(images.shape) == 2:
-            images = images.unsqueeze(0)
-
-        if hxs is not None:
-            hxs = hxs.to(self.device)
-
-        if beam_search:
-            pred_chars = self.model.beam_search(images, beam_width=beam_width)
-            pred_chars = self.beam_search_decode_outputs(pred_chars)
-            pred_prob_avg = None
-        else:
-            outputs = self.model(images)
-            pred_chars, pred_prob_avg = self.decode_outputs(outputs)
-
-        return pred_chars, pred_prob_avg
-
-
-os.environ["PYTHONIOENCODING"] = "utf-8"
-
-
-def main():
-    """CLI entrypoint for running CRNN on a saved numpy tensor."""
-    parser = argparse.ArgumentParser(description="Run CRNN inference on a .npy image tensor.")
-    parser.add_argument("input_npy_path", help="Path to a .npy array used as CRNN input.")
-    parser.add_argument(
-        "--model-path",
-        default=os.path.join(os.path.dirname(__file__), "crnn_cfc_model.pth"),
-        help="Path to the TorchScript CRNN model.",
-    )
-    args = parser.parse_args()
-
-    predictor = TextPredictor(args.model_path)
-    images = np.load(args.input_npy_path)
-    predicted_texts, pred_prob_avg = predictor.predict_images(images, beam_search=False)
-    print("predicted_texts:", predicted_texts)
-    print("pred_prob_avg:", pred_prob_avg)
-
-
-if __name__ == "__main__":
-    main()
-import os
-import argparse
 import time
+
 import cv2
 import numpy as np
-import os
-import json
 import torch
+
+from src.common.run_state import get_run_state_manager
+
+logger = get_run_state_manager()
+
+
+def _log_info(text: str) -> None:
+    try:
+        logger.log_info(text)
+    except RuntimeError:
+        pass
+
+
+def _log_error(text: str) -> None:
+    try:
+        logger.log_error(text)
+    except RuntimeError:
+        pass
+
 
 class TextPredictor:
     def __init__(self, model_path):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        print("Using device:", self.device)
+        _log_info(f"read_screen_text inference device={self.device}")
 
         if model_path is None:
             raise ValueError("You must provide a path to the TorchScript model.")
@@ -141,7 +37,7 @@ class TextPredictor:
         self.model = torch.jit.load(model_path, map_location=self.device)
         self.model.to(self.device)
         self.model.eval()
-        print("TorchScript model loaded from", model_path)
+        _log_info(f"read_screen_text TorchScript model loaded path={model_path}")
         
         
         with open(os.path.join(os.path.dirname(__file__), 'char_dict.json'), "r", encoding="utf-8") as f:
@@ -276,7 +172,7 @@ class TextExtractor:
                     import shutil
                     shutil.rmtree(self.save_dir)
                 except Exception as e:
-                    print(f"Error deleting directory {self.save_dir}: {e}")
+                    _log_error(f"read_screen_text TextExtractor failed deleting save_dir={self.save_dir} err={e}")
             os.makedirs(self.save_dir, exist_ok=True)
         self.rgb = rgb
         if image_path:
@@ -828,7 +724,7 @@ class TextExtractor:
             for i_line_image in range(len(line_images)):
                 line_images[i_line_image] = np.concatenate([line_images[i_line_image], np.zeros((self.height, max_line_length - line_images[i_line_image].shape[1]))], axis=1)
             line_images = np.array(line_images)
-            print("line_images.shape=", line_images.shape)
+            _log_info(f"read_screen_text line_images.shape={line_images.shape}")
         else:
             for i_line_image, line_image in enumerate(line_images):
                 line_images[i_line_image] = np.expand_dims(np.array(line_image), axis=0)
@@ -899,12 +795,12 @@ class TextExtractor:
 
 
 def main():
-    print("Starting inference...")
+    _log_info("read_screen_text Starting inference (image CLI)")
     parser = argparse.ArgumentParser(description="Run inference on an image.")
     parser.add_argument("image_path", help="Path to the input image.")
     args = parser.parse_args()
     image_path = args.image_path
-    print("Image path: ", image_path)
+    _log_info(f"read_screen_text image_path={image_path}")
 
     # src = 'C:/Users/Joseph Hung/Pictures/data/debug/'
     # image_path = src + 'wiki_asia.png'
@@ -916,13 +812,13 @@ def main():
     images, rects = text_extractor.line_images(batched_np=False)
     results = zip(images, rects)
     start_time = time.time()
-    print("Predicting...")
+    _log_info("read_screen_text Predicting...")
     for image, rect in results:
         predicted_texts, pred_prob_avg = text_predictor.predict_images(image, beam_search=False)
         text = ''.join(predicted_texts)
-        print("rect: ", rect, "text: ", text)
+        _log_info(f"read_screen_text rect={rect} text={text!r}")
     end_time = time.time()
-    print("Time taken: ", end_time - start_time)
+    _log_info(f"read_screen_text inference elapsed_s={end_time - start_time:.4f}")
     return results
 
 if __name__ == "__main__":

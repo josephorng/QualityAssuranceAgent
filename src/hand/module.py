@@ -11,7 +11,7 @@ from mcp.types import TextContent
 from cua_mcp.tools import mcp_server
 from src.common.io_utils import append_csv_row
 from src.common.models import ExecutionResult, ToolCommand
-from src.common.ollama_client import OllamaClient
+from src.common.llm_factory import get_llm_client
 from src.common.run_state import get_run_state_manager
 from src.common.runtime_context import get_runtime_env
 from src.common.settings import load_settings
@@ -52,7 +52,7 @@ def _merged_tool_args(original: dict[str, Any], tool_output: Any) -> dict[str, A
 class HandModule:
     def __init__(self) -> None:
         self.settings = load_settings()
-        self.ollama = OllamaClient(self.settings.ollama_host)
+        self.ollama = get_llm_client()
         self.run_root, self.run_id = get_runtime_env()
         self.manager = get_run_state_manager()
         self.manager.init_run(self.run_id, self.run_root.name)

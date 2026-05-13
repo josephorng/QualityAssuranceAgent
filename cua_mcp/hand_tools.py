@@ -10,12 +10,12 @@ import pyperclip
 
 import pyautogui
 import pygetwindow as gw
-from src.common.ollama_client import OllamaClient
+from src.common.llm_factory import get_llm_client
 from src.common.settings import load_settings
 from src.eye.capture import capture_active_monitor_to_file
 
 _settings = load_settings()
-_ollama = OllamaClient(_settings.ollama_host, timeout_seconds=60)
+_ollama = get_llm_client()
 
 
 def _normalize_hotkey_token(key: str) -> str:

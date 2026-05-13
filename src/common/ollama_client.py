@@ -1,23 +1,22 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from ollama import AsyncClient, ChatResponse, Message
-from PIL import Image
-from pydantic import BaseModel
 
+from src.common.llm_client import (
+    LLMClient,
+    ResponseFormatParam,
+    ThinkParam,
+    ToolCall,
+)
 from src.common.run_state import get_run_state_manager
 
-ResponseFormatParam = Literal["json"] | dict[str, Any] | None
+__all__ = ["OllamaClient", "ResponseFormatParam", "ThinkParam", "ToolCall"]
 
 
-class ToolCall(BaseModel):
-    name: str
-    arguments: dict[str, Any]
-
-class OllamaClient:
+class OllamaClient(LLMClient):
     def __init__(self, host: str, timeout_seconds: int = 60) -> None:
         self.host = host.rstrip("/")
         self.timeout_seconds = timeout_seconds
@@ -31,6 +30,7 @@ class OllamaClient:
         response_format: ResponseFormatParam = None,
         *,
         append_image_sizes: bool = True,
+        think: ThinkParam = None,
     ) -> Message:
         """
         Run chat with an explicit message list (no merge with _message_history).
@@ -38,6 +38,7 @@ class OllamaClient:
 
         Args:
             tools: Tool definitions to provide to the model. If None, uses the default tool set from ``cua_mcp.tools.TOOL_FUNCTIONS``. Pass an empty list to disable tools.
+            think: When set, forwarded to Ollama ``think`` (thinking models).
         
         Returns:
             Message: The response message.
@@ -58,7 +59,10 @@ class OllamaClient:
 
         if tools:
             chat_kwargs["tools"] = tools
-        
+
+        if think is not None:
+            chat_kwargs["think"] = think
+
         last_assistant_idx = -1
         for idx in reversed(range(len(prepared_messages))):
             if prepared_messages[idx].get("role") == "assistant":
@@ -74,7 +78,8 @@ class OllamaClient:
         get_run_state_manager().log_info(f"Ollama chat_messages response=\n{response}")
         response_message = response.message
         tool_calls = response_message.tool_calls
-        if not response_message.content and not tool_calls:
+        has_thinking = bool((response_message.thinking or "").strip())
+        if not response_message.content and not tool_calls and not has_thinking:
             get_run_state_manager().log_info("Ollama returned empty response and no tools; retrying in 5 seconds.")
             await asyncio.sleep(5)
             return await self.chat_messages(
@@ -83,37 +88,6 @@ class OllamaClient:
                 tools=tools,
                 response_format=response_format,
                 append_image_sizes=append_image_sizes,
+                think=think,
             )
         return response_message
-
-    def _append_last_message_image_sizes(
-        self, messages: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
-        if not messages:
-            return messages
-        last = messages[-1]
-        images = last.get("images")
-        if not isinstance(images, list) or not images:
-            return messages
-        content = last.get("content")
-        if not isinstance(content, str):
-            return messages
-        size_entries: list[str] = []
-        for image in images:
-            if not isinstance(image, str):
-                continue
-            image_path = Path(image)
-            try:
-                with Image.open(image_path) as image_obj:
-                    width, height = image_obj.size
-                size_entries.append(f"{image_path.name}={width}x{height}")
-            except (OSError, ValueError):
-                size_entries.append(f"{image_path.name}=unavailable")
-        if not size_entries:
-            return messages
-        message_with_sizes = dict(last)
-        message_with_sizes["content"] = (
-            f"{content}\n\nImageSizes: {', '.join(size_entries)}"
-        )
-        return [*messages[:-1], message_with_sizes]
-

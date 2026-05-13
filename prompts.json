@@ -55,18 +55,13 @@
   ],
   "ui_element_selection": [
     {
-      "prompt": "Choose AT MOST ONE candidate from the Candidates list that best matches the Instruction. It is OK to choose nothing if no candidate matches.\nEach line is: [index] center=[cx,cy] w=<width_px> h=<height_px> (optional text=...).\nIndices are 0-based. Use the image together with approximate box sizes to disambiguate similar candidates.\n\nAttached images: image 0 is the full screenshot; the remaining images are per-candidate crops, each with its [index] burned into a black header at the top. Read that stamped label from the crop and use it as the AUTHORITATIVE index. Never use any coordinate as the index.\n\nInstruction:\n{instruction}\n\nCandidates:\n{candidates_text}\n",
+      "prompt": "Pick the candidate index from Candidates that best matches the Instruction's location hint. Each candidate row starts with [index] then center=[cx,cy] w=<width_px> h=<height_px>.\n\nInstruction:\n{instruction}\n\nCandidates:\n{candidates_text}\n",
       "instructions": [
-        "Candidates are non-text UI detections; do not expect readable text labels.",
-        "Output NOTHING except valid JSON matching the server's schema.",
-        "If exactly one candidate matches: return {{\"index\": <integer>, \"cx\": <integer>, \"cy\": <integer>, \"w\": <integer>, \"h\": <integer>}}.",
-        "If NONE of the candidates match the instruction (e.g. the target is not present in the attached crops): return {{\"index\": null, \"cx\": null, \"cy\": null, \"w\": null, \"h\": null}}.",
-        "Never invent a guess just to fill the index when nothing matches; prefer null over a wrong pick.",
-        "When picking, the chosen \"index\" MUST equal the number stamped in the [..] header of the candidate crop you selected.",
-        "All five non-null values MUST be copied verbatim from the SAME row of the Candidates list whose [index] matches; never invent or substitute coordinates.",
-        "Example mapping: a crop whose header says '[7]' picked from the row '[7] center=[1711,28] w=54 h=43' yields index=7, cx=1711, cy=28, w=54, h=43.",
-        "Do not summarize, explain, or add prose."
+        "Reply only with JSON: {{\"index\": <integer>}} — the [index] from the chosen candidate row (0-based).",
+        "Never invent an index; only use an index shown in the Candidates list.",
+        "No extra text or explanation."
       ],
+
       "models": ["gemma4:e2b", "gemma3:4b"]
     }
   ],
@@ -80,6 +75,21 @@
         "Return an empty list when no icon is relevant.",
         "Do not use or infer coordinates.",
         "Do not output prose."
+      ],
+      "models": ["gemma4:e2b", "gemma3:4b"]
+    }
+  ],
+  "ui_instruction_icon_location_extract": [
+    {
+      "prompt": "Analyze the UI automation instruction below for downstream models in one response.\n\nUser instruction:\n{instruction}\n",
+      "instructions": [
+        "Return JSON only: {{\"need_text_anchor\": <true|false>, \"ui_icon_description\": \"<string>\", \"location_description\": \"<string>\", \"ui_shape_description\": \"<string>\"}}.",
+        "need_text_anchor: set true when the instruction refers to visible words, labels, or on-screen text content (for example: click 'Sign in', the row named X, select by caption). Set false when the target is mostly non-text visual (icon, toggle, avatar, gear, unlabeled button, panel) with no substantive text anchor.",
+        "ui_icon_description: the non-text control or visual to match (icon, button, toggle, avatar, gear, etc.). No leading verbs like click/tap. Omit pure location wording.",
+        "location_description: a detailed spatial description for disambiguating multiple on-screen candidates: regions (top/bottom/left/right/center, corners), relative layout (above/below/next to/beside), ordinal (first/last row), distance from window edges, header/footer/toolbar/sidebar when implied. Expand vague hints into explicit positional language. If there is no positional clue, use an empty string.",
+        "ui_shape_description (optional): short visual shape, size, or aspect of the target control (e.g. small square icon, wide rounded pill, tall narrow strip, circular avatar, horizontal slider). Use an empty string when not implied or not useful for disambiguation.",
+        "Do not invent UI that is not implied by the instruction.",
+        "Do not output markdown or prose outside the JSON object."
       ],
       "models": ["gemma4:e2b", "gemma3:4b"]
     }

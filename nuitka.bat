@@ -32,6 +32,7 @@ python -m nuitka ^
     --windows-icon-from-ico=icon.ico ^
     --include-data-dir=cua_mcp/read_screen_text=cua_mcp/read_screen_text ^
     --include-data-dir=cua_mcp/get_UI=cua_mcp/get_UI ^
+    --include-package-data=opencc ^
     %ENTRYSCRIPT%
 
 :: --- CHECK RESULT ---

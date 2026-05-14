@@ -4,7 +4,17 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import dataclass
 from typing import Any
+
+
+@dataclass(frozen=True)
+class EyeMonitorChoice:
+    """One selectable mss monitor row for UI or CLI display."""
+
+    index: int
+    title: str
+    detail: str
 
 
 def _physical_monitors() -> list[dict[str, Any]]:
@@ -53,6 +63,41 @@ def _all_screens_entry() -> dict[str, Any]:
         }
 
 
+def list_eye_monitor_choices() -> list[EyeMonitorChoice]:
+    """
+    Build monitor rows in display order (all screens first, then physical left → right).
+
+    Returns at least the all-screens row; if no physical monitors, only that row is returned.
+    """
+    all_entry = _all_screens_entry()
+    physical = _physical_monitors()
+    physical_sorted = sorted(physical, key=lambda d: (d["left"], d["top"]))
+    primary_idx = _primary_monitor_index(physical)
+    labels = _position_labels(len(physical_sorted))
+    index_to_label: dict[int, str] = {}
+    for mon, label in zip(physical_sorted, labels):
+        index_to_label[mon["index"]] = label
+
+    rows: list[EyeMonitorChoice] = [
+        EyeMonitorChoice(
+            index=0,
+            title="All screens combined",
+            detail=f"{all_entry['width']}×{all_entry['height']} at ({all_entry['left']}, {all_entry['top']})",
+        )
+    ]
+    if not physical:
+        return rows
+
+    for mon in physical_sorted:
+        idx = mon["index"]
+        label = index_to_label.get(idx, "")
+        primary_note = " [main]" if idx == primary_idx else ""
+        title = f"Monitor {idx}: {label}{primary_note}".strip()
+        detail = f"{mon['width']}×{mon['height']} at ({mon['left']}, {mon['top']})"
+        rows.append(EyeMonitorChoice(index=idx, title=title, detail=detail))
+    return rows
+
+
 def _primary_monitor_index(physical: list[dict[str, Any]]) -> int | None:
     """
     Best-effort detection of the OS main display.
@@ -89,38 +134,18 @@ def prompt_eye_monitor_index() -> int:
         )
         return 1
 
-    all_entry = _all_screens_entry()
+    rows = list_eye_monitor_choices()
     physical = _physical_monitors()
-    physical_sorted = sorted(physical, key=lambda d: (d["left"], d["top"]))
-    primary_idx = _primary_monitor_index(physical)
-    labels = _position_labels(len(physical_sorted))
-    index_to_label: dict[int, str] = {}
-    for mon, label in zip(physical_sorted, labels):
-        index_to_label[mon["index"]] = label
-
     print()
     print("Which screen should Eye capture? (coordinates from screenshots use this region.)")
     print()
-    print(
-        f"  [0]  All screens combined  —  {all_entry['width']}×{all_entry['height']} "
-        f"at virtual origin ({all_entry['left']}, {all_entry['top']})"
-    )
+    for row in rows:
+        print(f"  [{row.index}]  {row.title}  —  {row.detail}")
     print()
 
     if not physical:
         print("  No separate physical monitors detected; using [0] all screens.")
         return 0
-
-    print("  Physical monitors (mss index; order is left → right by virtual desktop position):")
-    for mon in physical_sorted:
-        idx = mon["index"]
-        label = index_to_label.get(idx, "")
-        primary_note = "  [main screen]" if idx == primary_idx else ""
-        print(
-            f"  [{idx}]  {label:22}  {mon['width']}×{mon['height']}  "
-            f"at ({mon['left']}, {mon['top']}){primary_note}"
-        )
-    print()
 
     valid = {0} | {m["index"] for m in physical}
     while True:

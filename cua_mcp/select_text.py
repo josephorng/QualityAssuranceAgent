@@ -16,14 +16,20 @@ from cua_mcp.read_screen_text.ocr_image import (
 )
 from src.common.llm_factory import get_llm_client
 from src.common.prompting import get_prompt
-from src.common.run_state import get_run_state_manager, ts_name
+from src.common.run_state import RunStateManager, get_run_state_manager, ts_name
 from src.common.settings import load_settings
 from src.eye import active_monitor_offset
 from src.eye.capture import capture_active_monitor_to_file
 
 settings = load_settings()
-logger = get_run_state_manager()
 _ollama = get_llm_client()
+
+
+def _run_manager() -> RunStateManager:
+    """Always resolve the current singleton (never cache): ``reset_run_state_manager`` replaces it."""
+    return get_run_state_manager()
+
+
 _t2s_converter = OpenCC("t2s") if OpenCC else None
 
 # Ollama JSON mode: model names OCR text; we map back to region centers.
@@ -51,7 +57,7 @@ def _get_active_capture_offset() -> tuple[int, int]:
     try:
         return active_monitor_offset()
     except Exception as exc:
-        logger.log_info(f"Failed active_monitor_offset err={type(exc).__name__}: {exc}")
+        _run_manager().log_info(f"Failed active_monitor_offset err={type(exc).__name__}: {exc}")
     return 0, 0
 
 
@@ -296,7 +302,7 @@ async def _disambiguate_duplicate_centers(
         )
         x, y, llm_text = _parse_xy_text_from_llm_content(reply.content)
     except ValueError as exc:
-        logger.log_info(f"_disambiguate_duplicate_centers: retry ({exc})")
+        _run_manager().log_info(f"_disambiguate_duplicate_centers: retry ({exc})")
         messages[0]["content"] += (
             '\nReply with ONLY: {"x": <integer>, "y": <integer>, "text": "<string>"} '
             "where x,y equals one candidate [cx,cy] above and \"text\" is that line's "
@@ -344,7 +350,7 @@ async def _select_coordinate(
     similarity_matches = _pick_best_similarity_row(extracted_texts, rows)
     if len(similarity_matches) == 1:
         cx, cy, matched_text = similarity_matches[0]
-        logger.log_info(
+        _run_manager().log_info(
             f"_select_coordinate: similarity pre-match picked ({cx},{cy}) from {matched_text!r}"
         )
         return cx, cy
@@ -353,7 +359,7 @@ async def _select_coordinate(
         x, y, dis_text = await _disambiguate_duplicate_centers(
             instruction, target, similarity_matches, image_path
         )
-        logger.log_info(
+        _run_manager().log_info(
             f"_select_coordinate: similarity pre-match disambiguated to ({x},{y}) {dis_text!r}"
         )
         return x, y
@@ -378,7 +384,7 @@ async def _select_coordinate(
         chosen = _parse_target_text_from_llm_content(reply.content)
         matches = _match_tiers_to_rows(chosen, rows)
     except ValueError as exc:
-        logger.log_info(
+        _run_manager().log_info(
             f"_select_coordinate: first attempt failed ({exc}); retrying with format=json."
         )
         messages[0]["content"] += (
@@ -431,7 +437,7 @@ def _with_clicked_text(result: dict[str, Any], clicked_text: str) -> dict[str, A
 
 
 async def _resolve_point(target: str, instruction: str) -> tuple[int, int, str]:
-    paths = logger.require_paths()
+    paths = _run_manager().require_paths()
     name = f"{ts_name()}.png"
     out = paths.yolo_ocr_dir / name
     capture_active_monitor_to_file(out)

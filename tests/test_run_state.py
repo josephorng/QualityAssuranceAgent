@@ -1,6 +1,23 @@
 from pathlib import Path
 
-from src.common.run_state import RunStateManager, sanitize_log_text
+import pytest
+
+from src.common.run_state import RunStateManager, reset_run_state_manager, sanitize_log_text
+
+
+def test_reset_run_state_manager_recreates_singleton(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from src.common import run_state
+
+    root = tmp_path / "run_a"
+    root.mkdir()
+    monkeypatch.setenv("CUA_RUN_ROOT", str(root))
+    monkeypatch.setenv("CUA_RUN_ID", "run_a")
+    reset_run_state_manager()
+    m1 = run_state.get_run_state_manager()
+    reset_run_state_manager()
+    m2 = run_state.get_run_state_manager()
+    assert m1 is not m2
+    reset_run_state_manager()
 
 
 def test_init_run_creates_expected_paths(tmp_path: Path) -> None:

@@ -28,7 +28,7 @@ from cua_mcp.select_text import _to_global_coordinate
 from cua_mcp.read_screen_text.ocr_image import get_coordinates_from_path, get_text_boxes_from_path
 from src.common.llm_factory import get_llm_client
 from src.common.prompting import get_prompt
-from src.common.run_state import get_run_state_manager, ts_name
+from src.common.run_state import RunStateManager, get_run_state_manager, ts_name
 from src.common.settings import load_settings
 from src.common.io_utils import write_json
 from src.eye.capture import capture_active_monitor_to_file
@@ -40,8 +40,13 @@ _UI_ONNX_SESSION: ort.InferenceSession | None = None
 _UI_ONNX_INPUT_NAME: str | None = None
 
 settings = load_settings()
-logger = get_run_state_manager()
 _ollama = get_llm_client()
+
+
+def _run_manager() -> RunStateManager:
+    """Always resolve the current singleton (never cache): ``reset_run_state_manager`` replaces it."""
+    return get_run_state_manager()
+
 
 _INDEX_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -89,7 +94,7 @@ class UiDetection:
 
 def _log_info(text: str) -> None:
     try:
-        logger.log_info(text)
+        _run_manager().log_info(text)
     except RuntimeError:
         pass
 
@@ -334,7 +339,7 @@ def _persist_ui_result(
     text_boxes: list[tuple[int, int, int, int]],
     final: list[UiDetection],
 ) -> None:
-    paths = logger.require_paths()
+    paths = _run_manager().require_paths()
     out_path = paths.yolo_ui_dir / Path(image_path).with_suffix(".json").name
     result_image_path: Path | None = (
         paths.yolo_ui_dir / f"{Path(image_path).stem}_result{Path(image_path).suffix}"
@@ -441,7 +446,7 @@ def _write_bbox_crop(image_path: str, bbox: tuple[int, int, int, int]) -> str:
     ih, iw = img.shape[:2]
     x, y, w, h = _clip_box(x, y, w, h, iw, ih)
     crop = img[y : y + h, x : x + w]
-    paths = logger.require_paths()
+    paths = _run_manager().require_paths()
     out = paths.yolo_ui_dir / f"{Path(image_path).stem}_bbox_confirm_{ts_name()}.png"
     out.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out), crop)
@@ -505,7 +510,7 @@ def _write_labeled_bbox_crop(
 
     labeled = np.vstack([header, crop])
 
-    paths = logger.require_paths()
+    paths = _run_manager().require_paths()
     safe_label = label.strip("[]").replace("/", "_").replace("\\", "_") or "x"
     out = paths.yolo_ui_dir / f"{Path(image_path).stem}_pick_{safe_label}_{ts_name()}.png"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -535,7 +540,7 @@ async def _confirm_selection_bbox_with_ollama(instruction: str, crop_image_path:
         )
         return _parse_confirmed_from_llm(reply.content)
     except ValueError as exc:
-        logger.log_info(f"_confirm_selection_bbox_with_ollama: retry ({exc})")
+        _run_manager().log_info(f"_confirm_selection_bbox_with_ollama: retry ({exc})")
         messages[0]["content"] += (
             '\nReply with ONLY: {"confirmed": true|false}. '
             "No text before or after the JSON.\n"
@@ -636,7 +641,7 @@ async def _filter_text_detections(
         )
         keep_indices = _parse_keep_indices_from_llm(reply.content, len(text_detections))
     except ValueError as exc:
-        logger.log_info(f"_filter_text_detections: retry ({exc})")
+        _run_manager().log_info(f"_filter_text_detections: retry ({exc})")
         messages[0]["content"] += (
             '\nReply with ONLY: {"keep_indices": [<integer>, ...]}. '
             "No text before or after the JSON.\n"
@@ -650,7 +655,7 @@ async def _filter_text_detections(
             )
             keep_indices = _parse_keep_indices_from_llm(reply.content, len(text_detections))
         except ValueError as retry_exc:
-            logger.log_info(f"_filter_text_detections: fallback keep-all ({retry_exc})")
+            _run_manager().log_info(f"_filter_text_detections: fallback keep-all ({retry_exc})")
             return text_detections
 
     if not keep_indices:
@@ -830,7 +835,7 @@ async def _select_center_with_ollama(
     if pool_idx is not None:
         return pool_idx
 
-    logger.log_info("_select_center_with_ollama: retry (invalid or missing index)")
+    _run_manager().log_info("_select_center_with_ollama: retry (invalid or missing index)")
     messages[0]["content"] += (
         '\nReply with ONLY: {"index": <integer>} — the [index] from the Candidates '
         "list row that best matches the location instruction (0-based). "
@@ -853,7 +858,7 @@ async def resolve_ui_element_point(instruction: str) -> tuple[int, int, dict[str
     if not text:
         raise ValueError("instruction must be non-empty")
 
-    paths = logger.require_paths()
+    paths = _run_manager().require_paths()
     name = f"{ts_name()}.png"
     out = paths.yolo_ui_dir / name
     capture_active_monitor_to_file(out)

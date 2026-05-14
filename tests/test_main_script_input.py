@@ -4,6 +4,17 @@ from pathlib import Path
 from src.common import script_helper
 
 
+def test_parse_executable_lines_from_text_matches_file(tmp_path: Path) -> None:
+    script = tmp_path / "sample.txt"
+    script.write_text(
+        "\n# comment line\nopen chrome\n   \n# another comment\nsearch cats\n",
+        encoding="utf-8",
+    )
+    from_disk = script_helper.parse_script_lines(script)
+    from_text = script_helper.parse_executable_lines_from_text(script.read_text(encoding="utf-8"))
+    assert from_disk == from_text == ["open chrome", "search cats"]
+
+
 def test_parse_script_lines_skips_blank_and_comments(tmp_path: Path) -> None:
     script = tmp_path / "sample.txt"
     script.write_text(

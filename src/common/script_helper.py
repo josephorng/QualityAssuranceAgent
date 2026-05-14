@@ -22,9 +22,8 @@ def list_script_files(scripts_dir: Path) -> list[Path]:
     return sorted([path for path in scripts_dir.glob("*.txt") if path.is_file()])
 
 
-def parse_script_lines(script_path: Path) -> list[str]:
-    """Parse executable script lines, skipping blanks and comment lines starting with `#`."""
-    raw = script_path.read_text(encoding="utf-8")
+def parse_executable_lines_from_text(raw: str) -> list[str]:
+    """Parse executable script lines from in-memory text (same rules as ``parse_script_lines``)."""
     lines: list[str] = []
     for line in raw.splitlines():
         cleaned = line.strip()
@@ -32,6 +31,11 @@ def parse_script_lines(script_path: Path) -> list[str]:
             continue
         lines.append(cleaned)
     return lines
+
+
+def parse_script_lines(script_path: Path) -> list[str]:
+    """Parse executable script lines, skipping blanks and comment lines starting with `#`."""
+    return parse_executable_lines_from_text(script_path.read_text(encoding="utf-8"))
 
 
 def save_plain_task_script(task: str, scripts_dir: Path) -> Path:

@@ -20,6 +20,11 @@ def ts_name() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
 
 
+def unique_run_folder_name(name: str) -> str:
+    """Filesystem-safe unique folder name under a runs root (slug + UTC timestamp)."""
+    return f"{slugify(name)[:40]}_{ts_name()}"
+
+
 _B64_BODY_CHARS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/= \t\r\n"
 )
@@ -201,6 +206,12 @@ class RunStateManager:
         self._emit_log_line(line)
 
 _manager: RunStateManager | None = None
+
+
+def reset_run_state_manager() -> None:
+    """Clear the cached manager so the next ``get_run_state_manager`` rebuilds from ``CUA_RUN_ROOT``."""
+    global _manager
+    _manager = None
 
 
 def get_run_state_manager() -> RunStateManager:

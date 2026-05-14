@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-import json
-import os
-import signal
-import shutil
+import argparse
 import asyncio
 import ctypes
+import json
+import os
+import shutil
+import signal
 from pathlib import Path
 
 from src.common.monitor_prompt import prompt_eye_monitor_index
-from src.common.run_state import RunStateManager
+from src.common.run_state import RunStateManager, RunPaths, reset_run_state_manager
 from src.common.script_helper import list_script_files, parse_script_lines
+from src.common.settings import ROOT_DIR, load_settings
 from src.runtime.coordinator import RuntimeCoordinator
 from src.common.runtime_context import (
     RUNTIME_COMMAND_MODE_ENV,
@@ -18,7 +20,6 @@ from src.common.runtime_context import (
     SCRIPT_PATH_ENV,
     set_runtime_env,
 )
-from src.common.settings import ROOT_DIR, load_settings
 
 
 def clear_runs_folder(runs_root: Path) -> None:
@@ -81,18 +82,22 @@ def show_completion_popup(message: str, title: str = "QualityAssuranceAgent") ->
         print(f"[master] {title}: {message}")
 
 
-def main() -> None:
-    runtime_mode = prompt_run_mode()
-    if runtime_mode:
-        task = "runtime_command"
-    else:
-        task, selected_script_path, script_steps = select_script_input(ROOT_DIR)
-
-    settings = load_settings()
-    runs_root = Path(settings.runs_dir)
-    clear_runs_folder(runs_root)
+def prepare_run_session(
+    *,
+    runs_root: Path,
+    task: str,
+    runtime_mode: bool,
+    selected_script_path: Path | None,
+    script_steps: list[str] | None,
+    eye_monitor_index: int,
+    clear_runs_root: bool,
+    run_folder_name: str | None = None,
+) -> tuple[RunStateManager, RunPaths, str]:
+    """Create run directory, set process env for script/runtime mode and monitor index."""
+    if clear_runs_root:
+        clear_runs_folder(runs_root)
     manager = RunStateManager(runs_root=runs_root)
-    paths = manager.init_run(task)
+    paths = manager.init_run(task, run_folder_name)
     run_id = paths.root.name
 
     set_runtime_env(paths.root, run_id)
@@ -100,24 +105,76 @@ def main() -> None:
         os.environ[RUNTIME_COMMAND_MODE_ENV] = "1"
     else:
         os.environ.pop(RUNTIME_COMMAND_MODE_ENV, None)
+        if selected_script_path is None or script_steps is None:
+            raise ValueError("Script mode requires selected_script_path and script_steps")
         os.environ[SCRIPT_PATH_ENV] = str(selected_script_path)
         os.environ[SCRIPT_LINES_ENV] = json.dumps(script_steps, ensure_ascii=False)
-    eye_monitor_index = prompt_eye_monitor_index()
     os.environ["EYE_MONITOR_INDEX"] = str(eye_monitor_index)
-    print(f"[master] Eye capture monitor index: {eye_monitor_index} (0 = all screens)")
     manager.log_info(f"Eye capture monitor index set to {eye_monitor_index}")
+    return manager, paths, run_id
+
+
+def run_coordinator_sync() -> None:
+    """Run one coordinator lifecycle; caller must set env and ``prepare_run_session`` first."""
+    reset_run_state_manager()
+    coordinator = RuntimeCoordinator()
+    asyncio.run(coordinator.run())
+
+
+def cli_main() -> None:
+    runtime_mode = prompt_run_mode()
+    if runtime_mode:
+        task = "runtime_command"
+        selected_script_path: Path | None = None
+        script_steps: list[str] | None = None
+    else:
+        task, selected_script_path, script_steps = select_script_input(ROOT_DIR)
+
+    settings = load_settings()
+    runs_root = Path(settings.runs_dir)
+    eye_monitor_index = prompt_eye_monitor_index()
+    manager, _, run_id = prepare_run_session(
+        runs_root=runs_root,
+        task=task,
+        runtime_mode=runtime_mode,
+        selected_script_path=selected_script_path,
+        script_steps=script_steps,
+        eye_monitor_index=eye_monitor_index,
+        clear_runs_root=True,
+        run_folder_name=None,
+    )
+    print(f"[master] Eye capture monitor index: {eye_monitor_index} (0 = all screens)")
     completion_message = f"Run {run_id} finished."
 
     try:
         manager.log_info("Master starting coordinator module runtime")
-        coordinator = RuntimeCoordinator()
-        asyncio.run(coordinator.run())
+        run_coordinator_sync()
     except KeyboardInterrupt:
         manager.log_info("KeyboardInterrupt received. shutting down coordinator.")
         completion_message = f"Run {run_id} interrupted by user."
     finally:
         manager.log_info("Master stopped.")
         show_completion_popup(completion_message)
+
+
+def launch_gui() -> None:
+    from app_main_hub import run_main_hub
+
+    run_main_hub()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="QualityAssuranceAgent master")
+    parser.add_argument(
+        "--cli",
+        action="store_true",
+        help="Interactive stdin mode (legacy); default opens the graphical hub.",
+    )
+    args = parser.parse_args()
+    if args.cli:
+        cli_main()
+    else:
+        launch_gui()
 
 
 if __name__ == "__main__":

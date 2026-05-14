@@ -1,7 +1,7 @@
 from ultralytics import YOLO
 
-# 1. Load your trained v26 model
-model = YOLO("yolo_ui_model.pt") 
+# 1. Load your trained v26 mo
+model = YOLO("model_source/yolo_ui_model.pt") 
 
 # 2. Export to ONNX with end2end enabled
 success = model.export(

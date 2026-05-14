@@ -1,8 +1,8 @@
 """
 OCR pipeline: YOLO text-region detection + CRNN recognition.
 
-Reads an image from disk, detects text regions with ``yolo_best.pt``,
-runs CRNN directly on each detected crop using ``crnn_cfc_model.pt``, and
+Reads an image from disk, detects text regions with ``read_screen_text/yolo_best.onnx`` (ONNX Runtime),
+runs CRNN (ONNX) on each detected crop using ``ocr_model_finetuned.onnx``, and
 returns an offset plus reading-order regions ``(bbox, (center_x, center_y), predict_images)``.
 Use :func:`format_coordinate_text_from_regions` for ``[center_x,center_y] text`` hints.
 """
@@ -17,14 +17,22 @@ from typing import Optional
 
 import cv2
 import numpy as np
+import onnxruntime as ort
 
+from cua_mcp.yolo_onnx import (
+    DEFAULT_CONF_YOLOV26_END2END,
+    bgr_to_nchw_normalized,
+    create_cpu_session,
+    decode_yolov26_end2end,
+)
 from src.eye.capture import capture_active_monitor_to_file
-from .inference import TextPredictor
+from .inference_onnx import TextPredictor
 from src.common.io_utils import write_json
 from src.common.run_state import get_run_state_manager, ts_name
 
 _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
-_YOLO_MODEL: object | None = None
+_OCR_YOLO_ONNX_SESSION: ort.InferenceSession | None = None
+_OCR_YOLO_ONNX_INPUT_NAME: str | None = None
 _CRNN_PREDICTOR: TextPredictor | None = None
 
 
@@ -69,44 +77,61 @@ def _persist_ocr_result(
 
 
 def _default_crnn_path() -> str:
-    """Return the default CRNN model path inside this package."""
-    return os.path.join(_PACKAGE_DIR, "crnn_cfc_model.pt")
+    """Return the default ONNX CRNN model path inside this package."""
+    return os.path.join(_PACKAGE_DIR, "ocr_model_finetuned.onnx")
 
 
 def _default_yolo_path() -> str:
-    """Return the default YOLO detector path inside this package."""
-    return os.path.join(_PACKAGE_DIR, "yolo_best.pt")
+    """Return the default ONNX OCR text-region detector path."""
+    return os.path.join(_PACKAGE_DIR, "yolo_best.onnx")
 
 
 def _get_crnn_predictor(model_path: Optional[str] = None) -> TextPredictor:
-    """Lazily initialize and cache the CRNN predictor instance."""
+    """Lazily initialize and cache the ONNX CRNN predictor instance."""
     global _CRNN_PREDICTOR
     path = model_path or _default_crnn_path()
     if _CRNN_PREDICTOR is None:
         if not os.path.isfile(path):
-            raise FileNotFoundError(f"CRNN model not found: {path}")
-        _log_info(f"OCR initializing CRNN predictor model_path={path}")
+            raise FileNotFoundError(f"ONNX CRNN model not found: {path}")
+        _log_info(f"OCR initializing ONNX CRNN predictor model_path={path}")
         _CRNN_PREDICTOR = TextPredictor(path)
     return _CRNN_PREDICTOR
 
 
-def _get_yolo() -> object:
-    """Lazily initialize and cache the YOLO detector instance."""
-    global _YOLO_MODEL
-    if _YOLO_MODEL is None:
-        try:
-            from ultralytics import YOLO  # type: ignore[import-untyped]
-        except ImportError as e:
-            raise RuntimeError(
-                "ultralytics is required for YOLO detection. "
-                "Install with: pip install ultralytics"
-            ) from e
+def _get_ocr_yolo_onnx_session() -> tuple[ort.InferenceSession, str]:
+    """Lazily initialize and cache ONNX Runtime session for ``yolo_best.onnx``."""
+    global _OCR_YOLO_ONNX_SESSION, _OCR_YOLO_ONNX_INPUT_NAME
+    if _OCR_YOLO_ONNX_SESSION is None:
         yolo_path = _default_yolo_path()
         if not os.path.isfile(yolo_path):
             raise FileNotFoundError(f"YOLO model not found: {yolo_path}")
-        _log_info(f"OCR initializing YOLO detector model_path={yolo_path}")
-        _YOLO_MODEL = YOLO(yolo_path)
-    return _YOLO_MODEL
+        _log_info(f"OCR initializing YOLO ONNX detector model_path={yolo_path}")
+        _OCR_YOLO_ONNX_SESSION, _OCR_YOLO_ONNX_INPUT_NAME = create_cpu_session(yolo_path)
+    assert _OCR_YOLO_ONNX_INPUT_NAME is not None
+    return _OCR_YOLO_ONNX_SESSION, _OCR_YOLO_ONNX_INPUT_NAME
+
+
+def _run_ocr_yolo_onnx_inference(
+    bgr: np.ndarray,
+    *,
+    conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
+) -> np.ndarray:
+    """
+    Resize to 640×640, RGB CHW normalize, run ``yolo_best.onnx`` (YOLOv26 end2end).
+
+    Returns ``N×4`` ``xyxy`` float array in original image pixel space after score filtering
+    (NMS is in the ONNX graph).
+    """
+    session, input_name = _get_ocr_yolo_onnx_session()
+    img_data, h0, w0 = bgr_to_nchw_normalized(bgr)
+    outputs = session.run(None, {input_name: img_data})
+    xyxy, _scores = decode_yolov26_end2end(
+        outputs[0],
+        h0,
+        w0,
+        conf_threshold=conf_threshold,
+    )
+    return xyxy
 
 
 def _clip_box(x: int, y: int, w: int, h: int, img_w: int, img_h: int) -> tuple[int, int, int, int]:
@@ -121,36 +146,21 @@ def _clip_box(x: int, y: int, w: int, h: int, img_w: int, img_h: int) -> tuple[i
 def _yolo_text_boxes(bgr: np.ndarray) -> list[tuple[int, int, int, int]]:
     """Return list of (x, y, w, h) in image coordinates, or empty if unavailable."""
     try:
-        model = _get_yolo()
+        xyxy = _run_ocr_yolo_onnx_inference(bgr)
     except (RuntimeError, FileNotFoundError, OSError) as exc:
         _log_info(f"OCR YOLO unavailable: {type(exc).__name__}: {exc}")
         return []
+    except Exception as exc:
+        _log_info(f"OCR YOLO ONNX predict failed: {type(exc).__name__}: {exc}")
+        return []
+
+    if xyxy.size == 0:
+        return []
 
     h, w = bgr.shape[:2]
-    # Ultralytics expects imgsz to align with stride (32); avoid noisy warnings.
-    m = max(h, w)
-    imgsz = max(32, ((m + 31) // 32) * 32)
-    try:
-        results = model.predict(  # type: ignore[union-attr]
-            bgr,
-            verbose=False,
-            conf=0.25,
-            imgsz=imgsz,
-        )
-    except Exception as exc:
-        _log_info(f"OCR YOLO predict failed: {type(exc).__name__}: {exc}")
-        return []
-
-    if not results:
-        return []
-    res = results[0]
-    if res.boxes is None or len(res.boxes) == 0:
-        return []
-
     out: list[tuple[int, int, int, int]] = []
-    xyxy = res.boxes.xyxy.cpu().numpy()
     for row in xyxy:
-        x1, y1, x2, y2 = (float(row[0]), float(row[1]), float(row[2]), float(row[3]))
+        x1, y1, x2, y2 = float(row[0]), float(row[1]), float(row[2]), float(row[3])
         x1i, y1i = max(0, int(x1)), max(0, int(y1))
         x2i, y2i = min(w, int(x2)), min(h, int(y2))
         bw, bh = max(1, x2i - x1i), max(1, y2i - y1i)
@@ -257,18 +267,22 @@ def _ocr_crop_predicted_texts(
 
     if len(bgr_crop.shape) == 3:
         gray = cv2.cvtColor(bgr_crop, cv2.COLOR_BGR2GRAY)
+        normalized = (gray - np.min(gray)) / (
+                np.max(gray) - np.min(gray) + 1e-7
+            )
     else:
-        gray = bgr_crop
+        normalized = bgr_crop
 
-    h, w = gray.shape[:2]
+    h, w = normalized.shape[:2]
     new_width = max(1, int((w / max(1, h)) * line_height))
-    resized = cv2.resize(gray, (new_width, line_height), interpolation=cv2.INTER_LINEAR)
+    resized = cv2.resize(normalized, (new_width, line_height), interpolation=cv2.INTER_LINEAR)
     line_image = np.expand_dims(np.array(resized), axis=0)
 
     try:
-        predicted_texts, _pred_prob = predictor.predict_images(line_image, beam_search=False)
+        predicted_texts = predictor.predict_images(line_image)
         return list(predicted_texts) if predicted_texts else []
-    except Exception:
+    except Exception as e:
+        print(f"OCR _ocr_crop_predicted_texts error: {e}")
         return []
 
 
@@ -291,7 +305,7 @@ def get_coordinates_from_path(
     crop_rect: tuple[int, int, int, int] | None = None,
 ) -> tuple[tuple[int, int], list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]]]:
     """
-    Run YOLO + CRNN OCR on the image at ``image_path``.
+    Run YOLO + ONNX CRNN OCR on the image at ``image_path``.
 
     Optional ``crop_rect`` is ``(x, y, w, h)`` in image pixel coordinates; OCR runs only on
     that region. Box coordinates in ``regions`` are relative to the cropped OCR image; add
@@ -337,7 +351,7 @@ def get_coordinates_from_path(
     try:
         predictor = _get_crnn_predictor(crnn_model_path)
     except FileNotFoundError as e:
-        _log_info(f"OCR CRNN model missing: {e}")
+        _log_info(f"OCR ONNX CRNN model missing: {e}")
         return (0, 0), []
 
     img_h, img_w = bgr.shape[:2]
@@ -413,7 +427,7 @@ def get_coordinates(
     crop_rect: tuple[int, int, int, int] | None = None,
 ) -> tuple[tuple[int, int], list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]]]:
     """
-    Capture the active monitor to this run's ``yolo_ocr/`` folder, then run YOLO + CRNN OCR.
+    Capture the active monitor to this run's ``yolo_ocr/`` folder, then run YOLO + ONNX CRNN OCR.
 
     Writes ``<timestamp>.png`` and persists OCR JSON with the same basename beside it.
     If ``crop_rect`` is set, OCR runs on that (x, y, w, h) region of the capture; see

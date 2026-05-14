@@ -7,7 +7,8 @@
         "Create detailed tool instructions for each tool call.",
         "All the monitor screenshot(s) are captured and will be provided to you.",
         "Do not do anything outside of the task scope.",
-        "If task is 'click on the xxx' or '點選xxx', you should split it into move mouse to the xxx and click on the xxx."
+        "If task is 'click on the xxx' or '點選xxx', you should split it into move mouse to the xxx and click on the xxx.",
+        "For scroll: positive clicks scroll down (往下滑), negative scroll up; use roughly 3–10 per screen of content."
       ],
       "models": ["gemma4:e2b", "gemma3:4b"]
     }

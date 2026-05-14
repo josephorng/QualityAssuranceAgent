@@ -272,7 +272,9 @@ def scroll(
     instruction: str = "",
 ):
     '''
-    Scroll the mouse wheel.
+    Scroll the mouse wheel at the current cursor. Positive ``clicks`` move the
+    document downward (toward the bottom); negative move upward. Each unit is
+    roughly one wheel detent. Hover the scrollable region before calling.
     '''
     return _scroll(clicks=clicks).update({"instruction": instruction})
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from tempfile import mkdtemp
 from time import sleep
@@ -218,10 +219,25 @@ def mouse_up(x: int | None = None, y: int | None = None, button: str = "left") -
     return out
 
 
+def _pyautogui_vertical_scroll_amount(clicks: int) -> int:
+    """Convert logical wheel detents to the value PyAutoGUI passes to the OS.
+
+    On Windows, vertical wheel ``dwData`` is in multiples of WHEEL_DELTA (120).
+    PyAutoGUI forwards the integer unchanged, so small values like 4 are a tiny
+    fraction of one notch and look like a no-op.
+    """
+    n = int(clicks)
+    if sys.platform == "win32":
+        return n * 120
+    return n
+
+
 def scroll_at(clicks: int, x: int | None = None, y: int | None = None) -> dict[str, Any]:
     if x is not None and y is not None:
         pyautogui.moveTo(x, y)
-    pyautogui.scroll(clicks)
+    # Positive MCP `clicks` = scroll document/view downward (往下滑); PyAutoGUI uses
+    # the opposite sign on Windows and X11.
+    pyautogui.scroll(-_pyautogui_vertical_scroll_amount(clicks))
     out: dict[str, Any] = {"clicks": clicks}
     if x is not None:
         out["x"] = x
@@ -544,7 +560,7 @@ def zoom_scroll(scroll_clicks: int, x: int | None = None, y: int | None = None) 
         pyautogui.moveTo(x, y)
     pyautogui.keyDown("ctrl")
     try:
-        pyautogui.scroll(scroll_clicks)
+        pyautogui.scroll(_pyautogui_vertical_scroll_amount(scroll_clicks))
     finally:
         pyautogui.keyUp("ctrl")
     out: dict[str, Any] = {"scroll_clicks": scroll_clicks, "modifier": "ctrl"}

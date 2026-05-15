@@ -14,7 +14,7 @@ from tkinter import filedialog
 
 from main import prepare_run_session, run_coordinator_sync
 from src.common.ctk_dialogs import show_ctk_message
-from src.common.io_utils import append_text
+from src.common.io_utils import append_text, read_json, write_json
 from src.common.monitor_prompt import EyeMonitorChoice, list_eye_monitor_choices
 from src.common.run_state import unique_run_folder_name
 from src.common.runtime_command_dialog import (
@@ -25,7 +25,55 @@ from src.common.runtime_command_dialog import (
 from src.common.script_helper import parse_executable_lines_from_text
 from src.common.settings import ROOT_DIR, load_settings
 
-_RUNTIME_COMMANDS_CACHE_NAME = "runtime_commands_cache.txt"
+# Step-mode runtime command transcript (append during run); not hub UI preferences.
+_RUNTIME_COMMAND_TRANSCRIPT_NAME = "runtime_commands_cache.txt"
+_HUB_UI_STATE_NAME = "hub_ui.json"
+_HUB_UI_VERSION = 1
+
+
+def _default_hub_ui_dict() -> dict[str, Any]:
+    return {
+        "version": _HUB_UI_VERSION,
+        "appearance_dark": True,
+        "selected_monitor_indices": [],
+        "last_script_path": None,
+    }
+
+
+def _coerce_int_list(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    out: list[int] = []
+    for x in value:
+        try:
+            out.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _normalize_hub_ui_state(raw: Any) -> dict[str, Any]:
+    base = _default_hub_ui_dict()
+    if not isinstance(raw, dict):
+        return base
+    base["version"] = int(raw.get("version", _HUB_UI_VERSION))
+    base["appearance_dark"] = bool(raw.get("appearance_dark", True))
+    base["selected_monitor_indices"] = _coerce_int_list(raw.get("selected_monitor_indices"))
+    lsp = raw.get("last_script_path")
+    base["last_script_path"] = lsp if isinstance(lsp, str) or lsp is None else None
+    return base
+
+
+def _read_hub_ui_state() -> dict[str, Any]:
+    try:
+        path = Path(load_settings().runs_dir) / _HUB_UI_STATE_NAME
+        return _normalize_hub_ui_state(read_json(path, {}))
+    except (OSError, ValueError, TypeError):
+        return _default_hub_ui_dict()
+
+
+def _hub_ui_state_path() -> Path:
+    return Path(load_settings().runs_dir) / _HUB_UI_STATE_NAME
 
 
 @dataclass
@@ -43,11 +91,15 @@ class MainHub(ctk.CTk):
         self.geometry("960x780")
         self.minsize(880, 880)
 
-        ctk.set_appearance_mode("dark")
+        hub = _read_hub_ui_state()
+        self._remember_monitor_indices: list[int] = list(hub["selected_monitor_indices"])
+        self._appearance_dark = bool(hub["appearance_dark"])
+        self._suppress_hub_monitor_persist = False
+        ctk.set_appearance_mode("dark" if self._appearance_dark else "light")
         ctk.set_default_color_theme("dark-blue")
 
         self._script_path: Path | None = None
-        # When set, Save writes here (runtime-command cache under runs_dir); not a user-opened script.
+        # When set, Save writes here (step-mode transcript under runs_dir); not a user-opened script.
         self._runtime_commands_cache_path: Path | None = None
         self._worker_thread: threading.Thread | None = None
         self._bridge: RuntimeCommandHubBridge | None = None
@@ -67,14 +119,25 @@ class MainHub(ctk.CTk):
         self._build_status()
 
         self._refresh_monitors()
-        self._try_load_last_runtime_command_cache()
+        last_script = hub.get("last_script_path")
+        if isinstance(last_script, str) and last_script.strip():
+            p = Path(last_script)
+            if p.is_file():
+                self._script_path = p
+                self._runtime_commands_cache_path = None
+                text = p.read_text(encoding="utf-8")
+                self._script_text.delete("0.0", "end")
+                self._script_text.insert("0.0", text)
+                self._script_path_label.configure(text=str(p.resolve()))
+        if self._script_path is None:
+            self._try_load_last_runtime_command_cache()
 
     def _try_load_last_runtime_command_cache(self) -> None:
         """If no script file is open, show the last runtime command cache for editing and Save."""
         if self._script_path is not None:
             return
         settings = load_settings()
-        cache_path = Path(settings.runs_dir) / _RUNTIME_COMMANDS_CACHE_NAME
+        cache_path = Path(settings.runs_dir) / _RUNTIME_COMMAND_TRANSCRIPT_NAME
         if not cache_path.is_file():
             return
         raw = cache_path.read_text(encoding="utf-8")
@@ -107,8 +170,6 @@ class MainHub(ctk.CTk):
         top_row = ctk.CTkFrame(head, fg_color="transparent")
         top_row.pack(fill="x")
 
-        self._appearance_dark = True
-
         theme_row = ctk.CTkFrame(top_row, fg_color="transparent")
         theme_row.pack(side="right", anchor="ne")
         self._appearance_toggle_btn = ctk.CTkButton(
@@ -135,11 +196,28 @@ class MainHub(ctk.CTk):
             font=ctk.CTkFont(size=14),
             text_color=("gray30", "gray70"),
         ).pack(anchor="w", pady=(4, 0))
+        self._sync_appearance_toggle_button()
+
+    def _persist_hub_ui_state(self) -> None:
+        try:
+            data = {
+                "version": _HUB_UI_VERSION,
+                "appearance_dark": self._appearance_dark,
+                "selected_monitor_indices": self._selected_monitor_indices(),
+                "last_script_path": str(self._script_path.resolve())
+                if self._script_path is not None
+                else None,
+            }
+            write_json(_hub_ui_state_path(), data)
+            self._remember_monitor_indices = list(data["selected_monitor_indices"])
+        except OSError:
+            pass
 
     def _toggle_appearance(self) -> None:
         self._appearance_dark = not self._appearance_dark
         ctk.set_appearance_mode("dark" if self._appearance_dark else "light")
         self._sync_appearance_toggle_button()
+        self._persist_hub_ui_state()
 
     def _sync_appearance_toggle_button(self) -> None:
         self._appearance_toggle_btn.configure(
@@ -177,7 +255,28 @@ class MainHub(ctk.CTk):
             choices = []
         self._monitor_labels = [self._format_monitor_row(c) for c in choices]
         self._monitor_indices = [c.index for c in choices]
-        self._rebuild_monitor_checkboxes()
+        self._suppress_hub_monitor_persist = True
+        try:
+            self._rebuild_monitor_checkboxes()
+            self._apply_remembered_monitor_selection()
+        finally:
+            self._suppress_hub_monitor_persist = False
+
+    def _apply_remembered_monitor_selection(self) -> None:
+        valid = [i for i in self._remember_monitor_indices if i in self._monitor_indices]
+        if not valid:
+            return
+        for midx, cb in zip(self._monitor_indices, self._monitor_checkboxes):
+            if midx in valid:
+                cb.select()
+            else:
+                cb.deselect()
+
+    def _on_monitor_checkbox_changed(self) -> None:
+        if self._suppress_hub_monitor_persist:
+            return
+        self._remember_monitor_indices = self._selected_monitor_indices()
+        self._persist_hub_ui_state()
 
     def _rebuild_monitor_checkboxes(self) -> None:
         for w in self._monitor_checks_scroll.winfo_children():
@@ -194,6 +293,7 @@ class MainHub(ctk.CTk):
                 self._monitor_checks_scroll,
                 text=label,
                 font=ctk.CTkFont(size=13),
+                command=self._on_monitor_checkbox_changed,
             )
             cb.pack(anchor="w", padx=4, pady=3)
             self._monitor_checkboxes.append(cb)
@@ -276,12 +376,14 @@ class MainHub(ctk.CTk):
         self._script_text.delete("0.0", "end")
         self._script_text.insert("0.0", text)
         self._script_path_label.configure(text=str(p.resolve()))
+        self._persist_hub_ui_state()
 
     def _script_save(self) -> None:
         body = self._script_text.get("0.0", "end").rstrip() + "\n"
         if self._script_path is not None:
             self._script_path.write_text(body, encoding="utf-8")
             self._status.configure(text=f"Saved {self._script_path.name}")
+            self._persist_hub_ui_state()
             return
         if self._runtime_commands_cache_path is not None:
             self._runtime_commands_cache_path.write_text(body, encoding="utf-8")
@@ -305,6 +407,7 @@ class MainHub(ctk.CTk):
         self._runtime_commands_cache_path = None
         self._script_path_label.configure(text=str(p.resolve()))
         self._status.configure(text=f"Saved as {p.name}")
+        self._persist_hub_ui_state()
 
     def _script_clear(self) -> None:
         """Unload any opened path / cache binding and empty the script editor."""
@@ -314,6 +417,7 @@ class MainHub(ctk.CTk):
         self._script_text.delete("0.0", "end")
         self._script_path_label.configure(text="No file loaded")
         self._status.configure(text="")
+        self._persist_hub_ui_state()
 
     def _on_start_run(self) -> None:
         if self._worker_thread and self._worker_thread.is_alive():
@@ -335,7 +439,7 @@ class MainHub(ctk.CTk):
             settings = load_settings()
             runs_root = Path(settings.runs_dir)
             runs_root.mkdir(parents=True, exist_ok=True)
-            cache_path = runs_root / _RUNTIME_COMMANDS_CACHE_NAME
+            cache_path = runs_root / _RUNTIME_COMMAND_TRANSCRIPT_NAME
             self._runtime_commands_cache_path = cache_path
             cache_path.write_text("", encoding="utf-8")
             self._script_text.configure(state="normal")

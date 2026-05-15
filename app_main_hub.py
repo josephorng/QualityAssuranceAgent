@@ -216,7 +216,9 @@ class MainHub(ctk.CTk):
         b_save = ctk.CTkButton(row, text="Save", width=100, command=self._script_save)
         b_save.pack(side="left", padx=(0, 8))
         b_sas = ctk.CTkButton(row, text="Save as…", width=100, command=self._script_save_as)
-        b_sas.pack(side="left")
+        b_sas.pack(side="left", padx=(0, 8))
+        b_clear = ctk.CTkButton(row, text="Clear", width=100, command=self._script_clear)
+        b_clear.pack(side="left")
         self._script_path_label = ctk.CTkLabel(
             box,
             text="No file loaded",
@@ -226,7 +228,7 @@ class MainHub(ctk.CTk):
         self._script_path_label.pack(anchor="w", padx=16, pady=(4, 8))
         self._script_text = ctk.CTkTextbox(box, font=ctk.CTkFont(size=14), wrap="word")
         self._script_text.pack(fill="both", expand=True, padx=16, pady=(0, 14))
-        self._script_controls.extend([b_open, b_save, b_sas, self._script_text])
+        self._script_controls.extend([b_open, b_save, b_sas, b_clear, self._script_text])
 
     def _build_actions_row(self) -> None:
         row = ctk.CTkFrame(self, fg_color="transparent")
@@ -293,6 +295,15 @@ class MainHub(ctk.CTk):
         self._runtime_commands_cache_path = None
         self._script_path_label.configure(text=str(p.resolve()))
         self._status.configure(text=f"Saved as {p.name}")
+
+    def _script_clear(self) -> None:
+        """Unload any opened path / cache binding and empty the script editor."""
+        self._script_path = None
+        self._runtime_commands_cache_path = None
+        self._script_text.configure(state="normal")
+        self._script_text.delete("0.0", "end")
+        self._script_path_label.configure(text="No file loaded")
+        self._status.configure(text="")
 
     def _on_start_run(self) -> None:
         if self._worker_thread and self._worker_thread.is_alive():

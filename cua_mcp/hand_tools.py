@@ -16,7 +16,6 @@ from src.common.settings import load_settings
 from src.eye.capture import capture_active_monitor_to_file
 
 _settings = load_settings()
-_ollama = get_llm_client()
 
 
 def _normalize_hotkey_token(key: str) -> str:
@@ -303,7 +302,7 @@ async def _ollama_pick_window_indices(
         "Windows:\n"
         + "\n".join(lines)
     )
-    msg = await _ollama.chat_messages(
+    msg = await get_llm_client().chat_messages(
         model=_settings.brain_lm,
         messages=[{"role": "user", "content": prompt}],
         tools=[],

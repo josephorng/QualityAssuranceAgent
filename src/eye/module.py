@@ -4,6 +4,7 @@ from src.common.models import EyeEvent
 from src.common.run_state import get_run_state_manager, ts_name
 from src.common.runtime_context import get_runtime_env
 from src.common.settings import load_settings
+from src.common.monitor_prompt import read_eye_monitor_indices_from_env
 from src.eye.capture import (
     active_monitor_index,
     capture_monitor_to_file,
@@ -75,9 +76,23 @@ class EyeModule:
         """
         Capture verification screenshots and return image paths.
 
-        If `requested_monitor_index` is 0, capture one screenshot per physical monitor
-        (mss indexes > 0). Otherwise, capture a single screenshot from the requested target.
+        If ``EYE_MONITOR_INDICES`` is set (comma-separated), capture each index in order.
+        Else if ``EYE_MONITOR_INDEX`` is non-zero, capture a single target.
+        Else (index 0): capture one screenshot per physical monitor (mss indexes > 0).
         """
+        indices_override = read_eye_monitor_indices_from_env()
+        if indices_override is not None:
+            original_monitor_index = self.active_monitor_index
+            image_paths: list[str] = []
+            try:
+                for monitor_index in indices_override:
+                    self.set_capture_target(monitor_index)
+                    monitor_event = await self.capture_once()
+                    image_paths.append(monitor_event.screenshot_path)
+            finally:
+                self.set_capture_target(original_monitor_index)
+            return image_paths
+
         eye_monitor_index = os.environ.get("EYE_MONITOR_INDEX", "0").strip()
         if eye_monitor_index != "0":
             self.set_capture_target(int(eye_monitor_index))

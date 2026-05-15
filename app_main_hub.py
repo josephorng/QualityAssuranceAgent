@@ -1,9 +1,8 @@
-"""CustomTkinter hub: script vs step-by-step runs with monitor selection."""
+"""CustomTkinter hub: runs from an opened script file or step-by-step when no file is set."""
 
 from __future__ import annotations
 
 import os
-import shutil
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -15,17 +14,24 @@ from tkinter import filedialog
 
 from main import prepare_run_session, run_coordinator_sync
 from src.common.ctk_dialogs import show_ctk_message
+from src.common.io_utils import append_text
 from src.common.monitor_prompt import EyeMonitorChoice, list_eye_monitor_choices
 from src.common.run_state import unique_run_folder_name
-from src.common.runtime_command_dialog import RuntimeCommandHubBridge
+from src.common.runtime_command_dialog import (
+    RuntimeCommandHubBridge,
+    consume_runtime_user_ended_at_prompt,
+    reset_runtime_user_ended_at_prompt,
+)
 from src.common.script_helper import parse_executable_lines_from_text
 from src.common.settings import ROOT_DIR, load_settings
+
+_RUNTIME_COMMANDS_CACHE_NAME = "runtime_commands_cache.txt"
 
 
 @dataclass
 class _WorkerArgs:
     step_mode: bool
-    eye_index: int
+    eye_monitor_indices: list[int]
     script_raw: str
     script_disk_path: Path | None
 
@@ -41,28 +47,58 @@ class MainHub(ctk.CTk):
         ctk.set_default_color_theme("dark-blue")
 
         self._script_path: Path | None = None
+        # When set, Save writes here (runtime-command cache under runs_dir); not a user-opened script.
+        self._runtime_commands_cache_path: Path | None = None
         self._worker_thread: threading.Thread | None = None
         self._bridge: RuntimeCommandHubBridge | None = None
         self._worker_outcome: tuple[str, str] = ("ok", "")
-        self._last_commands_file: Path | None = None
 
         self._monitor_labels: list[str] = []
         self._monitor_indices: list[int] = []
+        self._monitor_checkboxes: list[ctk.CTkCheckBox] = []
 
         self._post_run_unlink: Path | None = None
         self._script_controls: list[Any] = []
-        self._step_controls: list[Any] = []
 
         self._build_header()
         self._build_monitor_row()
-        self._build_mode_row()
         self._build_script_section()
-        self._build_step_section()
         self._build_actions_row()
         self._build_status()
 
-        self._on_mode_change("Script file")
         self._refresh_monitors()
+        self._try_load_last_runtime_command_cache()
+
+    def _try_load_last_runtime_command_cache(self) -> None:
+        """If no script file is open, show the last runtime command cache for editing and Save."""
+        if self._script_path is not None:
+            return
+        settings = load_settings()
+        cache_path = Path(settings.runs_dir) / _RUNTIME_COMMANDS_CACHE_NAME
+        if not cache_path.is_file():
+            return
+        raw = cache_path.read_text(encoding="utf-8")
+        if not raw.strip():
+            return
+        self._runtime_commands_cache_path = cache_path
+        self._script_text.delete("0.0", "end")
+        self._script_text.insert("0.0", raw)
+        self._script_path_label.configure(text=str(cache_path.resolve()))
+
+    def _append_runtime_command_to_script_view(self, cmd: str) -> None:
+        """Underlying Tk Text ignores ``insert`` while the widget is ``disabled`` (as during a run)."""
+        self._script_text.configure(state="normal")
+        self._script_text.insert("end", cmd + "\n")
+        self._script_text.configure(state="disabled")
+
+    def _refresh_runtime_script_text_from_cache(self) -> None:
+        """After a runtime-command run, reload the cache file into the script textbox (disk is source of truth)."""
+        p = self._runtime_commands_cache_path
+        if p is None or not p.is_file():
+            return
+        self._script_text.delete("0.0", "end")
+        self._script_text.insert("0.0", p.read_text(encoding="utf-8"))
+        self._script_path_label.configure(text=str(p.resolve()))
 
     def _build_header(self) -> None:
         head = ctk.CTkFrame(self, fg_color="transparent")
@@ -74,7 +110,7 @@ class MainHub(ctk.CTk):
         ).pack(anchor="w")
         ctk.CTkLabel(
             head,
-            text="Configure a run, choose the capture monitor, then start.",
+            text="Configure a run, choose which display(s) Eye captures, then start.",
             font=ctk.CTkFont(size=14),
             text_color=("gray30", "gray70"),
         ).pack(anchor="w", pady=(4, 0))
@@ -97,22 +133,25 @@ class MainHub(ctk.CTk):
     def _build_monitor_row(self) -> None:
         box = ctk.CTkFrame(self, corner_radius=12)
         box.pack(fill="x", padx=24, pady=8)
-        ctk.CTkLabel(box, text="Eye capture monitor", font=ctk.CTkFont(size=16, weight="bold")).pack(
+        ctk.CTkLabel(box, text="Eye capture monitors", font=ctk.CTkFont(size=16, weight="bold")).pack(
             anchor="w", padx=16, pady=(14, 4)
         )
         ctk.CTkLabel(
             box,
-            text="Screenshots and coordinates use this region.",
+            text="Check every display to include in captures. The first checked row is the primary region for coordinates.",
             font=ctk.CTkFont(size=12),
             text_color=("gray30", "gray70"),
+            wraplength=860,
+            justify="left",
         ).pack(anchor="w", padx=16, pady=(0, 8))
         row = ctk.CTkFrame(box, fg_color="transparent")
-        row.pack(fill="x", padx=16, pady=(0, 14))
-        self._monitor_menu = ctk.CTkOptionMenu(row, values=["(loading…)"], width=560)
-        self._monitor_menu.pack(side="left", fill="x", expand=True)
-        ctk.CTkButton(row, text="Refresh", width=100, command=self._refresh_monitors).pack(
-            side="left", padx=(10, 0)
+        self._monitor_checks_scroll = ctk.CTkScrollableFrame(row, height=200)
+        self._monitor_checks_scroll.pack(side="left", fill="both", expand=True)
+        self._monitor_refresh_btn = ctk.CTkButton(
+            row, text="Refresh", width=100, command=self._refresh_monitors
         )
+        self._monitor_refresh_btn.pack(side="left", padx=(10, 0), anchor="n")
+        row.pack(fill="x", padx=16, pady=(0, 14))
 
     def _refresh_monitors(self) -> None:
         try:
@@ -122,53 +161,52 @@ class MainHub(ctk.CTk):
             choices = [EyeMonitorChoice(0, "All screens (fallback)", "—")]
         self._monitor_labels = [self._format_monitor_row(c) for c in choices]
         self._monitor_indices = [c.index for c in choices]
-        self._monitor_menu.configure(values=self._monitor_labels)
-        self._monitor_menu.set(self._monitor_labels[0])
+        self._rebuild_monitor_checkboxes()
+
+    def _rebuild_monitor_checkboxes(self) -> None:
+        for w in self._monitor_checks_scroll.winfo_children():
+            w.destroy()
+        self._monitor_checkboxes.clear()
+        for i, label in enumerate(self._monitor_labels):
+            cb = ctk.CTkCheckBox(
+                self._monitor_checks_scroll,
+                text=label,
+                font=ctk.CTkFont(size=13),
+                command=lambda idx=i: self._on_monitor_checkbox_changed(idx),
+            )
+            cb.pack(anchor="w", padx=4, pady=3)
+            self._monitor_checkboxes.append(cb)
+            if i == 0:
+                cb.select()
+            else:
+                cb.deselect()
+
+    def _on_monitor_checkbox_changed(self, changed_row: int) -> None:
+        """All screens (row 0) is exclusive with per-monitor rows."""
+        if not self._monitor_checkboxes:
+            return
+        if changed_row == 0:
+            if self._monitor_checkboxes[0].get():
+                for j in range(1, len(self._monitor_checkboxes)):
+                    self._monitor_checkboxes[j].deselect()
+        elif self._monitor_checkboxes[changed_row].get():
+            self._monitor_checkboxes[0].deselect()
 
     @staticmethod
     def _format_monitor_row(c: EyeMonitorChoice) -> str:
         return f"[{c.index}] {c.title} — {c.detail}"
 
-    def _selected_monitor_index(self) -> int:
-        label = self._monitor_menu.get()
-        try:
-            i = self._monitor_labels.index(label)
-        except ValueError:
-            return self._monitor_indices[0] if self._monitor_indices else 1
-        return self._monitor_indices[i]
-
-    def _build_mode_row(self) -> None:
-        box = ctk.CTkFrame(self, corner_radius=12)
-        box.pack(fill="x", padx=24, pady=8)
-        ctk.CTkLabel(box, text="Run mode", font=ctk.CTkFont(size=16, weight="bold")).pack(
-            anchor="w", padx=16, pady=(14, 8)
-        )
-        self._mode_seg = ctk.CTkSegmentedButton(
-            box,
-            values=["Script file", "Step-by-step"],
-            command=self._on_mode_change,
-            height=36,
-        )
-        self._mode_seg.pack(fill="x", padx=16, pady=(0, 14))
-        self._mode_seg.set("Script file")
-
-    def _on_mode_change(self, value: str) -> None:
-        script = value == "Script file"
-        self._script_section.pack_forget()
-        self._step_section.pack_forget()
-        if script:
-            self._script_section.pack(fill="both", expand=True, padx=24, pady=8)
-        else:
-            self._step_section.pack(fill="x", padx=24, pady=8)
-        for w in self._script_controls:
-            w.configure(state="normal" if script else "disabled")
-        for w in self._step_controls:
-            w.configure(state="normal" if not script else "disabled")
+    def _selected_monitor_indices(self) -> list[int]:
+        out: list[int] = []
+        for midx, cb in zip(self._monitor_indices, self._monitor_checkboxes):
+            if cb.get():
+                out.append(midx)
+        return out
 
     def _build_script_section(self) -> None:
         box = ctk.CTkFrame(self, corner_radius=12)
-        self._script_section = box
-        ctk.CTkLabel(box, text="Script mode", font=ctk.CTkFont(size=16, weight="bold")).pack(
+        box.pack(fill="both", expand=True, padx=24, pady=8)
+        ctk.CTkLabel(box, text="Script", font=ctk.CTkFont(size=16, weight="bold")).pack(
             anchor="w", padx=16, pady=(14, 4)
         )
         row = ctk.CTkFrame(box, fg_color="transparent")
@@ -190,34 +228,11 @@ class MainHub(ctk.CTk):
         self._script_text.pack(fill="both", expand=True, padx=16, pady=(0, 14))
         self._script_controls.extend([b_open, b_save, b_sas, self._script_text])
 
-    def _build_step_section(self) -> None:
-        box = ctk.CTkFrame(self, corner_radius=12)
-        self._step_section = box
-        ctk.CTkLabel(box, text="Step-by-step mode", font=ctk.CTkFont(size=16, weight="bold")).pack(
-            anchor="w", padx=16, pady=(14, 4)
-        )
-        ctk.CTkLabel(
-            box,
-            text="Each run is stored under the default runs folder (see settings / runs_dir). "
-            "Commands are written to runtime_commands.txt in that run folder. "
-            "Use Save commands as… to copy that file elsewhere.",
-            font=ctk.CTkFont(size=13),
-            text_color=("gray20", "gray65"),
-            wraplength=860,
-            justify="left",
-        ).pack(anchor="w", padx=16, pady=(4, 12))
-        b_save_cmd = ctk.CTkButton(
-            box,
-            text="Save commands as…",
-            width=180,
-            command=self._save_commands_as,
-        )
-        b_save_cmd.pack(anchor="w", padx=16, pady=(0, 14))
-        self._step_controls.append(b_save_cmd)
-
     def _build_actions_row(self) -> None:
         row = ctk.CTkFrame(self, fg_color="transparent")
         row.pack(fill="x", padx=24, pady=(12, 8))
+        row.grid_columnconfigure(0, weight=1)
+        row.grid_columnconfigure(2, weight=1)
         self._run_btn = ctk.CTkButton(
             row,
             text="Start run",
@@ -226,7 +241,7 @@ class MainHub(ctk.CTk):
             width=200,
             command=self._on_start_run,
         )
-        self._run_btn.pack(side="left")
+        self._run_btn.grid(row=0, column=1)
 
     def _build_status(self) -> None:
         self._status = ctk.CTkLabel(self, text="", font=ctk.CTkFont(size=13))
@@ -244,17 +259,23 @@ class MainHub(ctk.CTk):
             return
         p = Path(path)
         self._script_path = p
+        self._runtime_commands_cache_path = None
         text = p.read_text(encoding="utf-8")
         self._script_text.delete("0.0", "end")
         self._script_text.insert("0.0", text)
         self._script_path_label.configure(text=str(p.resolve()))
 
     def _script_save(self) -> None:
-        if self._script_path is None:
-            self._script_save_as()
+        body = self._script_text.get("0.0", "end").rstrip() + "\n"
+        if self._script_path is not None:
+            self._script_path.write_text(body, encoding="utf-8")
+            self._status.configure(text=f"Saved {self._script_path.name}")
             return
-        self._script_path.write_text(self._script_text.get("0.0", "end").rstrip() + "\n", encoding="utf-8")
-        self._status.configure(text=f"Saved {self._script_path.name}")
+        if self._runtime_commands_cache_path is not None:
+            self._runtime_commands_cache_path.write_text(body, encoding="utf-8")
+            self._status.configure(text=f"Saved {self._runtime_commands_cache_path.name}")
+            return
+        self._script_save_as()
 
     def _script_save_as(self) -> None:
         path = filedialog.asksaveasfilename(
@@ -269,45 +290,57 @@ class MainHub(ctk.CTk):
         p = Path(path)
         p.write_text(self._script_text.get("0.0", "end").rstrip() + "\n", encoding="utf-8")
         self._script_path = p
+        self._runtime_commands_cache_path = None
         self._script_path_label.configure(text=str(p.resolve()))
         self._status.configure(text=f"Saved as {p.name}")
-
-    def _save_commands_as(self) -> None:
-        src = self._last_commands_file
-        if src is None or not src.is_file():
-            show_ctk_message(
-                self,
-                "Save commands",
-                "No runtime_commands.txt yet. Finish a step-by-step run first, or use Save commands as after a run.",
-                kind="info",
-            )
-            return
-        dest = filedialog.asksaveasfilename(
-            parent=self,
-            title="Save commands as",
-            defaultextension=".txt",
-            filetypes=[("Text", "*.txt"), ("All", "*.*")],
-        )
-        if not dest:
-            return
-        shutil.copy2(src, dest)
-        self._status.configure(text=f"Commands copied to {Path(dest).name}")
 
     def _on_start_run(self) -> None:
         if self._worker_thread and self._worker_thread.is_alive():
             return
         self._post_run_unlink = None
-        step_mode = self._mode_seg.get() == "Step-by-step"
-        eye = self._selected_monitor_index()
+        # Script file on disk (Open or Save as) → script mode; otherwise step-by-step (runtime commands).
+        step_mode = self._script_path is None
+        eye_indices = self._selected_monitor_indices()
+        if not eye_indices:
+            show_ctk_message(
+                self,
+                "Monitors",
+                "Select at least one display to capture.",
+                kind="warning",
+            )
+            return
+        if 0 in eye_indices and len(eye_indices) > 1:
+            show_ctk_message(
+                self,
+                "Monitors",
+                'Uncheck either "All screens combined" or the individual monitors — not both.',
+                kind="warning",
+            )
+            return
 
         if step_mode:
+            settings = load_settings()
+            runs_root = Path(settings.runs_dir)
+            runs_root.mkdir(parents=True, exist_ok=True)
+            cache_path = runs_root / _RUNTIME_COMMANDS_CACHE_NAME
+            self._runtime_commands_cache_path = cache_path
+            cache_path.write_text("", encoding="utf-8")
+            self._script_text.configure(state="normal")
+            self._script_text.delete("0.0", "end")
+            self._script_path_label.configure(text=str(cache_path.resolve()))
+
             args = _WorkerArgs(
                 step_mode=True,
-                eye_index=eye,
+                eye_monitor_indices=eye_indices,
                 script_raw="",
                 script_disk_path=None,
             )
-            self._bridge = RuntimeCommandHubBridge(self)
+
+            def on_runtime_command(cmd: str) -> None:
+                append_text(cache_path, cmd + "\n")
+                self._append_runtime_command_to_script_view(cmd)
+
+            self._bridge = RuntimeCommandHubBridge(self, on_runtime_command=on_runtime_command)
             self._bridge.start()
         else:
             raw = self._script_text.get("0.0", "end")
@@ -320,20 +353,20 @@ class MainHub(ctk.CTk):
                     kind="warning",
                 )
                 return
+            self._runtime_commands_cache_path = None
             args = _WorkerArgs(
                 step_mode=False,
-                eye_index=eye,
+                eye_monitor_indices=eye_indices,
                 script_raw=raw,
                 script_disk_path=self._script_path,
             )
             self._bridge = None
 
         self._run_btn.configure(state="disabled")
-        self._mode_seg.configure(state="disabled")
-        self._monitor_menu.configure(state="disabled")
+        for cb in self._monitor_checkboxes:
+            cb.configure(state="disabled")
+        self._monitor_refresh_btn.configure(state="disabled")
         for w in self._script_controls:
-            w.configure(state="disabled")
-        for w in self._step_controls:
             w.configure(state="disabled")
         self._status.configure(text="Running…")
 
@@ -345,23 +378,26 @@ class MainHub(ctk.CTk):
     def _worker_main(self, args: _WorkerArgs) -> None:
         try:
             if args.step_mode:
+                reset_runtime_user_ended_at_prompt()
                 settings = load_settings()
                 runs_root = Path(settings.runs_dir)
                 folder_name = unique_run_folder_name("runtime_command")
-                manager, paths, run_id = prepare_run_session(
+                manager, _, run_id = prepare_run_session(
                     runs_root=runs_root,
                     task="runtime_command",
                     runtime_mode=True,
                     selected_script_path=None,
                     script_steps=None,
-                    eye_monitor_index=args.eye_index,
+                    eye_monitor_indices=args.eye_monitor_indices,
                     clear_runs_root=False,
                     run_folder_name=folder_name,
                 )
-                self._last_commands_file = paths.root / "runtime_commands.txt"
                 manager.log_info("Master starting coordinator module runtime")
                 run_coordinator_sync()
-                self._worker_outcome = ("ok", f"Run {run_id} finished.")
+                if consume_runtime_user_ended_at_prompt():
+                    self._worker_outcome = ("ok_quiet", "")
+                else:
+                    self._worker_outcome = ("ok", f"Run {run_id} finished.")
                 manager.log_info("Master stopped.")
             else:
                 script_path = args.script_disk_path
@@ -376,17 +412,16 @@ class MainHub(ctk.CTk):
                 task = steps[0]
                 settings = load_settings()
                 runs_root = Path(settings.runs_dir)
-                manager, paths, run_id = prepare_run_session(
+                manager, _, run_id = prepare_run_session(
                     runs_root=runs_root,
                     task=task,
                     runtime_mode=False,
                     selected_script_path=script_path,
                     script_steps=steps,
-                    eye_monitor_index=args.eye_index,
+                    eye_monitor_indices=args.eye_monitor_indices,
                     clear_runs_root=False,
                     run_folder_name=None,
                 )
-                self._last_commands_file = None
                 manager.log_info("Master starting coordinator module runtime")
                 run_coordinator_sync()
                 self._worker_outcome = ("ok", f"Run {run_id} finished.")
@@ -416,13 +451,16 @@ class MainHub(ctk.CTk):
         except Exception:
             pass
         self._run_btn.configure(state="normal")
-        self._mode_seg.configure(state="normal")
-        self._monitor_menu.configure(state="normal")
-        self._on_mode_change(self._mode_seg.get())
-        self._status.configure(text="Ready" if kind == "ok" else f"Error: {msg}")
+        for cb in self._monitor_checkboxes:
+            cb.configure(state="normal")
+        self._monitor_refresh_btn.configure(state="normal")
+        for w in self._script_controls:
+            w.configure(state="normal")
+        self._refresh_runtime_script_text_from_cache()
+        self._status.configure(text="Ready" if kind in ("ok", "ok_quiet") else f"Error: {msg}")
         if kind == "ok":
             show_ctk_message(self, "QualityAssuranceAgent", msg, kind="info")
-        else:
+        elif kind == "err":
             show_ctk_message(self, "QualityAssuranceAgent", msg, kind="error")
 
 

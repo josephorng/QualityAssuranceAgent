@@ -22,7 +22,6 @@ from src.eye import active_monitor_offset
 from src.eye.capture import capture_active_monitor_to_file
 
 settings = load_settings()
-_ollama = get_llm_client()
 
 
 def _run_manager() -> RunStateManager:
@@ -294,7 +293,7 @@ async def _disambiguate_duplicate_centers(
         {"role": "user", "content": base, "images": [image_path]},
     ]
     try:
-        reply = await _ollama.chat_messages(
+        reply = await get_llm_client().chat_messages(
             settings.brain_lm,
             messages=messages,
             tools=[],
@@ -308,7 +307,7 @@ async def _disambiguate_duplicate_centers(
             "where x,y equals one candidate [cx,cy] above and \"text\" is that line's "
             "OCR text. No text before or after the JSON.\n"
         )
-        reply = await _ollama.chat_messages(
+        reply = await get_llm_client().chat_messages(
             settings.brain_lm,
             messages=messages,
             tools=[],
@@ -375,7 +374,7 @@ async def _select_coordinate(
         {"role": "user", "content": base_instructions, "images": [image_path]},
     ]
     try:
-        reply = await _ollama.chat_messages(
+        reply = await get_llm_client().chat_messages(
             settings.brain_lm,
             messages=messages,
             tools=[],
@@ -391,7 +390,7 @@ async def _select_coordinate(
             '\nReply with ONLY: {"text": "<string>"} where "text" is the OCR line text from CoordinatesText '
             "(after [cx,cy] ), as verbatim as possible. No text before or after the JSON.\n"
         )
-        reply = await _ollama.chat_messages(
+        reply = await get_llm_client().chat_messages(
             settings.brain_lm,
             messages=messages,
             tools=[],

@@ -40,7 +40,6 @@ _UI_ONNX_SESSION: ort.InferenceSession | None = None
 _UI_ONNX_INPUT_NAME: str | None = None
 
 settings = load_settings()
-_ollama = get_llm_client()
 
 
 def _run_manager() -> RunStateManager:
@@ -532,7 +531,7 @@ async def _confirm_selection_bbox_with_ollama(instruction: str, crop_image_path:
         {"role": "user", "content": prompt, "images": [crop_image_path]},
     ]
     try:
-        reply = await _ollama.chat_messages(
+        reply = await get_llm_client().chat_messages(
             settings.brain_lm,
             messages=messages,
             tools=[],
@@ -545,7 +544,7 @@ async def _confirm_selection_bbox_with_ollama(instruction: str, crop_image_path:
             '\nReply with ONLY: {"confirmed": true|false}. '
             "No text before or after the JSON.\n"
         )
-        reply = await _ollama.chat_messages(
+        reply = await get_llm_client().chat_messages(
             settings.brain_lm,
             messages=messages,
             tools=[],
@@ -571,7 +570,7 @@ async def _analyze_instruction(instruction: str) -> tuple[bool, str, str, str]:
     prompt = get_prompt("ui_instruction_icon_location_extract").replace("{instruction}", text)
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
     try:
-        reply = await _ollama.chat_messages(
+        reply = await get_llm_client().chat_messages(
             settings.brain_lm,
             messages=messages,
             tools=[],
@@ -592,7 +591,7 @@ async def _analyze_instruction(instruction: str) -> tuple[bool, str, str, str]:
             "No text before or after the JSON.\n"
         )
         try:
-            reply = await _ollama.chat_messages(
+            reply = await get_llm_client().chat_messages(
                 settings.brain_lm,
                 messages=messages,
                 tools=[],
@@ -633,7 +632,7 @@ async def _filter_text_detections(
     )
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
     try:
-        reply = await _ollama.chat_messages(
+        reply = await get_llm_client().chat_messages(
             settings.brain_lm,
             messages=messages,
             tools=[],
@@ -647,7 +646,7 @@ async def _filter_text_detections(
             "No text before or after the JSON.\n"
         )
         try:
-            reply = await _ollama.chat_messages(
+            reply = await get_llm_client().chat_messages(
                 settings.brain_lm,
                 messages=messages,
                 tools=[],
@@ -711,7 +710,7 @@ async def _filter_icon_detections_with_ollama(
                 },
             ]
             try:
-                reply = await _ollama.chat_messages(
+                reply = await get_llm_client().chat_messages(
                     settings.brain_lm,
                     messages=messages,
                     tools=[],
@@ -728,7 +727,7 @@ async def _filter_icon_detections_with_ollama(
                     "Use only indices visible in image headers [i]. "
                     "No text before or after the JSON.\n"
                 )
-                reply = await _ollama.chat_messages(
+                reply = await get_llm_client().chat_messages(
                     settings.brain_lm,
                     messages=messages,
                     tools=[],
@@ -788,7 +787,7 @@ async def _select_center_with_ollama(
         },
     ]
     n = len(detections)
-    reply1 = await _ollama.chat_messages(
+    reply1 = await get_llm_client().chat_messages(
         settings.brain_lm,
         messages=messages,
         tools=[],
@@ -809,7 +808,7 @@ async def _select_center_with_ollama(
         messages2 = [
             {"role": "user", "content": refine},
         ]
-        reply2 = await _ollama.chat_messages(
+        reply2 = await get_llm_client().chat_messages(
             settings.brain_lm,
             messages=messages2,
             tools=[],
@@ -841,7 +840,7 @@ async def _select_center_with_ollama(
         "list row that best matches the location instruction (0-based). "
         "No other keys. No text before or after the JSON.\n"
     )
-    reply = await _ollama.chat_messages(
+    reply = await get_llm_client().chat_messages(
         settings.brain_lm,
         messages=messages,
         tools=[],

@@ -16,6 +16,27 @@ _last_runtime_command: str | None = None
 
 _runtime_command_provider: Callable[[], str | None] | None = None
 
+# Set when runtime coordinator exits because the user ended the run at the prompt (End run / close dialog).
+_runtime_user_ended_at_prompt: bool = False
+
+
+def reset_runtime_user_ended_at_prompt() -> None:
+    global _runtime_user_ended_at_prompt
+    _runtime_user_ended_at_prompt = False
+
+
+def note_runtime_user_ended_at_prompt() -> None:
+    global _runtime_user_ended_at_prompt
+    _runtime_user_ended_at_prompt = True
+
+
+def consume_runtime_user_ended_at_prompt() -> bool:
+    """Return whether the last coordinator run ended because the user chose End run, then clear the flag."""
+    global _runtime_user_ended_at_prompt
+    v = _runtime_user_ended_at_prompt
+    _runtime_user_ended_at_prompt = False
+    return v
+
 
 def set_runtime_command_provider(provider: Callable[[], str | None] | None) -> None:
     global _runtime_command_provider
@@ -252,11 +273,18 @@ class RuntimeCommandHubBridge:
     Start polling before starting the worker; call ``stop`` after the worker joins.
     """
 
-    def __init__(self, tk_parent: "tk.Misc", poll_interval_ms: int = 20) -> None:
+    def __init__(
+        self,
+        tk_parent: "tk.Misc",
+        poll_interval_ms: int = 20,
+        *,
+        on_runtime_command: Callable[[str], None] | None = None,
+    ) -> None:
         import tkinter as tk
 
         self._tk: tk.Misc = tk_parent
         self._poll_interval_ms = poll_interval_ms
+        self._on_runtime_command = on_runtime_command
         self._q: Queue[tuple[threading.Event, list[str | None]]] = Queue()
         self._active = False
 
@@ -276,6 +304,8 @@ class RuntimeCommandHubBridge:
             self._tk.after(self._poll_interval_ms, self._poll)
             return
         cmd = show_runtime_command_toplevel(self._tk, get_last_runtime_command())
+        if cmd and self._on_runtime_command is not None:
+            self._on_runtime_command(cmd)
         slot[0] = cmd
         ev.set()
         self._tk.after(0, self._poll)

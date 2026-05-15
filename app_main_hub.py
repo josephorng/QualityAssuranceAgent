@@ -103,32 +103,48 @@ class MainHub(ctk.CTk):
     def _build_header(self) -> None:
         head = ctk.CTkFrame(self, fg_color="transparent")
         head.pack(fill="x", padx=24, pady=(20, 8))
+
+        top_row = ctk.CTkFrame(head, fg_color="transparent")
+        top_row.pack(fill="x")
+
+        self._appearance_dark = True
+
+        theme_row = ctk.CTkFrame(top_row, fg_color="transparent")
+        theme_row.pack(side="right", anchor="ne")
+        self._appearance_toggle_btn = ctk.CTkButton(
+            theme_row,
+            text="\u2600",
+            width=32,
+            height=32,
+            corner_radius=16,
+            font=ctk.CTkFont(size=15),
+            command=self._toggle_appearance,
+        )
+        self._appearance_toggle_btn.pack(side="left")
+
+        left_col = ctk.CTkFrame(top_row, fg_color="transparent")
+        left_col.pack(side="left", fill="x", expand=True, padx=(0, 16))
         ctk.CTkLabel(
-            head,
+            left_col,
             text="Quality Assurance Agent",
             font=ctk.CTkFont(size=26, weight="bold"),
         ).pack(anchor="w")
         ctk.CTkLabel(
-            head,
+            left_col,
             text="Configure a run, choose which display(s) Eye captures, then start.",
             font=ctk.CTkFont(size=14),
             text_color=("gray30", "gray70"),
         ).pack(anchor="w", pady=(4, 0))
 
-        theme_row = ctk.CTkFrame(head, fg_color="transparent")
-        theme_row.pack(anchor="w", pady=(12, 0))
-        ctk.CTkLabel(theme_row, text="Appearance:").pack(side="left", padx=(0, 8))
-        self._theme_menu = ctk.CTkOptionMenu(
-            theme_row,
-            values=["Dark", "Light", "System"],
-            command=self._on_theme_change,
-            width=120,
-        )
-        self._theme_menu.set("Dark")
-        self._theme_menu.pack(side="left")
+    def _toggle_appearance(self) -> None:
+        self._appearance_dark = not self._appearance_dark
+        ctk.set_appearance_mode("dark" if self._appearance_dark else "light")
+        self._sync_appearance_toggle_button()
 
-    def _on_theme_change(self, value: str) -> None:
-        ctk.set_appearance_mode(value.lower())
+    def _sync_appearance_toggle_button(self) -> None:
+        self._appearance_toggle_btn.configure(
+            text="\u2600" if self._appearance_dark else "\u263e"
+        )
 
     def _build_monitor_row(self) -> None:
         box = ctk.CTkFrame(self, corner_radius=12)

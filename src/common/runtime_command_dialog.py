@@ -130,11 +130,6 @@ def show_runtime_command_ctk(
     entry.bind("<Return>", on_return)
     dialog.protocol("WM_DELETE_WINDOW", on_end)
 
-    def _focus_when_shown() -> None:
-        dialog.lift()
-        entry.focus_force()
-
-    dialog.after_idle(_focus_when_shown)
     dialog.update_idletasks()
     w, h = dialog.winfo_reqwidth(), dialog.winfo_reqheight()
     sw, sh = dialog.winfo_screenwidth(), dialog.winfo_screenheight()
@@ -143,6 +138,21 @@ def show_runtime_command_ctk(
         dialog.grab_set()
     except Exception:
         pass
+
+    def _focus_entry(_event: object | None = None) -> None:
+        try:
+            dialog.lift()
+            dialog.focus_force()
+            entry.focus_force()
+            entry.icursor("end")
+        except Exception:
+            pass
+
+    # Idle + Map: first paint on some WMs; short delays: after grab / -topmost toggle on Windows.
+    dialog.after_idle(_focus_entry)
+    dialog.bind("<Map>", _focus_entry, add="+")
+    dialog.after(10, _focus_entry)
+    dialog.after(120, _focus_entry)
 
     root = parent.winfo_toplevel()
     try:
@@ -230,12 +240,6 @@ def show_runtime_command_ttk(
     entry.bind("<Return>", on_return)
     dialog.protocol("WM_DELETE_WINDOW", on_end)
 
-    def _focus_entry_when_shown() -> None:
-        dialog.lift()
-        entry.focus_force()
-        entry.icursor(tk.END)
-
-    dialog.after_idle(_focus_entry_when_shown)
     dialog.update_idletasks()
     w, h = dialog.winfo_reqwidth(), dialog.winfo_reqheight()
     sw, sh = dialog.winfo_screenwidth(), dialog.winfo_screenheight()
@@ -244,6 +248,20 @@ def show_runtime_command_ttk(
         dialog.grab_set()
     except tk.TclError:
         pass
+
+    def _focus_entry(_event: object | None = None) -> None:
+        try:
+            dialog.lift()
+            dialog.focus_force()
+            entry.focus_force()
+            entry.icursor(tk.END)
+        except tk.TclError:
+            pass
+
+    dialog.after_idle(_focus_entry)
+    dialog.bind("<Map>", _focus_entry, add="+")
+    dialog.after(10, _focus_entry)
+    dialog.after(120, _focus_entry)
 
     top = parent.winfo_toplevel()
     try:

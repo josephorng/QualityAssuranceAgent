@@ -138,7 +138,7 @@ class MainHub(ctk.CTk):
         )
         ctk.CTkLabel(
             box,
-            text="Check every display to include in captures. The first checked row is the primary region for coordinates.",
+            text="Check each display to include in captures. Order follows the list; the first checked monitor is the primary region for coordinates.",
             font=ctk.CTkFont(size=12),
             text_color=("gray30", "gray70"),
             wraplength=860,
@@ -158,7 +158,7 @@ class MainHub(ctk.CTk):
             choices = list_eye_monitor_choices()
         except Exception as e:
             show_ctk_message(self, "Monitors", f"Could not list displays:\n{e}", kind="error")
-            choices = [EyeMonitorChoice(0, "All screens (fallback)", "—")]
+            choices = []
         self._monitor_labels = [self._format_monitor_row(c) for c in choices]
         self._monitor_indices = [c.index for c in choices]
         self._rebuild_monitor_checkboxes()
@@ -167,34 +167,28 @@ class MainHub(ctk.CTk):
         for w in self._monitor_checks_scroll.winfo_children():
             w.destroy()
         self._monitor_checkboxes.clear()
+        default_on: list[int] = []
+        for i, label in enumerate(self._monitor_labels):
+            if " [main]" in label:
+                default_on.append(i)
+        if not default_on:
+            default_on = [0] if self._monitor_labels else []
         for i, label in enumerate(self._monitor_labels):
             cb = ctk.CTkCheckBox(
                 self._monitor_checks_scroll,
                 text=label,
                 font=ctk.CTkFont(size=13),
-                command=lambda idx=i: self._on_monitor_checkbox_changed(idx),
             )
             cb.pack(anchor="w", padx=4, pady=3)
             self._monitor_checkboxes.append(cb)
-            if i == 0:
+            if i in default_on:
                 cb.select()
             else:
                 cb.deselect()
 
-    def _on_monitor_checkbox_changed(self, changed_row: int) -> None:
-        """All screens (row 0) is exclusive with per-monitor rows."""
-        if not self._monitor_checkboxes:
-            return
-        if changed_row == 0:
-            if self._monitor_checkboxes[0].get():
-                for j in range(1, len(self._monitor_checkboxes)):
-                    self._monitor_checkboxes[j].deselect()
-        elif self._monitor_checkboxes[changed_row].get():
-            self._monitor_checkboxes[0].deselect()
-
     @staticmethod
     def _format_monitor_row(c: EyeMonitorChoice) -> str:
-        return f"[{c.index}] {c.title} — {c.detail}"
+        return f"{c.title} — {c.detail}"
 
     def _selected_monitor_indices(self) -> list[int]:
         out: list[int] = []
@@ -317,14 +311,6 @@ class MainHub(ctk.CTk):
                 self,
                 "Monitors",
                 "Select at least one display to capture.",
-                kind="warning",
-            )
-            return
-        if 0 in eye_indices and len(eye_indices) > 1:
-            show_ctk_message(
-                self,
-                "Monitors",
-                'Uncheck either "All screens combined" or the individual monitors — not both.',
                 kind="warning",
             )
             return

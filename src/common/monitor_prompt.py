@@ -1,9 +1,8 @@
-"""Interactive prompt to choose which monitor Eye captures (or all screens)."""
+"""Helpers to list physical displays for Eye capture selection."""
 
 from __future__ import annotations
 
 import os
-import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -15,6 +14,7 @@ class EyeMonitorChoice:
     index: int
     title: str
     detail: str
+    start_at: str
 
 
 def _physical_monitors() -> list[dict[str, Any]]:
@@ -48,28 +48,12 @@ def _position_labels(count: int) -> list[str]:
     return [f"position {i + 1} from left" for i in range(count)]
 
 
-def _all_screens_entry() -> dict[str, Any]:
-    import mss
-
-    with mss.mss() as sct:
-        m = sct.monitors[0]
-        return {
-            "index": 0,
-            "left": int(m["left"]),
-            "top": int(m["top"]),
-            "width": int(m["width"]),
-            "height": int(m["height"]),
-            "name": "all_screens",
-        }
-
-
 def list_eye_monitor_choices() -> list[EyeMonitorChoice]:
     """
-    Build monitor rows in display order (all screens first, then physical left → right).
+    Build monitor rows in display order (physical monitors left → right).
 
-    Returns at least the all-screens row; if no physical monitors, only that row is returned.
+    Returns one row per mss physical monitor (index ≥ 1). Empty if none are detected.
     """
-    all_entry = _all_screens_entry()
     physical = _physical_monitors()
     physical_sorted = sorted(physical, key=lambda d: (d["left"], d["top"]))
     primary_idx = _primary_monitor_index(physical)
@@ -78,23 +62,15 @@ def list_eye_monitor_choices() -> list[EyeMonitorChoice]:
     for mon, label in zip(physical_sorted, labels):
         index_to_label[mon["index"]] = label
 
-    rows: list[EyeMonitorChoice] = [
-        EyeMonitorChoice(
-            index=0,
-            title="All screens combined",
-            detail=f"{all_entry['width']}×{all_entry['height']} at ({all_entry['left']}, {all_entry['top']})",
-        )
-    ]
-    if not physical:
-        return rows
-
+    rows: list[EyeMonitorChoice] = []
     for mon in physical_sorted:
         idx = mon["index"]
         label = index_to_label.get(idx, "")
         primary_note = " [main]" if idx == primary_idx else ""
         title = f"Monitor {idx}: {label}{primary_note}".strip()
-        detail = f"{mon['width']}×{mon['height']} at ({mon['left']}, {mon['top']})"
-        rows.append(EyeMonitorChoice(index=idx, title=title, detail=detail))
+        detail = f"{mon['width']}×{mon['height']}"
+        start_at = f"{mon['left']},{mon['top']}"
+        rows.append(EyeMonitorChoice(index=idx, title=title, detail=detail, start_at=start_at))
     return rows
 
 

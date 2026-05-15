@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 import threading
@@ -104,6 +105,8 @@ class MainHub(ctk.CTk):
         self._worker_thread: threading.Thread | None = None
         self._bridge: RuntimeCommandHubBridge | None = None
         self._worker_outcome: tuple[str, str] = ("ok", "")
+        self._user_requested_stop = False
+        self._stop_cancel_remaining = 0
 
         self._monitor_labels: list[str] = []
         self._monitor_indices: list[int] = []
@@ -355,6 +358,12 @@ class MainHub(ctk.CTk):
         )
         self._run_btn.grid(row=0, column=1)
 
+    def _set_run_button_idle(self) -> None:
+        self._run_btn.configure(text="Start run", command=self._on_start_run, state="normal")
+
+    def _set_run_button_running(self) -> None:
+        self._run_btn.configure(text="Stop run", command=self._on_stop_run, state="normal")
+
     def _build_status(self) -> None:
         self._status = ctk.CTkLabel(self, text="", font=ctk.CTkFont(size=13))
         self._status.pack(anchor="w", padx=28, pady=(0, 16))
@@ -419,9 +428,32 @@ class MainHub(ctk.CTk):
         self._status.configure(text="")
         self._persist_hub_ui_state()
 
+    def _on_stop_run(self) -> None:
+        from main import request_coordinator_cancel
+
+        self._user_requested_stop = True
+        self._status.configure(text="Stopping…")
+        if self._bridge is not None:
+            self._bridge.request_stop()
+        if not request_coordinator_cancel():
+            self._stop_cancel_remaining = 30
+            self.after(50, self._try_coordinator_cancel)
+
+    def _try_coordinator_cancel(self) -> None:
+        from main import request_coordinator_cancel
+
+        if self._worker_thread is None or not self._worker_thread.is_alive():
+            return
+        if request_coordinator_cancel():
+            return
+        self._stop_cancel_remaining -= 1
+        if self._stop_cancel_remaining > 0:
+            self.after(50, self._try_coordinator_cancel)
+
     def _on_start_run(self) -> None:
         if self._worker_thread and self._worker_thread.is_alive():
             return
+        self._user_requested_stop = False
         self._post_run_unlink = None
         # Script file on disk (Open or Save as) → script mode; otherwise step-by-step (runtime commands).
         step_mode = self._script_path is None
@@ -479,7 +511,7 @@ class MainHub(ctk.CTk):
             )
             self._bridge = None
 
-        self._run_btn.configure(state="disabled")
+        self._set_run_button_running()
         for cb in self._monitor_checkboxes:
             cb.configure(state="disabled")
         self._monitor_refresh_btn.configure(state="disabled")
@@ -543,6 +575,8 @@ class MainHub(ctk.CTk):
                 run_coordinator_sync()
                 self._worker_outcome = ("ok", f"Run {run_id} finished.")
                 manager.log_info("Master stopped.")
+        except asyncio.CancelledError:
+            self._worker_outcome = ("ok_quiet", "")
         except BaseException as e:
             self._worker_outcome = ("err", str(e))
 
@@ -561,20 +595,31 @@ class MainHub(ctk.CTk):
             except OSError:
                 pass
             self._post_run_unlink = None
+        user_stopped = self._user_requested_stop
+        self._user_requested_stop = False
         kind, msg = self._worker_outcome
         try:
             self.deiconify()
             self.lift()
         except Exception:
             pass
-        self._run_btn.configure(state="normal")
+        self._set_run_button_idle()
         for cb in self._monitor_checkboxes:
             cb.configure(state="normal")
         self._monitor_refresh_btn.configure(state="normal")
         for w in self._script_controls:
             w.configure(state="normal")
         self._refresh_runtime_script_text_from_cache()
-        self._status.configure(text="Ready" if kind in ("ok", "ok_quiet") else f"Error: {msg}")
+        if kind == "err":
+            self._status.configure(text=f"Error: {msg}")
+        elif user_stopped:
+            self._status.configure(text="Run stopped.")
+        elif kind == "ok_quiet" and msg.strip():
+            self._status.configure(text=msg.strip())
+        elif kind in ("ok", "ok_quiet"):
+            self._status.configure(text="Ready")
+        if user_stopped and kind != "err":
+            return
         if kind == "ok":
             show_ctk_message(self, "QualityAssuranceAgent", msg, kind="info")
         elif kind == "err":

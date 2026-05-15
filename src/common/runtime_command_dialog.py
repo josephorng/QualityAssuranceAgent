@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 from queue import Empty, Queue
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from src.common.ctk_dialogs import is_ctk_window, show_ctk_message
 
@@ -52,12 +52,20 @@ def _prompt_runtime_command_console_fallback() -> str | None:
     return None if not cmd else cmd
 
 
-def show_runtime_command_ctk(parent: object, previous_command: str | None = None) -> str | None:
+def show_runtime_command_ctk(
+    parent: object,
+    previous_command: str | None = None,
+    *,
+    dialog_container: list[Any] | None = None,
+) -> str | None:
     import customtkinter as ctk
 
     result: dict[str, str | None] = {"action": "end", "cmd": None}
 
     dialog = ctk.CTkToplevel(parent)
+    if dialog_container is not None:
+        dialog_container.clear()
+        dialog_container.append(dialog)
     dialog.title("Runtime command")
     dialog.resizable(True, False)
     dialog.attributes("-topmost", True)
@@ -137,20 +145,32 @@ def show_runtime_command_ctk(parent: object, previous_command: str | None = None
         pass
 
     root = parent.winfo_toplevel()
-    root.wait_window(dialog)
+    try:
+        root.wait_window(dialog)
+    finally:
+        if dialog_container is not None:
+            dialog_container.clear()
 
     if result["action"] == "run" and result["cmd"]:
         return str(result["cmd"])
     return None
 
 
-def show_runtime_command_ttk(parent: "tk.Misc", previous_command: str | None = None) -> str | None:
+def show_runtime_command_ttk(
+    parent: "tk.Misc",
+    previous_command: str | None = None,
+    *,
+    dialog_container: list[Any] | None = None,
+) -> str | None:
     import tkinter as tk
     from tkinter import messagebox, ttk
 
     result: dict[str, str | None] = {"action": "end", "cmd": None}
 
     dialog = tk.Toplevel(parent)
+    if dialog_container is not None:
+        dialog_container.clear()
+        dialog_container.append(dialog)
     dialog.title("Runtime command")
     dialog.resizable(True, False)
     dialog.attributes("-topmost", True)
@@ -226,17 +246,26 @@ def show_runtime_command_ttk(parent: "tk.Misc", previous_command: str | None = N
         pass
 
     top = parent.winfo_toplevel()
-    top.wait_window(dialog)
+    try:
+        top.wait_window(dialog)
+    finally:
+        if dialog_container is not None:
+            dialog_container.clear()
 
     if result["action"] == "run" and result["cmd"]:
         return str(result["cmd"])
     return None
 
 
-def show_runtime_command_toplevel(parent: "tk.Misc", previous_command: str | None = None) -> str | None:
+def show_runtime_command_toplevel(
+    parent: "tk.Misc",
+    previous_command: str | None = None,
+    *,
+    dialog_container: list[Any] | None = None,
+) -> str | None:
     if is_ctk_window(parent):
-        return show_runtime_command_ctk(parent, previous_command)
-    return show_runtime_command_ttk(parent, previous_command)
+        return show_runtime_command_ctk(parent, previous_command, dialog_container=dialog_container)
+    return show_runtime_command_ttk(parent, previous_command, dialog_container=dialog_container)
 
 
 def _prompt_runtime_command_tk_standalone(previous_command: str | None = None) -> str | None:
@@ -248,7 +277,7 @@ def _prompt_runtime_command_tk_standalone(previous_command: str | None = None) -
         root = tk.Tk()
         root.withdraw()
         try:
-            return show_runtime_command_ttk(root, previous_command)
+            return show_runtime_command_ttk(root, previous_command, dialog_container=None)
         finally:
             try:
                 root.destroy()
@@ -258,7 +287,7 @@ def _prompt_runtime_command_tk_standalone(previous_command: str | None = None) -
     app = ctk.CTk()
     app.withdraw()
     try:
-        return show_runtime_command_ctk(app, previous_command)
+        return show_runtime_command_ctk(app, previous_command, dialog_container=None)
     finally:
         try:
             app.destroy()
@@ -287,6 +316,35 @@ class RuntimeCommandHubBridge:
         self._on_runtime_command = on_runtime_command
         self._q: Queue[tuple[threading.Event, list[str | None]]] = Queue()
         self._active = False
+        self._stop_requested = False
+        self._dialog_ref: list[Any] = []
+
+    def request_stop(self) -> None:
+        """End a hub runtime-command run from the UI: unblock pending prompts and close an open dialog."""
+        if not self._active:
+            return
+        self._stop_requested = True
+        self._drain_pending_prompts()
+        self.force_close_open_runtime_dialog()
+
+    def _drain_pending_prompts(self) -> None:
+        while True:
+            try:
+                ev, slot = self._q.get_nowait()
+            except Empty:
+                break
+            slot[0] = None
+            ev.set()
+
+    def force_close_open_runtime_dialog(self) -> None:
+        if not self._dialog_ref:
+            return
+        w = self._dialog_ref[0]
+        try:
+            w.destroy()
+        except Exception:
+            pass
+        self._dialog_ref.clear()
 
     def _provide(self) -> str | None:
         ev = threading.Event()
@@ -303,7 +361,14 @@ class RuntimeCommandHubBridge:
         except Empty:
             self._tk.after(self._poll_interval_ms, self._poll)
             return
-        cmd = show_runtime_command_toplevel(self._tk, get_last_runtime_command())
+        if self._stop_requested:
+            slot[0] = None
+            ev.set()
+            self._tk.after(0, self._poll)
+            return
+        cmd = show_runtime_command_toplevel(
+            self._tk, get_last_runtime_command(), dialog_container=self._dialog_ref
+        )
         if cmd and self._on_runtime_command is not None:
             self._on_runtime_command(cmd)
         slot[0] = cmd
@@ -312,11 +377,15 @@ class RuntimeCommandHubBridge:
 
     def start(self) -> None:
         self._active = True
+        self._stop_requested = False
+        self._dialog_ref.clear()
         set_runtime_command_provider(self._provide)
         self._tk.after(0, self._poll)
 
     def stop(self) -> None:
         self._active = False
+        self._stop_requested = False
+        self._dialog_ref.clear()
         set_runtime_command_provider(None)
 
 

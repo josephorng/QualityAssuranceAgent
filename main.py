@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import signal
+import threading
 from pathlib import Path
 
 from src.common.llm_factory import reset_llm_client
@@ -67,14 +68,50 @@ def prepare_run_session(
     return manager, paths, run_id
 
 
+_coordinator_loop_lock = threading.Lock()
+_coordinator_loop: asyncio.AbstractEventLoop | None = None
+_coordinator_main_task: asyncio.Task[None] | None = None
+
+
+def request_coordinator_cancel() -> bool:
+    """Cancel the coordinator task created by ``run_coordinator_sync`` (safe from another thread)."""
+    with _coordinator_loop_lock:
+        loop = _coordinator_loop
+        task = _coordinator_main_task
+    if loop is None or task is None:
+        return False
+    try:
+        if loop.is_closed():
+            return False
+        loop.call_soon_threadsafe(task.cancel)
+        return True
+    except RuntimeError:
+        return False
+
+
 def run_coordinator_sync() -> None:
     """Run one coordinator lifecycle; caller must set env and ``prepare_run_session`` first."""
     reset_run_state_manager()
     # ``asyncio.run`` closes its loop when the run ends; drop LLM clients so the next
     # run builds fresh async transports instead of reusing ones bound to a closed loop.
     reset_llm_client()
-    coordinator = RuntimeCoordinator()
-    asyncio.run(coordinator.run())
+
+    async def _main() -> None:
+        global _coordinator_loop, _coordinator_main_task
+        loop = asyncio.get_running_loop()
+        task = asyncio.current_task()
+        with _coordinator_loop_lock:
+            _coordinator_loop = loop
+            _coordinator_main_task = task
+        try:
+            coordinator = RuntimeCoordinator()
+            await coordinator.run()
+        finally:
+            with _coordinator_loop_lock:
+                _coordinator_loop = None
+                _coordinator_main_task = None
+
+    asyncio.run(_main())
 
 
 def launch_gui() -> None:

@@ -48,7 +48,7 @@ def get_last_runtime_command() -> str | None:
 
 
 def _prompt_runtime_command_console_fallback() -> str | None:
-    cmd = input("Runtime command (empty to stop): ").strip()
+    cmd = input("執行時指令（留白則停止）：").strip()
     return None if not cmd else cmd
 
 
@@ -66,7 +66,7 @@ def show_runtime_command_ctk(
     if dialog_container is not None:
         dialog_container.clear()
         dialog_container.append(dialog)
-    dialog.title("Runtime command")
+    dialog.title("執行指令")
     dialog.resizable(True, False)
     dialog.attributes("-topmost", True)
     dialog.after(100, lambda: dialog.attributes("-topmost", False))
@@ -81,7 +81,7 @@ def show_runtime_command_ctk(
 
     ctk.CTkLabel(
         master=outer,
-        text="Enter the next command for this step:",
+        text="請輸入本步驟要執行的指令：",
         font=ctk.CTkFont(size=14),
     ).grid(row=0, column=0, sticky="w", pady=(0, 8))
 
@@ -96,8 +96,8 @@ def show_runtime_command_ctk(
         if not text:
             show_ctk_message(
                 dialog,
-                "Runtime command",
-                "Enter a non-empty command, or choose End run.",
+                "執行指令",
+                "請輸入非空指令，或選擇結束執行。",
                 kind="warning",
             )
             return
@@ -117,11 +117,11 @@ def show_runtime_command_ctk(
         entry.insert(0, previous_command)
         entry.focus_set()
 
-    ctk.CTkButton(btn_row, text="Previous command", width=150, command=on_use_previous).pack(
+    ctk.CTkButton(btn_row, text="上一步", width=100, command=on_use_previous).pack(
         side="left", padx=(0, 10)
     )
-    ctk.CTkButton(btn_row, text="Run step", width=120, command=on_run).pack(side="left", padx=(0, 10))
-    ctk.CTkButton(btn_row, text="End run", width=100, command=on_end).pack(side="left")
+    ctk.CTkButton(btn_row, text="執行本步", width=100, command=on_run).pack(side="left", padx=(0, 10))
+    ctk.CTkButton(btn_row, text="結束執行", width=100, command=on_end).pack(side="left")
 
     def on_return(_event: object) -> str:
         on_run()
@@ -181,7 +181,7 @@ def show_runtime_command_ttk(
     if dialog_container is not None:
         dialog_container.clear()
         dialog_container.append(dialog)
-    dialog.title("Runtime command")
+    dialog.title("執行指令")
     dialog.resizable(True, False)
     dialog.attributes("-topmost", True)
     dialog.after(100, lambda: dialog.attributes("-topmost", False))
@@ -195,7 +195,7 @@ def show_runtime_command_ttk(
     dialog.columnconfigure(0, weight=1)
     dialog.rowconfigure(0, weight=1)
 
-    ttk.Label(frame, text="Enter the next command for this step:").grid(row=0, column=0, columnspan=2, sticky="w")
+    ttk.Label(frame, text="請輸入本步驟要執行的指令：").grid(row=0, column=0, columnspan=2, sticky="w")
     entry_var = tk.StringVar()
     entry = ttk.Entry(frame, textvariable=entry_var, width=56)
     entry.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 10))
@@ -208,8 +208,8 @@ def show_runtime_command_ttk(
         text = entry_var.get().strip()
         if not text:
             messagebox.showwarning(
-                "Runtime command",
-                "Enter a non-empty command, or choose End run.",
+                "執行指令",
+                "請輸入非空指令，或選擇結束執行。",
                 parent=dialog,
             )
             return
@@ -229,9 +229,9 @@ def show_runtime_command_ttk(
         entry.icursor(tk.END)
         entry.focus_set()
 
-    ttk.Button(btn_row, text="Previous command", command=on_use_previous).pack(side=tk.LEFT, padx=(0, 8))
-    ttk.Button(btn_row, text="Run step", command=on_run).pack(side=tk.LEFT, padx=(0, 8))
-    ttk.Button(btn_row, text="End run", command=on_end).pack(side=tk.LEFT)
+    ttk.Button(btn_row, text="上一步", command=on_use_previous).pack(side=tk.LEFT, padx=(0, 8))
+    ttk.Button(btn_row, text="執行本步", command=on_run).pack(side=tk.LEFT, padx=(0, 8))
+    ttk.Button(btn_row, text="結束執行", command=on_end).pack(side=tk.LEFT)
 
     def on_return(_event: object) -> str:
         on_run()

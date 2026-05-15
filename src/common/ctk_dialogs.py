@@ -50,7 +50,7 @@ def show_ctk_message(
 
     dialog.protocol("WM_DELETE_WINDOW", _close)
 
-    btn = ctk.CTkButton(master=inner, text="OK", width=120, height=36, command=_close)
+    btn = ctk.CTkButton(master=inner, text="確定", width=120, height=36, command=_close)
     if kind == "warning":
         btn.configure(fg_color="#B8860B", hover_color="#DAA520")
     elif kind == "error":

@@ -6,6 +6,9 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+# Appended to the OS primary display row; hub pre-selects rows containing this marker.
+PRIMARY_MONITOR_MARKER = " [主螢幕]"
+
 
 @dataclass(frozen=True)
 class EyeMonitorChoice:
@@ -40,12 +43,12 @@ def _position_labels(count: int) -> list[str]:
     if count <= 0:
         return []
     if count == 1:
-        return ["only physical display"]
+        return ["唯一實體顯示器"]
     if count == 2:
-        return ["left", "right"]
+        return ["左側", "右側"]
     if count == 3:
-        return ["left", "middle", "right"]
-    return [f"position {i + 1} from left" for i in range(count)]
+        return ["左側", "中間", "右側"]
+    return [f"從左起第 {i + 1} 台" for i in range(count)]
 
 
 def list_eye_monitor_choices() -> list[EyeMonitorChoice]:
@@ -66,8 +69,8 @@ def list_eye_monitor_choices() -> list[EyeMonitorChoice]:
     for mon in physical_sorted:
         idx = mon["index"]
         label = index_to_label.get(idx, "")
-        primary_note = " [main]" if idx == primary_idx else ""
-        title = f"Monitor {idx}: {label}{primary_note}".strip()
+        primary_note = PRIMARY_MONITOR_MARKER if idx == primary_idx else ""
+        title = f"顯示器 {idx}：{label}{primary_note}".strip()
         detail = f"{mon['width']}×{mon['height']}"
         start_at = f"{mon['left']},{mon['top']}"
         rows.append(EyeMonitorChoice(index=idx, title=title, detail=detail, start_at=start_at))

@@ -16,7 +16,11 @@ from tkinter import filedialog
 from main import prepare_run_session, run_coordinator_sync
 from src.common.ctk_dialogs import show_ctk_message
 from src.common.io_utils import append_text, read_json, write_json
-from src.common.monitor_prompt import EyeMonitorChoice, list_eye_monitor_choices
+from src.common.monitor_prompt import (
+    PRIMARY_MONITOR_MARKER,
+    EyeMonitorChoice,
+    list_eye_monitor_choices,
+)
 from src.common.run_state import unique_run_folder_name
 from src.common.runtime_command_dialog import (
     RuntimeCommandHubBridge,
@@ -88,7 +92,7 @@ class _WorkerArgs:
 class MainHub(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Quality Assurance Agent")
+        self.title("電腦使用代理")
         self.geometry("960x780")
         self.minsize(880, 880)
 
@@ -190,12 +194,12 @@ class MainHub(ctk.CTk):
         left_col.pack(side="left", fill="x", expand=True, padx=(0, 16))
         ctk.CTkLabel(
             left_col,
-            text="Quality Assurance Agent",
+            text="電腦使用代理",
             font=ctk.CTkFont(size=26, weight="bold"),
         ).pack(anchor="w")
         ctk.CTkLabel(
             left_col,
-            text="Configure a run, choose which display(s) Eye captures, then start.",
+            text="設定一次執行，選擇螢幕畫面，然後開始。",
             font=ctk.CTkFont(size=14),
             text_color=("gray30", "gray70"),
         ).pack(anchor="w", pady=(4, 0))
@@ -230,12 +234,12 @@ class MainHub(ctk.CTk):
     def _build_monitor_row(self) -> None:
         box = ctk.CTkFrame(self, corner_radius=12)
         box.pack(fill="x", padx=24, pady=8)
-        ctk.CTkLabel(box, text="Eye capture monitors", font=ctk.CTkFont(size=16, weight="bold")).pack(
+        ctk.CTkLabel(box, text="螢幕畫面", font=ctk.CTkFont(size=16, weight="bold")).pack(
             anchor="w", padx=16, pady=(14, 4)
         )
         ctk.CTkLabel(
             box,
-            text="Check each display to include in captures. Order follows the list; the first checked monitor is the primary region for coordinates.",
+            text="勾選要納入截取的每台顯示器。",
             font=ctk.CTkFont(size=12),
             text_color=("gray30", "gray70"),
             wraplength=860,
@@ -245,7 +249,7 @@ class MainHub(ctk.CTk):
         self._monitor_checks_scroll = ctk.CTkScrollableFrame(row, height=200)
         self._monitor_checks_scroll.pack(side="left", fill="both", expand=True)
         self._monitor_refresh_btn = ctk.CTkButton(
-            row, text="Refresh", width=100, command=self._refresh_monitors
+            row, text="重新整理", width=100, command=self._refresh_monitors
         )
         self._monitor_refresh_btn.pack(side="left", padx=(10, 0), anchor="n")
         row.pack(fill="x", padx=16, pady=(0, 14))
@@ -254,7 +258,7 @@ class MainHub(ctk.CTk):
         try:
             choices = list_eye_monitor_choices()
         except Exception as e:
-            show_ctk_message(self, "Monitors", f"Could not list displays:\n{e}", kind="error")
+            show_ctk_message(self, "顯示器", f"無法列出顯示器：\n{e}", kind="error")
             choices = []
         self._monitor_labels = [self._format_monitor_row(c) for c in choices]
         self._monitor_indices = [c.index for c in choices]
@@ -287,7 +291,7 @@ class MainHub(ctk.CTk):
         self._monitor_checkboxes.clear()
         default_on: list[int] = []
         for i, label in enumerate(self._monitor_labels):
-            if " [main]" in label:
+            if PRIMARY_MONITOR_MARKER in label:
                 default_on.append(i)
         if not default_on:
             default_on = [0] if self._monitor_labels else []
@@ -319,22 +323,22 @@ class MainHub(ctk.CTk):
     def _build_script_section(self) -> None:
         box = ctk.CTkFrame(self, corner_radius=12)
         box.pack(fill="both", expand=True, padx=24, pady=8)
-        ctk.CTkLabel(box, text="Script", font=ctk.CTkFont(size=16, weight="bold")).pack(
+        ctk.CTkLabel(box, text="腳本", font=ctk.CTkFont(size=16, weight="bold")).pack(
             anchor="w", padx=16, pady=(14, 4)
         )
         row = ctk.CTkFrame(box, fg_color="transparent")
         row.pack(fill="x", padx=16, pady=4)
-        b_open = ctk.CTkButton(row, text="Open…", width=100, command=self._script_open)
+        b_open = ctk.CTkButton(row, text="開啟…", width=100, command=self._script_open)
         b_open.pack(side="left", padx=(0, 8))
-        b_save = ctk.CTkButton(row, text="Save", width=100, command=self._script_save)
+        b_save = ctk.CTkButton(row, text="儲存", width=100, command=self._script_save)
         b_save.pack(side="left", padx=(0, 8))
-        b_sas = ctk.CTkButton(row, text="Save as…", width=100, command=self._script_save_as)
+        b_sas = ctk.CTkButton(row, text="另存新檔…", width=100, command=self._script_save_as)
         b_sas.pack(side="left", padx=(0, 8))
-        b_clear = ctk.CTkButton(row, text="Clear", width=100, command=self._script_clear)
+        b_clear = ctk.CTkButton(row, text="清空", width=100, command=self._script_clear)
         b_clear.pack(side="left")
         self._script_path_label = ctk.CTkLabel(
             box,
-            text="No file loaded",
+            text="未載入檔案",
             font=ctk.CTkFont(size=12),
             text_color=("gray20", "gray65"),
         )
@@ -350,7 +354,7 @@ class MainHub(ctk.CTk):
         row.grid_columnconfigure(2, weight=1)
         self._run_btn = ctk.CTkButton(
             row,
-            text="Start run",
+            text="開始執行",
             font=ctk.CTkFont(size=16, weight="bold"),
             height=44,
             width=200,
@@ -359,10 +363,10 @@ class MainHub(ctk.CTk):
         self._run_btn.grid(row=0, column=1)
 
     def _set_run_button_idle(self) -> None:
-        self._run_btn.configure(text="Start run", command=self._on_start_run, state="normal")
+        self._run_btn.configure(text="開始執行", command=self._on_start_run, state="normal")
 
     def _set_run_button_running(self) -> None:
-        self._run_btn.configure(text="Stop run", command=self._on_stop_run, state="normal")
+        self._run_btn.configure(text="停止執行", command=self._on_stop_run, state="normal")
 
     def _build_status(self) -> None:
         self._status = ctk.CTkLabel(self, text="", font=ctk.CTkFont(size=13))
@@ -372,9 +376,9 @@ class MainHub(ctk.CTk):
         initial = ROOT_DIR / "scripts"
         path = filedialog.askopenfilename(
             parent=self,
-            title="Open script",
+            title="開啟腳本",
             initialdir=str(initial) if initial.is_dir() else str(ROOT_DIR),
-            filetypes=[("Text", "*.txt"), ("All", "*.*")],
+            filetypes=[("文字檔", "*.txt"), ("全部", "*.*")],
         )
         if not path:
             return
@@ -391,21 +395,21 @@ class MainHub(ctk.CTk):
         body = self._script_text.get("0.0", "end").rstrip() + "\n"
         if self._script_path is not None:
             self._script_path.write_text(body, encoding="utf-8")
-            self._status.configure(text=f"Saved {self._script_path.name}")
+            self._status.configure(text=f"已儲存 {self._script_path.name}")
             self._persist_hub_ui_state()
             return
         if self._runtime_commands_cache_path is not None:
             self._runtime_commands_cache_path.write_text(body, encoding="utf-8")
-            self._status.configure(text=f"Saved {self._runtime_commands_cache_path.name}")
+            self._status.configure(text=f"已儲存 {self._runtime_commands_cache_path.name}")
             return
         self._script_save_as()
 
     def _script_save_as(self) -> None:
         path = filedialog.asksaveasfilename(
             parent=self,
-            title="Save script as",
+            title="腳本另存新檔",
             defaultextension=".txt",
-            filetypes=[("Text", "*.txt"), ("All", "*.*")],
+            filetypes=[("文字檔", "*.txt"), ("全部", "*.*")],
             initialdir=str(ROOT_DIR / "scripts"),
         )
         if not path:
@@ -415,7 +419,7 @@ class MainHub(ctk.CTk):
         self._script_path = p
         self._runtime_commands_cache_path = None
         self._script_path_label.configure(text=str(p.resolve()))
-        self._status.configure(text=f"Saved as {p.name}")
+        self._status.configure(text=f"已另存新檔 {p.name}")
         self._persist_hub_ui_state()
 
     def _script_clear(self) -> None:
@@ -424,7 +428,7 @@ class MainHub(ctk.CTk):
         self._runtime_commands_cache_path = None
         self._script_text.configure(state="normal")
         self._script_text.delete("0.0", "end")
-        self._script_path_label.configure(text="No file loaded")
+        self._script_path_label.configure(text="未載入檔案")
         self._status.configure(text="")
         self._persist_hub_ui_state()
 
@@ -432,7 +436,7 @@ class MainHub(ctk.CTk):
         from main import request_coordinator_cancel
 
         self._user_requested_stop = True
-        self._status.configure(text="Stopping…")
+        self._status.configure(text="正在停止…")
         if self._bridge is not None:
             self._bridge.request_stop()
         if not request_coordinator_cancel():
@@ -461,8 +465,8 @@ class MainHub(ctk.CTk):
         if not eye_indices:
             show_ctk_message(
                 self,
-                "Monitors",
-                "Select at least one display to capture.",
+                "顯示器",
+                "請至少選擇一台要截取的顯示器。",
                 kind="warning",
             )
             return
@@ -497,8 +501,8 @@ class MainHub(ctk.CTk):
             if not steps:
                 show_ctk_message(
                     self,
-                    "Run",
-                    "Script has no executable lines (empty or only # comments).",
+                    "執行",
+                    "腳本沒有可執行行數（為空或僅有 # 註解）。",
                     kind="warning",
                 )
                 return
@@ -517,7 +521,7 @@ class MainHub(ctk.CTk):
         self._monitor_refresh_btn.configure(state="disabled")
         for w in self._script_controls:
             w.configure(state="disabled")
-        self._status.configure(text="Running…")
+        self._status.configure(text="執行中…")
 
         self._worker_thread = threading.Thread(target=self._worker_main, args=(args,), daemon=True)
         self._worker_thread.start()
@@ -546,7 +550,7 @@ class MainHub(ctk.CTk):
                 if consume_runtime_user_ended_at_prompt():
                     self._worker_outcome = ("ok_quiet", "")
                 else:
-                    self._worker_outcome = ("ok", f"Run {run_id} finished.")
+                    self._worker_outcome = ("ok", f"執行 {run_id} 已完成。")
                 manager.log_info("Master stopped.")
             else:
                 script_path = args.script_disk_path
@@ -573,7 +577,7 @@ class MainHub(ctk.CTk):
                 )
                 manager.log_info("Master starting coordinator module runtime")
                 run_coordinator_sync()
-                self._worker_outcome = ("ok", f"Run {run_id} finished.")
+                self._worker_outcome = ("ok", f"執行 {run_id} 已完成。")
                 manager.log_info("Master stopped.")
         except asyncio.CancelledError:
             self._worker_outcome = ("ok_quiet", "")
@@ -611,19 +615,19 @@ class MainHub(ctk.CTk):
             w.configure(state="normal")
         self._refresh_runtime_script_text_from_cache()
         if kind == "err":
-            self._status.configure(text=f"Error: {msg}")
+            self._status.configure(text=f"錯誤：{msg}")
         elif user_stopped:
-            self._status.configure(text="Run stopped.")
+            self._status.configure(text="執行已停止。")
         elif kind == "ok_quiet" and msg.strip():
             self._status.configure(text=msg.strip())
         elif kind in ("ok", "ok_quiet"):
-            self._status.configure(text="Ready")
+            self._status.configure(text="就緒")
         if user_stopped and kind != "err":
             return
         if kind == "ok":
-            show_ctk_message(self, "QualityAssuranceAgent", msg, kind="info")
+            show_ctk_message(self, "電腦使用代理", msg, kind="info")
         elif kind == "err":
-            show_ctk_message(self, "QualityAssuranceAgent", msg, kind="error")
+            show_ctk_message(self, "電腦使用代理", msg, kind="error")
 
 
 def run_main_hub() -> None:

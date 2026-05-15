@@ -317,7 +317,7 @@ async def _disambiguate_duplicate_centers(
         x, y, llm_text = _parse_xy_text_from_llm_content(reply.content)
     if (x, y) not in allowed and llm_text not in allowed_str.keys():
         raise ValueError(
-            f"disambiguation returned ({x},{y}) not in allowed {sorted(allowed)}"
+            f"disambiguation returned ({x},{y},{llm_text}) not in allowed {matches}"
         )
     if (x, y) not in allowed:
         x, y = allowed_str[llm_text]

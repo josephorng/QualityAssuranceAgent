@@ -28,7 +28,7 @@ pip install -r requirements.txt
 
 Key values:
 
-- `eye_vlm`, `brain_lm`
+- `brain_lm`
 - model/runtime settings
 
 ## Run

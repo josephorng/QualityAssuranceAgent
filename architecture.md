@@ -3,7 +3,6 @@ This is a computer use agent project. We will use python and interactive cli to 
 # Setting
 
 - constants.json: Store all the constant mentioned in this document.
-  - eye_vlm: default to Gemma 4 e2B
   - brain_lm: default to Gemma 4 e2B
 - "mcp" folder: This will store a python file with mcp tools which will be initiated in the begining, and contain folders for each tool to store their logics. We will gradually add tools afterward.
 - prompts.json: Store all the prompt in this file to better maintain the project. Each prompt will have a model list meaning that this prompt can be used for these models.

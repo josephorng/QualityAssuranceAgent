@@ -22,7 +22,6 @@ class Settings(BaseSettings):
 
     llm_backend: str = "ollama"
     ollama_host: str = "http://localhost:11434"
-    eye_vlm: str = "gemma4:e2b"
     brain_lm: str = "gemma4:e2b"
     vllm_host: str = "http://192.168.13.101:11434"
     vllm_model: str = "gemma4:26b"
@@ -36,7 +35,6 @@ def load_settings() -> Settings:
     data = {
         "llm_backend": constants.get("llm_backend", "ollama"),
         "ollama_host": constants.get("ollama_host", "http://localhost:11434"),
-        "eye_vlm": constants.get("eye_vlm", "gemma4:e2b"),
         "brain_lm": constants.get("brain_lm", "gemma4:e2b"),
         "vllm_host": constants.get("vllm_host", "http://192.168.13.101:11434"),
         "vllm_model": constants.get("vllm_model", "gemma4:26b"),

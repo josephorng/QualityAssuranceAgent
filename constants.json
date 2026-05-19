@@ -1,11 +1,9 @@
 {
-  "llm_backend": "ollama",
+  "llm_backend": "vllm",
   "eye_vlm": "gemma4:e4b",
   "brain_lm": "gemma4:e4b",
   "ollama_host": "http://localhost:11434",
   "vllm_host": "http://192.168.13.101:11434",
   "vllm_model": "gemma4:e4b",
-  "screenshot_interval_seconds": 2,
-  "screenshot_similarity_threshold": 0.985,
   "debug": true
 }

@@ -29,8 +29,6 @@ pip install -r requirements.txt
 Key values:
 
 - `eye_vlm`, `brain_lm`
-- `screenshot_interval_seconds`
-- `screenshot_similarity_threshold`
 - model/runtime settings
 
 ## Run

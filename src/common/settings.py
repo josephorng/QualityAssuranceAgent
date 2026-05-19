@@ -28,8 +28,6 @@ class Settings(BaseSettings):
     vllm_model: str = "gemma4:26b"
     runs_dir: str = "runs"
     log_level: str = "INFO"
-    screenshot_interval_seconds: int = 2
-    screenshot_similarity_threshold: float = 0.985
     debug: bool = True
 
 
@@ -42,8 +40,6 @@ def load_settings() -> Settings:
         "brain_lm": constants.get("brain_lm", "gemma4:e2b"),
         "vllm_host": constants.get("vllm_host", "http://192.168.13.101:11434"),
         "vllm_model": constants.get("vllm_model", "gemma4:26b"),
-        "screenshot_interval_seconds": constants.get("screenshot_interval_seconds", 2),
-        "screenshot_similarity_threshold": constants.get("screenshot_similarity_threshold", 0.985),
         "debug": constants.get("debug", True),
     }
     return Settings(**data)

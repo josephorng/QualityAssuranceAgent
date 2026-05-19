@@ -7,7 +7,11 @@ from collections.abc import Callable
 from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any
 
+from pathlib import Path
+
 from src.common.ctk_dialogs import is_ctk_window, show_ctk_message
+from src.common.io_utils import read_text
+from src.common.runtime_context import get_runtime_env
 
 if TYPE_CHECKING:
     import tkinter as tk
@@ -15,6 +19,12 @@ if TYPE_CHECKING:
 _last_runtime_command: str | None = None
 
 _runtime_command_provider: Callable[[], str | None] | None = None
+
+_runtime_step_undo_handler: Callable[[], bool] | None = None
+
+_on_undo_last_runtime_command: Callable[[], None] | None = None
+
+_UNDO_WARNING_MSG = "沒有可復原的上一步。"
 
 # Set when runtime coordinator exits because the user ended the run at the prompt (End run / close dialog).
 _runtime_user_ended_at_prompt: bool = False
@@ -45,6 +55,36 @@ def set_runtime_command_provider(provider: Callable[[], str | None] | None) -> N
 
 def get_last_runtime_command() -> str | None:
     return _last_runtime_command
+
+
+def set_runtime_step_undo_handler(handler: Callable[[], bool] | None) -> None:
+    global _runtime_step_undo_handler
+    _runtime_step_undo_handler = handler
+
+
+def set_on_undo_last_runtime_command(callback: Callable[[], None] | None) -> None:
+    global _on_undo_last_runtime_command
+    _on_undo_last_runtime_command = callback
+
+
+def _refresh_last_runtime_command_from_disk() -> None:
+    global _last_runtime_command
+    try:
+        run_root, _ = get_runtime_env()
+        path = Path(run_root) / "runtime_commands.txt"
+        lines = [ln for ln in read_text(path).splitlines() if ln.strip()]
+        _last_runtime_command = lines[-1] if lines else None
+    except Exception:
+        _last_runtime_command = None
+
+
+def try_undo_last_runtime_step() -> bool:
+    if _runtime_step_undo_handler is None or not _runtime_step_undo_handler():
+        return False
+    _refresh_last_runtime_command_from_disk()
+    if _on_undo_last_runtime_command is not None:
+        _on_undo_last_runtime_command()
+    return True
 
 
 def _prompt_runtime_command_console_fallback() -> str | None:
@@ -112,6 +152,9 @@ def show_runtime_command_ctk(
 
     def on_use_previous() -> None:
         if not previous_command:
+            return
+        if not try_undo_last_runtime_step():
+            show_ctk_message(dialog, "執行指令", _UNDO_WARNING_MSG, kind="warning")
             return
         entry.delete(0, "end")
         entry.insert(0, previous_command)
@@ -225,6 +268,9 @@ def show_runtime_command_ttk(
     def on_use_previous() -> None:
         if not previous_command:
             return
+        if not try_undo_last_runtime_step():
+            messagebox.showwarning("執行指令", _UNDO_WARNING_MSG, parent=dialog)
+            return
         entry_var.set(previous_command)
         entry.icursor(tk.END)
         entry.focus_set()
@@ -326,12 +372,14 @@ class RuntimeCommandHubBridge:
         poll_interval_ms: int = 20,
         *,
         on_runtime_command: Callable[[str], None] | None = None,
+        on_undo_last_runtime_command: Callable[[], None] | None = None,
     ) -> None:
         import tkinter as tk
 
         self._tk: tk.Misc = tk_parent
         self._poll_interval_ms = poll_interval_ms
         self._on_runtime_command = on_runtime_command
+        self._on_undo_last_runtime_command = on_undo_last_runtime_command
         self._q: Queue[tuple[threading.Event, list[str | None]]] = Queue()
         self._active = False
         self._stop_requested = False
@@ -398,6 +446,7 @@ class RuntimeCommandHubBridge:
         self._stop_requested = False
         self._dialog_ref.clear()
         set_runtime_command_provider(self._provide)
+        set_on_undo_last_runtime_command(self._on_undo_last_runtime_command)
         self._tk.after(0, self._poll)
 
     def stop(self) -> None:
@@ -405,6 +454,7 @@ class RuntimeCommandHubBridge:
         self._stop_requested = False
         self._dialog_ref.clear()
         set_runtime_command_provider(None)
+        set_on_undo_last_runtime_command(None)
 
 
 def prompt_runtime_command_popup() -> str | None:

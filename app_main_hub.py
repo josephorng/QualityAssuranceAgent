@@ -15,7 +15,7 @@ from tkinter import filedialog
 
 from main import prepare_run_session, run_coordinator_sync
 from src.common.ctk_dialogs import show_ctk_message
-from src.common.io_utils import append_text, read_json, write_json
+from src.common.io_utils import append_text, pop_last_nonempty_line, read_json, write_json
 from src.common.monitor_prompt import (
     PRIMARY_MONITOR_MARKER,
     EyeMonitorChoice,
@@ -159,6 +159,17 @@ class MainHub(ctk.CTk):
         """Underlying Tk Text ignores ``insert`` while the widget is ``disabled`` (as during a run)."""
         self._script_text.configure(state="normal")
         self._script_text.insert("end", cmd + "\n")
+        self._script_text.configure(state="disabled")
+
+    def _pop_last_runtime_command_from_cache(self) -> None:
+        p = self._runtime_commands_cache_path
+        if p is None:
+            return
+        pop_last_nonempty_line(p)
+        self._script_text.configure(state="normal")
+        self._script_text.delete("0.0", "end")
+        if p.is_file():
+            self._script_text.insert("0.0", p.read_text(encoding="utf-8"))
         self._script_text.configure(state="disabled")
 
     def _refresh_runtime_script_text_from_cache(self) -> None:
@@ -493,7 +504,11 @@ class MainHub(ctk.CTk):
                 append_text(cache_path, cmd + "\n")
                 self._append_runtime_command_to_script_view(cmd)
 
-            self._bridge = RuntimeCommandHubBridge(self, on_runtime_command=on_runtime_command)
+            self._bridge = RuntimeCommandHubBridge(
+                self,
+                on_runtime_command=on_runtime_command,
+                on_undo_last_runtime_command=self._pop_last_runtime_command_from_cache,
+            )
             self._bridge.start()
         else:
             raw = self._script_text.get("0.0", "end")

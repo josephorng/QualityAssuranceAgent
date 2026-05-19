@@ -189,6 +189,21 @@ class BrainModule:
         self.script_lines = [cleaned]
         self._script_step_index = 0
 
+    def undo_last_runtime_step(self) -> bool:
+        """Remove the last completed step transcript and rewind the step counter."""
+        if self._step_transcript_counter <= 0:
+            return False
+        tc = self._step_transcript_counter - 1
+        si = 0
+        steps_dir = self.manager.require_paths().root / "steps"
+        for ext in (".json", ".log"):
+            path = steps_dir / f"{tc}_{si}{ext}"
+            if path.exists():
+                path.unlink()
+        self._step_transcript_counter = tc
+        self._script_step_index = 0
+        return True
+
     def _current_goal(self) -> str:
         """Return the goal text for `_script_step_index`, or the last line if the index is past the end."""
         if not self.script_lines:

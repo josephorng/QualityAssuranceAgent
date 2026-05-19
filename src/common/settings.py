@@ -24,7 +24,6 @@ class Settings(BaseSettings):
     ollama_host: str = "http://localhost:11434"
     brain_lm: str = "gemma4:e2b"
     vllm_host: str = "http://192.168.13.101:11434"
-    vllm_model: str = "gemma4:26b"
     runs_dir: str = "runs"
     log_level: str = "INFO"
     debug: bool = True
@@ -37,7 +36,6 @@ def load_settings() -> Settings:
         "ollama_host": constants.get("ollama_host", "http://localhost:11434"),
         "brain_lm": constants.get("brain_lm", "gemma4:e2b"),
         "vllm_host": constants.get("vllm_host", "http://192.168.13.101:11434"),
-        "vllm_model": constants.get("vllm_model", "gemma4:26b"),
         "debug": constants.get("debug", True),
     }
     return Settings(**data)

@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
+def application_root() -> Path:
+    """Project root in dev; directory containing the exe when frozen (Nuitka/PyInstaller)."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
+
+
+ROOT_DIR = application_root()
 
 
 def _load_constants() -> dict[str, Any]:

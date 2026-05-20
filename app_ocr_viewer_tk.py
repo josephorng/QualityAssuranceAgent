@@ -18,6 +18,14 @@ from cua_mcp.read_screen_text.ocr_image import (
     format_coordinate_text_from_regions,
     get_coordinates_from_path,
 )
+from cua_mcp.yolo_onnx import (
+    DEFAULT_CONF_YOLOV26_END2END,
+    DEFAULT_YOLO_ONNX_PATH,
+    YOLO_CLASS_ELEMENT,
+    YOLO_CLASS_NAMES,
+    YOLO_CLASS_TEXT,
+    run_best_onnx_end2end,
+)
 from src.common.io_utils import read_json, write_json
 from src.common.settings import ROOT_DIR
 
@@ -25,6 +33,8 @@ SCREENSHOT_CREATOR_UNDONE_IMAGES = Path(
     r"C:\Users\Joseph Hung\Documents\Repos\Git\ScreenshotCreator\real_screenshot\undone\images"
 )
 OCR_EXPORT_DEFAULT_DIR = Path(r"C:\Users\Joseph Hung\Documents\Repos\Git\crnn.pytorch\finetune\data")
+# Same weights as ONNX export used by OCR (`cua_mcp/yolo_onnx.DEFAULT_YOLO_ONNX_PATH`).
+DEFAULT_ULTRALYTICS_PT_PATH = ROOT_DIR / "cua_mcp" / "best.pt"
 
 
 @dataclass(frozen=True)
@@ -35,6 +45,20 @@ class OcrLine:
 
 _STRING_LINE_RE = re.compile(r"^\[(\d+),(\d+),(\d+),(\d+)\]\s*(.*)$")
 _STRING_CENTER_RE = re.compile(r"^\[(\d+),(\d+)\]\s*(.*)$")
+
+
+def _parse_conf_0_to_1(raw: str) -> tuple[float | None, str | None]:
+    """Parse confidence in ``[0, 1]``; returns ``(value, None)`` or ``(None, error_message)``."""
+    s = raw.strip()
+    if not s:
+        return None, "confidence is empty"
+    try:
+        v = float(s)
+    except ValueError:
+        return None, "confidence must be a number (e.g. 0.25)"
+    if not (0.0 <= v <= 1.0):
+        return None, "confidence must be between 0 and 1"
+    return v, None
 
 
 def _parse_string_line(line: str) -> OcrLine | None:
@@ -197,6 +221,102 @@ def _run_ocr_with_boxes(image_path: Path) -> tuple[list[OcrLine], float | None, 
     return out_lines, yolo_elapsed_ms, ocr_elapsed_ms
 
 
+def _run_ultralytics_yolo_pt(
+    image_path: Path,
+    weights_path: Path,
+    *,
+    conf: float,
+    model_holder: list[Any],
+) -> tuple[list[OcrLine], float]:
+    """
+    Run Ultralytics ``YOLO`` on ``weights_path``; overlay labels use ``class conf``.
+    ``model_holder`` is a single-element list caching the loaded model across clicks.
+
+    ``conf`` is passed to ``model.predict(conf=...)`` (0–1 inclusive).
+    """
+    try:
+        from ultralytics import YOLO
+    except ImportError as exc:
+        raise ImportError(
+            "ultralytics is not installed. Install with: pip install ultralytics"
+        ) from exc
+
+    if not weights_path.is_file():
+        raise FileNotFoundError(f"YOLO weights not found: {weights_path}")
+
+    t0 = time.perf_counter()
+    if not model_holder:
+        model_holder.append(YOLO(str(weights_path)))
+    model = model_holder[0]
+    results = model.predict(
+        str(image_path),
+        conf=float(conf),
+        imgsz=640,
+        iou=0.7,
+        verbose=False,
+    )
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    if not results:
+        return [], elapsed_ms
+    r0 = results[0]
+    names: dict[int, str] = getattr(model, "names", {}) or {}
+    boxes = r0.boxes
+    if boxes is None or len(boxes) == 0:
+        return [], elapsed_ms
+
+    xyxy = boxes.xyxy.cpu().numpy()
+    cls_arr = boxes.cls.cpu().numpy().astype(int)
+    conf_arr = boxes.conf.cpu().numpy()
+    lines: list[OcrLine] = []
+    for i in range(len(xyxy)):
+        x1f, y1f, x2f, y2f = (float(v) for v in xyxy[i])
+        x1 = int(round(x1f))
+        y1 = int(round(y1f))
+        x2 = int(round(x2f))
+        y2 = int(round(y2f))
+        w_box = max(1, x2 - x1)
+        h_box = max(1, y2 - y1)
+        cid = int(cls_arr[i])
+        label = str(names.get(cid, str(cid)))
+        conf_val = float(conf_arr[i])
+        lines.append(OcrLine(box=(x1, y1, w_box, h_box), text=f"{label} {conf_val:.2f}"))
+    lines.sort(key=lambda ln: (ln.box[1] + ln.box[3] // 2, ln.box[0] + ln.box[2] // 2))
+    return lines, elapsed_ms
+
+
+def _run_yolo_onnx_best_detections(
+    image_path: Path, *, conf_threshold: float
+) -> tuple[list[OcrLine], float]:
+    """
+    Run ``cua_mcp/best.onnx`` via :func:`run_best_onnx_end2end` (ONNX Runtime, CPU).
+
+    Keeps ``text`` and ``element`` detections above ``conf_threshold``.
+    """
+    if not DEFAULT_YOLO_ONNX_PATH.is_file():
+        raise FileNotFoundError(f"YOLO ONNX model not found: {DEFAULT_YOLO_ONNX_PATH}")
+    bgr = cv2.imread(str(image_path))
+    if bgr is None:
+        raise ValueError(f"could not read image: {image_path}")
+    t0 = time.perf_counter()
+    xyxy, scores, cls_ids = run_best_onnx_end2end(
+        bgr,
+        class_ids={YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT},
+        conf_threshold=float(conf_threshold),
+    )
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    lines: list[OcrLine] = []
+    for i in range(len(xyxy)):
+        x1, y1, x2, y2 = (int(v) for v in xyxy[i])
+        w_box = max(1, x2 - x1)
+        h_box = max(1, y2 - y1)
+        cid = int(cls_ids[i])
+        label = YOLO_CLASS_NAMES.get(cid, str(cid))
+        conf_val = float(scores[i])
+        lines.append(OcrLine(box=(x1, y1, w_box, h_box), text=f"{label} {conf_val:.2f}"))
+    lines.sort(key=lambda ln: (ln.box[1] + ln.box[3] // 2, ln.box[0] + ln.box[2] // 2))
+    return lines, elapsed_ms
+
+
 class OcrViewerApp:
     _MIN_ZOOM = 0.125
     _MAX_ZOOM = 32.0
@@ -214,10 +334,14 @@ class OcrViewerApp:
         self.current_image: Image.Image | None = None
         self.current_lines: list[OcrLine] = []
         self.selected_line_idx: int | None = None
+        self._ultralytics_model_holder: list[Any] = []
 
         self.show_boxes = tk.BooleanVar(value=True)
         self.show_labels = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="Ready")
+        _dcf = DEFAULT_CONF_YOLOV26_END2END
+        self.yolo_pt_conf_var = tk.StringVar(value=f"{_dcf:g}")
+        self.yolo_onnx_conf_var = tk.StringVar(value=f"{_dcf:g}")
 
         self._view_zoom = 1.0
         self._rmb_last_x: int | None = None
@@ -277,8 +401,26 @@ class OcrViewerApp:
         ttk.Button(controls, text="Copy to undone/images", command=self._copy_current_image_to_undone).grid(
             row=2, column=2, columnspan=2, sticky="ew", pady=(6, 0)
         )
+        ttk.Label(controls, text="Conf (.pt)").grid(row=3, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(controls, textvariable=self.yolo_pt_conf_var, width=10).grid(
+            row=3, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(6, 0)
+        )
+        ttk.Button(
+            controls,
+            text="YOLO .pt (Ultralytics)",
+            command=self._run_ultralytics_yolo_current_image,
+        ).grid(row=4, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        ttk.Label(controls, text="Conf (ONNX)").grid(row=5, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(controls, textvariable=self.yolo_onnx_conf_var, width=10).grid(
+            row=5, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(6, 0)
+        )
+        ttk.Button(
+            controls,
+            text="YOLO best.onnx (ORT)",
+            command=self._run_yolo_onnx_current_image,
+        ).grid(row=6, column=0, columnspan=4, sticky="ew", pady=(6, 0))
         ttk.Button(controls, text="Reset Zoom", command=self._reset_zoom).grid(
-            row=3, column=0, columnspan=4, sticky="ew", pady=(6, 0)
+            row=7, column=0, columnspan=4, sticky="ew", pady=(6, 0)
         )
 
         canvas_wrap = ttk.Frame(self.root, padding=8)
@@ -708,6 +850,68 @@ class OcrViewerApp:
         self.image_list.select_set(nxt)
         self.image_list.see(nxt)
         self._on_image_select()
+
+    def _run_ultralytics_yolo_current_image(self) -> None:
+        src = self._current_image_path()
+        if src is None or not src.is_file():
+            self.status_var.set("No image selected for Ultralytics YOLO")
+            return
+        conf_pt, err = _parse_conf_0_to_1(self.yolo_pt_conf_var.get())
+        if conf_pt is None:
+            self.status_var.set(f"Ultralytics .pt — invalid confidence: {err}")
+            return
+        self.status_var.set(
+            f"Running Ultralytics YOLO ({DEFAULT_ULTRALYTICS_PT_PATH.name}, conf={conf_pt:g})..."
+        )
+        self.root.update_idletasks()
+        try:
+            lines, elapsed_ms = _run_ultralytics_yolo_pt(
+                src,
+                DEFAULT_ULTRALYTICS_PT_PATH,
+                conf=conf_pt,
+                model_holder=self._ultralytics_model_holder,
+            )
+        except ImportError as exc:
+            self.status_var.set(str(exc))
+            return
+        except Exception as exc:
+            self.status_var.set(f"Ultralytics YOLO failed: {type(exc).__name__}: {exc}")
+            return
+        self.current_lines = lines
+        self.selected_line_idx = None
+        self._populate_item_list()
+        self._refresh_image()
+        self.status_var.set(
+            f"Ultralytics YOLO: {len(lines)} boxes in {elapsed_ms:.0f} ms "
+            f"(conf={conf_pt:g}, {DEFAULT_ULTRALYTICS_PT_PATH.name})"
+        )
+
+    def _run_yolo_onnx_current_image(self) -> None:
+        src = self._current_image_path()
+        if src is None or not src.is_file():
+            self.status_var.set("No image selected for YOLO ONNX")
+            return
+        conf_onnx, err = _parse_conf_0_to_1(self.yolo_onnx_conf_var.get())
+        if conf_onnx is None:
+            self.status_var.set(f"YOLO ONNX — invalid confidence: {err}")
+            return
+        self.status_var.set(
+            f"Running YOLO ONNX ({DEFAULT_YOLO_ONNX_PATH.name}, conf={conf_onnx:g})..."
+        )
+        self.root.update_idletasks()
+        try:
+            lines, elapsed_ms = _run_yolo_onnx_best_detections(src, conf_threshold=conf_onnx)
+        except Exception as exc:
+            self.status_var.set(f"YOLO ONNX failed: {type(exc).__name__}: {exc}")
+            return
+        self.current_lines = lines
+        self.selected_line_idx = None
+        self._populate_item_list()
+        self._refresh_image()
+        self.status_var.set(
+            f"YOLO ONNX: {len(lines)} boxes in {elapsed_ms:.0f} ms "
+            f"(conf={conf_onnx:g}, {DEFAULT_YOLO_ONNX_PATH.name})"
+        )
 
     def _copy_current_image_to_undone(self) -> None:
         src = self._current_image_path()

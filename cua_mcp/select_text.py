@@ -273,8 +273,8 @@ async def _disambiguate_duplicate_centers(
     image_path: str,
 ) -> tuple[int, int, str]:
     """Second LLM round: pick one of several identical (or tier-equivalent) OCR locations."""
-    allowed = {(cx, cy) for cx, cy, _ in matches}
-    allowed_str = {s: (cx, cy) for cx, cy, s in matches}
+    allowed_coordinates = {(cx, cy) for cx, cy, _ in matches}
+    allowed_texts = {s: (cx, cy) for cx, cy, s in matches}
     options_lines = "\n".join(f"[{cx},{cy}] {t}" for cx, cy, t in matches)
     base = (
         "The matching OCR text appears at MORE THAN ONE location on the image.\n"
@@ -315,14 +315,15 @@ async def _disambiguate_duplicate_centers(
             response_format="json",
         )
         x, y, llm_text = _parse_xy_text_from_llm_content(reply.content)
-    if (x, y) not in allowed and llm_text not in allowed_str.keys():
+    if (x, y) not in allowed_coordinates and llm_text not in allowed_texts:
         raise ValueError(
-            f"disambiguation returned ({x},{y},{llm_text}) not in allowed {matches}"
+            f"disambiguation returned ({x},{y},{llm_text!r}) not in allowed {matches}"
         )
-    if (x, y) not in allowed:
-        x, y = allowed_str[llm_text]
-    elif llm_text not in allowed_str.keys():
-        llm_text = [m[2] for m in matches if m[2] == llm_text][0]
+    if (x, y) in allowed_coordinates:
+        # Prefer coordinates from the model; OCR line text may be paraphrased.
+        llm_text = next(t for cx, cy, t in matches if (cx, cy) == (x, y))
+    else:
+        x, y = allowed_texts[llm_text]
     return x, y, llm_text
 
 

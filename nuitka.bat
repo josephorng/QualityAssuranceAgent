@@ -31,7 +31,7 @@ python -m nuitka ^
     --product-version=%APP_VERSION% ^
     --windows-icon-from-ico=icon.ico ^
     --include-data-dir=cua_mcp/read_screen_text=cua_mcp/read_screen_text ^
-    --include-data-dir=cua_mcp/get_UI=cua_mcp/get_UI ^
+    --include-data-files=cua_mcp/best.onnx=cua_mcp/best.onnx ^
     --include-package-data=opencc ^
     %ENTRYSCRIPT%
 

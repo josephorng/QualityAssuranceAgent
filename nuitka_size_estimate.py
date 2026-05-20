@@ -120,7 +120,7 @@ def main() -> None:
 
     data_dirs = [
         ROOT / "cua_mcp" / "read_screen_text",
-        ROOT / "cua_mcp" / "get_UI",
+        ROOT / "cua_mcp" / "best.onnx",
     ]
     data_bytes = sum(dir_size(d) for d in data_dirs)
 

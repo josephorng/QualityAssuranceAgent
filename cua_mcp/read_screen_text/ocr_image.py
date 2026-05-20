@@ -1,7 +1,7 @@
 """
 OCR pipeline: YOLO text-region detection + CRNN recognition.
 
-Reads an image from disk, detects text regions with ``read_screen_text/yolo_best.onnx`` (ONNX Runtime),
+Reads an image from disk, detects text regions with ``cua_mcp/best.onnx`` (ONNX Runtime),
 runs CRNN (ONNX) on each detected crop using ``ocr_model_finetuned.onnx``, and
 returns an offset plus reading-order regions ``(bbox, (center_x, center_y), predict_images)``.
 Use :func:`format_coordinate_text_from_regions` for ``[center_x,center_y] text`` hints.
@@ -17,13 +17,11 @@ from typing import Optional
 
 import cv2
 import numpy as np
-import onnxruntime as ort
 
 from cua_mcp.yolo_onnx import (
     DEFAULT_CONF_YOLOV26_END2END,
-    bgr_to_nchw_normalized,
-    create_cpu_session,
-    decode_yolov26_end2end,
+    YOLO_CLASS_TEXT,
+    run_best_onnx_end2end,
 )
 from src.eye.capture import capture_active_monitor_to_file
 from .inference_onnx import TextPredictor
@@ -31,8 +29,6 @@ from src.common.io_utils import write_json
 from src.common.run_state import get_run_state_manager, ts_name
 
 _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
-_OCR_YOLO_ONNX_SESSION: ort.InferenceSession | None = None
-_OCR_YOLO_ONNX_INPUT_NAME: str | None = None
 _CRNN_PREDICTOR: TextPredictor | None = None
 
 
@@ -81,11 +77,6 @@ def _default_crnn_path() -> str:
     return os.path.join(_PACKAGE_DIR, "ocr_model_finetuned.onnx")
 
 
-def _default_yolo_path() -> str:
-    """Return the default ONNX OCR text-region detector path."""
-    return os.path.join(_PACKAGE_DIR, "yolo_best.onnx")
-
-
 def _get_crnn_predictor(model_path: Optional[str] = None) -> TextPredictor:
     """Lazily initialize and cache the ONNX CRNN predictor instance."""
     global _CRNN_PREDICTOR
@@ -98,38 +89,24 @@ def _get_crnn_predictor(model_path: Optional[str] = None) -> TextPredictor:
     return _CRNN_PREDICTOR
 
 
-def _get_ocr_yolo_onnx_session() -> tuple[ort.InferenceSession, str]:
-    """Lazily initialize and cache ONNX Runtime session for ``yolo_best.onnx``."""
-    global _OCR_YOLO_ONNX_SESSION, _OCR_YOLO_ONNX_INPUT_NAME
-    if _OCR_YOLO_ONNX_SESSION is None:
-        yolo_path = _default_yolo_path()
-        if not os.path.isfile(yolo_path):
-            raise FileNotFoundError(f"YOLO model not found: {yolo_path}")
-        _log_info(f"OCR initializing YOLO ONNX detector model_path={yolo_path}")
-        _OCR_YOLO_ONNX_SESSION, _OCR_YOLO_ONNX_INPUT_NAME = create_cpu_session(yolo_path)
-    assert _OCR_YOLO_ONNX_INPUT_NAME is not None
-    return _OCR_YOLO_ONNX_SESSION, _OCR_YOLO_ONNX_INPUT_NAME
-
-
 def _run_ocr_yolo_onnx_inference(
     bgr: np.ndarray,
     *,
     conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
 ) -> np.ndarray:
     """
-    Resize to 640×640, RGB CHW normalize, run ``yolo_best.onnx`` (YOLOv26 end2end).
+    Resize to 640×640, RGB CHW normalize, run ``cua_mcp/best.onnx`` (YOLOv26 end2end).
 
-    Returns ``N×4`` ``xyxy`` float array in original image pixel space after score filtering
-    (NMS is in the ONNX graph).
+    Returns ``N×4`` ``xyxy`` in original image pixel space after score filtering
+    (NMS is in the ONNX graph). Only ``text`` class detections are kept.
     """
-    session, input_name = _get_ocr_yolo_onnx_session()
-    img_data, h0, w0 = bgr_to_nchw_normalized(bgr)
-    outputs = session.run(None, {input_name: img_data})
-    xyxy, _scores = decode_yolov26_end2end(
-        outputs[0],
-        h0,
-        w0,
+    xyxy, _scores, _cls = run_best_onnx_end2end(
+        bgr,
+        class_ids={YOLO_CLASS_TEXT},
         conf_threshold=conf_threshold,
+        on_session_created=lambda p: _log_info(
+            f"OCR initializing YOLO ONNX detector model_path={p}"
+        ),
     )
     return xyxy
 

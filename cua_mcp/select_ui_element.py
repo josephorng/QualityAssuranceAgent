@@ -1,5 +1,5 @@
 """
-UI element detection with YOLO (`get_UI/model.onnx`) + Ollama index selection.
+UI element detection with YOLO (`cua_mcp/best.onnx`) + Ollama index selection.
 
 Moves the cursor to the center of a detected non-text UI region; coordinate mapping
 matches ``coordinate_selection._resolve_point`` (screenshot pixels → global screen).
@@ -14,15 +14,12 @@ from typing import Any
 
 import cv2
 import numpy as np
-import onnxruntime as ort
 
 from cua_mcp.yolo_onnx import (
     DEFAULT_CONF_YOLOV26_END2END,
-    DEFAULT_CONF_YOLOV26_RAW,
-    DEFAULT_IOU_YOLOV26_RAW,
-    bgr_to_nchw_normalized,
-    create_cpu_session,
-    decode_yolov26_raw_output,
+    YOLO_CLASS_ELEMENT,
+    YOLO_CLASS_NAMES,
+    run_best_onnx_end2end,
 )
 from cua_mcp.select_text import _to_global_coordinate
 from cua_mcp.read_screen_text.ocr_image import get_coordinates_from_path, get_text_boxes_from_path
@@ -32,12 +29,6 @@ from src.common.run_state import RunStateManager, get_run_state_manager, ts_name
 from src.common.settings import load_settings
 from src.common.io_utils import write_json
 from src.eye.capture import capture_active_monitor_to_file
-
-_PACKAGE_DIR = Path(__file__).resolve().parent
-_UI_MODEL_PATH = _PACKAGE_DIR / "get_UI" / "model.onnx"
-
-_UI_ONNX_SESSION: ort.InferenceSession | None = None
-_UI_ONNX_INPUT_NAME: str | None = None
 
 settings = load_settings()
 
@@ -208,37 +199,20 @@ def _parse_keep_indices_from_llm(raw: str, max_len: int) -> list[int]:
     return keep
 
 
-def _get_ui_onnx_session() -> tuple[ort.InferenceSession, str]:
-    """Load and cache ONNX Runtime session for ``get_UI/model.onnx``."""
-    global _UI_ONNX_SESSION, _UI_ONNX_INPUT_NAME
-    if _UI_ONNX_SESSION is None:
-        if not _UI_MODEL_PATH.is_file():
-            raise FileNotFoundError(f"UI YOLO model not found: {_UI_MODEL_PATH}")
-        _log_info(f"UI YOLO ONNX initializing model_path={_UI_MODEL_PATH}")
-        _UI_ONNX_SESSION, _UI_ONNX_INPUT_NAME = create_cpu_session(_UI_MODEL_PATH)
-    assert _UI_ONNX_INPUT_NAME is not None
-    return _UI_ONNX_SESSION, _UI_ONNX_INPUT_NAME
-
-
 def _run_ui_onnx_inference(
     bgr: np.ndarray,
     *,
-    conf_threshold: float = DEFAULT_CONF_YOLOV26_RAW,
-    iou_threshold: float = DEFAULT_IOU_YOLOV26_RAW,
-) -> tuple[np.ndarray, np.ndarray]:
+    conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Preprocess BGR (640, RGB CHW, /255), run UI YOLOv26 ONNX (raw head), return
-    ``(xyxy, scores)`` in original image pixels after NMS.
+    Preprocess BGR (640, RGB CHW, /255), run UI YOLOv26 ONNX (end2end), return
+    ``(xyxy, scores, class_ids)`` in original image pixels. Only ``element`` class detections are kept.
     """
-    session, input_name = _get_ui_onnx_session()
-    img_data, h0, w0 = bgr_to_nchw_normalized(bgr)
-    outputs = session.run(None, {input_name: img_data})
-    return decode_yolov26_raw_output(
-        outputs[0],
-        h0,
-        w0,
+    return run_best_onnx_end2end(
+        bgr,
+        class_ids={YOLO_CLASS_ELEMENT},
         conf_threshold=conf_threshold,
-        iou_threshold=iou_threshold,
+        on_session_created=lambda p: _log_info(f"UI YOLO ONNX initializing model_path={p}"),
     )
 
 
@@ -253,11 +227,7 @@ def _clip_box(x: int, y: int, w: int, h: int, img_w: int, img_h: int) -> tuple[i
 def _predict_ui_elements_raw(bgr: np.ndarray) -> list[UiDetection]:
     h, w = bgr.shape[:2]
     try:
-        xyxy, _scores = _run_ui_onnx_inference(
-            bgr,
-            conf_threshold=DEFAULT_CONF_YOLOV26_RAW,
-            iou_threshold=DEFAULT_IOU_YOLOV26_RAW,
-        )
+        xyxy, _scores, class_ids = _run_ui_onnx_inference(bgr)
     except Exception as exc:
         _log_info(f"UI YOLO ONNX predict failed: {type(exc).__name__}: {exc}")
         raise RuntimeError(f"UI YOLO predict failed: {exc}") from exc
@@ -266,7 +236,7 @@ def _predict_ui_elements_raw(bgr: np.ndarray) -> list[UiDetection]:
         return []
 
     out: list[UiDetection] = []
-    for row in xyxy:
+    for row, cls_id in zip(xyxy, class_ids, strict=True):
         x1, y1, x2, y2 = float(row[0]), float(row[1]), float(row[2]), float(row[3])
         x1i, y1i = max(0, int(x1)), max(0, int(y1))
         x2i, y2i = min(w, int(x2)), min(h, int(y2))
@@ -274,8 +244,8 @@ def _predict_ui_elements_raw(bgr: np.ndarray) -> list[UiDetection]:
         bx, by, bw, bh = _clip_box(x1i, y1i, bw, bh, w, h)
         cx = bx + bw // 2
         cy = by + bh // 2
-        cls_id = 0
-        class_name = str(cls_id)
+        cls_id = int(cls_id)
+        class_name = YOLO_CLASS_NAMES.get(cls_id, str(cls_id))
         out.append(
             UiDetection(
                 bbox=(bx, by, bw, bh),

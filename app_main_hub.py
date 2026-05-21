@@ -13,7 +13,7 @@ from typing import Any
 import customtkinter as ctk
 from tkinter import filedialog
 
-from main import prepare_run_session, run_coordinator_sync
+from main import dismiss_nuitka_onefile_splash, prepare_run_session, run_coordinator_sync
 from src.common.agent_settings_dialog import open_agent_settings_dialog
 from src.common.ctk_dialogs import show_ctk_message
 from src.common.io_utils import append_text, pop_last_nonempty_line, read_json, write_json
@@ -668,6 +668,8 @@ class MainHub(ctk.CTk):
 
 def run_main_hub() -> None:
     app = MainHub()
+    app.update_idletasks()
+    dismiss_nuitka_onefile_splash()
     app.mainloop()
 
 

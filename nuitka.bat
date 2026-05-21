@@ -9,6 +9,10 @@ SET APP_VERSION=1.0.0.0
 SET OUTPUT_DIR=dist
 
 :: --- CLEANUP ---
+echo Stopping any running %APPNAME%.exe (required to replace dist\%APPNAME%.exe)...
+taskkill /F /IM %APPNAME%.exe >nul 2>&1
+timeout /t 1 /nobreak >nul
+
 echo Cleaning previous builds...
 if exist %OUTPUT_DIR% rd /s /q %OUTPUT_DIR%
 if exist %ENTRYSCRIPT:.py=.build% rd /s /q %ENTRYSCRIPT:.py=.build%
@@ -30,10 +34,12 @@ python -m nuitka ^
     --file-version=%APP_VERSION% ^
     --product-version=%APP_VERSION% ^
     --windows-icon-from-ico=icon.ico ^
+    --onefile-windows-splash-screen-image=splash.png ^
     --include-data-dir=cua_mcp/read_screen_text=cua_mcp/read_screen_text ^
     --include-data-files=cua_mcp/best.onnx=cua_mcp/best.onnx ^
     --include-package-data=opencc ^
     --enable-plugin=tk-inter ^
+    --windows-disable-console ^
     %ENTRYSCRIPT%
 
 :: --- CHECK RESULT ---

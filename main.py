@@ -6,6 +6,7 @@ import os
 import shutil
 import signal
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -113,6 +114,23 @@ def run_coordinator_sync() -> None:
                 _coordinator_main_task = None
 
     asyncio.run(_main())
+
+
+def dismiss_nuitka_onefile_splash() -> None:
+    """Close Nuitka's onefile splash once the hub window is ready (Windows onefile builds only)."""
+    parent = os.environ.get("NUITKA_ONEFILE_PARENT")
+    if not parent:
+        return
+    try:
+        pid = int(parent)
+    except ValueError:
+        return
+    splash_filename = os.path.join(
+        tempfile.gettempdir(),
+        f"onefile_{pid}_splash_feedback.tmp",
+    )
+    if os.path.exists(splash_filename):
+        os.unlink(splash_filename)
 
 
 def launch_gui() -> None:

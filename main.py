@@ -121,11 +121,11 @@ def launch_gui() -> None:
     run_main_hub()
 
 
-_REQUIRED_CONFIG_FILES = ("constants.json", "prompts.json")
+_REQUIRED_CONFIG_FILES = ("prompts.json",)
 
 
 def ensure_required_config_files() -> None:
-    """Exit with an error dialog if constants.json or prompts.json is missing."""
+    """Exit with an error dialog if prompts.json is missing."""
     from src.common.settings import ROOT_DIR
 
     missing = [name for name in _REQUIRED_CONFIG_FILES if not (ROOT_DIR / name).is_file()]

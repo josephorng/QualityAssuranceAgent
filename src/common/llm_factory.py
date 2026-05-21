@@ -1,15 +1,15 @@
 """
 Single source of truth for the LLM backend used across the project.
 
-The active client is selected by ``constants.json`` -> ``llm_backend`` (loaded by
-:func:`src.common.settings.load_settings`). Supported values:
+The active client is selected by ``llm_backend`` in ``runs/agent_settings.json``
+(loaded by :func:`src.common.settings.load_settings`). Supported values:
 
 * ``"ollama"`` (default) - :class:`src.common.ollama_client.OllamaClient`
 * ``"vllm"``             - :class:`src.common.vllm_client.VLLMClient`
 
 The client is constructed lazily on first use and cached as a process-wide
-singleton, so swapping backends only requires editing ``constants.json`` and
-restarting the process.
+singleton; use the hub settings dialog or :func:`reset_llm_client` before the
+next run to pick up changes.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def _build_client() -> LLMClient:
 
         return VLLMClient(settings.vllm_host)
     raise ValueError(
-        f"Unknown llm_backend {backend!r} in constants.json; expected 'ollama' or 'vllm'"
+        f"Unknown llm_backend {backend!r} in agent settings; expected 'ollama' or 'vllm'"
     )
 
 

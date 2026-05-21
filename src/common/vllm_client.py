@@ -221,8 +221,8 @@ class VLLMClient(LLMClient):
     LLM client for OpenAI-compatible chat completion APIs.
 
     Configured for **Ollama** at ``OLLAMA_OPENAI_COMPAT_URL`` (OpenAI-compatible
-    routes). Use model name ``gemma4:26b`` in callers (e.g. ``constants.json`` ->
-    ``brain_lm``).
+    routes). Use model name ``gemma4:26b`` in callers (e.g. ``brain_lm`` in
+    ``runs/agent_settings.json``).
 
     The wire format is translated to/from ``ollama.Message`` so the rest of the
     codebase can keep using the existing message shape and tool descriptors.

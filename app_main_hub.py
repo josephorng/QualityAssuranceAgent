@@ -14,6 +14,7 @@ import customtkinter as ctk
 from tkinter import filedialog
 
 from main import prepare_run_session, run_coordinator_sync
+from src.common.agent_settings_dialog import open_agent_settings_dialog
 from src.common.ctk_dialogs import show_ctk_message
 from src.common.io_utils import append_text, pop_last_nonempty_line, read_json, write_json
 from src.common.monitor_prompt import (
@@ -190,6 +191,16 @@ class MainHub(ctk.CTk):
 
         theme_row = ctk.CTkFrame(top_row, fg_color="transparent")
         theme_row.pack(side="right", anchor="ne")
+        self._settings_btn = ctk.CTkButton(
+            theme_row,
+            text="\u2699",
+            width=32,
+            height=32,
+            corner_radius=16,
+            font=ctk.CTkFont(size=15),
+            command=self._open_settings,
+        )
+        self._settings_btn.pack(side="left", padx=(0, 6))
         self._appearance_toggle_btn = ctk.CTkButton(
             theme_row,
             text="\u2600",
@@ -230,6 +241,14 @@ class MainHub(ctk.CTk):
             self._remember_monitor_indices = list(data["selected_monitor_indices"])
         except OSError:
             pass
+
+    def _open_settings(self) -> None:
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            return
+        open_agent_settings_dialog(
+            self,
+            on_saved=lambda: self._status.configure(text="設定已儲存"),
+        )
 
     def _toggle_appearance(self) -> None:
         self._appearance_dark = not self._appearance_dark
@@ -531,6 +550,7 @@ class MainHub(ctk.CTk):
             self._bridge = None
 
         self._set_run_button_running()
+        self._settings_btn.configure(state="disabled")
         for cb in self._monitor_checkboxes:
             cb.configure(state="disabled")
         self._monitor_refresh_btn.configure(state="disabled")
@@ -623,6 +643,7 @@ class MainHub(ctk.CTk):
         except Exception:
             pass
         self._set_run_button_idle()
+        self._settings_btn.configure(state="normal")
         for cb in self._monitor_checkboxes:
             cb.configure(state="normal")
         self._monitor_refresh_btn.configure(state="normal")

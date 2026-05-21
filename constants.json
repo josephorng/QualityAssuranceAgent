@@ -1,7 +1,0 @@
-{
-  "llm_backend": "vllm",
-  "brain_lm": "gemma4:26b",
-  "ollama_host": "http://localhost:11434",
-  "vllm_host": "http://192.168.13.101:11434",
-  "debug": true
-}

@@ -95,7 +95,7 @@ def _run_ocr_yolo_onnx_inference(
     conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
 ) -> np.ndarray:
     """
-    Resize to 640×640, RGB CHW normalize, run ``cua_mcp/best.onnx`` (YOLOv26 end2end).
+    Letterbox to 640×640 (Ultralytics-style), RGB CHW normalize, run ``cua_mcp/best.onnx`` (YOLOv26 end2end).
 
     Returns ``N×4`` ``xyxy`` in original image pixel space after score filtering
     (NMS is in the ONNX graph). Only ``text`` class detections are kept.

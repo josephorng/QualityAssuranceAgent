@@ -33,6 +33,7 @@ python -m nuitka ^
     --include-data-dir=cua_mcp/read_screen_text=cua_mcp/read_screen_text ^
     --include-data-files=cua_mcp/best.onnx=cua_mcp/best.onnx ^
     --include-package-data=opencc ^
+    --enable-plugin=tk-inter ^
     %ENTRYSCRIPT%
 
 :: --- CHECK RESULT ---

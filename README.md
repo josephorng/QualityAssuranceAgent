@@ -24,12 +24,11 @@ pip install -r requirements.txt
 ## Configure
 
 1. Copy `.env.example` to `.env` and edit as needed.
-2. Optionally adjust defaults in `constants.json`.
+2. Adjust LLM/runtime settings from the hub gear button (saved to `runs/agent_settings.json`), or edit that file directly.
 
-Key values:
+Key values (defaults are in code; overrides in `runs/agent_settings.json`):
 
-- `brain_lm`
-- model/runtime settings
+- `llm_backend`, `brain_lm`, `ollama_host`, `vllm_host`, `debug`
 
 ## Run
 

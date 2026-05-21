@@ -1,8 +1,10 @@
 """
 YOLOv26 ONNX helpers — ONNX Runtime on CPU.
 
-Ultralytics-style exports use a fixed square input (default 640): BGR → RGB, ``NCHW``,
-``float32 / 255``, then ``InferenceSession.run``.
+Ultralytics-compatible preprocessing (default 640): ``LetterBox``–style resize–pad to a
+square tensor, BGR → RGB, ``NCHW``, ``float32 / 255``, then ``InferenceSession.run``. Box
+coordinates are mapped back with the same ``scale_boxes`` math as ``ultralytics``
+(``padding=True``, ``ratio_pad=None``).
 
 Two post-process paths:
 
@@ -28,6 +30,8 @@ import numpy as np
 import onnxruntime as ort
 
 YOLO_ONNX_INPUT_SIZE: int = 640
+# Matches ``ultralytics.data.augment.LetterBox`` default ``padding_value``.
+YOLO_LETTERBOX_PAD_BGR: tuple[int, int, int] = (114, 114, 114)
 DEFAULT_PROVIDERS: Sequence[str] = ("CPUExecutionProvider",)
 
 # Raw-head decode (NMS in Python)
@@ -36,6 +40,14 @@ DEFAULT_IOU_YOLOV26_RAW: float = 0.7
 
 # End-to-end decode (NMS in ONNX graph)
 DEFAULT_CONF_YOLOV26_END2END: float = 0.05
+
+# After decode, optionally merge same-class detections when pairwise IoU exceeds
+# :data:`DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD` (intersection/union); each merged group is the
+# axis-aligned union with max score. Default off: set ``DEFAULT_MERGE_TOUCHING_SAME_CLASS`` True
+# or pass ``merge_touching_same_class=True`` to enable.
+DEFAULT_MERGE_TOUCHING_SAME_CLASS: bool = False
+# Pairs of same-class boxes are linked (and merged transitively) when ``IoU >`` this value.
+DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD: float = 0.5
 
 # ``cua_mcp/best.onnx`` classes (Ultralytics metadata: Text=0, Element=1)
 YOLO_CLASS_TEXT: int = 0
@@ -87,6 +99,8 @@ def run_best_onnx_end2end(
     conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
     model_path: str | Path | None = None,
     on_session_created: Callable[[Path], None] | None = None,
+    merge_touching_same_class: bool = DEFAULT_MERGE_TOUCHING_SAME_CLASS,
+    merge_same_class_iou_threshold: float = DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Preprocess ``bgr``, run the packaged multi-class YOLOv26 end2end ONNX (default
@@ -96,6 +110,10 @@ def run_best_onnx_end2end(
     ``on_session_created`` runs only when a new cached session is built for the model path
     (first use in the process, or first use of a new ``model_path``); later calls reuse the
     session and do not invoke it again.
+
+    Pass ``merge_touching_same_class=True`` to fuse same-class boxes whose pairwise IoU exceeds
+    ``merge_same_class_iou_threshold`` after decode (see :data:`DEFAULT_MERGE_TOUCHING_SAME_CLASS`
+    and :data:`DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD`).
     """
     path = DEFAULT_YOLO_ONNX_PATH if model_path is None else Path(model_path)
     session, input_name = get_cached_cpu_session(
@@ -109,6 +127,8 @@ def run_best_onnx_end2end(
         w0,
         conf_threshold=conf_threshold,
         class_ids=class_ids,
+        merge_touching_same_class=merge_touching_same_class,
+        merge_same_class_iou_threshold=merge_same_class_iou_threshold,
     )
 
 
@@ -116,16 +136,44 @@ def bgr_to_nchw_normalized(
     bgr: np.ndarray, size: int = YOLO_ONNX_INPUT_SIZE
 ) -> tuple[np.ndarray, int, int]:
     """
-    Preprocess a BGR image for YOLOv26 ONNX: resize to ``size``×``size``, RGB, CHW, /255, batch 1.
+    Preprocess a BGR image like ``ultralytics.data.augment.LetterBox`` (``auto=False``,
+    ``scaleup=True``, ``center=True``): fit inside ``size``×``size`` with aspect ratio
+    preserved, pad with :data:`YOLO_LETTERBOX_PAD_BGR`, then RGB CHW ``/255``, batch 1.
 
     Returns ``(input_nchw, orig_h, orig_w)`` where ``input_nchw`` has shape ``(1, 3, size, size)``.
     """
-    h0, w0 = bgr.shape[:2]
-    resized = cv2.resize(bgr, (size, size), interpolation=cv2.INTER_LINEAR)
-    rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+    letter_bgr = letterbox_bgr_ultralytics(bgr, size=size)
+    rgb = cv2.cvtColor(letter_bgr, cv2.COLOR_BGR2RGB)
     chw = rgb.transpose(2, 0, 1).astype(np.float32) / 255.0
     batch = np.expand_dims(chw, axis=0)
+    h0, w0 = bgr.shape[:2]
     return batch, h0, w0
+
+
+def letterbox_bgr_ultralytics(bgr: np.ndarray, size: int = YOLO_ONNX_INPUT_SIZE) -> np.ndarray:
+    """
+    Match ``LetterBox(new_shape=(size, size), auto=False, scaleup=True, center=True)`` on BGR uint8.
+    """
+    h0, w0 = bgr.shape[:2]
+    new_shape = (size, size)
+    r = min(new_shape[0] / h0, new_shape[1] / w0)
+    new_unpad = (round(w0 * r), round(h0 * r))
+    dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]
+    dw /= 2.0
+    dh /= 2.0
+    if (w0, h0) != new_unpad:
+        bgr = cv2.resize(bgr, new_unpad, interpolation=cv2.INTER_LINEAR)
+    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+    return cv2.copyMakeBorder(
+        bgr,
+        top,
+        bottom,
+        left,
+        right,
+        cv2.BORDER_CONSTANT,
+        value=YOLO_LETTERBOX_PAD_BGR,
+    )
 
 
 def nms_indices_xyxy(
@@ -193,6 +241,137 @@ def nms_indices_xyxy(
 #     idx = np.asarray(keep, dtype=np.int64)
 #     return xyxy[idx], scores[idx]
 
+def scale_xyxy_letterboxed_to_original(
+    xyxy: np.ndarray,
+    orig_h: int,
+    orig_w: int,
+    *,
+    input_h: int = YOLO_ONNX_INPUT_SIZE,
+    input_w: int = YOLO_ONNX_INPUT_SIZE,
+) -> np.ndarray:
+    """
+    Map ``xyxy`` from letterboxed ``input_h``×``input_w`` inference space to original
+    ``(orig_h, orig_w)``. Matches ``ultralytics.utils.ops.scale_boxes(..., padding=True)`` when
+    ``ratio_pad=None``.
+    """
+    if len(xyxy) == 0:
+        return xyxy.astype(np.float32)
+    img1_h, img1_w = input_h, input_w
+    gain = min(img1_h / orig_h, img1_w / orig_w)
+    pad_x = round((img1_w - orig_w * gain) / 2 - 0.1)
+    pad_y = round((img1_h - orig_h * gain) / 2 - 0.1)
+    out = xyxy.astype(np.float32).copy()
+    out[:, 0] -= pad_x
+    out[:, 1] -= pad_y
+    out[:, 2] -= pad_x
+    out[:, 3] -= pad_y
+    out /= gain
+    out[:, [0, 2]] = np.clip(out[:, [0, 2]], 0, orig_w)
+    out[:, [1, 3]] = np.clip(out[:, [1, 3]], 0, orig_h)
+    return out
+
+
+def _iou_xyxy(xy0: np.ndarray, xy1: np.ndarray) -> float:
+    """Intersection-over-union for axis-aligned ``xyxy`` boxes (returns ``0.0`` if disjoint or degenerate union)."""
+    ax1, ay1, ax2, ay2 = (float(xy0[i]) for i in range(4))
+    bx1, by1, bx2, by2 = (float(xy1[i]) for i in range(4))
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    iw = ix2 - ix1
+    ih = iy2 - iy1
+    if iw <= 0 or ih <= 0:
+        return 0.0
+    inter = iw * ih
+    aw = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    bw = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = aw + bw - inter
+    if union <= 0:
+        return 0.0
+    return inter / union
+
+
+class _DisjointSet:
+    __slots__ = ("_p",)
+
+    def __init__(self, n: int) -> None:
+        self._p = list(range(n))
+
+    def find(self, x: int) -> int:
+        p = self._p
+        while p[x] != x:
+            p[x] = p[p[x]]
+            x = p[x]
+        return x
+
+    def union(self, a: int, b: int) -> None:
+        pa, pb = self.find(a), self.find(b)
+        if pa != pb:
+            self._p[pa] = pb
+
+
+def merge_touching_same_class_xyxy(
+    xyxy: np.ndarray,
+    scores: np.ndarray,
+    cls_ids: np.ndarray,
+    *,
+    min_iou: float = DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Merge detections **per class** when pairwise IoU is **strictly greater** than ``min_iou``
+    (intersection over union); groups are connected transitively. Each output row is the union
+    bbox of its group with the max score in that group.
+    """
+    if len(xyxy) == 0:
+        return xyxy, scores, cls_ids
+
+    xyxy = np.asarray(xyxy, dtype=np.float32)
+    scores = np.asarray(scores, dtype=np.float32).reshape(-1)
+    cls_ids = np.asarray(cls_ids, dtype=np.int64).reshape(-1)
+
+    merged_xy: list[np.ndarray] = []
+    merged_sc: list[float] = []
+    merged_cls: list[int] = []
+
+    for c in sorted(int(x) for x in np.unique(cls_ids)):
+        idx = np.flatnonzero(cls_ids == c)
+        sub_xy = xyxy[idx]
+        sub_sc = scores[idx]
+        n = sub_xy.shape[0]
+        dsu = _DisjointSet(n)
+        for i in range(n):
+            for j in range(i + 1, n):
+                if _iou_xyxy(sub_xy[i], sub_xy[j]) > min_iou:
+                    dsu.union(i, j)
+
+        roots: dict[int, list[int]] = {}
+        for i in range(n):
+            roots.setdefault(dsu.find(i), []).append(i)
+
+        for members in roots.values():
+            gxy = sub_xy[members]
+            gsc = sub_sc[members]
+            union_box = np.array(
+                [
+                    float(gxy[:, 0].min()),
+                    float(gxy[:, 1].min()),
+                    float(gxy[:, 2].max()),
+                    float(gxy[:, 3].max()),
+                ],
+                dtype=np.float32,
+            )
+            merged_xy.append(union_box)
+            merged_sc.append(float(np.max(gsc)))
+            merged_cls.append(c)
+
+    return (
+        np.stack(merged_xy, axis=0),
+        np.asarray(merged_sc, dtype=np.float32),
+        np.asarray(merged_cls, dtype=np.int64),
+    )
+
+
 def decode_yolov26_end2end(
     det: np.ndarray,
     orig_h: int,
@@ -201,10 +380,15 @@ def decode_yolov26_end2end(
     conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
     input_size: int = YOLO_ONNX_INPUT_SIZE,
     class_ids: set[int] | None = None,
+    merge_touching_same_class: bool = DEFAULT_MERGE_TOUCHING_SAME_CLASS,
+    merge_same_class_iou_threshold: float = DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Decodes YOLOv26 end-to-end ONNX output of shape (1, N, 6+).
-    
+
+    When ``merge_touching_same_class`` is True, same-class pairs with ``IoU > merge_same_class_iou_threshold``
+    are merged transitively via :func:`merge_touching_same_class_xyxy`.
+
     Returns:
         xyxy: (M, 4) np.ndarray of type int32 (ready for drawing/cropping)
         scores: (M,) np.ndarray of type float32
@@ -238,20 +422,24 @@ def decode_yolov26_end2end(
             np.zeros((0,), dtype=np.int64),
         )
         
-    # 3. Calculate scale factors
-    sx = orig_w / float(input_size)
-    sy = orig_h / float(input_size)
-    
-    # 4. Extract and scale coordinates
-    xyxy = det[:, :4].copy().astype(np.float32)
-    xyxy[:, [0, 2]] *= sx
-    xyxy[:, [1, 3]] *= sy
-    
-    # 5. Boundary Protection: Clip coordinates to actual image boundaries
-    xyxy[:, [0, 2]] = np.clip(xyxy[:, [0, 2]], 0, orig_w)
-    xyxy[:, [1, 3]] = np.clip(xyxy[:, [1, 3]], 0, orig_h)
-    
-    # 6. Convert to integer so it plays nice with cv2.rectangle / image slicers
+    # Map from letterboxed ``input_size`` space to original image (Ultralytics ``scale_boxes``).
+    xyxy = scale_xyxy_letterboxed_to_original(
+        det[:, :4],
+        orig_h,
+        orig_w,
+        input_h=input_size,
+        input_w=input_size,
+    )
+
+    if merge_touching_same_class:
+        xyxy, scores, cls = merge_touching_same_class_xyxy(
+            xyxy,
+            scores,
+            cls,
+            min_iou=merge_same_class_iou_threshold,
+        )
+
+    # Convert to integer so it plays nice with cv2.rectangle / image slicers
     xyxy = np.round(xyxy).astype(np.int32)
     
     return xyxy, scores, cls

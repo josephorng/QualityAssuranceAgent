@@ -340,8 +340,7 @@ class OcrViewerApp:
         self.show_labels = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="Ready")
         _dcf = DEFAULT_CONF_YOLOV26_END2END
-        self.yolo_pt_conf_var = tk.StringVar(value=f"{_dcf:g}")
-        self.yolo_onnx_conf_var = tk.StringVar(value=f"{_dcf:g}")
+        self.yolo_conf_var = tk.StringVar(value=f"{_dcf:g}")
 
         self._view_zoom = 1.0
         self._rmb_last_x: int | None = None
@@ -401,8 +400,8 @@ class OcrViewerApp:
         ttk.Button(controls, text="Copy to undone/images", command=self._copy_current_image_to_undone).grid(
             row=2, column=2, columnspan=2, sticky="ew", pady=(6, 0)
         )
-        ttk.Label(controls, text="Conf (.pt)").grid(row=3, column=0, sticky="w", pady=(6, 0))
-        ttk.Entry(controls, textvariable=self.yolo_pt_conf_var, width=10).grid(
+        ttk.Label(controls, text="YOLO confidence").grid(row=3, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(controls, textvariable=self.yolo_conf_var, width=10).grid(
             row=3, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(6, 0)
         )
         ttk.Button(
@@ -410,17 +409,13 @@ class OcrViewerApp:
             text="YOLO .pt (Ultralytics)",
             command=self._run_ultralytics_yolo_current_image,
         ).grid(row=4, column=0, columnspan=4, sticky="ew", pady=(6, 0))
-        ttk.Label(controls, text="Conf (ONNX)").grid(row=5, column=0, sticky="w", pady=(6, 0))
-        ttk.Entry(controls, textvariable=self.yolo_onnx_conf_var, width=10).grid(
-            row=5, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(6, 0)
-        )
         ttk.Button(
             controls,
             text="YOLO best.onnx (ORT)",
             command=self._run_yolo_onnx_current_image,
-        ).grid(row=6, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        ).grid(row=5, column=0, columnspan=4, sticky="ew", pady=(6, 0))
         ttk.Button(controls, text="Reset Zoom", command=self._reset_zoom).grid(
-            row=7, column=0, columnspan=4, sticky="ew", pady=(6, 0)
+            row=6, column=0, columnspan=4, sticky="ew", pady=(6, 0)
         )
 
         canvas_wrap = ttk.Frame(self.root, padding=8)
@@ -856,7 +851,7 @@ class OcrViewerApp:
         if src is None or not src.is_file():
             self.status_var.set("No image selected for Ultralytics YOLO")
             return
-        conf_pt, err = _parse_conf_0_to_1(self.yolo_pt_conf_var.get())
+        conf_pt, err = _parse_conf_0_to_1(self.yolo_conf_var.get())
         if conf_pt is None:
             self.status_var.set(f"Ultralytics .pt — invalid confidence: {err}")
             return
@@ -891,7 +886,7 @@ class OcrViewerApp:
         if src is None or not src.is_file():
             self.status_var.set("No image selected for YOLO ONNX")
             return
-        conf_onnx, err = _parse_conf_0_to_1(self.yolo_onnx_conf_var.get())
+        conf_onnx, err = _parse_conf_0_to_1(self.yolo_conf_var.get())
         if conf_onnx is None:
             self.status_var.set(f"YOLO ONNX — invalid confidence: {err}")
             return

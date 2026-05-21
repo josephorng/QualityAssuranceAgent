@@ -30,8 +30,6 @@ from src.common.settings import load_settings
 from src.common.io_utils import write_json
 from src.eye.capture import capture_active_monitor_to_file
 
-settings = load_settings()
-
 
 def _run_manager() -> RunStateManager:
     """Always resolve the current singleton (never cache): ``reset_run_state_manager`` replaces it."""
@@ -205,7 +203,7 @@ def _run_ui_onnx_inference(
     conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Preprocess BGR (640, RGB CHW, /255), run UI YOLOv26 ONNX (end2end), return
+    Letterbox BGR to 640 square (RGB CHW /255), run UI YOLOv26 ONNX (end2end), return
     ``(xyxy, scores, class_ids)`` in original image pixels. Only ``element`` class detections are kept.
     """
     return run_best_onnx_end2end(
@@ -502,7 +500,7 @@ async def _confirm_selection_bbox_with_ollama(instruction: str, crop_image_path:
     ]
     try:
         reply = await get_llm_client().chat_messages(
-            settings.brain_lm,
+            load_settings().brain_lm,
             messages=messages,
             tools=[],
             response_format=_CONFIRM_JSON_SCHEMA,
@@ -515,7 +513,7 @@ async def _confirm_selection_bbox_with_ollama(instruction: str, crop_image_path:
             "No text before or after the JSON.\n"
         )
         reply = await get_llm_client().chat_messages(
-            settings.brain_lm,
+            load_settings().brain_lm,
             messages=messages,
             tools=[],
             response_format="json",
@@ -541,7 +539,7 @@ async def _analyze_instruction(instruction: str) -> tuple[bool, str, str, str]:
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
     try:
         reply = await get_llm_client().chat_messages(
-            settings.brain_lm,
+            load_settings().brain_lm,
             messages=messages,
             tools=[],
             response_format=_INSTRUCTION_ANALYSIS_JSON_SCHEMA,
@@ -562,7 +560,7 @@ async def _analyze_instruction(instruction: str) -> tuple[bool, str, str, str]:
         )
         try:
             reply = await get_llm_client().chat_messages(
-                settings.brain_lm,
+                load_settings().brain_lm,
                 messages=messages,
                 tools=[],
                 response_format="json",
@@ -603,7 +601,7 @@ async def _filter_text_detections(
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
     try:
         reply = await get_llm_client().chat_messages(
-            settings.brain_lm,
+            load_settings().brain_lm,
             messages=messages,
             tools=[],
             response_format=_TEXT_FILTER_JSON_SCHEMA,
@@ -617,7 +615,7 @@ async def _filter_text_detections(
         )
         try:
             reply = await get_llm_client().chat_messages(
-                settings.brain_lm,
+                load_settings().brain_lm,
                 messages=messages,
                 tools=[],
                 response_format="json",
@@ -681,7 +679,7 @@ async def _filter_icon_detections_with_ollama(
             ]
             try:
                 reply = await get_llm_client().chat_messages(
-                    settings.brain_lm,
+                    load_settings().brain_lm,
                     messages=messages,
                     tools=[],
                     response_format=_TEXT_FILTER_JSON_SCHEMA,
@@ -698,7 +696,7 @@ async def _filter_icon_detections_with_ollama(
                     "No text before or after the JSON.\n"
                 )
                 reply = await get_llm_client().chat_messages(
-                    settings.brain_lm,
+                    load_settings().brain_lm,
                     messages=messages,
                     tools=[],
                     response_format="json",
@@ -758,7 +756,7 @@ async def _select_center_with_ollama(
     ]
     n = len(detections)
     reply1 = await get_llm_client().chat_messages(
-        settings.brain_lm,
+        load_settings().brain_lm,
         messages=messages,
         tools=[],
         response_format=_INDEX_JSON_SCHEMA,
@@ -779,7 +777,7 @@ async def _select_center_with_ollama(
             {"role": "user", "content": refine},
         ]
         reply2 = await get_llm_client().chat_messages(
-            settings.brain_lm,
+            load_settings().brain_lm,
             messages=messages2,
             tools=[],
             response_format=_INDEX_JSON_SCHEMA,
@@ -811,7 +809,7 @@ async def _select_center_with_ollama(
         "No other keys. No text before or after the JSON.\n"
     )
     reply = await get_llm_client().chat_messages(
-        settings.brain_lm,
+        load_settings().brain_lm,
         messages=messages,
         tools=[],
         response_format="json",

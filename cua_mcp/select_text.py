@@ -21,8 +21,6 @@ from src.common.settings import load_settings
 from src.eye import active_monitor_offset
 from src.eye.capture import capture_active_monitor_to_file
 
-settings = load_settings()
-
 
 def _run_manager() -> RunStateManager:
     """Always resolve the current singleton (never cache): ``reset_run_state_manager`` replaces it."""
@@ -295,7 +293,7 @@ async def _disambiguate_duplicate_centers(
     ]
     try:
         reply = await get_llm_client().chat_messages(
-            settings.brain_lm,
+            load_settings().brain_lm,
             messages=messages,
             tools=[],
             response_format=_DISAMBIGUATE_XY_TEXT_JSON_SCHEMA,
@@ -309,7 +307,7 @@ async def _disambiguate_duplicate_centers(
             "OCR text. No text before or after the JSON.\n"
         )
         reply = await get_llm_client().chat_messages(
-            settings.brain_lm,
+            load_settings().brain_lm,
             messages=messages,
             tools=[],
             response_format="json",
@@ -372,7 +370,7 @@ async def _select_coordinate(
     ]
     try:
         reply = await get_llm_client().chat_messages(
-            settings.brain_lm,
+            load_settings().brain_lm,
             messages=messages,
             tools=[],
             response_format=_TARGET_TEXT_JSON_SCHEMA,
@@ -388,7 +386,7 @@ async def _select_coordinate(
             "(after [cx,cy] ), as verbatim as possible. No text before or after the JSON.\n"
         )
         reply = await get_llm_client().chat_messages(
-            settings.brain_lm,
+            load_settings().brain_lm,
             messages=messages,
             tools=[],
             response_format="json",

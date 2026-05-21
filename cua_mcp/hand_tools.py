@@ -15,8 +15,6 @@ from src.common.llm_factory import get_llm_client
 from src.common.settings import load_settings
 from src.eye.capture import capture_active_monitor_to_file
 
-_settings = load_settings()
-
 
 def _normalize_hotkey_token(key: str) -> str:
     """Normalize odd wrappers that can appear in model output."""
@@ -303,7 +301,7 @@ async def _ollama_pick_window_indices(
         + "\n".join(lines)
     )
     msg = await get_llm_client().chat_messages(
-        model=_settings.brain_lm,
+        model=load_settings().brain_lm,
         messages=[{"role": "user", "content": prompt}],
         tools=[],
     )

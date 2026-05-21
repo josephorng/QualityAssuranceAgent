@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
-from src.common.settings import ROOT_DIR
+from src.common.prompts import PROMPTS
 
 
 @dataclass(frozen=True)
@@ -16,15 +14,11 @@ class PromptConfig:
 
 
 def load_prompts() -> dict[str, Any]:
-    path = ROOT_DIR / "prompts.json"
-    if not path.exists():
-        return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    return PROMPTS
 
 
 def get_prompt_config(name: str) -> PromptConfig:
-    prompts = load_prompts()
-    variants = prompts.get(name, [])
+    variants = PROMPTS.get(name, [])
     if not variants:
         return PromptConfig(prompt="", instructions=[], models=[])
 

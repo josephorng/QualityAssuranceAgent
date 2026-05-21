@@ -121,37 +121,7 @@ def launch_gui() -> None:
     run_main_hub()
 
 
-_REQUIRED_CONFIG_FILES = ("prompts.json",)
-
-
-def ensure_required_config_files() -> None:
-    """Exit with an error dialog if prompts.json is missing."""
-    from src.common.settings import ROOT_DIR
-
-    missing = [name for name in _REQUIRED_CONFIG_FILES if not (ROOT_DIR / name).is_file()]
-    if not missing:
-        return
-
-    paths = "\n".join(f"  • {ROOT_DIR / name}" for name in missing)
-    message = (
-        "缺少必要設定檔，請將下列檔案放在程式目錄後再啟動：\n\n"
-        f"{paths}"
-    )
-    try:
-        import tkinter as tk
-        from tkinter import messagebox
-
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showerror("無法啟動", message, parent=root)
-        root.destroy()
-    except Exception:
-        print(message, file=sys.stderr)
-    raise SystemExit(1)
-
-
 def main() -> None:
-    ensure_required_config_files()
     launch_gui()
 
 

@@ -33,6 +33,7 @@ from src.common.settings import ROOT_DIR, load_settings
 
 # Step-mode runtime command transcript (append during run); not hub UI preferences.
 _RUNTIME_COMMAND_TRANSCRIPT_NAME = "runtime_commands_cache.txt"
+_RUNTIME_COMMAND_LABEL = "逐步執行命令"
 _HUB_UI_STATE_NAME = "hub_ui.json"
 _HUB_UI_VERSION = 1
 
@@ -136,9 +137,17 @@ class MainHub(ctk.CTk):
                 text = p.read_text(encoding="utf-8")
                 self._script_text.delete("0.0", "end")
                 self._script_text.insert("0.0", text)
-                self._script_path_label.configure(text=str(p.resolve()))
+                self._refresh_script_path_label()
         if self._script_path is None:
             self._try_load_last_runtime_command_cache()
+
+    def _refresh_script_path_label(self) -> None:
+        if self._script_path is not None:
+            self._script_path_label.configure(text=str(self._script_path.resolve()))
+        elif self._runtime_commands_cache_path is not None:
+            self._script_path_label.configure(text=_RUNTIME_COMMAND_LABEL)
+        else:
+            self._script_path_label.configure(text="未載入檔案")
 
     def _try_load_last_runtime_command_cache(self) -> None:
         """If no script file is open, show the last runtime command cache for editing and Save."""
@@ -154,7 +163,7 @@ class MainHub(ctk.CTk):
         self._runtime_commands_cache_path = cache_path
         self._script_text.delete("0.0", "end")
         self._script_text.insert("0.0", raw)
-        self._script_path_label.configure(text=str(cache_path.resolve()))
+        self._refresh_script_path_label()
 
     def _append_runtime_command_to_script_view(self, cmd: str) -> None:
         """Underlying Tk Text ignores ``insert`` while the widget is ``disabled`` (as during a run)."""
@@ -180,7 +189,7 @@ class MainHub(ctk.CTk):
             return
         self._script_text.delete("0.0", "end")
         self._script_text.insert("0.0", p.read_text(encoding="utf-8"))
-        self._script_path_label.configure(text=str(p.resolve()))
+        self._refresh_script_path_label()
 
     def _build_header(self) -> None:
         head = ctk.CTkFrame(self, fg_color="transparent")
@@ -418,7 +427,7 @@ class MainHub(ctk.CTk):
         text = p.read_text(encoding="utf-8")
         self._script_text.delete("0.0", "end")
         self._script_text.insert("0.0", text)
-        self._script_path_label.configure(text=str(p.resolve()))
+        self._refresh_script_path_label()
         self._persist_hub_ui_state()
 
     def _script_save(self) -> None:
@@ -430,7 +439,7 @@ class MainHub(ctk.CTk):
             return
         if self._runtime_commands_cache_path is not None:
             self._runtime_commands_cache_path.write_text(body, encoding="utf-8")
-            self._status.configure(text=f"已儲存 {self._runtime_commands_cache_path.name}")
+            self._status.configure(text="已儲存執行命令")
             return
         self._script_save_as()
 
@@ -448,7 +457,7 @@ class MainHub(ctk.CTk):
         p.write_text(self._script_text.get("0.0", "end").rstrip() + "\n", encoding="utf-8")
         self._script_path = p
         self._runtime_commands_cache_path = None
-        self._script_path_label.configure(text=str(p.resolve()))
+        self._refresh_script_path_label()
         self._status.configure(text=f"已另存新檔 {p.name}")
         self._persist_hub_ui_state()
 
@@ -458,7 +467,7 @@ class MainHub(ctk.CTk):
         self._runtime_commands_cache_path = None
         self._script_text.configure(state="normal")
         self._script_text.delete("0.0", "end")
-        self._script_path_label.configure(text="未載入檔案")
+        self._refresh_script_path_label()
         self._status.configure(text="")
         self._persist_hub_ui_state()
 
@@ -510,7 +519,7 @@ class MainHub(ctk.CTk):
             cache_path.write_text("", encoding="utf-8")
             self._script_text.configure(state="normal")
             self._script_text.delete("0.0", "end")
-            self._script_path_label.configure(text=str(cache_path.resolve()))
+            self._refresh_script_path_label()
 
             args = _WorkerArgs(
                 step_mode=True,

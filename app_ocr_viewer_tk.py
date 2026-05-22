@@ -36,6 +36,10 @@ OCR_EXPORT_DEFAULT_DIR = Path(r"C:\Users\Joseph Hung\Documents\Repos\Git\crnn.py
 # Same weights as ONNX export used by OCR (`cua_mcp/yolo_onnx.DEFAULT_YOLO_ONNX_PATH`).
 DEFAULT_ULTRALYTICS_PT_PATH = ROOT_DIR / "cua_mcp" / "best.pt"
 
+BOX_EDIT_STEP = 1
+BOX_EDIT_STEP_SHIFT = 8
+MIN_BOX_SIZE = 2
+
 
 @dataclass(frozen=True)
 class OcrLine:
@@ -191,6 +195,53 @@ def _draw_overlays(
     return out
 
 
+def _clamp_box(
+    x: int, y: int, w: int, h: int, img_w: int, img_h: int, *, min_size: int = MIN_BOX_SIZE
+) -> tuple[int, int, int, int]:
+    x = max(0, min(x, max(0, img_w - 1)))
+    y = max(0, min(y, max(0, img_h - 1)))
+    w = max(min_size, min(w, img_w - x))
+    h = max(min_size, min(h, img_h - y))
+    return x, y, w, h
+
+
+def _adjust_box_edge(
+    box: tuple[int, int, int, int],
+    direction: str,
+    *,
+    expand: bool,
+    step: int,
+    img_w: int,
+    img_h: int,
+) -> tuple[int, int, int, int]:
+    """Move one edge of ``(x, y, w, h)`` outward (expand) or inward (shrink)."""
+    x, y, w, h = box
+    s = max(1, step)
+    if expand:
+        if direction == "up":
+            y -= s
+            h += s
+        elif direction == "down":
+            h += s
+        elif direction == "left":
+            x -= s
+            w += s
+        elif direction == "right":
+            w += s
+    else:
+        if direction == "up":
+            y += s
+            h -= s
+        elif direction == "down":
+            h -= s
+        elif direction == "left":
+            x += s
+            w -= s
+        elif direction == "right":
+            w -= s
+    return _clamp_box(x, y, w, h, img_w, img_h)
+
+
 def _run_ocr_with_boxes(image_path: Path) -> tuple[list[OcrLine], float | None, float]:
     """Run YOLO+OCR and return full rectangle boxes with timings."""
     bgr = cv2.imread(str(image_path))
@@ -341,6 +392,7 @@ class OcrViewerApp:
         self.status_var = tk.StringVar(value="Ready")
         _dcf = DEFAULT_CONF_YOLOV26_END2END
         self.yolo_conf_var = tk.StringVar(value=f"{_dcf:g}")
+        self.box_edit_mode = tk.StringVar(value="expand")
 
         self._view_zoom = 1.0
         self._rmb_last_x: int | None = None
@@ -390,32 +442,45 @@ class OcrViewerApp:
             controls.columnconfigure(col, weight=1)
         ttk.Checkbutton(controls, text="Boxes", variable=self.show_boxes, command=self._refresh_image).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(controls, text="Labels", variable=self.show_labels, command=self._refresh_image).grid(row=0, column=1, sticky="w")
-        ttk.Button(controls, text="Prev", command=self._prev_image).grid(row=1, column=0, sticky="ew", pady=(6, 0))
-        ttk.Button(controls, text="Next", command=self._next_image).grid(row=1, column=1, sticky="ew", pady=(6, 0))
-        ttk.Button(controls, text="Zoom +", command=self._zoom_in).grid(row=1, column=2, sticky="ew", pady=(6, 0))
-        ttk.Button(controls, text="Zoom -", command=self._zoom_out).grid(row=1, column=3, sticky="ew", pady=(6, 0))
+        ttk.Label(controls, text="Arrows").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Radiobutton(
+            controls,
+            text="Expand",
+            variable=self.box_edit_mode,
+            value="expand",
+        ).grid(row=1, column=1, sticky="w", pady=(6, 0))
+        ttk.Radiobutton(
+            controls,
+            text="Shrink",
+            variable=self.box_edit_mode,
+            value="shrink",
+        ).grid(row=1, column=2, sticky="w", pady=(6, 0))
+        ttk.Button(controls, text="Prev", command=self._prev_image).grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        ttk.Button(controls, text="Next", command=self._next_image).grid(row=2, column=1, sticky="ew", pady=(6, 0))
+        ttk.Button(controls, text="Zoom +", command=self._zoom_in).grid(row=2, column=2, sticky="ew", pady=(6, 0))
+        ttk.Button(controls, text="Zoom -", command=self._zoom_out).grid(row=2, column=3, sticky="ew", pady=(6, 0))
         ttk.Button(controls, text="Run YOLO+OCR", command=self._run_ocr_current_image).grid(
-            row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0)
+            row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0)
         )
         ttk.Button(controls, text="Copy to undone/images", command=self._copy_current_image_to_undone).grid(
-            row=2, column=2, columnspan=2, sticky="ew", pady=(6, 0)
+            row=3, column=2, columnspan=2, sticky="ew", pady=(6, 0)
         )
-        ttk.Label(controls, text="YOLO confidence").grid(row=3, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(controls, text="YOLO confidence").grid(row=4, column=0, sticky="w", pady=(6, 0))
         ttk.Entry(controls, textvariable=self.yolo_conf_var, width=10).grid(
-            row=3, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(6, 0)
+            row=4, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(6, 0)
         )
         ttk.Button(
             controls,
             text="YOLO .pt (Ultralytics)",
             command=self._run_ultralytics_yolo_current_image,
-        ).grid(row=4, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        ).grid(row=5, column=0, columnspan=4, sticky="ew", pady=(6, 0))
         ttk.Button(
             controls,
             text="YOLO best.onnx (ORT)",
             command=self._run_yolo_onnx_current_image,
-        ).grid(row=5, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        ).grid(row=6, column=0, columnspan=4, sticky="ew", pady=(6, 0))
         ttk.Button(controls, text="Reset Zoom", command=self._reset_zoom).grid(
-            row=6, column=0, columnspan=4, sticky="ew", pady=(6, 0)
+            row=7, column=0, columnspan=4, sticky="ew", pady=(6, 0)
         )
 
         canvas_wrap = ttk.Frame(self.root, padding=8)
@@ -443,8 +508,12 @@ class OcrViewerApp:
         status = ttk.Label(self.root, textvariable=self.status_var, anchor="w")
         status.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 8))
 
-        self.root.bind("<Left>", lambda _event: self._prev_image())
-        self.root.bind("<Right>", lambda _event: self._next_image())
+        for key in ("<Up>", "<Down>", "<Left>", "<Right>"):
+            self.root.bind(key, self._on_arrow_key)
+            self.canvas.bind(key, self._on_arrow_key)
+            self.item_list.bind(key, self._on_arrow_key)
+            self.image_list.bind(key, self._on_arrow_key)
+            self.run_list.bind(key, self._on_arrow_key)
         self.root.bind("<Control-plus>", self._on_zoom_in_hotkey)
         self.root.bind("<Control-equal>", self._on_zoom_in_hotkey)
         self.root.bind("<Control-minus>", self._on_zoom_out_hotkey)
@@ -631,6 +700,50 @@ class OcrViewerApp:
     def _on_reset_zoom_hotkey(self, _event: tk.Event[tk.Tk]) -> str:
         self._reset_zoom()
         return "break"
+
+    def _arrow_direction(self, keysym: str) -> str | None:
+        return {"Up": "up", "Down": "down", "Left": "left", "Right": "right"}.get(keysym)
+
+    def _adjust_selected_box(self, direction: str, *, step: int) -> bool:
+        idx = self.selected_line_idx
+        if idx is None or self.current_image is None or idx < 0 or idx >= len(self.current_lines):
+            return False
+        img_w, img_h = self.current_image.size
+        line = self.current_lines[idx]
+        expand = self.box_edit_mode.get() == "expand"
+        new_box = _adjust_box_edge(
+            line.box,
+            direction,
+            expand=expand,
+            step=step,
+            img_w=img_w,
+            img_h=img_h,
+        )
+        if new_box == line.box:
+            return False
+        self.current_lines[idx] = OcrLine(box=new_box, text=line.text)
+        self._refresh_image()
+        mode = "Expand" if expand else "Shrink"
+        x, y, w, h = new_box
+        self.status_var.set(f"{mode} box #{idx + 1}: ({x},{y}) {w}×{h}")
+        return True
+
+    def _on_arrow_key(self, event: tk.Event) -> str | None:
+        direction = self._arrow_direction(event.keysym)
+        if direction is None:
+            return None
+        if self.selected_line_idx is not None:
+            step = BOX_EDIT_STEP_SHIFT if (event.state & 0x0001) else BOX_EDIT_STEP
+            if self._adjust_selected_box(direction, step=step):
+                return "break"
+            return "break"
+        if event.keysym == "Left":
+            self._prev_image()
+            return "break"
+        if event.keysym == "Right":
+            self._next_image()
+            return "break"
+        return None
 
     def _populate_item_list(self) -> None:
         self.item_list.delete(0, tk.END)

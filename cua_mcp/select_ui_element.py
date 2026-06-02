@@ -222,10 +222,14 @@ def _clip_box(x: int, y: int, w: int, h: int, img_w: int, img_h: int) -> tuple[i
     return x, y, w, h
 
 
-def _predict_ui_elements_raw(bgr: np.ndarray) -> list[UiDetection]:
+def _predict_ui_elements_raw(
+    bgr: np.ndarray,
+    *,
+    conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
+) -> list[UiDetection]:
     h, w = bgr.shape[:2]
     try:
-        xyxy, _scores, class_ids = _run_ui_onnx_inference(bgr)
+        xyxy, _scores, class_ids = _run_ui_onnx_inference(bgr, conf_threshold=conf_threshold)
     except Exception as exc:
         _log_info(f"UI YOLO ONNX predict failed: {type(exc).__name__}: {exc}")
         raise RuntimeError(f"UI YOLO predict failed: {exc}") from exc
@@ -817,7 +821,11 @@ async def _select_center_with_ollama(
     return _parse_index_from_llm(reply.content, n)
 
 
-async def resolve_ui_element_point(instruction: str) -> tuple[int, int, dict[str, Any]]:
+async def resolve_ui_element_point(
+    instruction: str,
+    *,
+    yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
+) -> tuple[int, int, dict[str, Any]]:
     """
     Capture screen, run UI YOLO, pick one detection via Ollama, return global (x, y) and metadata.
     """
@@ -835,7 +843,7 @@ async def resolve_ui_element_point(instruction: str) -> tuple[int, int, dict[str
     if bgr is None:
         raise RuntimeError(f"could not read capture image: {image_path}")
 
-    raw = _predict_ui_elements_raw(bgr)
+    raw = _predict_ui_elements_raw(bgr, conf_threshold=yolo_conf_threshold)
     pruned = _keep_smallest_non_overlapping(raw)
     need_text_anchor, icon_desc, loc_desc, shape_desc = await _analyze_instruction(text)
     _log_info(f"_resolve_ui_element: need_text_anchor={need_text_anchor}")

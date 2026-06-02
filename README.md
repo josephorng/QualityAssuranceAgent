@@ -28,7 +28,7 @@ pip install -r requirements.txt
 
 Key values (defaults are in code; overrides in `runs/agent_settings.json`):
 
-- `llm_backend`, `brain_lm`, `ollama_host`, `vllm_host`, `debug`
+- `llm_backend`, `brain_lm`, `ollama_host`, `debug`
 
 ## Run
 

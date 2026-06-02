@@ -11,25 +11,22 @@ from pathlib import Path
 from tkinter import filedialog, ttk
 from typing import Any
 
+import cv2
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from app_ocr_viewer_tk import (
     BOX_EDIT_STEP,
     BOX_EDIT_STEP_SHIFT,
-    DEFAULT_ULTRALYTICS_PT_PATH,
     OCR_EXPORT_DEFAULT_DIR,
+    OCR_VALIDATE_DIR,
     OcrLine,
     _adjust_box_edge,
     _parse_conf_0_to_1,
-    _run_ultralytics_yolo_pt,
-    _run_yolo_onnx_best_detections,
     load_ocr_lines,
+    toggle_box_edit_mode,
 )
-from cua_mcp.read_screen_text.ocr_image import (
-    format_coordinate_text_from_regions,
-    get_coordinates_from_path,
-    get_text_boxes_from_path,
-)
+from cua_mcp.select_text import get_text_regions_from_image_path
+from cua_mcp.select_ui_element import UiDetection, _predict_ui_elements_raw
 from cua_mcp.yolo_onnx import DEFAULT_CONF_YOLOV26_END2END
 from src.common.io_utils import write_json
 from src.common.settings import ROOT_DIR
@@ -110,6 +107,18 @@ def _regions_to_ocr_lines(
 
 def _boxes_to_ocr_lines(boxes: list[tuple[int, int, int, int]]) -> list[OcrLine]:
     return [OcrLine(box=tuple(int(v) for v in b), text="(text)") for b in boxes]
+
+
+def _ui_detections_to_ocr_lines(detections: list[UiDetection]) -> list[OcrLine]:
+    lines: list[OcrLine] = []
+    for det in detections:
+        x, y, w, h = det.bbox
+        obj_text = (
+            f"{{class:'{det.class_name}', class_id:{det.class_id}, "
+            f"center:[{det.cx},{det.cy}], bbox:[{x},{y},{w},{h}]}}"
+        )
+        lines.append(OcrLine(box=(x, y, w, h), text=obj_text))
+    return lines
 
 
 def _save_ocr_json(
@@ -252,30 +261,20 @@ class TestImagesViewerApp:
         )
         ttk.Button(
             controls,
-            text="YOLO text boxes (ocr_image)",
-            command=self._run_yolo_text_boxes,
+            text="YOLO text regions (select_text)",
+            command=self._run_select_text_regions,
         ).grid(row=3, column=0, columnspan=4, sticky="ew", pady=(6, 0))
-        ttk.Button(
-            controls,
-            text="YOLO+OCR (get_coordinates_from_path)",
-            command=self._run_yolo_ocr,
-        ).grid(row=4, column=0, columnspan=4, sticky="ew", pady=(6, 0))
-        ttk.Label(controls, text="YOLO confidence").grid(row=5, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(controls, text="YOLO confidence").grid(row=4, column=0, sticky="w", pady=(6, 0))
         ttk.Entry(controls, textvariable=self.yolo_conf_var, width=10).grid(
-            row=5, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(6, 0)
+            row=4, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(6, 0)
         )
         ttk.Button(
             controls,
-            text="YOLO best.onnx (text+element)",
-            command=self._run_yolo_onnx,
-        ).grid(row=6, column=0, columnspan=4, sticky="ew", pady=(6, 0))
-        ttk.Button(
-            controls,
-            text="YOLO .pt (Ultralytics)",
-            command=self._run_ultralytics_yolo,
-        ).grid(row=7, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+            text="YOLO element objects (select_ui_element)",
+            command=self._run_yolo_element_objects,
+        ).grid(row=5, column=0, columnspan=4, sticky="ew", pady=(6, 0))
         ttk.Button(controls, text="Reset Zoom", command=self._reset_zoom).grid(
-            row=8, column=0, columnspan=4, sticky="ew", pady=(6, 0)
+            row=6, column=0, columnspan=4, sticky="ew", pady=(6, 0)
         )
 
         canvas_wrap = ttk.Frame(self.root, padding=8)
@@ -308,6 +307,7 @@ class TestImagesViewerApp:
             self.canvas.bind(key, self._on_arrow_key)
             self.item_list.bind(key, self._on_arrow_key)
             self.image_list.bind(key, self._on_arrow_key)
+        self._bind_shift_box_edit_toggle(self.root, self.canvas, self.item_list, self.image_list)
         self.root.bind("<Control-plus>", self._on_zoom_in_hotkey)
         self.root.bind("<Control-equal>", self._on_zoom_in_hotkey)
         self.root.bind("<Control-minus>", self._on_zoom_out_hotkey)
@@ -428,6 +428,7 @@ class TestImagesViewerApp:
         button_bar.columnconfigure(0, weight=1)
         button_bar.columnconfigure(1, weight=1)
         button_bar.columnconfigure(2, weight=1)
+        button_bar.columnconfigure(3, weight=1)
 
         def _save_text() -> None:
             new_text = text_var.get().strip()
@@ -443,56 +444,32 @@ class TestImagesViewerApp:
         def _export_current() -> None:
             _save_text()
             try:
-                saved = self._export_line_variants(idx, text_var.get().strip(), Path(dest_var.get().strip()))
+                self._export_line_variants(idx, text_var.get().strip(), Path(dest_var.get().strip()))
             except Exception as exc:
                 self.status_var.set(f"Export failed: {type(exc).__name__}: {exc}")
                 return
-            self.status_var.set(f"Exported {saved} files for item #{idx + 1}")
+            self.status_var.set(f"Exported image + label for item #{idx + 1}")
+
+        def _export_to_validate() -> None:
+            _save_text()
+            try:
+                self._export_line_variants(idx, text_var.get().strip(), OCR_VALIDATE_DIR)
+            except Exception as exc:
+                self.status_var.set(f"Export to validate failed: {type(exc).__name__}: {exc}")
+                return
+            self.status_var.set(f"Exported image + label to validate for item #{idx + 1}")
 
         ttk.Button(button_bar, text="Save Text", command=_save_text).grid(row=0, column=0, sticky="ew", padx=(0, 4))
         ttk.Button(button_bar, text="Export", command=_export_current).grid(row=0, column=1, sticky="ew", padx=4)
-        ttk.Button(button_bar, text="Close", command=dialog.destroy).grid(row=0, column=2, sticky="ew", padx=(4, 0))
+        ttk.Button(button_bar, text="Export Validate", command=_export_to_validate).grid(
+            row=0, column=2, sticky="ew", padx=4
+        )
+        ttk.Button(button_bar, text="Close", command=dialog.destroy).grid(row=0, column=3, sticky="ew", padx=(4, 0))
 
         text_entry.focus_set()
         text_entry.selection_range(0, tk.END)
         dialog.bind("<Return>", lambda _event: _save_text())
         dialog.bind("<Escape>", lambda _event: dialog.destroy())
-
-    def _variant_crop_boxes(
-        self, box: tuple[int, int, int, int], image_w: int, image_h: int
-    ) -> list[tuple[str, tuple[int, int, int, int]]]:
-        x, y, w, h = box
-        if w <= 0 or h <= 0:
-            raise ValueError("invalid OCR item box dimensions")
-        base_l = max(0, x)
-        base_t = max(0, y)
-        base_r = min(image_w, x + w)
-        base_b = min(image_h, y + h)
-        if base_r <= base_l or base_b <= base_t:
-            raise ValueError("OCR box is outside image bounds")
-
-        dx = max(1, int(round((base_r - base_l) * 0.05)))
-        dy = max(1, int(round((base_b - base_t) * 0.05)))
-        sx = max(1, int(round((base_r - base_l) * 0.02)))
-        sy = max(1, int(round((base_b - base_t) * 0.02)))
-
-        expanded_l = max(0, base_l - dx)
-        expanded_t = max(0, base_t - dy)
-        expanded_r = min(image_w, base_r + dx)
-        expanded_b = min(image_h, base_b + dy)
-
-        shrunk_l = min(base_r - 1, base_l + sx)
-        shrunk_t = min(base_b - 1, base_t + sy)
-        shrunk_r = max(shrunk_l + 1, base_r - sx)
-        shrunk_b = max(shrunk_t + 1, base_b - sy)
-        if shrunk_r <= shrunk_l or shrunk_b <= shrunk_t:
-            shrunk_l, shrunk_t, shrunk_r, shrunk_b = base_l, base_t, base_r, base_b
-
-        return [
-            ("orig", (base_l, base_t, base_r, base_b)),
-            ("expand5", (expanded_l, expanded_t, expanded_r, expanded_b)),
-            ("shrink2", (shrunk_l, shrunk_t, shrunk_r, shrunk_b)),
-        ]
 
     def _export_line_variants(self, idx: int, corrected_text: str, dest_dir: Path) -> int:
         if self.current_image is None:
@@ -505,24 +482,23 @@ class TestImagesViewerApp:
         src = self._current_image_path()
         base_name = src.stem if src is not None else "image"
         img_w, img_h = self.current_image.size
-        variants = self._variant_crop_boxes(self.current_lines[idx].box, img_w, img_h)
-        saved_files = 0
-        for suffix, crop_box in variants:
-            crop = self.current_image.crop(crop_box)
-            stem = f"{base_name}_item{idx + 1:03d}_{suffix}"
-            out_img = dest_dir / f"{stem}.png"
-            out_json = dest_dir / f"{stem}.json"
-            crop.save(out_img)
-            write_json(
-                out_json,
-                {
-                    "rec_text": corrected_text,
-                    "revised": True,
-                    "char": "",
-                },
-            )
-            saved_files += 2
-        return saved_files
+        x, y, w, h = self.current_lines[idx].box
+        if w <= 0 or h <= 0:
+            raise ValueError("invalid OCR item box dimensions")
+        crop_l = max(0, x)
+        crop_t = max(0, y)
+        crop_r = min(img_w, x + w)
+        crop_b = min(img_h, y + h)
+        if crop_r <= crop_l or crop_b <= crop_t:
+            raise ValueError("OCR box is outside image bounds")
+
+        crop = self.current_image.crop((crop_l, crop_t, crop_r, crop_b))
+        stem = f"{base_name}_item{idx + 1:03d}"
+        out_img = dest_dir / f"{stem}.png"
+        out_txt = dest_dir / f"{stem}.txt"
+        crop.save(out_img)
+        out_txt.write_text(corrected_text, encoding="utf-8")
+        return 2
 
     def _set_lines(self, lines: list[OcrLine], status: str) -> None:
         self.current_lines = lines
@@ -531,46 +507,22 @@ class TestImagesViewerApp:
         self._refresh_image()
         self.status_var.set(status)
 
-    def _run_yolo_text_boxes(self) -> None:
+    def _run_select_text_regions(self) -> None:
         src = self._current_image_path()
         if src is None or not src.is_file():
             self.status_var.set("No image selected")
             return
-        self.status_var.set("Running YOLO text boxes (get_text_boxes_from_path)…")
+        conf, err = _parse_conf_0_to_1(self.yolo_conf_var.get())
+        if conf is None:
+            self.status_var.set(f"Invalid confidence: {err}")
+            return
+        self.status_var.set(f"Running YOLO text regions (select_text, conf={conf:g})…")
         self.root.update_idletasks()
         t0 = time.perf_counter()
         try:
-            boxes = get_text_boxes_from_path(str(src))
+            _offset, regions = get_text_regions_from_image_path(str(src), yolo_conf_threshold=conf)
         except Exception as exc:
-            self.status_var.set(f"YOLO text boxes failed: {type(exc).__name__}: {exc}")
-            return
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        lines = _boxes_to_ocr_lines(boxes)
-        try:
-            out_path = _save_ocr_json(
-                src, lines, yolo_elapsed_ms=elapsed_ms, ocr_elapsed_ms=None, source="yolo_text_boxes"
-            )
-            save_note = f", saved {out_path.name}"
-        except Exception as exc:
-            save_note = f", save failed: {exc}"
-        self._set_lines(
-            lines,
-            f"YOLO text: {len(lines)} boxes in {elapsed_ms:.0f} ms{save_note}",
-        )
-
-    def _run_yolo_ocr(self) -> None:
-        src = self._current_image_path()
-        if src is None or not src.is_file():
-            self.status_var.set("No image selected")
-            return
-        self.status_var.set("Running YOLO+OCR (get_coordinates_from_path)…")
-        self.root.update_idletasks()
-        t0 = time.perf_counter()
-        try:
-            _offset, regions = get_coordinates_from_path(str(src))
-            hint = format_coordinate_text_from_regions(regions)
-        except Exception as exc:
-            self.status_var.set(f"YOLO+OCR failed: {type(exc).__name__}: {exc}")
+            self.status_var.set(f"YOLO text regions failed: {type(exc).__name__}: {exc}")
             return
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         lines = _regions_to_ocr_lines(regions)
@@ -578,22 +530,19 @@ class TestImagesViewerApp:
             out_path = _save_ocr_json(
                 src,
                 lines,
-                yolo_elapsed_ms=None,
-                ocr_elapsed_ms=elapsed_ms,
-                source="get_coordinates_from_path",
+                yolo_elapsed_ms=elapsed_ms,
+                ocr_elapsed_ms=None,
+                source="select_text_regions",
             )
             save_note = f", saved {out_path.name}"
         except Exception as exc:
             save_note = f", save failed: {exc}"
-        preview = hint.replace("\n", " | ")[:120]
-        if len(hint) > 120:
-            preview += "…"
         self._set_lines(
             lines,
-            f"YOLO+OCR: {len(lines)} regions in {elapsed_ms:.0f} ms{save_note} — {preview}",
+            f"YOLO text regions: {len(lines)} regions in {elapsed_ms:.0f} ms{save_note}",
         )
 
-    def _run_yolo_onnx(self) -> None:
+    def _run_yolo_element_objects(self) -> None:
         src = self._current_image_path()
         if src is None or not src.is_file():
             self.status_var.set("No image selected")
@@ -602,44 +551,22 @@ class TestImagesViewerApp:
         if conf is None:
             self.status_var.set(f"Invalid confidence: {err}")
             return
-        self.status_var.set(f"Running YOLO ONNX (conf={conf:g})…")
+        self.status_var.set(f"Running YOLO element objects (select_ui_element, conf={conf:g})…")
         self.root.update_idletasks()
+        t0 = time.perf_counter()
         try:
-            lines, elapsed_ms = _run_yolo_onnx_best_detections(src, conf_threshold=conf)
+            bgr = cv2.imread(str(src))
+            if bgr is None:
+                raise RuntimeError(f"failed to read image: {src.name}")
+            detections = _predict_ui_elements_raw(bgr, conf_threshold=conf)
         except Exception as exc:
-            self.status_var.set(f"YOLO ONNX failed: {type(exc).__name__}: {exc}")
+            self.status_var.set(f"YOLO element objects failed: {type(exc).__name__}: {exc}")
             return
-        self._set_lines(lines, f"YOLO ONNX: {len(lines)} boxes in {elapsed_ms:.0f} ms")
-
-    def _run_ultralytics_yolo(self) -> None:
-        src = self._current_image_path()
-        if src is None or not src.is_file():
-            self.status_var.set("No image selected")
-            return
-        conf, err = _parse_conf_0_to_1(self.yolo_conf_var.get())
-        if conf is None:
-            self.status_var.set(f"Invalid confidence: {err}")
-            return
-        self.status_var.set(
-            f"Running Ultralytics YOLO ({DEFAULT_ULTRALYTICS_PT_PATH.name}, conf={conf:g})…"
-        )
-        self.root.update_idletasks()
-        try:
-            lines, elapsed_ms = _run_ultralytics_yolo_pt(
-                src,
-                DEFAULT_ULTRALYTICS_PT_PATH,
-                conf=conf,
-                model_holder=self._ultralytics_model_holder,
-            )
-        except ImportError as exc:
-            self.status_var.set(str(exc))
-            return
-        except Exception as exc:
-            self.status_var.set(f"Ultralytics YOLO failed: {type(exc).__name__}: {exc}")
-            return
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        lines = _ui_detections_to_ocr_lines(detections)
         self._set_lines(
             lines,
-            f"Ultralytics YOLO: {len(lines)} boxes in {elapsed_ms:.0f} ms",
+            f"YOLO element objects: {len(lines)} detections in {elapsed_ms:.0f} ms",
         )
 
     def _refresh_image(self) -> None:
@@ -717,6 +644,15 @@ class TestImagesViewerApp:
 
     def _arrow_direction(self, keysym: str) -> str | None:
         return {"Up": "up", "Down": "down", "Left": "left", "Right": "right"}.get(keysym)
+
+    def _bind_shift_box_edit_toggle(self, *widgets: tk.Misc) -> None:
+        for widget in widgets:
+            for key in ("<KeyPress-Shift_L>", "<KeyPress-Shift_R>"):
+                widget.bind(key, self._on_shift_toggle_box_mode)
+
+    def _on_shift_toggle_box_mode(self, _event: tk.Event) -> str:
+        toggle_box_edit_mode(self.box_edit_mode, self.status_var)
+        return "break"
 
     def _adjust_selected_box(self, direction: str, *, step: int) -> bool:
         idx = self.selected_line_idx

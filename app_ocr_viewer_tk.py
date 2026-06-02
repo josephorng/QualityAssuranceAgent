@@ -13,32 +13,33 @@ from typing import Any
 import cv2
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
-from cua_mcp.read_screen_text import ocr_image as ocr_image_mod
-from cua_mcp.read_screen_text.ocr_image import (
-    format_coordinate_text_from_regions,
-    get_coordinates_from_path,
-)
-from cua_mcp.yolo_onnx import (
-    DEFAULT_CONF_YOLOV26_END2END,
-    DEFAULT_YOLO_ONNX_PATH,
-    YOLO_CLASS_ELEMENT,
-    YOLO_CLASS_NAMES,
-    YOLO_CLASS_TEXT,
-    run_best_onnx_end2end,
-)
+from cua_mcp.select_text import get_text_regions_from_image_path
+from cua_mcp.select_ui_element import UiDetection, _predict_ui_elements_raw
+from cua_mcp.yolo_onnx import DEFAULT_CONF_YOLOV26_END2END
 from src.common.io_utils import read_json, write_json
 from src.common.settings import ROOT_DIR
 
 SCREENSHOT_CREATOR_UNDONE_IMAGES = Path(
     r"C:\Users\Joseph Hung\Documents\Repos\Git\ScreenshotCreator\real_screenshot\undone\images"
 )
-OCR_EXPORT_DEFAULT_DIR = Path(r"C:\Users\Joseph Hung\Documents\Repos\Git\crnn.pytorch\finetune\data")
+OCR_EXPORT_DEFAULT_DIR = Path(
+    r"C:\Users\Joseph Hung\Documents\Repos\Git\OCR\data\train\cua_data"
+)
+OCR_VALIDATE_DIR = Path(
+    r"C:\Users\Joseph Hung\Documents\Repos\Git\OCR\data\validate\cua_validate"
+)
 # Same weights as ONNX export used by OCR (`cua_mcp/yolo_onnx.DEFAULT_YOLO_ONNX_PATH`).
 DEFAULT_ULTRALYTICS_PT_PATH = ROOT_DIR / "cua_mcp" / "best.pt"
 
 BOX_EDIT_STEP = 1
 BOX_EDIT_STEP_SHIFT = 8
 MIN_BOX_SIZE = 2
+
+
+def toggle_box_edit_mode(mode_var: tk.StringVar, status_var: tk.StringVar) -> None:
+    mode_var.set("shrink" if mode_var.get() == "expand" else "expand")
+    label = "Expand" if mode_var.get() == "expand" else "Shrink"
+    status_var.set(f"Box edit mode: {label}")
 
 
 @dataclass(frozen=True)
@@ -132,6 +133,40 @@ def _normalize_lines(raw_lines: Any) -> list[OcrLine]:
                     continue
                 parsed.append(OcrLine(box=(x, y, w, h), text=str(item.get("text", "")).strip()))
     return parsed
+
+
+def copy_image_and_ocr_json_to_dir(
+    image_path: Path,
+    lines: list[OcrLine],
+    dest_dir: Path,
+) -> tuple[Path, Path]:
+    """Copy ``image_path`` and a sidecar OCR JSON (from ``lines``) into ``dest_dir``."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_img = dest_dir / image_path.name
+    shutil.copy2(image_path, dest_img)
+    dest_json = dest_dir / image_path.with_suffix(".json").name
+
+    existing: dict[str, Any] = {}
+    json_src = image_path.with_suffix(".json")
+    if json_src.exists():
+        raw = read_json(json_src, default={})
+        if isinstance(raw, dict):
+            existing = raw
+
+    line_pairs = [[list(line.box), line.text] for line in lines]
+    payload: dict[str, Any] = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "image_path": str(dest_img),
+        "image_name": dest_img.name,
+        "line_height": existing.get("line_height", 32),
+        "lines": line_pairs,
+        "text": "\n".join(line.text for line in lines),
+    }
+    for key in ("yolo_elapsed_ms", "ocr_elapsed_ms", "source"):
+        if key in existing:
+            payload[key] = existing[key]
+    write_json(dest_json, payload)
+    return dest_img, dest_json
 
 
 def load_ocr_lines(json_path: Path) -> tuple[list[OcrLine], str]:
@@ -242,130 +277,16 @@ def _adjust_box_edge(
     return _clamp_box(x, y, w, h, img_w, img_h)
 
 
-def _run_ocr_with_boxes(image_path: Path) -> tuple[list[OcrLine], float | None, float]:
-    """Run YOLO+OCR and return full rectangle boxes with timings."""
-    bgr = cv2.imread(str(image_path))
-    if bgr is None:
-        raise ValueError(f"could not read image: {image_path}")
-    img_h, img_w = bgr.shape[:2]
-    predictor = ocr_image_mod._get_crnn_predictor()  # noqa: SLF001
-
-    yolo_start = time.perf_counter()
-    boxes = ocr_image_mod._yolo_text_boxes(bgr)  # noqa: SLF001
-    yolo_elapsed_ms = (time.perf_counter() - yolo_start) * 1000.0
-    if not boxes:
-        boxes = [(0, 0, img_w, img_h)]
-    boxes = ocr_image_mod._merge_overlapping_boxes(boxes)  # noqa: SLF001
-    boxes = ocr_image_mod._sort_boxes_reading_order(boxes)  # noqa: SLF001
-
-    out_lines: list[OcrLine] = []
-    ocr_elapsed_ms = 0.0
-    for x, y, w, h in boxes:
-        crop = bgr[y : y + h, x : x + w]
-        if crop.size == 0:
-            continue
-        ocr_start = time.perf_counter()
-        preds = ocr_image_mod._ocr_crop_predicted_texts(crop, predictor, 32)  # noqa: SLF001
-        text = "".join(preds).strip()
-        ocr_elapsed_ms += (time.perf_counter() - ocr_start) * 1000.0
-        out_lines.append(OcrLine(box=(x, y, w, h), text=text))
-    return out_lines, yolo_elapsed_ms, ocr_elapsed_ms
-
-
-def _run_ultralytics_yolo_pt(
-    image_path: Path,
-    weights_path: Path,
-    *,
-    conf: float,
-    model_holder: list[Any],
-) -> tuple[list[OcrLine], float]:
-    """
-    Run Ultralytics ``YOLO`` on ``weights_path``; overlay labels use ``class conf``.
-    ``model_holder`` is a single-element list caching the loaded model across clicks.
-
-    ``conf`` is passed to ``model.predict(conf=...)`` (0–1 inclusive).
-    """
-    try:
-        from ultralytics import YOLO
-    except ImportError as exc:
-        raise ImportError(
-            "ultralytics is not installed. Install with: pip install ultralytics"
-        ) from exc
-
-    if not weights_path.is_file():
-        raise FileNotFoundError(f"YOLO weights not found: {weights_path}")
-
-    t0 = time.perf_counter()
-    if not model_holder:
-        model_holder.append(YOLO(str(weights_path)))
-    model = model_holder[0]
-    results = model.predict(
-        str(image_path),
-        conf=float(conf),
-        imgsz=640,
-        iou=0.7,
-        verbose=False,
-    )
-    elapsed_ms = (time.perf_counter() - t0) * 1000.0
-    if not results:
-        return [], elapsed_ms
-    r0 = results[0]
-    names: dict[int, str] = getattr(model, "names", {}) or {}
-    boxes = r0.boxes
-    if boxes is None or len(boxes) == 0:
-        return [], elapsed_ms
-
-    xyxy = boxes.xyxy.cpu().numpy()
-    cls_arr = boxes.cls.cpu().numpy().astype(int)
-    conf_arr = boxes.conf.cpu().numpy()
+def _ui_detections_to_ocr_lines(detections: list[UiDetection]) -> list[OcrLine]:
     lines: list[OcrLine] = []
-    for i in range(len(xyxy)):
-        x1f, y1f, x2f, y2f = (float(v) for v in xyxy[i])
-        x1 = int(round(x1f))
-        y1 = int(round(y1f))
-        x2 = int(round(x2f))
-        y2 = int(round(y2f))
-        w_box = max(1, x2 - x1)
-        h_box = max(1, y2 - y1)
-        cid = int(cls_arr[i])
-        label = str(names.get(cid, str(cid)))
-        conf_val = float(conf_arr[i])
-        lines.append(OcrLine(box=(x1, y1, w_box, h_box), text=f"{label} {conf_val:.2f}"))
-    lines.sort(key=lambda ln: (ln.box[1] + ln.box[3] // 2, ln.box[0] + ln.box[2] // 2))
-    return lines, elapsed_ms
-
-
-def _run_yolo_onnx_best_detections(
-    image_path: Path, *, conf_threshold: float
-) -> tuple[list[OcrLine], float]:
-    """
-    Run ``cua_mcp/best.onnx`` via :func:`run_best_onnx_end2end` (ONNX Runtime, CPU).
-
-    Keeps ``text`` and ``element`` detections above ``conf_threshold``.
-    """
-    if not DEFAULT_YOLO_ONNX_PATH.is_file():
-        raise FileNotFoundError(f"YOLO ONNX model not found: {DEFAULT_YOLO_ONNX_PATH}")
-    bgr = cv2.imread(str(image_path))
-    if bgr is None:
-        raise ValueError(f"could not read image: {image_path}")
-    t0 = time.perf_counter()
-    xyxy, scores, cls_ids = run_best_onnx_end2end(
-        bgr,
-        class_ids={YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT},
-        conf_threshold=float(conf_threshold),
-    )
-    elapsed_ms = (time.perf_counter() - t0) * 1000.0
-    lines: list[OcrLine] = []
-    for i in range(len(xyxy)):
-        x1, y1, x2, y2 = (int(v) for v in xyxy[i])
-        w_box = max(1, x2 - x1)
-        h_box = max(1, y2 - y1)
-        cid = int(cls_ids[i])
-        label = YOLO_CLASS_NAMES.get(cid, str(cid))
-        conf_val = float(scores[i])
-        lines.append(OcrLine(box=(x1, y1, w_box, h_box), text=f"{label} {conf_val:.2f}"))
-    lines.sort(key=lambda ln: (ln.box[1] + ln.box[3] // 2, ln.box[0] + ln.box[2] // 2))
-    return lines, elapsed_ms
+    for det in detections:
+        x, y, w, h = det.bbox
+        text = (
+            f"{{class:'{det.class_name}', class_id:{det.class_id}, "
+            f"center:[{det.cx},{det.cy}], bbox:[{x},{y},{w},{h}]}}"
+        )
+        lines.append(OcrLine(box=(x, y, w, h), text=text))
+    return lines
 
 
 class OcrViewerApp:
@@ -459,7 +380,7 @@ class OcrViewerApp:
         ttk.Button(controls, text="Next", command=self._next_image).grid(row=2, column=1, sticky="ew", pady=(6, 0))
         ttk.Button(controls, text="Zoom +", command=self._zoom_in).grid(row=2, column=2, sticky="ew", pady=(6, 0))
         ttk.Button(controls, text="Zoom -", command=self._zoom_out).grid(row=2, column=3, sticky="ew", pady=(6, 0))
-        ttk.Button(controls, text="Run YOLO+OCR", command=self._run_ocr_current_image).grid(
+        ttk.Button(controls, text="YOLO text regions (select_text)", command=self._run_select_text_current_image).grid(
             row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0)
         )
         ttk.Button(controls, text="Copy to undone/images", command=self._copy_current_image_to_undone).grid(
@@ -471,16 +392,11 @@ class OcrViewerApp:
         )
         ttk.Button(
             controls,
-            text="YOLO .pt (Ultralytics)",
-            command=self._run_ultralytics_yolo_current_image,
+            text="YOLO element objects (select_ui_element)",
+            command=self._run_select_ui_element_current_image,
         ).grid(row=5, column=0, columnspan=4, sticky="ew", pady=(6, 0))
-        ttk.Button(
-            controls,
-            text="YOLO best.onnx (ORT)",
-            command=self._run_yolo_onnx_current_image,
-        ).grid(row=6, column=0, columnspan=4, sticky="ew", pady=(6, 0))
         ttk.Button(controls, text="Reset Zoom", command=self._reset_zoom).grid(
-            row=7, column=0, columnspan=4, sticky="ew", pady=(6, 0)
+            row=6, column=0, columnspan=4, sticky="ew", pady=(6, 0)
         )
 
         canvas_wrap = ttk.Frame(self.root, padding=8)
@@ -514,6 +430,7 @@ class OcrViewerApp:
             self.item_list.bind(key, self._on_arrow_key)
             self.image_list.bind(key, self._on_arrow_key)
             self.run_list.bind(key, self._on_arrow_key)
+        self._bind_shift_box_edit_toggle(self.root, self.canvas, self.item_list, self.image_list, self.run_list)
         self.root.bind("<Control-plus>", self._on_zoom_in_hotkey)
         self.root.bind("<Control-equal>", self._on_zoom_in_hotkey)
         self.root.bind("<Control-minus>", self._on_zoom_out_hotkey)
@@ -704,6 +621,15 @@ class OcrViewerApp:
     def _arrow_direction(self, keysym: str) -> str | None:
         return {"Up": "up", "Down": "down", "Left": "left", "Right": "right"}.get(keysym)
 
+    def _bind_shift_box_edit_toggle(self, *widgets: tk.Misc) -> None:
+        for widget in widgets:
+            for key in ("<KeyPress-Shift_L>", "<KeyPress-Shift_R>"):
+                widget.bind(key, self._on_shift_toggle_box_mode)
+
+    def _on_shift_toggle_box_mode(self, _event: tk.Event) -> str:
+        toggle_box_edit_mode(self.box_edit_mode, self.status_var)
+        return "break"
+
     def _adjust_selected_box(self, direction: str, *, step: int) -> bool:
         idx = self.selected_line_idx
         if idx is None or self.current_image is None or idx < 0 or idx >= len(self.current_lines):
@@ -803,6 +729,7 @@ class OcrViewerApp:
         button_bar.columnconfigure(0, weight=1)
         button_bar.columnconfigure(1, weight=1)
         button_bar.columnconfigure(2, weight=1)
+        button_bar.columnconfigure(3, weight=1)
 
         def _save_text() -> None:
             new_text = text_var.get().strip()
@@ -818,56 +745,32 @@ class OcrViewerApp:
         def _export_current() -> None:
             _save_text()
             try:
-                saved = self._export_line_variants(idx, text_var.get().strip(), Path(dest_var.get().strip()))
+                self._export_line_variants(idx, text_var.get().strip(), Path(dest_var.get().strip()))
             except Exception as exc:
                 self.status_var.set(f"Export failed: {type(exc).__name__}: {exc}")
                 return
-            self.status_var.set(f"Exported {saved} files for item #{idx + 1}")
+            self.status_var.set(f"Exported image + label for item #{idx + 1}")
+
+        def _export_to_validate() -> None:
+            _save_text()
+            try:
+                self._export_line_variants(idx, text_var.get().strip(), OCR_VALIDATE_DIR)
+            except Exception as exc:
+                self.status_var.set(f"Export to validate failed: {type(exc).__name__}: {exc}")
+                return
+            self.status_var.set(f"Exported image + label to validate for item #{idx + 1}")
 
         ttk.Button(button_bar, text="Save Text", command=_save_text).grid(row=0, column=0, sticky="ew", padx=(0, 4))
         ttk.Button(button_bar, text="Export", command=_export_current).grid(row=0, column=1, sticky="ew", padx=4)
-        ttk.Button(button_bar, text="Close", command=dialog.destroy).grid(row=0, column=2, sticky="ew", padx=(4, 0))
+        ttk.Button(button_bar, text="Export Validate", command=_export_to_validate).grid(
+            row=0, column=2, sticky="ew", padx=4
+        )
+        ttk.Button(button_bar, text="Close", command=dialog.destroy).grid(row=0, column=3, sticky="ew", padx=(4, 0))
 
         text_entry.focus_set()
         text_entry.selection_range(0, tk.END)
         dialog.bind("<Return>", lambda _event: _save_text())
         dialog.bind("<Escape>", lambda _event: dialog.destroy())
-
-    def _variant_crop_boxes(
-        self, box: tuple[int, int, int, int], image_w: int, image_h: int
-    ) -> list[tuple[str, tuple[int, int, int, int]]]:
-        x, y, w, h = box
-        if w <= 0 or h <= 0:
-            raise ValueError("invalid OCR item box dimensions")
-        base_l = max(0, x)
-        base_t = max(0, y)
-        base_r = min(image_w, x + w)
-        base_b = min(image_h, y + h)
-        if base_r <= base_l or base_b <= base_t:
-            raise ValueError("OCR box is outside image bounds")
-
-        dx = max(1, int(round((base_r - base_l) * 0.05)))
-        dy = max(1, int(round((base_b - base_t) * 0.05)))
-        sx = max(1, int(round((base_r - base_l) * 0.02)))
-        sy = max(1, int(round((base_b - base_t) * 0.02)))
-
-        expanded_l = max(0, base_l - dx)
-        expanded_t = max(0, base_t - dy)
-        expanded_r = min(image_w, base_r + dx)
-        expanded_b = min(image_h, base_b + dy)
-
-        shrunk_l = min(base_r - 1, base_l + sx)
-        shrunk_t = min(base_b - 1, base_t + sy)
-        shrunk_r = max(shrunk_l + 1, base_r - sx)
-        shrunk_b = max(shrunk_t + 1, base_b - sy)
-        if shrunk_r <= shrunk_l or shrunk_b <= shrunk_t:
-            shrunk_l, shrunk_t, shrunk_r, shrunk_b = base_l, base_t, base_r, base_b
-
-        return [
-            ("orig", (base_l, base_t, base_r, base_b)),
-            ("expand5", (expanded_l, expanded_t, expanded_r, expanded_b)),
-            ("shrink2", (shrunk_l, shrunk_t, shrunk_r, shrunk_b)),
-        ]
 
     def _export_line_variants(self, idx: int, corrected_text: str, dest_dir: Path) -> int:
         if self.current_image is None:
@@ -880,24 +783,23 @@ class OcrViewerApp:
         src = self._current_image_path()
         base_name = src.stem if src is not None else "image"
         img_w, img_h = self.current_image.size
-        variants = self._variant_crop_boxes(self.current_lines[idx].box, img_w, img_h)
-        saved_files = 0
-        for suffix, crop_box in variants:
-            crop = self.current_image.crop(crop_box)
-            stem = f"{base_name}_item{idx + 1:03d}_{suffix}"
-            out_img = dest_dir / f"{stem}.png"
-            out_json = dest_dir / f"{stem}.json"
-            crop.save(out_img)
-            write_json(
-                out_json,
-                {
-                    "rec_text": corrected_text,
-                    "revised": True,
-                    "char": "",
-                },
-            )
-            saved_files += 2
-        return saved_files
+        x, y, w, h = self.current_lines[idx].box
+        if w <= 0 or h <= 0:
+            raise ValueError("invalid OCR item box dimensions")
+        crop_l = max(0, x)
+        crop_t = max(0, y)
+        crop_r = min(img_w, x + w)
+        crop_b = min(img_h, y + h)
+        if crop_r <= crop_l or crop_b <= crop_t:
+            raise ValueError("OCR box is outside image bounds")
+
+        crop = self.current_image.crop((crop_l, crop_t, crop_r, crop_b))
+        stem = f"{base_name}_item{idx + 1:03d}"
+        out_img = dest_dir / f"{stem}.png"
+        out_txt = dest_dir / f"{stem}.txt"
+        crop.save(out_img)
+        out_txt.write_text(corrected_text, encoding="utf-8")
+        return 2
 
     def _refresh_image(self) -> None:
         if self.current_image is None:
@@ -959,67 +861,58 @@ class OcrViewerApp:
         self.image_list.see(nxt)
         self._on_image_select()
 
-    def _run_ultralytics_yolo_current_image(self) -> None:
+    def _run_select_text_current_image(self) -> None:
         src = self._current_image_path()
         if src is None or not src.is_file():
-            self.status_var.set("No image selected for Ultralytics YOLO")
+            self.status_var.set("No image selected for YOLO text regions")
             return
-        conf_pt, err = _parse_conf_0_to_1(self.yolo_conf_var.get())
-        if conf_pt is None:
-            self.status_var.set(f"Ultralytics .pt — invalid confidence: {err}")
+        conf, err = _parse_conf_0_to_1(self.yolo_conf_var.get())
+        if conf is None:
+            self.status_var.set(f"Invalid confidence: {err}")
             return
-        self.status_var.set(
-            f"Running Ultralytics YOLO ({DEFAULT_ULTRALYTICS_PT_PATH.name}, conf={conf_pt:g})..."
-        )
+        self.status_var.set(f"Running YOLO text regions (select_text, conf={conf:g})...")
         self.root.update_idletasks()
+        t0 = time.perf_counter()
         try:
-            lines, elapsed_ms = _run_ultralytics_yolo_pt(
-                src,
-                DEFAULT_ULTRALYTICS_PT_PATH,
-                conf=conf_pt,
-                model_holder=self._ultralytics_model_holder,
-            )
-        except ImportError as exc:
-            self.status_var.set(str(exc))
-            return
+            _offset, regions = get_text_regions_from_image_path(str(src), yolo_conf_threshold=conf)
         except Exception as exc:
-            self.status_var.set(f"Ultralytics YOLO failed: {type(exc).__name__}: {exc}")
+            self.status_var.set(f"YOLO text regions failed: {type(exc).__name__}: {exc}")
             return
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        lines = [OcrLine(box=tuple(int(v) for v in box), text="".join(str(p) for p in preds).strip()) for box, _center, preds in regions]
         self.current_lines = lines
         self.selected_line_idx = None
         self._populate_item_list()
         self._refresh_image()
-        self.status_var.set(
-            f"Ultralytics YOLO: {len(lines)} boxes in {elapsed_ms:.0f} ms "
-            f"(conf={conf_pt:g}, {DEFAULT_ULTRALYTICS_PT_PATH.name})"
-        )
+        self.status_var.set(f"YOLO text regions: {len(lines)} regions in {elapsed_ms:.0f} ms")
 
-    def _run_yolo_onnx_current_image(self) -> None:
+    def _run_select_ui_element_current_image(self) -> None:
         src = self._current_image_path()
         if src is None or not src.is_file():
-            self.status_var.set("No image selected for YOLO ONNX")
+            self.status_var.set("No image selected for UI element YOLO")
             return
-        conf_onnx, err = _parse_conf_0_to_1(self.yolo_conf_var.get())
-        if conf_onnx is None:
-            self.status_var.set(f"YOLO ONNX — invalid confidence: {err}")
+        conf, err = _parse_conf_0_to_1(self.yolo_conf_var.get())
+        if conf is None:
+            self.status_var.set(f"Invalid confidence: {err}")
             return
-        self.status_var.set(
-            f"Running YOLO ONNX ({DEFAULT_YOLO_ONNX_PATH.name}, conf={conf_onnx:g})..."
-        )
+        self.status_var.set(f"Running UI element YOLO (select_ui_element, conf={conf:g})...")
         self.root.update_idletasks()
+        t0 = time.perf_counter()
         try:
-            lines, elapsed_ms = _run_yolo_onnx_best_detections(src, conf_threshold=conf_onnx)
+            bgr = cv2.imread(str(src))
+            if bgr is None:
+                raise ValueError(f"could not read image: {src}")
+            detections = _predict_ui_elements_raw(bgr, conf_threshold=conf)
         except Exception as exc:
-            self.status_var.set(f"YOLO ONNX failed: {type(exc).__name__}: {exc}")
+            self.status_var.set(f"UI element YOLO failed: {type(exc).__name__}: {exc}")
             return
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        lines = _ui_detections_to_ocr_lines(detections)
         self.current_lines = lines
         self.selected_line_idx = None
         self._populate_item_list()
         self._refresh_image()
-        self.status_var.set(
-            f"YOLO ONNX: {len(lines)} boxes in {elapsed_ms:.0f} ms "
-            f"(conf={conf_onnx:g}, {DEFAULT_YOLO_ONNX_PATH.name})"
-        )
+        self.status_var.set(f"UI element YOLO: {len(lines)} detections in {elapsed_ms:.0f} ms")
 
     def _copy_current_image_to_undone(self) -> None:
         src = self._current_image_path()
@@ -1034,64 +927,6 @@ class OcrViewerApp:
             self.status_var.set(f"Copied to {dest}")
         except OSError as exc:
             self.status_var.set(f"Copy failed: {exc}")
-
-    def _run_ocr_current_image(self) -> None:
-        src = self._current_image_path()
-        run = self._selected_run()
-        if src is None or not src.is_file():
-            self.status_var.set("No image selected for OCR")
-            return
-        if run is None:
-            self.status_var.set("No run selected for OCR output")
-            return
-        self.status_var.set("Running YOLO+OCR...")
-        self.root.update_idletasks()
-        try:
-            _offset, regions = get_coordinates_from_path(str(src))
-            output = format_coordinate_text_from_regions(regions)
-        except Exception as exc:
-            self.status_var.set(f"YOLO+OCR failed: {type(exc).__name__}: {exc}")
-            return
-        if not regions:
-            self.status_var.set("YOLO+OCR returned no regions (empty or failed)")
-            return
-        try:
-            out_dir = src.parent
-            out_dir.mkdir(parents=True, exist_ok=True)
-            out_path = src.with_suffix(".json")
-            existing = read_json(out_path, default={}) if out_path.exists() else {}
-            existing_data = existing if isinstance(existing, dict) else {}
-            loaded_lines = _normalize_lines(existing_data.get("lines", []))
-            has_real_boxes = any(line.box[2] > 4 or line.box[3] > 4 for line in loaded_lines)
-            if loaded_lines and has_real_boxes:
-                self.current_lines = loaded_lines
-                yolo_elapsed_ms = existing_data.get("yolo_elapsed_ms")
-                ocr_elapsed_ms = existing_data.get("ocr_elapsed_ms")
-            else:
-                self.current_lines, yolo_elapsed_ms, ocr_elapsed_ms = _run_ocr_with_boxes(src)
-            line_pairs = [[list(line.box), line.text] for line in self.current_lines]
-            write_json(
-                out_path,
-                {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "image_path": str(src),
-                    "image_name": src.name,
-                    "line_height": 32,
-                    "yolo_elapsed_ms": yolo_elapsed_ms,
-                    "ocr_elapsed_ms": ocr_elapsed_ms,
-                    "lines": line_pairs,
-                    "text": "\n".join(line.text for line in self.current_lines),
-                },
-            )
-            self.selected_line_idx = None
-            self._populate_item_list()
-            self._refresh_image()
-            self.status_var.set(f"YOLO+OCR complete: {len(self.current_lines)} lines (saved: {out_path.name})")
-        except Exception as exc:
-            self.status_var.set(
-                f"YOLO+OCR complete: {len(self.current_lines)} lines, but save failed: {type(exc).__name__}: {exc}"
-            )
-
 
 def run_app(runs_root: Path | None = None) -> None:
     base = runs_root if runs_root is not None else ROOT_DIR / "runs"

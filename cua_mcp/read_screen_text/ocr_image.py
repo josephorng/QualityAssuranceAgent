@@ -120,10 +120,28 @@ def _clip_box(x: int, y: int, w: int, h: int, img_w: int, img_h: int) -> tuple[i
     return x, y, w, h
 
 
-def _yolo_text_boxes(bgr: np.ndarray) -> list[tuple[int, int, int, int]]:
+def _expand_box(
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    img_w: int,
+    img_h: int,
+    *,
+    margin: int = 2,
+) -> tuple[int, int, int, int]:
+    """Expand a box by ``margin`` pixels on all four sides, clamped to image bounds."""
+    return _clip_box(x - margin, y - margin, w + 2 * margin, h + 2 * margin, img_w, img_h)
+
+
+def _yolo_text_boxes(
+    bgr: np.ndarray,
+    *,
+    conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
+) -> list[tuple[int, int, int, int]]:
     """Return list of (x, y, w, h) in image coordinates, or empty if unavailable."""
     try:
-        xyxy = _run_ocr_yolo_onnx_inference(bgr)
+        xyxy = _run_ocr_yolo_onnx_inference(bgr, conf_threshold=conf_threshold)
     except (RuntimeError, FileNotFoundError, OSError) as exc:
         _log_info(f"OCR YOLO unavailable: {type(exc).__name__}: {exc}")
         return []
@@ -280,6 +298,7 @@ def get_coordinates_from_path(
     line_height: int = 32,
     crnn_model_path: Optional[str] = None,
     crop_rect: tuple[int, int, int, int] | None = None,
+    yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
 ) -> tuple[tuple[int, int], list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]]]:
     """
     Run YOLO + ONNX CRNN OCR on the image at ``image_path``.
@@ -335,7 +354,7 @@ def get_coordinates_from_path(
     boxes: list[tuple[int, int, int, int]] = []
     yolo_elapsed_ms: float | None = None
     yolo_start = time.perf_counter()
-    boxes = _yolo_text_boxes(bgr)
+    boxes = _yolo_text_boxes(bgr, conf_threshold=yolo_conf_threshold)
     yolo_elapsed_ms = (time.perf_counter() - yolo_start) * 1000.0
     _log_info(f"OCR YOLO detected_boxes={len(boxes)}")
 
@@ -346,6 +365,7 @@ def get_coordinates_from_path(
 
     boxes = _merge_overlapping_boxes(boxes)
     boxes = _sort_boxes_reading_order(boxes)
+    boxes = [_expand_box(x, y, w, h, img_w, img_h) for x, y, w, h in boxes]
 
     all_regions: list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]] = []
     ocr_elapsed_ms = 0.0
@@ -373,7 +393,11 @@ def get_coordinates_from_path(
     return (offset_x, offset_y), all_regions
 
 
-def get_text_boxes_from_path(image_path: str) -> list[tuple[int, int, int, int]]:
+def get_text_boxes_from_path(
+    image_path: str,
+    *,
+    yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
+) -> list[tuple[int, int, int, int]]:
     """
     Return OCR detector YOLO text boxes only (x, y, w, h) for an image.
 
@@ -392,7 +416,7 @@ def get_text_boxes_from_path(image_path: str) -> list[tuple[int, int, int, int]]
         _log_info(f"OCR get_text_boxes_from_path could not read image path={image_path}")
         return []
 
-    boxes = _yolo_text_boxes(bgr)
+    boxes = _yolo_text_boxes(bgr, conf_threshold=yolo_conf_threshold)
     _log_info(f"OCR get_text_boxes_from_path boxes={len(boxes)}")
     return boxes
 

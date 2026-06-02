@@ -14,6 +14,7 @@ from cua_mcp.read_screen_text.ocr_image import (
     format_coordinate_text_from_regions,
     get_coordinates_from_path,
 )
+from cua_mcp.yolo_onnx import DEFAULT_CONF_YOLOV26_END2END
 from src.common.llm_factory import get_llm_client
 from src.common.prompting import get_prompt
 from src.common.run_state import RunStateManager, get_run_state_manager, ts_name
@@ -430,13 +431,20 @@ def _with_clicked_text(result: dict[str, Any], clicked_text: str) -> dict[str, A
     return merged
 
 
-async def _resolve_point(target: str, instruction: str) -> tuple[int, int, str]:
+async def _resolve_point(
+    target: str,
+    instruction: str,
+    *,
+    yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
+) -> tuple[int, int, str]:
     paths = _run_manager().require_paths()
     name = f"{ts_name()}.png"
     out = paths.yolo_ocr_dir / name
     capture_active_monitor_to_file(out)
 
-    (off_x, off_y), regions = get_coordinates_from_path(str(out))
+    (off_x, off_y), regions = get_coordinates_from_path(
+        str(out), yolo_conf_threshold=yolo_conf_threshold
+    )
     local_x, local_y = await _select_coordinate(
         target=target,
         instruction=instruction,
@@ -447,3 +455,20 @@ async def _resolve_point(target: str, instruction: str) -> tuple[int, int, str]:
     clicked = _clicked_text_at_image_point(img_x, img_y, regions)
     gx, gy = _to_global_coordinate(img_x, img_y)
     return gx, gy, clicked
+
+
+def get_text_regions_from_image_path(
+    image_path: str | Path,
+    *,
+    yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
+    line_height: int = 32,
+) -> tuple[tuple[int, int], list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]]]:
+    """
+    Convenience helper for callers that want the same OCR text-region pipeline used by
+    the select-text tool, but on an existing image file path (no screen capture, no LLM).
+    """
+    return get_coordinates_from_path(
+        str(image_path),
+        line_height=line_height,
+        yolo_conf_threshold=yolo_conf_threshold,
+    )

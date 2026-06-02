@@ -29,7 +29,7 @@ from src.common.runtime_command_dialog import (
     reset_runtime_user_ended_at_prompt,
 )
 from src.common.script_helper import parse_executable_lines_from_text
-from src.common.settings import ROOT_DIR, load_settings
+from src.common.settings import ROOT_DIR, apply_startup_ollama_host_probe, load_settings
 
 # Step-mode runtime command transcript (append during run); not hub UI preferences.
 _RUNTIME_COMMAND_TRANSCRIPT_NAME = "runtime_commands_cache.txt"
@@ -140,6 +140,25 @@ class MainHub(ctk.CTk):
                 self._refresh_script_path_label()
         if self._script_path is None:
             self._try_load_last_runtime_command_cache()
+
+        self._status.configure(text="正在檢查 Ollama 主機…")
+        self._start_ollama_host_probe()
+
+    def _start_ollama_host_probe(self) -> None:
+        def work() -> None:
+            ok, message = apply_startup_ollama_host_probe()
+            self.after(0, lambda: self._on_ollama_host_probe_done(ok, message))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_ollama_host_probe_done(self, ok: bool, message: str) -> None:
+        if ok:
+            self._status.configure(text=message, text_color=("gray20", "gray65"))
+        else:
+            self._status.configure(
+                text=message,
+                text_color=("#b91c1c", "#f87171"),
+            )
 
     def _refresh_script_path_label(self) -> None:
         if self._script_path is not None:
@@ -468,7 +487,7 @@ class MainHub(ctk.CTk):
         self._script_text.configure(state="normal")
         self._script_text.delete("0.0", "end")
         self._refresh_script_path_label()
-        self._status.configure(text="")
+        self._status.configure(text="", text_color=("gray20", "gray65"))
         self._persist_hub_ui_state()
 
     def _on_stop_run(self) -> None:

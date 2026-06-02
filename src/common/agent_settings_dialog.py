@@ -8,6 +8,7 @@ from typing import Any
 from src.common.ctk_dialogs import show_ctk_message
 from src.common.settings import (
     BACKEND_PRESETS,
+    canonicalize_llm_backend,
     load_agent_settings_dict,
     preset_for_backend,
     save_agent_settings_dict,
@@ -15,33 +16,35 @@ from src.common.settings import (
 )
 
 _BACKEND_LABELS: dict[str, str] = {
-    "ollama": "ollama (local)",
-    "vllm": "ollama (公司主機)",
+    "ollama_local": "ollama (local)",
+    "ollama_server": "ollama (公司主機)",
 }
 _LABEL_TO_BACKEND = {label: key for key, label in _BACKEND_LABELS.items()}
-_BACKEND_MENU_VALUES = [_BACKEND_LABELS["ollama"], _BACKEND_LABELS["vllm"]]
+_BACKEND_MENU_VALUES = [
+    _BACKEND_LABELS["ollama_local"],
+    _BACKEND_LABELS["ollama_server"],
+]
 
 
 def _backend_to_label(backend: str) -> str:
-    key = backend.strip().lower()
-    return _BACKEND_LABELS.get(key, _BACKEND_LABELS["ollama"])
+    key = canonicalize_llm_backend(backend)
+    return _BACKEND_LABELS.get(key, _BACKEND_LABELS["ollama_local"])
 
 
 def _label_to_backend(label: str) -> str:
     text = label.strip()
     if text in _LABEL_TO_BACKEND:
         return _LABEL_TO_BACKEND[text]
-    key = text.lower()
+    key = canonicalize_llm_backend(text)
     if key in BACKEND_PRESETS:
         return key
-    return "ollama"
+    return "ollama_local"
 
 
 def _preset_summary(backend: str) -> tuple[str, str]:
-    key = backend.strip().lower()
+    key = canonicalize_llm_backend(backend)
     preset = BACKEND_PRESETS[key]
-    host_key = "ollama_host" if key == "ollama" else "vllm_host"
-    return preset["brain_lm"], preset[host_key]
+    return preset["brain_lm"], preset["ollama_host"]
 
 
 def open_agent_settings_dialog(
@@ -52,9 +55,9 @@ def open_agent_settings_dialog(
     import customtkinter as ctk
 
     initial = load_agent_settings_dict()
-    backend_initial = str(initial.get("llm_backend", "ollama")).strip().lower()
+    backend_initial = canonicalize_llm_backend(str(initial.get("llm_backend", "ollama_local")))
     if backend_initial not in BACKEND_PRESETS:
-        backend_initial = "ollama"
+        backend_initial = "ollama_local"
 
     dialog = ctk.CTkToplevel(master)
     dialog.title("代理設定")
@@ -152,7 +155,6 @@ def open_agent_settings_dialog(
             return
         if on_saved is not None:
             on_saved()
-        show_ctk_message(dialog, "代理設定", "設定已儲存。", kind="info")
         _close()
 
     ctk.CTkButton(btn_row, text="取消", width=100, command=_close).pack(side="right", padx=(8, 0))

@@ -7,7 +7,7 @@ import pytest
 
 from cua_mcp.read_screen_text.ocr_image import (
     format_coordinate_text_from_regions,
-    get_coordinates_from_path,
+    get_coordinates_from_image_path,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,7 +63,7 @@ def test_get_coordinates_has_sample_images() -> None:
     ids=lambda p: Path(p).name,
 )
 def test_get_coordinates_tool_returns_bbox_lines(image_path: Path) -> None:
-    _offset, regions = get_coordinates_from_path(str(image_path))
+    regions = get_coordinates_from_image_path(str(image_path))
     assert isinstance(regions, list)
     assert regions, f"OCR returned no regions for {image_path.name}"
     output = format_coordinate_text_from_regions(regions)
@@ -81,7 +81,7 @@ def test_get_coordinates_tool_returns_bbox_lines(image_path: Path) -> None:
     ids=lambda p: Path(p).name,
 )
 def test_get_coordinates_helper_matches_tool_type(image_path: Path) -> None:
-    _offset, regions = get_coordinates_from_path(str(image_path))
+    regions = get_coordinates_from_image_path(str(image_path))
     helper_output = format_coordinate_text_from_regions(regions)
     assert isinstance(helper_output, str)
 

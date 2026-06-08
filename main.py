@@ -133,7 +133,27 @@ def dismiss_nuitka_onefile_splash() -> None:
         os.unlink(splash_filename)
 
 
+def preload_vision_models_async() -> None:
+    """Load YOLO + OCR ONNX models on a daemon thread so the hub opens immediately."""
+
+    def _worker() -> None:
+        try:
+            from cua_mcp.read_screen_text.ocr_image import warm_vision_models
+
+            warm_vision_models(quiet=True)
+        except Exception:
+            # Warmup is best-effort; first real OCR/YOLO use will load if this fails.
+            pass
+
+    threading.Thread(
+        target=_worker,
+        name="vision-model-preload",
+        daemon=True,
+    ).start()
+
+
 def launch_gui() -> None:
+    preload_vision_models_async()
     from app_main_hub import run_main_hub
 
     run_main_hub()

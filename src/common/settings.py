@@ -29,10 +29,16 @@ BACKEND_PRESETS: dict[str, dict[str, str]] = {
         "brain_lm": "gemma4:e4b",
         "ollama_host": "http://localhost:11434",
     },
+    "ollama_local_12b": {
+        "llm_backend": "ollama_local_12b",
+        "brain_lm": "gemma4:12b",
+        "ollama_host": "http://localhost:11434",
+    },
     "ollama_server": {
         "llm_backend": "ollama_server",
         "brain_lm": "gemma4:26b",
-        "ollama_host": "http://192.168.13.101:11434",
+        "ollama_host": "http://192.168.4.134:8000",
+        # "ollama_host": "http://192.168.13.101:11434",
     },
 }
 
@@ -79,7 +85,8 @@ def canonicalize_llm_backend(backend: str) -> str:
 def preset_for_backend(backend: str) -> dict[str, Any]:
     key = canonicalize_llm_backend(backend)
     if key not in BACKEND_PRESETS:
-        raise ValueError("llm_backend 必須為 ollama_local 或 ollama_server")
+        known = ", ".join(sorted(BACKEND_PRESETS))
+        raise ValueError(f"llm_backend 必須為已知後端之一：{known}")
     return dict(BACKEND_PRESETS[key])
 
 

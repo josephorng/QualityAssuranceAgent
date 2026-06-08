@@ -6,9 +6,26 @@ from pathlib import Path
 from typing import Any
 
 from cua_mcp import hand_tools
-from cua_mcp.select_text import _resolve_point, _with_clicked_text
+from cua_mcp.select_text import resolve_text_point, _with_clicked_text
 from cua_mcp.select_ui_element import resolve_ui_element_point
 from cua_mcp.storage import store_clipboard_text, store_image, store_text, _current_run_paths
+
+
+def _with_unified_target_metadata(
+    result: dict[str, Any],
+    *,
+    target_kind: str,
+    target_text: str = "",
+    target_icons: list[dict[str, Any]] | None = None,
+    target_bbox: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    merged = dict(result)
+    merged["target_kind"] = target_kind
+    merged["target_text"] = target_text
+    merged["target_icons"] = list(target_icons or [])
+    if target_bbox is not None:
+        merged["target_bbox"] = dict(target_bbox)
+    return merged
 
 
 def _click(button: str = "left") -> dict[str, Any]:
@@ -27,9 +44,15 @@ def _hotkey(keys: list[str] | str) -> dict[str, Any]:
     return hand_tools.hotkey(keys=keys)
 
 
-async def _move(target: str, instruction: str, duration: float = 0.0) -> dict[str, Any]:
-    x, y, clicked = await _resolve_point(target=target, instruction=instruction)
-    return _with_clicked_text(hand_tools.move(x=x, y=y, duration=duration), clicked)
+async def _move_to_text(target_text: str, instruction: str, duration: float = 0.0) -> dict[str, Any]:
+    x, y, clicked = await resolve_text_point(target_text=target_text, instruction=instruction)
+    base = _with_clicked_text(hand_tools.move(x=x, y=y, duration=duration), clicked)
+    return _with_unified_target_metadata(
+        base,
+        target_kind="text",
+        target_text=clicked,
+        target_icons=base.get("target_icons", []),
+    )
 
 
 async def _move_to_ui_element(instruction: str, duration: float = 0.0) -> dict[str, Any]:
@@ -38,7 +61,13 @@ async def _move_to_ui_element(instruction: str, duration: float = 0.0) -> dict[s
     merged: dict[str, Any] = dict(result)
     merged.update(meta)
     merged["instruction"] = instruction
-    return merged
+    return _with_unified_target_metadata(
+        merged,
+        target_kind=str(meta.get("target_kind", "ui_element")),
+        target_text=str(meta.get("target_text", "")),
+        target_icons=meta.get("target_icons", []),
+        target_bbox=meta.get("target_bbox"),
+    )
 
 
 def _wait(seconds: float) -> dict[str, Any]:

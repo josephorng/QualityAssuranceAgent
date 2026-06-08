@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any
@@ -12,13 +11,14 @@ except Exception:  # pragma: no cover - optional dependency
 
 from cua_mcp.read_screen_text.ocr_image import (
     format_coordinate_text_from_regions,
-    get_coordinates_from_path,
+    get_coordinates_from_image_path,
 )
+from cua_mcp.icon_map import describe_text_icons, is_pua_char, map_pua_in_text
+from cua_mcp.llm_json import parse_json_object
+from cua_mcp.selection_engine import request_json_with_retry
 from cua_mcp.yolo_onnx import DEFAULT_CONF_YOLOV26_END2END
-from src.common.llm_factory import get_llm_client
 from src.common.prompting import get_prompt
 from src.common.run_state import RunStateManager, get_run_state_manager, ts_name
-from src.common.settings import load_settings
 from src.eye import active_monitor_offset
 from src.eye.capture import capture_active_monitor_to_file
 
@@ -64,31 +64,14 @@ def _to_global_coordinate(local_x: int, local_y: int) -> tuple[int, int]:
     return local_x + left, local_y + top
 
 
-def _llm_text_to_json_object_string(raw: str) -> str:
-    """Extract the first JSON object from a possibly markdown-fenced string."""
-    text = (raw or "").strip()
-    start, end = text.find("{"), text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        return text[start : end + 1]
-    return text
-
-
 def _parse_target_text_from_llm_content(raw: str) -> str:
     """Parse `{"text": str}` from model text; raises ValueError if missing or invalid."""
-    json_text = _llm_text_to_json_object_string(raw)
+    out = parse_json_object(
+        raw,
+        empty_error='Ollama target picker returned empty or non-JSON content; expected {"text": string}',
+        decode_error_prefix="Ollama target picker returned invalid JSON",
+    )
     preview = (raw or "")[:240]
-    if not json_text:
-        raise ValueError(
-            'Ollama target picker returned empty or non-JSON content; expected {"text": string}'
-        )
-    try:
-        out = json.loads(json_text)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"Ollama target picker returned invalid JSON ({exc}); preview={preview!r}"
-        ) from exc
-    if not isinstance(out, dict):
-        raise ValueError(f"Ollama target JSON must be an object, got {type(out).__name__}")
     if "text" not in out:
         raise ValueError(
             f'Ollama target JSON must include "text"; got keys={list(out.keys())!r}; preview={preview!r}'
@@ -116,12 +99,12 @@ def _to_simplified_chinese(s: str) -> str:
         return s
 
 
-def _extract_matchable_text_candidates(instruction: str) -> list[str]:
+def _sanitize_target_text(target_text: str) -> list[str]:
     """
     Extract likely UI text snippets from an instruction that can be compared
     against OCR row texts.
     """
-    text = (instruction or "").strip()
+    text = (target_text or "").strip()
     if not text:
         return []
 
@@ -188,7 +171,21 @@ def _pick_best_similarity_row(
     return [(cx, cy, t) for s, cx, cy, t in positive]
 
 
-def _extract_rows(
+def _regions_with_mapped_pua(
+    regions: list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]],
+) -> list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]]:
+    """Return a copy of ``regions`` with PUA glyphs replaced by ``chinese_id`` from icon_map."""
+    mapped: list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]] = []
+    for box, center, preds in regions:
+        line = _predictions_to_str(preds)
+        if not line:
+            mapped.append((box, center, preds))
+            continue
+        mapped.append((box, center, [map_pua_in_text(line)]))
+    return mapped
+
+
+def _build_rows_text(
     regions: list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]],
 ) -> list[tuple[int, int, str]]:
     rows: list[tuple[int, int, str]] = []
@@ -249,20 +246,36 @@ def _match_tiers_to_rows(
 
 def _parse_xy_text_from_llm_content(raw: str) -> tuple[int, int, str]:
     """Parse ``{"x": int, "y": int, "text": str}`` from model text; raises ValueError if invalid."""
-    json_text = _llm_text_to_json_object_string(raw)
+    out = parse_json_object(
+        raw,
+        empty_error='expected {"x": int, "y": int, "text": string}',
+        decode_error_prefix="invalid JSON",
+    )
     preview = (raw or "")[:240]
-    if not json_text:
-        raise ValueError('expected {"x": int, "y": int, "text": string}')
-    try:
-        out = json.loads(json_text)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid JSON ({exc}); preview={preview!r}") from exc
     if not isinstance(out, dict) or "x" not in out or "y" not in out or "text" not in out:
         raise ValueError(f'must include "x", "y", and "text"; preview={preview!r}')
     x, y, t = out["x"], out["y"], out["text"]
     if not isinstance(t, str):
         raise ValueError(f'"text" must be a string, got {type(t).__name__}')
     return int(x), int(y), t.strip()
+
+
+def _strip_pua_from_text(text: str) -> str:
+    """Remove Private Use Area codepoints and normalize whitespace."""
+    without_pua = "".join(ch for ch in text if not is_pua_char(ch))
+    return " ".join(without_pua.split()).strip()
+
+
+def _matches_without_pua(
+    matches: list[tuple[int, int, str]],
+) -> list[tuple[int, int, str]]:
+    """Drop PUA from each match line; omit rows that are empty after stripping."""
+    filtered: list[tuple[int, int, str]] = []
+    for cx, cy, line in matches:
+        cleaned = _strip_pua_from_text(line)
+        if cleaned:
+            filtered.append((cx, cy, cleaned))
+    return filtered
 
 
 async def _disambiguate_duplicate_centers(
@@ -272,128 +285,67 @@ async def _disambiguate_duplicate_centers(
     image_path: str,
 ) -> tuple[int, int, str]:
     """Second LLM round: pick one of several identical (or tier-equivalent) OCR locations."""
-    allowed_coordinates = {(cx, cy) for cx, cy, _ in matches}
-    allowed_texts = {s: (cx, cy) for cx, cy, s in matches}
+    matches = _matches_without_pua(matches)
+    if not matches:
+        raise ValueError(
+            "no text candidates remain after removing PUA icon glyphs from duplicate matches"
+        )
+    if len(matches) == 1:
+        return matches[0]
+
     options_lines = "\n".join(f"[{cx},{cy}] {t}" for cx, cy, t in matches)
-    base = (
-        "The matching OCR text appears at MORE THAN ONE location on the image.\n"
-        "Pick ONE center (x, y) that best matches the Instruction.\n"
-        "(x, y) MUST be exactly one of the candidate centers listed below - same "
-        "coordinate space as CoordinatesText (image pixels).\n"
-        '"text" MUST be the OCR line for that same choice: copy it from the line after '
-        "[cx,cy] for your chosen center (as verbatim as possible; OCR may have typos).\n"
-        "Keep in mind that the OCR text might have typos and errors, so you need to be careful to match the text correctly.\n"
-        "Output NOTHING except valid JSON matching the server's schema.\n"
-        "Do not summarize, explain, or add prose.\n\n"
-        f"Instruction:\n{instruction}\n\n"
-        f"Matched text from the first step:\n{chosen_text}\n\n"
-        f"Candidate centers (choose exactly one):\n{options_lines}\n"
+    prompt_content = get_prompt("coordinate_disambiguation").format(
+        instruction=instruction,
+        chosen_text=chosen_text,
+        options_lines=options_lines,
     )
     messages: list[dict[str, Any]] = [
-        {"role": "user", "content": base, "images": [image_path]},
+        {"role": "user", "content": prompt_content, "images": [image_path]},
     ]
-    try:
-        reply = await get_llm_client().chat_messages(
-            load_settings().brain_lm,
-            messages=messages,
-            tools=[],
-            response_format=_DISAMBIGUATE_XY_TEXT_JSON_SCHEMA,
-        )
-        x, y, llm_text = _parse_xy_text_from_llm_content(reply.content)
-    except ValueError as exc:
-        _run_manager().log_info(f"_disambiguate_duplicate_centers: retry ({exc})")
-        messages[0]["content"] += (
-            '\nReply with ONLY: {"x": <integer>, "y": <integer>, "text": "<string>"} '
-            "where x,y equals one candidate [cx,cy] above and \"text\" is that line's "
-            "OCR text. No text before or after the JSON.\n"
-        )
-        reply = await get_llm_client().chat_messages(
-            load_settings().brain_lm,
-            messages=messages,
-            tools=[],
-            response_format="json",
-        )
-        x, y, llm_text = _parse_xy_text_from_llm_content(reply.content)
-    if (x, y) not in allowed_coordinates and llm_text not in allowed_texts:
-        raise ValueError(
-            f"disambiguation returned ({x},{y},{llm_text!r}) not in allowed {matches}"
-        )
-    if (x, y) in allowed_coordinates:
-        # Prefer coordinates from the model; OCR line text may be paraphrased.
-        llm_text = next(t for cx, cy, t in matches if (cx, cy) == (x, y))
-    else:
-        x, y = allowed_texts[llm_text]
-    return x, y, llm_text
+    x, y, llm_text = await request_json_with_retry(
+        messages=messages,
+        response_schema=_DISAMBIGUATE_XY_TEXT_JSON_SCHEMA,
+        parse_reply=_parse_xy_text_from_llm_content,
+        retry_instruction='Reply with ONLY: {"x": <integer>, "y": <integer>, "text": "<string>"} where x,y equals one candidate [cx,cy] above and "text" is that line\'s OCR text. No text before or after the JSON.',
+        log_info=lambda m: _run_manager().log_info(f"_disambiguate_duplicate_centers: {m}"),
+    )
+    
+    for cx, cy, t in matches:
+        if (x, y) == (cx, cy):
+            return x, y, t
+        if llm_text == t:
+            return cx, cy, t
+    raise ValueError(
+        f"disambiguation returned ({x},{y},{llm_text!r}) not in allowed {matches}"
+    )
 
 
-async def _select_coordinate(
-    target: str,
+async def _select_text_coordinate_via_llm(
     instruction: str,
+    target_text: str,
     regions: list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]],
-    screenshot_path: str | Path,
+    coordinate_and_texts: list[tuple[int, int, str]],
+    image_path: str,
 ) -> tuple[int, int]:
-    path = Path(screenshot_path)
-    if not path.is_file():
-        raise FileNotFoundError(f"screenshot not found: {path}")
-    image_path = str(path.resolve())
-    rows = _extract_rows(regions)
-    if not rows:
-        raise ValueError("OCR regions contain no non-empty text")
-
-    # Fast path: OCR rows with positive text similarity to instruction-derived candidates.
-    extracted_texts = _extract_matchable_text_candidates(target)
-    similarity_matches = _pick_best_similarity_row(extracted_texts, rows)
-    if len(similarity_matches) == 1:
-        cx, cy, matched_text = similarity_matches[0]
-        _run_manager().log_info(
-            f"_select_coordinate: similarity pre-match picked ({cx},{cy}) from {matched_text!r}"
-        )
-        return cx, cy
-    if len(similarity_matches) > 1:
-        image_path = str(path.resolve())
-        x, y, dis_text = await _disambiguate_duplicate_centers(
-            instruction, target, similarity_matches, image_path
-        )
-        _run_manager().log_info(
-            f"_select_coordinate: similarity pre-match disambiguated to ({x},{y}) {dis_text!r}"
-        )
-        return x, y
-
+    """Ask the model to pick OCR text from CoordinatesText, then resolve to (cx, cy)."""
     coordinate_text = format_coordinate_text_from_regions(regions)
     base_instructions = get_prompt("coordinate_selection").format(
         instruction=instruction,
-        target=target,
+        target=target_text,
         coordinate_text=coordinate_text,
     )
 
     messages: list[dict[str, Any]] = [
         {"role": "user", "content": base_instructions, "images": [image_path]},
     ]
-    try:
-        reply = await get_llm_client().chat_messages(
-            load_settings().brain_lm,
-            messages=messages,
-            tools=[],
-            response_format=_TARGET_TEXT_JSON_SCHEMA,
-        )
-        chosen = _parse_target_text_from_llm_content(reply.content)
-        matches = _match_tiers_to_rows(chosen, rows)
-    except ValueError as exc:
-        _run_manager().log_info(
-            f"_select_coordinate: first attempt failed ({exc}); retrying with format=json."
-        )
-        messages[0]["content"] += (
-            '\nReply with ONLY: {"text": "<string>"} where "text" is the OCR line text from CoordinatesText '
-            "(after [cx,cy] ), as verbatim as possible. No text before or after the JSON.\n"
-        )
-        reply = await get_llm_client().chat_messages(
-            load_settings().brain_lm,
-            messages=messages,
-            tools=[],
-            response_format="json",
-        )
-        chosen = _parse_target_text_from_llm_content(reply.content)
-        matches = _match_tiers_to_rows(chosen, rows)
+    chosen = await request_json_with_retry(
+        messages=messages,
+        response_schema=_TARGET_TEXT_JSON_SCHEMA,
+        parse_reply=_parse_target_text_from_llm_content,
+        retry_instruction='Reply with ONLY: {"text": "<string>"} where "text" is the OCR line text from CoordinatesText (after [cx,cy] ), as verbatim as possible. No text before or after the JSON.',
+        log_info=lambda m: _run_manager().log_info(f"_select_coordinate_via_llm: {m}"),
+    )
+    matches = _match_tiers_to_rows(chosen, coordinate_and_texts)
 
     if len(matches) == 1:
         cx, cy, _ = matches[0]
@@ -405,11 +357,50 @@ async def _select_coordinate(
     return cx, cy
 
 
+async def _select_coordinate(
+    target_text: str,
+    instruction: str,
+    regions: list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]],
+    screenshot_path: str | Path,
+) -> tuple[int, int]:
+    path = Path(screenshot_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"screenshot not found: {path}")
+    image_path = str(path.resolve())
+    regions = _regions_with_mapped_pua(regions)
+    coordinate_and_texts = _build_rows_text(regions)
+    if not coordinate_and_texts:
+        raise ValueError("OCR regions contain no non-empty text")
+
+    # Fast path: OCR rows with positive text similarity to instruction-derived candidates.
+    sanitized_target_texts = _sanitize_target_text(target_text)
+    similarity_matches = _pick_best_similarity_row(sanitized_target_texts, coordinate_and_texts)
+    if len(similarity_matches) == 1:
+        cx, cy, matched_text = similarity_matches[0]
+        _run_manager().log_info(
+            f"_select_coordinate: similarity pre-match picked ({cx},{cy}) from {matched_text!r}"
+        )
+        return cx, cy
+    if len(similarity_matches) > 1:
+        image_path = str(path.resolve())
+        x, y, dis_text = await _disambiguate_duplicate_centers(
+            instruction, target_text, similarity_matches, image_path
+        )
+        _run_manager().log_info(
+            f"_select_coordinate: similarity pre-match disambiguated to ({x},{y}) {dis_text!r}"
+        )
+        return x, y
+
+    return await _select_text_coordinate_via_llm(
+        instruction, target_text, regions, coordinate_and_texts, image_path
+    )
+
+
 def _predictions_to_str(preds: list[str]) -> str:
     return "".join(preds).strip()
 
 
-def _clicked_text_at_image_point(
+def _get_clicked_text_at_image_point(
     img_x: int,
     img_y: int,
     regions: list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]],
@@ -428,11 +419,14 @@ def _clicked_text_at_image_point(
 def _with_clicked_text(result: dict[str, Any], clicked_text: str) -> dict[str, Any]:
     merged = dict(result)
     merged["clicked_text"] = clicked_text
+    merged["target_kind"] = "text"
+    merged["target_text"] = clicked_text
+    merged["target_icons"] = describe_text_icons(clicked_text)
     return merged
 
 
-async def _resolve_point(
-    target: str,
+async def resolve_text_point(
+    target_text: str,
     instruction: str,
     *,
     yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
@@ -442,33 +436,15 @@ async def _resolve_point(
     out = paths.yolo_ocr_dir / name
     capture_active_monitor_to_file(out)
 
-    (off_x, off_y), regions = get_coordinates_from_path(
+    regions = get_coordinates_from_image_path(
         str(out), yolo_conf_threshold=yolo_conf_threshold
     )
     local_x, local_y = await _select_coordinate(
-        target=target,
+        target_text=target_text,
         instruction=instruction,
         regions=regions,
         screenshot_path=out,
     )
-    img_x, img_y = local_x + off_x, local_y + off_y
-    clicked = _clicked_text_at_image_point(img_x, img_y, regions)
-    gx, gy = _to_global_coordinate(img_x, img_y)
-    return gx, gy, clicked
-
-
-def get_text_regions_from_image_path(
-    image_path: str | Path,
-    *,
-    yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
-    line_height: int = 32,
-) -> tuple[tuple[int, int], list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]]]:
-    """
-    Convenience helper for callers that want the same OCR text-region pipeline used by
-    the select-text tool, but on an existing image file path (no screen capture, no LLM).
-    """
-    return get_coordinates_from_path(
-        str(image_path),
-        line_height=line_height,
-        yolo_conf_threshold=yolo_conf_threshold,
-    )
+    clicked_text = _get_clicked_text_at_image_point(local_x, local_y, regions)
+    gx, gy = _to_global_coordinate(local_x, local_y)
+    return gx, gy, clicked_text

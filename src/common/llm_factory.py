@@ -5,6 +5,7 @@ The active client is selected by ``llm_backend`` in ``runs/agent_settings.json``
 (loaded by :func:`src.common.settings.load_settings`). Supported values:
 
 * ``"ollama_local"`` (default) - :class:`src.common.ollama_client.OllamaClient`
+* ``"ollama_local_12b"``       - :class:`src.common.ollama_client.OllamaClient`
 * ``"ollama_server"``          - :class:`src.common.vllm_client.VLLMClient`
 
 The client is constructed lazily on first use and cached as a process-wide
@@ -17,7 +18,7 @@ from __future__ import annotations
 from threading import Lock
 
 from src.common.llm_client import LLMClient
-from src.common.settings import canonicalize_llm_backend, load_settings
+from src.common.settings import BACKEND_PRESETS, canonicalize_llm_backend, load_settings
 
 __all__ = ["get_llm_client", "reset_llm_client"]
 
@@ -29,18 +30,16 @@ _client_lock = Lock()
 def _build_client() -> LLMClient:
     settings = load_settings()
     backend = canonicalize_llm_backend(settings.llm_backend or "ollama_local")
-    if backend == "ollama_local":
-        from src.common.ollama_client import OllamaClient
-
-        return OllamaClient(settings.ollama_host)
+    if backend not in BACKEND_PRESETS:
+        known = ", ".join(sorted(BACKEND_PRESETS))
+        raise ValueError(f"Unknown llm_backend {backend!r} in agent settings; expected one of: {known}")
     if backend == "ollama_server":
         from src.common.vllm_client import VLLMClient
 
         return VLLMClient(settings.ollama_host)
-    raise ValueError(
-        f"Unknown llm_backend {backend!r} in agent settings; "
-        "expected 'ollama_local' or 'ollama_server'"
-    )
+    from src.common.ollama_client import OllamaClient
+
+    return OllamaClient(settings.ollama_host)
 
 
 def get_llm_client() -> LLMClient:

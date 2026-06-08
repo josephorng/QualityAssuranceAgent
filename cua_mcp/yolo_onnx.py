@@ -34,10 +34,6 @@ YOLO_ONNX_INPUT_SIZE: int = 640
 YOLO_LETTERBOX_PAD_BGR: tuple[int, int, int] = (114, 114, 114)
 DEFAULT_PROVIDERS: Sequence[str] = ("CPUExecutionProvider",)
 
-# Raw-head decode (NMS in Python)
-DEFAULT_CONF_YOLOV26_RAW: float = 0.05
-DEFAULT_IOU_YOLOV26_RAW: float = 0.7
-
 # End-to-end decode (NMS in ONNX graph)
 DEFAULT_CONF_YOLOV26_END2END: float = 0.05
 
@@ -45,7 +41,7 @@ DEFAULT_CONF_YOLOV26_END2END: float = 0.05
 # :data:`DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD` (intersection/union); each merged group is the
 # axis-aligned union with max score. Default off: set ``DEFAULT_MERGE_TOUCHING_SAME_CLASS`` True
 # or pass ``merge_touching_same_class=True`` to enable.
-DEFAULT_MERGE_TOUCHING_SAME_CLASS: bool = False
+DEFAULT_MERGE_TOUCHING_SAME_CLASS: bool = True
 # Pairs of same-class boxes are linked (and merged transitively) when ``IoU >`` this value.
 DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD: float = 0.5
 
@@ -92,7 +88,7 @@ def get_cached_cpu_session(
     return _SESSION_BY_RESOLVED_PATH[key]
 
 
-def run_best_onnx_end2end(
+def run_yolo_onnx_end2end(
     bgr: np.ndarray,
     *,
     class_ids: set[int],

@@ -17,11 +17,13 @@ from src.common.settings import (
 
 _BACKEND_LABELS: dict[str, str] = {
     "ollama_local": "ollama (local)",
+    "ollama_local_12b": "ollama (local 12b)",
     "ollama_server": "ollama (公司主機)",
 }
 _LABEL_TO_BACKEND = {label: key for key, label in _BACKEND_LABELS.items()}
 _BACKEND_MENU_VALUES = [
     _BACKEND_LABELS["ollama_local"],
+    _BACKEND_LABELS["ollama_local_12b"],
     _BACKEND_LABELS["ollama_server"],
 ]
 

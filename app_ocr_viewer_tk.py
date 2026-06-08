@@ -10,11 +10,10 @@ from pathlib import Path
 from tkinter import filedialog, ttk
 from typing import Any
 
-import cv2
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
-from cua_mcp.select_text import get_text_regions_from_image_path
-from cua_mcp.select_ui_element import UiDetection, _predict_ui_elements_raw
+from cua_mcp.icon_map import describe_text_icons, is_pua_char, text_has_pua
+from cua_mcp.read_screen_text.ocr_image import get_coordinates_from_image_path
 from cua_mcp.yolo_onnx import DEFAULT_CONF_YOLOV26_END2END
 from src.common.io_utils import read_json, write_json
 from src.common.settings import ROOT_DIR
@@ -24,6 +23,12 @@ SCREENSHOT_CREATOR_UNDONE_IMAGES = Path(
 )
 OCR_EXPORT_DEFAULT_DIR = Path(
     r"C:\Users\Joseph Hung\Documents\Repos\Git\OCR\data\train\cua_data"
+)
+OCR_EXPORT_ICONS_DIR = Path(
+    r"C:\Users\Joseph Hung\Documents\Repos\Git\OCR\data\train\icons"
+)
+UI_EXPORT_DEFAULT_DIR = Path(
+    r"C:\Users\Joseph Hung\Documents\Repos\Git\OCR\data\train\elements"
 )
 OCR_VALIDATE_DIR = Path(
     r"C:\Users\Joseph Hung\Documents\Repos\Git\OCR\data\validate\cua_validate"
@@ -46,6 +51,74 @@ def toggle_box_edit_mode(mode_var: tk.StringVar, status_var: tk.StringVar) -> No
 class OcrLine:
     box: tuple[int, int, int, int]
     text: str
+    line_type: str = "ocr"  # "ocr" | "element" | "ocr_icon" | …
+    class_name: str = ""
+    class_id: int | None = None
+    chinese_ids: tuple[str, ...] = ()
+
+
+def _is_ui_object_line(line: OcrLine) -> bool:
+    return line.line_type != "ocr"
+
+
+def _chinese_ids_for_text(text: str) -> list[str]:
+    return [
+        str(i.get("chinese_id", ""))
+        for i in describe_text_icons(text)
+        if i.get("chinese_id")
+    ]
+
+
+def _resolved_ui_ids(line: OcrLine) -> list[str]:
+    if line.chinese_ids:
+        return list(line.chinese_ids)
+    if line.text:
+        return _chinese_ids_for_text(line.text)
+    return []
+
+
+def _ui_object_label(line: OcrLine) -> str:
+    ids = _resolved_ui_ids(line)
+    if ids:
+        name = ", ".join(ids)
+    elif line.text.strip():
+        name = line.text.strip()
+    else:
+        name = line.class_name or line.line_type or "ui"
+        if line.class_id is not None:
+            name = f"{name} (class_id={line.class_id})"
+    x, y, w, h = line.box
+    return f"{name} @ ({x},{y}) {w}×{h}"
+
+
+def _display_label_for_line(line: OcrLine) -> str:
+    if _is_ui_object_line(line):
+        return _ui_object_label(line)
+    chinese_ids = _chinese_ids_for_text(line.text)
+    if chinese_ids:
+        non_icon = "".join(ch for ch in line.text if not is_pua_char(ch)).strip()
+        if non_icon:
+            return f"{', '.join(chinese_ids)} + {non_icon}"
+        return ", ".join(chinese_ids)
+    return line.text if line.text else "<empty>"
+
+
+def _is_icon_ocr_line(line: OcrLine) -> bool:
+    return line.line_type == "ocr" and text_has_pua(line.text)
+
+
+def _is_single_pua_icon_text(text: str) -> bool:
+    """True when ``text`` is a lone PUA glyph (exactly one icon, no other characters)."""
+    pua_chars = [ch for ch in text if is_pua_char(ch)]
+    non_pua = "".join(ch for ch in text if not is_pua_char(ch)).strip()
+    return len(pua_chars) == 1 and not non_pua
+
+
+def _export_dest_for_text(text: str) -> Path:
+    """Train export folder: single-icon PUA → ``icons``; pure text or mixed PUA+text → ``cua_data``."""
+    if _is_single_pua_icon_text(text):
+        return OCR_EXPORT_ICONS_DIR
+    return OCR_EXPORT_DEFAULT_DIR
 
 
 _STRING_LINE_RE = re.compile(r"^\[(\d+),(\d+),(\d+),(\d+)\]\s*(.*)$")
@@ -202,6 +275,16 @@ def _yolo_ocr_paired_images(run_dir: Path) -> list[Path]:
     return out
 
 
+def _box_outline_for_line(line: OcrLine, *, is_selected: bool) -> str:
+    if is_selected:
+        return "red"
+    if _is_ui_object_line(line):
+        return "orange"
+    if _is_icon_ocr_line(line):
+        return "cyan"
+    return "lime"
+
+
 def _draw_overlays(
     image: Image.Image,
     lines: list[OcrLine],
@@ -217,15 +300,25 @@ def _draw_overlays(
         x2, y2 = x + w, y + h
         is_selected = selected_idx is not None and idx == selected_idx
         if show_boxes:
-            outline = "red" if is_selected else "lime"
-            draw.rectangle([(x, y), (x2, y2)], outline=outline, width=1)
-        if show_labels and line.text:
-            text = line.text
+            outline = _box_outline_for_line(line, is_selected=is_selected)
+            width = 2 if is_selected or _is_ui_object_line(line) else 1
+            draw.rectangle([(x, y), (x2, y2)], outline=outline, width=width)
+        if show_labels:
+            text = _display_label_for_line(line)
+            if not text or text == "<empty>":
+                continue
             text_bbox = draw.textbbox((x, y), text, font=font)
             tx1, ty1, tx2, ty2 = text_bbox
             pad = 2
             draw.rectangle([(tx1 - pad, ty1 - pad), (tx2 + pad, ty2 + pad)], fill="black")
-            text_color = "red" if is_selected else "yellow"
+            if is_selected:
+                text_color = "red"
+            elif _is_ui_object_line(line):
+                text_color = "orange"
+            elif _is_icon_ocr_line(line):
+                text_color = "cyan"
+            else:
+                text_color = "yellow"
             draw.text((x, y), text, font=font, fill=text_color)
     return out
 
@@ -277,18 +370,6 @@ def _adjust_box_edge(
     return _clamp_box(x, y, w, h, img_w, img_h)
 
 
-def _ui_detections_to_ocr_lines(detections: list[UiDetection]) -> list[OcrLine]:
-    lines: list[OcrLine] = []
-    for det in detections:
-        x, y, w, h = det.bbox
-        text = (
-            f"{{class:'{det.class_name}', class_id:{det.class_id}, "
-            f"center:[{det.cx},{det.cy}], bbox:[{x},{y},{w},{h}]}}"
-        )
-        lines.append(OcrLine(box=(x, y, w, h), text=text))
-    return lines
-
-
 class OcrViewerApp:
     _MIN_ZOOM = 0.125
     _MAX_ZOOM = 32.0
@@ -323,6 +404,18 @@ class OcrViewerApp:
 
         self._build_ui()
         self._populate_runs()
+
+    def _all_display_lines(self) -> list[OcrLine]:
+        return self.current_lines
+
+    def _line_at_display_index(self, idx: int) -> OcrLine | None:
+        lines = self._all_display_lines()
+        if idx < 0 or idx >= len(lines):
+            return None
+        return lines[idx]
+
+    def _is_ocr_line_index(self, idx: int) -> bool:
+        return 0 <= idx < len(self.current_lines)
 
     def _build_ui(self) -> None:
         self.root.title("OCR Overlay Viewer")
@@ -390,13 +483,8 @@ class OcrViewerApp:
         ttk.Entry(controls, textvariable=self.yolo_conf_var, width=10).grid(
             row=4, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(6, 0)
         )
-        ttk.Button(
-            controls,
-            text="YOLO element objects (select_ui_element)",
-            command=self._run_select_ui_element_current_image,
-        ).grid(row=5, column=0, columnspan=4, sticky="ew", pady=(6, 0))
         ttk.Button(controls, text="Reset Zoom", command=self._reset_zoom).grid(
-            row=6, column=0, columnspan=4, sticky="ew", pady=(6, 0)
+            row=5, column=0, columnspan=4, sticky="ew", pady=(6, 0)
         )
 
         canvas_wrap = ttk.Frame(self.root, padding=8)
@@ -549,13 +637,14 @@ class OcrViewerApp:
             self._lmb_panning = False
 
     def _ocr_hit_index_at_canvas(self, event: tk.Event[tk.Canvas]) -> int | None:
-        if self.current_image is None or not self.current_lines:
+        lines = self._all_display_lines()
+        if self.current_image is None or not lines:
             return None
         canvas_x = self.canvas.canvasx(int(event.x))
         canvas_y = self.canvas.canvasy(int(event.y))
         img_x = int(canvas_x / max(self._render_scale, 1e-6))
         img_y = int(canvas_y / max(self._render_scale, 1e-6))
-        for idx, line in enumerate(self.current_lines):
+        for idx, line in enumerate(lines):
             x, y, w, h = line.box
             if x <= img_x <= x + w and y <= img_y <= y + h:
                 return idx
@@ -570,7 +659,12 @@ class OcrViewerApp:
         self.item_list.select_set(idx)
         self.item_list.see(idx)
         self._refresh_image()
-        self._open_item_edit_popup(idx)
+        if self._is_ocr_line_index(idx):
+            self._open_item_edit_popup(idx)
+            return
+        line = self._line_at_display_index(idx)
+        if line is not None and _is_ui_object_line(line):
+            self._open_ui_object_export_popup(idx)
 
     def _on_mmb_press(self, event: tk.Event[tk.Canvas]) -> None:
         self.canvas.scan_mark(int(event.x), int(event.y))
@@ -632,7 +726,7 @@ class OcrViewerApp:
 
     def _adjust_selected_box(self, direction: str, *, step: int) -> bool:
         idx = self.selected_line_idx
-        if idx is None or self.current_image is None or idx < 0 or idx >= len(self.current_lines):
+        if idx is None or self.current_image is None or not self._is_ocr_line_index(idx):
             return False
         img_w, img_h = self.current_image.size
         line = self.current_lines[idx]
@@ -647,7 +741,14 @@ class OcrViewerApp:
         )
         if new_box == line.box:
             return False
-        self.current_lines[idx] = OcrLine(box=new_box, text=line.text)
+        self.current_lines[idx] = OcrLine(
+            box=new_box,
+            text=line.text,
+            line_type=line.line_type,
+            class_name=line.class_name,
+            class_id=line.class_id,
+            chinese_ids=line.chinese_ids,
+        )
         self._refresh_image()
         mode = "Expand" if expand else "Shrink"
         x, y, w, h = new_box
@@ -673,9 +774,10 @@ class OcrViewerApp:
 
     def _populate_item_list(self) -> None:
         self.item_list.delete(0, tk.END)
-        for idx, line in enumerate(self.current_lines):
-            text = line.text if line.text else "<empty>"
-            self.item_list.insert(tk.END, f"{idx + 1:03d}: {text}")
+        for idx, line in enumerate(self._all_display_lines()):
+            prefix = "OCR" if line.line_type == "ocr" else "OBJ"
+            label = _display_label_for_line(line)
+            self.item_list.insert(tk.END, f"{prefix} {idx + 1:03d}: {label}")
 
     def _on_item_select(self, _event: object | None = None) -> None:
         selected = self.item_list.curselection()
@@ -691,16 +793,22 @@ class OcrViewerApp:
         if not selected:
             return
         idx = selected[0]
-        if idx < 0 or idx >= len(self.current_lines):
+        if self._line_at_display_index(idx) is None:
             return
         self.selected_line_idx = idx
         self._refresh_image()
-        self._open_item_edit_popup(idx)
+        line = self._line_at_display_index(idx)
+        if line is not None and _is_ui_object_line(line):
+            self._open_ui_object_export_popup(idx)
+        elif self._is_ocr_line_index(idx):
+            self._open_item_edit_popup(idx)
 
-    def _open_item_edit_popup(self, idx: int) -> None:
-        line = self.current_lines[idx]
+    def _open_item_edit_popup(self, display_idx: int) -> None:
+        if not self._is_ocr_line_index(display_idx):
+            return
+        line = self.current_lines[display_idx]
         dialog = tk.Toplevel(self.root)
-        dialog.title(f"Edit OCR Item #{idx + 1}")
+        dialog.title(f"Edit OCR Item #{display_idx + 1}")
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.columnconfigure(1, weight=1)
@@ -711,7 +819,7 @@ class OcrViewerApp:
         text_entry.grid(row=0, column=1, columnspan=2, sticky="ew", padx=10, pady=(10, 6))
 
         ttk.Label(dialog, text="Export folder").grid(row=1, column=0, sticky="w", padx=10, pady=(0, 6))
-        dest_var = tk.StringVar(value=str(OCR_EXPORT_DEFAULT_DIR))
+        dest_var = tk.StringVar(value=str(_export_dest_for_text(line.text)))
         dest_entry = ttk.Entry(dialog, textvariable=dest_var, width=72)
         dest_entry.grid(row=1, column=1, sticky="ew", padx=10, pady=(0, 6))
 
@@ -733,32 +841,49 @@ class OcrViewerApp:
 
         def _save_text() -> None:
             new_text = text_var.get().strip()
-            self.current_lines[idx] = OcrLine(box=line.box, text=new_text)
+            self.current_lines[display_idx] = OcrLine(
+                box=line.box,
+                text=new_text,
+                line_type=line.line_type,
+                class_name=line.class_name,
+                class_id=line.class_id,
+                chinese_ids=line.chinese_ids,
+            )
             self._populate_item_list()
             self.item_list.select_clear(0, tk.END)
-            self.item_list.select_set(idx)
-            self.item_list.see(idx)
-            self.selected_line_idx = idx
+            self.item_list.select_set(display_idx)
+            self.item_list.see(display_idx)
+            self.selected_line_idx = display_idx
             self._refresh_image()
-            self.status_var.set(f"Updated OCR text for item #{idx + 1}")
+            dest_var.set(str(_export_dest_for_text(new_text)))
+            self.status_var.set(f"Updated OCR text for item #{display_idx + 1}")
 
         def _export_current() -> None:
             _save_text()
+            corrected = text_var.get().strip()
+            if _is_single_pua_icon_text(corrected):
+                dest_dir = OCR_EXPORT_ICONS_DIR
+            else:
+                dest_dir = Path(dest_var.get().strip())
             try:
-                self._export_line_variants(idx, text_var.get().strip(), Path(dest_var.get().strip()))
+                n = self._export_display_item(display_idx, dest_dir, label_text=corrected)
             except Exception as exc:
                 self.status_var.set(f"Export failed: {type(exc).__name__}: {exc}")
                 return
-            self.status_var.set(f"Exported image + label for item #{idx + 1}")
+            kind = "image + label" if n > 1 else "image"
+            self.status_var.set(f"Exported {kind} for item #{display_idx + 1} → {dest_dir}")
 
         def _export_to_validate() -> None:
             _save_text()
             try:
-                self._export_line_variants(idx, text_var.get().strip(), OCR_VALIDATE_DIR)
+                n = self._export_display_item(
+                    display_idx, OCR_VALIDATE_DIR, label_text=text_var.get().strip()
+                )
             except Exception as exc:
                 self.status_var.set(f"Export to validate failed: {type(exc).__name__}: {exc}")
                 return
-            self.status_var.set(f"Exported image + label to validate for item #{idx + 1}")
+            kind = "image + label" if n > 1 else "image"
+            self.status_var.set(f"Exported {kind} to validate for item #{display_idx + 1}")
 
         ttk.Button(button_bar, text="Save Text", command=_save_text).grid(row=0, column=0, sticky="ew", padx=(0, 4))
         ttk.Button(button_bar, text="Export", command=_export_current).grid(row=0, column=1, sticky="ew", padx=4)
@@ -772,41 +897,107 @@ class OcrViewerApp:
         dialog.bind("<Return>", lambda _event: _save_text())
         dialog.bind("<Escape>", lambda _event: dialog.destroy())
 
-    def _export_line_variants(self, idx: int, corrected_text: str, dest_dir: Path) -> int:
+    def _open_ui_object_export_popup(self, display_idx: int) -> None:
+        line = self._line_at_display_index(display_idx)
+        if line is None or not _is_ui_object_line(line):
+            return
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Export UI Object #{display_idx + 1}")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.columnconfigure(1, weight=1)
+
+        ttk.Label(dialog, text="Object").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 6))
+        ttk.Label(dialog, text=_display_label_for_line(line), wraplength=520).grid(
+            row=0, column=1, columnspan=2, sticky="w", padx=10, pady=(10, 6)
+        )
+
+        ttk.Label(dialog, text="Export folder").grid(row=1, column=0, sticky="w", padx=10, pady=(0, 6))
+        dest_var = tk.StringVar(value=str(UI_EXPORT_DEFAULT_DIR))
+        dest_entry = ttk.Entry(dialog, textvariable=dest_var, width=72)
+        dest_entry.grid(row=1, column=1, sticky="ew", padx=10, pady=(0, 6))
+
+        def _browse_folder() -> None:
+            chosen = filedialog.askdirectory(initialdir=dest_var.get() or str(UI_EXPORT_DEFAULT_DIR))
+            if chosen:
+                dest_var.set(chosen)
+
+        ttk.Button(dialog, text="Browse...", command=_browse_folder).grid(
+            row=1, column=2, sticky="ew", padx=(0, 10), pady=(0, 6)
+        )
+
+        button_bar = ttk.Frame(dialog)
+        button_bar.grid(row=2, column=0, columnspan=3, sticky="ew", padx=10, pady=(2, 10))
+        button_bar.columnconfigure(0, weight=1)
+        button_bar.columnconfigure(1, weight=1)
+        button_bar.columnconfigure(2, weight=1)
+
+        def _export_current() -> None:
+            try:
+                dest_dir = Path(dest_var.get().strip())
+                self._export_display_item(display_idx, dest_dir, label_text=None)
+            except Exception as exc:
+                self.status_var.set(f"Export failed: {type(exc).__name__}: {exc}")
+                return
+            self.status_var.set(
+                f"Exported image (no label) for UI object #{display_idx + 1} → {dest_dir}"
+            )
+
+        ttk.Button(button_bar, text="Export", command=_export_current).grid(row=0, column=0, sticky="ew", padx=4)
+        ttk.Button(button_bar, text="Close", command=dialog.destroy).grid(row=0, column=1, sticky="ew", padx=4)
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+
+    def _export_display_item(
+        self,
+        display_idx: int,
+        dest_dir: Path,
+        *,
+        label_text: str | None,
+    ) -> int:
+        """Export one item crop. UI objects write ``.png`` only; OCR lines also write ``.txt``."""
         if self.current_image is None:
             raise ValueError("no image loaded")
-        if idx < 0 or idx >= len(self.current_lines):
-            raise ValueError("invalid OCR item index")
-        if not corrected_text:
+        line = self._line_at_display_index(display_idx)
+        if line is None:
+            raise ValueError("invalid item index")
+        write_txt = not _is_ui_object_line(line)
+        if write_txt and not (label_text or "").strip():
             raise ValueError("corrected text is empty")
         dest_dir.mkdir(parents=True, exist_ok=True)
         src = self._current_image_path()
         base_name = src.stem if src is not None else "image"
         img_w, img_h = self.current_image.size
-        x, y, w, h = self.current_lines[idx].box
+        x, y, w, h = line.box
         if w <= 0 or h <= 0:
-            raise ValueError("invalid OCR item box dimensions")
+            raise ValueError("invalid item box dimensions")
         crop_l = max(0, x)
         crop_t = max(0, y)
         crop_r = min(img_w, x + w)
         crop_b = min(img_h, y + h)
         if crop_r <= crop_l or crop_b <= crop_t:
-            raise ValueError("OCR box is outside image bounds")
+            raise ValueError("box is outside image bounds")
 
         crop = self.current_image.crop((crop_l, crop_t, crop_r, crop_b))
-        stem = f"{base_name}_item{idx + 1:03d}"
+        kind = "obj" if _is_ui_object_line(line) else "ocr"
+        stem = f"{base_name}_{kind}_item{display_idx + 1:03d}"
         out_img = dest_dir / f"{stem}.png"
-        out_txt = dest_dir / f"{stem}.txt"
         crop.save(out_img)
-        out_txt.write_text(corrected_text, encoding="utf-8")
+        if not write_txt:
+            return 1
+        out_txt = dest_dir / f"{stem}.txt"
+        out_txt.write_text(label_text or "", encoding="utf-8")
         return 2
+
+    def _export_line_variants(self, display_idx: int, corrected_text: str, dest_dir: Path) -> int:
+        """Backward-compatible wrapper for OCR export callers."""
+        return self._export_display_item(display_idx, dest_dir, label_text=corrected_text)
 
     def _refresh_image(self) -> None:
         if self.current_image is None:
             return
         rendered = _draw_overlays(
             self.current_image,
-            self.current_lines,
+            self._all_display_lines(),
             show_boxes=self.show_boxes.get(),
             show_labels=self.show_labels.get(),
             selected_idx=self.selected_line_idx,
@@ -874,45 +1065,20 @@ class OcrViewerApp:
         self.root.update_idletasks()
         t0 = time.perf_counter()
         try:
-            _offset, regions = get_text_regions_from_image_path(str(src), yolo_conf_threshold=conf)
+            regions = get_coordinates_from_image_path(str(src), yolo_conf_threshold=conf)
         except Exception as exc:
             self.status_var.set(f"YOLO text regions failed: {type(exc).__name__}: {exc}")
             return
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        lines = [OcrLine(box=tuple(int(v) for v in box), text="".join(str(p) for p in preds).strip()) for box, _center, preds in regions]
+        lines = [
+            OcrLine(box=tuple(int(v) for v in box), text="".join(str(p) for p in preds).strip())
+            for box, _center, preds in regions
+        ]
         self.current_lines = lines
         self.selected_line_idx = None
         self._populate_item_list()
         self._refresh_image()
         self.status_var.set(f"YOLO text regions: {len(lines)} regions in {elapsed_ms:.0f} ms")
-
-    def _run_select_ui_element_current_image(self) -> None:
-        src = self._current_image_path()
-        if src is None or not src.is_file():
-            self.status_var.set("No image selected for UI element YOLO")
-            return
-        conf, err = _parse_conf_0_to_1(self.yolo_conf_var.get())
-        if conf is None:
-            self.status_var.set(f"Invalid confidence: {err}")
-            return
-        self.status_var.set(f"Running UI element YOLO (select_ui_element, conf={conf:g})...")
-        self.root.update_idletasks()
-        t0 = time.perf_counter()
-        try:
-            bgr = cv2.imread(str(src))
-            if bgr is None:
-                raise ValueError(f"could not read image: {src}")
-            detections = _predict_ui_elements_raw(bgr, conf_threshold=conf)
-        except Exception as exc:
-            self.status_var.set(f"UI element YOLO failed: {type(exc).__name__}: {exc}")
-            return
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        lines = _ui_detections_to_ocr_lines(detections)
-        self.current_lines = lines
-        self.selected_line_idx = None
-        self._populate_item_list()
-        self._refresh_image()
-        self.status_var.set(f"UI element YOLO: {len(lines)} detections in {elapsed_ms:.0f} ms")
 
     def _copy_current_image_to_undone(self) -> None:
         src = self._current_image_path()
@@ -922,7 +1088,7 @@ class OcrViewerApp:
         dest_dir = SCREENSHOT_CREATOR_UNDONE_IMAGES
         try:
             dest_dir.mkdir(parents=True, exist_ok=True)
-            dest = dest_dir / src.name
+            dest = dest_dir / f"cua_{src.name}"
             shutil.copy2(src, dest)
             self.status_var.set(f"Copied to {dest}")
         except OSError as exc:

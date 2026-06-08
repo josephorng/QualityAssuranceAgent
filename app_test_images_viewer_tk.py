@@ -11,22 +11,26 @@ from pathlib import Path
 from tkinter import filedialog, ttk
 from typing import Any
 
-import cv2
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from app_ocr_viewer_tk import (
     BOX_EDIT_STEP,
     BOX_EDIT_STEP_SHIFT,
     OCR_EXPORT_DEFAULT_DIR,
+    OCR_EXPORT_ICONS_DIR,
     OCR_VALIDATE_DIR,
     OcrLine,
     _adjust_box_edge,
+    _box_outline_for_line,
+    _display_label_for_line,
+    _export_dest_for_text,
+    _is_icon_ocr_line,
+    _is_single_pua_icon_text,
     _parse_conf_0_to_1,
     load_ocr_lines,
     toggle_box_edit_mode,
 )
-from cua_mcp.select_text import get_text_regions_from_image_path
-from cua_mcp.select_ui_element import UiDetection, _predict_ui_elements_raw
+from cua_mcp.read_screen_text.ocr_image import get_coordinates_from_image_path
 from cua_mcp.yolo_onnx import DEFAULT_CONF_YOLOV26_END2END
 from src.common.io_utils import write_json
 from src.common.settings import ROOT_DIR
@@ -72,15 +76,22 @@ def _draw_overlays(
         x2, y2 = x + w, y + h
         is_selected = selected_idx is not None and idx == selected_idx
         if show_boxes:
-            outline = "red" if is_selected else "lime"
+            outline = _box_outline_for_line(line, is_selected=is_selected)
             draw.rectangle([(x, y), (x2, y2)], outline=outline, width=2 if is_selected else 1)
-        if show_labels and line.text:
-            text = line.text
+        if show_labels:
+            text = _display_label_for_line(line)
+            if not text or text == "<empty>":
+                continue
             text_bbox = draw.textbbox((x, y), text, font=overlay_font)
             tx1, ty1, tx2, ty2 = text_bbox
             pad = 3
             draw.rectangle([(tx1 - pad, ty1 - pad), (tx2 + pad, ty2 + pad)], fill="black")
-            text_color = "red" if is_selected else "yellow"
+            if is_selected:
+                text_color = "red"
+            elif _is_icon_ocr_line(line):
+                text_color = "cyan"
+            else:
+                text_color = "yellow"
             draw.text((x, y), text, font=overlay_font, fill=text_color)
     return out
 
@@ -107,18 +118,6 @@ def _regions_to_ocr_lines(
 
 def _boxes_to_ocr_lines(boxes: list[tuple[int, int, int, int]]) -> list[OcrLine]:
     return [OcrLine(box=tuple(int(v) for v in b), text="(text)") for b in boxes]
-
-
-def _ui_detections_to_ocr_lines(detections: list[UiDetection]) -> list[OcrLine]:
-    lines: list[OcrLine] = []
-    for det in detections:
-        x, y, w, h = det.bbox
-        obj_text = (
-            f"{{class:'{det.class_name}', class_id:{det.class_id}, "
-            f"center:[{det.cx},{det.cy}], bbox:[{x},{y},{w},{h}]}}"
-        )
-        lines.append(OcrLine(box=(x, y, w, h), text=obj_text))
-    return lines
 
 
 def _save_ocr_json(
@@ -268,13 +267,8 @@ class TestImagesViewerApp:
         ttk.Entry(controls, textvariable=self.yolo_conf_var, width=10).grid(
             row=4, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(6, 0)
         )
-        ttk.Button(
-            controls,
-            text="YOLO element objects (select_ui_element)",
-            command=self._run_yolo_element_objects,
-        ).grid(row=5, column=0, columnspan=4, sticky="ew", pady=(6, 0))
         ttk.Button(controls, text="Reset Zoom", command=self._reset_zoom).grid(
-            row=6, column=0, columnspan=4, sticky="ew", pady=(6, 0)
+            row=5, column=0, columnspan=4, sticky="ew", pady=(6, 0)
         )
 
         canvas_wrap = ttk.Frame(self.root, padding=8)
@@ -368,8 +362,8 @@ class TestImagesViewerApp:
     def _populate_item_list(self) -> None:
         self.item_list.delete(0, tk.END)
         for idx, line in enumerate(self.current_lines):
-            text = line.text if line.text else "<empty>"
-            self.item_list.insert(tk.END, f"{idx + 1:03d}: {text}")
+            label = _display_label_for_line(line)
+            self.item_list.insert(tk.END, f"{idx + 1:03d}: {label}")
 
     def _on_item_select(self, _event: object | None = None) -> None:
         selected = self.item_list.curselection()
@@ -410,7 +404,7 @@ class TestImagesViewerApp:
         ttk.Label(dialog, text="Export folder").grid(
             row=1, column=0, sticky="w", padx=dialog_pad, pady=(0, 8)
         )
-        dest_var = tk.StringVar(value=str(OCR_EXPORT_DEFAULT_DIR))
+        dest_var = tk.StringVar(value=str(_export_dest_for_text(line.text)))
         dest_entry = ttk.Entry(dialog, textvariable=dest_var, width=64)
         dest_entry.grid(row=1, column=1, sticky="ew", padx=dialog_pad, pady=(0, 8))
 
@@ -439,16 +433,22 @@ class TestImagesViewerApp:
             self.item_list.see(idx)
             self.selected_line_idx = idx
             self._refresh_image()
+            dest_var.set(str(_export_dest_for_text(new_text)))
             self.status_var.set(f"Updated OCR text for item #{idx + 1}")
 
         def _export_current() -> None:
             _save_text()
+            corrected = text_var.get().strip()
+            if _is_single_pua_icon_text(corrected):
+                dest_dir = OCR_EXPORT_ICONS_DIR
+            else:
+                dest_dir = Path(dest_var.get().strip())
             try:
-                self._export_line_variants(idx, text_var.get().strip(), Path(dest_var.get().strip()))
+                self._export_line_variants(idx, corrected, dest_dir)
             except Exception as exc:
                 self.status_var.set(f"Export failed: {type(exc).__name__}: {exc}")
                 return
-            self.status_var.set(f"Exported image + label for item #{idx + 1}")
+            self.status_var.set(f"Exported image + label for item #{idx + 1} → {dest_dir}")
 
         def _export_to_validate() -> None:
             _save_text()
@@ -520,7 +520,7 @@ class TestImagesViewerApp:
         self.root.update_idletasks()
         t0 = time.perf_counter()
         try:
-            _offset, regions = get_text_regions_from_image_path(str(src), yolo_conf_threshold=conf)
+            regions = get_coordinates_from_image_path(str(src), yolo_conf_threshold=conf)
         except Exception as exc:
             self.status_var.set(f"YOLO text regions failed: {type(exc).__name__}: {exc}")
             return
@@ -540,33 +540,6 @@ class TestImagesViewerApp:
         self._set_lines(
             lines,
             f"YOLO text regions: {len(lines)} regions in {elapsed_ms:.0f} ms{save_note}",
-        )
-
-    def _run_yolo_element_objects(self) -> None:
-        src = self._current_image_path()
-        if src is None or not src.is_file():
-            self.status_var.set("No image selected")
-            return
-        conf, err = _parse_conf_0_to_1(self.yolo_conf_var.get())
-        if conf is None:
-            self.status_var.set(f"Invalid confidence: {err}")
-            return
-        self.status_var.set(f"Running YOLO element objects (select_ui_element, conf={conf:g})…")
-        self.root.update_idletasks()
-        t0 = time.perf_counter()
-        try:
-            bgr = cv2.imread(str(src))
-            if bgr is None:
-                raise RuntimeError(f"failed to read image: {src.name}")
-            detections = _predict_ui_elements_raw(bgr, conf_threshold=conf)
-        except Exception as exc:
-            self.status_var.set(f"YOLO element objects failed: {type(exc).__name__}: {exc}")
-            return
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        lines = _ui_detections_to_ocr_lines(detections)
-        self._set_lines(
-            lines,
-            f"YOLO element objects: {len(lines)} detections in {elapsed_ms:.0f} ms",
         )
 
     def _refresh_image(self) -> None:

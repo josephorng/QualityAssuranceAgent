@@ -17,7 +17,7 @@ from cua_mcp.tool_module import (
     _left_mouse_up,
     _list_storage_files,
     _middle_click,
-    _move,
+    _move_to_text,
     _type_text,
     _press_key,
     _read_storage_text,
@@ -160,12 +160,13 @@ async def mouse_move(
 ):
     '''
     Move the mouse cursor based on the instruction.
+    instruction: the detailed instruction of the action
     target_type: "text" or "ui_element"
     target: the target text if the target_type is "text", leave it blank if the target_type is "ui_element"
     '''
     duration: float = 0.2
     if target_type == "text":
-        return (await _move(target=target_text, instruction=instruction, duration=duration)).update({"instruction": instruction})
+        return (await _move_to_text(target_text=target_text, instruction=instruction, duration=duration)).update({"instruction": instruction})
     elif target_type == "ui_element":
         return (await _move_to_ui_element(instruction=instruction, duration=duration)).update({"instruction": instruction})
     else:

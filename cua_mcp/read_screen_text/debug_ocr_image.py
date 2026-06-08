@@ -21,7 +21,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from cua_mcp.read_screen_text.ocr_image import (  # noqa: E402
     format_coordinate_text_from_regions,
-    get_coordinates_from_path,
+    get_coordinates_from_image_path,
     get_text_boxes_from_path,
 )
 
@@ -48,9 +48,8 @@ def main() -> int:
 
     print(f"image: {image_path}")
     t0 = time.perf_counter()
-    offset, regions = get_coordinates_from_path(str(image_path), line_height=args.line_height)
+    regions = get_coordinates_from_image_path(str(image_path), line_height=args.line_height)
     elapsed = time.perf_counter() - t0
-    print(f"offset: {offset}")
     print(f"regions: {len(regions)}")
     print(f"elapsed: {elapsed:.3f}s")
     print()

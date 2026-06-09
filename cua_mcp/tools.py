@@ -153,24 +153,47 @@ def key(
 
 
 @mcp_server.tool()
-async def mouse_move(
-    target_type: str,
+async def move_mouse_to_text(
     instruction: str,
     target_text: str = "",
 ):
     '''
-    Move the mouse cursor based on the instruction.
+    Move the mouse cursor to clickable text based on the instruction.
     instruction: the detailed instruction of the action
-    target_type: "text" or "ui_element"
-    target: the target text if the target_type is "text", leave it blank if the target_type is "ui_element"
+    target_text: the target text in Chinese
     '''
     duration: float = 0.2
-    if target_type == "text":
-        return (await _move_to_text(target_text=target_text, instruction=instruction, duration=duration)).update({"instruction": instruction})
-    elif target_type == "ui_element":
-        return (await _move_to_ui_element(instruction=instruction, duration=duration)).update({"instruction": instruction})
-    else:
-        raise ValueError(f"Invalid target type: {target_type}")
+    return (await _move_to_text(target_text=target_text, instruction=instruction, duration=duration)).update({"instruction": instruction})
+
+
+@mcp_server.tool()
+async def move_mouse_to_ui_element(
+    instruction: str,
+    need_text_anchor: bool,
+    ui_icon_description: str,
+    location_description: str,
+    target_text: str = "",
+    ui_shape_description: str = "",
+):
+    '''
+    Move the mouse cursor to a UI element (icon, button, toggle, avatar, gear, inputbox, etc.) based on the instruction.
+    instruction: the detailed instruction of the action
+    need_text_anchor: true when the target refers to visible words, labels, or on-screen text; false for mostly non-text visuals (icon, toggle, gear, unlabeled button)
+    ui_icon_description: the non-text control or visual to match (icon, button, toggle, avatar, gear, etc.); no leading verbs like click/tap
+    location_description: spatial hint for disambiguating candidates (regions, relative layout, ordinal position); empty string when no positional clue
+    target_text: the name of ui element in Chinese
+    ui_shape_description: optional short shape or size hint for the control; empty string when not useful
+    '''
+    duration: float = 0.2
+    return (await _move_to_ui_element(
+        instruction=instruction,
+        need_text_anchor=need_text_anchor,
+        ui_icon_description=ui_icon_description,
+        location_description=location_description,
+        ui_shape_description=ui_shape_description,
+        target_text=target_text,
+        duration=duration,
+    )).update({"instruction": instruction})
 
 
 @mcp_server.tool()
@@ -410,7 +433,8 @@ TOOL_FUNCTIONS: list[callable[..., Any]] = [
     store_clipboard_text,
     store_image,
     key,
-    mouse_move,
+    move_mouse_to_text,
+    move_mouse_to_ui_element,
     left_click_drag,
     right_click,
     cursor_position,

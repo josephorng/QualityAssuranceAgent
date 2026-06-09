@@ -76,6 +76,27 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "models": ["gemma4:e2b", "gemma3:4b"],
         }
     ],
+    "coordinate_disambiguation": [
+        {
+            "prompt": (
+                "The matched OCR text appears at multiple locations in the image.\n"
+                "Choose one center point (x, y) that best matches the Instruction.\n"
+                "(x, y) must be one of the candidate centers listed below — "
+                "same coordinate space as CoordinatesText (image pixels).\n"
+                '"text" must be the OCR line for the same choice: copy from after [cx,cy] '
+                "for the center you pick (verbatim when possible; OCR may have typos).\n\n"
+                "Instruction:\n{instruction}\n\n"
+                "Text matched in the first step:\n{chosen_text}\n\n"
+                "Candidate centers (pick exactly one):\n{options_lines}\n"
+            ),
+            "instructions": [
+                "OCR text might have typos and errors, so you need to be careful to match the text correctly.",
+                "Output NOTHING except valid JSON matching the server's schema.",
+                "Do not summarize, explain, or add prose.",
+            ],
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
     "ui_element_selection": [
         {
             "prompt": (
@@ -107,6 +128,20 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Return an empty list when no icon is relevant.",
                 "Do not use or infer coordinates.",
                 "Do not output prose.",
+            ],
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
+    "ui_text_filter": [
+        {
+            "prompt": (
+                "Select ONLY text candidates that match the user instruction.\n\n"
+                "Instruction:\n{instruction}\n\n"
+                "Candidates:\n{candidates_text}\n"
+            ),
+            "instructions": [
+                'Return JSON only: {{"keep_indices": [<int>, ...]}}.',
+                "Use indices from the Candidates list. Keep an empty list when none match.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
         }

@@ -37,7 +37,7 @@ BACKEND_PRESETS: dict[str, dict[str, str]] = {
     "ollama_server": {
         "llm_backend": "ollama_server",
         "brain_lm": "gemma4:26b",
-        "ollama_host": "http://192.168.4.134:8000",
+        "ollama_host": "http://192.168.13.8:11434",
         # "ollama_host": "http://192.168.13.101:11434",
     },
 }

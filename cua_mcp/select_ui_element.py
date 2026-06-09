@@ -9,6 +9,7 @@ disambiguates by location (and ``chinese_id`` hints in the candidate list).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -24,12 +25,18 @@ from cua_mcp.yolo_onnx import (
 from cua_mcp.geometry import clip_box, sort_by_reading_order
 from cua_mcp.icon_map import (
     describe_text_icons,
+    is_unknown_icon_record,
     text_has_pua,
     unknown_icon_record,
 )
 from cua_mcp.llm_json import parse_json_object
 from cua_mcp.selection_engine import request_json_with_retry
-from cua_mcp.select_text import _to_global_coordinate
+from cua_mcp.select_text import (
+    _normalize_match_key,
+    _sanitize_target_text,
+    _to_global_coordinate,
+    _to_simplified_chinese,
+)
 from cua_mcp.read_screen_text.ocr_image import get_coordinates_from_image_path
 from src.common.llm_factory import get_llm_client
 from src.common.prompting import get_prompt
@@ -279,6 +286,60 @@ def _icons_for_pua_text(text_value: str) -> list[dict[str, Any]]:
     return icons if icons else [unknown_icon_record()]
 
 
+def _detection_chinese_ids(detection: UiDetection) -> list[str]:
+    return [
+        str(icon.get("chinese_id", "")).strip()
+        for icon in (detection.icons or [])
+        if icon.get("chinese_id")
+    ]
+
+
+def _best_chinese_id_similarity_score(
+    target_candidates: list[str],
+    chinese_ids: list[str],
+) -> float:
+    if not target_candidates or not chinese_ids:
+        return 0.0
+    best = 0.0
+    for chinese_id in chinese_ids:
+        row_key = _normalize_match_key(_to_simplified_chinese(chinese_id))
+        if not row_key:
+            continue
+        for candidate in target_candidates:
+            cand_key = _normalize_match_key(_to_simplified_chinese(candidate))
+            if not cand_key:
+                continue
+            score = SequenceMatcher(None, cand_key, row_key).ratio()
+            if score > best:
+                best = score
+    return best
+
+
+def _filter_ui_detections_by_icon_name(
+    detections: list[UiDetection],
+    target_text: str,
+    *,
+    fallback_icon_text: str = "",
+) -> list[UiDetection]:
+    """
+    Keep detections whose icon ``chinese_id`` values best-match ``target_text``.
+
+    When no detection scores above zero, return the original list unchanged.
+    """
+    candidates = _sanitize_target_text(target_text)
+    if not candidates and fallback_icon_text:
+        candidates = _sanitize_target_text(fallback_icon_text)
+    if not candidates:
+        return detections
+
+    matched = [
+        d
+        for d in detections
+        if _best_chinese_id_similarity_score(candidates, _detection_chinese_ids(d)) > 0
+    ]
+    return matched if matched else detections
+
+
 def _ocr_regions_to_candidates(
     regions: list[_OcrRegion],
     *,
@@ -307,6 +368,9 @@ def _ocr_regions_to_candidates(
         cy = y + h // 2
 
         if text_has_pua(text_value):
+            icons = _icons_for_pua_text(text_value)
+            if not icons or all(is_unknown_icon_record(ii) for ii in icons):
+                continue
             ocr_icon_detections.append(
                 UiDetection(
                     bbox=bbox,
@@ -315,7 +379,7 @@ def _ocr_regions_to_candidates(
                     class_id=2,
                     class_name="ocr_icon",
                     text=text_value,
-                    icons=_icons_for_pua_text(text_value),
+                    icons=icons,
                 )
             )
             continue
@@ -422,12 +486,9 @@ async def _filter_text_detections(
         return []
 
     candidates_text = _format_text_candidates_text(text_detections)
-    prompt = (
-        "Select ONLY text candidates that match the user instruction.\n"
-        'Return JSON only: {"keep_indices": [<int>, ...]}.\n'
-        "Use indices from the Candidates list. Keep an empty list when none match.\n\n"
-        f"Instruction: {instruction}\n\n"
-        f"Candidates:\n{candidates_text}"
+    prompt = get_prompt("ui_text_filter").format(
+        instruction=instruction,
+        candidates_text=candidates_text,
     )
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
     try:
@@ -548,6 +609,11 @@ async def _select_center_with_ollama(
 async def resolve_ui_element_point(
     instruction: str,
     *,
+    need_text_anchor: bool | None = None,
+    ui_icon_description: str = "",
+    location_description: str = "",
+    ui_shape_description: str = "",
+    target_text: str = "",
     yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
 ) -> tuple[int, int, dict[str, Any]]:
     """
@@ -555,10 +621,16 @@ async def resolve_ui_element_point(
 
     Candidates are PUA ``ocr_icon`` regions; when the instruction needs a text anchor, matching
     non-PUA text regions are included. Disambiguation uses Ollama on location (and optional shape)
-    hints from :func:`_analyze_instruction`.
+    hints. When ``need_text_anchor`` is provided by the caller, :func:`_analyze_instruction` is
+    skipped.
 
     Args:
         instruction: Natural-language UI target (non-empty).
+        need_text_anchor: When set, use caller-provided analysis instead of Ollama.
+        ui_icon_description: Non-text control description from caller analysis.
+        location_description: Spatial disambiguation hint from caller analysis.
+        ui_shape_description: Optional shape hint from caller analysis.
+        target_text: Optional label to pre-filter icon candidates by ``chinese_id`` similarity.
         yolo_conf_threshold: Confidence threshold passed to :func:`get_coordinates_from_image_path`.
 
     Returns:
@@ -577,7 +649,16 @@ async def resolve_ui_element_point(
     capture_active_monitor_to_file(out)
     image_path = str(out.resolve())
 
-    need_text_anchor, _icon_desc, loc_desc, shape_desc = await _analyze_instruction(instruction_text)
+    if need_text_anchor is None:
+        need_text_anchor, icon_desc, loc_desc, shape_desc = await _analyze_instruction(
+            instruction_text
+        )
+        _log_info("_resolve_ui_element: instruction analysis from Ollama")
+    else:
+        icon_desc = (ui_icon_description or "").strip() or instruction_text
+        loc_desc = (location_description or "").strip()
+        shape_desc = (ui_shape_description or "").strip()
+        _log_info("_resolve_ui_element: instruction analysis from caller")
     _log_info(f"_resolve_ui_element: need_text_anchor={need_text_anchor}")
 
     regions = get_coordinates_from_image_path(
@@ -588,9 +669,18 @@ async def resolve_ui_element_point(
         regions,
         need_text_anchor=need_text_anchor,
     )
+    icon_candidate_count = len(ui_element_detections)
+    ui_element_detections = _filter_ui_detections_by_icon_name(
+        ui_element_detections,
+        target_text,
+        fallback_icon_text=icon_desc,
+    )
     _log_info(
         f"_resolve_ui_element: ocr_regions={len(regions)} "
-        f"pua_icon_candidates={len(ui_element_detections)} text_candidates={len(text_detections)}"
+        f"pua_icon_candidates={icon_candidate_count} "
+        f"icon_similarity_candidates={len(ui_element_detections)} "
+        f"text_candidates={len(text_detections)} "
+        f"target_text={target_text!r}"
     )
 
     if need_text_anchor:

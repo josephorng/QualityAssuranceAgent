@@ -309,11 +309,11 @@ async def _disambiguate_duplicate_centers(
         retry_instruction='Reply with ONLY: {"x": <integer>, "y": <integer>, "text": "<string>"} where x,y equals one candidate [cx,cy] above and "text" is that line\'s OCR text. No text before or after the JSON.',
         log_info=lambda m: _run_manager().log_info(f"_disambiguate_duplicate_centers: {m}"),
     )
-    
     for cx, cy, t in matches:
-        if (x, y) == (cx, cy):
+        if (x, y) == (cx, cy) and llm_text == t:
             return x, y, t
-        if llm_text == t:
+    for cx, cy, t in matches:
+        if (x, y) == (cx, cy) or llm_text == t:
             return cx, cy, t
     raise ValueError(
         f"disambiguation returned ({x},{y},{llm_text!r}) not in allowed {matches}"

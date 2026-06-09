@@ -63,6 +63,14 @@ def unknown_icon_record(*, pua: str = "") -> dict[str, Any]:
     }
 
 
+def is_unknown_icon_record(record: dict[str, Any]) -> bool:
+    """True when ``record`` came from an unmapped PUA codepoint."""
+    pua = record.get("pua")
+    if isinstance(pua, str) and pua and is_pua_char(pua):
+        return lookup_pua_icon(pua) is None
+    return str(record.get("chinese_id", "")) == _unknown_icon_map_entry()["chinese_id"]
+
+
 def lookup_pua_icon(char: str) -> dict[str, Any] | None:
     if not char:
         return None

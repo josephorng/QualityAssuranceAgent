@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from cua_mcp.icon_map import map_pua_in_text
 from cua_mcp.select_text import (
+    _best_row_by_llm_text_similarity,
     _matches_without_pua,
     _regions_with_mapped_pua,
     _strip_pua_from_text,
@@ -29,6 +30,15 @@ def test_regions_with_mapped_pua() -> None:
     mapped = _regions_with_mapped_pua(regions)
     assert mapped[0][2] == ["資料夾"]
     assert mapped[1][2] == ["OK"]
+
+
+def test_best_row_by_llm_text_similarity_prefers_containing_row() -> None:
+    matches = [
+        (1558, 1020, "麵無"),
+        (1978, 245, "空心方框 桌面"),
+        (2446, 200, "麵。有帳"),
+    ]
+    assert _best_row_by_llm_text_similarity("桌面", matches) == (1978, 245, "空心方框 桌面")
 
 
 def test_matches_without_pua_drops_empty_and_keeps_labels() -> None:

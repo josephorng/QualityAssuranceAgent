@@ -15,7 +15,7 @@ from tkinter import filedialog
 
 from main import dismiss_nuitka_onefile_splash, prepare_run_session, run_coordinator_sync
 from src.common.agent_settings_dialog import open_agent_settings_dialog
-from src.common.ctk_dialogs import show_ctk_message
+from src.common.ctk_dialogs import prompt_script_continue_or_end, show_ctk_message
 from src.common.io_utils import append_text, pop_last_nonempty_line, read_json, write_json
 from src.common.monitor_prompt import (
     PRIMARY_MONITOR_MARKER,
@@ -120,6 +120,7 @@ class MainHub(ctk.CTk):
 
         self._post_run_unlink: Path | None = None
         self._script_controls: list[Any] = []
+        self._last_run_was_script_mode = False
 
         self._build_header()
         self._build_monitor_row()
@@ -192,6 +193,17 @@ class MainHub(ctk.CTk):
 
     def _pop_last_runtime_command_from_cache(self) -> None:
         p = self._runtime_commands_cache_path
+        if p is None:
+            return
+        pop_last_nonempty_line(p)
+        self._script_text.configure(state="normal")
+        self._script_text.delete("0.0", "end")
+        if p.is_file():
+            self._script_text.insert("0.0", p.read_text(encoding="utf-8"))
+        self._script_text.configure(state="disabled")
+
+    def _pop_last_runtime_command_from_script_file(self) -> None:
+        p = self._script_path
         if p is None:
             return
         pop_last_nonempty_line(p)
@@ -512,13 +524,66 @@ class MainHub(ctk.CTk):
         if self._stop_cancel_remaining > 0:
             self.after(50, self._try_coordinator_cancel)
 
+    def _begin_worker_run(self, args: _WorkerArgs) -> None:
+        self._set_run_button_running()
+        self._settings_btn.configure(state="disabled")
+        for cb in self._monitor_checkboxes:
+            cb.configure(state="disabled")
+        self._monitor_refresh_btn.configure(state="disabled")
+        for w in self._script_controls:
+            w.configure(state="disabled")
+        self._status.configure(text="執行中…")
+        self._worker_thread = threading.Thread(target=self._worker_main, args=(args,), daemon=True)
+        self._worker_thread.start()
+        self.after(80, self._poll_worker_finished)
+        self.after_idle(self.iconify)
+
+    def _runtime_command_transcript_path(self) -> Path:
+        settings = load_settings()
+        runs_root = Path(settings.runs_dir)
+        runs_root.mkdir(parents=True, exist_ok=True)
+        return runs_root / _RUNTIME_COMMAND_TRANSCRIPT_NAME
+
+    def _start_runtime_after_script(self, eye_indices: list[int]) -> None:
+        """After a script run completes, enter runtime step mode and append to the open script or cache."""
+        if self._worker_thread and self._worker_thread.is_alive():
+            return
+        if self._script_path is not None:
+            transcript_path = self._script_path
+            on_undo = self._pop_last_runtime_command_from_script_file
+        else:
+            if self._runtime_commands_cache_path is None:
+                self._runtime_commands_cache_path = self._runtime_command_transcript_path()
+            transcript_path = self._runtime_commands_cache_path
+            on_undo = self._pop_last_runtime_command_from_cache
+
+        self._user_requested_stop = False
+        self._post_run_unlink = None
+        self._last_run_was_script_mode = False
+
+        def on_runtime_command(cmd: str) -> None:
+            append_text(transcript_path, cmd + "\n")
+            self._append_runtime_command_to_script_view(cmd)
+
+        self._bridge = RuntimeCommandHubBridge(
+            self,
+            on_runtime_command=on_runtime_command,
+            on_undo_last_runtime_command=on_undo,
+        )
+        self._bridge.start()
+        args = _WorkerArgs(
+            step_mode=True,
+            eye_monitor_indices=eye_indices,
+            script_raw="",
+            script_disk_path=None,
+        )
+        self._begin_worker_run(args)
+
     def _on_start_run(self) -> None:
         if self._worker_thread and self._worker_thread.is_alive():
             return
         self._user_requested_stop = False
         self._post_run_unlink = None
-        # Script file on disk (Open or Save as) → script mode; otherwise step-by-step (runtime commands).
-        step_mode = self._script_path is None
         eye_indices = self._selected_monitor_indices()
         if not eye_indices:
             show_ctk_message(
@@ -529,11 +594,27 @@ class MainHub(ctk.CTk):
             )
             return
 
-        if step_mode:
-            settings = load_settings()
-            runs_root = Path(settings.runs_dir)
-            runs_root.mkdir(parents=True, exist_ok=True)
-            cache_path = runs_root / _RUNTIME_COMMAND_TRANSCRIPT_NAME
+        raw = self._script_text.get("0.0", "end")
+        steps = parse_executable_lines_from_text(raw)
+
+        if steps:
+            # Opened script file, cache transcript, or typed commands → run as one script task.
+            if self._script_path is not None:
+                script_disk_path = self._script_path
+            else:
+                script_disk_path = self._runtime_commands_cache_path
+            self._last_run_was_script_mode = True
+            self._bridge = None
+            args = _WorkerArgs(
+                step_mode=False,
+                eye_monitor_indices=eye_indices,
+                script_raw=raw,
+                script_disk_path=script_disk_path,
+            )
+        else:
+            # Empty script box → interactive step-by-step runtime commands.
+            self._last_run_was_script_mode = False
+            cache_path = self._runtime_command_transcript_path()
             self._runtime_commands_cache_path = cache_path
             cache_path.write_text("", encoding="utf-8")
             self._script_text.configure(state="normal")
@@ -557,39 +638,8 @@ class MainHub(ctk.CTk):
                 on_undo_last_runtime_command=self._pop_last_runtime_command_from_cache,
             )
             self._bridge.start()
-        else:
-            raw = self._script_text.get("0.0", "end")
-            steps = parse_executable_lines_from_text(raw)
-            if not steps:
-                show_ctk_message(
-                    self,
-                    "執行",
-                    "腳本沒有可執行行數（為空或僅有 # 註解）。",
-                    kind="warning",
-                )
-                return
-            self._runtime_commands_cache_path = None
-            args = _WorkerArgs(
-                step_mode=False,
-                eye_monitor_indices=eye_indices,
-                script_raw=raw,
-                script_disk_path=self._script_path,
-            )
-            self._bridge = None
 
-        self._set_run_button_running()
-        self._settings_btn.configure(state="disabled")
-        for cb in self._monitor_checkboxes:
-            cb.configure(state="disabled")
-        self._monitor_refresh_btn.configure(state="disabled")
-        for w in self._script_controls:
-            w.configure(state="disabled")
-        self._status.configure(text="執行中…")
-
-        self._worker_thread = threading.Thread(target=self._worker_main, args=(args,), daemon=True)
-        self._worker_thread.start()
-        self.after(80, self._poll_worker_finished)
-        self.after_idle(self.iconify)
+        self._begin_worker_run(args)
 
     def _worker_main(self, args: _WorkerArgs) -> None:
         try:
@@ -665,6 +715,8 @@ class MainHub(ctk.CTk):
         user_stopped = self._user_requested_stop
         self._user_requested_stop = False
         kind, msg = self._worker_outcome
+        script_finished = self._last_run_was_script_mode and kind == "ok"
+        self._last_run_was_script_mode = False
         try:
             self.deiconify()
             self.lift()
@@ -682,16 +734,35 @@ class MainHub(ctk.CTk):
             self._status.configure(text=f"錯誤：{msg}")
         elif user_stopped:
             self._status.configure(text="執行已停止。")
+        elif script_finished:
+            pass
         elif kind == "ok_quiet" and msg.strip():
             self._status.configure(text=msg.strip())
         elif kind in ("ok", "ok_quiet"):
             self._status.configure(text="就緒")
         if user_stopped and kind != "err":
             return
+        if kind == "err":
+            show_ctk_message(self, "電腦使用代理", msg, kind="error")
+            return
+        if script_finished:
+            if prompt_script_continue_or_end(self, msg):
+                eye_indices = self._selected_monitor_indices()
+                if not eye_indices:
+                    show_ctk_message(
+                        self,
+                        "顯示器",
+                        "請至少選擇一台要截取的顯示器。",
+                        kind="warning",
+                    )
+                    self._status.configure(text=msg.strip() or "就緒")
+                    return
+                self._start_runtime_after_script(eye_indices)
+            else:
+                self._status.configure(text=msg.strip() or "就緒")
+            return
         if kind == "ok":
             show_ctk_message(self, "電腦使用代理", msg, kind="info")
-        elif kind == "err":
-            show_ctk_message(self, "電腦使用代理", msg, kind="error")
 
 
 def run_main_hub() -> None:

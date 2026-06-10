@@ -69,3 +69,69 @@ def show_ctk_message(
 
     root = master.winfo_toplevel()
     root.wait_window(dialog)
+
+
+def prompt_script_continue_or_end(master: Any, message: str) -> bool:
+    """Return True to keep adding runtime steps to the open script, False to end the session."""
+    import customtkinter as ctk
+
+    result = {"continue": False}
+
+    dialog = ctk.CTkToplevel(master)
+    dialog.title("電腦使用代理")
+    dialog.resizable(False, False)
+    dialog.attributes("-topmost", True)
+    dialog.after(120, lambda: dialog.attributes("-topmost", False))
+    try:
+        dialog.transient(master.winfo_toplevel())
+    except Exception:
+        pass
+
+    inner = ctk.CTkFrame(dialog, fg_color="transparent")
+    inner.pack(fill="both", expand=True, padx=22, pady=22)
+
+    body = message.strip()
+    if body:
+        body += "\n\n"
+    body += "要繼續逐步新增指令到目前腳本，還是結束此工作階段？"
+    ctk.CTkLabel(
+        master=inner,
+        text=body,
+        wraplength=420,
+        justify="left",
+        font=ctk.CTkFont(size=14),
+    ).pack(anchor="w", pady=(0, 18))
+
+    btn_row = ctk.CTkFrame(inner, fg_color="transparent")
+    btn_row.pack()
+
+    def on_continue() -> None:
+        result["continue"] = True
+        dialog.destroy()
+
+    def on_end() -> None:
+        result["continue"] = False
+        dialog.destroy()
+
+    dialog.protocol("WM_DELETE_WINDOW", on_end)
+
+    ctk.CTkButton(
+        master=btn_row, text="繼續新增", width=120, height=36, command=on_continue
+    ).pack(side="left", padx=(0, 10))
+    ctk.CTkButton(
+        master=btn_row, text="結束工作階段", width=120, height=36, command=on_end
+    ).pack(side="left")
+
+    try:
+        dialog.grab_set()
+    except Exception:
+        pass
+
+    dialog.update_idletasks()
+    w, h = dialog.winfo_reqwidth(), dialog.winfo_reqheight()
+    sw, sh = dialog.winfo_screenwidth(), dialog.winfo_screenheight()
+    dialog.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
+
+    root = master.winfo_toplevel()
+    root.wait_window(dialog)
+    return bool(result["continue"])

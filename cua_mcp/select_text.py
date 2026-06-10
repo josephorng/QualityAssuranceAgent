@@ -277,6 +277,30 @@ def _matches_without_pua(
     return filtered
 
 
+def _best_row_by_llm_text_similarity(
+    llm_text: str,
+    matches: list[tuple[int, int, str]],
+) -> tuple[int, int, str] | None:
+    """Return the allowed row whose OCR text best matches ``llm_text``."""
+    llm_key = _normalize_match_key(llm_text)
+    if not llm_key:
+        return None
+    best_row: tuple[int, int, str] | None = None
+    best_score = 0.0
+    for cx, cy, t in matches:
+        row_key = _normalize_match_key(t)
+        if not row_key:
+            continue
+        if llm_key in row_key or row_key in llm_key:
+            score = 1.0
+        else:
+            score = SequenceMatcher(None, llm_key, row_key).ratio()
+        if score > best_score:
+            best_score = score
+            best_row = (cx, cy, t)
+    return best_row if best_score > 0 else None
+
+
 async def _disambiguate_duplicate_centers(
     instruction: str,
     chosen_text: str,
@@ -311,9 +335,9 @@ async def _disambiguate_duplicate_centers(
     for cx, cy, t in matches:
         if (x, y) == (cx, cy) and llm_text == t:
             return x, y, t
-    for cx, cy, t in matches:
-        if (x, y) == (cx, cy) or llm_text == t:
-            return cx, cy, t
+    best = _best_row_by_llm_text_similarity(llm_text, matches)
+    if best is not None:
+        return best
     raise ValueError(
         f"disambiguation returned ({x},{y},{llm_text!r}) not in allowed {matches}"
     )

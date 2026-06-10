@@ -118,11 +118,9 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "用户指令：\n{instruction}\n"
             ),
             "instructions": [
-                '仅返回 JSON：{{"need_text_anchor": <true|false>, "ui_icon_description": "<string>", "location_description": "<string>", "ui_shape_description": "<string>"}}。',
+                '仅返回 JSON：{{"need_text_anchor": <true|false>, "location_description": "<string>"}}。',
                 "need_text_anchor：当指令涉及可见文字、标签或屏幕文本内容时设为 true（例如：点击「登录」、名为 X 的行、按标题选择）。当目标主要是非文本视觉元素（图标、开关、头像、齿轮、无标签按钮、面板）且无实质文本锚点时设为 false。",
-                "ui_icon_description：要匹配的非文本控件或视觉元素（图标、按钮、开关、头像、齿轮等）。不要以点击/轻触等动词开头。省略纯位置描述。",
                 "location_description：用于区分多个屏幕候选的详细空间描述：区域（上/下/左/右/中、角落）、相对布局（上方/下方/旁边/邻近）、序数（第一/最后一行）、与窗口边缘的距离、标题栏/页脚/工具栏/侧边栏（如有暗示）。将模糊提示展开为明确的位置语言。若无位置线索，使用空字符串。",
-                "ui_shape_description（可选）：目标控件的简短视觉形状、大小或外观（例如：小方形图标、宽圆角药丸形、高窄条、圆形头像、水平滑块）。未暗示或对消歧无用时使用空字符串。",
                 "不要臆造指令中未暗示的 UI。",
                 "不要在 JSON 对象之外输出 markdown 或说明文字。",
             ],

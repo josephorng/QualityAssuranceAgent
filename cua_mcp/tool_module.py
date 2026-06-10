@@ -58,20 +58,12 @@ async def _move_to_text(target_text: str, instruction: str, duration: float = 0.
 async def _move_to_ui_element(
     instruction: str,
     *,
-    need_text_anchor: bool | None = None,
-    ui_icon_description: str = "",
-    location_description: str = "",
-    ui_shape_description: str = "",
-    target_text: str = "",
+    ui_element_name: str = "",
     duration: float = 0.0,
 ) -> dict[str, Any]:
     gx, gy, meta = await resolve_ui_element_point(
         instruction,
-        target_text=target_text,
-        need_text_anchor=need_text_anchor,
-        ui_icon_description=ui_icon_description,
-        location_description=location_description,
-        ui_shape_description=ui_shape_description,
+        ui_element_name=ui_element_name,
     )
     result = hand_tools.move(x=gx, y=gy, duration=duration)
     merged: dict[str, Any] = dict(result)

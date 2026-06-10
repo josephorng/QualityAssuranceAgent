@@ -169,29 +169,17 @@ async def move_mouse_to_text(
 @mcp_server.tool()
 async def move_mouse_to_ui_element(
     instruction: str,
-    need_text_anchor: bool,
-    ui_icon_description: str,
-    location_description: str,
-    target_text: str = "",
-    ui_shape_description: str = "",
+    ui_element_name: str = "",
 ):
     '''
     Move the mouse cursor to a UI element (icon, button, toggle, avatar, gear, inputbox, etc.) based on the instruction.
     instruction: the detailed instruction of the action
-    need_text_anchor: true when the target refers to visible words, labels, or on-screen text; false for mostly non-text visuals (icon, toggle, gear, unlabeled button)
-    ui_icon_description: the non-text control or visual to match (icon, button, toggle, avatar, gear, etc.); no leading verbs like click/tap
-    location_description: spatial hint for disambiguating candidates (regions, relative layout, ordinal position); empty string when no positional clue
-    target_text: the name of ui element in Chinese
-    ui_shape_description: optional short shape or size hint for the control; empty string when not useful
+    ui_element_name: the name of ui element in Chinese
     '''
     duration: float = 0.2
     return (await _move_to_ui_element(
         instruction=instruction,
-        need_text_anchor=need_text_anchor,
-        ui_icon_description=ui_icon_description,
-        location_description=location_description,
-        ui_shape_description=ui_shape_description,
-        target_text=target_text,
+        ui_element_name=ui_element_name,
         duration=duration,
     )).update({"instruction": instruction})
 

@@ -25,7 +25,8 @@ from cua_mcp.yolo_onnx import (
     YOLO_CLASS_TEXT,
     run_yolo_onnx_end2end,
 )
-from src.eye.capture import capture_active_monitor_to_file
+from src.common.monitor_prompt import selected_eye_monitor_indices
+from src.eye.capture import active_monitor_offset, capture_monitor_to_file
 from .inference_onnx import TextPredictor
 from src.common.io_utils import write_json
 from src.common.run_state import get_run_state_manager, ts_name
@@ -261,8 +262,17 @@ def _ocr_crop_predicted_texts(
         return []
 
 
+OcrRegion = tuple[tuple[int, int, int, int], tuple[int, int], list[str]]
+
+
+def _offset_region(region: OcrRegion, left: int, top: int) -> OcrRegion:
+    """Shift a region's bbox and center into global desktop coordinates."""
+    (x, y, w, h), (cx, cy), preds = region
+    return ((x + left, y + top, w, h), (cx + left, cy + top), preds)
+
+
 def format_coordinate_text_from_regions(
-    regions: list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]],
+    regions: list[OcrRegion],
 ) -> str:
     """Build ``[cx,cy] text`` lines for the coordinate-picker LM (one line per region, reading order)."""
     lines: list[str] = []
@@ -387,23 +397,63 @@ def get_text_boxes_from_path(
     return boxes
 
 
+def get_coordinates_from_selected_monitors(
+    *,
+    line_height: int = 32,
+    ocr_model_path: Optional[str] = None,
+    yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
+) -> tuple[list[OcrRegion], list[str]]:
+    """
+    Capture each selected monitor, run YOLO + OCR per image, and merge regions in global coords.
+
+    Returns ``(merged_regions, image_paths)`` where centers and bboxes are in virtual-desktop
+    pixel space (suitable for pyautogui). When only one monitor is selected, behavior matches
+    single-monitor OCR with the appropriate desktop offset applied.
+    """
+    paths = get_run_state_manager().require_paths()
+    monitor_indices = selected_eye_monitor_indices()
+    stamp = ts_name()
+    merged_regions: list[OcrRegion] = []
+    image_paths: list[str] = []
+
+    _log_info(f"OCR get_coordinates_from_selected_monitors monitors={monitor_indices}")
+    for monitor_index in monitor_indices:
+        name = f"{stamp}_mon{monitor_index}.png"
+        out = paths.yolo_ocr_dir / name
+        capture_monitor_to_file(out, monitor_index)
+        image_path = str(out.resolve())
+        image_paths.append(image_path)
+
+        regions = get_coordinates_from_image_path(
+            image_path,
+            line_height=line_height,
+            ocr_model_path=ocr_model_path,
+            yolo_conf_threshold=yolo_conf_threshold,
+        )
+        left, top = active_monitor_offset(monitor_index)
+        merged_regions.extend(_offset_region(region, left, top) for region in regions)
+
+    merged_regions.sort(key=lambda item: (item[1][1], item[1][0]))
+    _log_info(
+        f"OCR get_coordinates_from_selected_monitors done monitors={len(monitor_indices)} "
+        f"regions={len(merged_regions)}"
+    )
+    return merged_regions, image_paths
+
+
 def get_coordinates(
     *,
     line_height: int = 32,
     crnn_model_path: Optional[str] = None,
-) -> list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]]:
+) -> list[OcrRegion]:
     """
-    Capture the active monitor to this run's ``yolo_ocr/`` folder, then run YOLO + ONNX CRNN OCR.
+    Capture selected monitor(s) to this run's ``yolo_ocr/`` folder, then run YOLO + ONNX CRNN OCR.
 
-    Writes ``<timestamp>.png`` and persists OCR JSON with the same basename beside it.
-    See :func:`get_coordinates_from_image_path` for per-region tuples.
+    Writes ``<timestamp>_mon<N>.png`` per monitor and persists OCR JSON beside each image.
+    See :func:`get_coordinates_from_image_path` for per-region tuples (local coords per image).
     """
-    paths = get_run_state_manager().require_paths()
-    name = f"{ts_name()}.png"
-    out = paths.yolo_ocr_dir / name
-    capture_active_monitor_to_file(out)
-    return get_coordinates_from_image_path(
-        str(out),
+    regions, _image_paths = get_coordinates_from_selected_monitors(
         line_height=line_height,
         ocr_model_path=crnn_model_path,
     )
+    return regions

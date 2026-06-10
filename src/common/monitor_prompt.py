@@ -171,3 +171,11 @@ def read_eye_monitor_indices_from_env() -> list[int] | None:
             continue
     return out or None
 
+
+def selected_eye_monitor_indices(default_single: int = 1) -> list[int]:
+    """Return all selected monitor indices, or a single-element list for legacy single-monitor mode."""
+    multi = read_eye_monitor_indices_from_env()
+    if multi:
+        return multi
+    return [read_eye_monitor_index_from_env(default_single)]
+

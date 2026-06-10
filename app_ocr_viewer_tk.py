@@ -18,8 +18,8 @@ from cua_mcp.yolo_onnx import DEFAULT_CONF_YOLOV26_END2END
 from src.common.io_utils import read_json, write_json
 from src.common.settings import ROOT_DIR
 
-SCREENSHOT_CREATOR_UNDONE_IMAGES = Path(
-    r"C:\Users\Joseph Hung\Documents\Repos\Git\ScreenshotCreator\real_screenshot\undone\images"
+YOLO_UNDONE_IMAGES = Path(
+    r"C:\Users\Joseph Hung\Documents\Repos\Git\YOLO\real_screenshot\undone\images"
 )
 OCR_EXPORT_DEFAULT_DIR = Path(
     r"C:\Users\Joseph Hung\Documents\Repos\Git\OCR\data\train\cua_data"
@@ -1085,7 +1085,7 @@ class OcrViewerApp:
         if src is None or not src.is_file():
             self.status_var.set("No image selected to copy")
             return
-        dest_dir = SCREENSHOT_CREATOR_UNDONE_IMAGES
+        dest_dir = YOLO_UNDONE_IMAGES
         try:
             dest_dir.mkdir(parents=True, exist_ok=True)
             dest = dest_dir / f"cua_{src.name}"

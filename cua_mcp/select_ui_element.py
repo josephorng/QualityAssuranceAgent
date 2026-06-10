@@ -34,15 +34,13 @@ from cua_mcp.selection_engine import request_json_with_retry
 from cua_mcp.select_text import (
     _normalize_match_key,
     _sanitize_target_text,
-    _to_global_coordinate,
     _to_simplified_chinese,
 )
-from cua_mcp.read_screen_text.ocr_image import get_coordinates_from_image_path
+from cua_mcp.read_screen_text.ocr_image import get_coordinates_from_selected_monitors
 from src.common.llm_factory import get_llm_client
 from src.common.prompting import get_prompt
-from src.common.run_state import RunStateManager, get_run_state_manager, ts_name
+from src.common.run_state import RunStateManager, get_run_state_manager
 from src.common.settings import load_settings
-from src.eye.capture import capture_active_monitor_to_file
 
 
 def _run_manager() -> RunStateManager:
@@ -59,11 +57,9 @@ _INSTRUCTION_ANALYSIS_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "need_text_anchor": {"type": "boolean"},
-        "ui_icon_description": {"type": "string"},
         "location_description": {"type": "string"},
-        "ui_shape_description": {"type": "string"},
     },
-    "required": ["need_text_anchor", "ui_icon_description", "location_description"],
+    "required": ["need_text_anchor", "location_description"],
 }
 _TEXT_FILTER_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -119,34 +115,24 @@ def _parse_index_from_llm(raw: str, num_candidates: int) -> int:
     return idx
 
 
-def _parse_instruction_analysis_from_llm(raw: str) -> tuple[bool, str, str, str]:
-    """Parse Ollama reply: text-anchor flag plus icon, location, and optional shape strings."""
+def _parse_instruction_analysis_from_llm(raw: str) -> tuple[bool, str]:
+    """Parse Ollama reply: text-anchor flag and location description."""
     out = parse_json_object(
         raw,
         empty_error=(
             "Ollama instruction analysis returned empty content; expected "
-            '{"need_text_anchor": bool, "ui_icon_description": str, "location_description": str, '
-            '"ui_shape_description": str (optional)}'
+            '{"need_text_anchor": bool, "location_description": str}'
         ),
         decode_error_prefix="invalid JSON",
     )
     preview = (raw or "")[:240]
-    if (
-        "need_text_anchor" not in out
-        or "ui_icon_description" not in out
-        or "location_description" not in out
-    ):
+    if "need_text_anchor" not in out or "location_description" not in out:
         raise ValueError(
-            f'must include "need_text_anchor", "ui_icon_description", and '
-            f'"location_description"; preview={preview!r}'
+            f'must include "need_text_anchor" and "location_description"; preview={preview!r}'
         )
     need = bool(out["need_text_anchor"])
-    icon = str(out["ui_icon_description"] or "").strip()
     loc = str(out["location_description"] or "").strip()
-    shape = str(out.get("ui_shape_description") or "").strip()
-    if not icon and not loc:
-        raise ValueError(f"both descriptions empty; preview={preview!r}")
-    return need, icon, loc, shape
+    return need, loc
 
 
 def _parse_keep_indices_from_llm(raw: str, max_len: int) -> list[int]:
@@ -317,16 +303,16 @@ def _best_chinese_id_similarity_score(
 
 def _filter_ui_detections_by_icon_name(
     detections: list[UiDetection],
-    target_text: str,
+    ui_element_name: str,
     *,
     fallback_icon_text: str = "",
 ) -> list[UiDetection]:
     """
-    Keep detections whose icon ``chinese_id`` values best-match ``target_text``.
+    Keep detections whose icon ``chinese_id`` values best-match ``ui_element_name``.
 
     When no detection scores above zero, return the original list unchanged.
     """
-    candidates = _sanitize_target_text(target_text)
+    candidates = _sanitize_target_text(ui_element_name)
     if not candidates and fallback_icon_text:
         candidates = _sanitize_target_text(fallback_icon_text)
     if not candidates:
@@ -342,8 +328,8 @@ def _filter_ui_detections_by_icon_name(
 
 def _ocr_regions_to_candidates(
     regions: list[_OcrRegion],
-    *,
-    need_text_anchor: bool,
+    # *,
+    # need_text_anchor: bool,
 ) -> tuple[list[UiDetection], list[UiDetection]]:
     """
     Convert OCR regions into picker candidates.
@@ -384,18 +370,18 @@ def _ocr_regions_to_candidates(
             )
             continue
 
-        if need_text_anchor:
-            text_detections.append(
-                UiDetection(
-                    bbox=bbox,
-                    cx=cx,
-                    cy=cy,
-                    class_id=0,
-                    class_name="text",
-                    text=text_value,
-                    icons=describe_text_icons(text_value),
-                )
+        # if need_text_anchor:
+        text_detections.append(
+            UiDetection(
+                bbox=bbox,
+                cx=cx,
+                cy=cy,
+                class_id=0,
+                class_name="text",
+                text=text_value,
+                icons=describe_text_icons(text_value),
             )
+        )
 
     return text_detections, ocr_icon_detections
 
@@ -415,12 +401,13 @@ def _format_text_candidates_text(detections: list[UiDetection]) -> str:
     lines: list[str] = []
     for i, d in enumerate(detections):
         text = f" text={d.text!r}" if d.text else ""
-        chinese_ids = ",".join(
-            ii.get("chinese_id", "") for ii in (d.icons or []) if ii.get("chinese_id")
-        )
-        icon_text = f" icons={chinese_ids}" if chinese_ids else ""
-        _bx, _by, bw, bh = d.bbox
-        lines.append(f"[index {i}] center=[{d.cx},{d.cy}] w={bw} h={bh}{text}{icon_text}")
+        # chinese_ids = ",".join(
+        #     ii.get("chinese_id", "") for ii in (d.icons or []) if ii.get("chinese_id")
+        # )
+        # icon_text = f" icons={chinese_ids}" if chinese_ids else ""
+        # _bx, _by, bw, bh = d.bbox
+        # lines.append(f"[index {i}] center=[{d.cx},{d.cy}] w={bw} h={bh}{text}{icon_text}")
+        lines.append(f"[index {i}] {text}")
     return "\n".join(lines)
 
 
@@ -438,43 +425,39 @@ def _format_ui_candidates_text(detections: list[UiDetection]) -> str:
     return "\n".join(lines)
 
 
-async def _analyze_instruction(instruction: str) -> tuple[bool, str, str, str]:
-    """Classify text-anchor need and split instruction for icon vs. location in one Ollama call.
+async def _analyze_instruction(instruction: str) -> tuple[bool, str]:
+    """Classify text-anchor need and extract location hint in one Ollama call.
 
-    Returns ``(need_text_anchor, ui_icon_description, location_description, ui_shape_description)``.
-    ``ui_shape_description`` may be empty when the model omits it or no shape hint applies.
+    Returns ``(need_text_anchor, location_description)``.
 
-    On parse failure after retry, or on transport errors, returns ``(True, text, text, "")``
+    On parse failure after retry, or on transport errors, returns ``(True, text)``
     so downstream steps still run (conservative text-anchor path, full instruction
-    for icon/location prompts).
+    for location prompts).
     """
     text = (instruction or "").strip()
     if not text:
-        return False, "", "", ""
+        return False, ""
 
     prompt = get_prompt("ui_instruction_icon_location_extract").replace("{instruction}", text)
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
     try:
-        need, icon_llm, loc_llm, shape_llm = await request_json_with_retry(
+        need, loc_llm = await request_json_with_retry(
             messages=messages,
             response_schema=_INSTRUCTION_ANALYSIS_JSON_SCHEMA,
             parse_reply=_parse_instruction_analysis_from_llm,
-            retry_instruction='Reply with ONLY: {"need_text_anchor": true|false, "ui_icon_description": "...", "location_description": "...", "ui_shape_description": "..."}. need_text_anchor: true for visible words/labels/on-screen text; false for mostly non-text targets (icon, toggle, gear, unlabeled control). location_description: detailed positional language for picking among candidates, or empty when there is no spatial clue. ui_shape_description: optional short shape/size hint for the control, or empty. No text before or after the JSON.',
+            retry_instruction='Reply with ONLY: {"need_text_anchor": true|false, "location_description": "..."}. need_text_anchor: true for visible words/labels/on-screen text; false for mostly non-text targets (icon, toggle, gear, unlabeled control). location_description: detailed positional language for picking among candidates, or empty when there is no spatial clue. No text before or after the JSON.',
             log_info=lambda m: _log_info(f"_need_text_anchors: {m}"),
         )
     except ValueError as retry_exc:
         _log_info(f"_need_text_anchors: fallback full instruction ({retry_exc})")
-        return True, text, text, ""
+        return True, text
     except Exception as exc:
         _log_info(
             f"_need_text_anchors: fallback full instruction ({type(exc).__name__}: {exc})"
         )
-        return True, text, text, ""
+        return True, text
 
-    icon_out = (icon_llm.strip() if icon_llm else "") or text
-    loc_out = loc_llm.strip()
-    shape_out = shape_llm.strip()
-    return need, icon_out, loc_out, shape_out
+    return need, loc_llm.strip()
 
 
 async def _filter_text_detections(
@@ -511,8 +494,7 @@ async def _filter_text_detections(
 async def _select_center_with_ollama(
     instruction: str,
     detections: list[UiDetection],
-    image_path: str,
-    ui_shape_description: str = "",
+    image_paths: list[str],
 ) -> int:
     """
     Ask Ollama for the best candidate index (0-based into ``detections``).
@@ -527,26 +509,23 @@ async def _select_center_with_ollama(
         instruction=instruction,
         candidates_text=candidates_text,
     )
-    screenshot_size_text = "unknown"
-    img = cv2.imread(image_path)
-    if img is not None:
-        img_h, img_w = img.shape[:2]
-        screenshot_size_text = f"{img_w}x{img_h}"
+    screenshot_sizes: list[str] = []
+    for image_path in image_paths:
+        img = cv2.imread(image_path)
+        if img is not None:
+            img_h, img_w = img.shape[:2]
+            screenshot_sizes.append(f"{img_w}x{img_h}")
+    screenshot_size_text = ", ".join(screenshot_sizes) if screenshot_sizes else "unknown"
     prompt = (
         f"{base_instructions}\n\n"
-        f"Screenshot size: {screenshot_size_text} (width x height pixels)."
+        f"Screenshot size(s): {screenshot_size_text} (width x height pixels per monitor)."
     )
-    shape_hint = (ui_shape_description or "").strip()
-    if shape_hint:
-        prompt += (
-            "\n\nTarget shape/size hint (from instruction analysis; use with location "
-            f"to pick the best-matching candidate bbox proportions):\n{shape_hint}"
-        )
 
     messages: list[dict[str, Any]] = [
         {
             "role": "user",
             "content": prompt,
+            "images": image_paths,
         },
     ]
     n = len(detections)
@@ -609,32 +588,23 @@ async def _select_center_with_ollama(
 async def resolve_ui_element_point(
     instruction: str,
     *,
-    need_text_anchor: bool | None = None,
-    ui_icon_description: str = "",
-    location_description: str = "",
-    ui_shape_description: str = "",
-    target_text: str = "",
+    ui_element_name: str = "",
     yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
 ) -> tuple[int, int, dict[str, Any]]:
     """
-    Capture the active monitor, build UI candidates from OCR, and return a global click point.
+    Capture selected monitor(s), build UI candidates from OCR, and return a global click point.
 
     Candidates are PUA ``ocr_icon`` regions; when the instruction needs a text anchor, matching
-    non-PUA text regions are included. Disambiguation uses Ollama on location (and optional shape)
-    hints. When ``need_text_anchor`` is provided by the caller, :func:`_analyze_instruction` is
-    skipped.
+    non-PUA text regions are included. Disambiguation uses Ollama on location hints from
+    :func:`_analyze_instruction`.
 
     Args:
         instruction: Natural-language UI target (non-empty).
-        need_text_anchor: When set, use caller-provided analysis instead of Ollama.
-        ui_icon_description: Non-text control description from caller analysis.
-        location_description: Spatial disambiguation hint from caller analysis.
-        ui_shape_description: Optional shape hint from caller analysis.
-        target_text: Optional label to pre-filter icon candidates by ``chinese_id`` similarity.
-        yolo_conf_threshold: Confidence threshold passed to :func:`get_coordinates_from_image_path`.
+        ui_element_name: Optional label to pre-filter icon candidates by ``chinese_id`` similarity.
+        yolo_conf_threshold: Confidence threshold passed to :func:`get_coordinates_from_selected_monitors`.
 
     Returns:
-        ``(global_x, global_y, metadata)`` with bbox, class, icons, and screenshot path.
+        ``(global_x, global_y, metadata)`` with bbox, class, icons, and screenshot path(s).
 
     Raises:
         ValueError: Empty instruction or no candidates after OCR/LLM filtering.
@@ -643,61 +613,35 @@ async def resolve_ui_element_point(
     if not instruction_text:
         raise ValueError("instruction must be non-empty")
 
-    paths = _run_manager().require_paths()
-    name = f"{ts_name()}.png"
-    out = paths.yolo_ocr_dir / name
-    capture_active_monitor_to_file(out)
-    image_path = str(out.resolve())
-
-    if need_text_anchor is None:
-        need_text_anchor, icon_desc, loc_desc, shape_desc = await _analyze_instruction(
-            instruction_text
-        )
-        _log_info("_resolve_ui_element: instruction analysis from Ollama")
-    else:
-        icon_desc = (ui_icon_description or "").strip() or instruction_text
-        loc_desc = (location_description or "").strip()
-        shape_desc = (ui_shape_description or "").strip()
-        _log_info("_resolve_ui_element: instruction analysis from caller")
-    _log_info(f"_resolve_ui_element: need_text_anchor={need_text_anchor}")
-
-    regions = get_coordinates_from_image_path(
-        image_path,
+    regions, image_paths = get_coordinates_from_selected_monitors(
         yolo_conf_threshold=yolo_conf_threshold,
     )
+    image_path = image_paths[0] if image_paths else ""
+
+    # need_text_anchor, loc_desc = await _analyze_instruction(instruction_text)
+    # _log_info(f"_resolve_ui_element: need_text_anchor={need_text_anchor}")
     text_detections, ui_element_detections = _ocr_regions_to_candidates(
         regions,
-        need_text_anchor=need_text_anchor,
+        # need_text_anchor=need_text_anchor,
     )
-    icon_candidate_count = len(ui_element_detections)
     ui_element_detections = _filter_ui_detections_by_icon_name(
         ui_element_detections,
-        target_text,
-        fallback_icon_text=icon_desc,
+        ui_element_name,
+        fallback_icon_text=instruction_text,
     )
+    text_detections = await _filter_text_detections(text_detections, instruction)
+    detections = _sort_detections_reading_order(ui_element_detections + text_detections)
     _log_info(
         f"_resolve_ui_element: ocr_regions={len(regions)} "
-        f"pua_icon_candidates={icon_candidate_count} "
         f"icon_similarity_candidates={len(ui_element_detections)} "
         f"text_candidates={len(text_detections)} "
-        f"target_text={target_text!r}"
+        f"ui_element_name={ui_element_name!r}"
     )
 
-    if need_text_anchor:
-        text_detections = await _filter_text_detections(text_detections, instruction)
-
-    detections = _sort_detections_reading_order(ui_element_detections + text_detections)
-
     if not detections:
-        if need_text_anchor:
-            raise ValueError(
-                "No matching text anchors or PUA icon regions for this instruction."
-            )
-        raise ValueError(
-            "No PUA icon regions detected on screen; icons must encode as PUA in OCR."
-        )
+        raise ValueError("No matching text anchors or PUA icon regions for this instruction.")
 
-    location_instruction = (loc_desc or "").strip() or instruction_text
+    # location_instruction = (loc_desc or "").strip() or instruction_text
 
     if len(detections) == 1:
         idx = 0
@@ -705,10 +649,9 @@ async def resolve_ui_element_point(
         _log_info("_resolve_ui_element: single candidate; skipping Ollama center pick")
     else:
         pool_idx = await _select_center_with_ollama(
-            location_instruction,
+            instruction_text,
             detections,
-            image_path,
-            ui_shape_description=shape_desc,
+            image_paths,
         )
         idx = pool_idx
         chosen = detections[pool_idx]
@@ -717,12 +660,12 @@ async def resolve_ui_element_point(
             f"(chosen center=[{chosen.cx},{chosen.cy}])"
         )
 
-    gx, gy = _to_global_coordinate(chosen.cx, chosen.cy)
     meta: dict[str, Any] = {
         "selected_index": idx,
         "class_name": chosen.class_name,
         "image_center": {"x": chosen.cx, "y": chosen.cy},
         "screenshot_path": image_path,
+        "screenshot_paths": image_paths,
         "target_kind": "ui_element",
         "target_text": chosen.text or "",
         "target_icons": chosen.icons or [],
@@ -733,4 +676,4 @@ async def resolve_ui_element_point(
             "h": chosen.bbox[3],
         },
     }
-    return gx, gy, meta
+    return chosen.cx, chosen.cy, meta

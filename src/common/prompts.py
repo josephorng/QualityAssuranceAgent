@@ -108,7 +108,6 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "instructions": [
                 'Reply only with JSON: {{"index": <integer>}} — the [index] from the chosen candidate row (0-based).',
                 "Never invent an index; only use an index shown in the Candidates list.",
-                "No extra text or explanation.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
         }
@@ -153,11 +152,9 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "User instruction:\n{instruction}\n"
             ),
             "instructions": [
-                'Return JSON only: {{"need_text_anchor": <true|false>, "ui_icon_description": "<string>", "location_description": "<string>", "ui_shape_description": "<string>"}}.',
+                'Return JSON only: {{"need_text_anchor": <true|false>, "location_description": "<string>"}}.',
                 "need_text_anchor: set true when the instruction refers to visible words, labels, or on-screen text content (for example: click 'Sign in', the row named X, select by caption). Set false when the target is mostly non-text visual (icon, toggle, avatar, gear, unlabeled button, panel) with no substantive text anchor.",
-                "ui_icon_description: the non-text control or visual to match (icon, button, toggle, avatar, gear, etc.). No leading verbs like click/tap. Omit pure location wording.",
                 "location_description: a detailed spatial description for disambiguating multiple on-screen candidates: regions (top/bottom/left/right/center, corners), relative layout (above/below/next to/beside), ordinal (first/last row), distance from window edges, header/footer/toolbar/sidebar when implied. Expand vague hints into explicit positional language. If there is no positional clue, use an empty string.",
-                "ui_shape_description (optional): short visual shape, size, or aspect of the target control (e.g. small square icon, wide rounded pill, tall narrow strip, circular avatar, horizontal slider). Use an empty string when not implied or not useful for disambiguation.",
                 "Do not invent UI that is not implied by the instruction.",
                 "Do not output markdown or prose outside the JSON object.",
             ],

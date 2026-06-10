@@ -11,16 +11,15 @@ except Exception:  # pragma: no cover - optional dependency
 
 from cua_mcp.read_screen_text.ocr_image import (
     format_coordinate_text_from_regions,
-    get_coordinates_from_image_path,
+    get_coordinates_from_selected_monitors,
 )
 from cua_mcp.icon_map import describe_text_icons, is_pua_char, map_pua_in_text
 from cua_mcp.llm_json import parse_json_object
 from cua_mcp.selection_engine import request_json_with_retry
 from cua_mcp.yolo_onnx import DEFAULT_CONF_YOLOV26_END2END
 from src.common.prompting import get_prompt
-from src.common.run_state import RunStateManager, get_run_state_manager, ts_name
+from src.common.run_state import RunStateManager, get_run_state_manager
 from src.eye import active_monitor_offset
-from src.eye.capture import capture_active_monitor_to_file
 
 
 def _run_manager() -> RunStateManager:
@@ -282,7 +281,7 @@ async def _disambiguate_duplicate_centers(
     instruction: str,
     chosen_text: str,
     matches: list[tuple[int, int, str]],
-    image_path: str,
+    image_paths: list[str],
 ) -> tuple[int, int, str]:
     """Second LLM round: pick one of several identical (or tier-equivalent) OCR locations."""
     matches = _matches_without_pua(matches)
@@ -300,7 +299,7 @@ async def _disambiguate_duplicate_centers(
         options_lines=options_lines,
     )
     messages: list[dict[str, Any]] = [
-        {"role": "user", "content": prompt_content, "images": [image_path]},
+        {"role": "user", "content": prompt_content, "images": image_paths},
     ]
     x, y, llm_text = await request_json_with_retry(
         messages=messages,
@@ -325,7 +324,7 @@ async def _select_text_coordinate_via_llm(
     target_text: str,
     regions: list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]],
     coordinate_and_texts: list[tuple[int, int, str]],
-    image_path: str,
+    image_paths: list[str],
 ) -> tuple[int, int]:
     """Ask the model to pick OCR text from CoordinatesText, then resolve to (cx, cy)."""
     coordinate_text = format_coordinate_text_from_regions(regions)
@@ -336,7 +335,7 @@ async def _select_text_coordinate_via_llm(
     )
 
     messages: list[dict[str, Any]] = [
-        {"role": "user", "content": base_instructions, "images": [image_path]},
+        {"role": "user", "content": base_instructions, "images": image_paths},
     ]
     chosen = await request_json_with_retry(
         messages=messages,
@@ -352,7 +351,7 @@ async def _select_text_coordinate_via_llm(
         return cx, cy
 
     cx, cy, _ = await _disambiguate_duplicate_centers(
-        instruction, chosen, matches, image_path
+        instruction, chosen, matches, image_paths
     )
     return cx, cy
 
@@ -361,12 +360,12 @@ async def _select_coordinate(
     target_text: str,
     instruction: str,
     regions: list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]],
-    screenshot_path: str | Path,
+    screenshot_paths: list[str | Path],
 ) -> tuple[int, int]:
-    path = Path(screenshot_path)
-    if not path.is_file():
-        raise FileNotFoundError(f"screenshot not found: {path}")
-    image_path = str(path.resolve())
+    image_paths = [str(Path(p).resolve()) for p in screenshot_paths]
+    for path in image_paths:
+        if not Path(path).is_file():
+            raise FileNotFoundError(f"screenshot not found: {path}")
     regions = _regions_with_mapped_pua(regions)
     coordinate_and_texts = _build_rows_text(regions)
     if not coordinate_and_texts:
@@ -382,9 +381,8 @@ async def _select_coordinate(
         )
         return cx, cy
     if len(similarity_matches) > 1:
-        image_path = str(path.resolve())
         x, y, dis_text = await _disambiguate_duplicate_centers(
-            instruction, target_text, similarity_matches, image_path
+            instruction, target_text, similarity_matches, image_paths
         )
         _run_manager().log_info(
             f"_select_coordinate: similarity pre-match disambiguated to ({x},{y}) {dis_text!r}"
@@ -392,7 +390,7 @@ async def _select_coordinate(
         return x, y
 
     return await _select_text_coordinate_via_llm(
-        instruction, target_text, regions, coordinate_and_texts, image_path
+        instruction, target_text, regions, coordinate_and_texts, image_paths
     )
 
 
@@ -431,20 +429,14 @@ async def resolve_text_point(
     *,
     yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
 ) -> tuple[int, int, str]:
-    paths = _run_manager().require_paths()
-    name = f"{ts_name()}.png"
-    out = paths.yolo_ocr_dir / name
-    capture_active_monitor_to_file(out)
-
-    regions = get_coordinates_from_image_path(
-        str(out), yolo_conf_threshold=yolo_conf_threshold
+    regions, image_paths = get_coordinates_from_selected_monitors(
+        yolo_conf_threshold=yolo_conf_threshold,
     )
-    local_x, local_y = await _select_coordinate(
+    global_x, global_y = await _select_coordinate(
         target_text=target_text,
         instruction=instruction,
         regions=regions,
-        screenshot_path=out,
+        screenshot_paths=image_paths,
     )
-    clicked_text = _get_clicked_text_at_image_point(local_x, local_y, regions)
-    gx, gy = _to_global_coordinate(local_x, local_y)
-    return gx, gy, clicked_text
+    clicked_text = _get_clicked_text_at_image_point(global_x, global_y, regions)
+    return global_x, global_y, clicked_text

@@ -1,963 +1,1048 @@
 {
-    "next_pua": 57547,
+    "next_pua": 57566,
     "": {
         "id": "folder_icon",
-        "description": "A simple, flat, gray folder silhouette with an open top.",
-        "chinese_id": "資料夾"
+        "chinese_id": "",
+        "description": "A simple, flat, gray folder silhouette with an open top."
     },
     "": {
         "id": "file_icon",
-        "description": "A solid, gray, rectangular silhouette of a document or file with a folded corner.",
-        "chinese_id": "檔案"
+        "chinese_id": "",
+        "description": "A solid, gray, rectangular silhouette of a document or file with a folded corner."
     },
     "": {
         "id": "chevron_pointing_down",
-        "description": "A simple, V-shaped chevron pointing downward.",
-        "chinese_id": "向下箭頭"
+        "chinese_id": "向下箭頭",
+        "description": "A simple, V-shaped chevron pointing downward."
     },
     "": {
         "id": "menu_icon",
-        "description": "Three horizontal, parallel, gray lines of equal length, stacked vertically.",
-        "chinese_id": "選單"
+        "chinese_id": "選單",
+        "description": "Three horizontal, parallel, gray lines of equal length, stacked vertically."
     },
     "": {
         "id": "calculator_icon",
-        "description": "A grid of buttons in a gray rectangular frame with a light blue top display area.",
-        "chinese_id": "計算機"
+        "chinese_id": "計算機",
+        "description": "A grid of buttons in a gray rectangular frame with a light blue top display area."
     },
     "": {
         "id": "chrome_icon",
-        "description": "Google Chrome icon with its characteristic red, yellow, and green segments around a blue circle.",
-        "chinese_id": "Chrome"
+        "chinese_id": "Chrome",
+        "description": "Google Chrome icon with its characteristic red, yellow, and green segments around a blue circle."
     },
     "": {
         "id": "docker_icon",
-        "description": "A white whale silhouette inside a blue circle.",
-        "chinese_id": "Docker"
+        "chinese_id": "Docker",
+        "description": "A white whale silhouette inside a blue circle."
     },
     "": {
         "id": "palette_icon",
-        "description": "A blue artist's palette with several colorful paint splotches and a brush handle visible.",
-        "chinese_id": "調色盤"
+        "chinese_id": "調色盤",
+        "description": "A blue artist's palette with several colorful paint splotches and a brush handle visible."
     },
     "": {
         "id": "firewall_icon",
-        "description": "A 3D-style brick wall with brown bricks and visible mortar, partially obscuring a blue and green globe. This represents a 3D walls or 3D walls functionality.",
-        "chinese_id": "防火牆"
+        "chinese_id": "防火牆",
+        "description": "A 3D-style brick wall with brown bricks and visible mortar, partially obscuring a blue and green globe. This represents a 3D walls or 3D walls functionality."
     },
     "": {
         "id": "terminal_prompt_icon",
-        "description": "A dark gray rectangular box containing a white right-pointing angle bracket and a white underscore/cursor symbol.",
-        "chinese_id": "終端機"
+        "chinese_id": "終端機",
+        "description": "A dark gray rectangular box containing a white right-pointing angle bracket and a white underscore/cursor symbol."
     },
     "": {
         "id": "telegram_icon",
-        "description": "A blue circular icon containing a white paper plane.",
-        "chinese_id": "Telegram"
+        "chinese_id": "Telegram",
+        "description": "A blue circular icon containing a white paper plane."
     },
     "": {
         "id": "briefcase_icon",
-        "description": "A white, rectangular silhouette of a briefcase with a handle and a latch, set against a yellow square background.",
-        "chinese_id": "公事包"
+        "chinese_id": "公事包",
+        "description": "A white, rectangular silhouette of a briefcase with a handle and a latch, set against a yellow square background."
     },
     "": {
         "id": "outlook_icon",
-        "description": "A blue icon with a white 'O' character inside a square, overlaid on a blue envelope silhouette.",
-        "chinese_id": "Outlook"
+        "chinese_id": "Outlook",
+        "description": "A blue icon with a white 'O' character inside a square, overlaid on a blue envelope silhouette."
     },
     "": {
         "id": "book_icon",
-        "description": "A book shape with a vertical dark brown stripe on the left side.",
-        "chinese_id": "書本"
+        "chinese_id": "",
+        "description": "A book shape with a vertical dark brown stripe on the left side."
     },
     "": {
         "id": "open_in_new_window",
-        "description": "An outline of a square or window shape with an arrow pointing diagonally outward to the upper right from its lower-left corner.",
-        "chinese_id": "新視窗開啟"
+        "chinese_id": "新視窗開啟",
+        "description": "An outline of a square or window shape with an arrow pointing diagonally outward to the upper right from its lower-left corner."
     },
     "": {
         "id": "horizontal_line",
-        "description": "A single horizontal line commonly used in desktop window management to represent the minimize action, as well as removal or subtraction in other context menus.",
-        "chinese_id": "水平線"
+        "chinese_id": "水平線",
+        "description": "A single horizontal line commonly used in desktop window management to represent the minimize action, as well as removal or subtraction in other context menus."
     },
     "": {
         "id": "python_terminal_shortcut",
-        "description": "A terminal window with a dark background and green text lines, overlaid in the foreground by the blue and yellow Python logo snakes.",
-        "chinese_id": "Python 終端機"
+        "chinese_id": "Python 終端機",
+        "description": "A terminal window with a dark background and green text lines, overlaid in the foreground by the blue and yellow Python logo snakes."
     },
     "": {
         "id": "line_messenger_app",
-        "description": "A green rounded square icon featuring a white speech bubble with the text 'LINE' written inside in a green, bold, sans-serif font.",
-        "chinese_id": "LINE"
+        "chinese_id": "LINE",
+        "description": "A green rounded square icon featuring a white speech bubble with the text 'LINE' written inside in a green, bold, sans-serif font."
     },
     "": {
         "id": "cursor_ai_editor",
-        "description": "A dark rounded square icon containing the Cursor AI code editor logo, which resembles a stylized, translucent grayscale 3D cube with highlighted white facets.",
-        "chinese_id": "Cursor 編輯器"
+        "chinese_id": "Cursor 編輯器",
+        "description": "A dark rounded square icon containing the Cursor AI code editor logo, which resembles a stylized, translucent grayscale 3D cube with highlighted white facets."
     },
     "": {
         "id": "microsoft_edge",
-        "description": "The Microsoft Edge browser logo, a stylized wave transitioning from blue to green",
-        "chinese_id": "Edge"
+        "chinese_id": "Edge",
+        "description": "The Microsoft Edge browser logo, a stylized wave transitioning from blue to green"
     },
     "": {
         "id": "microsoft_copilot",
-        "description": "A colorful, continuous stylized ribbon loop forming an open abstract shape with a vibrant gradient shifting through blue, green, yellow, orange, red, and purple.",
-        "chinese_id": "Copilot"
+        "chinese_id": "Copilot",
+        "description": "A colorful, continuous stylized ribbon loop forming an open abstract shape with a vibrant gradient shifting through blue, green, yellow, orange, red, and purple."
     },
     "": {
         "id": "microsoft_windows",
-        "description": "An icon consisting of four blue squares arranged in a two-by-two grid to resemble a window, with a slight gradient transitioning from lighter blue on the top-left to darker blue on the right.",
-        "chinese_id": "Windows"
+        "chinese_id": "Windows",
+        "description": "An icon consisting of four blue squares arranged in a two-by-two grid to resemble a window, with a slight gradient transitioning from lighter blue on the top-left to darker blue on the right."
     },
     "": {
         "id": "circular_shape",
-        "description": "A circle with a no discernible pattern or detail.",
-        "chinese_id": "圓形"
+        "chinese_id": "圓形",
+        "description": "A circle with a no discernible pattern or detail."
     },
     "": {
         "id": "magnifying_glass",
-        "description": "A simple line drawing of a magnifying glass with a circular lens and a short handle at a diagonal angle.",
-        "chinese_id": "搜尋"
+        "chinese_id": "搜尋",
+        "description": "A simple line drawing of a magnifying glass with a circular lens and a short handle at a diagonal angle."
     },
     "": {
         "id": "unknown_icon",
-        "description": "Unknown or unclear icon type.",
-        "chinese_id": "未知圖示"
+        "chinese_id": "",
+        "description": "Unknown or unclear icon type."
     },
     "": {
         "id": "inputbox_icon",
-        "description": "Input box related icon type.",
-        "chinese_id": "輸入框"
+        "chinese_id": "",
+        "description": "Input box related icon type."
     },
     "": {
         "id": "check_circle",
-        "description": "A circular icon containing a checkmark symbol in the center.",
-        "chinese_id": "勾選圓圈"
+        "chinese_id": "",
+        "description": "A circular icon containing a checkmark symbol in the center."
     },
     "": {
         "id": "dropdown_icon",
-        "description": "Dropdown related icon type.",
-        "chinese_id": "下拉選單"
+        "chinese_id": "",
+        "description": "Dropdown related icon type."
     },
     "": {
         "id": "copy_with_plus",
-        "description": "An icon depicting two overlapping document sheets outlined in gray, where the front sheet features a small plus sign centered on its face to denote copying or adding a duplicate.",
-        "chinese_id": "複製新增"
+        "chinese_id": "複製新增",
+        "description": "An icon depicting two overlapping document sheets outlined in gray, where the front sheet features a small plus sign centered on its face to denote copying or adding a duplicate."
     },
     "": {
-        "id": "up_arrow",
-        "description": "A simple, solid gray upward-pointing arrow with a vertical stem and a triangular head.",
-        "chinese_id": "向上箭頭"
+        "id": "arrow_up",
+        "chinese_id": "",
+        "description": "A simple, solid gray upward-pointing arrow with a vertical stem and a triangular head."
     },
     "": {
-        "id": "down_arrow",
-        "description": "A simple, dark gray arrow pointing downwards with a straight vertical line and a tip formed by two diagonal lines.",
-        "chinese_id": "向下箭頭"
+        "id": "arrow_down",
+        "chinese_id": "向下箭頭",
+        "description": "A simple, dark gray arrow pointing downwards with a straight vertical line and a tip formed by two diagonal lines."
     },
     "": {
         "id": "double_checkmark",
-        "description": "Two green checkmark symbols positioned side by side, both oriented diagonally upwards to the right.",
-        "chinese_id": "雙勾選"
+        "chinese_id": "雙勾選",
+        "description": "Two green checkmark symbols positioned side by side, both oriented diagonally upwards to the right."
     },
     "": {
         "id": "face_emoji",
-        "description": "A face expression.",
-        "chinese_id": "表情符號"
+        "chinese_id": "表情符號",
+        "description": "A face expression."
     },
     "": {
         "id": "download_icon",
-        "description": "A gray rounded square icon containing a white downward-pointing arrow and a horizontal line below it, representing a download action.",
-        "chinese_id": "下載"
+        "chinese_id": "下載",
+        "description": "A gray rounded square icon containing a white downward-pointing arrow and a horizontal line below it, representing a download action."
     },
     "": {
         "id": "bell_icon",
-        "description": "a bell silhouette inside a circle",
-        "chinese_id": "通知鈴鐺"
+        "chinese_id": "",
+        "description": "a bell silhouette inside a circle"
     },
     "": {
         "id": "volume_speaker_icon",
-        "description": "speaker silhouette with sound wave lines to the right",
-        "chinese_id": "音量"
+        "chinese_id": "音量",
+        "description": "speaker silhouette with sound wave lines to the right"
     },
     "": {
         "id": "duplicate_and_external_link",
-        "description": "Two overlapping square window silhouettes where the top-right window features an arrow pointing diagonally up and out to the right, signifying a combined action of duplication or opening in a new tab.",
-        "chinese_id": "複製外部連結"
+        "chinese_id": "複製外部連結",
+        "description": "Two overlapping square window silhouettes where the top-right window features an arrow pointing diagonally up and out to the right, signifying a combined action of duplication or opening in a new tab."
     },
     "": {
         "id": "shield_with_star",
-        "description": "shield shape with a star in the center",
-        "chinese_id": "星形盾牌"
+        "chinese_id": "星形盾牌",
+        "description": "shield shape with a star in the center"
     },
     "": {
         "id": "chevron_pointing_right",
-        "description": "A simple, V-shaped symbol pointing to the right, consisting of two diagonal lines meeting at a vertex on the right side.",
-        "chinese_id": "向右箭頭"
+        "chinese_id": "向右箭頭",
+        "description": "A simple, V-shaped symbol pointing to the right, consisting of two diagonal lines meeting at a vertex on the right side."
     },
     "": {
-        "id": "share_arrow_curved",
-        "description": "A thick, curved arrow pointing upward and to the right, commonly used to represent a share, forward, or redirect action.",
-        "chinese_id": "分享"
+        "id": "arrow_curved_up_right_share",
+        "chinese_id": "分享",
+        "description": "A thick, curved arrow pointing upward and to the right, commonly used to represent a share, forward, or redirect action."
     },
     "": {
         "id": "avatar_user_profile",
-        "description": "A circular user profile photo or avatar placeholder featuring a close-up portrait of a person with short dark hair and eyeglasses.",
-        "chinese_id": "使用者頭像"
+        "chinese_id": "使用者頭像",
+        "description": "A circular user profile photo or avatar placeholder featuring a close-up portrait of a person with short dark hair and eyeglasses."
     },
     "": {
         "id": "close_or_cancel_x",
-        "description": "A thick, prominent white letter X or cross symbol centered over a blurred window interface background, typically representing a close, cancel, or dismiss action.",
-        "chinese_id": "關閉"
+        "chinese_id": "",
+        "description": "A thick, prominent white letter X or cross symbol centered over a blurred window interface background, typically representing a close, cancel, or dismiss action."
     },
     "": {
         "id": "heart_icon",
-        "description": "heart shaped symbol",
-        "chinese_id": "愛心"
+        "chinese_id": "",
+        "description": "heart shaped symbol"
     },
     "": {
         "id": "scrollbar_icon",
-        "description": "Scrollbar related icon type.",
-        "chinese_id": "捲軸"
+        "chinese_id": "",
+        "description": "Scrollbar related icon type."
     },
     "": {
         "id": "downward_pointing_triangle",
-        "description": "A solid downward pointing triangle.",
-        "chinese_id": "向下三角"
+        "chinese_id": "向下三角",
+        "description": "A solid downward pointing triangle."
     },
     "": {
         "id": "trash_can",
-        "description": "A classic corrugated trash can silhouette featuring a horizontal lid with a top-center rectangular handle bar, used to represent a delete, discard, or bin action.",
-        "chinese_id": "垃圾桶"
+        "chinese_id": "垃圾桶",
+        "description": "A classic corrugated trash can silhouette featuring a horizontal lid with a top-center rectangular handle bar, used to represent a delete, discard, or bin action."
     },
     "": {
         "id": "paperclip_attachment",
-        "description": "The upper looped portion of a classic paperclip silhouette, angled diagonally, commonly used to denote a file attachment or link action.",
-        "chinese_id": "附件"
+        "chinese_id": "附件",
+        "description": "The upper looped portion of a classic paperclip silhouette, angled diagonally, commonly used to denote a file attachment or link action."
     },
     "": {
         "id": "check_mark",
-        "description": "a single check mark symbol",
-        "chinese_id": "勾選"
+        "chinese_id": "",
+        "description": "a single check mark symbol"
     },
     "": {
-        "id": "right_arrow",
-        "description": "An arrow pointing to the right.",
-        "chinese_id": "向右箭頭"
+        "id": "arrow_right",
+        "chinese_id": "向右箭頭",
+        "description": "An arrow pointing to the right."
     },
     "": {
         "id": "ribbon_badge",
-        "description": "circular_ribbon_badge_with_two_hanging_tails",
-        "chinese_id": "緞帶徽章"
+        "chinese_id": "緞帶徽章",
+        "description": "circular_ribbon_badge_with_two_hanging_tails"
     },
     "": {
         "id": "curved_arrow_upward",
-        "description": "curved arrow pointing upwards and to the right",
-        "chinese_id": "向上彎箭頭"
+        "chinese_id": "向上彎箭頭",
+        "description": "curved arrow pointing upwards and to the right"
     },
     "": {
         "id": "rightward_pointing_triangle",
-        "description": "A solid triangle pointing directly toward the right, featuring slightly softened edges and a pronounced glow effect.",
-        "chinese_id": "向右三角"
+        "chinese_id": "向右三角",
+        "description": "A solid triangle pointing directly toward the right, featuring slightly softened edges and a pronounced glow effect."
     },
     "": {
         "id": "artificial_intelligence_brain",
-        "description": "An outline of a human brain in image_41ae02.png, split vertically to show biological-style sulci or maze lines on the left half and digital circuit board traces with node points on the right half.",
-        "chinese_id": "人工智慧"
+        "chinese_id": "人工智慧",
+        "description": "An outline of a human brain in image_41ae02.png, split vertically to show biological-style sulci or maze lines on the left half and digital circuit board traces with node points on the right half."
     },
     "": {
         "id": "solid_circle_with_center_dot",
-        "description": "A solid circle with a white dot in the center",
-        "chinese_id": "實心圓點"
+        "chinese_id": "實心圓點",
+        "description": "A solid circle with a white dot in the center"
     },
     "": {
         "id": "empty_circle_outline",
-        "description": "thin outline of a circle",
-        "chinese_id": "空心圓圈"
+        "chinese_id": "空心圓圈",
+        "description": "thin outline of a circle"
     },
     "": {
         "id": "map_pin_marker",
-        "description": "teardrop-shaped icon with a circular cutout in the center, representing a location marker or map pin",
-        "chinese_id": "地圖標記"
+        "chinese_id": "地圖標記",
+        "description": "teardrop-shaped icon with a circular cutout in the center, representing a location marker or map pin"
     },
     "": {
         "id": "window_settings_gears",
-        "description": "An outline of an application window frame containing two interlocking gears or cogs positioned diagonally within the center of image_41a2dc.png.",
-        "chinese_id": "視窗設定"
+        "chinese_id": "視窗設定",
+        "description": "An outline of an application window frame containing two interlocking gears or cogs positioned diagonally within the center of image_41a2dc.png."
     },
     "": {
         "id": "text_input_cursor",
-        "description": "A square text container boundary with rounded corners, intersected on the right by a prominent vertical text insertion beam or I-bar cursor, representing writing or inline text generation.",
-        "chinese_id": "文字輸入游標"
+        "chinese_id": "文字輸入游標",
+        "description": "A square text container boundary with rounded corners, intersected on the right by a prominent vertical text insertion beam or I-bar cursor, representing writing or inline text generation."
     },
     "": {
         "id": "scissors_icon",
-        "description": "two crossed lines forming an X shape with two circles at the bottom ends",
-        "chinese_id": "剪刀"
+        "chinese_id": "剪刀",
+        "description": "two crossed lines forming an X shape with two circles at the bottom ends"
     },
     "": {
         "id": "copy_duplicate_sheets",
-        "description": "Two overlapping vertical rectangular silhouettes with rounded corners, stacked diagonally to represent a copy, duplicate, or multiple documents action.",
-        "chinese_id": "複製"
+        "chinese_id": "複製",
+        "description": "Two overlapping vertical rectangular silhouettes with rounded corners, stacked diagonally to represent a copy, duplicate, or multiple documents action."
     },
     "": {
-        "id": "refresh_clockwise_arrow",
-        "description": "An open circular line forming a nearly complete ring, ending with an arrowhead at the top-right that points clockwise, commonly used to denote a refresh, reload, or retry action.",
-        "chinese_id": "重新整理"
+        "id": "arrow_circular_refresh",
+        "chinese_id": "重新整理",
+        "description": "An open circular line forming a nearly complete ring, ending with an arrowhead at the top-right that points clockwise, commonly used to denote a refresh, reload, or retry action."
     },
     "": {
-        "id": "left_arrow",
-        "description": "An arrow pointing to the left, consisting of a horizontal line and a triangular head.",
-        "chinese_id": "向左箭頭"
+        "id": "arrow_left",
+        "chinese_id": "向左箭頭",
+        "description": "An arrow pointing to the left, consisting of a horizontal line and a triangular head."
     },
     "": {
         "id": "plus_symbol",
-        "description": "a cross shape formed by two intersecting perpendicular lines",
-        "chinese_id": "加號"
+        "chinese_id": "加號",
+        "description": "a cross shape formed by two intersecting perpendicular lines"
     },
     "": {
         "id": "horizontal_ellipsis_dots",
-        "description": "three horizontal dots arranged in a row",
-        "chinese_id": "更多選項"
+        "chinese_id": "更多選項",
+        "description": "three horizontal dots arranged in a row"
     },
     "": {
         "id": "word_document_file_icon",
-        "description": "A silhouette-stylesiliouette-stylesiliouette-stylesiliouette-styles_document_file_icon_with_a_letter_W",
-        "chinese_id": "Word 文件"
+        "chinese_id": "Word 文件",
+        "description": "A silhouette-stylesiliouette-stylesiliouette-stylesiliouette-styles_document_file_icon_with_a_letter_W"
     },
     "": {
         "id": "image_icon",
-        "description": "square shape with a mountain silhouette and a sun or moon circle inside",
-        "chinese_id": "圖片"
+        "chinese_id": "圖片",
+        "description": "square shape with a mountain silhouette and a sun or moon circle inside"
     },
     "": {
         "id": "home_icon",
-        "description": "a silhouette of a house with a peaked roof and a rectangular base",
-        "chinese_id": "首頁"
+        "chinese_id": "首頁",
+        "description": "a silhouette of a house with a peaked roof and a rectangular base"
     },
     "": {
         "id": "document_layout_preview",
-        "description": "A vertical sheet silhouette with a dog-eared or folded top-right corner, featuring horizontal text-line placeholders and a small square layout frame on the right side, representing a profile, resume, or document preview.",
-        "chinese_id": "文件版面預覽"
+        "chinese_id": "文件版面預覽",
+        "description": "A vertical sheet silhouette with a dog-eared or folded top-right corner, featuring horizontal text-line placeholders and a small square layout frame on the right side, representing a profile, resume, or document preview."
     },
     "": {
         "id": "cloud_storage",
-        "description": "A classic stylized cloud silhouette with multiple rounded puffs and a flat base, representing data synchronization, cloud computing, or online storage services.",
-        "chinese_id": "雲端儲存"
+        "chinese_id": "雲端儲存",
+        "description": "A classic stylized cloud silhouette with multiple rounded puffs and a flat base, representing data synchronization, cloud computing, or online storage services."
     },
     "": {
         "id": "pushpin_pin",
-        "description": "A silhouette of a classic pushpin or thumbtack, indicating a pin item, save shortcut, or fix position action.",
-        "chinese_id": "圖釘"
+        "chinese_id": "",
+        "description": "A silhouette of a classic pushpin or thumbtack, indicating a pin item, save shortcut, or fix position action."
     },
     "": {
         "id": "export_or_share_document",
-        "description": "A vertical sheet silhouette with rounded corners, featuring a large curved arrow centered inside that points outward, indicating an export, share, or forward action.",
-        "chinese_id": "匯出文件"
+        "chinese_id": "匯出文件",
+        "description": "A vertical sheet silhouette with rounded corners, featuring a large curved arrow centered inside that points outward, indicating an export, share, or forward action."
     },
     "": {
         "id": "arrows_up_down_sort",
-        "description": "Two linear vertical arrows placed side-by-side, where the left arrow points straight up and the right arrow points straight down, representing data synchronization, traffic transfer, or a sorting action.",
-        "chinese_id": "排序"
+        "chinese_id": "排序",
+        "description": "Two linear vertical arrows placed side-by-side, where the left arrow points straight up and the right arrow points straight down, representing data synchronization, traffic transfer, or a sorting action."
     },
     "": {
         "id": "chevron_pointing_up",
-        "description": "A linear, upward-pointing chevron angle, commonly used to represent collapsing/opening a drawer, hiding/showing a panel, or minimizing/maximizing a section.",
-        "chinese_id": "向上箭頭"
+        "chinese_id": "向上箭頭",
+        "description": "A linear, upward-pointing chevron angle, commonly used to represent collapsing/opening a drawer, hiding/showing a panel, or minimizing/maximizing a section."
     },
     "": {
         "id": "clipboard_paste",
-        "description": "An icon representing a paste action, showing a clipboard outline in the background.",
-        "chinese_id": "貼上"
+        "chinese_id": "貼上",
+        "description": "An icon representing a paste action, showing a clipboard outline in the background."
     },
     "": {
         "id": "smr",
-        "description": "SMR coorporation icon",
-        "chinese_id": "SMR"
+        "chinese_id": "SMR",
+        "description": "SMR coorporation icon"
     },
     "": {
         "id": "empty_square_outline_box",
-        "description": "A single, empty square with a thin border/outline/outline-only shape, might be a checkbox.",
-        "chinese_id": "空心方框"
+        "chinese_id": "空心方框",
+        "description": "A single, empty square with a thin border/outline/outline-only shape, might be a checkbox."
     },
     "": {
         "id": "cloud_upload_circle",
-        "description": "An outline of a cloud partially overlaid by a solid circular badge containing an upward-pointing arrow, indicating a cloud upload action.",
-        "chinese_id": "雲端上傳"
+        "chinese_id": "雲端上傳",
+        "description": "An outline of a cloud partially overlaid by a solid circular badge containing an upward-pointing arrow, indicating a cloud upload action."
     },
     "": {
         "id": "chevron_pointing_left",
-        "description": "A simple chevron or arrowhead pointing to the left, commonly used to indicate a back or previous page action.",
-        "chinese_id": "向左箭頭"
+        "chinese_id": "",
+        "description": "A simple chevron or arrowhead pointing to the left, commonly used to indicate a back or previous page action."
     },
     "": {
         "id": "key_silhouette",
-        "description": "silhouette of a traditional key with a round head and notched shaft",
-        "chinese_id": "金鑰"
+        "chinese_id": "金鑰",
+        "description": "silhouette of a traditional key with a round head and notched shaft"
     },
     "": {
         "id": "information_icon_circle",
-        "description": "a single lowercase 'i' centered within a thin outline of a circle",
-        "chinese_id": "資訊"
-    },
-    "": {
-        "id": "refresh_clockwise_arrows",
-        "description": "A solid circular badge containing two curved arrows forming a continuous clockwise loop, indicating a refresh, sync, or repeat action.",
-        "chinese_id": "重新整理"
+        "chinese_id": "資訊",
+        "description": "a single lowercase 'i' centered within a thin outline of a circle"
     },
     "": {
         "id": "chevron_double_pointing_up",
-        "description": "Two chevrons stacked vertically pointing upwards, typically representing a fast-scroll to top, expand all, or double-speed action.",
-        "chinese_id": "雙向上箭頭"
+        "chinese_id": "雙向上箭頭",
+        "description": "Two chevrons stacked vertically pointing upwards, typically representing a fast-scroll to top, expand all, or double-speed action."
     },
     "": {
         "id": "file_cpe_letters_cluster",
-        "description": "A document or file silhouette with a folded top-right corner, closely clustered with three large distinct letters: 'C', 'P', and 'E' arranged around its lower right side.",
-        "chinese_id": "CPE 檔案"
+        "chinese_id": "CPE 檔案",
+        "description": "A document or file silhouette with a folded top-right corner, closely clustered with three large distinct letters: 'C', 'P', and 'E' arranged around its lower right side."
     },
     "": {
         "id": "file_letters_cve",
-        "description": "A document or file silhouette with a folded top-right corner, closely clustered with three large distinct letters: 'C', 'V', and 'E' arranged around its lower right side.",
-        "chinese_id": "CVE 檔案"
+        "chinese_id": "CVE 檔案",
+        "description": "A document or file silhouette with a folded top-right corner, closely clustered with three large distinct letters: 'C', 'V', and 'E' arranged around its lower right side."
     },
     "": {
         "id": "file_edit_pencil",
-        "description": "A document silhouette with a folded corner and horizontal line details, overlaid diagonally by a large pencil, signifying an edit file or rename action.",
-        "chinese_id": "編輯檔案"
+        "chinese_id": "編輯檔案",
+        "description": "A document silhouette with a folded corner and horizontal line details, overlaid diagonally by a large pencil, signifying an edit file or rename action."
     },
     "": {
         "id": "truck_with_circular_chart",
-        "description": "A delivery or flatbed truck silhouette carrying a large circular element resembling a segmented chart, cog, or mechanical part with small trailing motion lines to the right.",
-        "chinese_id": "物流圖表"
+        "chinese_id": "物流圖表",
+        "description": "A delivery or flatbed truck silhouette carrying a large circular element resembling a segmented chart, cog, or mechanical part with small trailing motion lines to the right."
     },
     "": {
         "id": "gavel_and_sound_block",
-        "description": "A legal gavel silhouette positioned diagonally above a horizontal rectangular sound block, commonly representing law, justice, auctions, or rules.",
-        "chinese_id": "法槌"
+        "chinese_id": "法槌",
+        "description": "A legal gavel silhouette positioned diagonally above a horizontal rectangular sound block, commonly representing law, justice, auctions, or rules."
     },
     "": {
         "id": "files_stack_with_preview",
-        "description": "A stacked pair of document silhouettes, where the front document features a distinct highlighted rectangular preview area containing horizontal text or data rows.",
-        "chinese_id": "檔案堆疊"
+        "chinese_id": "檔案堆疊",
+        "description": "A stacked pair of document silhouettes, where the front document features a distinct highlighted rectangular preview area containing horizontal text or data rows."
     },
     "": {
         "id": "envelope_warning",
-        "description": "An envelope silhouette overlaid at the bottom-right corner with a triangular warning badge containing an exclamation mark, indicating an email error, alert, or spam warning.",
-        "chinese_id": "郵件警告"
+        "chinese_id": "郵件警告",
+        "description": "An envelope silhouette overlaid at the bottom-right corner with a triangular warning badge containing an exclamation mark, indicating an email error, alert, or spam warning."
     },
     "": {
         "id": "lock_closed_with_keyhole",
-        "description": "A solid, closed padlock silhouette with a square body and a U-shaped shackle, featuring a distinct centered keyhole detail on the body.",
-        "chinese_id": "鎖定"
+        "chinese_id": "",
+        "description": "A solid, closed padlock silhouette with a square body and a U-shaped shackle, featuring a distinct centered keyhole detail on the body."
     },
     "": {
         "id": "desktop_monitor",
-        "description": "A classic desktop computer monitor silhouette with a rectangular screen area and a small central stand base.",
-        "chinese_id": "螢幕"
+        "chinese_id": "",
+        "description": "A classic desktop computer monitor silhouette with a rectangular screen area and a small central stand base."
     },
     "": {
         "id": "speedometer_gauge_dial_metering_instrument",
-        "description": "circular_gauge_with_needle_and_scale_markings",
-        "chinese_id": "速度計"
+        "chinese_id": "速度計",
+        "description": "circular_gauge_with_needle_and_scale_markings"
     },
     "": {
         "id": "notebooks_stacked",
-        "description": "Two notebooks or documents stacked diagonally, with the front notebook showing a distinct top border or header bar and the rear notebook peeking out from behind the bottom right.",
-        "chinese_id": "筆記本堆疊"
+        "chinese_id": "筆記本堆疊",
+        "description": "Two notebooks or documents stacked diagonally, with the front notebook showing a distinct top border or header bar and the rear notebook peeking out from behind the bottom right."
     },
     "": {
         "id": "smr_wm7",
-        "description": "smr_wm7 product icon",
-        "chinese_id": "SMR WM7"
+        "chinese_id": "",
+        "description": "smr_wm7 product icon"
     },
     "": {
         "id": "tree_node_collapse",
-        "description": "A square icon outline with rounded corners, featuring a small centered minus sign or horizontal dash and an anchor point at the top edge, indicating a collapsible tree node structure.",
-        "chinese_id": "收合節點"
+        "chinese_id": "收合節點",
+        "description": "A square icon outline with rounded corners, featuring a small centered minus sign or horizontal dash and an anchor point at the top edge, indicating a collapsible tree node structure."
     },
     "": {
         "id": "square_edit_pencil",
-        "description": "A square icon featuring a thick outline of a pencil oriented diagonally from top-right to bottom-left, representing a compose or edit action.",
-        "chinese_id": "編輯方塊"
+        "chinese_id": "",
+        "description": "A square icon featuring a thick outline of a pencil oriented diagonally from top-right to bottom-left, representing a compose or edit action."
     },
     "": {
         "id": "upload_box_with_arrow",
-        "description": "A square/box shape with an upward-pointing arrow inside, representing an upload action.",
-        "chinese_id": "上傳"
+        "chinese_id": "上傳",
+        "description": "A square/box shape with an upward-pointing arrow inside, representing an upload action."
     },
     "": {
         "id": "lit_bomb_explosion",
-        "description": "A classic round, spherical cartoon bomb silhouette in an orange or golden hue, complete with a lit fuse at the top throwing off sparks or an explosion burst pattern.",
-        "chinese_id": "炸彈"
+        "chinese_id": "炸彈",
+        "description": "A classic round, spherical cartoon bomb silhouette in an orange or golden hue, complete with a lit fuse at the top throwing off sparks or an explosion burst pattern."
     },
     "": {
         "id": "file_shopping_cart",
-        "description": "A green document silhouette with a folded top corner, partially obscured in the foreground by a matching green shopping cart, representing a purchase order, invoice, or digital product checkout.",
-        "chinese_id": "購物車檔案"
+        "chinese_id": "購物車檔案",
+        "description": "A green document silhouette with a folded top corner, partially obscured in the foreground by a matching green shopping cart, representing a purchase order, invoice, or digital product checkout."
     },
     "": {
         "id": "leftward_pointing_triangle",
-        "description": "A triangle pointing to the left.",
-        "chinese_id": "向左三角"
+        "chinese_id": "向左三角",
+        "description": "A triangle pointing to the left."
     },
     "": {
         "id": "square_network_topology",
-        "description": "A green square icon featuring a tree-like network diagram with one desktop monitor at the top branching down to two desktop monitors below, representing a local network, server topology, or tree structure.",
-        "chinese_id": "網路拓樸"
+        "chinese_id": "網路拓樸",
+        "description": "A green square icon featuring a tree-like network diagram with one desktop monitor at the top branching down to two desktop monitors below, representing a local network, server topology, or tree structure."
     },
     "": {
         "id": "square_layout_dashboard",
-        "description": "A dark blue square icon featuring a white wireframe layout template: a full-width header bar at the top spanning over a narrow sidebar on the left and a larger main content area on the right, representing a dashboard or application interface layout.",
-        "chinese_id": "儀表板"
+        "chinese_id": "儀表板",
+        "description": "A dark blue square icon featuring a white wireframe layout template: a full-width header bar at the top spanning over a narrow sidebar on the left and a larger main content area on the right, representing a dashboard or application interface layout."
     },
     "": {
         "id": "square_sort_descending",
-        "description": "A green square icon featuring a downward-pointing arrow on the left next to a stack of horizontal text lines on the right, representing a descending sort, data arrangement, or download listing action.",
-        "chinese_id": "降序排序"
+        "chinese_id": "降序排序",
+        "description": "A green square icon featuring a downward-pointing arrow on the left next to a stack of horizontal text lines on the right, representing a descending sort, data arrangement, or download listing action."
     },
     "": {
         "id": "settings_gear",
-        "description": "An icon featuring a prominent white gear or cogwheel silhouette, representing system configurations, developer settings, or administrative utilities.",
-        "chinese_id": "設定"
+        "chinese_id": "設定",
+        "description": "An icon featuring a prominent white gear or cogwheel silhouette, representing system configurations, developer settings, or administrative utilities."
     },
     "": {
         "id": "broom_clear",
-        "description": "An icon featuring a thick white silhouette of a broom or cleaning brush, representing data clearing, system cleanup, or wiping settings.",
-        "chinese_id": "清除"
+        "chinese_id": "清除",
+        "description": "An icon featuring a thick white silhouette of a broom or cleaning brush, representing data clearing, system cleanup, or wiping settings."
     },
     "": {
         "id": "import_monitor",
-        "description": "An icon featuring a desktop monitor silhouette with an arrow pointing diagonally downward and inward toward the center of the screen, representing an import data or receive-to-display action.",
-        "chinese_id": "匯入螢幕"
+        "chinese_id": "匯入螢幕",
+        "description": "An icon featuring a desktop monitor silhouette with an arrow pointing diagonally downward and inward toward the center of the screen, representing an import data or receive-to-display action."
     },
     "": {
         "id": "chevron_double_pointing_down",
-        "description": "Two bold black chevrons stacked vertically pointing downwards, typically representing a fast-scroll to bottom, collapse all, or dropdown expansion action.",
-        "chinese_id": "雙向下箭頭"
+        "chinese_id": "雙向下箭頭",
+        "description": "Two bold black chevrons stacked vertically pointing downwards, typically representing a fast-scroll to bottom, collapse all, or dropdown expansion action."
     },
     "": {
         "id": "overlapping_lists",
-        "description": "An icon consisting of two overlapping list interfaces or stacked menu views, representing multiple lists, data sets, or categorized items.",
-        "chinese_id": "重疊清單"
+        "chinese_id": "重疊清單",
+        "description": "An icon consisting of two overlapping list interfaces or stacked menu views, representing multiple lists, data sets, or categorized items."
     },
     "": {
         "id": "filter_funnel",
-        "description": "An outline of a funnel symbol, representing data filtering, sorting, or refinement operations.",
-        "chinese_id": "篩選"
+        "chinese_id": "篩選",
+        "description": "An outline of a funnel symbol, representing data filtering, sorting, or refinement operations."
     },
     "": {
         "id": "desktop_monitor_with_linux_penguin",
-        "description": "An outline of a desktop computer monitor containing the silhouette of the Linux penguin (Tux) centered inside brackets, representing a Linux system, server console, or open-source software environment.",
-        "chinese_id": "Linux 電腦"
+        "chinese_id": "Linux 電腦",
+        "description": "An outline of a desktop computer monitor containing the silhouette of the Linux penguin (Tux) centered inside brackets, representing a Linux system, server console, or open-source software environment."
     },
     "": {
         "id": "mouse_pointer_arrow",
-        "description": "An outline of a classic pixelated mouse cursor arrow pointing up and to the left, representing selection, navigation, or a default pointer state.",
-        "chinese_id": "滑鼠指標"
+        "chinese_id": "滑鼠指標",
+        "description": "An outline of a classic pixelated mouse cursor arrow pointing up and to the left, representing selection, navigation, or a default pointer state."
     },
     "": {
         "id": "cloud_with_notification_badge",
-        "description": "A silhouette of a cloud with a circular notification badge overlapping the upper right corner, containing a digit to indicate pending updates, alerts, or sync items.",
-        "chinese_id": "雲端通知"
+        "chinese_id": "雲端通知",
+        "description": "A silhouette of a cloud with a circular notification badge overlapping the upper right corner, containing a digit to indicate pending updates, alerts, or sync items."
     },
     "": {
         "id": "desktop_monitor_with_plug_cable",
-        "description": "An outline of a desktop computer monitor with a hardware plug or cable connector overlapping the right side, representing display connectivity, peripheral connection, or hardware settings.",
-        "chinese_id": "已連線螢幕"
+        "chinese_id": "已連線螢幕",
+        "description": "An outline of a desktop computer monitor with a hardware plug or cable connector overlapping the right side, representing display connectivity, peripheral connection, or hardware settings."
     },
     "": {
         "id": "document_hierarchy_tree",
-        "description": "An icon representing a file organization hierarchy, showing a single parent document at the top branching down via connection lines to three distinct child documents arranged horizontally beneath it.",
-        "chinese_id": "文件樹狀結構"
+        "chinese_id": "文件樹狀結構",
+        "description": "An icon representing a file organization hierarchy, showing a single parent document at the top branching down via connection lines to three distinct child documents arranged horizontally beneath it."
     },
     "": {
         "id": "concentric_circle_with_inner_gear",
-        "description": "An icon consisting of a large outer circle enclosing a smaller, multi-toothed gear symbol at its exact center, representing a system process, automated setting, or technical core function.",
-        "chinese_id": "設定圓圈"
+        "chinese_id": "設定圓圈",
+        "description": "An icon consisting of a large outer circle enclosing a smaller, multi-toothed gear symbol at its exact center, representing a system process, automated setting, or technical core function."
     },
     "": {
         "id": "usb_flash_drive",
-        "description": "An icon of a USB flash drive, showing a rectangular body with a standard USB Type-A metal connector at the top, representing external storage, file transfer, or hardware keys.",
-        "chinese_id": "隨身碟"
+        "chinese_id": "隨身碟",
+        "description": "An icon of a USB flash drive, showing a rectangular body with a standard USB Type-A metal connector at the top, representing external storage, file transfer, or hardware keys."
     },
     "": {
         "id": "overlapping_monitor_and_window_with_clock",
-        "description": "An icon depicting a layout with a background window frame, a computer monitor as the middle layer, and a circular clock badge positioned in the foreground at the bottom right corner, representing system scheduling, screen time, or display history.",
-        "chinese_id": "排程視窗"
+        "chinese_id": "排程視窗",
+        "description": "An icon depicting a layout with a background window frame, a computer monitor as the middle layer, and a circular clock badge positioned in the foreground at the bottom right corner, representing system scheduling, screen time, or display history."
     },
     "": {
         "id": "shield_with_gcb_text",
-        "description": "An icon featuring a prominent shield shape containing the text characters 'GCB' arranged inside it, flanked on the right side by a vertical column of indicators.",
-        "chinese_id": "GCB 盾牌"
+        "chinese_id": "GCB 盾牌",
+        "description": "An icon featuring a prominent shield shape containing the text characters 'GCB' arranged inside it, flanked on the right side by a vertical column of indicators."
     },
     "": {
         "id": "overlapping_curled_documents",
-        "description": "An icon showing two stacked, overlapping text documents, where each sheet has a distinct curled scroll effect along its edges, representing multiple text files, logs, or reports.",
-        "chinese_id": "重疊文件"
+        "chinese_id": "重疊文件",
+        "description": "An icon showing two stacked, overlapping text documents, where each sheet has a distinct curled scroll effect along its edges, representing multiple text files, logs, or reports."
     },
     "": {
         "id": "linux_penguin_tux",
-        "description": "The classic Linux mascot penguin (Tux) sitting down with a white belly, black back and wings, and yellow beak and feet, representing the Linux operating system or open-source software.",
-        "chinese_id": "Linux"
+        "chinese_id": "Linux",
+        "description": "The classic Linux mascot penguin (Tux) sitting down with a white belly, black back and wings, and yellow beak and feet, representing the Linux operating system or open-source software."
     },
     "": {
         "id": "downward_arrow_with_list_lines",
-        "description": "An icon inside a square background featuring a prominent downward-pointing arrow on the left, positioned alongside several horizontal text or list lines on the right, representing sorting in descending order, importing a list, or downloading a document.",
-        "chinese_id": "展開清單"
+        "chinese_id": "展開清單",
+        "description": "An icon inside a square background featuring a prominent downward-pointing arrow on the left, positioned alongside several horizontal text or list lines on the right, representing sorting in descending order, importing a list, or downloading a document."
     },
     "": {
         "id": "computer_monitor_with_person_profile",
-        "description": "An icon featuring a silhouette of a person profile juxtaposed with a computer monitor, representing a user account, online profile, or video call interface.",
-        "chinese_id": "使用者電腦"
+        "chinese_id": "使用者電腦",
+        "description": "An icon featuring a silhouette of a person profile juxtaposed with a computer monitor, representing a user account, online profile, or video call interface."
     },
     "": {
         "id": "tree_node_expand",
-        "description": "An icon of a rounded square button enclosing a plus symbol, commonly used in tree view interfaces to expand a node or folder to show its nested contents.",
-        "chinese_id": "展開節點"
+        "chinese_id": "展開節點",
+        "description": "An icon of a rounded square button enclosing a plus symbol, commonly used in tree view interfaces to expand a node or folder to show its nested contents."
     },
     "": {
         "id": "open_cardboard_box_with_binders",
-        "description": "A retro-style icon showing an open cardboard box containing three vertical office binders or books lined up inside, typically representing archiving, unpacking, installation packages, or document storage.",
-        "chinese_id": "開啟檔案盒"
+        "chinese_id": "開啟檔案盒",
+        "description": "A retro-style icon showing an open cardboard box containing three vertical office binders or books lined up inside, typically representing archiving, unpacking, installation packages, or document storage."
     },
     "": {
         "id": "tag_icon",
-        "description": "a rectangular shape with one end pointed and a small circular hole",
-        "chinese_id": "標籤"
-    },
-    "": {
-        "id": "printer_with_document",
-        "description": "An icon depicting a hardware printer machine with a lined document sheet feeding into or out of it, commonly used to represent print actions, print setup, or a print queue.",
-        "chinese_id": "印表機"
+        "chinese_id": "標籤",
+        "description": "a rectangular shape with one end pointed and a small circular hole"
     },
     "": {
         "id": "clock_with_envelope",
-        "description": "An icon representing a round clock face in the background with a sealed mail envelope in the foreground, typically indicating a scheduled email, delayed delivery, or message history/timestamp.",
-        "chinese_id": "排程郵件"
+        "chinese_id": "排程郵件",
+        "description": "An icon representing a round clock face in the background with a sealed mail envelope in the foreground, typically indicating a scheduled email, delayed delivery, or message history/timestamp."
     },
     "": {
         "id": "documents_with_envelope",
-        "description": "An icon representing a stacked pair of paper documents in the background with a sealed mail envelope in the foreground, typically indicating an email attachment, document mailing, or message template.",
-        "chinese_id": "郵件文件"
+        "chinese_id": "郵件文件",
+        "description": "An icon representing a stacked pair of paper documents in the background with a sealed mail envelope in the foreground, typically indicating an email attachment, document mailing, or message template."
     },
     "": {
         "id": "folder_with_magnifying_glass",
-        "description": "An icon combining a file folder silhouette in the background with a magnifying glass in the foreground, typically indicating a folder search, find in directory, or browse function.",
-        "chinese_id": "搜尋資料夾"
+        "chinese_id": "搜尋資料夾",
+        "description": "An icon combining a file folder silhouette in the background with a magnifying glass in the foreground, typically indicating a folder search, find in directory, or browse function."
     },
     "": {
         "id": "bar_chart_with_upward_trend_arrow",
-        "description": "An icon consisting of four vertical bar charts of increasing or varying heights, overlaid with a zigzagging arrow pointing upwards and to the right, representing growth, statistics, analytics, or financial progress.",
-        "chinese_id": "上升趨勢圖"
+        "chinese_id": "上升趨勢圖",
+        "description": "An icon consisting of four vertical bar charts of increasing or varying heights, overlaid with a zigzagging arrow pointing upwards and to the right, representing growth, statistics, analytics, or financial progress."
     },
     "": {
         "id": "shield",
-        "description": "A classic metallic-style security shield icon with faceted shading, representing protection, safety, firewall status, or system defense.",
-        "chinese_id": "盾牌"
+        "chinese_id": "",
+        "description": "A classic metallic-style security shield icon with faceted shading, representing protection, safety, firewall status, or system defense."
     },
     "": {
         "id": "paint_brush",
-        "description": "An icon of an artist's paint brush angled diagonally, featuring a cylindrical handle and a pointed bristle tip, typically representing formatting options, appearance themes, or drawing and painting tools.",
-        "chinese_id": "畫筆"
+        "chinese_id": "畫筆",
+        "description": "An icon of an artist's paint brush angled diagonally, featuring a cylindrical handle and a pointed bristle tip, typically representing formatting options, appearance themes, or drawing and painting tools."
     },
     "": {
         "id": "globe_with_clock",
-        "description": "An icon displaying a globe with a grid pattern of latitude and longitude lines in the background, overlaid with a smaller round clock face in the lower-left foreground showing a generic time layout, typically representing world clock, time zones, or global synchronization.",
-        "chinese_id": "全球時鐘"
+        "chinese_id": "全球時鐘",
+        "description": "An icon displaying a globe with a grid pattern of latitude and longitude lines in the background, overlaid with a smaller round clock face in the lower-left foreground showing a generic time layout, typically representing world clock, time zones, or global synchronization."
     },
     "": {
         "id": "person_silhouette",
-        "description": "An icon featuring a basic stick-figure style silhouette of a person with outstretched arms and legs, representing a user profile, human figure, or accessibility indicators.",
-        "chinese_id": "人物"
+        "chinese_id": "人物",
+        "description": "An icon featuring a basic stick-figure style silhouette of a person with outstretched arms and legs, representing a user profile, human figure, or accessibility indicators."
     },
     "": {
         "id": "bluetooth",
-        "description": "An icon displaying the standard Bluetooth rune symbol centered within a vertical capsule-shaped background with rounded ends, representing wireless connectivity, device pairing, or hardware status.",
-        "chinese_id": "藍牙"
+        "chinese_id": "藍牙",
+        "description": "An icon displaying the standard Bluetooth rune symbol centered within a vertical capsule-shaped background with rounded ends, representing wireless connectivity, device pairing, or hardware status."
     },
     "": {
         "id": "gamepad_controller",
-        "description": "A retro-style icon of a horizontal capsule-shaped video game controller or gamepad, featuring a prominent dark cross-shaped directional pad (D-pad) on the left and two circular action buttons arranged diagonally on the right.",
-        "chinese_id": "遊戲手把"
+        "chinese_id": "遊戲手把",
+        "description": "A retro-style icon of a horizontal capsule-shaped video game controller or gamepad, featuring a prominent dark cross-shaped directional pad (D-pad) on the left and two circular action buttons arranged diagonally on the right."
     },
     "": {
         "id": "upward_pointing_triangle",
-        "description": "A basic icon or indicator showing a solid dark, upward-pointing equilateral triangle, frequently used as a scroll arrow, collapse/expand indicator, or upward trend symbol.",
-        "chinese_id": "向上三角"
+        "chinese_id": "向上三角",
+        "description": "A basic icon or indicator showing a solid dark, upward-pointing equilateral triangle, frequently used as a scroll arrow, collapse/expand indicator, or upward trend symbol."
     },
     "": {
         "id": "external_link",
-        "description": "A standard icon consisting of a square frame with an arrow breaking out from the top-right corner pointing diagonally upward, commonly used to represent an external link, open in a new tab, or export action.",
-        "chinese_id": "外部連結"
+        "chinese_id": "外部連結",
+        "description": "A standard icon consisting of a square frame with an arrow breaking out from the top-right corner pointing diagonally upward, commonly used to represent an external link, open in a new tab, or export action."
     },
     "": {
         "id": "cancel_close_circle",
-        "description": "A minimalist circular icon containing an 'X' symbol in the center and a small dot off to the right edge, commonly used as a button or indicator to close, cancel, or delete an item.",
-        "chinese_id": "取消圓圈"
+        "chinese_id": "取消圓圈",
+        "description": "A minimalist circular icon containing an 'X' symbol in the center and a small dot off to the right edge, commonly used as a button or indicator to close, cancel, or delete an item."
     },
     "": {
         "id": "thumbs_down",
-        "description": "A minimalist, line-drawn icon depicting a human hand in a thumbs-down gesture with thick black outlines, representing dislike, disapproval, rejection, or negative feedback.",
-        "chinese_id": "不喜歡"
+        "chinese_id": "不喜歡",
+        "description": "A minimalist, line-drawn icon depicting a human hand in a thumbs-down gesture with thick black outlines, representing dislike, disapproval, rejection, or negative feedback."
     },
     "": {
         "id": "thumbs_up",
-        "description": "A minimalist, line-drawn icon depicting a human hand in a thumbs-up gesture with thick black outlines, representing like, approval, agreement, or positive feedback.",
-        "chinese_id": "喜歡"
+        "chinese_id": "喜歡",
+        "description": "A minimalist, line-drawn icon depicting a human hand in a thumbs-up gesture with thick black outlines, representing like, approval, agreement, or positive feedback."
     },
     "": {
         "id": "star_favorite",
-        "description": "An icon of a solid yellow five-pointed star with slightly rounded tips, commonly used to represent favorites, bookmarks, ratings, or featured items.",
-        "chinese_id": "星號"
+        "chinese_id": "星號",
+        "description": "An icon of a solid yellow five-pointed star with slightly rounded tips, commonly used to represent favorites, bookmarks, ratings, or featured items."
     },
     "": {
         "id": "lightning_bolt",
-        "description": "A minimalist, solid white lightning bolt icon set against a dark grey background, commonly used to denote speed, quick actions, electrical power, or optimization.",
-        "chinese_id": "閃電"
+        "chinese_id": "閃電",
+        "description": "A minimalist, solid white lightning bolt icon set against a dark grey background, commonly used to denote speed, quick actions, electrical power, or optimization."
     },
     "": {
         "id": "checked_checkbox",
-        "description": "An icon of a standard checkbox selector featuring a distinct dark check mark or tick centered inside a square box, representing a selected setting, active option, or completed status.",
-        "chinese_id": "已勾選方框"
+        "chinese_id": "已勾選方框",
+        "description": "An icon of a standard checkbox selector featuring a distinct dark check mark or tick centered inside a square box, representing a selected setting, active option, or completed status."
     },
     "": {
         "id": "responsive_devices",
-        "description": "A minimalist line-drawn icon featuring a vertical smartphone silhouette in the foreground overlapping a horizontal desktop monitor or tablet frame in the background, representing multi-device synchronization, responsive design, or casting options.",
-        "chinese_id": "響應式裝置"
+        "chinese_id": "響應式裝置",
+        "description": "A minimalist line-drawn icon featuring a vertical smartphone silhouette in the foreground overlapping a horizontal desktop monitor or tablet frame in the background, representing multi-device synchronization, responsive design, or casting options."
     },
     "": {
         "id": "screen_selection_cursor",
-        "description": "A minimalist icon displaying a dark arrow cursor or mouse pointer overlapping the bottom-right corner of a simple rectangular screen outline, typically representing display selection, screen capture, region cropping, or desktop control functions.",
-        "chinese_id": "選取游標"
+        "chinese_id": "選取游標",
+        "description": "A minimalist icon displaying a dark arrow cursor or mouse pointer overlapping the bottom-right corner of a simple rectangular screen outline, typically representing display selection, screen capture, region cropping, or desktop control functions."
     },
     "": {
         "id": "code_tags",
-        "description": "A simple line-drawn icon consisting of a opening less-than bracket and a closing greater-than bracket separated by a forward slash, commonly used to represent source code, developer tools, or programming languages.",
-        "chinese_id": "程式碼"
+        "chinese_id": "程式碼",
+        "description": "A simple line-drawn icon consisting of a opening less-than bracket and a closing greater-than bracket separated by a forward slash, commonly used to represent source code, developer tools, or programming languages."
     },
     "": {
         "id": "bug_debug",
-        "description": "A simple line-drawn icon of an insect or bug with an oval body, six legs, and two antennae, commonly used in software interfaces to represent bug tracking, error reporting, or debugging tools.",
-        "chinese_id": "除錯"
+        "chinese_id": "除錯",
+        "description": "A simple line-drawn icon of an insect or bug with an oval body, six legs, and two antennae, commonly used in software interfaces to represent bug tracking, error reporting, or debugging tools."
     },
     "": {
         "id": "wifi_signal",
-        "description": "A simple line-drawn icon featuring a solid central dot at the bottom with three concentric curved signal waves expanding upwards and outwards, universally used to represent Wi-Fi connection, network strength, or wireless internet status.",
-        "chinese_id": "Wi-Fi"
+        "chinese_id": "Wi-Fi",
+        "description": "A simple line-drawn icon featuring a solid central dot at the bottom with three concentric curved signal waves expanding upwards and outwards, universally used to represent Wi-Fi connection, network strength, or wireless internet status."
     },
     "": {
         "id": "import_document",
-        "description": "A dark minimalist icon depicting a vertical sheet of paper with a folded top-right corner, overlaid with a bold horizontal arrow pointing from left to right directly into the document body, commonly representing data import, file uploading, or bringing in external files.",
-        "chinese_id": "匯入文件"
+        "chinese_id": "匯入文件",
+        "description": "A dark minimalist icon depicting a vertical sheet of paper with a folded top-right corner, overlaid with a bold horizontal arrow pointing from left to right directly into the document body, commonly representing data import, file uploading, or bringing in external files."
     },
     "": {
         "id": "play_button",
-        "description": "A prominent square icon with a yellow-to-orange gradient background, featuring a bold white right-pointing triangle centered inside, universally used to initiate media playback, start a video/audio track, or launch an application.",
-        "chinese_id": "播放"
+        "chinese_id": "播放",
+        "description": "A prominent square icon with a yellow-to-orange gradient background, featuring a bold white right-pointing triangle centered inside, universally used to initiate media playback, start a video/audio track, or launch an application."
     },
     "": {
         "id": "sign_in_enter",
-        "description": "An icon featuring a right-pointing arrow transitioning into a box or open bracket structure, commonly used to represent sign-in, log-in, enter, or import actions.",
-        "chinese_id": "進入"
+        "chinese_id": "進入",
+        "description": "An icon featuring a right-pointing arrow transitioning into a box or open bracket structure, commonly used to represent sign-in, log-in, enter, or import actions."
     },
     "": {
         "id": "stop_hand_sign",
-        "description": "An icon featuring a white open hand with fingers extended upward, centered inside a bright red octagonal stop sign shape, universally used to represent block, restriction, stop, or security warnings.",
-        "chinese_id": "停止"
+        "chinese_id": "停止",
+        "description": "An icon featuring a white open hand with fingers extended upward, centered inside a bright red octagonal stop sign shape, universally used to represent block, restriction, stop, or security warnings."
     },
     "": {
         "id": "pause_button",
-        "description": "A standard line-drawn media control icon consisting of two identical, vertically parallel bars with rounded ends separated by a narrow gap, universally used to represent pausing video or audio playback.",
-        "chinese_id": "暫停"
+        "chinese_id": "暫停",
+        "description": "A standard line-drawn media control icon consisting of two identical, vertically parallel bars with rounded ends separated by a narrow gap, universally used to represent pausing video or audio playback."
     },
     "": {
         "id": "warning_alert",
-        "description": "An icon displaying a white exclamation point centered within a soft white triangle framework, set against a dark reddish-brown square container, used to denote errors, critical warnings, system alerts, or potential issues.",
-        "chinese_id": "警告"
+        "chinese_id": "警告",
+        "description": "An icon displaying a white exclamation point centered within a soft white triangle framework, set against a dark reddish-brown square container, used to denote errors, critical warnings, system alerts, or potential issues."
     },
     "": {
         "id": "hand_cursor_click",
-        "description": "A pixelated or low-resolution line-drawn icon of a classic white human hand cursor with the index finger extended upward in a clicking or selecting gesture, with a faint grid-like background texture, universally used to denote clickable links, buttons, or interactive elements.",
-        "chinese_id": "手型游標"
+        "chinese_id": "",
+        "description": "A pixelated or low-resolution line-drawn icon of a classic white human hand cursor with the index finger extended upward in a clicking or selecting gesture, with a faint grid-like background texture, universally used to denote clickable links, buttons, or interactive elements."
     },
     "": {
         "id": "telephone",
-        "description": "A vibrant silhouette icon of a classic physical telephone handset, angled diagonally as if being held, commonly used to represent phone calls, contact hotlines, or telecommunication features.",
-        "chinese_id": "電話"
+        "chinese_id": "",
+        "description": "A vibrant silhouette icon of a classic physical telephone handset, angled diagonally as if being held, commonly used to represent phone calls, contact hotlines, or telecommunication features."
     },
     "": {
         "id": "save_floppy_disk",
-        "description": "A slightly blurry icon featuring a classic white 3.5-inch floppy disk silhouette set against a square blue gradient background canvas with rounded corners, universally used to represent save actions or data preservation.",
-        "chinese_id": "儲存"
+        "chinese_id": "儲存",
+        "description": "A slightly blurry icon featuring a classic white 3.5-inch floppy disk silhouette set against a square blue gradient background canvas with rounded corners, universally used to represent save actions or data preservation."
     },
     "": {
         "id": "printer_device",
-        "description": "A blurry, horizontal icon representing a consumer electronic device or hardware peripheral, featuring a distinct slot and a green indicator accent on the right portion, commonly used to denote a printer, paper output, or hardware status.",
-        "chinese_id": "印表機"
+        "chinese_id": "印表機",
+        "description": "A blurry, horizontal icon representing a consumer electronic device or hardware peripheral, featuring a distinct slot and a green indicator accent on the right portion, commonly used to denote a printer, paper output, or hardware status."
     },
     "": {
         "id": "layers_stack",
-        "description": "A minimalist line-drawn icon featuring three identical rounded square shapes stacked diagonally behind one another from left to right, commonly used to represent layers, cards, history stacks, or multi-view interfaces.",
-        "chinese_id": "圖層"
+        "chinese_id": "圖層",
+        "description": "A minimalist line-drawn icon featuring three identical rounded square shapes stacked diagonally behind one another from left to right, commonly used to represent layers, cards, history stacks, or multi-view interfaces."
     },
     "": {
         "id": "bookmark_ribbon",
-        "description": "An icon of a vertical, rectangular bookmark ribbon featuring a sharp inverted 'V' or chevron indentation at its bottom edge, commonly used to represent bookmarks, saved content, or read-later items.",
-        "chinese_id": "書籤緞帶"
+        "chinese_id": "書籤緞帶",
+        "description": "An icon of a vertical, rectangular bookmark ribbon featuring a sharp inverted 'V' or chevron indentation at its bottom edge, commonly used to represent bookmarks, saved content, or read-later items."
     },
     "": {
         "id": "apple_logo",
-        "description": "The classic, iconic solid white silhouette of an apple with a single bite taken out of its right side and a small detached leaf angled above, universally recognized as the trademark logo for Apple Inc. electronics and software.",
-        "chinese_id": "蘋果標誌"
+        "chinese_id": "蘋果標誌",
+        "description": "The classic, iconic solid white silhouette of an apple with a single bite taken out of its right side and a small detached leaf angled above, universally recognized as the trademark logo for Apple Inc. electronics and software."
     },
     "": {
         "id": "help_question_mark",
-        "description": "A clean icon featuring a dark question mark centered inside a solid light grey circular background, universally used to represent help documentation, customer support, or information queries.",
-        "chinese_id": "說明"
+        "chinese_id": "",
+        "description": "A clean icon featuring a dark question mark centered inside a solid light grey circular background, universally used to represent help documentation, customer support, or information queries."
     },
     "": {
         "id": "google_gmail",
-        "description": "A blurry, multi-colored geometric icon outlining a capital letter 'M' using red, blue, yellow, and green segments, universally recognized as the official trademark logo for Google's Gmail service.",
-        "chinese_id": "Gmail"
+        "chinese_id": "Gmail",
+        "description": "A blurry, multi-colored geometric icon outlining a capital letter 'M' using red, blue, yellow, and green segments, universally recognized as the official trademark logo for Google's Gmail service."
     },
     "": {
         "id": "python_programming_language_logo",
-        "description": "Two interlocking stylized snake silhouettes forming a square-like shape with rounded corners, each snake having a single eye dot near its head.",
-        "chinese_id": "Python"
+        "chinese_id": "Python",
+        "description": "Two interlocking stylized snake silhouettes forming a square-like shape with rounded corners, each snake having a single eye dot near its head."
     },
     "": {
         "id": "photo_camera",
-        "description": "Outline icon of a compact photo camera featuring a rectangular body, a top central flash or prism hump, a top right shutter button bump, and a prominent circular lens element in the center.",
-        "chinese_id": "相機"
+        "chinese_id": "相機",
+        "description": "Outline icon of a compact photo camera featuring a rectangular body, a top central flash or prism hump, a top right shutter button bump, and a prominent circular lens element in the center."
     },
     "": {
         "id": "image_file_document",
-        "description": "A vertical document page icon with a folded top-right corner, featuring an embedded image placeholder in the center that depicts a landscape with mountains and a sun or moon.",
-        "chinese_id": "圖片文件"
+        "chinese_id": "圖片文件",
+        "description": "A vertical document page icon with a folded top-right corner, featuring an embedded image placeholder in the center that depicts a landscape with mountains and a sun or moon."
     },
     "": {
         "id": "scheduled_mail",
-        "description": "An envelope icon in the foreground overlaid on top of a circular clock face with hands in the background, signifying a timed or delayed message.",
-        "chinese_id": "排程郵件"
+        "chinese_id": "排程郵件",
+        "description": "An envelope icon in the foreground overlaid on top of a circular clock face with hands in the background, signifying a timed or delayed message."
     },
     "": {
         "id": "eye_visibility",
-        "description": "An outline of an eye icon, featuring an almond-shaped outer border with a centered, circular pupil.",
-        "chinese_id": "顯示"
+        "chinese_id": "顯示",
+        "description": "An outline of an eye icon, featuring an almond-shaped outer border with a centered, circular pupil."
     },
     "": {
         "id": "video_reels",
-        "description": "A square icon with heavily rounded corners, featuring a horizontal line near the top divided by two vertical tick marks to simulate a film strip or media player header, and a centered right-pointing triangle play button symbol.",
-        "chinese_id": "影片捲軸"
+        "chinese_id": "影片捲軸",
+        "description": "A square icon with heavily rounded corners, featuring a horizontal line near the top divided by two vertical tick marks to simulate a film strip or media player header, and a centered right-pointing triangle play button symbol."
     },
     "": {
         "id": "sidebar_toggle_right",
-        "description": "A square icon container with rounded corners, split vertically into a larger solid section on the left and a narrow rectangular outline section on the right, representing a right-hand sidebar panel layout.",
-        "chinese_id": "側邊欄"
+        "chinese_id": "側邊欄",
+        "description": "A square icon container with rounded corners, split vertically into a larger solid section on the left and a narrow rectangular outline section on the right, representing a right-hand sidebar panel layout."
     },
     "": {
         "id": "music_playlist",
-        "description": "An icon combining a stack of three horizontal text lines on the left with a prominent single musical eighth note silhouette on the right, signifying an audio track queue or music playlist.",
-        "chinese_id": "播放清單"
+        "chinese_id": "播放清單",
+        "description": "An icon combining a stack of three horizontal text lines on the left with a prominent single musical eighth note silhouette on the right, signifying an audio track queue or music playlist."
     },
     "": {
         "id": "stacked_documents",
-        "description": "An icon depicting multiple layered or stacked document sheets, with the front vertical page prominently showing three wide horizontal content segments or placeholder fields.",
-        "chinese_id": "文件堆疊"
+        "chinese_id": "文件堆疊",
+        "description": "An icon depicting multiple layered or stacked document sheets, with the front vertical page prominently showing three wide horizontal content segments or placeholder fields."
     },
     "": {
         "id": "more_vertical",
-        "description": "Three solid circular dots arranged in a static, vertically aligned linear sequence, commonly representing an overflow menu button.",
-        "chinese_id": "垂直更多"
+        "chinese_id": "",
+        "description": "Three solid circular dots arranged in a static, vertically aligned linear sequence, commonly representing an overflow menu button."
     },
     "": {
         "id": "list_validation",
-        "description": "A square icon containing a vertically stacked list layout on the left side with horizontal line items, overlaid at the bottom right with a prominent circular badge containing a checkmark silhouette.",
-        "chinese_id": "清單驗證"
+        "chinese_id": "",
+        "description": "A square icon containing a vertically stacked list layout on the left side with horizontal line items, overlaid at the bottom right with a prominent circular badge containing a checkmark silhouette."
     },
     "": {
         "id": "book_bookmark",
-        "description": "A square icon featuring a stylized outline of a vertical book cover containing an internal ribbon or bookmark silhouette that hangs from the top spine.",
-        "chinese_id": "書籤"
+        "chinese_id": "書籤",
+        "description": "A square icon featuring a stylized outline of a vertical book cover containing an internal ribbon or bookmark silhouette that hangs from the top spine."
     },
     "": {
         "id": "plug_connected_status",
-        "description": "An icon featuring a power plug silhouette oriented diagonally, consisting of male and female ends joined together in the center, overlaid at the bottom right with a solid circular badge or status indicator dot.",
-        "chinese_id": "已連線"
+        "chinese_id": "已連線",
+        "description": "An icon featuring a power plug silhouette oriented diagonally, consisting of male and female ends joined together in the center, overlaid at the bottom right with a solid circular badge or status indicator dot."
     },
     "": {
         "id": "earth_globe",
-        "description": "A circular icon representing the planet Earth, featuring simplified continent silhouettes contrasting against a solid round background.",
-        "chinese_id": "地球"
+        "chinese_id": "地球",
+        "description": "A circular icon representing the planet Earth, featuring simplified continent silhouettes contrasting against a solid round background."
     },
     "": {
         "id": "clipboard",
-        "description": "An icon of a vertical clipboard layout with a prominent top clasp, featuring three distinct horizontal bar elements stacked vertically in the main content area.",
-        "chinese_id": "剪貼簿"
+        "chinese_id": "剪貼簿",
+        "description": "An icon of a vertical clipboard layout with a prominent top clasp, featuring three distinct horizontal bar elements stacked vertically in the main content area."
     },
     "": {
         "id": "google_logo_letter_g",
-        "description": "The brand logo featuring a stylized geometric capital letter G inside a solid circular container.",
-        "chinese_id": "Google"
+        "chinese_id": "Google",
+        "description": "The brand logo featuring a stylized geometric capital letter G inside a solid circular container."
     },
     "": {
         "id": "video_camera",
-        "description": "A side-profile silhouette of a professional video camera or camcorder.",
-        "chinese_id": "攝影機"
+        "chinese_id": "攝影機",
+        "description": "A side-profile silhouette of a professional video camera or camcorder."
     },
     "": {
         "id": "log_in_door",
-        "description": "An arrow pointing right towards the open space of a partially open vertical rectangular door silhouette, indicating entry or logging in.",
-        "chinese_id": "登入"
+        "chinese_id": "登入",
+        "description": "An arrow pointing right towards the open space of a partially open vertical rectangular door silhouette, indicating entry or logging in."
     },
     "": {
         "id": "ghost_silhouette",
-        "description": "A floating ghost silhouette with a rounded upper body, a wavy or rippled lower edge, and two solid circular eyes cut out from the main form.",
-        "chinese_id": "幽靈"
+        "chinese_id": "幽靈",
+        "description": "A floating ghost silhouette with a rounded upper body, a wavy or rippled lower edge, and two solid circular eyes cut out from the main form."
     },
     "": {
         "id": "integrated_circuit_chip",
-        "description": "A square microchip or computer processing unit silhouette containing a central dark die surrounded by linear circuit trace patterns inside a distinct square background boundary.",
-        "chinese_id": "晶片"
+        "chinese_id": "",
+        "description": "A square microchip or computer processing unit silhouette containing a central dark die surrounded by linear circuit trace patterns inside a distinct square background boundary."
     },
     "": {
         "id": "clock",
-        "description": "An analog clock face.",
-        "chinese_id": "時鐘"
+        "chinese_id": "時鐘",
+        "description": "An analog clock face."
     },
     "": {
         "id": "facebook_logo_letter_f",
-        "description": "The brand logo featuring a lowercase letter f positioned off-center inside a solid rounded square container.",
-        "chinese_id": "Facebook"
+        "chinese_id": "Facebook",
+        "description": "The brand logo featuring a lowercase letter f positioned off-center inside a solid rounded square container."
     },
     "": {
         "id": "megaphone_outline",
-        "description": "A simple outline of a megaphone or bullhorn facing right, featuring a cylindrical mouthpiece on the left, an expanding conical body, and a small rectangular handle extending downwards at the base. Commonly used to signify announcements, marketing, or broadcasts.",
-        "chinese_id": "擴音器"
+        "chinese_id": "擴音器",
+        "description": "A simple outline of a megaphone or bullhorn facing right, featuring a cylindrical mouthpiece on the left, an expanding conical body, and a small rectangular handle extending downwards at the base. Commonly used to signify announcements, marketing, or broadcasts."
     },
     "": {
         "id": "i_beam_cursor",
-        "description": "A vertical text insertion cursor or I-beam shape, featuring a straight vertical line with small horizontal crossbars at the top and bottom. Commonly used to indicate text selection or an editable text field.",
-        "chinese_id": "文字游標"
+        "chinese_id": "文字游標",
+        "description": "A vertical text insertion cursor or I-beam shape, featuring a straight vertical line with small horizontal crossbars at the top and bottom. Commonly used to indicate text selection or an editable text field."
     },
     "": {
         "id": "alarm_clock_outline",
-        "description": "An outline of an alarm clock consisting of a circular face with simplified clock hands showing a time, topped with two small diagonal lines on the upper left and upper right representing bells or ringing clappers.",
-        "chinese_id": "鬧鐘"
+        "chinese_id": "鬧鐘",
+        "description": "An outline of an alarm clock consisting of a circular face with simplified clock hands showing a time, topped with two small diagonal lines on the upper left and upper right representing bells or ringing clappers."
     },
     "": {
         "id": "bar_chart",
-        "description": "A vertical bar chart icon with four parallel vertical columns of varying heights, arranged from left to right in a medium, tall, short, and tall sequence, resting on a horizontal base line. Commonly used to represent data analytics, metrics, or statistics.",
-        "chinese_id": "長條圖"
+        "chinese_id": "長條圖",
+        "description": "A vertical bar chart icon with four parallel vertical columns of varying heights, arranged from left to right in a medium, tall, short, and tall sequence, resting on a horizontal base line. Commonly used to represent data analytics, metrics, or statistics."
     },
     "": {
         "id": "chain_link",
-        "description": "An outline icon of two interlocking chain links oriented diagonally from bottom-left to top-right, universally used to represent a hyperlink, attachment, or URL link.",
-        "chinese_id": "連結"
+        "chinese_id": "連結",
+        "description": "An outline icon of two interlocking chain links oriented diagonally from bottom-left to top-right, universally used to represent a hyperlink, attachment, or URL link."
     },
     "": {
         "id": "text_align_left",
-        "description": "An icon representing left-aligned text, composed of four horizontal parallel bars stacked vertically. The bars alternate in length, starting with a long line at the top, followed by a short line, another long line, and a short line at the bottom, all flush along the left edge.",
-        "chinese_id": "靠左對齊"
+        "chinese_id": "靠左對齊",
+        "description": "An icon representing left-aligned text, composed of four horizontal parallel bars stacked vertically. The bars alternate in length, starting with a long line at the top, followed by a short line, another long line, and a short line at the bottom, all flush along the left edge."
+    },
+    "": {
+        "id": "slider_handle",
+        "chinese_id": "",
+        "description": "A vertical pill-shaped slider handle attached to a horizontal track that is divided into evenly spaced segments."
+    },
+    "": {
+        "id": "horizontal_arrows_exchange",
+        "chinese_id": "交換",
+        "description": "Two horizontal arrows stacked vertically and pointing in opposite directions, with the top arrow pointing to the right and the bottom arrow pointing to the left."
+    },
+    "": {
+        "id": "qr_code",
+        "chinese_id": "QR 碼",
+        "description": "A square matrix barcode consisting of black modules arranged in a square grid on a white background, featuring three large square position detection patterns in its corners."
+    },
+    "": {
+        "id": "winrar_archive",
+        "chinese_id": "WinRAR",
+        "description": "A stack of three horizontally oriented volumes arranged vertically, bound tightly together by a vertical strap with a prominent buckle down the center, representing an archive or compressed file format."
+    },
+    "": {
+        "id": "envelope_icon",
+        "chinese_id": "信封",
+        "description": "A square icon with rounded corners depicting an envelope. A prominent downward-pointing triangular flap sits at the top, meeting two diagonal lines that rise from the bottom corners to form the classic mail pouch layout."
+    },
+    "": {
+        "id": "reply_all_arrow",
+        "chinese_id": "全部回覆",
+        "description": "An outline icon featuring a curved line that loops from the bottom right up towards the left, terminating in a double arrowhead pointing left, commonly used to represent replying to all recipients."
+    },
+    "": {
+        "id": "copyright_symbol_in_circle",
+        "chinese_id": "版權",
+        "description": "A letter 'C' enclosed inside a circular border, representing a copyright symbol."
+    },
+    "": {
+        "id": "chevron_double_pointing_right",
+        "chinese_id": "雙向右箭頭",
+        "description": "Two right-pointing arrowheads stacked horizontally, commonly used to indicate fast-forward or next page."
+    },
+    "": {
+        "id": "grid_view",
+        "chinese_id": "網格檢視",
+        "description": "Nine circular dots arranged symmetrically in a three-by-three square grid layout, commonly used to represent an applications menu or dashboard view."
+    },
+    "": {
+        "id": "beaker_flask",
+        "chinese_id": "燒杯",
+        "description": "An outline of an Erlenmeyer flask filled halfway with liquid, typically used to represent science, labs, or experimental features."
+    },
+    "": {
+        "id": "notepad_text",
+        "chinese_id": "",
+        "description": "A square notepad with spiral or comb binding holes at the top and three horizontal lines representing written text."
+    },
+    "": {
+        "id": "excel_document_spreadsheet",
+        "chinese_id": "Excel 文件",
+        "description": "A square icon with the letter 'X' superimposed on a larger, multi-toned grid pattern composed of overlapping squares, representing a spreadsheet or data document."
+    },
+    "": {
+        "id": "microphone",
+        "chinese_id": "麥克風",
+        "description": "A classic microphone silhouette consisting of a vertical capsule nesting inside a curved cradle stand with a small base stem, representing voice input or audio recording."
+    },
+    "": {
+        "id": "google_translate",
+        "chinese_id": "Google 翻譯",
+        "description": "Two overlapping pages representing translation, where the foreground sheet features a stylized letter 'G' and the background sheet displays a Han character."
+    },
+    "": {
+        "id": "puzzle_piece",
+        "chinese_id": "",
+        "description": "An outline of a square puzzle piece shape, featuring a small tab extending from the top and right edges, and a matching indention or blank space on the left edge, commonly representing add-ons or extensions."
+    },
+    "": {
+        "id": "settings_sliders",
+        "chinese_id": "設定滑桿",
+        "description": "Two parallel horizontal slider tracks stacked vertically, each featuring a circular control knob positioned on opposing sides, used to denote settings, adjustments, or filters."
+    },
+    "": {
+        "id": "grid_view_squares",
+        "chinese_id": "方格檢視",
+        "description": "Four hollow square outlines arranged symmetrically in a two-by-two grid configuration, typically used to represent a dashboard, layout options, or a category menu."
+    },
+    "": {
+        "id": "arrow_up_right_external",
+        "chinese_id": "外部連結箭頭",
+        "description": "A straight arrow pointing diagonally up and to the right, commonly used to denote an external link, export action, or shortcut opening in a new tab."
+    },
+    "": {
+        "id": "undo_arrow_back",
+        "chinese_id": "復原",
+        "description": "An arrow looping backwards from right to left, forming a U-turn shape with a left-pointing arrowhead, representing an undo or reply action."
     }
 }

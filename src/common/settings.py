@@ -40,11 +40,16 @@ BACKEND_PRESETS: dict[str, dict[str, str]] = {
         "ollama_host": "http://192.168.13.8:11434",
         # "ollama_host": "http://192.168.13.101:11434",
     },
+    "vllm_server": {
+        "llm_backend": "vllm_server",
+        "brain_lm": "google/gemma-4-26B-A4B-it",
+        "ollama_host": "http://192.168.4.134:8000",
+    },
 }
 
 _LEGACY_LLM_BACKEND_ALIASES: dict[str, str] = {
     "ollama": "ollama_local",
-    "vllm": "ollama_server",
+    "vllm": "vllm_server",
 }
 
 _LEGACY_CONSTANTS_PATH = "constants.json"
@@ -137,6 +142,8 @@ def normalize_agent_settings_dict(data: dict[str, Any]) -> dict[str, Any]:
     backend = canonicalize_llm_backend(str(data.get("llm_backend", "ollama_local")))
     out = preset_for_backend(backend)
     out["debug"] = bool(data.get("debug", True))
+    if backend == "vllm_server":
+        return out
     host = data.get("ollama_host") or data.get("vllm_host")
     if isinstance(host, str) and host.strip():
         out["ollama_host"] = host.strip()
@@ -182,13 +189,17 @@ def _ollama_host_probe_status_message(host: str) -> str:
 
 def apply_startup_ollama_host_probe() -> tuple[bool, str]:
     """Probe local then remote Ollama; persist chosen host when reachable."""
+    data = load_agent_settings_dict()
+    backend = canonicalize_llm_backend(str(data.get("llm_backend", "ollama_local")))
+    if backend == "vllm_server":
+        return True, f"vLLM 主機：{data['ollama_host']}"
+
     chosen = select_reachable_ollama_host()
     if chosen is None:
         return (
             False,
             "錯誤：無法連線至 Ollama（本機與公司主機皆無回應）",
         )
-    data = load_agent_settings_dict()
     data["ollama_host"] = chosen
     try:
         save_agent_settings_dict(data)

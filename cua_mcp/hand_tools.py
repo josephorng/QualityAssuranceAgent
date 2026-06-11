@@ -42,6 +42,31 @@ def _canonicalize_key(key: str) -> str:
     return KEY_ALIASES.get(token, token)
 
 
+def _parse_hotkey_keys(keys: list[str] | str) -> list[str]:
+    """Normalize model-supplied hotkey args into a list of key names."""
+    if isinstance(keys, list):
+        return [str(item) for item in keys]
+
+    raw = keys.strip()
+    if raw.startswith("[") and raw.endswith("]"):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed]
+        except json.JSONDecodeError:
+            pass
+        inner = raw[1:-1].strip()
+        if inner:
+            return [part.strip() for part in inner.split(",") if part.strip()]
+        return []
+
+    if "+" in raw:
+        return [part.strip() for part in raw.split("+") if part.strip()]
+    if "," in raw:
+        return [part.strip() for part in raw.split(",") if part.strip()]
+    return [raw]
+
+
 def click(
     x: int | None = None,
     y: int | None = None,
@@ -81,20 +106,10 @@ def type_text(
 
 def hotkey(keys: list[str] | str) -> dict[str, Any]:
     """Press a key combination."""
-    if isinstance(keys, str):
-        raw = keys.strip()
-        parsed_keys: Any = None
-        if raw.startswith("[") and raw.endswith("]"):
-            try:
-                parsed_keys = json.loads(raw)
-            except json.JSONDecodeError:
-                parsed_keys = None
-        if isinstance(parsed_keys, list):
-            keys = [str(item) for item in parsed_keys]
-        else:
-            keys = [keys]
+    raw_input = keys
+    parsed_keys = _parse_hotkey_keys(keys)
     normalized_keys: list[str] = []
-    for key in keys:
+    for key in parsed_keys:
         token = _canonicalize_key(key)
         if not token:
             continue
@@ -108,7 +123,13 @@ def hotkey(keys: list[str] | str) -> dict[str, Any]:
         raise ValueError("keys must contain at least one key")
     invalid = [k for k in normalized_keys if k not in pyautogui.KEYBOARD_KEYS]
     if invalid:
-        raise ValueError(f"Invalid hotkey keys: {invalid}")
+        hint = ""
+        if isinstance(raw_input, str) and ("[" in raw_input or "," in raw_input or "+" in raw_input):
+            hint = (
+                ' Use a JSON array like ["win", "e"], '
+                'or comma/plus-separated names like "win+e" or "[win,e]".'
+            )
+        raise ValueError(f"Invalid hotkey keys: {invalid}.{hint}")
     pyautogui.hotkey(*normalized_keys)
     return {"keys": normalized_keys}
 

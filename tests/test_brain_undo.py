@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from src.brain.module import BrainModule
@@ -40,6 +41,24 @@ def test_resume_step_transcript_counter_continues_after_script_steps(tmp_path: P
     brain.manager = mgr
 
     assert brain._resume_step_transcript_counter() == 3
+
+
+def test_append_failed_tool_call_records_tool_name(tmp_path: Path) -> None:
+    mgr = RunStateManager(tmp_path)
+    paths = mgr.init_run("test", "test_run")
+    steps_dir = paths.root / "steps"
+    steps_dir.mkdir(parents=True, exist_ok=True)
+    step_path = steps_dir / "1_1.json"
+    step_path.write_text(json.dumps({"messages": []}), encoding="utf-8")
+
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = mgr
+
+    brain._append_failed_tool_call("hotkey", 1, 1)
+    brain._append_failed_tool_call("hotkey", 1, 1)
+
+    payload = json.loads(step_path.read_text(encoding="utf-8"))
+    assert payload["failed_tool_calls"] == ["hotkey", "hotkey"]
 
 
 def test_undo_last_runtime_step_returns_false_when_empty(tmp_path: Path) -> None:

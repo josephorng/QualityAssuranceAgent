@@ -183,6 +183,37 @@ class BrainModule:
         payload[attribute_name] = merged_messages
         write_json(out_path, payload)
 
+    def _append_failed_tool_call(
+        self,
+        tool_name: str,
+        transcript_counter: int,
+        script_step_index: int,
+    ) -> None:
+        """Append a failed tool name to `failed_tool_calls` in a step transcript file."""
+        steps_dir = self.manager.require_paths().root / "steps"
+        steps_dir.mkdir(parents=True, exist_ok=True)
+        out_path = steps_dir / f"{transcript_counter}_{script_step_index}.json"
+
+        payload: dict[str, Any] = {}
+        failed_tool_calls: list[str] = []
+        if out_path.exists():
+            try:
+                existing = json.loads(out_path.read_text(encoding="utf-8"))
+                if isinstance(existing, dict):
+                    payload = dict(existing)
+                    existing_failed = existing.get("failed_tool_calls")
+                    if isinstance(existing_failed, list):
+                        failed_tool_calls.extend(
+                            item for item in existing_failed if isinstance(item, str)
+                        )
+            except (OSError, ValueError, json.JSONDecodeError):
+                payload = {}
+                failed_tool_calls = []
+
+        failed_tool_calls.append(tool_name)
+        payload["failed_tool_calls"] = failed_tool_calls
+        write_json(out_path, payload)
+
     def _script_seed_steps(self) -> list[str]:
         """Load non-empty script lines from `SCRIPT_LINES_ENV` (JSON array of strings)."""
         raw = os.environ.get(SCRIPT_LINES_ENV, "")
@@ -454,7 +485,11 @@ class BrainModule:
                     })
                     sleep(1)
                     if not result.ok:
-                        self._append_step_messages(messages[-1], self._step_transcript_counter, self._script_step_index, attribute_name="failed_tool_calls")
+                        self._append_failed_tool_call(
+                            result.action,
+                            self._step_transcript_counter,
+                            self._script_step_index,
+                        )
                 else:
                     continue
                 break

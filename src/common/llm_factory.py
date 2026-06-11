@@ -6,7 +6,8 @@ The active client is selected by ``llm_backend`` in ``runs/agent_settings.json``
 
 * ``"ollama_local"`` (default) - :class:`src.common.ollama_client.OllamaClient`
 * ``"ollama_local_12b"``       - :class:`src.common.ollama_client.OllamaClient`
-* ``"ollama_server"``          - :class:`src.common.vllm_client.VLLMClient`
+* ``"ollama_server"``          - :class:`src.common.ollama_client.OllamaClient`
+* ``"vllm_server"``            - :class:`src.common.vllm_client.VLLMClient`
 
 The client is constructed lazily on first use and cached as a process-wide
 singleton; use the hub settings dialog or :func:`reset_llm_client` before the
@@ -33,7 +34,7 @@ def _build_client() -> LLMClient:
     if backend not in BACKEND_PRESETS:
         known = ", ".join(sorted(BACKEND_PRESETS))
         raise ValueError(f"Unknown llm_backend {backend!r} in agent settings; expected one of: {known}")
-    if backend == "ollama_server":
+    if backend == "vllm_server":
         from src.common.vllm_client import VLLMClient
 
         return VLLMClient(settings.ollama_host)

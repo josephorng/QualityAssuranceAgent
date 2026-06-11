@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
-import mimetypes
-from pathlib import Path
+import re
 from typing import Any
 
 import httpx
@@ -36,23 +34,46 @@ def _normalize_tool_descriptor(tool: Any) -> dict[str, Any]:
     raise TypeError(f"Unsupported tool descriptor type: {type(tool).__name__}")
 
 
-def _image_to_data_url(image: str) -> str:
-    """Encode a local image path (or pass through an existing data URL) for OpenAI content."""
-    if image.startswith("data:") or image.startswith("http://") or image.startswith("https://"):
-        return image
-    image_path = Path(image)
-    mime, _ = mimetypes.guess_type(image_path.name)
-    if not mime:
-        mime = "image/png"
-    raw = image_path.read_bytes()
-    encoded = base64.b64encode(raw).decode("ascii")
-    return f"data:{mime};base64,{encoded}"
-
-
 def _coerce_arguments_to_json_string(arguments: Any) -> str:
     if isinstance(arguments, str):
         return arguments
     return json.dumps(arguments or {}, ensure_ascii=False)
+
+
+_CALL_SYNTAX_PATTERN = re.compile(
+    r"call:(?P<name>[A-Za-z_][\w]*)\{(?P<args>[^}]*)\}"
+)
+
+
+def _parse_call_syntax_arguments(args_str: str) -> dict[str, Any]:
+    arguments: dict[str, Any] = {}
+    if not args_str.strip():
+        return arguments
+    for part in re.split(r",(?=\w+:)", args_str):
+        if ":" not in part:
+            continue
+        key, value = part.split(":", 1)
+        arguments[key.strip()] = value.strip()
+    return arguments
+
+
+def _parse_call_syntax_tool_calls(content: str) -> list[Message.ToolCall]:
+    """
+    Parse vLLM text tool invocations like
+    ``call:minimize_windows{instruction:...,window_title_contains:all}``.
+    """
+    tool_calls: list[Message.ToolCall] = []
+    for match in _CALL_SYNTAX_PATTERN.finditer(content):
+        arguments = _parse_call_syntax_arguments(match.group("args"))
+        tool_calls.append(
+            Message.ToolCall(
+                function=Message.ToolCall.Function(
+                    name=match.group("name"),
+                    arguments=arguments,
+                )
+            )
+        )
+    return tool_calls
 
 
 def _coerce_arguments_to_dict(arguments: Any) -> dict[str, Any]:
@@ -73,8 +94,8 @@ def _translate_messages_to_openai(
     messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """
-    Translate Ollama-style messages (with ``images`` and minimal tool messages)
-    into OpenAI ``/v1/chat/completions`` ``messages[]`` shape.
+    Translate Ollama-style messages (text and tool messages only) into OpenAI
+    ``/v1/chat/completions`` ``messages[]`` shape.
 
     Tool calls in assistant messages are given stable ids (``call_<i>_<j>``);
     immediately following ``tool`` messages are paired with those ids in order,
@@ -104,22 +125,10 @@ def _translate_messages_to_openai(
             continue
 
         content_value = msg.get("content")
-        images = msg.get("images") if isinstance(msg.get("images"), list) else None
-
-        openai_msg: dict[str, Any] = {"role": role or "user"}
-
-        if images:
-            content_parts: list[dict[str, Any]] = []
-            if isinstance(content_value, str) and content_value:
-                content_parts.append({"type": "text", "text": content_value})
-            for image in images:
-                if not isinstance(image, str):
-                    continue
-                url = _image_to_data_url(image)
-                content_parts.append({"type": "image_url", "image_url": {"url": url}})
-            openai_msg["content"] = content_parts or ""
-        else:
-            openai_msg["content"] = content_value if content_value is not None else ""
+        openai_msg: dict[str, Any] = {
+            "role": role or "user",
+            "content": content_value if content_value is not None else "",
+        }
 
         if role == "assistant":
             tool_calls = msg.get("tool_calls")
@@ -190,6 +199,12 @@ def _translate_openai_message_to_ollama(message: dict[str, Any]) -> Message:
         if converted:
             tool_calls_payload = converted
 
+    if not tool_calls_payload and isinstance(content, str):
+        parsed_calls = _parse_call_syntax_tool_calls(content)
+        if parsed_calls:
+            tool_calls_payload = parsed_calls
+            content = _CALL_SYNTAX_PATTERN.sub("", content).strip() or None
+
     return Message(
         role=role,
         content=content if content else None,
@@ -255,14 +270,13 @@ class VLLMClient(LLMClient):
         """
         Run a chat completion against the OpenAI-compatible server.
 
-        ``think`` is accepted for interface compatibility but ignored unless the
-        backend exposes thinking content via ``reasoning_content`` in the reply.
+        ``images`` on incoming messages are dropped (vLLM backend is text-only).
+        ``append_image_sizes`` and ``think`` are accepted for interface compatibility
+        but ignored.
         """
-        prepared_messages = (
-            self._append_last_message_image_sizes(messages)
-            if append_image_sizes
-            else messages
-        )
+        prepared_messages = [
+            {k: v for k, v in msg.items() if k != "images"} for msg in messages
+        ]
         openai_messages = _translate_messages_to_openai(prepared_messages)
 
         payload: dict[str, Any] = {
@@ -279,6 +293,10 @@ class VLLMClient(LLMClient):
 
         if tools:
             payload["tools"] = [_normalize_tool_descriptor(tool) for tool in tools]
+            # vLLM defaults to tool_choice=auto, which 400s unless the server was
+            # started with --enable-auto-tool-choice. "none" still exposes tools to
+            # the model; replies use call:name{...} text we parse below.
+            payload["tool_choice"] = "none"
 
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -301,6 +319,10 @@ class VLLMClient(LLMClient):
 
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
             response = await client.post(self._endpoint, headers=headers, json=payload)
+        if response.is_error:
+            get_run_state_manager().log_info(
+                f"VLLM chat_messages error status={response.status_code} body={response.text}"
+            )
         response.raise_for_status()
         body = response.json()
         get_run_state_manager().log_info(f"VLLM chat_messages response=\n{body}")
@@ -324,7 +346,6 @@ class VLLMClient(LLMClient):
                 messages=messages,
                 tools=tools,
                 response_format=response_format,
-                append_image_sizes=append_image_sizes,
                 think=think,
             )
         return response_message

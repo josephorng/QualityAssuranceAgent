@@ -22,7 +22,6 @@ from cua_mcp.tool_module import (
     _press_key,
     _read_storage_text,
     _right_click,
-    _screenshot,
     _scroll,
     _store_image,
     _store_clipboard_text,
@@ -78,6 +77,9 @@ def hotkey(
 ):
     '''
     Press a keyboard shortcut combination.
+
+    keys: key names as a list (e.g. ["win", "e"]) or string such as "win+e",
+    "win,e", or "[win,e]".
     '''
     return _hotkey(keys=keys).update({"instruction": instruction})
 
@@ -158,7 +160,7 @@ async def move_mouse_to_text(
     target_text: str = "",
 ):
     '''
-    Move the mouse cursor to clickable text based on the instruction.
+    Take screenshot to find the text and move the mouse cursor to the text.
     instruction: the detailed instruction of the action
     target_text: the target text in Chinese
     '''
@@ -172,7 +174,7 @@ async def move_mouse_to_ui_element(
     ui_element_name: str = "",
 ):
     '''
-    Move the mouse cursor to a UI element (icon, button, toggle, avatar, gear, inputbox, etc.) based on the instruction.
+    Take screenshot to find the ui element and move the mouse cursor to the ui element.
     instruction: the detailed instruction of the action
     ui_element_name: the name of ui element in Chinese
     '''
@@ -235,17 +237,6 @@ def triple_click(
     Triple-click at the current cursor position.
     '''
     return _triple_click().update({"instruction": instruction})
-
-
-@mcp_server.tool()
-def screenshot(
-    path: str = "",
-    instruction: str = "",
-):
-    '''
-    Capture a screenshot and save it.
-    '''
-    return _screenshot(path=path, instruction=instruction)
 
 
 @mcp_server.tool()
@@ -437,7 +428,6 @@ TOOL_FUNCTIONS: list[callable[..., Any]] = [
     triple_click,
     middle_click,
     double_click,
-    screenshot,
     open_website,
 ]
 

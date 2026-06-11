@@ -89,6 +89,7 @@ class _WorkerArgs:
     eye_monitor_indices: list[int]
     script_raw: str
     script_disk_path: Path | None
+    run_folder_name: str | None = None
 
 
 class MainHub(ctk.CTk):
@@ -121,6 +122,7 @@ class MainHub(ctk.CTk):
         self._post_run_unlink: Path | None = None
         self._script_controls: list[Any] = []
         self._last_run_was_script_mode = False
+        self._last_script_run_folder: str | None = None
 
         self._build_header()
         self._build_monitor_row()
@@ -576,6 +578,7 @@ class MainHub(ctk.CTk):
             eye_monitor_indices=eye_indices,
             script_raw="",
             script_disk_path=None,
+            run_folder_name=self._last_script_run_folder,
         )
         self._begin_worker_run(args)
 
@@ -584,6 +587,7 @@ class MainHub(ctk.CTk):
             return
         self._user_requested_stop = False
         self._post_run_unlink = None
+        self._last_script_run_folder = None
         eye_indices = self._selected_monitor_indices()
         if not eye_indices:
             show_ctk_message(
@@ -647,7 +651,7 @@ class MainHub(ctk.CTk):
                 reset_runtime_user_ended_at_prompt()
                 settings = load_settings()
                 runs_root = Path(settings.runs_dir)
-                folder_name = unique_run_folder_name("runtime_command")
+                folder_name = args.run_folder_name or unique_run_folder_name("runtime_command")
                 manager, _, run_id = prepare_run_session(
                     runs_root=runs_root,
                     task="runtime_command",
@@ -690,6 +694,7 @@ class MainHub(ctk.CTk):
                 )
                 manager.log_info("Master starting coordinator module runtime")
                 run_coordinator_sync()
+                self._last_script_run_folder = run_id
                 self._worker_outcome = ("ok", f"執行 {run_id} 已完成。")
                 manager.log_info("Master stopped.")
         except asyncio.CancelledError:
@@ -759,6 +764,7 @@ class MainHub(ctk.CTk):
                     return
                 self._start_runtime_after_script(eye_indices)
             else:
+                self._last_script_run_folder = None
                 self._status.configure(text=msg.strip() or "就緒")
             return
         if kind == "ok":

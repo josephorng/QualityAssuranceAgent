@@ -12,6 +12,7 @@ import pyperclip
 import pyautogui
 import pygetwindow as gw
 from src.common.llm_factory import get_llm_client
+from src.common.prompting import get_prompt
 from src.common.settings import load_settings
 from src.eye.capture import capture_active_monitor_to_file
 
@@ -275,30 +276,17 @@ def _parse_json_object_from_llm(content: str) -> dict[str, Any]:
 async def _ollama_pick_window_indices(
     user_query: str,
     candidates: list[tuple[Any, str]],
-    instruction: str = "",
+    instruction: str,
     action: str = "maximize",
 ) -> list[int]:
     if not candidates:
         raise ValueError("no candidate windows to choose from")
     lines = [f"{i}: {title}" for i, (_, title) in enumerate(candidates)]
-    extra = (instruction or "").strip()
-    context_block = (
-        f"Additional context from the operator (use to disambiguate):\n{extra}\n\n"
-        if extra
-        else ""
-    )
-    prompt = (
-        f"You select one or more desktop windows to {action}.\n"
-        "The user wants these windows (natural-language or partial title):\n"
-        f"{user_query!r}\n\n"
-        f"{context_block}"
-        "From the numbered list, choose every window that matches the user's intent. "
-        "Use a single-element list when only one window is appropriate. "
-        "Prefer main application windows over tiny dialogs or tool windows when unclear.\n"
-        "Return JSON only in this exact shape: {\"indices\": [<int>, ...]}\n"
-        "Use 0-based indices from the list.\n\n"
-        "Windows:\n"
-        + "\n".join(lines)
+    prompt = get_prompt("window_select").format(
+        action=action,
+        user_query=repr(user_query),
+        instruction=instruction,
+        windows_list="\n".join(lines),
     )
     msg = await get_llm_client().chat_messages(
         model=load_settings().brain_lm,

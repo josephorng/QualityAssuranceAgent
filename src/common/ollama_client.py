@@ -52,7 +52,7 @@ class OllamaClient(LLMClient):
             "model": model,
             "messages": prepared_messages,
             "stream": False,
-            "options": {"num_ctx": 4096},
+            "options": {"num_ctx": 1024*64},
         }
         if response_format is not None:
             chat_kwargs["format"] = response_format

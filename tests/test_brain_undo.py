@@ -27,6 +27,21 @@ def test_undo_last_runtime_step_removes_files_and_decrements_counter(tmp_path: P
     assert not (steps_dir / "1_0.log").exists()
 
 
+def test_resume_step_transcript_counter_continues_after_script_steps(tmp_path: Path) -> None:
+    mgr = RunStateManager(tmp_path)
+    paths = mgr.init_run("test", "test_run")
+    steps_dir = paths.root / "steps"
+    steps_dir.mkdir(parents=True, exist_ok=True)
+    (steps_dir / "0_0.json").write_text("{}", encoding="utf-8")
+    (steps_dir / "1_1.json").write_text("{}", encoding="utf-8")
+    (steps_dir / "2_2.json").write_text("{}", encoding="utf-8")
+
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = mgr
+
+    assert brain._resume_step_transcript_counter() == 3
+
+
 def test_undo_last_runtime_step_returns_false_when_empty(tmp_path: Path) -> None:
     mgr = RunStateManager(tmp_path)
     mgr.init_run("test", "test_run")

@@ -1,14 +1,25 @@
-"""LLM prompt definitions. Each key maps to variant list (first variant is used)."""
+"""LLM prompt definitions. Each key maps to variant list (first variant is used).
+
+``image_usage`` tiers (per prompt, at call site):
+- ``no_image``: no screenshots attached; answer from text / structured lists only.
+- ``optional``: images may be attached for context, but the prompt carries enough text to answer without vision.
+- ``use_image``: screenshots attached and spatial or visual reasoning is required or strongly intended.
+Retry prompts inherit the parent message's ``images`` list when used via ``request_json_with_retry``.
+"""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
+
+ImageUsage = Literal["no_image", "optional", "use_image"]
 
 PROMPTS: dict[str, list[dict[str, Any]]] = {
     "brain_decide_action": [
         {
+            "image_usage": "optional",
             "prompt": (
-                "Given task objective, current screenshot(s), and available tools, "
+                "You are a helpful assistant that can help with tasks on the computer. "
+                "Given task objective, and available tools, "
                 "decide one or multiple tool calls to take to achieve the task objective.\n\n"
                 "CurrentTaskGoal:\n{task}"
             ),
@@ -17,7 +28,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Create detailed tool instructions for each tool call.",
                 "All the monitor screenshot(s) are captured and will be provided to you.",
                 "Do not do anything outside of the task scope.",
-                "If task is 'click on the xxx' or '點選xxx', you should split it into move mouse to the xxx and click on the xxx.",
+                "If task is 'click on the object' or '點選物件', you should split it into move mouse to the object and click on the object.",
                 "For scroll: positive clicks scroll down (往下滑), negative scroll up; use roughly 3–10 per screen of content.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
@@ -25,15 +36,15 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
     ],
     "brain_decide_action_2": [
         {
+            "image_usage": "optional",
             "prompt": (
                 "Now you need to decide the next action to take. If the task is completed, "
                 "return the reason why it is completed. Current task: {task}\n\n"
-                "All monitor screenshots have been captured and will be provided to you."
             ),
             "instructions": [
                 "If the previous task is not executed, try new method to achieve the task.",
                 "If the tool failed to execute, do not assume the task is completed. Try new method to achieve the task.",
-                "If the task can be examined by screenshot, use the screenshot to examine if the task is completed.",
+                "If the task can be examined by screenshot, use the screenshot to examine if the task is completed if the screenshot is provided.",
                 "If the task cannot be examined by screenshot, then assume the task is completed if the tool is executed successfully.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
@@ -41,6 +52,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
     ],
     "brain_verify_script_step": [
         {
+            "image_usage": "use_image",
             "prompt": (
                 "You are verifying whether the current scripted task step is satisfied in the screenshot. "
                 "You will see the full numbered script and which step is current."
@@ -59,6 +71,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
     ],
     "coordinate_selection": [
         {
+            "image_usage": "optional",
             "prompt": (
                 "Choose ONE line from CoordinatesText that best matches Target.\n"
                 "CoordinatesText lines look like: [center_x,center_y] <OCR text for that region>.\n\n"
@@ -78,6 +91,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
     ],
     "coordinate_disambiguation": [
         {
+            "image_usage": "optional",
             "prompt": (
                 "The matched OCR text appears at multiple locations in the image.\n"
                 "Choose one center point (x, y) that best matches the Instruction.\n"
@@ -99,11 +113,13 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
     ],
     "ui_element_selection": [
         {
+            "image_usage": "optional",
             "prompt": (
                 "Pick the candidate index from Candidates that best matches the Instruction's location hint. "
                 "Each candidate row starts with [index] then center=[cx,cy] w=<width_px> h=<height_px>.\n\n"
                 "Instruction:\n{instruction}\n\n"
-                "Candidates:\n{candidates_text}\n"
+                "Candidates:\n{candidates_text}\n\n"
+                "Screenshot size(s): {screenshot_sizes} (width x height pixels per monitor)."
             ),
             "instructions": [
                 'Reply only with JSON: {{"index": <integer>}} — the [index] from the chosen candidate row (0-based).',
@@ -112,27 +128,9 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "models": ["gemma4:e2b", "gemma3:4b"],
         }
     ],
-    "ui_icon_filter": [
-        {
-            "prompt": (
-                "Filter candidate icons by relevance to the Instruction.\n"
-                "Use ONLY the attached icon crops and their [index] labels in the headers.\n\n"
-                "Instruction:\n{instruction}\n\n"
-                "Candidate count: {candidate_count}\n"
-            ),
-            "instructions": [
-                'Return JSON only: {{"keep_indices": [<int>, ...]}}.',
-                "keep_indices must contain only indices visible in image headers.",
-                "Keep all relevant candidates; include multiple indices when uncertain.",
-                "Return an empty list when no icon is relevant.",
-                "Do not use or infer coordinates.",
-                "Do not output prose.",
-            ],
-            "models": ["gemma4:e2b", "gemma3:4b"],
-        }
-    ],
     "ui_text_filter": [
         {
+            "image_usage": "no_image",
             "prompt": (
                 "Select ONLY text candidates that match the user instruction.\n\n"
                 "Instruction:\n{instruction}\n\n"
@@ -147,6 +145,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
     ],
     "ui_instruction_icon_location_extract": [
         {
+            "image_usage": "no_image",
             "prompt": (
                 "Analyze the UI automation instruction below for downstream models in one response.\n\n"
                 "User instruction:\n{instruction}\n"
@@ -158,6 +157,108 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Do not invent UI that is not implied by the instruction.",
                 "Do not output markdown or prose outside the JSON object.",
             ],
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
+    "hand_remap_tool": [
+        {
+            "image_usage": "no_image",
+            "prompt": (
+                "You are remapping a failed tool invocation to a valid MCP tool.\n"
+                "Failed action: {action}\n"
+                "Failed args JSON: {failed_args_json}\n"
+                "Runtime error: {error_message}\n\n"
+                "Available tools:\n{available_tools}\n\n"
+                "Return JSON only with this exact shape:\n"
+                '{{"action":"<one available tool name>","args":{{"...": "..."}} }}\n'
+                "If args do not need changes, return the original args."
+            ),
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
+    "window_select": [
+        {
+            "image_usage": "no_image",
+            "prompt": (
+                "You select one or more desktop windows to {action}.\n"
+                "The user wants these windows (natural-language or partial title):\n"
+                "{user_query}\n\n"
+                "Additional context from the operator (use to disambiguate):\n{instruction}\n\n"
+                "From the numbered list, choose every window that matches the user's intent. "
+                "Use a single-element list when only one window is appropriate. "
+                "Prefer main application windows over tiny dialogs or tool windows when unclear.\n"
+                'Return JSON only in this exact shape: {{"indices": [<int>, ...]}}\n'
+                "Use 0-based indices from the list.\n\n"
+                "Windows:\n{windows_list}\n"
+            ),
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
+    # "ui_element_selection_thinking_refine": [
+    #     {
+    #         "image_usage": "no_image",
+    #         "prompt": (
+    #             "Prior reasoning: {thinking}\n\n"
+    #             "Using your prior reasoning in context and the Candidates list below, output your "
+    #             'final choice as JSON only: a single object with key "index" (integer 0..{max_index}). '
+    #             "No markdown, no explanation.\n\n"
+    #         ),
+    #         "models": ["gemma4:e2b", "gemma3:4b"],
+    #     }
+    # ],
+    "coordinate_selection_retry": [
+        {
+            "image_usage": "optional",
+            "prompt": (
+                'Reply with ONLY: {{"text": "<string>"}} where "text" is the OCR line text from '
+                "CoordinatesText (after [cx,cy] ), as verbatim as possible. "
+                "No text before or after the JSON."
+            ),
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
+    "coordinate_disambiguation_retry": [
+        {
+            "image_usage": "optional",
+            "prompt": (
+                'Reply with ONLY: {{"x": <integer>, "y": <integer>, "text": "<string>"}} where x,y '
+                "equals one candidate [cx,cy] above and \"text\" is that line's OCR text. "
+                "No text before or after the JSON."
+            ),
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
+    "ui_instruction_icon_location_extract_retry": [
+        {
+            "image_usage": "no_image",
+            "prompt": (
+                'Reply with ONLY: {{"need_text_anchor": true|false, "location_description": "..."}}. '
+                "need_text_anchor: true for visible words/labels/on-screen text; false for mostly "
+                "non-text targets (icon, toggle, gear, unlabeled control). location_description: "
+                "detailed positional language for picking among candidates, or empty when there is "
+                "no spatial clue. No text before or after the JSON."
+            ),
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
+    "ui_text_filter_retry": [
+        {
+            "image_usage": "no_image",
+            "prompt": (
+                'Reply with ONLY: {{"keep_indices": [<integer>, ...]}}. '
+                "No text before or after the JSON."
+            ),
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
+    "ui_element_selection_retry": [
+        {
+            "image_usage": "no_image",
+            "prompt": (
+                'Reply with ONLY: {{"index": <integer>}} - the [index] from the Candidates list row '
+                "that best matches the location instruction (0-based). No other keys. "
+                "No text before or after the JSON."
+            ),
             "models": ["gemma4:e2b", "gemma3:4b"],
         }
     ],

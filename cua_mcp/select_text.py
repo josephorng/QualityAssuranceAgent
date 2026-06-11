@@ -291,14 +291,27 @@ def _best_row_by_llm_text_similarity(
         row_key = _normalize_match_key(t)
         if not row_key:
             continue
-        if llm_key in row_key or row_key in llm_key:
-            score = 1.0
-        else:
-            score = SequenceMatcher(None, llm_key, row_key).ratio()
+        score = SequenceMatcher(None, llm_key, row_key).ratio()
         if score > best_score:
             best_score = score
             best_row = (cx, cy, t)
     return best_row if best_score > 0 else None
+
+
+def _resolve_disambiguation_pick(
+    x: int,
+    y: int,
+    llm_text: str,
+    matches: list[tuple[int, int, str]],
+) -> tuple[int, int, str] | None:
+    """Map an LLM disambiguation reply onto an allowed OCR row, if possible."""
+    for cx, cy, t in matches:
+        if (x, y) == (cx, cy) and llm_text == t:
+            return cx, cy, t
+    for cx, cy, t in matches:
+        if (x, y) == (cx, cy):
+            return cx, cy, t
+    return _best_row_by_llm_text_similarity(llm_text, matches)
 
 
 async def _disambiguate_duplicate_centers(
@@ -329,15 +342,12 @@ async def _disambiguate_duplicate_centers(
         messages=messages,
         response_schema=_DISAMBIGUATE_XY_TEXT_JSON_SCHEMA,
         parse_reply=_parse_xy_text_from_llm_content,
-        retry_instruction='Reply with ONLY: {"x": <integer>, "y": <integer>, "text": "<string>"} where x,y equals one candidate [cx,cy] above and "text" is that line\'s OCR text. No text before or after the JSON.',
+        retry_instruction=get_prompt("coordinate_disambiguation_retry"),
         log_info=lambda m: _run_manager().log_info(f"_disambiguate_duplicate_centers: {m}"),
     )
-    for cx, cy, t in matches:
-        if (x, y) == (cx, cy) and llm_text == t:
-            return x, y, t
-    best = _best_row_by_llm_text_similarity(llm_text, matches)
-    if best is not None:
-        return best
+    picked = _resolve_disambiguation_pick(x, y, llm_text, matches)
+    if picked is not None:
+        return picked
     raise ValueError(
         f"disambiguation returned ({x},{y},{llm_text!r}) not in allowed {matches}"
     )
@@ -365,7 +375,7 @@ async def _select_text_coordinate_via_llm(
         messages=messages,
         response_schema=_TARGET_TEXT_JSON_SCHEMA,
         parse_reply=_parse_target_text_from_llm_content,
-        retry_instruction='Reply with ONLY: {"text": "<string>"} where "text" is the OCR line text from CoordinatesText (after [cx,cy] ), as verbatim as possible. No text before or after the JSON.',
+        retry_instruction=get_prompt("coordinate_selection_retry"),
         log_info=lambda m: _run_manager().log_info(f"_select_coordinate_via_llm: {m}"),
     )
     matches = _match_tiers_to_rows(chosen, coordinate_and_texts)

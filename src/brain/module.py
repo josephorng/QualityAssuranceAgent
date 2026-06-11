@@ -80,8 +80,30 @@ class BrainModule:
         self._script_step_index = 0
         self._hand = hand
         self._eye = eye
-        self._step_transcript_counter = 0
+        self._step_transcript_counter = (
+            self._resume_step_transcript_counter()
+            if is_runtime_command_mode()
+            else 0
+        )
         self.manager.log_info(f"Brain module initialized run_id={self.run_id}")
+
+    def _resume_step_transcript_counter(self) -> int:
+        """Continue numbering runtime steps after script steps in the same run folder."""
+        steps_dir = self.manager.require_paths().root / "steps"
+        if not steps_dir.is_dir():
+            return 0
+        max_tc = -1
+        for path in steps_dir.iterdir():
+            if path.suffix not in (".json", ".log"):
+                continue
+            stem = path.stem
+            if "_" not in stem:
+                continue
+            try:
+                max_tc = max(max_tc, int(stem.split("_", 1)[0]))
+            except ValueError:
+                continue
+        return max_tc + 1
 
     def _save_step_messages(self, messages: list[dict[str, Any]]) -> None:
         """Save or update the decide-loop transcript under `steps/<n>.json`."""        

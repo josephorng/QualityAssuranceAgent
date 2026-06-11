@@ -5,6 +5,7 @@ from cua_mcp.select_text import (
     _best_row_by_llm_text_similarity,
     _matches_without_pua,
     _regions_with_mapped_pua,
+    _resolve_disambiguation_pick,
     _strip_pua_from_text,
 )
 
@@ -39,6 +40,30 @@ def test_best_row_by_llm_text_similarity_prefers_containing_row() -> None:
         (2446, 200, "麵。有帳"),
     ]
     assert _best_row_by_llm_text_similarity("桌面", matches) == (1978, 245, "空心方框 桌面")
+
+
+def test_best_row_by_llm_text_similarity_prefers_near_exact_over_substring() -> None:
+    matches = [
+        (2024, 725, "本機磁碟 (C)"),
+        (1990, 692, "本機"),
+    ]
+    assert _best_row_by_llm_text_similarity("本機磁碟 (C:)", matches) == (
+        2024,
+        725,
+        "本機磁碟 (C)",
+    )
+
+
+def test_resolve_disambiguation_pick_trusts_coordinates_over_text_mismatch() -> None:
+    matches = [
+        (2024, 725, "本機磁碟 (C)"),
+        (1990, 692, "本機"),
+    ]
+    assert _resolve_disambiguation_pick(2024, 725, "本機磁碟 (C:)", matches) == (
+        2024,
+        725,
+        "本機磁碟 (C)",
+    )
 
 
 def test_matches_without_pua_drops_empty_and_keeps_labels() -> None:

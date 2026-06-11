@@ -12,6 +12,7 @@ from cua_mcp.tools import mcp_server
 from src.common.io_utils import append_csv_row
 from src.common.models import ExecutionResult, ToolCommand
 from src.common.llm_factory import get_llm_client
+from src.common.prompting import get_prompt
 from src.common.run_state import get_run_state_manager
 from src.common.runtime_context import get_runtime_env
 from src.common.settings import load_settings
@@ -86,17 +87,11 @@ class HandModule:
         if not tool_names:
             return None
 
-        prompt = (
-            "You are remapping a failed tool invocation to a valid MCP tool.\n"
-            f"Failed action: {action}\n"
-            f"Failed args JSON: {json.dumps(args, ensure_ascii=False)}\n"
-            f"Runtime error: {error_message}\n\n"
-            "Available tools:\n"
-            + "\n".join(f"- {name}" for name in tool_names)
-            + "\n\n"
-            "Return JSON only with this exact shape:\n"
-            '{"action":"<one available tool name>","args":{"...": "..."} }\n'
-            "If args do not need changes, return the original args."
+        prompt = get_prompt("hand_remap_tool").format(
+            action=action,
+            failed_args_json=json.dumps(args, ensure_ascii=False),
+            error_message=error_message,
+            available_tools="\n".join(f"- {name}" for name in tool_names),
         )
 
         try:

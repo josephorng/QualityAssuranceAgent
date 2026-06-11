@@ -196,7 +196,7 @@ def _run_ui_yolo_inference(
     conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Letterbox BGR to 640 square (RGB CHW /255), run UI YOLOv26 ONNX (end2end), return
+    Letterbox BGR to 1280 square (RGB CHW /255), run UI YOLOv26 ONNX (end2end), return
     ``(xyxy, scores, class_ids)`` in the input image's pixel space. Only ``element`` class
     detections are kept.
     """
@@ -425,39 +425,39 @@ def _format_ui_candidates_text(detections: list[UiDetection]) -> str:
     return "\n".join(lines)
 
 
-async def _analyze_instruction(instruction: str) -> tuple[bool, str]:
-    """Classify text-anchor need and extract location hint in one Ollama call.
+# async def _analyze_instruction(instruction: str) -> tuple[bool, str]:
+#     """Classify text-anchor need and extract location hint in one Ollama call.
 
-    Returns ``(need_text_anchor, location_description)``.
+#     Returns ``(need_text_anchor, location_description)``.
 
-    On parse failure after retry, or on transport errors, returns ``(True, text)``
-    so downstream steps still run (conservative text-anchor path, full instruction
-    for location prompts).
-    """
-    text = (instruction or "").strip()
-    if not text:
-        return False, ""
+#     On parse failure after retry, or on transport errors, returns ``(True, text)``
+#     so downstream steps still run (conservative text-anchor path, full instruction
+#     for location prompts).
+#     """
+#     text = (instruction or "").strip()
+#     if not text:
+#         return False, ""
 
-    prompt = get_prompt("ui_instruction_icon_location_extract").replace("{instruction}", text)
-    messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
-    try:
-        need, loc_llm = await request_json_with_retry(
-            messages=messages,
-            response_schema=_INSTRUCTION_ANALYSIS_JSON_SCHEMA,
-            parse_reply=_parse_instruction_analysis_from_llm,
-            retry_instruction='Reply with ONLY: {"need_text_anchor": true|false, "location_description": "..."}. need_text_anchor: true for visible words/labels/on-screen text; false for mostly non-text targets (icon, toggle, gear, unlabeled control). location_description: detailed positional language for picking among candidates, or empty when there is no spatial clue. No text before or after the JSON.',
-            log_info=lambda m: _log_info(f"_need_text_anchors: {m}"),
-        )
-    except ValueError as retry_exc:
-        _log_info(f"_need_text_anchors: fallback full instruction ({retry_exc})")
-        return True, text
-    except Exception as exc:
-        _log_info(
-            f"_need_text_anchors: fallback full instruction ({type(exc).__name__}: {exc})"
-        )
-        return True, text
+#     prompt = get_prompt("ui_instruction_icon_location_extract").replace("{instruction}", text)
+#     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
+#     try:
+#         need, loc_llm = await request_json_with_retry(
+#             messages=messages,
+#             response_schema=_INSTRUCTION_ANALYSIS_JSON_SCHEMA,
+#             parse_reply=_parse_instruction_analysis_from_llm,
+#             retry_instruction=get_prompt("ui_instruction_icon_location_extract_retry"),
+#             log_info=lambda m: _log_info(f"_need_text_anchors: {m}"),
+#         )
+#     except ValueError as retry_exc:
+#         _log_info(f"_need_text_anchors: fallback full instruction ({retry_exc})")
+#         return True, text
+#     except Exception as exc:
+#         _log_info(
+#             f"_need_text_anchors: fallback full instruction ({type(exc).__name__}: {exc})"
+#         )
+#         return True, text
 
-    return need, loc_llm.strip()
+#     return need, loc_llm.strip()
 
 
 async def _filter_text_detections(
@@ -479,7 +479,7 @@ async def _filter_text_detections(
             messages=messages,
             response_schema=_TEXT_FILTER_JSON_SCHEMA,
             parse_reply=lambda raw: _parse_keep_indices_from_llm(raw, len(text_detections)),
-            retry_instruction='Reply with ONLY: {"keep_indices": [<integer>, ...]}. No text before or after the JSON.',
+            retry_instruction=get_prompt("ui_text_filter_retry"),
             log_info=lambda m: _run_manager().log_info(f"_filter_text_detections: {m}"),
         )
     except ValueError as retry_exc:
@@ -499,16 +499,11 @@ async def _select_center_with_ollama(
     """
     Ask Ollama for the best candidate index (0-based into ``detections``).
 
-    With thinking models, runs a second turn using ``thinking`` from the first reply, then
-    falls back to :func:`request_json_with_retry` if parsing still fails.
+    Falls back to :func:`request_json_with_retry` if the first reply cannot be parsed.
     """
     if not detections:
         raise ValueError("no candidates to pick from")
     candidates_text = _format_ui_candidates_text(detections)
-    base_instructions = get_prompt("ui_element_selection").format(
-        instruction=instruction,
-        candidates_text=candidates_text,
-    )
     screenshot_sizes: list[str] = []
     for image_path in image_paths:
         img = cv2.imread(image_path)
@@ -516,9 +511,10 @@ async def _select_center_with_ollama(
             img_h, img_w = img.shape[:2]
             screenshot_sizes.append(f"{img_w}x{img_h}")
     screenshot_size_text = ", ".join(screenshot_sizes) if screenshot_sizes else "unknown"
-    prompt = (
-        f"{base_instructions}\n\n"
-        f"Screenshot size(s): {screenshot_size_text} (width x height pixels per monitor)."
+    prompt = get_prompt("ui_element_selection").format(
+        instruction=instruction,
+        candidates_text=candidates_text,
+        screenshot_sizes=screenshot_size_text,
     )
 
     messages: list[dict[str, Any]] = [
@@ -536,42 +532,10 @@ async def _select_center_with_ollama(
         response_format=_INDEX_JSON_SCHEMA,
         think=True,
     )
-    thinking = (getattr(reply1, "thinking", None) or "").strip()
-    pool_idx: int | None = None
-
-    if thinking:
-        refine = (
-            "Prior reasoning: "
-            f"{thinking}\n\n"
-            "Using your prior reasoning in context and the Candidates list below, output your "
-            f"final choice as JSON only: a single object with key \"index\" (integer 0..{n - 1}). "
-            "No markdown, no explanation.\n\n"
-        )
-        messages2 = [
-            {"role": "user", "content": refine},
-        ]
-        reply2 = await get_llm_client().chat_messages(
-            load_settings().brain_lm,
-            messages=messages2,
-            tools=[],
-            response_format=_INDEX_JSON_SCHEMA,
-        )
-        try:
-            pool_idx = _parse_index_from_llm(reply2.content, n)
-        except ValueError as exc:
-            _log_info(
-                f"_select_center_with_ollama: thinking-refine parse failed ({exc}); "
-                "trying first reply JSON"
-            )
-            try:
-                pool_idx = _parse_index_from_llm(reply1.content, n)
-            except ValueError:
-                pool_idx = None
-    else:
-        try:
-            pool_idx = _parse_index_from_llm(reply1.content, n)
-        except ValueError:
-            pool_idx = None
+    try:
+        pool_idx = _parse_index_from_llm(reply1.content, n)
+    except ValueError:
+        pool_idx = None
 
     if pool_idx is not None:
         return pool_idx
@@ -580,7 +544,7 @@ async def _select_center_with_ollama(
         messages=messages,
         response_schema=_INDEX_JSON_SCHEMA,
         parse_reply=lambda raw: _parse_index_from_llm(raw, n),
-        retry_instruction='Reply with ONLY: {"index": <integer>} - the [index] from the Candidates list row that best matches the location instruction (0-based). No other keys. No text before or after the JSON.',
+        retry_instruction=get_prompt("ui_element_selection_retry"),
         log_info=lambda m: _run_manager().log_info(f"_select_center_with_ollama: {m}"),
     )
 
@@ -613,23 +577,24 @@ async def resolve_ui_element_point(
     if not instruction_text:
         raise ValueError("instruction must be non-empty")
 
+    # get ocr detections
     regions, image_paths = get_coordinates_from_selected_monitors(
         yolo_conf_threshold=yolo_conf_threshold,
     )
     image_path = image_paths[0] if image_paths else ""
-
-    # need_text_anchor, loc_desc = await _analyze_instruction(instruction_text)
-    # _log_info(f"_resolve_ui_element: need_text_anchor={need_text_anchor}")
     text_detections, ui_element_detections = _ocr_regions_to_candidates(
         regions,
-        # need_text_anchor=need_text_anchor,
     )
+    
+    # filter
     ui_element_detections = _filter_ui_detections_by_icon_name(
         ui_element_detections,
         ui_element_name,
         fallback_icon_text=instruction_text,
     )
     text_detections = await _filter_text_detections(text_detections, instruction)
+    
+    # sort
     detections = _sort_detections_reading_order(ui_element_detections + text_detections)
     _log_info(
         f"_resolve_ui_element: ocr_regions={len(regions)} "

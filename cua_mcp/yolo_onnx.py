@@ -1,7 +1,7 @@
 """
 YOLOv26 ONNX helpers — ONNX Runtime on CPU.
 
-Ultralytics-compatible preprocessing (default 640): ``LetterBox``–style resize–pad to a
+Ultralytics-compatible preprocessing (default 1280): ``LetterBox``–style resize–pad to a
 square tensor, BGR → RGB, ``NCHW``, ``float32 / 255``, then ``InferenceSession.run``. Box
 coordinates are mapped back with the same ``scale_boxes`` math as ``ultralytics``
 (``padding=True``, ``ratio_pad=None``).
@@ -29,7 +29,7 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
-YOLO_ONNX_INPUT_SIZE: int = 640
+YOLO_ONNX_INPUT_SIZE: int = 1280
 # Matches ``ultralytics.data.augment.LetterBox`` default ``padding_value``.
 YOLO_LETTERBOX_PAD_BGR: tuple[int, int, int] = (114, 114, 114)
 DEFAULT_PROVIDERS: Sequence[str] = ("CPUExecutionProvider",)
@@ -41,7 +41,7 @@ DEFAULT_CONF_YOLOV26_END2END: float = 0.05
 # :data:`DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD` (intersection/union); each merged group is the
 # axis-aligned union with max score. Default off: set ``DEFAULT_MERGE_TOUCHING_SAME_CLASS`` True
 # or pass ``merge_touching_same_class=True`` to enable.
-DEFAULT_MERGE_TOUCHING_SAME_CLASS: bool = True
+DEFAULT_MERGE_TOUCHING_SAME_CLASS: bool = False
 # Pairs of same-class boxes are linked (and merged transitively) when ``IoU >`` this value.
 DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD: float = 0.5
 

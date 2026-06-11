@@ -102,6 +102,11 @@ class RunStateManager:
         self.runs_root = runs_root
         self.paths: RunPaths | None = None
         self._step_log: tuple[int, int] | None = None
+        self.session_end_reason: str | None = None
+
+    def set_session_end_reason(self, reason: str) -> None:
+        """Record why the current coordinator session ended (used for ``report.json``)."""
+        self.session_end_reason = reason
 
     def init_run(self, task_input: str, run_folder_name: str | None = None) -> RunPaths:
         """
@@ -135,6 +140,7 @@ class RunStateManager:
             info_log.write_text("", encoding="utf-8")
 
         self._step_log = None
+        self.session_end_reason = None
         self.paths = RunPaths(
             root=root,
             eye_dir=eye_dir,

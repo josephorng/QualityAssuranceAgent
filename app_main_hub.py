@@ -22,7 +22,8 @@ from src.common.monitor_prompt import (
     EyeMonitorChoice,
     list_eye_monitor_choices,
 )
-from src.common.run_state import unique_run_folder_name
+from src.common.run_state import get_run_state_manager, unique_run_folder_name
+from src.common.session_report import should_write_session_report, write_session_report
 from src.common.runtime_command_dialog import (
     RuntimeCommandHubBridge,
     consume_runtime_user_ended_at_prompt,
@@ -123,6 +124,7 @@ class MainHub(ctk.CTk):
         self._script_controls: list[Any] = []
         self._last_run_was_script_mode = False
         self._last_script_run_folder: str | None = None
+        self._active_run_root: Path | None = None
 
         self._build_header()
         self._build_monitor_row()
@@ -645,6 +647,41 @@ class MainHub(ctk.CTk):
 
         self._begin_worker_run(args)
 
+    def _resolve_session_end_reason(self, *, kind: str, user_stopped: bool) -> str:
+        if user_stopped:
+            return "user_stopped"
+        if kind == "err":
+            return "error"
+        try:
+            reason = get_run_state_manager().session_end_reason
+            if reason:
+                return reason
+        except RuntimeError:
+            pass
+        return "completed"
+
+    def _maybe_write_session_report(
+        self,
+        *,
+        script_finished: bool,
+        user_continues_runtime: bool,
+        session_end_reason: str,
+    ) -> None:
+        if not should_write_session_report(
+            script_finished=script_finished,
+            user_continues_runtime=user_continues_runtime,
+        ):
+            return
+        run_root = self._active_run_root
+        if run_root is None:
+            return
+        report_path = write_session_report(run_root, session_end_reason=session_end_reason)
+        try:
+            get_run_state_manager().log_info(f"Report written to {report_path}")
+        except RuntimeError:
+            pass
+        self._active_run_root = None
+
     def _worker_main(self, args: _WorkerArgs) -> None:
         try:
             if args.step_mode:
@@ -652,7 +689,7 @@ class MainHub(ctk.CTk):
                 settings = load_settings()
                 runs_root = Path(settings.runs_dir)
                 folder_name = args.run_folder_name or unique_run_folder_name("runtime_command")
-                manager, _, run_id = prepare_run_session(
+                manager, paths, run_id = prepare_run_session(
                     runs_root=runs_root,
                     task="runtime_command",
                     runtime_mode=True,
@@ -662,6 +699,7 @@ class MainHub(ctk.CTk):
                     clear_runs_root=False,
                     run_folder_name=folder_name,
                 )
+                self._active_run_root = paths.root
                 manager.log_info("Master starting coordinator module runtime")
                 run_coordinator_sync()
                 if consume_runtime_user_ended_at_prompt():
@@ -682,7 +720,7 @@ class MainHub(ctk.CTk):
                 task = steps[0]
                 settings = load_settings()
                 runs_root = Path(settings.runs_dir)
-                manager, _, run_id = prepare_run_session(
+                manager, paths, run_id = prepare_run_session(
                     runs_root=runs_root,
                     task=task,
                     runtime_mode=False,
@@ -692,6 +730,7 @@ class MainHub(ctk.CTk):
                     clear_runs_root=False,
                     run_folder_name=None,
                 )
+                self._active_run_root = paths.root
                 manager.log_info("Master starting coordinator module runtime")
                 run_coordinator_sync()
                 self._last_script_run_folder = run_id
@@ -745,9 +784,20 @@ class MainHub(ctk.CTk):
             self._status.configure(text=msg.strip())
         elif kind in ("ok", "ok_quiet"):
             self._status.configure(text="就緒")
+        session_end_reason = self._resolve_session_end_reason(kind=kind, user_stopped=user_stopped)
         if user_stopped and kind != "err":
+            self._maybe_write_session_report(
+                script_finished=script_finished,
+                user_continues_runtime=False,
+                session_end_reason=session_end_reason,
+            )
             return
         if kind == "err":
+            self._maybe_write_session_report(
+                script_finished=script_finished,
+                user_continues_runtime=False,
+                session_end_reason=session_end_reason,
+            )
             show_ctk_message(self, "電腦使用代理", msg, kind="error")
             return
         if script_finished:
@@ -764,9 +814,19 @@ class MainHub(ctk.CTk):
                     return
                 self._start_runtime_after_script(eye_indices)
             else:
+                self._maybe_write_session_report(
+                    script_finished=True,
+                    user_continues_runtime=False,
+                    session_end_reason=session_end_reason,
+                )
                 self._last_script_run_folder = None
                 self._status.configure(text=msg.strip() or "就緒")
             return
+        self._maybe_write_session_report(
+            script_finished=False,
+            user_continues_runtime=False,
+            session_end_reason=session_end_reason,
+        )
         if kind == "ok":
             show_ctk_message(self, "電腦使用代理", msg, kind="info")
 

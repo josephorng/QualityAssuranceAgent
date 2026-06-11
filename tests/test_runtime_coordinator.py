@@ -7,8 +7,14 @@ from src.runtime.coordinator import RuntimeCoordinator
 
 
 class _FakeManager:
+    def __init__(self) -> None:
+        self.session_end_reason: str | None = None
+
     def log_info(self, _message: str) -> None:
         return
+
+    def set_session_end_reason(self, reason: str) -> None:
+        self.session_end_reason = reason
 
 
 class _FakeBrain:

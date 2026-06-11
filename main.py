@@ -98,6 +98,10 @@ def run_coordinator_sync() -> None:
     # run builds fresh async transports instead of reusing ones bound to a closed loop.
     reset_llm_client()
 
+    from src.common.runtime_context import get_runtime_env
+
+    run_root, _ = get_runtime_env()
+
     async def _main() -> None:
         global _coordinator_loop, _coordinator_main_task
         loop = asyncio.get_running_loop()
@@ -113,7 +117,16 @@ def run_coordinator_sync() -> None:
                 _coordinator_loop = None
                 _coordinator_main_task = None
 
-    asyncio.run(_main())
+    try:
+        asyncio.run(_main())
+    finally:
+        if os.environ.get("CUA_WRITE_SESSION_REPORT") == "1":
+            from src.common.run_state import get_run_state_manager
+            from src.common.session_report import write_session_report
+
+            manager = get_run_state_manager()
+            reason = manager.session_end_reason or "completed"
+            write_session_report(run_root, session_end_reason=reason)
 
 
 def dismiss_nuitka_onefile_splash() -> None:

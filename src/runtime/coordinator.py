@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from src.brain.module import BrainModule
@@ -41,6 +42,9 @@ class RuntimeCoordinator:
         set_runtime_step_undo_handler(self._undo_last_step)
         try:
             await self._run_loop()
+        except asyncio.CancelledError:
+            self.manager.set_session_end_reason("user_stopped")
+            raise
         finally:
             set_runtime_step_undo_handler(None)
 
@@ -50,6 +54,7 @@ class RuntimeCoordinator:
                 cmd = prompt_runtime_command_popup()
                 if cmd is None:
                     self.manager.log_info("Runtime mode: user ended run")
+                    self.manager.set_session_end_reason("user_ended")
                     break
                 run_root = self.manager.require_paths().root
                 append_text(_runtime_command_script_path(run_root), cmd + "\n")
@@ -57,11 +62,13 @@ class RuntimeCoordinator:
             step_result = await self.brain.process_step()
             if not step_result.step_finished:
                 self.manager.log_info(step_result.reason or "Coordinator failed to process step")
+                self.manager.set_session_end_reason("step_failed")
                 break
             if step_result.run_complete:
                 if is_runtime_command_mode():
                     self.manager.log_info(step_result.reason or "Runtime step complete")
                     continue
                 self.manager.log_info(step_result.reason or "All script steps complete")
+                self.manager.set_session_end_reason("completed")
                 break
             self.manager.log_info("Coordinator finished one step cycle")

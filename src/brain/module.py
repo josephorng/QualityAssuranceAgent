@@ -554,6 +554,7 @@ class BrainModule:
                         "duration_seconds": duration_seconds,
                         "status": "failed",
                         "step_index": script_step_index,
+                        "goal": self._current_goal(),
                     },
                 )
                 return BrainStepResult(
@@ -584,6 +585,7 @@ class BrainModule:
                     "duration_seconds": duration_seconds,
                     "status": "completed",
                     "step_index": script_step_index,
+                    "goal": self._current_goal(),
                 },
             )
             self._script_step_index += 1

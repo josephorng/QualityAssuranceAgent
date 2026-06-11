@@ -3,7 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import mss
-from PIL import Image
+import pyautogui
+from PIL import Image, ImageDraw
 
 from src.common.monitor_prompt import read_eye_monitor_index_from_env
 from src.common.run_state import get_run_state_manager
@@ -50,6 +51,33 @@ def active_monitor_offset(monitor_index: int | None = None) -> tuple[int, int]:
         return int(mon["left"]), int(mon["top"])
 
 
+def overlay_mouse_cursor(img: Image.Image, origin_left: int = 0, origin_top: int = 0) -> Image.Image:
+    """Draw the current mouse cursor onto a desktop screenshot."""
+    try:
+        pos = pyautogui.position()
+    except Exception:
+        return img
+
+    local_x = int(pos.x) - int(origin_left)
+    local_y = int(pos.y) - int(origin_top)
+    if not (0 <= local_x < img.width and 0 <= local_y < img.height):
+        return img
+
+    draw = ImageDraw.Draw(img)
+    x, y = local_x, local_y
+    arrow = [
+        (x, y),
+        (x, y + 16),
+        (x + 4, y + 12),
+        (x + 7, y + 19),
+        (x + 10, y + 18),
+        (x + 7, y + 12),
+        (x + 12, y + 11),
+    ]
+    draw.polygon(arrow, fill="white", outline="black")
+    return img
+
+
 def grab_monitor_image(monitor_index: int) -> Image.Image:
     with mss.mss() as sct:
         idx = resolve_monitor_index(sct, monitor_index)
@@ -58,7 +86,28 @@ def grab_monitor_image(monitor_index: int) -> Image.Image:
         return Image.frombytes("RGB", shot.size, shot.rgb)
 
 
-def capture_monitor_to_file(dest: Path, monitor_index: int) -> int:
+def capture_all_screens_to_file(dest: Path) -> None:
+    """Capture the full virtual desktop (all monitors) into one image with the mouse cursor."""
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with mss.mss() as sct:
+        monitor = sct.monitors[0]
+        shot = sct.grab(monitor)
+        img = Image.frombytes("RGB", shot.size, shot.rgb)
+        overlay_mouse_cursor(img, int(monitor["left"]), int(monitor["top"]))
+    img.save(dest)
+    try:
+        get_run_state_manager().log_info(f"eye capture saved path={dest} monitor_index=0")
+    except RuntimeError:
+        pass
+
+
+def capture_monitor_to_file(
+    dest: Path,
+    monitor_index: int,
+    *,
+    include_cursor: bool = False,
+) -> int:
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     with mss.mss() as sct:
@@ -66,6 +115,8 @@ def capture_monitor_to_file(dest: Path, monitor_index: int) -> int:
         monitor = sct.monitors[idx]
         shot = sct.grab(monitor)
         img = Image.frombytes("RGB", shot.size, shot.rgb)
+        if include_cursor:
+            overlay_mouse_cursor(img, int(monitor["left"]), int(monitor["top"]))
     img.save(dest)
     try:
         get_run_state_manager().log_info(f"eye capture saved path={dest} monitor_index={idx}")

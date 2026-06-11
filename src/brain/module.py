@@ -43,6 +43,14 @@ def prune_nulls(d):
         return d
     return {k: v for k, v in d.items() if v is not None}
 
+
+def stamp_message(message: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of a chat message with `timestamp_utc` set if missing."""
+    stamped = prune_nulls(message)
+    if "timestamp_utc" not in stamped:
+        stamped["timestamp_utc"] = datetime.now(timezone.utc).isoformat()
+    return stamped
+
 @dataclass
 class BrainRuntime:
     """Lightweight flags for brain task lifecycle (reserved for future use)."""
@@ -118,7 +126,7 @@ class BrainModule:
                     payload = dict(existing)
             except (OSError, ValueError, json.JSONDecodeError):
                 payload = {}
-        payload["messages"] = messages
+        payload["messages"] = [stamp_message(msg) for msg in messages]
         write_json(out_path, payload)
 
     def _update_step_metadata(
@@ -178,7 +186,7 @@ class BrainModule:
                 merged_messages = []
                 payload = {}
 
-        merged_messages.extend([prune_nulls(msg) for msg in messages])
+        merged_messages.extend([stamp_message(msg) for msg in messages])
  
         payload[attribute_name] = merged_messages
         write_json(out_path, payload)
@@ -401,11 +409,13 @@ class BrainModule:
         verification_image_paths = await self._eye.capture_separated_images()
 
         messages: list[dict[str, Any]] = [
-            {
-                "role": ROLE_USER,
-                "content": body,
-                "images": verification_image_paths,
-            }
+            stamp_message(
+                {
+                    "role": ROLE_USER,
+                    "content": body,
+                    "images": verification_image_paths,
+                }
+            )
         ]
         response_message = await self.ollama.chat_messages(
             self.settings.brain_lm,
@@ -413,7 +423,7 @@ class BrainModule:
             tools=VERIFICATION_TOOLS,
         )
         if response_message:
-            messages.append(response_message.model_dump())
+            messages.append(stamp_message(response_message.model_dump()))
         self._append_step_messages(
             messages,
             transcript_counter,
@@ -449,11 +459,13 @@ class BrainModule:
                 all_image_paths = await self._eye.capture_separated_images()
                 user_content = first_prompt if not messages else second_prompt
                 messages.append(
-                    {
-                        "role": ROLE_USER,
-                        "content": user_content,
-                        "images": all_image_paths,
-                    }
+                    stamp_message(
+                        {
+                            "role": ROLE_USER,
+                            "content": user_content,
+                            "images": all_image_paths,
+                        }
+                    )
                 )
                 response_message = await self.ollama.chat_messages(
                     self.settings.brain_lm,
@@ -463,7 +475,7 @@ class BrainModule:
                 if not response_message:
                     self.manager.log_error("Ollama returned empty response")
                     break
-                response_message_dict = self.sanitize_message(response_message)
+                response_message_dict = stamp_message(self.sanitize_message(response_message))
                 messages.append(response_message_dict)
 
                 if not response_message.tool_calls:
@@ -479,10 +491,17 @@ class BrainModule:
                         step_succeeded = False
                         break
                     result = await self._hand.execute_tool_command(ToolCommand(action=normalized_name, args=arguments))
-                    messages.append({
-                        "role": ROLE_TOOL,
-                        "content": json.dumps(self.sanitize_execution_result(result), ensure_ascii=False),
-                    })
+                    messages.append(
+                        stamp_message(
+                            {
+                                "role": ROLE_TOOL,
+                                "content": json.dumps(
+                                    self.sanitize_execution_result(result),
+                                    ensure_ascii=False,
+                                ),
+                            }
+                        )
+                    )
                     sleep(1)
                     if not result.ok:
                         self._append_failed_tool_call(

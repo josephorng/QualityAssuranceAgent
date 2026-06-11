@@ -154,7 +154,7 @@ def read_eye_monitor_indices_from_env() -> list[int] | None:
     """
     Optional comma-separated EYE_MONITOR_INDICES (e.g. ``1,2``).
 
-    When set, Eye ``capture_separated_images`` captures each index in order.
+    When set, YOLO/OCR capture each selected index in order (``yolo_ocr/``).
     When unset, behavior follows ``EYE_MONITOR_INDEX`` only (legacy).
     """
     raw = os.environ.get("EYE_MONITOR_INDICES")

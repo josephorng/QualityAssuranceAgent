@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.brain.module import BrainModule
+from src.brain.module import BrainModule, stamp_message
 from src.common.run_state import RunStateManager
 
 
@@ -59,6 +59,33 @@ def test_append_failed_tool_call_records_tool_name(tmp_path: Path) -> None:
 
     payload = json.loads(step_path.read_text(encoding="utf-8"))
     assert payload["failed_tool_calls"] == ["hotkey", "hotkey"]
+
+
+def test_stamp_message_adds_timestamp_utc_once() -> None:
+    first = stamp_message({"role": "user", "content": "hello"})
+    second = stamp_message(first)
+
+    assert "timestamp_utc" in first
+    assert second["timestamp_utc"] == first["timestamp_utc"]
+
+
+def test_append_step_messages_stamps_each_message(tmp_path: Path) -> None:
+    mgr = RunStateManager(tmp_path)
+    paths = mgr.init_run("test", "test_run")
+    steps_dir = paths.root / "steps"
+    steps_dir.mkdir(parents=True, exist_ok=True)
+
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = mgr
+
+    brain._append_step_messages(
+        [{"role": "assistant", "content": "done"}],
+        transcript_counter=0,
+        script_step_index=0,
+    )
+
+    payload = json.loads((steps_dir / "0_0.json").read_text(encoding="utf-8"))
+    assert "timestamp_utc" in payload["messages"][0]
 
 
 def test_undo_last_runtime_step_returns_false_when_empty(tmp_path: Path) -> None:

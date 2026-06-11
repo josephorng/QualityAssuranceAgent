@@ -4,16 +4,14 @@ from src.common.models import EyeEvent
 from src.common.run_state import get_run_state_manager, ts_name
 from src.common.runtime_context import get_runtime_env
 from src.common.settings import load_settings
-from src.common.monitor_prompt import read_eye_monitor_indices_from_env
 from src.eye.capture import (
     active_monitor_index,
+    capture_all_screens_to_file,
     capture_monitor_to_file,
     grab_monitor_image,
     monitor_details as list_monitor_details,
     resolve_monitor_index,
 )
-
-import os
 
 
 class EyeModule:
@@ -63,6 +61,7 @@ class EyeModule:
         self.active_monitor_index = capture_monitor_to_file(
             dest=image_path,
             monitor_index=self.active_monitor_index,
+            include_cursor=True,
         )
         event = EyeEvent(
             screenshot_name=image_name,
@@ -74,51 +73,14 @@ class EyeModule:
 
     async def capture_separated_images(self) -> list[str]:
         """
-        Capture verification screenshots and return image paths.
+        Capture one combined screenshot of all monitors for the Brain and return its path.
 
-        If ``EYE_MONITOR_INDICES`` is set (comma-separated), capture each index in order.
-        Else if ``EYE_MONITOR_INDEX`` is non-zero, capture a single target.
-        Else (index 0): capture one screenshot per physical monitor (mss indexes > 0).
+        Per-monitor images are only written for YOLO/OCR (see ``yolo_ocr/``).
         """
-        indices_override = read_eye_monitor_indices_from_env()
-        if indices_override is not None:
-            original_monitor_index = self.active_monitor_index
-            image_paths: list[str] = []
-            try:
-                for monitor_index in indices_override:
-                    self.set_capture_target(monitor_index)
-                    monitor_event = await self.capture_once()
-                    image_paths.append(monitor_event.screenshot_path)
-            finally:
-                self.set_capture_target(original_monitor_index)
-            return image_paths
-
-        eye_monitor_index = os.environ.get("EYE_MONITOR_INDEX", "0").strip()
-        if eye_monitor_index != "0":
-            self.set_capture_target(int(eye_monitor_index))
-            event = await self.capture_once()
-            return [event.screenshot_path]
-
-        monitor_info = self.monitor_details()
-        physical_monitor_indexes = [
-            int(detail["index"])
-            for detail in monitor_info
-            if int(detail.get("index", 0)) > 0
-        ]
-
-        original_monitor_index = self.active_monitor_index
-        image_paths: list[str] = []
-        try:
-            if physical_monitor_indexes:
-                for monitor_index in physical_monitor_indexes:
-                    self.set_capture_target(monitor_index)
-                    monitor_event = await self.capture_once()
-                    image_paths.append(monitor_event.screenshot_path)
-            else:
-                fallback_event = await self.capture_once()
-                image_paths.append(fallback_event.screenshot_path)
-        finally:
-            self.set_capture_target(original_monitor_index)
-
-        return image_paths
+        paths = self.manager.require_paths()
+        image_name = f"{ts_name()}.png"
+        image_path = paths.eye_dir / image_name
+        capture_all_screens_to_file(image_path)
+        self.manager.log_info(f"Eye captured combined screenshot {image_name}")
+        return [str(image_path)]
 

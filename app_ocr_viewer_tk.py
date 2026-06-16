@@ -10,10 +10,12 @@ from pathlib import Path
 from tkinter import filedialog, ttk
 from typing import Any
 
+import cv2
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
-from cua_mcp.icon_map import describe_text_icons, is_pua_char, text_has_pua
+from cua_mcp.icon_map import is_pua_char, lookup_pua_icon, text_has_pua, unknown_icon_record
 from cua_mcp.read_screen_text.ocr_image import get_coordinates_from_image_path
+from cua_mcp.select_mouse_target import _build_candidates_from_bgr
 from cua_mcp.yolo_onnx import DEFAULT_CONF_YOLOV26_END2END
 from src.common.io_utils import read_json, write_json
 from src.common.settings import ROOT_DIR
@@ -61,19 +63,56 @@ def _is_ui_object_line(line: OcrLine) -> bool:
     return line.line_type != "ocr"
 
 
-def _chinese_ids_for_text(text: str) -> list[str]:
-    return [
-        str(i.get("chinese_id", ""))
-        for i in describe_text_icons(text)
-        if i.get("chinese_id")
-    ]
+def _unknown_icon_label() -> str:
+    return str(unknown_icon_record().get("chinese_id", "未知圖示"))
+
+
+def _icon_label_for_pua(char: str) -> str:
+    mapped = lookup_pua_icon(char)
+    if mapped is None:
+        return _unknown_icon_label()
+    chinese_id = str(mapped.get("chinese_id", "")).strip()
+    if chinese_id:
+        return chinese_id
+    icon_id = str(mapped.get("id", "")).strip()
+    if icon_id and icon_id != "unknown_icon":
+        return icon_id.replace("_", " ")
+    return _unknown_icon_label()
+
+
+def _icon_label_for_record(record: dict[str, Any]) -> str:
+    chinese_id = str(record.get("chinese_id", "")).strip()
+    if chinese_id:
+        return chinese_id
+    pua = record.get("pua")
+    if isinstance(pua, str) and pua:
+        return _icon_label_for_pua(pua)
+    return _unknown_icon_label()
+
+
+def _icon_labels_for_text(text: str) -> list[str]:
+    return [_icon_label_for_pua(ch) for ch in text or "" if is_pua_char(ch)]
+
+
+def _display_text_with_icon_labels(text: str) -> str:
+    if not text:
+        return ""
+    if not text_has_pua(text):
+        return text.strip()
+    labels = _icon_labels_for_text(text)
+    non_icon = "".join(ch for ch in text if not is_pua_char(ch)).strip()
+    if labels and non_icon:
+        return f"{', '.join(labels)} + {non_icon}"
+    if labels:
+        return ", ".join(labels)
+    return non_icon
 
 
 def _resolved_ui_ids(line: OcrLine) -> list[str]:
     if line.chinese_ids:
         return list(line.chinese_ids)
     if line.text:
-        return _chinese_ids_for_text(line.text)
+        return _icon_labels_for_text(line.text)
     return []
 
 
@@ -82,7 +121,7 @@ def _ui_object_label(line: OcrLine) -> str:
     if ids:
         name = ", ".join(ids)
     elif line.text.strip():
-        name = line.text.strip()
+        name = _display_text_with_icon_labels(line.text) or line.text.strip()
     else:
         name = line.class_name or line.line_type or "ui"
         if line.class_id is not None:
@@ -94,13 +133,8 @@ def _ui_object_label(line: OcrLine) -> str:
 def _display_label_for_line(line: OcrLine) -> str:
     if _is_ui_object_line(line):
         return _ui_object_label(line)
-    chinese_ids = _chinese_ids_for_text(line.text)
-    if chinese_ids:
-        non_icon = "".join(ch for ch in line.text if not is_pua_char(ch)).strip()
-        if non_icon:
-            return f"{', '.join(chinese_ids)} + {non_icon}"
-        return ", ".join(chinese_ids)
-    return line.text if line.text else "<empty>"
+    mapped = _display_text_with_icon_labels(line.text)
+    return mapped if mapped else "<empty>"
 
 
 def _is_icon_ocr_line(line: OcrLine) -> bool:
@@ -255,6 +289,34 @@ def load_ocr_lines(json_path: Path) -> tuple[list[OcrLine], str]:
     return lines, f"Loaded {len(lines)} OCR lines"
 
 
+def load_yolo_lines(image_path: Path, *, yolo_conf_threshold: float) -> tuple[list[OcrLine], str]:
+    bgr = cv2.imread(str(image_path))
+    if bgr is None:
+        return [], "Could not read image for YOLO"
+    try:
+        candidates = _build_candidates_from_bgr(bgr, yolo_conf_threshold=yolo_conf_threshold)
+    except Exception as exc:
+        return [], f"YOLO detect failed: {type(exc).__name__}: {exc}"
+    lines: list[OcrLine] = []
+    for det in candidates:
+        text = det.text or ""
+        if det.icons:
+            icon_labels = tuple(_icon_label_for_record(i) for i in det.icons)
+        else:
+            icon_labels = tuple(_icon_labels_for_text(text))
+        lines.append(
+            OcrLine(
+                box=det.bbox,
+                text=text,
+                line_type="ocr" if det.class_name == "text" else "element",
+                class_name=det.class_name,
+                class_id=det.class_id,
+                chinese_ids=icon_labels,
+            )
+        )
+    return lines, f"Loaded {len(lines)} YOLO detections"
+
+
 def _discover_runs(runs_root: Path) -> list[Path]:
     if not runs_root.exists():
         return []
@@ -262,17 +324,15 @@ def _discover_runs(runs_root: Path) -> list[Path]:
 
 
 def _yolo_ocr_paired_images(run_dir: Path) -> list[Path]:
-    """PNG/JPEG files in yolo_ocr/ that have a sibling JSON with the same stem."""
+    """All PNG/JPEG files in yolo_ocr/ (JSON optional)."""
     yolo_dir = run_dir / "yolo_ocr"
     if not yolo_dir.exists():
         return []
-    out: list[Path] = []
-    for p in sorted(yolo_dir.iterdir()):
-        if p.suffix.lower() not in {".png", ".jpg", ".jpeg"}:
-            continue
-        if p.with_suffix(".json").is_file():
-            out.append(p)
-    return out
+    return sorted(
+        p
+        for p in yolo_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg"}
+    )
 
 
 def _box_outline_for_line(line: OcrLine, *, is_selected: bool) -> str:
@@ -439,7 +499,7 @@ class OcrViewerApp:
         self.run_list.configure(yscrollcommand=self.run_scroll.set)
         self.run_list.bind("<<ListboxSelect>>", self._on_run_select)
 
-        ttk.Label(left, text="YOLO OCR (image + JSON)").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(left, text="YOLO Images").grid(row=2, column=0, sticky="w", pady=(8, 0))
         image_wrap = ttk.Frame(left)
         image_wrap.grid(row=3, column=0, sticky="nsew")
         image_wrap.columnconfigure(0, weight=1)
@@ -451,7 +511,7 @@ class OcrViewerApp:
         self.image_list.configure(yscrollcommand=self.image_scroll.set)
         self.image_list.bind("<<ListboxSelect>>", self._on_image_select)
 
-        ttk.Label(left, text="OCR Items").grid(row=4, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(left, text="YOLO Detections").grid(row=4, column=0, sticky="w", pady=(8, 0))
         item_wrap = ttk.Frame(left)
         item_wrap.grid(row=5, column=0, sticky="nsew")
         item_wrap.columnconfigure(0, weight=1)
@@ -487,7 +547,7 @@ class OcrViewerApp:
         ttk.Button(controls, text="Next", command=self._next_image).grid(row=2, column=1, sticky="ew", pady=(6, 0))
         ttk.Button(controls, text="Zoom +", command=self._zoom_in).grid(row=2, column=2, sticky="ew", pady=(6, 0))
         ttk.Button(controls, text="Zoom -", command=self._zoom_out).grid(row=2, column=3, sticky="ew", pady=(6, 0))
-        ttk.Button(controls, text="YOLO text regions (select_text)", command=self._run_select_text_current_image).grid(
+        ttk.Button(controls, text="Reload YOLO detections", command=self._run_select_text_current_image).grid(
             row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0)
         )
         ttk.Button(controls, text="Copy to undone/images", command=self._copy_current_image_to_undone).grid(
@@ -571,7 +631,7 @@ class OcrViewerApp:
             self.item_list.delete(0, tk.END)
             self.canvas.delete("all")
             self.status_var.set(
-                f"No paired image+JSON in yolo_ocr for {run.name if run else '-'}"
+                f"No images in yolo_ocr for {run.name if run else '-'}"
             )
 
     def _selected_image_index(self) -> int | None:
@@ -593,8 +653,12 @@ class OcrViewerApp:
             return
         self.current_image = Image.open(image_path).convert("RGB")
         self._view_zoom = 1.0
-        json_path = image_path.with_suffix(".json")
-        self.current_lines, status = load_ocr_lines(json_path)
+        conf, err = _parse_conf_0_to_1(self.yolo_conf_var.get())
+        if conf is None:
+            self.current_lines = []
+            status = f"Invalid confidence: {err}"
+        else:
+            self.current_lines, status = load_yolo_lines(image_path, yolo_conf_threshold=conf)
         self.selected_line_idx = None
         self._populate_item_list()
         self.status_var.set(f"{image_path.name} - {status}")
@@ -1069,30 +1133,26 @@ class OcrViewerApp:
     def _run_select_text_current_image(self) -> None:
         src = self._current_image_path()
         if src is None or not src.is_file():
-            self.status_var.set("No image selected for YOLO text regions")
+            self.status_var.set("No image selected for YOLO detections")
             return
         conf, err = _parse_conf_0_to_1(self.yolo_conf_var.get())
         if conf is None:
             self.status_var.set(f"Invalid confidence: {err}")
             return
-        self.status_var.set(f"Running YOLO text regions (select_text, conf={conf:g})...")
+        self.status_var.set(f"Running YOLO detections (conf={conf:g})...")
         self.root.update_idletasks()
         t0 = time.perf_counter()
         try:
-            regions = get_coordinates_from_image_path(str(src), yolo_conf_threshold=conf)
+            lines, status = load_yolo_lines(src, yolo_conf_threshold=conf)
         except Exception as exc:
-            self.status_var.set(f"YOLO text regions failed: {type(exc).__name__}: {exc}")
+            self.status_var.set(f"YOLO detections failed: {type(exc).__name__}: {exc}")
             return
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        lines = [
-            OcrLine(box=tuple(int(v) for v in box), text="".join(str(p) for p in preds).strip())
-            for box, _center, preds in regions
-        ]
         self.current_lines = lines
         self.selected_line_idx = None
         self._populate_item_list()
         self._refresh_image()
-        self.status_var.set(f"YOLO text regions: {len(lines)} regions in {elapsed_ms:.0f} ms")
+        self.status_var.set(f"{status} in {elapsed_ms:.0f} ms")
 
     def _copy_current_image_to_undone(self) -> None:
         src = self._current_image_path()

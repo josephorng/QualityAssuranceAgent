@@ -8,6 +8,7 @@ from typing import Any
 from cua_mcp import hand_tools
 from cua_mcp.select_text import resolve_text_point, _with_clicked_text
 from cua_mcp.select_ui_element import resolve_ui_element_point
+from cua_mcp.select_mouse_target import resolve_mouse_point
 from cua_mcp.storage import store_clipboard_text, store_image, store_text, _current_run_paths
 
 
@@ -52,6 +53,24 @@ async def _move_to_text(target_text: str, instruction: str, duration: float = 0.
         target_kind="text",
         target_text=clicked,
         target_icons=base.get("target_icons", []),
+    )
+
+
+async def _move_mouse(
+    instruction: str,
+    duration: float = 0.0,
+) -> dict[str, Any]:
+    gx, gy, meta = await resolve_mouse_point(instruction)
+    result = hand_tools.move(x=gx, y=gy, duration=duration)
+    merged: dict[str, Any] = dict(result)
+    merged.update(meta)
+    merged["instruction"] = instruction
+    return _with_unified_target_metadata(
+        merged,
+        target_kind=str(meta.get("target_kind", "mouse_target")),
+        target_text=str(meta.get("target_text", "")),
+        target_icons=meta.get("target_icons", []),
+        target_bbox=meta.get("target_bbox"),
     )
 
 

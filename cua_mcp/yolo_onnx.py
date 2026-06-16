@@ -1,7 +1,7 @@
 """
 YOLOv26 ONNX helpers — ONNX Runtime on CPU.
 
-Ultralytics-compatible preprocessing (default 1280): ``LetterBox``–style resize–pad to a
+Ultralytics-compatible preprocessing (default 640): ``LetterBox``–style resize–pad to a
 square tensor, BGR → RGB, ``NCHW``, ``float32 / 255``, then ``InferenceSession.run``. Box
 coordinates are mapped back with the same ``scale_boxes`` math as ``ultralytics``
 (``padding=True``, ``ratio_pad=None``).
@@ -11,8 +11,9 @@ Two post-process paths:
 * **Raw head** ``(1, 4+nc, num_anchors)`` — decode ``cx,cy,w,h`` + class scores, optional
   Python NMS (:func:`nms_indices_xyxy`).
 * **End-to-end** ``(1, N, 6+)`` with ``end2end=True`` — ``x1,y1,x2,y2,score,cls``; NMS is
-  in the graph. Used by :data:`DEFAULT_YOLO_ONNX_PATH` (``cua_mcp/best.onnx``), classes
-  ``text`` (:data:`YOLO_CLASS_TEXT`) and ``element`` (:data:`YOLO_CLASS_ELEMENT`).
+  in the graph. Used by :data:`DEFAULT_YOLO_ONNX_PATH` (``best.onnx``), classes
+  ``text`` (:data:`YOLO_CLASS_TEXT`), ``element`` (:data:`YOLO_CLASS_ELEMENT`),
+  ``input`` (:data:`YOLO_CLASS_INPUT`), and ``scrollbar`` (:data:`YOLO_CLASS_SCROLLBAR`).
 
 Tune defaults via ``DEFAULT_CONF_*`` / ``DEFAULT_IOU_*``, or pass keyword args per call.
 
@@ -39,19 +40,50 @@ DEFAULT_CONF_YOLOV26_END2END: float = 0.05
 
 # After decode, optionally merge same-class detections when pairwise IoU exceeds
 # :data:`DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD` (intersection/union); each merged group is the
-# axis-aligned union with max score. Default off: set ``DEFAULT_MERGE_TOUCHING_SAME_CLASS`` True
-# or pass ``merge_touching_same_class=True`` to enable.
+# axis-aligned union with max score.
+#
+# ``input`` and ``scrollbar`` are always merged when IoU exceeds the threshold.
+# Set ``DEFAULT_MERGE_TOUCHING_SAME_CLASS`` True or pass ``merge_touching_same_class=True``
+# to also merge ``text`` and ``element``.
 DEFAULT_MERGE_TOUCHING_SAME_CLASS: bool = False
 # Pairs of same-class boxes are linked (and merged transitively) when ``IoU >`` this value.
 DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD: float = 0.5
 
-# ``cua_mcp/best.onnx`` classes (Ultralytics metadata: Text=0, Element=1)
+# ``best.onnx`` classes (Ultralytics metadata: Text=0, Element=1, Input=2, Scrollbar=3)
 YOLO_CLASS_TEXT: int = 0
 YOLO_CLASS_ELEMENT: int = 1
+YOLO_CLASS_INPUT: int = 2
+YOLO_CLASS_SCROLLBAR: int = 3
+DEFAULT_MERGE_TOUCHING_CLASS_IDS = frozenset({
+    YOLO_CLASS_INPUT,
+    YOLO_CLASS_SCROLLBAR,
+})
 YOLO_CLASS_NAMES: dict[int, str] = {
     YOLO_CLASS_TEXT: "text",
     YOLO_CLASS_ELEMENT: "element",
+    YOLO_CLASS_INPUT: "input",
+    YOLO_CLASS_SCROLLBAR: "scrollbar",
 }
+
+OCR_DETECTION_CLASS_IDS = frozenset({
+    YOLO_CLASS_TEXT,
+    YOLO_CLASS_ELEMENT,
+})
+UI_DETECTION_CLASS_IDS = frozenset({
+    YOLO_CLASS_ELEMENT,
+    YOLO_CLASS_INPUT,
+    YOLO_CLASS_SCROLLBAR,
+})
+MOUSE_TARGET_CLASS_IDS = frozenset({
+    YOLO_CLASS_TEXT,
+    YOLO_CLASS_ELEMENT,
+    YOLO_CLASS_INPUT,
+    YOLO_CLASS_SCROLLBAR,
+})
+
+# Synthetic picker IDs for OCR-derived UI candidates (not YOLO model class IDs).
+PICKER_CLASS_TEXT = 100
+PICKER_CLASS_OCR_ICON = 101
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 DEFAULT_YOLO_ONNX_PATH = _PACKAGE_DIR / "best.onnx"
@@ -107,9 +139,9 @@ def run_yolo_onnx_end2end(
     (first use in the process, or first use of a new ``model_path``); later calls reuse the
     session and do not invoke it again.
 
-    Pass ``merge_touching_same_class=True`` to fuse same-class boxes whose pairwise IoU exceeds
-    ``merge_same_class_iou_threshold`` after decode (see :data:`DEFAULT_MERGE_TOUCHING_SAME_CLASS`
-    and :data:`DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD`).
+    Pass ``merge_touching_same_class=True`` to also fuse ``text`` and ``element`` boxes whose
+    pairwise IoU exceeds ``merge_same_class_iou_threshold``. ``input`` and ``scrollbar`` are
+    always merged at that threshold (see :data:`DEFAULT_MERGE_TOUCHING_CLASS_IDS`).
     """
     path = DEFAULT_YOLO_ONNX_PATH if model_path is None else Path(model_path)
     session, input_name = get_cached_cpu_session(
@@ -313,11 +345,15 @@ def merge_touching_same_class_xyxy(
     cls_ids: np.ndarray,
     *,
     min_iou: float = DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD,
+    merge_class_ids: set[int] | frozenset[int] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Merge detections **per class** when pairwise IoU is **strictly greater** than ``min_iou``
     (intersection over union); groups are connected transitively. Each output row is the union
     bbox of its group with the max score in that group.
+
+    When ``merge_class_ids`` is set, only those classes are merged; other classes pass through
+    unchanged.
     """
     if len(xyxy) == 0:
         return xyxy, scores, cls_ids
@@ -335,6 +371,13 @@ def merge_touching_same_class_xyxy(
         sub_xy = xyxy[idx]
         sub_sc = scores[idx]
         n = sub_xy.shape[0]
+        if merge_class_ids is not None and c not in merge_class_ids:
+            for i in range(n):
+                merged_xy.append(sub_xy[i])
+                merged_sc.append(float(sub_sc[i]))
+                merged_cls.append(c)
+            continue
+
         dsu = _DisjointSet(n)
         for i in range(n):
             for j in range(i + 1, n):
@@ -385,6 +428,9 @@ def decode_yolov26_end2end(
     When ``merge_touching_same_class`` is True, same-class pairs with ``IoU > merge_same_class_iou_threshold``
     are merged transitively via :func:`merge_touching_same_class_xyxy`.
 
+    ``input`` and ``scrollbar`` are always merged when IoU exceeds ``merge_same_class_iou_threshold``
+    (see :data:`DEFAULT_MERGE_TOUCHING_CLASS_IDS`).
+
     Returns:
         xyxy: (M, 4) np.ndarray of type int32 (ready for drawing/cropping)
         scores: (M,) np.ndarray of type float32
@@ -427,13 +473,18 @@ def decode_yolov26_end2end(
         input_w=input_size,
     )
 
-    if merge_touching_same_class:
-        xyxy, scores, cls = merge_touching_same_class_xyxy(
-            xyxy,
-            scores,
-            cls,
-            min_iou=merge_same_class_iou_threshold,
-        )
+    merge_ids = (
+        None
+        if merge_touching_same_class
+        else DEFAULT_MERGE_TOUCHING_CLASS_IDS
+    )
+    xyxy, scores, cls = merge_touching_same_class_xyxy(
+        xyxy,
+        scores,
+        cls,
+        min_iou=merge_same_class_iou_threshold,
+        merge_class_ids=merge_ids,
+    )
 
     # Convert to integer so it plays nice with cv2.rectangle / image slicers
     xyxy = np.round(xyxy).astype(np.int32)

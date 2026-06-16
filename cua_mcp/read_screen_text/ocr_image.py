@@ -21,7 +21,7 @@ import numpy as np
 from cua_mcp.geometry import boxes_overlap, clip_box, sort_by_reading_order
 from cua_mcp.yolo_onnx import (
     DEFAULT_CONF_YOLOV26_END2END,
-    YOLO_CLASS_ELEMENT,
+    OCR_DETECTION_CLASS_IDS,
     YOLO_CLASS_TEXT,
     run_yolo_onnx_end2end,
 )
@@ -31,7 +31,8 @@ from .inference_onnx import TextPredictor
 from src.common.io_utils import write_json
 from src.common.run_state import get_run_state_manager, ts_name
 
-_OCR_DETECTION_CLASS_IDS = frozenset({YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT})
+_OCR_DETECTION_CLASS_IDS = OCR_DETECTION_CLASS_IDS
+_DEFAULT_CRNN_BATCH_SIZE = 16
 
 _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 _CRNN_PREDICTOR: TextPredictor | None = None
@@ -144,6 +145,43 @@ def _expand_box(
     return clip_box(x - margin, y - margin, w + 2 * margin, h + 2 * margin, img_w, img_h)
 
 
+def _ocr_boxes_on_bgr(
+    bgr: np.ndarray,
+    boxes: list[tuple[int, int, int, int]],
+    *,
+    line_height: int = 32,
+    ocr_model_path: Optional[str] = None,
+    batch_size: int = _DEFAULT_CRNN_BATCH_SIZE,
+) -> list[list[str]]:
+    """
+    Run CRNN OCR on each ``(x, y, w, h)`` crop in ``boxes``.
+
+    Returns one prediction list per box (same order as ``boxes``). Empty boxes yield ``[]``.
+    """
+    if not boxes:
+        return []
+
+    img_h, img_w = bgr.shape[:2]
+    try:
+        predictor = _get_ocr_predictor(ocr_model_path)
+    except FileNotFoundError as exc:
+        _log_info(f"OCR ONNX OCR model missing: {exc}")
+        return [[] for _ in boxes]
+
+    expanded = [_expand_box(x, y, w, h, img_w, img_h) for x, y, w, h in boxes]
+    crops: list[np.ndarray] = []
+    for x, y, w, h in expanded:
+        crop = bgr[y : y + h, x : x + w]
+        crops.append(crop if crop.size > 0 else np.empty((0, 0), dtype=np.uint8))
+
+    return _ocr_crops_batched(
+        crops,
+        predictor,
+        line_height,
+        batch_size=batch_size,
+    )
+
+
 def _yolo_boxes(
     bgr: np.ndarray,
     *,
@@ -230,36 +268,84 @@ def _merge_overlapping_boxes(
     return merged
 
 
-def _ocr_crop_predicted_texts(
-    bgr_crop: np.ndarray,
-    predictor: TextPredictor,
-    line_height: int,
-) -> list[str]:
-    """Run CRNN OCR on a single crop; return raw ``predict_images`` token strings (same as line 269)."""
+def _effective_line_height(line_height: int) -> int:
+    return 32 if line_height < 2 else line_height
+
+
+def _prepare_crop_line_image(bgr_crop: np.ndarray, line_height: int) -> np.ndarray | None:
+    """Normalize and resize a crop to shape ``(line_height, width)`` float32, or ``None`` if invalid."""
     if bgr_crop.size == 0 or bgr_crop.shape[0] < 2 or bgr_crop.shape[1] < 2:
-        return []
-    if line_height < 2:
-        line_height = 32
+        return None
+
+    line_height = _effective_line_height(line_height)
 
     if len(bgr_crop.shape) == 3:
         gray = cv2.cvtColor(bgr_crop, cv2.COLOR_BGR2GRAY)
         normalized = (gray - np.min(gray)) / (
-                np.max(gray) - np.min(gray) + 1e-7
-            )
+            np.max(gray) - np.min(gray) + 1e-7
+        )
     else:
         normalized = bgr_crop
 
     h, w = normalized.shape[:2]
     new_width = max(1, int((w / max(1, h)) * line_height))
     resized = cv2.resize(normalized, (new_width, line_height), interpolation=cv2.INTER_LINEAR)
-    line_image = np.expand_dims(np.array(resized), axis=0)
+    return np.asarray(resized, dtype=np.float32)
 
-    try:
-        predicted_texts = predictor.predict_images(line_image)
-        return list(predicted_texts) if predicted_texts else []
-    except Exception as e:
-        print(f"OCR _ocr_crop_predicted_texts error: {e}")
-        return []
+
+def _ocr_crops_batched(
+    crops: list[np.ndarray],
+    predictor: TextPredictor,
+    line_height: int,
+    *,
+    batch_size: int = _DEFAULT_CRNN_BATCH_SIZE,
+) -> list[list[str]]:
+    """Run CRNN OCR on crops in width-sorted, zero-padded batches."""
+    if batch_size < 1:
+        batch_size = _DEFAULT_CRNN_BATCH_SIZE
+
+    line_height = _effective_line_height(line_height)
+    results: list[list[str]] = [[] for _ in crops]
+    valid: list[tuple[int, np.ndarray]] = []
+
+    for index, crop in enumerate(crops):
+        line_image = _prepare_crop_line_image(crop, line_height)
+        if line_image is not None:
+            valid.append((index, line_image))
+
+    valid.sort(key=lambda item: item[1].shape[1])
+
+    for start in range(0, len(valid), batch_size):
+        chunk = valid[start : start + batch_size]
+        if not chunk:
+            continue
+
+        max_w = max(image.shape[1] for _, image in chunk)
+        batch = np.zeros((len(chunk), line_height, max_w), dtype=np.float32)
+        for row, (_, image) in enumerate(chunk):
+            h_img, w_img = image.shape[:2]
+            batch[row, :h_img, :w_img] = image
+
+        try:
+            predicted_texts = predictor.predict_images(batch)
+            for row, (orig_index, _) in enumerate(chunk):
+                if predicted_texts and row < len(predicted_texts):
+                    text = predicted_texts[row]
+                    results[orig_index] = [text] if text else []
+        except Exception as exc:
+            print(f"OCR _ocr_crops_batched error: {exc}")
+
+    return results
+
+
+def _ocr_crop_predicted_texts(
+    bgr_crop: np.ndarray,
+    predictor: TextPredictor,
+    line_height: int,
+) -> list[str]:
+    """Run CRNN OCR on a single crop; return raw ``predict_images`` token strings."""
+    preds = _ocr_crops_batched([bgr_crop], predictor, line_height, batch_size=1)
+    return preds[0] if preds else []
 
 
 OcrRegion = tuple[tuple[int, int, int, int], tuple[int, int], list[str]]
@@ -288,6 +374,7 @@ def get_coordinates_from_image_path(
     line_height: int = 32,
     ocr_model_path: Optional[str] = None,
     yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
+    batch_size: int = _DEFAULT_CRNN_BATCH_SIZE,
 ) -> list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]]:
     """
     Run YOLO + OCR on the image at ``image_path``.
@@ -340,15 +427,29 @@ def get_coordinates_from_image_path(
     boxes = _sort_boxes_reading_order(boxes)
     boxes = [_expand_box(x, y, w, h, img_w, img_h) for x, y, w, h in boxes]
 
-    all_regions: list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]] = []
-    ocr_elapsed_ms = 0.0
+    box_crops: list[tuple[tuple[int, int, int, int], np.ndarray]] = []
     for x, y, w, h in boxes:
         crop = bgr[y : y + h, x : x + w]
         if crop.size == 0:
             continue
-        ocr_start = time.perf_counter()
-        preds = _ocr_crop_predicted_texts(crop, predictor, line_height)
-        ocr_elapsed_ms += (time.perf_counter() - ocr_start) * 1000.0
+        box_crops.append(((x, y, w, h), crop))
+
+    _log_info(f"OCR CRNN start boxes={len(box_crops)} batch_size={batch_size}")
+    ocr_start = time.perf_counter()
+    all_preds = _ocr_crops_batched(
+        [crop for _, crop in box_crops],
+        predictor,
+        line_height,
+        batch_size=batch_size,
+    )
+    ocr_elapsed_ms = (time.perf_counter() - ocr_start) * 1000.0
+
+    all_regions: list[tuple[tuple[int, int, int, int], tuple[int, int], list[str]]] = []
+    for (x, y, w, h), preds in zip(
+        (box for box, _crop in box_crops),
+        all_preds,
+        strict=True,
+    ):
         all_regions.append(((x, y, w, h), (x + w // 2, y + h // 2), preds))
 
     # Global reading order: top to bottom, left to right.
@@ -402,6 +503,7 @@ def get_coordinates_from_selected_monitors(
     line_height: int = 32,
     ocr_model_path: Optional[str] = None,
     yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
+    batch_size: int = _DEFAULT_CRNN_BATCH_SIZE,
 ) -> tuple[list[OcrRegion], list[str]]:
     """
     Capture each selected monitor, run YOLO + OCR per image, and merge regions in global coords.
@@ -429,6 +531,7 @@ def get_coordinates_from_selected_monitors(
             line_height=line_height,
             ocr_model_path=ocr_model_path,
             yolo_conf_threshold=yolo_conf_threshold,
+            batch_size=batch_size,
         )
         left, top = active_monitor_offset(monitor_index)
         merged_regions.extend(_offset_region(region, left, top) for region in regions)
@@ -445,6 +548,7 @@ def get_coordinates(
     *,
     line_height: int = 32,
     crnn_model_path: Optional[str] = None,
+    batch_size: int = _DEFAULT_CRNN_BATCH_SIZE,
 ) -> list[OcrRegion]:
     """
     Capture selected monitor(s) to this run's ``yolo_ocr/`` folder, then run YOLO + ONNX CRNN OCR.
@@ -455,5 +559,6 @@ def get_coordinates(
     regions, _image_paths = get_coordinates_from_selected_monitors(
         line_height=line_height,
         ocr_model_path=crnn_model_path,
+        batch_size=batch_size,
     )
     return regions

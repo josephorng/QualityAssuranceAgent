@@ -143,6 +143,24 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "models": ["gemma4:e2b", "gemma3:4b"],
         }
     ],
+    "mouse_target_filter": [
+        {
+            "image_usage": "no_image",
+            "prompt": (
+                "Select ONLY candidates that are related to the user instruction.\n"
+                "Each row has class=text|element|input|scrollbar, optional OCR text, and optional icon labels.\n\n"
+                "Instruction:\n{instruction}\n\n"
+                "Candidates:\n{candidates_text}\n"
+            ),
+            "instructions": [
+                'Return JSON only: {{"keep_indices": [<int>, ...]}}.',
+                "Use [index N] values from the Candidates list. Keep an empty list when none match.",
+                "Keep text/element rows when OCR text or icons are related to the instruction.",
+                "Keep input/scrollbar rows when the instruction implies a field, control, or scrollable region.",
+            ],
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
     "ui_instruction_icon_location_extract": [
         {
             "image_usage": "no_image",
@@ -242,6 +260,16 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
         }
     ],
     "ui_text_filter_retry": [
+        {
+            "image_usage": "no_image",
+            "prompt": (
+                'Reply with ONLY: {{"keep_indices": [<integer>, ...]}}. '
+                "No text before or after the JSON."
+            ),
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
+    "mouse_target_filter_retry": [
         {
             "image_usage": "no_image",
             "prompt": (

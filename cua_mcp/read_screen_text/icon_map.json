@@ -1,5 +1,5 @@
 {
-    "next_pua": 57566,
+    "next_pua": 57567,
     "": {
         "id": "folder_icon",
         "chinese_id": "",
@@ -202,7 +202,7 @@
     },
     "": {
         "id": "avatar_user_profile",
-        "chinese_id": "使用者頭像",
+        "chinese_id": "",
         "description": "A circular user profile photo or avatar placeholder featuring a close-up portrait of a person with short dark hair and eyeglasses."
     },
     "": {
@@ -467,7 +467,7 @@
     },
     "": {
         "id": "tree_node_collapse",
-        "chinese_id": "收合節點",
+        "chinese_id": "",
         "description": "A square icon outline with rounded corners, featuring a small centered minus sign or horizontal dash and an anchor point at the top edge, indicating a collapsible tree node structure."
     },
     "": {
@@ -1044,5 +1044,10 @@
         "id": "undo_arrow_back",
         "chinese_id": "復原",
         "description": "An arrow looping backwards from right to left, forming a U-turn shape with a left-pointing arrowhead, representing an undo or reply action."
+    },
+    "": {
+        "id": "calendar_grid",
+        "chinese_id": "",
+        "description": "A square calendar icon with two top rings or tabs representing a spiral binding, featuring a grid of small rectangular or square blocks representing dates inside."
     }
 }

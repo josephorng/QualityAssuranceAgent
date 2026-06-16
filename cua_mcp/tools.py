@@ -17,7 +17,7 @@ from cua_mcp.tool_module import (
     _left_mouse_up,
     _list_storage_files,
     _middle_click,
-    _move_to_text,
+    _move_mouse,
     _type_text,
     _press_key,
     _read_storage_text,
@@ -28,7 +28,6 @@ from cua_mcp.tool_module import (
     _store_text,
     _triple_click,
     _wait,
-    _move_to_ui_element,
     _zoom,
     _maximize_windows,
     _close_windows,
@@ -155,35 +154,17 @@ def key(
 
 
 @mcp_server.tool()
-async def move_mouse_to_text(
+async def move_mouse(
     instruction: str,
-    target_text: str = "",
 ):
     '''
-    Take screenshot to find the text and move the mouse cursor to the text.
-    instruction: the detailed instruction of the action
-    target_text: the target text in Chinese
+    Take a screenshot, detect UI targets (text, element, input, scrollbar), and move
+    the mouse cursor to the best match for the instruction.
     '''
     duration: float = 0.2
-    return (await _move_to_text(target_text=target_text, instruction=instruction, duration=duration)).update({"instruction": instruction})
-
-
-@mcp_server.tool()
-async def move_mouse_to_ui_element(
-    instruction: str,
-    ui_element_name: str = "",
-):
-    '''
-    Take screenshot to find the ui element and move the mouse cursor to the ui element.
-    instruction: the detailed instruction of the action
-    ui_element_name: the name of ui element in Chinese
-    '''
-    duration: float = 0.2
-    return (await _move_to_ui_element(
-        instruction=instruction,
-        ui_element_name=ui_element_name,
-        duration=duration,
-    )).update({"instruction": instruction})
+    return (await _move_mouse(instruction=instruction, duration=duration)).update(
+        {"instruction": instruction}
+    )
 
 
 @mcp_server.tool()
@@ -412,8 +393,7 @@ TOOL_FUNCTIONS: list[callable[..., Any]] = [
     store_clipboard_text,
     store_image,
     key,
-    move_mouse_to_text,
-    move_mouse_to_ui_element,
+    move_mouse,
     left_click_drag,
     right_click,
     cursor_position,

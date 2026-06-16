@@ -13,7 +13,15 @@ from src.common.llm_client import (
 )
 from src.common.run_state import get_run_state_manager
 
-__all__ = ["OllamaClient", "ResponseFormatParam", "ThinkParam", "ToolCall"]
+OLLAMA_INCLUDE_IMAGES = False
+
+__all__ = [
+    "OllamaClient",
+    "OLLAMA_INCLUDE_IMAGES",
+    "ResponseFormatParam",
+    "ThinkParam",
+    "ToolCall",
+]
 
 
 class OllamaClient(LLMClient):
@@ -43,10 +51,15 @@ class OllamaClient(LLMClient):
         Returns:
             Message: The response message.
         """
+        messages_to_send = messages
+        if not OLLAMA_INCLUDE_IMAGES:
+            messages_to_send = [
+                {k: v for k, v in msg.items() if k != "images"} for msg in messages
+            ]
         prepared_messages = (
-            self._append_last_message_image_sizes(messages)
+            self._append_last_message_image_sizes(messages_to_send)
             if append_image_sizes
-            else messages
+            else messages_to_send
         )
         chat_kwargs: dict[str, Any] = {
             "model": model,

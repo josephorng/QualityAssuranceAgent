@@ -18,7 +18,9 @@ import numpy as np
 
 from cua_mcp.yolo_onnx import (
     DEFAULT_CONF_YOLOV26_END2END,
-    YOLO_CLASS_ELEMENT,
+    PICKER_CLASS_OCR_ICON,
+    PICKER_CLASS_TEXT,
+    UI_DETECTION_CLASS_IDS,
     YOLO_CLASS_NAMES,
     run_yolo_onnx_end2end,
 )
@@ -197,12 +199,12 @@ def _run_ui_yolo_inference(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Letterbox BGR to 1280 square (RGB CHW /255), run UI YOLOv26 ONNX (end2end), return
-    ``(xyxy, scores, class_ids)`` in the input image's pixel space. Only ``element`` class
-    detections are kept.
+    ``(xyxy, scores, class_ids)`` in the input image's pixel space. Keeps ``element``,
+    ``input``, and ``scrollbar`` detections; excludes ``text``.
     """
     return run_yolo_onnx_end2end(
         bgr,
-        class_ids={YOLO_CLASS_ELEMENT},
+        class_ids=set(UI_DETECTION_CLASS_IDS),
         conf_threshold=conf_threshold,
         on_session_created=lambda p: _log_info(f"UI YOLO ONNX initializing model_path={p}"),
     )
@@ -214,7 +216,8 @@ def _predict_ui_elements_yolo(
     conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
 ) -> list[UiDetection]:
     """
-    Run UI YOLO on BGR (square-compress non-square inputs) and return ``element`` detections.
+    Run UI YOLO on BGR (square-compress non-square inputs) and return ``element``,
+    ``input``, and ``scrollbar`` detections.
 
     Used by debug viewers; ``resolve_ui_element_point`` uses OCR PUA regions instead.
     """
@@ -362,7 +365,7 @@ def _ocr_regions_to_candidates(
                     bbox=bbox,
                     cx=cx,
                     cy=cy,
-                    class_id=2,
+                    class_id=PICKER_CLASS_OCR_ICON,
                     class_name="ocr_icon",
                     text=text_value,
                     icons=icons,
@@ -376,7 +379,7 @@ def _ocr_regions_to_candidates(
                 bbox=bbox,
                 cx=cx,
                 cy=cy,
-                class_id=0,
+                class_id=PICKER_CLASS_TEXT,
                 class_name="text",
                 text=text_value,
                 icons=describe_text_icons(text_value),

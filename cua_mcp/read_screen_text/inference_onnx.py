@@ -76,7 +76,7 @@ class TextPredictor:
         return pred_chars
     
     def predict_images(self, images, hxs=None):
-        # ✅ Convert image to NumPy array of shape [1, 1, H, W]
+        # Input: [batch, line_height, width] float32 (line_height is typically 32).
         if isinstance(images, list):
             images = np.array(images)
         if len(images.shape) == 2:  # [H, W]

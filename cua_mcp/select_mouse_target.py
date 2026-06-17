@@ -67,6 +67,16 @@ def _known_icons_for_text(text: str) -> list[dict[str, Any]] | None:
     return known if known else None
 
 
+def _text_is_pua_only(text: str) -> bool:
+    """True when ``text`` has PUA codepoints and no other visible characters."""
+    if not text:
+        return False
+    if not text_has_pua(text):
+        return False
+    non_pua = "".join(ch for ch in text if not is_pua_char(ch)).strip()
+    return not non_pua
+
+
 def _should_skip_ocr_text_candidate(text_value: str, class_id: int) -> bool:
     """
     Skip OCR rows whose only PUA glyphs have no ``icon_map`` label.
@@ -75,12 +85,11 @@ def _should_skip_ocr_text_candidate(text_value: str, class_id: int) -> bool:
     """
     if not text_value:
         return False
-    if not text_has_pua(text_value):
+    if not _text_is_pua_only(text_value):
         return False
     if _known_icons_for_text(text_value):
         return False
-    non_pua = "".join(ch for ch in text_value if not is_pua_char(ch)).strip()
-    return not non_pua
+    return True
 
 
 def _detection_from_bbox(
@@ -175,7 +184,11 @@ def _format_mouse_candidates_text(detections: list[UiDetection]) -> str:
     """Format candidate rows for the mouse-target filter LLM."""
     lines: list[str] = []
     for i, d in enumerate(detections):
-        text_part = f" text={d.text!r}" if d.text else ""
+        text_part = (
+            f" text={d.text!r}"
+            if d.text and not _text_is_pua_only(d.text)
+            else ""
+        )
         chinese_ids = ",".join(
             ii.get("chinese_id", "") for ii in (d.icons or []) if ii.get("chinese_id")
         )

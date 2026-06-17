@@ -5,14 +5,12 @@ import json
 import os
 import shutil
 import signal
-import sys
 import tempfile
 import threading
 from pathlib import Path
 
 from src.common.llm_factory import reset_llm_client
 from src.common.run_state import RunStateManager, RunPaths, reset_run_state_manager
-# from src.common.settings import load_settings
 from src.runtime.coordinator import RuntimeCoordinator
 from src.common.runtime_context import (
     RUNTIME_COMMAND_MODE_ENV,

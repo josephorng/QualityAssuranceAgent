@@ -147,7 +147,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
         {
             "image_usage": "no_image",
             "prompt": (
-                "Select ONLY candidates that are related to the user instruction.\n"
+                "Select candidates related to the user instruction.\n"
                 "Each row has class=text|element|input|scrollbar, optional OCR text, and optional icon labels.\n\n"
                 "Instruction:\n{instruction}\n\n"
                 "Candidates:\n{candidates_text}\n"
@@ -156,7 +156,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 'Return JSON only: {{"keep_indices": [<int>, ...]}}.',
                 "Use [index N] values from the Candidates list. Keep an empty list when none match.",
                 "Keep text/element rows when OCR text or icons are related to the instruction.",
-                "Keep input/scrollbar rows when the instruction implies a field, control, or scrollable region.",
+                "Keep all input/scrollbar rows when the instruction implies a field, control, or scrollable region.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
         }

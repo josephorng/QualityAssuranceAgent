@@ -51,6 +51,18 @@ def test_format_mouse_candidates_includes_class_and_text() -> None:
     assert "center=[106,100]" in text
 
 
+def test_format_mouse_candidates_omits_pua_only_text() -> None:
+    pua = "\ue002"
+    detections = [
+        _detection_from_bbox((0, 0, 20, 20), YOLO_CLASS_ELEMENT, text=pua),
+        _detection_from_bbox((30, 0, 80, 20), YOLO_CLASS_TEXT, text=f"OK{pua}"),
+    ]
+    text = _format_mouse_candidates_text(detections)
+    assert "text=" not in text.split("\n")[0]
+    assert "icons=向下箭頭" in text.split("\n")[0]
+    assert "text='OK" in text.split("\n")[1]
+
+
 def test_parse_keep_indices_from_llm() -> None:
     raw = '{"keep_indices": [0, 2, 2, 99]}'
     keep = _parse_keep_indices_from_llm(raw, max_len=3)

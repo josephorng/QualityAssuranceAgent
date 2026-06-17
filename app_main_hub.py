@@ -29,6 +29,7 @@ from src.common.runtime_command_dialog import (
     consume_runtime_user_ended_at_prompt,
     reset_runtime_user_ended_at_prompt,
 )
+from src.common.runtime_context import USE_TOOL_CACHE_ENV
 from src.common.script_helper import parse_executable_lines_from_text
 from src.common.settings import ROOT_DIR, apply_startup_ollama_host_probe, load_settings
 
@@ -45,6 +46,7 @@ def _default_hub_ui_dict() -> dict[str, Any]:
         "appearance_dark": True,
         "selected_monitor_indices": [],
         "last_script_path": None,
+        "use_tool_cache": False,
     }
 
 
@@ -69,6 +71,7 @@ def _normalize_hub_ui_state(raw: Any) -> dict[str, Any]:
     base["selected_monitor_indices"] = _coerce_int_list(raw.get("selected_monitor_indices"))
     lsp = raw.get("last_script_path")
     base["last_script_path"] = lsp if isinstance(lsp, str) or lsp is None else None
+    base["use_tool_cache"] = bool(raw.get("use_tool_cache", False))
     return base
 
 
@@ -91,6 +94,7 @@ class _WorkerArgs:
     script_raw: str
     script_disk_path: Path | None
     run_folder_name: str | None = None
+    use_tool_cache: bool = False
 
 
 class MainHub(ctk.CTk):
@@ -103,6 +107,7 @@ class MainHub(ctk.CTk):
         hub = _read_hub_ui_state()
         self._remember_monitor_indices: list[int] = list(hub["selected_monitor_indices"])
         self._appearance_dark = bool(hub["appearance_dark"])
+        self._use_tool_cache = bool(hub.get("use_tool_cache", False))
         self._suppress_hub_monitor_persist = False
         ctk.set_appearance_mode("dark" if self._appearance_dark else "light")
         ctk.set_default_color_theme("dark-blue")
@@ -280,6 +285,7 @@ class MainHub(ctk.CTk):
                 "last_script_path": str(self._script_path.resolve())
                 if self._script_path is not None
                 else None,
+                "use_tool_cache": self._tool_cache_enabled_for_run(),
             }
             write_json(_hub_ui_state_path(), data)
             self._remember_monitor_indices = list(data["selected_monitor_indices"])
@@ -424,10 +430,21 @@ class MainHub(ctk.CTk):
     def _build_actions_row(self) -> None:
         row = ctk.CTkFrame(self, fg_color="transparent")
         row.pack(fill="x", padx=24, pady=(12, 8))
-        row.grid_columnconfigure(0, weight=1)
-        row.grid_columnconfigure(2, weight=1)
-        self._run_btn = ctk.CTkButton(
+        self._use_tool_cache_checkbox = ctk.CTkCheckBox(
             row,
+            text="使用快取工具（略過 LLM）",
+            font=ctk.CTkFont(size=13),
+            command=self._on_use_tool_cache_changed,
+        )
+        self._use_tool_cache_checkbox.pack(pady=(0, 10))
+        if self._use_tool_cache:
+            self._use_tool_cache_checkbox.select()
+        btn_row = ctk.CTkFrame(row, fg_color="transparent")
+        btn_row.pack()
+        btn_row.grid_columnconfigure(0, weight=1)
+        btn_row.grid_columnconfigure(2, weight=1)
+        self._run_btn = ctk.CTkButton(
+            btn_row,
             text="開始執行",
             font=ctk.CTkFont(size=16, weight="bold"),
             height=44,
@@ -435,6 +452,13 @@ class MainHub(ctk.CTk):
             command=self._on_start_run,
         )
         self._run_btn.grid(row=0, column=1)
+
+    def _on_use_tool_cache_changed(self) -> None:
+        self._use_tool_cache = self._use_tool_cache_checkbox.get() == 1
+        self._persist_hub_ui_state()
+
+    def _tool_cache_enabled_for_run(self) -> bool:
+        return self._use_tool_cache_checkbox.get() == 1
 
     def _set_run_button_idle(self) -> None:
         self._run_btn.configure(text="開始執行", command=self._on_start_run, state="normal")
@@ -536,6 +560,7 @@ class MainHub(ctk.CTk):
         self._monitor_refresh_btn.configure(state="disabled")
         for w in self._script_controls:
             w.configure(state="disabled")
+        self._use_tool_cache_checkbox.configure(state="disabled")
         self._status.configure(text="執行中…")
         self._worker_thread = threading.Thread(target=self._worker_main, args=(args,), daemon=True)
         self._worker_thread.start()
@@ -581,6 +606,7 @@ class MainHub(ctk.CTk):
             script_raw="",
             script_disk_path=None,
             run_folder_name=self._last_script_run_folder,
+            use_tool_cache=self._tool_cache_enabled_for_run(),
         )
         self._begin_worker_run(args)
 
@@ -616,6 +642,7 @@ class MainHub(ctk.CTk):
                 eye_monitor_indices=eye_indices,
                 script_raw=raw,
                 script_disk_path=script_disk_path,
+                use_tool_cache=self._tool_cache_enabled_for_run(),
             )
         else:
             # Empty script box → interactive step-by-step runtime commands.
@@ -632,6 +659,7 @@ class MainHub(ctk.CTk):
                 eye_monitor_indices=eye_indices,
                 script_raw="",
                 script_disk_path=None,
+                use_tool_cache=self._tool_cache_enabled_for_run(),
             )
 
             def on_runtime_command(cmd: str) -> None:
@@ -683,6 +711,10 @@ class MainHub(ctk.CTk):
         self._active_run_root = None
 
     def _worker_main(self, args: _WorkerArgs) -> None:
+        if args.use_tool_cache:
+            os.environ[USE_TOOL_CACHE_ENV] = "1"
+        else:
+            os.environ.pop(USE_TOOL_CACHE_ENV, None)
         try:
             if args.step_mode:
                 reset_runtime_user_ended_at_prompt()
@@ -773,6 +805,7 @@ class MainHub(ctk.CTk):
         self._monitor_refresh_btn.configure(state="normal")
         for w in self._script_controls:
             w.configure(state="normal")
+        self._use_tool_cache_checkbox.configure(state="normal")
         self._refresh_runtime_script_text_from_cache()
         if kind == "err":
             self._status.configure(text=f"錯誤：{msg}")

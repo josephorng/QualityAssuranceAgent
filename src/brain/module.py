@@ -17,10 +17,20 @@ from src.common.models import (
     ScriptStepVerifyResult,
     ToolCommand,
 )
+from src.common.instruction_tool_cache import (
+    extract_tool_calls_from_messages,
+    lookup_tool_calls,
+    upsert_tool_calls,
+)
 from src.common.llm_factory import get_llm_client
 from src.common.prompting import get_prompt
 from src.common.run_state import get_run_state_manager
-from src.common.runtime_context import SCRIPT_LINES_ENV, get_runtime_env, is_runtime_command_mode
+from src.common.runtime_context import (
+    SCRIPT_LINES_ENV,
+    get_runtime_env,
+    is_runtime_command_mode,
+    use_tool_cache_enabled,
+)
 from src.common.settings import load_settings
 from time import sleep
 
@@ -440,6 +450,74 @@ class BrainModule:
             self.manager.log_error(f"Verify step JSON parse/validation failed: {e}")
             return None
 
+    async def _try_replay_cached_tools(
+        self,
+        goal: str,
+        cached_calls: list[dict[str, Any]],
+    ) -> bool:
+        """Execute cached tool calls in order. Returns True only if every tool succeeds."""
+        all_image_paths = await self._eye.capture_separated_images()
+        messages: list[dict[str, Any]] = [
+            stamp_message(
+                {
+                    "role": ROLE_USER,
+                    "content": f"Cache replay for task: {goal}",
+                    "images": all_image_paths,
+                    "cache_replay": True,
+                }
+            ),
+            stamp_message(
+                {
+                    "role": ROLE_ASSISTANT,
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": call["name"],
+                                "arguments": call["arguments"],
+                            }
+                        }
+                        for call in cached_calls
+                    ],
+                    "cache_replay": True,
+                }
+            ),
+        ]
+
+        for call in cached_calls:
+            arguments = dict(call["arguments"])
+            try:
+                normalized_name = await self._normalize_tool_name(call["name"], arguments)
+            except Exception as e:
+                self.manager.log_error(f"Cache replay: error normalizing tool name: {e}")
+                self._save_step_messages(messages)
+                return False
+            result = await self._hand.execute_tool_command(
+                ToolCommand(action=normalized_name, args=arguments)
+            )
+            messages.append(
+                stamp_message(
+                    {
+                        "role": ROLE_TOOL,
+                        "content": json.dumps(
+                            self.sanitize_execution_result(result),
+                            ensure_ascii=False,
+                        ),
+                    }
+                )
+            )
+            sleep(1)
+            if not result.ok:
+                self._append_failed_tool_call(
+                    result.action,
+                    self._step_transcript_counter,
+                    self._script_step_index,
+                )
+                self._save_step_messages(messages)
+                return False
+
+        self._save_step_messages(messages)
+        return True
+
     async def loop(self) -> bool:
         """Run the capture → LLM (with tools) → execute tools loop until the model returns no tool calls or cap is hit."""
         if self._hand is None:
@@ -451,11 +529,23 @@ class BrainModule:
         first_prompt = get_prompt("brain_decide_action").format(task=goal)
         second_prompt = get_prompt("brain_decide_action_2").format(task=goal)
 
+        if use_tool_cache_enabled():
+            cached_calls = lookup_tool_calls(goal)
+            if cached_calls:
+                self.manager.log_info(
+                    f"Instruction tool cache hit ({len(cached_calls)} tool call(s)); replaying"
+                )
+                if await self._try_replay_cached_tools(goal, cached_calls):
+                    return True
+                self.manager.log_info("Cache replay failed; falling back to LLM decide loop")
+
         messages: list[dict[str, Any]] = []
         step_succeeded = False
+        llm_path_used = False
 
         for _ in range(_MAX_INNER_DECIDE_STEPS):
             try:
+                llm_path_used = True
                 all_image_paths = await self._eye.capture_separated_images()
                 user_content = first_prompt if not messages else second_prompt
                 messages.append(
@@ -519,6 +609,14 @@ class BrainModule:
                 f"Brain inner loop reached max steps ({_MAX_INNER_DECIDE_STEPS}) without model completion"
             )
             step_succeeded = False
+
+        if step_succeeded and llm_path_used:
+            tool_calls = extract_tool_calls_from_messages(messages)
+            if tool_calls:
+                upsert_tool_calls(goal, tool_calls, source_run_id=self.run_id)
+                self.manager.log_info(
+                    f"Instruction tool cache updated ({len(tool_calls)} tool call(s))"
+                )
 
         return step_succeeded
 

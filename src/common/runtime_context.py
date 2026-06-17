@@ -9,10 +9,16 @@ RUN_ID_ENV = "CUA_RUN_ID"
 SCRIPT_PATH_ENV = "CUA_SCRIPT_PATH"
 SCRIPT_LINES_ENV = "CUA_SCRIPT_LINES_JSON"
 RUNTIME_COMMAND_MODE_ENV = "CUA_RUNTIME_COMMAND_MODE"
+USE_TOOL_CACHE_ENV = "CUA_USE_TOOL_CACHE"
 
 
 def is_runtime_command_mode() -> bool:
     raw = os.getenv(RUNTIME_COMMAND_MODE_ENV, "").strip().lower()
+    return raw in ("1", "true", "yes")
+
+
+def use_tool_cache_enabled() -> bool:
+    raw = os.getenv(USE_TOOL_CACHE_ENV, "").strip().lower()
     return raw in ("1", "true", "yes")
 
 

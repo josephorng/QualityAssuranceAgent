@@ -14,7 +14,7 @@ import cv2
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from cua_mcp.icon_map import is_pua_char, lookup_pua_icon, text_has_pua, unknown_icon_record
-from cua_mcp.read_screen_text.ocr_image import get_coordinates_from_image_path
+from cua_mcp.read_screen_text.get_coordinates import get_coordinates_from_image_path
 from cua_mcp.select_mouse_target import _build_candidates_from_bgr
 from cua_mcp.yolo_onnx import DEFAULT_CONF_YOLOV26_END2END
 from src.common.io_utils import read_json, write_json

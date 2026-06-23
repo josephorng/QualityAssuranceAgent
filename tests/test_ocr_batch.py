@@ -8,18 +8,20 @@ import numpy as np
 import pytest
 
 from cua_mcp.read_screen_text import ocr_image
-from cua_mcp.read_screen_text.ocr_image import (
-    DEFAULT_CONF_YOLOV26_END2END,
-    _expand_box,
-    _get_ocr_predictor,
+from cua_mcp.read_screen_text.get_coordinates import (
     _merge_overlapping_boxes,
-    _ocr_crop_predicted_texts,
-    _ocr_crops_batched,
-    _prepare_crop_line_image,
     _sort_boxes_reading_order,
     _yolo_boxes,
     get_coordinates_from_image_path,
 )
+from cua_mcp.read_screen_text.ocr_image import (
+    _expand_box,
+    _get_ocr_predictor,
+    _ocr_crop_predicted_texts,
+    _ocr_crops_batched,
+    _prepare_crop_line_image,
+)
+from cua_mcp.yolo_onnx import DEFAULT_CONF_YOLOV26_END2END
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE_DIRS = [

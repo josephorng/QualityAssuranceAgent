@@ -1,4 +1,4 @@
-"""Tkinter viewer for YOLO + OCR on ``test_images/`` using ``cua_mcp.read_screen_text.ocr_image``."""
+"""Tkinter viewer for YOLO + OCR on ``test_images/`` using ``cua_mcp.read_screen_text.get_coordinates``."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from app_ocr_viewer_tk import (
     load_ocr_lines,
     toggle_box_edit_mode,
 )
-from cua_mcp.read_screen_text.ocr_image import get_coordinates_from_image_path
+from cua_mcp.read_screen_text.get_coordinates import get_coordinates_from_image_path
 from cua_mcp.yolo_onnx import DEFAULT_CONF_YOLOV26_END2END
 from src.common.io_utils import write_json
 from src.common.settings import ROOT_DIR

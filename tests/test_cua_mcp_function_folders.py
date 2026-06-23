@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from cua_mcp.read_screen_text.ocr_image import (
+from cua_mcp.read_screen_text.get_coordinates import (
     format_coordinate_text_from_regions,
     get_coordinates_from_image_path,
 )
@@ -19,6 +19,7 @@ FUNCTION_FOLDERS: dict[str, dict[str, object]] = {
         "path": ROOT / "cua_mcp" / "read_screen_text",
         "required_files": [
             "ocr_image.py",
+            "get_coordinates.py",
             "inference.py",
             "yolo_best.pt",
             "crnn_cfc_model.pt",

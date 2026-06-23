@@ -20,6 +20,7 @@ from cua_mcp.read_screen_text.ocr_image import _ocr_boxes_on_bgr
 from cua_mcp.select_ui_element import (
     UiDetection,
     _TEXT_FILTER_JSON_SCHEMA,
+    _format_ui_candidates_text,
     _parse_keep_indices_from_llm,
     _select_center_with_ollama,
     _sort_detections_reading_order,
@@ -180,27 +181,6 @@ def _build_candidates_from_bgr(
     return candidates
 
 
-def _format_mouse_candidates_text(detections: list[UiDetection]) -> str:
-    """Format candidate rows for the mouse-target filter LLM."""
-    lines: list[str] = []
-    for i, d in enumerate(detections):
-        text_part = (
-            f" text={d.text!r}"
-            if d.text and not _text_is_pua_only(d.text)
-            else ""
-        )
-        chinese_ids = ",".join(
-            ii.get("chinese_id", "") for ii in (d.icons or []) if ii.get("chinese_id")
-        )
-        icon_part = f" icons={chinese_ids}" if chinese_ids else ""
-        _bx, _by, bw, bh = d.bbox
-        lines.append(
-            f"[index {i}] class={d.class_name} center=[{d.cx},{d.cy}] w={bw} h={bh}"
-            f"{text_part}{icon_part}"
-        )
-    return "\n".join(lines)
-
-
 async def _filter_mouse_candidates(
     detections: list[UiDetection],
     instruction: str,
@@ -209,7 +189,7 @@ async def _filter_mouse_candidates(
     if not detections:
         return []
 
-    candidates_text = _format_mouse_candidates_text(detections)
+    candidates_text = _format_ui_candidates_text(detections)
     prompt = get_prompt("mouse_target_filter").format(
         instruction=instruction,
         candidates_text=candidates_text,

@@ -10,6 +10,7 @@ from typing import Any
 import cv2
 
 from cua_mcp.geometry import sort_by_reading_order
+from cua_mcp.icon_map import is_pua_char, text_has_pua
 from cua_mcp.llm_json import parse_json_object
 from cua_mcp.selection_engine import request_json_with_retry
 from src.common.llm_factory import get_llm_client
@@ -51,6 +52,16 @@ class UiDetection:
     class_name: str
     text: str | None = None
     icons: list[dict[str, Any]] | None = None
+
+
+def _text_is_pua_only(text: str) -> bool:
+    """True when ``text`` has PUA codepoints and no other visible characters."""
+    if not text:
+        return False
+    if not text_has_pua(text):
+        return False
+    non_pua = "".join(ch for ch in text if not is_pua_char(ch)).strip()
+    return not non_pua
 
 
 def _parse_index_from_llm(raw: str, num_candidates: int) -> int:
@@ -98,6 +109,18 @@ def _parse_keep_indices_from_llm(raw: str, max_len: int) -> list[int]:
     return keep
 
 
+_CANDIDATE_CLASS_LABELS: dict[str, str] = {
+    "text": "文字(Text)",
+    "element": "元素(Element)",
+    "input": "輸入欄(Input)",
+    "scrollbar": "滾動條(Scrollbar)",
+}
+
+
+def _candidate_class_label(class_name: str) -> str:
+    return _CANDIDATE_CLASS_LABELS.get(class_name, class_name)
+
+
 def _sort_detections_reading_order(detections: list[UiDetection]) -> list[UiDetection]:
     """Top-to-bottom, then left-to-right (same spirit as OCR reading order)."""
     return sort_by_reading_order(
@@ -109,15 +132,23 @@ def _sort_detections_reading_order(detections: list[UiDetection]) -> list[UiDete
 
 
 def _format_ui_candidates_text(detections: list[UiDetection]) -> str:
-    """Format candidate rows for the UI element picker LLM (``[N] center=...`` per line)."""
+    """Format candidate rows for LLM filter/picker prompts."""
     lines: list[str] = []
     for i, d in enumerate(detections):
+        text_part = (
+            f" text={d.text!r}"
+            if d.text and not _text_is_pua_only(d.text)
+            else ""
+        )
         chinese_ids = ",".join(
             ii.get("chinese_id", "") for ii in (d.icons or []) if ii.get("chinese_id")
         )
-        icon_text = f" icons={chinese_ids}" if chinese_ids else ""
+        icon_part = f" icons={chinese_ids}" if chinese_ids else ""
         _bx, _by, bw, bh = d.bbox
-        lines.append(f"[{i}] center=[{d.cx},{d.cy}] w={bw} h={bh}{icon_text}")
+        lines.append(
+            f"[index {i}] class={_candidate_class_label(d.class_name)} center=[{d.cx},{d.cy}] w={bw} h={bh}"
+            f"{text_part}{icon_part}"
+        )
     return "\n".join(lines)
 
 

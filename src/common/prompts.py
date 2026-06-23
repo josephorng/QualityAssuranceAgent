@@ -28,7 +28,8 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Create detailed tool instructions for each tool call.",
                 "All the monitor screenshot(s) are captured and will be provided to you.",
                 "Do not do anything outside of the task scope.",
-                "If task is 'click on the object' or '點選物件', you should split it into move mouse to the object and click on the object.",
+                "Use move_mouse only when the task explicitly asks to move the cursor or interact with a named/specific on-screen target (e.g. 'click on the object', '點選物件', 'click the Submit button'). For 'click on the object' or '點選物件', split into move_mouse then click.",
+                "Do not call move_mouse when the task only describes an action at the current cursor and does not name a target (e.g. triple-click, double-click, scroll, type text, press a key)—call that action tool directly.",
                 "For scroll: positive clicks scroll down (往下滑), negative scroll up; use roughly 3–10 per screen of content.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
@@ -148,7 +149,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "image_usage": "no_image",
             "prompt": (
                 "Select candidates related to the user instruction.\n"
-                "Each row has class=text|element|input|scrollbar, optional OCR text, and optional icon labels.\n\n"
+                "Each row has class=text|element|輸入欄|滾動條, optional OCR text, and optional icon labels.\n\n"
                 "Instruction:\n{instruction}\n\n"
                 "Candidates:\n{candidates_text}\n"
             ),
@@ -156,7 +157,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 'Return JSON only: {{"keep_indices": [<int>, ...]}}.',
                 "Use [index N] values from the Candidates list. Keep an empty list when none match.",
                 "Keep text/element rows when OCR text or icons are related to the instruction.",
-                "Keep all input/scrollbar rows when the instruction implies a field, control, or scrollable region.",
+                "Keep all 輸入欄/滾動條 rows when the instruction implies a field, control, or scrollable region.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
         }

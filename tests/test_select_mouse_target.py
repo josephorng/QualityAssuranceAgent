@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-from cua_mcp.select_mouse_target import (
-    _detection_from_bbox,
-    _format_mouse_candidates_text,
-)
-from cua_mcp.select_ui_element import UiDetection, _parse_keep_indices_from_llm
+from cua_mcp.select_mouse_target import _detection_from_bbox
+from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text, _parse_keep_indices_from_llm
 from cua_mcp.yolo_onnx import (
     MOUSE_TARGET_CLASS_IDS,
     YOLO_CLASS_ELEMENT,
@@ -43,11 +40,13 @@ def test_format_mouse_candidates_includes_class_and_text() -> None:
     detections = [
         _detection_from_bbox((0, 0, 80, 20), YOLO_CLASS_TEXT, text="OK"),
         _detection_from_bbox((100, 0, 12, 200), YOLO_CLASS_SCROLLBAR),
+        _detection_from_bbox((200, 0, 50, 20), YOLO_CLASS_INPUT),
     ]
-    text = _format_mouse_candidates_text(detections)
+    text = _format_ui_candidates_text(detections)
     assert "[index 0] class=text" in text
     assert "text='OK'" in text
-    assert "[index 1] class=scrollbar" in text
+    assert "[index 1] class=滾動條" in text
+    assert "[index 2] class=輸入欄" in text
     assert "center=[106,100]" in text
 
 
@@ -57,7 +56,7 @@ def test_format_mouse_candidates_omits_pua_only_text() -> None:
         _detection_from_bbox((0, 0, 20, 20), YOLO_CLASS_ELEMENT, text=pua),
         _detection_from_bbox((30, 0, 80, 20), YOLO_CLASS_TEXT, text=f"OK{pua}"),
     ]
-    text = _format_mouse_candidates_text(detections)
+    text = _format_ui_candidates_text(detections)
     assert "text=" not in text.split("\n")[0]
     assert "icons=向下箭頭" in text.split("\n")[0]
     assert "text='OK" in text.split("\n")[1]

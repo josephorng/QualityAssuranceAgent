@@ -1,0 +1,31 @@
+name: "yolo_ui"
+platform: "onnxruntime_onnx"
+max_batch_size: 1
+
+input [
+  {
+    name: "images"
+    data_type: TYPE_FP32
+    dims: [ 3, 1280, 1280 ]
+  }
+]
+
+output [
+  {
+    name: "output0"
+    data_type: TYPE_FP32
+    dims: [ 300, 6 ]
+  }
+]
+
+instance_group [
+  {
+    count: 2
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  },
+  {
+    count: 1
+    kind: KIND_CPU
+  }
+]

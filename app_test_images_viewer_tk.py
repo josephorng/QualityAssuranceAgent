@@ -24,6 +24,7 @@ from app_ocr_viewer_tk import (
     _box_outline_for_line,
     _display_label_for_line,
     _export_dest_for_text,
+    _smallest_box_hit_index,
     _is_icon_ocr_line,
     _is_single_pua_icon_text,
     _parse_conf_0_to_1,
@@ -444,20 +445,22 @@ class TestImagesViewerApp:
             else:
                 dest_dir = Path(dest_var.get().strip())
             try:
-                self._export_line_variants(idx, corrected, dest_dir)
+                n = self._export_line_variants(idx, corrected, dest_dir)
             except Exception as exc:
                 self.status_var.set(f"Export failed: {type(exc).__name__}: {exc}")
                 return
-            self.status_var.set(f"Exported image + label for item #{idx + 1} → {dest_dir}")
+            kind = "image + label" if n > 1 else "image"
+            self.status_var.set(f"Exported {kind} for item #{idx + 1} → {dest_dir}")
 
         def _export_to_validate() -> None:
             _save_text()
             try:
-                self._export_line_variants(idx, text_var.get().strip(), OCR_VALIDATE_DIR)
+                n = self._export_line_variants(idx, text_var.get().strip(), OCR_VALIDATE_DIR)
             except Exception as exc:
                 self.status_var.set(f"Export to validate failed: {type(exc).__name__}: {exc}")
                 return
-            self.status_var.set(f"Exported image + label to validate for item #{idx + 1}")
+            kind = "image + label" if n > 1 else "image"
+            self.status_var.set(f"Exported {kind} to validate for item #{idx + 1}")
 
         ttk.Button(button_bar, text="Save Text", command=_save_text).grid(row=0, column=0, sticky="ew", padx=(0, 4))
         ttk.Button(button_bar, text="Export", command=_export_current).grid(row=0, column=1, sticky="ew", padx=4)
@@ -495,8 +498,10 @@ class TestImagesViewerApp:
         crop = self.current_image.crop((crop_l, crop_t, crop_r, crop_b))
         stem = f"{base_name}_item{idx + 1:03d}"
         out_img = dest_dir / f"{stem}.png"
-        out_txt = dest_dir / f"{stem}.txt"
         crop.save(out_img)
+        if _is_single_pua_icon_text(corrected_text):
+            return 1
+        out_txt = dest_dir / f"{stem}.txt"
         out_txt.write_text(corrected_text, encoding="utf-8")
         return 2
 
@@ -721,11 +726,7 @@ class TestImagesViewerApp:
         canvas_y = self.canvas.canvasy(int(event.y))
         img_x = int(canvas_x / max(self._render_scale, 1e-6))
         img_y = int(canvas_y / max(self._render_scale, 1e-6))
-        for idx, line in enumerate(self.current_lines):
-            x, y, w, h = line.box
-            if x <= img_x <= x + w and y <= img_y <= y + h:
-                return idx
-        return None
+        return _smallest_box_hit_index(self.current_lines, img_x, img_y)
 
     def _on_canvas_double_click(self, event: tk.Event[tk.Canvas]) -> None:
         idx = self._ocr_hit_index_at_canvas(event)

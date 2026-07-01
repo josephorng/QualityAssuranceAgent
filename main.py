@@ -171,6 +171,9 @@ def launch_gui() -> None:
 
 
 def main() -> None:
+    from src.common.settings import apply_vision_env_from_settings
+
+    apply_vision_env_from_settings()
     launch_gui()
 
 

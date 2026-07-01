@@ -148,11 +148,24 @@ def _is_single_pua_icon_text(text: str) -> bool:
     return len(pua_chars) == 1 and not non_pua
 
 
+def _export_dest_for_icon_identity(is_icon: bool) -> Path:
+    """Train export folder for explicit icon vs text identity."""
+    return OCR_EXPORT_ICONS_DIR if is_icon else OCR_EXPORT_DEFAULT_DIR
+
+
 def _export_dest_for_text(text: str) -> Path:
     """Train export folder: single-icon PUA → ``icons``; pure text or mixed PUA+text → ``cua_data``."""
-    if _is_single_pua_icon_text(text):
-        return OCR_EXPORT_ICONS_DIR
-    return OCR_EXPORT_DEFAULT_DIR
+    return _export_dest_for_icon_identity(_is_single_pua_icon_text(text))
+
+
+def _undo_export_files(paths: list[Path]) -> int:
+    """Delete files from a prior export. Returns the number of files removed."""
+    removed = 0
+    for path in paths:
+        if path.is_file():
+            path.unlink()
+            removed += 1
+    return removed
 
 
 _STRING_LINE_RE = re.compile(r"^\[(\d+),(\d+),(\d+),(\d+)\]\s*(.*)$")
@@ -317,6 +330,36 @@ def load_yolo_lines(image_path: Path, *, yolo_conf_threshold: float) -> tuple[li
     return lines, f"Loaded {len(lines)} YOLO detections"
 
 
+YoloLinesCache = dict[tuple[str, float], tuple[list[OcrLine], str]]
+
+
+def resolve_image_lines(
+    image_path: Path,
+    *,
+    yolo_conf_threshold: float,
+    allow_yolo: bool,
+    yolo_cache: YoloLinesCache | None = None,
+    force_yolo: bool = False,
+) -> tuple[list[OcrLine], str]:
+    """Load detections from sidecar JSON, else cache or optional live YOLO."""
+    if not force_yolo:
+        json_path = image_path.with_suffix(".json")
+        if json_path.exists():
+            return load_ocr_lines(json_path)
+
+    cache_key = (str(image_path.resolve()), yolo_conf_threshold)
+    if not force_yolo and yolo_cache is not None and cache_key in yolo_cache:
+        return yolo_cache[cache_key]
+
+    if not allow_yolo:
+        return [], "No OCR JSON — click Reload YOLO detections"
+
+    lines, status = load_yolo_lines(image_path, yolo_conf_threshold=yolo_conf_threshold)
+    if yolo_cache is not None:
+        yolo_cache[cache_key] = (lines, status)
+    return lines, status
+
+
 def _discover_runs(runs_root: Path) -> list[Path]:
     if not runs_root.exists():
         return []
@@ -393,6 +436,20 @@ def _clamp_box(
     return x, y, w, h
 
 
+def _smallest_box_hit_index(lines: list[OcrLine], img_x: int, img_y: int) -> int | None:
+    """Return the index of the smallest box containing ``(img_x, img_y)``."""
+    best_idx: int | None = None
+    best_area = 0
+    for idx, line in enumerate(lines):
+        x, y, w, h = line.box
+        if x <= img_x <= x + w and y <= img_y <= y + h:
+            area = w * h
+            if best_idx is None or area < best_area:
+                best_idx = idx
+                best_area = area
+    return best_idx
+
+
 def _adjust_box_edge(
     box: tuple[int, int, int, int],
     direction: str,
@@ -461,6 +518,7 @@ class OcrViewerApp:
         self._render_scale = 1.0
         self._lmb_press_xy: tuple[int, int] | None = None
         self._lmb_panning = False
+        self._yolo_lines_cache: YoloLinesCache = {}
 
         self._build_ui()
         self._populate_runs()
@@ -619,12 +677,12 @@ class OcrViewerApp:
         run = self._selected_run()
         self.current_run_images = _yolo_ocr_paired_images(run) if run is not None else []
         self.selected_line_idx = None
+        self._yolo_lines_cache.clear()
         self.image_list.delete(0, tk.END)
         for img in self.current_run_images:
             self.image_list.insert(tk.END, img.name)
         if self.current_run_images:
-            self.image_list.select_set(0)
-            self._on_image_select()
+            self._select_image_index(0)
         else:
             self.current_image = None
             self.current_lines = []
@@ -646,6 +704,11 @@ class OcrViewerApp:
             return None
         return self.current_run_images[idx]
 
+    def _select_image_index(self, idx: int) -> None:
+        self.image_list.select_clear(0, tk.END)
+        self.image_list.select_set(idx)
+        self.image_list.see(idx)
+
     def _on_image_select(self, _event: object | None = None) -> None:
         image_path = self._current_image_path()
         run = self._selected_run()
@@ -658,7 +721,12 @@ class OcrViewerApp:
             self.current_lines = []
             status = f"Invalid confidence: {err}"
         else:
-            self.current_lines, status = load_yolo_lines(image_path, yolo_conf_threshold=conf)
+            self.current_lines, status = resolve_image_lines(
+                image_path,
+                yolo_conf_threshold=conf,
+                allow_yolo=False,
+                yolo_cache=self._yolo_lines_cache,
+            )
         self.selected_line_idx = None
         self._populate_item_list()
         self.status_var.set(f"{image_path.name} - {status}")
@@ -722,11 +790,7 @@ class OcrViewerApp:
         canvas_y = self.canvas.canvasy(int(event.y))
         img_x = int(canvas_x / max(self._render_scale, 1e-6))
         img_y = int(canvas_y / max(self._render_scale, 1e-6))
-        for idx, line in enumerate(lines):
-            x, y, w, h = line.box
-            if x <= img_x <= x + w and y <= img_y <= y + h:
-                return idx
-        return None
+        return _smallest_box_hit_index(lines, img_x, img_y)
 
     def _on_canvas_double_click(self, event: tk.Event[tk.Canvas]) -> None:
         idx = self._ocr_hit_index_at_canvas(event)
@@ -896,10 +960,23 @@ class OcrViewerApp:
         text_entry = ttk.Entry(dialog, textvariable=text_var, width=72)
         text_entry.grid(row=0, column=1, columnspan=2, sticky="ew", padx=10, pady=(10, 6))
 
-        ttk.Label(dialog, text="Export folder").grid(row=1, column=0, sticky="w", padx=10, pady=(0, 6))
-        dest_var = tk.StringVar(value=str(_export_dest_for_text(line.text)))
+        is_icon = _is_single_pua_icon_text(line.text)
+        icon_var = tk.BooleanVar(value=is_icon)
+
+        def _on_icon_toggle() -> None:
+            dest_var.set(str(_export_dest_for_icon_identity(icon_var.get())))
+
+        ttk.Checkbutton(
+            dialog,
+            text="Icon identity (not text)",
+            variable=icon_var,
+            command=_on_icon_toggle,
+        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=10, pady=(0, 6))
+
+        ttk.Label(dialog, text="Export folder").grid(row=2, column=0, sticky="w", padx=10, pady=(0, 6))
+        dest_var = tk.StringVar(value=str(_export_dest_for_icon_identity(is_icon)))
         dest_entry = ttk.Entry(dialog, textvariable=dest_var, width=72)
-        dest_entry.grid(row=1, column=1, sticky="ew", padx=10, pady=(0, 6))
+        dest_entry.grid(row=2, column=1, sticky="ew", padx=10, pady=(0, 6))
 
         def _browse_folder() -> None:
             chosen = filedialog.askdirectory(initialdir=dest_var.get() or str(OCR_EXPORT_DEFAULT_DIR))
@@ -907,15 +984,37 @@ class OcrViewerApp:
                 dest_var.set(chosen)
 
         ttk.Button(dialog, text="Browse...", command=_browse_folder).grid(
-            row=1, column=2, sticky="ew", padx=(0, 10), pady=(0, 6)
+            row=2, column=2, sticky="ew", padx=(0, 10), pady=(0, 6)
         )
 
         button_bar = ttk.Frame(dialog)
-        button_bar.grid(row=2, column=0, columnspan=3, sticky="ew", padx=10, pady=(2, 10))
+        button_bar.grid(row=3, column=0, columnspan=3, sticky="ew", padx=10, pady=(2, 10))
         button_bar.columnconfigure(0, weight=1)
         button_bar.columnconfigure(1, weight=1)
         button_bar.columnconfigure(2, weight=1)
         button_bar.columnconfigure(3, weight=1)
+        button_bar.columnconfigure(4, weight=1)
+
+        last_export_paths: list[Path] = []
+
+        def _after_export(paths: list[Path], status: str) -> None:
+            nonlocal last_export_paths
+            last_export_paths = list(paths)
+            undo_btn.config(state="normal")
+            self.status_var.set(status)
+
+        def _undo_last_export() -> None:
+            nonlocal last_export_paths
+            if not last_export_paths:
+                return
+            try:
+                n = _undo_export_files(last_export_paths)
+            except Exception as exc:
+                self.status_var.set(f"Undo export failed: {type(exc).__name__}: {exc}")
+                return
+            last_export_paths = []
+            undo_btn.config(state="disabled")
+            self.status_var.set(f"Undid export ({n} file(s) removed) for item #{display_idx + 1}")
 
         def _save_text() -> None:
             new_text = text_var.get().strip()
@@ -933,42 +1032,51 @@ class OcrViewerApp:
             self.item_list.see(display_idx)
             self.selected_line_idx = display_idx
             self._refresh_image()
-            dest_var.set(str(_export_dest_for_text(new_text)))
             self.status_var.set(f"Updated OCR text for item #{display_idx + 1}")
 
         def _export_current() -> None:
             _save_text()
             corrected = text_var.get().strip()
-            if _is_single_pua_icon_text(corrected):
-                dest_dir = OCR_EXPORT_ICONS_DIR
-            else:
-                dest_dir = Path(dest_var.get().strip())
+            export_as_icon = icon_var.get()
+            dest_dir = (
+                OCR_EXPORT_ICONS_DIR if export_as_icon else Path(dest_var.get().strip())
+            )
             try:
-                n = self._export_display_item(display_idx, dest_dir, label_text=corrected)
+                paths = self._export_display_item(
+                    display_idx,
+                    dest_dir,
+                    label_text=corrected,
+                    export_as_icon=export_as_icon,
+                )
             except Exception as exc:
                 self.status_var.set(f"Export failed: {type(exc).__name__}: {exc}")
                 return
-            kind = "image + label" if n > 1 else "image"
-            self.status_var.set(f"Exported {kind} for item #{display_idx + 1} → {dest_dir}")
+            kind = "image + label" if len(paths) > 1 else "image"
+            _after_export(paths, f"Exported {kind} for item #{display_idx + 1} → {dest_dir}")
 
         def _export_to_validate() -> None:
             _save_text()
             try:
-                n = self._export_display_item(
-                    display_idx, OCR_VALIDATE_DIR, label_text=text_var.get().strip()
+                paths = self._export_display_item(
+                    display_idx,
+                    OCR_VALIDATE_DIR,
+                    label_text=text_var.get().strip(),
+                    export_as_icon=icon_var.get(),
                 )
             except Exception as exc:
                 self.status_var.set(f"Export to validate failed: {type(exc).__name__}: {exc}")
                 return
-            kind = "image + label" if n > 1 else "image"
-            self.status_var.set(f"Exported {kind} to validate for item #{display_idx + 1}")
+            kind = "image + label" if len(paths) > 1 else "image"
+            _after_export(paths, f"Exported {kind} to validate for item #{display_idx + 1}")
 
         ttk.Button(button_bar, text="Save Text", command=_save_text).grid(row=0, column=0, sticky="ew", padx=(0, 4))
         ttk.Button(button_bar, text="Export", command=_export_current).grid(row=0, column=1, sticky="ew", padx=4)
         ttk.Button(button_bar, text="Export Validate", command=_export_to_validate).grid(
             row=0, column=2, sticky="ew", padx=4
         )
-        ttk.Button(button_bar, text="Close", command=dialog.destroy).grid(row=0, column=3, sticky="ew", padx=(4, 0))
+        undo_btn = ttk.Button(button_bar, text="Undo Export", command=_undo_last_export, state="disabled")
+        undo_btn.grid(row=0, column=3, sticky="ew", padx=4)
+        ttk.Button(button_bar, text="Close", command=dialog.destroy).grid(row=0, column=4, sticky="ew", padx=(4, 0))
 
         text_entry.focus_set()
         text_entry.selection_range(0, tk.END)
@@ -1010,19 +1118,43 @@ class OcrViewerApp:
         button_bar.columnconfigure(1, weight=1)
         button_bar.columnconfigure(2, weight=1)
 
+        last_export_paths: list[Path] = []
+
+        def _after_export(paths: list[Path], status: str) -> None:
+            nonlocal last_export_paths
+            last_export_paths = list(paths)
+            undo_btn.config(state="normal")
+            self.status_var.set(status)
+
+        def _undo_last_export() -> None:
+            nonlocal last_export_paths
+            if not last_export_paths:
+                return
+            try:
+                n = _undo_export_files(last_export_paths)
+            except Exception as exc:
+                self.status_var.set(f"Undo export failed: {type(exc).__name__}: {exc}")
+                return
+            last_export_paths = []
+            undo_btn.config(state="disabled")
+            self.status_var.set(f"Undid export ({n} file(s) removed) for UI object #{display_idx + 1}")
+
         def _export_current() -> None:
             try:
                 dest_dir = Path(dest_var.get().strip())
-                self._export_display_item(display_idx, dest_dir, label_text=None)
+                paths = self._export_display_item(display_idx, dest_dir, label_text=None)
             except Exception as exc:
                 self.status_var.set(f"Export failed: {type(exc).__name__}: {exc}")
                 return
-            self.status_var.set(
-                f"Exported image (no label) for UI object #{display_idx + 1} → {dest_dir}"
+            _after_export(
+                paths,
+                f"Exported image (no label) for UI object #{display_idx + 1} → {dest_dir}",
             )
 
         ttk.Button(button_bar, text="Export", command=_export_current).grid(row=0, column=0, sticky="ew", padx=4)
-        ttk.Button(button_bar, text="Close", command=dialog.destroy).grid(row=0, column=1, sticky="ew", padx=4)
+        undo_btn = ttk.Button(button_bar, text="Undo Export", command=_undo_last_export, state="disabled")
+        undo_btn.grid(row=0, column=1, sticky="ew", padx=4)
+        ttk.Button(button_bar, text="Close", command=dialog.destroy).grid(row=0, column=2, sticky="ew", padx=4)
         dialog.bind("<Escape>", lambda _event: dialog.destroy())
 
     def _export_display_item(
@@ -1031,14 +1163,15 @@ class OcrViewerApp:
         dest_dir: Path,
         *,
         label_text: str | None,
-    ) -> int:
-        """Export one item crop. UI objects write ``.png`` only; OCR lines also write ``.txt``."""
+        export_as_icon: bool = False,
+    ) -> list[Path]:
+        """Export one item crop. UI objects and icon identity write ``.png`` only; text OCR lines also write ``.txt``."""
         if self.current_image is None:
             raise ValueError("no image loaded")
         line = self._line_at_display_index(display_idx)
         if line is None:
             raise ValueError("invalid item index")
-        write_txt = not _is_ui_object_line(line)
+        write_txt = not _is_ui_object_line(line) and not export_as_icon
         if write_txt and not (label_text or "").strip():
             raise ValueError("corrected text is empty")
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -1060,15 +1193,31 @@ class OcrViewerApp:
         stem = f"{base_name}_{kind}_item{display_idx + 1:03d}"
         out_img = dest_dir / f"{stem}.png"
         crop.save(out_img)
+        written = [out_img]
         if not write_txt:
-            return 1
+            return written
         out_txt = dest_dir / f"{stem}.txt"
         out_txt.write_text(label_text or "", encoding="utf-8")
-        return 2
+        written.append(out_txt)
+        return written
 
-    def _export_line_variants(self, display_idx: int, corrected_text: str, dest_dir: Path) -> int:
+    def _export_line_variants(
+        self,
+        display_idx: int,
+        corrected_text: str,
+        dest_dir: Path,
+        *,
+        export_as_icon: bool | None = None,
+    ) -> list[Path]:
         """Backward-compatible wrapper for OCR export callers."""
-        return self._export_display_item(display_idx, dest_dir, label_text=corrected_text)
+        if export_as_icon is None:
+            export_as_icon = _is_single_pua_icon_text(corrected_text)
+        return self._export_display_item(
+            display_idx,
+            dest_dir,
+            label_text=corrected_text,
+            export_as_icon=export_as_icon,
+        )
 
     def _refresh_image(self) -> None:
         if self.current_image is None:
@@ -1114,21 +1263,13 @@ class OcrViewerApp:
         idx = self._selected_image_index()
         if idx is None:
             return
-        nxt = max(0, idx - 1)
-        self.image_list.select_clear(0, tk.END)
-        self.image_list.select_set(nxt)
-        self.image_list.see(nxt)
-        self._on_image_select()
+        self._select_image_index(max(0, idx - 1))
 
     def _next_image(self) -> None:
         idx = self._selected_image_index()
         if idx is None:
             return
-        nxt = min(len(self.current_run_images) - 1, idx + 1)
-        self.image_list.select_clear(0, tk.END)
-        self.image_list.select_set(nxt)
-        self.image_list.see(nxt)
-        self._on_image_select()
+        self._select_image_index(min(len(self.current_run_images) - 1, idx + 1))
 
     def _run_select_text_current_image(self) -> None:
         src = self._current_image_path()
@@ -1143,7 +1284,13 @@ class OcrViewerApp:
         self.root.update_idletasks()
         t0 = time.perf_counter()
         try:
-            lines, status = load_yolo_lines(src, yolo_conf_threshold=conf)
+            lines, status = resolve_image_lines(
+                src,
+                yolo_conf_threshold=conf,
+                allow_yolo=True,
+                yolo_cache=self._yolo_lines_cache,
+                force_yolo=True,
+            )
         except Exception as exc:
             self.status_var.set(f"YOLO detections failed: {type(exc).__name__}: {exc}")
             return

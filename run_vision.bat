@@ -1,0 +1,1 @@
+docker compose -f triton/docker-compose.yml up

@@ -24,6 +24,7 @@ session per resolved model path (OCR text + UI element both use ``best.onnx``).
 from __future__ import annotations
 
 from pathlib import Path
+import time
 from typing import Callable, Sequence
 
 import cv2
@@ -89,6 +90,15 @@ _PACKAGE_DIR = Path(__file__).resolve().parent
 DEFAULT_YOLO_ONNX_PATH = _PACKAGE_DIR / "best.onnx"
 
 
+def _log_yolo_profile(message: str) -> None:
+    try:
+        from src.common.run_state import get_run_state_manager
+
+        get_run_state_manager().log_info(f"[vision/yolo] {message}")
+    except RuntimeError:
+        pass
+
+
 def create_cpu_session(model_path: str | Path) -> tuple[ort.InferenceSession, str]:
     """Build an ONNX Runtime session on CPU and return ``(session, input_tensor_name)``."""
     path = Path(model_path)
@@ -120,6 +130,59 @@ def get_cached_cpu_session(
     return _SESSION_BY_RESOLVED_PATH[key]
 
 
+def _local_ort_infer_yolo(
+    img_data: np.ndarray,
+    *,
+    model_path: str | Path,
+    on_session_created: Callable[[Path], None] | None = None,
+) -> np.ndarray:
+    started = time.perf_counter()
+    session, input_name = get_cached_cpu_session(
+        model_path, on_created=on_session_created
+    )
+    outputs = session.run(None, {input_name: img_data})
+    elapsed = time.perf_counter() - started
+    _log_yolo_profile(
+        f"infer backend=ort_local shape={list(img_data.shape)} "
+        f"elapsed_s={elapsed:.3f}"
+    )
+    return outputs[0]
+
+
+def _run_yolo_raw_output(
+    img_data: np.ndarray,
+    *,
+    model_path: str | Path,
+    on_session_created: Callable[[Path], None] | None = None,
+) -> np.ndarray:
+    from cua_mcp.vision_backend import allow_local_ort_fallback, should_try_triton
+    from cua_mcp.vision_triton import TritonUnavailableError, infer_yolo
+
+    started = time.perf_counter()
+    if should_try_triton():
+        try:
+            out = infer_yolo(img_data)
+            elapsed = time.perf_counter() - started
+            _log_yolo_profile(
+                f"infer backend=triton shape={list(img_data.shape)} "
+                f"elapsed_s={elapsed:.3f}"
+            )
+            return out
+        except TritonUnavailableError as exc:
+            elapsed = time.perf_counter() - started
+            _log_yolo_profile(
+                f"infer backend=triton failed shape={list(img_data.shape)} "
+                f"elapsed_s={elapsed:.3f} error={exc}; fallback=ort_local"
+            )
+            if not allow_local_ort_fallback():
+                raise
+    return _local_ort_infer_yolo(
+        img_data,
+        model_path=model_path,
+        on_session_created=on_session_created,
+    )
+
+
 def run_yolo_onnx_end2end(
     bgr: np.ndarray,
     *,
@@ -144,13 +207,14 @@ def run_yolo_onnx_end2end(
     always merged at that threshold (see :data:`DEFAULT_MERGE_TOUCHING_CLASS_IDS`).
     """
     path = DEFAULT_YOLO_ONNX_PATH if model_path is None else Path(model_path)
-    session, input_name = get_cached_cpu_session(
-        path, on_created=on_session_created
-    )
     img_data, h0, w0 = bgr_to_nchw_normalized(bgr)
-    outputs = session.run(None, {input_name: img_data})
+    raw = _run_yolo_raw_output(
+        img_data,
+        model_path=path,
+        on_session_created=on_session_created,
+    )
     return decode_yolov26_end2end(
-        outputs[0],
+        raw,
         h0,
         w0,
         conf_threshold=conf_threshold,

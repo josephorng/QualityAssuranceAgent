@@ -4,6 +4,7 @@ Unified mouse target selection: YOLO (text, element, input, scrollbar) + OCR + L
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import cv2
@@ -137,6 +138,8 @@ def _build_candidates_from_bgr(
 ) -> list[UiDetection]:
     """Run YOLO on ``bgr``, OCR text/element boxes, return local-coordinate candidates."""
     h, w = bgr.shape[:2]
+    vision_started = time.perf_counter()
+    yolo_started = time.perf_counter()
     try:
         xyxy, _scores, class_ids = run_yolo_onnx_end2end(
             bgr,
@@ -147,8 +150,13 @@ def _build_candidates_from_bgr(
     except Exception as exc:
         _log_info(f"move_mouse YOLO failed: {type(exc).__name__}: {exc}")
         raise RuntimeError(f"move_mouse YOLO predict failed: {exc}") from exc
+    yolo_elapsed = time.perf_counter() - yolo_started
 
     if xyxy.size == 0:
+        _log_info(
+            f"move_mouse vision profile yolo_s={yolo_elapsed:.3f} ocr_s=0.000 "
+            f"total_s={time.perf_counter() - vision_started:.3f} detections=0"
+        )
         return []
 
     ocr_boxes: list[tuple[int, int, int, int]] = []
@@ -164,7 +172,9 @@ def _build_candidates_from_bgr(
         else:
             non_ocr.append((bbox, cls_id))
 
+    ocr_started = time.perf_counter()
     ocr_preds = _ocr_boxes_on_bgr(bgr, ocr_boxes) if ocr_boxes else []
+    ocr_elapsed = time.perf_counter() - ocr_started
 
     candidates: list[UiDetection] = []
     for bbox, cls_id in non_ocr:
@@ -177,6 +187,13 @@ def _build_candidates_from_bgr(
         if _should_skip_ocr_text_candidate(text_value, cls_id):
             continue
         candidates.append(_detection_from_bbox(bbox, cls_id, text=text_value or None))
+
+    _log_info(
+        "move_mouse vision profile "
+        f"yolo_s={yolo_elapsed:.3f} ocr_s={ocr_elapsed:.3f} "
+        f"total_s={time.perf_counter() - vision_started:.3f} "
+        f"yolo_boxes={len(xyxy)} ocr_boxes={len(ocr_boxes)} candidates={len(candidates)}"
+    )
 
     return candidates
 

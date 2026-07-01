@@ -8,16 +8,18 @@ pipelines (viewers, debug scripts), use :mod:`cua_mcp.read_screen_text.get_coord
 from __future__ import annotations
 
 import os
+import time
 from typing import Optional
 
 import cv2
 import numpy as np
 
 from cua_mcp.geometry import clip_box
+from cua_mcp.vision_backend import should_try_triton
 from .inference_onnx import TextPredictor
 from src.common.run_state import get_run_state_manager
 
-_DEFAULT_CRNN_BATCH_SIZE = 16
+_DEFAULT_CRNN_BATCH_SIZE = 64
 
 _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 _CRNN_PREDICTOR: TextPredictor | None = None
@@ -46,20 +48,42 @@ def _get_ocr_predictor(
     global _CRNN_PREDICTOR
     path = model_path or _default_crnn_path()
     if _CRNN_PREDICTOR is None:
-        if not os.path.isfile(path):
+        if not should_try_triton() and not os.path.isfile(path):
             raise FileNotFoundError(f"ONNX CRNN model not found: {path}")
         if not quiet:
-            _log_info(f"OCR initializing ONNX CRNN predictor model_path={path}")
+            backend = "triton" if should_try_triton() else "local"
+            _log_info(
+                f"OCR initializing CRNN predictor backend={backend} model_path={path}"
+            )
         _CRNN_PREDICTOR = TextPredictor(path, quiet=quiet)
     return _CRNN_PREDICTOR
 
 
 def warm_vision_models(*, quiet: bool = True) -> None:
-    """Eagerly load YOLO and CRNN ONNX sessions (no-op when already cached)."""
+    """Eagerly warm YOLO + CRNN (Triton health check or local ONNX sessions)."""
+    from cua_mcp.vision_backend import should_try_triton
+
+    started = time.perf_counter()
+    if should_try_triton():
+        from cua_mcp.vision_triton import triton_ready
+
+        if triton_ready():
+            elapsed = time.perf_counter() - started
+            _log_info(f"Vision warmup: Triton server ready elapsed_s={elapsed:.3f}")
+            return
+        elapsed = time.perf_counter() - started
+        _log_info(
+            f"Vision warmup: Triton not ready elapsed_s={elapsed:.3f}, "
+            "loading local ONNX fallback"
+        )
+
     from cua_mcp.yolo_onnx import DEFAULT_YOLO_ONNX_PATH, get_cached_cpu_session
 
     get_cached_cpu_session(DEFAULT_YOLO_ONNX_PATH)
     _get_ocr_predictor(quiet=quiet)
+    if not quiet:
+        elapsed = time.perf_counter() - started
+        _log_info(f"Vision warmup: local ONNX loaded elapsed_s={elapsed:.3f}")
 
 
 def _expand_box(
@@ -160,6 +184,10 @@ def _ocr_crops_batched(
 
     valid.sort(key=lambda item: item[1].shape[1])
 
+    batch_count = 0
+    infer_total_s = 0.0
+    started = time.perf_counter()
+
     for start in range(0, len(valid), batch_size):
         chunk = valid[start : start + batch_size]
         if not chunk:
@@ -172,13 +200,24 @@ def _ocr_crops_batched(
             batch[row, :h_img, :w_img] = image
 
         try:
+            batch_started = time.perf_counter()
             predicted_texts = predictor.predict_images(batch)
+            infer_total_s += time.perf_counter() - batch_started
+            batch_count += 1
             for row, (orig_index, _) in enumerate(chunk):
                 if predicted_texts and row < len(predicted_texts):
                     text = predicted_texts[row]
                     results[orig_index] = [text] if text else []
         except Exception as exc:
             print(f"OCR _ocr_crops_batched error: {exc}")
+
+    elapsed = time.perf_counter() - started
+    if valid:
+        _log_info(
+            "CRNN profile "
+            f"crops={len(crops)} valid={len(valid)} batches={batch_count} "
+            f"infer_total_s={infer_total_s:.3f} total_s={elapsed:.3f}"
+        )
 
     return results
 

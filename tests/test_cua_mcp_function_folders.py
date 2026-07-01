@@ -20,12 +20,11 @@ FUNCTION_FOLDERS: dict[str, dict[str, object]] = {
         "required_files": [
             "ocr_image.py",
             "get_coordinates.py",
-            "inference.py",
-            "yolo_best.pt",
-            "crnn_cfc_model.pt",
+            "inference_onnx.py",
             "char_dict.json",
             "char_decode_dict.json",
             "model_config.json",
+            "ocr_model_finetuned.onnx",
         ],
         "image_dir": ROOT / "cua_mcp" / "read_screen_text" / "images",
     }

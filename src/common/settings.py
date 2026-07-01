@@ -79,6 +79,8 @@ class Settings(BaseSettings):
     runs_dir: str = "runs"
     log_level: str = "INFO"
     debug: bool = True
+    triton_http_url: str = "http://localhost:8000"
+    vision_backend: str = "auto"
 
 
 def canonicalize_llm_backend(backend: str) -> str:
@@ -252,5 +254,16 @@ def load_settings() -> Settings:
         "debug": agent["debug"],
         "runs_dir": base.runs_dir,
         "log_level": base.log_level,
+        "triton_http_url": base.triton_http_url,
+        "vision_backend": base.vision_backend,
     }
     return Settings(**data)
+
+
+def apply_vision_env_from_settings() -> None:
+    """Mirror vision-related Settings into ``os.environ`` for cua_mcp inference modules."""
+    import os
+
+    settings = Settings()
+    os.environ.setdefault("TRITON_HTTP_URL", settings.triton_http_url)
+    os.environ.setdefault("VISION_BACKEND", settings.vision_backend)

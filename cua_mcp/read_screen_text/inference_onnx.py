@@ -4,16 +4,30 @@ import numpy as np
 import json
 import onnxruntime
 
+from cua_mcp.vision_backend import allow_local_ort_fallback, should_try_triton
+
 onnxruntime.set_default_logger_severity(3)
+
+
+def _log_crnn_profile(message: str) -> None:
+    try:
+        from src.common.run_state import get_run_state_manager
+
+        get_run_state_manager().log_info(f"[vision/crnn] {message}")
+    except RuntimeError:
+        pass
+
 
 class TextPredictor:
     def __init__(self, model_path=None, *, quiet: bool = False):
         self.device = "cpu"
+        self.quiet = quiet
         if not quiet:
             print("Using device:", self.device)
 
         if model_path is None:
             model_path = os.path.join(os.path.dirname(__file__), "crnn_model.onnx")
+        self.model_path = model_path
 
         # Load configuration and dictionaries
         with open(os.path.join(os.path.dirname(__file__), 'char_dict.json'), "r", encoding="utf-8") as f:
@@ -23,20 +37,29 @@ class TextPredictor:
         with open(os.path.join(os.path.dirname(__file__), 'model_config.json'), "r", encoding="utf-8") as f:
             self.config_dict = json.load(f)
 
-        # Initialize ONNX Runtime session with dynamic axes configuration
-        if not quiet:
+        self.session = None
+        self.input_name = None
+        if not should_try_triton():
+            self._ensure_ort_session()
+
+    def _ensure_ort_session(self) -> None:
+        if self.session is not None:
+            return
+        if not os.path.isfile(self.model_path):
+            raise FileNotFoundError(f"ONNX CRNN model not found: {self.model_path}")
+        if not self.quiet:
             print("Loading ONNX model...")
         start_time = time.time()
         sess_options = onnxruntime.SessionOptions()
         sess_options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
         self.session = onnxruntime.InferenceSession(
-            model_path,
+            self.model_path,
             sess_options,
             providers=['CPUExecutionProvider']
         )
         self.input_name = self.session.get_inputs()[0].name
-        if not quiet:
-            print("ONNX model loaded from", model_path)
+        if not self.quiet:
+            print("ONNX model loaded from", self.model_path)
             end_time = time.time()
             print("Time taken: ", end_time - start_time)
 
@@ -75,6 +98,19 @@ class TextPredictor:
         
         return pred_chars
     
+    def _local_ort_predict(self, images: np.ndarray) -> np.ndarray:
+        self._ensure_ort_session()
+        assert self.session is not None
+        assert self.input_name is not None
+        started = time.perf_counter()
+        out = self.session.run(None, {self.input_name: images})[0]
+        elapsed = time.perf_counter() - started
+        _log_crnn_profile(
+            f"infer backend=ort_local shape={list(images.shape)} "
+            f"elapsed_s={elapsed:.3f}"
+        )
+        return out
+
     def predict_images(self, images, hxs=None):
         # Input: [batch, line_height, width] float32 (line_height is typically 32).
         if isinstance(images, list):
@@ -86,7 +122,30 @@ class TextPredictor:
             hxs = None
         else:
             hxs = hxs.to(self.device)
-        outputs = self.session.run(None, {self.input_name: images})[0]
+
+        started = time.perf_counter()
+        if should_try_triton():
+            from cua_mcp.vision_triton import TritonUnavailableError, infer_crnn
+
+            try:
+                outputs = infer_crnn(images)
+                elapsed = time.perf_counter() - started
+                _log_crnn_profile(
+                    f"infer backend=triton shape={list(images.shape)} "
+                    f"elapsed_s={elapsed:.3f}"
+                )
+            except TritonUnavailableError as exc:
+                elapsed = time.perf_counter() - started
+                _log_crnn_profile(
+                    f"infer backend=triton failed shape={list(images.shape)} "
+                    f"elapsed_s={elapsed:.3f} error={exc}; fallback=ort_local"
+                )
+                if not allow_local_ort_fallback():
+                    raise
+                outputs = self._local_ort_predict(images)
+        else:
+            outputs = self._local_ort_predict(images)
+
         pred_chars = self.decode_outputs(outputs)
 
         return pred_chars
@@ -102,4 +161,3 @@ class TextExtractor:
         raise RuntimeError(
             "TextExtractor is deprecated and no longer supported. Use TextPredictor-based OCR via cua_mcp.read_screen_text.ocr_image."
         )
-   

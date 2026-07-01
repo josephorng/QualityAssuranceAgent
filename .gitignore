@@ -207,3 +207,6 @@ marimo/_lsp/
 __marimo__/
 
 runs/
+
+# Triton model copies (sync via triton/scripts/sync_models.py)
+triton/model_repository/**/model.onnx

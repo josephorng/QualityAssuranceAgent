@@ -35,8 +35,9 @@ python -m nuitka ^
     --product-version=%APP_VERSION% ^
     --windows-icon-from-ico=icon.ico ^
     --onefile-windows-splash-screen-image=splash.png ^
-    --include-data-dir=cua_mcp/read_screen_text=cua_mcp/read_screen_text ^
-    --include-data-files=cua_mcp/best.onnx=cua_mcp/best.onnx ^
+    --include-data-files=cua_mcp/read_screen_text/char_dict.json=cua_mcp/read_screen_text/char_dict.json ^
+    --include-data-files=cua_mcp/read_screen_text/char_decode_dict.json=cua_mcp/read_screen_text/char_decode_dict.json ^
+    --include-data-files=cua_mcp/read_screen_text/model_config.json=cua_mcp/read_screen_text/model_config.json ^
     --include-package-data=opencc ^
     --enable-plugin=tk-inter ^
     --windows-disable-console ^

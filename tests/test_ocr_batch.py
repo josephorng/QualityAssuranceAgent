@@ -101,7 +101,7 @@ def test_ocr_crops_batched_padding() -> None:
     crops = [_make_text_crop(width) for width in (10, 50, 100)]
 
     serial_preds = [_ocr_crop_predicted_texts(crop, predictor, 32) for crop in crops]
-    batch_preds = _ocr_crops_batched(crops, predictor, 32, batch_size=16)
+    batch_preds = _ocr_crops_batched(crops, predictor, 32, batch_size=64)
 
     assert batch_preds == serial_preds
 
@@ -113,7 +113,7 @@ def test_ocr_crops_batched_padding() -> None:
 )
 def test_batch_matches_serial_on_sample_images(image_path: Path) -> None:
     serial_regions = get_coordinates_from_image_path(str(image_path), batch_size=1)
-    batch_regions = get_coordinates_from_image_path(str(image_path), batch_size=16)
+    batch_regions = get_coordinates_from_image_path(str(image_path), batch_size=64)
 
     assert len(batch_regions) == len(serial_regions)
     for batch_region, serial_region in zip(batch_regions, serial_regions, strict=True):
@@ -145,7 +145,7 @@ def test_batch_ocr_text_near_serial_on_fixed_crops(image_path: Path) -> None:
 
     predictor = _get_ocr_predictor(quiet=True)
     serial_preds = _ocr_crops_batched(crops, predictor, 32, batch_size=1)
-    batch_preds = _ocr_crops_batched(crops, predictor, 32, batch_size=16)
+    batch_preds = _ocr_crops_batched(crops, predictor, 32, batch_size=64)
 
     mismatches = [
         (serial, batch)
@@ -168,4 +168,4 @@ def test_sample_images_available() -> None:
 
 
 def test_default_batch_size_constant() -> None:
-    assert ocr_image._DEFAULT_CRNN_BATCH_SIZE == 16
+    assert ocr_image._DEFAULT_CRNN_BATCH_SIZE == 64

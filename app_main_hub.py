@@ -13,9 +13,13 @@ from typing import Any
 import customtkinter as ctk
 from tkinter import filedialog
 
-from main import dismiss_nuitka_onefile_splash, prepare_run_session, run_coordinator_sync
+from main import analyze_screen_recording, dismiss_nuitka_onefile_splash, prepare_run_session, run_coordinator_sync
 from src.common.agent_settings_dialog import open_agent_settings_dialog
-from src.common.ctk_dialogs import prompt_script_continue_or_end, show_ctk_message
+from src.common.ctk_dialogs import (
+    prompt_append_recording_instructions,
+    prompt_script_continue_or_end,
+    show_ctk_message,
+)
 from src.common.io_utils import append_text, pop_last_nonempty_line, read_json, write_json
 from src.common.monitor_prompt import (
     PRIMARY_MONITOR_MARKER,
@@ -32,6 +36,8 @@ from src.common.runtime_command_dialog import (
 from src.common.runtime_context import USE_TOOL_CACHE_ENV
 from src.common.script_helper import parse_executable_lines_from_text
 from src.common.settings import ROOT_DIR, apply_startup_ollama_host_probe, load_settings
+from src.recorder.capture import RecordingSession
+from src.recorder.hotkey import RecordingHotkeyManager
 
 # Step-mode runtime command transcript (append during run); not hub UI preferences.
 _RUNTIME_COMMAND_TRANSCRIPT_NAME = "runtime_commands_cache.txt"
@@ -47,6 +53,7 @@ def _default_hub_ui_dict() -> dict[str, Any]:
         "selected_monitor_indices": [],
         "last_script_path": None,
         "use_tool_cache": False,
+        "recording_hotkey_enabled": True,
     }
 
 
@@ -72,6 +79,7 @@ def _normalize_hub_ui_state(raw: Any) -> dict[str, Any]:
     lsp = raw.get("last_script_path")
     base["last_script_path"] = lsp if isinstance(lsp, str) or lsp is None else None
     base["use_tool_cache"] = bool(raw.get("use_tool_cache", False))
+    base["recording_hotkey_enabled"] = bool(raw.get("recording_hotkey_enabled", True))
     return base
 
 
@@ -108,6 +116,7 @@ class MainHub(ctk.CTk):
         self._remember_monitor_indices: list[int] = list(hub["selected_monitor_indices"])
         self._appearance_dark = bool(hub["appearance_dark"])
         self._use_tool_cache = bool(hub.get("use_tool_cache", False))
+        self._recording_hotkey_enabled = bool(hub.get("recording_hotkey_enabled", True))
         self._suppress_hub_monitor_persist = False
         ctk.set_appearance_mode("dark" if self._appearance_dark else "light")
         ctk.set_default_color_theme("dark-blue")
@@ -131,6 +140,15 @@ class MainHub(ctk.CTk):
         self._last_script_run_folder: str | None = None
         self._active_run_root: Path | None = None
 
+        self._recording_session = RecordingSession()
+        self._recording_session.set_on_event(self._on_recording_event)
+        self._recording_hotkey = RecordingHotkeyManager()
+        self._recording_analysis_thread: threading.Thread | None = None
+        self._analysis_cancel_event = threading.Event()
+        self._record_btn: ctk.CTkButton | None = None
+        self._analysis_progress_frame: ctk.CTkFrame | None = None
+        self._analysis_progress: ctk.CTkProgressBar | None = None
+
         self._build_header()
         self._build_monitor_row()
         self._build_script_section()
@@ -153,6 +171,10 @@ class MainHub(ctk.CTk):
 
         self._status.configure(text="正在檢查 Ollama 主機…")
         self._start_ollama_host_probe()
+
+        if self._recording_hotkey_enabled:
+            self._recording_hotkey.register(self._schedule_toggle_recording)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _start_ollama_host_probe(self) -> None:
         def work() -> None:
@@ -286,6 +308,7 @@ class MainHub(ctk.CTk):
                 if self._script_path is not None
                 else None,
                 "use_tool_cache": self._tool_cache_enabled_for_run(),
+                "recording_hotkey_enabled": self._recording_hotkey_enabled,
             }
             write_json(_hub_ui_state_path(), data)
             self._remember_monitor_indices = list(data["selected_monitor_indices"])
@@ -415,7 +438,11 @@ class MainHub(ctk.CTk):
         b_sas = ctk.CTkButton(row, text="另存新檔…", width=100, command=self._script_save_as)
         b_sas.pack(side="left", padx=(0, 8))
         b_clear = ctk.CTkButton(row, text="清空", width=100, command=self._script_clear)
-        b_clear.pack(side="left")
+        b_clear.pack(side="left", padx=(0, 8))
+        self._record_btn = ctk.CTkButton(
+            row, text="開始錄製", width=100, command=self._on_record_button
+        )
+        self._record_btn.pack(side="left")
         self._script_path_label = ctk.CTkLabel(
             box,
             text="未載入檔案",
@@ -425,7 +452,9 @@ class MainHub(ctk.CTk):
         self._script_path_label.pack(anchor="w", padx=16, pady=(4, 8))
         self._script_text = ctk.CTkTextbox(box, font=ctk.CTkFont(size=14), wrap="word")
         self._script_text.pack(fill="both", expand=True, padx=16, pady=(0, 14))
-        self._script_controls.extend([b_open, b_save, b_sas, b_clear, self._script_text])
+        self._script_controls.extend(
+            [b_open, b_save, b_sas, b_clear, self._record_btn, self._script_text]
+        )
 
     def _build_actions_row(self) -> None:
         row = ctk.CTkFrame(self, fg_color="transparent")
@@ -439,6 +468,16 @@ class MainHub(ctk.CTk):
         self._use_tool_cache_checkbox.pack(pady=(0, 10))
         if self._use_tool_cache:
             self._use_tool_cache_checkbox.select()
+        self._analysis_progress_frame = ctk.CTkFrame(row, fg_color="transparent")
+        self._analysis_progress = ctk.CTkProgressBar(
+            self._analysis_progress_frame,
+            width=420,
+            height=14,
+        )
+        self._analysis_progress.pack(fill="x")
+        self._analysis_progress.set(0)
+        self._analysis_progress_frame.pack(fill="x", pady=(0, 10))
+        self._analysis_progress_frame.pack_forget()
         btn_row = ctk.CTkFrame(row, fg_color="transparent")
         btn_row.pack()
         btn_row.grid_columnconfigure(0, weight=1)
@@ -469,6 +508,82 @@ class MainHub(ctk.CTk):
     def _build_status(self) -> None:
         self._status = ctk.CTkLabel(self, text="", font=ctk.CTkFont(size=13))
         self._status.pack(anchor="w", padx=28, pady=(0, 16))
+
+    def _is_analysis_running(self) -> bool:
+        thread = self._recording_analysis_thread
+        return thread is not None and thread.is_alive()
+
+    def _show_analysis_progress(self) -> None:
+        if self._analysis_progress_frame is not None:
+            self._analysis_progress_frame.pack(fill="x", pady=(0, 10))
+        if self._analysis_progress is not None:
+            self._analysis_progress.set(0)
+
+    def _hide_analysis_progress(self) -> None:
+        if self._analysis_progress_frame is not None:
+            self._analysis_progress_frame.pack_forget()
+        if self._analysis_progress is not None:
+            self._analysis_progress.set(0)
+
+    def _set_hub_controls_idle(self) -> None:
+        self._run_btn.configure(state="normal")
+        self._settings_btn.configure(state="normal")
+        for cb in self._monitor_checkboxes:
+            cb.configure(state="normal")
+        self._monitor_refresh_btn.configure(state="normal")
+        for w in self._script_controls:
+            w.configure(state="normal")
+        self._use_tool_cache_checkbox.configure(state="normal")
+        if self._record_btn is not None:
+            self._record_btn.configure(text="開始錄製", state="normal", command=self._on_record_button)
+        self._hide_analysis_progress()
+
+    def _set_hub_controls_recording(self) -> None:
+        self._run_btn.configure(state="disabled")
+        self._settings_btn.configure(state="disabled")
+        for cb in self._monitor_checkboxes:
+            cb.configure(state="disabled")
+        self._monitor_refresh_btn.configure(state="disabled")
+        for w in self._script_controls:
+            if w is self._record_btn:
+                continue
+            w.configure(state="disabled")
+        self._use_tool_cache_checkbox.configure(state="disabled")
+        if self._record_btn is not None:
+            self._record_btn.configure(text="停止錄製", state="normal", command=self._on_record_button)
+        self._hide_analysis_progress()
+
+    def _set_hub_controls_analyzing(self) -> None:
+        self._analysis_cancel_event.clear()
+        self._run_btn.configure(state="disabled")
+        self._settings_btn.configure(state="disabled")
+        for cb in self._monitor_checkboxes:
+            cb.configure(state="disabled")
+        self._monitor_refresh_btn.configure(state="disabled")
+        for w in self._script_controls:
+            if w is self._record_btn:
+                continue
+            w.configure(state="disabled")
+        self._use_tool_cache_checkbox.configure(state="disabled")
+        if self._record_btn is not None:
+            self._record_btn.configure(text="停止分析", state="normal", command=self._on_record_button)
+        self._show_analysis_progress()
+
+    def _update_analysis_progress(self, current: int, total: int) -> None:
+        if self._analysis_progress is not None and total > 0:
+            self._analysis_progress.set(current / total)
+        self._status.configure(
+            text=f"分析錄製中 ({current}/{total})…",
+            text_color=("gray20", "gray65"),
+        )
+
+    def _request_cancel_analysis(self) -> None:
+        if not self._is_analysis_running():
+            return
+        self._analysis_cancel_event.set()
+        if self._record_btn is not None:
+            self._record_btn.configure(state="disabled")
+        self._status.configure(text="正在停止分析…", text_color=("gray20", "gray65"))
 
     def _script_open(self) -> None:
         initial = ROOT_DIR / "scripts"
@@ -552,6 +667,183 @@ class MainHub(ctk.CTk):
         if self._stop_cancel_remaining > 0:
             self.after(50, self._try_coordinator_cancel)
 
+    def _on_close(self) -> None:
+        if self._is_analysis_running():
+            self._analysis_cancel_event.set()
+        if self._recording_session.is_active():
+            self._stop_recording(analyze=False)
+        self._recording_hotkey.unregister()
+        self.destroy()
+
+    def _hub_ignore_rect(self) -> tuple[int, int, int, int] | None:
+        try:
+            if not self.winfo_viewable():
+                return None
+        except Exception:
+            return None
+        self.update_idletasks()
+        width = int(self.winfo_width())
+        height = int(self.winfo_height())
+        if width <= 0 or height <= 0:
+            return None
+        return (
+            int(self.winfo_rootx()),
+            int(self.winfo_rooty()),
+            width,
+            height,
+        )
+
+    def _recording_ignore_rect_provider(self) -> tuple[int, int, int, int] | None:
+        return self._hub_ignore_rect()
+
+    def _schedule_toggle_recording(self) -> None:
+        self.after(0, self._toggle_recording)
+
+    def _on_record_button(self) -> None:
+        if self._is_analysis_running():
+            self._request_cancel_analysis()
+            return
+        self._toggle_recording()
+
+    def _toggle_recording(self) -> None:
+        if self._is_analysis_running():
+            return
+        if self._worker_thread and self._worker_thread.is_alive():
+            show_ctk_message(self, "錄製", "請先停止執行再開始錄製。", kind="warning")
+            return
+        if self._recording_session.is_active():
+            self._stop_recording(analyze=True)
+        else:
+            self._start_recording()
+
+    def _start_recording(self) -> None:
+        if self._worker_thread and self._worker_thread.is_alive():
+            return
+        if self._recording_session.is_active():
+            return
+        try:
+            self._recording_session.set_suppress_hotkey_keys(True)
+            run_dir = self._recording_session.start(
+                ignore_rect_provider=self._recording_ignore_rect_provider,
+            )
+        except Exception as exc:
+            self._recording_session.set_suppress_hotkey_keys(False)
+            show_ctk_message(self, "錄製", f"無法開始錄製：{exc}", kind="error")
+            return
+        finally:
+            self.after(400, lambda: self._recording_session.set_suppress_hotkey_keys(False))
+
+        self._set_hub_controls_recording()
+        self._status.configure(
+            text=f"錄製中 (0 個事件)… {run_dir.name}",
+            text_color=("gray20", "gray65"),
+        )
+        try:
+            self.iconify()
+        except Exception:
+            pass
+
+    def _on_recording_event(self) -> None:
+        count = self._recording_session.event_count()
+        run_dir = self._recording_session.run_dir()
+        name = run_dir.name if run_dir is not None else ""
+        self.after(
+            0,
+            lambda: self._status.configure(
+                text=f"錄製中 ({count} 個事件)… {name}",
+                text_color=("gray20", "gray65"),
+            ),
+        )
+
+    def _stop_recording(self, *, analyze: bool) -> None:
+        if not self._recording_session.is_active():
+            return
+        run_dir = self._recording_session.stop()
+        try:
+            self.deiconify()
+            self.lift()
+        except Exception:
+            pass
+        if run_dir is None:
+            self._set_hub_controls_idle()
+            self._status.configure(text="錄製已停止。")
+            return
+        event_count = self._recording_session.event_count()
+        if analyze and event_count > 0:
+            self._set_hub_controls_analyzing()
+            self._update_analysis_progress(0, event_count)
+            self._recording_analysis_thread = threading.Thread(
+                target=self._analyze_recording_worker,
+                args=(run_dir,),
+                daemon=True,
+            )
+            self._recording_analysis_thread.start()
+        else:
+            self._set_hub_controls_idle()
+            self._status.configure(text=f"錄製已停止（{event_count} 個事件）。")
+
+    def _analyze_recording_worker(self, run_dir: Path) -> None:
+        def on_progress(current: int, total: int) -> None:
+            self.after(0, lambda c=current, t=total: self._update_analysis_progress(c, t))
+
+        def should_cancel() -> bool:
+            return self._analysis_cancel_event.is_set()
+
+        try:
+            report = analyze_screen_recording(
+                run_dir,
+                on_progress=on_progress,
+                should_cancel=should_cancel,
+            )
+        except Exception as exc:
+            self.after(0, lambda: self._set_hub_controls_idle())
+            self.after(0, lambda: setattr(self, "_recording_analysis_thread", None))
+            self.after(
+                0,
+                lambda: show_ctk_message(
+                    self,
+                    "錄製分析",
+                    f"分析失敗：{exc}",
+                    kind="error",
+                ),
+            )
+            self.after(0, lambda: self._status.configure(text="錄製分析失敗。"))
+            return
+        self.after(0, lambda: self._on_recording_analysis_done(report))
+
+    def _on_recording_analysis_done(self, report: dict[str, Any]) -> None:
+        self._recording_analysis_thread = None
+        self._set_hub_controls_idle()
+        cached = int(report.get("cached", 0))
+        skipped = int(report.get("skipped", 0))
+        recorded = int(report.get("recorded", 0))
+        cancelled = bool(report.get("cancelled", False))
+        instructions = report.get("instructions")
+        lines: list[str] = []
+        if isinstance(instructions, list):
+            lines = [str(x) for x in instructions if str(x).strip()]
+        if cancelled:
+            processed = int(report.get("processed", 0))
+            msg = (
+                f"分析已停止（已完成 {processed}/{recorded} 個事件）。\n"
+                f"已寫入快取 {cached} 筆，略過 {skipped} 筆。"
+            )
+            self._status.configure(text=f"分析已停止（{processed}/{recorded}）。")
+            show_ctk_message(self, "錄製分析已停止", msg, kind="warning")
+            return
+        msg = (
+            f"錄製 {recorded} 個事件。\n"
+            f"已寫入快取 {cached} 筆，略過 {skipped} 筆。"
+        )
+        self._status.configure(text=f"已寫入快取 {cached} 筆（略過 {skipped}）。")
+        if lines and prompt_append_recording_instructions(self, msg):
+            self._script_text.configure(state="normal")
+            if self._script_text.get("0.0", "end").strip():
+                self._script_text.insert("end", "\n")
+            self._script_text.insert("end", "\n".join(lines) + "\n")
+        else:
+            show_ctk_message(self, "錄製分析完成", msg, kind="info")
+
     def _begin_worker_run(self, args: _WorkerArgs) -> None:
         self._set_run_button_running()
         self._settings_btn.configure(state="disabled")
@@ -611,6 +903,12 @@ class MainHub(ctk.CTk):
         self._begin_worker_run(args)
 
     def _on_start_run(self) -> None:
+        if self._recording_session.is_active():
+            show_ctk_message(self, "執行", "請先停止錄製再開始執行。", kind="warning")
+            return
+        if self._recording_analysis_thread and self._recording_analysis_thread.is_alive():
+            show_ctk_message(self, "執行", "請等待錄製分析完成，或按「停止分析」。", kind="warning")
+            return
         if self._worker_thread and self._worker_thread.is_alive():
             return
         self._user_requested_stop = False

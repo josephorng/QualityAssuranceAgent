@@ -7,7 +7,9 @@ import shutil
 import signal
 import tempfile
 import threading
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from src.common.llm_factory import reset_llm_client
 from src.common.run_state import RunStateManager, RunPaths, reset_run_state_manager
@@ -161,6 +163,24 @@ def preload_vision_models_async() -> None:
         name="vision-model-preload",
         daemon=True,
     ).start()
+
+
+def analyze_screen_recording(
+    run_dir: Path,
+    *,
+    on_progress: Callable[[int, int], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    """Analyze a finished screen recording session and update instruction_tool_cache.json."""
+    from src.recorder.orchestrator import analyze_recording_session
+
+    return asyncio.run(
+        analyze_recording_session(
+            run_dir,
+            on_progress=on_progress,
+            should_cancel=should_cancel,
+        )
+    )
 
 
 def launch_gui() -> None:

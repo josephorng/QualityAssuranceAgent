@@ -179,6 +179,47 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "models": ["gemma4:e2b", "gemma3:4b"],
         }
     ],
+    "recording_action_to_cache": [
+        {
+            "image_usage": "optional",
+            "prompt": (
+                "You convert one recorded desktop user action into a hub script instruction "
+                "and matching MCP tool calls.\n\n"
+                "RecordedEvent:\n{event_json}\n\n"
+                "Vision hints (screenshot pixels):\n"
+                "Click location: [{cursor_x},{cursor_y}]\n"
+                "Eight UI candidates nearest the click (closest first):\n"
+                "Each row has class=文字(Text)|元素(Element)|輸入欄(Input)|滾動條(Scrollbar), "
+                "optional text='...' OCR, and optional icons=Chinese icon labels.\n\n"
+                "{candidate_text}\n\n"
+                "Valid tool names (use only these): {valid_tools}\n"
+            ),
+            "instructions": [
+                "Write the instruction in Traditional Chinese when possible, matching hub script style.",
+                "Use the nearest matching candidate row to name the clicked target in the instruction (OCR text and/or icon labels).",
+                "Pointer click on a visible target: use move_mouse then click (or double_click / right_click / middle_click as appropriate).",
+                "Scroll: use scroll with signed clicks (positive scrolls down, negative scrolls up).",
+                "Single special key: use press_key with key name.",
+                "Modifier combo: use hotkey with keys list.",
+                "Single printable character: use type_text with text equal to that character.",
+                "When RecordedEvent.text contains multiple characters, use one type_text call with the full string.",
+                "Every tool call must include an instruction argument string describing the action.",
+                "Do not put pixel coordinates in tool arguments; targeting uses move_mouse instruction text only.",
+                'Return strict JSON only: {{"instruction": "<string>", "tool_calls": [{{"name": "<tool>", "arguments": {{...}}}}]}}',
+            ],
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
+    "recording_action_to_cache_retry": [
+        {
+            "image_usage": "optional",
+            "prompt": (
+                'Reply with ONLY: {{"instruction": "<string>", "tool_calls": [{{"name": "<tool>", '
+                '"arguments": {{...}}}}]}}. No text before or after the JSON.'
+            ),
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
     "hand_remap_tool": [
         {
             "image_usage": "no_image",

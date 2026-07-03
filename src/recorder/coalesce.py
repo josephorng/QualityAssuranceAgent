@@ -23,9 +23,10 @@ def coalesce_consecutive_text_inputs(events: list[RecordedEvent]) -> list[Record
                 kind="text_input",
                 cursor_xy=prev.cursor_xy,
                 text=(prev.text or "") + event.text,
-                screenshot_path=prev.screenshot_path,
-                monitor_index=prev.monitor_index,
-                monitor_offset=prev.monitor_offset,
+                screenshot_path=event.screenshot_path or prev.screenshot_path,
+                monitor_index=event.monitor_index if event.monitor_index is not None else prev.monitor_index,
+                monitor_offset=event.monitor_offset if event.monitor_offset is not None else prev.monitor_offset,
+                anchor_click_xy=prev.anchor_click_xy or event.anchor_click_xy,
             )
             continue
         merged.append(event)

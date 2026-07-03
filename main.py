@@ -171,7 +171,7 @@ def analyze_screen_recording(
     on_progress: Callable[[int, int], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
-    """Analyze a finished screen recording session and update instruction_tool_cache.json."""
+    """Analyze a finished screen recording session and write hub-script instructions."""
     from src.recorder.orchestrator import analyze_recording_session
 
     return asyncio.run(

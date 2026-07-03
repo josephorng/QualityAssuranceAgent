@@ -88,6 +88,7 @@ class _QueuedEvent:
     keys: list[str] | None = None
     text: str | None = None
     scroll_delta: int | None = None
+    anchor_click_xy: tuple[int, int] | None = None
 
 
 def _pending_capture_path(run_dir: Path) -> Path:
@@ -325,6 +326,7 @@ class RecordingSession:
         self._pending_screenshot: tuple[str, int, tuple[int, int]] | None = None
         self._pending_text_chars: list[str] = []
         self._pending_text_meta: dict[str, Any] | None = None
+        self._last_pointer_cursor_xy: tuple[int, int] | None = None
         self._event_queue: queue.Queue[object] = queue.Queue()
         self._worker_thread: threading.Thread | None = None
         self._on_event: Callable[[], None] | None = None
@@ -379,6 +381,7 @@ class RecordingSession:
             self._pending_screenshot = None
             self._pending_text_chars = []
             self._pending_text_meta = None
+            self._last_pointer_cursor_xy = None
             pending = self._pending_click_timer
             self._pending_click_timer = None
             self._event_queue = queue.Queue()
@@ -529,6 +532,10 @@ class RecordingSession:
     def _queue_event(self, item: _QueuedEvent) -> None:
         self._enqueue(item)
 
+    def _remember_pointer_cursor(self, cursor_xy: tuple[int, int]) -> None:
+        with self._lock:
+            self._last_pointer_cursor_xy = cursor_xy
+
     def _queue_pointer_event_immediate(
         self,
         *,
@@ -549,6 +556,7 @@ class RecordingSession:
             index,
             cursor_xy,
         )
+        self._remember_pointer_cursor(cursor_xy)
         self._queue_event(
             _QueuedEvent(
                 kind=kind,
@@ -605,19 +613,39 @@ class RecordingSession:
         with self._lock:
             chars = list(self._pending_text_chars)
             meta = self._pending_text_meta
+            run_dir = self._run_dir
             self._pending_text_chars = []
             self._pending_text_meta = None
-        if not chars or meta is None:
+        if not chars or meta is None or run_dir is None:
             return
+
+        shot_xy = meta.get("cursor_xy")
+        try:
+            pos = pyautogui.position()
+            shot_xy = (int(pos.x), int(pos.y))
+        except Exception:
+            pass
+
+        shot_path = ""
+        mon_idx: int | None = None
+        mon_offset: tuple[int, int] | None = None
+        if shot_xy is not None:
+            shot_path, mon_idx, mon_offset = self._capture_immediate_screenshot(
+                run_dir,
+                int(meta["index"]),
+                shot_xy,
+            )
+
         self._queue_event(
             _QueuedEvent(
                 kind="text_input",
                 cursor_xy=meta.get("cursor_xy"),
                 event_index=int(meta["index"]),
-                screenshot_path=str(meta.get("screenshot_path", "")),
-                monitor_index=meta.get("monitor_index"),
-                monitor_offset=meta.get("monitor_offset"),
+                screenshot_path=shot_path,
+                monitor_index=mon_idx,
+                monitor_offset=mon_offset,
                 text="".join(chars),
+                anchor_click_xy=meta.get("anchor_click_xy"),
             )
         )
 
@@ -634,22 +662,12 @@ class RecordingSession:
                 index = None
 
         if starting_burst:
-            shot_path = ""
-            mon_idx: int | None = None
-            mon_offset: tuple[int, int] | None = None
-            if cursor_xy is not None:
-                shot_path, mon_idx, mon_offset = self._capture_immediate_screenshot(
-                    run_dir,
-                    index,
-                    cursor_xy,
-                )
             with self._lock:
+                anchor_click_xy = self._last_pointer_cursor_xy
                 self._pending_text_meta = {
                     "index": index,
-                    "screenshot_path": shot_path,
-                    "monitor_index": mon_idx,
-                    "monitor_offset": mon_offset,
                     "cursor_xy": cursor_xy,
+                    "anchor_click_xy": anchor_click_xy,
                 }
 
         with self._lock:
@@ -676,6 +694,7 @@ class RecordingSession:
             (x, y),
             pending_shot,
         )
+        self._remember_pointer_cursor((x, y))
         self._queue_event(
             _QueuedEvent(
                 kind="click",
@@ -715,6 +734,7 @@ class RecordingSession:
             screenshot_path=item.screenshot_path,
             monitor_index=item.monitor_index,
             monitor_offset=item.monitor_offset,
+            anchor_click_xy=item.anchor_click_xy,
         )
         with self._lock:
             if self._run_dir is None:

@@ -4,14 +4,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from src.common.instruction_tool_cache import upsert_tool_calls
 from src.common.io_utils import append_text, read_json, write_json
 from src.common.run_state import get_run_state_manager, reset_run_state_manager
 from src.common.runtime_context import set_runtime_env
 from src.recorder.analyze import analyze_event_to_cache
 from src.recorder.models import RecordedEvent, SessionManifest
 from src.recorder.coalesce import coalesce_consecutive_text_inputs
-from src.recorder.to_cache import validate_tool_calls
+from src.recorder.text_resolve import event_with_resolved_text, resolve_text_input_text
 from src.recorder.vision_context import build_vision_context
 
 
@@ -55,7 +54,7 @@ async def analyze_recording_session(
     on_progress: Callable[[int, int], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
-    """Analyze all events in a recording session and write instruction_tool_cache entries."""
+    """Analyze all events in a recording session and write hub-script instructions."""
     run_dir = Path(run_dir)
     log_path = run_dir / "import.log"
     manifest_raw = read_json(run_dir / "session.json", {})
@@ -88,12 +87,30 @@ async def analyze_recording_session(
                 log_info("analyze_recording_session cancelled by user")
                 break
             log_info(f"processing event {event.index} kind={event.kind}")
-            vision = build_vision_context(event, run_dir=run_dir)
+            text_resolution: dict[str, Any] | None = None
+            event_for_llm = event
+            if event.kind == "text_input":
+                resolved = await resolve_text_input_text(
+                    event,
+                    run_dir=run_dir,
+                    log_info=log_info,
+                )
+                text_resolution = {
+                    "recorded_text": resolved.get("recorded_text"),
+                    "resolved_text": resolved.get("text"),
+                    "source": resolved.get("source"),
+                    "meaningful": resolved.get("meaningful"),
+                    "reason": resolved.get("reason"),
+                }
+                event_for_llm = event_with_resolved_text(event, resolved)
+                vision = resolved.get("vision") or build_vision_context(event_for_llm, run_dir=run_dir)
+            else:
+                vision = build_vision_context(event, run_dir=run_dir)
             analysis_path = run_dir / "analysis" / f"event_{event.index:03d}.json"
             analysis_path.parent.mkdir(parents=True, exist_ok=True)
 
             result = await analyze_event_to_cache(
-                event,
+                event_for_llm,
                 run_dir=run_dir,
                 vision=vision,
                 log_info=log_info,
@@ -103,28 +120,25 @@ async def analyze_recording_session(
                 errors.append({"event_index": event.index, "error": "llm_analysis_failed"})
             else:
                 instruction = result["instruction"]
-                tool_calls = result["tool_calls"]
-                err = validate_tool_calls(tool_calls)
-                if err:
-                    skipped += 1
-                    errors.append({"event_index": event.index, "error": err})
-                else:
-                    upsert_tool_calls(instruction, tool_calls, source_run_id=run_id)
-                    cached += 1
-                    instructions.append(instruction)
-                    write_json(
-                        analysis_path,
-                        {
-                            "event_index": event.index,
-                            "instruction": instruction,
-                            "tool_calls": tool_calls,
-                            "vision": {
-                                "used_vision": vision.get("used_vision"),
-                                "candidate_text": vision.get("candidate_text"),
-                            },
+                cached += 1
+                instructions.append(instruction)
+                write_json(
+                    analysis_path,
+                    {
+                        "event_index": event.index,
+                        "instruction": instruction,
+                        "vision": {
+                            "used_vision": vision.get("used_vision"),
+                            "candidate_text": vision.get("candidate_text"),
                         },
-                    )
-                    log_info(f"cached event {event.index}: {instruction}")
+                        **(
+                            {"text_resolution": text_resolution}
+                            if text_resolution is not None
+                            else {}
+                        ),
+                    },
+                )
+                log_info(f"cached event {event.index}: {instruction}")
 
             processed += 1
             if on_progress is not None:

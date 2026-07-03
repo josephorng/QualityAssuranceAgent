@@ -27,7 +27,7 @@ OCR_EXPORT_DEFAULT_DIR = Path(
     r"C:\Users\Joseph Hung\Documents\Repos\Git\OCR\data\train\cua_data"
 )
 OCR_EXPORT_ICONS_DIR = Path(
-    r"C:\Users\Joseph Hung\Documents\Repos\Git\OCR\data\train\icons"
+    r"C:\Users\Joseph Hung\Documents\Repos\Git\OCR\data\train\elements"
 )
 UI_EXPORT_DEFAULT_DIR = Path(
     r"C:\Users\Joseph Hung\Documents\Repos\Git\OCR\data\train\elements"
@@ -289,6 +289,71 @@ def copy_image_and_ocr_json_to_dir(
     return dest_img, dest_json
 
 
+def _resolve_run_image_path(run_dir: Path, raw_path: str) -> Path | None:
+    """Resolve a screenshot path from a run manifest or yolo_ocr JSON field."""
+    if not raw_path.strip():
+        return None
+    direct = Path(raw_path)
+    if direct.is_file():
+        return direct
+    by_name = run_dir / "screenshots" / direct.name
+    if by_name.is_file():
+        return by_name
+    from_root = ROOT_DIR / raw_path
+    if from_root.is_file():
+        return from_root
+    return None
+
+
+def _sidecar_json_path(image_path: Path, run_dir: Path | None = None) -> Path:
+    sidecar = image_path.with_suffix(".json")
+    if sidecar.is_file():
+        return sidecar
+    if run_dir is not None:
+        yolo_json = run_dir / "yolo_ocr" / f"{image_path.stem}.json"
+        if yolo_json.is_file():
+            return yolo_json
+    return sidecar
+
+
+def _load_candidate_lines(candidates: Any) -> list[OcrLine]:
+    if not isinstance(candidates, list):
+        return []
+    lines: list[OcrLine] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        bbox = item.get("bbox")
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            continue
+        try:
+            x, y, w, h = (int(v) for v in bbox)
+        except (TypeError, ValueError):
+            continue
+        class_name = str(item.get("class_name", ""))
+        text = str(item.get("text") or "").strip()
+        icons = item.get("icons")
+        icon_labels: tuple[str, ...] = ()
+        if isinstance(icons, list):
+            icon_labels = tuple(
+                str(icon.get("chinese_id", "")).strip()
+                for icon in icons
+                if isinstance(icon, dict) and str(icon.get("chinese_id", "")).strip()
+            )
+        class_id = item.get("class_id")
+        lines.append(
+            OcrLine(
+                box=(x, y, w, h),
+                text=text,
+                line_type="ocr" if class_name == "text" else "element",
+                class_name=class_name,
+                class_id=int(class_id) if isinstance(class_id, int) else None,
+                chinese_ids=icon_labels,
+            )
+        )
+    return lines
+
+
 def load_ocr_lines(json_path: Path) -> tuple[list[OcrLine], str]:
     if not json_path.exists():
         return [], "Missing OCR JSON"
@@ -298,6 +363,10 @@ def load_ocr_lines(json_path: Path) -> tuple[list[OcrLine], str]:
         return [], f"JSON parse error: {exc}"
     if not isinstance(data, dict):
         return [], "Invalid JSON root"
+    candidates = data.get("candidates")
+    if isinstance(candidates, list) and candidates:
+        lines = _load_candidate_lines(candidates)
+        return lines, f"Loaded {len(lines)} vision candidates"
     lines = _normalize_lines(data.get("lines", []))
     return lines, f"Loaded {len(lines)} OCR lines"
 
@@ -340,11 +409,12 @@ def resolve_image_lines(
     allow_yolo: bool,
     yolo_cache: YoloLinesCache | None = None,
     force_yolo: bool = False,
+    run_dir: Path | None = None,
 ) -> tuple[list[OcrLine], str]:
     """Load detections from sidecar JSON, else cache or optional live YOLO."""
     if not force_yolo:
-        json_path = image_path.with_suffix(".json")
-        if json_path.exists():
+        json_path = _sidecar_json_path(image_path, run_dir)
+        if json_path.is_file():
             return load_ocr_lines(json_path)
 
     cache_key = (str(image_path.resolve()), yolo_conf_threshold)
@@ -366,16 +436,48 @@ def _discover_runs(runs_root: Path) -> list[Path]:
     return sorted([p for p in runs_root.iterdir() if p.is_dir()], reverse=True)
 
 
-def _yolo_ocr_paired_images(run_dir: Path) -> list[Path]:
-    """All PNG/JPEG files in yolo_ocr/ (JSON optional)."""
+def _discover_run_images(run_dir: Path) -> list[Path]:
+    """Images for a run: yolo_ocr/*.png|jpg, screenshots/, or paths from yolo_ocr JSON."""
+    found: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path) -> None:
+        if not path.is_file():
+            return
+        key = str(path.resolve())
+        if key in seen:
+            return
+        seen.add(key)
+        found.append(path)
+
     yolo_dir = run_dir / "yolo_ocr"
-    if not yolo_dir.exists():
-        return []
-    return sorted(
-        p
-        for p in yolo_dir.iterdir()
-        if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg"}
-    )
+    if yolo_dir.is_dir():
+        for entry in sorted(yolo_dir.iterdir()):
+            if not entry.is_file():
+                continue
+            suffix = entry.suffix.lower()
+            if suffix in {".png", ".jpg", ".jpeg"}:
+                add(entry)
+            elif suffix == ".json":
+                raw = read_json(entry, default={})
+                if isinstance(raw, dict):
+                    image_raw = raw.get("image_path")
+                    if isinstance(image_raw, str):
+                        resolved = _resolve_run_image_path(run_dir, image_raw)
+                        if resolved is not None:
+                            add(resolved)
+
+    shots_dir = run_dir / "screenshots"
+    if shots_dir.is_dir():
+        for entry in sorted(shots_dir.iterdir()):
+            if entry.is_file() and entry.suffix.lower() in {".png", ".jpg", ".jpeg"}:
+                add(entry)
+
+    return sorted(found, key=lambda p: p.name)
+
+
+def _yolo_ocr_paired_images(run_dir: Path) -> list[Path]:
+    return _discover_run_images(run_dir)
 
 
 def _box_outline_for_line(line: OcrLine, *, is_selected: bool) -> str:
@@ -689,7 +791,7 @@ class OcrViewerApp:
             self.item_list.delete(0, tk.END)
             self.canvas.delete("all")
             self.status_var.set(
-                f"No images in yolo_ocr for {run.name if run else '-'}"
+                f"No images found for {run.name if run else '-'}"
             )
 
     def _selected_image_index(self) -> int | None:
@@ -726,6 +828,7 @@ class OcrViewerApp:
                 yolo_conf_threshold=conf,
                 allow_yolo=False,
                 yolo_cache=self._yolo_lines_cache,
+                run_dir=run,
             )
         self.selected_line_idx = None
         self._populate_item_list()
@@ -1290,6 +1393,7 @@ class OcrViewerApp:
                 allow_yolo=True,
                 yolo_cache=self._yolo_lines_cache,
                 force_yolo=True,
+                run_dir=self._selected_run(),
             )
         except Exception as exc:
             self.status_var.set(f"YOLO detections failed: {type(exc).__name__}: {exc}")

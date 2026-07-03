@@ -20,12 +20,7 @@ async def test_analyze_event_to_cache_parses_llm_json(tmp_path: Path) -> None:
         key="enter",
         screenshot_path="",
     )
-    llm_payload = {
-        "instruction": "按下 Enter 鍵。",
-        "tool_calls": [
-            {"name": "press_key", "arguments": {"instruction": "按下 Enter", "key": "enter"}},
-        ],
-    }
+    llm_payload = {"instruction": "按下 Enter 鍵。"}
 
     with patch(
         "src.recorder.analyze.request_json_with_retry",
@@ -39,7 +34,26 @@ async def test_analyze_event_to_cache_parses_llm_json(tmp_path: Path) -> None:
 
     assert result is not None
     assert result["instruction"] == "按下 Enter 鍵。"
-    assert result["tool_calls"][0]["name"] == "press_key"
+
+
+@pytest.mark.asyncio
+async def test_analyze_event_to_cache_text_input_is_deterministic(tmp_path: Path) -> None:
+    event = RecordedEvent(
+        index=7,
+        timestamp_utc="t",
+        kind="text_input",
+        text="打電話的時候",
+        screenshot_path="",
+    )
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(event, run_dir=tmp_path)
+
+    assert result == {"instruction": "輸入「打電話的時候」"}
+    llm_mock.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -73,17 +87,12 @@ async def test_analyze_recording_session_binds_run_state(tmp_path: Path) -> None
         encoding="utf-8",
     )
 
-    llm_payload = {
-        "instruction": "按下 Enter 鍵。",
-        "tool_calls": [
-            {"name": "press_key", "arguments": {"instruction": "按下 Enter", "key": "enter"}},
-        ],
-    }
+    llm_payload = {"instruction": "按下 Enter 鍵。"}
 
     with patch(
         "src.recorder.analyze.request_json_with_retry",
         new=AsyncMock(return_value=llm_payload),
-    ), patch("src.recorder.orchestrator.upsert_tool_calls"):
+    ):
         report = await analyze_recording_session(run_dir)
 
     assert report["cached"] == 1
@@ -94,7 +103,7 @@ async def test_analyze_recording_session_binds_run_state(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_analyze_recording_session_writes_cache(tmp_path: Path) -> None:
+async def test_analyze_recording_session_writes_instructions(tmp_path: Path) -> None:
     from src.common.run_state import reset_run_state_manager
 
     reset_run_state_manager()
@@ -104,7 +113,7 @@ async def test_analyze_recording_session_writes_cache(tmp_path: Path) -> None:
         index=1,
         timestamp_utc="t",
         kind="text_input",
-        text="a",
+        text="2832u04cj842k7g6c.4",
         screenshot_path="",
     )
     (run_dir / "events" / "event_001.json").write_text(
@@ -124,24 +133,30 @@ async def test_analyze_recording_session_writes_cache(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    llm_payload = {
-        "instruction": "輸入字母 a。",
-        "tool_calls": [
-            {"name": "type_text", "arguments": {"instruction": "輸入 a", "text": "a"}},
-        ],
-    }
+    llm_payload = {"instruction": "should not be used"}
 
     with patch(
         "src.recorder.analyze.request_json_with_retry",
         new=AsyncMock(return_value=llm_payload),
     ), patch(
-        "src.recorder.orchestrator.upsert_tool_calls",
-    ) as upsert_mock:
+        "src.recorder.orchestrator.resolve_text_input_text",
+        new=AsyncMock(
+            return_value={
+                "text": "打電話的時候",
+                "recorded_text": "2832u04cj842k7g6c.4",
+                "source": "ocr",
+                "meaningful": False,
+                "reason": "ime",
+                "vision": None,
+            }
+        ),
+    ):
         report = await analyze_recording_session(run_dir)
 
     assert report["cached"] == 1
     assert report["skipped"] == 0
-    upsert_mock.assert_called_once()
-    args = upsert_mock.call_args
-    assert args[0][0] == "輸入字母 a。"
-    assert args[0][1][0]["name"] == "type_text"
+    assert report["instructions"] == ["輸入「打電話的時候」"]
+    analysis = json.loads((run_dir / "analysis" / "event_001.json").read_text(encoding="utf-8"))
+    assert analysis["instruction"] == "輸入「打電話的時候」"
+    assert "tool_calls" not in analysis
+    assert analysis["text_resolution"]["resolved_text"] == "打電話的時候"

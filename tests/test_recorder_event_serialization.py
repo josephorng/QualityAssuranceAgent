@@ -20,3 +20,17 @@ def test_recorded_event_round_trip() -> None:
     assert restored.cursor_xy == (100, 200)
     assert restored.button == "left"
     assert restored.monitor_offset == (0, 0)
+
+
+def test_recorded_event_round_trip_anchor_click_xy() -> None:
+    event = RecordedEvent(
+        index=2,
+        timestamp_utc="2026-07-02T00:00:00+00:00",
+        kind="text_input",
+        text="你好",
+        anchor_click_xy=(400, 300),
+        screenshot_path="runs/test/screenshots/event_002.jpeg",
+    )
+    restored = RecordedEvent.from_dict(event.to_dict())
+    assert restored.anchor_click_xy == (400, 300)
+    assert restored.text == "你好"

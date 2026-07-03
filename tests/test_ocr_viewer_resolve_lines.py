@@ -11,7 +11,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app_ocr_viewer_tk import OcrLine, _smallest_box_hit_index, resolve_image_lines
+from app_ocr_viewer_tk import (
+    OcrLine,
+    _discover_run_images,
+    _smallest_box_hit_index,
+    load_ocr_lines,
+    resolve_image_lines,
+)
 
 
 def test_smallest_box_hit_index_prefers_smallest_overlap() -> None:
@@ -110,3 +116,79 @@ def test_resolve_force_yolo_bypasses_json(tmp_path: Path) -> None:
     load_yolo.assert_called_once()
     assert lines[0].text == "from yolo"
     assert "YOLO" in status
+
+
+def test_discover_run_images_finds_screenshot_recording_shots(tmp_path: Path) -> None:
+    run_dir = tmp_path / "screen_record_test"
+    shots = run_dir / "screenshots"
+    yolo = run_dir / "yolo_ocr"
+    shots.mkdir(parents=True)
+    yolo.mkdir(parents=True)
+    shot = shots / "event_001.jpeg"
+    shot.write_bytes(b"jpeg")
+    (yolo / "event_001.json").write_text(
+        json.dumps(
+            {
+                "image_path": str(shot),
+                "candidates": [
+                    {"bbox": [10, 20, 30, 40], "class_name": "text", "text": "hello"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    images = _discover_run_images(run_dir)
+    assert len(images) == 1
+    assert images[0] == shot
+
+
+def test_resolve_loads_yolo_ocr_candidates_from_run_dir(tmp_path: Path) -> None:
+    run_dir = tmp_path / "screen_record_test"
+    shots = run_dir / "screenshots"
+    yolo = run_dir / "yolo_ocr"
+    shots.mkdir(parents=True)
+    yolo.mkdir(parents=True)
+    shot = shots / "event_001.jpeg"
+    shot.write_bytes(b"jpeg")
+    (yolo / "event_001.json").write_text(
+        json.dumps(
+            {
+                "candidates": [
+                    {"bbox": [1, 2, 3, 4], "class_name": "text", "text": "間間Gemini"},
+                    {"bbox": [5, 6, 7, 8], "class_name": "input", "text": None},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    lines, status = resolve_image_lines(
+        shot,
+        yolo_conf_threshold=0.5,
+        allow_yolo=False,
+        run_dir=run_dir,
+    )
+
+    assert len(lines) == 2
+    assert lines[0].text == "間間Gemini"
+    assert lines[1].class_name == "input"
+    assert "vision candidates" in status
+
+
+def test_load_ocr_lines_candidates_format(tmp_path: Path) -> None:
+    json_path = tmp_path / "event_001.json"
+    json_path.write_text(
+        json.dumps(
+            {
+                "candidates": [
+                    {"bbox": [0, 0, 10, 10], "class_name": "element", "text": "e", "icons": [{"chinese_id": "加號"}]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    lines, status = load_ocr_lines(json_path)
+    assert len(lines) == 1
+    assert lines[0].chinese_ids == ("加號",)
+    assert "vision candidates" in status

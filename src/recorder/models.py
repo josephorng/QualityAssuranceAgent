@@ -25,6 +25,7 @@ class RecordedEvent:
     screenshot_path: str = ""
     monitor_index: int | None = None
     monitor_offset: tuple[int, int] | None = None
+    anchor_click_xy: tuple[int, int] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -32,12 +33,15 @@ class RecordedEvent:
             data["cursor_xy"] = list(self.cursor_xy)
         if self.monitor_offset is not None:
             data["monitor_offset"] = list(self.monitor_offset)
+        if self.anchor_click_xy is not None:
+            data["anchor_click_xy"] = list(self.anchor_click_xy)
         return data
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> RecordedEvent:
         cursor = raw.get("cursor_xy")
         offset = raw.get("monitor_offset")
+        anchor = raw.get("anchor_click_xy")
         keys = raw.get("keys")
         return cls(
             index=int(raw["index"]),
@@ -52,6 +56,7 @@ class RecordedEvent:
             screenshot_path=str(raw.get("screenshot_path", "")),
             monitor_index=raw.get("monitor_index"),
             monitor_offset=tuple(offset) if isinstance(offset, list) and len(offset) == 2 else None,
+            anchor_click_xy=tuple(anchor) if isinstance(anchor, list) and len(anchor) == 2 else None,
         )
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -24,6 +25,7 @@ __all__ = [
     "TritonUnavailableError",
     "infer_crnn",
     "infer_yolo",
+    "reset_triton_client",
     "triton_configured",
     "triton_ready",
 ]
@@ -34,6 +36,8 @@ CRNN_INPUT_NAME = "input"
 CRNN_OUTPUT_NAME = "output"
 
 _CLIENT: httpclient.InferenceServerClient | None = None
+_CLIENT_THREAD_ID: int | None = None
+_CLIENT_LOCK = threading.Lock()
 
 
 def _log_triton_profile(message: str) -> None:
@@ -79,34 +83,58 @@ def triton_ready(*, timeout_seconds: float = 2.5) -> bool:
         return False
 
 
-def _get_client() -> httpclient.InferenceServerClient:
-    global _CLIENT
-    if _CLIENT is None:
-        import tritonclient.http as httpclient
+def reset_triton_client() -> None:
+    """Drop the cached Triton client (e.g. after the creating thread exits)."""
+    global _CLIENT, _CLIENT_THREAD_ID
+    with _CLIENT_LOCK:
+        _CLIENT = None
+        _CLIENT_THREAD_ID = None
 
-        started = time.perf_counter()
-        try:
-            _CLIENT = httpclient.InferenceServerClient(
-                url=triton_client_address(),
-                verbose=False,
-                ssl=triton_client_use_ssl(),
-            )
-        except Exception as exc:
-            elapsed = time.perf_counter() - started
-            _log_triton_profile(
-                f"client_create failed address={triton_client_address()!r} "
-                f"elapsed_s={elapsed:.3f} error={type(exc).__name__}: {exc}"
-            )
-            raise TritonUnavailableError(
-                f"Failed to create Triton client for {triton_http_url()!r}: "
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
+
+def _create_client() -> httpclient.InferenceServerClient:
+    import tritonclient.http as httpclient
+
+    started = time.perf_counter()
+    try:
+        client = httpclient.InferenceServerClient(
+            url=triton_client_address(),
+            verbose=False,
+            ssl=triton_client_use_ssl(),
+        )
+    except Exception as exc:
         elapsed = time.perf_counter() - started
         _log_triton_profile(
-            f"client_create ok address={triton_client_address()!r} "
-            f"ssl={triton_client_use_ssl()} elapsed_s={elapsed:.3f}"
+            f"client_create failed address={triton_client_address()!r} "
+            f"elapsed_s={elapsed:.3f} error={type(exc).__name__}: {exc}"
         )
-    return _CLIENT
+        raise TritonUnavailableError(
+            f"Failed to create Triton client for {triton_http_url()!r}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    elapsed = time.perf_counter() - started
+    _log_triton_profile(
+        f"client_create ok address={triton_client_address()!r} "
+        f"ssl={triton_client_use_ssl()} elapsed_s={elapsed:.3f}"
+    )
+    return client
+
+
+def _get_client() -> httpclient.InferenceServerClient:
+    """Return a Triton client bound to the current thread."""
+    global _CLIENT, _CLIENT_THREAD_ID
+    thread_id = threading.get_ident()
+    with _CLIENT_LOCK:
+        if _CLIENT is not None and _CLIENT_THREAD_ID != thread_id:
+            _log_triton_profile(
+                f"client_reset reason=thread_changed "
+                f"from_thread={_CLIENT_THREAD_ID} to_thread={thread_id}"
+            )
+            _CLIENT = None
+            _CLIENT_THREAD_ID = None
+        if _CLIENT is None:
+            _CLIENT = _create_client()
+            _CLIENT_THREAD_ID = thread_id
+        return _CLIENT
 
 
 def _infer(
@@ -114,6 +142,8 @@ def _infer(
     input_name: str,
     input_array: np.ndarray,
     output_name: str,
+    *,
+    _allow_thread_retry: bool = True,
 ) -> np.ndarray:
     import tritonclient.http as httpclient
 
@@ -154,6 +184,18 @@ def _infer(
         )
         raise
     except Exception as exc:
+        if _allow_thread_retry and _is_thread_affinity_error(exc):
+            _log_triton_profile(
+                f"infer retry model={model_name} reason=thread_affinity_error"
+            )
+            reset_triton_client()
+            return _infer(
+                model_name,
+                input_name,
+                input_array,
+                output_name,
+                _allow_thread_retry=False,
+            )
         elapsed = time.perf_counter() - started
         _log_triton_profile(
             f"infer failed model={model_name} input={input_name} shape={shape} "
@@ -162,6 +204,11 @@ def _infer(
         raise TritonUnavailableError(
             f"Triton infer failed for model {model_name!r}: {type(exc).__name__}: {exc}"
         ) from exc
+
+
+def _is_thread_affinity_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return "cannot switch to a different thread" in message
 
 
 def infer_yolo(nchw_batch: np.ndarray) -> np.ndarray:

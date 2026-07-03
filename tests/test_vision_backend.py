@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -74,12 +75,81 @@ def test_infer_yolo_calls_triton_client(monkeypatch: pytest.MonkeyPatch) -> None
         from cua_mcp import vision_triton as vt
 
         vt._CLIENT = None
+        vt._CLIENT_THREAD_ID = None
         out = vt.infer_yolo(batch)
 
     assert out.shape == expected.shape
     mock_client.infer.assert_called_once()
     call_kwargs = mock_client.infer.call_args.kwargs
     assert call_kwargs["model_name"] == "yolo_ui"
+
+
+def test_get_client_recreates_on_different_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VISION_BACKEND", "triton")
+    batch = np.zeros((1, 3, 1280, 1280), dtype=np.float32)
+    expected = np.zeros((1, 300, 6), dtype=np.float32)
+    clients: list[MagicMock] = []
+
+    def make_client(*_args: object, **_kwargs: object) -> MagicMock:
+        mock_result = MagicMock()
+        mock_result.as_numpy.return_value = expected
+        mock_client = MagicMock()
+        mock_client.infer.return_value = mock_result
+        clients.append(mock_client)
+        return mock_client
+
+    with patch("tritonclient.http.InferenceServerClient", side_effect=make_client):
+        from cua_mcp import vision_triton as vt
+
+        vt.reset_triton_client()
+        first_thread_id: list[int] = []
+        second_thread_id: list[int] = []
+
+        def first_thread() -> None:
+            first_thread_id.append(threading.get_ident())
+            vt.infer_yolo(batch)
+
+        def second_thread() -> None:
+            second_thread_id.append(threading.get_ident())
+            vt.infer_yolo(batch)
+
+        t1 = threading.Thread(target=first_thread)
+        t2 = threading.Thread(target=second_thread)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+    assert len(first_thread_id) == 1
+    assert len(second_thread_id) == 1
+    assert first_thread_id[0] != second_thread_id[0]
+    assert len(clients) == 2
+    assert clients[0] is not clients[1]
+    vt.reset_triton_client()
+
+
+def test_infer_retries_once_on_thread_affinity_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VISION_BACKEND", "triton")
+    batch = np.zeros((1, 3, 1280, 1280), dtype=np.float32)
+    expected = np.zeros((1, 300, 6), dtype=np.float32)
+
+    mock_result = MagicMock()
+    mock_result.as_numpy.return_value = expected
+    mock_client = MagicMock()
+    mock_client.infer.side_effect = [
+        ValueError("error: cannot switch to a different thread (which happens to have exited)"),
+        mock_result,
+    ]
+
+    with patch("tritonclient.http.InferenceServerClient", return_value=mock_client):
+        from cua_mcp import vision_triton as vt
+
+        vt.reset_triton_client()
+        out = vt.infer_yolo(batch)
+
+    assert out.shape == expected.shape
+    assert mock_client.infer.call_count == 2
+    vt.reset_triton_client()
 
 
 def test_yolo_falls_back_to_ort_on_triton_error(monkeypatch: pytest.MonkeyPatch) -> None:

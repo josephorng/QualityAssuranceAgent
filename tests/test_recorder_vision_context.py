@@ -11,6 +11,8 @@ from src.recorder.vision_context import (
     _local_cursor,
     _nearest_candidates,
     build_vision_context,
+    build_vision_context_at_point,
+    format_field_context_hint,
 )
 
 
@@ -81,6 +83,7 @@ def test_build_vision_context_formats_yolo_candidates(tmp_path) -> None:
 
     assert vision["used_vision"] is True
     assert vision["local_cursor"] == (10, 10)
+    assert vision["field_context"] == "(none)"
     text = vision["candidate_text"]
     assert "[index 0]" in text
     assert "class=元素(Element)" in text
@@ -101,3 +104,68 @@ def test_build_vision_context_skips_vision_for_key_events(tmp_path) -> None:
     vision = build_vision_context(event, run_dir=tmp_path, persist_debug=False)
     assert vision["used_vision"] is False
     assert vision["candidate_text"] == ""
+
+
+def test_build_vision_context_at_point_uses_explicit_coords(tmp_path) -> None:
+    shot = tmp_path / "event.jpeg"
+    shot.write_bytes(b"not-a-real-jpeg")
+    event = RecordedEvent(
+        index=2,
+        timestamp_utc="t",
+        kind="text_input",
+        text="nihao",
+        screenshot_path=str(shot),
+    )
+    fake_detections = [
+        _detection_from_bbox((8, 8, 10, 10), YOLO_CLASS_TEXT, text="你好"),
+    ]
+
+    with patch("src.recorder.vision_context.cv2.imread", return_value=np.zeros((100, 100, 3), dtype=np.uint8)), patch(
+        "src.recorder.vision_context._build_candidates_from_bgr",
+        return_value=fake_detections,
+    ):
+        vision = build_vision_context_at_point(
+            event,
+            local_x=10,
+            local_y=10,
+            run_dir=tmp_path,
+            reference_xy=(110, 210),
+        )
+
+    assert vision["used_vision"] is True
+    assert vision["local_cursor"] == (10, 10)
+    assert "text='你好'" in vision["candidate_text"]
+    assert "bgr" in vision
+    assert "all_detections" in vision
+
+
+def test_format_field_context_hint_combines_input_and_inner_text() -> None:
+    vision = {
+        "local_cursor": (888, 921),
+        "candidates": [
+            {
+                "bbox": [714, 874, 652, 96],
+                "class_name": "input",
+                "text": None,
+            },
+            {
+                "bbox": [788, 912, 119, 19],
+                "class_name": "text",
+                "text": "間間Gemini",
+            },
+        ],
+    }
+    hint = format_field_context_hint(vision)
+    assert hint == "輸入欄內可見文字: 「間間Gemini」"
+
+
+def test_format_field_context_hint_prefers_typed_text_for_text_input() -> None:
+    vision = {
+        "local_cursor": (10, 10),
+        "candidates": [
+            {"bbox": [0, 0, 100, 30], "class_name": "input", "text": None},
+            {"bbox": [5, 5, 40, 20], "class_name": "text", "text": "間間Gemini"},
+        ],
+    }
+    hint = format_field_context_hint(vision, typed_text="hello")
+    assert hint == "輸入欄內可見文字: 「hello」"

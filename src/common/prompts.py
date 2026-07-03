@@ -186,6 +186,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "You convert one recorded desktop user action into a single hub script "
                 "instruction line.\n\n"
                 "RecordedEvent:\n{event_json}\n\n"
+                "Window state change detected (if any):\n{window_change_hint}\n\n"
                 "Vision hints (screenshot pixels):\n"
                 "Click location: [{cursor_x},{cursor_y}]\n"
                 "Input field context:\n{field_context}\n"
@@ -203,6 +204,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "For special keys: e.g. 按下 Enter 鍵.",
                 "For modifier combos: e.g. 按下 Ctrl+C.",
                 "For text_input events, another pipeline step writes 輸入「...」 directly; do not handle text_input here.",
+                "If window state change hints report a confident minimize/maximize/close/restore action, prefer phrasing like 最小化/最大化/關閉/還原「title」視窗.",
                 "Do not include pixel coordinates in the instruction.",
                 'Return strict JSON only: {{"instruction": "<string>"}}',
             ],

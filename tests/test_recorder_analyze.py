@@ -10,7 +10,6 @@ from src.recorder.analyze import analyze_event_to_cache
 from src.recorder.models import RecordedEvent
 from src.recorder.orchestrator import analyze_recording_session
 
-
 @pytest.mark.asyncio
 async def test_analyze_event_to_cache_parses_llm_json(tmp_path: Path) -> None:
     event = RecordedEvent(
@@ -53,6 +52,58 @@ async def test_analyze_event_to_cache_text_input_is_deterministic(tmp_path: Path
         result = await analyze_event_to_cache(event, run_dir=tmp_path)
 
     assert result == {"instruction": "輸入「打電話的時候」"}
+    llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_analyze_event_to_cache_window_change_is_deterministic(tmp_path: Path) -> None:
+    event = RecordedEvent(
+        index=2,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(400, 120),
+        button="left",
+        screenshot_path="",
+        window_change={"action": "minimize", "title": "Google Chrome", "confidence": "high"},
+    )
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision={"used_vision": False, "candidate_text": "", "local_cursor": None},
+        )
+
+    assert result == {"instruction": "最小化「Google Chrome」視窗"}
+    llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_analyze_event_to_cache_medium_close_is_deterministic(tmp_path: Path) -> None:
+    event = RecordedEvent(
+        index=3,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(640, 70),
+        button="left",
+        screenshot_path="",
+        window_change={"action": "close", "title": "連線資訊.txt - 記事本", "confidence": "medium"},
+    )
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision={"used_vision": False, "candidate_text": "", "local_cursor": None},
+        )
+
+    assert result == {"instruction": "關閉「連線資訊.txt - 記事本」視窗"}
     llm_mock.assert_not_called()
 
 

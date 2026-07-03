@@ -53,5 +53,7 @@ def event_summary_for_llm(event: RecordedEvent) -> str:
         "text": event.text,
         "scroll_delta": event.scroll_delta,
         "cursor_xy": list(event.cursor_xy) if event.cursor_xy else None,
+        "window_change": event.window_change,
+        "target_window_title": event.target_window_title,
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)

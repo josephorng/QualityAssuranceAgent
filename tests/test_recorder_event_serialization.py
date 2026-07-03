@@ -34,3 +34,21 @@ def test_recorded_event_round_trip_anchor_click_xy() -> None:
     restored = RecordedEvent.from_dict(event.to_dict())
     assert restored.anchor_click_xy == (400, 300)
     assert restored.text == "你好"
+
+
+def test_recorded_event_round_trip_window_change() -> None:
+    event = RecordedEvent(
+        index=3,
+        timestamp_utc="2026-07-02T00:00:00+00:00",
+        kind="click",
+        cursor_xy=(100, 100),
+        window_change={"action": "minimize", "title": "Chrome", "confidence": "high"},
+        target_window_title="Chrome",
+    )
+    restored = RecordedEvent.from_dict(event.to_dict())
+    assert restored.window_change == {
+        "action": "minimize",
+        "title": "Chrome",
+        "confidence": "high",
+    }
+    assert restored.target_window_title == "Chrome"

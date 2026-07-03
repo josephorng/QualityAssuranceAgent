@@ -1,0 +1,24 @@
+{
+  "index": 1,
+  "timestamp_utc": "2026-07-03T09:05:49.275161+00:00",
+  "kind": "click",
+  "cursor_xy": [
+    400,
+    400
+  ],
+  "button": "left",
+  "key": null,
+  "keys": null,
+  "text": null,
+  "scroll_delta": null,
+  "screenshot_path": "tmp_cap_test\\screen_record_20260703_090548_780871\\screenshots\\event_001.jpeg",
+  "monitor_index": 1,
+  "monitor_offset": [
+    0,
+    0
+  ],
+  "anchor_click_xy": null,
+  "window_change": null,
+  "target_window_title": null,
+  "window_snapshot_debug": null
+}

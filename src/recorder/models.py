@@ -26,6 +26,9 @@ class RecordedEvent:
     monitor_index: int | None = None
     monitor_offset: tuple[int, int] | None = None
     anchor_click_xy: tuple[int, int] | None = None
+    window_change: dict[str, Any] | None = None
+    target_window_title: str | None = None
+    window_snapshot_debug: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -57,6 +60,13 @@ class RecordedEvent:
             monitor_index=raw.get("monitor_index"),
             monitor_offset=tuple(offset) if isinstance(offset, list) and len(offset) == 2 else None,
             anchor_click_xy=tuple(anchor) if isinstance(anchor, list) and len(anchor) == 2 else None,
+            window_change=raw.get("window_change") if isinstance(raw.get("window_change"), dict) else None,
+            target_window_title=raw.get("target_window_title"),
+            window_snapshot_debug=(
+                raw.get("window_snapshot_debug")
+                if isinstance(raw.get("window_snapshot_debug"), dict)
+                else None
+            ),
         )
 
 

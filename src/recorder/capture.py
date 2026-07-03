@@ -24,6 +24,12 @@ from src.recorder.models import (
     screenshot_path_for_event,
     utc_now_iso,
 )
+from src.recorder.window_snapshot import (
+    WindowInfo,
+    diff_snapshots_with_debug,
+    settle_delay_for_click,
+    snapshot_top_level_windows,
+)
 
 _DOUBLE_CLICK_INTERVAL_S = 0.35
 _DOUBLE_CLICK_MAX_DIST_PX = 8
@@ -89,6 +95,7 @@ class _QueuedEvent:
     text: str | None = None
     scroll_delta: int | None = None
     anchor_click_xy: tuple[int, int] | None = None
+    windows_before: tuple[WindowInfo, ...] | None = None
 
 
 def _pending_capture_path(run_dir: Path) -> Path:
@@ -324,6 +331,7 @@ class RecordingSession:
         self._pending_click_timer: threading.Timer | None = None
         self._pending_click_coords: tuple[int, int, str] | None = None
         self._pending_screenshot: tuple[str, int, tuple[int, int]] | None = None
+        self._pending_windows_before: tuple[WindowInfo, ...] | None = None
         self._pending_text_chars: list[str] = []
         self._pending_text_meta: dict[str, Any] | None = None
         self._last_pointer_cursor_xy: tuple[int, int] | None = None
@@ -379,6 +387,7 @@ class RecordingSession:
             self._last_click = None
             self._pending_click_coords = None
             self._pending_screenshot = None
+            self._pending_windows_before = None
             self._pending_text_chars = []
             self._pending_text_meta = None
             self._last_pointer_cursor_xy = None
@@ -439,6 +448,7 @@ class RecordingSession:
             self._pending_click_timer = None
             self._pending_click_coords = None
             self._pending_screenshot = None
+            self._pending_windows_before = None
 
         self._flush_pending_text_input()
         if pending is not None:
@@ -519,15 +529,23 @@ class RecordingSession:
         except Exception:
             return str(dest), 0, (0, 0)
 
+    def _snapshot_windows_before(self) -> tuple[WindowInfo, ...]:
+        try:
+            return tuple(snapshot_top_level_windows())
+        except Exception:
+            return ()
+
     def _capture_pending_left_press(self, run_dir: Path, x: int, y: int) -> None:
         """Capture the screen on mouse-down before the click is delivered to apps."""
         pending_dest = _pending_capture_path(run_dir)
+        windows_before = self._snapshot_windows_before()
         try:
             info = _capture_screenshot_at_point(x, y, pending_dest)
         except Exception:
             info = None
         with self._lock:
             self._pending_screenshot = info
+            self._pending_windows_before = windows_before
 
     def _queue_event(self, item: _QueuedEvent) -> None:
         self._enqueue(item)
@@ -545,6 +563,7 @@ class RecordingSession:
         scroll_delta: int | None = None,
     ) -> None:
         self._flush_pending_text_input()
+        windows_before = self._snapshot_windows_before()
         with self._lock:
             run_dir = self._run_dir
             if run_dir is None:
@@ -567,6 +586,7 @@ class RecordingSession:
                 monitor_offset=mon_offset,
                 button=button,
                 scroll_delta=scroll_delta,
+                windows_before=windows_before or None,
             )
         )
 
@@ -684,7 +704,9 @@ class RecordingSession:
             index = self._next_index
             self._next_index += 1
             pending_shot = self._pending_screenshot
+            pending_windows = self._pending_windows_before
             self._pending_screenshot = None
+            self._pending_windows_before = None
             self._pending_click_timer = None
             self._pending_click_coords = None
             self._last_click = None
@@ -704,6 +726,7 @@ class RecordingSession:
                 monitor_index=mon_idx,
                 monitor_offset=mon_offset,
                 button=button,
+                windows_before=pending_windows,
             )
         )
 
@@ -715,11 +738,33 @@ class RecordingSession:
             if isinstance(item, _QueuedEvent):
                 self._persist_queued_event(item)
 
+    def _resolve_window_change(
+        self,
+        item: _QueuedEvent,
+    ) -> tuple[dict[str, Any] | None, str | None, dict[str, Any] | None]:
+        if not item.windows_before:
+            return None, None, None
+        time.sleep(settle_delay_for_click(item.cursor_xy))
+        try:
+            windows_after = snapshot_top_level_windows()
+        except Exception:
+            return None, None, None
+        result = diff_snapshots_with_debug(
+            list(item.windows_before),
+            windows_after,
+            click_xy=item.cursor_xy,
+        )
+        if result.change is None:
+            return None, None, result.debug
+        return result.change.to_dict(), result.change.title or None, result.debug
+
     def _persist_queued_event(self, item: _QueuedEvent) -> None:
         with self._lock:
             if self._run_dir is None:
                 return
             run_dir = self._run_dir
+
+        window_change, target_title, snapshot_debug = self._resolve_window_change(item)
 
         event = RecordedEvent(
             index=item.event_index,
@@ -735,6 +780,9 @@ class RecordingSession:
             monitor_index=item.monitor_index,
             monitor_offset=item.monitor_offset,
             anchor_click_xy=item.anchor_click_xy,
+            window_change=window_change,
+            target_window_title=target_title,
+            window_snapshot_debug=snapshot_debug,
         )
         with self._lock:
             if self._run_dir is None:
@@ -773,6 +821,7 @@ class RecordingSession:
                         self._pending_click_timer = None
                         self._pending_click_coords = None
                         self._pending_screenshot = None
+                        self._pending_windows_before = None
                     self._queue_pointer_event_immediate(
                         kind="double_click",
                         cursor_xy=(ix, iy),

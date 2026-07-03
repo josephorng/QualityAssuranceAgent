@@ -9,6 +9,7 @@ from src.common.prompting import get_prompt
 from src.recorder.models import RecordedEvent
 from src.recorder.to_cache import event_summary_for_llm
 from src.recorder.vision_context import build_vision_context, format_field_context_hint
+from src.recorder.window_snapshot import format_window_change_hint, instruction_for_window_change
 
 _INSTRUCTION_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -50,6 +51,11 @@ async def analyze_event_to_cache(
         if instruction is not None:
             return {"instruction": instruction}
 
+    if event.window_change:
+        deterministic = instruction_for_window_change(event.window_change)
+        if deterministic is not None:
+            return {"instruction": deterministic}
+
     if vision is None:
         vision = build_vision_context(event, run_dir=run_dir)
 
@@ -70,6 +76,7 @@ async def analyze_event_to_cache(
         cursor_y=cursor_y,
         candidate_text=vision.get("candidate_text") or "(none)",
         field_context=field_context,
+        window_change_hint=format_window_change_hint(event.window_change),
     )
 
     user_content = prompt

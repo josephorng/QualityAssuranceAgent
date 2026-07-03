@@ -136,6 +136,16 @@ async def analyze_recording_session(
                             if text_resolution is not None
                             else {}
                         ),
+                        **(
+                            {"window_change": event.window_change}
+                            if event.window_change is not None
+                            else {}
+                        ),
+                        **(
+                            {"window_snapshot_debug": event.window_snapshot_debug}
+                            if event.window_snapshot_debug is not None
+                            else {}
+                        ),
                     },
                 )
                 log_info(f"cached event {event.index}: {instruction}")

@@ -174,6 +174,10 @@ def analyze_screen_recording(
     """Analyze a finished screen recording session and write hub-script instructions."""
     from src.recorder.orchestrator import analyze_recording_session
 
+    # Mirror run_coordinator_sync: rebuild the LLM client from agent settings and
+    # avoid reusing async transports bound to a prior asyncio.run() loop.
+    reset_llm_client()
+
     return asyncio.run(
         analyze_recording_session(
             run_dir,

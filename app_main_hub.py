@@ -468,16 +468,6 @@ class MainHub(ctk.CTk):
         self._use_tool_cache_checkbox.pack(pady=(0, 10))
         if self._use_tool_cache:
             self._use_tool_cache_checkbox.select()
-        self._analysis_progress_frame = ctk.CTkFrame(row, fg_color="transparent")
-        self._analysis_progress = ctk.CTkProgressBar(
-            self._analysis_progress_frame,
-            width=420,
-            height=14,
-        )
-        self._analysis_progress.pack(fill="x")
-        self._analysis_progress.set(0)
-        self._analysis_progress_frame.pack(fill="x", pady=(0, 10))
-        self._analysis_progress_frame.pack_forget()
         btn_row = ctk.CTkFrame(row, fg_color="transparent")
         btn_row.pack()
         btn_row.grid_columnconfigure(0, weight=1)
@@ -491,6 +481,16 @@ class MainHub(ctk.CTk):
             command=self._on_start_run,
         )
         self._run_btn.grid(row=0, column=1)
+        self._analysis_progress_frame = ctk.CTkFrame(row, fg_color="transparent")
+        self._analysis_progress = ctk.CTkProgressBar(
+            self._analysis_progress_frame,
+            width=420,
+            height=14,
+        )
+        self._analysis_progress.pack(fill="x")
+        self._analysis_progress.set(0)
+        self._analysis_progress_frame.pack(fill="x", pady=(20, 0))
+        self._analysis_progress_frame.pack_forget()
 
     def _on_use_tool_cache_changed(self) -> None:
         self._use_tool_cache = self._use_tool_cache_checkbox.get() == 1
@@ -515,7 +515,7 @@ class MainHub(ctk.CTk):
 
     def _show_analysis_progress(self) -> None:
         if self._analysis_progress_frame is not None:
-            self._analysis_progress_frame.pack(fill="x", pady=(0, 10))
+            self._analysis_progress_frame.pack(fill="x", pady=(20, 0))
         if self._analysis_progress is not None:
             self._analysis_progress.set(0)
 
@@ -572,8 +572,9 @@ class MainHub(ctk.CTk):
     def _update_analysis_progress(self, current: int, total: int) -> None:
         if self._analysis_progress is not None and total > 0:
             self._analysis_progress.set(current / total)
+        settings = load_settings()
         self._status.configure(
-            text=f"分析錄製中 ({current}/{total})…",
+            text=f"分析錄製中 ({current}/{total})… {settings.brain_lm}",
             text_color=("gray20", "gray65"),
         )
 
@@ -771,6 +772,11 @@ class MainHub(ctk.CTk):
         event_count = self._recording_session.event_count()
         if analyze and event_count > 0:
             self._set_hub_controls_analyzing()
+            settings = load_settings()
+            self._status.configure(
+                text=f"分析錄製中 (0/{event_count})… {settings.brain_lm}",
+                text_color=("gray20", "gray65"),
+            )
             self._update_analysis_progress(0, event_count)
             self._recording_analysis_thread = threading.Thread(
                 target=self._analyze_recording_worker,

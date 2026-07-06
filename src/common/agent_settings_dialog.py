@@ -133,7 +133,7 @@ def open_agent_settings_dialog(
 
     ctk.CTkLabel(
         inner,
-        text="變更將於下次執行時生效。",
+        text="變更將於下次執行或錄製分析時生效。",
         font=ctk.CTkFont(size=12),
         text_color=("gray30", "gray70"),
     ).pack(anchor="w", pady=(4, 14))

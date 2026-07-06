@@ -7,6 +7,7 @@ from typing import Any
 from src.common.io_utils import append_text, read_json, write_json
 from src.common.run_state import get_run_state_manager, reset_run_state_manager
 from src.common.runtime_context import set_runtime_env
+from src.common.settings import load_settings
 from src.recorder.analyze import analyze_event_to_cache
 from src.recorder.models import RecordedEvent, SessionManifest
 from src.recorder.coalesce import coalesce_consecutive_text_inputs
@@ -67,6 +68,11 @@ async def analyze_recording_session(
 
     _bind_run_state_for_analysis(run_dir, run_id)
     try:
+        settings = load_settings()
+        log_info(
+            "analyze_recording_session llm "
+            f"backend={settings.llm_backend} model={settings.brain_lm} host={settings.ollama_host}"
+        )
         events = coalesce_consecutive_text_inputs(_load_events(run_dir))
         log_info(f"analyze_recording_session start events={len(events)} run_id={run_id}")
 

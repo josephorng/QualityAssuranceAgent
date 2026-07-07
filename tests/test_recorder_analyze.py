@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.recorder.analyze import analyze_event_to_cache
+from src.recorder.analyze import analyze_event_to_cache, enrich_drag_instruction_offset
 from src.recorder.models import RecordedEvent
 from src.recorder.orchestrator import analyze_recording_session
 
@@ -211,3 +211,70 @@ async def test_analyze_recording_session_writes_instructions(tmp_path: Path) -> 
     assert analysis["instruction"] == "輸入「打電話的時候」"
     assert "tool_calls" not in analysis
     assert analysis["text_resolution"]["resolved_text"] == "打電話的時候"
+
+
+def test_enrich_drag_instruction_offset_appends_exact_pixels() -> None:
+    destination = {
+        "local_cursor": (189, 638),
+        "candidates": [
+            {
+                "center": [191, 589],
+                "class_name": "text",
+                "text": "Desktop",
+            },
+        ],
+    }
+    instruction = "從「Chrome」圖示拖到「Desktop」文字"
+    enriched = enrich_drag_instruction_offset(instruction, destination)
+    assert enriched == "從「Chrome」圖示拖到「Desktop」文字下方49個像素的位置"
+
+
+@pytest.mark.asyncio
+async def test_analyze_event_to_cache_enriches_drag_instruction(tmp_path: Path) -> None:
+    event = RecordedEvent(
+        index=2,
+        timestamp_utc="t",
+        kind="drag",
+        cursor_xy=(38, 636),
+        end_xy=(2109, 637),
+        screenshot_path="",
+    )
+    vision = {
+        "used_vision": True,
+        "candidate_text": "[index 0] icons=Chrome",
+        "local_cursor": (38, 636),
+        "destination": {
+            "local_cursor": (189, 638),
+            "candidate_text": "[index 1] text='Desktop'",
+            "candidates": [
+                {
+                    "center": [191, 589],
+                    "class_name": "text",
+                    "text": "Desktop",
+                },
+            ],
+            "destination_offset_hints": "[index 0] 「Desktop」: 下方49個像素",
+        },
+    }
+    llm_payload = {"instruction": "從「Chrome」圖示拖到「Desktop」文字"}
+    captured_messages: list[dict[str, object]] = []
+
+    async def _fake_request(*, messages, **kwargs):
+        captured_messages.extend(messages)
+        return llm_payload
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(side_effect=_fake_request),
+    ):
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision=vision,
+        )
+
+    assert result is not None
+    assert result["instruction"] == "從「Chrome」圖示拖到「Desktop」文字下方49個像素的位置"
+    assert captured_messages
+    prompt_text = str(captured_messages[0]["content"])
+    assert "下方49個像素" in prompt_text

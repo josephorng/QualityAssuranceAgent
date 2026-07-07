@@ -46,6 +46,64 @@ def _mock_screenshot(*_args, **_kwargs) -> tuple[str, int, tuple[int, int]]:
     return str(dest), 1, (0, 0)
 
 
+def _left_click(session: RecordingSession, x: int, y: int) -> None:
+    from pynput.mouse import Button
+
+    session._on_mouse_click(x, y, Button.left, True)
+    session._on_mouse_click(x, y, Button.left, False)
+    time.sleep(_DOUBLE_CLICK_INTERVAL_S + 0.05)
+
+
+def test_left_drag_records_single_drag_event(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.mouse import Button
+
+            session._on_mouse_click(100, 100, Button.left, True)
+            session._on_mouse_move(150, 150)
+            session._on_mouse_click(200, 200, Button.left, False)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "drag"
+    assert raw["cursor_xy"] == [100, 100]
+    assert raw["end_xy"] == [200, 200]
+    assert raw["button"] == "left"
+    assert raw["end_screenshot_path"].endswith("event_001_end.jpeg")
+
+
+def test_small_move_still_records_click(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.mouse import Button
+
+            session._on_mouse_click(400, 400, Button.left, True)
+            session._on_mouse_move(402, 401)
+            session._on_mouse_click(403, 402, Button.left, False)
+            time.sleep(_DOUBLE_CLICK_INTERVAL_S + 0.05)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "click"
+    assert raw["cursor_xy"] == [400, 400]
+
+
 def test_keyboard_events_not_filtered_by_ignore_rect(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
     hub_rect = (0, 0, 2000, 1200)
@@ -162,8 +220,7 @@ def test_mouse_click_inside_ignore_rect_is_skipped(tmp_path) -> None:
 
             session._on_mouse_click(100, 100, Button.left, True)
             time.sleep(0.5)
-            session._on_mouse_click(900, 900, Button.left, True)
-            time.sleep(0.5)
+            _left_click(session, 900, 900)
         finally:
             session.stop()
 
@@ -189,8 +246,7 @@ def test_left_click_uses_press_time_screenshot(tmp_path) -> None:
         try:
             from pynput.mouse import Button
 
-            session._on_mouse_click(400, 400, Button.left, True)
-            time.sleep(_DOUBLE_CLICK_INTERVAL_S + 0.05)
+            _left_click(session, 400, 400)
         finally:
             session.stop()
 
@@ -211,8 +267,7 @@ def test_text_input_stores_anchor_click_xy_after_pointer_event(tmp_path) -> None
             from pynput.keyboard import Key, KeyCode
             from pynput.mouse import Button
 
-            session._on_mouse_click(400, 300, Button.left, True)
-            time.sleep(_DOUBLE_CLICK_INTERVAL_S + 0.05)
+            _left_click(session, 400, 300)
             session._on_key_press(KeyCode.from_char("a"))
             session._on_key_press(Key.enter)
         finally:
@@ -271,8 +326,7 @@ def test_pointer_click_persists_window_change(tmp_path) -> None:
         try:
             from pynput.mouse import Button
 
-            session._on_mouse_click(400, 120, Button.left, True)
-            time.sleep(_DOUBLE_CLICK_INTERVAL_S + 0.05)
+            _left_click(session, 400, 120)
         finally:
             session.stop()
 

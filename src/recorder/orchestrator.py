@@ -109,9 +109,17 @@ async def analyze_recording_session(
                     "reason": resolved.get("reason"),
                 }
                 event_for_llm = event_with_resolved_text(event, resolved)
-                vision = resolved.get("vision") or build_vision_context(event_for_llm, run_dir=run_dir)
+                vision = resolved.get("vision") or await build_vision_context(
+                    event_for_llm,
+                    run_dir=run_dir,
+                    log_info=log_info,
+                )
             else:
-                vision = build_vision_context(event, run_dir=run_dir)
+                vision = await build_vision_context(
+                    event,
+                    run_dir=run_dir,
+                    log_info=log_info,
+                )
             analysis_path = run_dir / "analysis" / f"event_{event.index:03d}.json"
             analysis_path.parent.mkdir(parents=True, exist_ok=True)
 

@@ -22,6 +22,7 @@ from src.recorder.models import (
     SessionManifest,
     event_json_path,
     screenshot_path_for_event,
+    screenshot_path_for_event_end,
     utc_now_iso,
 )
 from src.recorder.window_snapshot import (
@@ -33,6 +34,7 @@ from src.recorder.window_snapshot import (
 
 _DOUBLE_CLICK_INTERVAL_S = 0.35
 _DOUBLE_CLICK_MAX_DIST_PX = 8
+_DRAG_THRESHOLD_PX = 8
 _QUEUE_SENTINEL = object()
 _LISTENER_STARTUP_TIMEOUT_S = 2.0
 _SPECIAL_KEYS = frozenset(
@@ -95,6 +97,10 @@ class _QueuedEvent:
     text: str | None = None
     scroll_delta: int | None = None
     anchor_click_xy: tuple[int, int] | None = None
+    end_xy: tuple[int, int] | None = None
+    end_screenshot_path: str = ""
+    end_monitor_index: int | None = None
+    end_monitor_offset: tuple[int, int] | None = None
     windows_before: tuple[WindowInfo, ...] | None = None
 
 
@@ -327,9 +333,12 @@ class RecordingSession:
         self._mouse_listener: mouse.Listener | None = None
         self._keyboard_listener: keyboard.Listener | None = None
         self._pressed_modifiers: set[str] = set()
-        self._last_click: tuple[float, int, int, str] | None = None
         self._pending_click_timer: threading.Timer | None = None
         self._pending_click_coords: tuple[int, int, str] | None = None
+        self._pending_click_down_at: float | None = None
+        self._left_button_down = False
+        self._left_press_dragging = False
+        self._last_move_xy: tuple[int, int] | None = None
         self._pending_screenshot: tuple[str, int, tuple[int, int]] | None = None
         self._pending_windows_before: tuple[WindowInfo, ...] | None = None
         self._pending_text_chars: list[str] = []
@@ -384,8 +393,11 @@ class RecordingSession:
             self._ignore_rect_provider = provider
             self._accepting_input = True
             self._pressed_modifiers = set()
-            self._last_click = None
             self._pending_click_coords = None
+            self._pending_click_down_at = None
+            self._left_button_down = False
+            self._left_press_dragging = False
+            self._last_move_xy = None
             self._pending_screenshot = None
             self._pending_windows_before = None
             self._pending_text_chars = []
@@ -408,6 +420,7 @@ class RecordingSession:
         self._mouse_listener = mouse.Listener(
             on_click=self._on_mouse_click,
             on_scroll=self._on_mouse_scroll,
+            on_move=self._on_mouse_move,
         )
         self._keyboard_listener = keyboard.Listener(
             on_press=self._on_key_press,
@@ -445,15 +458,24 @@ class RecordingSession:
             started_at = self._started_at
             pending = self._pending_click_timer
             pending_coords = self._pending_click_coords
+            left_press_dragging = self._left_press_dragging
+            last_move_xy = self._last_move_xy
             self._pending_click_timer = None
             self._pending_click_coords = None
+            self._pending_click_down_at = None
+            self._left_button_down = False
+            self._left_press_dragging = False
+            self._last_move_xy = None
             self._pending_screenshot = None
             self._pending_windows_before = None
 
         self._flush_pending_text_input()
         if pending is not None:
             pending.cancel()
-        if pending_coords is not None:
+        if left_press_dragging and pending_coords is not None and last_move_xy is not None:
+            sx, sy, button = pending_coords
+            self._flush_pending_drag(sx, sy, last_move_xy[0], last_move_xy[1], button)
+        elif pending_coords is not None:
             x, y, button = pending_coords
             self._flush_pending_click(x, y, button)
 
@@ -693,6 +715,36 @@ class RecordingSession:
         with self._lock:
             self._pending_text_chars.append(char)
 
+    def _cancel_pending_click_timer(self) -> None:
+        with self._lock:
+            pending = self._pending_click_timer
+            self._pending_click_timer = None
+        if pending is not None:
+            pending.cancel()
+
+    def _clear_pending_left_gesture(self) -> None:
+        with self._lock:
+            self._pending_click_coords = None
+            self._pending_click_down_at = None
+            self._left_button_down = False
+            self._left_press_dragging = False
+            self._last_move_xy = None
+            self._pending_screenshot = None
+            self._pending_windows_before = None
+
+    def _schedule_deferred_click(self, x: int, y: int, button: str, down_at: float) -> None:
+        delay = max(0.0, _DOUBLE_CLICK_INTERVAL_S - (time.monotonic() - down_at))
+        self._cancel_pending_click_timer()
+        timer = threading.Timer(
+            delay,
+            self._emit_pending_click,
+            args=(x, y, button),
+        )
+        timer.daemon = True
+        with self._lock:
+            self._pending_click_timer = timer
+        timer.start()
+
     def _flush_pending_click(self, x: int, y: int, button: str) -> None:
         self._flush_pending_text_input()
         with self._lock:
@@ -709,7 +761,10 @@ class RecordingSession:
             self._pending_windows_before = None
             self._pending_click_timer = None
             self._pending_click_coords = None
-            self._last_click = None
+            self._pending_click_down_at = None
+            self._left_button_down = False
+            self._left_press_dragging = False
+            self._last_move_xy = None
         shot_path, mon_idx, mon_offset = _finalize_screenshot(
             run_dir,
             index,
@@ -725,6 +780,66 @@ class RecordingSession:
                 screenshot_path=shot_path,
                 monitor_index=mon_idx,
                 monitor_offset=mon_offset,
+                button=button,
+                windows_before=pending_windows,
+            )
+        )
+
+    def _flush_pending_drag(
+        self,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        button: str,
+    ) -> None:
+        self._flush_pending_text_input()
+        with self._lock:
+            run_dir = self._run_dir
+            if run_dir is None:
+                return
+            if self._pending_click_coords != (x1, y1, button):
+                return
+            index = self._next_index
+            self._next_index += 1
+            pending_shot = self._pending_screenshot
+            pending_windows = self._pending_windows_before
+            self._pending_screenshot = None
+            self._pending_windows_before = None
+            self._pending_click_timer = None
+            self._pending_click_coords = None
+            self._pending_click_down_at = None
+            self._left_button_down = False
+            self._left_press_dragging = False
+            self._last_move_xy = None
+        shot_path, mon_idx, mon_offset = _finalize_screenshot(
+            run_dir,
+            index,
+            (x1, y1),
+            pending_shot,
+        )
+        end_dest = screenshot_path_for_event_end(run_dir, index)
+        try:
+            end_shot_path, end_mon_idx, end_mon_offset = _capture_screenshot_at_point(
+                x2,
+                y2,
+                end_dest,
+            )
+        except Exception:
+            end_shot_path, end_mon_idx, end_mon_offset = str(end_dest), mon_idx, mon_offset
+        self._remember_pointer_cursor((x2, y2))
+        self._queue_event(
+            _QueuedEvent(
+                kind="drag",
+                cursor_xy=(x1, y1),
+                end_xy=(x2, y2),
+                event_index=index,
+                screenshot_path=shot_path,
+                monitor_index=mon_idx,
+                monitor_offset=mon_offset,
+                end_screenshot_path=end_shot_path,
+                end_monitor_index=end_mon_idx,
+                end_monitor_offset=end_mon_offset,
                 button=button,
                 windows_before=pending_windows,
             )
@@ -771,6 +886,7 @@ class RecordingSession:
             timestamp_utc=utc_now_iso(),
             kind=item.kind,
             cursor_xy=item.cursor_xy,
+            end_xy=item.end_xy,
             button=item.button,
             key=item.key,
             keys=item.keys,
@@ -779,6 +895,9 @@ class RecordingSession:
             screenshot_path=item.screenshot_path,
             monitor_index=item.monitor_index,
             monitor_offset=item.monitor_offset,
+            end_screenshot_path=item.end_screenshot_path,
+            end_monitor_index=item.end_monitor_index,
+            end_monitor_offset=item.end_monitor_offset,
             anchor_click_xy=item.anchor_click_xy,
             window_change=window_change,
             target_window_title=target_title,
@@ -794,56 +913,91 @@ class RecordingSession:
     def _emit_pending_click(self, x: int, y: int, button: str) -> None:
         self._flush_pending_click(x, y, button)
 
-    def _on_mouse_click(self, x: int, y: int, button: mouse.Button, pressed: bool) -> None:
-        if not pressed:
+    def _on_mouse_move(self, x: int, y: int) -> None:
+        ix, iy = int(x), int(y)
+        with self._lock:
+            self._last_move_xy = (ix, iy)
+            if not self._left_button_down or self._pending_click_coords is None:
+                return
+            sx, sy, _btn = self._pending_click_coords
+            dragging = self._left_press_dragging
+        if dragging:
             return
+        if abs(sx - ix) > _DRAG_THRESHOLD_PX or abs(sy - iy) > _DRAG_THRESHOLD_PX:
+            with self._lock:
+                self._left_press_dragging = True
+            self._cancel_pending_click_timer()
+
+    def _on_left_mouse_down(self, ix: int, iy: int, btn: str) -> None:
+        now = time.monotonic()
+        with self._lock:
+            pending_coords = self._pending_click_coords
+            down_at = self._pending_click_down_at
+            pending_timer = self._pending_click_timer
+        if (
+            pending_coords is not None
+            and down_at is not None
+            and now - down_at <= _DOUBLE_CLICK_INTERVAL_S
+        ):
+            px, py, pbtn = pending_coords
+            if (
+                pbtn == "left"
+                and abs(px - ix) <= _DOUBLE_CLICK_MAX_DIST_PX
+                and abs(py - iy) <= _DOUBLE_CLICK_MAX_DIST_PX
+            ):
+                if pending_timer is not None:
+                    pending_timer.cancel()
+                self._clear_pending_left_gesture()
+                with self._lock:
+                    self._pending_click_timer = None
+                self._queue_pointer_event_immediate(
+                    kind="double_click",
+                    cursor_xy=(ix, iy),
+                    button=btn,
+                )
+                return
+
+        self._cancel_pending_click_timer()
+        with self._lock:
+            run_dir = self._run_dir
+            self._pending_click_coords = (ix, iy, btn)
+            self._pending_click_down_at = now
+            self._left_button_down = True
+            self._left_press_dragging = False
+            self._last_move_xy = (ix, iy)
+        if run_dir is not None:
+            self._capture_pending_left_press(run_dir, ix, iy)
+
+    def _on_left_mouse_up(self, ix: int, iy: int) -> None:
+        with self._lock:
+            pending_coords = self._pending_click_coords
+            down_at = self._pending_click_down_at
+            dragging = self._left_press_dragging
+            self._left_button_down = False
+            self._last_move_xy = (ix, iy)
+        if pending_coords is None:
+            return
+        sx, sy, button = pending_coords
+        if dragging:
+            self._flush_pending_drag(sx, sy, ix, iy, button)
+            return
+        if down_at is None:
+            self._flush_pending_click(sx, sy, button)
+            return
+        self._schedule_deferred_click(sx, sy, button, down_at)
+
+    def _on_mouse_click(self, x: int, y: int, button: mouse.Button, pressed: bool) -> None:
         if self._should_ignore_mouse_point(int(x), int(y)):
             return
         btn = _normalize_button(button)
-        now = time.monotonic()
         ix, iy = int(x), int(y)
         if btn == "left":
-            with self._lock:
-                last = self._last_click
-                pending = self._pending_click_timer
-            if last is not None:
-                dt, lx, ly, lbtn = last
-                if (
-                    lbtn == "left"
-                    and now - dt <= _DOUBLE_CLICK_INTERVAL_S
-                    and abs(lx - ix) <= _DOUBLE_CLICK_MAX_DIST_PX
-                    and abs(ly - iy) <= _DOUBLE_CLICK_MAX_DIST_PX
-                ):
-                    if pending is not None:
-                        pending.cancel()
-                    with self._lock:
-                        self._last_click = None
-                        self._pending_click_timer = None
-                        self._pending_click_coords = None
-                        self._pending_screenshot = None
-                        self._pending_windows_before = None
-                    self._queue_pointer_event_immediate(
-                        kind="double_click",
-                        cursor_xy=(ix, iy),
-                        button=btn,
-                    )
-                    return
-            with self._lock:
-                run_dir = self._run_dir
-                self._last_click = (now, ix, iy, btn)
-                if self._pending_click_timer is not None:
-                    self._pending_click_timer.cancel()
-                self._pending_click_coords = (ix, iy, btn)
-                timer = threading.Timer(
-                    _DOUBLE_CLICK_INTERVAL_S,
-                    self._emit_pending_click,
-                    args=(ix, iy, btn),
-                )
-                timer.daemon = True
-                self._pending_click_timer = timer
-            if run_dir is not None:
-                self._capture_pending_left_press(run_dir, ix, iy)
-            timer.start()
+            if pressed:
+                self._on_left_mouse_down(ix, iy, btn)
+            else:
+                self._on_left_mouse_up(ix, iy)
+            return
+        if not pressed:
             return
         kind = "right_click" if btn == "right" else "middle_click" if btn == "middle" else "click"
         self._queue_pointer_event_immediate(kind=kind, cursor_xy=(ix, iy), button=btn)

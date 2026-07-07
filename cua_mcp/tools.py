@@ -9,10 +9,10 @@ from cua_mcp.tool_module import (
     _click,
     _cursor_position,
     _double_click,
+    _drag,
     _hold_key,
     _hotkey,
     _key,
-    _left_click_drag,
     _left_mouse_down,
     _left_mouse_up,
     _list_storage_files,
@@ -168,16 +168,22 @@ async def move_mouse(
 
 
 @mcp_server.tool()
-def left_click_drag(
-    x2: int,
-    y2: int,
+async def drag(
+    start_instruction: str,
+    destination_instruction: str,
     duration: float = 0.5,
-    instruction: str = "",
+    button: str = "left",
 ):
     '''
-    Drag from current cursor position to a target point.
+    Drag from the UI target matching start_instruction to the target matching
+    destination_instruction.
     '''
-    return _left_click_drag(x2=x2, y2=y2, duration=duration).update({"instruction": instruction})
+    return await _drag(
+        start_instruction=start_instruction,
+        destination_instruction=destination_instruction,
+        duration=duration,
+        button=button,
+    )
 
 
 @mcp_server.tool()
@@ -394,7 +400,7 @@ TOOL_FUNCTIONS: list[callable[..., Any]] = [
     store_image,
     key,
     move_mouse,
-    left_click_drag,
+    drag,
     right_click,
     cursor_position,
     left_mouse_down,

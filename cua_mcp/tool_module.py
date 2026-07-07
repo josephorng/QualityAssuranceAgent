@@ -85,10 +85,38 @@ def _triple_click() -> dict[str, Any]:
     return hand_tools.click(button="left", clicks=3, interval=0.1)
 
 
-def _left_click_drag(x2: int, y2: int, duration: float = 0.5) -> dict[str, Any]:
-    pos = hand_tools.cursor_position()
-    x1, y1 = pos["x"], pos["y"]
-    return hand_tools.drag(x1, y1, x2, y2, duration=duration, button="left")
+def _drag_at_points(
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    duration: float = 0.5,
+    button: str = "left",
+) -> dict[str, Any]:
+    return hand_tools.drag(x1, y1, x2, y2, duration=duration, button=button)
+
+
+async def _drag(
+    start_instruction: str,
+    destination_instruction: str,
+    duration: float = 0.5,
+    button: str = "left",
+) -> dict[str, Any]:
+    x1, y1, start_meta = await resolve_mouse_point(start_instruction)
+    x2, y2, end_meta = await resolve_mouse_point(destination_instruction)
+    result = _drag_at_points(x1, y1, x2, y2, duration=duration, button=button)
+    merged: dict[str, Any] = dict(result)
+    merged["start_instruction"] = start_instruction
+    merged["destination_instruction"] = destination_instruction
+    merged["start_target"] = dict(start_meta)
+    merged["destination_target"] = dict(end_meta)
+    return _with_unified_target_metadata(
+        merged,
+        target_kind=str(end_meta.get("target_kind", "mouse_target")),
+        target_text=str(end_meta.get("target_text", "")),
+        target_icons=end_meta.get("target_icons", []),
+        target_bbox=end_meta.get("target_bbox"),
+    )
 
 
 def _screenshot(path: str = "", instruction: str = "") -> dict[str, Any]:

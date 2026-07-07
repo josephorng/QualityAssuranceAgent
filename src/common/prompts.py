@@ -193,19 +193,29 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Eight UI candidates nearest the click (closest first):\n"
                 "Each row has class=文字(Text)|元素(Element)|輸入欄(Input)|滾動條(Scrollbar), "
                 "optional text='...' OCR, and optional icons=Chinese icon labels.\n\n"
-                "{candidate_text}\n"
+                "{candidate_text}\n\n"
+                "Drag destination vision (when kind=drag):\n"
+                "Destination location: [{destination_x},{destination_y}]\n"
+                "Destination field context:\n{destination_field_context}\n"
+                "Eight UI candidates nearest the destination (closest first).\n"
+                "These already exclude OCR text/elements identified as part of the dragged object at the start point:\n\n"
+                "{destination_candidate_text}\n\n"
+                "Destination offset from drop point relative to each candidate center "
+                "(dx=right, dy=down):\n"
+                "{destination_offset_hints}\n"
             ),
             "instructions": [
                 "Write one concise instruction in Traditional Chinese when possible, matching hub script style.",
                 "Use the nearest matching candidate row to name the target (OCR text and/or icon labels).",
                 "When Input field context shows visible text inside an 輸入欄(Input), name the target with that text plus 輸入欄, e.g. 點擊「間間Gemini」文字所在的輸入欄 — not a generic 輸入欄 alone.",
                 "For pointer clicks: describe the click target, e.g. 點擊「Submit」按鈕 or 點擊「間間Gemini」文字所在的輸入欄.",
+                "For drag events: name the start target and destination anchor from candidates. Append the relative pixel offset from the offset hints to the destination anchor, e.g. 從「Chrome」圖示拖到「Desktop」文字下方49個像素的位置. Use the exact pixel counts from the hints for the anchor you name. If offset is negligible, omit it. If destination candidates are empty, describe the drop area directionally (e.g. 右側空白區域).",
                 "For scroll: describe direction and target area, e.g. 在檔案清單區域向下捲動.",
                 "For special keys: e.g. 按下 Enter 鍵.",
                 "For modifier combos: e.g. 按下 Ctrl+C.",
                 "For text_input events, another pipeline step writes 輸入「...」 directly; do not handle text_input here.",
                 "If window state change hints report a confident minimize/maximize/close/restore action, prefer phrasing like 最小化/最大化/關閉/還原「title」視窗.",
-                "Do not include pixel coordinates in the instruction.",
+                "Do not include absolute screen pixel coordinates in the instruction; relative pixel offsets for drag destinations are allowed.",
                 'Return strict JSON only: {{"instruction": "<string>"}}',
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
@@ -216,6 +226,40 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "image_usage": "optional",
             "prompt": (
                 'Reply with ONLY: {{"instruction": "<string>"}}. '
+                "No text before or after the JSON."
+            ),
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
+    "recording_drag_destination_overlap": [
+        {
+            "image_usage": "no_image",
+            "prompt": (
+                "You decide which destination UI candidates are the SAME dragged object "
+                "that appears at the drag start point.\n\n"
+                "The user dragged an on-screen item from start to destination. OCR text may "
+                "have small typos between start and end (missing/extra letters, similar "
+                "characters). Icon labels and visible text that belong to the moved item "
+                "should be excluded from destination targeting.\n\n"
+                "Drag start cluster (moved content):\n{start_candidate_text}\n\n"
+                "Destination candidates near the drop point (0-based indices):\n"
+                "{destination_candidate_text}\n"
+            ),
+            "instructions": [
+                "Return exclude_indices: 0-based indices of destination candidates that refer to the dragged object itself (icon, label, or typo variants of start text/icons).",
+                "Do NOT exclude unrelated background UI at the destination (folders, desktop labels, other apps).",
+                "Treat OCR typo variants as the same item, e.g. Cbhrome/Chrome, 帳多/振銓 when they clearly label the same shortcut.",
+                "When icon chinese_id at start matches a destination row semantically, exclude that destination row.",
+                'Return strict JSON only: {{"exclude_indices": [<int>, ...]}}',
+            ],
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
+    "recording_drag_destination_overlap_retry": [
+        {
+            "image_usage": "no_image",
+            "prompt": (
+                'Reply with ONLY: {{"exclude_indices": [<int>, ...]}}. '
                 "No text before or after the JSON."
             ),
             "models": ["gemma4:e2b", "gemma3:4b"],

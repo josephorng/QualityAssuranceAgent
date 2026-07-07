@@ -7,7 +7,7 @@ from typing import Any
 
 
 POINTER_EVENT_KINDS = frozenset(
-    {"click", "double_click", "right_click", "middle_click", "scroll"}
+    {"click", "double_click", "right_click", "middle_click", "scroll", "drag"}
 )
 
 
@@ -17,6 +17,7 @@ class RecordedEvent:
     timestamp_utc: str
     kind: str
     cursor_xy: tuple[int, int] | None = None
+    end_xy: tuple[int, int] | None = None
     button: str | None = None
     key: str | None = None
     keys: list[str] | None = None
@@ -25,6 +26,9 @@ class RecordedEvent:
     screenshot_path: str = ""
     monitor_index: int | None = None
     monitor_offset: tuple[int, int] | None = None
+    end_screenshot_path: str = ""
+    end_monitor_index: int | None = None
+    end_monitor_offset: tuple[int, int] | None = None
     anchor_click_xy: tuple[int, int] | None = None
     window_change: dict[str, Any] | None = None
     target_window_title: str | None = None
@@ -34,8 +38,12 @@ class RecordedEvent:
         data = asdict(self)
         if self.cursor_xy is not None:
             data["cursor_xy"] = list(self.cursor_xy)
+        if self.end_xy is not None:
+            data["end_xy"] = list(self.end_xy)
         if self.monitor_offset is not None:
             data["monitor_offset"] = list(self.monitor_offset)
+        if self.end_monitor_offset is not None:
+            data["end_monitor_offset"] = list(self.end_monitor_offset)
         if self.anchor_click_xy is not None:
             data["anchor_click_xy"] = list(self.anchor_click_xy)
         return data
@@ -43,7 +51,9 @@ class RecordedEvent:
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> RecordedEvent:
         cursor = raw.get("cursor_xy")
+        end = raw.get("end_xy")
         offset = raw.get("monitor_offset")
+        end_offset = raw.get("end_monitor_offset")
         anchor = raw.get("anchor_click_xy")
         keys = raw.get("keys")
         return cls(
@@ -51,6 +61,7 @@ class RecordedEvent:
             timestamp_utc=str(raw["timestamp_utc"]),
             kind=str(raw["kind"]),
             cursor_xy=tuple(cursor) if isinstance(cursor, list) and len(cursor) == 2 else None,
+            end_xy=tuple(end) if isinstance(end, list) and len(end) == 2 else None,
             button=raw.get("button"),
             key=raw.get("key"),
             keys=list(keys) if isinstance(keys, list) else None,
@@ -59,6 +70,11 @@ class RecordedEvent:
             screenshot_path=str(raw.get("screenshot_path", "")),
             monitor_index=raw.get("monitor_index"),
             monitor_offset=tuple(offset) if isinstance(offset, list) and len(offset) == 2 else None,
+            end_screenshot_path=str(raw.get("end_screenshot_path", "")),
+            end_monitor_index=raw.get("end_monitor_index"),
+            end_monitor_offset=(
+                tuple(end_offset) if isinstance(end_offset, list) and len(end_offset) == 2 else None
+            ),
             anchor_click_xy=tuple(anchor) if isinstance(anchor, list) and len(anchor) == 2 else None,
             window_change=raw.get("window_change") if isinstance(raw.get("window_change"), dict) else None,
             target_window_title=raw.get("target_window_title"),
@@ -92,3 +108,7 @@ def event_json_path(run_dir: Path, index: int) -> Path:
 
 def screenshot_path_for_event(run_dir: Path, index: int) -> Path:
     return run_dir / "screenshots" / f"event_{index:03d}.jpeg"
+
+
+def screenshot_path_for_event_end(run_dir: Path, index: int) -> Path:
+    return run_dir / "screenshots" / f"event_{index:03d}_end.jpeg"

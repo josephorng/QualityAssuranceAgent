@@ -26,6 +26,19 @@ def test_validate_tool_calls_accepts_move_mouse_and_click() -> None:
     assert validate_tool_calls(calls) is None
 
 
+def test_validate_tool_calls_accepts_drag() -> None:
+    calls = [
+        {
+            "name": "drag",
+            "arguments": {
+                "start_instruction": "音量滑桿",
+                "destination_instruction": "音量滑桿右側",
+            },
+        }
+    ]
+    assert validate_tool_calls(calls) is None
+
+
 def test_upsert_from_recorder_shape(tmp_path: Path) -> None:
     from src.common.instruction_tool_cache import upsert_tool_calls
 

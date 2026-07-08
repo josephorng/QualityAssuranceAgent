@@ -375,6 +375,8 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Convert phrases like 右方5個像素 to dx=5, 上方28個像素 to dy=-28, 下方57個像素 to dy=57.",
                 "When no relative pixel offset is stated, use dx=0 and dy=0.",
                 "If the instruction is a drag sentence (從…拖到…), extract only the destination target and its offset.",
+                "Ignore trailing （...） contextual comments (e.g. nearby-element hints) when extracting anchor and offsets.",
+                "Ignore inline （起點附近...） comments between the drag source and 拖到 when extracting anchor and offsets.",
                 "Do not invent targets or offsets not stated in the instruction.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],

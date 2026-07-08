@@ -11,6 +11,8 @@ from src.common.prompting import get_prompt
 from src.common.run_state import get_run_state_manager
 
 _OFFSET_TOKEN_RE = re.compile(r"(右方|左方|上方|下方)(\d+)個像素")
+_TRAILING_CONTEXT_COMMENT_RE = re.compile(r"(?:（[^）]*）)+$")
+_INLINE_START_CONTEXT_COMMENT_RE = re.compile(r"（起點附近[^）]*）")
 
 _OFFSET_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -46,9 +48,20 @@ def _parse_offset_reply(raw: str) -> tuple[str, int, int]:
     return anchor.strip(), dx, dy
 
 
+def _strip_trailing_context_comment(text: str) -> str:
+    """Remove trailing full-width parenthetical nearby-context comments."""
+    return _TRAILING_CONTEXT_COMMENT_RE.sub("", text).strip()
+
+
+def _strip_context_comments(text: str) -> str:
+    """Remove inline start and trailing nearby-context comments."""
+    text = _strip_trailing_context_comment(text)
+    return _INLINE_START_CONTEXT_COMMENT_RE.sub("", text).strip()
+
+
 def _parse_relative_pixel_offset_regex(instruction: str) -> tuple[str, int, int]:
     """Regex fallback when LLM extraction fails."""
-    text = (instruction or "").strip()
+    text = _strip_context_comments((instruction or "").strip())
     if not text:
         return "", 0, 0
 
@@ -80,7 +93,7 @@ async def parse_relative_pixel_offset(instruction: str) -> tuple[str, int, int]:
     Uses an LLM to extract anchor/dx/dy, with a regex fallback on failure.
     Positive dx is right; positive dy is down.
     """
-    text = (instruction or "").strip()
+    text = _strip_context_comments((instruction or "").strip())
     if not text:
         return "", 0, 0
 

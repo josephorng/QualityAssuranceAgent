@@ -45,6 +45,16 @@ def test_parse_relative_pixel_offset_regex_round_trip_with_recorder_phrase() -> 
     assert dy == 49
 
 
+def test_parse_relative_pixel_offset_regex_strips_trailing_nearby_comment() -> None:
+    anchor, dx, dy = _parse_relative_pixel_offset_regex(
+        "從「Chrome」圖示（起點附近有「Desktop」文字）拖到「OneNote」文字左方8個像素、下方58個像素的位置"
+        "（終點附近有「Recycle Bin」圖示）"
+    )
+    assert anchor == "從「Chrome」圖示拖到「OneNote」文字"
+    assert dx == -8
+    assert dy == 58
+
+
 @pytest.mark.asyncio
 async def test_parse_relative_pixel_offset_uses_llm() -> None:
     with patch(

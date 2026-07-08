@@ -15,6 +15,80 @@ from src.recorder.analyze import (
 )
 from src.recorder.models import RecordedEvent
 from src.recorder.orchestrator import analyze_recording_session
+from src.recorder.vision_context import (
+    append_drag_nearby_context_comments,
+    append_nearby_context_comment,
+    collect_nearby_hint_labels,
+    format_nearby_context_comment,
+)
+
+_VISION_WITH_NEARBY = {
+    "used_vision": True,
+    "candidates": [
+        {
+            "class_name": "element",
+            "text": "chrome",
+            "icons": [{"chinese_id": "Chrome"}],
+        },
+        {"class_name": "text", "text": "OneNote"},
+        {
+            "class_name": "element",
+            "text": "docker",
+            "icons": [{"chinese_id": "Docker"}],
+        },
+    ],
+}
+
+
+def test_collect_nearby_hint_labels_skips_primary_and_instruction_duplicates() -> None:
+    labels = collect_nearby_hint_labels(
+        _VISION_WITH_NEARBY,
+        instruction="點擊「Chrome」圖示",
+    )
+    assert labels == ["「OneNote」文字", "「Docker」圖示"]
+
+
+def test_format_nearby_context_comment() -> None:
+    assert format_nearby_context_comment(["「OneNote」文字", "「Docker」圖示"]) == (
+        "（附近有「OneNote」文字、「Docker」圖示）"
+    )
+    assert format_nearby_context_comment([]) is None
+
+
+def test_append_nearby_context_comment() -> None:
+    result = append_nearby_context_comment("點擊「Chrome」圖示", _VISION_WITH_NEARBY)
+    assert result == "點擊「Chrome」圖示（附近有「OneNote」文字、「Docker」圖示）"
+
+
+def test_append_drag_nearby_context_comments() -> None:
+    vision = {
+        "used_vision": True,
+        "candidates": [
+            {
+                "class_name": "element",
+                "text": "chrome",
+                "icons": [{"chinese_id": "Chrome"}],
+            },
+            {"class_name": "text", "text": "OneNote"},
+        ],
+    }
+    destination = {
+        "candidates": [
+            {"class_name": "text", "text": "Desktop"},
+            {
+                "class_name": "element",
+                "text": "recycle",
+                "icons": [{"chinese_id": "Recycle Bin"}],
+            },
+        ],
+    }
+    instruction = "從「Chrome」圖示拖到「Desktop」文字下方49個像素的位置"
+    result = append_drag_nearby_context_comments(instruction, vision, destination)
+    assert result == (
+        "從「Chrome」圖示（起點附近有「OneNote」文字）拖到「Desktop」文字下方49個像素的位置"
+        "（終點附近有「Recycle Bin」圖示）"
+    )
+
 
 @pytest.mark.asyncio
 async def test_analyze_event_to_cache_parses_llm_json(tmp_path: Path) -> None:
@@ -423,4 +497,93 @@ async def test_analyze_event_to_cache_drag_is_deterministic(tmp_path: Path) -> N
 
     assert result is not None
     assert result["instruction"] == "從「Chrome」圖示拖到「Desktop」文字下方49個像素的位置"
+    llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_analyze_event_to_cache_click_appends_nearby_context(tmp_path: Path) -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(38, 636),
+        button="left",
+        screenshot_path="",
+    )
+    llm_payload = {"instruction": "點擊「Chrome」圖示"}
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(return_value=llm_payload),
+    ):
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision=_VISION_WITH_NEARBY,
+        )
+
+    assert result is not None
+    assert result["instruction"] == (
+        "點擊「Chrome」圖示（附近有「OneNote」文字、「Docker」圖示）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_analyze_event_to_cache_drag_appends_nearby_after_enrichment(tmp_path: Path) -> None:
+    event = RecordedEvent(
+        index=2,
+        timestamp_utc="t",
+        kind="drag",
+        cursor_xy=(38, 636),
+        end_xy=(189, 638),
+        screenshot_path="",
+    )
+    vision = {
+        "used_vision": True,
+        "candidate_text": "[index 0] icons=Chrome",
+        "local_cursor": (38, 636),
+        "candidates": [
+            {
+                "center": [38, 636],
+                "class_name": "element",
+                "text": "chrome",
+                "icons": [{"chinese_id": "Chrome"}],
+            },
+            {"center": [100, 600], "class_name": "text", "text": "OneNote"},
+        ],
+        "destination": {
+            "local_cursor": (189, 638),
+            "candidate_text": "[index 1] text='Desktop'",
+            "candidates": [
+                {
+                    "center": [191, 589],
+                    "class_name": "text",
+                    "text": "Desktop",
+                },
+                {
+                    "center": [250, 620],
+                    "class_name": "element",
+                    "text": "recycle",
+                    "icons": [{"chinese_id": "Recycle Bin"}],
+                },
+            ],
+            "destination_offset_hints": "[index 0] 「Desktop」: 下方49個像素",
+        },
+    }
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision=vision,
+        )
+
+    assert result is not None
+    assert result["instruction"] == (
+        "從「Chrome」圖示（起點附近有「OneNote」文字）拖到「Desktop」文字下方49個像素的位置"
+        "（終點附近有「Recycle Bin」圖示）"
+    )
     llm_mock.assert_not_called()

@@ -7,9 +7,11 @@ from typing import Any
 
 from cua_mcp.selection_engine import request_json_with_retry
 from src.common.prompting import get_prompt
-from src.recorder.models import RecordedEvent
+from src.recorder.models import POINTER_EVENT_KINDS, RecordedEvent
 from src.recorder.to_cache import event_summary_for_llm
 from src.recorder.vision_context import (
+    append_drag_nearby_context_comments,
+    append_nearby_context_comment,
     build_vision_context,
     candidate_anchor_name,
     candidate_offset_for_instruction,
@@ -170,6 +172,39 @@ def instruction_for_drag(
     return f"從{source_anchor}拖到{dest_anchor}"
 
 
+def _finalize_instruction(
+    instruction: str,
+    event: RecordedEvent,
+    vision: dict[str, Any] | None,
+    destination: dict[str, Any] | None = None,
+) -> str:
+    if event.kind not in POINTER_EVENT_KINDS or vision is None:
+        return instruction
+    if event.kind == "drag":
+        return append_drag_nearby_context_comments(
+            instruction,
+            vision,
+            destination if isinstance(destination, dict) else {},
+        )
+    return append_nearby_context_comment(instruction, vision)
+
+
+def _instruction_result(
+    instruction: str,
+    event: RecordedEvent,
+    vision: dict[str, Any] | None,
+    destination: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    return {
+        "instruction": _finalize_instruction(
+            instruction,
+            event,
+            vision,
+            destination,
+        )
+    }
+
+
 async def analyze_event_to_cache(
     event: RecordedEvent,
     *,
@@ -195,7 +230,7 @@ async def analyze_event_to_cache(
     if event.kind == "drag":
         drag_instruction = instruction_for_drag(vision, destination)
         if drag_instruction is not None:
-            return {"instruction": drag_instruction}
+            return _instruction_result(drag_instruction, event, vision, destination)
 
     local = vision.get("local_cursor")
     if isinstance(local, (list, tuple)) and len(local) == 2:
@@ -270,8 +305,8 @@ async def analyze_event_to_cache(
                 vision=vision,
                 destination=destination,
             )
-            return {"instruction": instruction}
-        return result
+            return _instruction_result(instruction, event, vision, destination)
+        return _instruction_result(result["instruction"], event, vision, destination)
     except (ValueError, json.JSONDecodeError) as exc:
         if log_info is not None:
             log_info(f"analyze_event_to_cache failed event={event.index}: {exc}")

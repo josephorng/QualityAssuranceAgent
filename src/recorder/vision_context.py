@@ -240,6 +240,107 @@ def format_drag_candidate_anchor(candidate: dict[str, Any]) -> str | None:
     return None
 
 
+def _candidate_label_for_hint(candidate: dict[str, Any]) -> str | None:
+    """Return a hub-style label for a nearby-context hint, or None if not meaningful."""
+    anchor = format_drag_candidate_anchor(candidate)
+    if anchor is None:
+        return None
+    generic_only = {"文字", "元素", "輸入欄", "按鈕", "滾動條"}
+    if anchor in generic_only:
+        return None
+    return anchor
+
+
+def _label_already_in_instruction(label: str, instruction: str) -> bool:
+    """True when the label's quoted name or full phrase already appears in the instruction."""
+    if label in instruction:
+        return True
+    if label.startswith("「") and "」" in label:
+        inner = label.split("」", 1)[0][1:]
+        if inner and f"「{inner}」" in instruction:
+            return True
+    return False
+
+
+def collect_nearby_hint_labels(
+    vision: dict[str, Any],
+    *,
+    instruction: str,
+    max_count: int = 2,
+) -> list[str]:
+    """Collect up to max_count nearby candidate labels, skipping the primary target."""
+    candidates = vision.get("candidates") or []
+    if len(candidates) < 2:
+        return []
+
+    labels: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates[1:]:
+        if not isinstance(candidate, dict):
+            continue
+        label = _candidate_label_for_hint(candidate)
+        if not label or label in seen:
+            continue
+        if _label_already_in_instruction(label, instruction):
+            continue
+        seen.add(label)
+        labels.append(label)
+        if len(labels) >= max_count:
+            break
+    return labels
+
+
+def format_nearby_context_comment(
+    labels: list[str],
+    *,
+    location: str = "附近",
+) -> str | None:
+    """Format nearby labels as a trailing parenthetical comment."""
+    if not labels:
+        return None
+    return f"（{location}有{'、'.join(labels)}）"
+
+
+def append_nearby_context_comment(instruction: str, vision: dict[str, Any]) -> str:
+    """Append a nearby-context parenthetical comment when vision data is available."""
+    if not vision.get("used_vision"):
+        return instruction
+    comment = format_nearby_context_comment(
+        collect_nearby_hint_labels(vision, instruction=instruction)
+    )
+    if comment is None:
+        return instruction
+    return instruction + comment
+
+
+def append_drag_nearby_context_comments(
+    instruction: str,
+    vision: dict[str, Any],
+    destination: dict[str, Any],
+) -> str:
+    """Insert start nearby comment before 拖到; append destination comment at end."""
+    if not vision.get("used_vision"):
+        return instruction
+
+    result = instruction
+    start_comment = format_nearby_context_comment(
+        collect_nearby_hint_labels(vision, instruction=instruction),
+        location="起點附近",
+    )
+    if start_comment and "拖到" in result:
+        drag_at = result.index("拖到")
+        result = result[:drag_at] + start_comment + result[drag_at:]
+
+    dest_comment = format_nearby_context_comment(
+        collect_nearby_hint_labels(destination, instruction=instruction),
+        location="終點附近",
+    )
+    if dest_comment:
+        result = result + dest_comment
+
+    return result
+
+
 def _candidate_center(candidate: dict[str, Any]) -> tuple[int, int] | None:
     center = candidate.get("center")
     if isinstance(center, (list, tuple)) and len(center) == 2:

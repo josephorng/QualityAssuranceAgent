@@ -197,8 +197,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Drag destination vision (when kind=drag):\n"
                 "Destination location: [{destination_x},{destination_y}]\n"
                 "Destination field context:\n{destination_field_context}\n"
-                "Eight UI candidates nearest the destination (closest first).\n"
-                "These already exclude OCR text/elements identified as part of the dragged object at the start point:\n\n"
+                "Eight UI candidates nearest the destination (closest first):\n\n"
                 "{destination_candidate_text}\n\n"
                 "Destination offset from drop point relative to each candidate center "
                 "(dx=right, dy=down):\n"
@@ -226,40 +225,6 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "image_usage": "optional",
             "prompt": (
                 'Reply with ONLY: {{"instruction": "<string>"}}. '
-                "No text before or after the JSON."
-            ),
-            "models": ["gemma4:e2b", "gemma3:4b"],
-        }
-    ],
-    "recording_drag_destination_overlap": [
-        {
-            "image_usage": "no_image",
-            "prompt": (
-                "You decide which destination UI candidates are the SAME dragged object "
-                "that appears at the drag start point.\n\n"
-                "The user dragged an on-screen item from start to destination. OCR text may "
-                "have small typos between start and end (missing/extra letters, similar "
-                "characters). Icon labels and visible text that belong to the moved item "
-                "should be excluded from destination targeting.\n\n"
-                "Drag start cluster (moved content):\n{start_candidate_text}\n\n"
-                "Destination candidates near the drop point (0-based indices):\n"
-                "{destination_candidate_text}\n"
-            ),
-            "instructions": [
-                "Return exclude_indices: 0-based indices of destination candidates that refer to the dragged object itself (icon, label, or typo variants of start text/icons).",
-                "Do NOT exclude unrelated background UI at the destination (folders, desktop labels, other apps).",
-                "Treat OCR typo variants as the same item, e.g. Cbhrome/Chrome, 帳多/振銓 when they clearly label the same shortcut.",
-                "When icon chinese_id at start matches a destination row semantically, exclude that destination row.",
-                'Return strict JSON only: {{"exclude_indices": [<int>, ...]}}',
-            ],
-            "models": ["gemma4:e2b", "gemma3:4b"],
-        }
-    ],
-    "recording_drag_destination_overlap_retry": [
-        {
-            "image_usage": "no_image",
-            "prompt": (
-                'Reply with ONLY: {{"exclude_indices": [<int>, ...]}}. '
                 "No text before or after the JSON."
             ),
             "models": ["gemma4:e2b", "gemma3:4b"],
@@ -388,6 +353,38 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "image_usage": "no_image",
             "prompt": (
                 'Reply with ONLY: {{"keep_indices": [<integer>, ...]}}. '
+                "No text before or after the JSON."
+            ),
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
+    "instruction_relative_offset": [
+        {
+            "image_usage": "no_image",
+            "prompt": (
+                "Extract the UI anchor and relative pixel offset from a mouse-target "
+                "instruction.\n\n"
+                "Instruction:\n{instruction}\n"
+            ),
+            "instructions": [
+                'Return JSON only: {{"anchor": "<string>", "dx": <integer>, "dy": <integer>}}.',
+                "anchor: the on-screen target phrase for locating a UI element, without relative pixel offset clauses and without trailing 的位置.",
+                "Keep quoted labels and type suffixes when present, e.g. 「振銓」文字, 「Chrome」圖示, 「Submit」按鈕.",
+                "dx: horizontal offset in pixels from the anchor center; positive means right (右方), negative means left (左方).",
+                "dy: vertical offset in pixels from the anchor center; positive means down (下方), negative means up (上方).",
+                "Convert phrases like 右方5個像素 to dx=5, 上方28個像素 to dy=-28, 下方57個像素 to dy=57.",
+                "When no relative pixel offset is stated, use dx=0 and dy=0.",
+                "If the instruction is a drag sentence (從…拖到…), extract only the destination target and its offset.",
+                "Do not invent targets or offsets not stated in the instruction.",
+            ],
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
+    "instruction_relative_offset_retry": [
+        {
+            "image_usage": "no_image",
+            "prompt": (
+                'Reply with ONLY: {{"anchor": "<string>", "dx": <integer>, "dy": <integer>}}. '
                 "No text before or after the JSON."
             ),
             "models": ["gemma4:e2b", "gemma3:4b"],

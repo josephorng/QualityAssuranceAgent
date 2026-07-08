@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 
 from cua_mcp.geometry import clip_box
+from cua_mcp.instruction_offset import parse_relative_pixel_offset
 from cua_mcp.icon_map import (
     describe_text_icons,
     is_pua_char,
@@ -243,6 +244,9 @@ async def resolve_mouse_point(
     if not instruction_text:
         raise ValueError("instruction must be non-empty")
 
+    anchor_instruction, offset_dx, offset_dy = await parse_relative_pixel_offset(instruction_text)
+    target_instruction = anchor_instruction or instruction_text
+
     paths = _run_manager().require_paths()
     monitor_indices = selected_eye_monitor_indices()
     stamp = ts_name()
@@ -275,7 +279,7 @@ async def resolve_mouse_point(
     if not detections:
         raise ValueError("No YOLO candidates found on selected monitor(s).")
 
-    filtered = await _filter_mouse_candidates(detections, instruction_text)
+    filtered = await _filter_mouse_candidates(detections, target_instruction)
     _log_info(f"move_mouse after_filter={len(filtered)}")
 
     if not filtered:
@@ -287,7 +291,7 @@ async def resolve_mouse_point(
         _log_info("move_mouse: single candidate after filter; skipping Ollama pick")
     else:
         pool_idx = await _select_center_with_ollama(
-            instruction_text,
+            target_instruction,
             filtered,
             image_paths,
         )
@@ -297,11 +301,23 @@ async def resolve_mouse_point(
             f"move_mouse: Ollama picked index={pool_idx} center=[{chosen.cx},{chosen.cy}]"
         )
 
+    resolved_x = chosen.cx + offset_dx
+    resolved_y = chosen.cy + offset_dy
+    if offset_dx or offset_dy:
+        _log_info(
+            "move_mouse relative offset applied "
+            f"dx={offset_dx} dy={offset_dy} "
+            f"anchor=[{chosen.cx},{chosen.cy}] resolved=[{resolved_x},{resolved_y}]"
+        )
+
     image_path = image_paths[0] if image_paths else ""
     meta: dict[str, Any] = {
         "selected_index": idx,
         "class_name": chosen.class_name,
         "image_center": {"x": chosen.cx, "y": chosen.cy},
+        "resolved_center": {"x": resolved_x, "y": resolved_y},
+        "relative_offset": {"dx": offset_dx, "dy": offset_dy},
+        "anchor_instruction": target_instruction,
         "screenshot_path": image_path,
         "screenshot_paths": image_paths,
         "target_kind": chosen.class_name,
@@ -314,4 +330,4 @@ async def resolve_mouse_point(
             "h": chosen.bbox[3],
         },
     }
-    return chosen.cx, chosen.cy, meta
+    return resolved_x, resolved_y, meta

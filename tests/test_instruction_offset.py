@@ -1,0 +1,92 @@
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from cua_mcp.instruction_offset import (
+    _parse_relative_pixel_offset_regex,
+    parse_relative_pixel_offset,
+)
+from src.recorder.vision_context import format_drag_relative_offset_phrase
+
+
+def test_parse_relative_pixel_offset_regex_right_and_up() -> None:
+    anchor, dx, dy = _parse_relative_pixel_offset_regex(
+        "「振銓」文字右方5個像素、上方28個像素的位置"
+    )
+    assert anchor == "「振銓」文字"
+    assert dx == 5
+    assert dy == -28
+
+
+def test_parse_relative_pixel_offset_regex_down_only() -> None:
+    anchor, dx, dy = _parse_relative_pixel_offset_regex(
+        "「iniseape」文字下方57個像素的位置"
+    )
+    assert anchor == "「iniseape」文字"
+    assert dx == 0
+    assert dy == 57
+
+
+def test_parse_relative_pixel_offset_regex_no_offset() -> None:
+    anchor, dx, dy = _parse_relative_pixel_offset_regex("「Chrome」圖示")
+    assert anchor == "「Chrome」圖示"
+    assert dx == 0
+    assert dy == 0
+
+
+def test_parse_relative_pixel_offset_regex_round_trip_with_recorder_phrase() -> None:
+    phrase = format_drag_relative_offset_phrase(12, 49)
+    assert phrase is not None
+    anchor, dx, dy = _parse_relative_pixel_offset_regex(f"「Desktop」文字{phrase}的位置")
+    assert anchor == "「Desktop」文字"
+    assert dx == 12
+    assert dy == 49
+
+
+@pytest.mark.asyncio
+async def test_parse_relative_pixel_offset_uses_llm() -> None:
+    with patch(
+        "cua_mcp.instruction_offset.request_json_with_retry",
+        new=AsyncMock(
+            return_value=("「振銓」文字", 5, -28),
+        ),
+    ) as mock_request:
+        anchor, dx, dy = await parse_relative_pixel_offset(
+            "「振銓」文字右方5個像素、上方28個像素的位置"
+        )
+
+    assert anchor == "「振銓」文字"
+    assert dx == 5
+    assert dy == -28
+    mock_request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_parse_relative_pixel_offset_empty_instruction_skips_llm() -> None:
+    with patch(
+        "cua_mcp.instruction_offset.request_json_with_retry",
+        new=AsyncMock(),
+    ) as mock_request:
+        anchor, dx, dy = await parse_relative_pixel_offset("   ")
+
+    assert anchor == ""
+    assert dx == 0
+    assert dy == 0
+    mock_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_parse_relative_pixel_offset_falls_back_to_regex() -> None:
+    with patch(
+        "cua_mcp.instruction_offset.request_json_with_retry",
+        new=AsyncMock(side_effect=ValueError("bad llm reply")),
+    ):
+        anchor, dx, dy = await parse_relative_pixel_offset(
+            "「iniseape」文字下方57個像素的位置"
+        )
+
+    assert anchor == "「iniseape」文字"
+    assert dx == 0
+    assert dy == 57

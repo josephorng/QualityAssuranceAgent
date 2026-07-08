@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -11,27 +10,13 @@ from cua_mcp.icon_map import is_pua_char
 from cua_mcp.read_screen_text.ocr_image import _ocr_boxes_on_bgr
 from cua_mcp.select_mouse_target import _build_candidates_from_bgr
 from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text
-from cua_mcp.yolo_onnx import YOLO_CLASS_INPUT
-from cua_mcp.selection_engine import request_json_with_retry
+from cua_mcp.yolo_onnx import YOLO_CLASS_ELEMENT, YOLO_CLASS_INPUT, YOLO_CLASS_TEXT
 from src.common.io_utils import write_json
-from src.common.prompting import get_prompt
 from src.recorder.models import POINTER_EVENT_KINDS, RecordedEvent
 
 _NEAREST_CANDIDATE_LIMIT = 8
 _DRAG_CLUSTER_MAX_DIST_PX = 60
-_DRAG_DESTINATION_LLM_POOL = 12
 _DRAG_OFFSET_THRESHOLD_PX = 5
-
-_DRAG_OVERLAP_RESPONSE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "exclude_indices": {
-            "type": "array",
-            "items": {"type": "integer"},
-        },
-    },
-    "required": ["exclude_indices"],
-}
 
 
 def _local_cursor(event: RecordedEvent) -> tuple[int, int] | None:
@@ -99,6 +84,43 @@ def _bbox_center_inside(
     ix, iy, iw, ih = inner
     cx, cy = ix + iw // 2, iy + ih // 2
     return ox <= cx < ox + ow and oy <= cy < oy + oh
+
+
+def _point_inside_bbox(x: int, y: int, bbox: tuple[int, int, int, int]) -> bool:
+    bx, by, bw, bh = bbox
+    return bx <= x < bx + bw and by <= y < by + bh
+
+
+def _drop_point_inside_candidate(
+    drop_x: int,
+    drop_y: int,
+    candidate: dict[str, Any],
+) -> bool:
+    bbox = candidate.get("bbox")
+    if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+        return _point_inside_bbox(
+            drop_x,
+            drop_y,
+            (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])),
+        )
+    return False
+
+
+def _destination_target_at_point(
+    all_detections: list[UiDetection],
+    x: int,
+    y: int,
+) -> UiDetection | None:
+    """Return the innermost text/element whose bbox contains the drop point."""
+    hits = [
+        det
+        for det in all_detections
+        if det.class_id in (YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT)
+        and _point_inside_bbox(x, y, det.bbox)
+    ]
+    if not hits:
+        return None
+    return min(hits, key=lambda det: det.bbox[2] * det.bbox[3])
 
 
 def format_field_context_hint(
@@ -177,6 +199,47 @@ def _candidate_display_label(candidate: dict[str, Any]) -> str:
     return f"({class_name})"
 
 
+def format_drag_candidate_anchor(candidate: dict[str, Any]) -> str | None:
+    """Return a hub-style drag anchor phrase like 「Chrome」圖示 or 「Desktop」文字."""
+    class_name = str(candidate.get("class_name") or "").strip()
+
+    for icon in candidate.get("icons") or []:
+        if not isinstance(icon, dict):
+            continue
+        label = str(icon.get("chinese_id") or icon.get("id") or "").strip()
+        if label:
+            return f"「{label}」圖示"
+
+    visible = _visible_text(candidate.get("text"))
+    if visible:
+        if class_name == "text":
+            return f"「{visible}」文字"
+        if class_name == "element":
+            return f"「{visible}」元素"
+        if class_name == "input":
+            return f"「{visible}」文字所在的輸入欄"
+        return f"「{visible}」"
+
+    raw = str(candidate.get("text") or "").strip()
+    if raw:
+        if class_name == "text":
+            return f"「{raw}」文字"
+        if class_name == "element":
+            return f"「{raw}」元素"
+
+    suffix_by_class = {
+        "text": "文字",
+        "element": "元素",
+        "input": "輸入欄",
+        "button": "按鈕",
+        "scrollbar": "滾動條",
+    }
+    suffix = suffix_by_class.get(class_name)
+    if suffix:
+        return suffix
+    return None
+
+
 def _candidate_center(candidate: dict[str, Any]) -> tuple[int, int] | None:
     center = candidate.get("center")
     if isinstance(center, (list, tuple)) and len(center) == 2:
@@ -215,18 +278,36 @@ def format_drag_destination_offset_hints(destination: dict[str, Any]) -> str:
 
     lines: list[str] = []
     for index, candidate in enumerate(candidates):
+        label = _candidate_display_label(candidate)
+        if _drop_point_inside_candidate(drop_x, drop_y, candidate):
+            lines.append(f"[index {index}] {label}: (on anchor, offset negligible)")
+            continue
         center = _candidate_center(candidate)
         if center is None:
             continue
         dx = drop_x - center[0]
         dy = drop_y - center[1]
         phrase = format_drag_relative_offset_phrase(dx, dy)
-        label = _candidate_display_label(candidate)
         if phrase is None:
             lines.append(f"[index {index}] {label}: (on anchor, offset negligible)")
         else:
             lines.append(f"[index {index}] {label}: {phrase}")
     return "\n".join(lines) if lines else "(none)"
+
+
+def candidate_anchor_name(candidate: dict[str, Any]) -> str | None:
+    """Return the label used to match a candidate in drag offset lookup."""
+    for icon in candidate.get("icons") or []:
+        if not isinstance(icon, dict):
+            continue
+        label = str(icon.get("chinese_id") or icon.get("id") or "").strip()
+        if label:
+            return label
+    visible = _visible_text(candidate.get("text"))
+    if visible:
+        return visible
+    raw = str(candidate.get("text") or "").strip()
+    return raw or None
 
 
 def candidate_offset_for_instruction(
@@ -244,6 +325,8 @@ def candidate_offset_for_instruction(
     for candidate in destination.get("candidates") or []:
         if not _candidate_matches_anchor(candidate, anchor):
             continue
+        if _drop_point_inside_candidate(drop_x, drop_y, candidate):
+            return None
         center = _candidate_center(candidate)
         if center is None:
             continue
@@ -251,28 +334,16 @@ def candidate_offset_for_instruction(
     return None
 
 
-def _bbox_overlap_ratio(
-    a: tuple[int, int, int, int],
-    b: tuple[int, int, int, int],
-) -> float:
-    ax, ay, aw, ah = a
-    bx, by, bw, bh = b
-    ax2, ay2 = ax + aw, ay + ah
-    bx2, by2 = bx + bw, by + bh
-    ix1, iy1 = max(ax, bx), max(ay, by)
-    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
-    if ix2 <= ix1 or iy2 <= iy1:
-        return 0.0
-    inter = (ix2 - ix1) * (iy2 - iy1)
-    area_a = max(aw * ah, 1)
-    area_b = max(bw * bh, 1)
-    return inter / min(area_a, area_b)
-
-
-def _visible_text(text: str | None) -> str:
-    if not text:
-        return ""
-    return "".join(ch for ch in text if not is_pua_char(ch)).strip()
+def _is_drag_cluster_member(det: UiDetection, anchor: UiDetection) -> bool:
+    det_bbox = det.bbox
+    anchor_bbox = anchor.bbox
+    if _bbox_center_inside(anchor_bbox, det_bbox):
+        return True
+    if _bbox_center_inside(det_bbox, anchor_bbox):
+        return True
+    dx = det.cx - anchor.cx
+    dy = det.cy - anchor.cy
+    return (dx * dx + dy * dy) <= _DRAG_CLUSTER_MAX_DIST_PX * _DRAG_CLUSTER_MAX_DIST_PX
 
 
 def _detection_identities(det: UiDetection) -> set[str]:
@@ -296,38 +367,10 @@ def _detection_identities(det: UiDetection) -> set[str]:
     return keys
 
 
-def _candidate_dict_identities(candidate: dict[str, Any]) -> set[str]:
-    keys: set[str] = set()
-    raw = str(candidate.get("text") or "").strip()
-    visible = _visible_text(candidate.get("text"))
-    if visible:
-        keys.add(f"text:{visible}")
-    if raw and not visible:
-        keys.add(f"text:{raw}")
-    for icon in candidate.get("icons") or []:
-        if not isinstance(icon, dict):
-            continue
-        label = str(icon.get("chinese_id") or icon.get("id") or "").strip()
-        if label:
-            keys.add(f"icon:{label}")
-            keys.add(f"text:{label}")
-    if not keys:
-        keys.add(f"{candidate.get('class_name', '')}:element")
-    return keys
-
-
-def _is_drag_cluster_member(det: UiDetection, anchor: UiDetection) -> bool:
-    det_bbox = det.bbox
-    anchor_bbox = anchor.bbox
-    if _bbox_center_inside(anchor_bbox, det_bbox):
-        return True
-    if _bbox_center_inside(det_bbox, anchor_bbox):
-        return True
-    if _bbox_overlap_ratio(anchor_bbox, det_bbox) >= 0.15:
-        return True
-    dx = det.cx - anchor.cx
-    dy = det.cy - anchor.cy
-    return (dx * dx + dy * dy) <= _DRAG_CLUSTER_MAX_DIST_PX * _DRAG_CLUSTER_MAX_DIST_PX
+def _visible_text(text: str | None) -> str:
+    if not text:
+        return ""
+    return "".join(ch for ch in text if not is_pua_char(ch)).strip()
 
 
 def _collect_drag_source_cluster(
@@ -367,120 +410,17 @@ def _collect_drag_source_identities(
     return identities
 
 
-def _parse_drag_overlap_exclude_indices(raw: str, *, pool_size: int) -> set[int]:
-    data = json.loads(raw)
-    if not isinstance(data, dict):
-        raise ValueError("response is not an object")
-    indices = data.get("exclude_indices")
-    if not isinstance(indices, list):
-        raise ValueError("exclude_indices must be a list")
-    excluded: set[int] = set()
-    for item in indices:
-        if not isinstance(item, (int, float)):
-            continue
-        idx = int(item)
-        if 0 <= idx < pool_size:
-            excluded.add(idx)
-    return excluded
-
-
-async def _llm_exclude_dragged_destination_indices(
-    start_cluster: list[UiDetection],
-    destination_pool: list[UiDetection],
-    *,
-    log_info: Callable[[str], None] | None = None,
-) -> set[int]:
-    """Ask the LLM which destination candidates are the dragged object (OCR typo tolerant)."""
-    if not start_cluster or not destination_pool:
-        return set()
-
-    prompt = get_prompt("recording_drag_destination_overlap").format(
-        start_candidate_text=_format_ui_candidates_text(start_cluster),
-        destination_candidate_text=_format_ui_candidates_text(destination_pool),
-    )
-    messages = [{"role": "user", "content": prompt}]
-
-    try:
-        result = await request_json_with_retry(
-            messages=messages,
-            response_schema=_DRAG_OVERLAP_RESPONSE_SCHEMA,
-            parse_reply=lambda raw: _parse_drag_overlap_exclude_indices(
-                raw,
-                pool_size=len(destination_pool),
-            ),
-            retry_instruction=get_prompt("recording_drag_destination_overlap_retry"),
-            log_info=log_info,
-            append_image_sizes=False,
-        )
-        return result
-    except (ValueError, json.JSONDecodeError) as exc:
-        if log_info is not None:
-            log_info(f"drag destination overlap LLM failed: {exc}")
-        return set()
-
-
-async def _filter_drag_destination_candidates(
+def _destination_candidates(
     all_detections: list[UiDetection],
     end_local: tuple[int, int],
-    start_cluster: list[UiDetection],
-    *,
-    limit: int = _NEAREST_CANDIDATE_LIMIT,
-    log_info: Callable[[str], None] | None = None,
-) -> tuple[list[UiDetection], set[int], set[str]]:
-    """Filter destination detections using exact keys plus LLM fuzzy overlap."""
-    if not all_detections:
-        return [], set(), set()
-
-    start_identities: set[str] = set()
-    for det in start_cluster:
-        start_identities.update(_detection_identities(det))
-
-    scored = sorted(
-        all_detections,
-        key=lambda d: _point_to_bbox_distance_sq(end_local[0], end_local[1], d.bbox),
-    )
-    pool = scored[:_DRAG_DESTINATION_LLM_POOL]
-    llm_exclude = await _llm_exclude_dragged_destination_indices(
-        start_cluster,
-        pool,
-        log_info=log_info,
-    )
-
-    kept: list[UiDetection] = []
-    for index, det in enumerate(pool):
-        if index in llm_exclude:
-            continue
-        if _detection_identities(det) & start_identities:
-            continue
-        kept.append(det)
-        if len(kept) >= limit:
-            break
-    return kept, llm_exclude, start_identities
-
-
-def _filtered_nearest_candidates(
-    all_detections: list[UiDetection],
-    local_x: int,
-    local_y: int,
-    exclude_identities: set[str],
     *,
     limit: int = _NEAREST_CANDIDATE_LIMIT,
 ) -> list[UiDetection]:
-    """Nearest detections at a point, skipping dragged-content identities."""
-    if not all_detections:
-        return []
-    scored = sorted(
-        all_detections,
-        key=lambda d: _point_to_bbox_distance_sq(local_x, local_y, d.bbox),
-    )
-    kept: list[UiDetection] = []
-    for det in scored:
-        if _detection_identities(det) & exclude_identities:
-            continue
-        kept.append(det)
-        if len(kept) >= limit:
-            break
-    return kept
+    """Return destination candidates at the drop point."""
+    hit = _destination_target_at_point(all_detections, end_local[0], end_local[1])
+    if hit is not None:
+        return [hit]
+    return _nearest_candidates(all_detections, end_local[0], end_local[1], limit=limit)
 
 
 def _candidate_dict_to_detection(candidate: dict[str, Any]) -> UiDetection:
@@ -498,43 +438,27 @@ def _candidate_dict_to_detection(candidate: dict[str, Any]) -> UiDetection:
     )
 
 
-async def _build_filtered_destination_vision(
+def _build_filtered_destination_vision(
     end_result: dict[str, Any],
     *,
     end_local: tuple[int, int],
-    start_cluster: list[UiDetection],
-    log_info: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     all_detections = end_result.get("all_detections")
-    llm_exclude: set[int] = set()
-    start_identities: set[str] = set()
     if isinstance(all_detections, list) and all_detections:
-        filtered, llm_exclude, start_identities = await _filter_drag_destination_candidates(
-            all_detections,
-            end_local,
-            start_cluster,
-            log_info=log_info,
-        )
+        filtered = _destination_candidates(all_detections, end_local)
         candidate_dicts = [_detection_to_dict(d) for d in filtered]
         candidate_text = (
             _format_ui_candidates_text(filtered)
             if filtered
-            else "(no destination candidates after excluding dragged content)"
+            else "(no destination candidates)"
         )
     else:
-        start_identities = set()
-        for det in start_cluster:
-            start_identities.update(_detection_identities(det))
-        candidate_dicts = [
-            c
-            for c in end_result.get("candidates", [])
-            if not (_candidate_dict_identities(c) & start_identities)
-        ]
+        candidate_dicts = list(end_result.get("candidates", []))
         filtered = [_candidate_dict_to_detection(c) for c in candidate_dicts]
         candidate_text = (
             _format_ui_candidates_text(filtered)
             if filtered
-            else "(no destination candidates after excluding dragged content)"
+            else "(no destination candidates)"
         )
 
     vision = {
@@ -549,8 +473,6 @@ async def _build_filtered_destination_vision(
                 "local_cursor": end_local,
             }
         ),
-        "excluded_dragged_identities": sorted(start_identities),
-        "llm_exclude_indices": sorted(llm_exclude),
     }
     vision["destination_offset_hints"] = format_drag_destination_offset_hints(vision)
     return vision
@@ -728,15 +650,9 @@ async def build_vision_context(
             debug_name="_end",
         )
         start_compact = _compact_vision_point(start_result)
-        start_cluster = _collect_drag_source_cluster(
-            start_result.get("all_detections") or [],
-            start_local,
-        )
-        end_compact = await _build_filtered_destination_vision(
+        end_compact = _build_filtered_destination_vision(
             end_result,
             end_local=end_local,
-            start_cluster=start_cluster,
-            log_info=log_info,
         )
         if persist_debug:
             write_json(
@@ -744,11 +660,6 @@ async def build_vision_context(
                 {
                     "event_index": event.index,
                     "local_cursor": list(end_local),
-                    "excluded_dragged_identities": end_compact.get(
-                        "excluded_dragged_identities",
-                        [],
-                    ),
-                    "llm_exclude_indices": end_compact.get("llm_exclude_indices", []),
                     "candidate_text": end_compact["candidate_text"],
                     "candidates": end_compact["candidates"],
                 },

@@ -176,7 +176,9 @@ async def drag(
 ):
     '''
     Drag from the UI target matching start_instruction to the target matching
-    destination_instruction.
+    destination_instruction. It will move the mouse cursor to the start_instruction and then drag to the destination_instruction.
+    start_instruction: the source phrase, including any relative pixel offsets in Traditional Chinese (e.g. 「OneNote」文字左方5個像素、下方55個像素的位置)
+    destination_instruction: the destination phrase, including any relative pixel offsets in Traditional Chinese (e.g. 「OneNote」文字左方5個像素、下方55個像素的位置)
     '''
     return await _drag(
         start_instruction=start_instruction,

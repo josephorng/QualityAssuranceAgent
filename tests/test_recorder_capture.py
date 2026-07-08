@@ -3,9 +3,14 @@ from __future__ import annotations
 import json
 import time
 from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import patch
 
-from src.recorder.capture import RecordingSession, _DOUBLE_CLICK_INTERVAL_S
+from src.recorder.capture import (
+    RecordingSession,
+    _DOUBLE_CLICK_INTERVAL_S,
+    _finalize_drag_end_screenshot,
+)
 from src.recorder.window_snapshot import WindowInfo
 
 
@@ -339,3 +344,123 @@ def test_pointer_click_persists_window_change(tmp_path) -> None:
     assert raw["target_window_title"] == "Google Chrome"
     assert raw["window_snapshot_debug"]["windows_before_count"] == 1
     assert raw["window_snapshot_debug"]["target_hwnd"] == 100
+
+
+def test_finalize_drag_end_screenshot_selects_release_monitor(tmp_path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "screenshots").mkdir()
+    pending = {
+        1: (str(run_dir / "screenshots" / "_pending_drag_end_mon1.jpeg"), 1, (0, 0)),
+        2: (str(run_dir / "screenshots" / "_pending_drag_end_mon2.jpeg"), 2, (1920, 0)),
+    }
+    for mon, (path, _, _) in pending.items():
+        Path(path).write_bytes(f"monitor-{mon}".encode())
+
+    with patch(
+        "src.recorder.capture._monitor_at_point",
+        return_value=(2, 1920, 0, 1920, 1080),
+    ):
+        end_path, end_mon_idx, end_offset = _finalize_drag_end_screenshot(
+            run_dir,
+            2,
+            (2100, 500),
+            pending,
+            fallback_mon_idx=1,
+            fallback_mon_offset=(0, 0),
+        )
+
+    assert end_path.endswith("event_002_end.jpeg")
+    assert end_mon_idx == 2
+    assert end_offset == (1920, 0)
+    assert (run_dir / "screenshots" / "event_002_end.jpeg").read_bytes() == b"monitor-2"
+    assert not Path(pending[1][0]).exists()
+    assert not Path(pending[2][0]).exists()
+
+
+def test_drag_prefers_pre_captured_monitor_on_release(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+    capture_calls = {"all": 0, "end_point": 0}
+
+    def _mock_capture_all(run_dir):
+        capture_calls["all"] += 1
+        pending = {
+            1: (str(run_dir / "screenshots" / "_pending_drag_end_mon1.jpeg"), 1, (0, 0)),
+            2: (str(run_dir / "screenshots" / "_pending_drag_end_mon2.jpeg"), 2, (1920, 0)),
+        }
+        for mon, (path, _, _) in pending.items():
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_bytes(f"monitor-{mon}".encode())
+        return pending
+
+    def _mock_capture_point(x, y, dest):
+        if str(dest).endswith("_end.jpeg"):
+            capture_calls["end_point"] += 1
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"fallback")
+        return str(dest), 1, (0, 0)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_all_monitors_to_pending",
+        side_effect=_mock_capture_all,
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_capture_point,
+    ), patch(
+        "src.recorder.capture._monitor_at_point",
+        return_value=(2, 1920, 0, 1920, 1080),
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.mouse import Button
+
+            session._on_mouse_click(100, 100, Button.left, True)
+            session._on_mouse_move(150, 150)
+            session._on_mouse_click(2100, 500, Button.left, False)
+        finally:
+            session.stop()
+
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "drag"
+    assert capture_calls["all"] >= 1
+    assert capture_calls["end_point"] == 0
+    assert (run_dir / "screenshots" / "event_001_end.jpeg").read_bytes() == b"monitor-2"
+    assert raw["end_monitor_index"] == 2
+    assert raw["end_monitor_offset"] == [1920, 0]
+
+
+def test_drag_end_capture_runs_once_at_drag_start(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+    capture_calls = {"all": 0}
+
+    def _mock_capture_all(run_dir):
+        capture_calls["all"] += 1
+        pending = {
+            1: (str(run_dir / "screenshots" / "_pending_drag_end_mon1.jpeg"), 1, (0, 0)),
+        }
+        Path(pending[1][0]).parent.mkdir(parents=True, exist_ok=True)
+        Path(pending[1][0]).write_bytes(b"mon1")
+        return pending
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_all_monitors_to_pending",
+        side_effect=_mock_capture_all,
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.mouse import Button
+
+            session._on_mouse_click(100, 100, Button.left, True)
+            session._on_mouse_move(150, 150)
+            session._on_mouse_move(300, 300)
+            session._on_mouse_move(450, 450)
+            session._on_mouse_click(500, 500, Button.left, False)
+        finally:
+            session.stop()
+
+    assert capture_calls["all"] == 1
+    assert (run_dir / "screenshots" / "event_001_end.jpeg").is_file()
+

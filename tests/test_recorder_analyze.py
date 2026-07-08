@@ -6,7 +6,13 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.recorder.analyze import analyze_event_to_cache, enrich_drag_instruction_offset
+from src.recorder.analyze import (
+    analyze_event_to_cache,
+    enrich_drag_instruction,
+    enrich_drag_instruction_offset,
+    enrich_drag_instruction_source,
+    instruction_for_drag,
+)
 from src.recorder.models import RecordedEvent
 from src.recorder.orchestrator import analyze_recording_session
 
@@ -229,8 +235,148 @@ def test_enrich_drag_instruction_offset_appends_exact_pixels() -> None:
     assert enriched == "從「Chrome」圖示拖到「Desktop」文字下方49個像素的位置"
 
 
+def test_enrich_drag_instruction_source_replaces_wrong_llm_pick() -> None:
+    vision = {
+        "candidates": [
+            {
+                "center": [190, 567],
+                "class_name": "text",
+                "text": "DDocker",
+            },
+            {
+                "center": [111, 531],
+                "class_name": "element",
+                "text": "a",
+            },
+        ],
+    }
+    instruction = "從「a」元素拖到「Edge」圖示"
+    enriched = enrich_drag_instruction_source(instruction, vision)
+    assert enriched == "從「DDocker」文字拖到「Edge」圖示"
+
+
+def test_instruction_for_drag_builds_from_nearest_candidates() -> None:
+    vision = {
+        "candidates": [
+            {
+                "center": [38, 636],
+                "class_name": "element",
+                "text": "chrome",
+                "icons": [{"chinese_id": "Chrome"}],
+            },
+        ],
+    }
+    destination = {
+        "local_cursor": (189, 638),
+        "candidates": [
+            {
+                "center": [191, 589],
+                "class_name": "text",
+                "text": "Desktop",
+            },
+        ],
+    }
+    assert instruction_for_drag(vision, destination) == (
+        "從「Chrome」圖示拖到「Desktop」文字下方49個像素的位置"
+    )
+
+
+def test_instruction_for_drag_event_six_like_case() -> None:
+    vision = {
+        "candidates": [
+            {
+                "center": [190, 567],
+                "class_name": "text",
+                "text": "DDocker",
+            },
+        ],
+    }
+    destination = {
+        "local_cursor": (192, 39),
+        "candidates": [
+            {
+                "center": [114, 30],
+                "class_name": "element",
+                "text": "edge-icon",
+                "icons": [{"chinese_id": "Edge"}],
+            },
+        ],
+    }
+    assert instruction_for_drag(vision, destination) == (
+        "從「DDocker」文字拖到「Edge」圖示右方78個像素、下方9個像素的位置"
+    )
+
+
+def test_instruction_for_drag_returns_none_without_candidates() -> None:
+    assert instruction_for_drag({"candidates": []}, {"candidates": [{"text": "x"}]}) is None
+    assert instruction_for_drag({"candidates": [{"text": "x"}]}, {"candidates": []}) is None
+
+
+def test_enrich_drag_instruction_normalizes_source_destination_and_offset() -> None:
+    vision = {
+        "candidates": [
+            {
+                "center": [190, 567],
+                "class_name": "text",
+                "text": "DDocker",
+            },
+        ],
+    }
+    destination = {
+        "local_cursor": (192, 39),
+        "candidates": [
+            {
+                "center": [114, 30],
+                "class_name": "element",
+                "text": "edge-icon",
+                "icons": [{"chinese_id": "Edge"}],
+            },
+        ],
+    }
+    instruction = "從「a」元素拖到「Edge」圖示下方9個像素的位置"
+    enriched = enrich_drag_instruction(
+        instruction,
+        vision=vision,
+        destination=destination,
+    )
+    assert enriched == "從「DDocker」文字拖到「Edge」圖示右方78個像素、下方9個像素的位置"
+
+
+def test_enrich_drag_instruction_offset_replaces_partial_llm_offset() -> None:
+    destination = {
+        "local_cursor": (192, 39),
+        "candidates": [
+            {
+                "center": [114, 30],
+                "class_name": "element",
+                "text": "edge-icon",
+                "icons": [{"chinese_id": "Edge"}],
+            },
+        ],
+    }
+    instruction = "從「a」元素拖到「Edge」圖示下方9個像素的位置"
+    enriched = enrich_drag_instruction_offset(instruction, destination)
+    assert enriched == "從「a」元素拖到「Edge」圖示右方78個像素、下方9個像素的位置"
+
+
+def test_enrich_drag_instruction_offset_replaces_incorrect_llm_offset() -> None:
+    destination = {
+        "local_cursor": (189, 638),
+        "candidates": [
+            {
+                "center": [191, 589],
+                "class_name": "text",
+                "text": "Desktop",
+            },
+        ],
+    }
+    instruction = "從「Chrome」圖示拖到「Desktop」文字右方12個像素的位置"
+    enriched = enrich_drag_instruction_offset(instruction, destination)
+    assert enriched == "從「Chrome」圖示拖到「Desktop」文字下方49個像素的位置"
+
+
 @pytest.mark.asyncio
-async def test_analyze_event_to_cache_enriches_drag_instruction(tmp_path: Path) -> None:
+async def test_analyze_event_to_cache_drag_is_deterministic(tmp_path: Path) -> None:
     event = RecordedEvent(
         index=2,
         timestamp_utc="t",
@@ -243,6 +389,14 @@ async def test_analyze_event_to_cache_enriches_drag_instruction(tmp_path: Path) 
         "used_vision": True,
         "candidate_text": "[index 0] icons=Chrome",
         "local_cursor": (38, 636),
+        "candidates": [
+            {
+                "center": [38, 636],
+                "class_name": "element",
+                "text": "chrome",
+                "icons": [{"chinese_id": "Chrome"}],
+            },
+        ],
         "destination": {
             "local_cursor": (189, 638),
             "candidate_text": "[index 1] text='Desktop'",
@@ -256,17 +410,11 @@ async def test_analyze_event_to_cache_enriches_drag_instruction(tmp_path: Path) 
             "destination_offset_hints": "[index 0] 「Desktop」: 下方49個像素",
         },
     }
-    llm_payload = {"instruction": "從「Chrome」圖示拖到「Desktop」文字"}
-    captured_messages: list[dict[str, object]] = []
-
-    async def _fake_request(*, messages, **kwargs):
-        captured_messages.extend(messages)
-        return llm_payload
 
     with patch(
         "src.recorder.analyze.request_json_with_retry",
-        new=AsyncMock(side_effect=_fake_request),
-    ):
+        new=AsyncMock(),
+    ) as llm_mock:
         result = await analyze_event_to_cache(
             event,
             run_dir=tmp_path,
@@ -275,6 +423,4 @@ async def test_analyze_event_to_cache_enriches_drag_instruction(tmp_path: Path) 
 
     assert result is not None
     assert result["instruction"] == "從「Chrome」圖示拖到「Desktop」文字下方49個像素的位置"
-    assert captured_messages
-    prompt_text = str(captured_messages[0]["content"])
-    assert "下方49個像素" in prompt_text
+    llm_mock.assert_not_called()

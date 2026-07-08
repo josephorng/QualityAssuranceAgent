@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -17,19 +16,11 @@ from src.recorder.vision_context import (
     build_vision_context,
     build_vision_context_at_point,
     candidate_offset_for_instruction,
+    format_drag_candidate_anchor,
     format_drag_destination_offset_hints,
     format_drag_relative_offset_phrase,
     format_field_context_hint,
 )
-
-
-@contextmanager
-def _mock_drag_overlap_llm(exclude_indices: set[int] | None = None):
-    with patch(
-        "src.recorder.vision_context.request_json_with_retry",
-        new=AsyncMock(return_value=exclude_indices or set()),
-    ):
-        yield
 
 
 def test_local_cursor_uses_monitor_offset() -> None:
@@ -140,7 +131,7 @@ async def test_build_vision_context_drag_includes_start_and_destination(tmp_path
         call_count["n"] += 1
         return start_detections if call_count["n"] == 1 else end_detections
 
-    with _mock_drag_overlap_llm(), patch(
+    with patch(
         "src.recorder.vision_context.cv2.imread",
         return_value=np.zeros((100, 100, 3), dtype=np.uint8),
     ), patch(
@@ -161,7 +152,7 @@ async def test_build_vision_context_drag_includes_start_and_destination(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_drag_destination_excludes_dragged_start_content(tmp_path) -> None:
+async def test_drag_destination_keeps_nearest_candidates_without_exclusion(tmp_path) -> None:
     start_shot = tmp_path / "event_start.jpeg"
     end_shot = tmp_path / "event_end.jpeg"
     start_shot.write_bytes(b"not-a-real-jpeg")
@@ -192,7 +183,7 @@ async def test_drag_destination_excludes_dragged_start_content(tmp_path) -> None
         call_count["n"] += 1
         return start_detections if call_count["n"] == 1 else end_detections
 
-    with _mock_drag_overlap_llm(), patch(
+    with patch(
         "src.recorder.vision_context.cv2.imread",
         return_value=np.zeros((100, 100, 3), dtype=np.uint8),
     ), patch(
@@ -202,8 +193,6 @@ async def test_drag_destination_excludes_dragged_start_content(tmp_path) -> None
         vision = await build_vision_context(event, run_dir=tmp_path, persist_debug=True)
 
     destination = vision["destination"]
-    assert "text='報告.pdf'" not in destination["candidate_text"]
-    assert "text='內嵌標籤'" not in destination["candidate_text"]
     assert "text='文件'" in destination["candidate_text"]
 
 
@@ -239,7 +228,7 @@ def test_detection_identities_links_icon_label_and_visible_text() -> None:
 
 
 @pytest.mark.asyncio
-async def test_drag_destination_excludes_chrome_icon_and_label(tmp_path) -> None:
+async def test_drag_destination_lists_nearest_candidates_at_drop(tmp_path) -> None:
     start_shot = tmp_path / "event_start.jpeg"
     end_shot = tmp_path / "event_end.jpeg"
     start_shot.write_bytes(b"x")
@@ -282,7 +271,7 @@ async def test_drag_destination_excludes_chrome_icon_and_label(tmp_path) -> None
         call_count["n"] += 1
         return start_detections if call_count["n"] == 1 else end_detections
 
-    with _mock_drag_overlap_llm(), patch(
+    with patch(
         "src.recorder.vision_context.cv2.imread",
         return_value=np.zeros((100, 100, 3), dtype=np.uint8),
     ), patch(
@@ -292,13 +281,11 @@ async def test_drag_destination_excludes_chrome_icon_and_label(tmp_path) -> None
         vision = await build_vision_context(event, run_dir=tmp_path, persist_debug=False)
 
     destination = vision["destination"]
-    assert "Chrome" not in destination["candidate_text"]
-    assert "text='Desktop'" in destination["candidate_text"]
-    assert "text:Chrome" in destination["excluded_dragged_identities"]
+    assert "Chrome" in destination["candidate_text"]
 
 
 @pytest.mark.asyncio
-async def test_llm_excludes_ocr_typo_dragged_label(tmp_path) -> None:
+async def test_drag_destination_uses_nearest_when_drop_not_inside_text(tmp_path) -> None:
     start_shot = tmp_path / "event_start.jpeg"
     end_shot = tmp_path / "event_end.jpeg"
     start_shot.write_bytes(b"x")
@@ -330,7 +317,7 @@ async def test_llm_excludes_ocr_typo_dragged_label(tmp_path) -> None:
         call_count["n"] += 1
         return start_detections if call_count["n"] == 1 else end_detections
 
-    with _mock_drag_overlap_llm({0}), patch(
+    with patch(
         "src.recorder.vision_context.cv2.imread",
         return_value=np.zeros((100, 100, 3), dtype=np.uint8),
     ), patch(
@@ -340,9 +327,8 @@ async def test_llm_excludes_ocr_typo_dragged_label(tmp_path) -> None:
         vision = await build_vision_context(event, run_dir=tmp_path, persist_debug=False)
 
     destination = vision["destination"]
-    assert "振銓" not in destination["candidate_text"]
+    assert "振銓" in destination["candidate_text"]
     assert "text='Desktop'" in destination["candidate_text"]
-    assert destination["llm_exclude_indices"] == [0]
 
 
 @pytest.mark.asyncio
@@ -436,6 +422,23 @@ def test_format_drag_relative_offset_phrase_negligible() -> None:
     assert format_drag_relative_offset_phrase(2, -3) is None
 
 
+def test_format_drag_candidate_anchor_text() -> None:
+    assert format_drag_candidate_anchor({"class_name": "text", "text": "Desktop"}) == "「Desktop」文字"
+
+
+def test_format_drag_candidate_anchor_icon() -> None:
+    candidate = {
+        "class_name": "element",
+        "text": "pua",
+        "icons": [{"chinese_id": "Chrome"}],
+    }
+    assert format_drag_candidate_anchor(candidate) == "「Chrome」圖示"
+
+
+def test_format_drag_candidate_anchor_element_text() -> None:
+    assert format_drag_candidate_anchor({"class_name": "element", "text": "a"}) == "「a」元素"
+
+
 def test_format_drag_destination_offset_hints_desktop_like() -> None:
     destination = {
         "local_cursor": (189, 638),
@@ -470,6 +473,83 @@ def test_candidate_offset_for_instruction_matches_desktop() -> None:
         ],
     }
     assert candidate_offset_for_instruction(destination, "Desktop") == "下方49個像素"
+
+
+def test_format_drag_destination_offset_hints_when_drop_inside_anchor() -> None:
+    destination = {
+        "local_cursor": (188, 672),
+        "candidates": [
+            {
+                "bbox": [171, 665, 35, 15],
+                "center": [188, 672],
+                "class_name": "text",
+                "text": "振銓",
+            },
+        ],
+    }
+    hints = format_drag_destination_offset_hints(destination)
+    assert "[index 0] 「振銓」: (on anchor, offset negligible)" in hints
+
+
+def test_candidate_offset_for_instruction_when_drop_inside_anchor() -> None:
+    destination = {
+        "local_cursor": (188, 672),
+        "candidates": [
+            {
+                "bbox": [171, 665, 35, 15],
+                "center": [188, 672],
+                "class_name": "text",
+                "text": "振銓",
+            },
+        ],
+    }
+    assert candidate_offset_for_instruction(destination, "振銓") is None
+
+
+@pytest.mark.asyncio
+async def test_drag_destination_uses_hit_target_when_drop_inside_text(tmp_path) -> None:
+    start_shot = tmp_path / "event_start.jpeg"
+    end_shot = tmp_path / "event_end.jpeg"
+    start_shot.write_bytes(b"x")
+    end_shot.write_bytes(b"x")
+    event = RecordedEvent(
+        index=7,
+        timestamp_utc="t",
+        kind="drag",
+        cursor_xy=(43, 638),
+        end_xy=(2108, 672),
+        monitor_offset=(0, 0),
+        end_monitor_offset=(1920, 0),
+        screenshot_path=str(start_shot),
+        end_screenshot_path=str(end_shot),
+    )
+    start_detections = [
+        _detection_from_bbox((12, 607, 51, 50), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "Chrome"}]),
+        _detection_from_bbox((10, 680, 58, 14), YOLO_CLASS_TEXT, text="Cbhrome"),
+    ]
+    end_detections = [
+        _detection_from_bbox((171, 665, 35, 15), YOLO_CLASS_TEXT, text="振銓"),
+        _detection_from_bbox((162, 580, 56, 15), YOLO_CLASS_TEXT, text="Desktop"),
+    ]
+
+    call_count = {"n": 0}
+
+    def _fake_build(_bgr, **_kwargs):
+        call_count["n"] += 1
+        return start_detections if call_count["n"] == 1 else end_detections
+
+    with patch(
+        "src.recorder.vision_context.cv2.imread",
+        return_value=np.zeros((100, 100, 3), dtype=np.uint8),
+    ), patch(
+        "src.recorder.vision_context._build_candidates_from_bgr",
+        side_effect=_fake_build,
+    ):
+        vision = await build_vision_context(event, run_dir=tmp_path, persist_debug=False)
+
+    destination = vision["destination"]
+    assert "text='振銓'" in destination["candidate_text"]
+    assert "text='Desktop'" not in destination["candidate_text"]
 
 
 @pytest.mark.asyncio
@@ -508,7 +588,7 @@ async def test_build_vision_context_drag_includes_destination_offset_hints(tmp_p
         call_count["n"] += 1
         return start_detections if call_count["n"] == 1 else end_detections
 
-    with _mock_drag_overlap_llm(), patch(
+    with patch(
         "src.recorder.vision_context.cv2.imread",
         return_value=np.zeros((100, 100, 3), dtype=np.uint8),
     ), patch(

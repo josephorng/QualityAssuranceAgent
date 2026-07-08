@@ -11,7 +11,9 @@ from src.recorder.models import RecordedEvent
 from src.recorder.to_cache import event_summary_for_llm
 from src.recorder.vision_context import (
     build_vision_context,
+    candidate_anchor_name,
     candidate_offset_for_instruction,
+    format_drag_candidate_anchor,
     format_drag_destination_offset_hints,
     format_field_context_hint,
 )
@@ -25,8 +27,12 @@ _INSTRUCTION_RESPONSE_SCHEMA: dict[str, Any] = {
     "required": ["instruction"],
 }
 
-_DRAG_DESTINATION_SUFFIX_RE = re.compile(r"(文字|圖示|檔案|資料夾|按鈕)*")
-_OFFSET_ALREADY_PRESENT_RE = re.compile(r"個像素")
+_DRAG_ANCHOR_RE = re.compile(r"拖到「([^」]+)」")
+_DRAG_SOURCE_RE = re.compile(r"^從「[^」]+」(?:文字|圖示|檔案|資料夾|按鈕|元素)*(?=拖到)")
+_DRAG_DESTINATION_SUFFIX_RE = re.compile(r"(文字|圖示|檔案|資料夾|按鈕|元素)*")
+_DRAG_OFFSET_PHRASE_RE = re.compile(
+    r"(?:(?:左方|右方|上方|下方)\d+個像素)(?:、(?:(?:左方|右方|上方|下方)\d+個像素))*"
+)
 
 
 def _parse_instruction_reply(raw: str) -> dict[str, Any]:
@@ -39,15 +45,68 @@ def _parse_instruction_reply(raw: str) -> dict[str, Any]:
     return {"instruction": instruction.strip()}
 
 
+def enrich_drag_instruction_source(
+    instruction: str,
+    vision: dict[str, Any],
+) -> str:
+    """Replace the drag source with the nearest OCR/YOLO candidate."""
+    if "拖到" not in instruction:
+        return instruction
+
+    candidates = vision.get("candidates") or []
+    if not candidates:
+        return instruction
+
+    anchor = format_drag_candidate_anchor(candidates[0])
+    if not anchor:
+        return instruction
+
+    match = _DRAG_SOURCE_RE.match(instruction)
+    if not match:
+        return instruction
+
+    return f"從{anchor}{instruction[match.end():]}"
+
+
+def enrich_drag_instruction_destination(
+    instruction: str,
+    destination: dict[str, Any],
+) -> str:
+    """Replace the drag destination anchor with the nearest OCR/YOLO candidate."""
+    if "拖到" not in instruction:
+        return instruction
+
+    candidates = destination.get("candidates") or []
+    if not candidates:
+        return instruction
+
+    anchor = format_drag_candidate_anchor(candidates[0])
+    if not anchor:
+        return instruction
+
+    match = _DRAG_ANCHOR_RE.search(instruction)
+    if not match:
+        return instruction
+
+    anchor_end = match.end()
+    suffix_match = _DRAG_DESTINATION_SUFFIX_RE.match(instruction[anchor_end:])
+    insert_at = anchor_end + (suffix_match.end() if suffix_match else 0)
+    remainder = instruction[insert_at:]
+    remainder = _DRAG_OFFSET_PHRASE_RE.sub("", remainder, count=1)
+    if remainder.startswith("的位置"):
+        remainder = remainder[len("的位置") :]
+    return instruction[: match.start()] + f"拖到{anchor}" + remainder
+
+
 def enrich_drag_instruction_offset(
     instruction: str,
     destination: dict[str, Any],
 ) -> str:
-    """Append exact relative pixel offset to a drag instruction when missing."""
-    if "拖到" not in instruction or _OFFSET_ALREADY_PRESENT_RE.search(instruction):
+    """Normalize drag instructions to the exact OCR-derived relative pixel offset."""
+    if "拖到" not in instruction:
         return instruction
 
-    match = re.search(r"拖到「([^」]+)」", instruction)
+    match = _DRAG_ANCHOR_RE.search(instruction)
     if not match:
         return instruction
 
@@ -58,9 +117,23 @@ def enrich_drag_instruction_offset(
     anchor_end = match.end()
     suffix_match = _DRAG_DESTINATION_SUFFIX_RE.match(instruction[anchor_end:])
     insert_at = anchor_end + (suffix_match.end() if suffix_match else 0)
-    if instruction[insert_at : insert_at + 3] == "的位置":
-        return instruction[:insert_at] + offset_phrase + instruction[insert_at:]
-    return instruction[:insert_at] + f"{offset_phrase}的位置" + instruction[insert_at:]
+    remainder = instruction[insert_at:]
+    remainder = _DRAG_OFFSET_PHRASE_RE.sub("", remainder, count=1)
+    if remainder.startswith("的位置"):
+        remainder = remainder[len("的位置") :]
+    return instruction[:insert_at] + offset_phrase + "的位置" + remainder
+
+
+def enrich_drag_instruction(
+    instruction: str,
+    *,
+    vision: dict[str, Any],
+    destination: dict[str, Any],
+) -> str:
+    """Normalize drag source, destination, and relative pixel offset from vision."""
+    instruction = enrich_drag_instruction_source(instruction, vision)
+    instruction = enrich_drag_instruction_destination(instruction, destination)
+    return enrich_drag_instruction_offset(instruction, destination)
 
 
 def instruction_for_text_input(text: str) -> str | None:
@@ -69,6 +142,32 @@ def instruction_for_text_input(text: str) -> str | None:
     if not cleaned:
         return None
     return f"輸入「{cleaned}」"
+
+
+def instruction_for_drag(
+    vision: dict[str, Any],
+    destination: dict[str, Any],
+) -> str | None:
+    """Build a hub-script drag line from nearest OCR/YOLO candidates."""
+    source_candidates = vision.get("candidates") or []
+    dest_candidates = destination.get("candidates") or []
+    if not source_candidates or not dest_candidates:
+        return None
+
+    source_anchor = format_drag_candidate_anchor(source_candidates[0])
+    dest_anchor = format_drag_candidate_anchor(dest_candidates[0])
+    if not source_anchor or not dest_anchor:
+        return None
+
+    dest_name = candidate_anchor_name(dest_candidates[0])
+    offset_phrase = (
+        candidate_offset_for_instruction(destination, dest_name)
+        if dest_name
+        else None
+    )
+    if offset_phrase:
+        return f"從{source_anchor}拖到{dest_anchor}{offset_phrase}的位置"
+    return f"從{source_anchor}拖到{dest_anchor}"
 
 
 async def analyze_event_to_cache(
@@ -92,13 +191,18 @@ async def analyze_event_to_cache(
     if vision is None:
         vision = await build_vision_context(event, run_dir=run_dir, log_info=log_info)
 
+    destination = vision.get("destination") if isinstance(vision.get("destination"), dict) else {}
+    if event.kind == "drag":
+        drag_instruction = instruction_for_drag(vision, destination)
+        if drag_instruction is not None:
+            return {"instruction": drag_instruction}
+
     local = vision.get("local_cursor")
     if isinstance(local, (list, tuple)) and len(local) == 2:
         cursor_x, cursor_y = local[0], local[1]
     else:
         cursor_x, cursor_y = "", ""
 
-    destination = vision.get("destination") if isinstance(vision.get("destination"), dict) else {}
     dest_local = destination.get("local_cursor")
     if isinstance(dest_local, (list, tuple)) and len(dest_local) == 2:
         destination_x, destination_y = dest_local[0], dest_local[1]
@@ -160,10 +264,11 @@ async def analyze_event_to_cache(
             log_info=log_info,
             append_image_sizes=True,
         )
-        if event.kind == "drag" and destination:
-            instruction = enrich_drag_instruction_offset(
+        if event.kind == "drag":
+            instruction = enrich_drag_instruction(
                 result["instruction"],
-                destination,
+                vision=vision,
+                destination=destination,
             )
             return {"instruction": instruction}
         return result

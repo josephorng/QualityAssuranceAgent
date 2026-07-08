@@ -108,6 +108,95 @@ def _pending_capture_path(run_dir: Path) -> Path:
     return run_dir / "screenshots" / "_pending_capture.jpeg"
 
 
+def _pending_drag_end_capture_path(run_dir: Path, monitor_index: int) -> Path:
+    return run_dir / "screenshots" / f"_pending_drag_end_mon{monitor_index}.jpeg"
+
+
+def _capture_all_monitors_to_pending(
+    run_dir: Path,
+) -> dict[int, tuple[str, int, tuple[int, int]]]:
+    """Capture every physical monitor into temporary drag-end pending files."""
+    captures: dict[int, tuple[str, int, tuple[int, int]]] = {}
+    with mss.mss() as sct:
+        for raw_idx in range(1, len(sct.monitors)):
+            mon_idx = resolve_monitor_index(sct, raw_idx)
+            monitor = sct.monitors[mon_idx]
+            dest = _pending_drag_end_capture_path(run_dir, mon_idx)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shot = sct.grab(monitor)
+            from PIL import Image
+
+            img = Image.frombytes("RGB", shot.size, shot.rgb)
+            img.save(dest, format="JPEG")
+            captures[mon_idx] = (
+                str(dest),
+                mon_idx,
+                (int(monitor["left"]), int(monitor["top"])),
+            )
+    return captures
+
+
+def _discard_pending_drag_end_capture_files(
+    captures: dict[int, tuple[str, int, tuple[int, int]]] | None,
+) -> None:
+    if not captures:
+        return
+    for path, _, _ in captures.values():
+        pending = Path(path)
+        if pending.is_file():
+            pending.unlink()
+
+
+def _finalize_drag_end_screenshot(
+    run_dir: Path,
+    index: int,
+    end_xy: tuple[int, int],
+    pending_captures: dict[int, tuple[str, int, tuple[int, int]]] | None,
+    *,
+    fallback_mon_idx: int,
+    fallback_mon_offset: tuple[int, int],
+) -> tuple[str, int, tuple[int, int]]:
+    """Pick the pre-captured monitor at ``end_xy`` and save it as ``event_{index}_end``."""
+    end_dest = screenshot_path_for_event_end(run_dir, index)
+    if not pending_captures:
+        try:
+            return _capture_screenshot_at_point(end_xy[0], end_xy[1], end_dest)
+        except Exception:
+            return str(end_dest), fallback_mon_idx, fallback_mon_offset
+
+    raw_idx, _, _, _, _ = _monitor_at_point(end_xy[0], end_xy[1])
+    with mss.mss() as sct:
+        end_mon_idx = resolve_monitor_index(sct, raw_idx)
+
+    entry = pending_captures.get(end_mon_idx)
+    if entry is None:
+        try:
+            return _capture_screenshot_at_point(end_xy[0], end_xy[1], end_dest)
+        except Exception:
+            return str(end_dest), fallback_mon_idx, fallback_mon_offset
+
+    src = Path(entry[0])
+    end_dest.parent.mkdir(parents=True, exist_ok=True)
+    if end_dest.is_file():
+        end_dest.unlink()
+    if src.is_file():
+        src.replace(end_dest)
+    else:
+        try:
+            return _capture_screenshot_at_point(end_xy[0], end_xy[1], end_dest)
+        except Exception:
+            return str(end_dest), fallback_mon_idx, fallback_mon_offset
+
+    for mon_idx, (path, _, _) in pending_captures.items():
+        if mon_idx == end_mon_idx:
+            continue
+        pending = Path(path)
+        if pending.is_file():
+            pending.unlink()
+
+    return str(end_dest), entry[1], entry[2]
+
+
 def _finalize_screenshot(
     run_dir: Path,
     index: int,
@@ -340,6 +429,7 @@ class RecordingSession:
         self._left_press_dragging = False
         self._last_move_xy: tuple[int, int] | None = None
         self._pending_screenshot: tuple[str, int, tuple[int, int]] | None = None
+        self._pending_drag_end_captures: dict[int, tuple[str, int, tuple[int, int]]] | None = None
         self._pending_windows_before: tuple[WindowInfo, ...] | None = None
         self._pending_text_chars: list[str] = []
         self._pending_text_meta: dict[str, Any] | None = None
@@ -399,6 +489,7 @@ class RecordingSession:
             self._left_press_dragging = False
             self._last_move_xy = None
             self._pending_screenshot = None
+            self._pending_drag_end_captures = None
             self._pending_windows_before = None
             self._pending_text_chars = []
             self._pending_text_meta = None
@@ -460,6 +551,7 @@ class RecordingSession:
             pending_coords = self._pending_click_coords
             left_press_dragging = self._left_press_dragging
             last_move_xy = self._last_move_xy
+            pending_drag_end = self._pending_drag_end_captures
             self._pending_click_timer = None
             self._pending_click_coords = None
             self._pending_click_down_at = None
@@ -467,8 +559,10 @@ class RecordingSession:
             self._left_press_dragging = False
             self._last_move_xy = None
             self._pending_screenshot = None
+            self._pending_drag_end_captures = None
             self._pending_windows_before = None
 
+        _discard_pending_drag_end_capture_files(pending_drag_end)
         self._flush_pending_text_input()
         if pending is not None:
             pending.cancel()
@@ -722,7 +816,36 @@ class RecordingSession:
         if pending is not None:
             pending.cancel()
 
+    def _discard_pending_drag_end_captures(self) -> None:
+        with self._lock:
+            captures = self._pending_drag_end_captures
+            self._pending_drag_end_captures = None
+        _discard_pending_drag_end_capture_files(captures)
+
+    def _capture_pending_drag_end_screens(self) -> None:
+        with self._lock:
+            if not self._left_press_dragging or self._run_dir is None:
+                return
+            if self._pending_drag_end_captures is not None:
+                return
+            run_dir = self._run_dir
+
+        try:
+            captures = _capture_all_monitors_to_pending(run_dir)
+        except Exception:
+            return
+
+        with self._lock:
+            if not self._left_press_dragging:
+                _discard_pending_drag_end_capture_files(captures)
+                return
+            if self._pending_drag_end_captures is not None:
+                _discard_pending_drag_end_capture_files(captures)
+                return
+            self._pending_drag_end_captures = captures
+
     def _clear_pending_left_gesture(self) -> None:
+        self._discard_pending_drag_end_captures()
         with self._lock:
             self._pending_click_coords = None
             self._pending_click_down_at = None
@@ -747,6 +870,7 @@ class RecordingSession:
 
     def _flush_pending_click(self, x: int, y: int, button: str) -> None:
         self._flush_pending_text_input()
+        self._discard_pending_drag_end_captures()
         with self._lock:
             run_dir = self._run_dir
             if run_dir is None:
@@ -804,8 +928,10 @@ class RecordingSession:
             self._next_index += 1
             pending_shot = self._pending_screenshot
             pending_windows = self._pending_windows_before
+            pending_drag_end = self._pending_drag_end_captures
             self._pending_screenshot = None
             self._pending_windows_before = None
+            self._pending_drag_end_captures = None
             self._pending_click_timer = None
             self._pending_click_coords = None
             self._pending_click_down_at = None
@@ -818,15 +944,14 @@ class RecordingSession:
             (x1, y1),
             pending_shot,
         )
-        end_dest = screenshot_path_for_event_end(run_dir, index)
-        try:
-            end_shot_path, end_mon_idx, end_mon_offset = _capture_screenshot_at_point(
-                x2,
-                y2,
-                end_dest,
-            )
-        except Exception:
-            end_shot_path, end_mon_idx, end_mon_offset = str(end_dest), mon_idx, mon_offset
+        end_shot_path, end_mon_idx, end_mon_offset = _finalize_drag_end_screenshot(
+            run_dir,
+            index,
+            (x2, y2),
+            pending_drag_end,
+            fallback_mon_idx=mon_idx,
+            fallback_mon_offset=mon_offset,
+        )
         self._remember_pointer_cursor((x2, y2))
         self._queue_event(
             _QueuedEvent(
@@ -927,6 +1052,7 @@ class RecordingSession:
             with self._lock:
                 self._left_press_dragging = True
             self._cancel_pending_click_timer()
+            self._capture_pending_drag_end_screens()
 
     def _on_left_mouse_down(self, ix: int, iy: int, btn: str) -> None:
         now = time.monotonic()

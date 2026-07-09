@@ -145,6 +145,8 @@ class MainHub(ctk.CTk):
         self._recording_hotkey = RecordingHotkeyManager()
         self._recording_analysis_thread: threading.Thread | None = None
         self._analysis_cancel_event = threading.Event()
+        self._suppress_script_cache_sync = False
+        self._sync_cache_after_id: str | None = None
         self._record_btn: ctk.CTkButton | None = None
         self._analysis_progress_frame: ctk.CTkFrame | None = None
         self._analysis_progress: ctk.CTkProgressBar | None = None
@@ -163,8 +165,12 @@ class MainHub(ctk.CTk):
                 self._script_path = p
                 self._runtime_commands_cache_path = None
                 text = p.read_text(encoding="utf-8")
-                self._script_text.delete("0.0", "end")
-                self._script_text.insert("0.0", text)
+                self._suppress_script_cache_sync = True
+                try:
+                    self._script_text.delete("0.0", "end")
+                    self._script_text.insert("0.0", text)
+                finally:
+                    self._suppress_script_cache_sync = False
                 self._refresh_script_path_label()
         if self._script_path is None:
             self._try_load_last_runtime_command_cache()
@@ -212,8 +218,12 @@ class MainHub(ctk.CTk):
         if not raw.strip():
             return
         self._runtime_commands_cache_path = cache_path
-        self._script_text.delete("0.0", "end")
-        self._script_text.insert("0.0", raw)
+        self._suppress_script_cache_sync = True
+        try:
+            self._script_text.delete("0.0", "end")
+            self._script_text.insert("0.0", raw)
+        finally:
+            self._suppress_script_cache_sync = False
         self._refresh_script_path_label()
 
     def _append_runtime_command_to_script_view(self, cmd: str) -> None:
@@ -249,9 +259,46 @@ class MainHub(ctk.CTk):
         p = self._runtime_commands_cache_path
         if p is None or not p.is_file():
             return
-        self._script_text.delete("0.0", "end")
-        self._script_text.insert("0.0", p.read_text(encoding="utf-8"))
+        self._suppress_script_cache_sync = True
+        try:
+            self._script_text.delete("0.0", "end")
+            self._script_text.insert("0.0", p.read_text(encoding="utf-8"))
+        finally:
+            self._suppress_script_cache_sync = False
         self._refresh_script_path_label()
+
+    def _sync_script_text_to_runtime_cache(self) -> bool:
+        """Write the script textbox to runtime_commands_cache.txt when no script file is open."""
+        if self._script_path is not None:
+            return False
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            return False
+        cache_path = self._runtime_command_transcript_path()
+        self._runtime_commands_cache_path = cache_path
+        body = self._script_text.get("0.0", "end").rstrip() + "\n"
+        cache_path.write_text(body, encoding="utf-8")
+        self._refresh_script_path_label()
+        return True
+
+    def _schedule_sync_script_text_to_runtime_cache(self) -> None:
+        if self._suppress_script_cache_sync or self._script_path is not None:
+            return
+        if self._sync_cache_after_id is not None:
+            self.after_cancel(self._sync_cache_after_id)
+        self._sync_cache_after_id = self.after(250, self._run_scheduled_sync_script_text_to_runtime_cache)
+
+    def _run_scheduled_sync_script_text_to_runtime_cache(self) -> None:
+        self._sync_cache_after_id = None
+        self._sync_script_text_to_runtime_cache()
+
+    def _on_script_text_modified(self, _event: object = None) -> None:
+        textbox = self._script_text._textbox
+        if textbox.edit_modified():
+            textbox.edit_modified(False)
+            self._schedule_sync_script_text_to_runtime_cache()
+
+    def _bind_script_text_cache_sync(self) -> None:
+        self._script_text._textbox.bind("<<Modified>>", self._on_script_text_modified)
 
     def _build_header(self) -> None:
         head = ctk.CTkFrame(self, fg_color="transparent")
@@ -452,6 +499,7 @@ class MainHub(ctk.CTk):
         self._script_path_label.pack(anchor="w", padx=16, pady=(4, 8))
         self._script_text = ctk.CTkTextbox(box, font=ctk.CTkFont(size=14), wrap="word")
         self._script_text.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+        self._bind_script_text_cache_sync()
         self._script_controls.extend(
             [b_open, b_save, b_sas, b_clear, self._record_btn, self._script_text]
         )
@@ -600,20 +648,23 @@ class MainHub(ctk.CTk):
         self._script_path = p
         self._runtime_commands_cache_path = None
         text = p.read_text(encoding="utf-8")
-        self._script_text.delete("0.0", "end")
-        self._script_text.insert("0.0", text)
+        self._suppress_script_cache_sync = True
+        try:
+            self._script_text.delete("0.0", "end")
+            self._script_text.insert("0.0", text)
+        finally:
+            self._suppress_script_cache_sync = False
         self._refresh_script_path_label()
         self._persist_hub_ui_state()
 
     def _script_save(self) -> None:
-        body = self._script_text.get("0.0", "end").rstrip() + "\n"
         if self._script_path is not None:
+            body = self._script_text.get("0.0", "end").rstrip() + "\n"
             self._script_path.write_text(body, encoding="utf-8")
             self._status.configure(text=f"已儲存 {self._script_path.name}")
             self._persist_hub_ui_state()
             return
-        if self._runtime_commands_cache_path is not None:
-            self._runtime_commands_cache_path.write_text(body, encoding="utf-8")
+        if self._sync_script_text_to_runtime_cache():
             self._status.configure(text="已儲存執行命令")
             return
         self._script_save_as()
@@ -641,7 +692,11 @@ class MainHub(ctk.CTk):
         self._script_path = None
         self._runtime_commands_cache_path = None
         self._script_text.configure(state="normal")
-        self._script_text.delete("0.0", "end")
+        self._suppress_script_cache_sync = True
+        try:
+            self._script_text.delete("0.0", "end")
+        finally:
+            self._suppress_script_cache_sync = False
         self._refresh_script_path_label()
         self._status.configure(text="", text_color=("gray20", "gray65"))
         self._persist_hub_ui_state()
@@ -847,6 +902,7 @@ class MainHub(ctk.CTk):
             if self._script_text.get("0.0", "end").strip():
                 self._script_text.insert("end", "\n")
             self._script_text.insert("end", "\n".join(lines) + "\n")
+            self._sync_script_text_to_runtime_cache()
         else:
             show_ctk_message(self, "錄製分析完成", msg, kind="info")
 
@@ -938,6 +994,7 @@ class MainHub(ctk.CTk):
             if self._script_path is not None:
                 script_disk_path = self._script_path
             else:
+                self._sync_script_text_to_runtime_cache()
                 script_disk_path = self._runtime_commands_cache_path
             self._last_run_was_script_mode = True
             self._bridge = None
@@ -955,7 +1012,11 @@ class MainHub(ctk.CTk):
             self._runtime_commands_cache_path = cache_path
             cache_path.write_text("", encoding="utf-8")
             self._script_text.configure(state="normal")
-            self._script_text.delete("0.0", "end")
+            self._suppress_script_cache_sync = True
+            try:
+                self._script_text.delete("0.0", "end")
+            finally:
+                self._suppress_script_cache_sync = False
             self._refresh_script_path_label()
 
             args = _WorkerArgs(

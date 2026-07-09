@@ -166,6 +166,35 @@ def ollama_host_responds(host: str, *, timeout_seconds: float = _OLLAMA_PROBE_TI
         return False
 
 
+def vllm_host_responds(host: str, *, timeout_seconds: float = _OLLAMA_PROBE_TIMEOUT_SECONDS) -> bool:
+    """Return True if an OpenAI-compatible vLLM server responds at ``host`` (GET /v1/models)."""
+    base = host.strip().rstrip("/")
+    if not base:
+        return False
+    url = f"{base}/v1/models"
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            return 200 <= int(resp.status) < 300
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return False
+
+
+def probe_llm_backend(backend: str) -> tuple[bool, str]:
+    """Test connectivity for the selected LLM backend preset. Returns ``(ok, message)``."""
+    key = canonicalize_llm_backend(backend)
+    preset = preset_for_backend(key)
+    host = str(preset["ollama_host"])
+    model = str(preset["brain_lm"])
+    if key == "vllm_server":
+        if vllm_host_responds(host):
+            return True, f"連線成功\n主機：{host}\n模型：{model}"
+        return False, f"無法連線至 vLLM\n主機：{host}"
+    if ollama_host_responds(host):
+        return True, f"連線成功\n主機：{host}\n模型：{model}"
+    return False, f"無法連線至 Ollama\n主機：{host}"
+
+
 def select_reachable_ollama_host(
     *,
     local_host: str = OLLAMA_PROBE_LOCAL_HOST,

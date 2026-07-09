@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -11,6 +12,7 @@ from src.common.settings import (
     canonicalize_llm_backend,
     load_agent_settings_dict,
     preset_for_backend,
+    probe_llm_backend,
     save_agent_settings_dict,
     validate_agent_settings_dict,
 )
@@ -160,6 +162,35 @@ def open_agent_settings_dialog(
         if on_saved is not None:
             on_saved()
         _close()
+
+    test_btn = ctk.CTkButton(btn_row, text="測試連線", width=100)
+    test_btn.pack(side="left")
+
+    def _on_probe_done(ok: bool, message: str) -> None:
+        if not dialog.winfo_exists():
+            return
+        test_btn.configure(state="normal", text="測試連線")
+        show_ctk_message(
+            dialog,
+            "測試連線",
+            message,
+            kind="info" if ok else "error",
+        )
+
+    def _test_connection() -> None:
+        backend = _label_to_backend(backend_var.get())
+        test_btn.configure(state="disabled", text="測試中…")
+
+        def _worker() -> None:
+            try:
+                ok, message = probe_llm_backend(backend)
+            except ValueError as e:
+                ok, message = False, str(e)
+            dialog.after(0, lambda: _on_probe_done(ok, message))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    test_btn.configure(command=_test_connection)
 
     ctk.CTkButton(btn_row, text="取消", width=100, command=_close).pack(side="right", padx=(8, 0))
     ctk.CTkButton(btn_row, text="儲存", width=100, command=_save).pack(side="right")

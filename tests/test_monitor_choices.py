@@ -27,4 +27,5 @@ def test_list_eye_monitor_choices_with_physical(monkeypatch) -> None:
 
 def test_unique_run_folder_name(monkeypatch) -> None:
     monkeypatch.setattr("src.common.run_state.ts_name", lambda: "fixed_ts")
-    assert unique_run_folder_name("Hello!! World") == "hello_world_fixed_ts"
+    assert unique_run_folder_name("Hello!! World") == "task_fixed_ts"
+    assert unique_run_folder_name() == "task_fixed_ts"

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,20 +8,18 @@ from pathlib import Path
 from src.common.io_utils import append_text, write_json
 
 
-def slugify(text: str) -> str:
-    """Turn arbitrary text into a filesystem-safe slug (lowercase, alnum and underscores)."""
-    safe = re.sub(r"[^a-zA-Z0-9]+", "_", text.strip().lower()).strip("_")
-    return safe or "task"
-
-
 def ts_name() -> str:
     """UTC timestamp string for unique run folder suffixes: ``YYYYMMDD_HHMMSS_microseconds``."""
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
 
 
-def unique_run_folder_name(name: str) -> str:
-    """Filesystem-safe unique folder name under a runs root (slug + UTC timestamp)."""
-    return f"{slugify(name)[:40]}_{ts_name()}"
+def unique_run_folder_name(name: str = "task") -> str:
+    """Unique folder name under a runs root: ``task_`` + UTC timestamp.
+
+    ``name`` is accepted for call-site compatibility but ignored; folders are not
+    named from task text or an LLM.
+    """
+    return f"task_{ts_name()}"
 
 
 _B64_BODY_CHARS = frozenset(
@@ -113,14 +110,14 @@ class RunStateManager:
         Allocate a new run directory, create standard subfolders and empty artifacts, and log startup.
 
         Args:
-            task_input: Task description used to build the default folder name (slugified).
+            task_input: Task description (logged only; not used for folder naming).
             run_folder_name: If set, use this exact folder name under ``runs_root`` instead of auto-naming.
 
         Returns:
             ``RunPaths`` for the new run; also stored on ``self.paths``.
         """
         self.runs_root.mkdir(parents=True, exist_ok=True)
-        folder_name = run_folder_name or f"{slugify(task_input)[:40]}_{ts_name()}"
+        folder_name = run_folder_name or unique_run_folder_name()
         root = self.runs_root / folder_name
         eye_dir = root / "eye"
         yolo_ocr_dir = root / "yolo_ocr"

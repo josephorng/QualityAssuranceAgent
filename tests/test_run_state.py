@@ -30,6 +30,13 @@ def test_init_run_creates_expected_paths(tmp_path: Path) -> None:
     assert paths.info_log.exists()
 
 
+def test_init_run_default_folder_uses_task_prefix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("src.common.run_state.ts_name", lambda: "fixed_ts")
+    mgr = RunStateManager(tmp_path)
+    paths = mgr.init_run("some descriptive task text")
+    assert paths.root.name == "task_fixed_ts"
+
+
 def test_sanitize_log_text_redacts_long_data_urls() -> None:
     b64 = "A" * 200
     raw = f"payload={{'url': 'data:image/png;base64,{b64}'}}"

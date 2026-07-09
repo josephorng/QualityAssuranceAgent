@@ -9,7 +9,7 @@ This is a computer use agent project. We will use python and interactive cli to 
 # Initiation
 
 - The whole thing will start with an input task in text. 
-- Use gemma4 e2b to generate a folder name and then add a new folder under the runs folder, everything about this task will be stored in this folder.
+- Create a new folder under the runs folder named ``task_`` + UTC timestamp (no LLM naming); everything about this task will be stored in this folder.
   - Add a folder named "eye" to store the first and every different screenshot and their descriptions sent to the Brain. Use timestamp to name files.
   - Add a csv file called "hand.csv" to record every action made by the Hand. Add the image name to each action that it reacts to and the timestamp that the action is executed.
   - Add a text file named "long_term_memory.txt" to store the long term memory. This context will be kept under {constant default to 16k} length. When the file exceed the threshold, ask {model in constant.json} to summarize/shorten the file.

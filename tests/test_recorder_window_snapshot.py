@@ -8,6 +8,8 @@ from src.recorder.window_snapshot import (
     WindowInfo,
     WindowStateChange,
     diff_snapshots,
+    diff_snapshots_with_debug,
+    format_window_change_hint,
     instruction_for_window_change,
     settle_delay_for_click,
 )
@@ -106,8 +108,38 @@ def test_diff_medium_confidence_single_removed_window() -> None:
         _win(2, "App B", left=500, top=0, width=400, height=300),
     ]
     after = [_win(1, "App A", left=0, top=0, width=400, height=300)]
-    change = diff_snapshots(before, after, click_xy=(900, 900))
-    assert change == WindowStateChange(action="close", title="App B", confidence="medium")
+    result = diff_snapshots_with_debug(before, after, click_xy=(900, 900))
+    assert result.change == WindowStateChange(action="close", title="App B", confidence="medium")
+    assert result.debug["detection_path"] == "identity_close"
+    assert [w["title"] for w in result.debug["windows_before"]] == ["App A", "App B"]
+    assert [w["title"] for w in result.debug["windows_after"]] == ["App A"]
+
+
+def test_diff_ignores_title_flicker_when_hwnd_still_present() -> None:
+    """Explorer-style navigation can clear/change the title while hwnd stays alive."""
+    before = [
+        _win(1, "VS Code", left=0, top=0, width=400, height=300),
+        _win(7934096, "常用 - 檔案總管", left=0, top=0, width=1920, height=1040, pid=42),
+    ]
+    after = [
+        _win(1, "VS Code", left=0, top=0, width=400, height=300),
+        # Same hwnd/pid; title briefly empty or changed during navigation.
+        _win(7934096, "", left=0, top=0, width=1920, height=1040, pid=42),
+    ]
+    result = diff_snapshots_with_debug(before, after, click_xy=(72, 307))
+    assert result.change is None
+    assert result.debug["detection_path"] is None
+    assert result.debug["windows_before_count"] == 2
+    assert result.debug["windows_after_count"] == 2
+    assert any(w["hwnd"] == 7934096 and w["title"] == "常用 - 檔案總管" for w in result.debug["windows_before"])
+    assert any(w["hwnd"] == 7934096 and w["title"] == "" for w in result.debug["windows_after"])
+
+
+def test_diff_ignores_title_rename_when_hwnd_still_present() -> None:
+    before = [_win(100, "常用 - 檔案總管", left=0, top=0, width=800, height=600, pid=7)]
+    after = [_win(100, "文件 - 檔案總管", left=0, top=0, width=800, height=600, pid=7)]
+    change = diff_snapshots(before, after, click_xy=(72, 307))
+    assert change is None
 
 
 def test_diff_detects_minimize_from_iconic_rect_without_flag() -> None:
@@ -176,6 +208,24 @@ def test_instruction_for_high_confidence_window_change() -> None:
     assert instruction_for_window_change({"action": "close", "title": "Notepad", "confidence": "medium"}) == "關閉「Notepad」視窗"
     assert instruction_for_window_change({"action": "minimize", "title": "Chrome", "confidence": "medium"}) == "最小化「Chrome」視窗"
     assert instruction_for_window_change({"action": "opened", "title": "X", "confidence": "medium"}) is None
+
+
+def test_instruction_ignores_shell_experience_host_window() -> None:
+    assert (
+        instruction_for_window_change(
+            {"action": "close", "title": "快顯主機", "confidence": "medium"}
+        )
+        is None
+    )
+    assert (
+        instruction_for_window_change(
+            {"action": "close", "title": "快顯主機", "confidence": "high"}
+        )
+        is None
+    )
+    assert format_window_change_hint(
+        {"action": "close", "title": "快顯主機", "confidence": "medium"}
+    ) == "(none)"
 
 
 def test_settle_delay_is_longer_for_title_bar_clicks() -> None:

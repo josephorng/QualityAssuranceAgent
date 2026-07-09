@@ -8,10 +8,14 @@ import pytest
 
 from src.recorder.analyze import (
     analyze_event_to_cache,
+    enrich_click_instruction_offset,
     enrich_drag_instruction,
     enrich_drag_instruction_offset,
     enrich_drag_instruction_source,
+    instruction_for_click,
     instruction_for_drag,
+    instruction_for_key,
+    instruction_for_scroll,
 )
 from src.recorder.models import RecordedEvent
 from src.recorder.orchestrator import analyze_recording_session
@@ -24,8 +28,11 @@ from src.recorder.vision_context import (
 
 _VISION_WITH_NEARBY = {
     "used_vision": True,
+    "local_cursor": (38, 636),
     "candidates": [
         {
+            "bbox": [28, 626, 20, 20],
+            "center": [38, 636],
             "class_name": "element",
             "text": "chrome",
             "icons": [{"chinese_id": "Chrome"}],
@@ -91,7 +98,7 @@ def test_append_drag_nearby_context_comments() -> None:
 
 
 @pytest.mark.asyncio
-async def test_analyze_event_to_cache_parses_llm_json(tmp_path: Path) -> None:
+async def test_analyze_event_to_cache_key_press_is_deterministic(tmp_path: Path) -> None:
     event = RecordedEvent(
         index=1,
         timestamp_utc="t",
@@ -99,12 +106,11 @@ async def test_analyze_event_to_cache_parses_llm_json(tmp_path: Path) -> None:
         key="enter",
         screenshot_path="",
     )
-    llm_payload = {"instruction": "按下 Enter 鍵。"}
 
     with patch(
         "src.recorder.analyze.request_json_with_retry",
-        new=AsyncMock(return_value=llm_payload),
-    ):
+        new=AsyncMock(),
+    ) as llm_mock:
         result = await analyze_event_to_cache(
             event,
             run_dir=tmp_path,
@@ -112,7 +118,8 @@ async def test_analyze_event_to_cache_parses_llm_json(tmp_path: Path) -> None:
         )
 
     assert result is not None
-    assert result["instruction"] == "按下 Enter 鍵。"
+    assert result["instruction"] == "按下 Enter 鍵"
+    llm_mock.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -188,6 +195,52 @@ async def test_analyze_event_to_cache_medium_close_is_deterministic(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_analyze_event_to_cache_ignores_shell_host_close(tmp_path: Path) -> None:
+    """Closing 快顯主機 is a side effect; keep the click instruction instead."""
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(624, 1059),
+        button="left",
+        screenshot_path="",
+        window_change={"action": "close", "title": "快顯主機", "confidence": "medium"},
+    )
+    vision = {
+        "used_vision": True,
+        "local_cursor": (619, 1057),
+        "candidate_text": "",
+        "candidates": [
+            {
+                "bbox": [603, 1049, 32, 16],
+                "center": [619, 1057],
+                "class_name": "text",
+                "text": "搜尋",
+            },
+            {
+                "bbox": [577, 1048, 14, 15],
+                "center": [584, 1056],
+                "class_name": "element",
+                "icons": [{"chinese_id": "搜尋"}],
+            },
+        ],
+    }
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision=vision,
+        )
+
+    assert result == {"instruction": "點擊「搜尋」文字"}
+    llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_analyze_recording_session_binds_run_state(tmp_path: Path) -> None:
     from src.common.run_state import get_run_state_manager, reset_run_state_manager
 
@@ -218,16 +271,17 @@ async def test_analyze_recording_session_binds_run_state(tmp_path: Path) -> None
         encoding="utf-8",
     )
 
-    llm_payload = {"instruction": "按下 Enter 鍵。"}
+    llm_payload = {"instruction": "按下 Enter 鍵"}
 
     with patch(
         "src.recorder.analyze.request_json_with_retry",
         new=AsyncMock(return_value=llm_payload),
-    ):
+    ) as llm_mock:
         report = await analyze_recording_session(run_dir)
 
     assert report["cached"] == 1
     assert (run_dir / "run.log").is_file()
+    llm_mock.assert_not_called()
     reset_run_state_manager()
     with pytest.raises(RuntimeError, match="Run state not initialized"):
         get_run_state_manager().require_paths()
@@ -309,6 +363,66 @@ def test_enrich_drag_instruction_offset_appends_exact_pixels() -> None:
     assert enriched == "從「Chrome」圖示拖到「Desktop」文字下方49個像素的位置"
 
 
+def test_enrich_click_instruction_offset_replaces_nearby_with_pixels() -> None:
+    vision = {
+        "local_cursor": (419, 875),
+        "candidates": [
+            {
+                "bbox": [380, 829, 106, 14],
+                "center": [433, 836],
+                "class_name": "text",
+                "text": "自訂Office 範本",
+            },
+            {
+                "bbox": [356, 828, 17, 15],
+                "center": [364, 835],
+                "class_name": "element",
+                "text": "folder",
+                "icons": [{"chinese_id": "資料夾"}],
+            },
+        ],
+    }
+    instruction = "在「快顯主機」視窗中的「自訂Office 範本」文字附近按右鍵"
+    enriched = enrich_click_instruction_offset(instruction, vision)
+    assert enriched == (
+        "在「快顯主機」視窗中的「自訂Office 範本」文字"
+        "左方14個像素、下方39個像素的位置按右鍵"
+    )
+
+
+def test_enrich_click_instruction_offset_leaves_inside_bbox_unchanged() -> None:
+    vision = {
+        "local_cursor": (433, 836),
+        "candidates": [
+            {
+                "bbox": [380, 829, 106, 14],
+                "center": [433, 836],
+                "class_name": "text",
+                "text": "自訂Office 範本",
+            },
+        ],
+    }
+    instruction = "點擊「自訂Office 範本」文字附近"
+    assert enrich_click_instruction_offset(instruction, vision) == instruction
+
+
+def test_enrich_click_instruction_offset_inserts_when_no_nearby() -> None:
+    vision = {
+        "local_cursor": (419, 875),
+        "candidates": [
+            {
+                "bbox": [380, 829, 106, 14],
+                "center": [433, 836],
+                "class_name": "text",
+                "text": "自訂Office 範本",
+            },
+        ],
+    }
+    instruction = "點擊「自訂Office 範本」文字"
+    enriched = enrich_click_instruction_offset(instruction, vision)
+    assert enriched == "點擊「自訂Office 範本」文字左方14個像素、下方39個像素的位置"
+
+
 def test_enrich_drag_instruction_source_replaces_wrong_llm_pick() -> None:
     vision = {
         "candidates": [
@@ -384,6 +498,210 @@ def test_instruction_for_drag_event_six_like_case() -> None:
 def test_instruction_for_drag_returns_none_without_candidates() -> None:
     assert instruction_for_drag({"candidates": []}, {"candidates": [{"text": "x"}]}) is None
     assert instruction_for_drag({"candidates": [{"text": "x"}]}, {"candidates": []}) is None
+
+
+def test_instruction_for_click_builds_from_nearest_candidate() -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(38, 636),
+        button="left",
+        screenshot_path="",
+    )
+    assert instruction_for_click(event, _VISION_WITH_NEARBY) == "點擊「Chrome」圖示"
+
+
+def test_instruction_for_click_right_click_with_offset() -> None:
+    event = RecordedEvent(
+        index=6,
+        timestamp_utc="t",
+        kind="right_click",
+        cursor_xy=(419, 875),
+        button="right",
+        screenshot_path="",
+    )
+    vision = {
+        "local_cursor": (419, 875),
+        "candidates": [
+            {
+                "bbox": [380, 829, 106, 14],
+                "center": [433, 836],
+                "class_name": "text",
+                "text": "自訂Office 範本",
+            },
+        ],
+    }
+    assert instruction_for_click(event, vision) == (
+        "按右鍵「自訂Office 範本」文字左方14個像素、下方39個像素的位置"
+    )
+
+
+def test_instruction_for_click_double_click() -> None:
+    event = RecordedEvent(
+        index=5,
+        timestamp_utc="t",
+        kind="double_click",
+        cursor_xy=(1073, 184),
+        button="left",
+        screenshot_path="",
+    )
+    vision = {
+        "local_cursor": (1073, 184),
+        "candidates": [
+            {
+                "bbox": [1057, 176, 31, 15],
+                "center": [1073, 184],
+                "class_name": "text",
+                "text": "文件",
+            },
+        ],
+    }
+    assert instruction_for_click(event, vision) == "連按兩下「文件」文字"
+
+
+def test_instruction_for_click_input_field_with_visible_text() -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(675, 1056),
+        button="left",
+        screenshot_path="",
+    )
+    vision = {
+        "local_cursor": (675, 1056),
+        "candidates": [
+            {
+                "bbox": [564, 1040, 221, 31],
+                "center": [675, 1056],
+                "class_name": "input",
+                "text": None,
+            },
+            {
+                "bbox": [602, 1049, 33, 16],
+                "center": [619, 1057],
+                "class_name": "text",
+                "text": "搜尋",
+            },
+        ],
+    }
+    assert instruction_for_click(event, vision) == "點擊「搜尋」文字所在的輸入欄"
+
+
+def test_instruction_for_click_returns_none_for_generic_anchor() -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(10, 10),
+        button="left",
+        screenshot_path="",
+    )
+    vision = {
+        "local_cursor": (10, 10),
+        "candidates": [
+            {"bbox": [0, 0, 20, 20], "center": [10, 10], "class_name": "element", "text": None},
+        ],
+    }
+    assert instruction_for_click(event, vision) is None
+
+
+def test_instruction_for_key_enter() -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="key_press",
+        key="enter",
+        screenshot_path="",
+    )
+    assert instruction_for_key(event) == "按下 Enter 鍵"
+
+
+def test_instruction_for_key_hotkey_ctrl_c() -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="hotkey",
+        keys=["ctrl", "c"],
+        screenshot_path="",
+    )
+    assert instruction_for_key(event) == "按下 Ctrl+C"
+
+
+def test_instruction_for_key_hotkey_orders_modifiers() -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="hotkey",
+        keys=["shift", "ctrl", "s"],
+        screenshot_path="",
+    )
+    assert instruction_for_key(event) == "按下 Ctrl+Shift+S"
+
+
+def test_instruction_for_key_returns_none_for_unknown_vk() -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="key_press",
+        key="vk_123",
+        screenshot_path="",
+    )
+    assert instruction_for_key(event) is None
+
+
+def test_instruction_for_scroll_with_named_target() -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="scroll",
+        cursor_xy=(100, 200),
+        scroll_delta=-3,
+        screenshot_path="",
+    )
+    vision = {
+        "local_cursor": (100, 200),
+        "candidates": [
+            {
+                "bbox": [80, 180, 40, 20],
+                "center": [100, 190],
+                "class_name": "text",
+                "text": "檔案清單",
+            },
+        ],
+    }
+    assert instruction_for_scroll(event, vision) == "在「檔案清單」文字附近向下捲動"
+
+
+def test_instruction_for_scroll_without_named_target() -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="scroll",
+        cursor_xy=(100, 200),
+        scroll_delta=2,
+        screenshot_path="",
+    )
+    vision = {
+        "local_cursor": (100, 200),
+        "candidates": [
+            {"bbox": [0, 0, 20, 20], "center": [10, 10], "class_name": "element", "text": None},
+        ],
+    }
+    assert instruction_for_scroll(event, vision) == "向上捲動"
+
+
+def test_instruction_for_scroll_returns_none_without_delta() -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="scroll",
+        cursor_xy=(100, 200),
+        scroll_delta=None,
+        screenshot_path="",
+    )
+    assert instruction_for_scroll(event, {"candidates": []}) is None
 
 
 def test_enrich_drag_instruction_normalizes_source_destination_and_offset() -> None:
@@ -501,6 +819,95 @@ async def test_analyze_event_to_cache_drag_is_deterministic(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_analyze_event_to_cache_hotkey_is_deterministic(tmp_path: Path) -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="hotkey",
+        keys=["ctrl", "c"],
+        screenshot_path="",
+    )
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(event, run_dir=tmp_path)
+
+    assert result == {"instruction": "按下 Ctrl+C"}
+    llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_analyze_event_to_cache_scroll_is_deterministic(tmp_path: Path) -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="scroll",
+        cursor_xy=(100, 200),
+        scroll_delta=-1,
+        screenshot_path="",
+    )
+    vision = {
+        "used_vision": True,
+        "local_cursor": (100, 200),
+        "candidates": [
+            {
+                "bbox": [80, 180, 40, 20],
+                "center": [100, 190],
+                "class_name": "text",
+                "text": "檔案清單",
+            },
+            {"class_name": "text", "text": "其他"},
+        ],
+    }
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision=vision,
+        )
+
+    assert result is not None
+    assert result["instruction"] == (
+        "在「檔案清單」文字附近向下捲動（附近有「其他」文字）"
+    )
+    llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_analyze_event_to_cache_key_falls_back_to_llm_for_unknown_vk(
+    tmp_path: Path,
+) -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="key_press",
+        key="vk_999",
+        screenshot_path="",
+    )
+    llm_payload = {"instruction": "按下未知按鍵"}
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(return_value=llm_payload),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision={"used_vision": False, "candidate_text": "", "local_cursor": None},
+        )
+
+    assert result is not None
+    assert result["instruction"] == "按下未知按鍵"
+    llm_mock.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_analyze_event_to_cache_click_appends_nearby_context(tmp_path: Path) -> None:
     event = RecordedEvent(
         index=1,
@@ -510,12 +917,11 @@ async def test_analyze_event_to_cache_click_appends_nearby_context(tmp_path: Pat
         button="left",
         screenshot_path="",
     )
-    llm_payload = {"instruction": "點擊「Chrome」圖示"}
 
     with patch(
         "src.recorder.analyze.request_json_with_retry",
-        new=AsyncMock(return_value=llm_payload),
-    ):
+        new=AsyncMock(),
+    ) as llm_mock:
         result = await analyze_event_to_cache(
             event,
             run_dir=tmp_path,
@@ -526,6 +932,99 @@ async def test_analyze_event_to_cache_click_appends_nearby_context(tmp_path: Pat
     assert result["instruction"] == (
         "點擊「Chrome」圖示（附近有「OneNote」文字、「Docker」圖示）"
     )
+    llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_analyze_event_to_cache_click_enriches_offset_then_nearby(
+    tmp_path: Path,
+) -> None:
+    event = RecordedEvent(
+        index=6,
+        timestamp_utc="t",
+        kind="right_click",
+        cursor_xy=(419, 875),
+        button="right",
+        screenshot_path="",
+    )
+    vision = {
+        "used_vision": True,
+        "local_cursor": (419, 875),
+        "candidates": [
+            {
+                "bbox": [380, 829, 106, 14],
+                "center": [433, 836],
+                "class_name": "text",
+                "text": "自訂Office 範本",
+            },
+            {
+                "bbox": [356, 828, 17, 15],
+                "center": [364, 835],
+                "class_name": "element",
+                "text": "folder",
+                "icons": [{"chinese_id": "資料夾"}],
+            },
+            {
+                "bbox": [378, 800, 143, 12],
+                "center": [449, 806],
+                "class_name": "text",
+                "text": "WindowsPowerShell",
+            },
+        ],
+    }
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision=vision,
+        )
+
+    assert result is not None
+    assert result["instruction"] == (
+        "按右鍵「自訂Office 範本」文字左方14個像素、下方39個像素的位置"
+        "（附近有「資料夾」圖示、「WindowsPowerShell」文字）"
+    )
+    llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_analyze_event_to_cache_click_falls_back_to_llm_when_generic(
+    tmp_path: Path,
+) -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(10, 10),
+        button="left",
+        screenshot_path="",
+    )
+    vision = {
+        "used_vision": True,
+        "local_cursor": (10, 10),
+        "candidates": [
+            {"bbox": [0, 0, 20, 20], "center": [10, 10], "class_name": "element", "text": None},
+        ],
+    }
+    llm_payload = {"instruction": "點擊空白區域"}
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(return_value=llm_payload),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision=vision,
+        )
+
+    assert result is not None
+    assert result["instruction"] == "點擊空白區域"
+    llm_mock.assert_called_once()
 
 
 @pytest.mark.asyncio

@@ -376,6 +376,27 @@ def _pick_opened_at_click(
     return None
 
 
+def _window_debug_entry(win: WindowInfo) -> dict[str, Any]:
+    return {
+        "hwnd": win.hwnd,
+        "title": win.title,
+        "pid": win.pid,
+        "left": win.left,
+        "top": win.top,
+        "width": win.width,
+        "height": win.height,
+        "is_minimized": win.is_minimized,
+        "is_maximized": win.is_maximized,
+    }
+
+
+def _windows_debug_list(windows: list[WindowInfo]) -> list[dict[str, Any]]:
+    """Compact before/after program list for event debug (titled windows first)."""
+    titled = [w for w in windows if w.title]
+    untitled = [w for w in windows if not w.title]
+    return [_window_debug_entry(w) for w in (*titled, *untitled)]
+
+
 def diff_snapshots(
     before: list[WindowInfo],
     after: list[WindowInfo],
@@ -396,9 +417,12 @@ def diff_snapshots_with_debug(
     debug: dict[str, Any] = {
         "windows_before_count": len(before),
         "windows_after_count": len(after),
+        "windows_before": _windows_debug_list(before),
+        "windows_after": _windows_debug_list(after),
         "target_hwnd": None,
         "title_bar_click": _is_title_bar_click(click_xy),
         "settle_delay_s": settle_delay_for_click(click_xy),
+        "detection_path": None,
     }
     if not before and not after:
         return WindowDiffResult(change=None, debug=debug)
@@ -409,46 +433,79 @@ def diff_snapshots_with_debug(
         after_match = _find_match(target, after)
         change = _classify_target_change(target, after_match)
         if change is not None:
+            debug["detection_path"] = "target"
             return WindowDiffResult(change=change, debug=debug)
 
     opened = _pick_opened_at_click(before, after, click_xy)
     if opened is not None:
+        debug["detection_path"] = "opened_at_click"
         return WindowDiffResult(change=opened, debug=debug)
 
     global_minimize = _pick_global_minimize(before, after)
     if global_minimize is not None:
+        debug["detection_path"] = "global_minimize"
         return WindowDiffResult(change=global_minimize, debug=debug)
 
     before_set = {_window_identity_key(w) for w in before if w.title}
     after_set = {_window_identity_key(w) for w in after if w.title}
     removed = before_set - after_set
     added = after_set - before_set
+    # Title/pid identity can flicker (e.g. Explorer navigates and the title
+    # briefly clears) while the hwnd is still alive. Only treat as close/open
+    # when the window handle itself is gone / new.
     if len(removed) == 1 and not added:
         key = next(iter(removed))
         for win in before:
             if _window_identity_key(win) == key:
-                return WindowDiffResult(
-                    change=WindowStateChange(action="close", title=win.title, confidence="medium"),
-                    debug=debug,
-                )
+                if _find_match(win, after) is None:
+                    debug["detection_path"] = "identity_close"
+                    return WindowDiffResult(
+                        change=WindowStateChange(
+                            action="close", title=win.title, confidence="medium"
+                        ),
+                        debug=debug,
+                    )
+                break
     if len(added) == 1 and not removed:
         key = next(iter(added))
         for win in after:
             if _window_identity_key(win) == key:
-                return WindowDiffResult(
-                    change=WindowStateChange(action="opened", title=win.title, confidence="medium"),
-                    debug=debug,
-                )
+                if _find_match(win, before) is None:
+                    debug["detection_path"] = "identity_opened"
+                    return WindowDiffResult(
+                        change=WindowStateChange(
+                            action="opened", title=win.title, confidence="medium"
+                        ),
+                        debug=debug,
+                    )
+                break
 
     return WindowDiffResult(change=None, debug=debug)
 
 
+# Windows shell host that often disappears as a side effect of unrelated clicks
+# (taskbar search, Start, etc.). Never treat it as the user's intended action.
+_IGNORED_WINDOW_CHANGE_TITLES = frozenset({"快顯主機"})
+
+
+def _window_change_data(
+    change: WindowStateChange | dict[str, Any],
+) -> dict[str, Any]:
+    if isinstance(change, WindowStateChange):
+        return change.to_dict()
+    return change
+
+
+def _should_ignore_window_change(data: dict[str, Any]) -> bool:
+    title = str(data.get("title", "")).strip()
+    return title in _IGNORED_WINDOW_CHANGE_TITLES
+
+
 def instruction_for_window_change(change: WindowStateChange | dict[str, Any]) -> str | None:
     """Build a hub-script instruction for a confident window state change."""
-    if isinstance(change, WindowStateChange):
-        data = change.to_dict()
-    else:
-        data = change
+    data = _window_change_data(change)
+    if _should_ignore_window_change(data):
+        return None
     confidence = data.get("confidence")
     if confidence not in {"high", "medium"}:
         return None
@@ -470,10 +527,9 @@ def instruction_for_window_change(change: WindowStateChange | dict[str, Any]) ->
 def format_window_change_hint(change: WindowStateChange | dict[str, Any] | None) -> str:
     if change is None:
         return "(none)"
-    if isinstance(change, WindowStateChange):
-        data = change.to_dict()
-    else:
-        data = change
+    data = _window_change_data(change)
+    if _should_ignore_window_change(data):
+        return "(none)"
     action = data.get("action", "unknown")
     title = data.get("title", "")
     confidence = data.get("confidence", "unknown")

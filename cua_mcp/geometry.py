@@ -21,6 +21,26 @@ def boxes_overlap(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) ->
     return ax < bx2 and bx < ax2 and ay < by2 and by < ay2
 
 
+def iou_xywh(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+    """Intersection-over-union for ``(x, y, w, h)`` boxes; 0 when either has no area."""
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    if aw <= 0 or ah <= 0 or bw <= 0 or bh <= 0:
+        return 0.0
+    ax2, ay2 = ax + aw, ay + ah
+    bx2, by2 = bx + bw, by + bh
+    ix1, iy1 = max(ax, bx), max(ay, by)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = ix2 - ix1, iy2 - iy1
+    if iw <= 0 or ih <= 0:
+        return 0.0
+    inter = float(iw * ih)
+    union = float(aw * ah + bw * bh) - inter
+    if union <= 0.0:
+        return 0.0
+    return inter / union
+
+
 def sort_by_reading_order(
     items: list[T],
     *,

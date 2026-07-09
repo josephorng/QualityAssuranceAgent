@@ -141,3 +141,66 @@ def test_should_keep_text_with_unmapped_pua_when_label_present() -> None:
     text = f"OK\uf000"
     assert _resolve_ocr_class_id(YOLO_CLASS_TEXT, text) == YOLO_CLASS_TEXT
     assert _known_icons_for_text(text) is None
+
+
+def test_dedupe_overlapping_same_icon_keeps_one() -> None:
+    from cua_mcp.select_mouse_target import _dedupe_overlapping_detections
+
+    star = [{"chinese_id": "星號、我的最愛"}]
+    # Near-identical boxes like the log (center=[539,528], w=16, h=16 vs h=15).
+    a = UiDetection(
+        bbox=(531, 520, 16, 16),
+        cx=539,
+        cy=528,
+        class_id=YOLO_CLASS_ELEMENT,
+        class_name="element",
+        icons=star,
+    )
+    b = UiDetection(
+        bbox=(531, 521, 16, 15),
+        cx=539,
+        cy=528,
+        class_id=YOLO_CLASS_ELEMENT,
+        class_name="element",
+        icons=star,
+    )
+    kept = _dedupe_overlapping_detections([a, b])
+    assert len(kept) == 1
+    assert kept[0].bbox == (531, 520, 16, 16)
+
+
+def test_dedupe_overlapping_same_text_keeps_one() -> None:
+    from cua_mcp.select_mouse_target import _dedupe_overlapping_detections
+
+    a = _detection_from_bbox((489, 245, 29, 15), YOLO_CLASS_TEXT, text="圖片")
+    b = _detection_from_bbox((490, 245, 29, 15), YOLO_CLASS_TEXT, text="圖片")
+    kept = _dedupe_overlapping_detections([a, b])
+    assert len(kept) == 1
+    assert kept[0].text == "圖片"
+
+
+def test_dedupe_keeps_distinct_labels_even_if_overlapping() -> None:
+    from cua_mcp.select_mouse_target import _dedupe_overlapping_detections
+
+    a = _detection_from_bbox((100, 100, 20, 20), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "星號、我的最愛"}])
+    b = _detection_from_bbox((101, 100, 20, 20), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "時鐘、鬧鐘"}])
+    kept = _dedupe_overlapping_detections([a, b])
+    assert len(kept) == 2
+
+
+def test_dedupe_keeps_non_overlapping_same_label() -> None:
+    from cua_mcp.select_mouse_target import _dedupe_overlapping_detections
+
+    pin = [{"chinese_id": "圖釘"}]
+    a = _detection_from_bbox((100, 100, 12, 12), YOLO_CLASS_ELEMENT, icons=pin)
+    b = _detection_from_bbox((300, 100, 12, 12), YOLO_CLASS_ELEMENT, icons=pin)
+    kept = _dedupe_overlapping_detections([a, b])
+    assert len(kept) == 2
+
+
+def test_iou_xywh_near_identical_boxes() -> None:
+    from cua_mcp.geometry import iou_xywh
+
+    a = (531, 520, 16, 16)
+    b = (531, 521, 16, 15)
+    assert iou_xywh(a, b) > 0.5

@@ -10,7 +10,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from cua_mcp.geometry import clip_box
+from cua_mcp.geometry import clip_box, iou_xywh
 from cua_mcp.instruction_offset import parse_relative_pixel_offset
 from cua_mcp.icon_map import (
     describe_text_icons,
@@ -138,6 +138,77 @@ def _offset_detection(det: UiDetection, left: int, top: int) -> UiDetection:
     )
 
 
+# Drop near-duplicate YOLO/OCR candidates when boxes heavily overlap and share
+# the same OCR text / icon labels (e.g. two 星號、我的最愛 boxes on one star).
+DEFAULT_DEDUPE_OVERLAP_IOU_THRESHOLD: float = 0.5
+
+
+def _detection_content_key(det: UiDetection) -> tuple[str, str]:
+    """Identity used for overlap dedupe: OCR text plus sorted icon chinese_ids."""
+    text = (det.text or "").strip()
+    icon_ids = ",".join(
+        sorted(
+            str(ii.get("chinese_id", ""))
+            for ii in (det.icons or [])
+            if ii.get("chinese_id")
+        )
+    )
+    return text, icon_ids
+
+
+def _detection_preference_score(det: UiDetection) -> tuple[int, int, int]:
+    """Higher score is kept when two overlapping detections share content."""
+    has_icons = 1 if det.icons else 0
+    has_text = 1 if (det.text or "").strip() else 0
+    area = int(det.bbox[2]) * int(det.bbox[3])
+    return (has_icons, has_text, area)
+
+
+def _detections_are_content_duplicates(a: UiDetection, b: UiDetection) -> bool:
+    """True when ``a`` and ``b`` share the same text/icon identity (or blank same-class)."""
+    key_a = _detection_content_key(a)
+    key_b = _detection_content_key(b)
+    if key_a != key_b:
+        return False
+    if key_a != ("", ""):
+        return True
+    return a.class_id == b.class_id
+
+
+def _dedupe_overlapping_detections(
+    detections: list[UiDetection],
+    *,
+    iou_threshold: float = DEFAULT_DEDUPE_OVERLAP_IOU_THRESHOLD,
+) -> list[UiDetection]:
+    """
+    Keep one detection per heavily overlapping same-content group.
+
+    Candidates are compared by IoU of ``(x, y, w, h)`` boxes. When IoU exceeds
+    ``iou_threshold`` and content matches (same OCR text and icon labels, or
+    blank same-class boxes), only the preferred detection is kept.
+    """
+    if len(detections) < 2:
+        return detections
+
+    order = sorted(
+        range(len(detections)),
+        key=lambda i: _detection_preference_score(detections[i]),
+        reverse=True,
+    )
+    kept: list[int] = []
+    for i in order:
+        det = detections[i]
+        if any(
+            iou_xywh(det.bbox, detections[j].bbox) > iou_threshold
+            and _detections_are_content_duplicates(det, detections[j])
+            for j in kept
+        ):
+            continue
+        kept.append(i)
+    kept.sort()
+    return [detections[i] for i in kept]
+
+
 def _build_candidates_from_bgr(
     bgr: np.ndarray,
     *,
@@ -196,11 +267,14 @@ def _build_candidates_from_bgr(
             _detection_from_bbox(bbox, resolved_cls, text=text_value or None)
         )
 
+    before_dedupe = len(candidates)
+    candidates = _dedupe_overlapping_detections(candidates)
     _log_info(
         "move_mouse vision profile "
         f"yolo_s={yolo_elapsed:.3f} ocr_s={ocr_elapsed:.3f} "
         f"total_s={time.perf_counter() - vision_started:.3f} "
-        f"yolo_boxes={len(xyxy)} ocr_boxes={len(ocr_boxes)} candidates={len(candidates)}"
+        f"yolo_boxes={len(xyxy)} ocr_boxes={len(ocr_boxes)} "
+        f"candidates={len(candidates)} deduped_from={before_dedupe}"
     )
 
     return candidates

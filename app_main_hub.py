@@ -153,9 +153,11 @@ class MainHub(ctk.CTk):
 
         self._build_header()
         self._build_monitor_row()
-        self._build_script_section()
-        self._build_actions_row()
+        # Pack bottom chrome first so the expanding script section cannot clip it
+        # when the window is restored (not maximized).
         self._build_status()
+        self._build_actions_row()
+        self._build_script_section()
 
         self._refresh_monitors()
         last_script = hub.get("last_script_path")
@@ -506,7 +508,7 @@ class MainHub(ctk.CTk):
 
     def _build_actions_row(self) -> None:
         row = ctk.CTkFrame(self, fg_color="transparent")
-        row.pack(fill="x", padx=24, pady=(12, 8))
+        row.pack(side="bottom", fill="x", padx=24, pady=(12, 8))
         self._use_tool_cache_checkbox = ctk.CTkCheckBox(
             row,
             text="使用快取工具（略過 LLM）",
@@ -555,7 +557,7 @@ class MainHub(ctk.CTk):
 
     def _build_status(self) -> None:
         self._status = ctk.CTkLabel(self, text="", font=ctk.CTkFont(size=13))
-        self._status.pack(anchor="w", padx=28, pady=(0, 16))
+        self._status.pack(side="bottom", anchor="w", padx=28, pady=(0, 16))
 
     def _is_analysis_running(self) -> bool:
         thread = self._recording_analysis_thread

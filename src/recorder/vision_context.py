@@ -440,6 +440,24 @@ def candidate_offset_for_instruction(
     return None
 
 
+def primary_candidate_offset(vision: dict[str, Any]) -> str | None:
+    """Return relative-pixel offset from the nearest candidate, or None if on-target."""
+    candidates = vision.get("candidates") or []
+    if not candidates:
+        return None
+    local = vision.get("local_cursor")
+    if not isinstance(local, (list, tuple)) or len(local) != 2:
+        return None
+    drop_x, drop_y = int(local[0]), int(local[1])
+    primary = candidates[0]
+    if _drop_point_inside_candidate(drop_x, drop_y, primary):
+        return None
+    center = _candidate_center(primary)
+    if center is None:
+        return None
+    return format_drag_relative_offset_phrase(drop_x - center[0], drop_y - center[1])
+
+
 def _is_drag_cluster_member(det: UiDetection, anchor: UiDetection) -> bool:
     det_bbox = det.bbox
     anchor_bbox = anchor.bbox

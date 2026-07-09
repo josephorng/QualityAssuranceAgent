@@ -18,6 +18,7 @@ from src.recorder.vision_context import (
     format_drag_candidate_anchor,
     format_drag_destination_offset_hints,
     format_field_context_hint,
+    primary_candidate_offset,
 )
 from src.recorder.window_snapshot import format_window_change_hint, instruction_for_window_change
 
@@ -32,9 +33,50 @@ _INSTRUCTION_RESPONSE_SCHEMA: dict[str, Any] = {
 _DRAG_ANCHOR_RE = re.compile(r"拖到「([^」]+)」")
 _DRAG_SOURCE_RE = re.compile(r"^從「[^」]+」(?:文字|圖示|檔案|資料夾|按鈕|元素)*(?=拖到)")
 _DRAG_DESTINATION_SUFFIX_RE = re.compile(r"(文字|圖示|檔案|資料夾|按鈕|元素)*")
+_CLICK_TARGET_SUFFIX_RE = re.compile(r"(文字|圖示|檔案|資料夾|按鈕|元素|未知|輸入欄)*")
 _DRAG_OFFSET_PHRASE_RE = re.compile(
     r"(?:(?:左方|右方|上方|下方)\d+個像素)(?:、(?:(?:左方|右方|上方|下方)\d+個像素))*"
 )
+_CLICK_POINTER_KINDS = frozenset(
+    {"click", "double_click", "right_click", "middle_click"}
+)
+_CLICK_VERB_BY_KIND = {
+    "click": "點擊",
+    "double_click": "連按兩下",
+    "right_click": "按右鍵",
+    "middle_click": "按中鍵",
+}
+_GENERIC_CLICK_ANCHORS = frozenset(
+    {"文字", "元素", "未知", "輸入欄", "按鈕", "滾動條"}
+)
+_KEY_DISPLAY_NAMES = {
+    "enter": "Enter",
+    "return": "Enter",
+    "tab": "Tab",
+    "backspace": "Backspace",
+    "delete": "Delete",
+    "esc": "Esc",
+    "escape": "Esc",
+    "up": "Up",
+    "down": "Down",
+    "left": "Left",
+    "right": "Right",
+    "home": "Home",
+    "end": "End",
+    "page_up": "PageUp",
+    "page_down": "PageDown",
+    "insert": "Insert",
+    "space": "Space",
+    "ctrl": "Ctrl",
+    "control": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "win": "Win",
+    "cmd": "Win",
+    "command": "Win",
+    "windows": "Win",
+}
+_MODIFIER_DISPLAY_ORDER = ("Ctrl", "Alt", "Shift", "Win")
 
 
 def _parse_instruction_reply(raw: str) -> dict[str, Any]:
@@ -138,12 +180,176 @@ def enrich_drag_instruction(
     return enrich_drag_instruction_offset(instruction, destination)
 
 
+def enrich_click_instruction_offset(
+    instruction: str,
+    vision: dict[str, Any],
+) -> str:
+    """Replace vague 附近 with OCR-derived relative pixel offset when click is off-target."""
+    candidates = vision.get("candidates") or []
+    if not candidates:
+        return instruction
+
+    anchor_name = candidate_anchor_name(candidates[0])
+    if not anchor_name:
+        return instruction
+
+    offset_phrase = candidate_offset_for_instruction(vision, anchor_name)
+    if not offset_phrase:
+        return instruction
+
+    pattern = re.compile(rf"「{re.escape(anchor_name)}」")
+    best: tuple[re.Match[str], int] | None = None
+    for match in pattern.finditer(instruction):
+        after = instruction[match.end() :]
+        suffix_match = _CLICK_TARGET_SUFFIX_RE.match(after)
+        insert_at = match.end() + (suffix_match.end() if suffix_match else 0)
+        remainder = instruction[insert_at:]
+        if remainder.startswith("附近") and not remainder.startswith("附近有"):
+            best = (match, insert_at)
+            break
+        if best is None:
+            best = (match, insert_at)
+
+    if best is None:
+        return instruction
+
+    _, insert_at = best
+    remainder = instruction[insert_at:]
+    if remainder.startswith("附近") and not remainder.startswith("附近有"):
+        remainder = remainder[len("附近") :]
+    remainder = _DRAG_OFFSET_PHRASE_RE.sub("", remainder, count=1)
+    if remainder.startswith("的位置"):
+        remainder = remainder[len("的位置") :]
+    return instruction[:insert_at] + offset_phrase + "的位置" + remainder
+
+
 def instruction_for_text_input(text: str) -> str | None:
     """Build a hub-script line for a typing-only recorded event."""
     cleaned = text.strip()
     if not cleaned:
         return None
     return f"輸入「{cleaned}」"
+
+
+def _visible_input_field_text(vision: dict[str, Any]) -> str | None:
+    """Return OCR text shown inside the nearest input, if format_field_context_hint found one."""
+    hint = format_field_context_hint(vision)
+    prefix = "輸入欄內可見文字: 「"
+    if hint.startswith(prefix) and hint.endswith("」"):
+        return hint[len(prefix) : -1] or None
+    return None
+
+
+def _click_target_anchor(vision: dict[str, Any]) -> str | None:
+    """Return a named click target from the nearest candidate, or None if too generic."""
+    candidates = vision.get("candidates") or []
+    if not candidates:
+        return None
+
+    primary = candidates[0]
+    if primary.get("class_name") == "input":
+        visible = _visible_input_field_text(vision)
+        if visible:
+            return f"「{visible}」文字所在的輸入欄"
+
+    anchor = format_drag_candidate_anchor(primary)
+    if anchor is None or anchor in _GENERIC_CLICK_ANCHORS:
+        return None
+    return anchor
+
+
+def instruction_for_click(
+    event: RecordedEvent,
+    vision: dict[str, Any],
+) -> str | None:
+    """Build a hub-script click line from the nearest OCR/YOLO candidate."""
+    if event.kind not in _CLICK_POINTER_KINDS:
+        return None
+
+    verb = _CLICK_VERB_BY_KIND.get(event.kind)
+    if not verb:
+        return None
+
+    anchor = _click_target_anchor(vision)
+    if not anchor:
+        return None
+
+    offset_phrase = primary_candidate_offset(vision)
+    if offset_phrase:
+        return f"{verb}{anchor}{offset_phrase}的位置"
+    return f"{verb}{anchor}"
+
+
+def _key_display_name(token: str) -> str | None:
+    cleaned = token.strip()
+    if not cleaned:
+        return None
+    lower = cleaned.lower()
+    if lower in _KEY_DISPLAY_NAMES:
+        return _KEY_DISPLAY_NAMES[lower]
+    if len(lower) >= 2 and lower[0] == "f" and lower[1:].isdigit():
+        return f"F{lower[1:]}"
+    if lower.startswith("vk_"):
+        return None
+    if len(cleaned) == 1 and cleaned.isprintable():
+        return cleaned.upper() if cleaned.isalpha() else cleaned
+    if cleaned.isalnum():
+        return cleaned.capitalize()
+    return None
+
+
+def _hotkey_display_combo(keys: list[str]) -> str | None:
+    if not keys:
+        return None
+    displays: list[str] = []
+    for token in keys:
+        name = _key_display_name(token)
+        if name is None:
+            return None
+        displays.append(name)
+
+    modifiers = [name for name in _MODIFIER_DISPLAY_ORDER if name in displays]
+    others = [name for name in displays if name not in _MODIFIER_DISPLAY_ORDER]
+    ordered = modifiers + others
+    if not ordered:
+        return None
+    return "+".join(ordered)
+
+
+def instruction_for_key(event: RecordedEvent) -> str | None:
+    """Build a hub-script key/hotkey line from recorded key tokens."""
+    if event.kind == "key_press":
+        name = _key_display_name(event.key or "")
+        if name is None:
+            return None
+        return f"按下 {name} 鍵"
+
+    if event.kind == "hotkey":
+        keys = event.keys or []
+        combo = _hotkey_display_combo([str(k) for k in keys])
+        if combo is None:
+            return None
+        return f"按下 {combo}"
+
+    return None
+
+
+def instruction_for_scroll(
+    event: RecordedEvent,
+    vision: dict[str, Any],
+) -> str | None:
+    """Build a hub-script scroll line from scroll_delta and nearest candidate."""
+    if event.kind != "scroll":
+        return None
+    delta = event.scroll_delta
+    if delta is None or delta == 0:
+        return None
+
+    direction = "向上" if delta > 0 else "向下"
+    anchor = _click_target_anchor(vision)
+    if anchor:
+        return f"在{anchor}附近{direction}捲動"
+    return f"{direction}捲動"
 
 
 def instruction_for_drag(
@@ -218,6 +424,11 @@ async def analyze_event_to_cache(
         if instruction is not None:
             return {"instruction": instruction}
 
+    if event.kind in {"key_press", "hotkey"}:
+        key_instruction = instruction_for_key(event)
+        if key_instruction is not None:
+            return {"instruction": key_instruction}
+
     if event.window_change:
         deterministic = instruction_for_window_change(event.window_change)
         if deterministic is not None:
@@ -231,6 +442,16 @@ async def analyze_event_to_cache(
         drag_instruction = instruction_for_drag(vision, destination)
         if drag_instruction is not None:
             return _instruction_result(drag_instruction, event, vision, destination)
+
+    if event.kind in _CLICK_POINTER_KINDS:
+        click_instruction = instruction_for_click(event, vision)
+        if click_instruction is not None:
+            return _instruction_result(click_instruction, event, vision, destination)
+
+    if event.kind == "scroll":
+        scroll_instruction = instruction_for_scroll(event, vision)
+        if scroll_instruction is not None:
+            return _instruction_result(scroll_instruction, event, vision, destination)
 
     local = vision.get("local_cursor")
     if isinstance(local, (list, tuple)) and len(local) == 2:
@@ -255,6 +476,8 @@ async def analyze_event_to_cache(
             destination.get("destination_offset_hints")
             or format_drag_destination_offset_hints(destination)
         )
+    elif event.kind in _CLICK_POINTER_KINDS:
+        destination_offset_hints = format_drag_destination_offset_hints(vision)
     else:
         destination_offset_hints = "(not applicable)"
 
@@ -304,6 +527,12 @@ async def analyze_event_to_cache(
                 result["instruction"],
                 vision=vision,
                 destination=destination,
+            )
+            return _instruction_result(instruction, event, vision, destination)
+        if event.kind in _CLICK_POINTER_KINDS:
+            instruction = enrich_click_instruction_offset(
+                result["instruction"],
+                vision,
             )
             return _instruction_result(instruction, event, vision, destination)
         return _instruction_result(result["instruction"], event, vision, destination)

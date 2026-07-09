@@ -344,6 +344,9 @@ def test_pointer_click_persists_window_change(tmp_path) -> None:
     assert raw["target_window_title"] == "Google Chrome"
     assert raw["window_snapshot_debug"]["windows_before_count"] == 1
     assert raw["window_snapshot_debug"]["target_hwnd"] == 100
+    assert raw["window_snapshot_debug"]["detection_path"] == "target"
+    assert raw["window_snapshot_debug"]["windows_before"][0]["title"] == "Google Chrome"
+    assert raw["window_snapshot_debug"]["windows_after"][0]["is_minimized"] is True
 
 
 def test_finalize_drag_end_screenshot_selects_release_monitor(tmp_path) -> None:

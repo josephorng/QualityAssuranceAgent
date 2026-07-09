@@ -31,6 +31,7 @@ from cua_mcp.selection_engine import request_json_with_retry
 from cua_mcp.yolo_onnx import (
     DEFAULT_CONF_YOLOV26_END2END,
     MOUSE_TARGET_CLASS_IDS,
+    PICKER_CLASS_UNKNOWN,
     YOLO_CLASS_ELEMENT,
     YOLO_CLASS_NAMES,
     YOLO_CLASS_TEXT,
@@ -80,19 +81,24 @@ def _text_is_pua_only(text: str) -> bool:
     return not non_pua
 
 
-def _should_skip_ocr_text_candidate(text_value: str, class_id: int) -> bool:
+def _resolve_ocr_class_id(class_id: int, text_value: str) -> int:
     """
-    Skip OCR rows whose only PUA glyphs have no ``icon_map`` label.
+    Reclassify ambiguous OCR results as ``unknown``.
 
-    Plain text and element boxes with no OCR text are kept.
+    - PUA-only OCR with no known ``icon_map`` labels (any YOLO class)
+    - YOLO ``element`` whose OCR decode is plain text (no PUA)
+
+    Known-icon PUA and empty element OCR keep their YOLO class.
     """
+    if text_value and _text_is_pua_only(text_value) and not _known_icons_for_text(text_value):
+        return PICKER_CLASS_UNKNOWN
+    if class_id != YOLO_CLASS_ELEMENT:
+        return class_id
     if not text_value:
-        return False
-    if not _text_is_pua_only(text_value):
-        return False
-    if _known_icons_for_text(text_value):
-        return False
-    return True
+        return class_id
+    if text_has_pua(text_value):
+        return class_id
+    return PICKER_CLASS_UNKNOWN
 
 
 def _detection_from_bbox(
@@ -185,9 +191,10 @@ def _build_candidates_from_bgr(
         text_value = "".join(preds).strip()
         if cls_id == YOLO_CLASS_TEXT and not text_value:
             continue
-        if _should_skip_ocr_text_candidate(text_value, cls_id):
-            continue
-        candidates.append(_detection_from_bbox(bbox, cls_id, text=text_value or None))
+        resolved_cls = _resolve_ocr_class_id(cls_id, text_value)
+        candidates.append(
+            _detection_from_bbox(bbox, resolved_cls, text=text_value or None)
+        )
 
     _log_info(
         "move_mouse vision profile "

@@ -80,31 +80,64 @@ def test_offset_detection_preserves_class() -> None:
     assert shifted.text == "icon"
 
 
-def test_should_skip_unknown_pua_only() -> None:
-    from cua_mcp.select_mouse_target import _should_skip_ocr_text_candidate
+def test_resolve_ocr_class_id_element_plain_text_becomes_unknown() -> None:
+    from cua_mcp.select_mouse_target import _resolve_ocr_class_id
+    from cua_mcp.yolo_onnx import PICKER_CLASS_UNKNOWN
 
-    assert _should_skip_ocr_text_candidate("\uf000", YOLO_CLASS_ELEMENT) is True
+    assert _resolve_ocr_class_id(YOLO_CLASS_ELEMENT, "搜") == PICKER_CLASS_UNKNOWN
+    assert _resolve_ocr_class_id(YOLO_CLASS_ELEMENT, "g") == PICKER_CLASS_UNKNOWN
+
+
+def test_resolve_ocr_class_id_keeps_element_for_known_pua_or_empty() -> None:
+    from cua_mcp.select_mouse_target import _resolve_ocr_class_id
+
+    assert _resolve_ocr_class_id(YOLO_CLASS_ELEMENT, "") == YOLO_CLASS_ELEMENT
+    assert _resolve_ocr_class_id(YOLO_CLASS_ELEMENT, "\ue002") == YOLO_CLASS_ELEMENT
+    assert _resolve_ocr_class_id(YOLO_CLASS_TEXT, "OK") == YOLO_CLASS_TEXT
+
+
+def test_resolve_ocr_class_id_unknown_pua_only_becomes_unknown() -> None:
+    from cua_mcp.select_mouse_target import _resolve_ocr_class_id
+    from cua_mcp.yolo_onnx import PICKER_CLASS_UNKNOWN
+
+    # Unmapped PUA, or the mapped ``unknown_icon`` entry (U+E01A).
+    assert _resolve_ocr_class_id(YOLO_CLASS_ELEMENT, "\uf000") == PICKER_CLASS_UNKNOWN
+    assert _resolve_ocr_class_id(YOLO_CLASS_ELEMENT, "\ue01a") == PICKER_CLASS_UNKNOWN
+    assert _resolve_ocr_class_id(YOLO_CLASS_TEXT, "\ue01a") == PICKER_CLASS_UNKNOWN
+
+
+def test_detection_from_bbox_unknown() -> None:
+    from cua_mcp.yolo_onnx import PICKER_CLASS_UNKNOWN
+
+    det = _detection_from_bbox((0, 0, 20, 20), PICKER_CLASS_UNKNOWN, text="搜")
+    assert det.class_name == "unknown"
+    assert det.text == "搜"
+
+
+def test_format_mouse_candidates_includes_unknown() -> None:
+    from cua_mcp.yolo_onnx import PICKER_CLASS_UNKNOWN
+
+    detections = [
+        _detection_from_bbox((0, 0, 20, 20), PICKER_CLASS_UNKNOWN, text="搜"),
+    ]
+    text = _format_ui_candidates_text(detections)
+    assert "class=未知(Unknown)" in text
+    assert "text='搜'" in text
 
 
 def test_should_keep_known_pua() -> None:
-    from cua_mcp.select_mouse_target import (
-        _known_icons_for_text,
-        _should_skip_ocr_text_candidate,
-    )
+    from cua_mcp.select_mouse_target import _known_icons_for_text, _resolve_ocr_class_id
 
     pua = "\ue002"
-    assert _should_skip_ocr_text_candidate(pua, YOLO_CLASS_ELEMENT) is False
+    assert _resolve_ocr_class_id(YOLO_CLASS_ELEMENT, pua) == YOLO_CLASS_ELEMENT
     icons = _known_icons_for_text(pua)
     assert icons
     assert not any("未知" in str(ii.get("chinese_id", "")) for ii in icons)
 
 
 def test_should_keep_text_with_unmapped_pua_when_label_present() -> None:
-    from cua_mcp.select_mouse_target import (
-        _known_icons_for_text,
-        _should_skip_ocr_text_candidate,
-    )
+    from cua_mcp.select_mouse_target import _known_icons_for_text, _resolve_ocr_class_id
 
     text = f"OK\uf000"
-    assert _should_skip_ocr_text_candidate(text, YOLO_CLASS_TEXT) is False
+    assert _resolve_ocr_class_id(YOLO_CLASS_TEXT, text) == YOLO_CLASS_TEXT
     assert _known_icons_for_text(text) is None

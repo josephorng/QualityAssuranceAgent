@@ -439,6 +439,10 @@ def test_format_drag_candidate_anchor_element_text() -> None:
     assert format_drag_candidate_anchor({"class_name": "element", "text": "a"}) == "「a」元素"
 
 
+def test_format_drag_candidate_anchor_unknown_text() -> None:
+    assert format_drag_candidate_anchor({"class_name": "unknown", "text": "搜"}) == "「搜」未知"
+
+
 def test_format_drag_destination_offset_hints_desktop_like() -> None:
     destination = {
         "local_cursor": (189, 638),

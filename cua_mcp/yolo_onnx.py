@@ -59,11 +59,18 @@ DEFAULT_MERGE_TOUCHING_CLASS_IDS = frozenset({
     YOLO_CLASS_INPUT,
     YOLO_CLASS_SCROLLBAR,
 })
+# Synthetic picker IDs for OCR-derived UI candidates (not YOLO model class IDs).
+PICKER_CLASS_TEXT = 100
+PICKER_CLASS_OCR_ICON = 101
+# YOLO ``element`` whose OCR decode is plain text (not icon PUA) — ambiguous / unknown.
+PICKER_CLASS_UNKNOWN = 102
+
 YOLO_CLASS_NAMES: dict[int, str] = {
     YOLO_CLASS_TEXT: "text",
     YOLO_CLASS_ELEMENT: "element",
     YOLO_CLASS_INPUT: "input",
     YOLO_CLASS_SCROLLBAR: "scrollbar",
+    PICKER_CLASS_UNKNOWN: "unknown",
 }
 
 OCR_DETECTION_CLASS_IDS = frozenset({
@@ -81,10 +88,6 @@ MOUSE_TARGET_CLASS_IDS = frozenset({
     YOLO_CLASS_INPUT,
     YOLO_CLASS_SCROLLBAR,
 })
-
-# Synthetic picker IDs for OCR-derived UI candidates (not YOLO model class IDs).
-PICKER_CLASS_TEXT = 100
-PICKER_CLASS_OCR_ICON = 101
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 DEFAULT_YOLO_ONNX_PATH = _PACKAGE_DIR / "best.onnx"

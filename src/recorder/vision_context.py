@@ -216,6 +216,8 @@ def format_drag_candidate_anchor(candidate: dict[str, Any]) -> str | None:
             return f"「{visible}」文字"
         if class_name == "element":
             return f"「{visible}」元素"
+        if class_name == "unknown":
+            return f"「{visible}」未知"
         if class_name == "input":
             return f"「{visible}」文字所在的輸入欄"
         return f"「{visible}」"
@@ -226,10 +228,13 @@ def format_drag_candidate_anchor(candidate: dict[str, Any]) -> str | None:
             return f"「{raw}」文字"
         if class_name == "element":
             return f"「{raw}」元素"
+        if class_name == "unknown":
+            return f"「{raw}」未知"
 
     suffix_by_class = {
         "text": "文字",
         "element": "元素",
+        "unknown": "未知",
         "input": "輸入欄",
         "button": "按鈕",
         "scrollbar": "滾動條",
@@ -245,7 +250,7 @@ def _candidate_label_for_hint(candidate: dict[str, Any]) -> str | None:
     anchor = format_drag_candidate_anchor(candidate)
     if anchor is None:
         return None
-    generic_only = {"文字", "元素", "輸入欄", "按鈕", "滾動條"}
+    generic_only = {"文字", "元素", "未知", "輸入欄", "按鈕", "滾動條"}
     if anchor in generic_only:
         return None
     return anchor

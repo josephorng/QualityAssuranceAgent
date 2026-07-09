@@ -114,6 +114,7 @@ _CANDIDATE_CLASS_LABELS: dict[str, str] = {
     "element": "元素(Element)",
     "input": "輸入欄(Input)",
     "scrollbar": "滾動條(Scrollbar)",
+    "unknown": "未知(Unknown)",
 }
 
 

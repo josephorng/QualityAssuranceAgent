@@ -22,10 +22,10 @@ from cua_mcp.icon_map import (
 from cua_mcp.read_screen_text.ocr_image import _ocr_boxes_on_bgr
 from cua_mcp.select_ui_element import (
     UiDetection,
-    _TEXT_FILTER_JSON_SCHEMA,
+    _MOUSE_FILTER_JSON_SCHEMA,
     _detection_anchor_label,
     _format_ui_candidates_text,
-    _parse_keep_indices_from_llm,
+    _parse_anchor_nearby_indices_from_llm,
     _select_center_with_ollama,
     _sort_detections_reading_order,
 )
@@ -365,40 +365,57 @@ def _fallback_filter_by_similarity(
     detections: list[UiDetection],
     anchor: str,
     nearby: list[str],
-) -> list[UiDetection]:
-    """Keep the most similar candidate for the anchor and each nearby label."""
+) -> tuple[list[UiDetection], list[UiDetection]]:
+    """Return ``(anchor_matches, nearby_matches)`` via string similarity."""
     if not detections:
-        return []
+        return [], []
 
-    keep: list[int] = []
+    anchor_matches: list[UiDetection] = []
+    nearby_matches: list[UiDetection] = []
     seen: set[int] = set()
-    queries = [anchor, *(label for label in nearby if (label or "").strip())]
-    for query in queries:
+
+    anchor_idx = _best_matching_index(detections, anchor)
+    if anchor_idx is not None:
+        seen.add(anchor_idx)
+        anchor_matches.append(detections[anchor_idx])
+        _log_info(
+            "_filter_mouse_candidates: similarity fallback "
+            f"query={anchor!r} index={anchor_idx} "
+            f"label={_detection_anchor_label(detections[anchor_idx])!r} "
+            f"score={_detection_similarity_to_query(detections[anchor_idx], anchor):.3f} "
+            f"bucket=anchor"
+        )
+
+    for query in nearby:
+        if not (query or "").strip():
+            continue
         idx = _best_matching_index(detections, query)
         if idx is None or idx in seen:
             continue
         seen.add(idx)
-        keep.append(idx)
+        nearby_matches.append(detections[idx])
         _log_info(
             "_filter_mouse_candidates: similarity fallback "
             f"query={query!r} index={idx} "
             f"label={_detection_anchor_label(detections[idx])!r} "
-            f"score={_detection_similarity_to_query(detections[idx], query):.3f}"
+            f"score={_detection_similarity_to_query(detections[idx], query):.3f} "
+            f"bucket=nearby"
         )
-    return [detections[i] for i in keep]
+    return anchor_matches, nearby_matches
 
 
 async def _filter_mouse_candidates(
     detections: list[UiDetection],
     anchor: str,
     nearby: list[str],
-) -> list[UiDetection]:
-    """Ask Ollama which candidates match the anchor or nearby labels.
+) -> tuple[list[UiDetection], list[UiDetection]]:
+    """Ask Ollama which candidates match the anchor vs nearby labels.
 
-    On LLM failure, keep the most similar candidate for the anchor and each nearby label.
+    Returns ``(anchor_matches, nearby_matches)``. On LLM failure, falls back to
+    similarity matching for each bucket.
     """
     if not detections:
-        return []
+        return [], []
 
     nearby_text = ", ".join(label.strip() for label in nearby if label.strip()) or "(none)"
     candidates_text = _format_ui_candidates_text(detections, include_geometry=False)
@@ -409,10 +426,12 @@ async def _filter_mouse_candidates(
     )
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
     try:
-        keep_indices = await request_json_with_retry(
+        anchor_indices, nearby_indices = await request_json_with_retry(
             messages=messages,
-            response_schema=_TEXT_FILTER_JSON_SCHEMA,
-            parse_reply=lambda raw: _parse_keep_indices_from_llm(raw, len(detections)),
+            response_schema=_MOUSE_FILTER_JSON_SCHEMA,
+            parse_reply=lambda raw: _parse_anchor_nearby_indices_from_llm(
+                raw, len(detections)
+            ),
             retry_instruction=get_prompt("mouse_target_filter_retry"),
             log_info=lambda m: _run_manager().log_info(f"_filter_mouse_candidates: {m}"),
         )
@@ -422,16 +441,27 @@ async def _filter_mouse_candidates(
         )
         return _fallback_filter_by_similarity(detections, anchor, nearby)
 
-    if not keep_indices:
-        return []
+    anchor_expanded = _expand_keep_indices_with_similar(detections, anchor_indices)
+    nearby_expanded = _expand_keep_indices_with_similar(detections, nearby_indices)
+    expanded_nearby_count = len(nearby_expanded)
+    anchor_set = set(anchor_expanded)
+    nearby_expanded = [i for i in nearby_expanded if i not in anchor_set]
 
-    expanded = _expand_keep_indices_with_similar(detections, keep_indices)
-    if len(expanded) != len(keep_indices):
+    if (
+        len(anchor_expanded) != len(anchor_indices)
+        or expanded_nearby_count != len(nearby_indices)
+    ):
         _run_manager().log_info(
             "_filter_mouse_candidates: expanded similar "
-            f"llm_keep={len(keep_indices)} after_expand={len(expanded)}"
+            f"llm_anchor={len(anchor_indices)} after_expand_anchor={len(anchor_expanded)} "
+            f"llm_nearby={len(nearby_indices)} after_expand_nearby={expanded_nearby_count} "
+            f"nearby_after_dedupe={len(nearby_expanded)}"
         )
-    return [detections[i] for i in expanded]
+
+    return (
+        [detections[i] for i in anchor_expanded],
+        [detections[i] for i in nearby_expanded],
+    )
 
 
 async def resolve_mouse_point(
@@ -448,7 +478,7 @@ async def resolve_mouse_point(
     if not instruction_text:
         raise ValueError("instruction must be non-empty")
 
-    # Parse anchor/offset/nearby once; filter uses anchor+nearby, pick still uses raw instruction.
+    # Parse anchor/offset/nearby once; filter splits anchor vs nearby; pick uses anchor only.
     anchor, offset_dx, offset_dy, nearby = await parse_relative_pixel_offset(
         instruction_text
     )
@@ -485,27 +515,32 @@ async def resolve_mouse_point(
     if not detections:
         raise ValueError("No YOLO candidates found on selected monitor(s).")
 
-    filtered = await _filter_mouse_candidates(detections, anchor, nearby)
+    anchor_matches, nearby_matches = await _filter_mouse_candidates(
+        detections, anchor, nearby
+    )
     _log_info(
-        f"move_mouse after_filter={len(filtered)} "
-        f"anchor={anchor!r} nearby={nearby!r}"
+        f"move_mouse after_filter anchor={len(anchor_matches)} "
+        f"nearby={len(nearby_matches)} "
+        f"anchor={anchor!r} nearby_labels={nearby!r}"
     )
 
-    if not filtered:
-        raise ValueError("No candidates matched the instruction after LLM filtering.")
+    if not anchor_matches:
+        raise ValueError("No anchor candidates matched the instruction after LLM filtering.")
 
-    if len(filtered) == 1:
+    if len(anchor_matches) == 1:
         idx = 0
-        chosen = filtered[0]
-        _log_info("move_mouse: single candidate after filter; skipping Ollama pick")
+        chosen = anchor_matches[0]
+        _log_info("move_mouse: single anchor candidate after filter; skipping Ollama pick")
     else:
         pool_idx = await _select_center_with_ollama(
-            instruction_text,
-            filtered,
+            anchor,
+            anchor_matches,
             image_paths,
+            neighbor_candidates=nearby_matches,
+            nearby_labels=nearby,
         )
         idx = pool_idx
-        chosen = filtered[pool_idx]
+        chosen = anchor_matches[pool_idx]
         _log_info(
             f"move_mouse: Ollama picked index={pool_idx} center=[{chosen.cx},{chosen.cy}]"
         )

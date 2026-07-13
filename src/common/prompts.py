@@ -116,19 +116,24 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
         {
             "image_usage": "optional",
             "prompt": (
-                "Pick the candidate index from Candidates whose label best matches the Instruction's "
-                "primary target. Each candidate row is [index N] <label>（<relative neighbor clauses>）. "
-                "Neighbor clauses describe the two nearest other candidates with Traditional Chinese "
-                "direction and pixel distance (左方/右方/上方/下方 + N個像素有<label>).\n\n"
-                "Instruction:\n{instruction}\n\n"
+                "Pick the candidate index from Candidates whose label matches the Anchor. "
+                "Each candidate row is [index N] <label>（<relative neighbor clauses>）. "
+                "Neighbor clauses describe the two nearest other detections (including nearby "
+                "landmarks) with Traditional Chinese direction and pixel distance "
+                "(左方/右方/上方/下方 + N個像素有<label>). "
+                "Only rows in Candidates are selectable; Nearby labels and neighbor clauses "
+                "are for disambiguation only.\n\n"
+                "Anchor:\n{instruction}\n\n"
+                "Nearby:\n{nearby_text}\n\n"
                 "Candidates:\n{candidates_text}"
             ),
             "instructions": [
                 'Reply only with JSON: {{"index": <integer>}} — the [index] from the chosen candidate row (0-based).',
-                "Prefer the candidate whose <label> matches the Instruction's primary quoted target "
-                "(e.g. 「自訂Office 範本」文字).",
-                "Use （附近有…） / nearby-context mentions and neighbor clauses only to disambiguate "
-                "among candidates with the same primary label — not to pick a different label.",
+                "Every Candidates row already matches the Anchor.",
+                "When multiple candidates share the same Anchor label, prefer the one whose "
+                "neighbor clauses best match the Nearby landmarks.",
+                "Nearby may be (none); when it is, pick the best spatial match among Candidates.",
+                "Never pick a Nearby landmark itself — only Candidates indices are valid.",
                 "Never invent an index; only use an index shown in the Candidates list.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
@@ -153,7 +158,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
         {
             "image_usage": "no_image",
             "prompt": (
-                "Select all candidates that correspond to the anchor or any nearby label.\n"
+                "Split candidates into two lists: those matching the Anchor, and those matching any Nearby label.\n"
                 "Each row has class=文字(Text)|元素(Element)|未知(Unknown)|輸入欄(Input)|滾動條(Scrollbar), "
                 "optional OCR text, and optional icon labels.\n\n"
                 "Anchor:\n{anchor}\n\n"
@@ -161,13 +166,15 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Candidates:\n{candidates_text}\n"
             ),
             "instructions": [
-                'Return JSON only: {{"keep_indices": [<int>, ...]}}.',
-                "Use [index N] values from the Candidates list. Keep an empty list when none match.",
-                "Keep every candidate whose OCR text, icons, or class matches the Anchor.",
-                "Also keep every candidate that matches any Nearby label (文字/圖示/元素/輸入欄/滾動條), "
-                "so spatial disambiguation can use them later.",
-                "Nearby may be empty; when it is, only keep candidates matching the Anchor.",
-                "Prefer recall: include all plausible matches for Anchor and Nearby, not only the single best one.",
+                'Return JSON only: {{"anchor_indices": [<int>, ...], "nearby_indices": [<int>, ...]}}.',
+                "Use [index N] values from the Candidates list. Use empty lists when none match.",
+                "anchor_indices: every candidate whose OCR text, icons, or class matches the Anchor.",
+                "nearby_indices: every candidate that matches any Nearby label "
+                "(文字/圖示/元素/輸入欄/滾動條), for spatial disambiguation later.",
+                "Do not put the same index in both lists; if a candidate matches both, put it only in "
+                "anchor_indices.",
+                "Nearby may be empty; when it is, nearby_indices must be [].",
+                "Prefer recall: include all plausible matches for each list, not only the single best one.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
         }
@@ -362,7 +369,8 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
         {
             "image_usage": "no_image",
             "prompt": (
-                'Reply with ONLY: {{"keep_indices": [<integer>, ...]}}. '
+                'Reply with ONLY: {{"anchor_indices": [<integer>, ...], '
+                '"nearby_indices": [<integer>, ...]}}. '
                 "No text before or after the JSON."
             ),
             "models": ["gemma4:e2b", "gemma3:4b"],

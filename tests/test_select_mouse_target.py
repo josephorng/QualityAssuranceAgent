@@ -5,6 +5,7 @@ from cua_mcp.select_ui_element import (
     UiDetection,
     _format_ui_candidates_relational,
     _format_ui_candidates_text,
+    _parse_anchor_nearby_indices_from_llm,
     _parse_keep_indices_from_llm,
     _two_nearest_indices,
 )
@@ -87,6 +88,25 @@ def test_parse_keep_indices_from_llm() -> None:
     raw = '{"keep_indices": [0, 2, 2, 99]}'
     keep = _parse_keep_indices_from_llm(raw, max_len=3)
     assert keep == [0, 2]
+
+
+def test_parse_anchor_nearby_indices_from_llm() -> None:
+    raw = '{"anchor_indices": [1, 1, 99], "nearby_indices": [0, 2, 1]}'
+    anchor, nearby = _parse_anchor_nearby_indices_from_llm(raw, max_len=3)
+    assert anchor == [1]
+    # 1 is also in nearby_raw but must be dropped because it is an anchor match.
+    assert nearby == [0, 2]
+
+
+def test_parse_anchor_nearby_indices_requires_both_keys() -> None:
+    try:
+        _parse_anchor_nearby_indices_from_llm(
+            '{"keep_indices": [0]}', max_len=3
+        )
+    except ValueError as exc:
+        assert "anchor_indices" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
 
 
 def test_offset_detection_preserves_class() -> None:
@@ -268,13 +288,13 @@ def test_fallback_filter_by_similarity_picks_anchor_and_nearby() -> None:
         ),
         _detection_from_bbox((150, 0, 30, 15), YOLO_CLASS_TEXT, text="圖片"),
     ]
-    kept = _fallback_filter_by_similarity(
+    anchor_matches, nearby_matches = _fallback_filter_by_similarity(
         detections,
         "「文件」文字",
         ["「Chrome」圖示", "「圖片」文字"],
     )
-    assert [d.text or (d.icons or [{}])[0].get("chinese_id") for d in kept] == [
-        "文件",
+    assert [d.text for d in anchor_matches] == ["文件"]
+    assert [d.text or (d.icons or [{}])[0].get("chinese_id") for d in nearby_matches] == [
         "Chrome",
         "圖片",
     ]
@@ -287,13 +307,14 @@ def test_fallback_filter_by_similarity_dedupes_same_match() -> None:
         _detection_from_bbox((0, 0, 30, 15), YOLO_CLASS_TEXT, text="文件"),
         _detection_from_bbox((50, 0, 30, 15), YOLO_CLASS_TEXT, text="下載"),
     ]
-    kept = _fallback_filter_by_similarity(
+    anchor_matches, nearby_matches = _fallback_filter_by_similarity(
         detections,
         "「文件」文字",
         ["「文件」文字"],
     )
-    assert len(kept) == 1
-    assert kept[0].text == "文件"
+    assert len(anchor_matches) == 1
+    assert anchor_matches[0].text == "文件"
+    assert nearby_matches == []
 
 
 def test_two_nearest_indices_by_center_distance() -> None:
@@ -331,6 +352,28 @@ def test_format_ui_candidates_relational_uses_neighbor_phrases() -> None:
     assert "center=" not in text
     assert " w=" not in text
     assert " h=" not in text
+
+
+def test_format_ui_candidates_relational_neighbor_context_not_selectable() -> None:
+    """Pick rows are anchors only; nearby landmarks appear only in neighbor clauses."""
+    anchors = [
+        _detection_from_bbox((54, 302, 30, 14), YOLO_CLASS_TEXT, text="自訂Office 範本"),
+        _detection_from_bbox((200, 400, 30, 14), YOLO_CLASS_TEXT, text="自訂Office 範本"),
+    ]
+    nearby = [
+        _detection_from_bbox((56, 280, 28, 14), YOLO_CLASS_TEXT, text="WindowsPowerShell"),
+        _detection_from_bbox(
+            (20, 300, 16, 16), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "資料夾"}]
+        ),
+    ]
+    text = _format_ui_candidates_relational(anchors, neighbors=nearby)
+    lines = text.split("\n")
+    assert len(lines) == 2
+    assert lines[0].startswith("[index 0] 「自訂Office 範本」文字（")
+    assert "WindowsPowerShell" in lines[0]
+    assert "資料夾" in lines[0]
+    assert "WindowsPowerShell" not in lines[0].split("（")[0]
+    assert "[index 2]" not in text
 
 
 def test_format_ui_candidates_relational_single_candidate() -> None:

@@ -47,6 +47,20 @@ _TEXT_FILTER_JSON_SCHEMA: dict[str, Any] = {
     },
     "required": ["keep_indices"],
 }
+_MOUSE_FILTER_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "anchor_indices": {
+            "type": "array",
+            "items": {"type": "integer"},
+        },
+        "nearby_indices": {
+            "type": "array",
+            "items": {"type": "integer"},
+        },
+    },
+    "required": ["anchor_indices", "nearby_indices"],
+}
 
 
 @dataclass(frozen=True)
@@ -106,6 +120,11 @@ def _parse_keep_indices_from_llm(raw: str, max_len: int) -> list[int]:
     value = out["keep_indices"]
     if not isinstance(value, list):
         raise ValueError(f'"keep_indices" must be a list; preview={preview!r}')
+    return _sanitize_index_list(value, max_len)
+
+
+def _sanitize_index_list(value: list[Any], max_len: int) -> list[int]:
+    """Deduplicate and clamp indices to ``[0, max_len)``, preserving order."""
     keep: list[int] = []
     seen: set[int] = set()
     for item in value:
@@ -115,6 +134,39 @@ def _parse_keep_indices_from_llm(raw: str, max_len: int) -> list[int]:
         seen.add(idx)
         keep.append(idx)
     return keep
+
+
+def _parse_anchor_nearby_indices_from_llm(
+    raw: str, max_len: int
+) -> tuple[list[int], list[int]]:
+    """Parse mouse-filter reply into ``(anchor_indices, nearby_indices)``.
+
+    Indices that appear in both lists are kept only in ``anchor_indices``.
+    """
+    out = parse_json_object(
+        raw,
+        empty_error=(
+            "Ollama mouse filter returned empty content; expected "
+            '{"anchor_indices": [int, ...], "nearby_indices": [int, ...]}'
+        ),
+        decode_error_prefix="invalid JSON",
+    )
+    preview = (raw or "")[:240]
+    if "anchor_indices" not in out or "nearby_indices" not in out:
+        raise ValueError(
+            f'must include "anchor_indices" and "nearby_indices"; preview={preview!r}'
+        )
+    anchor_raw = out["anchor_indices"]
+    nearby_raw = out["nearby_indices"]
+    if not isinstance(anchor_raw, list) or not isinstance(nearby_raw, list):
+        raise ValueError(
+            f'"anchor_indices" and "nearby_indices" must be lists; preview={preview!r}'
+        )
+    anchor_indices = _sanitize_index_list(anchor_raw, max_len)
+    nearby_indices = _sanitize_index_list(nearby_raw, max_len)
+    anchor_set = set(anchor_indices)
+    nearby_indices = [i for i in nearby_indices if i not in anchor_set]
+    return anchor_indices, nearby_indices
 
 
 _CANDIDATE_CLASS_LABELS: dict[str, str] = {
@@ -260,37 +312,81 @@ def _two_nearest_indices(detections: list[UiDetection], index: int) -> list[int]
     return [j for _, j in ranked[:2]]
 
 
-def _format_ui_candidates_relational(detections: list[UiDetection]) -> str:
-    """Format picker candidates as labels plus two-nearest-neighbor spatial phrases."""
+def _format_ui_candidates_relational(
+    anchors: list[UiDetection],
+    *,
+    neighbors: list[UiDetection] | None = None,
+) -> str:
+    """Format picker candidates as labels plus two-nearest-neighbor spatial phrases.
+
+    Selectable rows are only ``detections`` (0-based indices). Neighbor phrases may
+    cite detections from ``neighbor_context`` (e.g. nearby landmarks) without making
+    those landmarks selectable.
+    """
+
+    def _identity_key(d: UiDetection) -> tuple[Any, ...]:
+        icon_ids = tuple(
+            sorted(
+                str(ii.get("chinese_id", ""))
+                for ii in (d.icons or [])
+                if ii.get("chinese_id")
+            )
+        )
+        return (d.bbox, d.cx, d.cy, d.class_id, d.text or "", icon_ids)
+
+    pool = list(anchors)
+    if neighbors:
+        seen = {_identity_key(d) for d in anchors}
+        for neighbor in neighbors:
+            key = _identity_key(neighbor)
+            if key in seen:
+                continue
+            seen.add(key)
+            pool.append(neighbor)
+
     lines: list[str] = []
-    for i, d in enumerate(detections):
-        label = _detection_anchor_label(d)
-        neighbor_idxs = _two_nearest_indices(detections, i)
+    for i, neighbor in enumerate(anchors):
+        label = _detection_anchor_label(neighbor)
+        neighbor_idxs = _two_nearest_indices(pool, i)
         if not neighbor_idxs:
             lines.append(f"[index {i}] {label}")
             continue
         clauses = [
-            _relative_neighbor_phrase(d, detections[j]) for j in neighbor_idxs
+            _relative_neighbor_phrase(neighbor, pool[j]) for j in neighbor_idxs
         ]
         lines.append(f"[index {i}] {label}（{'、'.join(clauses)}）")
     return "\n".join(lines)
 
 
 async def _select_center_with_ollama(
-    instruction: str,
-    detections: list[UiDetection],
+    anchor_instruction: str,
+    anchor_candidates: list[UiDetection],
     image_paths: list[str],
+    *,
+    neighbor_candidates: list[UiDetection] | None = None,
+    nearby_labels: list[str] | None = None,
 ) -> int:
     """
     Ask Ollama for the best candidate index (0-based into ``detections``).
 
+    ``neighbor_context`` may supply nearby landmarks for relational phrases.
+    ``nearby_labels`` are shown as disambiguation hints (not selectable targets).
+
     Falls back to :func:`request_json_with_retry` if the first reply cannot be parsed.
     """
-    if not detections:
+    if not anchor_candidates:
         raise ValueError("no candidates to pick from")
-    candidates_text = _format_ui_candidates_relational(detections)
+    candidates_text = _format_ui_candidates_relational(
+        anchor_candidates,
+        neighbors=neighbor_candidates,
+    )
+    nearby_text = (
+        ", ".join(label.strip() for label in (nearby_labels or []) if label.strip())
+        or "(none)"
+    )
     prompt = get_prompt("ui_element_selection").format(
-        instruction=instruction,
+        instruction=anchor_instruction,
+        nearby_text=nearby_text,
         candidates_text=candidates_text,
     )
 
@@ -301,7 +397,7 @@ async def _select_center_with_ollama(
             "images": image_paths,
         },
     ]
-    n = len(detections)
+    n = len(anchor_candidates)
     reply1 = await get_llm_client().chat_messages(
         load_settings().brain_lm,
         messages=messages,

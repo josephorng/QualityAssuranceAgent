@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from cua_mcp.select_mouse_target import _detection_from_bbox
-from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text, _parse_keep_indices_from_llm
+from cua_mcp.select_ui_element import (
+    UiDetection,
+    _format_ui_candidates_relational,
+    _format_ui_candidates_text,
+    _parse_keep_indices_from_llm,
+    _two_nearest_indices,
+)
 from cua_mcp.yolo_onnx import (
     MOUSE_TARGET_CLASS_IDS,
     YOLO_CLASS_ELEMENT,
@@ -249,3 +255,58 @@ def test_expand_keep_indices_ignores_blank_detections() -> None:
     ]
     expanded = _expand_keep_indices_with_similar(detections, [0, 1])
     assert expanded == [0, 1]
+
+
+def test_two_nearest_indices_by_center_distance() -> None:
+    detections = [
+        _detection_from_bbox((0, 0, 20, 20), YOLO_CLASS_TEXT, text="遠"),  # center 10,10
+        _detection_from_bbox((56, 280, 28, 14), YOLO_CLASS_TEXT, text="下載"),  # ~70,287
+        _detection_from_bbox((54, 302, 30, 14), YOLO_CLASS_TEXT, text="文件"),  # ~69,309
+        _detection_from_bbox((55, 334, 28, 14), YOLO_CLASS_TEXT, text="圖片"),  # ~69,341
+        _detection_from_bbox((500, 500, 20, 20), YOLO_CLASS_TEXT, text="遠2"),
+    ]
+    assert _two_nearest_indices(detections, 2) == [1, 3]
+
+
+def test_two_nearest_indices_single_and_empty() -> None:
+    alone = [_detection_from_bbox((0, 0, 20, 20), YOLO_CLASS_TEXT, text="A")]
+    assert _two_nearest_indices(alone, 0) == []
+    pair = [
+        _detection_from_bbox((0, 0, 20, 20), YOLO_CLASS_TEXT, text="A"),
+        _detection_from_bbox((40, 0, 20, 20), YOLO_CLASS_TEXT, text="B"),
+    ]
+    assert _two_nearest_indices(pair, 0) == [1]
+
+
+def test_format_ui_candidates_relational_uses_neighbor_phrases() -> None:
+    detections = [
+        _detection_from_bbox((56, 280, 28, 14), YOLO_CLASS_TEXT, text="下載"),
+        _detection_from_bbox((54, 302, 30, 14), YOLO_CLASS_TEXT, text="文件"),
+        _detection_from_bbox((55, 334, 28, 14), YOLO_CLASS_TEXT, text="圖片"),
+    ]
+    text = _format_ui_candidates_relational(detections)
+    lines = text.split("\n")
+    assert lines[1].startswith("[index 1] 「文件」文字（")
+    assert "上方" in lines[1] and "「下載」文字" in lines[1]
+    assert "下方" in lines[1] and "「圖片」文字" in lines[1]
+    assert "center=" not in text
+    assert " w=" not in text
+    assert " h=" not in text
+
+
+def test_format_ui_candidates_relational_single_candidate() -> None:
+    detections = [_detection_from_bbox((0, 0, 20, 20), YOLO_CLASS_TEXT, text="文件")]
+    text = _format_ui_candidates_relational(detections)
+    assert text == "[index 0] 「文件」文字"
+
+
+def test_format_ui_candidates_relational_icon_label() -> None:
+    detections = [
+        _detection_from_bbox((0, 0, 16, 16), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "下載"}]),
+        _detection_from_bbox((40, 0, 30, 14), YOLO_CLASS_TEXT, text="文件"),
+    ]
+    text = _format_ui_candidates_relational(detections)
+    assert "「下載」圖示" in text
+    assert "「文件」文字" in text
+    assert "右方" in text
+    assert "左方" in text

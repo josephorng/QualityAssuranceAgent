@@ -7,8 +7,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import cv2
-
 from cua_mcp.geometry import sort_by_reading_order
 from cua_mcp.icon_map import is_pua_char, text_has_pua
 from cua_mcp.llm_json import parse_json_object
@@ -17,6 +15,16 @@ from src.common.llm_factory import get_llm_client
 from src.common.prompting import get_prompt
 from src.common.run_state import RunStateManager, get_run_state_manager
 from src.common.settings import load_settings
+
+_NEIGHBOR_OFFSET_THRESHOLD_PX = 8
+_ANCHOR_SUFFIX_BY_CLASS: dict[str, str] = {
+    "text": "文字",
+    "element": "元素",
+    "unknown": "未知",
+    "input": "輸入欄",
+    "button": "按鈕",
+    "scrollbar": "滾動條",
+}
 
 
 def _run_manager() -> RunStateManager:
@@ -165,6 +173,109 @@ def _format_ui_candidates_text(
     return "\n".join(lines)
 
 
+def _visible_anchor_text(text: str | None) -> str:
+    """OCR text with PUA codepoints stripped; empty when nothing visible remains."""
+    if not text:
+        return ""
+    return "".join(ch for ch in text if not is_pua_char(ch)).strip()
+
+
+def _detection_anchor_label(d: UiDetection) -> str:
+    """Hub-style label such as 「文件」文字 or 「下載」圖示."""
+    for icon in d.icons or []:
+        if not isinstance(icon, dict):
+            continue
+        label = str(icon.get("chinese_id") or icon.get("id") or "").strip()
+        if label:
+            return f"「{label}」圖示"
+
+    visible = _visible_anchor_text(d.text)
+    if visible:
+        suffix = _ANCHOR_SUFFIX_BY_CLASS.get(d.class_name)
+        if suffix:
+            if d.class_name == "input":
+                return f"「{visible}」文字所在的輸入欄"
+            return f"「{visible}」{suffix}"
+        return f"「{visible}」"
+
+    return _ANCHOR_SUFFIX_BY_CLASS.get(d.class_name, d.class_name or "元素")
+
+
+def _offset_direction_parts(dx: int, dy: int) -> list[str]:
+    """Traditional Chinese direction+distance parts; dominant axis first."""
+    parts: list[str] = []
+    include_x = abs(dx) >= _NEIGHBOR_OFFSET_THRESHOLD_PX
+    include_y = abs(dy) >= _NEIGHBOR_OFFSET_THRESHOLD_PX
+    if not include_x and not include_y:
+        # Nearly overlapping: still emit the larger axis so distance is visible.
+        if abs(dx) >= abs(dy) and dx != 0:
+            include_x = True
+        elif dy != 0:
+            include_y = True
+        else:
+            return parts
+
+    def _x_part() -> str:
+        return f"右方{dx}個像素" if dx > 0 else f"左方{abs(dx)}個像素"
+
+    def _y_part() -> str:
+        return f"下方{dy}個像素" if dy > 0 else f"上方{abs(dy)}個像素"
+
+    if include_x and include_y:
+        if abs(dx) >= abs(dy):
+            parts.extend([_x_part(), _y_part()])
+        else:
+            parts.extend([_y_part(), _x_part()])
+    elif include_x:
+        parts.append(_x_part())
+    else:
+        parts.append(_y_part())
+    return parts
+
+
+def _relative_neighbor_phrase(self: UiDetection, neighbor: UiDetection) -> str:
+    """Describe ``neighbor`` relative to ``self``, e.g. 上方32個像素有「下載」文字."""
+    dx = neighbor.cx - self.cx
+    dy = neighbor.cy - self.cy
+    label = _detection_anchor_label(neighbor)
+    parts = _offset_direction_parts(dx, dy)
+    if not parts:
+        return f"附近有{label}"
+    return f"{'、'.join(parts)}有{label}"
+
+
+def _two_nearest_indices(detections: list[UiDetection], index: int) -> list[int]:
+    """Return up to two other candidate indices closest to ``detections[index]`` by center."""
+    if index < 0 or index >= len(detections) or len(detections) < 2:
+        return []
+    origin = detections[index]
+    ranked: list[tuple[int, int]] = []
+    for j, other in enumerate(detections):
+        if j == index:
+            continue
+        dx = other.cx - origin.cx
+        dy = other.cy - origin.cy
+        ranked.append((dx * dx + dy * dy, j))
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    return [j for _, j in ranked[:2]]
+
+
+def _format_ui_candidates_relational(detections: list[UiDetection]) -> str:
+    """Format picker candidates as labels plus two-nearest-neighbor spatial phrases."""
+    lines: list[str] = []
+    for i, d in enumerate(detections):
+        label = _detection_anchor_label(d)
+        neighbor_idxs = _two_nearest_indices(detections, i)
+        if not neighbor_idxs:
+            lines.append(f"[index {i}] {label}")
+            continue
+        clauses = [
+            _relative_neighbor_phrase(d, detections[j]) for j in neighbor_idxs
+        ]
+        lines.append(f"[index {i}] {label}（{'、'.join(clauses)}）")
+    return "\n".join(lines)
+
+
 async def _select_center_with_ollama(
     instruction: str,
     detections: list[UiDetection],
@@ -177,18 +288,10 @@ async def _select_center_with_ollama(
     """
     if not detections:
         raise ValueError("no candidates to pick from")
-    candidates_text = _format_ui_candidates_text(detections)
-    screenshot_sizes: list[str] = []
-    for image_path in image_paths:
-        img = cv2.imread(image_path)
-        if img is not None:
-            img_h, img_w = img.shape[:2]
-            screenshot_sizes.append(f"{img_w}x{img_h}")
-    screenshot_size_text = ", ".join(screenshot_sizes) if screenshot_sizes else "unknown"
+    candidates_text = _format_ui_candidates_relational(detections)
     prompt = get_prompt("ui_element_selection").format(
         instruction=instruction,
         candidates_text=candidates_text,
-        screenshot_sizes=screenshot_size_text,
     )
 
     messages: list[dict[str, Any]] = [

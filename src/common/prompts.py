@@ -116,14 +116,19 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
         {
             "image_usage": "optional",
             "prompt": (
-                "Pick the candidate index from Candidates that best matches the Instruction's location hint. "
-                "Each candidate row starts with [index] then center=[cx,cy] w=<width_px> h=<height_px>.\n\n"
+                "Pick the candidate index from Candidates whose label best matches the Instruction's "
+                "primary target. Each candidate row is [index N] <label>（<relative neighbor clauses>）. "
+                "Neighbor clauses describe the two nearest other candidates with Traditional Chinese "
+                "direction and pixel distance (左方/右方/上方/下方 + N個像素有<label>).\n\n"
                 "Instruction:\n{instruction}\n\n"
-                "Candidates:\n{candidates_text}\n\n"
-                "Screenshot size(s): {screenshot_sizes} (width x height pixels per monitor)."
+                "Candidates:\n{candidates_text}"
             ),
             "instructions": [
                 'Reply only with JSON: {{"index": <integer>}} — the [index] from the chosen candidate row (0-based).',
+                "Prefer the candidate whose <label> matches the Instruction's primary quoted target "
+                "(e.g. 「自訂Office 範本」文字).",
+                "Use （附近有…） / nearby-context mentions and neighbor clauses only to disambiguate "
+                "among candidates with the same primary label — not to pick a different label.",
                 "Never invent an index; only use an index shown in the Candidates list.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
@@ -160,6 +165,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Keep text/element/unknown rows when OCR text or icons match the primary anchor in the instruction.",
                 "Also keep candidates that match nearby/context element or text mentioned with the anchor "
                 "(e.g. beside, above, below, next to, near, 旁邊, 上方, 下方, 附近), so spatial disambiguation can use them later.",
+                "Do not treat relative click-offset phrases (右方/左方/上方/下方 + N個像素) as a reason to keep a different primary target.",
                 "Keep all 輸入欄/滾動條 rows when the instruction implies a field, control, or scrollable region.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],

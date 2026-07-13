@@ -4,6 +4,7 @@ Unified mouse target selection: YOLO (text, element, input, scrollbar) + OCR + L
 
 from __future__ import annotations
 
+from difflib import SequenceMatcher
 import time
 from typing import Any
 
@@ -22,6 +23,7 @@ from cua_mcp.read_screen_text.ocr_image import _ocr_boxes_on_bgr
 from cua_mcp.select_ui_element import (
     UiDetection,
     _TEXT_FILTER_JSON_SCHEMA,
+    _detection_anchor_label,
     _format_ui_candidates_text,
     _parse_keep_indices_from_llm,
     _select_center_with_ollama,
@@ -323,17 +325,86 @@ def _expand_keep_indices_with_similar(
     return expanded
 
 
-async def _filter_mouse_candidates(
+def _label_similarity(a: str, b: str) -> float:
+    """Case-insensitive string similarity in ``[0, 1]``."""
+    left = (a or "").strip()
+    right = (b or "").strip()
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+    return SequenceMatcher(None, left.casefold(), right.casefold()).ratio()
+
+
+def _detection_similarity_to_query(det: UiDetection, query: str) -> float:
+    """Best similarity between ``query`` and a detection's hub label / OCR / icon ids."""
+    query = (query or "").strip()
+    if not query:
+        return 0.0
+    candidates = {_detection_anchor_label(det)}
+    candidates |= _detection_match_labels(det)
+    return max((_label_similarity(query, label) for label in candidates if label), default=0.0)
+
+
+def _best_matching_index(detections: list[UiDetection], query: str) -> int | None:
+    """Index of the detection most similar to ``query``, or None when query is blank."""
+    query = (query or "").strip()
+    if not query or not detections:
+        return None
+    best_idx = 0
+    best_score = _detection_similarity_to_query(detections[0], query)
+    for i in range(1, len(detections)):
+        score = _detection_similarity_to_query(detections[i], query)
+        if score > best_score:
+            best_idx = i
+            best_score = score
+    return best_idx
+
+
+def _fallback_filter_by_similarity(
     detections: list[UiDetection],
-    instruction: str,
+    anchor: str,
+    nearby: list[str],
 ) -> list[UiDetection]:
-    """Ask Ollama which candidates match the instruction; on failure, keep all."""
+    """Keep the most similar candidate for the anchor and each nearby label."""
     if not detections:
         return []
 
+    keep: list[int] = []
+    seen: set[int] = set()
+    queries = [anchor, *(label for label in nearby if (label or "").strip())]
+    for query in queries:
+        idx = _best_matching_index(detections, query)
+        if idx is None or idx in seen:
+            continue
+        seen.add(idx)
+        keep.append(idx)
+        _log_info(
+            "_filter_mouse_candidates: similarity fallback "
+            f"query={query!r} index={idx} "
+            f"label={_detection_anchor_label(detections[idx])!r} "
+            f"score={_detection_similarity_to_query(detections[idx], query):.3f}"
+        )
+    return [detections[i] for i in keep]
+
+
+async def _filter_mouse_candidates(
+    detections: list[UiDetection],
+    anchor: str,
+    nearby: list[str],
+) -> list[UiDetection]:
+    """Ask Ollama which candidates match the anchor or nearby labels.
+
+    On LLM failure, keep the most similar candidate for the anchor and each nearby label.
+    """
+    if not detections:
+        return []
+
+    nearby_text = ", ".join(label.strip() for label in nearby if label.strip()) or "(none)"
     candidates_text = _format_ui_candidates_text(detections, include_geometry=False)
     prompt = get_prompt("mouse_target_filter").format(
-        instruction=instruction,
+        anchor=anchor,
+        nearby_text=nearby_text,
         candidates_text=candidates_text,
     )
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
@@ -346,8 +417,10 @@ async def _filter_mouse_candidates(
             log_info=lambda m: _run_manager().log_info(f"_filter_mouse_candidates: {m}"),
         )
     except ValueError as retry_exc:
-        _run_manager().log_info(f"_filter_mouse_candidates: fallback keep-all ({retry_exc})")
-        return detections
+        _run_manager().log_info(
+            f"_filter_mouse_candidates: fallback similarity match ({retry_exc})"
+        )
+        return _fallback_filter_by_similarity(detections, anchor, nearby)
 
     if not keep_indices:
         return []
@@ -375,9 +448,10 @@ async def resolve_mouse_point(
     if not instruction_text:
         raise ValueError("instruction must be non-empty")
 
-    # Keep the raw instruction for filter/pick (including nearby-context comments).
-    # Only parse relative pixel offsets for the final click point.
-    _, offset_dx, offset_dy = await parse_relative_pixel_offset(instruction_text)
+    # Parse anchor/offset/nearby once; filter uses anchor+nearby, pick still uses raw instruction.
+    anchor, offset_dx, offset_dy, nearby = await parse_relative_pixel_offset(
+        instruction_text
+    )
 
     paths = _run_manager().require_paths()
     monitor_indices = selected_eye_monitor_indices()
@@ -411,8 +485,11 @@ async def resolve_mouse_point(
     if not detections:
         raise ValueError("No YOLO candidates found on selected monitor(s).")
 
-    filtered = await _filter_mouse_candidates(detections, instruction_text)
-    _log_info(f"move_mouse after_filter={len(filtered)}")
+    filtered = await _filter_mouse_candidates(detections, anchor, nearby)
+    _log_info(
+        f"move_mouse after_filter={len(filtered)} "
+        f"anchor={anchor!r} nearby={nearby!r}"
+    )
 
     if not filtered:
         raise ValueError("No candidates matched the instruction after LLM filtering.")

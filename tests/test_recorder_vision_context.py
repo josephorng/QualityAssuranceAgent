@@ -9,8 +9,6 @@ from cua_mcp.select_mouse_target import _detection_from_bbox
 from cua_mcp.yolo_onnx import YOLO_CLASS_ELEMENT, YOLO_CLASS_TEXT
 from src.recorder.models import RecordedEvent
 from src.recorder.vision_context import (
-    _collect_drag_source_identities,
-    _detection_identities,
     _local_cursor,
     _nearest_candidates,
     build_vision_context,
@@ -196,35 +194,7 @@ async def test_drag_destination_keeps_nearest_candidates_without_exclusion(tmp_p
     assert "text='文件'" in destination["candidate_text"]
 
 
-def test_collect_drag_source_identities_includes_cluster_text() -> None:
-    detections = [
-        _detection_from_bbox((0, 0, 100, 80), YOLO_CLASS_ELEMENT),
-        _detection_from_bbox((10, 10, 60, 20), YOLO_CLASS_TEXT, text="報告.pdf"),
-        _detection_from_bbox((10, 40, 60, 20), YOLO_CLASS_TEXT, text="內嵌標籤"),
-        _detection_from_bbox((300, 300, 40, 20), YOLO_CLASS_TEXT, text="遠處"),
-    ]
-    identities = _collect_drag_source_identities(detections, (20, 20))
-    assert "text:報告.pdf" in identities
-    assert "text:內嵌標籤" in identities
-    assert "text:遠處" not in identities
 
-
-def test_detection_identities_links_icon_label_and_visible_text() -> None:
-    chrome_icon = _detection_from_bbox(
-        (13, 607, 52, 50),
-        YOLO_CLASS_ELEMENT,
-        text="\ue007",
-        icons=[{"chinese_id": "Chrome"}],
-    )
-    chrome_label = _detection_from_bbox((10, 680, 58, 14), YOLO_CLASS_TEXT, text="Chrome")
-
-    icon_keys = _detection_identities(chrome_icon)
-    label_keys = _detection_identities(chrome_label)
-
-    assert "icon:Chrome" in icon_keys
-    assert "text:Chrome" in icon_keys
-    assert "text:Chrome" in label_keys
-    assert icon_keys & label_keys
 
 
 @pytest.mark.asyncio

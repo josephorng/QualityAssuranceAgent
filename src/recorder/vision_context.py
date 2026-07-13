@@ -15,17 +15,18 @@ from src.common.io_utils import write_json
 from src.recorder.models import POINTER_EVENT_KINDS, RecordedEvent
 
 _NEAREST_CANDIDATE_LIMIT = 8
-_DRAG_CLUSTER_MAX_DIST_PX = 60
 _DRAG_OFFSET_THRESHOLD_PX = 5
 
 
 def _local_cursor(event: RecordedEvent) -> tuple[int, int] | None:
+    """Convert the event cursor from global desktop coords to screenshot-local coords."""
     if event.cursor_xy is None:
         return None
     return _global_to_local(event, event.cursor_xy)
 
 
 def _local_end_cursor(event: RecordedEvent) -> tuple[int, int] | None:
+    """Convert the drag end point from global desktop coords to screenshot-local coords."""
     if event.end_xy is None:
         return None
     gx, gy = event.end_xy
@@ -37,6 +38,7 @@ def _local_end_cursor(event: RecordedEvent) -> tuple[int, int] | None:
 
 
 def _global_to_local(event: RecordedEvent, global_xy: tuple[int, int]) -> tuple[int, int]:
+    """Subtract the event monitor offset to map a global point into screenshot space."""
     gx, gy = global_xy
     if event.monitor_offset is not None:
         ox, oy = event.monitor_offset
@@ -80,6 +82,7 @@ def _bbox_center_inside(
     outer: tuple[int, int, int, int],
     inner: tuple[int, int, int, int],
 ) -> bool:
+    """True when the center of ``inner`` lies inside the ``outer`` bbox."""
     ox, oy, ow, oh = outer
     ix, iy, iw, ih = inner
     cx, cy = ix + iw // 2, iy + ih // 2
@@ -87,6 +90,7 @@ def _bbox_center_inside(
 
 
 def _point_inside_bbox(x: int, y: int, bbox: tuple[int, int, int, int]) -> bool:
+    """True when ``(x, y)`` lies inside an axis-aligned ``(x, y, w, h)`` bbox."""
     bx, by, bw, bh = bbox
     return bx <= x < bx + bw and by <= y < by + bh
 
@@ -96,6 +100,7 @@ def _drop_point_inside_candidate(
     drop_y: int,
     candidate: dict[str, Any],
 ) -> bool:
+    """True when the drop point falls inside a candidate's bbox dict."""
     bbox = candidate.get("bbox")
     if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
         return _point_inside_bbox(
@@ -186,6 +191,7 @@ def format_drag_relative_offset_phrase(dx: int, dy: int) -> str | None:
 
 
 def _candidate_display_label(candidate: dict[str, Any]) -> str:
+    """Return a short display label for offset-hint lines (text, icon, or class)."""
     text = _visible_text(candidate.get("text"))
     if text:
         return f"「{text}」"
@@ -347,6 +353,7 @@ def append_drag_nearby_context_comments(
 
 
 def _candidate_center(candidate: dict[str, Any]) -> tuple[int, int] | None:
+    """Return the candidate center from ``center`` or by deriving it from ``bbox``."""
     center = candidate.get("center")
     if isinstance(center, (list, tuple)) and len(center) == 2:
         return int(center[0]), int(center[1])
@@ -357,6 +364,7 @@ def _candidate_center(candidate: dict[str, Any]) -> tuple[int, int] | None:
 
 
 def _candidate_matches_anchor(candidate: dict[str, Any], anchor: str) -> bool:
+    """True when candidate visible text, raw text, or icon label equals ``anchor``."""
     text = _visible_text(candidate.get("text"))
     if text and text == anchor:
         return True
@@ -458,80 +466,11 @@ def primary_candidate_offset(vision: dict[str, Any]) -> str | None:
     return format_drag_relative_offset_phrase(drop_x - center[0], drop_y - center[1])
 
 
-def _is_drag_cluster_member(det: UiDetection, anchor: UiDetection) -> bool:
-    det_bbox = det.bbox
-    anchor_bbox = anchor.bbox
-    if _bbox_center_inside(anchor_bbox, det_bbox):
-        return True
-    if _bbox_center_inside(det_bbox, anchor_bbox):
-        return True
-    dx = det.cx - anchor.cx
-    dy = det.cy - anchor.cy
-    return (dx * dx + dy * dy) <= _DRAG_CLUSTER_MAX_DIST_PX * _DRAG_CLUSTER_MAX_DIST_PX
-
-
-def _detection_identities(det: UiDetection) -> set[str]:
-    """Return identity keys that may reappear when the same UI item is dragged."""
-    keys: set[str] = set()
-    raw = (det.text or "").strip()
-    visible = _visible_text(det.text)
-    if visible:
-        keys.add(f"text:{visible}")
-    if raw and not visible:
-        keys.add(f"text:{raw}")
-    for icon in det.icons or []:
-        if not isinstance(icon, dict):
-            continue
-        label = str(icon.get("chinese_id") or icon.get("id") or "").strip()
-        if label:
-            keys.add(f"icon:{label}")
-            keys.add(f"text:{label}")
-    if not keys:
-        keys.add(f"{det.class_name}:element")
-    return keys
-
-
 def _visible_text(text: str | None) -> str:
+    """Strip Private Use Area icon glyphs and whitespace from OCR text."""
     if not text:
         return ""
     return "".join(ch for ch in text if not is_pua_char(ch)).strip()
-
-
-def _collect_drag_source_cluster(
-    all_detections: list[UiDetection],
-    start_local: tuple[int, int],
-) -> list[UiDetection]:
-    """Return detections that belong to the UI cluster being dragged."""
-    if not all_detections:
-        return []
-
-    nearest = _nearest_candidates(
-        all_detections,
-        start_local[0],
-        start_local[1],
-        limit=_NEAREST_CANDIDATE_LIMIT,
-    )
-    if not nearest:
-        return []
-
-    anchor = nearest[0]
-    cluster: list[UiDetection] = []
-    for det in all_detections:
-        if not _is_drag_cluster_member(det, anchor):
-            continue
-        cluster.append(det)
-    return cluster
-
-
-def _collect_drag_source_identities(
-    all_detections: list[UiDetection],
-    start_local: tuple[int, int],
-) -> set[str]:
-    """Collect OCR/element identities for the widget cluster being dragged."""
-    identities: set[str] = set()
-    for det in _collect_drag_source_cluster(all_detections, start_local):
-        identities.update(_detection_identities(det))
-    return identities
 
 
 def _destination_candidates(
@@ -548,6 +487,7 @@ def _destination_candidates(
 
 
 def _candidate_dict_to_detection(candidate: dict[str, Any]) -> UiDetection:
+    """Rebuild a ``UiDetection`` from a serialized candidate dict."""
     bbox = tuple(candidate["bbox"])
     x, y, w, h = bbox
     center = candidate.get("center") or [x + w // 2, y + h // 2]
@@ -567,6 +507,7 @@ def _build_filtered_destination_vision(
     *,
     end_local: tuple[int, int],
 ) -> dict[str, Any]:
+    """Filter end-point vision to drop-target candidates and attach offset hints."""
     all_detections = end_result.get("all_detections")
     if isinstance(all_detections, list) and all_detections:
         filtered = _destination_candidates(all_detections, end_local)
@@ -603,6 +544,7 @@ def _build_filtered_destination_vision(
 
 
 def _detection_to_dict(det: UiDetection) -> dict[str, Any]:
+    """Serialize a ``UiDetection`` into a JSON-friendly candidate dict."""
     return {
         "bbox": list(det.bbox),
         "center": [det.cx, det.cy],
@@ -614,6 +556,7 @@ def _detection_to_dict(det: UiDetection) -> dict[str, Any]:
 
 
 def _ocr_input_bbox_text(bgr: np.ndarray, bbox: tuple[int, int, int, int]) -> str:
+    """Run OCR on a single input bbox and return the joined text, or empty."""
     preds = _ocr_boxes_on_bgr(bgr, [bbox])
     if not preds:
         return ""
@@ -717,6 +660,7 @@ def build_vision_context_at_point(
 
 
 def _compact_vision_point(result: dict[str, Any]) -> dict[str, Any]:
+    """Drop heavy fields (bgr/detections) and keep LLM-facing vision payload keys."""
     compact = {
         "used_vision": result.get("used_vision", False),
         "candidate_text": result.get("candidate_text", ""),

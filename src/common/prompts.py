@@ -153,20 +153,21 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
         {
             "image_usage": "no_image",
             "prompt": (
-                "Select candidates related to the user instruction.\n"
+                "Select all candidates that correspond to the anchor or any nearby label.\n"
                 "Each row has class=文字(Text)|元素(Element)|未知(Unknown)|輸入欄(Input)|滾動條(Scrollbar), "
                 "optional OCR text, and optional icon labels.\n\n"
-                "Instruction:\n{instruction}\n\n"
+                "Anchor:\n{anchor}\n\n"
+                "Nearby:\n{nearby_text}\n\n"
                 "Candidates:\n{candidates_text}\n"
             ),
             "instructions": [
                 'Return JSON only: {{"keep_indices": [<int>, ...]}}.',
                 "Use [index N] values from the Candidates list. Keep an empty list when none match.",
-                "Keep text/element/unknown rows when OCR text or icons match the primary anchor in the instruction.",
-                "Also keep candidates that match nearby/context element or text mentioned with the anchor "
-                "(e.g. beside, above, below, next to, near, 旁邊, 上方, 下方, 附近), so spatial disambiguation can use them later.",
-                "Do not treat relative click-offset phrases (右方/左方/上方/下方 + N個像素) as a reason to keep a different primary target.",
-                "Keep all 輸入欄/滾動條 rows when the instruction implies a field, control, or scrollable region.",
+                "Keep every candidate whose OCR text, icons, or class matches the Anchor.",
+                "Also keep every candidate that matches any Nearby label (文字/圖示/元素/輸入欄/滾動條), "
+                "so spatial disambiguation can use them later.",
+                "Nearby may be empty; when it is, only keep candidates matching the Anchor.",
+                "Prefer recall: include all plausible matches for Anchor and Nearby, not only the single best one.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
         }
@@ -371,12 +372,12 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
         {
             "image_usage": "no_image",
             "prompt": (
-                "Extract the UI anchor and relative pixel offset from a mouse-target "
-                "instruction.\n\n"
+                "Extract the UI anchor, relative pixel offset, and nearby labels from a "
+                "mouse-target instruction.\n\n"
                 "Instruction:\n{instruction}\n"
             ),
             "instructions": [
-                'Return JSON only: {{"anchor": "<string>", "dx": <integer>, "dy": <integer>}}.',
+                'Return JSON only: {{"anchor": "<string>", "dx": <integer>, "dy": <integer>, "nearby": ["<string>", ...]}}.',
                 "anchor: the on-screen target phrase for locating a UI element, without relative pixel offset clauses and without trailing 的位置.",
                 "Keep quoted labels and type suffixes when present, e.g. 「振銓」文字, 「Chrome」圖示, 「Submit」按鈕.",
                 "dx: horizontal offset in pixels from the anchor center; positive means right (右方), negative means left (左方).",
@@ -384,9 +385,13 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Convert phrases like 右方5個像素 to dx=5, 上方28個像素 to dy=-28, 下方57個像素 to dy=57.",
                 "When no relative pixel offset is stated, use dx=0 and dy=0.",
                 "If the instruction is a drag sentence (從…拖到…), extract only the destination target and its offset.",
-                "Ignore trailing （...） contextual comments (e.g. nearby-element hints) when extracting anchor and offsets.",
+                "Ignore trailing （...） contextual comments when extracting anchor and offsets.",
                 "Ignore inline （起點附近...） comments between the drag source and 拖到 when extracting anchor and offsets.",
-                "Do not invent targets or offsets not stated in the instruction.",
+                "nearby: list of nearby UI labels from contextual comments such as （附近有…）, （起點附近有…）, （終點附近有…）. "
+                "Keep each label as written, including quoted names and type suffixes "
+                "(文字/圖示/元素/輸入欄/滾動條/按鈕), e.g. 「圖片」文字, 「Chrome」圖示, 輸入欄, 滾動條.",
+                "Preserve order of appearance. Use an empty list when no nearby labels are stated.",
+                "Do not invent targets, offsets, or nearby labels not stated in the instruction.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
         }
@@ -395,7 +400,8 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
         {
             "image_usage": "no_image",
             "prompt": (
-                'Reply with ONLY: {{"anchor": "<string>", "dx": <integer>, "dy": <integer>}}. '
+                'Reply with ONLY: {{"anchor": "<string>", "dx": <integer>, "dy": <integer>, '
+                '"nearby": ["<string>", ...]}}. '
                 "No text before or after the JSON."
             ),
             "models": ["gemma4:e2b", "gemma3:4b"],

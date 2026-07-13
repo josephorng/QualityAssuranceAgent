@@ -257,6 +257,45 @@ def test_expand_keep_indices_ignores_blank_detections() -> None:
     assert expanded == [0, 1]
 
 
+def test_fallback_filter_by_similarity_picks_anchor_and_nearby() -> None:
+    from cua_mcp.select_mouse_target import _fallback_filter_by_similarity
+
+    detections = [
+        _detection_from_bbox((0, 0, 30, 15), YOLO_CLASS_TEXT, text="下載"),
+        _detection_from_bbox((50, 0, 30, 15), YOLO_CLASS_TEXT, text="文件"),
+        _detection_from_bbox(
+            (100, 0, 20, 20), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "Chrome"}]
+        ),
+        _detection_from_bbox((150, 0, 30, 15), YOLO_CLASS_TEXT, text="圖片"),
+    ]
+    kept = _fallback_filter_by_similarity(
+        detections,
+        "「文件」文字",
+        ["「Chrome」圖示", "「圖片」文字"],
+    )
+    assert [d.text or (d.icons or [{}])[0].get("chinese_id") for d in kept] == [
+        "文件",
+        "Chrome",
+        "圖片",
+    ]
+
+
+def test_fallback_filter_by_similarity_dedupes_same_match() -> None:
+    from cua_mcp.select_mouse_target import _fallback_filter_by_similarity
+
+    detections = [
+        _detection_from_bbox((0, 0, 30, 15), YOLO_CLASS_TEXT, text="文件"),
+        _detection_from_bbox((50, 0, 30, 15), YOLO_CLASS_TEXT, text="下載"),
+    ]
+    kept = _fallback_filter_by_similarity(
+        detections,
+        "「文件」文字",
+        ["「文件」文字"],
+    )
+    assert len(kept) == 1
+    assert kept[0].text == "文件"
+
+
 def test_two_nearest_indices_by_center_distance() -> None:
     detections = [
         _detection_from_bbox((0, 0, 20, 20), YOLO_CLASS_TEXT, text="遠"),  # center 10,10

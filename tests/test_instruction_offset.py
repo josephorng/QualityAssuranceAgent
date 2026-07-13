@@ -60,16 +60,17 @@ async def test_parse_relative_pixel_offset_uses_llm() -> None:
     with patch(
         "cua_mcp.instruction_offset.request_json_with_retry",
         new=AsyncMock(
-            return_value=("「振銓」文字", 5, -28),
+            return_value=("「振銓」文字", 5, -28, ["「圖片」文字"]),
         ),
     ) as mock_request:
-        anchor, dx, dy = await parse_relative_pixel_offset(
-            "「振銓」文字右方5個像素、上方28個像素的位置"
+        anchor, dx, dy, nearby = await parse_relative_pixel_offset(
+            "「振銓」文字右方5個像素、上方28個像素的位置（附近有「圖片」文字）"
         )
 
     assert anchor == "「振銓」文字"
     assert dx == 5
     assert dy == -28
+    assert nearby == ["「圖片」文字"]
     mock_request.assert_awaited_once()
 
 
@@ -78,7 +79,9 @@ async def test_parse_relative_pixel_offset_passes_raw_instruction_to_llm() -> No
     raw = "點擊「文件」文字（附近有「圖片」文字、「下載」文字）"
     with patch(
         "cua_mcp.instruction_offset.request_json_with_retry",
-        new=AsyncMock(return_value=("「文件」文字", 0, 0)),
+        new=AsyncMock(
+            return_value=("「文件」文字", 0, 0, ["「圖片」文字", "「下載」文字"]),
+        ),
     ) as mock_request:
         await parse_relative_pixel_offset(raw)
 
@@ -93,11 +96,12 @@ async def test_parse_relative_pixel_offset_empty_instruction_skips_llm() -> None
         "cua_mcp.instruction_offset.request_json_with_retry",
         new=AsyncMock(),
     ) as mock_request:
-        anchor, dx, dy = await parse_relative_pixel_offset("   ")
+        anchor, dx, dy, nearby = await parse_relative_pixel_offset("   ")
 
     assert anchor == ""
     assert dx == 0
     assert dy == 0
+    assert nearby == []
     mock_request.assert_not_awaited()
 
 
@@ -107,10 +111,11 @@ async def test_parse_relative_pixel_offset_falls_back_to_regex() -> None:
         "cua_mcp.instruction_offset.request_json_with_retry",
         new=AsyncMock(side_effect=ValueError("bad llm reply")),
     ):
-        anchor, dx, dy = await parse_relative_pixel_offset(
-            "「iniseape」文字下方57個像素的位置"
+        anchor, dx, dy, nearby = await parse_relative_pixel_offset(
+            "「iniseape」文字下方57個像素的位置（附近有「圖片」文字）"
         )
 
     assert anchor == "「iniseape」文字"
     assert dx == 0
     assert dy == 57
+    assert nearby == []

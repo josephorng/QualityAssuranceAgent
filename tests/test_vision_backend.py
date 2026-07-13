@@ -74,8 +74,7 @@ def test_infer_yolo_calls_triton_client(monkeypatch: pytest.MonkeyPatch) -> None
     with patch("tritonclient.http.InferenceServerClient", return_value=mock_client):
         from cua_mcp import vision_triton as vt
 
-        vt._CLIENT = None
-        vt._CLIENT_THREAD_ID = None
+        vt.reset_triton_client()
         out = vt.infer_yolo(batch)
 
     assert out.shape == expected.shape

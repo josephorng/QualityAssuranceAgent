@@ -35,9 +35,7 @@ YOLO_OUTPUT_NAME = "output0"
 CRNN_INPUT_NAME = "input"
 CRNN_OUTPUT_NAME = "output"
 
-_CLIENT: httpclient.InferenceServerClient | None = None
-_CLIENT_THREAD_ID: int | None = None
-_CLIENT_LOCK = threading.Lock()
+_CLIENT_LOCAL = threading.local()
 
 
 def _log_triton_profile(message: str) -> None:
@@ -84,11 +82,9 @@ def triton_ready(*, timeout_seconds: float = 2.5) -> bool:
 
 
 def reset_triton_client() -> None:
-    """Drop the cached Triton client (e.g. after the creating thread exits)."""
-    global _CLIENT, _CLIENT_THREAD_ID
-    with _CLIENT_LOCK:
-        _CLIENT = None
-        _CLIENT_THREAD_ID = None
+    """Drop the cached Triton client for the current thread."""
+    if hasattr(_CLIENT_LOCAL, "client"):
+        _CLIENT_LOCAL.client = None
 
 
 def _create_client() -> httpclient.InferenceServerClient:
@@ -120,21 +116,12 @@ def _create_client() -> httpclient.InferenceServerClient:
 
 
 def _get_client() -> httpclient.InferenceServerClient:
-    """Return a Triton client bound to the current thread."""
-    global _CLIENT, _CLIENT_THREAD_ID
-    thread_id = threading.get_ident()
-    with _CLIENT_LOCK:
-        if _CLIENT is not None and _CLIENT_THREAD_ID != thread_id:
-            _log_triton_profile(
-                f"client_reset reason=thread_changed "
-                f"from_thread={_CLIENT_THREAD_ID} to_thread={thread_id}"
-            )
-            _CLIENT = None
-            _CLIENT_THREAD_ID = None
-        if _CLIENT is None:
-            _CLIENT = _create_client()
-            _CLIENT_THREAD_ID = thread_id
-        return _CLIENT
+    """Return a Triton HTTP client local to the calling thread."""
+    client = getattr(_CLIENT_LOCAL, "client", None)
+    if client is None:
+        client = _create_client()
+        _CLIENT_LOCAL.client = client
+    return client
 
 
 def _infer(

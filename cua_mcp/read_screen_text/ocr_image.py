@@ -8,6 +8,7 @@ pipelines (viewers, debug scripts), use :mod:`cua_mcp.read_screen_text.get_coord
 from __future__ import annotations
 
 import os
+import threading
 import time
 from typing import Optional
 
@@ -23,6 +24,7 @@ _DEFAULT_CRNN_BATCH_SIZE = 64
 
 _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 _CRNN_PREDICTOR: TextPredictor | None = None
+_CRNN_PREDICTOR_LOCK = threading.Lock()
 
 
 def _log_info(text: str) -> None:
@@ -47,16 +49,17 @@ def _get_ocr_predictor(
     """Lazily initialize and cache the ONNX CRNN predictor instance."""
     global _CRNN_PREDICTOR
     path = model_path or _default_crnn_path()
-    if _CRNN_PREDICTOR is None:
-        if not should_try_triton() and not os.path.isfile(path):
-            raise FileNotFoundError(f"ONNX CRNN model not found: {path}")
-        if not quiet:
-            backend = "triton" if should_try_triton() else "local"
-            _log_info(
-                f"OCR initializing CRNN predictor backend={backend} model_path={path}"
-            )
-        _CRNN_PREDICTOR = TextPredictor(path, quiet=quiet)
-    return _CRNN_PREDICTOR
+    with _CRNN_PREDICTOR_LOCK:
+        if _CRNN_PREDICTOR is None:
+            if not should_try_triton() and not os.path.isfile(path):
+                raise FileNotFoundError(f"ONNX CRNN model not found: {path}")
+            if not quiet:
+                backend = "triton" if should_try_triton() else "local"
+                _log_info(
+                    f"OCR initializing CRNN predictor backend={backend} model_path={path}"
+                )
+            _CRNN_PREDICTOR = TextPredictor(path, quiet=quiet)
+        return _CRNN_PREDICTOR
 
 
 def warm_vision_models(*, quiet: bool = True) -> None:

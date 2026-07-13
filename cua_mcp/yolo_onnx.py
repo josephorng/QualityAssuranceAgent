@@ -24,6 +24,7 @@ session per resolved model path (OCR text + UI element both use ``best.onnx``).
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 import time
 from typing import Callable, Sequence
 
@@ -110,6 +111,8 @@ def create_cpu_session(model_path: str | Path) -> tuple[ort.InferenceSession, st
 
 
 _SESSION_BY_RESOLVED_PATH: dict[str, tuple[ort.InferenceSession, str]] = {}
+# Shared session is not safe for concurrent ``run``; serialize local ORT YOLO.
+_LOCAL_ORT_LOCK = threading.RLock()
 
 
 def get_cached_cpu_session(
@@ -124,13 +127,14 @@ def get_cached_cpu_session(
     """
     path = Path(model_path).expanduser().resolve()
     key = str(path)
-    if key not in _SESSION_BY_RESOLVED_PATH:
-        if not path.is_file():
-            raise FileNotFoundError(f"YOLO ONNX model not found: {path}")
-        _SESSION_BY_RESOLVED_PATH[key] = create_cpu_session(path)
-        if on_created is not None:
-            on_created(path)
-    return _SESSION_BY_RESOLVED_PATH[key]
+    with _LOCAL_ORT_LOCK:
+        if key not in _SESSION_BY_RESOLVED_PATH:
+            if not path.is_file():
+                raise FileNotFoundError(f"YOLO ONNX model not found: {path}")
+            _SESSION_BY_RESOLVED_PATH[key] = create_cpu_session(path)
+            if on_created is not None:
+                on_created(path)
+        return _SESSION_BY_RESOLVED_PATH[key]
 
 
 def _local_ort_infer_yolo(
@@ -140,10 +144,11 @@ def _local_ort_infer_yolo(
     on_session_created: Callable[[Path], None] | None = None,
 ) -> np.ndarray:
     started = time.perf_counter()
-    session, input_name = get_cached_cpu_session(
-        model_path, on_created=on_session_created
-    )
-    outputs = session.run(None, {input_name: img_data})
+    with _LOCAL_ORT_LOCK:
+        session, input_name = get_cached_cpu_session(
+            model_path, on_created=on_session_created
+        )
+        outputs = session.run(None, {input_name: img_data})
     elapsed = time.perf_counter() - started
     _log_yolo_profile(
         f"infer backend=ort_local shape={list(img_data.shape)} "

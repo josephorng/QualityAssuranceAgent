@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from cua_mcp.select_mouse_target import _detection_from_bbox
 from cua_mcp.select_ui_element import (
     UiDetection,
@@ -392,3 +394,49 @@ def test_format_ui_candidates_relational_icon_label() -> None:
     assert "「文件」文字" in text
     assert "右方" in text
     assert "左方" in text
+
+
+def test_collect_monitor_detections_preserves_order_and_offsets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    from cua_mcp.select_mouse_target import _collect_monitor_detections
+    from cua_mcp.select_ui_element import UiDetection
+
+    calls: list[int] = []
+
+    def fake_build(bgr, *, yolo_conf_threshold: float = 0.05):
+        monitor_tag = int(bgr[0, 0, 0])
+        calls.append(monitor_tag)
+        return [
+            UiDetection(
+                bbox=(1, 2, 3, 4),
+                cx=2,
+                cy=4,
+                class_id=YOLO_CLASS_TEXT,
+                class_name="text",
+                text=f"m{monitor_tag}",
+                icons=None,
+            )
+        ]
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._build_candidates_from_bgr",
+        fake_build,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.active_monitor_offset",
+        lambda idx: (100 * idx, 10 * idx),
+    )
+
+    img1 = np.full((4, 4, 3), 1, dtype=np.uint8)
+    img2 = np.full((4, 4, 3), 2, dtype=np.uint8)
+    detections = _collect_monitor_detections(
+        [(1, img1), (2, img2)],
+        yolo_conf_threshold=0.05,
+    )
+
+    assert [d.text for d in detections] == ["m1", "m2"]
+    assert detections[0].bbox == (101, 12, 3, 4)
+    assert detections[1].bbox == (201, 22, 3, 4)
+    assert set(calls) == {1, 2}

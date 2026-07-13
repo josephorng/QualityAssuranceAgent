@@ -4,6 +4,7 @@ Unified mouse target selection: YOLO (text, element, input, scrollbar) + OCR + L
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 import time
 from typing import Any
@@ -464,6 +465,59 @@ async def _filter_mouse_candidates(
     )
 
 
+def _detections_for_captured_monitor(
+    monitor_index: int,
+    bgr: np.ndarray,
+    *,
+    yolo_conf_threshold: float,
+) -> list[UiDetection]:
+    """YOLO+OCR on one monitor image, then map boxes into virtual-desktop coords."""
+    local_candidates = _build_candidates_from_bgr(
+        bgr,
+        yolo_conf_threshold=yolo_conf_threshold,
+    )
+    left, top = active_monitor_offset(monitor_index)
+    return [_offset_detection(d, left, top) for d in local_candidates]
+
+
+def _collect_monitor_detections(
+    captured: list[tuple[int, np.ndarray]],
+    *,
+    yolo_conf_threshold: float,
+) -> list[UiDetection]:
+    """
+    Run YOLO+OCR on captured monitors.
+
+    Capture stays sequential (caller); inference runs in parallel when there is more
+    than one monitor so Triton/ORT work can overlap.
+    """
+    if not captured:
+        return []
+
+    if len(captured) == 1:
+        monitor_index, bgr = captured[0]
+        return _detections_for_captured_monitor(
+            monitor_index,
+            bgr,
+            yolo_conf_threshold=yolo_conf_threshold,
+        )
+
+    all_detections: list[UiDetection] = []
+    with ThreadPoolExecutor(max_workers=len(captured)) as pool:
+        futures = [
+            pool.submit(
+                _detections_for_captured_monitor,
+                monitor_index,
+                bgr,
+                yolo_conf_threshold=yolo_conf_threshold,
+            )
+            for monitor_index, bgr in captured
+        ]
+        for future in futures:
+            all_detections.extend(future.result())
+    return all_detections
+
+
 async def resolve_mouse_point(
     instruction: str,
     *,
@@ -487,9 +541,10 @@ async def resolve_mouse_point(
     monitor_indices = selected_eye_monitor_indices()
     stamp = ts_name()
     image_paths: list[str] = []
-    all_detections: list[UiDetection] = []
+    captured: list[tuple[int, np.ndarray]] = []
 
     _log_info(f"move_mouse resolve monitors={monitor_indices}")
+    # Capture sequentially — desktop grabbers are often not concurrent-safe.
     for monitor_index in monitor_indices:
         name = f"{stamp}_mon{monitor_index}.png"
         out = paths.yolo_ocr_dir / name
@@ -501,14 +556,12 @@ async def resolve_mouse_point(
         if bgr is None:
             _log_info(f"move_mouse could not read captured image path={image_path}")
             continue
+        captured.append((monitor_index, bgr))
 
-        local_candidates = _build_candidates_from_bgr(
-            bgr,
-            yolo_conf_threshold=yolo_conf_threshold,
-        )
-        left, top = active_monitor_offset(monitor_index)
-        all_detections.extend(_offset_detection(d, left, top) for d in local_candidates)
-
+    all_detections = _collect_monitor_detections(
+        captured,
+        yolo_conf_threshold=yolo_conf_threshold,
+    )
     detections = _sort_detections_reading_order(all_detections)
     _log_info(f"move_mouse yolo_candidates={len(detections)}")
 

@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 import numpy as np
 import json
@@ -39,6 +40,8 @@ class TextPredictor:
 
         self.session = None
         self.input_name = None
+        # Shared ORT session is not safe for concurrent ``run``.
+        self._ort_lock = threading.Lock()
         if not should_try_triton():
             self._ensure_ort_session()
 
@@ -99,12 +102,13 @@ class TextPredictor:
         return pred_chars
     
     def _local_ort_predict(self, images: np.ndarray) -> np.ndarray:
-        self._ensure_ort_session()
-        assert self.session is not None
-        assert self.input_name is not None
-        started = time.perf_counter()
-        out = self.session.run(None, {self.input_name: images})[0]
-        elapsed = time.perf_counter() - started
+        with self._ort_lock:
+            self._ensure_ort_session()
+            assert self.session is not None
+            assert self.input_name is not None
+            started = time.perf_counter()
+            out = self.session.run(None, {self.input_name: images})[0]
+            elapsed = time.perf_counter() - started
         _log_crnn_profile(
             f"infer backend=ort_local shape={list(images.shape)} "
             f"elapsed_s={elapsed:.3f}"

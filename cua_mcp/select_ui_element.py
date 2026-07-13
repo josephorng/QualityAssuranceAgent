@@ -319,9 +319,9 @@ def _format_ui_candidates_relational(
 ) -> str:
     """Format picker candidates as labels plus two-nearest-neighbor spatial phrases.
 
-    Selectable rows are only ``detections`` (0-based indices). Neighbor phrases may
-    cite detections from ``neighbor_context`` (e.g. nearby landmarks) without making
-    those landmarks selectable.
+    Selectable rows are only ``anchors`` (0-based indices). External ``neighbors``
+    (e.g. nearby landmarks) are cited in phrases only, and each such neighbor is
+    assigned exclusively to its closest anchor so distant duplicates cannot claim it.
     """
 
     def _identity_key(d: UiDetection) -> tuple[Any, ...]:
@@ -334,7 +334,12 @@ def _format_ui_candidates_relational(
         )
         return (d.bbox, d.cx, d.cy, d.class_id, d.text or "", icon_ids)
 
-    pool = list(anchors)
+    def _dist2(a: UiDetection, b: UiDetection) -> int:
+        dx = a.cx - b.cx
+        dy = a.cy - b.cy
+        return dx * dx + dy * dy
+
+    exclusive_neighbors: list[UiDetection] = []
     if neighbors:
         seen = {_identity_key(d) for d in anchors}
         for neighbor in neighbors:
@@ -342,18 +347,26 @@ def _format_ui_candidates_relational(
             if key in seen:
                 continue
             seen.add(key)
-            pool.append(neighbor)
+            exclusive_neighbors.append(neighbor)
+
+    assigned: list[list[UiDetection]] = [[] for _ in anchors]
+    for neighbor in exclusive_neighbors:
+        best_i = min(
+            range(len(anchors)),
+            key=lambda i: (_dist2(anchors[i], neighbor), i),
+        )
+        assigned[best_i].append(neighbor)
 
     lines: list[str] = []
-    for i, neighbor in enumerate(anchors):
-        label = _detection_anchor_label(neighbor)
-        neighbor_idxs = _two_nearest_indices(pool, i)
-        if not neighbor_idxs:
+    for i, anchor in enumerate(anchors):
+        label = _detection_anchor_label(anchor)
+        eligible = [anchors[j] for j in range(len(anchors)) if j != i]
+        eligible.extend(assigned[i])
+        if not eligible:
             lines.append(f"[index {i}] {label}")
             continue
-        clauses = [
-            _relative_neighbor_phrase(neighbor, pool[j]) for j in neighbor_idxs
-        ]
+        ranked = sorted(eligible, key=lambda d: (_dist2(anchor, d), d.cx, d.cy))
+        clauses = [_relative_neighbor_phrase(anchor, d) for d in ranked[:2]]
         lines.append(f"[index {i}] {label}（{'、'.join(clauses)}）")
     return "\n".join(lines)
 

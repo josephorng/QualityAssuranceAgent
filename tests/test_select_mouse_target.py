@@ -375,7 +375,30 @@ def test_format_ui_candidates_relational_neighbor_context_not_selectable() -> No
     assert "WindowsPowerShell" in lines[0]
     assert "資料夾" in lines[0]
     assert "WindowsPowerShell" not in lines[0].split("（")[0]
+    assert "WindowsPowerShell" not in lines[1]
+    assert "資料夾" not in lines[1]
     assert "[index 2]" not in text
+
+
+def test_format_ui_candidates_relational_neighbor_exclusive_to_closest_anchor() -> None:
+    """Each landmark neighbor is cited only by the closest matching anchor."""
+    anchors = [
+        # Far 「文字文件」 (type column for another file)
+        _detection_from_bbox((1000, 160, 60, 20), YOLO_CLASS_TEXT, text="文字文件"),
+        # Near 「文字文件」 next to WinRAR / Excel
+        _detection_from_bbox((100, 200, 60, 20), YOLO_CLASS_TEXT, text="文字文件"),
+    ]
+    nearby = [
+        _detection_from_bbox((80, 160, 80, 20), YOLO_CLASS_TEXT, text="WinRAR麼縮檔"),
+        _detection_from_bbox((150, 240, 100, 20), YOLO_CLASS_TEXT, text="Microsoft Excel工作表"),
+    ]
+    text = _format_ui_candidates_relational(anchors, neighbors=nearby)
+    lines = text.split("\n")
+    assert len(lines) == 2
+    assert "WinRAR麼縮檔" not in lines[0]
+    assert "Microsoft Excel工作表" not in lines[0]
+    assert "WinRAR麼縮檔" in lines[1]
+    assert "Microsoft Excel工作表" in lines[1]
 
 
 def test_format_ui_candidates_relational_single_candidate() -> None:

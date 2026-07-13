@@ -41,10 +41,10 @@ _CLICK_POINTER_KINDS = frozenset(
     {"click", "double_click", "right_click", "middle_click"}
 )
 _CLICK_VERB_BY_KIND = {
-    "click": "點擊",
-    "double_click": "連按兩下",
-    "right_click": "按右鍵",
-    "middle_click": "按中鍵",
+    "click": "點擊在",
+    "double_click": "連按兩下在",
+    "right_click": "按右鍵在",
+    "middle_click": "按中鍵在",
 }
 _GENERIC_CLICK_ANCHORS = frozenset(
     {"文字", "元素", "未知", "輸入欄", "按鈕", "滾動條"}

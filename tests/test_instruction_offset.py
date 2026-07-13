@@ -74,6 +74,20 @@ async def test_parse_relative_pixel_offset_uses_llm() -> None:
 
 
 @pytest.mark.asyncio
+async def test_parse_relative_pixel_offset_passes_raw_instruction_to_llm() -> None:
+    raw = "點擊「文件」文字（附近有「圖片」文字、「下載」文字）"
+    with patch(
+        "cua_mcp.instruction_offset.request_json_with_retry",
+        new=AsyncMock(return_value=("「文件」文字", 0, 0)),
+    ) as mock_request:
+        await parse_relative_pixel_offset(raw)
+
+    messages = mock_request.await_args.kwargs["messages"]
+    assert raw in messages[0]["content"]
+    assert "附近有「圖片」文字" in messages[0]["content"]
+
+
+@pytest.mark.asyncio
 async def test_parse_relative_pixel_offset_empty_instruction_skips_llm() -> None:
     with patch(
         "cua_mcp.instruction_offset.request_json_with_retry",

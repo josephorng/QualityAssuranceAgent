@@ -43,11 +43,26 @@ def test_format_mouse_candidates_includes_class_and_text() -> None:
         _detection_from_bbox((200, 0, 50, 20), YOLO_CLASS_INPUT),
     ]
     text = _format_ui_candidates_text(detections)
-    assert "[index 0] class=text" in text
+    assert "[index 0] class=文字(Text)" in text
     assert "text='OK'" in text
-    assert "[index 1] class=滾動條" in text
-    assert "[index 2] class=輸入欄" in text
+    assert "[index 1] class=滾動條(Scrollbar)" in text
+    assert "[index 2] class=輸入欄(Input)" in text
     assert "center=[106,100]" in text
+    assert "w=12" in text
+    assert "h=200" in text
+
+
+def test_format_mouse_candidates_omits_geometry() -> None:
+    detections = [
+        _detection_from_bbox((0, 0, 80, 20), YOLO_CLASS_TEXT, text="OK"),
+        _detection_from_bbox((100, 0, 12, 200), YOLO_CLASS_SCROLLBAR),
+    ]
+    text = _format_ui_candidates_text(detections, include_geometry=False)
+    assert "[index 0] class=文字(Text) text='OK'" in text
+    assert "[index 1] class=滾動條(Scrollbar)" in text
+    assert "center=" not in text
+    assert " w=" not in text
+    assert " h=" not in text
 
 
 def test_format_mouse_candidates_omits_pua_only_text() -> None:
@@ -58,7 +73,7 @@ def test_format_mouse_candidates_omits_pua_only_text() -> None:
     ]
     text = _format_ui_candidates_text(detections)
     assert "text=" not in text.split("\n")[0]
-    assert "icons=向下箭頭" in text.split("\n")[0]
+    assert "icons=" in text.split("\n")[0]
     assert "text='OK" in text.split("\n")[1]
 
 
@@ -204,3 +219,33 @@ def test_iou_xywh_near_identical_boxes() -> None:
     a = (531, 520, 16, 16)
     b = (531, 521, 16, 15)
     assert iou_xywh(a, b) > 0.5
+
+
+def test_expand_keep_indices_adds_same_text_and_icon_labels() -> None:
+    from cua_mcp.select_mouse_target import _expand_keep_indices_with_similar
+
+    detections = [
+        _detection_from_bbox((0, 0, 20, 20), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "圖片"}]),
+        _detection_from_bbox((50, 0, 30, 15), YOLO_CLASS_TEXT, text="文件"),
+        _detection_from_bbox((100, 0, 30, 15), YOLO_CLASS_TEXT, text="圖片"),
+        _detection_from_bbox((150, 0, 30, 15), YOLO_CLASS_TEXT, text="下載"),
+        _detection_from_bbox((200, 0, 20, 20), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "圖片"}]),
+        _detection_from_bbox((250, 0, 30, 15), YOLO_CLASS_TEXT, text="圖片"),
+        _detection_from_bbox((300, 0, 30, 15), YOLO_CLASS_TEXT, text="文件"),
+        _detection_from_bbox((350, 0, 40, 15), YOLO_CLASS_TEXT, text="文件\\Repos\\Git"),
+    ]
+    # LLM kept one 文件 and one 圖片 text row (under-recall).
+    expanded = _expand_keep_indices_with_similar(detections, [1, 2])
+    assert expanded == [0, 1, 2, 4, 5, 6]
+
+
+def test_expand_keep_indices_ignores_blank_detections() -> None:
+    from cua_mcp.select_mouse_target import _expand_keep_indices_with_similar
+
+    detections = [
+        _detection_from_bbox((0, 0, 20, 20), YOLO_CLASS_ELEMENT),
+        _detection_from_bbox((50, 0, 30, 15), YOLO_CLASS_TEXT, text="文件"),
+        _detection_from_bbox((100, 0, 20, 20), YOLO_CLASS_ELEMENT),
+    ]
+    expanded = _expand_keep_indices_with_similar(detections, [0, 1])
+    assert expanded == [0, 1]

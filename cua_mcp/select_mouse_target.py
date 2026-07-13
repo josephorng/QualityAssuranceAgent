@@ -280,6 +280,49 @@ def _build_candidates_from_bgr(
     return candidates
 
 
+def _detection_match_labels(det: UiDetection) -> set[str]:
+    """Labels used to find similar candidates: stripped OCR text and icon chinese_ids."""
+    labels: set[str] = set()
+    text = (det.text or "").strip()
+    if text:
+        labels.add(text)
+    for icon in det.icons or []:
+        chinese_id = str(icon.get("chinese_id", "")).strip()
+        if chinese_id:
+            labels.add(chinese_id)
+    return labels
+
+
+def _expand_keep_indices_with_similar(
+    detections: list[UiDetection],
+    keep_indices: list[int],
+) -> list[int]:
+    """
+    Expand LLM ``keep_indices`` with every detection that shares a text/icon label.
+
+    If the model keeps one ``圖片`` text row, also keep other ``圖片`` text rows and
+    element rows whose icon label is ``圖片``. Blank detections (no text/icons) are
+    never used as similarity seeds and never matched by label overlap.
+    """
+    if not keep_indices:
+        return []
+
+    seed_labels: set[str] = set()
+    for idx in keep_indices:
+        if 0 <= idx < len(detections):
+            seed_labels |= _detection_match_labels(detections[idx])
+
+    if not seed_labels:
+        return list(keep_indices)
+
+    kept = set(keep_indices)
+    expanded: list[int] = []
+    for i, det in enumerate(detections):
+        if i in kept or (_detection_match_labels(det) & seed_labels):
+            expanded.append(i)
+    return expanded
+
+
 async def _filter_mouse_candidates(
     detections: list[UiDetection],
     instruction: str,
@@ -288,7 +331,7 @@ async def _filter_mouse_candidates(
     if not detections:
         return []
 
-    candidates_text = _format_ui_candidates_text(detections)
+    candidates_text = _format_ui_candidates_text(detections, include_geometry=False)
     prompt = get_prompt("mouse_target_filter").format(
         instruction=instruction,
         candidates_text=candidates_text,
@@ -308,7 +351,14 @@ async def _filter_mouse_candidates(
 
     if not keep_indices:
         return []
-    return [detections[i] for i in keep_indices]
+
+    expanded = _expand_keep_indices_with_similar(detections, keep_indices)
+    if len(expanded) != len(keep_indices):
+        _run_manager().log_info(
+            "_filter_mouse_candidates: expanded similar "
+            f"llm_keep={len(keep_indices)} after_expand={len(expanded)}"
+        )
+    return [detections[i] for i in expanded]
 
 
 async def resolve_mouse_point(
@@ -325,8 +375,9 @@ async def resolve_mouse_point(
     if not instruction_text:
         raise ValueError("instruction must be non-empty")
 
-    anchor_instruction, offset_dx, offset_dy = await parse_relative_pixel_offset(instruction_text)
-    target_instruction = anchor_instruction or instruction_text
+    # Keep the raw instruction for filter/pick (including nearby-context comments).
+    # Only parse relative pixel offsets for the final click point.
+    _, offset_dx, offset_dy = await parse_relative_pixel_offset(instruction_text)
 
     paths = _run_manager().require_paths()
     monitor_indices = selected_eye_monitor_indices()
@@ -360,7 +411,7 @@ async def resolve_mouse_point(
     if not detections:
         raise ValueError("No YOLO candidates found on selected monitor(s).")
 
-    filtered = await _filter_mouse_candidates(detections, target_instruction)
+    filtered = await _filter_mouse_candidates(detections, instruction_text)
     _log_info(f"move_mouse after_filter={len(filtered)}")
 
     if not filtered:
@@ -372,7 +423,7 @@ async def resolve_mouse_point(
         _log_info("move_mouse: single candidate after filter; skipping Ollama pick")
     else:
         pool_idx = await _select_center_with_ollama(
-            target_instruction,
+            instruction_text,
             filtered,
             image_paths,
         )
@@ -398,7 +449,7 @@ async def resolve_mouse_point(
         "image_center": {"x": chosen.cx, "y": chosen.cy},
         "resolved_center": {"x": resolved_x, "y": resolved_y},
         "relative_offset": {"dx": offset_dx, "dy": offset_dy},
-        "anchor_instruction": target_instruction,
+        "anchor_instruction": instruction_text,
         "screenshot_path": image_path,
         "screenshot_paths": image_paths,
         "target_kind": chosen.class_name,

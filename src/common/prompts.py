@@ -149,14 +149,17 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "image_usage": "no_image",
             "prompt": (
                 "Select candidates related to the user instruction.\n"
-                "Each row has class=text|element|unknown|輸入欄|滾動條, optional OCR text, and optional icon labels.\n\n"
+                "Each row has class=文字(Text)|元素(Element)|未知(Unknown)|輸入欄(Input)|滾動條(Scrollbar), "
+                "optional OCR text, and optional icon labels.\n\n"
                 "Instruction:\n{instruction}\n\n"
                 "Candidates:\n{candidates_text}\n"
             ),
             "instructions": [
                 'Return JSON only: {{"keep_indices": [<int>, ...]}}.',
                 "Use [index N] values from the Candidates list. Keep an empty list when none match.",
-                "Keep text/element/unknown rows when OCR text or icons are related to the instruction.",
+                "Keep text/element/unknown rows when OCR text or icons match the primary anchor in the instruction.",
+                "Also keep candidates that match nearby/context element or text mentioned with the anchor "
+                "(e.g. beside, above, below, next to, near, 旁邊, 上方, 下方, 附近), so spatial disambiguation can use them later.",
                 "Keep all 輸入欄/滾動條 rows when the instruction implies a field, control, or scrollable region.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],

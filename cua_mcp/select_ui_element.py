@@ -132,8 +132,16 @@ def _sort_detections_reading_order(detections: list[UiDetection]) -> list[UiDete
     )
 
 
-def _format_ui_candidates_text(detections: list[UiDetection]) -> str:
-    """Format candidate rows for LLM filter/picker prompts."""
+def _format_ui_candidates_text(
+    detections: list[UiDetection],
+    *,
+    include_geometry: bool = True,
+) -> str:
+    """Format candidate rows for LLM filter/picker prompts.
+
+    When ``include_geometry`` is False, omit ``center`` / ``w`` / ``h`` (useful for
+    text-only filters that only need class, OCR text, and icons).
+    """
     lines: list[str] = []
     for i, d in enumerate(detections):
         text_part = (
@@ -145,10 +153,14 @@ def _format_ui_candidates_text(detections: list[UiDetection]) -> str:
             ii.get("chinese_id", "") for ii in (d.icons or []) if ii.get("chinese_id")
         )
         icon_part = f" icons={chinese_ids}" if chinese_ids else ""
-        _bx, _by, bw, bh = d.bbox
+        if include_geometry:
+            _bx, _by, bw, bh = d.bbox
+            geometry_part = f" center=[{d.cx},{d.cy}] w={bw} h={bh}"
+        else:
+            geometry_part = ""
         lines.append(
-            f"[index {i}] class={_candidate_class_label(d.class_name)} center=[{d.cx},{d.cy}] w={bw} h={bh}"
-            f"{text_part}{icon_part}"
+            f"[index {i}] class={_candidate_class_label(d.class_name)}"
+            f"{geometry_part}{text_part}{icon_part}"
         )
     return "\n".join(lines)
 

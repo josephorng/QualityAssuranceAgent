@@ -533,7 +533,7 @@ def test_instruction_for_click_right_click_with_offset() -> None:
         ],
     }
     assert instruction_for_click(event, vision) == (
-        "按右鍵「自訂Office 範本」文字左方14個像素、下方39個像素的位置"
+        "按右鍵在「自訂Office 範本」文字左方14個像素、下方39個像素的位置"
     )
 
 
@@ -985,7 +985,7 @@ async def test_analyze_event_to_cache_click_enriches_offset_then_nearby(
 
     assert result is not None
     assert result["instruction"] == (
-        "按右鍵「自訂Office 範本」文字左方14個像素、下方39個像素的位置"
+        "按右鍵在「自訂Office 範本」文字左方14個像素、下方39個像素的位置"
         "（附近有「資料夾」圖示、「WindowsPowerShell」文字）"
     )
     llm_mock.assert_not_called()

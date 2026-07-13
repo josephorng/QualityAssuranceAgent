@@ -92,8 +92,11 @@ async def parse_relative_pixel_offset(instruction: str) -> tuple[str, int, int]:
 
     Uses an LLM to extract anchor/dx/dy, with a regex fallback on failure.
     Positive dx is right; positive dy is down.
+
+    The raw instruction is passed to the LLM unchanged; the prompt tells it to
+    ignore nearby-context comments. Regex fallback still strips those comments.
     """
-    text = _strip_context_comments((instruction or "").strip())
+    text = (instruction or "").strip()
     if not text:
         return "", 0, 0
 

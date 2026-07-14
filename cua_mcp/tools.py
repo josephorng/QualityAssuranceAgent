@@ -42,7 +42,8 @@ def click(
     instruction: str = "",
 ):
     '''
-    Click the selected mouse button.
+    Single click at the current cursor (點擊 / 點選). Use after move_mouse.
+    Do not use for double-click (連按兩下) — use double_click instead.
     '''
     return _click(button=button).update({"instruction": instruction})
 
@@ -224,7 +225,8 @@ def double_click(
     instruction: str = "",
 ):
     '''
-    Double-click at the current cursor position.
+    Double-click at the current cursor position (連按兩下).
+    Do not use for a normal single click (點擊 / 點選) — use click instead.
     '''
     return _double_click().update({"instruction": instruction})
 

@@ -201,14 +201,18 @@ def _format_ui_candidates_text(
 
     When ``include_geometry`` is False, omit ``center`` / ``w`` / ``h`` (useful for
     text-only filters that only need class, OCR text, and icons).
+
+    Element-class rows never include OCR ``text=`` (identify via ``icons=`` only).
     """
     lines: list[str] = []
     for i, d in enumerate(detections):
-        text_part = (
-            f" text={d.text!r}"
-            if d.text and not _text_is_pua_only(d.text)
-            else ""
+        # Elements are icon targets; OCR PUA/noise must not appear as text=.
+        show_text = (
+            d.class_name != "element"
+            and bool(d.text)
+            and not _text_is_pua_only(d.text)
         )
+        text_part = f" text={d.text!r}" if show_text else ""
         chinese_ids = ",".join(
             ii.get("chinese_id", "") for ii in (d.icons or []) if ii.get("chinese_id")
         )

@@ -86,6 +86,22 @@ def test_format_mouse_candidates_omits_pua_only_text() -> None:
     assert "text='OK" in text.split("\n")[1]
 
 
+def test_format_mouse_candidates_omits_all_text_for_elements() -> None:
+    """Element rows never expose OCR text, including mixed PUA+noise."""
+    detections = [
+        _detection_from_bbox((0, 0, 20, 20), YOLO_CLASS_ELEMENT, text="\ue014)"),
+        _detection_from_bbox((30, 0, 20, 20), YOLO_CLASS_ELEMENT, text="\ue012e"),
+        _detection_from_bbox((60, 0, 80, 20), YOLO_CLASS_TEXT, text="OK"),
+    ]
+    text = _format_ui_candidates_text(detections, include_geometry=False)
+    lines = text.split("\n")
+    assert lines[0].startswith("[index 0] class=元素(Element)")
+    assert "text=" not in lines[0]
+    assert lines[1].startswith("[index 1] class=元素(Element)")
+    assert "text=" not in lines[1]
+    assert "text='OK'" in lines[2]
+
+
 def test_parse_keep_indices_from_llm() -> None:
     raw = '{"keep_indices": [0, 2, 2, 99]}'
     keep = _parse_keep_indices_from_llm(raw, max_len=3)

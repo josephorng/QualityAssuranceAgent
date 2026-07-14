@@ -159,8 +159,8 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "image_usage": "no_image",
             "prompt": (
                 "Split candidates into two lists: those matching the Anchor, and those matching any Nearby label.\n"
-                "Each row has class=文字(Text)|元素(Element)|未知(Unknown)|輸入欄(Input)|滾動條(Scrollbar), "
-                "optional OCR text, and optional icon labels.\n\n"
+                "Each row has class=文字(Text)|元素(Element)|未知(Unknown)|輸入欄(Input)|滾動條(Scrollbar). "
+                "文字/未知 may include OCR text; 元素 uses icon labels only (no OCR text).\n\n"
                 "Anchor:\n{anchor}\n\n"
                 "Nearby:\n{nearby_text}\n\n"
                 "Candidates:\n{candidates_text}\n"
@@ -208,8 +208,9 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Click location: [{cursor_x},{cursor_y}]\n"
                 "Input field context:\n{field_context}\n"
                 "Eight UI candidates nearest the click (closest first):\n"
-                "Each row has class=文字(Text)|元素(Element)|輸入欄(Input)|滾動條(Scrollbar), "
-                "optional text='...' OCR, and optional icons=Chinese icon labels.\n\n"
+                "Each row has class=文字(Text)|元素(Element)|輸入欄(Input)|滾動條(Scrollbar). "
+                "文字 may include text='...' OCR; 元素 uses icons=Chinese icon labels only "
+                "(no OCR text).\n\n"
                 "{candidate_text}\n\n"
                 "Drag destination vision (when kind=drag):\n"
                 "Destination location: [{destination_x},{destination_y}]\n"

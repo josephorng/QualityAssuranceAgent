@@ -338,13 +338,49 @@ def _label_similarity(a: str, b: str) -> float:
 
 
 def _detection_similarity_to_query(det: UiDetection, query: str) -> float:
-    """Best similarity between ``query`` and a detection's hub label / OCR / icon ids."""
+    """Best similarity between ``query`` and a detection's OCR text / icon ids."""
     query = (query or "").strip()
     if not query:
         return 0.0
-    candidates = {_detection_anchor_label(det)}
-    candidates |= _detection_match_labels(det)
-    return max((_label_similarity(query, label) for label in candidates if label), default=0.0)
+    return max(
+        (
+            _label_similarity(query, label)
+            for label in _detection_match_labels(det)
+            if label
+        ),
+        default=0.0,
+    )
+
+
+# Minimum SequenceMatcher score to keep a candidate before the LLM filter.
+_MOUSE_FILTER_SIMILARITY_THRESHOLD = 0.5
+
+
+def _detection_max_similarity_to_queries(
+    det: UiDetection,
+    queries: list[str],
+) -> float:
+    """Best similarity between ``det`` and any non-blank query in ``queries``."""
+    return max(
+        (_detection_similarity_to_query(det, q) for q in queries if (q or "").strip()),
+        default=0.0,
+    )
+
+
+def _prefilter_detections_by_similarity(
+    detections: list[UiDetection],
+    anchor: str,
+    nearby: list[str],
+    *,
+    threshold: float = _MOUSE_FILTER_SIMILARITY_THRESHOLD,
+) -> list[UiDetection]:
+    """Keep detections whose best score vs anchor/nearby is ``>= threshold``."""
+    queries = [anchor, *nearby]
+    return [
+        det
+        for det in detections
+        if _detection_max_similarity_to_queries(det, queries) >= threshold
+    ]
 
 
 def _best_matching_index(detections: list[UiDetection], query: str) -> int | None:
@@ -412,14 +448,27 @@ async def _filter_mouse_candidates(
 ) -> tuple[list[UiDetection], list[UiDetection]]:
     """Ask Ollama which candidates match the anchor vs nearby labels.
 
-    Returns ``(anchor_matches, nearby_matches)``. On LLM failure, falls back to
-    similarity matching for each bucket.
+    Candidates are first narrowed by string similarity (``>= 0.5`` vs anchor or
+    any nearby label). Only that shortlist is sent to the LLM. On empty prefilter
+    or LLM failure, falls back to similarity matching for each bucket.
     """
     if not detections:
         return [], []
 
+    prefiltered = _prefilter_detections_by_similarity(detections, anchor, nearby)
+    _run_manager().log_info(
+        "_filter_mouse_candidates: similarity prefilter "
+        f"threshold={_MOUSE_FILTER_SIMILARITY_THRESHOLD} "
+        f"before={len(detections)} after={len(prefiltered)}"
+    )
+    if not prefiltered:
+        _run_manager().log_info(
+            "_filter_mouse_candidates: prefilter empty; fallback similarity match"
+        )
+        return _fallback_filter_by_similarity(detections, anchor, nearby)
+
     nearby_text = ", ".join(label.strip() for label in nearby if label.strip()) or "(none)"
-    candidates_text = _format_ui_candidates_text(detections, include_geometry=False)
+    candidates_text = _format_ui_candidates_text(prefiltered, include_geometry=False)
     prompt = get_prompt("mouse_target_filter").format(
         anchor=anchor,
         nearby_text=nearby_text,
@@ -431,7 +480,7 @@ async def _filter_mouse_candidates(
             messages=messages,
             response_schema=_MOUSE_FILTER_JSON_SCHEMA,
             parse_reply=lambda raw: _parse_anchor_nearby_indices_from_llm(
-                raw, len(detections)
+                raw, len(prefiltered)
             ),
             retry_instruction=get_prompt("mouse_target_filter_retry"),
             log_info=lambda m: _run_manager().log_info(f"_filter_mouse_candidates: {m}"),
@@ -442,8 +491,8 @@ async def _filter_mouse_candidates(
         )
         return _fallback_filter_by_similarity(detections, anchor, nearby)
 
-    anchor_expanded = _expand_keep_indices_with_similar(detections, anchor_indices)
-    nearby_expanded = _expand_keep_indices_with_similar(detections, nearby_indices)
+    anchor_expanded = _expand_keep_indices_with_similar(prefiltered, anchor_indices)
+    nearby_expanded = _expand_keep_indices_with_similar(prefiltered, nearby_indices)
     expanded_nearby_count = len(nearby_expanded)
     anchor_set = set(anchor_expanded)
     nearby_expanded = [i for i in nearby_expanded if i not in anchor_set]
@@ -460,8 +509,8 @@ async def _filter_mouse_candidates(
         )
 
     return (
-        [detections[i] for i in anchor_expanded],
-        [detections[i] for i in nearby_expanded],
+        [prefiltered[i] for i in anchor_expanded],
+        [prefiltered[i] for i in nearby_expanded],
     )
 
 
@@ -518,13 +567,47 @@ def _collect_monitor_detections(
     return all_detections
 
 
+def _normalize_nearby_labels(labels: list[str] | None) -> list[str]:
+    """Strip, drop empties, and dedupe nearby labels while preserving order."""
+    if not labels:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in labels:
+        if not isinstance(item, str):
+            continue
+        label = item.strip()
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        out.append(label)
+    return out
+
+
+def _merge_nearby_labels(*sources: list[str] | None) -> list[str]:
+    """Merge nearby label lists; earlier sources win on duplicates."""
+    merged: list[str] = []
+    seen: set[str] = set()
+    for source in sources:
+        for label in _normalize_nearby_labels(source):
+            if label in seen:
+                continue
+            seen.add(label)
+            merged.append(label)
+    return merged
+
+
 async def resolve_mouse_point(
     instruction: str,
     *,
+    nearby_objects: list[str] | None = None,
     yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
 ) -> tuple[int, int, dict[str, Any]]:
     """
     Capture selected monitor(s), build YOLO+OCR candidates, filter and pick via LLM.
+
+    ``nearby_objects`` are optional landmark labels for spatial disambiguation.
+    They are merged with any （附近有…） labels parsed from ``instruction``.
 
     Returns ``(global_x, global_y, metadata)`` in virtual-desktop pixel space.
     """
@@ -533,9 +616,10 @@ async def resolve_mouse_point(
         raise ValueError("instruction must be non-empty")
 
     # Parse anchor/offset/nearby once; filter splits anchor vs nearby; pick uses anchor only.
-    anchor, offset_dx, offset_dy, nearby = await parse_relative_pixel_offset(
+    anchor, offset_dx, offset_dy, nearby_from_instruction = await parse_relative_pixel_offset(
         instruction_text
     )
+    nearby = _merge_nearby_labels(nearby_objects, nearby_from_instruction)
 
     paths = _run_manager().require_paths()
     monitor_indices = selected_eye_monitor_indices()
@@ -580,12 +664,13 @@ async def resolve_mouse_point(
     if not anchor_matches:
         raise ValueError("No anchor candidates matched the instruction after LLM filtering.")
 
+    selected_text: str | None = None
     if len(anchor_matches) == 1:
         idx = 0
         chosen = anchor_matches[0]
         _log_info("move_mouse: single anchor candidate after filter; skipping Ollama pick")
     else:
-        pool_idx = await _select_center_with_ollama(
+        pool_idx, selected_text = await _select_center_with_ollama(
             anchor,
             anchor_matches,
             image_paths,
@@ -595,7 +680,8 @@ async def resolve_mouse_point(
         idx = pool_idx
         chosen = anchor_matches[pool_idx]
         _log_info(
-            f"move_mouse: Ollama picked index={pool_idx} center=[{chosen.cx},{chosen.cy}]"
+            f"move_mouse: Ollama picked index={pool_idx} "
+            f"text={selected_text!r} center=[{chosen.cx},{chosen.cy}]"
         )
 
     resolved_x = chosen.cx + offset_dx
@@ -615,6 +701,7 @@ async def resolve_mouse_point(
         "resolved_center": {"x": resolved_x, "y": resolved_y},
         "relative_offset": {"dx": offset_dx, "dy": offset_dy},
         "anchor_instruction": instruction_text,
+        "nearby_objects": nearby,
         "screenshot_path": image_path,
         "screenshot_paths": image_paths,
         "target_kind": chosen.class_name,
@@ -627,4 +714,6 @@ async def resolve_mouse_point(
             "h": chosen.bbox[3],
         },
     }
+    if selected_text is not None:
+        meta["selected_text"] = selected_text
     return resolved_x, resolved_y, meta

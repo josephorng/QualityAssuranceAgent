@@ -156,15 +156,26 @@ def key(
 @mcp_server.tool()
 async def move_mouse(
     instruction: str,
+    nearby_objects: list[str] | None = None,
 ):
     '''
     Take a screenshot, detect UI targets (text, element, input, scrollbar), and move
     the mouse cursor to the best match for the instruction.
+
+    instruction: primary target phrase (e.g. 「資料夾」圖示), including any relative
+    pixel offsets in Traditional Chinese when needed (e.g. 「資料夾」圖示左方5個像素、下方55個像素的位置).
+    nearby_objects: optional list of nearby landmark labels used to disambiguate the
+    target (e.g. ["「Edge」圖示", "「Copilot」圖示"]). Prefer this over embedding
+    （附近有…） comments inside instruction.
     '''
     duration: float = 0.2
-    return (await _move_mouse(instruction=instruction, duration=duration)).update(
-        {"instruction": instruction}
+    result = await _move_mouse(
+        instruction=instruction,
+        nearby_objects=nearby_objects,
+        duration=duration,
     )
+    result["instruction"] = instruction
+    return result
 
 
 @mcp_server.tool()

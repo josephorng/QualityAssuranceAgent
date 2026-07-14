@@ -30,6 +30,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Do not do anything outside of the task scope.",
                 "Use move_mouse only when the task explicitly asks to move the cursor or interact with a named/specific on-screen target (e.g. 'click on the object', '點選物件', 'click the Submit button'). For 'click on the object' or '點選物件', split into move_mouse then click.",
                 "Do not call move_mouse when the task only describes an action at the current cursor and does not name a target (e.g. triple-click, double-click, scroll, type text, press a key)—call that action tool directly.",
+                "For move_mouse: put the primary target in instruction (e.g. 「資料夾」圖示). When the task lists nearby landmarks (附近有… / near …), pass them as nearby_objects (e.g. [\"「Edge」圖示\", \"「Copilot」圖示\"]) instead of only embedding them in instruction.",
                 "For scroll: positive clicks scroll down (往下滑), negative scroll up; use roughly 3–10 per screen of content.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
@@ -117,7 +118,8 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "image_usage": "optional",
             "prompt": (
                 "Pick the candidate index from Candidates whose label matches the Anchor. "
-                "Each candidate row is [index N] <label>（<relative neighbor clauses>）. "
+                "Each candidate row is [index N] <label> center=(x,y)（<relative neighbor clauses>）. "
+                "center=(x,y) is the primary anchor's screen center in pixels. "
                 "Neighbor clauses describe the two nearest other detections (including nearby "
                 "landmarks) with Traditional Chinese direction and pixel distance "
                 "(左方/右方/上方/下方 + N個像素有<label>). "
@@ -128,13 +130,17 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Candidates:\n{candidates_text}"
             ),
             "instructions": [
-                'Reply only with JSON: {{"index": <integer>}} — the [index] from the chosen candidate row (0-based).',
+                'Reply only with JSON: {{"index": <integer>, "text": "<string>"}}.',
+                '"index" is the [index] from the chosen candidate row (0-based).',
+                '"text" must be that same row\'s text context copied verbatim after [index N] '
+                "(label, optional center=(x,y), and neighbor clauses when present).",
                 "Every Candidates row already matches the Anchor.",
                 "When multiple candidates share the same Anchor label, prefer the one whose "
                 "neighbor clauses best match the Nearby landmarks.",
                 "Nearby may be (none); when it is, pick the best spatial match among Candidates.",
                 "Never pick a Nearby landmark itself — only Candidates indices are valid.",
                 "Never invent an index; only use an index shown in the Candidates list.",
+                "index and text must describe the same Candidates row.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
         }
@@ -420,8 +426,10 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
         {
             "image_usage": "no_image",
             "prompt": (
-                'Reply with ONLY: {{"index": <integer>}} - the [index] from the Candidates list row '
-                "that best matches the location instruction (0-based). No other keys. "
+                'Reply with ONLY: {{"index": <integer>, "text": "<string>"}} - "index" is the '
+                "[index] from the Candidates list row that best matches the location instruction "
+                '(0-based), and "text" is that same row copied verbatim after [index N] '
+                "(label, optional center=(x,y), and neighbor clauses when present). "
                 "No text before or after the JSON."
             ),
             "models": ["gemma4:e2b", "gemma3:4b"],

@@ -26,6 +26,19 @@ def test_validate_tool_calls_accepts_move_mouse_and_click() -> None:
     assert validate_tool_calls(calls) is None
 
 
+def test_validate_tool_calls_accepts_move_mouse_nearby_objects() -> None:
+    calls = [
+        {
+            "name": "move_mouse",
+            "arguments": {
+                "instruction": "「資料夾」圖示",
+                "nearby_objects": ["「Edge」圖示", "「Copilot」圖示"],
+            },
+        },
+        {"name": "click", "arguments": {"button": "left", "instruction": "點擊"}},
+    ]
+    assert validate_tool_calls(calls) is None
+
 def test_validate_tool_calls_accepts_drag() -> None:
     calls = [
         {

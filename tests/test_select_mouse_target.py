@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import pytest
 
-from cua_mcp.select_mouse_target import _detection_from_bbox
+from cua_mcp.select_mouse_target import (
+    _detection_from_bbox,
+    _merge_nearby_labels,
+    _normalize_nearby_labels,
+)
 from cua_mcp.select_ui_element import (
     UiDetection,
     _format_ui_candidates_relational,
     _format_ui_candidates_text,
     _parse_anchor_nearby_indices_from_llm,
+    _parse_index_from_llm,
     _parse_keep_indices_from_llm,
     _two_nearest_indices,
 )
@@ -28,6 +33,95 @@ def test_mouse_target_class_ids() -> None:
         YOLO_CLASS_SCROLLBAR,
     })
 
+
+def test_normalize_nearby_labels_strips_and_dedupes() -> None:
+    assert _normalize_nearby_labels(None) == []
+    assert _normalize_nearby_labels([]) == []
+    assert _normalize_nearby_labels(
+        [" 「Edge」圖示 ", "", "「Copilot」圖示", "「Edge」圖示", 12]  # type: ignore[list-item]
+    ) == ["「Edge」圖示", "「Copilot」圖示"]
+
+
+def test_merge_nearby_labels_prefers_earlier_sources() -> None:
+    assert _merge_nearby_labels(
+        ["「Edge」圖示", "「Copilot」圖示"],
+        ["「Copilot」圖示", "「Chrome」圖示"],
+        None,
+    ) == ["「Edge」圖示", "「Copilot」圖示", "「Chrome」圖示"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_mouse_point_merges_nearby_objects(monkeypatch: pytest.MonkeyPatch) -> None:
+    import numpy as np
+
+    from cua_mcp.select_mouse_target import resolve_mouse_point
+
+    captured_nearby: dict[str, list[str]] = {}
+
+    async def fake_parse(instruction: str):
+        assert "資料夾" in instruction
+        return "「資料夾」圖示", 0, 0, ["「Chrome」圖示"]
+
+    async def fake_filter(detections, anchor, nearby):
+        captured_nearby["labels"] = list(nearby)
+        return [detections[0]], []
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.parse_relative_pixel_offset",
+        fake_parse,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.selected_eye_monitor_indices",
+        lambda: [1],
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.capture_monitor_to_file",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.cv2.imread",
+        lambda *_args, **_kwargs: np.zeros((10, 10, 3), dtype=np.uint8),
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._collect_monitor_detections",
+        lambda *_args, **_kwargs: [
+            _detection_from_bbox(
+                (0, 0, 20, 20),
+                YOLO_CLASS_ELEMENT,
+                icons=[{"chinese_id": "資料夾"}],
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._filter_mouse_candidates",
+        fake_filter,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._run_manager",
+        lambda: type(
+            "M",
+            (),
+            {
+                "require_paths": staticmethod(
+                    lambda: type("P", (), {"yolo_ocr_dir": __import__("pathlib").Path(".")})()
+                ),
+                "log_info": staticmethod(lambda *_a, **_k: None),
+            },
+        )(),
+    )
+
+    gx, gy, meta = await resolve_mouse_point(
+        "「資料夾」圖示",
+        nearby_objects=["「Edge」圖示", "「Copilot」圖示"],
+    )
+
+    assert captured_nearby["labels"] == [
+        "「Edge」圖示",
+        "「Copilot」圖示",
+        "「Chrome」圖示",
+    ]
+    assert meta["nearby_objects"] == captured_nearby["labels"]
+    assert (gx, gy) == (10, 10)
 
 def test_detection_from_bbox_text() -> None:
     det = _detection_from_bbox((10, 20, 100, 30), YOLO_CLASS_TEXT, text="Submit")
@@ -106,6 +200,26 @@ def test_parse_keep_indices_from_llm() -> None:
     raw = '{"keep_indices": [0, 2, 2, 99]}'
     keep = _parse_keep_indices_from_llm(raw, max_len=3)
     assert keep == [0, 2]
+
+
+def test_parse_index_from_llm_returns_index_and_text() -> None:
+    raw = (
+        '{"index": 1, "text": "「文件」文字 center=(100,200)'
+        '（左方27個像素有「目」未知、下方32個像素有「圖片」文字）"}'
+    )
+    idx, text = _parse_index_from_llm(raw, num_candidates=4)
+    assert idx == 1
+    assert text.startswith("「文件」文字 center=(100,200)")
+
+
+def test_parse_index_from_llm_requires_text() -> None:
+    with pytest.raises(ValueError, match="index.*text"):
+        _parse_index_from_llm('{"index": 0}', num_candidates=2)
+
+
+def test_parse_index_from_llm_rejects_empty_text() -> None:
+    with pytest.raises(ValueError, match="non-empty string"):
+        _parse_index_from_llm('{"index": 0, "text": "  "}', num_candidates=2)
 
 
 def test_parse_anchor_nearby_indices_from_llm() -> None:
@@ -335,6 +449,55 @@ def test_fallback_filter_by_similarity_dedupes_same_match() -> None:
     assert nearby_matches == []
 
 
+def test_prefilter_detections_by_similarity_keeps_anchor_and_nearby() -> None:
+    from cua_mcp.select_mouse_target import _prefilter_detections_by_similarity
+
+    detections = [
+        _detection_from_bbox((0, 0, 30, 15), YOLO_CLASS_TEXT, text="簡"),
+        _detection_from_bbox(
+            (50, 0, 20, 20), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "資料夾"}]
+        ),
+        _detection_from_bbox(
+            (100, 0, 20, 20), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "Edge"}]
+        ),
+        _detection_from_bbox(
+            (150, 0, 20, 20), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "Copilot"}]
+        ),
+        _detection_from_bbox(
+            (200, 0, 20, 20), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "Chrome"}]
+        ),
+        _detection_from_bbox((250, 0, 30, 15), YOLO_CLASS_TEXT, text="下載"),
+    ]
+    kept = _prefilter_detections_by_similarity(
+        detections,
+        "資料夾",
+        ["「Edge」圖示", "「Copilot」圖示"],
+    )
+    labels = [
+        d.text or (d.icons or [{}])[0].get("chinese_id") for d in kept
+    ]
+    assert labels == ["資料夾", "Edge", "Copilot"]
+
+
+def test_prefilter_detections_by_similarity_empty_when_no_match() -> None:
+    from cua_mcp.select_mouse_target import _prefilter_detections_by_similarity
+
+    detections = [
+        _detection_from_bbox((0, 0, 30, 15), YOLO_CLASS_TEXT, text="簡"),
+        _detection_from_bbox(
+            (50, 0, 20, 20), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "Chrome"}]
+        ),
+    ]
+    assert (
+        _prefilter_detections_by_similarity(
+            detections,
+            "資料夾",
+            ["「Edge」圖示"],
+        )
+        == []
+    )
+
+
 def test_two_nearest_indices_by_center_distance() -> None:
     detections = [
         _detection_from_bbox((0, 0, 20, 20), YOLO_CLASS_TEXT, text="遠"),  # center 10,10
@@ -364,10 +527,9 @@ def test_format_ui_candidates_relational_uses_neighbor_phrases() -> None:
     ]
     text = _format_ui_candidates_relational(detections)
     lines = text.split("\n")
-    assert lines[1].startswith("[index 1] 「文件」文字（")
+    assert lines[1].startswith("[index 1] 「文件」文字 center=(69,309)（")
     assert "上方" in lines[1] and "「下載」文字" in lines[1]
     assert "下方" in lines[1] and "「圖片」文字" in lines[1]
-    assert "center=" not in text
     assert " w=" not in text
     assert " h=" not in text
 
@@ -387,7 +549,7 @@ def test_format_ui_candidates_relational_neighbor_context_not_selectable() -> No
     text = _format_ui_candidates_relational(anchors, neighbors=nearby)
     lines = text.split("\n")
     assert len(lines) == 2
-    assert lines[0].startswith("[index 0] 「自訂Office 範本」文字（")
+    assert lines[0].startswith("[index 0] 「自訂Office 範本」文字 center=(69,309)（")
     assert "WindowsPowerShell" in lines[0]
     assert "資料夾" in lines[0]
     assert "WindowsPowerShell" not in lines[0].split("（")[0]
@@ -420,7 +582,7 @@ def test_format_ui_candidates_relational_neighbor_exclusive_to_closest_anchor() 
 def test_format_ui_candidates_relational_single_candidate() -> None:
     detections = [_detection_from_bbox((0, 0, 20, 20), YOLO_CLASS_TEXT, text="文件")]
     text = _format_ui_candidates_relational(detections)
-    assert text == "[index 0] 「文件」文字"
+    assert text == "[index 0] 「文件」文字 center=(10,10)"
 
 
 def test_format_ui_candidates_relational_icon_label() -> None:
@@ -429,8 +591,8 @@ def test_format_ui_candidates_relational_icon_label() -> None:
         _detection_from_bbox((40, 0, 30, 14), YOLO_CLASS_TEXT, text="文件"),
     ]
     text = _format_ui_candidates_relational(detections)
-    assert "「下載」圖示" in text
-    assert "「文件」文字" in text
+    assert "「下載」圖示 center=(8,8)" in text
+    assert "「文件」文字 center=(55,7)" in text
     assert "右方" in text
     assert "左方" in text
 

@@ -34,8 +34,11 @@ def _run_manager() -> RunStateManager:
 
 _INDEX_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "properties": {"index": {"type": "integer"}},
-    "required": ["index"],
+    "properties": {
+        "index": {"type": "integer"},
+        "text": {"type": "string"},
+    },
+    "required": ["index", "text"],
 }
 _TEXT_FILTER_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -86,16 +89,19 @@ def _text_is_pua_only(text: str) -> bool:
     return not non_pua
 
 
-def _parse_index_from_llm(raw: str, num_candidates: int) -> int:
-    """Parse the picker LLM reply; returns the chosen candidate index (0-based)."""
+def _parse_index_from_llm(raw: str, num_candidates: int) -> tuple[int, str]:
+    """Parse the picker LLM reply; returns ``(index, text)`` for the chosen candidate."""
     out = parse_json_object(
         raw,
-        empty_error='Ollama UI picker returned empty content; expected {"index": <int>}',
+        empty_error=(
+            'Ollama UI picker returned empty content; '
+            'expected {"index": <int>, "text": "<string>"}'
+        ),
         decode_error_prefix="invalid JSON",
     )
     preview = (raw or "")[:240]
-    if not isinstance(out, dict) or "index" not in out:
-        raise ValueError(f'must include "index"; preview={preview!r}')
+    if not isinstance(out, dict) or "index" not in out or "text" not in out:
+        raise ValueError(f'must include "index" and "text"; preview={preview!r}')
     try:
         idx = int(out["index"])
     except (TypeError, ValueError) as exc:
@@ -104,7 +110,10 @@ def _parse_index_from_llm(raw: str, num_candidates: int) -> int:
         raise ValueError(
             f'"index" out of range: {idx} (valid 0..{num_candidates - 1}); preview={preview!r}'
         )
-    return idx
+    text = out["text"]
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError(f'"text" must be a non-empty string; got {text!r}')
+    return idx, text.strip()
 
 
 def _parse_keep_indices_from_llm(raw: str, max_len: int) -> list[int]:
@@ -321,9 +330,10 @@ def _format_ui_candidates_relational(
     *,
     neighbors: list[UiDetection] | None = None,
 ) -> str:
-    """Format picker candidates as labels plus two-nearest-neighbor spatial phrases.
+    """Format picker candidates as labels, center coords, and neighbor phrases.
 
-    Selectable rows are only ``anchors`` (0-based indices). External ``neighbors``
+    Selectable rows are only ``anchors`` (0-based indices). Each row includes
+    ``center=(x,y)`` for the primary anchor. External ``neighbors``
     (e.g. nearby landmarks) are cited in phrases only, and each such neighbor is
     assigned exclusively to its closest anchor so distant duplicates cannot claim it.
     """
@@ -364,14 +374,15 @@ def _format_ui_candidates_relational(
     lines: list[str] = []
     for i, anchor in enumerate(anchors):
         label = _detection_anchor_label(anchor)
+        head = f"[index {i}] {label} center=({anchor.cx},{anchor.cy})"
         eligible = [anchors[j] for j in range(len(anchors)) if j != i]
         eligible.extend(assigned[i])
         if not eligible:
-            lines.append(f"[index {i}] {label}")
+            lines.append(head)
             continue
         ranked = sorted(eligible, key=lambda d: (_dist2(anchor, d), d.cx, d.cy))
         clauses = [_relative_neighbor_phrase(anchor, d) for d in ranked[:2]]
-        lines.append(f"[index {i}] {label}（{'、'.join(clauses)}）")
+        lines.append(f"{head}（{'、'.join(clauses)}）")
     return "\n".join(lines)
 
 
@@ -382,9 +393,11 @@ async def _select_center_with_ollama(
     *,
     neighbor_candidates: list[UiDetection] | None = None,
     nearby_labels: list[str] | None = None,
-) -> int:
+) -> tuple[int, str]:
     """
     Ask Ollama for the best candidate index (0-based into ``detections``).
+
+    Returns ``(index, text)`` where ``text`` is the LLM-echoed candidate row context.
 
     ``neighbor_context`` may supply nearby landmarks for relational phrases.
     ``nearby_labels`` are shown as disambiguation hints (not selectable targets).
@@ -423,12 +436,12 @@ async def _select_center_with_ollama(
         think=True,
     )
     try:
-        pool_idx = _parse_index_from_llm(reply1.content, n)
+        selection = _parse_index_from_llm(reply1.content, n)
     except ValueError:
-        pool_idx = None
+        selection = None
 
-    if pool_idx is not None:
-        return pool_idx
+    if selection is not None:
+        return selection
 
     return await request_json_with_retry(
         messages=messages,

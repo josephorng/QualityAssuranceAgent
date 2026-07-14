@@ -45,13 +45,19 @@ def _hotkey(keys: list[str] | str) -> dict[str, Any]:
 
 async def _move_mouse(
     instruction: str,
+    nearby_objects: list[str] | None = None,
     duration: float = 0.0,
 ) -> dict[str, Any]:
-    gx, gy, meta = await resolve_mouse_point(instruction)
+    gx, gy, meta = await resolve_mouse_point(
+        instruction,
+        nearby_objects=nearby_objects,
+    )
     result = hand_tools.move(x=gx, y=gy, duration=duration)
     merged: dict[str, Any] = dict(result)
     merged.update(meta)
     merged["instruction"] = instruction
+    if nearby_objects is not None:
+        merged["nearby_objects_arg"] = list(nearby_objects)
     return _with_unified_target_metadata(
         merged,
         target_kind=str(meta.get("target_kind", "mouse_target")),

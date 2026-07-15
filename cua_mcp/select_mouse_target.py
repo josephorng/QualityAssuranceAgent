@@ -704,6 +704,11 @@ async def resolve_mouse_point(
     )
     detections = _sort_detections_reading_order(all_detections)
     _log_info(f"move_mouse yolo_candidates={len(detections)}")
+    if detections:
+        _log_info(
+            "move_mouse all_ocr_candidates:\n"
+            + _format_ui_candidates_text(detections, include_geometry=True)
+        )
 
     if not detections:
         raise ValueError("No YOLO candidates found on selected monitor(s).")

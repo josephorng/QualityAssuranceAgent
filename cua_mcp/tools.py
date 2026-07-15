@@ -7,6 +7,7 @@ from mcp.server.fastmcp import FastMCP
 
 from cua_mcp.tool_module import (
     _click,
+    _check_object_exists,
     _cursor_position,
     _double_click,
     _drag,
@@ -177,6 +178,28 @@ async def move_mouse(
     )
     result["instruction"] = instruction
     return result
+
+
+@mcp_server.tool()
+async def check_object_exists(
+    instruction: str,
+    nearby_objects: list[str] | None = None,
+):
+    '''
+    Check whether the UI target matching instruction is currently on screen.
+    Returns exists true/false; does not move or click.
+    Use when the step depends on whether something is visible; the brain decides
+    whether to continue based on exists and the full step wording (e.g. 如果畫面上有… / 如果畫面上沒有…).
+
+    instruction: primary target phrase to look for (e.g. 「取代目的地中的檔案」文字).
+    nearby_objects: optional list of nearby landmark labels used to disambiguate the
+    target (e.g. ["「取消」文字", "「略過」文字"]). Prefer this over embedding
+    （附近有…） comments inside instruction.
+    '''
+    return await _check_object_exists(
+        instruction=instruction,
+        nearby_objects=nearby_objects,
+    )
 
 
 @mcp_server.tool()
@@ -425,6 +448,7 @@ TOOL_FUNCTIONS: list[callable[..., Any]] = [
     store_image,
     key,
     move_mouse,
+    check_object_exists,
     drag,
     right_click,
     cursor_position,

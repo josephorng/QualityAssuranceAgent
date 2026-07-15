@@ -28,6 +28,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Create detailed tool instructions for each tool call.",
                 "All the monitor screenshot(s) are captured and will be provided to you.",
                 "Do not do anything outside of the task scope.",
+                "For steps that depend on whether something is on screen (如果畫面上有… / 如果畫面上沒有… / if … is visible / if … is not visible): call check_object_exists first with the target in instruction (and nearby_objects when given). Do not call move_mouse, click, or other action tools in the same turn as the check—wait for the exists result.",
                 "Use move_mouse only when the task explicitly asks to move the cursor or interact with a named/specific on-screen target (e.g. 'click on the object', '點選物件', 'click the Submit button'). For 'click on the object' or '點選物件', split into move_mouse then click.",
                 "Do not call move_mouse when the task only describes an action at the current cursor and does not name a target (e.g. triple-click, double-click, scroll, type text, press a key)—call that action tool directly.",
                 "Click tool mapping: 點擊 / 點選 / single click → click; 連按兩下 / double-click → double_click. Never use double_click for a normal 點擊.",
@@ -48,6 +49,8 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "instructions": [
                 "If the previous task is not executed, try new method to achieve the task.",
                 "If the tool failed to execute, do not assume the task is completed. Try new method to achieve the task.",
+                "If check_object_exists was the previous tool: read exists and the full CurrentTaskGoal to decide whether to continue. For 如果畫面上有… / if … is visible: continue with follow-up tools only when exists=true; when exists=false, the step is satisfied with no further tools. For 如果畫面上沒有… / if … is not visible: continue only when exists=false; when exists=true, the step is satisfied with no further tools.",
+                "When continuing after check_object_exists, issue the normal tools for the remainder of the step (e.g. move_mouse then click).",
                 "If the task can be examined by screenshot, use the screenshot to examine if the task is completed if the screenshot is provided.",
                 "If the task cannot be examined by screenshot, then assume the task is completed if the tool is executed successfully.",
             ],

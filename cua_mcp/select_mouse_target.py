@@ -653,19 +653,20 @@ def _prefilter_anchors_by_nearby(
     return anchors
 
 
-async def resolve_mouse_point(
+async def find_mouse_point(
     instruction: str,
     *,
     nearby_objects: list[str] | None = None,
     yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
-) -> tuple[int, int, dict[str, Any]]:
+) -> tuple[int, int, dict[str, Any]] | None:
     """
     Capture selected monitor(s), build YOLO+OCR candidates, filter and pick via LLM.
 
     ``nearby_objects`` are optional landmark labels for spatial disambiguation.
     They are merged with any （附近有…） labels parsed from ``instruction``.
 
-    Returns ``(global_x, global_y, metadata)`` in virtual-desktop pixel space.
+    Returns ``(global_x, global_y, metadata)`` in virtual-desktop pixel space,
+    or ``None`` when no YOLO candidates / no anchor match (soft miss).
     """
     instruction_text = (instruction or "").strip()
     if not instruction_text:
@@ -711,7 +712,8 @@ async def resolve_mouse_point(
         )
 
     if not detections:
-        raise ValueError("No YOLO candidates found on selected monitor(s).")
+        _log_info("move_mouse: no YOLO candidates found on selected monitor(s)")
+        return None
 
     anchor_matches, nearby_matches = await _filter_mouse_candidates(
         detections, anchor, nearby
@@ -723,7 +725,8 @@ async def resolve_mouse_point(
     )
 
     if not anchor_matches:
-        raise ValueError("No anchor candidates matched the instruction after LLM filtering.")
+        _log_info("move_mouse: no anchor candidates matched after LLM filtering")
+        return None
 
     before_nearby = len(anchor_matches)
     anchor_matches = _prefilter_anchors_by_nearby(
@@ -789,3 +792,28 @@ async def resolve_mouse_point(
     if selected_text is not None:
         meta["selected_text"] = selected_text
     return resolved_x, resolved_y, meta
+
+
+async def resolve_mouse_point(
+    instruction: str,
+    *,
+    nearby_objects: list[str] | None = None,
+    yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
+) -> tuple[int, int, dict[str, Any]]:
+    """
+    Capture selected monitor(s), build YOLO+OCR candidates, filter and pick via LLM.
+
+    ``nearby_objects`` are optional landmark labels for spatial disambiguation.
+    They are merged with any （附近有…） labels parsed from ``instruction``.
+
+    Returns ``(global_x, global_y, metadata)`` in virtual-desktop pixel space.
+    Raises ``ValueError`` when the target is not found.
+    """
+    found = await find_mouse_point(
+        instruction,
+        nearby_objects=nearby_objects,
+        yolo_conf_threshold=yolo_conf_threshold,
+    )
+    if found is None:
+        raise ValueError("No mouse target matched the instruction on selected monitor(s).")
+    return found

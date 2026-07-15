@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from cua_mcp import hand_tools
-from cua_mcp.select_mouse_target import resolve_mouse_point
+from cua_mcp.select_mouse_target import find_mouse_point, resolve_mouse_point
 from cua_mcp.storage import store_clipboard_text, store_image, store_text, _current_run_paths
 
 
@@ -56,6 +56,43 @@ async def _move_mouse(
     merged: dict[str, Any] = dict(result)
     merged.update(meta)
     merged["instruction"] = instruction
+    if nearby_objects is not None:
+        merged["nearby_objects_arg"] = list(nearby_objects)
+    return _with_unified_target_metadata(
+        merged,
+        target_kind=str(meta.get("target_kind", "mouse_target")),
+        target_text=str(meta.get("target_text", "")),
+        target_icons=meta.get("target_icons", []),
+        target_bbox=meta.get("target_bbox"),
+    )
+
+
+async def _check_object_exists(
+    instruction: str,
+    nearby_objects: list[str] | None = None,
+) -> dict[str, Any]:
+    """Report whether a UI target is on screen; does not move or click."""
+    found = await find_mouse_point(
+        instruction,
+        nearby_objects=nearby_objects,
+    )
+    if found is None:
+        result: dict[str, Any] = {
+            "exists": False,
+            "instruction": instruction,
+        }
+        if nearby_objects is not None:
+            result["nearby_objects_arg"] = list(nearby_objects)
+        return result
+
+    gx, gy, meta = found
+    merged: dict[str, Any] = {
+        "exists": True,
+        "instruction": instruction,
+        "x": gx,
+        "y": gy,
+    }
+    merged.update(meta)
     if nearby_objects is not None:
         merged["nearby_objects_arg"] = list(nearby_objects)
     return _with_unified_target_metadata(

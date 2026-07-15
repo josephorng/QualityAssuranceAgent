@@ -45,6 +45,43 @@ _CALL_SYNTAX_PATTERN = re.compile(
 )
 
 
+def _strip_wrapping_quotes(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def _parse_call_syntax_list(value: str) -> list[Any] | None:
+    """Parse a call-syntax list value into a Python list, or None if not a list."""
+    if not (value.startswith("[") and value.endswith("]")):
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, list):
+        return parsed
+
+    inner = value[1:-1].strip()
+    if not inner:
+        return []
+
+    items: list[str] = []
+    for item in re.split(r",(?=(?:[^\"']*[\"'][^\"']*[\"'])*[^\"']*$)", inner):
+        cleaned = _strip_wrapping_quotes(item.strip())
+        if cleaned:
+            items.append(cleaned)
+    return items
+
+
+def _parse_call_syntax_value(value: str) -> Any:
+    """Coerce a raw call-syntax value; lists become real lists for Pydantic tools."""
+    parsed_list = _parse_call_syntax_list(value)
+    if parsed_list is not None:
+        return parsed_list
+    return value
+
+
 def _parse_call_syntax_arguments(args_str: str) -> dict[str, Any]:
     arguments: dict[str, Any] = {}
     if not args_str.strip():
@@ -53,7 +90,7 @@ def _parse_call_syntax_arguments(args_str: str) -> dict[str, Any]:
         if ":" not in part:
             continue
         key, value = part.split(":", 1)
-        arguments[key.strip()] = value.strip()
+        arguments[key.strip()] = _parse_call_syntax_value(value.strip())
     return arguments
 
 

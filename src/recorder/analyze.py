@@ -251,6 +251,7 @@ def _click_target_anchor(vision: dict[str, Any]) -> str | None:
         visible = _visible_input_field_text(vision)
         if visible:
             return f"「{visible}」文字所在的輸入欄"
+        return "輸入欄"
 
     anchor = format_drag_candidate_anchor(primary)
     if anchor is None or anchor in _GENERIC_CLICK_ANCHORS:

@@ -29,3 +29,5 @@ def test_unique_run_folder_name(monkeypatch) -> None:
     monkeypatch.setattr("src.common.run_state.ts_name", lambda: "fixed_ts")
     assert unique_run_folder_name("Hello!! World") == "task_fixed_ts"
     assert unique_run_folder_name() == "task_fixed_ts"
+    assert unique_run_folder_name("recording") == "recording_fixed_ts"
+    assert unique_run_folder_name("runtime_command") == "runtime_command_fixed_ts"

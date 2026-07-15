@@ -23,7 +23,9 @@ from cua_mcp.icon_map import (
 from cua_mcp.read_screen_text.ocr_image import _ocr_boxes_on_bgr
 from cua_mcp.select_ui_element import (
     UiDetection,
+    _ANCHOR_SUFFIX_BY_CLASS,
     _MOUSE_FILTER_JSON_SCHEMA,
+    _assign_exclusive_neighbors_to_anchors,
     _detection_anchor_label,
     _format_ui_candidates_text,
     _parse_anchor_nearby_indices_from_llm,
@@ -283,8 +285,17 @@ def _build_candidates_from_bgr(
     return candidates
 
 
+# Class-only anchors (no OCR/icons) need these labels so similarity prefilter
+# can keep them when the instruction is e.g. 輸入欄 or 滾動條.
+_CLASS_MATCH_LABELS: frozenset[str] = frozenset({"input", "scrollbar"})
+
+
 def _detection_match_labels(det: UiDetection) -> set[str]:
-    """Labels used to find similar candidates: stripped OCR text and icon chinese_ids."""
+    """Labels used to find similar candidates: OCR text, icon ids, and class labels.
+
+    For ``input`` / ``scrollbar``, also includes the Chinese class name (輸入欄 /
+    滾動條) so class-only anchors survive the similarity prefilter.
+    """
     labels: set[str] = set()
     text = (det.text or "").strip()
     if text:
@@ -293,6 +304,10 @@ def _detection_match_labels(det: UiDetection) -> set[str]:
         chinese_id = str(icon.get("chinese_id", "")).strip()
         if chinese_id:
             labels.add(chinese_id)
+    if det.class_name in _CLASS_MATCH_LABELS:
+        class_label = _ANCHOR_SUFFIX_BY_CLASS.get(det.class_name, "").strip()
+        if class_label:
+            labels.add(class_label)
     return labels
 
 
@@ -597,6 +612,47 @@ def _merge_nearby_labels(*sources: list[str] | None) -> list[str]:
     return merged
 
 
+def _prefilter_anchors_by_nearby(
+    anchors: list[UiDetection],
+    nearby_matches: list[UiDetection],
+    nearby_labels: list[str],
+    *,
+    threshold: float = _MOUSE_FILTER_SIMILARITY_THRESHOLD,
+) -> list[UiDetection]:
+    """Narrow anchors using exclusive nearby-landmark assignment.
+
+    Prefer anchors whose assigned neighbors cover **all** ``nearby_labels``.
+    If none do, keep anchors with any covered nearby label. If still empty
+    (or nearby is absent), return ``anchors`` unchanged.
+    """
+    labels = _normalize_nearby_labels(nearby_labels)
+    if not anchors or not nearby_matches or not labels:
+        return anchors
+
+    assigned = _assign_exclusive_neighbors_to_anchors(anchors, nearby_matches)
+    coverage: list[set[int]] = []
+    for neighbors in assigned:
+        covered: set[int] = set()
+        for li, label in enumerate(labels):
+            if any(
+                _detection_similarity_to_query(neigh, label) >= threshold
+                for neigh in neighbors
+            ):
+                covered.add(li)
+        coverage.append(covered)
+
+    n_labels = len(labels)
+    full = [anchors[i] for i, covered in enumerate(coverage) if len(covered) == n_labels]
+    if full:
+        return full
+
+    partial = [anchors[i] for i, covered in enumerate(coverage) if covered]
+    if partial:
+        return partial
+
+    return anchors
+
+
 async def resolve_mouse_point(
     instruction: str,
     *,
@@ -663,6 +719,17 @@ async def resolve_mouse_point(
 
     if not anchor_matches:
         raise ValueError("No anchor candidates matched the instruction after LLM filtering.")
+
+    before_nearby = len(anchor_matches)
+    anchor_matches = _prefilter_anchors_by_nearby(
+        anchor_matches, nearby_matches, nearby
+    )
+    if len(anchor_matches) != before_nearby:
+        _log_info(
+            "move_mouse nearby prefilter "
+            f"anchors {before_nearby} -> {len(anchor_matches)} "
+            f"nearby_labels={nearby!r}"
+        )
 
     selected_text: str | None = None
     if len(anchor_matches) == 1:

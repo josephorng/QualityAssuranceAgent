@@ -6,9 +6,11 @@ from cua_mcp.select_mouse_target import (
     _detection_from_bbox,
     _merge_nearby_labels,
     _normalize_nearby_labels,
+    _prefilter_anchors_by_nearby,
 )
 from cua_mcp.select_ui_element import (
     UiDetection,
+    _assign_exclusive_neighbors_to_anchors,
     _format_ui_candidates_relational,
     _format_ui_candidates_text,
     _parse_anchor_nearby_indices_from_llm,
@@ -18,6 +20,7 @@ from cua_mcp.select_ui_element import (
 )
 from cua_mcp.yolo_onnx import (
     MOUSE_TARGET_CLASS_IDS,
+    PICKER_CLASS_UNKNOWN,
     YOLO_CLASS_ELEMENT,
     YOLO_CLASS_INPUT,
     YOLO_CLASS_SCROLLBAR,
@@ -498,6 +501,37 @@ def test_prefilter_detections_by_similarity_empty_when_no_match() -> None:
     )
 
 
+def test_prefilter_detections_by_similarity_keeps_input_and_scrollbar() -> None:
+    from cua_mcp.select_mouse_target import _prefilter_detections_by_similarity
+
+    detections = [
+        _detection_from_bbox((0, 0, 80, 24), YOLO_CLASS_INPUT),
+        _detection_from_bbox((100, 0, 12, 100), YOLO_CLASS_SCROLLBAR),
+        _detection_from_bbox((50, 0, 30, 15), YOLO_CLASS_TEXT, text="排序"),
+        _detection_from_bbox(
+            (200, 0, 20, 20), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "向下V箭頭"}]
+        ),
+        _detection_from_bbox(
+            (300, 0, 20, 20), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "Chrome"}]
+        ),
+    ]
+    kept = _prefilter_detections_by_similarity(
+        detections,
+        "輸入欄",
+        ["「排序」文字", "「向下V箭頭」圖示"],
+    )
+    assert [d.class_name for d in kept] == ["input", "text", "element"]
+    assert kept[1].text == "排序"
+    assert (kept[2].icons or [{}])[0].get("chinese_id") == "向下V箭頭"
+
+    kept_scroll = _prefilter_detections_by_similarity(
+        detections,
+        "滾動條",
+        [],
+    )
+    assert [d.class_name for d in kept_scroll] == ["scrollbar"]
+
+
 def test_two_nearest_indices_by_center_distance() -> None:
     detections = [
         _detection_from_bbox((0, 0, 20, 20), YOLO_CLASS_TEXT, text="遠"),  # center 10,10
@@ -517,6 +551,152 @@ def test_two_nearest_indices_single_and_empty() -> None:
         _detection_from_bbox((40, 0, 20, 20), YOLO_CLASS_TEXT, text="B"),
     ]
     assert _two_nearest_indices(pair, 0) == [1]
+
+
+def test_assign_exclusive_neighbors_to_closest_anchor() -> None:
+    anchors = [
+        _detection_from_bbox((1000, 160, 60, 20), YOLO_CLASS_TEXT, text="文件"),
+        _detection_from_bbox((54, 302, 30, 14), YOLO_CLASS_TEXT, text="文件"),
+    ]
+    nearby = [
+        _detection_from_bbox((20, 300, 16, 16), PICKER_CLASS_UNKNOWN, text="目"),
+        _detection_from_bbox((55, 334, 28, 14), YOLO_CLASS_TEXT, text="圖片"),
+    ]
+    assigned = _assign_exclusive_neighbors_to_anchors(anchors, nearby)
+    assert assigned[0] == []
+    assert {d.text for d in assigned[1]} == {"目", "圖片"}
+
+
+def test_prefilter_anchors_by_nearby_keeps_full_coverage() -> None:
+    """Reproduce 1_1.log: only the 「文件」near 「目」/「圖片」covers both landmarks."""
+    wrong_far = _detection_from_bbox((1057, 182, 31, 15), YOLO_CLASS_TEXT, text="文件")
+    correct = _detection_from_bbox((54, 302, 30, 14), YOLO_CLASS_TEXT, text="文件")
+    other = _detection_from_bbox((1467, 380, 30, 14), YOLO_CLASS_TEXT, text="文件")
+    partial = _detection_from_bbox((474, 634, 30, 14), YOLO_CLASS_TEXT, text="文件")
+    anchors = [wrong_far, correct, other, partial]
+    nearby_matches = [
+        _detection_from_bbox((20, 300, 16, 16), PICKER_CLASS_UNKNOWN, text="目"),
+        _detection_from_bbox((55, 334, 28, 14), YOLO_CLASS_TEXT, text="圖片"),
+        # Second 「圖片」closer to partial; should not steal full coverage from correct.
+        _detection_from_bbox((500, 620, 28, 14), YOLO_CLASS_TEXT, text="圖片"),
+    ]
+    kept = _prefilter_anchors_by_nearby(
+        anchors, nearby_matches, ["目未知", "圖片文字"]
+    )
+    assert kept == [correct]
+
+
+def test_prefilter_anchors_by_nearby_falls_back_when_unmatched() -> None:
+    anchors = [
+        _detection_from_bbox((0, 0, 20, 20), YOLO_CLASS_TEXT, text="文件"),
+        _detection_from_bbox((100, 0, 20, 20), YOLO_CLASS_TEXT, text="文件"),
+    ]
+    nearby_matches = [
+        _detection_from_bbox((200, 200, 20, 20), YOLO_CLASS_TEXT, text="無關"),
+    ]
+    kept = _prefilter_anchors_by_nearby(
+        anchors, nearby_matches, ["目未知", "圖片文字"]
+    )
+    assert kept == anchors
+
+
+def test_prefilter_anchors_by_nearby_partial_when_no_full_cover() -> None:
+    anchors = [
+        _detection_from_bbox((0, 0, 20, 20), YOLO_CLASS_TEXT, text="文件"),
+        _detection_from_bbox((200, 0, 20, 20), YOLO_CLASS_TEXT, text="文件"),
+    ]
+    nearby_matches = [
+        # Only one landmark present; closest to first anchor.
+        _detection_from_bbox((10, 30, 20, 20), YOLO_CLASS_TEXT, text="圖片"),
+    ]
+    kept = _prefilter_anchors_by_nearby(
+        anchors, nearby_matches, ["目未知", "圖片文字"]
+    )
+    assert kept == [anchors[0]]
+
+
+def test_prefilter_anchors_by_nearby_noop_without_nearby() -> None:
+    anchors = [
+        _detection_from_bbox((0, 0, 20, 20), YOLO_CLASS_TEXT, text="文件"),
+    ]
+    assert _prefilter_anchors_by_nearby(anchors, [], ["圖片文字"]) == anchors
+    assert _prefilter_anchors_by_nearby(anchors, anchors, []) == anchors
+
+
+@pytest.mark.asyncio
+async def test_resolve_mouse_point_nearby_prefilter_skips_ollama(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When nearby uniquely identifies one anchor, skip the picker LLM."""
+    import numpy as np
+
+    from cua_mcp.select_mouse_target import resolve_mouse_point
+
+    correct = _detection_from_bbox((54, 302, 30, 14), YOLO_CLASS_TEXT, text="文件")
+    wrong = _detection_from_bbox((1057, 182, 31, 15), YOLO_CLASS_TEXT, text="文件")
+    landmark_mu = _detection_from_bbox(
+        (20, 300, 16, 16), PICKER_CLASS_UNKNOWN, text="目"
+    )
+    landmark_img = _detection_from_bbox((55, 334, 28, 14), YOLO_CLASS_TEXT, text="圖片")
+
+    async def fake_parse(instruction: str):
+        return "文件", 0, 0, []
+
+    async def fake_filter(detections, anchor, nearby):
+        return [wrong, correct], [landmark_mu, landmark_img]
+
+    async def fail_ollama(*_args, **_kwargs):
+        raise AssertionError("picker LLM should be skipped after nearby prefilter")
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.parse_relative_pixel_offset",
+        fake_parse,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.selected_eye_monitor_indices",
+        lambda: [1],
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.capture_monitor_to_file",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.cv2.imread",
+        lambda *_args, **_kwargs: np.zeros((10, 10, 3), dtype=np.uint8),
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._collect_monitor_detections",
+        lambda *_args, **_kwargs: [wrong, correct, landmark_mu, landmark_img],
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._filter_mouse_candidates",
+        fake_filter,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._select_center_with_ollama",
+        fail_ollama,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._run_manager",
+        lambda: type(
+            "M",
+            (),
+            {
+                "require_paths": staticmethod(
+                    lambda: type("P", (), {"yolo_ocr_dir": __import__("pathlib").Path(".")})()
+                ),
+                "log_info": staticmethod(lambda *_a, **_k: None),
+            },
+        )(),
+    )
+
+    gx, gy, meta = await resolve_mouse_point(
+        "文件文字",
+        nearby_objects=["目未知", "圖片文字"],
+    )
+    assert (gx, gy) == (correct.cx, correct.cy)
+    assert meta["selected_index"] == 0
+    assert meta["target_text"] == "文件"
 
 
 def test_format_ui_candidates_relational_uses_neighbor_phrases() -> None:

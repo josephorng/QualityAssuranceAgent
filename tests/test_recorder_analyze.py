@@ -509,7 +509,7 @@ def test_instruction_for_click_builds_from_nearest_candidate() -> None:
         button="left",
         screenshot_path="",
     )
-    assert instruction_for_click(event, _VISION_WITH_NEARBY) == "點擊「Chrome」圖示"
+    assert instruction_for_click(event, _VISION_WITH_NEARBY) == "點擊在「Chrome」圖示"
 
 
 def test_instruction_for_click_right_click_with_offset() -> None:
@@ -557,7 +557,7 @@ def test_instruction_for_click_double_click() -> None:
             },
         ],
     }
-    assert instruction_for_click(event, vision) == "連按兩下「文件」文字"
+    assert instruction_for_click(event, vision) == "連按兩下在「文件」文字"
 
 
 def test_instruction_for_click_input_field_with_visible_text() -> None:
@@ -586,7 +586,37 @@ def test_instruction_for_click_input_field_with_visible_text() -> None:
             },
         ],
     }
-    assert instruction_for_click(event, vision) == "點擊「搜尋」文字所在的輸入欄"
+    assert instruction_for_click(event, vision) == "點擊在「搜尋」文字所在的輸入欄"
+
+
+def test_instruction_for_click_empty_input_field() -> None:
+    event = RecordedEvent(
+        index=3,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(408, 56),
+        button="left",
+        screenshot_path="",
+    )
+    vision = {
+        "local_cursor": (408, 56),
+        "candidates": [
+            {
+                "bbox": [170, 34, 1243, 43],
+                "center": [792, 56],
+                "class_name": "input",
+                "text": None,
+            },
+            {
+                "bbox": [413, 100, 17, 15],
+                "center": [421, 108],
+                "class_name": "element",
+                "text": None,
+                "icons": [{"chinese_id": "排序或同步"}],
+            },
+        ],
+    }
+    assert instruction_for_click(event, vision) == "點擊在輸入欄"
 
 
 def test_instruction_for_click_returns_none_for_generic_anchor() -> None:

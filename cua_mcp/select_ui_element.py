@@ -325,6 +325,55 @@ def _two_nearest_indices(detections: list[UiDetection], index: int) -> list[int]
     return [j for _, j in ranked[:2]]
 
 
+def _detection_identity_key(d: UiDetection) -> tuple[Any, ...]:
+    """Stable identity for deduping anchors vs landmark neighbors."""
+    icon_ids = tuple(
+        sorted(
+            str(ii.get("chinese_id", ""))
+            for ii in (d.icons or [])
+            if ii.get("chinese_id")
+        )
+    )
+    return (d.bbox, d.cx, d.cy, d.class_id, d.text or "", icon_ids)
+
+
+def _center_dist2(a: UiDetection, b: UiDetection) -> int:
+    dx = a.cx - b.cx
+    dy = a.cy - b.cy
+    return dx * dx + dy * dy
+
+
+def _assign_exclusive_neighbors_to_anchors(
+    anchors: list[UiDetection],
+    neighbors: list[UiDetection] | None,
+) -> list[list[UiDetection]]:
+    """Assign each unique neighbor to its closest anchor (exclusive).
+
+    Neighbors that are identical to an anchor are skipped. Returns one list of
+    assigned neighbors per anchor index.
+    """
+    assigned: list[list[UiDetection]] = [[] for _ in anchors]
+    if not anchors or not neighbors:
+        return assigned
+
+    seen = {_detection_identity_key(d) for d in anchors}
+    exclusive_neighbors: list[UiDetection] = []
+    for neighbor in neighbors:
+        key = _detection_identity_key(neighbor)
+        if key in seen:
+            continue
+        seen.add(key)
+        exclusive_neighbors.append(neighbor)
+
+    for neighbor in exclusive_neighbors:
+        best_i = min(
+            range(len(anchors)),
+            key=lambda i: (_center_dist2(anchors[i], neighbor), i),
+        )
+        assigned[best_i].append(neighbor)
+    return assigned
+
+
 def _format_ui_candidates_relational(
     anchors: list[UiDetection],
     *,
@@ -337,39 +386,7 @@ def _format_ui_candidates_relational(
     (e.g. nearby landmarks) are cited in phrases only, and each such neighbor is
     assigned exclusively to its closest anchor so distant duplicates cannot claim it.
     """
-
-    def _identity_key(d: UiDetection) -> tuple[Any, ...]:
-        icon_ids = tuple(
-            sorted(
-                str(ii.get("chinese_id", ""))
-                for ii in (d.icons or [])
-                if ii.get("chinese_id")
-            )
-        )
-        return (d.bbox, d.cx, d.cy, d.class_id, d.text or "", icon_ids)
-
-    def _dist2(a: UiDetection, b: UiDetection) -> int:
-        dx = a.cx - b.cx
-        dy = a.cy - b.cy
-        return dx * dx + dy * dy
-
-    exclusive_neighbors: list[UiDetection] = []
-    if neighbors:
-        seen = {_identity_key(d) for d in anchors}
-        for neighbor in neighbors:
-            key = _identity_key(neighbor)
-            if key in seen:
-                continue
-            seen.add(key)
-            exclusive_neighbors.append(neighbor)
-
-    assigned: list[list[UiDetection]] = [[] for _ in anchors]
-    for neighbor in exclusive_neighbors:
-        best_i = min(
-            range(len(anchors)),
-            key=lambda i: (_dist2(anchors[i], neighbor), i),
-        )
-        assigned[best_i].append(neighbor)
+    assigned = _assign_exclusive_neighbors_to_anchors(anchors, neighbors)
 
     lines: list[str] = []
     for i, anchor in enumerate(anchors):
@@ -380,7 +397,9 @@ def _format_ui_candidates_relational(
         if not eligible:
             lines.append(head)
             continue
-        ranked = sorted(eligible, key=lambda d: (_dist2(anchor, d), d.cx, d.cy))
+        ranked = sorted(
+            eligible, key=lambda d: (_center_dist2(anchor, d), d.cx, d.cy)
+        )
         clauses = [_relative_neighbor_phrase(anchor, d) for d in ranked[:2]]
         lines.append(f"{head}（{'、'.join(clauses)}）")
     return "\n".join(lines)

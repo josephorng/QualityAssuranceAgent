@@ -52,6 +52,21 @@ def test_validate_tool_calls_accepts_drag() -> None:
     assert validate_tool_calls(calls) is None
 
 
+def test_validate_tool_calls_accepts_drag_nearby_objects() -> None:
+    calls = [
+        {
+            "name": "drag",
+            "arguments": {
+                "start_instruction": "「新增文字文件.txt」",
+                "destination_instruction": "「新增資料夾」",
+                "start_nearby_objects": ["「Desktop」文字"],
+                "destination_nearby_objects": ["「新增文字文件txt」文字"],
+            },
+        }
+    ]
+    assert validate_tool_calls(calls) is None
+
+
 def test_upsert_from_recorder_shape(tmp_path: Path) -> None:
     from src.common.instruction_tool_cache import upsert_tool_calls
 

@@ -469,7 +469,7 @@ class RecordingSession:
         with self._lock:
             if self._accepting_input:
                 raise RuntimeError("Recording is already active")
-            run_id = unique_run_folder_name("screen_record")
+            run_id = unique_run_folder_name("recording")
             run_dir = self._runs_root / run_id
             run_dir.mkdir(parents=True, exist_ok=True)
             (run_dir / "events").mkdir(exist_ok=True)

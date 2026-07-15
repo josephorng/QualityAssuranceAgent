@@ -183,6 +183,8 @@ async def move_mouse(
 async def drag(
     start_instruction: str,
     destination_instruction: str,
+    start_nearby_objects: list[str] | None = None,
+    destination_nearby_objects: list[str] | None = None,
     duration: float = 0.5,
     button: str = "left",
 ):
@@ -191,10 +193,18 @@ async def drag(
     destination_instruction. It will move the mouse cursor to the start_instruction and then drag to the destination_instruction.
     start_instruction: the source phrase, including any relative pixel offsets in Traditional Chinese (e.g. 「OneNote」文字左方5個像素、下方55個像素的位置)
     destination_instruction: the destination phrase, including any relative pixel offsets in Traditional Chinese (e.g. 「OneNote」文字左方5個像素、下方55個像素的位置)
+    start_nearby_objects: optional list of nearby landmark labels used to disambiguate the
+    drag source (e.g. ["「Desktop」文字"]). Prefer this over embedding （起點附近有…）
+    comments inside start_instruction.
+    destination_nearby_objects: optional list of nearby landmark labels used to disambiguate
+    the drag destination (e.g. ["「新增文字文件txt」文字"]). Prefer this over embedding
+    （附近有…） / （終點附近有…） comments inside destination_instruction.
     '''
     return await _drag(
         start_instruction=start_instruction,
         destination_instruction=destination_instruction,
+        start_nearby_objects=start_nearby_objects,
+        destination_nearby_objects=destination_nearby_objects,
         duration=duration,
         button=button,
     )

@@ -32,6 +32,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Do not call move_mouse when the task only describes an action at the current cursor and does not name a target (e.g. triple-click, double-click, scroll, type text, press a key)—call that action tool directly.",
                 "Click tool mapping: 點擊 / 點選 / single click → click; 連按兩下 / double-click → double_click. Never use double_click for a normal 點擊.",
                 "For move_mouse: put the primary target in instruction (e.g. 「資料夾」圖示). When the task lists nearby landmarks (附近有… / near …), pass them as nearby_objects (e.g. [\"「Edge」圖示\", \"「Copilot」圖示\"]) instead of only embedding them in instruction.",
+                "For drag: put the source in start_instruction and the drop target in destination_instruction. When the task lists start landmarks (起點附近有…), pass them as start_nearby_objects; when it lists destination landmarks (附近有… / 終點附近有… / near …), pass them as destination_nearby_objects (e.g. start_nearby_objects=[\"「Desktop」文字\"], destination_nearby_objects=[\"「新增文字文件txt」文字\"]) instead of only embedding them in the instructions.",
                 "For scroll: positive clicks scroll down (往下滑), negative scroll up; use roughly 3–10 per screen of content.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
@@ -231,8 +232,8 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "instructions": [
                 "Write one concise instruction in Traditional Chinese when possible, matching hub script style.",
                 "Use the nearest matching candidate row to name the target (OCR text and/or icon labels).",
-                "When Input field context shows visible text inside an 輸入欄(Input), name the target with that text plus 輸入欄, e.g. 點擊「間間Gemini」文字所在的輸入欄 — not a generic 輸入欄 alone.",
-                "For pointer clicks: if the click is on the anchor (offset negligible / on anchor), name it directly, e.g. 點擊「Submit」按鈕 or 點擊「間間Gemini」文字所在的輸入欄. If the click is off the anchor, append the relative pixel offset from the offset hints, e.g. 點擊「自訂Office 範本」文字下方39個像素的位置. Use the exact pixel counts from the hints. Do not use vague 附近 for the primary target when an offset is available.",
+                "When Input field context shows visible text inside an 輸入欄(Input), name the target with that text plus 輸入欄, e.g. 點擊「間間Gemini」文字所在的輸入欄. When the nearest candidate is an empty 輸入欄(Input) with no visible OCR text, name it as 輸入欄 (do not fall back to a nearby icon or text).",
+                "For pointer clicks: if the click is on the anchor (offset negligible / on anchor), name it directly, e.g. 點擊「Submit」按鈕, 點擊「間間Gemini」文字所在的輸入欄, or 點擊輸入欄. If the click is off the anchor, append the relative pixel offset from the offset hints, e.g. 點擊「自訂Office 範本」文字下方39個像素的位置. Use the exact pixel counts from the hints. Do not use vague 附近 for the primary target when an offset is available.",
                 "For drag events: name the start target and destination anchor from candidates. Append the relative pixel offset from the offset hints to the destination anchor, e.g. 從「Chrome」圖示拖到「Desktop」文字下方49個像素的位置. Use the exact pixel counts from the hints for the anchor you name. If offset is negligible, omit it. If destination candidates are empty, describe the drop area directionally (e.g. 右側空白區域).",
                 "For scroll: describe direction and target area, e.g. 在檔案清單區域向下捲動.",
                 "For special keys: e.g. 按下 Enter 鍵.",

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import inspect
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from src.common.io_utils import append_text, write_json
+
+_RUN_FOLDER_PREFIX_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 
 
 def ts_name() -> str:
@@ -14,12 +17,15 @@ def ts_name() -> str:
 
 
 def unique_run_folder_name(name: str = "task") -> str:
-    """Unique folder name under a runs root: ``task_`` + UTC timestamp.
+    """Unique folder name under a runs root: ``{prefix}_`` + UTC timestamp.
 
-    ``name`` is accepted for call-site compatibility but ignored; folders are not
-    named from task text or an LLM.
+    Simple identifier prefixes (e.g. ``task``, ``recording``) are kept. Free-form
+    task text or LLM prose falls back to ``task`` so folders are never named from it.
     """
-    return f"task_{ts_name()}"
+    prefix = str(name).strip().lower()
+    if not _RUN_FOLDER_PREFIX_RE.fullmatch(prefix):
+        prefix = "task"
+    return f"{prefix}_{ts_name()}"
 
 
 _B64_BODY_CHARS = frozenset(

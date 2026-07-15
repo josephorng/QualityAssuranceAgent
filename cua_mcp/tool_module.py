@@ -105,15 +105,27 @@ def _drag_at_points(
 async def _drag(
     start_instruction: str,
     destination_instruction: str,
+    start_nearby_objects: list[str] | None = None,
+    destination_nearby_objects: list[str] | None = None,
     duration: float = 0.5,
     button: str = "left",
 ) -> dict[str, Any]:
-    x1, y1, start_meta = await resolve_mouse_point(start_instruction)
-    x2, y2, end_meta = await resolve_mouse_point(destination_instruction)
+    x1, y1, start_meta = await resolve_mouse_point(
+        start_instruction,
+        nearby_objects=start_nearby_objects,
+    )
+    x2, y2, end_meta = await resolve_mouse_point(
+        destination_instruction,
+        nearby_objects=destination_nearby_objects,
+    )
     result = _drag_at_points(x1, y1, x2, y2, duration=duration, button=button)
     merged: dict[str, Any] = dict(result)
     merged["start_instruction"] = start_instruction
     merged["destination_instruction"] = destination_instruction
+    if start_nearby_objects is not None:
+        merged["start_nearby_objects_arg"] = list(start_nearby_objects)
+    if destination_nearby_objects is not None:
+        merged["destination_nearby_objects_arg"] = list(destination_nearby_objects)
     merged["start_target"] = dict(start_meta)
     merged["destination_target"] = dict(end_meta)
     return _with_unified_target_metadata(

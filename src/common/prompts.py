@@ -18,9 +18,9 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
         {
             "image_usage": "optional",
             "prompt": (
-                "You are a helpful assistant that can help with tasks on the computer. "
-                "Given task objective, and available tools, "
-                "decide one or multiple tool calls to take to achieve the task objective.\n\n"
+                "Translate CurrentTaskGoal into one or more tool calls using the available tools. "
+                "Map the goal literally—do not invent preparatory steps, targets, or visibility "
+                "checks that are not stated in the goal.\n\n"
                 "CurrentTaskGoal:\n{task}"
             ),
             "instructions": [
@@ -28,6 +28,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Create detailed tool instructions for each tool call.",
                 "All the monitor screenshot(s) are captured and will be provided to you.",
                 "Do not do anything outside of the task scope.",
+                "Do not add click/move_mouse/check_object_exists unless the goal names a target or explicitly asks to check visibility (如果畫面上有… / 如果畫面上沒有… / if … is visible / if … is not visible).",
                 "For steps that depend on whether something is on screen (如果畫面上有… / 如果畫面上沒有… / if … is visible / if … is not visible): call check_object_exists first with the target in instruction (and nearby_objects when given). Do not call move_mouse, click, or other action tools in the same turn as the check—wait for the exists result.",
                 "Use move_mouse only when the task explicitly asks to move the cursor or interact with a named/specific on-screen target (e.g. 'click on the object', '點選物件', 'click the Submit button'). For 'click on the object' or '點選物件', split into move_mouse then click.",
                 "Do not call move_mouse when the task only describes an action at the current cursor and does not name a target (e.g. triple-click, double-click, scroll, type text, press a key)—call that action tool directly.",

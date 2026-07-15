@@ -341,6 +341,48 @@ def _expand_keep_indices_with_similar(
     return expanded
 
 
+# Quote/bracket pairs that may wrap a hub target name (e.g. 「擷取」文字).
+# Pair forms use distinct open/close; ASCII ``"…"`` uses the same glyph twice.
+_SIMILARITY_WRAP_PAIRS: tuple[tuple[str, str], ...] = (
+    ("「", "」"),
+    ("『", "』"),
+    ("【", "】"),
+    ("〔", "〕"),
+    ("[", "]"),
+    ('"', '"'),
+)
+
+
+def _normalize_similarity_label(label: str) -> str:
+    """Strip hub wrappers so ``「擷取」文字`` compares as ``擷取`` against raw OCR.
+
+    Prefer the content of the leftmost wrapper pair among ``""`` / ``「」`` /
+    ``『』`` / ``【】`` / ``〔〕`` / ``[]`` when present; otherwise keep the trimmed
+    label. Class-only anchors such as ``輸入欄`` / ``滾動條`` are unchanged.
+    """
+    text = (label or "").strip()
+    if not text:
+        return ""
+
+    best_start: int | None = None
+    best_end: int | None = None
+    for open_ch, close_ch in _SIMILARITY_WRAP_PAIRS:
+        start = text.find(open_ch)
+        if start < 0:
+            continue
+        end = text.find(close_ch, start + len(open_ch))
+        if end <= start:
+            continue
+        if best_start is None or start < best_start:
+            best_start, best_end = start, end
+
+    if best_start is not None and best_end is not None:
+        inner = text[best_start + 1 : best_end].strip()
+        if inner:
+            return inner
+    return text
+
+
 def _label_similarity(a: str, b: str) -> float:
     """Case-insensitive string similarity in ``[0, 1]``."""
     left = (a or "").strip()
@@ -349,7 +391,11 @@ def _label_similarity(a: str, b: str) -> float:
         return 0.0
     if left == right:
         return 1.0
-    return SequenceMatcher(None, left.casefold(), right.casefold()).ratio()
+    left_n = _normalize_similarity_label(left)
+    right_n = _normalize_similarity_label(right)
+    if left_n == right_n:
+        return 1.0
+    return SequenceMatcher(None, left_n.casefold(), right_n.casefold()).ratio()
 
 
 def _detection_similarity_to_query(det: UiDetection, query: str) -> float:

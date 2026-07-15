@@ -412,6 +412,48 @@ def test_expand_keep_indices_ignores_blank_detections() -> None:
     assert expanded == [0, 1]
 
 
+def test_normalize_similarity_label_strips_hub_wrappers() -> None:
+    from cua_mcp.select_mouse_target import _normalize_similarity_label
+
+    assert _normalize_similarity_label("「擷取」文字") == "擷取"
+    assert _normalize_similarity_label("『檔案』圖示") == "檔案"
+    assert _normalize_similarity_label("【Edge】圖示") == "Edge"
+    assert _normalize_similarity_label("〔排序〕文字") == "排序"
+    assert _normalize_similarity_label('[Submit]按鈕') == "Submit"
+    assert _normalize_similarity_label('"Chrome"圖示') == "Chrome"
+    assert _normalize_similarity_label("  「Edge」圖示  ") == "Edge"
+    assert _normalize_similarity_label("擷取") == "擷取"
+    assert _normalize_similarity_label("輸入欄") == "輸入欄"
+    assert _normalize_similarity_label("") == ""
+    assert _normalize_similarity_label("「」文字") == "「」文字"
+    assert _normalize_similarity_label('""文字') == '""文字'
+
+
+def test_label_similarity_hub_query_matches_ocr_near_miss() -> None:
+    from cua_mcp.select_mouse_target import _label_similarity
+
+    # OCR misread 擷取 → 握取; hub wrapper must not dilute the ratio below threshold.
+    assert _label_similarity("「擷取」文字", "握取") == 0.5
+    assert _label_similarity("『擷取』文字", "握取") == 0.5
+    assert _label_similarity("【擷取】", "擷取") == 1.0
+    assert _label_similarity('"擷取"', "擷取") == 1.0
+    assert _label_similarity("[擷取]文字", "擷取") == 1.0
+    assert _label_similarity("「擷取」文字", "文字文件") == 0.0
+    assert _label_similarity("「Edge」圖示", "Edge") == 1.0
+
+
+def test_prefilter_keeps_ocr_near_miss_over_shared_suffix() -> None:
+    from cua_mcp.select_mouse_target import _prefilter_detections_by_similarity
+
+    detections = [
+        _detection_from_bbox((0, 0, 30, 15), YOLO_CLASS_TEXT, text="握取"),
+        _detection_from_bbox((50, 0, 30, 15), YOLO_CLASS_TEXT, text="文字文件"),
+        _detection_from_bbox((100, 0, 30, 15), YOLO_CLASS_TEXT, text="新增文字文件.txt"),
+    ]
+    kept = _prefilter_detections_by_similarity(detections, "「擷取」文字", [])
+    assert [d.text for d in kept] == ["握取"]
+
+
 def test_fallback_filter_by_similarity_picks_anchor_and_nearby() -> None:
     from cua_mcp.select_mouse_target import _fallback_filter_by_similarity
 

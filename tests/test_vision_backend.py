@@ -45,12 +45,12 @@ def test_should_try_triton_for_auto_and_triton(monkeypatch: pytest.MonkeyPatch) 
 def test_triton_client_address_strips_scheme(monkeypatch: pytest.MonkeyPatch) -> None:
     from cua_mcp.vision_backend import triton_client_address, triton_client_use_ssl
 
-    monkeypatch.setenv("TRITON_HTTP_URL", "http://localhost:8000")
-    assert triton_client_address() == "localhost:8000"
+    monkeypatch.setenv("TRITON_HTTP_URL", "http://localhost:9000")
+    assert triton_client_address() == "localhost:9000"
     assert triton_client_use_ssl() is False
 
-    monkeypatch.setenv("TRITON_HTTP_URL", "https://gpu-host:8000")
-    assert triton_client_address() == "gpu-host:8000"
+    monkeypatch.setenv("TRITON_HTTP_URL", "https://gpu-host:9000")
+    assert triton_client_address() == "gpu-host:9000"
     assert triton_client_use_ssl() is True
 
 

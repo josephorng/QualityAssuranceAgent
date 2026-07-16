@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 
 VISION_BACKENDS = frozenset({"auto", "triton", "local"})
-DEFAULT_TRITON_HTTP_URL = "http://localhost:8000"
+DEFAULT_TRITON_HTTP_URL = "http://localhost:9000"
 DEFAULT_VISION_BACKEND = "auto"
 
 

@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     runs_dir: str = "runs"
     log_level: str = "INFO"
     debug: bool = True
-    triton_http_url: str = "http://localhost:8000"
+    triton_http_url: str = "http://localhost:9000"
     vision_backend: str = "auto"
 
 

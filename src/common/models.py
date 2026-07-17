@@ -11,6 +11,8 @@ class ToolCommand(BaseModel):
     action: str
     args: dict[str, Any] = Field(default_factory=dict)
     screenshot_name: str | None = None
+    screenshot_before_path: str | None = None
+    screenshot_after_path: str | None = None
     reason: str = ""
 
 
@@ -20,6 +22,8 @@ class ExecutionResult(BaseModel):
     args: dict[str, Any] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     screenshot_name: str | None = None
+    screenshot_before_path: str | None = None
+    screenshot_after_path: str | None = None
     message: str = ""
 
 

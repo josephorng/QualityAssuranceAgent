@@ -364,7 +364,11 @@ def build_session_report(run_root: Path, *, session_end_reason: str) -> dict[str
 
 
 def write_session_report(run_root: Path, *, session_end_reason: str) -> Path:
-    """Write ``report.json`` under ``run_root`` and return its path."""
+    """Write ``report.json`` under ``run_root`` and rebuild ``session_steps.html``; return report path."""
     report_path = run_root / "report.json"
     write_json(report_path, build_session_report(run_root, session_end_reason=session_end_reason))
+
+    from src.common.session_html import write_session_html_from_run
+
+    write_session_html_from_run(run_root)
     return report_path

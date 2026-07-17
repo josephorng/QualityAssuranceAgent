@@ -71,7 +71,10 @@ def show_ctk_message(
     root.wait_window(dialog)
 
 
-def prompt_script_continue_or_end(master: Any, message: str) -> bool:
+def prompt_script_continue_or_end(
+    master: Any,
+    message: str,
+) -> bool:
     """Return True to keep adding runtime steps to the open script, False to end the session."""
     import customtkinter as ctk
 

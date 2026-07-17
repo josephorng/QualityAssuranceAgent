@@ -4,7 +4,7 @@ import asyncio
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mcp.types import TextContent
 
@@ -16,6 +16,11 @@ from src.common.prompting import get_prompt
 from src.common.run_state import get_run_state_manager
 from src.common.runtime_context import get_runtime_env
 from src.common.settings import load_settings
+
+if TYPE_CHECKING:
+    from src.eye.module import EyeModule
+
+_AFTER_ACTION_SETTLE_S = 1.0
 
 
 def _parse_mcp_tool_result(tool_output: Any) -> dict[str, Any] | None:
@@ -51,12 +56,13 @@ def _merged_tool_args(original: dict[str, Any], tool_output: Any) -> dict[str, A
 
 
 class HandModule:
-    def __init__(self) -> None:
+    def __init__(self, eye: EyeModule | None = None) -> None:
         self.settings = load_settings()
         self.ollama = get_llm_client()
         self.run_root, self.run_id = get_runtime_env()
         self.manager = get_run_state_manager()
         self.manager.init_run(self.run_id, self.run_root.name)
+        self._eye = eye
         self._busy = False
         self._lock = asyncio.Lock()
         self.manager.log_info(f"Hand module initialized run_id={self.run_id}")
@@ -69,7 +75,26 @@ class HandModule:
         if not screenshot_name:
             return None
         candidate = Path(screenshot_name)
-        return str(self.manager.require_paths().eye_dir / candidate.name)
+        if candidate.is_file():
+            return str(candidate)
+        resolved = self.manager.require_paths().eye_dir / candidate.name
+        return str(resolved) if resolved.is_file() else None
+
+    async def _capture_report_screenshot(
+        self,
+        label: str,
+        settle_delay: float = 0.0,
+    ) -> str | None:
+        if self._eye is None:
+            return None
+        if settle_delay > 0:
+            await asyncio.sleep(settle_delay)
+        try:
+            event = await self._eye.capture_once()
+        except Exception as exc:
+            self.manager.log_error(f"Failed to capture {label} screenshot for report: {exc}")
+            return None
+        return event.screenshot_path
 
     async def _remap_unknown_action(
         self,
@@ -130,15 +155,27 @@ class HandModule:
     async def _exec_action(self, cmd: ToolCommand) -> ExecutionResult:
         action = cmd.action
         args = cmd.args
-        screenshot_path = self._resolve_screenshot_path(cmd.screenshot_name)
+        screenshot_before_path = self._resolve_screenshot_path(cmd.screenshot_before_path)
+        screenshot_after_path = self._resolve_screenshot_path(cmd.screenshot_after_path)
+        screenshot_path = screenshot_before_path or self._resolve_screenshot_path(cmd.screenshot_name)
+
+        if screenshot_before_path is None:
+            screenshot_before_path = await self._capture_report_screenshot("before-action")
+
         try:
             tool_output = await mcp_server.call_tool(action, args)
+            if screenshot_after_path is None:
+                screenshot_after_path = await self._capture_report_screenshot(
+                    "after-action", settle_delay=_AFTER_ACTION_SETTLE_S
+                )
             return ExecutionResult(
                 ok=True,
                 action=action,
                 args=_merged_tool_args(args, tool_output),
                 timestamp=datetime.now(timezone.utc),
-                screenshot_name=screenshot_path,
+                screenshot_name=screenshot_before_path,
+                screenshot_before_path=screenshot_before_path,
+                screenshot_after_path=screenshot_after_path,
                 message=cmd.reason or "executed",
             )
         except Exception as exc:
@@ -149,24 +186,36 @@ class HandModule:
                     remapped_action, remapped_args = remapped
                     try:
                         tool_output = await mcp_server.call_tool(remapped_action, remapped_args)
+                        if screenshot_after_path is None:
+                            screenshot_after_path = await self._capture_report_screenshot(
+                                "after-action", settle_delay=_AFTER_ACTION_SETTLE_S
+                            )
                         return ExecutionResult(
                             ok=True,
                             action=remapped_action,
                             args=_merged_tool_args(remapped_args, tool_output),
                             timestamp=datetime.now(timezone.utc),
-                            screenshot_name=screenshot_path,
+                            screenshot_name=screenshot_before_path,
+                            screenshot_before_path=screenshot_before_path,
+                            screenshot_after_path=screenshot_after_path,
                             message=f"{cmd.reason or 'executed'} (remapped from {action})",
                         )
                     except Exception as remap_exc:
                         error_message = (
                             f"{error_message}; remap retry failed with {remapped_action}: {remap_exc}"
                         )
+            if screenshot_after_path is None:
+                screenshot_after_path = await self._capture_report_screenshot(
+                    "after-action", settle_delay=_AFTER_ACTION_SETTLE_S
+                )
             return ExecutionResult(
                 ok=False,
                 action=action,
                 args=args,
                 timestamp=datetime.now(timezone.utc),
-                screenshot_name=screenshot_path,
+                screenshot_name=screenshot_before_path,
+                screenshot_before_path=screenshot_before_path,
+                screenshot_after_path=screenshot_after_path,
                 message=error_message,
             )
 
@@ -174,15 +223,27 @@ class HandModule:
         async with self._lock:
             self._busy = True
             result = await self._exec_action(cmd)
+            paths = self.manager.require_paths()
             append_csv_row(
-                self.manager.require_paths().hand_csv,
-                fieldnames=["timestamp", "action", "args", "ok", "screenshot_name", "message"],
+                paths.hand_csv,
+                fieldnames=[
+                    "timestamp",
+                    "action",
+                    "args",
+                    "ok",
+                    "screenshot_name",
+                    "screenshot_before_path",
+                    "screenshot_after_path",
+                    "message",
+                ],
                 row={
                     "timestamp": result.timestamp.isoformat(),
                     "action": result.action,
                     "args": result.args,
                     "ok": result.ok,
                     "screenshot_name": result.screenshot_name or "",
+                    "screenshot_before_path": result.screenshot_before_path or "",
+                    "screenshot_after_path": result.screenshot_after_path or "",
                     "message": result.message,
                 },
             )

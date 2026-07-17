@@ -24,7 +24,7 @@ def _runtime_command_script_path(run_root: Path) -> Path:
 class RuntimeCoordinator:
     def __init__(self) -> None:
         self.eye = EyeModule()
-        self.hand = HandModule()
+        self.hand = HandModule(eye=self.eye)
         self.brain = BrainModule(hand=self.hand, eye=self.eye)
         self.manager = get_run_state_manager()
 

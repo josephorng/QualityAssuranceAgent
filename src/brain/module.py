@@ -283,6 +283,12 @@ class BrainModule:
             return self.script_lines[-1]
         return self.script_lines[self._script_step_index]
 
+    @staticmethod
+    def _primary_decision_screenshot(image_paths: list[str]) -> str | None:
+        if not image_paths:
+            return None
+        return image_paths[0]
+
     async def _normalize_tool_name(self, tool_name: str, arguments: dict | None = None) -> str:
         """
         Normalize model-emitted tool names to canonical callable names.
@@ -333,7 +339,9 @@ class BrainModule:
         """Strip noisy or redundant fields from tool execution results before logging into chat."""
         result_dict = result.model_dump()
         result_dict.pop("timestamp")
-        result_dict.pop("screenshot_name")
+        result_dict.pop("screenshot_name", None)
+        result_dict.pop("screenshot_before_path", None)
+        result_dict.pop("screenshot_after_path", None)
         result_dict = prune_nulls(result_dict)       
         return result_dict
     
@@ -457,6 +465,7 @@ class BrainModule:
     ) -> bool:
         """Execute cached tool calls in order. Returns True only if every tool succeeds."""
         all_image_paths = await self._eye.capture_separated_images()
+        before_screenshot = self._primary_decision_screenshot(all_image_paths)
         messages: list[dict[str, Any]] = [
             stamp_message(
                 {
@@ -492,7 +501,11 @@ class BrainModule:
                 self._save_step_messages(messages)
                 return False
             result = await self._hand.execute_tool_command(
-                ToolCommand(action=normalized_name, args=arguments)
+                ToolCommand(
+                    action=normalized_name,
+                    args=arguments,
+                    screenshot_before_path=before_screenshot,
+                )
             )
             messages.append(
                 stamp_message(
@@ -547,6 +560,7 @@ class BrainModule:
             try:
                 llm_path_used = True
                 all_image_paths = await self._eye.capture_separated_images()
+                before_screenshot = self._primary_decision_screenshot(all_image_paths)
                 user_content = first_prompt if not messages else second_prompt
                 messages.append(
                     stamp_message(
@@ -580,7 +594,13 @@ class BrainModule:
                         self.manager.log_error(f"Error normalizing tool name: {e}")
                         step_succeeded = False
                         break
-                    result = await self._hand.execute_tool_command(ToolCommand(action=normalized_name, args=arguments))
+                    result = await self._hand.execute_tool_command(
+                        ToolCommand(
+                            action=normalized_name,
+                            args=arguments,
+                            screenshot_before_path=before_screenshot,
+                        )
+                    )
                     messages.append(
                         stamp_message(
                             {

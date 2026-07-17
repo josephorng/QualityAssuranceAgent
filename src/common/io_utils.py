@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import csv
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -48,11 +51,25 @@ def read_json(path: Path, default: Any) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def open_path_with_default_app(path: Path) -> None:
+    """Open a file or folder with the OS default application."""
+    resolved = path.resolve()
+    if sys.platform == "win32":
+        os.startfile(resolved)  # type: ignore[attr-defined]
+        return
+    if sys.platform == "darwin":
+        subprocess.run(["open", str(resolved)], check=True)
+        return
+    subprocess.run(["xdg-open", str(resolved)], check=True)
+
+
 def append_csv_row(path: Path, fieldnames: list[str], row: dict[str, Any]) -> None:
     ensure_parent(path)
-    file_exists = path.exists()
+    # ``run_state.init_run`` pre-creates an empty ``hand.csv``, so a plain ``path.exists()``
+    # check would skip the header forever. Write the header whenever the file has no content.
+    needs_header = (not path.exists()) or path.stat().st_size == 0
     with path.open("a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
-        if not file_exists:
+        if needs_header:
             writer.writeheader()
         writer.writerow(row)

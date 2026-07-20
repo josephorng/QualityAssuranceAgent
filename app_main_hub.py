@@ -6,6 +6,7 @@ import asyncio
 import os
 import tempfile
 import threading
+import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -54,7 +55,14 @@ def _default_hub_ui_dict() -> dict[str, Any]:
         "last_script_path": None,
         "use_tool_cache": False,
         "recording_hotkey_enabled": True,
+        "queue_script_paths": [],
     }
+
+
+def _coerce_str_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [x for x in value if isinstance(x, str) and x.strip()]
 
 
 def _coerce_int_list(value: Any) -> list[int]:
@@ -80,6 +88,7 @@ def _normalize_hub_ui_state(raw: Any) -> dict[str, Any]:
     base["last_script_path"] = lsp if isinstance(lsp, str) or lsp is None else None
     base["use_tool_cache"] = bool(raw.get("use_tool_cache", False))
     base["recording_hotkey_enabled"] = bool(raw.get("recording_hotkey_enabled", True))
+    base["queue_script_paths"] = _coerce_str_list(raw.get("queue_script_paths"))
     return base
 
 
@@ -103,6 +112,7 @@ class _WorkerArgs:
     script_disk_path: Path | None
     run_folder_name: str | None = None
     use_tool_cache: bool = False
+    queue_paths: list[Path] | None = None
 
 
 class MainHub(ctk.CTk):
@@ -136,6 +146,14 @@ class MainHub(ctk.CTk):
 
         self._post_run_unlink: Path | None = None
         self._script_controls: list[Any] = []
+        self._queue_controls: list[Any] = []
+        self._queue_paths: list[Path] = []
+        self._queue_selected: int | None = None
+        self._queue_mode_active = False
+        self._queue_results: list[tuple[str, str]] = []
+        self._queue_status_by_index: dict[int, str] = {}
+        self._queue_run_root_by_index: dict[int, Path] = {}
+        self._last_report_html: Path | None = None
         self._last_run_was_script_mode = False
         self._last_script_run_folder: str | None = None
         self._active_run_root: Path | None = None
@@ -148,6 +166,7 @@ class MainHub(ctk.CTk):
         self._suppress_script_cache_sync = False
         self._sync_cache_after_id: str | None = None
         self._record_btn: ctk.CTkButton | None = None
+        self._analyze_recording_btn: ctk.CTkButton | None = None
         self._analysis_progress_frame: ctk.CTkFrame | None = None
         self._analysis_progress: ctk.CTkProgressBar | None = None
 
@@ -176,6 +195,11 @@ class MainHub(ctk.CTk):
                 self._refresh_script_path_label()
         if self._script_path is None:
             self._try_load_last_runtime_command_cache()
+
+        self._queue_paths = [
+            Path(p) for p in hub.get("queue_script_paths", []) if Path(p).is_file()
+        ]
+        self._refresh_queue_list()
 
         self._status.configure(text="正在檢查 Ollama 主機…")
         self._start_ollama_host_probe()
@@ -358,6 +382,7 @@ class MainHub(ctk.CTk):
                 else None,
                 "use_tool_cache": self._tool_cache_enabled_for_run(),
                 "recording_hotkey_enabled": self._recording_hotkey_enabled,
+                "queue_script_paths": [str(p) for p in self._queue_paths],
             }
             write_json(_hub_ui_state_path(), data)
             self._remember_monitor_indices = list(data["selected_monitor_indices"])
@@ -475,11 +500,16 @@ class MainHub(ctk.CTk):
     def _build_script_section(self) -> None:
         box = ctk.CTkFrame(self, corner_radius=12)
         box.pack(fill="both", expand=True, padx=24, pady=8)
-        ctk.CTkLabel(box, text="腳本", font=ctk.CTkFont(size=16, weight="bold")).pack(
-            anchor="w", padx=16, pady=(14, 4)
-        )
-        row = ctk.CTkFrame(box, fg_color="transparent")
-        row.pack(fill="x", padx=16, pady=4)
+        self._mode_tabs = ctk.CTkTabview(box)
+        self._mode_tabs.pack(fill="both", expand=True, padx=8, pady=8)
+        self._tab_single = self._mode_tabs.add("單一腳本")
+        self._tab_queue = self._mode_tabs.add("佇列執行")
+        self._build_single_script_tab(self._tab_single)
+        self._build_queue_tab(self._tab_queue)
+
+    def _build_single_script_tab(self, parent: Any) -> None:
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=8, pady=4)
         b_open = ctk.CTkButton(row, text="開啟…", width=100, command=self._script_open)
         b_open.pack(side="left", padx=(0, 8))
         b_save = ctk.CTkButton(row, text="儲存", width=100, command=self._script_save)
@@ -491,20 +521,232 @@ class MainHub(ctk.CTk):
         self._record_btn = ctk.CTkButton(
             row, text="開始錄製", width=100, command=self._on_record_button
         )
-        self._record_btn.pack(side="left")
+        self._record_btn.pack(side="left", padx=(0, 8))
+        self._analyze_recording_btn = ctk.CTkButton(
+            row,
+            text="分析錄製…",
+            width=110,
+            command=self._on_analyze_recording_folder,
+        )
+        self._analyze_recording_btn.pack(side="left")
         self._script_path_label = ctk.CTkLabel(
-            box,
+            parent,
             text="未載入檔案",
             font=ctk.CTkFont(size=12),
             text_color=("gray20", "gray65"),
         )
-        self._script_path_label.pack(anchor="w", padx=16, pady=(4, 8))
-        self._script_text = ctk.CTkTextbox(box, font=ctk.CTkFont(size=14), wrap="word")
-        self._script_text.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+        self._script_path_label.pack(anchor="w", padx=8, pady=(4, 8))
+        self._script_text = ctk.CTkTextbox(parent, font=ctk.CTkFont(size=14), wrap="word")
+        self._script_text.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self._bind_script_text_cache_sync()
         self._script_controls.extend(
-            [b_open, b_save, b_sas, b_clear, self._record_btn, self._script_text]
+            [
+                b_open,
+                b_save,
+                b_sas,
+                b_clear,
+                self._record_btn,
+                self._analyze_recording_btn,
+                self._script_text,
+            ]
         )
+
+    def _build_queue_tab(self, parent: Any) -> None:
+        ctk.CTkLabel(
+            parent,
+            text="加入多個腳本檔案，依序執行；若某個腳本失敗，會繼續執行下一個。",
+            font=ctk.CTkFont(size=12),
+            text_color=("gray30", "gray70"),
+            wraplength=820,
+            justify="left",
+        ).pack(anchor="w", padx=8, pady=(4, 8))
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=8, pady=4)
+        b_add = ctk.CTkButton(row, text="新增檔案…", width=100, command=self._queue_add_files)
+        b_add.pack(side="left", padx=(0, 8))
+        b_up = ctk.CTkButton(row, text="上移", width=80, command=self._queue_move_up)
+        b_up.pack(side="left", padx=(0, 8))
+        b_down = ctk.CTkButton(row, text="下移", width=80, command=self._queue_move_down)
+        b_down.pack(side="left", padx=(0, 8))
+        b_remove = ctk.CTkButton(row, text="移除", width=80, command=self._queue_remove_selected)
+        b_remove.pack(side="left", padx=(0, 8))
+        b_clear = ctk.CTkButton(row, text="清空", width=80, command=self._queue_clear)
+        b_clear.pack(side="left")
+        self._queue_list_frame = ctk.CTkScrollableFrame(parent)
+        self._queue_list_frame.pack(fill="both", expand=True, padx=8, pady=(8, 8))
+        self._queue_controls.extend([b_add, b_up, b_down, b_remove, b_clear])
+
+    def _refresh_queue_list(self) -> None:
+        frame = getattr(self, "_queue_list_frame", None)
+        if frame is None:
+            return
+        for w in frame.winfo_children():
+            w.destroy()
+        if not self._queue_paths:
+            ctk.CTkLabel(
+                frame,
+                text="尚未加入任何腳本檔案。",
+                font=ctk.CTkFont(size=13),
+                text_color=("gray40", "gray60"),
+            ).pack(anchor="w", padx=6, pady=6)
+            return
+        for i, p in enumerate(self._queue_paths):
+            selected = i == self._queue_selected
+            fg = ("gray75", "gray28") if selected else "transparent"
+            row = ctk.CTkFrame(frame, fg_color="transparent")
+            row.pack(fill="x", padx=4, pady=2)
+            status = self._queue_status_by_index.get(i)
+            icon, icon_color = self._queue_status_icon(status)
+            ctk.CTkLabel(
+                row,
+                text=icon,
+                width=20,
+                font=ctk.CTkFont(size=15, weight="bold"),
+                text_color=icon_color,
+            ).pack(side="left", padx=(0, 2))
+            btn = ctk.CTkButton(
+                row,
+                text=f"{i + 1}. {p.name}",
+                anchor="w",
+                fg_color=fg,
+                hover=not selected,
+                text_color=("gray10", "gray90"),
+                command=lambda idx=i: self._queue_select(idx),
+            )
+            btn.pack(side="left", fill="x", expand=True)
+            run_root = self._queue_run_root_by_index.get(i)
+            if run_root is not None and (run_root / "session_steps.html").is_file():
+                report_btn = ctk.CTkButton(
+                    row,
+                    text="報告",
+                    width=56,
+                    command=lambda root=run_root: self._open_report_html(root / "session_steps.html"),
+                )
+                report_btn.pack(side="left", padx=(6, 0))
+            edit_btn = ctk.CTkButton(
+                row,
+                text="編輯",
+                width=56,
+                command=lambda idx=i: self._queue_edit_file(idx),
+            )
+            edit_btn.pack(side="left", padx=(6, 0))
+
+    @staticmethod
+    def _queue_status_icon(status: str | None) -> tuple[str, tuple[str, str]]:
+        if status == "ok":
+            return "\u2713", ("#16a34a", "#22c55e")
+        if status == "fail":
+            return "\u2717", ("#b91c1c", "#f87171")
+        if status == "skipped":
+            return "\u2013", ("gray40", "gray60")
+        return " ", ("gray40", "gray60")
+
+    def _mark_queue_result(self, index: int, status: str, run_root: Path | None = None) -> None:
+        def apply() -> None:
+            self._queue_status_by_index[index] = status
+            if run_root is not None:
+                self._queue_run_root_by_index[index] = run_root
+            self._refresh_queue_list()
+
+        self.after(0, apply)
+
+    def _queue_select(self, index: int) -> None:
+        self._queue_selected = index
+        self._refresh_queue_list()
+
+    def _queue_edit_file(self, index: int) -> None:
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            return
+        if index < 0 or index >= len(self._queue_paths):
+            return
+        p = self._queue_paths[index]
+        if not p.is_file():
+            show_ctk_message(self, "編輯", f"找不到檔案：\n{p}", kind="error")
+            return
+        self._script_path = p
+        self._runtime_commands_cache_path = None
+        text = p.read_text(encoding="utf-8")
+        self._suppress_script_cache_sync = True
+        try:
+            self._script_text.configure(state="normal")
+            self._script_text.delete("0.0", "end")
+            self._script_text.insert("0.0", text)
+        finally:
+            self._suppress_script_cache_sync = False
+        self._refresh_script_path_label()
+        self._persist_hub_ui_state()
+        try:
+            self._mode_tabs.set("單一腳本")
+        except Exception:
+            pass
+        self._status.configure(text=f"已在單一腳本開啟 {p.name}")
+
+    def _queue_add_files(self) -> None:
+        initial = ROOT_DIR / "scripts"
+        paths = filedialog.askopenfilenames(
+            parent=self,
+            title="新增腳本檔案",
+            initialdir=str(initial) if initial.is_dir() else str(ROOT_DIR),
+            filetypes=[("文字檔", "*.txt"), ("全部", "*.*")],
+        )
+        if not paths:
+            return
+        for path in paths:
+            self._queue_paths.append(Path(path))
+        self._queue_status_by_index = {}
+        self._queue_run_root_by_index = {}
+        self._refresh_queue_list()
+        self._persist_hub_ui_state()
+
+    def _queue_move_up(self) -> None:
+        i = self._queue_selected
+        if i is None or i <= 0:
+            return
+        self._queue_paths[i - 1], self._queue_paths[i] = (
+            self._queue_paths[i],
+            self._queue_paths[i - 1],
+        )
+        self._queue_selected = i - 1
+        self._queue_status_by_index = {}
+        self._queue_run_root_by_index = {}
+        self._refresh_queue_list()
+        self._persist_hub_ui_state()
+
+    def _queue_move_down(self) -> None:
+        i = self._queue_selected
+        if i is None or i >= len(self._queue_paths) - 1:
+            return
+        self._queue_paths[i + 1], self._queue_paths[i] = (
+            self._queue_paths[i],
+            self._queue_paths[i + 1],
+        )
+        self._queue_selected = i + 1
+        self._queue_status_by_index = {}
+        self._queue_run_root_by_index = {}
+        self._refresh_queue_list()
+        self._persist_hub_ui_state()
+
+    def _queue_remove_selected(self) -> None:
+        i = self._queue_selected
+        if i is None or i >= len(self._queue_paths):
+            return
+        del self._queue_paths[i]
+        self._queue_status_by_index = {}
+        self._queue_run_root_by_index = {}
+        if not self._queue_paths:
+            self._queue_selected = None
+        else:
+            self._queue_selected = min(i, len(self._queue_paths) - 1)
+        self._refresh_queue_list()
+        self._persist_hub_ui_state()
+
+    def _queue_clear(self) -> None:
+        self._queue_paths = []
+        self._queue_selected = None
+        self._queue_status_by_index = {}
+        self._queue_run_root_by_index = {}
+        self._refresh_queue_list()
+        self._persist_hub_ui_state()
 
     def _build_actions_row(self) -> None:
         row = ctk.CTkFrame(self, fg_color="transparent")
@@ -531,6 +773,13 @@ class MainHub(ctk.CTk):
             command=self._on_start_run,
         )
         self._run_btn.grid(row=0, column=1)
+        self._open_report_btn = ctk.CTkButton(
+            btn_row,
+            text="開啟報告",
+            height=44,
+            width=120,
+            command=self._open_last_report,
+        )
         self._analysis_progress_frame = ctk.CTkFrame(row, fg_color="transparent")
         self._analysis_progress = ctk.CTkProgressBar(
             self._analysis_progress_frame,
@@ -548,6 +797,30 @@ class MainHub(ctk.CTk):
 
     def _tool_cache_enabled_for_run(self) -> bool:
         return self._use_tool_cache_checkbox.get() == 1
+
+    def _show_report_button(self, html_path: Path) -> None:
+        if not html_path.is_file():
+            return
+        self._last_report_html = html_path
+        self._open_report_btn.grid(row=0, column=2, padx=(12, 0), sticky="w")
+
+    def _hide_report_button(self) -> None:
+        self._last_report_html = None
+        self._open_report_btn.grid_remove()
+
+    def _open_report_html(self, html_path: Path) -> None:
+        if not html_path.is_file():
+            show_ctk_message(self, "報告", f"找不到報告檔案：\n{html_path}", kind="error")
+            return
+        try:
+            webbrowser.open(html_path.resolve().as_uri())
+        except Exception as e:
+            show_ctk_message(self, "報告", f"無法開啟報告：\n{e}", kind="error")
+
+    def _open_last_report(self) -> None:
+        if self._last_report_html is None:
+            return
+        self._open_report_html(self._last_report_html)
 
     def _set_run_button_idle(self) -> None:
         self._run_btn.configure(text="開始執行", command=self._on_start_run, state="normal")
@@ -583,6 +856,8 @@ class MainHub(ctk.CTk):
         self._monitor_refresh_btn.configure(state="normal")
         for w in self._script_controls:
             w.configure(state="normal")
+        for w in self._queue_controls:
+            w.configure(state="normal")
         self._use_tool_cache_checkbox.configure(state="normal")
         if self._record_btn is not None:
             self._record_btn.configure(text="開始錄製", state="normal", command=self._on_record_button)
@@ -597,6 +872,8 @@ class MainHub(ctk.CTk):
         for w in self._script_controls:
             if w is self._record_btn:
                 continue
+            w.configure(state="disabled")
+        for w in self._queue_controls:
             w.configure(state="disabled")
         self._use_tool_cache_checkbox.configure(state="disabled")
         if self._record_btn is not None:
@@ -613,6 +890,8 @@ class MainHub(ctk.CTk):
         for w in self._script_controls:
             if w is self._record_btn:
                 continue
+            w.configure(state="disabled")
+        for w in self._queue_controls:
             w.configure(state="disabled")
         self._use_tool_cache_checkbox.configure(state="disabled")
         if self._record_btn is not None:
@@ -757,6 +1036,61 @@ class MainHub(ctk.CTk):
     def _schedule_toggle_recording(self) -> None:
         self.after(0, self._toggle_recording)
 
+    @staticmethod
+    def _is_recording_folder(run_dir: Path) -> bool:
+        return run_dir.is_dir() and (
+            (run_dir / "session.json").is_file() or (run_dir / "events").is_dir()
+        )
+
+    @staticmethod
+    def _count_recording_events(run_dir: Path) -> int:
+        manifest = read_json(run_dir / "session.json", {})
+        if isinstance(manifest, dict):
+            events = manifest.get("events")
+            if isinstance(events, list):
+                return len(events)
+        events_dir = run_dir / "events"
+        if events_dir.is_dir():
+            return len(list(events_dir.glob("event_*.json")))
+        return 0
+
+    def _on_analyze_recording_folder(self) -> None:
+        if self._is_analysis_running():
+            return
+        if self._worker_thread and self._worker_thread.is_alive():
+            show_ctk_message(self, "錄製分析", "請先停止執行再分析錄製。", kind="warning")
+            return
+        if self._recording_session.is_active():
+            show_ctk_message(self, "錄製分析", "請先停止錄製再分析。", kind="warning")
+            return
+
+        settings = load_settings()
+        initial = Path(settings.runs_dir)
+        folder = filedialog.askdirectory(
+            parent=self,
+            title="選擇錄製資料夾",
+            initialdir=str(initial) if initial.is_dir() else str(ROOT_DIR),
+        )
+        if not folder:
+            return
+
+        run_dir = Path(folder)
+        if not self._is_recording_folder(run_dir):
+            show_ctk_message(
+                self,
+                "錄製分析",
+                "所選資料夾不是有效的錄製工作階段。",
+                kind="error",
+            )
+            return
+
+        event_count = self._count_recording_events(run_dir)
+        if event_count <= 0:
+            show_ctk_message(self, "錄製分析", "此錄製資料夾沒有事件可分析。", kind="warning")
+            return
+
+        self._start_recording_analysis(run_dir, event_count)
+
     def _on_record_button(self) -> None:
         if self._is_analysis_running():
             self._request_cancel_analysis()
@@ -828,22 +1162,25 @@ class MainHub(ctk.CTk):
             return
         event_count = self._recording_session.event_count()
         if analyze and event_count > 0:
-            self._set_hub_controls_analyzing()
-            settings = load_settings()
-            self._status.configure(
-                text=f"分析錄製中 (0/{event_count})… {settings.brain_lm}",
-                text_color=("gray20", "gray65"),
-            )
-            self._update_analysis_progress(0, event_count)
-            self._recording_analysis_thread = threading.Thread(
-                target=self._analyze_recording_worker,
-                args=(run_dir,),
-                daemon=True,
-            )
-            self._recording_analysis_thread.start()
+            self._start_recording_analysis(run_dir, event_count)
         else:
             self._set_hub_controls_idle()
             self._status.configure(text=f"錄製已停止（{event_count} 個事件）。")
+
+    def _start_recording_analysis(self, run_dir: Path, event_count: int) -> None:
+        self._set_hub_controls_analyzing()
+        settings = load_settings()
+        self._status.configure(
+            text=f"分析錄製中 (0/{event_count})… {settings.brain_lm}",
+            text_color=("gray20", "gray65"),
+        )
+        self._update_analysis_progress(0, event_count)
+        self._recording_analysis_thread = threading.Thread(
+            target=self._analyze_recording_worker,
+            args=(run_dir,),
+            daemon=True,
+        )
+        self._recording_analysis_thread.start()
 
     def _analyze_recording_worker(self, run_dir: Path) -> None:
         def on_progress(current: int, total: int) -> None:
@@ -910,11 +1247,14 @@ class MainHub(ctk.CTk):
 
     def _begin_worker_run(self, args: _WorkerArgs) -> None:
         self._set_run_button_running()
+        self._hide_report_button()
         self._settings_btn.configure(state="disabled")
         for cb in self._monitor_checkboxes:
             cb.configure(state="disabled")
         self._monitor_refresh_btn.configure(state="disabled")
         for w in self._script_controls:
+            w.configure(state="disabled")
+        for w in self._queue_controls:
             w.configure(state="disabled")
         self._use_tool_cache_checkbox.configure(state="disabled")
         self._status.configure(text="執行中…")
@@ -966,6 +1306,33 @@ class MainHub(ctk.CTk):
         )
         self._begin_worker_run(args)
 
+    def _start_queue_run(self, eye_indices: list[int]) -> None:
+        paths = [p for p in self._queue_paths if p.is_file()]
+        if not paths:
+            show_ctk_message(
+                self,
+                "佇列執行",
+                "請先新增至少一個存在的腳本檔案。",
+                kind="warning",
+            )
+            return
+        self._queue_mode_active = True
+        self._queue_results = []
+        self._queue_status_by_index = {}
+        self._queue_run_root_by_index = {}
+        self._refresh_queue_list()
+        self._last_run_was_script_mode = False
+        self._bridge = None
+        args = _WorkerArgs(
+            step_mode=False,
+            eye_monitor_indices=eye_indices,
+            script_raw="",
+            script_disk_path=None,
+            use_tool_cache=self._tool_cache_enabled_for_run(),
+            queue_paths=list(paths),
+        )
+        self._begin_worker_run(args)
+
     def _on_start_run(self) -> None:
         if self._recording_session.is_active():
             show_ctk_message(self, "執行", "請先停止錄製再開始執行。", kind="warning")
@@ -986,6 +1353,10 @@ class MainHub(ctk.CTk):
                 "請至少選擇一台要截取的顯示器。",
                 kind="warning",
             )
+            return
+
+        if self._mode_tabs.get() == "佇列執行":
+            self._start_queue_run(eye_indices)
             return
 
         raw = self._script_text.get("0.0", "end")
@@ -1075,7 +1446,75 @@ class MainHub(ctk.CTk):
             get_run_state_manager().log_info(f"Report written to {report_path}")
         except RuntimeError:
             pass
+        html_path = run_root / "session_steps.html"
+        if html_path.is_file():
+            self._show_report_button(html_path)
         self._active_run_root = None
+
+    def _set_queue_status(self, text: str) -> None:
+        self.after(0, lambda: self._status.configure(text=text, text_color=("gray20", "gray65")))
+
+    def _run_queue_worker(self, args: _WorkerArgs) -> None:
+        paths = args.queue_paths or []
+        total = len(paths)
+        results: list[tuple[str, str]] = []
+        settings = load_settings()
+        runs_root = Path(settings.runs_dir)
+        os.environ["CUA_WRITE_SESSION_REPORT"] = "1"
+        try:
+            for i, script_path in enumerate(paths, start=1):
+                if self._user_requested_stop:
+                    break
+                name = script_path.name
+                try:
+                    raw = script_path.read_text(encoding="utf-8")
+                except OSError as e:
+                    results.append((name, "fail"))
+                    self._mark_queue_result(i - 1, "fail")
+                    self._set_queue_status(f"佇列執行 ({i}/{total})：{name} 無法讀取（{e}）")
+                    continue
+                steps = parse_executable_lines_from_text(raw)
+                if not steps:
+                    results.append((name, "skipped"))
+                    self._mark_queue_result(i - 1, "skipped")
+                    self._set_queue_status(f"佇列執行 ({i}/{total})：{name} 無可執行步驟，略過")
+                    continue
+                self._set_queue_status(f"佇列執行 ({i}/{total})：{name}")
+                run_root_for_row: Path | None = None
+                try:
+                    manager, paths_obj, run_id = prepare_run_session(
+                        runs_root=runs_root,
+                        task=steps[0],
+                        runtime_mode=False,
+                        selected_script_path=script_path,
+                        script_steps=steps,
+                        eye_monitor_indices=args.eye_monitor_indices,
+                        clear_runs_root=False,
+                        run_folder_name=None,
+                    )
+                    run_root_for_row = paths_obj.root
+                    self._active_run_root = paths_obj.root
+                    manager.log_info(f"Queue starting coordinator for {name}")
+                    run_coordinator_sync()
+                    manager.log_info("Queue script stopped.")
+                    results.append((name, "ok"))
+                    self._mark_queue_result(i - 1, "ok", run_root_for_row)
+                except asyncio.CancelledError:
+                    results.append((name, "stopped"))
+                    self._mark_queue_result(i - 1, "stopped", run_root_for_row)
+                    break
+                except BaseException as e:  # noqa: BLE001 - continue queue on any script failure
+                    results.append((name, "fail"))
+                    self._mark_queue_result(i - 1, "fail", run_root_for_row)
+                    self._set_queue_status(f"佇列執行 ({i}/{total})：{name} 失敗（{e}）")
+        finally:
+            os.environ.pop("CUA_WRITE_SESSION_REPORT", None)
+            self._active_run_root = None
+        self._queue_results = results
+        ok = sum(1 for _, s in results if s == "ok")
+        fail = sum(1 for _, s in results if s == "fail")
+        skipped = sum(1 for _, s in results if s == "skipped")
+        self._worker_outcome = ("ok", f"佇列完成：成功 {ok}、失敗 {fail}、略過 {skipped}。")
 
     def _worker_main(self, args: _WorkerArgs) -> None:
         if args.use_tool_cache:
@@ -1083,6 +1522,9 @@ class MainHub(ctk.CTk):
         else:
             os.environ.pop(USE_TOOL_CACHE_ENV, None)
         try:
+            if args.queue_paths is not None:
+                self._run_queue_worker(args)
+                return
             if args.step_mode:
                 reset_runtime_user_ended_at_prompt()
                 settings = load_settings()
@@ -1172,7 +1614,37 @@ class MainHub(ctk.CTk):
         self._monitor_refresh_btn.configure(state="normal")
         for w in self._script_controls:
             w.configure(state="normal")
+        for w in self._queue_controls:
+            w.configure(state="normal")
         self._use_tool_cache_checkbox.configure(state="normal")
+
+        if self._queue_mode_active:
+            self._queue_mode_active = False
+            self._active_run_root = None
+            results = self._queue_results
+            ok = sum(1 for _, s in results if s == "ok")
+            fail = sum(1 for _, s in results if s == "fail")
+            skipped = sum(1 for _, s in results if s == "skipped")
+            stopped = sum(1 for _, s in results if s == "stopped")
+            failed_names = [n for n, s in results if s == "fail"]
+            summary = f"佇列完成：成功 {ok}、失敗 {fail}、略過 {skipped}。"
+            if stopped:
+                summary = f"佇列已停止：成功 {ok}、失敗 {fail}、略過 {skipped}。"
+            if failed_names:
+                summary += "\n失敗檔案：\n" + "\n".join(f"• {n}" for n in failed_names)
+            self._status.configure(
+                text=f"佇列已停止（成功 {ok}／失敗 {fail}）。"
+                if stopped
+                else f"佇列完成（成功 {ok}／失敗 {fail}）。"
+            )
+            show_ctk_message(
+                self,
+                "佇列執行",
+                summary,
+                kind="warning" if (fail or stopped) else "info",
+            )
+            return
+
         self._refresh_runtime_script_text_from_cache()
         if kind == "err":
             self._status.configure(text=f"錯誤：{msg}")

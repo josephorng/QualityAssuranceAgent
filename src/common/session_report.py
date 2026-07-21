@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import csv
 import json
+import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from src.common.io_utils import write_json
+from src.common.runtime_context import SCRIPT_PATH_ENV
 
 _REPORT_VERSION = 1
 _RUNTIME_COMMANDS_NAME = "runtime_commands.txt"
+_QUEUE_SCRIPT_LOG_MARKER = "Queue starting coordinator for "
+_RUN_FOLDER_TS_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}_(\d{8})_(\d{6})_\d+$")
 _ROLE_USER = "user"
 _ROLE_ASSISTANT = "assistant"
 _ROLE_TOOL = "tool"
@@ -345,14 +350,67 @@ def _build_summary(
     return summary
 
 
+def _resolve_script_metadata(run_root: Path) -> dict[str, str]:
+    script_path_raw = os.environ.get(SCRIPT_PATH_ENV, "").strip()
+    if script_path_raw:
+        path = Path(script_path_raw)
+        return {"script_path": str(path), "script_name": path.name}
+
+    log_path = run_root / "run.log"
+    if log_path.is_file():
+        try:
+            for line in log_path.read_text(encoding="utf-8").splitlines():
+                if _QUEUE_SCRIPT_LOG_MARKER in line:
+                    name = line.split(_QUEUE_SCRIPT_LOG_MARKER, 1)[1].strip()
+                    if name:
+                        return {"script_name": name}
+        except OSError:
+            pass
+
+    if (run_root / _RUNTIME_COMMANDS_NAME).is_file():
+        return {"script_name": _RUNTIME_COMMANDS_NAME}
+
+    return {}
+
+
+def _resolve_started_at_utc(run_root: Path, step_records: list[dict[str, Any]]) -> str | None:
+    earliest: datetime | None = None
+    for record in step_records:
+        timing = record.get("timing")
+        if not isinstance(timing, dict):
+            continue
+        started = _parse_iso(timing.get("started_at_utc"))
+        if started is None:
+            continue
+        if earliest is None or started < earliest:
+            earliest = started
+    if earliest is not None:
+        return earliest.isoformat()
+
+    match = _RUN_FOLDER_TS_RE.match(run_root.name)
+    if match is None:
+        return None
+    date_part, time_part = match.groups()
+    try:
+        return (
+            datetime.strptime(f"{date_part}{time_part}", "%Y%m%d%H%M%S")
+            .replace(tzinfo=timezone.utc)
+            .isoformat()
+        )
+    except ValueError:
+        return None
+
+
 def build_session_report(run_root: Path, *, session_end_reason: str) -> dict[str, Any]:
     """Aggregate step timing and tool results from a run folder into a report dict."""
     step_files = _load_step_files(run_root)
     runtime_goals = _load_runtime_goals(run_root)
     step_records = _build_step_records(step_files, runtime_goals)
     tool_results = _load_tool_results(run_root, step_records)
+    script_meta = _resolve_script_metadata(run_root)
+    started_at_utc = _resolve_started_at_utc(run_root, step_records)
 
-    return {
+    report: dict[str, Any] = {
         "version": _REPORT_VERSION,
         "run_id": run_root.name,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -361,6 +419,11 @@ def build_session_report(run_root: Path, *, session_end_reason: str) -> dict[str
         "steps": step_records,
         "tool_results": tool_results,
     }
+    if script_meta:
+        report.update(script_meta)
+    if started_at_utc is not None:
+        report["started_at_utc"] = started_at_utc
+    return report
 
 
 def write_session_report(run_root: Path, *, session_end_reason: str) -> Path:

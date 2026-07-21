@@ -34,6 +34,7 @@ from src.common.run_control import (
     wait_while_paused_blocking,
 )
 from src.common.run_state import get_run_state_manager, unique_run_folder_name
+from src.common.session_html import write_runs_index_html
 from src.common.session_report import should_write_session_report, write_session_report
 from src.common.runtime_command_dialog import (
     RuntimeCommandHubBridge,
@@ -805,7 +806,7 @@ class MainHub(ctk.CTk):
         btn_row = ctk.CTkFrame(row, fg_color="transparent")
         btn_row.pack()
         btn_row.grid_columnconfigure(0, weight=1)
-        btn_row.grid_columnconfigure(4, weight=1)
+        btn_row.grid_columnconfigure(5, weight=1)
         self._pause_btn = ctk.CTkButton(
             btn_row,
             text="暫停",
@@ -830,6 +831,14 @@ class MainHub(ctk.CTk):
             width=120,
             command=self._open_last_report,
         )
+        self._open_reports_index_btn = ctk.CTkButton(
+            btn_row,
+            text="報告列表",
+            height=44,
+            width=120,
+            command=self._open_reports_index,
+        )
+        self._open_reports_index_btn.grid(row=0, column=4, padx=(12, 0), sticky="w")
         self._analysis_progress_frame = ctk.CTkFrame(row, fg_color="transparent")
         self._analysis_progress = ctk.CTkProgressBar(
             self._analysis_progress_frame,
@@ -871,6 +880,15 @@ class MainHub(ctk.CTk):
         if self._last_report_html is None:
             return
         self._open_report_html(self._last_report_html)
+
+    def _open_reports_index(self) -> None:
+        runs_root = Path(load_settings().runs_dir)
+        try:
+            index_path = write_runs_index_html(runs_root)
+        except Exception as e:
+            show_ctk_message(self, "報告", f"無法建立報告列表：\n{e}", kind="error")
+            return
+        self._open_report_html(index_path)
 
     def _set_run_button_idle(self) -> None:
         self._run_btn.configure(text="開始執行", command=self._on_start_run, state="normal")

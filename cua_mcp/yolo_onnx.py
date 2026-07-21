@@ -163,32 +163,17 @@ def _run_yolo_raw_output(
     model_path: str | Path,
     on_session_created: Callable[[Path], None] | None = None,
 ) -> np.ndarray:
-    from cua_mcp.vision_backend import allow_local_ort_fallback, should_try_triton
-    from cua_mcp.vision_triton import TritonUnavailableError, infer_yolo
+    from cua_mcp.vision_triton import infer_yolo
 
+    del model_path, on_session_created
     started = time.perf_counter()
-    if should_try_triton():
-        try:
-            out = infer_yolo(img_data)
-            elapsed = time.perf_counter() - started
-            _log_yolo_profile(
-                f"infer backend=triton shape={list(img_data.shape)} "
-                f"elapsed_s={elapsed:.3f}"
-            )
-            return out
-        except TritonUnavailableError as exc:
-            elapsed = time.perf_counter() - started
-            _log_yolo_profile(
-                f"infer backend=triton failed shape={list(img_data.shape)} "
-                f"elapsed_s={elapsed:.3f} error={exc}; fallback=ort_local"
-            )
-            if not allow_local_ort_fallback():
-                raise
-    return _local_ort_infer_yolo(
-        img_data,
-        model_path=model_path,
-        on_session_created=on_session_created,
+    out = infer_yolo(img_data)
+    elapsed = time.perf_counter() - started
+    _log_yolo_profile(
+        f"infer backend=triton shape={list(img_data.shape)} "
+        f"elapsed_s={elapsed:.3f}"
     )
+    return out
 
 
 def run_yolo_onnx_end2end(

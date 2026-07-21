@@ -5,6 +5,7 @@ from pathlib import Path
 
 from src.brain.module import BrainModule
 from src.common.io_utils import append_text, pop_last_nonempty_line
+from src.common.run_control import take_pause_log, wait_while_paused
 from src.common.run_state import get_run_state_manager
 from src.common.runtime_command_dialog import (
     prompt_runtime_command_popup,
@@ -50,6 +51,9 @@ class RuntimeCoordinator:
 
     async def _run_loop(self) -> None:
         while True:
+            if take_pause_log():
+                self.manager.log_info("Coordinator paused")
+            await wait_while_paused()
             if is_runtime_command_mode():
                 cmd = prompt_runtime_command_popup()
                 if cmd is None:

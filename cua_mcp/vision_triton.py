@@ -15,6 +15,7 @@ from cua_mcp.vision_backend import (
     triton_client_use_ssl,
     triton_crnn_model_name,
     triton_http_url,
+    triton_timeout_seconds,
     triton_yolo_model_name,
 )
 
@@ -90,12 +91,15 @@ def reset_triton_client() -> None:
 def _create_client() -> httpclient.InferenceServerClient:
     import tritonclient.http as httpclient
 
+    timeout = triton_timeout_seconds()
     started = time.perf_counter()
     try:
         client = httpclient.InferenceServerClient(
             url=triton_client_address(),
             verbose=False,
             ssl=triton_client_use_ssl(),
+            connection_timeout=timeout,
+            network_timeout=timeout,
         )
     except Exception as exc:
         elapsed = time.perf_counter() - started
@@ -136,6 +140,7 @@ def _infer(
 
     shape = list(input_array.shape)
     started = time.perf_counter()
+    timeout = triton_timeout_seconds()
     try:
         client = _get_client()
         infer_input = httpclient.InferInput(
@@ -151,6 +156,7 @@ def _infer(
             model_name=model_name,
             inputs=[infer_input],
             outputs=[infer_output],
+            timeout=int(timeout),
         )
         out = result.as_numpy(output_name)
         if out is None:
@@ -188,6 +194,11 @@ def _infer(
             f"infer failed model={model_name} input={input_name} shape={shape} "
             f"elapsed_s={elapsed:.3f} error={type(exc).__name__}: {exc}"
         )
+        if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower():
+            raise TritonUnavailableError(
+                f"Triton infer timed out after {timeout:.0f}s for model {model_name!r}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
         raise TritonUnavailableError(
             f"Triton infer failed for model {model_name!r}: {type(exc).__name__}: {exc}"
         ) from exc

@@ -47,6 +47,13 @@ class BrainDecision(BaseModel):
     rationale: str = ""
 
 
+class BrainStepOutcome(BaseModel):
+    """Structured end-of-step reply when the decide loop issues no further tool calls."""
+
+    status: Literal["completed", "failed"]
+    reason: str = ""
+
+
 class BrainTaskState(BaseModel):
     event: EyeEvent
     started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

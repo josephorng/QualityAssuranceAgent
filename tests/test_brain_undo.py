@@ -98,3 +98,36 @@ def test_undo_last_runtime_step_returns_false_when_empty(tmp_path: Path) -> None
     brain._script_step_index = 0
 
     assert brain.undo_last_runtime_step() is False
+
+
+def test_parse_step_outcome_completed() -> None:
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = RunStateManager.__new__(RunStateManager)
+
+    outcome = brain._parse_step_outcome(
+        '{"status":"completed","reason":"clicked the button"}'
+    )
+    assert outcome is not None
+    assert outcome.status == "completed"
+    assert outcome.reason == "clicked the button"
+
+
+def test_parse_step_outcome_failed_with_fence() -> None:
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = RunStateManager.__new__(RunStateManager)
+
+    outcome = brain._parse_step_outcome(
+        '```json\n{"status":"failed","reason":"target not on screen"}\n```'
+    )
+    assert outcome is not None
+    assert outcome.status == "failed"
+    assert "not on screen" in outcome.reason
+
+
+def test_parse_step_outcome_invalid_returns_none() -> None:
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = type("Mgr", (), {"log_error": lambda self, msg: None})()
+
+    assert brain._parse_step_outcome("The task is completed because...") is None
+    assert brain._parse_step_outcome("") is None
+    assert brain._parse_step_outcome('{"status":"maybe","reason":"x"}') is None

@@ -7,8 +7,9 @@ services:
       - --model-repository=/models
       - --strict-model-config=false
       - --log-verbose=0
+      - --http-port=9000
     ports:
-      - "9000:8000"
+      - "9000:9000"
     volumes:
       - ./model_repository:/models
     deploy:

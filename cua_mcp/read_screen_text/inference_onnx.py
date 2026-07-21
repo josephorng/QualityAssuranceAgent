@@ -1,13 +1,7 @@
 import os
-import threading
 import time
 import numpy as np
 import json
-import onnxruntime
-
-from cua_mcp.vision_backend import allow_local_ort_fallback, should_try_triton
-
-onnxruntime.set_default_logger_severity(3)
 
 
 def _log_crnn_profile(message: str) -> None:
@@ -40,31 +34,6 @@ class TextPredictor:
 
         self.session = None
         self.input_name = None
-        # Shared ORT session is not safe for concurrent ``run``.
-        self._ort_lock = threading.Lock()
-        if not should_try_triton():
-            self._ensure_ort_session()
-
-    def _ensure_ort_session(self) -> None:
-        if self.session is not None:
-            return
-        if not os.path.isfile(self.model_path):
-            raise FileNotFoundError(f"ONNX CRNN model not found: {self.model_path}")
-        if not self.quiet:
-            print("Loading ONNX model...")
-        start_time = time.time()
-        sess_options = onnxruntime.SessionOptions()
-        sess_options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
-        self.session = onnxruntime.InferenceSession(
-            self.model_path,
-            sess_options,
-            providers=['CPUExecutionProvider']
-        )
-        self.input_name = self.session.get_inputs()[0].name
-        if not self.quiet:
-            print("ONNX model loaded from", self.model_path)
-            end_time = time.time()
-            print("Time taken: ", end_time - start_time)
 
     def decode_outputs(self, outputs):
         """
@@ -100,20 +69,6 @@ class TextPredictor:
             pred_chars.append(''.join(chars))
         
         return pred_chars
-    
-    def _local_ort_predict(self, images: np.ndarray) -> np.ndarray:
-        with self._ort_lock:
-            self._ensure_ort_session()
-            assert self.session is not None
-            assert self.input_name is not None
-            started = time.perf_counter()
-            out = self.session.run(None, {self.input_name: images})[0]
-            elapsed = time.perf_counter() - started
-        _log_crnn_profile(
-            f"infer backend=ort_local shape={list(images.shape)} "
-            f"elapsed_s={elapsed:.3f}"
-        )
-        return out
 
     def predict_images(self, images, hxs=None):
         # Input: [batch, line_height, width] float32 (line_height is typically 32).
@@ -127,28 +82,15 @@ class TextPredictor:
         else:
             hxs = hxs.to(self.device)
 
-        started = time.perf_counter()
-        if should_try_triton():
-            from cua_mcp.vision_triton import TritonUnavailableError, infer_crnn
+        from cua_mcp.vision_triton import infer_crnn
 
-            try:
-                outputs = infer_crnn(images)
-                elapsed = time.perf_counter() - started
-                _log_crnn_profile(
-                    f"infer backend=triton shape={list(images.shape)} "
-                    f"elapsed_s={elapsed:.3f}"
-                )
-            except TritonUnavailableError as exc:
-                elapsed = time.perf_counter() - started
-                _log_crnn_profile(
-                    f"infer backend=triton failed shape={list(images.shape)} "
-                    f"elapsed_s={elapsed:.3f} error={exc}; fallback=ort_local"
-                )
-                if not allow_local_ort_fallback():
-                    raise
-                outputs = self._local_ort_predict(images)
-        else:
-            outputs = self._local_ort_predict(images)
+        started = time.perf_counter()
+        outputs = infer_crnn(images)
+        elapsed = time.perf_counter() - started
+        _log_crnn_profile(
+            f"infer backend=triton shape={list(images.shape)} "
+            f"elapsed_s={elapsed:.3f}"
+        )
 
         pred_chars = self.decode_outputs(outputs)
 

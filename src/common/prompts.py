@@ -44,16 +44,31 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
         {
             "image_usage": "optional",
             "prompt": (
-                "Now you need to decide the next action to take. If the task is completed, "
-                "return the reason why it is completed. Current task: {task}\n\n"
+                "Now you need to decide the next action to take. Either call tool(s) to continue, "
+                "or finish with a JSON status object (no tool calls). Current task: {task}\n\n"
             ),
             "instructions": [
+                'When finishing (no more tools), return strict JSON only: '
+                '{{"status":"completed"|"failed","reason":"<short explanation>"}}. '
+                "No markdown, no prose outside the JSON object.",
+                'Use status "completed" only when CurrentTaskGoal is satisfied.',
+                'Use status "failed" when the goal cannot be achieved (for example a required '
+                "click/move target is not on screen after tool failures, or no viable method remains).",
                 "If the previous task is not executed, try new method to achieve the task.",
-                "If the tool failed to execute, do not assume the task is completed. Try new method to achieve the task.",
-                "If check_object_exists was the previous tool: read exists and the full CurrentTaskGoal to decide whether to continue. For 如果畫面上有… / if … is visible: continue with follow-up tools only when exists=true; when exists=false, the step is satisfied with no further tools. For 如果畫面上沒有… / if … is not visible: continue only when exists=false; when exists=true, the step is satisfied with no further tools.",
-                "When continuing after check_object_exists, issue the normal tools for the remainder of the step (e.g. move_mouse then click).",
-                "If the task can be examined by screenshot, use the screenshot to examine if the task is completed if the screenshot is provided.",
-                "If the task cannot be examined by screenshot, then assume the task is completed if the tool is executed successfully.",
+                "If the tool failed to execute, do not assume the task is completed. Try new method "
+                "to achieve the task; if no viable method remains, finish with status failed.",
+                "If check_object_exists was the previous tool: read exists and the full CurrentTaskGoal "
+                "to decide whether to continue. For 如果畫面上有… / if … is visible: continue with "
+                "follow-up tools only when exists=true; when exists=false, finish with status completed "
+                "(conditional step satisfied, no further tools). For 如果畫面上沒有… / if … is not visible: "
+                "continue only when exists=false; when exists=true, finish with status completed. "
+                "Do not treat exists=false as completed unless the goal is one of those visibility conditionals.",
+                "When continuing after check_object_exists, issue the normal tools for the remainder of "
+                "the step (e.g. move_mouse then click).",
+                "If the task can be examined by screenshot, use the screenshot to examine if the task "
+                "is completed if the screenshot is provided.",
+                "If the task cannot be examined by screenshot, then assume the task is completed if "
+                "the tool is executed successfully.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
         }

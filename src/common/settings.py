@@ -9,18 +9,39 @@ from typing import Any
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.common.io_utils import read_json, write_json
+from cua_mcp.vision_backend import normalize_triton_http_url
 
 AGENT_SETTINGS_KEYS = (
     "llm_backend",
     "brain_lm",
     "ollama_host",
     "debug",
+    "vision_backend",
+    "triton_http_url",
 )
 
 AGENT_SETTINGS_SCHEMA: tuple[tuple[str, str, str], ...] = (
     ("llm_backend", "LLM 後端", "option"),
+    ("vision_backend", "Vision 後端", "option"),
     ("debug", "除錯模式", "bool"),
 )
+
+VISION_BACKEND_CHOICES = frozenset({"triton_local", "triton_192_168_0_17"})
+_LEGACY_VISION_BACKEND_ALIASES = {
+    "auto": "triton_local",
+    "local": "triton_local",
+    "triton": "triton_local",
+}
+
+# Fixed Triton host per vision preset (edited only via vision choice in the hub dialog).
+VISION_BACKEND_PRESETS: dict[str, dict[str, str]] = {
+    "triton_local": {
+        "triton_http_url": "http://127.0.0.1:9000",
+    },
+    "triton_192_168_0_17": {
+        "triton_http_url": "http://192.168.0.17:9000",
+    },
+}
 
 # Fixed model/host pairs per backend (edited only via backend choice in the hub dialog).
 BACKEND_PRESETS: dict[str, dict[str, str]] = {
@@ -79,14 +100,30 @@ class Settings(BaseSettings):
     runs_dir: str = "runs"
     log_level: str = "INFO"
     debug: bool = True
-    triton_http_url: str = "http://localhost:9000"
-    vision_backend: str = "auto"
+    triton_http_url: str = VISION_BACKEND_PRESETS["triton_local"]["triton_http_url"]
+    vision_backend: str = "triton_local"
+    triton_timeout_seconds: float = 20.0
 
 
 def canonicalize_llm_backend(backend: str) -> str:
     """Map legacy ``ollama`` / ``vllm`` names to ``ollama_local`` / ``ollama_server``."""
     key = str(backend).strip().lower()
     return _LEGACY_LLM_BACKEND_ALIASES.get(key, key)
+
+
+def canonicalize_vision_backend(backend: str) -> str:
+    """Return a known vision preset key (e.g. ``triton_local``)."""
+    key = str(backend).strip().lower()
+    key = _LEGACY_VISION_BACKEND_ALIASES.get(key, key)
+    if key not in VISION_BACKEND_CHOICES:
+        known = ", ".join(sorted(VISION_BACKEND_CHOICES))
+        raise ValueError(f"vision_backend 必須為已知後端之一：{known}")
+    return key
+
+
+def preset_for_vision_backend(backend: str) -> dict[str, Any]:
+    key = canonicalize_vision_backend(backend)
+    return dict(VISION_BACKEND_PRESETS[key])
 
 
 def preset_for_backend(backend: str) -> dict[str, Any]:
@@ -99,8 +136,11 @@ def preset_for_backend(backend: str) -> dict[str, Any]:
 
 def default_agent_settings_dict() -> dict[str, Any]:
     """Built-in defaults for agent settings (no file required)."""
+    base = Settings()
     data = preset_for_backend("ollama_local")
-    data["debug"] = Settings().debug
+    data["debug"] = base.debug
+    data["vision_backend"] = base.vision_backend
+    data["triton_http_url"] = preset_for_vision_backend(base.vision_backend)["triton_http_url"]
     return data
 
 
@@ -127,7 +167,7 @@ def _overlay_agent_keys(target: dict[str, Any], raw: Any) -> dict[str, Any]:
         value = raw[key]
         if key == "debug":
             out[key] = bool(value)
-        elif key in ("llm_backend", "brain_lm", "ollama_host"):
+        elif key in ("llm_backend", "brain_lm", "ollama_host", "vision_backend", "triton_http_url"):
             if isinstance(value, str) and value.strip():
                 out[key] = value.strip()
     if isinstance(raw, dict):
@@ -141,9 +181,16 @@ def _overlay_agent_keys(target: dict[str, Any], raw: Any) -> dict[str, Any]:
 
 def normalize_agent_settings_dict(data: dict[str, Any]) -> dict[str, Any]:
     """Apply fixed model/host preset for the selected backend; keep debug and probed hosts."""
+    base = Settings()
     backend = canonicalize_llm_backend(str(data.get("llm_backend", "ollama_local")))
     out = preset_for_backend(backend)
     out["debug"] = bool(data.get("debug", True))
+    vision_key = canonicalize_vision_backend(
+        str(data.get("vision_backend", base.vision_backend))
+    )
+    vision_preset = preset_for_vision_backend(vision_key)
+    out["vision_backend"] = vision_key
+    out["triton_http_url"] = normalize_triton_http_url(vision_preset["triton_http_url"])
     if backend == "vllm_server":
         return out
     host = data.get("ollama_host") or data.get("vllm_host")
@@ -195,6 +242,47 @@ def probe_llm_backend(backend: str) -> tuple[bool, str]:
     return False, f"無法連線至 Ollama\n主機：{host}"
 
 
+def triton_health_responds(
+    triton_http_url: str,
+    *,
+    timeout_seconds: float = _OLLAMA_PROBE_TIMEOUT_SECONDS,
+) -> bool:
+    """Return True when Triton responds to ``GET /v2/health/ready``."""
+    base = normalize_triton_http_url(triton_http_url)
+    if not base:
+        return False
+    url = f"{base}/v2/health/ready"
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            return 200 <= int(resp.status) < 300
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return False
+
+
+def local_vision_models_available() -> tuple[bool, str]:
+    """Deprecated: local ONNX models are no longer used for inference."""
+    return False, "本機 ONNX 推論已停用"
+
+
+def probe_vision_backend(
+    vision_backend: str,
+    *,
+    triton_http_url: str | None = None,
+) -> tuple[bool, str]:
+    """Test connectivity for the Triton Vision backend. Returns ``(ok, message)``."""
+    key = canonicalize_vision_backend(vision_backend)
+    if triton_http_url is None:
+        triton_url = normalize_triton_http_url(
+            preset_for_vision_backend(key)["triton_http_url"]
+        )
+    else:
+        triton_url = normalize_triton_http_url(triton_http_url)
+    if triton_health_responds(triton_url):
+        return True, f"Triton 連線成功\n主機：{triton_url}"
+    return False, f"無法連線至 Triton\n主機：{triton_url}"
+
+
 def select_reachable_ollama_host(
     *,
     local_host: str = OLLAMA_PROBE_LOCAL_HOST,
@@ -216,6 +304,16 @@ def _ollama_host_probe_status_message(host: str) -> str:
     if chosen == local:
         return f"Ollama 主機：本機 ({host})"
     return f"Ollama 主機：公司主機 ({host})"
+
+
+def apply_startup_triton_probe() -> tuple[bool, str]:
+    """Probe Triton readiness at startup. Returns ``(ok, message)`` without raising."""
+    settings = load_settings()
+    triton_url = settings.triton_http_url
+    ok, _detail = probe_vision_backend(settings.vision_backend, triton_http_url=triton_url)
+    if ok:
+        return True, f"Triton 主機：{triton_url}"
+    return False, f"警告：無法連線 Triton（{triton_url}）"
 
 
 def apply_startup_ollama_host_probe() -> tuple[bool, str]:
@@ -271,6 +369,13 @@ def save_agent_settings_dict(data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     write_json(path, validated)
     reset_llm_client()
+    apply_vision_env_from_settings()
+    try:
+        from cua_mcp.vision_triton import reset_triton_client
+
+        reset_triton_client()
+    except ImportError:
+        pass
 
 
 def load_settings() -> Settings:
@@ -283,8 +388,9 @@ def load_settings() -> Settings:
         "debug": agent["debug"],
         "runs_dir": base.runs_dir,
         "log_level": base.log_level,
-        "triton_http_url": base.triton_http_url,
-        "vision_backend": base.vision_backend,
+        "triton_http_url": agent["triton_http_url"],
+        "vision_backend": agent["vision_backend"],
+        "triton_timeout_seconds": base.triton_timeout_seconds,
     }
     return Settings(**data)
 
@@ -293,6 +399,7 @@ def apply_vision_env_from_settings() -> None:
     """Mirror vision-related Settings into ``os.environ`` for cua_mcp inference modules."""
     import os
 
-    settings = Settings()
-    os.environ.setdefault("TRITON_HTTP_URL", settings.triton_http_url)
-    os.environ.setdefault("VISION_BACKEND", settings.vision_backend)
+    settings = load_settings()
+    os.environ["TRITON_HTTP_URL"] = normalize_triton_http_url(settings.triton_http_url)
+    os.environ["VISION_BACKEND"] = "triton"
+    os.environ["TRITON_TIMEOUT_SECONDS"] = str(settings.triton_timeout_seconds)

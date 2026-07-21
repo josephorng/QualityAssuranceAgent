@@ -27,6 +27,12 @@ from src.common.monitor_prompt import (
     EyeMonitorChoice,
     list_eye_monitor_choices,
 )
+from src.common.run_control import (
+    pause_run,
+    reset_run_control,
+    resume_run,
+    wait_while_paused_blocking,
+)
 from src.common.run_state import get_run_state_manager, unique_run_folder_name
 from src.common.session_report import should_write_session_report, write_session_report
 from src.common.runtime_command_dialog import (
@@ -36,7 +42,12 @@ from src.common.runtime_command_dialog import (
 )
 from src.common.runtime_context import USE_TOOL_CACHE_ENV
 from src.common.script_helper import parse_executable_lines_from_text
-from src.common.settings import ROOT_DIR, apply_startup_ollama_host_probe, load_settings
+from src.common.settings import (
+    ROOT_DIR,
+    apply_startup_ollama_host_probe,
+    apply_startup_triton_probe,
+    load_settings,
+)
 from src.recorder.capture import RecordingSession
 from src.recorder.hotkey import RecordingHotkeyManager
 
@@ -201,12 +212,43 @@ class MainHub(ctk.CTk):
         ]
         self._refresh_queue_list()
 
-        self._status.configure(text="正在檢查 Ollama 主機…")
-        self._start_ollama_host_probe()
+        self._status.configure(text="正在檢查 Ollama 與 Triton…")
+        self._start_startup_probes()
 
         if self._recording_hotkey_enabled:
             self._recording_hotkey.register(self._schedule_toggle_recording)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _start_startup_probes(self) -> None:
+        def work() -> None:
+            ollama_ok, ollama_message = apply_startup_ollama_host_probe()
+            triton_ok, triton_message = apply_startup_triton_probe()
+            self.after(
+                0,
+                lambda: self._on_startup_probes_done(
+                    ollama_ok,
+                    ollama_message,
+                    triton_ok,
+                    triton_message,
+                ),
+            )
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_startup_probes_done(
+        self,
+        ollama_ok: bool,
+        ollama_message: str,
+        triton_ok: bool,
+        triton_message: str,
+    ) -> None:
+        message = f"{ollama_message} | {triton_message}"
+        if not ollama_ok:
+            self._status.configure(text=message, text_color=("#b91c1c", "#f87171"))
+        elif not triton_ok:
+            self._status.configure(text=message, text_color=("#b45309", "#fbbf24"))
+        else:
+            self._status.configure(text=message, text_color=("gray20", "gray65"))
 
     def _start_ollama_host_probe(self) -> None:
         def work() -> None:
@@ -763,7 +805,15 @@ class MainHub(ctk.CTk):
         btn_row = ctk.CTkFrame(row, fg_color="transparent")
         btn_row.pack()
         btn_row.grid_columnconfigure(0, weight=1)
-        btn_row.grid_columnconfigure(2, weight=1)
+        btn_row.grid_columnconfigure(4, weight=1)
+        self._pause_btn = ctk.CTkButton(
+            btn_row,
+            text="暫停",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            height=44,
+            width=120,
+            command=self._on_pause_run,
+        )
         self._run_btn = ctk.CTkButton(
             btn_row,
             text="開始執行",
@@ -772,7 +822,7 @@ class MainHub(ctk.CTk):
             width=200,
             command=self._on_start_run,
         )
-        self._run_btn.grid(row=0, column=1)
+        self._run_btn.grid(row=0, column=2)
         self._open_report_btn = ctk.CTkButton(
             btn_row,
             text="開啟報告",
@@ -802,7 +852,7 @@ class MainHub(ctk.CTk):
         if not html_path.is_file():
             return
         self._last_report_html = html_path
-        self._open_report_btn.grid(row=0, column=2, padx=(12, 0), sticky="w")
+        self._open_report_btn.grid(row=0, column=3, padx=(12, 0), sticky="w")
 
     def _hide_report_button(self) -> None:
         self._last_report_html = None
@@ -824,9 +874,16 @@ class MainHub(ctk.CTk):
 
     def _set_run_button_idle(self) -> None:
         self._run_btn.configure(text="開始執行", command=self._on_start_run, state="normal")
+        self._pause_btn.grid_remove()
 
     def _set_run_button_running(self) -> None:
         self._run_btn.configure(text="停止執行", command=self._on_stop_run, state="normal")
+        self._pause_btn.configure(text="暫停", command=self._on_pause_run, state="normal")
+        self._pause_btn.grid(row=0, column=1, padx=(0, 12))
+
+    def _set_pause_button_paused(self) -> None:
+        self._pause_btn.configure(text="繼續", command=self._on_resume_run, state="normal")
+        self._pause_btn.grid(row=0, column=1, padx=(0, 12))
 
     def _build_status(self) -> None:
         self._status = ctk.CTkLabel(self, text="", font=ctk.CTkFont(size=13))
@@ -982,11 +1039,27 @@ class MainHub(ctk.CTk):
         self._status.configure(text="", text_color=("gray20", "gray65"))
         self._persist_hub_ui_state()
 
+    def _on_pause_run(self) -> None:
+        if self._worker_thread is None or not self._worker_thread.is_alive():
+            return
+        pause_run()
+        self._set_pause_button_paused()
+        self._status.configure(text="已暫停（點繼續以恢復）")
+
+    def _on_resume_run(self) -> None:
+        if self._worker_thread is None or not self._worker_thread.is_alive():
+            return
+        resume_run()
+        self._set_run_button_running()
+        self._status.configure(text="執行中…")
+
     def _on_stop_run(self) -> None:
         from main import request_coordinator_cancel
 
         self._user_requested_stop = True
         self._status.configure(text="正在停止…")
+        # Unblock a paused wait so cancel can proceed promptly.
+        resume_run()
         if self._bridge is not None:
             self._bridge.request_stop()
         if not request_coordinator_cancel():
@@ -1246,6 +1319,7 @@ class MainHub(ctk.CTk):
             show_ctk_message(self, "錄製分析完成", msg, kind="info")
 
     def _begin_worker_run(self, args: _WorkerArgs) -> None:
+        reset_run_control()
         self._set_run_button_running()
         self._hide_report_button()
         self._settings_btn.configure(state="disabled")
@@ -1465,6 +1539,9 @@ class MainHub(ctk.CTk):
             for i, script_path in enumerate(paths, start=1):
                 if self._user_requested_stop:
                     break
+                wait_while_paused_blocking()
+                if self._user_requested_stop:
+                    break
                 name = script_path.name
                 try:
                     raw = script_path.read_text(encoding="utf-8")
@@ -1607,6 +1684,7 @@ class MainHub(ctk.CTk):
             self.lift()
         except Exception:
             pass
+        reset_run_control()
         self._set_run_button_idle()
         self._settings_btn.configure(state="normal")
         for cb in self._monitor_checkboxes:

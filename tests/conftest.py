@@ -16,7 +16,9 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _vision_backend_local(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Default tests to local ONNX Runtime unless a test opts into Triton."""
+def _vision_backend_triton(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default tests to Triton unless a test opts into another backend."""
     if "VISION_BACKEND" not in os.environ:
-        monkeypatch.setenv("VISION_BACKEND", "local")
+        monkeypatch.setenv("VISION_BACKEND", "triton")
+    if "TRITON_TIMEOUT_SECONDS" not in os.environ:
+        monkeypatch.setenv("TRITON_TIMEOUT_SECONDS", "20")

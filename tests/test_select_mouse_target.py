@@ -543,6 +543,38 @@ def test_prefilter_detections_by_similarity_empty_when_no_match() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_filter_mouse_candidates_empty_prefilter_returns_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cua_mcp.select_mouse_target import _filter_mouse_candidates
+
+    class _FakeRunManager:
+        def log_info(self, message: str) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._run_manager",
+        lambda: _FakeRunManager(),
+    )
+
+    detections = [
+        _detection_from_bbox(
+            (0, 0, 448, 12),
+            YOLO_CLASS_TEXT,
+            text="我們名樣的豐富和美善,為要讓我們可以高學神、服事神,不是為了要服事我們自...",
+        ),
+        _detection_from_bbox((50, 0, 30, 15), YOLO_CLASS_TEXT, text="搜尋聊天和訊息"),
+    ]
+    anchor_matches, nearby_matches = await _filter_mouse_candidates(
+        detections,
+        "「我自己」文字",
+        [],
+    )
+    assert anchor_matches == []
+    assert nearby_matches == []
+
+
 def test_prefilter_detections_by_similarity_keeps_input_and_scrollbar() -> None:
     from cua_mcp.select_mouse_target import _prefilter_detections_by_similarity
 

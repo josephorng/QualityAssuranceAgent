@@ -1,7 +1,9 @@
 from src.common.settings import (
     apply_startup_ollama_host_probe,
+    apply_startup_triton_probe,
     normalize_agent_settings_dict,
     probe_llm_backend,
+    probe_vision_backend,
 )
 
 
@@ -60,3 +62,80 @@ def test_probe_llm_backend_vllm_failure(monkeypatch) -> None:
     assert ok is False
     assert "無法連線至 vLLM" in message
     assert "192.168.4.134:8000" in message
+
+
+def test_normalize_agent_settings_includes_vision_fields() -> None:
+    out = normalize_agent_settings_dict(
+        {
+            "llm_backend": "ollama_local",
+            "vision_backend": "triton_local",
+            "triton_http_url": "http://localhost:9000/",
+            "debug": True,
+        }
+    )
+    assert out["vision_backend"] == "triton_local"
+    assert out["triton_http_url"] == "http://127.0.0.1:9000"
+
+
+def test_normalize_agent_settings_remote_vision_preset() -> None:
+    out = normalize_agent_settings_dict(
+        {
+            "llm_backend": "ollama_local",
+            "vision_backend": "triton_192_168_0_17",
+            "debug": True,
+        }
+    )
+    assert out["vision_backend"] == "triton_192_168_0_17"
+    assert out["triton_http_url"] == "http://192.168.0.17:9000"
+
+
+def test_probe_vision_backend_triton_success(monkeypatch) -> None:
+    monkeypatch.setattr("src.common.settings.triton_health_responds", lambda url: True)
+    ok, message = probe_vision_backend("triton_local")
+    assert ok is True
+    assert "Triton 連線成功" in message
+    assert "127.0.0.1:9000" in message
+
+
+def test_probe_vision_backend_remote_preset(monkeypatch) -> None:
+    monkeypatch.setattr("src.common.settings.triton_health_responds", lambda url: True)
+    ok, message = probe_vision_backend("triton_192_168_0_17")
+    assert ok is True
+    assert "192.168.0.17:9000" in message
+
+
+def test_probe_vision_backend_triton_failure(monkeypatch) -> None:
+    monkeypatch.setattr("src.common.settings.triton_health_responds", lambda url: False)
+    ok, message = probe_vision_backend("triton_local")
+    assert ok is False
+    assert "無法連線至 Triton" in message
+
+
+def test_apply_startup_triton_probe_success(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.common.settings.load_settings",
+        lambda: type(
+            "S",
+            (),
+            {
+                "triton_http_url": "http://localhost:9000",
+                "vision_backend": "triton_local",
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        "src.common.settings.probe_vision_backend",
+        lambda backend, triton_http_url=None: (True, "ok"),
+    )
+    ok, message = apply_startup_triton_probe()
+    assert ok is True
+    assert "Triton 主機" in message
+
+
+def test_warm_vision_models_returns_status_without_raising(monkeypatch) -> None:
+    from cua_mcp.read_screen_text import ocr_image
+
+    monkeypatch.setattr("cua_mcp.vision_triton.triton_ready", lambda **kw: False)
+    ok, message = ocr_image.warm_vision_models(quiet=True, timeout_seconds=0.2)
+    assert ok is False
+    assert "Triton 無回應" in message

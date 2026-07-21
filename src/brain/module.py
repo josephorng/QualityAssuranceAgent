@@ -11,7 +11,9 @@ from cua_mcp.tools import mcp_server, TOOL_FUNCTIONS, VERIFICATION_TOOLS
 from ollama import Message
 from pydantic import ValidationError
 from src.common.io_utils import write_json
+from cua_mcp.llm_json import parse_json_object
 from src.common.models import (
+    BrainStepOutcome,
     BrainTaskState,
     ExecutionResult,
     ScriptStepVerifyResult,
@@ -360,15 +362,22 @@ class BrainModule:
     @staticmethod
     def _parse_json_object_from_model_content(content: str) -> dict[str, Any]:
         """Parse a JSON object from model text, stripping optional markdown code fences."""
-        text = (content or "").strip()
-        if text.startswith("```"):
-            lines = text.split("\n")
-            if lines and lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            text = "\n".join(lines)
-        return json.loads(text)
+        return parse_json_object(
+            content,
+            empty_error="Model returned empty content; expected a JSON object",
+            decode_error_prefix="Model JSON decode failed",
+        )
+
+    def _parse_step_outcome(self, content: str | None) -> BrainStepOutcome | None:
+        """Parse a structured step finish reply, or None if content is missing/invalid."""
+        if not (content or "").strip():
+            return None
+        try:
+            payload = self._parse_json_object_from_model_content(content or "")
+            return BrainStepOutcome.model_validate(payload)
+        except (ValueError, ValidationError, TypeError) as e:
+            self.manager.log_error(f"Step outcome JSON parse/validation failed: {e}")
+            return None
 
     def _apply_verify_branch(self, result: ScriptStepVerifyResult) -> bool:
         """Apply verification `branch` to `_script_step_index`. Returns whether all script lines are done."""
@@ -583,7 +592,24 @@ class BrainModule:
                 messages.append(response_message_dict)
 
                 if not response_message.tool_calls:
-                    step_succeeded = True
+                    outcome = self._parse_step_outcome(
+                        getattr(response_message, "content", None)
+                    )
+                    if outcome is None:
+                        self.manager.log_error(
+                            "Decide loop finished without tools but step outcome JSON was missing/invalid"
+                        )
+                        step_succeeded = False
+                    elif outcome.status == "completed":
+                        self.manager.log_info(
+                            f"Step marked completed by model: {outcome.reason}"
+                        )
+                        step_succeeded = True
+                    else:
+                        self.manager.log_info(
+                            f"Step marked failed by model: {outcome.reason}"
+                        )
+                        step_succeeded = False
                     break
 
                 for tool_call in response_message.tool_calls:

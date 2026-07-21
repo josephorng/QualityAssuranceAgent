@@ -16,7 +16,6 @@ import cv2
 import numpy as np
 
 from cua_mcp.geometry import clip_box
-from cua_mcp.vision_backend import should_try_triton
 from .inference_onnx import TextPredictor
 from src.common.run_state import get_run_state_manager
 
@@ -46,47 +45,38 @@ def _get_ocr_predictor(
     *,
     quiet: bool = False,
 ) -> TextPredictor:
-    """Lazily initialize and cache the ONNX CRNN predictor instance."""
+    """Lazily initialize and cache the CRNN predictor instance (Triton-backed)."""
     global _CRNN_PREDICTOR
     path = model_path or _default_crnn_path()
     with _CRNN_PREDICTOR_LOCK:
         if _CRNN_PREDICTOR is None:
-            if not should_try_triton() and not os.path.isfile(path):
-                raise FileNotFoundError(f"ONNX CRNN model not found: {path}")
             if not quiet:
-                backend = "triton" if should_try_triton() else "local"
                 _log_info(
-                    f"OCR initializing CRNN predictor backend={backend} model_path={path}"
+                    f"OCR initializing CRNN predictor backend=triton model_path={path}"
                 )
             _CRNN_PREDICTOR = TextPredictor(path, quiet=quiet)
         return _CRNN_PREDICTOR
 
 
-def warm_vision_models(*, quiet: bool = True) -> None:
-    """Eagerly warm YOLO + CRNN (Triton health check or local ONNX sessions)."""
-    from cua_mcp.vision_backend import should_try_triton
+def warm_vision_models(*, quiet: bool = True, timeout_seconds: float = 2.5) -> tuple[bool, str]:
+    """Check whether Triton is ready. Returns ``(ok, message)``; never raises."""
+    from cua_mcp.vision_triton import triton_ready
 
     started = time.perf_counter()
-    if should_try_triton():
-        from cua_mcp.vision_triton import triton_ready
-
-        if triton_ready():
-            elapsed = time.perf_counter() - started
+    if triton_ready(timeout_seconds=timeout_seconds):
+        elapsed = time.perf_counter() - started
+        message = f"Vision：Triton 就緒（{elapsed:.1f}s）"
+        if not quiet:
             _log_info(f"Vision warmup: Triton server ready elapsed_s={elapsed:.3f}")
-            return
-        elapsed = time.perf_counter() - started
-        _log_info(
-            f"Vision warmup: Triton not ready elapsed_s={elapsed:.3f}, "
-            "loading local ONNX fallback"
-        )
-
-    from cua_mcp.yolo_onnx import DEFAULT_YOLO_ONNX_PATH, get_cached_cpu_session
-
-    get_cached_cpu_session(DEFAULT_YOLO_ONNX_PATH)
-    _get_ocr_predictor(quiet=quiet)
+        return True, message
+    elapsed = time.perf_counter() - started
+    message = (
+        f"Vision：Triton 無回應（{elapsed:.1f}s）— "
+        "move_mouse / OCR 需要 Triton 連線"
+    )
     if not quiet:
-        elapsed = time.perf_counter() - started
-        _log_info(f"Vision warmup: local ONNX loaded elapsed_s={elapsed:.3f}")
+        _log_info(f"Vision warmup: Triton not ready elapsed_s={elapsed:.3f}")
+    return False, message
 
 
 def _expand_box(

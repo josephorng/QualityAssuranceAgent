@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from src.common.models import EyeEvent
+from src.common.monitor_prompt import selected_eye_monitor_indices
 from src.common.run_state import get_run_state_manager, ts_name
 from src.common.runtime_context import get_runtime_env
 from src.common.settings import load_settings
@@ -58,11 +59,15 @@ class EyeModule:
         paths = self.manager.require_paths()
         image_name = f"{ts_name()}.png"
         image_path = paths.eye_dir / image_name
-        self.active_monitor_index = capture_monitor_to_file(
-            dest=image_path,
-            monitor_index=self.active_monitor_index,
-            include_cursor=True,
-        )
+        monitor_indices = selected_eye_monitor_indices(self.active_monitor_index)
+        if len(monitor_indices) > 1:
+            capture_all_screens_to_file(image_path)
+        else:
+            self.active_monitor_index = capture_monitor_to_file(
+                dest=image_path,
+                monitor_index=monitor_indices[0],
+                include_cursor=True,
+            )
         event = EyeEvent(
             screenshot_name=image_name,
             screenshot_path=str(image_path),

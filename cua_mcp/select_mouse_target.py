@@ -510,8 +510,9 @@ async def _filter_mouse_candidates(
     """Ask Ollama which candidates match the anchor vs nearby labels.
 
     Candidates are first narrowed by string similarity (``>= 0.5`` vs anchor or
-    any nearby label). Only that shortlist is sent to the LLM. On empty prefilter
-    or LLM failure, falls back to similarity matching for each bucket.
+    any nearby label). Only that shortlist is sent to the LLM. When the
+    prefilter is empty, return no matches (target not found). On LLM failure,
+    fall back to similarity matching for each bucket.
     """
     if not detections:
         return [], []
@@ -524,9 +525,9 @@ async def _filter_mouse_candidates(
     )
     if not prefiltered:
         _run_manager().log_info(
-            "_filter_mouse_candidates: prefilter empty; fallback similarity match"
+            "_filter_mouse_candidates: prefilter empty; returning not found"
         )
-        return _fallback_filter_by_similarity(detections, anchor, nearby)
+        return [], []
 
     nearby_text = ", ".join(label.strip() for label in nearby if label.strip()) or "(none)"
     candidates_text = _format_ui_candidates_text(prefiltered, include_geometry=False)

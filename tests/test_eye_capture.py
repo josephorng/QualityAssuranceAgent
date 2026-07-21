@@ -164,6 +164,88 @@ def test_capture_all_screens_to_file_uses_virtual_desktop(monkeypatch, tmp_path:
     assert overlay_calls == [(0, 0)]
 
 
+def test_capture_once_writes_combined_screenshot_when_multiple_monitors_selected(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manager = RunStateManager(runs_root=tmp_path)
+    paths = manager.init_run("combined-after-action-test", "test_combined_after_action")
+    set_runtime_env(paths.root, paths.root.name)
+
+    captured: list[Path] = []
+    single_monitor_calls: list[int] = []
+
+    def _fake_capture_all_screens(dest: Path) -> None:
+        captured.append(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"combined")
+
+    def _fake_capture_monitor(
+        *,
+        dest: Path,
+        monitor_index: int,
+        include_cursor: bool = False,
+    ) -> int:
+        single_monitor_calls.append(monitor_index)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"single")
+        return monitor_index
+
+    import src.eye.module as eye_module
+
+    monkeypatch.setattr(eye_module, "capture_all_screens_to_file", _fake_capture_all_screens)
+    monkeypatch.setattr(eye_module, "capture_monitor_to_file", _fake_capture_monitor)
+    monkeypatch.setenv("EYE_MONITOR_INDICES", "1,2")
+
+    eye = EyeModule()
+    event = asyncio.run(eye.capture_once())
+
+    assert len(captured) == 1
+    assert single_monitor_calls == []
+    assert captured[0].parent == paths.eye_dir
+    assert event.screenshot_path == str(captured[0])
+
+
+def test_capture_once_writes_single_monitor_when_only_one_selected(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manager = RunStateManager(runs_root=tmp_path)
+    paths = manager.init_run("single-after-action-test", "test_single_after_action")
+    set_runtime_env(paths.root, paths.root.name)
+
+    captured: list[Path] = []
+    single_monitor_calls: list[int] = []
+
+    def _fake_capture_all_screens(dest: Path) -> None:
+        captured.append(dest)
+
+    def _fake_capture_monitor(
+        *,
+        dest: Path,
+        monitor_index: int,
+        include_cursor: bool = False,
+    ) -> int:
+        single_monitor_calls.append(monitor_index)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"single")
+        return monitor_index
+
+    import src.eye.module as eye_module
+
+    monkeypatch.setattr(eye_module, "capture_all_screens_to_file", _fake_capture_all_screens)
+    monkeypatch.setattr(eye_module, "capture_monitor_to_file", _fake_capture_monitor)
+    monkeypatch.setenv("EYE_MONITOR_INDEX", "2")
+    monkeypatch.delenv("EYE_MONITOR_INDICES", raising=False)
+
+    eye = EyeModule()
+    event = asyncio.run(eye.capture_once())
+
+    assert captured == []
+    assert single_monitor_calls == [2]
+    assert event.screenshot_path.startswith(str(paths.eye_dir))
+
+
 def test_capture_separated_images_writes_one_combined_eye_screenshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

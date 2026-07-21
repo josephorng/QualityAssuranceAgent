@@ -231,7 +231,7 @@ async def test_loop_marks_step_failed_from_structured_outcome(
     brain._eye.capture_separated_images = AsyncMock(return_value=["shot.png"])
     brain.sanitize_message = BrainModule.sanitize_message.__get__(brain, BrainModule)
     brain._save_step_messages = MagicMock()
-    brain._current_goal = MagicMock(return_value="點擊在「我自己 」文字")
+    brain._current_goal = MagicMock(return_value="將滑鼠移到「我自己 」文字，並點擊滑鼠一下。")
 
     response = Message(
         role="assistant",

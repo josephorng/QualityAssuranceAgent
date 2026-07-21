@@ -236,7 +236,7 @@ async def test_analyze_event_to_cache_ignores_shell_host_close(tmp_path: Path) -
             vision=vision,
         )
 
-    assert result == {"instruction": "點擊「搜尋」文字"}
+    assert result == {"instruction": "將滑鼠移到「搜尋」文字，並點擊滑鼠一下。"}
     llm_mock.assert_not_called()
 
 
@@ -509,7 +509,7 @@ def test_instruction_for_click_builds_from_nearest_candidate() -> None:
         button="left",
         screenshot_path="",
     )
-    assert instruction_for_click(event, _VISION_WITH_NEARBY) == "點擊在「Chrome」圖示"
+    assert instruction_for_click(event, _VISION_WITH_NEARBY) == "將滑鼠移到「Chrome」圖示"
 
 
 def test_instruction_for_click_right_click_with_offset() -> None:
@@ -533,7 +533,7 @@ def test_instruction_for_click_right_click_with_offset() -> None:
         ],
     }
     assert instruction_for_click(event, vision) == (
-        "按右鍵在「自訂Office 範本」文字左方14個像素、下方39個像素的位置"
+        "將滑鼠移到「自訂Office 範本」文字左方14個像素、下方39個像素的位置"
     )
 
 
@@ -557,7 +557,7 @@ def test_instruction_for_click_double_click() -> None:
             },
         ],
     }
-    assert instruction_for_click(event, vision) == "連按兩下在「文件」文字"
+    assert instruction_for_click(event, vision) == "將滑鼠移到「文件」文字"
 
 
 def test_instruction_for_click_input_field_with_visible_text() -> None:
@@ -586,7 +586,7 @@ def test_instruction_for_click_input_field_with_visible_text() -> None:
             },
         ],
     }
-    assert instruction_for_click(event, vision) == "點擊在「搜尋」文字所在的輸入欄"
+    assert instruction_for_click(event, vision) == "將滑鼠移到「搜尋」文字所在的輸入欄"
 
 
 def test_instruction_for_click_empty_input_field() -> None:
@@ -616,7 +616,7 @@ def test_instruction_for_click_empty_input_field() -> None:
             },
         ],
     }
-    assert instruction_for_click(event, vision) == "點擊在輸入欄"
+    assert instruction_for_click(event, vision) == "將滑鼠移到輸入欄"
 
 
 def test_instruction_for_click_returns_none_for_generic_anchor() -> None:
@@ -960,7 +960,7 @@ async def test_analyze_event_to_cache_click_appends_nearby_context(tmp_path: Pat
 
     assert result is not None
     assert result["instruction"] == (
-        "點擊「Chrome」圖示（附近有「OneNote」文字、「Docker」圖示）"
+        "將滑鼠移到「Chrome」圖示（附近有「OneNote」文字、「Docker」圖示），並點擊滑鼠一下。"
     )
     llm_mock.assert_not_called()
 
@@ -1015,8 +1015,8 @@ async def test_analyze_event_to_cache_click_enriches_offset_then_nearby(
 
     assert result is not None
     assert result["instruction"] == (
-        "按右鍵在「自訂Office 範本」文字左方14個像素、下方39個像素的位置"
-        "（附近有「資料夾」圖示、「WindowsPowerShell」文字）"
+        "將滑鼠移到「自訂Office 範本」文字左方14個像素、下方39個像素的位置"
+        "（附近有「資料夾」圖示、「WindowsPowerShell」文字），用右鍵點選。"
     )
     llm_mock.assert_not_called()
 
@@ -1040,7 +1040,7 @@ async def test_analyze_event_to_cache_click_falls_back_to_llm_when_generic(
             {"bbox": [0, 0, 20, 20], "center": [10, 10], "class_name": "element", "text": None},
         ],
     }
-    llm_payload = {"instruction": "點擊空白區域"}
+    llm_payload = {"instruction": "將滑鼠移到空白區域"}
 
     with patch(
         "src.recorder.analyze.request_json_with_retry",
@@ -1053,7 +1053,7 @@ async def test_analyze_event_to_cache_click_falls_back_to_llm_when_generic(
         )
 
     assert result is not None
-    assert result["instruction"] == "點擊空白區域"
+    assert result["instruction"] == "將滑鼠移到空白區域，並點擊滑鼠一下。"
     llm_mock.assert_called_once()
 
 

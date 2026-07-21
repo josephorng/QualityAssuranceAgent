@@ -40,11 +40,12 @@ _DRAG_OFFSET_PHRASE_RE = re.compile(
 _CLICK_POINTER_KINDS = frozenset(
     {"click", "double_click", "right_click", "middle_click"}
 )
-_CLICK_VERB_BY_KIND = {
-    "click": "點擊在",
-    "double_click": "連按兩下在",
-    "right_click": "按右鍵在",
-    "middle_click": "按中鍵在",
+_CLICK_MOVE_PREFIX = "將滑鼠移到"
+_POINTER_CLICK_ACTION_SUFFIX_BY_KIND = {
+    "click": "，並點擊滑鼠一下。",
+    "double_click": "，並連按兩下。",
+    "right_click": "，用右鍵點選。",
+    "middle_click": "，並按中鍵一下。",
 }
 _GENERIC_CLICK_ANCHORS = frozenset(
     {"文字", "元素", "未知", "輸入欄", "按鈕", "滾動條"}
@@ -267,18 +268,14 @@ def instruction_for_click(
     if event.kind not in _CLICK_POINTER_KINDS:
         return None
 
-    verb = _CLICK_VERB_BY_KIND.get(event.kind)
-    if not verb:
-        return None
-
     anchor = _click_target_anchor(vision)
     if not anchor:
         return None
 
     offset_phrase = primary_candidate_offset(vision)
     if offset_phrase:
-        return f"{verb}{anchor}{offset_phrase}的位置"
-    return f"{verb}{anchor}"
+        return f"{_CLICK_MOVE_PREFIX}{anchor}{offset_phrase}的位置"
+    return f"{_CLICK_MOVE_PREFIX}{anchor}"
 
 
 def _key_display_name(token: str) -> str | None:
@@ -393,7 +390,11 @@ def _finalize_instruction(
             vision,
             destination if isinstance(destination, dict) else {},
         )
-    return append_nearby_context_comment(instruction, vision)
+    instruction = append_nearby_context_comment(instruction, vision)
+    suffix = _POINTER_CLICK_ACTION_SUFFIX_BY_KIND.get(event.kind)
+    if suffix:
+        return instruction + suffix
+    return instruction
 
 
 def _instruction_result(

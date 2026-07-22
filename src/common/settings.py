@@ -15,7 +15,6 @@ AGENT_SETTINGS_KEYS = (
     "llm_backend",
     "brain_lm",
     "ollama_host",
-    "debug",
     "vision_backend",
     "triton_http_url",
 )
@@ -23,7 +22,6 @@ AGENT_SETTINGS_KEYS = (
 AGENT_SETTINGS_SCHEMA: tuple[tuple[str, str, str], ...] = (
     ("llm_backend", "LLM 後端", "option"),
     ("vision_backend", "Vision 後端", "option"),
-    ("debug", "除錯模式", "bool"),
 )
 
 VISION_BACKEND_CHOICES = frozenset({"triton_local", "triton_192_168_0_17"})
@@ -99,7 +97,6 @@ class Settings(BaseSettings):
     brain_lm: str = "gemma4:e4b"
     runs_dir: str = "runs"
     log_level: str = "INFO"
-    debug: bool = True
     triton_http_url: str = VISION_BACKEND_PRESETS["triton_local"]["triton_http_url"]
     vision_backend: str = "triton_local"
     triton_timeout_seconds: float = 20.0
@@ -138,7 +135,6 @@ def default_agent_settings_dict() -> dict[str, Any]:
     """Built-in defaults for agent settings (no file required)."""
     base = Settings()
     data = preset_for_backend("ollama_local")
-    data["debug"] = base.debug
     data["vision_backend"] = base.vision_backend
     data["triton_http_url"] = preset_for_vision_backend(base.vision_backend)["triton_http_url"]
     return data
@@ -165,9 +161,7 @@ def _overlay_agent_keys(target: dict[str, Any], raw: Any) -> dict[str, Any]:
         if key not in raw:
             continue
         value = raw[key]
-        if key == "debug":
-            out[key] = bool(value)
-        elif key in ("llm_backend", "brain_lm", "ollama_host", "vision_backend", "triton_http_url"):
+        if key in ("llm_backend", "brain_lm", "ollama_host", "vision_backend", "triton_http_url"):
             if isinstance(value, str) and value.strip():
                 out[key] = value.strip()
     if isinstance(raw, dict):
@@ -180,11 +174,10 @@ def _overlay_agent_keys(target: dict[str, Any], raw: Any) -> dict[str, Any]:
 
 
 def normalize_agent_settings_dict(data: dict[str, Any]) -> dict[str, Any]:
-    """Apply fixed model/host preset for the selected backend; keep debug and probed hosts."""
+    """Apply fixed model/host preset for the selected backend; keep probed hosts."""
     base = Settings()
     backend = canonicalize_llm_backend(str(data.get("llm_backend", "ollama_local")))
     out = preset_for_backend(backend)
-    out["debug"] = bool(data.get("debug", True))
     vision_key = canonicalize_vision_backend(
         str(data.get("vision_backend", base.vision_backend))
     )
@@ -385,7 +378,6 @@ def load_settings() -> Settings:
         "llm_backend": agent["llm_backend"],
         "ollama_host": agent["ollama_host"],
         "brain_lm": agent["brain_lm"],
-        "debug": agent["debug"],
         "runs_dir": base.runs_dir,
         "log_level": base.log_level,
         "triton_http_url": agent["triton_http_url"],

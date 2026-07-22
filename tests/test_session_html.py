@@ -110,11 +110,12 @@ def test_write_session_html_renders_all_steps(tmp_path: Path) -> None:
     html = path.read_text(encoding="utf-8")
 
     assert html.startswith("<!DOCTYPE html>")
-    assert "task_html" in html
+    assert "<h1>task_html</h1>" in html
     assert "動作 1：click" in html
     assert "動作 2：type_text" in html
     assert '<a href="../index.html">← 報告列表</a>' in html
     assert html.count('<details class="instruction-group">') == 1
+    assert '<span class="instruction-number">1.</span>' in html
     assert "手部動作" in html
     assert html.count('<details class="args"><summary>參數</summary>') == 2
     assert "<th>button</th><td>left</td>" in html
@@ -187,9 +188,13 @@ def test_write_session_html_groups_hand_operations_by_user_instruction(tmp_path:
     html = write_session_html_from_run(run_root).read_text(encoding="utf-8")
 
     assert html.count('<details class="instruction-group">') == 2
+    assert '<span class="instruction-number">1.</span>' in html
+    assert '<span class="instruction-number">2.</span>' in html
     assert "最小化所有視窗。" in html
     assert "點擊「資料夾」圖示" in html
     assert html.index("最小化所有視窗。") < html.index("點擊「資料夾」圖示")
+    assert html.index('instruction-number">1.') < html.index("最小化所有視窗。")
+    assert html.index('instruction-number">2.') < html.index("點擊「資料夾」圖示")
     assert html.index("最小化所有視窗。") < html.index("動作 1：minimize_windows")
     assert html.index("點擊「資料夾」圖示") < html.index("動作 2：move_mouse")
     assert "動作 3：click" in html
@@ -354,8 +359,47 @@ def test_write_session_html_without_hand_csv(tmp_path: Path) -> None:
 
     assert path.is_file()
     html = path.read_text(encoding="utf-8")
-    assert "task_no_actions" in html
+    assert "<h1>task_no_actions</h1>" in html
     assert "動作 1" not in html
+
+
+def test_write_session_html_title_uses_script_name_and_datetime(tmp_path: Path) -> None:
+    run_root = tmp_path / "task_20260722_060427_312875"
+    run_root.mkdir()
+    (run_root / "report.json").write_text(
+        json.dumps(
+            {
+                "script_name": "click_folder.txt",
+                "started_at_utc": "2026-07-22T06:04:27.373338+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_hand_csv(
+        run_root,
+        [
+            {
+                "timestamp": "2026-07-22T06:04:27+00:00",
+                "action": "click",
+                "args": {"button": "left"},
+                "ok": True,
+                "screenshot_name": "",
+                "screenshot_before_path": "",
+                "screenshot_after_path": "",
+                "message": "executed",
+            }
+        ],
+    )
+
+    html = write_session_html_from_run(run_root).read_text(encoding="utf-8")
+
+    assert "工作階段步驟紀錄：" not in html
+    assert "task_20260722_060427_312875" not in html.split("<h1>")[1].split("</h1>")[0]
+    assert "click_folder.txt · " in html
+    assert re.search(
+        r"<h1>click_folder\.txt · \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \(UTC[+-]\d{2}:\d{2}\)</h1>",
+        html,
+    )
 
 
 def test_write_session_html_rebuilds_runs_index(tmp_path: Path) -> None:
@@ -459,8 +503,10 @@ def test_write_runs_index_includes_report_json_summary(tmp_path: Path) -> None:
     assert "點選欄位標題可排序" in html
     assert "sortable" in html
     assert 'class="delete-run"' in html
+    assert 'class="bug-run"' in html
     assert 'data-run-id="task_20260721_130000_000010"' in html
     assert "/api/runs/" in html
+    assert "/bug" in html
 
 
 def test_write_runs_index_uses_run_log_script_name_when_report_missing(tmp_path: Path) -> None:

@@ -55,8 +55,9 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 'Use status "failed" when the goal cannot be achieved (for example a required '
                 "click/move target is not on screen after tool failures, or no viable method remains).",
                 "If the previous task is not executed, try new method to achieve the task.",
-                "If the tool failed to execute, do not assume the task is completed. Try new method "
-                "to achieve the task; if no viable method remains, finish with status failed.",
+                "If any tool returned ok=false, do not mark the step completed and do not assume "
+                "follow-up tools in the same turn succeeded against the intended target. Retry with a "
+                "new method; if no viable method remains, finish with status failed.",
                 "If check_object_exists was the previous tool: read exists and the full CurrentTaskGoal "
                 "to decide whether to continue. For 如果畫面上有… / if … is visible: continue with "
                 "follow-up tools only when exists=true; when exists=false, finish with status completed "

@@ -2,6 +2,7 @@
 
 Browsers cannot delete folders from a ``file://`` page, so the hub opens the
 reports index via this loopback server and the page POSTs to ``/api/runs/<id>/delete``.
+Bug reports POST to ``/api/runs/<id>/bug`` to zip a run folder onto a network share.
 """
 
 from __future__ import annotations
@@ -9,7 +10,9 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import tempfile
 import threading
+from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -19,13 +22,17 @@ from src.common.session_html import write_runs_index_html
 
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,191}$")
 _DELETE_PATH_RE = re.compile(r"^/api/runs/([^/]+)/delete/?$")
+_BUG_PATH_RE = re.compile(r"^/api/runs/([^/]+)/bug/?$")
+
+# Default destination for "report bug" zip copies (Windows UNC share).
+BUG_REPORT_SHARE_DIR = Path(r"\\192.168.0.9\Joseph\CUA-BUG")
 
 _server_lock = threading.Lock()
 _active_server: RunsReportServer | None = None
 
 
 class RunsReportServer:
-    """Serve ``runs_root`` on ``127.0.0.1`` and accept report-folder deletes."""
+    """Serve ``runs_root`` on ``127.0.0.1`` and accept report delete / bug-zip POSTs."""
 
     def __init__(self, runs_root: Path) -> None:
         self.runs_root = Path(runs_root).resolve()
@@ -143,6 +150,45 @@ def resolve_deletable_run_folder(runs_root: Path, run_id: str) -> Path:
     return target
 
 
+def zip_run_report_to_bug_share(
+    runs_root: Path,
+    run_id: str,
+    dest_dir: Path | None = None,
+) -> Path:
+    """Zip one run folder and copy the archive to the bug-report share.
+
+    Returns the destination ``.zip`` path. Raises ``ValueError`` for invalid ids
+    and ``OSError`` when the share/path is unreachable or not writable.
+    """
+    target = resolve_deletable_run_folder(runs_root, run_id)
+    dest_root = Path(dest_dir) if dest_dir is not None else BUG_REPORT_SHARE_DIR
+    try:
+        dest_root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise OSError(f"bug share not reachable: {dest_root} ({exc})") from exc
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest_name = f"{run_id}_{stamp}.zip"
+    dest_path = dest_root / dest_name
+
+    with tempfile.TemporaryDirectory(prefix="cua-bug-") as tmp:
+        archive_base = Path(tmp) / run_id
+        zip_path = Path(
+            shutil.make_archive(
+                str(archive_base),
+                "zip",
+                root_dir=str(target.parent),
+                base_dir=target.name,
+            )
+        )
+        try:
+            shutil.copy2(zip_path, dest_path)
+        except OSError as exc:
+            raise OSError(f"failed to copy zip to bug share: {dest_path} ({exc})") from exc
+
+    return dest_path
+
+
 def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
     root = runs_root.resolve()
 
@@ -156,22 +202,40 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
 
         def do_POST(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
-            match = _DELETE_PATH_RE.fullmatch(unquote(parsed.path))
-            if match is None:
-                self._send_json(404, {"ok": False, "error": "not found"})
+            path = unquote(parsed.path)
+            delete_match = _DELETE_PATH_RE.fullmatch(path)
+            bug_match = _BUG_PATH_RE.fullmatch(path)
+
+            if delete_match is not None:
+                run_id = delete_match.group(1)
+                try:
+                    deleted = delete_run_report_folder(root, run_id)
+                except ValueError as exc:
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                    return
+                except OSError as exc:
+                    self._send_json(500, {"ok": False, "error": str(exc)})
+                    return
+                self._send_json(200, {"ok": True, "deleted": deleted.name})
                 return
 
-            run_id = match.group(1)
-            try:
-                deleted = delete_run_report_folder(root, run_id)
-            except ValueError as exc:
-                self._send_json(400, {"ok": False, "error": str(exc)})
-                return
-            except OSError as exc:
-                self._send_json(500, {"ok": False, "error": str(exc)})
+            if bug_match is not None:
+                run_id = bug_match.group(1)
+                try:
+                    dest = zip_run_report_to_bug_share(root, run_id)
+                except ValueError as exc:
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                    return
+                except OSError as exc:
+                    self._send_json(500, {"ok": False, "error": str(exc)})
+                    return
+                self._send_json(
+                    200,
+                    {"ok": True, "run_id": run_id, "copied_to": str(dest)},
+                )
                 return
 
-            self._send_json(200, {"ok": True, "deleted": deleted.name})
+            self._send_json(404, {"ok": False, "error": "not found"})
 
         def _send_json(self, status: int, payload: dict[str, Any]) -> None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

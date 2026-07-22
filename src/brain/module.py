@@ -564,6 +564,8 @@ class BrainModule:
         messages: list[dict[str, Any]] = []
         step_succeeded = False
         llm_path_used = False
+        # Actions that returned ok=false and have not succeeded on a later retry.
+        unresolved_tool_failures: set[str] = set()
 
         for _ in range(_MAX_INNER_DECIDE_STEPS):
             try:
@@ -601,10 +603,18 @@ class BrainModule:
                         )
                         step_succeeded = False
                     elif outcome.status == "completed":
-                        self.manager.log_info(
-                            f"Step marked completed by model: {outcome.reason}"
-                        )
-                        step_succeeded = True
+                        if unresolved_tool_failures:
+                            failed = ", ".join(sorted(unresolved_tool_failures))
+                            self.manager.log_info(
+                                f"Model marked completed but unresolved tool failure(s) remain "
+                                f"({failed}); treating step as failed. Model reason: {outcome.reason}"
+                            )
+                            step_succeeded = False
+                        else:
+                            self.manager.log_info(
+                                f"Step marked completed by model: {outcome.reason}"
+                            )
+                            step_succeeded = True
                     else:
                         self.manager.log_info(
                             f"Step marked failed by model: {outcome.reason}"
@@ -612,13 +622,17 @@ class BrainModule:
                         step_succeeded = False
                     break
 
+                abort_step = False
                 for tool_call in response_message.tool_calls:
                     arguments = dict(tool_call.function.arguments)
                     try:
-                        normalized_name = await self._normalize_tool_name(tool_call.function.name, arguments)
+                        normalized_name = await self._normalize_tool_name(
+                            tool_call.function.name, arguments
+                        )
                     except Exception as e:
                         self.manager.log_error(f"Error normalizing tool name: {e}")
                         step_succeeded = False
+                        abort_step = True
                         break
                     result = await self._hand.execute_tool_command(
                         ToolCommand(
@@ -645,9 +659,14 @@ class BrainModule:
                             self._step_transcript_counter,
                             self._script_step_index,
                         )
-                else:
-                    continue
-                break
+                        unresolved_tool_failures.add(result.action)
+                        # Do not run dependent follow-ups (e.g. click after failed move_mouse).
+                        # Continue the decide loop so the model can retry or finish as failed.
+                        break
+                    unresolved_tool_failures.discard(result.action)
+                if abort_step:
+                    break
+                continue
             finally:
                 self._save_step_messages(messages)
         else:

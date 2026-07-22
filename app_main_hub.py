@@ -13,12 +13,14 @@ from typing import Any
 
 import customtkinter as ctk
 from tkinter import filedialog
+import tkinter as tk
 
 from main import analyze_screen_recording, dismiss_nuitka_onefile_splash, prepare_run_session, run_coordinator_sync
 from src.common.agent_settings_dialog import open_agent_settings_dialog
 from src.common.ctk_dialogs import (
     prompt_append_recording_instructions,
     prompt_script_continue_or_end,
+    prompt_unsaved_script_changes,
     show_ctk_message,
 )
 from src.common.io_utils import append_text, pop_last_nonempty_line, read_json, write_json
@@ -178,6 +180,7 @@ class MainHub(ctk.CTk):
         self._analysis_cancel_event = threading.Event()
         self._suppress_script_cache_sync = False
         self._sync_cache_after_id: str | None = None
+        self._script_baseline = "\n"
         self._record_btn: ctk.CTkButton | None = None
         self._analyze_recording_btn: ctk.CTkButton | None = None
         self._analysis_progress_frame: ctk.CTkFrame | None = None
@@ -208,6 +211,7 @@ class MainHub(ctk.CTk):
                 self._refresh_script_path_label()
         if self._script_path is None:
             self._try_load_last_runtime_command_cache()
+        self._mark_script_clean()
 
         self._queue_paths = [
             Path(p) for p in hub.get("queue_script_paths", []) if Path(p).is_file()
@@ -295,12 +299,14 @@ class MainHub(ctk.CTk):
         finally:
             self._suppress_script_cache_sync = False
         self._refresh_script_path_label()
+        self._mark_script_clean()
 
     def _append_runtime_command_to_script_view(self, cmd: str) -> None:
         """Underlying Tk Text ignores ``insert`` while the widget is ``disabled`` (as during a run)."""
         self._script_text.configure(state="normal")
         self._script_text.insert("end", cmd + "\n")
         self._script_text.configure(state="disabled")
+        self._mark_script_clean()
 
     def _pop_last_runtime_command_from_cache(self) -> None:
         p = self._runtime_commands_cache_path
@@ -312,6 +318,7 @@ class MainHub(ctk.CTk):
         if p.is_file():
             self._script_text.insert("0.0", p.read_text(encoding="utf-8"))
         self._script_text.configure(state="disabled")
+        self._mark_script_clean()
 
     def _pop_last_runtime_command_from_script_file(self) -> None:
         p = self._script_path
@@ -323,6 +330,7 @@ class MainHub(ctk.CTk):
         if p.is_file():
             self._script_text.insert("0.0", p.read_text(encoding="utf-8"))
         self._script_text.configure(state="disabled")
+        self._mark_script_clean()
 
     def _refresh_runtime_script_text_from_cache(self) -> None:
         """After a runtime-command run, reload the cache file into the script textbox (disk is source of truth)."""
@@ -336,6 +344,7 @@ class MainHub(ctk.CTk):
         finally:
             self._suppress_script_cache_sync = False
         self._refresh_script_path_label()
+        self._mark_script_clean()
 
     def _sync_script_text_to_runtime_cache(self) -> bool:
         """Write the script textbox to runtime_commands_cache.txt when no script file is open."""
@@ -348,7 +357,38 @@ class MainHub(ctk.CTk):
         body = self._script_text.get("0.0", "end").rstrip() + "\n"
         cache_path.write_text(body, encoding="utf-8")
         self._refresh_script_path_label()
+        self._mark_script_clean()
         return True
+
+    def _script_editor_normalized_text(self) -> str:
+        return self._script_text.get("0.0", "end").rstrip() + "\n"
+
+    def _mark_script_clean(self) -> None:
+        self._script_baseline = self._script_editor_normalized_text()
+
+    def _is_script_dirty(self) -> bool:
+        return self._script_editor_normalized_text() != self._script_baseline
+
+    def _confirm_proceed_with_unsaved_script(self) -> bool:
+        """If the script editor has unsaved edits, prompt; return True when the action may proceed."""
+        if not self._is_script_dirty():
+            return True
+        choice = prompt_unsaved_script_changes(self)
+        if choice == "cancel":
+            return False
+        if choice == "discard":
+            return True
+        return self._script_save()
+
+    def _on_mode_tab_changed(self) -> None:
+        if self._mode_tabs.get() != "佇列執行":
+            return
+        if self._confirm_proceed_with_unsaved_script():
+            return
+        try:
+            self._mode_tabs.set("單一腳本")
+        except Exception:
+            pass
 
     def _schedule_sync_script_text_to_runtime_cache(self) -> None:
         if self._suppress_script_cache_sync or self._script_path is not None:
@@ -365,10 +405,108 @@ class MainHub(ctk.CTk):
         textbox = self._script_text._textbox
         if textbox.edit_modified():
             textbox.edit_modified(False)
+            self._refresh_script_line_numbers()
             self._schedule_sync_script_text_to_runtime_cache()
 
+    def _script_line_count(self) -> int:
+        """Return the number of logical lines in the script editor (at least 1)."""
+        textbox = self._script_text._textbox
+        return max(1, int(float(textbox.index("end-1c"))))
+
+    def _refresh_script_line_numbers(self) -> None:
+        """Rebuild the read-only gutter so line numbers stay aligned with script text."""
+        line_count = self._script_line_count()
+        numbers = "\n".join(str(i) for i in range(1, line_count + 1))
+        digit_width = max(2, len(str(line_count)))
+        gutter_width = 18 + digit_width * 10
+
+        gutter = self._script_line_numbers
+        gutter.configure(state="normal", width=gutter_width)
+        gutter.delete("0.0", "end")
+        gutter.insert("0.0", numbers)
+        gutter_tb = gutter._textbox
+        gutter_tb.tag_configure("linenum", justify="right")
+        gutter_tb.tag_add("linenum", "1.0", "end")
+        gutter.configure(state="disabled")
+        self._sync_script_line_number_scroll()
+
+    def _sync_script_line_number_scroll(self, *_args: object) -> None:
+        """Keep the gutter vertically scrolled with the script textbox."""
+        try:
+            first, _last = self._script_text._textbox.yview()
+            self._script_line_numbers._textbox.yview_moveto(first)
+        except tk.TclError:
+            return
+
     def _bind_script_text_cache_sync(self) -> None:
-        self._script_text._textbox.bind("<<Modified>>", self._on_script_text_modified)
+        textbox = self._script_text._textbox
+        textbox.bind("<<Modified>>", self._on_script_text_modified)
+        textbox.bind(
+            "<MouseWheel>",
+            lambda _e: self.after_idle(self._sync_script_line_number_scroll),
+            add="+",
+        )
+        textbox.bind(
+            "<Button-4>",
+            lambda _e: self.after_idle(self._sync_script_line_number_scroll),
+            add="+",
+        )
+        textbox.bind(
+            "<Button-5>",
+            lambda _e: self.after_idle(self._sync_script_line_number_scroll),
+            add="+",
+        )
+        textbox.bind(
+            "<KeyRelease>",
+            lambda _e: self.after_idle(self._sync_script_line_number_scroll),
+            add="+",
+        )
+        textbox.bind(
+            "<ButtonRelease-1>",
+            lambda _e: self.after_idle(self._sync_script_line_number_scroll),
+            add="+",
+        )
+        textbox.bind(
+            "<Configure>",
+            lambda _e: self.after_idle(self._sync_script_line_number_scroll),
+            add="+",
+        )
+
+        gutter = self._script_line_numbers._textbox
+        gutter.configure(takefocus=0, cursor="arrow")
+        gutter.bind("<MouseWheel>", self._forward_script_scroll_from_gutter)
+        gutter.bind("<Button-4>", self._forward_script_scroll_from_gutter)
+        gutter.bind("<Button-5>", self._forward_script_scroll_from_gutter)
+        gutter.bind("<Key>", lambda _e: "break")
+        gutter.bind("<Button-1>", lambda _e: "break")
+
+        self._install_script_yscroll_hook()
+        self._refresh_script_line_numbers()
+
+    def _forward_script_scroll_from_gutter(self, event: Any) -> str:
+        textbox = self._script_text._textbox
+        delta = getattr(event, "delta", 0)
+        if delta:
+            textbox.yview_scroll(int(-1 * (delta / 120)), "units")
+        else:
+            num = getattr(event, "num", 0)
+            if num == 4:
+                textbox.yview_scroll(-1, "units")
+            elif num == 5:
+                textbox.yview_scroll(1, "units")
+        self._sync_script_line_number_scroll()
+        return "break"
+
+    def _install_script_yscroll_hook(self) -> None:
+        """Attach yscrollcommand so gutter tracks CTkTextbox's built-in scrollbar."""
+        textbox = self._script_text._textbox
+        y_scrollbar = self._script_text._y_scrollbar
+
+        def yscroll_set(first: str, last: str) -> None:
+            y_scrollbar.set(first, last)
+            self._sync_script_line_number_scroll()
+
+        textbox.configure(yscrollcommand=yscroll_set)
 
     def _build_header(self) -> None:
         head = ctk.CTkFrame(self, fg_color="transparent")
@@ -544,7 +682,7 @@ class MainHub(ctk.CTk):
     def _build_script_section(self) -> None:
         box = ctk.CTkFrame(self, corner_radius=12)
         box.pack(fill="both", expand=True, padx=24, pady=8)
-        self._mode_tabs = ctk.CTkTabview(box)
+        self._mode_tabs = ctk.CTkTabview(box, command=self._on_mode_tab_changed)
         self._mode_tabs.pack(fill="both", expand=True, padx=8, pady=8)
         self._tab_single = self._mode_tabs.add("單一腳本")
         self._tab_queue = self._mode_tabs.add("佇列執行")
@@ -580,8 +718,24 @@ class MainHub(ctk.CTk):
             text_color=("gray20", "gray65"),
         )
         self._script_path_label.pack(anchor="w", padx=8, pady=(4, 8))
-        self._script_text = ctk.CTkTextbox(parent, font=ctk.CTkFont(size=14), wrap="word")
-        self._script_text.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        editor = ctk.CTkFrame(parent, fg_color="transparent")
+        editor.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        script_font = ctk.CTkFont(size=14)
+        self._script_line_numbers = ctk.CTkTextbox(
+            editor,
+            font=script_font,
+            width=44,
+            activate_scrollbars=False,
+            wrap="none",
+            fg_color=("gray90", "gray20"),
+            text_color=("gray40", "gray60"),
+        )
+        self._script_line_numbers.pack(side="left", fill="y", padx=(0, 4))
+        self._script_line_numbers.insert("0.0", "1")
+        self._script_line_numbers.configure(state="disabled")
+        self._script_text = ctk.CTkTextbox(editor, font=script_font, wrap="none")
+        self._script_text.pack(side="left", fill="both", expand=True)
         self._bind_script_text_cache_sync()
         self._script_controls.extend(
             [
@@ -718,6 +872,7 @@ class MainHub(ctk.CTk):
         finally:
             self._suppress_script_cache_sync = False
         self._refresh_script_path_label()
+        self._mark_script_clean()
         self._persist_hub_ui_state()
         try:
             self._mode_tabs.set("單一腳本")
@@ -821,13 +976,14 @@ class MainHub(ctk.CTk):
             text="開始執行",
             font=ctk.CTkFont(size=16, weight="bold"),
             height=44,
-            width=200,
+            width=120,
             command=self._on_start_run,
         )
         self._run_btn.grid(row=0, column=2)
         self._open_report_btn = ctk.CTkButton(
             btn_row,
             text="開啟報告",
+            font=ctk.CTkFont(size=16, weight="bold"),
             height=44,
             width=120,
             command=self._open_last_report,
@@ -835,6 +991,7 @@ class MainHub(ctk.CTk):
         self._open_reports_index_btn = ctk.CTkButton(
             btn_row,
             text="報告列表",
+            font=ctk.CTkFont(size=16, weight="bold"),
             height=44,
             width=120,
             command=self._open_reports_index,
@@ -1024,21 +1181,23 @@ class MainHub(ctk.CTk):
         finally:
             self._suppress_script_cache_sync = False
         self._refresh_script_path_label()
+        self._mark_script_clean()
         self._persist_hub_ui_state()
 
-    def _script_save(self) -> None:
+    def _script_save(self) -> bool:
         if self._script_path is not None:
             body = self._script_text.get("0.0", "end").rstrip() + "\n"
             self._script_path.write_text(body, encoding="utf-8")
+            self._mark_script_clean()
             self._status.configure(text=f"已儲存 {self._script_path.name}")
             self._persist_hub_ui_state()
-            return
+            return True
         if self._sync_script_text_to_runtime_cache():
             self._status.configure(text="已儲存執行命令")
-            return
-        self._script_save_as()
+            return True
+        return self._script_save_as()
 
-    def _script_save_as(self) -> None:
+    def _script_save_as(self) -> bool:
         path = filedialog.asksaveasfilename(
             parent=self,
             title="腳本另存新檔",
@@ -1047,14 +1206,16 @@ class MainHub(ctk.CTk):
             initialdir=str(ROOT_DIR / "scripts"),
         )
         if not path:
-            return
+            return False
         p = Path(path)
         p.write_text(self._script_text.get("0.0", "end").rstrip() + "\n", encoding="utf-8")
         self._script_path = p
         self._runtime_commands_cache_path = None
         self._refresh_script_path_label()
+        self._mark_script_clean()
         self._status.configure(text=f"已另存新檔 {p.name}")
         self._persist_hub_ui_state()
+        return True
 
     def _script_clear(self) -> None:
         """Unload any opened path / cache binding and empty the script editor."""
@@ -1067,6 +1228,7 @@ class MainHub(ctk.CTk):
         finally:
             self._suppress_script_cache_sync = False
         self._refresh_script_path_label()
+        self._mark_script_clean()
         self._status.configure(text="", text_color=("gray20", "gray65"))
         self._persist_hub_ui_state()
 
@@ -1109,6 +1271,8 @@ class MainHub(ctk.CTk):
             self.after(50, self._try_coordinator_cancel)
 
     def _on_close(self) -> None:
+        if not self._confirm_proceed_with_unsaved_script():
+            return
         if self._is_analysis_running():
             self._analysis_cancel_event.set()
         if self._recording_session.is_active():
@@ -1497,6 +1661,7 @@ class MainHub(ctk.CTk):
             finally:
                 self._suppress_script_cache_sync = False
             self._refresh_script_path_label()
+            self._mark_script_clean()
 
             args = _WorkerArgs(
                 step_mode=True,

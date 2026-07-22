@@ -2,7 +2,7 @@ This is a computer use agent project. We will use python and interactive cli to 
 
 # Setting
 
-- Agent settings: defaults in `src/common/settings.py`; user overrides in `runs/agent_settings.json` (editable via hub settings dialog). Includes `brain_lm` (default Gemma 4 e4b), `llm_backend`, hosts, and `debug`.
+- Agent settings: defaults in `src/common/settings.py`; user overrides in `runs/agent_settings.json` (editable via hub settings dialog). Includes `brain_lm` (default Gemma 4 e4b), `llm_backend`, hosts, and vision backend.
 - "mcp" folder: This will store a python file with mcp tools which will be initiated in the begining, and contain folders for each tool to store their logics. We will gradually add tools afterward.
 - `src/common/prompts.py`: Store all prompts in this module. Each prompt key maps to a list of variants; the first variant is used. Each variant has `prompt`, optional `instructions`, and `models` (models this prompt supports).
 

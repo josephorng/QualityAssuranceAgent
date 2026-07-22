@@ -13,12 +13,11 @@ def test_normalize_vllm_server_ignores_probed_ollama_host() -> None:
             "llm_backend": "vllm_server",
             "brain_lm": "google/gemma-4-26B-A4B-it",
             "ollama_host": "http://localhost:11434",
-            "debug": False,
         }
     )
     assert out["ollama_host"] == "http://192.168.4.134:8000"
     assert out["brain_lm"] == "google/gemma-4-26B-A4B-it"
-    assert out["debug"] is False
+    assert "debug" not in out
 
 
 def test_startup_probe_skips_ollama_for_vllm_server(
@@ -30,7 +29,6 @@ def test_startup_probe_skips_ollama_for_vllm_server(
             "llm_backend": "vllm_server",
             "brain_lm": "google/gemma-4-26B-A4B-it",
             "ollama_host": "http://192.168.4.134:8000",
-            "debug": True,
         },
     )
     saved: list[dict] = []
@@ -70,7 +68,6 @@ def test_normalize_agent_settings_includes_vision_fields() -> None:
             "llm_backend": "ollama_local",
             "vision_backend": "triton_local",
             "triton_http_url": "http://localhost:9000/",
-            "debug": True,
         }
     )
     assert out["vision_backend"] == "triton_local"
@@ -82,7 +79,6 @@ def test_normalize_agent_settings_remote_vision_preset() -> None:
         {
             "llm_backend": "ollama_local",
             "vision_backend": "triton_192_168_0_17",
-            "debug": True,
         }
     )
     assert out["vision_backend"] == "triton_192_168_0_17"

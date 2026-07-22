@@ -199,3 +199,76 @@ def prompt_append_recording_instructions(master: Any, message: str) -> bool:
     root = master.winfo_toplevel()
     root.wait_window(dialog)
     return bool(result["append"])
+
+
+def prompt_unsaved_script_changes(master: Any) -> str:
+    """Warn that the script editor has unsaved edits.
+
+    Returns ``save``, ``discard``, or ``cancel`` (closing the dialog counts as cancel).
+    """
+    import customtkinter as ctk
+
+    result = {"choice": "cancel"}
+
+    dialog = ctk.CTkToplevel(master)
+    dialog.title("尚未儲存")
+    dialog.resizable(False, False)
+    dialog.attributes("-topmost", True)
+    dialog.after(120, lambda: dialog.attributes("-topmost", False))
+    try:
+        dialog.transient(master.winfo_toplevel())
+    except Exception:
+        pass
+
+    inner = ctk.CTkFrame(dialog, fg_color="transparent")
+    inner.pack(fill="both", expand=True, padx=22, pady=22)
+
+    ctk.CTkLabel(
+        master=inner,
+        text="腳本內容已變更，但尚未儲存。要儲存變更嗎？",
+        wraplength=420,
+        justify="left",
+        font=ctk.CTkFont(size=14),
+    ).pack(anchor="w", pady=(0, 18))
+
+    btn_row = ctk.CTkFrame(inner, fg_color="transparent")
+    btn_row.pack()
+
+    def on_save() -> None:
+        result["choice"] = "save"
+        dialog.destroy()
+
+    def on_discard() -> None:
+        result["choice"] = "discard"
+        dialog.destroy()
+
+    def on_cancel() -> None:
+        result["choice"] = "cancel"
+        dialog.destroy()
+
+    dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+
+    ctk.CTkButton(master=btn_row, text="儲存", width=100, height=36, command=on_save).pack(
+        side="left", padx=(0, 10)
+    )
+    ctk.CTkButton(
+        master=btn_row, text="不要儲存", width=100, height=36, command=on_discard
+    ).pack(side="left", padx=(0, 10))
+    ctk.CTkButton(master=btn_row, text="取消", width=100, height=36, command=on_cancel).pack(
+        side="left"
+    )
+
+    try:
+        dialog.grab_set()
+    except Exception:
+        pass
+
+    dialog.update_idletasks()
+    w, h = dialog.winfo_reqwidth(), dialog.winfo_reqheight()
+    sw, sh = dialog.winfo_screenwidth(), dialog.winfo_screenheight()
+    dialog.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
+
+    root = master.winfo_toplevel()
+    root.wait_window(dialog)
+    choice = result["choice"]
+    return choice if choice in ("save", "discard", "cancel") else "cancel"

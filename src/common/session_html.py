@@ -61,6 +61,9 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
   transition: transform .15s ease;
 }
 .instruction-group[open] > summary::before { transform: rotate(90deg); }
+.instruction-group > summary .instruction-number {
+  flex: 0 0 auto; color: #57606a; font-variant-numeric: tabular-nums;
+}
 .instruction-group > summary .instruction-title { flex: 1 1 auto; min-width: 0; }
 .instruction-group[open] > summary { border-bottom: 1px solid #d0d7de; }
 .hand-ops {
@@ -134,15 +137,19 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 }
 .reports thead th.sortable[aria-sort="ascending"]::after { content: "▲"; opacity: .85; }
 .reports thead th.sortable[aria-sort="descending"]::after { content: "▼"; opacity: .85; }
-.reports thead th.no-sort { width: 3.25rem; text-align: center; }
+.reports thead th.no-sort { width: 5.5rem; text-align: center; }
 .reports td.actions { text-align: center; vertical-align: middle; white-space: nowrap; }
-.delete-run {
+.delete-run, .bug-run {
   appearance: none; border: 1px solid transparent; background: transparent;
-  color: #cf222e; cursor: pointer; border-radius: 6px;
+  cursor: pointer; border-radius: 6px;
   padding: .2rem .4rem; font-size: 1rem; line-height: 1;
 }
+.delete-run { color: #cf222e; }
 .delete-run:hover { background: #ffebe9; border-color: #ff8182; }
 .delete-run:disabled { opacity: .45; cursor: wait; }
+.bug-run { color: #9a6700; }
+.bug-run:hover { background: #fff8c5; border-color: #d4a72c; }
+.bug-run:disabled { opacity: .45; cursor: wait; }
 .reports tbody tr:hover { background: #f6f8fa; }
 .reports a { color: #0969da; text-decoration: none; font-weight: 600; word-break: break-all; }
 .reports a:hover { text-decoration: underline; }
@@ -236,8 +243,53 @@ _INDEX_SCRIPT = """
     var intro = document.querySelector("p.intro");
     if (!intro) return;
     var count = tbody.rows.length;
-    intro.textContent = "共 " + count + " 筆報告。點選執行名稱開啟步驟紀錄；點選欄位標題可排序；垃圾桶可刪除整份報告資料夾。";
+    intro.textContent = "共 " + count + " 筆報告。點選執行名稱開啟步驟紀錄；點選欄位標題可排序；🐛 可回報 bug；垃圾桶可刪除整份報告資料夾。";
   }
+
+  function requireLocalServer() {
+    if (!window.location.protocol || window.location.protocol === "file:") {
+      window.alert("無法操作：請從主程式的「報告列表」開啟此頁（需本機服務）。");
+      return false;
+    }
+    return true;
+  }
+
+  Array.prototype.slice.call(document.querySelectorAll("button.bug-run")).forEach(function (btn) {
+    btn.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      var runId = btn.getAttribute("data-run-id") || "";
+      if (!runId) return;
+      var label = btn.getAttribute("data-run-label") || runId;
+      if (!window.confirm("確定回報「" + label + "」？\\n將壓縮該執行資料夾並複製到 \\\\\\\\192.168.0.9\\\\Joseph\\\\CUA-BUG。")) {
+        return;
+      }
+      if (!requireLocalServer()) return;
+      btn.disabled = true;
+      fetch("/api/runs/" + encodeURIComponent(runId) + "/bug", { method: "POST" })
+        .then(function (response) {
+          return response.json().then(function (payload) {
+            return { ok: response.ok && payload && payload.ok, payload: payload || {}, status: response.status };
+          }).catch(function () {
+            return { ok: false, payload: {}, status: response.status };
+          });
+        })
+        .then(function (result) {
+          btn.disabled = false;
+          if (!result.ok) {
+            var message = (result.payload && result.payload.error) || ("HTTP " + result.status);
+            window.alert("回報失敗：" + message);
+            return;
+          }
+          var copied = (result.payload && result.payload.copied_to) || "";
+          window.alert(copied ? ("已複製到：\\n" + copied) : "已壓縮並複製到 bug 分享資料夾。");
+        })
+        .catch(function () {
+          window.alert("無法回報：請從主程式的「報告列表」開啟此頁（需本機服務）。");
+          btn.disabled = false;
+        });
+    });
+  });
 
   Array.prototype.slice.call(document.querySelectorAll("button.delete-run")).forEach(function (btn) {
     btn.addEventListener("click", function (event) {
@@ -249,10 +301,7 @@ _INDEX_SCRIPT = """
       if (!window.confirm("確定刪除報告「" + label + "」？\\n將刪除整個資料夾，且無法復原。")) {
         return;
       }
-      if (!window.location.protocol || window.location.protocol === "file:") {
-        window.alert("無法刪除：請從主程式的「報告列表」開啟此頁（需本機服務）。");
-        return;
-      }
+      if (!requireLocalServer()) return;
       btn.disabled = true;
       fetch("/api/runs/" + encodeURIComponent(runId) + "/delete", { method: "POST" })
         .then(function (response) {
@@ -624,11 +673,18 @@ def _render_hand_operation_html(*, run_root: Path, operation: dict[str, Any]) ->
     )
 
 
-def _render_instruction_group_html(*, run_root: Path, goal: str, operations: list[dict[str, Any]]) -> str:
+def _render_instruction_group_html(
+    *,
+    run_root: Path,
+    goal: str,
+    operations: list[dict[str, Any]],
+    step_number: int,
+) -> str:
     operation_count = len(operations)
     count_label = escape(f"{operation_count} 個動作")
     has_failure = any(not operation.get("ok", False) for operation in operations)
     summary_badge_class = "fail" if has_failure else "neutral"
+    step_label = escape(f"{step_number}.")
 
     if operations:
         items = "".join(
@@ -642,6 +698,7 @@ def _render_instruction_group_html(*, run_root: Path, goal: str, operations: lis
     return (
         f'<details class="instruction-group">'
         f"<summary>"
+        f'<span class="instruction-number">{step_label}</span>'
         f'<span class="instruction-title">{escape(goal)}</span>'
         f'<span class="badge {summary_badge_class}">{count_label}</span>'
         f"</summary>"
@@ -822,6 +879,10 @@ def _render_index_row(run_root: Path) -> str:
         f"{_count_text(failed_tools)}</td>"
         f'<td data-label="耗時"{_sort_attr(duration_sort)}>{escape(duration)}</td>'
         f'<td data-label="操作" class="actions" data-sort="">'
+        f'<button type="button" class="bug-run" data-run-id="{run_id_title}" '
+        f'data-run-label="{escape(script_name_raw, quote=True)}" '
+        f'title="回報 bug" '
+        f'aria-label="回報 bug {run_id_title}">🐛</button>'
         f'<button type="button" class="delete-run" data-run-id="{run_id_title}" '
         f'data-run-label="{escape(script_name_raw, quote=True)}" '
         f'title="刪除報告" aria-label="刪除報告 {run_id_title}">🗑</button></td>'
@@ -873,7 +934,8 @@ def write_runs_index_html(runs_root: Path) -> Path:
     if run_dirs:
         intro = (
             f"共 {len(run_dirs)} 筆報告。點選執行名稱開啟步驟紀錄；"
-            "點選欄位標題可排序；垃圾桶可刪除整份報告資料夾。"
+            "點選欄位標題可排序；🐛 可回報 bug；"
+            "垃圾桶可刪除整份報告資料夾。"
         )
     else:
         intro = "共 0 筆報告。完成一次執行後，報告會出現在此列表。"
@@ -897,6 +959,16 @@ def write_runs_index_html(runs_root: Path) -> Path:
     return path
 
 
+def _resolve_session_title(run_root: Path) -> str:
+    """Build the page title from source script name and run datetime."""
+    report = _load_run_report(run_root)
+    script_name = _resolve_index_script_name(run_root, report)
+    run_time = _resolve_index_run_datetime(run_root, report)
+    if run_time and run_time != "—":
+        return f"{script_name} · {run_time}"
+    return script_name
+
+
 def write_session_html_from_run(run_root: Path) -> Path:
     """Build ``session_steps.html`` from ``hand.csv`` in a single pass (O(n)).
 
@@ -913,11 +985,12 @@ def write_session_html_from_run(run_root: Path) -> Path:
             run_root=run_root,
             goal=group["goal"],
             operations=group["operations"],
+            step_number=index,
         )
-        for group in instruction_groups
+        for index, group in enumerate(instruction_groups, start=1)
     ]
 
-    title = escape(f"工作階段步驟紀錄：{run_root.name}")
+    title = escape(_resolve_session_title(run_root))
     body = "\n".join(groups_html)
     html = (
         "<!DOCTYPE html>\n"

@@ -125,7 +125,6 @@ def open_agent_settings_dialog(
 
     backend_var = ctk.StringVar(value=_backend_to_label(backend_initial))
     vision_var = ctk.StringVar(value=_vision_backend_to_label(vision_initial))
-    debug_var = ctk.BooleanVar(value=bool(initial.get("debug", True)))
 
     backend_row = ctk.CTkFrame(inner, fg_color="transparent")
     backend_row.pack(fill="x", pady=(0, 10))
@@ -215,11 +214,6 @@ def open_agent_settings_dialog(
 
     _sync_vision_preset_labels()
 
-    debug_row = ctk.CTkFrame(inner, fg_color="transparent")
-    debug_row.pack(fill="x", pady=(0, 10))
-    ctk.CTkLabel(debug_row, text="除錯模式", width=120, anchor="w").pack(side="left")
-    ctk.CTkCheckBox(debug_row, text="", variable=debug_var, width=28).pack(side="left")
-
     ctk.CTkLabel(
         inner,
         text="變更將於下次執行或錄製分析時生效。",
@@ -237,7 +231,6 @@ def open_agent_settings_dialog(
         backend = _label_to_backend(backend_var.get())
         try:
             payload = preset_for_backend(backend)
-            payload["debug"] = debug_var.get()
             vision_backend = _label_to_vision_backend(vision_var.get())
             payload.update(preset_for_vision_backend(vision_backend))
             payload["vision_backend"] = vision_backend

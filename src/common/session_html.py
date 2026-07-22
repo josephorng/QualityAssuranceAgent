@@ -124,6 +124,25 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 .reports thead th {
   border-top: none; background: #f6f8fa; color: #57606a; font-size: .85rem;
 }
+.reports thead th.sortable {
+  cursor: pointer; user-select: none; white-space: nowrap;
+}
+.reports thead th.sortable:hover { color: #1f2328; background: #eaeef2; }
+.reports thead th.sortable::after {
+  content: "⇅"; display: inline-block; margin-left: .35rem;
+  font-size: .7rem; opacity: .35; vertical-align: middle;
+}
+.reports thead th.sortable[aria-sort="ascending"]::after { content: "▲"; opacity: .85; }
+.reports thead th.sortable[aria-sort="descending"]::after { content: "▼"; opacity: .85; }
+.reports thead th.no-sort { width: 3.25rem; text-align: center; }
+.reports td.actions { text-align: center; vertical-align: middle; white-space: nowrap; }
+.delete-run {
+  appearance: none; border: 1px solid transparent; background: transparent;
+  color: #cf222e; cursor: pointer; border-radius: 6px;
+  padding: .2rem .4rem; font-size: 1rem; line-height: 1;
+}
+.delete-run:hover { background: #ffebe9; border-color: #ff8182; }
+.delete-run:disabled { opacity: .45; cursor: wait; }
 .reports tbody tr:hover { background: #f6f8fa; }
 .reports a { color: #0969da; text-decoration: none; font-weight: 600; word-break: break-all; }
 .reports a:hover { text-decoration: underline; }
@@ -142,6 +161,129 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
     font-size: .75rem; font-weight: 600; margin-bottom: .1rem;
   }
 }
+""".strip()
+
+_INDEX_SCRIPT = """
+(function () {
+  var table = document.querySelector("table.reports");
+  if (!table || !table.tBodies.length) return;
+  var tbody = table.tBodies[0];
+  var headers = Array.prototype.slice.call(table.querySelectorAll("thead th"));
+  var sortCol = -1;
+  var sortAsc = true;
+
+  function cellValue(row, col) {
+    var cell = row.cells[col];
+    if (!cell) return "";
+    if (cell.getAttribute("data-sort") != null) return cell.getAttribute("data-sort");
+    return (cell.textContent || "").trim();
+  }
+
+  function isEmpty(value) {
+    return value === "" || value === "—";
+  }
+
+  function compareRows(a, b, type) {
+    var va = cellValue(a, sortCol);
+    var vb = cellValue(b, sortCol);
+    if (isEmpty(va) && isEmpty(vb)) return 0;
+    if (isEmpty(va)) return 1;
+    if (isEmpty(vb)) return -1;
+    var cmp;
+    if (type === "num") {
+      cmp = parseFloat(va) - parseFloat(vb);
+      if (isNaN(cmp)) cmp = 0;
+    } else {
+      cmp = va.localeCompare(vb, undefined, { numeric: true, sensitivity: "base" });
+    }
+    return sortAsc ? cmp : -cmp;
+  }
+
+  headers.forEach(function (th, col) {
+    if (th.classList.contains("no-sort")) return;
+    th.classList.add("sortable");
+    th.setAttribute("tabindex", "0");
+    th.setAttribute("role", "columnheader");
+    th.setAttribute("title", "點選排序");
+
+    function sortByColumn() {
+      var type = th.getAttribute("data-type") || "text";
+      if (sortCol === col) {
+        sortAsc = !sortAsc;
+      } else {
+        sortCol = col;
+        sortAsc = true;
+      }
+      headers.forEach(function (header) {
+        header.removeAttribute("aria-sort");
+      });
+      th.setAttribute("aria-sort", sortAsc ? "ascending" : "descending");
+      var rows = Array.prototype.slice.call(tbody.rows);
+      rows.sort(function (a, b) { return compareRows(a, b, type); });
+      rows.forEach(function (row) { tbody.appendChild(row); });
+    }
+
+    th.addEventListener("click", sortByColumn);
+    th.addEventListener("keydown", function (event) {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        sortByColumn();
+      }
+    });
+  });
+
+  function updateIntroCount() {
+    var intro = document.querySelector("p.intro");
+    if (!intro) return;
+    var count = tbody.rows.length;
+    intro.textContent = "共 " + count + " 筆報告。點選執行名稱開啟步驟紀錄；點選欄位標題可排序；垃圾桶可刪除整份報告資料夾。";
+  }
+
+  Array.prototype.slice.call(document.querySelectorAll("button.delete-run")).forEach(function (btn) {
+    btn.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      var runId = btn.getAttribute("data-run-id") || "";
+      if (!runId) return;
+      var label = btn.getAttribute("data-run-label") || runId;
+      if (!window.confirm("確定刪除報告「" + label + "」？\\n將刪除整個資料夾，且無法復原。")) {
+        return;
+      }
+      if (!window.location.protocol || window.location.protocol === "file:") {
+        window.alert("無法刪除：請從主程式的「報告列表」開啟此頁（需本機服務）。");
+        return;
+      }
+      btn.disabled = true;
+      fetch("/api/runs/" + encodeURIComponent(runId) + "/delete", { method: "POST" })
+        .then(function (response) {
+          return response.json().then(function (payload) {
+            return { ok: response.ok && payload && payload.ok, payload: payload || {}, status: response.status };
+          }).catch(function () {
+            return { ok: false, payload: {}, status: response.status };
+          });
+        })
+        .then(function (result) {
+          if (!result.ok) {
+            var message = (result.payload && result.payload.error) || ("HTTP " + result.status);
+            window.alert("刪除失敗：" + message);
+            btn.disabled = false;
+            return;
+          }
+          var row = btn.closest("tr");
+          if (row && row.parentNode) row.parentNode.removeChild(row);
+          if (!tbody.rows.length) {
+            window.location.reload();
+            return;
+          }
+          updateIntroCount();
+        })
+        .catch(function () {
+          window.alert("無法刪除：請從主程式的「報告列表」開啟此頁（需本機服務）。");
+          btn.disabled = false;
+        });
+    });
+  });
+})();
 """.strip()
 
 
@@ -606,12 +748,25 @@ def _resolve_index_run_datetime(run_root: Path, report: dict[str, Any] | None) -
     return "—"
 
 
+def _sort_attr(value: Any) -> str:
+    """Render a ``data-sort`` attribute for client-side table sorting."""
+    if value is None:
+        return ' data-sort=""'
+    if isinstance(value, float):
+        text = f"{value:.6f}".rstrip("0").rstrip(".")
+    else:
+        text = str(value)
+    return f' data-sort="{escape(text, quote=True)}"'
+
+
 def _render_index_row(run_root: Path) -> str:
     run_id = run_root.name
     href = escape(f"{run_id}/{_HTML_NAME}", quote=True)
     report = _load_run_report(run_root)
-    script_name = escape(_resolve_index_script_name(run_root, report))
-    run_time = escape(_resolve_index_run_datetime(run_root, report))
+    script_name_raw = _resolve_index_script_name(run_root, report)
+    script_name = escape(script_name_raw)
+    run_time_raw = _resolve_index_run_datetime(run_root, report)
+    run_time = escape(run_time_raw)
     run_id_title = escape(run_id, quote=True)
     summary = report.get("summary") if isinstance(report, dict) else None
     if not isinstance(summary, dict):
@@ -627,7 +782,8 @@ def _render_index_row(run_root: Path) -> str:
     tool_count = summary.get("tool_call_count")
     failed_steps = summary.get("failed_step_count")
     failed_tools = summary.get("failed_tool_count")
-    duration = _format_duration_seconds(summary.get("total_duration_seconds"))
+    duration_raw = summary.get("total_duration_seconds")
+    duration = _format_duration_seconds(duration_raw)
 
     failed_step_n = failed_steps if isinstance(failed_steps, int) else 0
     failed_tool_n = failed_tools if isinstance(failed_tools, int) else 0
@@ -644,21 +800,31 @@ def _render_index_row(run_root: Path) -> str:
     def _count_text(value: Any) -> str:
         return escape(str(value)) if isinstance(value, int) else "—"
 
-    fail_text = (
-        f"{failed_step_n} / {failed_tool_n}"
-        if isinstance(failed_steps, int) or isinstance(failed_tools, int)
-        else "—"
+    duration_sort = (
+        float(duration_raw) if isinstance(duration_raw, (int, float)) else None
     )
 
     return (
         "<tr>"
-        f'<td data-label="執行"><a href="{href}" title="{run_id_title}">{script_name}</a></td>'
-        f'<td data-label="時間">{run_time}</td>'
-        f'<td data-label="結束原因">{reason_html}</td>'
-        f'<td data-label="步驟">{_count_text(step_count)}</td>'
-        f'<td data-label="工具">{_count_text(tool_count)}</td>'
-        f'<td data-label="失敗（步驟/工具）">{escape(fail_text)}</td>'
-        f'<td data-label="耗時">{escape(duration)}</td>'
+        f'<td data-label="執行"{_sort_attr(script_name_raw)}>'
+        f'<a href="{href}" title="{run_id_title}">{script_name}</a></td>'
+        f'<td data-label="時間"{_sort_attr(run_time_raw)}>{run_time}</td>'
+        f'<td data-label="結束原因"{_sort_attr(reason or "")}>{reason_html}</td>'
+        f'<td data-label="步驟"{_sort_attr(step_count if isinstance(step_count, int) else None)}>'
+        f"{_count_text(step_count)}</td>"
+        f'<td data-label="工具"{_sort_attr(tool_count if isinstance(tool_count, int) else None)}>'
+        f"{_count_text(tool_count)}</td>"
+        f'<td data-label="失敗步驟"'
+        f'{_sort_attr(failed_steps if isinstance(failed_steps, int) else None)}>'
+        f"{_count_text(failed_steps)}</td>"
+        f'<td data-label="失敗工具"'
+        f'{_sort_attr(failed_tools if isinstance(failed_tools, int) else None)}>'
+        f"{_count_text(failed_tools)}</td>"
+        f'<td data-label="耗時"{_sort_attr(duration_sort)}>{escape(duration)}</td>'
+        f'<td data-label="操作" class="actions" data-sort="">'
+        f'<button type="button" class="delete-run" data-run-id="{run_id_title}" '
+        f'data-run-label="{escape(script_name_raw, quote=True)}" '
+        f'title="刪除報告" aria-label="刪除報告 {run_id_title}">🗑</button></td>'
         "</tr>"
     )
 
@@ -685,16 +851,32 @@ def write_runs_index_html(runs_root: Path) -> Path:
         body = (
             '<table class="reports">'
             "<thead><tr>"
-            "<th>執行</th><th>時間</th><th>結束原因</th><th>步驟</th><th>工具</th>"
-            "<th>失敗（步驟/工具）</th><th>耗時</th>"
+            '<th data-type="text">執行</th>'
+            '<th data-type="text">時間</th>'
+            '<th data-type="text">結束原因</th>'
+            '<th data-type="num">步驟</th>'
+            '<th data-type="num">工具</th>'
+            '<th data-type="num">失敗步驟</th>'
+            '<th data-type="num">失敗工具</th>'
+            '<th data-type="num">耗時</th>'
+            '<th class="no-sort">操作</th>'
             "</tr></thead>"
             f"<tbody>{rows}</tbody>"
             "</table>"
         )
+        script = f"<script>\n{_INDEX_SCRIPT}\n</script>\n"
     else:
         body = '<p class="empty">尚無報告。完成一次執行後，報告會出現在此列表。</p>'
+        script = ""
 
     title = "工作階段報告列表"
+    if run_dirs:
+        intro = (
+            f"共 {len(run_dirs)} 筆報告。點選執行名稱開啟步驟紀錄；"
+            "點選欄位標題可排序；垃圾桶可刪除整份報告資料夾。"
+        )
+    else:
+        intro = "共 0 筆報告。完成一次執行後，報告會出現在此列表。"
     html = (
         "<!DOCTYPE html>\n"
         '<html lang="zh-Hant">\n<head>\n'
@@ -704,8 +886,9 @@ def write_runs_index_html(runs_root: Path) -> Path:
         f"<style>\n{_INDEX_STYLE}\n</style>\n"
         "</head>\n<body>\n"
         f"<h1>{escape(title)}</h1>\n"
-        f'<p class="intro">共 {len(run_dirs)} 筆報告。點選執行名稱開啟步驟紀錄。</p>\n'
+        f'<p class="intro">{intro}</p>\n'
         f"{body}\n"
+        f"{script}"
         "</body>\n</html>\n"
     )
 

@@ -35,6 +35,7 @@ from src.common.run_control import (
 )
 from src.common.run_state import get_run_state_manager, unique_run_folder_name
 from src.common.session_html import write_runs_index_html
+from src.common.runs_report_server import ensure_runs_report_server, stop_runs_report_server
 from src.common.session_report import should_write_session_report, write_session_report
 from src.common.runtime_command_dialog import (
     RuntimeCommandHubBridge,
@@ -872,9 +873,21 @@ class MainHub(ctk.CTk):
             show_ctk_message(self, "報告", f"找不到報告檔案：\n{html_path}", kind="error")
             return
         try:
-            webbrowser.open(html_path.resolve().as_uri())
+            url = self._report_http_url(html_path)
+            webbrowser.open(url)
         except Exception as e:
             show_ctk_message(self, "報告", f"無法開啟報告：\n{e}", kind="error")
+
+    def _report_http_url(self, html_path: Path) -> str:
+        """Serve reports over localhost so the index page can delete run folders."""
+        runs_root = Path(load_settings().runs_dir).resolve()
+        resolved = html_path.resolve()
+        try:
+            relative = resolved.relative_to(runs_root).as_posix()
+        except ValueError:
+            return resolved.as_uri()
+        server = ensure_runs_report_server(runs_root)
+        return f"{server.base_url}/{relative}"
 
     def _open_last_report(self) -> None:
         if self._last_report_html is None:
@@ -1101,6 +1114,7 @@ class MainHub(ctk.CTk):
         if self._recording_session.is_active():
             self._stop_recording(analyze=False)
         self._recording_hotkey.unregister()
+        stop_runs_report_server()
         self.destroy()
 
     def _hub_ignore_rect(self) -> tuple[int, int, int, int] | None:

@@ -449,8 +449,18 @@ def test_write_runs_index_includes_report_json_summary(tmp_path: Path) -> None:
     assert "completed" in html
     assert ">4<" in html
     assert ">7<" in html
-    assert "1 / 2" in html
+    assert 'data-label="失敗步驟"' in html
+    assert 'data-label="失敗工具"' in html
+    assert 'data-sort="1"' in html
+    assert 'data-sort="2"' in html
     assert "1m 35s" in html
+    assert 'data-type="num"' in html
+    assert 'data-sort="95.4"' in html
+    assert "點選欄位標題可排序" in html
+    assert "sortable" in html
+    assert 'class="delete-run"' in html
+    assert 'data-run-id="task_20260721_130000_000010"' in html
+    assert "/api/runs/" in html
 
 
 def test_write_runs_index_uses_run_log_script_name_when_report_missing(tmp_path: Path) -> None:

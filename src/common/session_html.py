@@ -406,6 +406,43 @@ def _flatten_args_pairs(args: Any, prefix: str = "") -> list[tuple[str, str]]:
     return [("值", str(args))]
 
 
+_INSTRUCTION_ARG_KEYS = frozenset(
+    {"instruction", "start_instruction", "destination_instruction"}
+)
+_INSTRUCTION_ARG_LABELS = {
+    "instruction": "指令",
+    "start_instruction": "起點指令",
+    "destination_instruction": "終點指令",
+}
+
+
+def _instruction_meta_pairs(args: Any) -> list[tuple[str, str]]:
+    """Return ``(label, value)`` pairs for instruction fields stored in tool args."""
+    if not isinstance(args, dict):
+        return []
+
+    pairs: list[tuple[str, str]] = []
+    for key in ("instruction", "start_instruction", "destination_instruction"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            pairs.append((_INSTRUCTION_ARG_LABELS[key], value.strip()))
+    return pairs
+
+
+def _args_without_instructions(args: Any) -> Any:
+    if not isinstance(args, dict):
+        return args
+    return {key: value for key, value in args.items() if key not in _INSTRUCTION_ARG_KEYS}
+
+
+def _render_instruction_meta_html(pairs: list[tuple[str, str]]) -> str:
+    if not pairs:
+        return ""
+    return "".join(
+        f"<dt>{escape(label)}</dt><dd>{escape(value)}</dd>" for label, value in pairs
+    )
+
+
 def _render_args_html(args: dict[str, Any] | Any) -> str:
     """Render args as a key/value table inside a collapsed ``<details>`` block."""
     pairs = _flatten_args_pairs(args)
@@ -651,6 +688,7 @@ def _render_hand_operation_html(*, run_root: Path, operation: dict[str, Any]) ->
     action_label = escape(f"{_HAND_OP_PREFIX}{operation_number}：{action}")
     time_text = escape(_timestamp_text(timestamp)) or "—"
     message_text = escape(message or "（無）")
+    instruction_meta = _render_instruction_meta_html(_instruction_meta_pairs(args))
 
     shots = _render_shot_html("動作前截圖", before, run_root) + _render_shot_html(
         "動作後截圖", after, run_root
@@ -663,11 +701,12 @@ def _render_hand_operation_html(*, run_root: Path, operation: dict[str, Any]) ->
         f'<span class="badge {status_class}">{status_label}</span>'
         f"</div>"
         f'<div class="meta"><dl>'
+        f"{instruction_meta}"
         f"<dt>狀態</dt><dd><span class=\"badge {status_class}\">{status_label}</span></dd>"
         f"<dt>時間</dt><dd>{time_text}</dd>"
         f"<dt>訊息</dt><dd>{message_text}</dd>"
         f"</dl></div>"
-        f"{_render_args_html(args)}"
+        f"{_render_args_html(_args_without_instructions(args))}"
         f'<div class="shots">{shots}</div>'
         f"</li>"
     )

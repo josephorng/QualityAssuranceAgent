@@ -234,7 +234,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Window state change detected (if any):\n{window_change_hint}\n\n"
                 "Vision hints (screenshot pixels):\n"
                 "Click location: [{cursor_x},{cursor_y}]\n"
-                "Input field context:\n{field_context}\n"
+                "Field context (input / scrollbar):\n{field_context}\n"
                 "Eight UI candidates nearest the click (closest first):\n"
                 "Each row has class=文字(Text)|元素(Element)|輸入欄(Input)|滾動條(Scrollbar). "
                 "文字 may include text='...' OCR; 元素 uses icons=Chinese icon labels only "
@@ -242,7 +242,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "{candidate_text}\n\n"
                 "Drag destination vision (when kind=drag):\n"
                 "Destination location: [{destination_x},{destination_y}]\n"
-                "Destination field context:\n{destination_field_context}\n"
+                "Destination field context (input / scrollbar):\n{destination_field_context}\n"
                 "Eight UI candidates nearest the destination (closest first):\n\n"
                 "{destination_candidate_text}\n\n"
                 "Click/destination offset from cursor relative to each candidate center "
@@ -252,8 +252,9 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "instructions": [
                 "Write one concise instruction in Traditional Chinese when possible, matching hub script style.",
                 "Use the nearest matching candidate row to name the target (OCR text and/or icon labels).",
-                "When Input field context shows visible text inside an 輸入欄(Input), name the target with that text plus 輸入欄, e.g. 將滑鼠移到「間間Gemini」文字所在的輸入欄. When the nearest candidate is an empty 輸入欄(Input) with no visible OCR text, name it as 輸入欄 (do not fall back to a nearby icon or text).",
-                "For pointer clicks (click, double_click, right_click, middle_click): return only the move-target portion starting with 將滑鼠移到. Do not include nearby comments or the trailing action phrase; post-processing adds those. If the click is on the anchor, e.g. 將滑鼠移到「Submit」按鈕, 將滑鼠移到「間間Gemini」文字所在的輸入欄, or 將滑鼠移到輸入欄. If the click is off the anchor, append the relative pixel offset from the offset hints, e.g. 將滑鼠移到「自訂Office 範本」文字下方39個像素的位置. Use the exact pixel counts from the hints. Do not use vague 附近 for the primary target when an offset is available.",
+                "When field context shows visible text inside an 輸入欄(Input), name the target with that text plus 輸入欄, e.g. 將滑鼠移到「間間Gemini」文字所在的輸入欄. When the nearest candidate is an empty 輸入欄(Input) with no visible OCR text, name it as 輸入欄 (do not fall back to a nearby icon or text).",
+                "When field context shows scrollable content beside a 滾動條(Scrollbar), name the target with that content plus 滾動條, e.g. 將滑鼠移到「資產總覽」文字區域的滾動條. When the nearest candidate is a 滾動條(Scrollbar) with no adjacent content label, name it as 滾動條 (do not fall back to a nearby icon or text).",
+                "For pointer clicks (click, double_click, right_click, middle_click): return only the move-target portion starting with 將滑鼠移到. Do not include nearby comments or the trailing action phrase; post-processing adds those. If the click is on the anchor, e.g. 將滑鼠移到「Submit」按鈕, 將滑鼠移到「間間Gemini」文字所在的輸入欄, 將滑鼠移到輸入欄, 將滑鼠移到「資產總覽」文字區域的滾動條, or 將滑鼠移到滾動條. If the click is off the anchor, append the relative pixel offset from the offset hints, e.g. 將滑鼠移到「自訂Office 範本」文字下方39個像素的位置. Use the exact pixel counts from the hints. Do not use vague 附近 for the primary target when an offset is available.",
                 "For drag events: name the start target and destination anchor from candidates. Append the relative pixel offset from the offset hints to the destination anchor, e.g. 從「Chrome」圖示拖到「Desktop」文字下方49個像素的位置. Use the exact pixel counts from the hints for the anchor you name. If offset is negligible, omit it. If destination candidates are empty, describe the drop area directionally (e.g. 右側空白區域).",
                 "For scroll: describe direction and target area, e.g. 在檔案清單區域向下捲動.",
                 "For special keys: e.g. 按下 Enter 鍵.",

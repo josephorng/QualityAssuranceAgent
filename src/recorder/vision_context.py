@@ -128,28 +128,79 @@ def _destination_target_at_point(
     return min(hits, key=lambda det: det.bbox[2] * det.bbox[3])
 
 
-def format_field_context_hint(
-    vision: dict[str, Any],
-    *,
-    typed_text: str | None = None,
-) -> str:
-    """Summarize visible text inside the nearest YOLO Input candidate for LLM naming."""
-    candidates = vision.get("candidates") or []
-    inputs = [c for c in candidates if c.get("class_name") == "input"]
-    if not inputs:
-        if typed_text and typed_text.strip():
-            return f"Typed text: {typed_text.strip()!r}"
-        return "(none)"
-
-    local = vision.get("local_cursor")
-    if isinstance(local, (list, tuple)) and len(local) == 2:
-        lx, ly = int(local[0]), int(local[1])
-        inp = min(
-            inputs,
+def _nearest_candidate_by_class(
+    candidates: list[dict[str, Any]],
+    class_name: str,
+    local: tuple[int, int] | None,
+) -> dict[str, Any] | None:
+    """Return the nearest candidate with ``class_name``, or the first when no cursor."""
+    matches = [c for c in candidates if c.get("class_name") == class_name]
+    if not matches:
+        return None
+    if local is not None:
+        lx, ly = local
+        return min(
+            matches,
             key=lambda c: _point_to_bbox_distance_sq(lx, ly, tuple(c["bbox"])),
         )
-    else:
-        inp = inputs[0]
+    return matches[0]
+
+
+def _candidate_meaningful_content_label(candidate: dict[str, Any]) -> str | None:
+    """Return OCR text or the first icon label from a candidate, when meaningful."""
+    text = _visible_text(candidate.get("text"))
+    if text:
+        return text
+    for icon in candidate.get("icons") or []:
+        if not isinstance(icon, dict):
+            continue
+        label = str(icon.get("chinese_id") or icon.get("id") or "").strip()
+        if label:
+            return label
+    return None
+
+
+def _scrollbar_content_region(
+    scrollbar_bbox: tuple[int, int, int, int],
+) -> tuple[int, int, int, int]:
+    """Expand a scrollbar bbox toward its scrollable content (left or above)."""
+    x, y, w, h = scrollbar_bbox
+    if h >= w:
+        expand = min(max(w * 4, 120), 480)
+        return max(0, x - expand), y, expand, h
+    expand = min(max(h * 4, 120), 480)
+    return x, max(0, y - expand), w, expand
+
+
+def _scrollbar_adjacent_content_labels(
+    candidates: list[dict[str, Any]],
+    scrollbar_bbox: tuple[int, int, int, int],
+) -> list[str]:
+    """Return visible labels from text/element candidates beside a scrollbar."""
+    region = _scrollbar_content_region(scrollbar_bbox)
+    labels: list[str] = []
+    for candidate in candidates:
+        class_name = candidate.get("class_name")
+        if class_name not in ("text", "element"):
+            continue
+        label = _candidate_meaningful_content_label(candidate)
+        if not label:
+            continue
+        if _bbox_center_inside(region, tuple(candidate["bbox"])) and label not in labels:
+            labels.append(label)
+    return labels
+
+
+def _input_field_context_hint(
+    candidates: list[dict[str, Any]],
+    local: tuple[int, int] | None,
+    *,
+    typed_text: str | None = None,
+) -> str | None:
+    """Summarize visible text inside the nearest input candidate."""
+    inp = _nearest_candidate_by_class(candidates, "input", local)
+    if inp is None:
+        return None
 
     inp_bbox = tuple(inp["bbox"])
     inner_texts: list[str] = []
@@ -170,6 +221,78 @@ def format_field_context_hint(
         return "最近的輸入欄（無 OCR 可見文字）"
 
     return f"輸入欄內可見文字: 「{visible}」"
+
+
+def _scrollbar_field_context_hint(
+    candidates: list[dict[str, Any]],
+    local: tuple[int, int] | None,
+) -> str | None:
+    """Summarize scrollable content beside the nearest scrollbar candidate."""
+    scroll = _nearest_candidate_by_class(candidates, "scrollbar", local)
+    if scroll is None:
+        return None
+
+    adjacent = _scrollbar_adjacent_content_labels(candidates, tuple(scroll["bbox"]))
+    if adjacent:
+        return f"滾動條旁可見內容: 「{adjacent[0]}」"
+    return "最近的滾動條（無可辨識內容）"
+
+
+def format_input_context_hint(
+    vision: dict[str, Any],
+    *,
+    typed_text: str | None = None,
+) -> str | None:
+    """Return an input context line for LLM naming, or None when no input nearby."""
+    candidates = vision.get("candidates") or []
+    local = vision.get("local_cursor")
+    local_xy: tuple[int, int] | None = None
+    if isinstance(local, (list, tuple)) and len(local) == 2:
+        local_xy = int(local[0]), int(local[1])
+    return _input_field_context_hint(candidates, local_xy, typed_text=typed_text)
+
+
+def format_scrollbar_context_hint(vision: dict[str, Any]) -> str | None:
+    """Return a scrollbar context line for LLM naming, or None when no scrollbar nearby."""
+    candidates = vision.get("candidates") or []
+    local = vision.get("local_cursor")
+    local_xy: tuple[int, int] | None = None
+    if isinstance(local, (list, tuple)) and len(local) == 2:
+        local_xy = int(local[0]), int(local[1])
+    return _scrollbar_field_context_hint(candidates, local_xy)
+
+
+def format_field_context_hint(
+    vision: dict[str, Any],
+    *,
+    typed_text: str | None = None,
+) -> str:
+    """Summarize the nearest input or scrollbar context for LLM naming."""
+    candidates = vision.get("candidates") or []
+    local = vision.get("local_cursor")
+    local_xy: tuple[int, int] | None = None
+    if isinstance(local, (list, tuple)) and len(local) == 2:
+        local_xy = int(local[0]), int(local[1])
+
+    input_hint = _input_field_context_hint(candidates, local_xy, typed_text=typed_text)
+    scroll_hint = _scrollbar_field_context_hint(candidates, local_xy)
+
+    if input_hint and scroll_hint and local_xy is not None:
+        lx, ly = local_xy
+        inp = _nearest_candidate_by_class(candidates, "input", local_xy)
+        scroll = _nearest_candidate_by_class(candidates, "scrollbar", local_xy)
+        if inp is not None and scroll is not None:
+            d_input = _point_to_bbox_distance_sq(lx, ly, tuple(inp["bbox"]))
+            d_scroll = _point_to_bbox_distance_sq(lx, ly, tuple(scroll["bbox"]))
+            return input_hint if d_input <= d_scroll else scroll_hint
+
+    if input_hint:
+        return input_hint
+    if scroll_hint:
+        return scroll_hint
+    if typed_text and typed_text.strip():
+        return f"Typed text: {typed_text.strip()!r}"
+    return "(none)"
 
 
 def format_drag_relative_offset_phrase(dx: int, dy: int) -> str | None:
@@ -253,11 +376,15 @@ def format_drag_candidate_anchor(candidate: dict[str, Any]) -> str | None:
 
 def _candidate_label_for_hint(candidate: dict[str, Any]) -> str | None:
     """Return a hub-style label for a nearby-context hint, or None if not meaningful."""
+    if str(candidate.get("class_name") or "").strip() == "unknown":
+        return None
     anchor = format_drag_candidate_anchor(candidate)
     if anchor is None:
         return None
     generic_only = {"文字", "元素", "未知", "輸入欄", "按鈕", "滾動條"}
     if anchor in generic_only:
+        return None
+    if anchor.endswith("未知"):
         return None
     return anchor
 

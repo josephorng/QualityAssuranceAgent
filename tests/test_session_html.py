@@ -119,7 +119,7 @@ def test_write_session_html_renders_all_steps(tmp_path: Path) -> None:
     assert "手部動作" in html
     assert html.count('<details class="args"><summary>參數</summary>') == 2
     assert "<th>button</th><td>left</td>" in html
-    assert "<th>instruction</th><td>搜尋欄</td>" in html
+    assert "<dt>指令</dt><dd>搜尋欄</dd>" in html
     assert "<th>text</th><td>hello</td>" in html
     assert "<details open" not in html
     assert "成功" in html
@@ -221,7 +221,9 @@ def test_write_session_html_shows_instruction_above_status(tmp_path: Path) -> No
 
     html = write_session_html_from_run(run_root).read_text(encoding="utf-8")
 
-    assert "<th>instruction</th><td>點擊「搜尋」欄位</td>" in html
+    assert "<dt>指令</dt><dd>點擊「搜尋」欄位</dd>" in html
+    assert html.index("點擊「搜尋」欄位") < html.index("<dt>狀態</dt>")
+    assert "<th>instruction</th>" not in html
     assert "動作 1：click" in html
 
 
@@ -245,7 +247,7 @@ def test_write_session_html_omits_instruction_when_absent(tmp_path: Path) -> Non
 
     html = write_session_html_from_run(run_root).read_text(encoding="utf-8")
 
-    assert "<th>instruction</th>" not in html
+    assert "<dt>指令</dt>" not in html
 
 
 def test_write_session_html_formats_timestamp(tmp_path: Path) -> None:

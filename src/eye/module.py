@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from src.common.models import EyeEvent
 from src.common.monitor_prompt import selected_eye_monitor_indices
 from src.common.run_state import get_run_state_manager, ts_name
@@ -55,19 +57,23 @@ class EyeModule:
         )
         return img
 
+    def _capture_selected_monitors_to_file(self, image_path: Path) -> None:
+        """Write one eye screenshot respecting the user's monitor selection."""
+        monitor_indices = selected_eye_monitor_indices(self.active_monitor_index)
+        if len(monitor_indices) > 1:
+            capture_all_screens_to_file(image_path)
+            return
+        self.active_monitor_index = capture_monitor_to_file(
+            dest=image_path,
+            monitor_index=monitor_indices[0],
+            include_cursor=True,
+        )
+
     async def capture_once(self) -> EyeEvent:
         paths = self.manager.require_paths()
         image_name = f"{ts_name()}.png"
         image_path = paths.eye_dir / image_name
-        monitor_indices = selected_eye_monitor_indices(self.active_monitor_index)
-        if len(monitor_indices) > 1:
-            capture_all_screens_to_file(image_path)
-        else:
-            self.active_monitor_index = capture_monitor_to_file(
-                dest=image_path,
-                monitor_index=monitor_indices[0],
-                include_cursor=True,
-            )
+        self._capture_selected_monitors_to_file(image_path)
         event = EyeEvent(
             screenshot_name=image_name,
             screenshot_path=str(image_path),
@@ -78,14 +84,15 @@ class EyeModule:
 
     async def capture_separated_images(self) -> list[str]:
         """
-        Capture one combined screenshot of all monitors for the Brain and return its path.
+        Capture screenshot(s) for the Brain matching the user's monitor selection.
 
-        Per-monitor images are only written for YOLO/OCR (see ``yolo_ocr/``).
+        One physical monitor → single-monitor image; multiple selected → combined
+        virtual desktop. Per-monitor YOLO/OCR images are written separately (``yolo_ocr/``).
         """
         paths = self.manager.require_paths()
         image_name = f"{ts_name()}.png"
         image_path = paths.eye_dir / image_name
-        capture_all_screens_to_file(image_path)
-        self.manager.log_info(f"Eye captured combined screenshot {image_name}")
+        self._capture_selected_monitors_to_file(image_path)
+        self.manager.log_info(f"Eye captured brain screenshot {image_name}")
         return [str(image_path)]
 

@@ -55,6 +55,29 @@ def test_collect_nearby_hint_labels_skips_primary_and_instruction_duplicates() -
     assert labels == ["「OneNote」文字", "「Docker」圖示"]
 
 
+def test_collect_nearby_hint_labels_skips_unknown_class() -> None:
+    vision = {
+        "used_vision": True,
+        "candidates": [
+            {
+                "class_name": "element",
+                "text": "chrome",
+                "icons": [{"chinese_id": "Chrome"}],
+            },
+            {"class_name": "unknown", "text": "v"},
+            {"class_name": "text", "text": "OneNote"},
+            {
+                "class_name": "element",
+                "text": "docker",
+                "icons": [{"chinese_id": "Docker"}],
+            },
+        ],
+    }
+    labels = collect_nearby_hint_labels(vision, instruction="點擊「Chrome」圖示")
+    assert labels == ["「OneNote」文字", "「Docker」圖示"]
+    assert not any("未知" in label for label in labels)
+
+
 def test_format_nearby_context_comment() -> None:
     assert format_nearby_context_comment(["「OneNote」文字", "「Docker」圖示"]) == (
         "（附近有「OneNote」文字、「Docker」圖示）"
@@ -617,6 +640,91 @@ def test_instruction_for_click_empty_input_field() -> None:
         ],
     }
     assert instruction_for_click(event, vision) == "將滑鼠移到輸入欄"
+
+
+def test_instruction_for_click_scrollbar_with_adjacent_text() -> None:
+    event = RecordedEvent(
+        index=2,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(3611, 358),
+        button="left",
+        screenshot_path="",
+    )
+    vision = {
+        "local_cursor": (3611, 358),
+        "candidates": [
+            {
+                "bbox": [3600, 272, 21, 172],
+                "center": [3611, 358],
+                "class_name": "scrollbar",
+                "text": None,
+            },
+            {
+                "bbox": [3500, 320, 60, 14],
+                "center": [3530, 327],
+                "class_name": "text",
+                "text": "資產總覽",
+            },
+        ],
+    }
+    assert (
+        instruction_for_click(event, vision)
+        == "將滑鼠移到「資產總覽」文字區域的滾動條"
+    )
+
+
+def test_instruction_for_click_empty_scrollbar() -> None:
+    event = RecordedEvent(
+        index=3,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(2115, 577),
+        button="left",
+        screenshot_path="",
+    )
+    vision = {
+        "local_cursor": (2115, 577),
+        "candidates": [
+            {
+                "bbox": [2104, 156, 22, 842],
+                "center": [2115, 577],
+                "class_name": "scrollbar",
+                "text": None,
+            },
+            {
+                "bbox": [413, 100, 17, 15],
+                "center": [421, 108],
+                "class_name": "element",
+                "text": None,
+                "icons": [{"chinese_id": "排序或同步"}],
+            },
+        ],
+    }
+    assert instruction_for_click(event, vision) == "將滑鼠移到滾動條"
+
+
+def test_instruction_for_scroll_on_scrollbar() -> None:
+    event = RecordedEvent(
+        index=4,
+        timestamp_utc="t",
+        kind="scroll",
+        cursor_xy=(2115, 577),
+        scroll_delta=-3,
+        screenshot_path="",
+    )
+    vision = {
+        "local_cursor": (2115, 577),
+        "candidates": [
+            {
+                "bbox": [2104, 156, 22, 842],
+                "center": [2115, 577],
+                "class_name": "scrollbar",
+                "text": None,
+            },
+        ],
+    }
+    assert instruction_for_scroll(event, vision) == "在滾動條附近向下捲動"
 
 
 def test_instruction_for_click_returns_none_for_generic_anchor() -> None:

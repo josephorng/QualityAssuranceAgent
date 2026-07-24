@@ -24,15 +24,11 @@ from cua_mcp.read_screen_text.ocr_image import _ocr_boxes_on_bgr
 from cua_mcp.select_ui_element import (
     UiDetection,
     _ANCHOR_SUFFIX_BY_CLASS,
-    _MOUSE_FILTER_JSON_SCHEMA,
     _assign_exclusive_neighbors_to_anchors,
-    _detection_anchor_label,
     _format_ui_candidates_text,
-    _parse_anchor_nearby_indices_from_llm,
     _select_center_with_ollama,
     _sort_detections_reading_order,
 )
-from cua_mcp.selection_engine import request_json_with_retry
 from cua_mcp.yolo_onnx import (
     DEFAULT_CONF_YOLOV26_END2END,
     MOUSE_TARGET_CLASS_IDS,
@@ -43,7 +39,6 @@ from cua_mcp.yolo_onnx import (
     run_yolo_onnx_end2end,
 )
 from src.common.monitor_prompt import selected_eye_monitor_indices
-from src.common.prompting import get_prompt
 from src.common.run_state import RunStateManager, get_run_state_manager, ts_name
 from src.eye.capture import active_monitor_offset, capture_monitor_to_file
 
@@ -316,7 +311,7 @@ def _expand_keep_indices_with_similar(
     keep_indices: list[int],
 ) -> list[int]:
     """
-    Expand LLM ``keep_indices`` with every detection that shares a text/icon label.
+    Expand ``keep_indices`` with every detection that shares a text/icon label.
 
     If the model keeps one ``圖片`` text row, also keep other ``圖片`` text rows and
     element rows whose icon label is ``圖片``. Blank detections (no text/icons) are
@@ -414,18 +409,30 @@ def _detection_similarity_to_query(det: UiDetection, query: str) -> float:
 
 
 # Minimum SequenceMatcher score to keep a candidate before the LLM filter.
-_MOUSE_FILTER_SIMILARITY_THRESHOLD = 0.5
+_MOUSE_FILTER_SIMILARITY_THRESHOLD = 0.75
 
 
-def _detection_max_similarity_to_queries(
-    det: UiDetection,
-    queries: list[str],
-) -> float:
-    """Best similarity between ``det`` and any non-blank query in ``queries``."""
-    return max(
-        (_detection_similarity_to_query(det, q) for q in queries if (q or "").strip()),
-        default=0.0,
-    )
+def _anchor_indices_by_top_similarity(
+    detections: list[UiDetection],
+    anchor: str,
+    *,
+    threshold: float = _MOUSE_FILTER_SIMILARITY_THRESHOLD,
+) -> list[int]:
+    """Keep detections whose anchor similarity equals the best score (ties only).
+
+    Returns an empty list when the best score is below ``threshold``.
+    """
+    if not detections or not (anchor or "").strip():
+        return []
+
+    scored: list[tuple[int, float]] = [
+        (i, _detection_similarity_to_query(det, anchor))
+        for i, det in enumerate(detections)
+    ]
+    best = max(score for _, score in scored)
+    if best < threshold:
+        return []
+    return [i for i, score in scored if score == best]
 
 
 def _prefilter_detections_by_similarity(
@@ -434,127 +441,60 @@ def _prefilter_detections_by_similarity(
     nearby: list[str],
     *,
     threshold: float = _MOUSE_FILTER_SIMILARITY_THRESHOLD,
-) -> list[UiDetection]:
-    """Keep detections whose best score vs anchor/nearby is ``>= threshold``."""
-    queries = [anchor, *nearby]
-    return [
-        det
-        for det in detections
-        if _detection_max_similarity_to_queries(det, queries) >= threshold
-    ]
+) -> tuple[list[int], list[int]]:
+    """Return anchor/nearby index buckets using string similarity per query.
 
+    Anchor detections use the highest similarity score only; lower-scoring
+    partial matches are dropped unless they tie for first. Nearby buckets are
+    filled by testing each nearby label independently at ``threshold``. Indices
+    that match the anchor are excluded from nearby (anchor wins).
+    """
+    anchor_indices = _anchor_indices_by_top_similarity(
+        detections, anchor, threshold=threshold
+    )
+    anchor_set = set(anchor_indices)
 
-def _best_matching_index(detections: list[UiDetection], query: str) -> int | None:
-    """Index of the detection most similar to ``query``, or None when query is blank."""
-    query = (query or "").strip()
-    if not query or not detections:
-        return None
-    best_idx = 0
-    best_score = _detection_similarity_to_query(detections[0], query)
-    for i in range(1, len(detections)):
-        score = _detection_similarity_to_query(detections[i], query)
-        if score > best_score:
-            best_idx = i
-            best_score = score
-    return best_idx
-
-
-def _fallback_filter_by_similarity(
-    detections: list[UiDetection],
-    anchor: str,
-    nearby: list[str],
-) -> tuple[list[UiDetection], list[UiDetection]]:
-    """Return ``(anchor_matches, nearby_matches)`` via string similarity."""
-    if not detections:
-        return [], []
-
-    anchor_matches: list[UiDetection] = []
-    nearby_matches: list[UiDetection] = []
-    seen: set[int] = set()
-
-    anchor_idx = _best_matching_index(detections, anchor)
-    if anchor_idx is not None:
-        seen.add(anchor_idx)
-        anchor_matches.append(detections[anchor_idx])
-        _log_info(
-            "_filter_mouse_candidates: similarity fallback "
-            f"query={anchor!r} index={anchor_idx} "
-            f"label={_detection_anchor_label(detections[anchor_idx])!r} "
-            f"score={_detection_similarity_to_query(detections[anchor_idx], anchor):.3f} "
-            f"bucket=anchor"
-        )
-
+    nearby_indices: list[int] = []
+    nearby_seen: set[int] = set()
     for query in nearby:
         if not (query or "").strip():
             continue
-        idx = _best_matching_index(detections, query)
-        if idx is None or idx in seen:
-            continue
-        seen.add(idx)
-        nearby_matches.append(detections[idx])
-        _log_info(
-            "_filter_mouse_candidates: similarity fallback "
-            f"query={query!r} index={idx} "
-            f"label={_detection_anchor_label(detections[idx])!r} "
-            f"score={_detection_similarity_to_query(detections[idx], query):.3f} "
-            f"bucket=nearby"
-        )
-    return anchor_matches, nearby_matches
+        for i, det in enumerate(detections):
+            if i in anchor_set or i in nearby_seen:
+                continue
+            if _detection_similarity_to_query(det, query) >= threshold:
+                nearby_indices.append(i)
+                nearby_seen.add(i)
+
+    return anchor_indices, nearby_indices
 
 
-async def _filter_mouse_candidates(
+def _filter_mouse_candidates(
     detections: list[UiDetection],
     anchor: str,
     nearby: list[str],
 ) -> tuple[list[UiDetection], list[UiDetection]]:
-    """Ask Ollama which candidates match the anchor vs nearby labels.
-
-    Candidates are first narrowed by string similarity (``>= 0.5`` vs anchor or
-    any nearby label). Only that shortlist is sent to the LLM. When the
-    prefilter is empty, return no matches (target not found). On LLM failure,
-    fall back to similarity matching for each bucket.
-    """
+    """Split detections into anchor vs nearby buckets via string similarity."""
     if not detections:
         return [], []
 
-    prefiltered = _prefilter_detections_by_similarity(detections, anchor, nearby)
-    _run_manager().log_info(
-        "_filter_mouse_candidates: similarity prefilter "
-        f"threshold={_MOUSE_FILTER_SIMILARITY_THRESHOLD} "
-        f"before={len(detections)} after={len(prefiltered)}"
+    anchor_indices, nearby_indices = _prefilter_detections_by_similarity(
+        detections, anchor, nearby
     )
-    if not prefiltered:
-        _run_manager().log_info(
-            "_filter_mouse_candidates: prefilter empty; returning not found"
+    _log_info(
+        "_filter_mouse_candidates: similarity split "
+        f"threshold={_MOUSE_FILTER_SIMILARITY_THRESHOLD} "
+        f"detections={len(detections)} anchor={len(anchor_indices)} "
+        f"nearby={len(nearby_indices)}"
+    )
+    if not anchor_indices and not nearby_indices:
+        _log_info(
+            "_filter_mouse_candidates: no similarity matches; returning not found"
         )
         return [], []
 
-    nearby_text = ", ".join(label.strip() for label in nearby if label.strip()) or "(none)"
-    candidates_text = _format_ui_candidates_text(prefiltered, include_geometry=False)
-    prompt = get_prompt("mouse_target_filter").format(
-        anchor=anchor,
-        nearby_text=nearby_text,
-        candidates_text=candidates_text,
-    )
-    messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
-    try:
-        anchor_indices, nearby_indices = await request_json_with_retry(
-            messages=messages,
-            response_schema=_MOUSE_FILTER_JSON_SCHEMA,
-            parse_reply=lambda raw: _parse_anchor_nearby_indices_from_llm(
-                raw, len(prefiltered)
-            ),
-            retry_instruction=get_prompt("mouse_target_filter_retry"),
-            log_info=lambda m: _run_manager().log_info(f"_filter_mouse_candidates: {m}"),
-        )
-    except ValueError as retry_exc:
-        _run_manager().log_info(
-            f"_filter_mouse_candidates: fallback similarity match ({retry_exc})"
-        )
-        return _fallback_filter_by_similarity(detections, anchor, nearby)
-
-    anchor_expanded = _expand_keep_indices_with_similar(prefiltered, anchor_indices)
-    nearby_expanded = _expand_keep_indices_with_similar(prefiltered, nearby_indices)
+    anchor_expanded = _expand_keep_indices_with_similar(detections, anchor_indices)
+    nearby_expanded = _expand_keep_indices_with_similar(detections, nearby_indices)
     expanded_nearby_count = len(nearby_expanded)
     anchor_set = set(anchor_expanded)
     nearby_expanded = [i for i in nearby_expanded if i not in anchor_set]
@@ -563,16 +503,16 @@ async def _filter_mouse_candidates(
         len(anchor_expanded) != len(anchor_indices)
         or expanded_nearby_count != len(nearby_indices)
     ):
-        _run_manager().log_info(
+        _log_info(
             "_filter_mouse_candidates: expanded similar "
-            f"llm_anchor={len(anchor_indices)} after_expand_anchor={len(anchor_expanded)} "
-            f"llm_nearby={len(nearby_indices)} after_expand_nearby={expanded_nearby_count} "
+            f"anchor={len(anchor_indices)} after_expand_anchor={len(anchor_expanded)} "
+            f"nearby={len(nearby_indices)} after_expand_nearby={expanded_nearby_count} "
             f"nearby_after_dedupe={len(nearby_expanded)}"
         )
 
     return (
-        [prefiltered[i] for i in anchor_expanded],
-        [prefiltered[i] for i in nearby_expanded],
+        [detections[i] for i in anchor_expanded],
+        [detections[i] for i in nearby_expanded],
     )
 
 
@@ -762,7 +702,7 @@ async def find_mouse_point(
         _log_info("move_mouse: no YOLO candidates found on selected monitor(s)")
         return None
 
-    anchor_matches, nearby_matches = await _filter_mouse_candidates(
+    anchor_matches, nearby_matches = _filter_mouse_candidates(
         detections, anchor, nearby
     )
     _log_info(

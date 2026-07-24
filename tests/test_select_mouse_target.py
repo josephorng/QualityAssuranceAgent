@@ -65,7 +65,7 @@ async def test_resolve_mouse_point_merges_nearby_objects(monkeypatch: pytest.Mon
         assert "資料夾" in instruction
         return "「資料夾」圖示", 0, 0, ["「Chrome」圖示"]
 
-    async def fake_filter(detections, anchor, nearby):
+    def fake_filter(detections, anchor, nearby):
         captured_nearby["labels"] = list(nearby)
         return [detections[0]], []
 
@@ -450,12 +450,68 @@ def test_prefilter_keeps_ocr_near_miss_over_shared_suffix() -> None:
         _detection_from_bbox((50, 0, 30, 15), YOLO_CLASS_TEXT, text="文字文件"),
         _detection_from_bbox((100, 0, 30, 15), YOLO_CLASS_TEXT, text="新增文字文件.txt"),
     ]
-    kept = _prefilter_detections_by_similarity(detections, "「擷取」文字", [])
-    assert [d.text for d in kept] == ["握取"]
+    anchor_indices, nearby_indices = _prefilter_detections_by_similarity(
+        detections, "「擷取」文字", []
+    )
+    assert [detections[i].text for i in anchor_indices] == ["握取"]
+    assert nearby_indices == []
 
 
-def test_fallback_filter_by_similarity_picks_anchor_and_nearby() -> None:
-    from cua_mcp.select_mouse_target import _fallback_filter_by_similarity
+def test_prefilter_matches_ocr_typo_panel_settings() -> None:
+    from cua_mcp.select_mouse_target import _prefilter_detections_by_similarity
+
+    detections = [
+        _detection_from_bbox((0, 0, 51, 12), YOLO_CLASS_TEXT, text="面板設定"),
+        _detection_from_bbox((50, 0, 75, 17), YOLO_CLASS_TEXT, text="管理面板"),
+        _detection_from_bbox(
+            (100, 0, 20, 20), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "螢幕"}]
+        ),
+    ]
+    anchor_indices, nearby_indices = _prefilter_detections_by_similarity(
+        detections,
+        "「面板詢定」文字",
+        ["「W」未知", "「螢幕」圖示"],
+    )
+    assert [detections[i].text for i in anchor_indices] == ["面板設定"]
+    assert [detections[i].class_name for i in nearby_indices] == ["element"]
+
+
+def test_prefilter_keeps_top_anchor_score_excludes_partial_panel_match() -> None:
+    from cua_mcp.select_mouse_target import _prefilter_detections_by_similarity
+
+    detections = [
+        _detection_from_bbox((0, 0, 51, 12), YOLO_CLASS_TEXT, text="面板設定"),
+        _detection_from_bbox((50, 0, 75, 17), YOLO_CLASS_TEXT, text="管理面板"),
+        _detection_from_bbox((100, 0, 53, 12), YOLO_CLASS_TEXT, text="資訊面板"),
+    ]
+    anchor_indices, nearby_indices = _prefilter_detections_by_similarity(
+        detections,
+        "「面板設定」文字",
+        [],
+    )
+    assert [detections[i].text for i in anchor_indices] == ["面板設定"]
+    assert nearby_indices == []
+
+
+def test_prefilter_keeps_tied_top_anchor_scores() -> None:
+    from cua_mcp.select_mouse_target import _prefilter_detections_by_similarity
+
+    detections = [
+        _detection_from_bbox((0, 0, 30, 15), YOLO_CLASS_TEXT, text="Submit"),
+        _detection_from_bbox((50, 0, 30, 15), YOLO_CLASS_TEXT, text="Submit"),
+        _detection_from_bbox((100, 0, 30, 15), YOLO_CLASS_TEXT, text="Cancel"),
+    ]
+    anchor_indices, nearby_indices = _prefilter_detections_by_similarity(
+        detections,
+        "「Submit」文字",
+        [],
+    )
+    assert [detections[i].text for i in anchor_indices] == ["Submit", "Submit"]
+    assert nearby_indices == []
+
+
+def test_filter_mouse_candidates_splits_anchor_and_nearby_by_similarity() -> None:
+    from cua_mcp.select_mouse_target import _filter_mouse_candidates
 
     detections = [
         _detection_from_bbox((0, 0, 30, 15), YOLO_CLASS_TEXT, text="下載"),
@@ -465,7 +521,7 @@ def test_fallback_filter_by_similarity_picks_anchor_and_nearby() -> None:
         ),
         _detection_from_bbox((150, 0, 30, 15), YOLO_CLASS_TEXT, text="圖片"),
     ]
-    anchor_matches, nearby_matches = _fallback_filter_by_similarity(
+    anchor_matches, nearby_matches = _filter_mouse_candidates(
         detections,
         "「文件」文字",
         ["「Chrome」圖示", "「圖片」文字"],
@@ -477,14 +533,14 @@ def test_fallback_filter_by_similarity_picks_anchor_and_nearby() -> None:
     ]
 
 
-def test_fallback_filter_by_similarity_dedupes_same_match() -> None:
-    from cua_mcp.select_mouse_target import _fallback_filter_by_similarity
+def test_filter_mouse_candidates_dedupes_anchor_from_nearby() -> None:
+    from cua_mcp.select_mouse_target import _filter_mouse_candidates
 
     detections = [
         _detection_from_bbox((0, 0, 30, 15), YOLO_CLASS_TEXT, text="文件"),
         _detection_from_bbox((50, 0, 30, 15), YOLO_CLASS_TEXT, text="下載"),
     ]
-    anchor_matches, nearby_matches = _fallback_filter_by_similarity(
+    anchor_matches, nearby_matches = _filter_mouse_candidates(
         detections,
         "「文件」文字",
         ["「文件」文字"],
@@ -513,15 +569,21 @@ def test_prefilter_detections_by_similarity_keeps_anchor_and_nearby() -> None:
         ),
         _detection_from_bbox((250, 0, 30, 15), YOLO_CLASS_TEXT, text="下載"),
     ]
-    kept = _prefilter_detections_by_similarity(
+    anchor_indices, nearby_indices = _prefilter_detections_by_similarity(
         detections,
         "資料夾",
         ["「Edge」圖示", "「Copilot」圖示"],
     )
-    labels = [
-        d.text or (d.icons or [{}])[0].get("chinese_id") for d in kept
+    anchor_labels = [
+        detections[i].text or (detections[i].icons or [{}])[0].get("chinese_id")
+        for i in anchor_indices
     ]
-    assert labels == ["資料夾", "Edge", "Copilot"]
+    nearby_labels = [
+        detections[i].text or (detections[i].icons or [{}])[0].get("chinese_id")
+        for i in nearby_indices
+    ]
+    assert anchor_labels == ["資料夾"]
+    assert nearby_labels == ["Edge", "Copilot"]
 
 
 def test_prefilter_detections_by_similarity_empty_when_no_match() -> None:
@@ -533,18 +595,14 @@ def test_prefilter_detections_by_similarity_empty_when_no_match() -> None:
             (50, 0, 20, 20), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "Chrome"}]
         ),
     ]
-    assert (
-        _prefilter_detections_by_similarity(
-            detections,
-            "資料夾",
-            ["「Edge」圖示"],
-        )
-        == []
-    )
+    assert _prefilter_detections_by_similarity(
+        detections,
+        "資料夾",
+        ["「Edge」圖示"],
+    ) == ([], [])
 
 
-@pytest.mark.asyncio
-async def test_filter_mouse_candidates_empty_prefilter_returns_not_found(
+def test_filter_mouse_candidates_empty_similarity_returns_not_found(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from cua_mcp.select_mouse_target import _filter_mouse_candidates
@@ -566,7 +624,7 @@ async def test_filter_mouse_candidates_empty_prefilter_returns_not_found(
         ),
         _detection_from_bbox((50, 0, 30, 15), YOLO_CLASS_TEXT, text="搜尋聊天和訊息"),
     ]
-    anchor_matches, nearby_matches = await _filter_mouse_candidates(
+    anchor_matches, nearby_matches = _filter_mouse_candidates(
         detections,
         "「我自己」文字",
         [],
@@ -589,21 +647,25 @@ def test_prefilter_detections_by_similarity_keeps_input_and_scrollbar() -> None:
             (300, 0, 20, 20), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "Chrome"}]
         ),
     ]
-    kept = _prefilter_detections_by_similarity(
+    anchor_indices, nearby_indices = _prefilter_detections_by_similarity(
         detections,
         "輸入欄",
         ["「排序」文字", "「向下V箭頭」圖示"],
     )
-    assert [d.class_name for d in kept] == ["input", "text", "element"]
-    assert kept[1].text == "排序"
-    assert (kept[2].icons or [{}])[0].get("chinese_id") == "向下V箭頭"
+    anchor_labels = [detections[i].class_name for i in anchor_indices]
+    nearby_labels = [detections[i].class_name for i in nearby_indices]
+    assert anchor_labels == ["input"]
+    assert nearby_labels == ["text", "element"]
+    assert detections[nearby_indices[0]].text == "排序"
+    assert (detections[nearby_indices[1]].icons or [{}])[0].get("chinese_id") == "向下V箭頭"
 
-    kept_scroll = _prefilter_detections_by_similarity(
+    anchor_scroll, nearby_scroll = _prefilter_detections_by_similarity(
         detections,
         "滾動條",
         [],
     )
-    assert [d.class_name for d in kept_scroll] == ["scrollbar"]
+    assert [detections[i].class_name for i in anchor_scroll] == ["scrollbar"]
+    assert nearby_scroll == []
 
 
 def test_two_nearest_indices_by_center_distance() -> None:
@@ -716,7 +778,7 @@ async def test_resolve_mouse_point_nearby_prefilter_skips_ollama(
     async def fake_parse(instruction: str):
         return "文件", 0, 0, []
 
-    async def fake_filter(detections, anchor, nearby):
+    def fake_filter(detections, anchor, nearby):
         return [wrong, correct], [landmark_mu, landmark_img]
 
     async def fail_ollama(*_args, **_kwargs):

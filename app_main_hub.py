@@ -698,7 +698,7 @@ class MainHub(ctk.CTk):
         b_save.pack(side="left", padx=(0, 8))
         b_sas = ctk.CTkButton(row, text="另存新檔…", width=100, command=self._script_save_as)
         b_sas.pack(side="left", padx=(0, 8))
-        b_clear = ctk.CTkButton(row, text="清空", width=100, command=self._script_clear)
+        b_clear = ctk.CTkButton(row, text="開新檔案", width=100, command=self._script_clear)
         b_clear.pack(side="left", padx=(0, 8))
         self._record_btn = ctk.CTkButton(
             row, text="開始錄製", width=100, command=self._on_record_button
@@ -837,7 +837,16 @@ class MainHub(ctk.CTk):
             return "\u2717", ("#b91c1c", "#f87171")
         if status == "skipped":
             return "\u2013", ("gray40", "gray60")
+        if status == "stopped":
+            return "\u25a0", ("#b45309", "#fbbf24")
         return " ", ("gray40", "gray60")
+
+    @staticmethod
+    def _queue_status_from_session_end_reason(reason: str | None) -> str:
+        """Map coordinator session_end_reason to a queue row status."""
+        if reason == "step_failed":
+            return "fail"
+        return "ok"
 
     def _mark_queue_result(self, index: int, status: str, run_root: Path | None = None) -> None:
         def apply() -> None:
@@ -1770,9 +1779,27 @@ class MainHub(ctk.CTk):
                     self._active_run_root = paths_obj.root
                     manager.log_info(f"Queue starting coordinator for {name}")
                     run_coordinator_sync()
-                    manager.log_info("Queue script stopped.")
-                    results.append((name, "ok"))
-                    self._mark_queue_result(i - 1, "ok", run_root_for_row)
+                    # Coordinator sets session_end_reason on the process-wide manager
+                    # (get_run_state_manager), not the local prepare_run_session instance.
+                    try:
+                        end_reason = get_run_state_manager().session_end_reason
+                    except RuntimeError:
+                        end_reason = None
+                    if end_reason is None and run_root_for_row is not None:
+                        report = read_json(run_root_for_row / "report.json", {})
+                        if isinstance(report, dict):
+                            raw = report.get("session_end_reason")
+                            end_reason = raw if isinstance(raw, str) else None
+                    manager.log_info(
+                        f"Queue script stopped (session_end_reason={end_reason!r})."
+                    )
+                    status = self._queue_status_from_session_end_reason(end_reason)
+                    results.append((name, status))
+                    self._mark_queue_result(i - 1, status, run_root_for_row)
+                    if status == "fail":
+                        self._set_queue_status(
+                            f"佇列執行 ({i}/{total})：{name} 失敗（步驟未完成）"
+                        )
                 except asyncio.CancelledError:
                     results.append((name, "stopped"))
                     self._mark_queue_result(i - 1, "stopped", run_root_for_row)

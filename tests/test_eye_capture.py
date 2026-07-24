@@ -246,6 +246,47 @@ def test_capture_once_writes_single_monitor_when_only_one_selected(
     assert event.screenshot_path.startswith(str(paths.eye_dir))
 
 
+def test_capture_separated_images_writes_single_monitor_when_only_one_selected(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manager = RunStateManager(runs_root=tmp_path)
+    paths = manager.init_run("single-brain-test", "test_single_brain")
+    set_runtime_env(paths.root, paths.root.name)
+
+    captured: list[Path] = []
+    single_monitor_calls: list[int] = []
+
+    def _fake_capture_all_screens(dest: Path) -> None:
+        captured.append(dest)
+
+    def _fake_capture_monitor(
+        *,
+        dest: Path,
+        monitor_index: int,
+        include_cursor: bool = False,
+    ) -> int:
+        single_monitor_calls.append(monitor_index)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"single")
+        return monitor_index
+
+    import src.eye.module as eye_module
+
+    monkeypatch.setattr(eye_module, "capture_all_screens_to_file", _fake_capture_all_screens)
+    monkeypatch.setattr(eye_module, "capture_monitor_to_file", _fake_capture_monitor)
+    monkeypatch.setenv("EYE_MONITOR_INDEX", "2")
+    monkeypatch.delenv("EYE_MONITOR_INDICES", raising=False)
+
+    eye = EyeModule()
+    image_paths = asyncio.run(eye.capture_separated_images())
+
+    assert len(image_paths) == 1
+    assert captured == []
+    assert single_monitor_calls == [2]
+    assert image_paths[0].startswith(str(paths.eye_dir))
+
+
 def test_capture_separated_images_writes_one_combined_eye_screenshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

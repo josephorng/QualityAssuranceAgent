@@ -18,6 +18,8 @@ from src.recorder.vision_context import (
     format_drag_candidate_anchor,
     format_drag_destination_offset_hints,
     format_field_context_hint,
+    format_input_context_hint,
+    format_scrollbar_context_hint,
     primary_candidate_offset,
 )
 from src.recorder.window_snapshot import format_window_change_hint, instruction_for_window_change
@@ -233,10 +235,19 @@ def instruction_for_text_input(text: str) -> str | None:
 
 
 def _visible_input_field_text(vision: dict[str, Any]) -> str | None:
-    """Return OCR text shown inside the nearest input, if format_field_context_hint found one."""
-    hint = format_field_context_hint(vision)
+    """Return OCR text shown inside the nearest input, if available."""
+    hint = format_input_context_hint(vision)
     prefix = "輸入欄內可見文字: 「"
-    if hint.startswith(prefix) and hint.endswith("」"):
+    if hint and hint.startswith(prefix) and hint.endswith("」"):
+        return hint[len(prefix) : -1] or None
+    return None
+
+
+def _visible_scrollbar_content_label(vision: dict[str, Any]) -> str | None:
+    """Return scrollable content beside the nearest scrollbar, when available."""
+    hint = format_scrollbar_context_hint(vision)
+    prefix = "滾動條旁可見內容: 「"
+    if hint and hint.startswith(prefix) and hint.endswith("」"):
         return hint[len(prefix) : -1] or None
     return None
 
@@ -253,6 +264,12 @@ def _click_target_anchor(vision: dict[str, Any]) -> str | None:
         if visible:
             return f"「{visible}」文字所在的輸入欄"
         return "輸入欄"
+
+    if primary.get("class_name") == "scrollbar":
+        visible = _visible_scrollbar_content_label(vision)
+        if visible:
+            return f"「{visible}」文字區域的滾動條"
+        return "滾動條"
 
     anchor = format_drag_candidate_anchor(primary)
     if anchor is None or anchor in _GENERIC_CLICK_ANCHORS:

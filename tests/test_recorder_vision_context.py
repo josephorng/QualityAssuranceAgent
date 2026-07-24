@@ -18,6 +18,8 @@ from src.recorder.vision_context import (
     format_drag_destination_offset_hints,
     format_drag_relative_offset_phrase,
     format_field_context_hint,
+    format_input_context_hint,
+    format_scrollbar_context_hint,
 )
 
 
@@ -378,6 +380,79 @@ def test_format_field_context_hint_prefers_typed_text_for_text_input() -> None:
     }
     hint = format_field_context_hint(vision, typed_text="hello")
     assert hint == "輸入欄內可見文字: 「hello」"
+
+
+def test_format_scrollbar_context_hint_with_adjacent_text() -> None:
+    vision = {
+        "local_cursor": (3611, 358),
+        "candidates": [
+            {
+                "bbox": [3600, 272, 21, 172],
+                "class_name": "scrollbar",
+                "text": None,
+            },
+            {
+                "bbox": [3500, 320, 60, 14],
+                "class_name": "text",
+                "text": "資產總覽",
+            },
+        ],
+    }
+    hint = format_scrollbar_context_hint(vision)
+    assert hint == "滾動條旁可見內容: 「資產總覽」"
+    assert format_field_context_hint(vision) == hint
+
+
+def test_format_scrollbar_context_hint_without_adjacent_text() -> None:
+    vision = {
+        "local_cursor": (2115, 577),
+        "candidates": [
+            {
+                "bbox": [2104, 156, 22, 842],
+                "class_name": "scrollbar",
+                "text": None,
+            },
+        ],
+    }
+    hint = format_scrollbar_context_hint(vision)
+    assert hint == "最近的滾動條（無可辨識內容）"
+    assert format_field_context_hint(vision) == hint
+
+
+def test_format_field_context_hint_prefers_closer_input_over_scrollbar() -> None:
+    vision = {
+        "local_cursor": (700, 1056),
+        "candidates": [
+            {
+                "bbox": [564, 1040, 221, 31],
+                "class_name": "input",
+                "text": None,
+            },
+            {
+                "bbox": [602, 1049, 33, 16],
+                "class_name": "text",
+                "text": "搜尋",
+            },
+            {
+                "bbox": [3600, 272, 21, 172],
+                "class_name": "scrollbar",
+                "text": None,
+            },
+            {
+                "bbox": [3500, 320, 60, 14],
+                "class_name": "text",
+                "text": "資產總覽",
+            },
+        ],
+    }
+    assert (
+        format_input_context_hint(vision)
+        == "輸入欄內可見文字: 「搜尋」"
+    )
+    assert (
+        format_field_context_hint(vision)
+        == "輸入欄內可見文字: 「搜尋」"
+    )
 
 
 def test_format_drag_relative_offset_phrase_below() -> None:

@@ -113,7 +113,24 @@ body {
   background: #f5f6f8; color: #1f2328;
 }
 h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
-.intro { color: #57606a; margin: 0 0 1.5rem; }
+.intro { color: #57606a; margin: 0 0 .75rem; }
+.bulk-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .75rem;
+  margin: 0 0 1.25rem; padding: .65rem .9rem;
+  background: #fff; border: 1px solid #d0d7de; border-radius: 8px;
+}
+.bulk-bar .bulk-count { color: #57606a; font-size: .9rem; min-width: 5.5rem; }
+.bulk-bar button {
+  appearance: none; border: 1px solid #d0d7de; background: #f6f8fa;
+  cursor: pointer; border-radius: 6px; padding: .35rem .7rem;
+  font-size: .85rem; line-height: 1.2; font-family: inherit;
+}
+.bulk-bar button:hover:not(:disabled) { background: #eaeef2; }
+.bulk-bar button:disabled { opacity: .45; cursor: not-allowed; }
+.bulk-bar .bulk-bug { color: #9a6700; border-color: #d4a72c; background: #fff8c5; }
+.bulk-bar .bulk-bug:hover:not(:disabled) { background: #fff1a8; }
+.bulk-bar .bulk-delete { color: #cf222e; border-color: #ff8182; background: #ffebe9; }
+.bulk-bar .bulk-delete:hover:not(:disabled) { background: #ffd7d5; }
 .empty { color: #8c959f; font-style: italic; }
 .reports {
   width: 100%; border-collapse: collapse; background: #fff;
@@ -138,7 +155,32 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 .reports thead th.sortable[aria-sort="ascending"]::after { content: "▲"; opacity: .85; }
 .reports thead th.sortable[aria-sort="descending"]::after { content: "▼"; opacity: .85; }
 .reports thead th.no-sort { width: 5.5rem; text-align: center; }
+.reports thead th.select-col,
+.reports td.select-col {
+  width: 2.5rem; text-align: center; vertical-align: middle; padding-left: .75rem; padding-right: .5rem;
+}
 .reports td.actions { text-align: center; vertical-align: middle; white-space: nowrap; }
+.select-run, .select-all {
+  appearance: none; -webkit-appearance: none;
+  width: 1rem; height: 1rem; cursor: pointer;
+  margin: 0; vertical-align: middle;
+  border: 1.5px solid #c9d1d9; border-radius: 3px;
+  background: #f6f8fa; box-shadow: inset 0 0 0 1px #fff;
+}
+.select-run:hover, .select-all:hover { border-color: #96c8ff; background: #eef5ff; }
+.select-run:checked, .select-all:checked {
+  border-color: #54aeff; background: #54aeff;
+  box-shadow: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%23ffffff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' d='M3.5 8.5l3 3 6-6'/%3E%3C/svg%3E");
+  background-size: 100% 100%;
+}
+.select-run:indeterminate, .select-all:indeterminate {
+  border-color: #54aeff; background: #54aeff;
+  box-shadow: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%23ffffff' stroke-width='2.2' stroke-linecap='round' d='M4 8h8'/%3E%3C/svg%3E");
+  background-size: 100% 100%;
+}
+.select-run:disabled, .select-all:disabled { opacity: .45; cursor: wait; }
 .delete-run, .bug-run {
   appearance: none; border: 1px solid transparent; background: transparent;
   cursor: pointer; border-radius: 6px;
@@ -151,6 +193,8 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 .bug-run:hover { background: #fff8c5; border-color: #d4a72c; }
 .bug-run:disabled { opacity: .45; cursor: wait; }
 .reports tbody tr:hover { background: #f6f8fa; }
+.reports tbody tr.selected { background: #ddf4ff; }
+.reports tbody tr.selected:hover { background: #cceafc; }
 .reports a { color: #0969da; text-decoration: none; font-weight: 600; word-break: break-all; }
 .reports a:hover { text-decoration: underline; }
 .badge { display: inline-block; padding: .1rem .55rem; border-radius: 999px; font-size: .8rem; font-weight: 600; }
@@ -163,6 +207,8 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
   .reports thead { display: none; }
   .reports tr { border-top: 1px solid #d0d7de; padding: .5rem 0; }
   .reports td { border-top: none; padding: .25rem 1rem; }
+  .reports td.select-col { padding-top: .5rem; }
+  .reports td.select-col::before { display: none; }
   .reports td::before {
     content: attr(data-label); display: block; color: #57606a;
     font-size: .75rem; font-weight: 600; margin-bottom: .1rem;
@@ -178,6 +224,11 @@ _INDEX_SCRIPT = """
   var headers = Array.prototype.slice.call(table.querySelectorAll("thead th"));
   var sortCol = -1;
   var sortAsc = true;
+  var selectAll = document.querySelector("input.select-all");
+  var bulkCount = document.querySelector(".bulk-count");
+  var bulkBug = document.querySelector("button.bulk-bug");
+  var bulkDelete = document.querySelector("button.bulk-delete");
+  var bulkBusy = false;
 
   function cellValue(row, col) {
     var cell = row.cells[col];
@@ -239,11 +290,14 @@ _INDEX_SCRIPT = """
     });
   });
 
+  function introHelpText(count) {
+    return "共 " + count + " 筆報告。勾選多筆後可批次回報或刪除；點選執行名稱開啟步驟紀錄；點選欄位標題可排序；🐛 可回報 bug；垃圾桶可刪除整份報告資料夾。";
+  }
+
   function updateIntroCount() {
     var intro = document.querySelector("p.intro");
     if (!intro) return;
-    var count = tbody.rows.length;
-    intro.textContent = "共 " + count + " 筆報告。點選執行名稱開啟步驟紀錄；點選欄位標題可排序；🐛 可回報 bug；垃圾桶可刪除整份報告資料夾。";
+    intro.textContent = introHelpText(tbody.rows.length);
   }
 
   function requireLocalServer() {
@@ -253,6 +307,178 @@ _INDEX_SCRIPT = """
     }
     return true;
   }
+
+  function selectedCheckboxes() {
+    return Array.prototype.slice.call(tbody.querySelectorAll("input.select-run:checked"));
+  }
+
+  function syncRowSelected(checkbox) {
+    var row = checkbox.closest("tr");
+    if (!row) return;
+    if (checkbox.checked) row.classList.add("selected");
+    else row.classList.remove("selected");
+  }
+
+  function updateBulkBar() {
+    var selected = selectedCheckboxes();
+    var count = selected.length;
+    var total = tbody.querySelectorAll("input.select-run").length;
+    if (bulkCount) bulkCount.textContent = "已選 " + count + " 筆";
+    if (bulkBug) bulkBug.disabled = bulkBusy || count === 0;
+    if (bulkDelete) bulkDelete.disabled = bulkBusy || count === 0;
+    if (selectAll) {
+      selectAll.checked = total > 0 && count === total;
+      selectAll.indeterminate = count > 0 && count < total;
+      selectAll.disabled = bulkBusy || total === 0;
+    }
+  }
+
+  function setBulkBusy(busy) {
+    bulkBusy = busy;
+    Array.prototype.slice.call(tbody.querySelectorAll("input.select-run")).forEach(function (cb) {
+      cb.disabled = busy;
+    });
+    updateBulkBar();
+  }
+
+  function formatSelectionSummary(items) {
+    var labels = items.map(function (item) { return item.label; });
+    var preview = labels.slice(0, 8).join("、");
+    if (labels.length > 8) preview += "…（共 " + labels.length + " 筆）";
+    return preview;
+  }
+
+  function postRunAction(runId, action) {
+    return fetch("/api/runs/" + encodeURIComponent(runId) + "/" + action, { method: "POST" })
+      .then(function (response) {
+        return response.json().then(function (payload) {
+          return { ok: response.ok && payload && payload.ok, payload: payload || {}, status: response.status };
+        }).catch(function () {
+          return { ok: false, payload: {}, status: response.status };
+        });
+      });
+  }
+
+  function getSelectedItems() {
+    return selectedCheckboxes().map(function (cb) {
+      return {
+        checkbox: cb,
+        runId: cb.getAttribute("data-run-id") || "",
+        label: cb.getAttribute("data-run-label") || cb.getAttribute("data-run-id") || "",
+        row: cb.closest("tr"),
+      };
+    }).filter(function (item) { return !!item.runId; });
+  }
+
+  Array.prototype.slice.call(tbody.querySelectorAll("input.select-run")).forEach(function (cb) {
+    syncRowSelected(cb);
+    cb.addEventListener("change", function () {
+      syncRowSelected(cb);
+      updateBulkBar();
+    });
+    cb.addEventListener("click", function (event) {
+      event.stopPropagation();
+    });
+  });
+
+  if (selectAll) {
+    selectAll.addEventListener("click", function (event) {
+      event.stopPropagation();
+    });
+    selectAll.addEventListener("change", function () {
+      var checked = selectAll.checked;
+      Array.prototype.slice.call(tbody.querySelectorAll("input.select-run")).forEach(function (cb) {
+        if (cb.disabled) return;
+        cb.checked = checked;
+        syncRowSelected(cb);
+      });
+      updateBulkBar();
+    });
+  }
+
+  if (bulkBug) {
+    bulkBug.addEventListener("click", function (event) {
+      event.preventDefault();
+      var items = getSelectedItems();
+      if (!items.length) return;
+      var summary = formatSelectionSummary(items);
+      if (!window.confirm("確定回報選取的 " + items.length + " 筆報告？\\n" + summary + "\\n將壓縮各執行資料夾並複製到 \\\\\\\\192.168.0.9\\\\Joseph\\\\CUA-BUG。")) {
+        return;
+      }
+      if (!requireLocalServer()) return;
+      setBulkBusy(true);
+      var okCount = 0;
+      var failures = [];
+      var chain = Promise.resolve();
+      items.forEach(function (item) {
+        chain = chain.then(function () {
+          return postRunAction(item.runId, "bug").then(function (result) {
+            if (result.ok) {
+              okCount += 1;
+            } else {
+              var message = (result.payload && result.payload.error) || ("HTTP " + result.status);
+              failures.push(item.label + "：" + message);
+            }
+          }).catch(function () {
+            failures.push(item.label + "：無法連線本機服務");
+          });
+        });
+      });
+      chain.then(function () {
+        setBulkBusy(false);
+        var lines = ["成功 " + okCount + " / 失敗 " + failures.length];
+        if (failures.length) lines = lines.concat(failures.slice(0, 10));
+        if (failures.length > 10) lines.push("…其餘 " + (failures.length - 10) + " 筆略");
+        window.alert(lines.join("\\n"));
+      });
+    });
+  }
+
+  if (bulkDelete) {
+    bulkDelete.addEventListener("click", function (event) {
+      event.preventDefault();
+      var items = getSelectedItems();
+      if (!items.length) return;
+      var summary = formatSelectionSummary(items);
+      if (!window.confirm("確定刪除選取的 " + items.length + " 筆報告？\\n" + summary + "\\n將刪除整個資料夾，且無法復原。")) {
+        return;
+      }
+      if (!requireLocalServer()) return;
+      setBulkBusy(true);
+      var failures = [];
+      var chain = Promise.resolve();
+      items.forEach(function (item) {
+        chain = chain.then(function () {
+          return postRunAction(item.runId, "delete").then(function (result) {
+            if (result.ok) {
+              if (item.row && item.row.parentNode) item.row.parentNode.removeChild(item.row);
+            } else {
+              var message = (result.payload && result.payload.error) || ("HTTP " + result.status);
+              failures.push(item.label + "：" + message);
+            }
+          }).catch(function () {
+            failures.push(item.label + "：無法連線本機服務");
+          });
+        });
+      });
+      chain.then(function () {
+        if (!tbody.rows.length) {
+          window.location.reload();
+          return;
+        }
+        setBulkBusy(false);
+        updateIntroCount();
+        updateBulkBar();
+        if (failures.length) {
+          var lines = ["部分刪除失敗（" + failures.length + " 筆）："].concat(failures.slice(0, 10));
+          if (failures.length > 10) lines.push("…其餘 " + (failures.length - 10) + " 筆略");
+          window.alert(lines.join("\\n"));
+        }
+      });
+    });
+  }
+
+  updateBulkBar();
 
   Array.prototype.slice.call(document.querySelectorAll("button.bug-run")).forEach(function (btn) {
     btn.addEventListener("click", function (event) {
@@ -266,14 +492,7 @@ _INDEX_SCRIPT = """
       }
       if (!requireLocalServer()) return;
       btn.disabled = true;
-      fetch("/api/runs/" + encodeURIComponent(runId) + "/bug", { method: "POST" })
-        .then(function (response) {
-          return response.json().then(function (payload) {
-            return { ok: response.ok && payload && payload.ok, payload: payload || {}, status: response.status };
-          }).catch(function () {
-            return { ok: false, payload: {}, status: response.status };
-          });
-        })
+      postRunAction(runId, "bug")
         .then(function (result) {
           btn.disabled = false;
           if (!result.ok) {
@@ -303,14 +522,7 @@ _INDEX_SCRIPT = """
       }
       if (!requireLocalServer()) return;
       btn.disabled = true;
-      fetch("/api/runs/" + encodeURIComponent(runId) + "/delete", { method: "POST" })
-        .then(function (response) {
-          return response.json().then(function (payload) {
-            return { ok: response.ok && payload && payload.ok, payload: payload || {}, status: response.status };
-          }).catch(function () {
-            return { ok: false, payload: {}, status: response.status };
-          });
-        })
+      postRunAction(runId, "delete")
         .then(function (result) {
           if (!result.ok) {
             var message = (result.payload && result.payload.error) || ("HTTP " + result.status);
@@ -325,6 +537,7 @@ _INDEX_SCRIPT = """
             return;
           }
           updateIntroCount();
+          updateBulkBar();
         })
         .catch(function () {
           window.alert("無法刪除：請從主程式的「報告列表」開啟此頁（需本機服務）。");
@@ -900,8 +1113,13 @@ def _render_index_row(run_root: Path) -> str:
         float(duration_raw) if isinstance(duration_raw, (int, float)) else None
     )
 
+    script_label = escape(script_name_raw, quote=True)
     return (
         "<tr>"
+        f'<td class="select-col" data-label="選取" data-sort="">'
+        f'<input type="checkbox" class="select-run" data-run-id="{run_id_title}" '
+        f'data-run-label="{script_label}" '
+        f'aria-label="選取報告 {run_id_title}"></td>'
         f'<td data-label="執行"{_sort_attr(script_name_raw)}>'
         f'<a href="{href}" title="{run_id_title}">{script_name}</a></td>'
         f'<td data-label="時間"{_sort_attr(run_time_raw)}>{run_time}</td>'
@@ -919,11 +1137,11 @@ def _render_index_row(run_root: Path) -> str:
         f'<td data-label="耗時"{_sort_attr(duration_sort)}>{escape(duration)}</td>'
         f'<td data-label="操作" class="actions" data-sort="">'
         f'<button type="button" class="bug-run" data-run-id="{run_id_title}" '
-        f'data-run-label="{escape(script_name_raw, quote=True)}" '
+        f'data-run-label="{script_label}" '
         f'title="回報 bug" '
         f'aria-label="回報 bug {run_id_title}">🐛</button>'
         f'<button type="button" class="delete-run" data-run-id="{run_id_title}" '
-        f'data-run-label="{escape(script_name_raw, quote=True)}" '
+        f'data-run-label="{script_label}" '
         f'title="刪除報告" aria-label="刪除報告 {run_id_title}">🗑</button></td>'
         "</tr>"
     )
@@ -948,9 +1166,20 @@ def write_runs_index_html(runs_root: Path) -> Path:
     run_dirs = _iter_report_run_dirs(runs_root)
     if run_dirs:
         rows = "".join(_render_index_row(run_dir) for run_dir in run_dirs)
+        bulk_bar = (
+            '<div class="bulk-bar" role="toolbar" aria-label="批次操作">'
+            '<span class="bulk-count">已選 0 筆</span>'
+            '<button type="button" class="bulk-bug" disabled>🐛 回報選取</button>'
+            '<button type="button" class="bulk-delete" disabled>🗑 刪除選取</button>'
+            "</div>"
+        )
         body = (
+            f"{bulk_bar}"
             '<table class="reports">'
             "<thead><tr>"
+            '<th class="no-sort select-col" title="全選">'
+            '<input type="checkbox" class="select-all" aria-label="全選報告">'
+            "</th>"
             '<th data-type="text">執行</th>'
             '<th data-type="text">時間</th>'
             '<th data-type="text">結束原因</th>'
@@ -972,7 +1201,8 @@ def write_runs_index_html(runs_root: Path) -> Path:
     title = "工作階段報告列表"
     if run_dirs:
         intro = (
-            f"共 {len(run_dirs)} 筆報告。點選執行名稱開啟步驟紀錄；"
+            f"共 {len(run_dirs)} 筆報告。勾選多筆後可批次回報或刪除；"
+            "點選執行名稱開啟步驟紀錄；"
             "點選欄位標題可排序；🐛 可回報 bug；"
             "垃圾桶可刪除整份報告資料夾。"
         )

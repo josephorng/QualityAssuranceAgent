@@ -80,6 +80,26 @@ _HOTKEY_SUPPRESS_KEYS = frozenset(
     }
 )
 
+# Windows VK codes for the numeric keypad (Num Lock on). pynput often
+# delivers these as KeyCode(vk=…) with char=None, so map them explicitly.
+_NUMPAD_VK_TO_CHAR: dict[int, str] = {
+    96: "0",
+    97: "1",
+    98: "2",
+    99: "3",
+    100: "4",
+    101: "5",
+    102: "6",
+    103: "7",
+    104: "8",
+    105: "9",
+    106: "*",
+    107: "+",
+    109: "-",
+    110: ".",
+    111: "/",
+}
+
 IgnoreRectProvider = Callable[[], tuple[int, int, int, int] | None]
 
 
@@ -262,10 +282,22 @@ def _normalize_button(button: mouse.Button) -> str:
     return "left"
 
 
+def _key_char(key: keyboard.Key | keyboard.KeyCode) -> str | None:
+    """Return the typed character for a key, including numpad VK fallbacks."""
+    if not isinstance(key, keyboard.KeyCode):
+        return None
+    if key.char:
+        return key.char
+    if key.vk is not None:
+        return _NUMPAD_VK_TO_CHAR.get(int(key.vk))
+    return None
+
+
 def _key_token(key: keyboard.Key | keyboard.KeyCode) -> str | None:
     if isinstance(key, keyboard.KeyCode):
-        if key.char:
-            return key.char
+        ch = _key_char(key)
+        if ch:
+            return ch
         if key.vk is not None:
             return f"vk_{key.vk}"
         return None
@@ -1180,8 +1212,9 @@ class RecordingSession:
             )
             return
 
-        if isinstance(key, keyboard.KeyCode) and key.char and key.char.isprintable():
-            self._append_text_input_char(key.char, cursor_xy)
+        typed = _key_char(key)
+        if typed and typed.isprintable():
+            self._append_text_input_char(typed, cursor_xy)
             return
 
         if key == keyboard.Key.space:
@@ -1195,9 +1228,6 @@ class RecordingSession:
                 key=token,
             )
             return
-
-        if isinstance(key, keyboard.KeyCode) and key.char:
-            self._append_text_input_char(key.char, cursor_xy)
 
     def _on_key_release(self, key: keyboard.Key | keyboard.KeyCode) -> None:
         mod = _modifier_name(key)

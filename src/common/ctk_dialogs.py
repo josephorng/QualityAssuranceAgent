@@ -213,7 +213,12 @@ def prompt_append_recording_instructions(master: Any, message: str) -> str:
     return choice if choice in ("append", "save_as", "close") else "close"
 
 
-def prompt_unsaved_script_changes(master: Any) -> str:
+def prompt_unsaved_script_changes(
+    master: Any,
+    *,
+    message: str = "腳本內容已變更，但尚未儲存。要儲存變更嗎？",
+    save_button_text: str = "儲存",
+) -> str:
     """Warn that the script editor has unsaved edits.
 
     Returns ``save``, ``discard``, or ``cancel`` (closing the dialog counts as cancel).
@@ -237,7 +242,7 @@ def prompt_unsaved_script_changes(master: Any) -> str:
 
     ctk.CTkLabel(
         master=inner,
-        text="腳本內容已變更，但尚未儲存。要儲存變更嗎？",
+        text=message,
         wraplength=420,
         justify="left",
         font=ctk.CTkFont(size=14),
@@ -260,9 +265,9 @@ def prompt_unsaved_script_changes(master: Any) -> str:
 
     dialog.protocol("WM_DELETE_WINDOW", on_cancel)
 
-    ctk.CTkButton(master=btn_row, text="儲存", width=100, height=36, command=on_save).pack(
-        side="left", padx=(0, 10)
-    )
+    ctk.CTkButton(
+        master=btn_row, text=save_button_text, width=100, height=36, command=on_save
+    ).pack(side="left", padx=(0, 10))
     ctk.CTkButton(
         master=btn_row, text="不要儲存", width=100, height=36, command=on_discard
     ).pack(side="left", padx=(0, 10))

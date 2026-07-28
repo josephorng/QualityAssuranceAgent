@@ -368,6 +368,27 @@ class MainHub(ctk.CTk):
             return True
         return self._script_save()
 
+    def _confirm_proceed_before_new_script(self) -> bool:
+        """Before clearing the editor (開新檔案), confirm save when content is not on disk."""
+        if not self._script_editor_normalized_text().strip():
+            return True
+        if self._script_path is not None:
+            if not self._is_script_dirty():
+                return True
+            return self._confirm_proceed_with_unsaved_script()
+        if self._is_script_dirty():
+            message = "腳本尚未存成檔案，且內容已變更。要另存為檔案嗎？"
+        else:
+            message = "腳本尚未存成檔案（目前僅存在執行命令暫存）。要另存為檔案嗎？"
+        choice = prompt_unsaved_script_changes(
+            self, message=message, save_button_text="另存新檔"
+        )
+        if choice == "cancel":
+            return False
+        if choice == "discard":
+            return True
+        return self._script_save_as()
+
     def _on_mode_tab_changed(self) -> None:
         if self._mode_tabs.get() != "佇列執行":
             return
@@ -1159,6 +1180,8 @@ class MainHub(ctk.CTk):
 
     def _script_clear(self) -> None:
         """Unload any opened path / cache binding and empty the script editor."""
+        if not self._confirm_proceed_before_new_script():
+            return
         self._script_path = None
         self._runtime_commands_cache_path = None
         self._script_text.configure(state="normal")

@@ -161,6 +161,35 @@ def test_typing_burst_coalesced_into_one_event(tmp_path) -> None:
     assert raw["text"] == "chrome"
 
 
+def test_numpad_vk_keys_recorded_as_text_input(tmp_path) -> None:
+    """Num Lock digits often arrive as vk-only KeyCodes with char=None."""
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import KeyCode
+
+            # VK_NUMPAD1..3 and VK_DECIMAL
+            for vk in (97, 98, 99, 110):
+                session._on_key_press(KeyCode.from_vk(vk))
+            session.stop()
+        finally:
+            if session.is_active():
+                session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "text_input"
+    assert raw["text"] == "123."
+
+
 def test_slow_typing_stays_one_event_until_other_operation(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
 

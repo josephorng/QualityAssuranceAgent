@@ -406,7 +406,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "models": ["gemma4:e2b", "gemma3:4b"],
         }
     ],
-    "instruction_relative_offset": [
+    "mouse_target_instruction": [
         {
             "image_usage": "no_image",
             "prompt": (
@@ -440,7 +440,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "models": ["gemma4:e2b", "gemma3:4b"],
         }
     ],
-    "instruction_relative_offset_retry": [
+    "mouse_target_instruction_retry": [
         {
             "image_usage": "no_image",
             "prompt": (

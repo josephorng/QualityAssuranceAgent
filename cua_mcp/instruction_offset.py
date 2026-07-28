@@ -142,21 +142,21 @@ async def parse_mouse_target_instruction(
     if not text:
         return "", 0, 0, []
 
-    prompt = get_prompt("instruction_relative_offset").format(instruction=text)
+    prompt = get_prompt("mouse_target_instruction").format(instruction=text)
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
     try:
         anchor, dx, dy, nearby = await request_json_with_retry(
             messages=messages,
             response_schema=_OFFSET_RESPONSE_SCHEMA,
             parse_reply=_parse_offset_reply,
-            retry_instruction=get_prompt("instruction_relative_offset_retry"),
-            log_info=lambda message: _log_info(f"parse_relative_pixel_offset: {message}"),
+            retry_instruction=get_prompt("mouse_target_instruction_retry"),
+            log_info=lambda message: _log_info(f"parse_mouse_target_instruction: {message}"),
             append_image_sizes=False,
         )
         if not anchor:
             raise ValueError("anchor is empty")
         _log_info(
-            "parse_relative_pixel_offset LLM "
+            "parse_mouse_target_instruction LLM "
             f"anchor={anchor!r} dx={dx} dy={dy} nearby={nearby!r}"
         )
         return anchor, dx, dy, nearby
@@ -164,7 +164,7 @@ async def parse_mouse_target_instruction(
         anchor, dx, dy = _parse_relative_pixel_offset_regex(text)
         nearby = extract_nearby_hints_from_instruction(text)
         _log_info(
-            "parse_relative_pixel_offset regex fallback "
+            "parse_mouse_target_instruction regex fallback "
             f"({exc}) anchor={anchor!r} dx={dx} dy={dy} nearby={nearby!r}"
         )
         return anchor, dx, dy, nearby

@@ -70,7 +70,7 @@ async def test_resolve_mouse_point_merges_nearby_objects(monkeypatch: pytest.Mon
         return [detections[0]], []
 
     monkeypatch.setattr(
-        "cua_mcp.select_mouse_target.parse_relative_pixel_offset",
+        "cua_mcp.select_mouse_target.parse_mouse_target_instruction",
         fake_parse,
     )
     monkeypatch.setattr(
@@ -817,7 +817,7 @@ async def test_resolve_mouse_point_nearby_prefilter_skips_ollama(
         raise AssertionError("picker LLM should be skipped after nearby prefilter")
 
     monkeypatch.setattr(
-        "cua_mcp.select_mouse_target.parse_relative_pixel_offset",
+        "cua_mcp.select_mouse_target.parse_mouse_target_instruction",
         fake_parse,
     )
     monkeypatch.setattr(

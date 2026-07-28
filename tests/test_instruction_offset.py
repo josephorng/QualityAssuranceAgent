@@ -6,7 +6,7 @@ import pytest
 
 from cua_mcp.instruction_offset import (
     _parse_relative_pixel_offset_regex,
-    parse_relative_pixel_offset,
+    parse_mouse_target_instruction,
 )
 from src.recorder.vision_context import format_drag_relative_offset_phrase
 
@@ -70,7 +70,7 @@ async def test_parse_relative_pixel_offset_uses_llm() -> None:
             ),
         ),
     ) as mock_request:
-        anchor, dx, dy, nearby = await parse_relative_pixel_offset(
+        anchor, dx, dy, nearby = await parse_mouse_target_instruction(
             "「振銓」文字右方5個像素、上方28個像素的位置（附近有「圖片」文字）"
         )
 
@@ -100,7 +100,7 @@ async def test_parse_relative_pixel_offset_passes_raw_instruction_to_llm() -> No
             ),
         ),
     ) as mock_request:
-        await parse_relative_pixel_offset(raw)
+        await parse_mouse_target_instruction(raw)
 
     messages = mock_request.await_args.kwargs["messages"]
     assert raw in messages[0]["content"]
@@ -113,7 +113,7 @@ async def test_parse_relative_pixel_offset_empty_instruction_skips_llm() -> None
         "cua_mcp.instruction_offset.request_json_with_retry",
         new=AsyncMock(),
     ) as mock_request:
-        anchor, dx, dy, nearby = await parse_relative_pixel_offset("   ")
+        anchor, dx, dy, nearby = await parse_mouse_target_instruction("   ")
 
     assert anchor == ""
     assert dx == 0
@@ -130,7 +130,7 @@ async def test_parse_relative_pixel_offset_falls_back_to_regex() -> None:
         "cua_mcp.instruction_offset.request_json_with_retry",
         new=AsyncMock(side_effect=ValueError("bad llm reply")),
     ):
-        anchor, dx, dy, nearby = await parse_relative_pixel_offset(
+        anchor, dx, dy, nearby = await parse_mouse_target_instruction(
             "「iniseape」文字下方57個像素的位置（附近有「圖片」文字）"
         )
 
@@ -143,7 +143,7 @@ async def test_parse_relative_pixel_offset_falls_back_to_regex() -> None:
         "cua_mcp.instruction_offset.request_json_with_retry",
         new=AsyncMock(side_effect=ValueError("bad llm reply")),
     ):
-        _, _, _, directed = await parse_relative_pixel_offset(
+        _, _, _, directed = await parse_mouse_target_instruction(
             "「矩形框線」圖示（在「顯示已授權電腦」文字的左邊）"
         )
     assert directed == [

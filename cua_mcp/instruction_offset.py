@@ -127,7 +127,7 @@ def _parse_relative_pixel_offset_regex(instruction: str) -> tuple[str, int, int]
     return anchor, dx, dy
 
 
-async def parse_relative_pixel_offset(
+async def parse_mouse_target_instruction(
     instruction: str,
 ) -> tuple[str, int, int, list[NearbyHint]]:
     """

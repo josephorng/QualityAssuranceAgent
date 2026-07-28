@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 
 from cua_mcp.geometry import clip_box, iou_xywh
-from cua_mcp.instruction_offset import parse_relative_pixel_offset
+from cua_mcp.instruction_offset import parse_mouse_target_instruction
 from cua_mcp.icon_map import (
     describe_text_icons,
     is_pua_char,
@@ -691,7 +691,7 @@ async def find_mouse_point(
         raise ValueError("instruction must be non-empty")
 
     # Parse anchor/offset/nearby once; filter splits anchor vs nearby; pick uses anchor only.
-    anchor, offset_dx, offset_dy, nearby_from_instruction = await parse_relative_pixel_offset(
+    anchor, offset_dx, offset_dy, nearby_from_instruction = await parse_mouse_target_instruction(
         instruction_text
     )
     nearby_hints = merge_nearby_hints(nearby_objects, nearby_from_instruction)

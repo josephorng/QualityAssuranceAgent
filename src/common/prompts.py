@@ -33,8 +33,8 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Use move_mouse only when the task explicitly asks to move the cursor or interact with a named/specific on-screen target (e.g. 'click on the object', '點選物件', 'click the Submit button'). For 'click on the object' or '點選物件', split into move_mouse then click.",
                 "Do not call move_mouse when the task only describes an action at the current cursor and does not name a target (e.g. triple-click, double-click, scroll, type text, press a key)—call that action tool directly.",
                 "Click tool mapping: 點擊 / 點選 / single click → click; 連按兩下 / double-click → double_click. Never use double_click for a normal 點擊.",
-                "For move_mouse: put the primary target in instruction (e.g. 「資料夾」圖示). When the task lists nearby landmarks (附近有… / near …), pass them as nearby_objects (e.g. [\"「Edge」圖示\", \"「Copilot」圖示\"]) instead of only embedding them in instruction.",
-                "For drag: put the source in start_instruction and the drop target in destination_instruction. When the task lists start landmarks (起點附近有…), pass them as start_nearby_objects; when it lists destination landmarks (附近有… / 終點附近有… / near …), pass them as destination_nearby_objects (e.g. start_nearby_objects=[\"「Desktop」文字\"], destination_nearby_objects=[\"「新增文字文件txt」文字\"]) instead of only embedding them in the instructions.",
+                "For move_mouse: put the primary target in instruction (e.g. 「資料夾」圖示). When the task lists nearby landmarks (附近有… / near … / 在「…」的左邊/右邊/上面/下面/左上方/右上方/左下方/右下方), pass them as nearby_objects. Use undirected labels (e.g. [\"「Edge」圖示\", \"「Copilot」圖示\"]) or directed phrases (e.g. [\"在「顯示已授權電腦」文字的左邊\"]) instead of only embedding them in instruction.",
+                "For drag: put the source in start_instruction and the drop target in destination_instruction. When the task lists start landmarks (起點附近有… / 起點在…的左邊), pass them as start_nearby_objects; when it lists destination landmarks (附近有… / 終點附近有… / 在…的左邊 / near …), pass them as destination_nearby_objects (e.g. start_nearby_objects=[\"「Desktop」文字\"], destination_nearby_objects=[\"在「新增文字文件txt」文字的左邊\"]) instead of only embedding them in the instructions.",
                 "For scroll: positive clicks scroll down (往下滑), negative scroll up; use roughly 3–10 per screen of content.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
@@ -415,7 +415,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Instruction:\n{instruction}\n"
             ),
             "instructions": [
-                'Return JSON only: {{"anchor": "<string>", "dx": <integer>, "dy": <integer>, "nearby": ["<string>", ...]}}.',
+                'Return JSON only: {{"anchor": "<string>", "dx": <integer>, "dy": <integer>, "nearby": [{{"label": "<string>", "side": <string|null>}}, ...]}}.',
                 "anchor: the on-screen target phrase for locating a UI element, without relative pixel offset clauses and without trailing 的位置.",
                 "Keep quoted labels and type suffixes when present, e.g. 「振銓」文字, 「Chrome」圖示, 「Submit」按鈕.",
                 "dx: horizontal offset in pixels from the anchor center; positive means right (右方), negative means left (左方).",
@@ -424,10 +424,16 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "When no relative pixel offset is stated, use dx=0 and dy=0.",
                 "If the instruction is a drag sentence (從…拖到…), extract only the destination target and its offset.",
                 "Ignore trailing （...） contextual comments when extracting anchor and offsets.",
-                "Ignore inline （起點附近...） comments between the drag source and 拖到 when extracting anchor and offsets.",
-                "nearby: list of nearby UI labels from contextual comments such as （附近有…）, （起點附近有…）, （終點附近有…）. "
-                "Keep each label as written, including quoted names and type suffixes "
+                "Ignore inline （起點附近...） / （起點在...） comments between the drag source and 拖到 when extracting anchor and offsets.",
+                "nearby: list of objects from contextual comments such as （附近有…）, （起點附近有…）, （終點附近有…）, "
+                "（在「X」的左邊）, （起點在「X」的右邊）, （終點在「X」的上面）. "
+                "Each item is {{\"label\": \"...\", \"side\": ...}} where label keeps quoted names and type suffixes "
                 "(文字/圖示/元素/輸入欄/滾動條/按鈕), e.g. 「圖片」文字, 「Chrome」圖示, 輸入欄, 滾動條.",
+                "side is null for undirected 附近有… landmarks. For 在…的X邊 phrases, side is one of: "
+                "left, right, above, below, upper_left, upper_right, lower_left, lower_right "
+                "(左邊→left, 右邊→right, 上面→above, 下面→below, 左上方→upper_left, 右上方→upper_right, "
+                "左下方→lower_left, 右下方→lower_right).",
+                "Do not treat pixel-offset clauses (左方N個像素 / 右方N個像素 / …) as nearby side.",
                 "Preserve order of appearance. Use an empty list when no nearby labels are stated.",
                 "Do not invent targets, offsets, or nearby labels not stated in the instruction.",
             ],
@@ -439,7 +445,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "image_usage": "no_image",
             "prompt": (
                 'Reply with ONLY: {{"anchor": "<string>", "dx": <integer>, "dy": <integer>, '
-                '"nearby": ["<string>", ...]}}. '
+                '"nearby": [{{"label": "<string>", "side": <string|null>}}, ...]}}. '
                 "No text before or after the JSON."
             ),
             "models": ["gemma4:e2b", "gemma3:4b"],

@@ -7,12 +7,18 @@ import re
 from typing import Any
 
 from cua_mcp.selection_engine import request_json_with_retry
+from src.common.nearby_side import (
+    NearbyHint,
+    extract_nearby_hints_from_instruction,
+    normalize_nearby_hints,
+    parse_side_schema_value,
+)
 from src.common.prompting import get_prompt
 from src.common.run_state import get_run_state_manager
 
 _OFFSET_TOKEN_RE = re.compile(r"(右方|左方|上方|下方)(\d+)個像素")
 _TRAILING_CONTEXT_COMMENT_RE = re.compile(r"(?:（[^）]*）)+$")
-_INLINE_START_CONTEXT_COMMENT_RE = re.compile(r"（起點附近[^）]*）")
+_INLINE_START_CONTEXT_COMMENT_RE = re.compile(r"（起點(?:附近|在)[^）]*）")
 
 _OFFSET_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -22,7 +28,16 @@ _OFFSET_RESPONSE_SCHEMA: dict[str, Any] = {
         "dy": {"type": "integer"},
         "nearby": {
             "type": "array",
-            "items": {"type": "string"},
+            "items": {
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string"},
+                    "side": {
+                        "type": ["string", "null"],
+                    },
+                },
+                "required": ["label", "side"],
+            },
         },
     },
     "required": ["anchor", "dx", "dy", "nearby"],
@@ -36,7 +51,27 @@ def _log_info(text: str) -> None:
         pass
 
 
-def _parse_offset_reply(raw: str) -> tuple[str, int, int, list[str]]:
+def _parse_nearby_items(nearby: Any) -> list[NearbyHint]:
+    """Accept structured nearby objects or legacy string labels."""
+    if not isinstance(nearby, list):
+        raise ValueError("nearby must be a list")
+    items: list[Any] = []
+    for item in nearby:
+        if isinstance(item, str):
+            items.append(item)
+            continue
+        if isinstance(item, dict):
+            label = item.get("label")
+            if not isinstance(label, str):
+                raise ValueError("nearby item label must be a string")
+            side = parse_side_schema_value(item.get("side"))
+            items.append({"label": label, "side": side.value if side else None})
+            continue
+        raise ValueError("nearby items must be objects or strings")
+    return normalize_nearby_hints(items)
+
+
+def _parse_offset_reply(raw: str) -> tuple[str, int, int, list[NearbyHint]]:
     data = json.loads(raw)
     if not isinstance(data, dict):
         raise ValueError("response is not an object")
@@ -50,10 +85,8 @@ def _parse_offset_reply(raw: str) -> tuple[str, int, int, list[str]]:
         raise ValueError("dx must be an integer")
     if not isinstance(dy, int) or isinstance(dy, bool):
         raise ValueError("dy must be an integer")
-    if not isinstance(nearby, list) or not all(isinstance(item, str) for item in nearby):
-        raise ValueError("nearby must be a list of strings")
-    nearby_labels = [item.strip() for item in nearby if item.strip()]
-    return anchor.strip(), dx, dy, nearby_labels
+    nearby_hints = _parse_nearby_items(nearby)
+    return anchor.strip(), dx, dy, nearby_hints
 
 
 def _strip_trailing_context_comment(text: str) -> str:
@@ -96,16 +129,14 @@ def _parse_relative_pixel_offset_regex(instruction: str) -> tuple[str, int, int]
 
 async def parse_relative_pixel_offset(
     instruction: str,
-) -> tuple[str, int, int, list[str]]:
+) -> tuple[str, int, int, list[NearbyHint]]:
     """
-    Split an instruction into anchor text, relative pixel offset, and nearby labels.
+    Split an instruction into anchor text, relative pixel offset, and nearby hints.
 
     Uses an LLM to extract anchor/dx/dy/nearby, with a regex fallback for
-    anchor/dx/dy on failure (nearby falls back to an empty list).
+    anchor/dx/dy on failure. Nearby hints are also recovered from parenthetical
+    comments on the regex path when possible.
     Positive dx is right; positive dy is down.
-
-    The raw instruction is passed to the LLM unchanged. Nearby labels come from
-    contextual comments such as （附近有…） / （起點附近有…） / （終點附近有…）.
     """
     text = (instruction or "").strip()
     if not text:
@@ -131,8 +162,9 @@ async def parse_relative_pixel_offset(
         return anchor, dx, dy, nearby
     except (ValueError, json.JSONDecodeError) as exc:
         anchor, dx, dy = _parse_relative_pixel_offset_regex(text)
+        nearby = extract_nearby_hints_from_instruction(text)
         _log_info(
             "parse_relative_pixel_offset regex fallback "
-            f"({exc}) anchor={anchor!r} dx={dx} dy={dy} nearby=[]"
+            f"({exc}) anchor={anchor!r} dx={dx} dy={dy} nearby={nearby!r}"
         )
-        return anchor, dx, dy, []
+        return anchor, dx, dy, nearby

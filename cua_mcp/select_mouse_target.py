@@ -29,6 +29,14 @@ from cua_mcp.select_ui_element import (
     _select_center_with_ollama,
     _sort_detections_reading_order,
 )
+from src.common.nearby_side import (
+    NearbyHint,
+    anchor_satisfies_side,
+    merge_nearby_hints,
+    nearby_hints_to_labels,
+    nearby_hints_to_phrases,
+    normalize_nearby_hints,
+)
 from cua_mcp.yolo_onnx import (
     DEFAULT_CONF_YOLOV26_END2END,
     MOUSE_TARGET_CLASS_IDS,
@@ -409,7 +417,7 @@ def _detection_similarity_to_query(det: UiDetection, query: str) -> float:
 
 
 # Minimum SequenceMatcher score to keep a candidate before the LLM filter.
-_MOUSE_FILTER_SIMILARITY_THRESHOLD = 0.75
+_MOUSE_FILTER_SIMILARITY_THRESHOLD = 0.5
 
 
 def _anchor_indices_by_top_similarity(
@@ -571,71 +579,94 @@ def _collect_monitor_detections(
 
 def _normalize_nearby_labels(labels: list[str] | None) -> list[str]:
     """Strip, drop empties, and dedupe nearby labels while preserving order."""
-    if not labels:
-        return []
-    out: list[str] = []
-    seen: set[str] = set()
-    for item in labels:
-        if not isinstance(item, str):
-            continue
-        label = item.strip()
-        if not label or label in seen:
-            continue
-        seen.add(label)
-        out.append(label)
-    return out
+    return nearby_hints_to_labels(normalize_nearby_hints(labels))
 
 
 def _merge_nearby_labels(*sources: list[str] | None) -> list[str]:
     """Merge nearby label lists; earlier sources win on duplicates."""
-    merged: list[str] = []
-    seen: set[str] = set()
-    for source in sources:
-        for label in _normalize_nearby_labels(source):
-            if label in seen:
+    return nearby_hints_to_phrases(merge_nearby_hints(*sources))
+
+
+def _hint_covered_by_neighbors(
+    anchor: UiDetection,
+    neighbors: list[UiDetection],
+    hint: NearbyHint,
+    *,
+    threshold: float,
+    require_side: bool,
+) -> bool:
+    """True when some neighbor matches ``hint`` (label, optional side)."""
+    for neigh in neighbors:
+        if _detection_similarity_to_query(neigh, hint.label) < threshold:
+            continue
+        if require_side and hint.side is not None:
+            if not anchor_satisfies_side(anchor.bbox, neigh.cx, neigh.cy, hint.side):
                 continue
-            seen.add(label)
-            merged.append(label)
-    return merged
+        return True
+    return False
 
 
 def _prefilter_anchors_by_nearby(
     anchors: list[UiDetection],
     nearby_matches: list[UiDetection],
-    nearby_labels: list[str],
+    nearby_labels: list[str] | list[NearbyHint] | None,
     *,
     threshold: float = _MOUSE_FILTER_SIMILARITY_THRESHOLD,
 ) -> list[UiDetection]:
     """Narrow anchors using exclusive nearby-landmark assignment.
 
-    Prefer anchors whose assigned neighbors cover **all** ``nearby_labels``.
-    If none do, keep anchors with any covered nearby label. If still empty
-    (or nearby is absent), return ``anchors`` unchanged.
+    Prefer anchors whose assigned neighbors cover **all** nearby hints (label and
+    optional side). Directed sides are checked against **all** ``nearby_matches``
+    for each anchor (so exclusive distance assignment cannot hide the correct
+    side). Undirected labels still use exclusive assignment. If directed sides
+    wipe every anchor, retry with label-only coverage. If none match, return
+    ``anchors`` unchanged.
     """
-    labels = _normalize_nearby_labels(nearby_labels)
-    if not anchors or not nearby_matches or not labels:
+    hints = normalize_nearby_hints(nearby_labels)
+    if not anchors or not nearby_matches or not hints:
         return anchors
 
     assigned = _assign_exclusive_neighbors_to_anchors(anchors, nearby_matches)
-    coverage: list[set[int]] = []
-    for neighbors in assigned:
-        covered: set[int] = set()
-        for li, label in enumerate(labels):
-            if any(
-                _detection_similarity_to_query(neigh, label) >= threshold
-                for neigh in neighbors
-            ):
-                covered.add(li)
-        coverage.append(covered)
 
-    n_labels = len(labels)
-    full = [anchors[i] for i, covered in enumerate(coverage) if len(covered) == n_labels]
-    if full:
-        return full
+    def _select(require_side: bool) -> list[UiDetection]:
+        coverage: list[set[int]] = []
+        for i, neighbors in enumerate(assigned):
+            covered: set[int] = set()
+            for li, hint in enumerate(hints):
+                pool = (
+                    nearby_matches
+                    if (require_side and hint.side is not None)
+                    else neighbors
+                )
+                if _hint_covered_by_neighbors(
+                    anchors[i],
+                    pool,
+                    hint,
+                    threshold=threshold,
+                    require_side=require_side,
+                ):
+                    covered.add(li)
+            coverage.append(covered)
 
-    partial = [anchors[i] for i, covered in enumerate(coverage) if covered]
-    if partial:
-        return partial
+        n_hints = len(hints)
+        full = [
+            anchors[i] for i, covered in enumerate(coverage) if len(covered) == n_hints
+        ]
+        if full:
+            return full
+        partial = [anchors[i] for i, covered in enumerate(coverage) if covered]
+        if partial:
+            return partial
+        return []
+
+    selected = _select(require_side=True)
+    if selected:
+        return selected
+
+    if any(hint.side is not None for hint in hints):
+        selected = _select(require_side=False)
+        if selected:
+            return selected
 
     return anchors
 
@@ -663,7 +694,9 @@ async def find_mouse_point(
     anchor, offset_dx, offset_dy, nearby_from_instruction = await parse_relative_pixel_offset(
         instruction_text
     )
-    nearby = _merge_nearby_labels(nearby_objects, nearby_from_instruction)
+    nearby_hints = merge_nearby_hints(nearby_objects, nearby_from_instruction)
+    nearby_labels = nearby_hints_to_labels(nearby_hints)
+    nearby_phrases = nearby_hints_to_phrases(nearby_hints)
 
     paths = _run_manager().require_paths()
     monitor_indices = selected_eye_monitor_indices()
@@ -703,12 +736,12 @@ async def find_mouse_point(
         return None
 
     anchor_matches, nearby_matches = _filter_mouse_candidates(
-        detections, anchor, nearby
+        detections, anchor, nearby_labels
     )
     _log_info(
         f"move_mouse after_filter anchor={len(anchor_matches)} "
         f"nearby={len(nearby_matches)} "
-        f"anchor={anchor!r} nearby_labels={nearby!r}"
+        f"anchor={anchor!r} nearby_labels={nearby_phrases!r}"
     )
 
     if not anchor_matches:
@@ -717,13 +750,13 @@ async def find_mouse_point(
 
     before_nearby = len(anchor_matches)
     anchor_matches = _prefilter_anchors_by_nearby(
-        anchor_matches, nearby_matches, nearby
+        anchor_matches, nearby_matches, nearby_hints
     )
     if len(anchor_matches) != before_nearby:
         _log_info(
             "move_mouse nearby prefilter "
             f"anchors {before_nearby} -> {len(anchor_matches)} "
-            f"nearby_labels={nearby!r}"
+            f"nearby_labels={nearby_phrases!r}"
         )
 
     selected_text: str | None = None
@@ -737,7 +770,7 @@ async def find_mouse_point(
             anchor_matches,
             image_paths,
             neighbor_candidates=nearby_matches,
-            nearby_labels=nearby,
+            nearby_labels=nearby_phrases,
         )
         idx = pool_idx
         chosen = anchor_matches[pool_idx]
@@ -763,7 +796,7 @@ async def find_mouse_point(
         "resolved_center": {"x": resolved_x, "y": resolved_y},
         "relative_offset": {"dx": offset_dx, "dy": offset_dy},
         "anchor_instruction": instruction_text,
-        "nearby_objects": nearby,
+        "nearby_objects": nearby_phrases,
         "screenshot_path": image_path,
         "screenshot_paths": image_paths,
         "target_kind": chosen.class_name,

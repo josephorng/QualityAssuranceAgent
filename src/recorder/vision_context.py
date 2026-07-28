@@ -12,6 +12,12 @@ from cua_mcp.select_mouse_target import _build_candidates_from_bgr
 from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text
 from cua_mcp.yolo_onnx import YOLO_CLASS_ELEMENT, YOLO_CLASS_INPUT, YOLO_CLASS_TEXT
 from src.common.io_utils import write_json
+from src.common.nearby_side import (
+    NearbyHint,
+    Side,
+    format_nearby_context_comment,
+    side_from_anchor_bbox,
+)
 from src.recorder.models import POINTER_EVENT_KINDS, RecordedEvent
 
 _NEAREST_CANDIDATE_LIMIT = 8
@@ -400,19 +406,40 @@ def _label_already_in_instruction(label: str, instruction: str) -> bool:
     return False
 
 
-def collect_nearby_hint_labels(
+def collect_nearby_hints(
     vision: dict[str, Any],
     *,
     instruction: str,
     max_count: int = 2,
-) -> list[str]:
-    """Collect up to max_count nearby candidate labels, skipping the primary target."""
+) -> list[NearbyHint]:
+    """Collect up to max_count nearby hints from candidates after the primary.
+
+    Uses the primary candidate bbox and each neighbor center to assign an
+    optional script side via the 9-section grid. At most one directed hint is
+    kept (the first neighbor with a non-CENTER cell); further neighbors are
+    undirected.
+    """
     candidates = vision.get("candidates") or []
     if len(candidates) < 2:
         return []
 
-    labels: list[str] = []
+    primary = candidates[0]
+    if not isinstance(primary, dict):
+        return []
+    primary_bbox = primary.get("bbox")
+    has_bbox = isinstance(primary_bbox, (list, tuple)) and len(primary_bbox) == 4
+    bbox: tuple[int, int, int, int] | None = None
+    if has_bbox:
+        bbox = (
+            int(primary_bbox[0]),
+            int(primary_bbox[1]),
+            int(primary_bbox[2]),
+            int(primary_bbox[3]),
+        )
+
+    hints: list[NearbyHint] = []
     seen: set[str] = set()
+    directed_used = False
     for candidate in candidates[1:]:
         if not isinstance(candidate, dict):
             continue
@@ -422,21 +449,33 @@ def collect_nearby_hint_labels(
         if _label_already_in_instruction(label, instruction):
             continue
         seen.add(label)
-        labels.append(label)
-        if len(labels) >= max_count:
+
+        side: Side | None = None
+        if bbox is not None and not directed_used:
+            center = _candidate_center(candidate)
+            if center is not None:
+                side = side_from_anchor_bbox(bbox, center[0], center[1])
+                if side is not None:
+                    directed_used = True
+        hints.append(NearbyHint(label=label, side=side))
+        if len(hints) >= max_count:
             break
-    return labels
+    return hints
 
 
-def format_nearby_context_comment(
-    labels: list[str],
+def collect_nearby_hint_labels(
+    vision: dict[str, Any],
     *,
-    location: str = "附近",
-) -> str | None:
-    """Format nearby labels as a trailing parenthetical comment."""
-    if not labels:
-        return None
-    return f"（{location}有{'、'.join(labels)}）"
+    instruction: str,
+    max_count: int = 2,
+) -> list[str]:
+    """Collect up to max_count nearby candidate labels, skipping the primary target."""
+    return [
+        hint.label
+        for hint in collect_nearby_hints(
+            vision, instruction=instruction, max_count=max_count
+        )
+    ]
 
 
 def append_nearby_context_comment(instruction: str, vision: dict[str, Any]) -> str:
@@ -444,7 +483,8 @@ def append_nearby_context_comment(instruction: str, vision: dict[str, Any]) -> s
     if not vision.get("used_vision"):
         return instruction
     comment = format_nearby_context_comment(
-        collect_nearby_hint_labels(vision, instruction=instruction)
+        collect_nearby_hints(vision, instruction=instruction),
+        location="附近",
     )
     if comment is None:
         return instruction
@@ -462,16 +502,16 @@ def append_drag_nearby_context_comments(
 
     result = instruction
     start_comment = format_nearby_context_comment(
-        collect_nearby_hint_labels(vision, instruction=instruction),
-        location="起點附近",
+        collect_nearby_hints(vision, instruction=instruction),
+        location="起點",
     )
     if start_comment and "拖到" in result:
         drag_at = result.index("拖到")
         result = result[:drag_at] + start_comment + result[drag_at:]
 
     dest_comment = format_nearby_context_comment(
-        collect_nearby_hint_labels(destination, instruction=instruction),
-        location="終點附近",
+        collect_nearby_hints(destination, instruction=instruction),
+        location="終點",
     )
     if dest_comment:
         result = result + dest_comment

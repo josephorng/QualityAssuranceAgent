@@ -57,10 +57,17 @@ def test_parse_relative_pixel_offset_regex_strips_trailing_nearby_comment() -> N
 
 @pytest.mark.asyncio
 async def test_parse_relative_pixel_offset_uses_llm() -> None:
+    from src.common.nearby_side import NearbyHint
+
     with patch(
         "cua_mcp.instruction_offset.request_json_with_retry",
         new=AsyncMock(
-            return_value=("「振銓」文字", 5, -28, ["「圖片」文字"]),
+            return_value=(
+                "「振銓」文字",
+                5,
+                -28,
+                [NearbyHint(label="「圖片」文字", side=None)],
+            ),
         ),
     ) as mock_request:
         anchor, dx, dy, nearby = await parse_relative_pixel_offset(
@@ -70,17 +77,27 @@ async def test_parse_relative_pixel_offset_uses_llm() -> None:
     assert anchor == "「振銓」文字"
     assert dx == 5
     assert dy == -28
-    assert nearby == ["「圖片」文字"]
+    assert nearby == [NearbyHint(label="「圖片」文字", side=None)]
     mock_request.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_parse_relative_pixel_offset_passes_raw_instruction_to_llm() -> None:
+    from src.common.nearby_side import NearbyHint
+
     raw = "點擊「文件」文字（附近有「圖片」文字、「下載」文字）"
     with patch(
         "cua_mcp.instruction_offset.request_json_with_retry",
         new=AsyncMock(
-            return_value=("「文件」文字", 0, 0, ["「圖片」文字", "「下載」文字"]),
+            return_value=(
+                "「文件」文字",
+                0,
+                0,
+                [
+                    NearbyHint(label="「圖片」文字", side=None),
+                    NearbyHint(label="「下載」文字", side=None),
+                ],
+            ),
         ),
     ) as mock_request:
         await parse_relative_pixel_offset(raw)
@@ -107,6 +124,8 @@ async def test_parse_relative_pixel_offset_empty_instruction_skips_llm() -> None
 
 @pytest.mark.asyncio
 async def test_parse_relative_pixel_offset_falls_back_to_regex() -> None:
+    from src.common.nearby_side import NearbyHint, Side
+
     with patch(
         "cua_mcp.instruction_offset.request_json_with_retry",
         new=AsyncMock(side_effect=ValueError("bad llm reply")),
@@ -118,4 +137,15 @@ async def test_parse_relative_pixel_offset_falls_back_to_regex() -> None:
     assert anchor == "「iniseape」文字"
     assert dx == 0
     assert dy == 57
-    assert nearby == []
+    assert nearby == [NearbyHint(label="「圖片」文字", side=None)]
+
+    with patch(
+        "cua_mcp.instruction_offset.request_json_with_retry",
+        new=AsyncMock(side_effect=ValueError("bad llm reply")),
+    ):
+        _, _, _, directed = await parse_relative_pixel_offset(
+            "「矩形框線」圖示（在「顯示已授權電腦」文字的左邊）"
+        )
+    assert directed == [
+        NearbyHint(label="「顯示已授權電腦」文字", side=Side.LEFT),
+    ]

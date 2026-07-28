@@ -759,6 +759,38 @@ def test_prefilter_anchors_by_nearby_noop_without_nearby() -> None:
     assert _prefilter_anchors_by_nearby(anchors, anchors, []) == anchors
 
 
+def test_prefilter_anchors_by_nearby_respects_side() -> None:
+    """Only the anchor whose bbox places the landmark in the matching cell survives."""
+    from src.common.nearby_side import NearbyHint, Side
+
+    # Landmark center at (100, 50). Left-of-landmark anchor has bbox to the left.
+    left_anchor = _detection_from_bbox((40, 40, 20, 20), YOLO_CLASS_ELEMENT, text="框")
+    right_anchor = _detection_from_bbox((120, 40, 20, 20), YOLO_CLASS_ELEMENT, text="框")
+    landmark = _detection_from_bbox((90, 40, 20, 20), YOLO_CLASS_TEXT, text="標籤")
+    # left_anchor edges x1=40,x2=60 → landmark cx=100 is RIGHT of bbox → script side LEFT
+    # right_anchor edges x1=120,x2=140 → landmark cx=100 is LEFT of bbox → script side RIGHT
+    kept = _prefilter_anchors_by_nearby(
+        [left_anchor, right_anchor],
+        [landmark],
+        [NearbyHint(label="「標籤」文字", side=Side.LEFT)],
+    )
+    assert kept == [left_anchor]
+
+
+def test_prefilter_anchors_by_nearby_relaxes_side_when_none_match() -> None:
+    from src.common.nearby_side import NearbyHint, Side
+
+    anchor = _detection_from_bbox((120, 40, 20, 20), YOLO_CLASS_ELEMENT, text="框")
+    landmark = _detection_from_bbox((90, 40, 20, 20), YOLO_CLASS_TEXT, text="標籤")
+    # Required LEFT but geometry is RIGHT → relax to label-only.
+    kept = _prefilter_anchors_by_nearby(
+        [anchor],
+        [landmark],
+        [NearbyHint(label="「標籤」文字", side=Side.LEFT)],
+    )
+    assert kept == [anchor]
+
+
 @pytest.mark.asyncio
 async def test_resolve_mouse_point_nearby_prefilter_skips_ollama(
     monkeypatch: pytest.MonkeyPatch,

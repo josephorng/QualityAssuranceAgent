@@ -140,11 +140,14 @@ def prompt_script_continue_or_end(
     return bool(result["continue"])
 
 
-def prompt_append_recording_instructions(master: Any, message: str) -> bool:
-    """Return True when the user wants generated instructions appended to the script editor."""
+def prompt_append_recording_instructions(master: Any, message: str) -> str:
+    """Ask what to do with generated recording instructions.
+
+    Returns ``append``, ``save_as``, or ``close`` (closing the dialog counts as close).
+    """
     import customtkinter as ctk
 
-    result = {"append": False}
+    result = {"choice": "close"}
 
     dialog = ctk.CTkToplevel(master)
     dialog.title("錄製分析完成")
@@ -171,16 +174,24 @@ def prompt_append_recording_instructions(master: Any, message: str) -> bool:
     btn_row.pack()
 
     def on_append() -> None:
-        result["append"] = True
+        result["choice"] = "append"
+        dialog.destroy()
+
+    def on_save_as() -> None:
+        result["choice"] = "save_as"
         dialog.destroy()
 
     def on_close() -> None:
+        result["choice"] = "close"
         dialog.destroy()
 
     dialog.protocol("WM_DELETE_WINDOW", on_close)
 
     ctk.CTkButton(
         master=btn_row, text="加入腳本", width=120, height=36, command=on_append
+    ).pack(side="left", padx=(0, 10))
+    ctk.CTkButton(
+        master=btn_row, text="存成新檔", width=120, height=36, command=on_save_as
     ).pack(side="left", padx=(0, 10))
     ctk.CTkButton(master=btn_row, text="關閉", width=120, height=36, command=on_close).pack(
         side="left"
@@ -198,7 +209,8 @@ def prompt_append_recording_instructions(master: Any, message: str) -> bool:
 
     root = master.winfo_toplevel()
     root.wait_window(dialog)
-    return bool(result["append"])
+    choice = result["choice"]
+    return choice if choice in ("append", "save_as", "close") else "close"
 
 
 def prompt_unsaved_script_changes(master: Any) -> str:

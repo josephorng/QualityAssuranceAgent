@@ -90,6 +90,44 @@ def test_append_nearby_context_comment() -> None:
     assert result == "點擊「Chrome」圖示（附近有「OneNote」文字、「Docker」圖示）"
 
 
+def test_append_nearby_context_comment_directed_from_geometry() -> None:
+    from src.common.nearby_side import NearbyHint, Side
+    from src.recorder.vision_context import collect_nearby_hints
+
+    vision = {
+        "used_vision": True,
+        "candidates": [
+            {
+                "bbox": [40, 40, 20, 20],
+                "center": [50, 50],
+                "class_name": "element",
+                "text": "box",
+                "icons": [{"chinese_id": "矩形框線"}],
+            },
+            {
+                "bbox": [90, 40, 40, 20],
+                "center": [110, 50],
+                "class_name": "text",
+                "text": "顯示已授權電腦",
+            },
+            {
+                "bbox": [200, 200, 20, 20],
+                "center": [210, 210],
+                "class_name": "text",
+                "text": "其他",
+            },
+        ],
+    }
+    hints = collect_nearby_hints(vision, instruction="點擊「矩形框線」圖示")
+    assert hints[0] == NearbyHint("「顯示已授權電腦」文字", Side.LEFT)
+    assert hints[1].label == "「其他」文字"
+    assert hints[1].side is None
+    result = append_nearby_context_comment("點擊「矩形框線」圖示", vision)
+    assert result == (
+        "點擊「矩形框線」圖示（在「顯示已授權電腦」文字的左邊、附近有「其他」文字）"
+    )
+
+
 def test_append_drag_nearby_context_comments() -> None:
     vision = {
         "used_vision": True,
@@ -1124,7 +1162,7 @@ async def test_analyze_event_to_cache_click_enriches_offset_then_nearby(
     assert result is not None
     assert result["instruction"] == (
         "將滑鼠移到「自訂Office 範本」文字左方14個像素、下方39個像素的位置"
-        "（附近有「資料夾」圖示、「WindowsPowerShell」文字），用右鍵點選。"
+        "（在「資料夾」圖示的右邊、附近有「WindowsPowerShell」文字），用右鍵點選。"
     )
     llm_mock.assert_not_called()
 

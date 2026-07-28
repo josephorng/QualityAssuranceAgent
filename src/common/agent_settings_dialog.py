@@ -7,6 +7,11 @@ from collections.abc import Callable
 from typing import Any
 
 from src.common.ctk_dialogs import show_ctk_message
+from src.common.monitor_prompt import (
+    PRIMARY_MONITOR_MARKER,
+    EyeMonitorChoice,
+    list_eye_monitor_choices,
+)
 from src.common.settings import (
     BACKEND_PRESETS,
     VISION_BACKEND_PRESETS,
@@ -91,6 +96,8 @@ def open_agent_settings_dialog(
     master: Any,
     *,
     on_saved: Callable[[], None] | None = None,
+    monitor_indices: list[int] | None = None,
+    on_monitors_changed: Callable[[list[int]], None] | None = None,
 ) -> None:
     import customtkinter as ctk
 
@@ -214,6 +221,75 @@ def open_agent_settings_dialog(
 
     _sync_vision_preset_labels()
 
+    # ── Monitor / screen selection ──────────────────────────────────
+    monitor_section = ctk.CTkFrame(inner, fg_color="transparent")
+    monitor_section.pack(fill="x", pady=(6, 0))
+    ctk.CTkLabel(
+        monitor_section,
+        text="螢幕畫面",
+        font=ctk.CTkFont(size=16, weight="bold"),
+    ).pack(anchor="w", pady=(0, 4))
+    ctk.CTkLabel(
+        monitor_section,
+        text="勾選要納入截取的每台顯示器。",
+        font=ctk.CTkFont(size=12),
+        text_color=("gray30", "gray70"),
+    ).pack(anchor="w", pady=(0, 6))
+
+    monitor_scroll = ctk.CTkScrollableFrame(monitor_section, height=120)
+    monitor_scroll.pack(fill="x", pady=(0, 4))
+    _monitor_checkboxes: list[Any] = []
+    _monitor_indices_list: list[int] = []
+    remembered = list(monitor_indices or [])
+
+    def _format_monitor_label(c: EyeMonitorChoice) -> str:
+        return f"{c.title} — {c.detail}"
+
+    def _rebuild_monitors() -> None:
+        for w in monitor_scroll.winfo_children():
+            w.destroy()
+        _monitor_checkboxes.clear()
+        _monitor_indices_list.clear()
+        try:
+            choices = list_eye_monitor_choices()
+        except Exception as e:
+            show_ctk_message(dialog, "顯示器", f"無法列出顯示器：\n{e}", kind="error")
+            choices = []
+        default_on: list[int] = []
+        for i, c in enumerate(choices):
+            if PRIMARY_MONITOR_MARKER in c.title:
+                default_on.append(i)
+        if not default_on:
+            default_on = [0] if choices else []
+        for i, c in enumerate(choices):
+            _monitor_indices_list.append(c.index)
+            cb = ctk.CTkCheckBox(
+                monitor_scroll,
+                text=_format_monitor_label(c),
+                font=ctk.CTkFont(size=13),
+            )
+            cb.pack(anchor="w", padx=4, pady=3)
+            _monitor_checkboxes.append(cb)
+            if remembered and c.index in remembered:
+                cb.select()
+            elif not remembered and i in default_on:
+                cb.select()
+
+    _rebuild_monitors()
+
+    monitor_btn_row = ctk.CTkFrame(monitor_section, fg_color="transparent")
+    monitor_btn_row.pack(fill="x", pady=(0, 6))
+    ctk.CTkButton(
+        monitor_btn_row, text="重新整理", width=100, command=_rebuild_monitors
+    ).pack(side="left")
+
+    def _get_selected_monitor_indices() -> list[int]:
+        out: list[int] = []
+        for midx, cb in zip(_monitor_indices_list, _monitor_checkboxes):
+            if cb.get():
+                out.append(midx)
+        return out
+
     ctk.CTkLabel(
         inner,
         text="變更將於下次執行或錄製分析時生效。",
@@ -242,6 +318,8 @@ def open_agent_settings_dialog(
         except OSError as e:
             show_ctk_message(dialog, "代理設定", f"無法儲存設定：\n{e}", kind="error")
             return
+        if on_monitors_changed is not None:
+            on_monitors_changed(_get_selected_monitor_indices())
         if on_saved is not None:
             on_saved()
         _close()

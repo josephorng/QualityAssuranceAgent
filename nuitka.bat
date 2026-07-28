@@ -38,6 +38,7 @@ python -m nuitka ^
     --include-data-files=cua_mcp/read_screen_text/char_dict.json=cua_mcp/read_screen_text/char_dict.json ^
     --include-data-files=cua_mcp/read_screen_text/char_decode_dict.json=cua_mcp/read_screen_text/char_decode_dict.json ^
     --include-data-files=cua_mcp/read_screen_text/model_config.json=cua_mcp/read_screen_text/model_config.json ^
+    --include-data-files=cua_mcp/read_screen_text/icon_map.json=cua_mcp/read_screen_text/icon_map.json ^
     --include-package-data=opencc ^
     --enable-plugin=tk-inter ^
     --windows-disable-console ^

@@ -24,11 +24,6 @@ from src.common.ctk_dialogs import (
     show_ctk_message,
 )
 from src.common.io_utils import append_text, pop_last_nonempty_line, read_json, write_json
-from src.common.monitor_prompt import (
-    PRIMARY_MONITOR_MARKER,
-    EyeMonitorChoice,
-    list_eye_monitor_choices,
-)
 from src.common.run_control import (
     pause_run,
     reset_run_control,
@@ -134,15 +129,14 @@ class MainHub(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title("電腦使用代理")
-        self.geometry("960x780")
-        self.minsize(880, 880)
+        self.geometry("960x620")
+        self.minsize(880, 680)
 
         hub = _read_hub_ui_state()
         self._remember_monitor_indices: list[int] = list(hub["selected_monitor_indices"])
         self._appearance_dark = bool(hub["appearance_dark"])
         self._use_tool_cache = bool(hub.get("use_tool_cache", False))
         self._recording_hotkey_enabled = bool(hub.get("recording_hotkey_enabled", True))
-        self._suppress_hub_monitor_persist = False
         ctk.set_appearance_mode("dark" if self._appearance_dark else "light")
         ctk.set_default_color_theme("dark-blue")
 
@@ -155,9 +149,6 @@ class MainHub(ctk.CTk):
         self._user_requested_stop = False
         self._stop_cancel_remaining = 0
 
-        self._monitor_labels: list[str] = []
-        self._monitor_indices: list[int] = []
-        self._monitor_checkboxes: list[ctk.CTkCheckBox] = []
 
         self._post_run_unlink: Path | None = None
         self._script_controls: list[Any] = []
@@ -187,14 +178,11 @@ class MainHub(ctk.CTk):
         self._analysis_progress: ctk.CTkProgressBar | None = None
 
         self._build_header()
-        self._build_monitor_row()
         # Pack bottom chrome first so the expanding script section cannot clip it
         # when the window is restored (not maximized).
         self._build_status()
         self._build_actions_row()
         self._build_script_section()
-
-        self._refresh_monitors()
         last_script = hub.get("last_script_path")
         if isinstance(last_script, str) and last_script.strip():
             p = Path(last_script)
@@ -574,9 +562,15 @@ class MainHub(ctk.CTk):
     def _open_settings(self) -> None:
         if self._worker_thread is not None and self._worker_thread.is_alive():
             return
+        def _on_monitors_changed(indices: list[int]) -> None:
+            self._remember_monitor_indices = indices
+            self._persist_hub_ui_state()
+
         open_agent_settings_dialog(
             self,
             on_saved=lambda: self._status.configure(text="設定已儲存"),
+            monitor_indices=self._remember_monitor_indices,
+            on_monitors_changed=_on_monitors_changed,
         )
 
     def _toggle_appearance(self) -> None:
@@ -590,94 +584,9 @@ class MainHub(ctk.CTk):
             text="\u2600" if self._appearance_dark else "\u263e"
         )
 
-    def _build_monitor_row(self) -> None:
-        box = ctk.CTkFrame(self, corner_radius=12)
-        box.pack(fill="x", padx=24, pady=8)
-        ctk.CTkLabel(box, text="螢幕畫面", font=ctk.CTkFont(size=16, weight="bold")).pack(
-            anchor="w", padx=16, pady=(14, 4)
-        )
-        ctk.CTkLabel(
-            box,
-            text="勾選要納入截取的每台顯示器。",
-            font=ctk.CTkFont(size=12),
-            text_color=("gray30", "gray70"),
-            wraplength=860,
-            justify="left",
-        ).pack(anchor="w", padx=16, pady=(0, 8))
-        row = ctk.CTkFrame(box, fg_color="transparent")
-        self._monitor_checks_scroll = ctk.CTkScrollableFrame(row, height=200)
-        self._monitor_checks_scroll.pack(side="left", fill="both", expand=True)
-        self._monitor_refresh_btn = ctk.CTkButton(
-            row, text="重新整理", width=100, command=self._refresh_monitors
-        )
-        self._monitor_refresh_btn.pack(side="left", padx=(10, 0), anchor="n")
-        row.pack(fill="x", padx=16, pady=(0, 14))
-
-    def _refresh_monitors(self) -> None:
-        try:
-            choices = list_eye_monitor_choices()
-        except Exception as e:
-            show_ctk_message(self, "顯示器", f"無法列出顯示器：\n{e}", kind="error")
-            choices = []
-        self._monitor_labels = [self._format_monitor_row(c) for c in choices]
-        self._monitor_indices = [c.index for c in choices]
-        self._suppress_hub_monitor_persist = True
-        try:
-            self._rebuild_monitor_checkboxes()
-            self._apply_remembered_monitor_selection()
-        finally:
-            self._suppress_hub_monitor_persist = False
-
-    def _apply_remembered_monitor_selection(self) -> None:
-        valid = [i for i in self._remember_monitor_indices if i in self._monitor_indices]
-        if not valid:
-            return
-        for midx, cb in zip(self._monitor_indices, self._monitor_checkboxes):
-            if midx in valid:
-                cb.select()
-            else:
-                cb.deselect()
-
-    def _on_monitor_checkbox_changed(self) -> None:
-        if self._suppress_hub_monitor_persist:
-            return
-        self._remember_monitor_indices = self._selected_monitor_indices()
-        self._persist_hub_ui_state()
-
-    def _rebuild_monitor_checkboxes(self) -> None:
-        for w in self._monitor_checks_scroll.winfo_children():
-            w.destroy()
-        self._monitor_checkboxes.clear()
-        default_on: list[int] = []
-        for i, label in enumerate(self._monitor_labels):
-            if PRIMARY_MONITOR_MARKER in label:
-                default_on.append(i)
-        if not default_on:
-            default_on = [0] if self._monitor_labels else []
-        for i, label in enumerate(self._monitor_labels):
-            cb = ctk.CTkCheckBox(
-                self._monitor_checks_scroll,
-                text=label,
-                font=ctk.CTkFont(size=13),
-                command=self._on_monitor_checkbox_changed,
-            )
-            cb.pack(anchor="w", padx=4, pady=3)
-            self._monitor_checkboxes.append(cb)
-            if i in default_on:
-                cb.select()
-            else:
-                cb.deselect()
-
-    @staticmethod
-    def _format_monitor_row(c: EyeMonitorChoice) -> str:
-        return f"{c.title} — {c.detail}"
-
     def _selected_monitor_indices(self) -> list[int]:
-        out: list[int] = []
-        for midx, cb in zip(self._monitor_indices, self._monitor_checkboxes):
-            if cb.get():
-                out.append(midx)
-        return out
+        """Return currently remembered monitor indices (managed by settings dialog)."""
+        return list(self._remember_monitor_indices)
 
     def _build_script_section(self) -> None:
         box = ctk.CTkFrame(self, corner_radius=12)
@@ -692,11 +601,11 @@ class MainHub(ctk.CTk):
     def _build_single_script_tab(self, parent: Any) -> None:
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=8, pady=4)
-        b_open = ctk.CTkButton(row, text="開啟…", width=100, command=self._script_open)
+        b_open = ctk.CTkButton(row, text="開啟", width=80, command=self._script_open)
         b_open.pack(side="left", padx=(0, 8))
-        b_save = ctk.CTkButton(row, text="儲存", width=100, command=self._script_save)
+        b_save = ctk.CTkButton(row, text="儲存", width=80, command=self._script_save)
         b_save.pack(side="left", padx=(0, 8))
-        b_sas = ctk.CTkButton(row, text="另存新檔…", width=100, command=self._script_save_as)
+        b_sas = ctk.CTkButton(row, text="另存新檔", width=100, command=self._script_save_as)
         b_sas.pack(side="left", padx=(0, 8))
         b_clear = ctk.CTkButton(row, text="開新檔案", width=100, command=self._script_clear)
         b_clear.pack(side="left", padx=(0, 8))
@@ -706,7 +615,7 @@ class MainHub(ctk.CTk):
         self._record_btn.pack(side="left", padx=(0, 8))
         self._analyze_recording_btn = ctk.CTkButton(
             row,
-            text="分析錄製…",
+            text="分析錄製",
             width=110,
             command=self._on_analyze_recording_folder,
         )
@@ -1105,9 +1014,6 @@ class MainHub(ctk.CTk):
     def _set_hub_controls_idle(self) -> None:
         self._run_btn.configure(state="normal")
         self._settings_btn.configure(state="normal")
-        for cb in self._monitor_checkboxes:
-            cb.configure(state="normal")
-        self._monitor_refresh_btn.configure(state="normal")
         for w in self._script_controls:
             w.configure(state="normal")
         for w in self._queue_controls:
@@ -1120,9 +1026,6 @@ class MainHub(ctk.CTk):
     def _set_hub_controls_recording(self) -> None:
         self._run_btn.configure(state="disabled")
         self._settings_btn.configure(state="disabled")
-        for cb in self._monitor_checkboxes:
-            cb.configure(state="disabled")
-        self._monitor_refresh_btn.configure(state="disabled")
         for w in self._script_controls:
             if w is self._record_btn:
                 continue
@@ -1138,9 +1041,6 @@ class MainHub(ctk.CTk):
         self._analysis_cancel_event.clear()
         self._run_btn.configure(state="disabled")
         self._settings_btn.configure(state="disabled")
-        for cb in self._monitor_checkboxes:
-            cb.configure(state="disabled")
-        self._monitor_refresh_btn.configure(state="disabled")
         for w in self._script_controls:
             if w is self._record_btn:
                 continue
@@ -1223,6 +1123,37 @@ class MainHub(ctk.CTk):
         self._refresh_script_path_label()
         self._mark_script_clean()
         self._status.configure(text=f"已另存新檔 {p.name}")
+        self._persist_hub_ui_state()
+        return True
+
+    def _save_recording_instructions_as_new_script(self, lines: list[str]) -> bool:
+        """Save analysis instructions to a new file and open it as the current script."""
+        if not self._confirm_proceed_with_unsaved_script():
+            return False
+        path = filedialog.asksavesasfilename(
+            parent=self,
+            title="存成新檔",
+            defaultextension=".txt",
+            filetypes=[("文字檔", "*.txt"), ("全部", "*.*")],
+            initialdir=str(ROOT_DIR / "scripts"),
+        )
+        if not path:
+            return False
+        body = "\n".join(lines).rstrip() + "\n"
+        p = Path(path)
+        p.write_text(body, encoding="utf-8")
+        self._script_path = p
+        self._runtime_commands_cache_path = None
+        self._suppress_script_cache_sync = True
+        try:
+            self._script_text.configure(state="normal")
+            self._script_text.delete("0.0", "end")
+            self._script_text.insert("0.0", body)
+        finally:
+            self._suppress_script_cache_sync = False
+        self._refresh_script_path_label()
+        self._mark_script_clean()
+        self._status.configure(text=f"已存成新檔並開啟 {p.name}")
         self._persist_hub_ui_state()
         return True
 
@@ -1514,23 +1445,24 @@ class MainHub(ctk.CTk):
             f"已寫入快取 {cached} 筆，略過 {skipped} 筆。"
         )
         self._status.configure(text=f"已寫入快取 {cached} 筆（略過 {skipped}）。")
-        if lines and prompt_append_recording_instructions(self, msg):
+        if not lines:
+            show_ctk_message(self, "錄製分析完成", msg, kind="info")
+            return
+        choice = prompt_append_recording_instructions(self, msg)
+        if choice == "append":
             self._script_text.configure(state="normal")
             if self._script_text.get("0.0", "end").strip():
                 self._script_text.insert("end", "\n")
             self._script_text.insert("end", "\n".join(lines) + "\n")
             self._sync_script_text_to_runtime_cache()
-        else:
-            show_ctk_message(self, "錄製分析完成", msg, kind="info")
+        elif choice == "save_as":
+            self._save_recording_instructions_as_new_script(lines)
 
     def _begin_worker_run(self, args: _WorkerArgs) -> None:
         reset_run_control()
         self._set_run_button_running()
         self._hide_report_button()
         self._settings_btn.configure(state="disabled")
-        for cb in self._monitor_checkboxes:
-            cb.configure(state="disabled")
-        self._monitor_refresh_btn.configure(state="disabled")
         for w in self._script_controls:
             w.configure(state="disabled")
         for w in self._queue_controls:
@@ -1911,9 +1843,6 @@ class MainHub(ctk.CTk):
         reset_run_control()
         self._set_run_button_idle()
         self._settings_btn.configure(state="normal")
-        for cb in self._monitor_checkboxes:
-            cb.configure(state="normal")
-        self._monitor_refresh_btn.configure(state="normal")
         for w in self._script_controls:
             w.configure(state="normal")
         for w in self._queue_controls:

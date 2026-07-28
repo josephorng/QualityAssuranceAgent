@@ -67,6 +67,23 @@ def _point_to_bbox_distance_sq(
     return float(dx * dx + dy * dy)
 
 
+def _bbox_area(bbox: tuple[int, int, int, int]) -> int:
+    """Return width × height for an axis-aligned ``(x, y, w, h)`` bbox."""
+    return int(bbox[2]) * int(bbox[3])
+
+
+def _nearest_candidate_rank_key(
+    bbox: tuple[int, int, int, int],
+    local_x: int,
+    local_y: int,
+) -> tuple[float, int]:
+    """Sort key: point-to-bbox distance, then smallest area (innermost hit)."""
+    return (
+        _point_to_bbox_distance_sq(local_x, local_y, bbox),
+        _bbox_area(bbox),
+    )
+
+
 def _nearest_candidates(
     detections: list[UiDetection],
     local_x: int,
@@ -74,12 +91,15 @@ def _nearest_candidates(
     *,
     limit: int = _NEAREST_CANDIDATE_LIMIT,
 ) -> list[UiDetection]:
-    """Return up to ``limit`` detections sorted by point-to-bbox distance (closest first)."""
+    """Return up to ``limit`` detections sorted by point-to-bbox distance (closest first).
+
+    When several boxes contain the cursor (distance 0), prefer the smallest bbox.
+    """
     if not detections:
         return []
     scored = sorted(
         detections,
-        key=lambda d: _point_to_bbox_distance_sq(local_x, local_y, d.bbox),
+        key=lambda d: _nearest_candidate_rank_key(d.bbox, local_x, local_y),
     )
     return scored[:limit]
 
@@ -147,7 +167,11 @@ def _nearest_candidate_by_class(
         lx, ly = local
         return min(
             matches,
-            key=lambda c: _point_to_bbox_distance_sq(lx, ly, tuple(c["bbox"])),
+            key=lambda c: _nearest_candidate_rank_key(
+                tuple(c["bbox"]),
+                lx,
+                ly,
+            ),
         )
     return matches[0]
 

@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from cua_mcp.select_mouse_target import _detection_from_bbox
-from cua_mcp.yolo_onnx import YOLO_CLASS_ELEMENT, YOLO_CLASS_TEXT
+from cua_mcp.yolo_onnx import YOLO_CLASS_ELEMENT, YOLO_CLASS_SCROLLBAR, YOLO_CLASS_TEXT
 from src.recorder.models import RecordedEvent
 from src.recorder.vision_context import (
     _local_cursor,
@@ -63,6 +63,20 @@ def test_nearest_candidates_respects_limit() -> None:
     ]
     nearest = _nearest_candidates(detections, 0, 0, limit=8)
     assert len(nearest) == 8
+
+
+def test_nearest_candidates_prefers_smallest_containing_bbox() -> None:
+    """Nested controls on a scrollbar thumb rank the inner icon above the scrollbar."""
+    scrollbar = _detection_from_bbox((1411, 386, 24, 563), YOLO_CLASS_SCROLLBAR)
+    thumb = _detection_from_bbox(
+        (1415, 945, 14, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下三角"}],
+    )
+    detections = [scrollbar, thumb]
+    nearest = _nearest_candidates(detections, 1421, 947, limit=2)
+    assert nearest[0] is thumb
+    assert nearest[1] is scrollbar
 
 
 @pytest.mark.asyncio

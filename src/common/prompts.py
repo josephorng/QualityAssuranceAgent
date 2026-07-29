@@ -287,8 +287,9 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Return JSON only: {{\"meaningful\": <bool>, \"reason\": \"<short explanation>\"}}\n"
             ),
             "instructions": [
-                "meaningful=true when recorded text is real user content: English words, Chinese characters, numbers, emails, URLs, or other intentional input.",
-                "meaningful=false for IME composition keys only (pinyin like nihao without matching Chinese in the field), vk_* virtual-key tokens, or gibberish that clearly does not match visible field content.",
+                "Judge only whether recorded text matches the visible typed content in the focused field. Do not speculate that alphanumeric strings are passwords, identifiers, or leetspeak.",
+                "meaningful=true only when recorded text clearly matches (or is a close substring of) the text shown in the focused field: English words, Chinese characters, numbers, emails, URLs, or other intentional input visible on screen.",
+                "meaningful=false for IME composition keys only (pinyin like nihao, Zhuyin like vul3nj04q06, without matching Chinese in the field), vk_* virtual-key tokens, or any recorded text that does not match visible field content.",
                 "When the screenshot shows Chinese (or other composed text) in the focused field but recorded text is only Latin IME keys, meaningful=false.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],

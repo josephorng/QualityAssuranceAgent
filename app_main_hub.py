@@ -424,8 +424,21 @@ class MainHub(ctk.CTk):
 
     def _refresh_script_line_numbers(self) -> None:
         """Rebuild the read-only gutter so line numbers stay aligned with script text."""
+        textbox = self._script_text._textbox
         line_count = self._script_line_count()
-        numbers = "\n".join(str(i) for i in range(1, line_count + 1))
+        # One number per logical line; blank rows for soft-wrapped display continuations.
+        rows: list[str] = []
+        for i in range(1, line_count + 1):
+            start = f"{i}.0"
+            end = f"{i}.end"
+            try:
+                counted = textbox.count(start, end, "displaylines")
+                display_lines = int(counted[0]) + 1 if counted else 1
+            except (tk.TclError, TypeError, ValueError, IndexError):
+                display_lines = 1
+            rows.append(str(i))
+            rows.extend("" for _ in range(max(0, display_lines - 1)))
+        numbers = "\n".join(rows) if rows else "1"
         digit_width = max(2, len(str(line_count)))
         gutter_width = 18 + digit_width * 10
 
@@ -446,6 +459,19 @@ class MainHub(ctk.CTk):
             self._script_line_numbers._textbox.yview_moveto(first)
         except tk.TclError:
             return
+
+    def _on_script_text_configured(self, *_args: object) -> None:
+        """Recompute gutter rows when wrap width changes, then re-sync scroll."""
+        try:
+            width = int(self._script_text._textbox.winfo_width())
+        except (tk.TclError, TypeError, ValueError):
+            self._sync_script_line_number_scroll()
+            return
+        if getattr(self, "_script_text_last_wrap_width", None) == width:
+            self._sync_script_line_number_scroll()
+            return
+        self._script_text_last_wrap_width = width
+        self._refresh_script_line_numbers()
 
     def _bind_script_text_cache_sync(self) -> None:
         textbox = self._script_text._textbox
@@ -477,7 +503,7 @@ class MainHub(ctk.CTk):
         )
         textbox.bind(
             "<Configure>",
-            lambda _e: self.after_idle(self._sync_script_line_number_scroll),
+            lambda _e: self.after_idle(self._on_script_text_configured),
             add="+",
         )
 
@@ -664,7 +690,7 @@ class MainHub(ctk.CTk):
         self._script_line_numbers.pack(side="left", fill="y", padx=(0, 4))
         self._script_line_numbers.insert("0.0", "1")
         self._script_line_numbers.configure(state="disabled")
-        self._script_text = ctk.CTkTextbox(editor, font=script_font, wrap="none")
+        self._script_text = ctk.CTkTextbox(editor, font=script_font, wrap="word")
         self._script_text.pack(side="left", fill="both", expand=True)
         self._bind_script_text_cache_sync()
         self._script_controls.extend(
@@ -1151,7 +1177,7 @@ class MainHub(ctk.CTk):
         """Save analysis instructions to a new file and open it as the current script."""
         if not self._confirm_proceed_with_unsaved_script():
             return False
-        path = filedialog.asksavesasfilename(
+        path = filedialog.asksaveasfilename(
             parent=self,
             title="存成新檔",
             defaultextension=".txt",

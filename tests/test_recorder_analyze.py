@@ -120,11 +120,10 @@ def test_append_nearby_context_comment_directed_from_geometry() -> None:
     }
     hints = collect_nearby_hints(vision, instruction="點擊「矩形框線」圖示")
     assert hints[0] == NearbyHint("「顯示已授權電腦」文字", Side.LEFT)
-    assert hints[1].label == "「其他」文字"
-    assert hints[1].side is None
+    assert hints[1] == NearbyHint("「其他」文字", Side.UPPER_LEFT)
     result = append_nearby_context_comment("點擊「矩形框線」圖示", vision)
     assert result == (
-        "點擊「矩形框線」圖示（在「顯示已授權電腦」文字的左邊、附近有「其他」文字）"
+        "點擊「矩形框線」圖示（在「顯示已授權電腦」文字的左邊、在「其他」文字的左上方）"
     )
 
 

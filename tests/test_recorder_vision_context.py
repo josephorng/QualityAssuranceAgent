@@ -611,8 +611,9 @@ async def test_drag_destination_uses_hit_target_when_drop_inside_text(tmp_path) 
         vision = await build_vision_context(event, run_dir=tmp_path, persist_debug=False)
 
     destination = vision["destination"]
+    assert destination["candidates"][0]["text"] == "振銓"
     assert "text='振銓'" in destination["candidate_text"]
-    assert "text='Desktop'" not in destination["candidate_text"]
+    assert "text='Desktop'" in destination["candidate_text"]
 
 
 @pytest.mark.asyncio

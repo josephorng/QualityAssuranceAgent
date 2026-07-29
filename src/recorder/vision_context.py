@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import cv2
+
+if TYPE_CHECKING:
+    import numpy as np
 
 from cua_mcp.icon_map import is_pua_char
 from cua_mcp.read_screen_text.ocr_image import _ocr_boxes_on_bgr
@@ -439,9 +442,8 @@ def collect_nearby_hints(
     """Collect up to max_count nearby hints from candidates after the primary.
 
     Uses the primary candidate bbox and each neighbor center to assign an
-    optional script side via the 9-section grid. At most one directed hint is
-    kept (the first neighbor with a non-CENTER cell); further neighbors are
-    undirected.
+    optional script side via the 9-section grid. Neighbors whose center falls
+    in the CENTER cell stay undirected (``side=None``).
     """
     candidates = vision.get("candidates") or []
     if len(candidates) < 2:
@@ -463,7 +465,6 @@ def collect_nearby_hints(
 
     hints: list[NearbyHint] = []
     seen: set[str] = set()
-    directed_used = False
     for candidate in candidates[1:]:
         if not isinstance(candidate, dict):
             continue
@@ -475,12 +476,10 @@ def collect_nearby_hints(
         seen.add(label)
 
         side: Side | None = None
-        if bbox is not None and not directed_used:
+        if bbox is not None:
             center = _candidate_center(candidate)
             if center is not None:
                 side = side_from_anchor_bbox(bbox, center[0], center[1])
-                if side is not None:
-                    directed_used = True
         hints.append(NearbyHint(label=label, side=side))
         if len(hints) >= max_count:
             break
@@ -670,11 +669,19 @@ def _destination_candidates(
     *,
     limit: int = _NEAREST_CANDIDATE_LIMIT,
 ) -> list[UiDetection]:
-    """Return destination candidates at the drop point."""
+    """Return destination candidates at the drop point.
+
+    When the drop lands inside a text/element, pin that hit as index 0 and
+    append the usual nearest neighbors (deduped) up to ``limit``.
+    """
+    nearest = _nearest_candidates(
+        all_detections, end_local[0], end_local[1], limit=limit
+    )
     hit = _destination_target_at_point(all_detections, end_local[0], end_local[1])
-    if hit is not None:
-        return [hit]
-    return _nearest_candidates(all_detections, end_local[0], end_local[1], limit=limit)
+    if hit is None:
+        return nearest
+    others = [det for det in nearest if det != hit]
+    return [hit, *others][:limit]
 
 
 def _candidate_dict_to_detection(candidate: dict[str, Any]) -> UiDetection:
@@ -698,7 +705,7 @@ def _build_filtered_destination_vision(
     *,
     end_local: tuple[int, int],
 ) -> dict[str, Any]:
-    """Filter end-point vision to drop-target candidates and attach offset hints."""
+    """Build destination vision with drop hit pinned first, then nearest neighbors."""
     all_detections = end_result.get("all_detections")
     if isinstance(all_detections, list) and all_detections:
         filtered = _destination_candidates(all_detections, end_local)

@@ -767,21 +767,38 @@ def extract_nearest_text(
     local_x: int,
     local_y: int,
 ) -> str | None:
-    """Return OCR text from the nearest candidate at ``local_x``/``local_y``."""
+    """Return OCR from the nearest input field, then fall back to nearby text."""
     nearest = _nearest_candidates(detections, local_x, local_y, limit=len(detections))
     if not nearest:
         return None
+
+    nearest_input = next(
+        (det for det in nearest if det.class_id == YOLO_CLASS_INPUT),
+        None,
+    )
+    if nearest_input is not None:
+        input_texts: list[str] = []
+        for det in sorted(detections, key=lambda item: (item.cy, item.cx)):
+            text = (det.text or "").strip()
+            if (
+                det.class_id == YOLO_CLASS_TEXT
+                and text
+                and _bbox_center_inside(nearest_input.bbox, det.bbox)
+                and text not in input_texts
+            ):
+                input_texts.append(text)
+        if input_texts:
+            return "".join(input_texts)
+
+        ocr_text = _ocr_input_bbox_text(bgr, nearest_input.bbox)
+        if ocr_text:
+            return ocr_text
 
     for det in nearest:
         text = (det.text or "").strip()
         if text:
             return text
 
-    first = nearest[0]
-    if first.class_id == YOLO_CLASS_INPUT:
-        ocr_text = _ocr_input_bbox_text(bgr, first.bbox)
-        if ocr_text:
-            return ocr_text
     return None
 
 

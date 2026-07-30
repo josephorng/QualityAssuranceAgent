@@ -1,65 +1,16 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from cua_mcp.selection_engine import request_json_with_retry
-from src.common.prompting import get_prompt
 from src.recorder.models import RecordedEvent
 from src.recorder.vision_context import (
     _global_to_local,
     build_vision_context_at_point,
     extract_nearest_text,
 )
-
-_MEANINGFUL_RESPONSE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "meaningful": {"type": "boolean"},
-        "reason": {"type": "string"},
-    },
-    "required": ["meaningful", "reason"],
-}
-
-
-def _parse_meaningful_reply(raw: str) -> dict[str, Any]:
-    data = json.loads(raw)
-    if not isinstance(data, dict):
-        raise ValueError("response is not an object")
-    meaningful = data.get("meaningful")
-    reason = data.get("reason")
-    if not isinstance(meaningful, bool):
-        raise ValueError("meaningful must be a boolean")
-    if not isinstance(reason, str):
-        raise ValueError("reason must be a string")
-    return {"meaningful": meaningful, "reason": reason.strip()}
-
-
-async def _check_text_meaningful(
-    event: RecordedEvent,
-    *,
-    log_info: Callable[[str], None] | None = None,
-) -> dict[str, Any]:
-    prompt = get_prompt("recording_text_meaningful_check").format(
-        recorded_text=event.text or "",
-    )
-    messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
-    shot = event.screenshot_path
-    if shot and Path(shot).is_file():
-        messages[0]["images"] = [shot]
-
-    return await request_json_with_retry(
-        messages=messages,
-        response_schema=_MEANINGFUL_RESPONSE_SCHEMA,
-        parse_reply=_parse_meaningful_reply,
-        retry_instruction=get_prompt("recording_text_meaningful_check_retry"),
-        log_info=log_info,
-        append_image_sizes=True,
-    )
-
 
 def _vision_for_llm(vision: dict[str, Any]) -> dict[str, Any]:
     return {
@@ -77,43 +28,16 @@ async def resolve_text_input_text(
     run_dir: Path,
     log_info: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """Resolve final typing text for analysis, with OCR fallback when capture is unreliable."""
+    """Resolve typing text with vision first, falling back to the recorded keystrokes."""
     recorded_text = event.text or ""
-    if not recorded_text.strip():
-        return {
-            "text": recorded_text,
-            "recorded_text": recorded_text,
-            "source": "recorded",
-            "meaningful": True,
-            "reason": "empty recorded text",
-            "vision": None,
-        }
-
-    try:
-        check = await _check_text_meaningful(event, log_info=log_info)
-    except (ValueError, json.JSONDecodeError) as exc:
-        if log_info is not None:
-            log_info(f"resolve_text_input_text meaningful check failed event={event.index}: {exc}")
-        check = {"meaningful": True, "reason": "meaningful check failed; keeping recorded text"}
-
-    if check["meaningful"]:
-        return {
-            "text": recorded_text,
-            "recorded_text": recorded_text,
-            "source": "recorded",
-            "meaningful": True,
-            "reason": check.get("reason", ""),
-            "vision": None,
-        }
-
-    anchor = event.anchor_click_xy
+    anchor = event.anchor_click_xy or event.cursor_xy
     if anchor is None:
         return {
             "text": recorded_text,
             "recorded_text": recorded_text,
             "source": "recorded",
-            "meaningful": False,
-            "reason": check.get("reason", ""),
+            "meaningful": None,
+            "reason": "vision unavailable: no anchor or cursor coordinates",
             "vision": None,
         }
 
@@ -136,14 +60,14 @@ async def resolve_text_input_text(
         if log_info is not None:
             log_info(
                 f"resolve_text_input_text event={event.index} "
-                f"ocr_fallback recorded={recorded_text!r} resolved={ocr_text!r}"
+                f"vision_first recorded={recorded_text!r} resolved={ocr_text!r}"
             )
         return {
             "text": ocr_text,
             "recorded_text": recorded_text,
             "source": "ocr",
-            "meaningful": False,
-            "reason": check.get("reason", ""),
+            "meaningful": None,
+            "reason": "vision-first OCR",
             "vision": _vision_for_llm(vision),
         }
 
@@ -151,8 +75,8 @@ async def resolve_text_input_text(
         "text": recorded_text,
         "recorded_text": recorded_text,
         "source": "recorded",
-        "meaningful": False,
-        "reason": check.get("reason", ""),
+        "meaningful": None,
+        "reason": "vision produced no text; kept recorded text",
         "vision": _vision_for_llm(vision),
     }
 

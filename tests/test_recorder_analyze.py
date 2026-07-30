@@ -405,6 +405,9 @@ async def test_analyze_recording_session_writes_instructions(tmp_path: Path) -> 
     assert analysis["instruction"] == "輸入「打電話的時候」"
     assert "tool_calls" not in analysis
     assert analysis["text_resolution"]["resolved_text"] == "打電話的時候"
+    recording_html = run_dir / "recording_steps.html"
+    assert recording_html.is_file()
+    assert "輸入「打電話的時候」" in recording_html.read_text(encoding="utf-8")
 
 
 def test_enrich_drag_instruction_offset_appends_exact_pixels() -> None:

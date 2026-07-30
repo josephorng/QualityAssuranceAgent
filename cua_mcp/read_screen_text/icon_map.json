@@ -1,5 +1,5 @@
 {
-    "next_pua": 57652,
+    "next_pua": 57653,
     "": {
         "id": "folder_icon",
         "chinese_id": "資料夾",
@@ -1259,5 +1259,10 @@
         "id": "cd_dvd_drive",
         "chinese_id": "光碟機",
         "description": "An icon depicting a computer disc drive unit or external hardware bay where optical media like CDs or DVDs are inserted, paired with a globe or indicator component."
+    },
+    "": {
+        "id": "backspace",
+        "chinese_id": "倒退鍵",
+        "description": "left-pointing tag shape containing an x mark, representing backspace or delete key"
     }
 }

@@ -771,6 +771,7 @@ class OcrViewerApp:
         self.item_list.configure(yscrollcommand=self.item_scroll.set)
         self.item_list.bind("<<ListboxSelect>>", self._on_item_select)
         self.item_list.bind("<Double-Button-1>", self._on_item_double_click)
+        self.item_list.bind("<Delete>", self._delete_selected_detection)
 
         controls = ttk.Frame(left)
         controls.grid(row=6, column=0, sticky="ew", pady=(8, 0))
@@ -805,8 +806,11 @@ class OcrViewerApp:
         ttk.Entry(controls, textvariable=self.yolo_conf_var, width=10).grid(
             row=4, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(6, 0)
         )
-        ttk.Button(controls, text="Reset Zoom", command=self._reset_zoom).grid(
+        ttk.Button(controls, text="Delete selected", command=self._delete_selected_detection).grid(
             row=5, column=0, columnspan=4, sticky="ew", pady=(6, 0)
+        )
+        ttk.Button(controls, text="Reset Zoom", command=self._reset_zoom).grid(
+            row=6, column=0, columnspan=4, sticky="ew", pady=(6, 0)
         )
 
         canvas_wrap = ttk.Frame(self.parent, padding=8)
@@ -830,6 +834,7 @@ class OcrViewerApp:
         self.canvas.bind("<ButtonPress-2>", self._on_mmb_press)
         self.canvas.bind("<B2-Motion>", self._on_mmb_drag)
         self.canvas.bind("<MouseWheel>", self._on_canvas_mousewheel)
+        self.canvas.bind("<Delete>", self._delete_selected_detection)
 
         status = ttk.Label(self.parent, textvariable=self.status_var, anchor="w")
         status.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 8))
@@ -1145,6 +1150,24 @@ class OcrViewerApp:
             return
         self.selected_line_idx = selected[0]
         self._refresh_image()
+
+    def _delete_selected_detection(self, _event: object | None = None) -> str:
+        idx = self.selected_line_idx
+        if idx is None or idx < 0 or idx >= len(self.current_lines):
+            self.status_var.set("Select a detection to delete")
+            return "break"
+
+        deleted = self.current_lines.pop(idx)
+        self.selected_line_idx = None
+        self._populate_item_list()
+        if self.current_lines:
+            next_idx = min(idx, len(self.current_lines) - 1)
+            self.item_list.select_set(next_idx)
+            self.item_list.see(next_idx)
+            self.selected_line_idx = next_idx
+        self._refresh_image()
+        self.status_var.set(f"Deleted detection #{idx + 1}: {_display_label_for_line(deleted)}")
+        return "break"
 
     def _on_item_double_click(self, _event: object | None = None) -> None:
         selected = self.item_list.curselection()
@@ -1470,6 +1493,7 @@ class OcrViewerApp:
             self._refresh_image()
             return
 
+        self.canvas.focus_set()
         self.selected_line_idx = selected_idx
         self.item_list.select_set(selected_idx)
         self.item_list.see(selected_idx)
@@ -1526,7 +1550,8 @@ class OcrViewerApp:
         dest_dir = YOLO_UNDONE_IMAGES
         try:
             dest_dir.mkdir(parents=True, exist_ok=True)
-            dest = dest_dir / f"cua_{src.name}"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            dest = dest_dir / f"cua_{timestamp}_{src.name}"
             shutil.copy2(src, dest)
             self.status_var.set(f"Copied to {dest}")
         except OSError as exc:
@@ -1637,6 +1662,7 @@ class TestImagesViewerApp:
         self.item_list.configure(yscrollcommand=self.item_scroll.set)
         self.item_list.bind("<<ListboxSelect>>", self._on_item_select)
         self.item_list.bind("<Double-Button-1>", self._on_item_double_click)
+        self.item_list.bind("<Delete>", self._delete_selected_detection)
 
         controls = ttk.Frame(left)
         controls.grid(row=5, column=0, sticky="ew", pady=(8, 0))
@@ -1682,8 +1708,11 @@ class TestImagesViewerApp:
         ttk.Entry(controls, textvariable=self.yolo_conf_var, width=10).grid(
             row=4, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(6, 0)
         )
-        ttk.Button(controls, text="Reset Zoom", command=self._reset_zoom).grid(
+        ttk.Button(controls, text="Delete selected", command=self._delete_selected_detection).grid(
             row=5, column=0, columnspan=4, sticky="ew", pady=(6, 0)
+        )
+        ttk.Button(controls, text="Reset Zoom", command=self._reset_zoom).grid(
+            row=6, column=0, columnspan=4, sticky="ew", pady=(6, 0)
         )
 
         canvas_wrap = ttk.Frame(self.parent, padding=8)
@@ -1707,6 +1736,7 @@ class TestImagesViewerApp:
         self.canvas.bind("<ButtonPress-2>", self._on_mmb_press)
         self.canvas.bind("<B2-Motion>", self._on_mmb_drag)
         self.canvas.bind("<MouseWheel>", self._on_canvas_mousewheel)
+        self.canvas.bind("<Delete>", self._delete_selected_detection)
 
         status = ttk.Label(self.parent, textvariable=self.status_var, anchor="w")
         status.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 8))
@@ -1813,6 +1843,24 @@ class TestImagesViewerApp:
             return
         self.selected_line_idx = selected[0]
         self._refresh_image()
+
+    def _delete_selected_detection(self, _event: object | None = None) -> str:
+        idx = self.selected_line_idx
+        if idx is None or idx < 0 or idx >= len(self.current_lines):
+            self.status_var.set("Select a detection to delete")
+            return "break"
+
+        deleted = self.current_lines.pop(idx)
+        self.selected_line_idx = None
+        self._populate_item_list()
+        if self.current_lines:
+            next_idx = min(idx, len(self.current_lines) - 1)
+            self.item_list.select_set(next_idx)
+            self.item_list.see(next_idx)
+            self.selected_line_idx = next_idx
+        self._refresh_image()
+        self.status_var.set(f"Deleted detection #{idx + 1}: {_display_label_for_line(deleted)}")
+        return "break"
 
     def _on_item_double_click(self, _event: object | None = None) -> None:
         selected = self.item_list.curselection()
@@ -2185,6 +2233,7 @@ class TestImagesViewerApp:
             self.selected_line_idx = None
             self._refresh_image()
             return
+        self.canvas.focus_set()
         self.selected_line_idx = selected_idx
         self.item_list.select_set(selected_idx)
         self.item_list.see(selected_idx)

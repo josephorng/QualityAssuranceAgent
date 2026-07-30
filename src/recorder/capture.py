@@ -631,6 +631,12 @@ class RecordingSession:
         )
         write_json(run_dir / "session.json", manifest.to_dict())
         self._log(run_dir, f"recording stopped events={len(events)}")
+        try:
+            from src.common.session_html import write_recording_html_from_run
+
+            write_recording_html_from_run(run_dir)
+        except Exception as exc:
+            self._log(run_dir, f"recording html write failed: {exc}")
         return run_dir
 
     def set_suppress_hotkey_keys(self, suppress: bool) -> None:

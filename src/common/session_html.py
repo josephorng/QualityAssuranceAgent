@@ -12,12 +12,25 @@ from typing import Any
 from src.common.session_report import _resolve_script_metadata, _resolve_started_at_utc
 
 _HTML_NAME = "session_steps.html"
+_RECORDING_HTML_NAME = "recording_steps.html"
 _INDEX_HTML_NAME = "index.html"
 _RUN_FOLDER_TS_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}_(\d{8})_(\d{6})_\d+$")
 _QUEUE_SCRIPT_LOG_MARKER = "Queue starting coordinator for "
 _HAND_OP_PREFIX = "動作 "
 _UNGROUPED_GOAL = "未分類動作"
 _FALLBACK_GOAL = "手部動作"
+_RECORDING_KIND_LABELS = {
+    "click": "點擊",
+    "double_click": "雙擊",
+    "right_click": "右鍵點擊",
+    "middle_click": "中鍵點擊",
+    "drag": "拖曳",
+    "scroll": "捲動",
+    "text_input": "輸入文字",
+    "key": "按鍵",
+    "key_press": "按鍵",
+    "hotkey": "快捷鍵",
+}
 
 # Column order written by ``src.hand.module`` via ``append_csv_row``; used as a fallback for
 # older ``hand.csv`` files that were saved without a header row.
@@ -202,6 +215,21 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 .badge.fail { background: #ffebe9; color: #cf222e; }
 .badge.neutral { background: #eaeef2; color: #57606a; }
 .mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: .9rem; }
+.tabs {
+  display: flex; flex-wrap: wrap; gap: .35rem; margin: 0 0 1.25rem;
+  border-bottom: 1px solid #d0d7de; padding-bottom: .35rem;
+}
+.tabs button {
+  appearance: none; border: 1px solid transparent; background: transparent;
+  cursor: pointer; border-radius: 6px 6px 0 0; padding: .45rem .9rem;
+  font-size: .95rem; font-family: inherit; color: #57606a; font-weight: 600;
+}
+.tabs button:hover { color: #1f2328; background: #eaeef2; }
+.tabs button.active {
+  color: #0969da; border-color: #d0d7de #d0d7de #f5f6f8; background: #fff;
+  margin-bottom: -1px; border-bottom-color: #fff;
+}
+.tab-panel[hidden] { display: none; }
 @media (max-width: 720px) {
   .reports, .reports thead, .reports tbody, .reports th, .reports td, .reports tr { display: block; }
   .reports thead { display: none; }
@@ -218,134 +246,12 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 
 _INDEX_SCRIPT = """
 (function () {
-  var table = document.querySelector("table.reports");
-  if (!table || !table.tBodies.length) return;
-  var tbody = table.tBodies[0];
-  var headers = Array.prototype.slice.call(table.querySelectorAll("thead th"));
-  var sortCol = -1;
-  var sortAsc = true;
-  var selectAll = document.querySelector("input.select-all");
-  var bulkCount = document.querySelector(".bulk-count");
-  var bulkBug = document.querySelector("button.bulk-bug");
-  var bulkDelete = document.querySelector("button.bulk-delete");
-  var bulkBusy = false;
-
-  function cellValue(row, col) {
-    var cell = row.cells[col];
-    if (!cell) return "";
-    if (cell.getAttribute("data-sort") != null) return cell.getAttribute("data-sort");
-    return (cell.textContent || "").trim();
-  }
-
-  function isEmpty(value) {
-    return value === "" || value === "—";
-  }
-
-  function compareRows(a, b, type) {
-    var va = cellValue(a, sortCol);
-    var vb = cellValue(b, sortCol);
-    if (isEmpty(va) && isEmpty(vb)) return 0;
-    if (isEmpty(va)) return 1;
-    if (isEmpty(vb)) return -1;
-    var cmp;
-    if (type === "num") {
-      cmp = parseFloat(va) - parseFloat(vb);
-      if (isNaN(cmp)) cmp = 0;
-    } else {
-      cmp = va.localeCompare(vb, undefined, { numeric: true, sensitivity: "base" });
-    }
-    return sortAsc ? cmp : -cmp;
-  }
-
-  headers.forEach(function (th, col) {
-    if (th.classList.contains("no-sort")) return;
-    th.classList.add("sortable");
-    th.setAttribute("tabindex", "0");
-    th.setAttribute("role", "columnheader");
-    th.setAttribute("title", "點選排序");
-
-    function sortByColumn() {
-      var type = th.getAttribute("data-type") || "text";
-      if (sortCol === col) {
-        sortAsc = !sortAsc;
-      } else {
-        sortCol = col;
-        sortAsc = true;
-      }
-      headers.forEach(function (header) {
-        header.removeAttribute("aria-sort");
-      });
-      th.setAttribute("aria-sort", sortAsc ? "ascending" : "descending");
-      var rows = Array.prototype.slice.call(tbody.rows);
-      rows.sort(function (a, b) { return compareRows(a, b, type); });
-      rows.forEach(function (row) { tbody.appendChild(row); });
-    }
-
-    th.addEventListener("click", sortByColumn);
-    th.addEventListener("keydown", function (event) {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        sortByColumn();
-      }
-    });
-  });
-
-  function introHelpText(count) {
-    return "共 " + count + " 筆報告。勾選多筆後可批次回報或刪除；點選執行名稱開啟步驟紀錄；點選欄位標題可排序；🐛 可回報 bug；垃圾桶可刪除整份報告資料夾。";
-  }
-
-  function updateIntroCount() {
-    var intro = document.querySelector("p.intro");
-    if (!intro) return;
-    intro.textContent = introHelpText(tbody.rows.length);
-  }
-
   function requireLocalServer() {
     if (!window.location.protocol || window.location.protocol === "file:") {
       window.alert("無法操作：請從主程式的「報告列表」開啟此頁（需本機服務）。");
       return false;
     }
     return true;
-  }
-
-  function selectedCheckboxes() {
-    return Array.prototype.slice.call(tbody.querySelectorAll("input.select-run:checked"));
-  }
-
-  function syncRowSelected(checkbox) {
-    var row = checkbox.closest("tr");
-    if (!row) return;
-    if (checkbox.checked) row.classList.add("selected");
-    else row.classList.remove("selected");
-  }
-
-  function updateBulkBar() {
-    var selected = selectedCheckboxes();
-    var count = selected.length;
-    var total = tbody.querySelectorAll("input.select-run").length;
-    if (bulkCount) bulkCount.textContent = "已選 " + count + " 筆";
-    if (bulkBug) bulkBug.disabled = bulkBusy || count === 0;
-    if (bulkDelete) bulkDelete.disabled = bulkBusy || count === 0;
-    if (selectAll) {
-      selectAll.checked = total > 0 && count === total;
-      selectAll.indeterminate = count > 0 && count < total;
-      selectAll.disabled = bulkBusy || total === 0;
-    }
-  }
-
-  function setBulkBusy(busy) {
-    bulkBusy = busy;
-    Array.prototype.slice.call(tbody.querySelectorAll("input.select-run")).forEach(function (cb) {
-      cb.disabled = busy;
-    });
-    updateBulkBar();
-  }
-
-  function formatSelectionSummary(items) {
-    var labels = items.map(function (item) { return item.label; });
-    var preview = labels.slice(0, 8).join("、");
-    if (labels.length > 8) preview += "…（共 " + labels.length + " 筆）";
-    return preview;
   }
 
   function postRunAction(runId, action) {
@@ -359,198 +265,367 @@ _INDEX_SCRIPT = """
       });
   }
 
-  function getSelectedItems() {
-    return selectedCheckboxes().map(function (cb) {
-      return {
-        checkbox: cb,
-        runId: cb.getAttribute("data-run-id") || "",
-        label: cb.getAttribute("data-run-label") || cb.getAttribute("data-run-id") || "",
-        row: cb.closest("tr"),
-      };
-    }).filter(function (item) { return !!item.runId; });
+  function formatSelectionSummary(items) {
+    var labels = items.map(function (item) { return item.label; });
+    var preview = labels.slice(0, 8).join("、");
+    if (labels.length > 8) preview += "…（共 " + labels.length + " 筆）";
+    return preview;
   }
 
-  Array.prototype.slice.call(tbody.querySelectorAll("input.select-run")).forEach(function (cb) {
-    syncRowSelected(cb);
-    cb.addEventListener("change", function () {
-      syncRowSelected(cb);
-      updateBulkBar();
-    });
-    cb.addEventListener("click", function (event) {
-      event.stopPropagation();
-    });
-  });
+  function initTabs() {
+    var buttons = Array.prototype.slice.call(document.querySelectorAll(".tabs button[data-tab]"));
+    var panels = Array.prototype.slice.call(document.querySelectorAll(".tab-panel[data-tab]"));
+    if (!buttons.length || !panels.length) return;
 
-  if (selectAll) {
-    selectAll.addEventListener("click", function (event) {
-      event.stopPropagation();
+    function activate(tabId) {
+      var resolved = tabId === "recordings" ? "recordings" : "runs";
+      buttons.forEach(function (btn) {
+        var active = btn.getAttribute("data-tab") === resolved;
+        btn.classList.toggle("active", active);
+        btn.setAttribute("aria-selected", active ? "true" : "false");
+      });
+      panels.forEach(function (panel) {
+        var active = panel.getAttribute("data-tab") === resolved;
+        if (active) panel.removeAttribute("hidden");
+        else panel.setAttribute("hidden", "");
+      });
+      if (window.history && window.history.replaceState) {
+        window.history.replaceState(null, "", "#" + resolved);
+      } else {
+        window.location.hash = resolved;
+      }
+    }
+
+    buttons.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        activate(btn.getAttribute("data-tab") || "runs");
+      });
     });
-    selectAll.addEventListener("change", function () {
-      var checked = selectAll.checked;
+
+    var hash = (window.location.hash || "").replace(/^#/, "");
+    activate(hash === "recordings" ? "recordings" : "runs");
+  }
+
+  function initPanel(panel) {
+    var table = panel.querySelector("table.reports");
+    if (!table || !table.tBodies.length) return;
+    var tbody = table.tBodies[0];
+    var headers = Array.prototype.slice.call(table.querySelectorAll("thead th"));
+    var sortCol = -1;
+    var sortAsc = true;
+    var selectAll = panel.querySelector("input.select-all");
+    var bulkCount = panel.querySelector(".bulk-count");
+    var bulkBug = panel.querySelector("button.bulk-bug");
+    var bulkDelete = panel.querySelector("button.bulk-delete");
+    var intro = panel.querySelector("p.intro");
+    var kind = panel.getAttribute("data-tab") || "runs";
+    var bulkBusy = false;
+
+    function cellValue(row, col) {
+      var cell = row.cells[col];
+      if (!cell) return "";
+      if (cell.getAttribute("data-sort") != null) return cell.getAttribute("data-sort");
+      return (cell.textContent || "").trim();
+    }
+
+    function isEmpty(value) {
+      return value === "" || value === "—";
+    }
+
+    function compareRows(a, b, type) {
+      var va = cellValue(a, sortCol);
+      var vb = cellValue(b, sortCol);
+      if (isEmpty(va) && isEmpty(vb)) return 0;
+      if (isEmpty(va)) return 1;
+      if (isEmpty(vb)) return -1;
+      var cmp;
+      if (type === "num") {
+        cmp = parseFloat(va) - parseFloat(vb);
+        if (isNaN(cmp)) cmp = 0;
+      } else {
+        cmp = va.localeCompare(vb, undefined, { numeric: true, sensitivity: "base" });
+      }
+      return sortAsc ? cmp : -cmp;
+    }
+
+    headers.forEach(function (th, col) {
+      if (th.classList.contains("no-sort")) return;
+      th.classList.add("sortable");
+      th.setAttribute("tabindex", "0");
+      th.setAttribute("role", "columnheader");
+      th.setAttribute("title", "點選排序");
+
+      function sortByColumn() {
+        var type = th.getAttribute("data-type") || "text";
+        if (sortCol === col) {
+          sortAsc = !sortAsc;
+        } else {
+          sortCol = col;
+          sortAsc = true;
+        }
+        headers.forEach(function (header) {
+          header.removeAttribute("aria-sort");
+        });
+        th.setAttribute("aria-sort", sortAsc ? "ascending" : "descending");
+        var rows = Array.prototype.slice.call(tbody.rows);
+        rows.sort(function (a, b) { return compareRows(a, b, type); });
+        rows.forEach(function (row) { tbody.appendChild(row); });
+      }
+
+      th.addEventListener("click", sortByColumn);
+      th.addEventListener("keydown", function (event) {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          sortByColumn();
+        }
+      });
+    });
+
+    function introHelpText(count) {
+      if (kind === "recordings") {
+        return "共 " + count + " 筆錄製。勾選多筆後可批次回報或刪除；點選錄製名稱開啟事件紀錄；點選欄位標題可排序；🐛 可回報 bug；垃圾桶可刪除整份錄製資料夾。";
+      }
+      return "共 " + count + " 筆報告。勾選多筆後可批次回報或刪除；點選執行名稱開啟步驟紀錄；點選欄位標題可排序；🐛 可回報 bug；垃圾桶可刪除整份報告資料夾。";
+    }
+
+    function updateIntroCount() {
+      if (!intro) return;
+      intro.textContent = introHelpText(tbody.rows.length);
+    }
+
+    function selectedCheckboxes() {
+      return Array.prototype.slice.call(tbody.querySelectorAll("input.select-run:checked"));
+    }
+
+    function syncRowSelected(checkbox) {
+      var row = checkbox.closest("tr");
+      if (!row) return;
+      if (checkbox.checked) row.classList.add("selected");
+      else row.classList.remove("selected");
+    }
+
+    function updateBulkBar() {
+      var selected = selectedCheckboxes();
+      var count = selected.length;
+      var total = tbody.querySelectorAll("input.select-run").length;
+      if (bulkCount) bulkCount.textContent = "已選 " + count + " 筆";
+      if (bulkBug) bulkBug.disabled = bulkBusy || count === 0;
+      if (bulkDelete) bulkDelete.disabled = bulkBusy || count === 0;
+      if (selectAll) {
+        selectAll.checked = total > 0 && count === total;
+        selectAll.indeterminate = count > 0 && count < total;
+        selectAll.disabled = bulkBusy || total === 0;
+      }
+    }
+
+    function setBulkBusy(busy) {
+      bulkBusy = busy;
       Array.prototype.slice.call(tbody.querySelectorAll("input.select-run")).forEach(function (cb) {
-        if (cb.disabled) return;
-        cb.checked = checked;
-        syncRowSelected(cb);
+        cb.disabled = busy;
       });
       updateBulkBar();
-    });
-  }
+    }
 
-  if (bulkBug) {
-    bulkBug.addEventListener("click", function (event) {
-      event.preventDefault();
-      var items = getSelectedItems();
-      if (!items.length) return;
-      var summary = formatSelectionSummary(items);
-      if (!window.confirm("確定回報選取的 " + items.length + " 筆報告？\\n" + summary + "\\n將壓縮各執行資料夾並複製到 \\\\\\\\192.168.0.9\\\\Joseph\\\\CUA-BUG。")) {
-        return;
-      }
-      if (!requireLocalServer()) return;
-      setBulkBusy(true);
-      var okCount = 0;
-      var failures = [];
-      var chain = Promise.resolve();
-      items.forEach(function (item) {
-        chain = chain.then(function () {
-          return postRunAction(item.runId, "bug").then(function (result) {
-            if (result.ok) {
-              okCount += 1;
-            } else {
-              var message = (result.payload && result.payload.error) || ("HTTP " + result.status);
-              failures.push(item.label + "：" + message);
-            }
-          }).catch(function () {
-            failures.push(item.label + "：無法連線本機服務");
-          });
-        });
+    function getSelectedItems() {
+      return selectedCheckboxes().map(function (cb) {
+        return {
+          checkbox: cb,
+          runId: cb.getAttribute("data-run-id") || "",
+          label: cb.getAttribute("data-run-label") || cb.getAttribute("data-run-id") || "",
+          row: cb.closest("tr"),
+        };
+      }).filter(function (item) { return !!item.runId; });
+    }
+
+    Array.prototype.slice.call(tbody.querySelectorAll("input.select-run")).forEach(function (cb) {
+      syncRowSelected(cb);
+      cb.addEventListener("change", function () {
+        syncRowSelected(cb);
+        updateBulkBar();
       });
-      chain.then(function () {
-        setBulkBusy(false);
-        var lines = ["成功 " + okCount + " / 失敗 " + failures.length];
-        if (failures.length) lines = lines.concat(failures.slice(0, 10));
-        if (failures.length > 10) lines.push("…其餘 " + (failures.length - 10) + " 筆略");
-        window.alert(lines.join("\\n"));
+      cb.addEventListener("click", function (event) {
+        event.stopPropagation();
       });
     });
-  }
 
-  if (bulkDelete) {
-    bulkDelete.addEventListener("click", function (event) {
-      event.preventDefault();
-      var items = getSelectedItems();
-      if (!items.length) return;
-      var summary = formatSelectionSummary(items);
-      if (!window.confirm("確定刪除選取的 " + items.length + " 筆報告？\\n" + summary + "\\n將刪除整個資料夾，且無法復原。")) {
-        return;
-      }
-      if (!requireLocalServer()) return;
-      setBulkBusy(true);
-      var failures = [];
-      var chain = Promise.resolve();
-      items.forEach(function (item) {
-        chain = chain.then(function () {
-          return postRunAction(item.runId, "delete").then(function (result) {
-            if (result.ok) {
-              if (item.row && item.row.parentNode) item.row.parentNode.removeChild(item.row);
-            } else {
-              var message = (result.payload && result.payload.error) || ("HTTP " + result.status);
-              failures.push(item.label + "：" + message);
-            }
-          }).catch(function () {
-            failures.push(item.label + "：無法連線本機服務");
-          });
-        });
+    if (selectAll) {
+      selectAll.addEventListener("click", function (event) {
+        event.stopPropagation();
       });
-      chain.then(function () {
-        if (!tbody.rows.length) {
-          window.location.reload();
+      selectAll.addEventListener("change", function () {
+        var checked = selectAll.checked;
+        Array.prototype.slice.call(tbody.querySelectorAll("input.select-run")).forEach(function (cb) {
+          if (cb.disabled) return;
+          cb.checked = checked;
+          syncRowSelected(cb);
+        });
+        updateBulkBar();
+      });
+    }
+
+    if (bulkBug) {
+      bulkBug.addEventListener("click", function (event) {
+        event.preventDefault();
+        var items = getSelectedItems();
+        if (!items.length) return;
+        var summary = formatSelectionSummary(items);
+        if (!window.confirm("確定回報選取的 " + items.length + " 筆報告？\\n" + summary + "\\n將壓縮各執行資料夾並複製到 \\\\\\\\192.168.0.9\\\\Joseph\\\\CUA-BUG。")) {
           return;
         }
-        setBulkBusy(false);
-        updateIntroCount();
-        updateBulkBar();
-        if (failures.length) {
-          var lines = ["部分刪除失敗（" + failures.length + " 筆）："].concat(failures.slice(0, 10));
+        if (!requireLocalServer()) return;
+        setBulkBusy(true);
+        var okCount = 0;
+        var failures = [];
+        var chain = Promise.resolve();
+        items.forEach(function (item) {
+          chain = chain.then(function () {
+            return postRunAction(item.runId, "bug").then(function (result) {
+              if (result.ok) {
+                okCount += 1;
+              } else {
+                var message = (result.payload && result.payload.error) || ("HTTP " + result.status);
+                failures.push(item.label + "：" + message);
+              }
+            }).catch(function () {
+              failures.push(item.label + "：無法連線本機服務");
+            });
+          });
+        });
+        chain.then(function () {
+          setBulkBusy(false);
+          var lines = ["成功 " + okCount + " / 失敗 " + failures.length];
+          if (failures.length) lines = lines.concat(failures.slice(0, 10));
           if (failures.length > 10) lines.push("…其餘 " + (failures.length - 10) + " 筆略");
           window.alert(lines.join("\\n"));
-        }
-      });
-    });
-  }
-
-  updateBulkBar();
-
-  Array.prototype.slice.call(document.querySelectorAll("button.bug-run")).forEach(function (btn) {
-    btn.addEventListener("click", function (event) {
-      event.preventDefault();
-      event.stopPropagation();
-      var runId = btn.getAttribute("data-run-id") || "";
-      if (!runId) return;
-      var label = btn.getAttribute("data-run-label") || runId;
-      if (!window.confirm("確定回報「" + label + "」？\\n將壓縮該執行資料夾並複製到 \\\\\\\\192.168.0.9\\\\Joseph\\\\CUA-BUG。")) {
-        return;
-      }
-      if (!requireLocalServer()) return;
-      btn.disabled = true;
-      postRunAction(runId, "bug")
-        .then(function (result) {
-          btn.disabled = false;
-          if (!result.ok) {
-            var message = (result.payload && result.payload.error) || ("HTTP " + result.status);
-            window.alert("回報失敗：" + message);
-            return;
-          }
-          var copied = (result.payload && result.payload.copied_to) || "";
-          window.alert(copied ? ("已複製到：\\n" + copied) : "已壓縮並複製到 bug 分享資料夾。");
-        })
-        .catch(function () {
-          window.alert("無法回報：請從主程式的「報告列表」開啟此頁（需本機服務）。");
-          btn.disabled = false;
         });
-    });
-  });
+      });
+    }
 
-  Array.prototype.slice.call(document.querySelectorAll("button.delete-run")).forEach(function (btn) {
-    btn.addEventListener("click", function (event) {
-      event.preventDefault();
-      event.stopPropagation();
-      var runId = btn.getAttribute("data-run-id") || "";
-      if (!runId) return;
-      var label = btn.getAttribute("data-run-label") || runId;
-      if (!window.confirm("確定刪除報告「" + label + "」？\\n將刪除整個資料夾，且無法復原。")) {
-        return;
-      }
-      if (!requireLocalServer()) return;
-      btn.disabled = true;
-      postRunAction(runId, "delete")
-        .then(function (result) {
-          if (!result.ok) {
-            var message = (result.payload && result.payload.error) || ("HTTP " + result.status);
-            window.alert("刪除失敗：" + message);
-            btn.disabled = false;
-            return;
-          }
-          var row = btn.closest("tr");
-          if (row && row.parentNode) row.parentNode.removeChild(row);
+    if (bulkDelete) {
+      bulkDelete.addEventListener("click", function (event) {
+        event.preventDefault();
+        var items = getSelectedItems();
+        if (!items.length) return;
+        var summary = formatSelectionSummary(items);
+        if (!window.confirm("確定刪除選取的 " + items.length + " 筆報告？\\n" + summary + "\\n將刪除整個資料夾，且無法復原。")) {
+          return;
+        }
+        if (!requireLocalServer()) return;
+        setBulkBusy(true);
+        var failures = [];
+        var chain = Promise.resolve();
+        items.forEach(function (item) {
+          chain = chain.then(function () {
+            return postRunAction(item.runId, "delete").then(function (result) {
+              if (result.ok) {
+                if (item.row && item.row.parentNode) item.row.parentNode.removeChild(item.row);
+              } else {
+                var message = (result.payload && result.payload.error) || ("HTTP " + result.status);
+                failures.push(item.label + "：" + message);
+              }
+            }).catch(function () {
+              failures.push(item.label + "：無法連線本機服務");
+            });
+          });
+        });
+        chain.then(function () {
           if (!tbody.rows.length) {
             window.location.reload();
             return;
           }
+          setBulkBusy(false);
           updateIntroCount();
           updateBulkBar();
-        })
-        .catch(function () {
-          window.alert("無法刪除：請從主程式的「報告列表」開啟此頁（需本機服務）。");
-          btn.disabled = false;
+          if (failures.length) {
+            var lines = ["部分刪除失敗（" + failures.length + " 筆）："].concat(failures.slice(0, 10));
+            if (failures.length > 10) lines.push("…其餘 " + (failures.length - 10) + " 筆略");
+            window.alert(lines.join("\\n"));
+          }
         });
+      });
+    }
+
+    Array.prototype.slice.call(panel.querySelectorAll("button.bug-run")).forEach(function (btn) {
+      btn.addEventListener("click", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        var runId = btn.getAttribute("data-run-id") || "";
+        if (!runId) return;
+        var label = btn.getAttribute("data-run-label") || runId;
+        if (!window.confirm("確定回報「" + label + "」？\\n將壓縮該執行資料夾並複製到 \\\\\\\\192.168.0.9\\\\Joseph\\\\CUA-BUG。")) {
+          return;
+        }
+        if (!requireLocalServer()) return;
+        btn.disabled = true;
+        postRunAction(runId, "bug")
+          .then(function (result) {
+            btn.disabled = false;
+            if (!result.ok) {
+              var message = (result.payload && result.payload.error) || ("HTTP " + result.status);
+              window.alert("回報失敗：" + message);
+              return;
+            }
+            var copied = (result.payload && result.payload.copied_to) || "";
+            window.alert(copied ? ("已複製到：\\n" + copied) : "已壓縮並複製到 bug 分享資料夾。");
+          })
+          .catch(function () {
+            window.alert("無法回報：請從主程式的「報告列表」開啟此頁（需本機服務）。");
+            btn.disabled = false;
+          });
+      });
     });
-  });
+
+    Array.prototype.slice.call(panel.querySelectorAll("button.delete-run")).forEach(function (btn) {
+      btn.addEventListener("click", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        var runId = btn.getAttribute("data-run-id") || "";
+        if (!runId) return;
+        var label = btn.getAttribute("data-run-label") || runId;
+        if (!window.confirm("確定刪除報告「" + label + "」？\\n將刪除整個資料夾，且無法復原。")) {
+          return;
+        }
+        if (!requireLocalServer()) return;
+        btn.disabled = true;
+        postRunAction(runId, "delete")
+          .then(function (result) {
+            if (!result.ok) {
+              var message = (result.payload && result.payload.error) || ("HTTP " + result.status);
+              window.alert("刪除失敗：" + message);
+              btn.disabled = false;
+              return;
+            }
+            var row = btn.closest("tr");
+            if (row && row.parentNode) row.parentNode.removeChild(row);
+            if (!tbody.rows.length) {
+              window.location.reload();
+              return;
+            }
+            updateIntroCount();
+            updateBulkBar();
+          })
+          .catch(function () {
+            window.alert("無法刪除：請從主程式的「報告列表」開啟此頁（需本機服務）。");
+            btn.disabled = false;
+          });
+      });
+    });
+
+    updateBulkBar();
+  }
+
+  initTabs();
+  Array.prototype.slice.call(document.querySelectorAll(".tab-panel")).forEach(initPanel);
 })();
 """.strip()
 
 
 def session_html_path(run_root: Path) -> Path:
     return run_root / _HTML_NAME
+
+
+def recording_html_path(run_root: Path) -> Path:
+    return run_root / _RECORDING_HTML_NAME
 
 
 def runs_index_html_path(runs_root: Path) -> Path:
@@ -1152,29 +1227,281 @@ def _iter_report_run_dirs(runs_root: Path) -> list[Path]:
         return []
     found: list[Path] = []
     for child in runs_root.iterdir():
-        if child.is_dir() and (child / _HTML_NAME).is_file():
+        if not child.is_dir() or _is_recording_run_dir(child):
+            continue
+        if (child / _HTML_NAME).is_file():
             found.append(child)
     found.sort(key=lambda path: (path.name, path.stat().st_mtime), reverse=True)
     return found
 
 
-def write_runs_index_html(runs_root: Path) -> Path:
-    """Build ``index.html`` listing every child run that has ``session_steps.html``."""
-    runs_root = Path(runs_root)
-    runs_root.mkdir(parents=True, exist_ok=True)
+def _is_recording_run_dir(run_root: Path) -> bool:
+    return run_root.name.startswith("recording_")
 
-    run_dirs = _iter_report_run_dirs(runs_root)
+
+def _iter_recording_source_dirs(runs_root: Path) -> list[Path]:
+    if not runs_root.is_dir():
+        return []
+    found: list[Path] = []
+    for child in runs_root.iterdir():
+        if child.is_dir() and _is_recording_run_dir(child) and (child / "session.json").is_file():
+            found.append(child)
+    found.sort(key=lambda path: (path.name, path.stat().st_mtime), reverse=True)
+    return found
+
+
+def _iter_recording_report_dirs(runs_root: Path) -> list[Path]:
+    if not runs_root.is_dir():
+        return []
+    found: list[Path] = []
+    for child in runs_root.iterdir():
+        if child.is_dir() and _is_recording_run_dir(child) and (child / _RECORDING_HTML_NAME).is_file():
+            found.append(child)
+    found.sort(key=lambda path: (path.name, path.stat().st_mtime), reverse=True)
+    return found
+
+
+def _load_json_dict(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _load_session_manifest(run_root: Path) -> dict[str, Any] | None:
+    return _load_json_dict(run_root / "session.json")
+
+
+def _resolve_recording_screenshot(raw: str | None, run_root: Path) -> Path | None:
+    if not raw:
+        return None
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        return candidate if candidate.is_file() else None
+    for resolved in (
+        run_root / candidate,
+        run_root / "screenshots" / candidate.name,
+    ):
+        if resolved.is_file():
+            return resolved
+    return None
+
+
+def _recording_kind_label(kind: str) -> str:
+    return _RECORDING_KIND_LABELS.get(kind, kind or "事件")
+
+
+def _format_xy(value: Any) -> str | None:
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        try:
+            return f"({int(value[0])}, {int(value[1])})"
+        except (TypeError, ValueError):
+            return f"({value[0]}, {value[1]})"
+    return None
+
+
+def _recording_duration_seconds(manifest: dict[str, Any] | None) -> float | None:
+    if not isinstance(manifest, dict):
+        return None
+    started = manifest.get("started_at_utc")
+    stopped = manifest.get("stopped_at_utc")
+    if not isinstance(started, str) or not isinstance(stopped, str):
+        return None
+    try:
+        start_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
+        stop_dt = datetime.fromisoformat(stopped.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return max(0.0, (stop_dt - start_dt).total_seconds())
+
+
+def _resolve_recording_datetime(run_root: Path, manifest: dict[str, Any] | None) -> str:
+    if isinstance(manifest, dict):
+        for key in ("started_at_utc", "stopped_at_utc"):
+            value = manifest.get(key)
+            if isinstance(value, str) and value.strip():
+                formatted = _timestamp_text(value)
+                if formatted:
+                    return formatted
+    return _resolve_index_run_datetime(run_root, None)
+
+
+def _load_recording_events(run_root: Path) -> list[dict[str, Any]]:
+    manifest = _load_session_manifest(run_root)
+    event_paths: list[Path] = []
+    if isinstance(manifest, dict):
+        raw_events = manifest.get("events")
+        if isinstance(raw_events, list):
+            for item in raw_events:
+                if isinstance(item, str) and item.strip():
+                    event_paths.append(run_root / item)
+
+    if not event_paths:
+        events_dir = run_root / "events"
+        if events_dir.is_dir():
+            event_paths = sorted(events_dir.glob("event_*.json"))
+
+    events: list[dict[str, Any]] = []
+    for path in event_paths:
+        payload = _load_json_dict(path)
+        if payload is not None:
+            events.append(payload)
+    events.sort(key=lambda event: int(event.get("index", 0)) if isinstance(event.get("index"), int) else 0)
+    return events
+
+
+def _load_recording_analysis(run_root: Path, event_index: int) -> dict[str, Any] | None:
+    return _load_json_dict(run_root / "analysis" / f"event_{event_index:03d}.json")
+
+
+def _render_recording_event_html(*, run_root: Path, event: dict[str, Any]) -> str:
+    raw_index = event.get("index")
+    index = raw_index if isinstance(raw_index, int) else 0
+    kind = str(event.get("kind") or "")
+    kind_label = _recording_kind_label(kind)
+    analysis = _load_recording_analysis(run_root, index) if index else None
+    instruction = ""
+    if isinstance(analysis, dict):
+        raw_instruction = analysis.get("instruction")
+        if isinstance(raw_instruction, str) and raw_instruction.strip():
+            instruction = raw_instruction.strip()
+
+    title = instruction or kind_label
+    step_label = escape(f"{index}.")
+    kind_badge = escape(kind_label)
+    time_text = escape(_timestamp_text(event.get("timestamp_utc"))) or "—"
+
+    meta_rows: list[tuple[str, str]] = [("時間", time_text)]
+    cursor = _format_xy(event.get("cursor_xy"))
+    if cursor:
+        meta_rows.append(("游標", escape(cursor)))
+    end_xy = _format_xy(event.get("end_xy"))
+    if end_xy:
+        meta_rows.append(("終點", escape(end_xy)))
+    text = event.get("text")
+    if isinstance(text, str) and text:
+        meta_rows.append(("文字", escape(text)))
+    key = event.get("key")
+    if isinstance(key, str) and key:
+        meta_rows.append(("按鍵", escape(key)))
+    keys = event.get("keys")
+    if isinstance(keys, list) and keys:
+        meta_rows.append(("快捷鍵", escape("+".join(str(item) for item in keys))))
+    scroll_delta = event.get("scroll_delta")
+    if isinstance(scroll_delta, int):
+        meta_rows.append(("捲動", escape(str(scroll_delta))))
+    window_title = event.get("target_window_title")
+    if isinstance(window_title, str) and window_title.strip():
+        meta_rows.append(("視窗", escape(window_title.strip())))
+
+    meta_html = "".join(f"<dt>{escape(label)}</dt><dd>{value}</dd>" for label, value in meta_rows)
+
+    shot = _resolve_recording_screenshot(str(event.get("screenshot_path") or ""), run_root)
+    end_shot = _resolve_recording_screenshot(str(event.get("end_screenshot_path") or ""), run_root)
+    if kind == "drag" or end_shot is not None:
+        shots = _render_shot_html("開始截圖", shot, run_root) + _render_shot_html(
+            "結束截圖", end_shot, run_root
+        )
+    else:
+        shots = _render_shot_html("截圖", shot, run_root)
+
+    return (
+        f'<details class="instruction-group">'
+        f"<summary>"
+        f'<span class="instruction-number">{step_label}</span>'
+        f'<span class="instruction-title">{escape(title)}</span>'
+        f'<span class="badge neutral">{kind_badge}</span>'
+        f"</summary>"
+        f'<div class="meta" style="padding: 1rem 1.5rem 0;"><dl>{meta_html}</dl></div>'
+        f'<div class="shots" style="padding: 0 1.5rem 1.25rem;">{shots}</div>'
+        f"</details>"
+    )
+
+
+def _render_recording_index_row(run_root: Path) -> str:
+    run_id = run_root.name
+    href = escape(f"{run_id}/{_RECORDING_HTML_NAME}", quote=True)
+    manifest = _load_session_manifest(run_root)
+    report = _load_run_report(run_root)
+    run_time_raw = _resolve_recording_datetime(run_root, manifest)
+    run_time = escape(run_time_raw)
+    run_id_title = escape(run_id, quote=True)
+    label = escape(run_id)
+    label_attr = escape(run_id, quote=True)
+
+    event_count: int | None = None
+    if isinstance(manifest, dict) and isinstance(manifest.get("event_count"), int):
+        event_count = manifest["event_count"]
+    elif isinstance(report, dict) and isinstance(report.get("recorded"), int):
+        event_count = report["recorded"]
+
+    analyzed_count: int | None = None
+    error_count: int | None = None
+    if isinstance(report, dict):
+        if isinstance(report.get("cached"), int):
+            analyzed_count = report["cached"]
+        elif isinstance(report.get("instructions"), list):
+            analyzed_count = len(report["instructions"])
+        errors = report.get("errors")
+        if isinstance(errors, list):
+            error_count = len(errors)
+
+    duration_raw = _recording_duration_seconds(manifest)
+    duration = _format_duration_seconds(duration_raw)
+
+    def _count_text(value: Any) -> str:
+        return escape(str(value)) if isinstance(value, int) else "—"
+
+    return (
+        "<tr>"
+        f'<td class="select-col" data-label="選取" data-sort="">'
+        f'<input type="checkbox" class="select-run" data-run-id="{run_id_title}" '
+        f'data-run-label="{label_attr}" '
+        f'aria-label="選取錄製 {run_id_title}"></td>'
+        f'<td data-label="錄製"{_sort_attr(run_id)}>'
+        f'<a href="{href}" title="{run_id_title}">{label}</a></td>'
+        f'<td data-label="時間"{_sort_attr(run_time_raw)}>{run_time}</td>'
+        f'<td data-label="事件"{_sort_attr(event_count)}>{_count_text(event_count)}</td>'
+        f'<td data-label="已分析"{_sort_attr(analyzed_count)}>{_count_text(analyzed_count)}</td>'
+        f'<td data-label="錯誤"{_sort_attr(error_count)}>{_count_text(error_count)}</td>'
+        f'<td data-label="耗時"{_sort_attr(duration_raw)}>{escape(duration)}</td>'
+        f'<td data-label="操作" class="actions" data-sort="">'
+        f'<button type="button" class="bug-run" data-run-id="{run_id_title}" '
+        f'data-run-label="{label_attr}" '
+        f'title="回報 bug" '
+        f'aria-label="回報 bug {run_id_title}">🐛</button>'
+        f'<button type="button" class="delete-run" data-run-id="{run_id_title}" '
+        f'data-run-label="{label_attr}" '
+        f'title="刪除錄製" aria-label="刪除錄製 {run_id_title}">🗑</button></td>'
+        "</tr>"
+    )
+
+
+def _render_bulk_bar() -> str:
+    return (
+        '<div class="bulk-bar" role="toolbar" aria-label="批次操作">'
+        '<span class="bulk-count">已選 0 筆</span>'
+        '<button type="button" class="bulk-bug" disabled>🐛 回報選取</button>'
+        '<button type="button" class="bulk-delete" disabled>🗑 刪除選取</button>'
+        "</div>"
+    )
+
+
+def _render_runs_tab_panel(run_dirs: list[Path]) -> str:
     if run_dirs:
         rows = "".join(_render_index_row(run_dir) for run_dir in run_dirs)
-        bulk_bar = (
-            '<div class="bulk-bar" role="toolbar" aria-label="批次操作">'
-            '<span class="bulk-count">已選 0 筆</span>'
-            '<button type="button" class="bulk-bug" disabled>🐛 回報選取</button>'
-            '<button type="button" class="bulk-delete" disabled>🗑 刪除選取</button>'
-            "</div>"
+        intro = (
+            f"共 {len(run_dirs)} 筆報告。勾選多筆後可批次回報或刪除；"
+            "點選執行名稱開啟步驟紀錄；"
+            "點選欄位標題可排序；🐛 可回報 bug；"
+            "垃圾桶可刪除整份報告資料夾。"
         )
         body = (
-            f"{bulk_bar}"
+            f'<p class="intro">{intro}</p>\n'
+            f"{_render_bulk_bar()}"
             '<table class="reports">'
             "<thead><tr>"
             '<th class="no-sort select-col" title="全選">'
@@ -1193,21 +1520,85 @@ def write_runs_index_html(runs_root: Path) -> Path:
             f"<tbody>{rows}</tbody>"
             "</table>"
         )
-        script = f"<script>\n{_INDEX_SCRIPT}\n</script>\n"
     else:
-        body = '<p class="empty">尚無報告。完成一次執行後，報告會出現在此列表。</p>'
-        script = ""
+        body = (
+            '<p class="intro">共 0 筆報告。完成一次執行後，報告會出現在此列表。</p>\n'
+            '<p class="empty">尚無報告。完成一次執行後，報告會出現在此列表。</p>'
+        )
+    return f'<section class="tab-panel" data-tab="runs" id="tab-runs">\n{body}\n</section>'
 
-    title = "工作階段報告列表"
-    if run_dirs:
+
+def _render_recordings_tab_panel(recording_dirs: list[Path]) -> str:
+    if recording_dirs:
+        rows = "".join(_render_recording_index_row(run_dir) for run_dir in recording_dirs)
         intro = (
-            f"共 {len(run_dirs)} 筆報告。勾選多筆後可批次回報或刪除；"
-            "點選執行名稱開啟步驟紀錄；"
+            f"共 {len(recording_dirs)} 筆錄製。勾選多筆後可批次回報或刪除；"
+            "點選錄製名稱開啟事件紀錄；"
             "點選欄位標題可排序；🐛 可回報 bug；"
-            "垃圾桶可刪除整份報告資料夾。"
+            "垃圾桶可刪除整份錄製資料夾。"
+        )
+        body = (
+            f'<p class="intro">{intro}</p>\n'
+            f"{_render_bulk_bar()}"
+            '<table class="reports">'
+            "<thead><tr>"
+            '<th class="no-sort select-col" title="全選">'
+            '<input type="checkbox" class="select-all" aria-label="全選錄製">'
+            "</th>"
+            '<th data-type="text">錄製</th>'
+            '<th data-type="text">時間</th>'
+            '<th data-type="num">事件</th>'
+            '<th data-type="num">已分析</th>'
+            '<th data-type="num">錯誤</th>'
+            '<th data-type="num">耗時</th>'
+            '<th class="no-sort">操作</th>'
+            "</tr></thead>"
+            f"<tbody>{rows}</tbody>"
+            "</table>"
         )
     else:
-        intro = "共 0 筆報告。完成一次執行後，報告會出現在此列表。"
+        body = (
+            '<p class="intro">共 0 筆錄製。完成一次錄製後，紀錄會出現在此列表。</p>\n'
+            '<p class="empty">尚無錄製。完成一次錄製後，紀錄會出現在此列表。</p>'
+        )
+    return (
+        f'<section class="tab-panel" data-tab="recordings" id="tab-recordings" hidden>\n'
+        f"{body}\n"
+        f"</section>"
+    )
+
+
+def _backfill_recording_html(runs_root: Path) -> None:
+    for run_dir in _iter_recording_source_dirs(runs_root):
+        if (run_dir / _RECORDING_HTML_NAME).is_file():
+            continue
+        write_recording_html_from_run(run_dir, update_index=False)
+
+
+def write_runs_index_html(runs_root: Path) -> Path:
+    """Build ``index.html`` with tabs for agent runs and recordings."""
+    runs_root = Path(runs_root)
+    runs_root.mkdir(parents=True, exist_ok=True)
+
+    _backfill_recording_html(runs_root)
+
+    run_dirs = _iter_report_run_dirs(runs_root)
+    recording_dirs = _iter_recording_report_dirs(runs_root)
+    tabs = (
+        '<nav class="tabs" role="tablist" aria-label="報告類型">'
+        '<button type="button" class="active" data-tab="runs" role="tab" aria-selected="true"'
+        ' aria-controls="tab-runs">執行報告</button>'
+        '<button type="button" data-tab="recordings" role="tab" aria-selected="false"'
+        ' aria-controls="tab-recordings">錄製紀錄</button>'
+        "</nav>"
+    )
+    body = (
+        f"{tabs}\n"
+        f"{_render_runs_tab_panel(run_dirs)}\n"
+        f"{_render_recordings_tab_panel(recording_dirs)}\n"
+    )
+    script = f"<script>\n{_INDEX_SCRIPT}\n</script>\n"
+    title = "工作階段報告列表"
     html = (
         "<!DOCTYPE html>\n"
         '<html lang="zh-Hant">\n<head>\n'
@@ -1217,8 +1608,7 @@ def write_runs_index_html(runs_root: Path) -> Path:
         f"<style>\n{_INDEX_STYLE}\n</style>\n"
         "</head>\n<body>\n"
         f"<h1>{escape(title)}</h1>\n"
-        f'<p class="intro">{intro}</p>\n'
-        f"{body}\n"
+        f"{body}"
         f"{script}"
         "</body>\n</html>\n"
     )
@@ -1236,6 +1626,14 @@ def _resolve_session_title(run_root: Path) -> str:
     if run_time and run_time != "—":
         return f"{script_name} · {run_time}"
     return script_name
+
+
+def _resolve_recording_title(run_root: Path) -> str:
+    manifest = _load_session_manifest(run_root)
+    run_time = _resolve_recording_datetime(run_root, manifest)
+    if run_time and run_time != "—":
+        return f"{run_root.name} · {run_time}"
+    return run_root.name
 
 
 def write_session_html_from_run(run_root: Path) -> Path:
@@ -1279,4 +1677,37 @@ def write_session_html_from_run(run_root: Path) -> Path:
     path = session_html_path(run_root)
     path.write_text(html, encoding="utf-8")
     write_runs_index_html(run_root.parent)
+    return path
+
+
+def write_recording_html_from_run(run_root: Path, *, update_index: bool = True) -> Path:
+    """Build ``recording_steps.html`` from recorded events and optional analysis."""
+    run_root = Path(run_root)
+    run_root.mkdir(parents=True, exist_ok=True)
+
+    events = _load_recording_events(run_root)
+    events_html = [
+        _render_recording_event_html(run_root=run_root, event=event) for event in events
+    ]
+    title = escape(_resolve_recording_title(run_root))
+    body = "\n".join(events_html) if events_html else '<p class="empty">尚無錄製事件。</p>'
+    html = (
+        "<!DOCTYPE html>\n"
+        '<html lang="zh-Hant">\n<head>\n'
+        '<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f"<title>{title}</title>\n"
+        f"<style>\n{_STYLE}\n.empty {{ color: #8c959f; font-style: italic; }}\n</style>\n"
+        "</head>\n<body>\n"
+        '<p class="nav"><a href="../index.html#recordings">← 報告列表</a></p>\n'
+        f"<h1>{title}</h1>\n"
+        '<p class="intro">依錄製事件排列的操作紀錄。點選事件可展開細節與截圖。</p>\n'
+        f"{body}\n"
+        "</body>\n</html>\n"
+    )
+
+    path = recording_html_path(run_root)
+    path.write_text(html, encoding="utf-8")
+    if update_index:
+        write_runs_index_html(run_root.parent)
     return path

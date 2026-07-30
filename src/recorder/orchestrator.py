@@ -179,6 +179,12 @@ async def analyze_recording_session(
             "instructions": instructions,
         }
         write_json(run_dir / "report.json", report)
+        try:
+            from src.common.session_html import write_recording_html_from_run
+
+            write_recording_html_from_run(run_dir)
+        except Exception as exc:
+            log_info(f"analyze_recording_session html write failed: {exc}")
         log_info(
             f"analyze_recording_session done recorded={len(events)} cached={cached} skipped={skipped}"
         )

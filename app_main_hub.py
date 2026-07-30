@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import queue
 import tempfile
 import threading
 import webbrowser
@@ -214,20 +215,25 @@ class MainHub(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _start_startup_probes(self) -> None:
+        results: queue.SimpleQueue[tuple[bool, str, bool, str]] = queue.SimpleQueue()
+
         def work() -> None:
             ollama_ok, ollama_message = apply_startup_ollama_host_probe()
             triton_ok, triton_message = apply_startup_triton_probe()
-            self.after(
-                0,
-                lambda: self._on_startup_probes_done(
-                    ollama_ok,
-                    ollama_message,
-                    triton_ok,
-                    triton_message,
-                ),
+            results.put(
+                (ollama_ok, ollama_message, triton_ok, triton_message)
             )
 
+        def poll_results() -> None:
+            try:
+                result = results.get_nowait()
+            except queue.Empty:
+                self.after(50, poll_results)
+                return
+            self._on_startup_probes_done(*result)
+
         threading.Thread(target=work, daemon=True).start()
+        self.after(50, poll_results)
 
     def _on_startup_probes_done(
         self,
@@ -245,11 +251,22 @@ class MainHub(ctk.CTk):
             self._status.configure(text=message, text_color=("gray20", "gray65"))
 
     def _start_ollama_host_probe(self) -> None:
+        results: queue.SimpleQueue[tuple[bool, str]] = queue.SimpleQueue()
+
         def work() -> None:
             ok, message = apply_startup_ollama_host_probe()
-            self.after(0, lambda: self._on_ollama_host_probe_done(ok, message))
+            results.put((ok, message))
+
+        def poll_results() -> None:
+            try:
+                result = results.get_nowait()
+            except queue.Empty:
+                self.after(50, poll_results)
+                return
+            self._on_ollama_host_probe_done(*result)
 
         threading.Thread(target=work, daemon=True).start()
+        self.after(50, poll_results)
 
     def _on_ollama_host_probe_done(self, ok: bool, message: str) -> None:
         if ok:

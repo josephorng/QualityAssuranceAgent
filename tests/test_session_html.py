@@ -8,8 +8,10 @@ from pathlib import Path
 from PIL import Image
 
 from src.common.session_html import (
+    recording_html_path,
     runs_index_html_path,
     session_html_path,
+    write_recording_html_from_run,
     write_runs_index_html,
     write_session_html_from_run,
 )
@@ -19,6 +21,73 @@ def _make_png(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", (32, 24), color=(20, 120, 200)).save(path)
     return path
+
+
+def _make_jpeg(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (32, 24), color=(20, 120, 200)).save(path, format="JPEG")
+    return path
+
+
+def _write_recording_fixture(
+    run_root: Path,
+    *,
+    with_analysis: bool = True,
+    with_html: bool = False,
+) -> Path:
+    run_root.mkdir(parents=True, exist_ok=True)
+    (run_root / "events").mkdir(exist_ok=True)
+    (run_root / "screenshots").mkdir(exist_ok=True)
+    shot = _make_jpeg(run_root / "screenshots" / "event_001.jpeg")
+    event = {
+        "index": 1,
+        "timestamp_utc": "2026-07-21T04:00:00+00:00",
+        "kind": "click",
+        "cursor_xy": [10, 20],
+        "screenshot_path": str(shot),
+        "text": None,
+    }
+    (run_root / "events" / "event_001.json").write_text(
+        json.dumps(event, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (run_root / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_root.name,
+                "started_at_utc": "2026-07-21T04:00:00+00:00",
+                "stopped_at_utc": "2026-07-21T04:01:30+00:00",
+                "event_count": 1,
+                "events": ["events/event_001.json"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    if with_analysis:
+        (run_root / "analysis").mkdir(exist_ok=True)
+        (run_root / "analysis" / "event_001.json").write_text(
+            json.dumps({"event_index": 1, "instruction": "點擊「搜尋」按鈕"}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        (run_root / "report.json").write_text(
+            json.dumps(
+                {
+                    "run_id": run_root.name,
+                    "recorded": 1,
+                    "processed": 1,
+                    "cached": 1,
+                    "skipped": 0,
+                    "cancelled": False,
+                    "errors": [],
+                    "instructions": ["點擊「搜尋」按鈕"],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    if with_html:
+        (run_root / "recording_steps.html").write_text("<html></html>", encoding="utf-8")
+    return run_root
 
 
 _HAND_CSV_FIELDS = [
@@ -537,3 +606,103 @@ def test_write_runs_index_empty_when_no_reports(tmp_path: Path) -> None:
 
     assert "尚無報告" in html
     assert "共 0 筆報告" in html
+    assert "執行報告" in html
+    assert "錄製紀錄" in html
+    assert "尚無錄製" in html
+
+
+def test_write_recording_html_renders_events_and_instructions(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000001"
+    _write_recording_fixture(run_root)
+
+    path = write_recording_html_from_run(run_root)
+    html = path.read_text(encoding="utf-8")
+
+    assert path == recording_html_path(run_root)
+    assert "點擊「搜尋」按鈕" in html
+    assert "點擊" in html
+    assert "screenshots/event_001.jpeg" in html
+    assert 'href="../index.html#recordings"' in html
+    assert "游標" in html
+
+
+def test_write_recording_html_escapes_markup(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000002"
+    _write_recording_fixture(run_root, with_analysis=False)
+    (run_root / "events" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "index": 1,
+                "timestamp_utc": "2026-07-21T04:00:00+00:00",
+                "kind": "text_input",
+                "text": "<script>alert(1)</script>",
+                "screenshot_path": "",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "analysis").mkdir(exist_ok=True)
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {"event_index": 1, "instruction": "輸入「<b>hi</b>」"},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "輸入「&lt;b&gt;hi&lt;/b&gt;」" in html
+
+
+def test_write_runs_index_lists_recordings_in_recordings_tab(tmp_path: Path) -> None:
+    task = tmp_path / "task_20260721_100000_000001"
+    task.mkdir()
+    (task / "session_steps.html").write_text("<html></html>", encoding="utf-8")
+    (task / "report.json").write_text(
+        json.dumps({"script_name": "demo.txt", "started_at_utc": "2026-07-21T10:00:00+00:00"}),
+        encoding="utf-8",
+    )
+
+    recording = tmp_path / "recording_20260721_110000_000002"
+    _write_recording_fixture(recording)
+    write_recording_html_from_run(recording)
+
+    html = write_runs_index_html(tmp_path).read_text(encoding="utf-8")
+
+    assert 'data-tab="runs"' in html
+    assert 'data-tab="recordings"' in html
+    assert 'href="task_20260721_100000_000001/session_steps.html"' in html
+    assert 'href="recording_20260721_110000_000002/recording_steps.html"' in html
+    assert "demo.txt" in html
+    assert "recording_20260721_110000_000002" in html
+    assert 'data-label="已分析"' in html
+    assert 'data-label="事件"' in html
+
+
+def test_write_runs_index_backfills_missing_recording_html(tmp_path: Path) -> None:
+    recording = tmp_path / "recording_20260721_120000_000010"
+    _write_recording_fixture(recording, with_html=False)
+
+    assert not (recording / "recording_steps.html").is_file()
+
+    html = write_runs_index_html(tmp_path).read_text(encoding="utf-8")
+
+    assert (recording / "recording_steps.html").is_file()
+    assert 'href="recording_20260721_120000_000010/recording_steps.html"' in html
+    assert "點擊「搜尋」按鈕" in (recording / "recording_steps.html").read_text(encoding="utf-8")
+
+
+def test_write_runs_index_excludes_recording_from_runs_tab(tmp_path: Path) -> None:
+    recording = tmp_path / "recording_20260721_130000_000011"
+    _write_recording_fixture(recording)
+    (recording / "session_steps.html").write_text("<html></html>", encoding="utf-8")
+    write_recording_html_from_run(recording)
+
+    html = write_runs_index_html(tmp_path).read_text(encoding="utf-8")
+
+    assert 'href="recording_20260721_130000_000011/recording_steps.html"' in html
+    assert 'href="recording_20260721_130000_000011/session_steps.html"' not in html

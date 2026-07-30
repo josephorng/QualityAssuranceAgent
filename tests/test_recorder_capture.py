@@ -129,6 +129,30 @@ def test_keyboard_events_not_filtered_by_ignore_rect(tmp_path) -> None:
     assert (run_dir / "events" / "event_001.json").is_file()
 
 
+def test_event_timestamp_is_captured_before_worker_persistence(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+    captured_items = []
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        session.start()
+        try:
+            with patch.object(session, "_queue_event", side_effect=captured_items.append), patch(
+                "src.recorder.capture.utc_now_iso",
+                return_value="2026-07-30T03:00:03.125000+00:00",
+            ):
+                from pynput.mouse import Button
+
+                session._on_mouse_click(900, 700, Button.right, True)
+        finally:
+            session.stop()
+
+    assert len(captured_items) == 1
+    assert captured_items[0].timestamp_utc == "2026-07-30T03:00:03.125000+00:00"
+
+
 def test_typing_burst_coalesced_into_one_event(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
     captures: list[tuple[int, tuple[int, int]]] = []

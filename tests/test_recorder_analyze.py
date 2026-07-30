@@ -18,7 +18,11 @@ from src.recorder.analyze import (
     instruction_for_scroll,
 )
 from src.recorder.models import RecordedEvent
-from src.recorder.orchestrator import analyze_recording_session
+from src.recorder.orchestrator import (
+    _elapsed_seconds,
+    _wait_instruction,
+    analyze_recording_session,
+)
 from src.recorder.vision_context import (
     append_drag_nearby_context_comments,
     append_nearby_context_comment,
@@ -408,6 +412,109 @@ async def test_analyze_recording_session_writes_instructions(tmp_path: Path) -> 
     recording_html = run_dir / "recording_steps.html"
     assert recording_html.is_file()
     assert "輸入「打電話的時候」" in recording_html.read_text(encoding="utf-8")
+
+
+def test_elapsed_seconds_requires_valid_ordered_timezone_aware_timestamps() -> None:
+    assert (
+        _elapsed_seconds(
+            "2026-07-30T03:00:00+00:00",
+            "2026-07-30T03:00:03.250+00:00",
+        )
+        == 3.25
+    )
+    assert _elapsed_seconds("invalid", "2026-07-30T03:00:04+00:00") is None
+    assert _elapsed_seconds("2026-07-30T03:00:00", "2026-07-30T03:00:04") is None
+    assert (
+        _elapsed_seconds(
+            "2026-07-30T03:00:04+00:00",
+            "2026-07-30T03:00:00+00:00",
+        )
+        is None
+    )
+
+
+def test_wait_instruction_ceilings_to_integer_seconds() -> None:
+    assert _wait_instruction(4.0) == "等待 4 秒"
+    assert _wait_instruction(3.0001) == "等待 4 秒"
+    assert _wait_instruction(3.1254) == "等待 4 秒"
+
+
+@pytest.mark.asyncio
+async def test_analyze_recording_session_inserts_wait_only_over_three_seconds(
+    tmp_path: Path,
+) -> None:
+    from src.common.run_state import reset_run_state_manager
+
+    reset_run_state_manager()
+    run_dir = tmp_path / "screen_record_wait_test"
+    (run_dir / "events").mkdir(parents=True)
+    events = [
+        RecordedEvent(
+            index=1,
+            timestamp_utc="2026-07-30T03:00:00+00:00",
+            kind="key_press",
+            key="enter",
+            screenshot_path="",
+        ),
+        RecordedEvent(
+            index=2,
+            timestamp_utc="2026-07-30T03:00:03+00:00",
+            kind="key_press",
+            key="tab",
+            screenshot_path="",
+        ),
+        RecordedEvent(
+            index=3,
+            timestamp_utc="2026-07-30T03:00:06.250+00:00",
+            kind="key_press",
+            key="esc",
+            screenshot_path="",
+        ),
+    ]
+    event_paths: list[str] = []
+    for event in events:
+        relative_path = f"events/event_{event.index:03d}.json"
+        event_paths.append(relative_path)
+        (run_dir / relative_path).write_text(
+            json.dumps(event.to_dict(), ensure_ascii=False),
+            encoding="utf-8",
+        )
+    (run_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "started_at_utc": events[0].timestamp_utc,
+                "stopped_at_utc": events[-1].timestamp_utc,
+                "event_count": len(events),
+                "events": event_paths,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    no_vision = {"used_vision": False, "candidate_text": "", "local_cursor": None}
+    with patch(
+        "src.recorder.orchestrator.build_vision_context",
+        new=AsyncMock(return_value=no_vision),
+    ):
+        report = await analyze_recording_session(run_dir)
+
+    assert report["instructions"] == [
+        "按下 Enter 鍵",
+        "按下 Tab 鍵",
+        "等待 4 秒",
+        "按下 Esc 鍵",
+    ]
+    second_analysis = json.loads(
+        (run_dir / "analysis" / "event_002.json").read_text(encoding="utf-8")
+    )
+    third_analysis = json.loads(
+        (run_dir / "analysis" / "event_003.json").read_text(encoding="utf-8")
+    )
+    assert second_analysis["elapsed_since_previous_seconds"] == 3.0
+    assert "wait_instruction" not in second_analysis
+    assert third_analysis["elapsed_since_previous_seconds"] == 3.25
+    assert third_analysis["wait_instruction"] == "等待 4 秒"
 
 
 def test_enrich_drag_instruction_offset_appends_exact_pixels() -> None:

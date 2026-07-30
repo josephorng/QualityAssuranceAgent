@@ -108,6 +108,7 @@ class _QueuedEvent:
     kind: str
     cursor_xy: tuple[int, int] | None
     event_index: int
+    timestamp_utc: str
     screenshot_path: str = ""
     monitor_index: int | None = None
     monitor_offset: tuple[int, int] | None = None
@@ -457,6 +458,7 @@ class RecordingSession:
         self._pending_click_timer: threading.Timer | None = None
         self._pending_click_coords: tuple[int, int, str] | None = None
         self._pending_click_down_at: float | None = None
+        self._pending_click_timestamp_utc: str | None = None
         self._left_button_down = False
         self._left_press_dragging = False
         self._last_move_xy: tuple[int, int] | None = None
@@ -517,6 +519,7 @@ class RecordingSession:
             self._pressed_modifiers = set()
             self._pending_click_coords = None
             self._pending_click_down_at = None
+            self._pending_click_timestamp_utc = None
             self._left_button_down = False
             self._left_press_dragging = False
             self._last_move_xy = None
@@ -715,7 +718,9 @@ class RecordingSession:
         cursor_xy: tuple[int, int],
         button: str | None = None,
         scroll_delta: int | None = None,
+        timestamp_utc: str | None = None,
     ) -> None:
+        action_timestamp_utc = timestamp_utc or utc_now_iso()
         self._flush_pending_text_input()
         windows_before = self._snapshot_windows_before()
         with self._lock:
@@ -735,6 +740,7 @@ class RecordingSession:
                 kind=kind,
                 cursor_xy=cursor_xy,
                 event_index=index,
+                timestamp_utc=action_timestamp_utc,
                 screenshot_path=shot_path,
                 monitor_index=mon_idx,
                 monitor_offset=mon_offset,
@@ -752,7 +758,9 @@ class RecordingSession:
         key: str | None = None,
         keys: list[str] | None = None,
         text: str | None = None,
+        timestamp_utc: str | None = None,
     ) -> None:
+        action_timestamp_utc = timestamp_utc or utc_now_iso()
         self._flush_pending_text_input()
         with self._lock:
             run_dir = self._run_dir
@@ -774,6 +782,7 @@ class RecordingSession:
                 kind=kind,
                 cursor_xy=cursor_xy,
                 event_index=index,
+                timestamp_utc=action_timestamp_utc,
                 screenshot_path=shot_path,
                 monitor_index=mon_idx,
                 monitor_offset=mon_offset,
@@ -815,6 +824,7 @@ class RecordingSession:
                 kind="text_input",
                 cursor_xy=meta.get("cursor_xy"),
                 event_index=int(meta["index"]),
+                timestamp_utc=str(meta["timestamp_utc"]),
                 screenshot_path=shot_path,
                 monitor_index=mon_idx,
                 monitor_offset=mon_offset,
@@ -823,7 +833,13 @@ class RecordingSession:
             )
         )
 
-    def _append_text_input_char(self, char: str, cursor_xy: tuple[int, int] | None) -> None:
+    def _append_text_input_char(
+        self,
+        char: str,
+        cursor_xy: tuple[int, int] | None,
+        *,
+        timestamp_utc: str | None = None,
+    ) -> None:
         with self._lock:
             run_dir = self._run_dir
             if run_dir is None:
@@ -842,6 +858,7 @@ class RecordingSession:
                     "index": index,
                     "cursor_xy": cursor_xy,
                     "anchor_click_xy": anchor_click_xy,
+                    "timestamp_utc": timestamp_utc or utc_now_iso(),
                 }
 
         with self._lock:
@@ -887,6 +904,7 @@ class RecordingSession:
         with self._lock:
             self._pending_click_coords = None
             self._pending_click_down_at = None
+            self._pending_click_timestamp_utc = None
             self._left_button_down = False
             self._left_press_dragging = False
             self._last_move_xy = None
@@ -919,11 +937,13 @@ class RecordingSession:
             self._next_index += 1
             pending_shot = self._pending_screenshot
             pending_windows = self._pending_windows_before
+            timestamp_utc = self._pending_click_timestamp_utc or utc_now_iso()
             self._pending_screenshot = None
             self._pending_windows_before = None
             self._pending_click_timer = None
             self._pending_click_coords = None
             self._pending_click_down_at = None
+            self._pending_click_timestamp_utc = None
             self._left_button_down = False
             self._left_press_dragging = False
             self._last_move_xy = None
@@ -939,6 +959,7 @@ class RecordingSession:
                 kind="click",
                 cursor_xy=(x, y),
                 event_index=index,
+                timestamp_utc=timestamp_utc,
                 screenshot_path=shot_path,
                 monitor_index=mon_idx,
                 monitor_offset=mon_offset,
@@ -967,12 +988,14 @@ class RecordingSession:
             pending_shot = self._pending_screenshot
             pending_windows = self._pending_windows_before
             pending_drag_end = self._pending_drag_end_captures
+            timestamp_utc = self._pending_click_timestamp_utc or utc_now_iso()
             self._pending_screenshot = None
             self._pending_windows_before = None
             self._pending_drag_end_captures = None
             self._pending_click_timer = None
             self._pending_click_coords = None
             self._pending_click_down_at = None
+            self._pending_click_timestamp_utc = None
             self._left_button_down = False
             self._left_press_dragging = False
             self._last_move_xy = None
@@ -997,6 +1020,7 @@ class RecordingSession:
                 cursor_xy=(x1, y1),
                 end_xy=(x2, y2),
                 event_index=index,
+                timestamp_utc=timestamp_utc,
                 screenshot_path=shot_path,
                 monitor_index=mon_idx,
                 monitor_offset=mon_offset,
@@ -1046,7 +1070,7 @@ class RecordingSession:
 
         event = RecordedEvent(
             index=item.event_index,
-            timestamp_utc=utc_now_iso(),
+            timestamp_utc=item.timestamp_utc,
             kind=item.kind,
             cursor_xy=item.cursor_xy,
             end_xy=item.end_xy,
@@ -1092,8 +1116,16 @@ class RecordingSession:
             self._cancel_pending_click_timer()
             self._capture_pending_drag_end_screens()
 
-    def _on_left_mouse_down(self, ix: int, iy: int, btn: str) -> None:
+    def _on_left_mouse_down(
+        self,
+        ix: int,
+        iy: int,
+        btn: str,
+        *,
+        timestamp_utc: str | None = None,
+    ) -> None:
         now = time.monotonic()
+        action_timestamp_utc = timestamp_utc or utc_now_iso()
         with self._lock:
             pending_coords = self._pending_click_coords
             down_at = self._pending_click_down_at
@@ -1118,6 +1150,7 @@ class RecordingSession:
                     kind="double_click",
                     cursor_xy=(ix, iy),
                     button=btn,
+                    timestamp_utc=action_timestamp_utc,
                 )
                 return
 
@@ -1126,6 +1159,7 @@ class RecordingSession:
             run_dir = self._run_dir
             self._pending_click_coords = (ix, iy, btn)
             self._pending_click_down_at = now
+            self._pending_click_timestamp_utc = action_timestamp_utc
             self._left_button_down = True
             self._left_press_dragging = False
             self._last_move_xy = (ix, iy)
@@ -1151,22 +1185,29 @@ class RecordingSession:
         self._schedule_deferred_click(sx, sy, button, down_at)
 
     def _on_mouse_click(self, x: int, y: int, button: mouse.Button, pressed: bool) -> None:
+        timestamp_utc = utc_now_iso()
         if self._should_ignore_mouse_point(int(x), int(y)):
             return
         btn = _normalize_button(button)
         ix, iy = int(x), int(y)
         if btn == "left":
             if pressed:
-                self._on_left_mouse_down(ix, iy, btn)
+                self._on_left_mouse_down(ix, iy, btn, timestamp_utc=timestamp_utc)
             else:
                 self._on_left_mouse_up(ix, iy)
             return
         if not pressed:
             return
         kind = "right_click" if btn == "right" else "middle_click" if btn == "middle" else "click"
-        self._queue_pointer_event_immediate(kind=kind, cursor_xy=(ix, iy), button=btn)
+        self._queue_pointer_event_immediate(
+            kind=kind,
+            cursor_xy=(ix, iy),
+            button=btn,
+            timestamp_utc=timestamp_utc,
+        )
 
     def _on_mouse_scroll(self, x: int, y: int, _dx: int, dy: int) -> None:
+        timestamp_utc = utc_now_iso()
         if self._should_ignore_mouse_point(int(x), int(y)):
             return
         clicks = int(dy)
@@ -1176,9 +1217,11 @@ class RecordingSession:
             kind="scroll",
             cursor_xy=(int(x), int(y)),
             scroll_delta=clicks,
+            timestamp_utc=timestamp_utc,
         )
 
     def _on_key_press(self, key: keyboard.Key | keyboard.KeyCode) -> None:
+        timestamp_utc = utc_now_iso()
         with self._lock:
             suppress = self._suppress_hotkey_keys
             active = self._accepting_input
@@ -1215,16 +1258,17 @@ class RecordingSession:
                 kind="hotkey",
                 cursor_xy=cursor_xy,
                 keys=mods + [token],
+                timestamp_utc=timestamp_utc,
             )
             return
 
         typed = _key_char(key)
         if typed and typed.isprintable():
-            self._append_text_input_char(typed, cursor_xy)
+            self._append_text_input_char(typed, cursor_xy, timestamp_utc=timestamp_utc)
             return
 
         if key == keyboard.Key.space:
-            self._append_text_input_char(" ", cursor_xy)
+            self._append_text_input_char(" ", cursor_xy, timestamp_utc=timestamp_utc)
             return
 
         if key in _SPECIAL_KEYS or isinstance(key, keyboard.Key):
@@ -1232,6 +1276,7 @@ class RecordingSession:
                 kind="key_press",
                 cursor_xy=cursor_xy,
                 key=token,
+                timestamp_utc=timestamp_utc,
             )
             return
 

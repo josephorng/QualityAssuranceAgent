@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
+from math import ceil
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,26 @@ from src.recorder.models import RecordedEvent, SessionManifest
 from src.recorder.coalesce import coalesce_consecutive_text_inputs
 from src.recorder.text_resolve import event_with_resolved_text, resolve_text_input_text
 from src.recorder.vision_context import build_vision_context
+
+
+_WAIT_THRESHOLD_SECONDS = 3.0
+
+
+def _elapsed_seconds(previous_timestamp_utc: str, current_timestamp_utc: str) -> float | None:
+    """Return the non-negative elapsed time between two timezone-aware ISO timestamps."""
+    try:
+        previous = datetime.fromisoformat(previous_timestamp_utc.replace("Z", "+00:00"))
+        current = datetime.fromisoformat(current_timestamp_utc.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if previous.tzinfo is None or current.tzinfo is None:
+        return None
+    elapsed = (current - previous).total_seconds()
+    return elapsed if elapsed >= 0 else None
+
+
+def _wait_instruction(elapsed_seconds: float) -> str:
+    return f"等待 {ceil(elapsed_seconds)} 秒"
 
 
 def _load_events(run_dir: Path) -> list[RecordedEvent]:
@@ -82,6 +104,7 @@ async def analyze_recording_session(
         processed = 0
         errors: list[dict[str, Any]] = []
         instructions: list[str] = []
+        previous_instruction_event: RecordedEvent | None = None
         total = len(events)
 
         if on_progress is not None:
@@ -135,12 +158,36 @@ async def analyze_recording_session(
             else:
                 instruction = result["instruction"]
                 cached += 1
+                elapsed_since_previous: float | None = None
+                wait_instruction: str | None = None
+                if previous_instruction_event is not None:
+                    elapsed_since_previous = _elapsed_seconds(
+                        previous_instruction_event.timestamp_utc,
+                        event.timestamp_utc,
+                    )
+                    if (
+                        elapsed_since_previous is not None
+                        and elapsed_since_previous > _WAIT_THRESHOLD_SECONDS
+                    ):
+                        wait_instruction = _wait_instruction(elapsed_since_previous)
+                        instructions.append(wait_instruction)
                 instructions.append(instruction)
+                previous_instruction_event = event
                 write_json(
                     analysis_path,
                     {
                         "event_index": event.index,
                         "instruction": instruction,
+                        **(
+                            {"elapsed_since_previous_seconds": elapsed_since_previous}
+                            if elapsed_since_previous is not None
+                            else {}
+                        ),
+                        **(
+                            {"wait_instruction": wait_instruction}
+                            if wait_instruction is not None
+                            else {}
+                        ),
                         "vision": {
                             "used_vision": vision.get("used_vision"),
                             "candidate_text": vision.get("candidate_text"),

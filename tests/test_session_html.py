@@ -270,6 +270,87 @@ def test_write_session_html_groups_hand_operations_by_user_instruction(tmp_path:
     assert "<details open" not in html
 
 
+def test_write_session_html_merges_smart_cycle_with_executed_tools(tmp_path: Path) -> None:
+    run_root = tmp_path / "smart_20260730_090228_245442"
+    timestamp = "2026-07-30T09:02:46+00:00"
+    _write_hand_csv(
+        run_root,
+        [
+            {
+                "timestamp": timestamp,
+                "action": "double_click",
+                "args": {"instruction": "Telegram 圖示"},
+                "ok": True,
+                "screenshot_name": "",
+                "screenshot_before_path": "",
+                "screenshot_after_path": "",
+                "message": "executed",
+            }
+        ],
+    )
+    (run_root / "report.json").write_text(
+        json.dumps(
+            {
+                "smart_goal": "Send a message",
+                "smart_cycles": [
+                    {
+                        "cycle": 1,
+                        "plan": {
+                            "instruction": "double_click(Telegram 圖示)",
+                            "expected_outcome": "Telegram opens",
+                            "rationale": "Open Telegram first",
+                        },
+                        "act": {"ok": True, "reason": "Actor completed"},
+                        "verify": {
+                            "branch": "advance",
+                            "reason": "Telegram is visible",
+                            "updated_state": "Telegram is open",
+                        },
+                    },
+                    {
+                        "cycle": 2,
+                        "plan": {
+                            "status": "completed",
+                            "rationale": "The goal is complete",
+                        },
+                        "act": None,
+                        "verify": None,
+                    },
+                ],
+                "steps": [
+                    {
+                        "transcript_counter": 0,
+                        "script_step_index": 0,
+                        "goal": "double_click(Telegram 圖示)",
+                    }
+                ],
+                "tool_results": [
+                    {
+                        "transcript_counter": 0,
+                        "script_step_index": 0,
+                        "timestamp_utc": timestamp,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_session_html_from_run(run_root).read_text(encoding="utf-8")
+
+    assert html.count('<details class="instruction-group">') == 2
+    assert html.count("Executed tools (1)") == 1
+    assert "Open Telegram first" in html
+    assert "Telegram opens" in html
+    assert "Actor completed" in html
+    assert "Telegram is visible" in html
+    assert "Telegram is open" in html
+    assert "動作 1：double_click" in html
+    first_cycle_end = html.index("</details>", html.index("Open Telegram first"))
+    assert html.index("動作 1：double_click") < first_cycle_end
+    assert html.index("The goal is complete") > first_cycle_end
+
+
 def test_write_session_html_shows_instruction_above_status(tmp_path: Path) -> None:
     run_root = tmp_path / "task_instruction"
     _write_hand_csv(

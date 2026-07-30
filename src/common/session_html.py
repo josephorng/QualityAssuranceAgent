@@ -91,6 +91,9 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 .hand-op-action {
   font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
 }
+.smart-cycle-meta { padding: 1rem 1.5rem 0; }
+.executed-tools { border-top: 1px solid #d0d7de; }
+.executed-tools h3 { font-size: 1rem; margin: 0; padding: 1rem 1.5rem 0; }
 .meta { margin: 0 0 1rem; }
 .meta dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; margin: 0; }
 .meta dt { color: #57606a; font-weight: 600; }
@@ -1636,7 +1639,12 @@ def _resolve_recording_title(run_root: Path) -> str:
     return run_root.name
 
 
-def _render_smart_cycles_html(report: dict[str, Any]) -> str:
+def _render_smart_cycles_html(
+    report: dict[str, Any],
+    *,
+    run_root: Path,
+    instruction_groups: list[dict[str, Any]],
+) -> str:
     cycles = report.get("smart_cycles")
     if not isinstance(cycles, list) or not cycles:
         return ""
@@ -1647,6 +1655,7 @@ def _render_smart_cycles_html(report: dict[str, Any]) -> str:
         else ""
     )
     blocks: list[str] = [goal_html, '<section class="smart-cycles"><h2>Plan → Act → Verify</h2>']
+    actor_group_index = 0
     for cycle in cycles:
         if not isinstance(cycle, dict):
             continue
@@ -1658,6 +1667,36 @@ def _render_smart_cycles_html(report: dict[str, Any]) -> str:
         verify_branch = verify.get("branch") or "—"
         act_ok = act.get("ok")
         badge = "ok" if act_ok else ("fail" if act_ok is False else "neutral")
+        tools_html = ""
+        if act:
+            group = (
+                instruction_groups[actor_group_index]
+                if actor_group_index < len(instruction_groups)
+                else None
+            )
+            actor_group_index += 1
+            if isinstance(group, dict):
+                operations = (
+                    group.get("operations") if isinstance(group.get("operations"), list) else []
+                )
+                operation_count = len(operations)
+                if operations:
+                    items = "".join(
+                        _render_hand_operation_html(run_root=run_root, operation=operation)
+                        for operation in operations
+                    )
+                    operations_html = f'<ul class="hand-ops">{items}</ul>'
+                else:
+                    operations_html = (
+                        '<p class="args-empty" style="padding: 1rem 1.5rem;">'
+                        "（無手部動作）</p>"
+                    )
+                tools_html = (
+                    f'<div class="executed-tools">'
+                    f"<h3>Executed tools ({operation_count})</h3>"
+                    f"{operations_html}"
+                    f"</div>"
+                )
         blocks.append(
             f'<details class="instruction-group">'
             f"<summary>"
@@ -1665,13 +1704,14 @@ def _render_smart_cycles_html(report: dict[str, Any]) -> str:
             f'<span class="instruction-title">{escape(str(instruction))}</span>'
             f'<span class="badge {badge}">{escape(str(verify_branch))}</span>'
             f"</summary>"
-            f'<div class="meta"><dl>'
+            f'<div class="meta smart-cycle-meta"><dl>'
             f"<dt>Plan</dt><dd>{escape(str(plan.get('rationale') or plan.get('status') or '—'))}</dd>"
             f"<dt>Expected</dt><dd>{escape(str(plan.get('expected_outcome') or '—'))}</dd>"
             f"<dt>Act</dt><dd>{escape(str(act.get('reason') or ('ok' if act_ok else 'fail' if act_ok is False else '—')))}</dd>"
             f"<dt>Verify</dt><dd>{escape(str(verify.get('reason') or verify.get('outcome') or '—'))}</dd>"
             f"<dt>Updated state</dt><dd>{escape(str(verify.get('updated_state') or '—'))}</dd>"
             f"</dl></div>"
+            f"{tools_html}"
             f"</details>"
         )
     blocks.append("</section>")
@@ -1689,6 +1729,18 @@ def write_session_html_from_run(run_root: Path) -> Path:
     run_root.mkdir(parents=True, exist_ok=True)
 
     instruction_groups = _load_instruction_groups(run_root)
+    report = _load_session_report_data(run_root)
+    smart_cycles = report.get("smart_cycles") if isinstance(report, dict) else None
+    smart_actor_count = (
+        sum(
+            1
+            for cycle in smart_cycles
+            if isinstance(cycle, dict) and isinstance(cycle.get("act"), dict) and cycle.get("act")
+        )
+        if isinstance(smart_cycles, list)
+        else 0
+    )
+    remaining_groups = instruction_groups[min(smart_actor_count, len(instruction_groups)) :]
     groups_html = [
         _render_instruction_group_html(
             run_root=run_root,
@@ -1696,10 +1748,13 @@ def write_session_html_from_run(run_root: Path) -> Path:
             operations=group["operations"],
             step_number=index,
         )
-        for index, group in enumerate(instruction_groups, start=1)
+        for index, group in enumerate(remaining_groups, start=smart_actor_count + 1)
     ]
-    report = _load_session_report_data(run_root)
-    smart_html = _render_smart_cycles_html(report if isinstance(report, dict) else {})
+    smart_html = _render_smart_cycles_html(
+        report if isinstance(report, dict) else {},
+        run_root=run_root,
+        instruction_groups=instruction_groups,
+    )
 
     title = escape(_resolve_session_title(run_root))
     body = smart_html + "\n" + "\n".join(groups_html)

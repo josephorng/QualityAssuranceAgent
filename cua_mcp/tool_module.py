@@ -7,6 +7,7 @@ from typing import Any
 
 from cua_mcp import hand_tools
 from cua_mcp.select_mouse_target import find_mouse_point, resolve_mouse_point
+from cua_mcp.visual_mouse import resolve_visual_mouse_point
 from cua_mcp.storage import store_clipboard_text, store_image, store_text, _current_run_paths
 
 
@@ -61,6 +62,25 @@ async def _move_mouse(
     return _with_unified_target_metadata(
         merged,
         target_kind=str(meta.get("target_kind", "mouse_target")),
+        target_text=str(meta.get("target_text", "")),
+        target_icons=meta.get("target_icons", []),
+        target_bbox=meta.get("target_bbox"),
+    )
+
+
+async def _move_mouse_visual(
+    instruction: str,
+    duration: float = 0.0,
+) -> dict[str, Any]:
+    """Move to the candidate selected by one multimodal screenshot+OCR LLM pass."""
+    gx, gy, meta = await resolve_visual_mouse_point(instruction)
+    result = hand_tools.move(x=gx, y=gy, duration=duration)
+    merged: dict[str, Any] = dict(result)
+    merged.update(meta)
+    merged["instruction"] = instruction
+    return _with_unified_target_metadata(
+        merged,
+        target_kind=str(meta.get("target_kind", "visual_mouse_target")),
         target_text=str(meta.get("target_text", "")),
         target_icons=meta.get("target_icons", []),
         target_bbox=meta.get("target_bbox"),

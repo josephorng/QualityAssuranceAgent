@@ -13,7 +13,7 @@ from src.common.llm_client import (
 )
 from src.common.run_state import get_run_state_manager
 
-OLLAMA_INCLUDE_IMAGES = False
+OLLAMA_INCLUDE_IMAGES = True
 
 __all__ = [
     "OllamaClient",

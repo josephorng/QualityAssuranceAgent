@@ -7,7 +7,12 @@ from datetime import datetime, timezone
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
-from cua_mcp.tools import mcp_server, TOOL_FUNCTIONS, VERIFICATION_TOOLS
+from cua_mcp.tools import (
+    TOOL_FUNCTIONS,
+    VERIFICATION_TOOLS,
+    get_mode_tool_functions,
+    mcp_server,
+)
 from ollama import Message
 from pydantic import ValidationError
 from src.common.io_utils import write_json
@@ -31,6 +36,7 @@ from src.common.runtime_context import (
     SCRIPT_LINES_ENV,
     get_runtime_env,
     is_runtime_command_mode,
+    is_smart_mode,
     use_tool_cache_enabled,
 )
 from src.common.settings import load_settings
@@ -96,13 +102,17 @@ class BrainModule:
         self.manager = get_run_state_manager()
         self.manager.init_run(self.run_id, self.run_root.name)
         self.runtime = BrainRuntime()
-        self.script_lines = [] if is_runtime_command_mode() else self._script_seed_steps()
+        self.script_lines = (
+            []
+            if is_runtime_command_mode() or is_smart_mode()
+            else self._script_seed_steps()
+        )
         self._script_step_index = 0
         self._hand = hand
         self._eye = eye
         self._step_transcript_counter = (
             self._resume_step_transcript_counter()
-            if is_runtime_command_mode()
+            if is_runtime_command_mode() or is_smart_mode()
             else 0
         )
         self.manager.log_info(f"Brain module initialized run_id={self.run_id}")
@@ -261,6 +271,49 @@ class BrainModule:
             raise ValueError("runtime step command must be non-empty")
         self.script_lines = [cleaned]
         self._script_step_index = 0
+
+    async def execute_instruction(self, instruction: str) -> bool:
+        """
+        Run the existing multi-tool decide/act loop against one bounded instruction.
+
+        Used by smart mode as the Act step. Preserves surrounding script state and
+        advances the step transcript counter after the actor finishes.
+        """
+        cleaned = instruction.strip()
+        if not cleaned:
+            raise ValueError("instruction must be non-empty")
+
+        saved_lines = list(self.script_lines)
+        saved_index = self._script_step_index
+        transcript_counter = self._step_transcript_counter
+        script_step_index = 0
+        self.script_lines = [cleaned]
+        self._script_step_index = 0
+        self.manager.set_step_log_context(transcript_counter, script_step_index)
+        started_iso = datetime.now(timezone.utc).isoformat()
+        started_at = perf_counter()
+        try:
+            step_succeeded = await self.loop()
+            finished_iso = datetime.now(timezone.utc).isoformat()
+            duration_seconds = round(perf_counter() - started_at, 3)
+            self._update_step_metadata(
+                transcript_counter,
+                script_step_index,
+                {
+                    "started_at_utc": started_iso,
+                    "finished_at_utc": finished_iso,
+                    "duration_seconds": duration_seconds,
+                    "status": "completed" if step_succeeded else "failed",
+                    "step_index": script_step_index,
+                    "goal": cleaned,
+                },
+            )
+            self._step_transcript_counter += 1
+            return step_succeeded
+        finally:
+            self.script_lines = saved_lines
+            self._script_step_index = saved_index
+            self.manager.clear_step_log_context()
 
     def undo_last_runtime_step(self) -> bool:
         """Remove the last completed step transcript and rewind the step counter."""
@@ -550,6 +603,22 @@ class BrainModule:
         goal = self._current_goal()
         first_prompt = get_prompt("brain_decide_action").format(task=goal)
         second_prompt = get_prompt("brain_decide_action_2").format(task=goal)
+        tool_functions = get_mode_tool_functions()
+        tool_names = {tool.__name__ for tool in tool_functions}
+        if "move_mouse_visual" in tool_names and "move_mouse" not in tool_names:
+            mode_tool_policy = (
+                "\n\nMode tool policy: move_mouse is unavailable. Use move_mouse_visual "
+                "for movement to a named on-screen target."
+            )
+        elif "move_mouse" in tool_names and "move_mouse_visual" not in tool_names:
+            mode_tool_policy = (
+                "\n\nMode tool policy: move_mouse_visual is unavailable. Use move_mouse "
+                "for movement to a named on-screen target."
+            )
+        else:
+            mode_tool_policy = ""
+        first_prompt += mode_tool_policy
+        second_prompt += mode_tool_policy
 
         if use_tool_cache_enabled():
             cached_calls = lookup_tool_calls(goal)
@@ -585,7 +654,7 @@ class BrainModule:
                 response_message = await self.ollama.chat_messages(
                     self.settings.brain_lm,
                     messages=messages,
-                    tools=TOOL_FUNCTIONS,
+                    tools=tool_functions,
                 )
                 if not response_message:
                     self.manager.log_error("Ollama returned empty response")

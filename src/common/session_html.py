@@ -1636,6 +1636,48 @@ def _resolve_recording_title(run_root: Path) -> str:
     return run_root.name
 
 
+def _render_smart_cycles_html(report: dict[str, Any]) -> str:
+    cycles = report.get("smart_cycles")
+    if not isinstance(cycles, list) or not cycles:
+        return ""
+    goal = report.get("smart_goal")
+    goal_html = (
+        f'<p class="intro">智能模式目標：{escape(str(goal))}</p>\n'
+        if isinstance(goal, str) and goal.strip()
+        else ""
+    )
+    blocks: list[str] = [goal_html, '<section class="smart-cycles"><h2>Plan → Act → Verify</h2>']
+    for cycle in cycles:
+        if not isinstance(cycle, dict):
+            continue
+        number = cycle.get("cycle", "?")
+        plan = cycle.get("plan") if isinstance(cycle.get("plan"), dict) else {}
+        act = cycle.get("act") if isinstance(cycle.get("act"), dict) else {}
+        verify = cycle.get("verify") if isinstance(cycle.get("verify"), dict) else {}
+        instruction = plan.get("instruction") or act.get("instruction") or "—"
+        verify_branch = verify.get("branch") or "—"
+        act_ok = act.get("ok")
+        badge = "ok" if act_ok else ("fail" if act_ok is False else "neutral")
+        blocks.append(
+            f'<details class="instruction-group">'
+            f"<summary>"
+            f'<span class="instruction-number">{escape(str(number))}.</span>'
+            f'<span class="instruction-title">{escape(str(instruction))}</span>'
+            f'<span class="badge {badge}">{escape(str(verify_branch))}</span>'
+            f"</summary>"
+            f'<div class="meta"><dl>'
+            f"<dt>Plan</dt><dd>{escape(str(plan.get('rationale') or plan.get('status') or '—'))}</dd>"
+            f"<dt>Expected</dt><dd>{escape(str(plan.get('expected_outcome') or '—'))}</dd>"
+            f"<dt>Act</dt><dd>{escape(str(act.get('reason') or ('ok' if act_ok else 'fail' if act_ok is False else '—')))}</dd>"
+            f"<dt>Verify</dt><dd>{escape(str(verify.get('reason') or verify.get('outcome') or '—'))}</dd>"
+            f"<dt>Updated state</dt><dd>{escape(str(verify.get('updated_state') or '—'))}</dd>"
+            f"</dl></div>"
+            f"</details>"
+        )
+    blocks.append("</section>")
+    return "\n".join(blocks)
+
+
 def write_session_html_from_run(run_root: Path) -> Path:
     """Build ``session_steps.html`` from ``hand.csv`` in a single pass (O(n)).
 
@@ -1656,9 +1698,11 @@ def write_session_html_from_run(run_root: Path) -> Path:
         )
         for index, group in enumerate(instruction_groups, start=1)
     ]
+    report = _load_session_report_data(run_root)
+    smart_html = _render_smart_cycles_html(report if isinstance(report, dict) else {})
 
     title = escape(_resolve_session_title(run_root))
-    body = "\n".join(groups_html)
+    body = smart_html + "\n" + "\n".join(groups_html)
     html = (
         "<!DOCTYPE html>\n"
         '<html lang="zh-Hant">\n<head>\n'

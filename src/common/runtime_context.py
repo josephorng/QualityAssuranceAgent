@@ -9,12 +9,23 @@ RUN_ID_ENV = "CUA_RUN_ID"
 SCRIPT_PATH_ENV = "CUA_SCRIPT_PATH"
 SCRIPT_LINES_ENV = "CUA_SCRIPT_LINES_JSON"
 RUNTIME_COMMAND_MODE_ENV = "CUA_RUNTIME_COMMAND_MODE"
+SMART_MODE_ENV = "CUA_SMART_MODE"
+SMART_GOAL_ENV = "CUA_SMART_GOAL"
 USE_TOOL_CACHE_ENV = "CUA_USE_TOOL_CACHE"
 
 
 def is_runtime_command_mode() -> bool:
     raw = os.getenv(RUNTIME_COMMAND_MODE_ENV, "").strip().lower()
     return raw in ("1", "true", "yes")
+
+
+def is_smart_mode() -> bool:
+    raw = os.getenv(SMART_MODE_ENV, "").strip().lower()
+    return raw in ("1", "true", "yes")
+
+
+def get_smart_goal() -> str:
+    return (os.getenv(SMART_GOAL_ENV) or "").strip()
 
 
 def use_tool_cache_enabled() -> bool:

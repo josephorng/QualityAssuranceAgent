@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import mimetypes
 import re
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -15,7 +18,12 @@ from src.common.run_state import get_run_state_manager
 # Ollama exposes an OpenAI-compatible API at /v1/chat/completions on port 11434.
 OLLAMA_OPENAI_COMPAT_URL = "http://192.168.13.101:11434"
 
-__all__ = ["VLLMClient", "OLLAMA_OPENAI_COMPAT_URL"]
+__all__ = [
+    "VLLMClient",
+    "OLLAMA_OPENAI_COMPAT_URL",
+    "_encode_image_data_url",
+    "_translate_messages_to_openai",
+]
 
 
 def _normalize_tool_descriptor(tool: Any) -> dict[str, Any]:
@@ -127,12 +135,86 @@ def _coerce_arguments_to_dict(arguments: Any) -> dict[str, Any]:
     return {}
 
 
+def _encode_image_data_url(path: str | Path) -> str:
+    """Read an image file and return a ``data:<mime>;base64,...`` URL."""
+    image_path = Path(path)
+    mime, _ = mimetypes.guess_type(str(image_path))
+    if not mime or not mime.startswith("image/"):
+        suffix = image_path.suffix.lower()
+        mime = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+        }.get(suffix, "image/png")
+    raw = image_path.read_bytes()
+    b64 = base64.b64encode(raw).decode("ascii")
+    return f"data:{mime};base64,{b64}"
+
+
+def _content_with_images(text: Any, image_paths: list[Any] | None) -> Any:
+    """Build OpenAI multimodal content when image paths are present."""
+    paths = [str(p) for p in (image_paths or []) if p]
+    if not paths:
+        return text if text is not None else ""
+    parts: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": text if isinstance(text, str) else ("" if text is None else str(text)),
+        }
+    ]
+    for path in paths:
+        try:
+            url = _encode_image_data_url(path)
+        except OSError:
+            continue
+        parts.append({"type": "image_url", "image_url": {"url": url}})
+    return parts
+
+
+def _keep_latest_message_images(
+    messages: list[dict[str, Any]],
+    *,
+    max_images: int = 2,
+) -> list[dict[str, Any]]:
+    """
+    Return message copies with images retained only on the newest image-bearing message.
+
+    vLLM counts images across the complete prompt and this deployment accepts at
+    most two. Older screenshots are stale after subsequent UI actions, so preserve
+    their text/tool history while removing their ``images`` fields.
+    """
+    prepared = [dict(message) for message in messages]
+    newest_image_index: int | None = None
+    for index in range(len(prepared) - 1, -1, -1):
+        images = prepared[index].get("images")
+        if isinstance(images, list) and any(images):
+            newest_image_index = index
+            break
+
+    for index, message in enumerate(prepared):
+        if index != newest_image_index:
+            message.pop("images", None)
+            continue
+        images = message.get("images")
+        if isinstance(images, list):
+            kept = [path for path in images if path][:max(0, max_images)]
+            if kept:
+                message["images"] = kept
+            else:
+                message.pop("images", None)
+    return prepared
+
+
 def _translate_messages_to_openai(
     messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """
-    Translate Ollama-style messages (text and tool messages only) into OpenAI
-    ``/v1/chat/completions`` ``messages[]`` shape.
+    Translate Ollama-style messages into OpenAI ``/v1/chat/completions`` ``messages[]``.
+
+    When a message includes ``images: [path, ...]``, those files are embedded as
+    OpenAI multimodal ``image_url`` parts (data URIs).
 
     Tool calls in assistant messages are given stable ids (``call_<i>_<j>``);
     immediately following ``tool`` messages are paired with those ids in order,
@@ -162,9 +244,12 @@ def _translate_messages_to_openai(
             continue
 
         content_value = msg.get("content")
+        images = msg.get("images")
         openai_msg: dict[str, Any] = {
             "role": role or "user",
-            "content": content_value if content_value is not None else "",
+            "content": _content_with_images(
+                content_value, images if isinstance(images, list) else None
+            ),
         }
 
         if role == "assistant":
@@ -179,7 +264,9 @@ def _translate_messages_to_openai(
                     arguments = function.get("arguments", {})
                     call_id = (
                         tc.get("id")
-                        if isinstance(tc, dict) and isinstance(tc.get("id"), str) and tc.get("id")
+                        if isinstance(tc, dict)
+                        and isinstance(tc.get("id"), str)
+                        and tc.get("id")
                         else f"call_{msg_idx}_{call_idx}"
                     )
                     converted.append(
@@ -307,13 +394,11 @@ class VLLMClient(LLMClient):
         """
         Run a chat completion against the OpenAI-compatible server.
 
-        ``images`` on incoming messages are dropped (vLLM backend is text-only).
+        Incoming ``images`` paths are embedded as multimodal ``image_url`` parts.
         ``append_image_sizes`` and ``think`` are accepted for interface compatibility
         but ignored.
         """
-        prepared_messages = [
-            {k: v for k, v in msg.items() if k != "images"} for msg in messages
-        ]
+        prepared_messages = _keep_latest_message_images(messages)
         openai_messages = _translate_messages_to_openai(prepared_messages)
 
         payload: dict[str, Any] = {
@@ -339,9 +424,14 @@ class VLLMClient(LLMClient):
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
+        # Log without embedding base64 image payloads.
+        log_messages = [
+            {k: ("<images omitted>" if k == "images" else v) for k, v in msg.items()}
+            for msg in prepared_messages
+        ]
         last_assistant_idx = -1
-        for idx in reversed(range(len(prepared_messages))):
-            if prepared_messages[idx].get("role") == "assistant":
+        for idx in reversed(range(len(log_messages))):
+            if log_messages[idx].get("role") == "assistant":
                 last_assistant_idx = idx
                 break
         get_run_state_manager().log_info(
@@ -349,9 +439,8 @@ class VLLMClient(LLMClient):
             f"tools_count={len(tools) if tools else 0} "
             f"response_format_set={response_format is not None} "
             f"endpoint={self._endpoint} "
-            f"last_assistant_messages=\n{prepared_messages[last_assistant_idx:]}"
+            f"last_assistant_messages=\n{log_messages[last_assistant_idx:]}"
             f"headers=\n{headers}"
-            f"payload=\n{payload}"
         )
 
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:

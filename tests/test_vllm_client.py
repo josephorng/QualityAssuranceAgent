@@ -1,8 +1,38 @@
 from src.common.vllm_client import (
+    _keep_latest_message_images,
     _parse_call_syntax_arguments,
     _parse_call_syntax_tool_calls,
     _translate_openai_message_to_ollama,
 )
+
+
+def test_keep_latest_message_images_removes_stale_screenshots() -> None:
+    messages = [
+        {"role": "user", "content": "first", "images": ["old-1.png", "old-2.png"]},
+        {"role": "assistant", "content": "acted"},
+        {"role": "user", "content": "second", "images": ["new-1.png", "new-2.png"]},
+    ]
+
+    prepared = _keep_latest_message_images(messages)
+
+    assert "images" not in prepared[0]
+    assert prepared[2]["images"] == ["new-1.png", "new-2.png"]
+    # The persisted caller-owned transcript remains intact.
+    assert messages[0]["images"] == ["old-1.png", "old-2.png"]
+
+
+def test_keep_latest_message_images_caps_newest_message_at_two() -> None:
+    prepared = _keep_latest_message_images(
+        [
+            {
+                "role": "user",
+                "content": "current",
+                "images": ["primary.png", "secondary.png", "third.png"],
+            }
+        ]
+    )
+
+    assert prepared[0]["images"] == ["primary.png", "secondary.png"]
 
 
 def test_parse_call_syntax_arguments() -> None:

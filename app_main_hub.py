@@ -42,6 +42,7 @@ from src.common.runtime_command_dialog import (
 )
 from src.common.runtime_context import USE_TOOL_CACHE_ENV
 from src.common.script_helper import parse_executable_lines_from_text
+from src.common.smart_mode import normalize_smart_goal, resolve_hub_run_mode
 from src.common.settings import (
     ROOT_DIR,
     apply_startup_ollama_host_probe,
@@ -54,8 +55,13 @@ from src.recorder.hotkey import RecordingHotkeyManager
 # Step-mode runtime command transcript (append during run); not hub UI preferences.
 _RUNTIME_COMMAND_TRANSCRIPT_NAME = "runtime_commands_cache.txt"
 _RUNTIME_COMMAND_LABEL = "逐步執行命令"
+_SMART_GOAL_CACHE_NAME = "smart_goal_cache.txt"
+_SMART_GOAL_CACHE_LABEL = "智能模式目標暫存"
 _HUB_UI_STATE_NAME = "hub_ui.json"
-_HUB_UI_VERSION = 1
+_HUB_UI_VERSION = 2
+_MODE_TAB_SINGLE = "單一腳本"
+_MODE_TAB_QUEUE = "佇列執行"
+_MODE_TAB_SMART = "智能模式"
 
 
 def _default_hub_ui_dict() -> dict[str, Any]:
@@ -64,6 +70,8 @@ def _default_hub_ui_dict() -> dict[str, Any]:
         "appearance_dark": True,
         "selected_monitor_indices": [],
         "last_script_path": None,
+        "last_smart_goal_path": None,
+        "selected_mode": _MODE_TAB_SINGLE,
         "use_tool_cache": False,
         "recording_hotkey_enabled": True,
         "queue_script_paths": [],
@@ -97,6 +105,11 @@ def _normalize_hub_ui_state(raw: Any) -> dict[str, Any]:
     base["selected_monitor_indices"] = _coerce_int_list(raw.get("selected_monitor_indices"))
     lsp = raw.get("last_script_path")
     base["last_script_path"] = lsp if isinstance(lsp, str) or lsp is None else None
+    lsg = raw.get("last_smart_goal_path")
+    base["last_smart_goal_path"] = lsg if isinstance(lsg, str) or lsg is None else None
+    selected_mode = raw.get("selected_mode")
+    if selected_mode in (_MODE_TAB_SINGLE, _MODE_TAB_QUEUE, _MODE_TAB_SMART):
+        base["selected_mode"] = selected_mode
     base["use_tool_cache"] = bool(raw.get("use_tool_cache", False))
     base["recording_hotkey_enabled"] = bool(raw.get("recording_hotkey_enabled", True))
     base["queue_script_paths"] = _coerce_str_list(raw.get("queue_script_paths"))
@@ -117,13 +130,19 @@ def _hub_ui_state_path() -> Path:
 
 @dataclass
 class _WorkerArgs:
-    step_mode: bool
+    run_mode: str
     eye_monitor_indices: list[int]
     script_raw: str
     script_disk_path: Path | None
     run_folder_name: str | None = None
     use_tool_cache: bool = False
     queue_paths: list[Path] | None = None
+    smart_goal: str = ""
+
+    @property
+    def step_mode(self) -> bool:
+        """Backward-compatible alias for runtime command mode."""
+        return self.run_mode == "runtime"
 
 
 class MainHub(ctk.CTk):
@@ -142,6 +161,7 @@ class MainHub(ctk.CTk):
         ctk.set_default_color_theme("dark-blue")
 
         self._script_path: Path | None = None
+        self._smart_goal_path: Path | None = None
         # When set, Save writes here (step-mode transcript under runs_dir); not a user-opened script.
         self._runtime_commands_cache_path: Path | None = None
         self._worker_thread: threading.Thread | None = None
@@ -153,6 +173,7 @@ class MainHub(ctk.CTk):
 
         self._post_run_unlink: Path | None = None
         self._script_controls: list[Any] = []
+        self._smart_controls: list[Any] = []
         self._queue_controls: list[Any] = []
         self._queue_paths: list[Path] = []
         self._queue_selected: int | None = None
@@ -164,6 +185,7 @@ class MainHub(ctk.CTk):
         self._last_run_was_script_mode = False
         self._last_script_run_folder: str | None = None
         self._active_run_root: Path | None = None
+        self._smart_baseline = "\n"
 
         self._recording_session = RecordingSession()
         self._recording_session.set_on_event(self._on_recording_event)
@@ -172,6 +194,8 @@ class MainHub(ctk.CTk):
         self._analysis_cancel_event = threading.Event()
         self._suppress_script_cache_sync = False
         self._sync_cache_after_id: str | None = None
+        self._suppress_smart_cache_sync = False
+        self._smart_sync_cache_after_id: str | None = None
         self._script_baseline = "\n"
         self._record_btn: ctk.CTkButton | None = None
         self._analyze_recording_btn: ctk.CTkButton | None = None
@@ -202,10 +226,33 @@ class MainHub(ctk.CTk):
             self._try_load_last_runtime_command_cache()
         self._mark_script_clean()
 
+        last_smart = hub.get("last_smart_goal_path")
+        if isinstance(last_smart, str) and last_smart.strip():
+            sp = Path(last_smart)
+            if sp.is_file():
+                self._smart_goal_path = sp
+                self._suppress_smart_cache_sync = True
+                try:
+                    self._smart_text.delete("0.0", "end")
+                    self._smart_text.insert("0.0", sp.read_text(encoding="utf-8"))
+                finally:
+                    self._suppress_smart_cache_sync = False
+                self._refresh_smart_path_label()
+                self._mark_smart_clean()
+        if self._smart_goal_path is None:
+            self._try_load_smart_goal_cache()
+
         self._queue_paths = [
             Path(p) for p in hub.get("queue_script_paths", []) if Path(p).is_file()
         ]
         self._refresh_queue_list()
+
+        selected_mode = hub.get("selected_mode")
+        if selected_mode in (_MODE_TAB_SINGLE, _MODE_TAB_QUEUE, _MODE_TAB_SMART):
+            try:
+                self._mode_tabs.set(selected_mode)
+            except Exception:
+                pass
 
         self._status.configure(text="正在檢查 Ollama 與 Triton…")
         self._start_startup_probes()
@@ -407,14 +454,179 @@ class MainHub(ctk.CTk):
         return self._script_save_as()
 
     def _on_mode_tab_changed(self) -> None:
-        if self._mode_tabs.get() != "佇列執行":
+        try:
+            selected = self._mode_tabs.get()
+        except Exception:
+            return
+        self._persist_hub_ui_state()
+        if selected != _MODE_TAB_QUEUE:
             return
         if self._confirm_proceed_with_unsaved_script():
             return
         try:
-            self._mode_tabs.set("單一腳本")
+            self._mode_tabs.set(_MODE_TAB_SINGLE)
         except Exception:
             pass
+
+    def _refresh_smart_path_label(self) -> None:
+        if self._smart_goal_path is not None:
+            self._smart_path_label.configure(text=str(self._smart_goal_path.resolve()))
+        elif self._smart_editor_normalized_text().strip():
+            self._smart_path_label.configure(text=_SMART_GOAL_CACHE_LABEL)
+        else:
+            self._smart_path_label.configure(text="未載入目標檔案")
+
+    def _smart_goal_cache_path(self) -> Path:
+        return Path(load_settings().runs_dir) / _SMART_GOAL_CACHE_NAME
+
+    def _try_load_smart_goal_cache(self) -> None:
+        cache_path = self._smart_goal_cache_path()
+        if not cache_path.is_file():
+            return
+        raw = cache_path.read_text(encoding="utf-8")
+        if not raw.strip():
+            return
+        self._suppress_smart_cache_sync = True
+        try:
+            self._smart_text.delete("0.0", "end")
+            self._smart_text.insert("0.0", raw)
+        finally:
+            self._suppress_smart_cache_sync = False
+        self._refresh_smart_path_label()
+        self._mark_smart_clean()
+
+    def _sync_smart_text_to_cache(self) -> bool:
+        """Persist an unsaved smart goal under runs_dir."""
+        if self._smart_goal_path is not None:
+            return False
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            return False
+        cache_path = self._smart_goal_cache_path()
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(self._smart_editor_normalized_text(), encoding="utf-8")
+        self._refresh_smart_path_label()
+        self._mark_smart_clean()
+        return True
+
+    def _schedule_sync_smart_text_to_cache(self) -> None:
+        if self._suppress_smart_cache_sync or self._smart_goal_path is not None:
+            return
+        if self._smart_sync_cache_after_id is not None:
+            self.after_cancel(self._smart_sync_cache_after_id)
+        self._smart_sync_cache_after_id = self.after(
+            250, self._run_scheduled_sync_smart_text_to_cache
+        )
+
+    def _run_scheduled_sync_smart_text_to_cache(self) -> None:
+        self._smart_sync_cache_after_id = None
+        self._sync_smart_text_to_cache()
+
+    def _on_smart_text_modified(self, _event: object = None) -> None:
+        textbox = self._smart_text._textbox
+        if textbox.edit_modified():
+            textbox.edit_modified(False)
+            self._schedule_sync_smart_text_to_cache()
+
+    def _smart_editor_normalized_text(self) -> str:
+        return self._smart_text.get("0.0", "end").rstrip() + "\n"
+
+    def _mark_smart_clean(self) -> None:
+        self._smart_baseline = self._smart_editor_normalized_text()
+
+    def _is_smart_dirty(self) -> bool:
+        return self._smart_editor_normalized_text() != self._smart_baseline
+
+    def _confirm_proceed_with_unsaved_smart(self) -> bool:
+        if not self._is_smart_dirty():
+            return True
+        choice = prompt_unsaved_script_changes(self, message="智能模式目標尚未儲存。要先儲存嗎？")
+        if choice == "cancel":
+            return False
+        if choice == "discard":
+            return True
+        return self._smart_save()
+
+    def _smart_open(self) -> None:
+        if not self._confirm_proceed_with_unsaved_smart():
+            return
+        initial = ROOT_DIR / "scripts"
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="開啟智能模式目標",
+            initialdir=str(initial) if initial.is_dir() else str(ROOT_DIR),
+            filetypes=[("文字檔", "*.txt"), ("全部", "*.*")],
+        )
+        if not path:
+            return
+        p = Path(path)
+        text = p.read_text(encoding="utf-8")
+        self._smart_goal_path = p
+        self._suppress_smart_cache_sync = True
+        try:
+            self._smart_text.delete("0.0", "end")
+            self._smart_text.insert("0.0", text)
+        finally:
+            self._suppress_smart_cache_sync = False
+        self._refresh_smart_path_label()
+        self._mark_smart_clean()
+        self._persist_hub_ui_state()
+
+    def _smart_save(self) -> bool:
+        if self._smart_goal_path is None:
+            if self._sync_smart_text_to_cache():
+                self._status.configure(text="已儲存智能模式目標")
+                return True
+            return self._smart_save_as()
+        body = self._smart_editor_normalized_text()
+        self._smart_goal_path.write_text(body, encoding="utf-8")
+        self._mark_smart_clean()
+        self._persist_hub_ui_state()
+        return True
+
+    def _smart_save_as(self) -> bool:
+        initial = ROOT_DIR / "scripts"
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="另存智能模式目標",
+            initialdir=str(initial) if initial.is_dir() else str(ROOT_DIR),
+            defaultextension=".txt",
+            filetypes=[("文字檔", "*.txt"), ("全部", "*.*")],
+        )
+        if not path:
+            return False
+        p = Path(path)
+        p.write_text(self._smart_editor_normalized_text(), encoding="utf-8")
+        self._smart_goal_path = p
+        self._refresh_smart_path_label()
+        self._mark_smart_clean()
+        self._persist_hub_ui_state()
+        return True
+
+    def _smart_clear(self) -> None:
+        if self._smart_editor_normalized_text().strip():
+            if self._is_smart_dirty() or self._smart_goal_path is not None:
+                choice = prompt_unsaved_script_changes(
+                    self,
+                    message="要清除目前智能模式目標嗎？未儲存內容將會遺失。",
+                    save_button_text="先儲存",
+                )
+                if choice == "cancel":
+                    return
+                if choice != "discard":
+                    if not self._smart_save():
+                        return
+        self._smart_goal_path = None
+        self._suppress_smart_cache_sync = True
+        try:
+            self._smart_text.delete("0.0", "end")
+        finally:
+            self._suppress_smart_cache_sync = False
+        cache_path = self._smart_goal_cache_path()
+        if cache_path.is_file():
+            cache_path.write_text("", encoding="utf-8")
+        self._refresh_smart_path_label()
+        self._mark_smart_clean()
+        self._persist_hub_ui_state()
 
     def _schedule_sync_script_text_to_runtime_cache(self) -> None:
         if self._suppress_script_cache_sync or self._script_path is not None:
@@ -607,6 +819,11 @@ class MainHub(ctk.CTk):
 
     def _persist_hub_ui_state(self) -> None:
         try:
+            selected_mode = _MODE_TAB_SINGLE
+            try:
+                selected_mode = self._mode_tabs.get()
+            except Exception:
+                pass
             data = {
                 "version": _HUB_UI_VERSION,
                 "appearance_dark": self._appearance_dark,
@@ -614,6 +831,10 @@ class MainHub(ctk.CTk):
                 "last_script_path": str(self._script_path.resolve())
                 if self._script_path is not None
                 else None,
+                "last_smart_goal_path": str(self._smart_goal_path.resolve())
+                if self._smart_goal_path is not None
+                else None,
+                "selected_mode": selected_mode,
                 "use_tool_cache": self._tool_cache_enabled_for_run(),
                 "recording_hotkey_enabled": self._recording_hotkey_enabled,
                 "queue_script_paths": [str(p) for p in self._queue_paths],
@@ -657,9 +878,11 @@ class MainHub(ctk.CTk):
         box.pack(fill="both", expand=True, padx=24, pady=8)
         self._mode_tabs = ctk.CTkTabview(box, command=self._on_mode_tab_changed)
         self._mode_tabs.pack(fill="both", expand=True, padx=8, pady=8)
-        self._tab_single = self._mode_tabs.add("單一腳本")
-        self._tab_queue = self._mode_tabs.add("佇列執行")
+        self._tab_single = self._mode_tabs.add(_MODE_TAB_SINGLE)
+        self._tab_smart = self._mode_tabs.add(_MODE_TAB_SMART)
+        self._tab_queue = self._mode_tabs.add(_MODE_TAB_QUEUE)
         self._build_single_script_tab(self._tab_single)
+        self._build_smart_mode_tab(self._tab_smart)
         self._build_queue_tab(self._tab_queue)
 
     def _build_single_script_tab(self, parent: Any) -> None:
@@ -721,6 +944,40 @@ class MainHub(ctk.CTk):
                 self._script_text,
             ]
         )
+
+    def _build_smart_mode_tab(self, parent: Any) -> None:
+        ctk.CTkLabel(
+            parent,
+            text="將整段文字視為一個目標；執行時由多模態 LLM 規劃、執行並驗證每一步。",
+            font=ctk.CTkFont(size=12),
+            text_color=("gray30", "gray70"),
+            wraplength=820,
+            justify="left",
+        ).pack(anchor="w", padx=8, pady=(4, 4))
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=8, pady=4)
+        b_open = ctk.CTkButton(row, text="開啟", width=80, command=self._smart_open)
+        b_open.pack(side="left", padx=(0, 8))
+        b_save = ctk.CTkButton(row, text="儲存", width=80, command=self._smart_save)
+        b_save.pack(side="left", padx=(0, 8))
+        b_sas = ctk.CTkButton(row, text="另存新檔", width=100, command=self._smart_save_as)
+        b_sas.pack(side="left", padx=(0, 8))
+        b_clear = ctk.CTkButton(row, text="開新檔案", width=100, command=self._smart_clear)
+        b_clear.pack(side="left", padx=(0, 8))
+        self._smart_path_label = ctk.CTkLabel(
+            parent,
+            text="未載入目標檔案",
+            font=ctk.CTkFont(size=12),
+            text_color=("gray20", "gray65"),
+        )
+        self._smart_path_label.pack(anchor="w", padx=8, pady=(4, 8))
+        editor = ctk.CTkFrame(parent, fg_color="transparent")
+        editor.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        smart_font = ctk.CTkFont(size=14)
+        self._smart_text = ctk.CTkTextbox(editor, font=smart_font, wrap="word")
+        self._smart_text.pack(side="left", fill="both", expand=True)
+        self._smart_text._textbox.bind("<<Modified>>", self._on_smart_text_modified)
+        self._smart_controls.extend([b_open, b_save, b_sas, b_clear, self._smart_text])
 
     def _build_queue_tab(self, parent: Any) -> None:
         ctk.CTkLabel(
@@ -1080,6 +1337,8 @@ class MainHub(ctk.CTk):
         self._settings_btn.configure(state="normal")
         for w in self._script_controls:
             w.configure(state="normal")
+        for w in self._smart_controls:
+            w.configure(state="normal")
         for w in self._queue_controls:
             w.configure(state="normal")
         self._use_tool_cache_checkbox.configure(state="normal")
@@ -1093,6 +1352,8 @@ class MainHub(ctk.CTk):
         for w in self._script_controls:
             if w is self._record_btn:
                 continue
+            w.configure(state="disabled")
+        for w in self._smart_controls:
             w.configure(state="disabled")
         for w in self._queue_controls:
             w.configure(state="disabled")
@@ -1108,6 +1369,8 @@ class MainHub(ctk.CTk):
         for w in self._script_controls:
             if w is self._record_btn:
                 continue
+            w.configure(state="disabled")
+        for w in self._smart_controls:
             w.configure(state="disabled")
         for w in self._queue_controls:
             w.configure(state="disabled")
@@ -1278,6 +1541,8 @@ class MainHub(ctk.CTk):
 
     def _on_close(self) -> None:
         if not self._confirm_proceed_with_unsaved_script():
+            return
+        if not self._confirm_proceed_with_unsaved_smart():
             return
         if self._is_analysis_running():
             self._analysis_cancel_event.set()
@@ -1531,6 +1796,8 @@ class MainHub(ctk.CTk):
         self._settings_btn.configure(state="disabled")
         for w in self._script_controls:
             w.configure(state="disabled")
+        for w in self._smart_controls:
+            w.configure(state="disabled")
         for w in self._queue_controls:
             w.configure(state="disabled")
         self._use_tool_cache_checkbox.configure(state="disabled")
@@ -1574,7 +1841,7 @@ class MainHub(ctk.CTk):
         )
         self._bridge.start()
         args = _WorkerArgs(
-            step_mode=True,
+            run_mode="runtime",
             eye_monitor_indices=eye_indices,
             script_raw="",
             script_disk_path=None,
@@ -1601,12 +1868,36 @@ class MainHub(ctk.CTk):
         self._last_run_was_script_mode = False
         self._bridge = None
         args = _WorkerArgs(
-            step_mode=False,
+            run_mode="queue",
             eye_monitor_indices=eye_indices,
             script_raw="",
             script_disk_path=None,
             use_tool_cache=self._tool_cache_enabled_for_run(),
             queue_paths=list(paths),
+        )
+        self._begin_worker_run(args)
+
+    def _start_smart_run(self, eye_indices: list[int]) -> None:
+        goal = normalize_smart_goal(self._smart_text.get("0.0", "end"))
+        if not goal:
+            show_ctk_message(
+                self,
+                "智能模式",
+                "請先輸入要達成的目標文字。",
+                kind="warning",
+            )
+            return
+        if self._smart_goal_path is not None and self._is_smart_dirty():
+            self._smart_save()
+        self._last_run_was_script_mode = False
+        self._bridge = None
+        args = _WorkerArgs(
+            run_mode="smart",
+            eye_monitor_indices=eye_indices,
+            script_raw="",
+            script_disk_path=self._smart_goal_path,
+            use_tool_cache=self._tool_cache_enabled_for_run(),
+            smart_goal=goal,
         )
         self._begin_worker_run(args)
 
@@ -1632,14 +1923,22 @@ class MainHub(ctk.CTk):
             )
             return
 
-        if self._mode_tabs.get() == "佇列執行":
-            self._start_queue_run(eye_indices)
-            return
-
+        selected_tab = self._mode_tabs.get()
         raw = self._script_text.get("0.0", "end")
         steps = parse_executable_lines_from_text(raw)
+        run_mode = resolve_hub_run_mode(
+            selected_tab=selected_tab,
+            script_has_steps=bool(steps),
+        )
 
-        if steps:
+        if run_mode == "queue":
+            self._start_queue_run(eye_indices)
+            return
+        if run_mode == "smart":
+            self._start_smart_run(eye_indices)
+            return
+
+        if run_mode == "script":
             # Opened script file, cache transcript, or typed commands → run as one script task.
             if self._script_path is not None:
                 script_disk_path = self._script_path
@@ -1649,7 +1948,7 @@ class MainHub(ctk.CTk):
             self._last_run_was_script_mode = True
             self._bridge = None
             args = _WorkerArgs(
-                step_mode=False,
+                run_mode="script",
                 eye_monitor_indices=eye_indices,
                 script_raw=raw,
                 script_disk_path=script_disk_path,
@@ -1671,7 +1970,7 @@ class MainHub(ctk.CTk):
             self._mark_script_clean()
 
             args = _WorkerArgs(
-                step_mode=True,
+                run_mode="runtime",
                 eye_monitor_indices=eye_indices,
                 script_raw="",
                 script_disk_path=None,
@@ -1821,10 +2120,33 @@ class MainHub(ctk.CTk):
         else:
             os.environ.pop(USE_TOOL_CACHE_ENV, None)
         try:
-            if args.queue_paths is not None:
+            if args.run_mode == "queue" or args.queue_paths is not None:
                 self._run_queue_worker(args)
                 return
-            if args.step_mode:
+            if args.run_mode == "smart":
+                settings = load_settings()
+                runs_root = Path(settings.runs_dir)
+                goal = normalize_smart_goal(args.smart_goal)
+                folder_name = args.run_folder_name or unique_run_folder_name("smart")
+                manager, paths, run_id = prepare_run_session(
+                    runs_root=runs_root,
+                    task=goal.splitlines()[0][:80] if goal else "smart",
+                    runtime_mode=False,
+                    selected_script_path=None,
+                    script_steps=None,
+                    eye_monitor_indices=args.eye_monitor_indices,
+                    clear_runs_root=False,
+                    run_folder_name=folder_name,
+                    smart_mode=True,
+                    smart_goal=goal,
+                )
+                self._active_run_root = paths.root
+                manager.log_info("Master starting smart coordinator")
+                run_coordinator_sync(smart_mode=True)
+                self._worker_outcome = ("ok", f"智能模式執行 {run_id} 已完成。")
+                manager.log_info("Master stopped.")
+                return
+            if args.run_mode == "runtime" or args.step_mode:
                 reset_runtime_user_ended_at_prompt()
                 settings = load_settings()
                 runs_root = Path(settings.runs_dir)
@@ -1908,12 +2230,7 @@ class MainHub(ctk.CTk):
             pass
         reset_run_control()
         self._set_run_button_idle()
-        self._settings_btn.configure(state="normal")
-        for w in self._script_controls:
-            w.configure(state="normal")
-        for w in self._queue_controls:
-            w.configure(state="normal")
-        self._use_tool_cache_checkbox.configure(state="normal")
+        self._set_hub_controls_idle()
 
         if self._queue_mode_active:
             self._queue_mode_active = False

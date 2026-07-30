@@ -18,6 +18,8 @@ from src.common.runtime_context import (
     RUNTIME_COMMAND_MODE_ENV,
     SCRIPT_LINES_ENV,
     SCRIPT_PATH_ENV,
+    SMART_GOAL_ENV,
+    SMART_MODE_ENV,
     set_runtime_env,
 )
 
@@ -41,21 +43,36 @@ def prepare_run_session(
     eye_monitor_indices: list[int],
     clear_runs_root: bool,
     run_folder_name: str | None = None,
+    smart_mode: bool = False,
+    smart_goal: str | None = None,
 ) -> tuple[RunStateManager, RunPaths, str]:
-    """Create run directory, set process env for script/runtime mode and monitor selection."""
+    """Create run directory, set process env for script/runtime/smart mode and monitor selection."""
     if clear_runs_root:
         clear_runs_folder(runs_root)
     if not eye_monitor_indices:
         raise ValueError("eye_monitor_indices must be non-empty")
+    if smart_mode and runtime_mode:
+        raise ValueError("smart_mode and runtime_mode are mutually exclusive")
     manager = RunStateManager(runs_root=runs_root)
     paths = manager.init_run(task, run_folder_name)
     run_id = paths.root.name
 
     set_runtime_env(paths.root, run_id)
-    if runtime_mode:
+    os.environ.pop(RUNTIME_COMMAND_MODE_ENV, None)
+    os.environ.pop(SMART_MODE_ENV, None)
+    os.environ.pop(SMART_GOAL_ENV, None)
+    os.environ.pop(SCRIPT_PATH_ENV, None)
+    os.environ.pop(SCRIPT_LINES_ENV, None)
+
+    if smart_mode:
+        goal = (smart_goal or task or "").strip()
+        if not goal:
+            raise ValueError("Smart mode requires a non-empty goal")
+        os.environ[SMART_MODE_ENV] = "1"
+        os.environ[SMART_GOAL_ENV] = goal
+    elif runtime_mode:
         os.environ[RUNTIME_COMMAND_MODE_ENV] = "1"
     else:
-        os.environ.pop(RUNTIME_COMMAND_MODE_ENV, None)
         if selected_script_path is None or script_steps is None:
             raise ValueError("Script mode requires selected_script_path and script_steps")
         os.environ[SCRIPT_PATH_ENV] = str(selected_script_path)
@@ -91,7 +108,7 @@ def request_coordinator_cancel() -> bool:
         return False
 
 
-def run_coordinator_sync() -> None:
+def run_coordinator_sync(*, smart_mode: bool = False) -> None:
     """Run one coordinator lifecycle; caller must set env and ``prepare_run_session`` first."""
     reset_run_state_manager()
     # ``asyncio.run`` closes its loop when the run ends; drop LLM clients so the next
@@ -110,7 +127,12 @@ def run_coordinator_sync() -> None:
             _coordinator_loop = loop
             _coordinator_main_task = task
         try:
-            coordinator = RuntimeCoordinator()
+            if smart_mode:
+                from src.runtime.smart_coordinator import SmartCoordinator
+
+                coordinator: Any = SmartCoordinator()
+            else:
+                coordinator = RuntimeCoordinator()
             await coordinator.run()
         finally:
             with _coordinator_loop_lock:

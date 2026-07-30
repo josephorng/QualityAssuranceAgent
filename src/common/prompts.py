@@ -34,6 +34,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Do not call move_mouse when the task only describes an action at the current cursor and does not name a target (e.g. triple-click, double-click, scroll, type text, press a key)—call that action tool directly.",
                 "Click tool mapping: 點擊 / 點選 / single click → click; 連按兩下 / double-click → double_click. Never use double_click for a normal 點擊.",
                 "For move_mouse: put the primary target in instruction (e.g. 「資料夾」圖示). When the task lists nearby landmarks (附近有… / near … / 在「…」的左邊/右邊/上面/下面/左上方/右上方/左下方/右下方), pass them as nearby_objects. Use undirected labels (e.g. [\"「Edge」圖示\", \"「Copilot」圖示\"]) or directed phrases (e.g. [\"在「顯示已授權電腦」文字的左邊\"]) instead of only embedding them in instruction.",
+                "If normal move_mouse repeatedly returns ok=false for a target that is visibly present, call move_mouse_visual with a clear natural-language target description as the fallback.",
                 "For drag: put the source in start_instruction and the drop target in destination_instruction. When the task lists start landmarks (起點附近有… / 起點在…的左邊), pass them as start_nearby_objects; when it lists destination landmarks (附近有… / 終點附近有… / 在…的左邊 / near …), pass them as destination_nearby_objects (e.g. start_nearby_objects=[\"「Desktop」文字\"], destination_nearby_objects=[\"在「新增文字文件txt」文字的左邊\"]) instead of only embedding them in the instructions.",
                 "For scroll: positive clicks scroll down (往下滑), negative scroll up; use roughly 3–10 per screen of content.",
             ],
@@ -89,6 +90,77 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "When accomplished is false: use retry to repeat the same step, skip to abandon this line and move to the next, or goto to jump to a specific script line (use target_step as the 1-based line number from the numbered list).",
                 "For goto, target_step must be the line number shown before each script line (1 to N). Set target_step to null for other branches.",
                 "Do not invent UI elements; base conclusions on the image and script text only.",
+            ],
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
+    "brain_smart_plan": [
+        {
+            "image_usage": "use_image",
+            "prompt": (
+                "You are the planner for an autonomous computer-use agent.\n"
+                "The user provided one overall goal. Decide the single best next bounded instruction "
+                "for the actor, or finish if the overall goal is already done or impossible.\n\n"
+                "OverallGoal:\n{goal}\n\n"
+                "CurrentState:\n{current_state}\n\n"
+                "RecentHistory:\n{history}\n\n"
+                "AvailableBrainTools:\n{available_tools}\n\n"
+                "ScreenOCR:\n{ocr_text}\n"
+            ),
+            "instructions": [
+                "Ground every decision in the screenshot, OCR text, current state, and history.",
+                "Only emit instructions the actor can accomplish using AvailableBrainTools.",
+                "Describe the desired user-visible result in natural language; do not emit raw tool-call JSON.",
+                "Emit exactly one bounded sub-goal instruction when status is continue — something the actor can complete with tools in one cycle.",
+                "Do not emit a full multi-step script; plan only the next instruction.",
+                "If the overall goal is already satisfied, set status to completed.",
+                "If the overall goal cannot be achieved, set status to failed.",
+                'Return strict JSON only: {{"status":"continue"|"completed"|"failed","instruction":string|null,"expected_outcome":string,"rationale":string}}.',
+                "When status is continue, instruction must be a non-empty imperative sentence.",
+                "When status is completed or failed, set instruction to null.",
+            ],
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
+    "brain_smart_verify": [
+        {
+            "image_usage": "use_image",
+            "prompt": (
+                "You are the verifier for an autonomous computer-use agent.\n"
+                "Decide whether the last instruction succeeded based on the actor result, "
+                "fresh screenshot, OCR text, and current state.\n\n"
+                "OverallGoal:\n{goal}\n\n"
+                "CurrentStateBeforeAction:\n{current_state}\n\n"
+                "Instruction:\n{instruction}\n\n"
+                "ExpectedOutcome:\n{expected_outcome}\n\n"
+                "ActorResult:\n{actor_result}\n\n"
+                "ScreenOCR:\n{ocr_text}\n"
+            ),
+            "instructions": [
+                "Base conclusions on the screenshot, OCR text, actor result, and expected outcome.",
+                "outcome must be succeeded or failed.",
+                "branch must be one of: advance, retry, replan, backtrack, stop.",
+                "When outcome is succeeded, prefer branch advance and write updated_state describing progress toward the overall goal.",
+                "When outcome is failed: use retry with an optional corrected_instruction for a small fix; replan to discard this instruction and ask the planner again; backtrack to restore the previous logical checkpoint; stop when recovery is hopeless.",
+                "backtrack is logical only — it restores a prior state summary, it does not physically undo UI actions.",
+                'Return strict JSON only: {{"outcome":"succeeded"|"failed","updated_state":string,"branch":"advance"|"retry"|"replan"|"backtrack"|"stop","reason":string,"corrected_instruction":string|null}}.',
+            ],
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
+    "visual_mouse_selection": [
+        {
+            "image_usage": "use_image",
+            "prompt": (
+                "Select the single UI object that best matches the requested mouse target.\n\n"
+                "TargetInstruction:\n{instruction}\n\n"
+                "YOLO/OCRCandidates:\n{candidates_text}\n"
+            ),
+            "instructions": [
+                "Use both the current screenshot and the complete YOLO/OCR candidate list.",
+                "Choose exactly one candidate index; do not invent coordinates or an object outside the list.",
+                "OCR may contain errors, so combine visible appearance, text, class, geometry, and surrounding context.",
+                'Return strict JSON only: {{"index":0,"text":"short reason identifying the selected candidate"}}.',
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
         }

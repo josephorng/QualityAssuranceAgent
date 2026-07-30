@@ -9,10 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from src.common.io_utils import write_json
-from src.common.runtime_context import SCRIPT_PATH_ENV
+from src.common.runtime_context import SCRIPT_PATH_ENV, SMART_GOAL_ENV, SMART_MODE_ENV
 
 _REPORT_VERSION = 1
 _RUNTIME_COMMANDS_NAME = "runtime_commands.txt"
+_SMART_EVENTS_NAME = "smart_events.jsonl"
+_SMART_STATE_NAME = "smart_state.json"
 _QUEUE_SCRIPT_LOG_MARKER = "Queue starting coordinator for "
 _RUN_FOLDER_TS_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}_(\d{8})_(\d{6})_\d+$")
 _ROLE_USER = "user"
@@ -351,6 +353,26 @@ def _build_summary(
 
 
 def _resolve_script_metadata(run_root: Path) -> dict[str, str]:
+    if os.environ.get(SMART_MODE_ENV, "").strip().lower() in ("1", "true", "yes"):
+        goal = os.environ.get(SMART_GOAL_ENV, "").strip()
+        meta = {"run_mode": "smart", "script_name": "智能模式"}
+        if goal:
+            meta["smart_goal"] = goal
+        return meta
+
+    smart_state_path = run_root / _SMART_STATE_NAME
+    if smart_state_path.is_file():
+        try:
+            payload = json.loads(smart_state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict):
+            meta = {"run_mode": "smart", "script_name": "智能模式"}
+            goal = payload.get("goal")
+            if isinstance(goal, str) and goal.strip():
+                meta["smart_goal"] = goal.strip()
+            return meta
+
     script_path_raw = os.environ.get(SCRIPT_PATH_ENV, "").strip()
     if script_path_raw:
         path = Path(script_path_raw)
@@ -371,6 +393,56 @@ def _resolve_script_metadata(run_root: Path) -> dict[str, str]:
         return {"script_name": _RUNTIME_COMMANDS_NAME}
 
     return {}
+
+
+def _load_smart_events(run_root: Path) -> list[dict[str, Any]]:
+    path = run_root / _SMART_EVENTS_NAME
+    if not path.is_file():
+        return []
+    events: list[dict[str, Any]] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            raw = line.strip()
+            if not raw:
+                continue
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                events.append(payload)
+    except OSError:
+        return []
+    return events
+
+
+def _load_smart_state(run_root: Path) -> dict[str, Any] | None:
+    path = run_root / _SMART_STATE_NAME
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _build_smart_cycles(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group Plan/Act/Verify events by cycle for the report UI."""
+    by_cycle: dict[int, dict[str, Any]] = {}
+    for event in events:
+        cycle = event.get("cycle")
+        if not isinstance(cycle, int):
+            continue
+        bucket = by_cycle.setdefault(
+            cycle,
+            {"cycle": cycle, "plan": None, "act": None, "verify": None, "events": []},
+        )
+        phase = event.get("phase")
+        if phase in ("plan", "act", "verify"):
+            bucket[phase] = event
+        bucket["events"].append(event)
+    return [by_cycle[key] for key in sorted(by_cycle)]
 
 
 def _resolve_started_at_utc(run_root: Path, step_records: list[dict[str, Any]]) -> str | None:
@@ -409,6 +481,9 @@ def build_session_report(run_root: Path, *, session_end_reason: str) -> dict[str
     tool_results = _load_tool_results(run_root, step_records)
     script_meta = _resolve_script_metadata(run_root)
     started_at_utc = _resolve_started_at_utc(run_root, step_records)
+    smart_events = _load_smart_events(run_root)
+    smart_state = _load_smart_state(run_root)
+    smart_cycles = _build_smart_cycles(smart_events)
 
     report: dict[str, Any] = {
         "version": _REPORT_VERSION,
@@ -423,6 +498,17 @@ def build_session_report(run_root: Path, *, session_end_reason: str) -> dict[str
         report.update(script_meta)
     if started_at_utc is not None:
         report["started_at_utc"] = started_at_utc
+    if smart_events:
+        report["smart_events"] = smart_events
+        report["smart_cycles"] = smart_cycles
+    if smart_state is not None:
+        report["smart_state"] = smart_state
+        summary = report.get("summary")
+        if isinstance(summary, dict):
+            summary["smart_cycle_count"] = len(smart_cycles)
+            terminal = smart_state.get("terminal_reason")
+            if isinstance(terminal, str) and terminal:
+                summary["smart_terminal_reason"] = terminal
     return report
 
 

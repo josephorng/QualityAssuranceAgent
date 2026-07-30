@@ -79,3 +79,68 @@ class ScriptStepVerifyResult(BaseModel):
             if self.target_step < 1:
                 raise ValueError("target_step must be >= 1 (1-based line number)")
         return self
+
+
+class SmartPlannerDecision(BaseModel):
+    """Planner output for one Plan→Act→Verify cycle in smart mode."""
+
+    status: Literal["continue", "completed", "failed"]
+    instruction: str | None = Field(
+        default=None,
+        description="One bounded sub-goal for the actor when status is continue",
+    )
+    expected_outcome: str = ""
+    rationale: str = ""
+
+    @model_validator(mode="after")
+    def continue_requires_instruction(self) -> SmartPlannerDecision:
+        if self.status == "continue":
+            if not (self.instruction or "").strip():
+                raise ValueError("instruction is required when status is continue")
+        return self
+
+
+class SmartVerifierDecision(BaseModel):
+    """Verifier output after the actor finishes one smart-mode instruction."""
+
+    outcome: Literal["succeeded", "failed"]
+    updated_state: str = ""
+    branch: Literal["advance", "retry", "replan", "backtrack", "stop"]
+    reason: str = ""
+    corrected_instruction: str | None = Field(
+        default=None,
+        description="Optional repaired instruction when branch is retry",
+    )
+
+    @model_validator(mode="after")
+    def succeeded_defaults_to_advance(self) -> SmartVerifierDecision:
+        if self.outcome == "succeeded" and self.branch not in ("advance", "stop"):
+            # Treat success with an unexpected branch as advance for safety.
+            object.__setattr__(self, "branch", "advance")
+        return self
+
+
+class SmartCheckpoint(BaseModel):
+    """Logical checkpoint after a verified successful instruction (not a physical undo)."""
+
+    cycle: int
+    state_summary: str
+    instruction: str
+    created_at_utc: str = ""
+
+
+class SmartRuntimeState(BaseModel):
+    """Persisted smart-mode run state written to ``smart_state.json``."""
+
+    goal: str
+    current_state: str = ""
+    cycle: int = 0
+    recovery_attempts: int = 0
+    checkpoints: list[SmartCheckpoint] = Field(default_factory=list)
+    last_instruction: str | None = None
+    last_expected_outcome: str = ""
+    last_actor_ok: bool | None = None
+    last_actor_reason: str = ""
+    pending_instruction: str | None = None
+    history: list[dict[str, Any]] = Field(default_factory=list)
+    terminal_reason: str | None = None

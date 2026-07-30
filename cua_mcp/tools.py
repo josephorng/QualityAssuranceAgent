@@ -5,6 +5,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from src.common.runtime_context import is_runtime_command_mode, is_smart_mode
 from cua_mcp.tool_module import (
     _click,
     _check_object_exists,
@@ -19,6 +20,7 @@ from cua_mcp.tool_module import (
     _list_storage_files,
     _middle_click,
     _move_mouse,
+    _move_mouse_visual,
     _type_text,
     _press_key,
     _read_storage_text,
@@ -178,6 +180,26 @@ async def move_mouse(
     )
     result["instruction"] = instruction
     return result
+
+
+@mcp_server.tool()
+async def move_mouse_visual(
+    instruction: str,
+):
+    """
+    Visual fallback for ambiguous targets. Capture fresh screenshot(s), run YOLO/OCR,
+    show the full indexed candidate list and screenshot(s) to the multimodal LLM once,
+    then move to the center of the candidate selected by that LLM.
+
+    Use when normal move_mouse repeatedly fails to match a visible target. This tool
+    intentionally skips target parsing, similarity filtering, nearby-object filtering,
+    and additional disambiguation logic.
+    """
+    duration: float = 0.2
+    return await _move_mouse_visual(
+        instruction=instruction,
+        duration=duration,
+    )
 
 
 @mcp_server.tool()
@@ -448,6 +470,7 @@ TOOL_FUNCTIONS: list[callable[..., Any]] = [
     store_image,
     key,
     move_mouse,
+    move_mouse_visual,
     check_object_exists,
     drag,
     right_click,
@@ -465,6 +488,23 @@ TOOL_FUNCTIONS: list[callable[..., Any]] = [
     double_click,
     open_website,
 ]
+
+
+def get_mode_tool_functions() -> list[callable[..., Any]]:
+    """Return the action tools exposed to the model for the active run mode."""
+    if is_smart_mode():
+        hidden_names = {"move_mouse_visual"}
+    elif not is_runtime_command_mode():
+        hidden_names = {"move_mouse"}
+    else:
+        hidden_names = set()
+    return [tool for tool in TOOL_FUNCTIONS if tool.__name__ not in hidden_names]
+
+
+def get_mode_tool_names() -> set[str]:
+    """Return action tool names exposed to the model for the active run mode."""
+    return {tool.__name__ for tool in get_mode_tool_functions()}
+
 
 VERIFICATION_TOOLS: list[callable[..., Any]] = [
     list_storage_files,

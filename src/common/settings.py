@@ -100,6 +100,8 @@ class Settings(BaseSettings):
     triton_http_url: str = VISION_BACKEND_PRESETS["triton_local"]["triton_http_url"]
     vision_backend: str = "triton_local"
     triton_timeout_seconds: float = 20.0
+    smart_max_cycles: int = 50
+    smart_max_recovery_attempts: int = 3
 
 
 def canonicalize_llm_backend(backend: str) -> str:

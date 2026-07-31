@@ -604,19 +604,30 @@ class MainHub(ctk.CTk):
         self._persist_hub_ui_state()
         return True
 
+    def _confirm_proceed_before_new_smart(self) -> bool:
+        """Before clearing the smart editor (開新檔案), confirm save when content is not on disk."""
+        if not self._smart_editor_normalized_text().strip():
+            return True
+        if self._smart_goal_path is not None:
+            if not self._is_smart_dirty():
+                return True
+            return self._confirm_proceed_with_unsaved_smart()
+        if self._is_smart_dirty():
+            message = "智能模式目標尚未存成檔案，且內容已變更。要另存為檔案嗎？"
+        else:
+            message = "智能模式目標尚未存成檔案（目前僅存在目標暫存）。要另存為檔案嗎？"
+        choice = prompt_unsaved_script_changes(
+            self, message=message, save_button_text="另存新檔"
+        )
+        if choice == "cancel":
+            return False
+        if choice == "discard":
+            return True
+        return self._smart_save_as()
+
     def _smart_clear(self) -> None:
-        if self._smart_editor_normalized_text().strip():
-            if self._is_smart_dirty() or self._smart_goal_path is not None:
-                choice = prompt_unsaved_script_changes(
-                    self,
-                    message="要清除目前智能模式目標嗎？未儲存內容將會遺失。",
-                    save_button_text="先儲存",
-                )
-                if choice == "cancel":
-                    return
-                if choice != "discard":
-                    if not self._smart_save():
-                        return
+        if not self._confirm_proceed_before_new_smart():
+            return
         self._smart_goal_path = None
         self._suppress_smart_cache_sync = True
         try:

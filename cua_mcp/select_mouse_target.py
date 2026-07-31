@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
+from pathlib import Path
+import re
 import time
 from typing import Any
 
@@ -25,7 +27,9 @@ from cua_mcp.select_ui_element import (
     UiDetection,
     _ANCHOR_SUFFIX_BY_CLASS,
     _assign_exclusive_neighbors_to_anchors,
+    _describe_ui_candidate_functions,
     _format_ui_candidates_text,
+    _select_center_with_functions,
     _select_center_with_ollama,
     _sort_detections_reading_order,
 )
@@ -48,7 +52,7 @@ from cua_mcp.yolo_onnx import (
 )
 from src.common.monitor_prompt import selected_eye_monitor_indices
 from src.common.run_state import RunStateManager, get_run_state_manager, ts_name
-from src.eye.capture import active_monitor_offset, capture_monitor_to_file
+from src.eye.capture import active_monitor_offset, capture_monitor_to_file, monitor_details
 
 
 def _run_manager() -> RunStateManager:
@@ -418,6 +422,221 @@ def _detection_similarity_to_query(det: UiDetection, query: str) -> float:
 
 # Minimum SequenceMatcher score to keep a candidate before the LLM filter.
 _MOUSE_FILTER_SIMILARITY_THRESHOLD = 0.5
+# Max peers sent to the post-pick function-describe disambiguator.
+_SIMILAR_PEER_CAP = 12
+
+
+def _detections_label_similar(
+    left: UiDetection,
+    right: UiDetection,
+    *,
+    threshold: float = _MOUSE_FILTER_SIMILARITY_THRESHOLD,
+) -> bool:
+    """True when any OCR/icon/class label pair scores at least ``threshold``."""
+    labels_left = _detection_match_labels(left)
+    labels_right = _detection_match_labels(right)
+    if not labels_left or not labels_right:
+        return False
+    for a in labels_left:
+        for b in labels_right:
+            if _label_similarity(a, b) >= threshold:
+                return True
+    return False
+
+
+def _detections_similar_to(
+    chosen: UiDetection,
+    detections: list[UiDetection],
+    *,
+    threshold: float = _MOUSE_FILTER_SIMILARITY_THRESHOLD,
+    cap: int = _SIMILAR_PEER_CAP,
+) -> list[UiDetection]:
+    """
+    Return YOLO detections label-similar to ``chosen``.
+
+    ``chosen`` is always first. Remaining peers follow ``detections`` order
+    (typically reading order). Blank detections never match. Result length is
+    capped at ``cap``.
+    """
+    if cap < 1:
+        return []
+    if not _detection_match_labels(chosen):
+        return [chosen]
+
+    ordered: list[UiDetection] = [chosen]
+    seen: set[int] = {id(chosen)}
+    for det in detections:
+        if id(det) in seen:
+            continue
+        if not _detections_label_similar(chosen, det, threshold=threshold):
+            continue
+        ordered.append(det)
+        seen.add(id(det))
+        if len(ordered) >= cap:
+            break
+    return ordered
+
+
+def _monitor_index_from_image_path(path: str) -> int | None:
+    """Parse ``_mon{N}`` from a capture filename when present."""
+    match = re.search(r"_mon(\d+)\.[^.]+$", path.replace("\\", "/"))
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _monitor_geometry(monitor_index: int) -> tuple[int, int, int, int]:
+    """Return ``(left, top, width, height)`` for ``monitor_index``."""
+    for entry in monitor_details():
+        if int(entry["index"]) == int(monitor_index):
+            return (
+                int(entry["left"]),
+                int(entry["top"]),
+                int(entry["width"]),
+                int(entry["height"]),
+            )
+    left, top = active_monitor_offset(monitor_index)
+    return left, top, 0, 0
+
+
+def _local_bbox_on_monitor(
+    bbox: tuple[int, int, int, int],
+    *,
+    left: int,
+    top: int,
+    img_w: int,
+    img_h: int,
+) -> tuple[int, int, int, int] | None:
+    """Map a virtual-desktop ``(x,y,w,h)`` into image-local coords, or None if off-screen."""
+    x, y, w, h = bbox
+    lx = int(x) - int(left)
+    ly = int(y) - int(top)
+    rx2 = lx + int(w)
+    ry2 = ly + int(h)
+    if rx2 <= 0 or ry2 <= 0 or lx >= img_w or ly >= img_h:
+        return None
+    return clip_box(lx, ly, int(w), int(h), img_w, img_h)
+
+
+def _draw_indexed_bbox(
+    image_bgr: np.ndarray,
+    local_bbox: tuple[int, int, int, int],
+    index: int,
+) -> None:
+    """Draw a high-contrast box and index label onto ``image_bgr`` in-place."""
+    x, y, w, h = local_bbox
+    color = (0, 255, 255)  # yellow in BGR
+    thickness = 2
+    cv2.rectangle(image_bgr, (x, y), (x + w, y + h), color, thickness)
+
+    label = str(index)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.7
+    text_thickness = 2
+    (tw, th), baseline = cv2.getTextSize(label, font, font_scale, text_thickness)
+    pad = 3
+    label_x = x
+    label_y = max(th + pad * 2, y)
+    # Prefer above the box when there is room; otherwise inside the top edge.
+    if y - th - pad * 2 >= 0:
+        bg_y1 = y - th - pad * 2
+        bg_y2 = y
+        text_org = (label_x + pad, y - pad - baseline)
+    else:
+        bg_y1 = y
+        bg_y2 = min(image_bgr.shape[0], y + th + pad * 2)
+        text_org = (label_x + pad, y + th + pad)
+    bg_x2 = min(image_bgr.shape[1], label_x + tw + pad * 2)
+    cv2.rectangle(image_bgr, (label_x, bg_y1), (bg_x2, bg_y2), (0, 0, 0), -1)
+    cv2.putText(
+        image_bgr,
+        label,
+        text_org,
+        font,
+        font_scale,
+        color,
+        text_thickness,
+        cv2.LINE_AA,
+    )
+
+
+def _write_indexed_bbox_overlay_images(
+    candidates: list[UiDetection],
+    image_paths: list[str],
+    monitor_indices: list[int],
+    output_dir: Path,
+    *,
+    stamp: str,
+) -> list[str]:
+    """
+    Write per-monitor screenshots with candidate index boxes and return those paths.
+
+    Candidate bboxes are virtual-desktop coordinates. Falls back to the original
+    ``image_paths`` when no annotated image can be written.
+    """
+    if not candidates or not image_paths:
+        return list(image_paths)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    annotated: list[str] = []
+    drew_any = False
+
+    for i, image_path in enumerate(image_paths):
+        monitor_index = (
+            monitor_indices[i]
+            if i < len(monitor_indices)
+            else _monitor_index_from_image_path(image_path)
+        )
+        if monitor_index is None:
+            annotated.append(image_path)
+            continue
+
+        bgr = cv2.imread(image_path)
+        if bgr is None:
+            _log_info(
+                "move_mouse indexed overlay could not read "
+                f"path={image_path}"
+            )
+            annotated.append(image_path)
+            continue
+
+        left, top, _mw, _mh = _monitor_geometry(int(monitor_index))
+        img_h, img_w = bgr.shape[:2]
+        canvas = bgr.copy()
+        drawn_here = 0
+        for idx, det in enumerate(candidates):
+            local = _local_bbox_on_monitor(
+                det.bbox,
+                left=left,
+                top=top,
+                img_w=img_w,
+                img_h=img_h,
+            )
+            if local is None:
+                continue
+            _draw_indexed_bbox(canvas, local, idx)
+            drawn_here += 1
+
+        out_path = output_dir / f"{stamp}_indexed_mon{monitor_index}.png"
+        if not cv2.imwrite(str(out_path), canvas):
+            _log_info(
+                "move_mouse indexed overlay write failed "
+                f"path={out_path}"
+            )
+            annotated.append(image_path)
+            continue
+
+        annotated.append(str(out_path.resolve()))
+        if drawn_here:
+            drew_any = True
+        _log_info(
+            "move_mouse indexed overlay "
+            f"monitor={monitor_index} boxes={drawn_here} path={out_path}"
+        )
+
+    if not drew_any:
+        return list(image_paths)
+    return annotated
 
 
 def _anchor_indices_by_top_similarity(
@@ -671,6 +890,77 @@ def _prefilter_anchors_by_nearby(
     return anchors
 
 
+async def _maybe_disambiguate_similar_selection(
+    *,
+    chosen: UiDetection,
+    initial_idx: int,
+    selected_text: str | None,
+    detections: list[UiDetection],
+    image_paths: list[str],
+    monitor_indices: list[int],
+    overlay_dir: Path,
+    overlay_stamp: str,
+    anchor: str,
+    nearby_phrases: list[str],
+    nearby_matches: list[UiDetection],
+) -> tuple[UiDetection, int, str | None, dict[str, Any]]:
+    """
+    When other YOLO detections share labels with ``chosen``, describe peers and re-pick.
+
+    Returns ``(chosen, selected_index, selected_text, extra_meta)``. ``extra_meta`` is
+    empty when disambiguation is skipped.
+    """
+    similar = _detections_similar_to(chosen, detections)
+    if len(similar) <= 1:
+        return chosen, initial_idx, selected_text, {}
+
+    peer_centers = ", ".join(f"({d.cx},{d.cy})" for d in similar)
+    _log_info(
+        "move_mouse similar peers for function describe "
+        f"count={len(similar)} centers=[{peer_centers}] "
+        f"initial_center=({chosen.cx},{chosen.cy})"
+    )
+    annotated_paths = _write_indexed_bbox_overlay_images(
+        similar,
+        image_paths,
+        monitor_indices,
+        overlay_dir,
+        stamp=overlay_stamp,
+    )
+    functions = await _describe_ui_candidate_functions(
+        anchor,
+        similar,
+        annotated_paths,
+    )
+    pool_idx, new_text = await _select_center_with_functions(
+        anchor,
+        similar,
+        functions,
+        annotated_paths,
+        neighbor_candidates=nearby_matches,
+        nearby_labels=nearby_phrases,
+    )
+    new_chosen = similar[pool_idx]
+    changed = (new_chosen.cx, new_chosen.cy) != (chosen.cx, chosen.cy)
+    _log_info(
+        "move_mouse function-describe re-pick "
+        f"index={pool_idx} changed={changed} "
+        f"center=[{new_chosen.cx},{new_chosen.cy}] "
+        f"text={new_text!r}"
+    )
+    extra: dict[str, Any] = {
+        "disambiguation": "similar_function_describe",
+        "similar_count": len(similar),
+        "function_descriptions": {
+            str(i): functions[i] for i in range(len(functions))
+        },
+        "initial_selected_index": initial_idx,
+        "initial_center": {"x": chosen.cx, "y": chosen.cy},
+        "indexed_screenshot_paths": annotated_paths,
+    }
+    return new_chosen, pool_idx, new_text, extra
+
+
 async def find_mouse_point(
     instruction: str,
     *,
@@ -779,6 +1069,20 @@ async def find_mouse_point(
             f"text={selected_text!r} center=[{chosen.cx},{chosen.cy}]"
         )
 
+    chosen, idx, selected_text, disambiguation_meta = await _maybe_disambiguate_similar_selection(
+        chosen=chosen,
+        initial_idx=idx,
+        selected_text=selected_text,
+        detections=detections,
+        image_paths=image_paths,
+        monitor_indices=list(monitor_indices),
+        overlay_dir=paths.yolo_ocr_dir,
+        overlay_stamp=f"{stamp}_sim",
+        anchor=anchor,
+        nearby_phrases=nearby_phrases,
+        nearby_matches=nearby_matches,
+    )
+
     resolved_x = chosen.cx + offset_dx
     resolved_y = chosen.cy + offset_dy
     if offset_dx or offset_dy:
@@ -811,6 +1115,8 @@ async def find_mouse_point(
     }
     if selected_text is not None:
         meta["selected_text"] = selected_text
+    if disambiguation_meta:
+        meta.update(disambiguation_meta)
     return resolved_x, resolved_y, meta
 
 

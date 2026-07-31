@@ -1,19 +1,27 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from cua_mcp.select_mouse_target import (
     _detection_from_bbox,
+    _detections_similar_to,
+    _local_bbox_on_monitor,
     _merge_nearby_labels,
+    _monitor_index_from_image_path,
     _normalize_nearby_labels,
     _prefilter_anchors_by_nearby,
+    _write_indexed_bbox_overlay_images,
 )
 from cua_mcp.select_ui_element import (
     UiDetection,
     _assign_exclusive_neighbors_to_anchors,
     _format_ui_candidates_relational,
     _format_ui_candidates_text,
+    _format_ui_candidates_with_functions,
     _parse_anchor_nearby_indices_from_llm,
+    _parse_function_descriptions_from_llm,
     _parse_index_from_llm,
     _parse_keep_indices_from_llm,
     _two_nearest_indices,
@@ -223,6 +231,134 @@ def test_parse_index_from_llm_requires_text() -> None:
 def test_parse_index_from_llm_rejects_empty_text() -> None:
     with pytest.raises(ValueError, match="non-empty string"):
         _parse_index_from_llm('{"index": 0, "text": "  "}', num_candidates=2)
+
+
+def test_parse_function_descriptions_from_llm() -> None:
+    raw = (
+        '{"items": ['
+        '{"index": 1, "function": "工作列搜尋"}, '
+        '{"index": 0, "function": "Outlook 郵件搜尋"}'
+        "]}"
+    )
+    funcs = _parse_function_descriptions_from_llm(raw, num_candidates=2)
+    assert funcs == ["Outlook 郵件搜尋", "工作列搜尋"]
+
+
+def test_parse_function_descriptions_requires_all_indices() -> None:
+    with pytest.raises(ValueError, match="missing function"):
+        _parse_function_descriptions_from_llm(
+            '{"items": [{"index": 0, "function": "only one"}]}',
+            num_candidates=2,
+        )
+
+
+def test_parse_function_descriptions_rejects_duplicate_index() -> None:
+    with pytest.raises(ValueError, match="duplicate index"):
+        _parse_function_descriptions_from_llm(
+            '{"items": ['
+            '{"index": 0, "function": "a"}, '
+            '{"index": 0, "function": "b"}'
+            "]}",
+            num_candidates=2,
+        )
+
+
+def test_detections_similar_to_groups_same_label() -> None:
+    outlook = _detection_from_bbox((2240, 20, 30, 16), YOLO_CLASS_TEXT, text="搜尋")
+    taskbar = _detection_from_bbox((2550, 1040, 30, 16), YOLO_CLASS_TEXT, text="搜尋")
+    left_bar = _detection_from_bbox((630, 1040, 30, 16), YOLO_CLASS_TEXT, text="搜尋")
+    other = _detection_from_bbox((100, 100, 30, 16), YOLO_CLASS_TEXT, text="關閉")
+    detections = [outlook, taskbar, left_bar, other]
+
+    peers = _detections_similar_to(taskbar, detections)
+    assert len(peers) == 3
+    assert peers[0] is taskbar
+    assert outlook in peers and left_bar in peers
+    assert other not in peers
+
+
+def test_detections_similar_to_unique_label_is_singleton() -> None:
+    only = _detection_from_bbox((100, 100, 30, 16), YOLO_CLASS_TEXT, text="唯一")
+    other = _detection_from_bbox((200, 200, 30, 16), YOLO_CLASS_TEXT, text="關閉")
+    peers = _detections_similar_to(only, [only, other])
+    assert peers == [only]
+
+
+def test_monitor_index_from_image_path() -> None:
+    assert _monitor_index_from_image_path(r"C:\tmp\stamp_mon2.png") == 2
+    assert _monitor_index_from_image_path("runs/yolo_ocr/2026_mon1.png") == 1
+    assert _monitor_index_from_image_path("shot.png") is None
+
+
+def test_local_bbox_on_monitor_clips_and_rejects_offscreen() -> None:
+    assert _local_bbox_on_monitor(
+        (100, 50, 40, 20),
+        left=100,
+        top=50,
+        img_w=200,
+        img_h=100,
+    ) == (0, 0, 40, 20)
+    assert (
+        _local_bbox_on_monitor(
+            (0, 0, 10, 10),
+            left=100,
+            top=50,
+            img_w=200,
+            img_h=100,
+        )
+        is None
+    )
+
+
+def test_write_indexed_bbox_overlay_images(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import numpy as np
+
+    src = tmp_path / "cap_mon2.png"
+    blank = np.zeros((120, 200, 3), dtype=np.uint8)
+    import cv2
+
+    assert cv2.imwrite(str(src), blank)
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._monitor_geometry",
+        lambda _idx: (1000, 0, 200, 120),
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._log_info",
+        lambda *_a, **_k: None,
+    )
+
+    # Virtual-desktop bbox on monitor 2 (left=1000): local (20,30)
+    det = _detection_from_bbox((1020, 30, 40, 20), YOLO_CLASS_TEXT, text="搜尋")
+    out_paths = _write_indexed_bbox_overlay_images(
+        [det],
+        [str(src)],
+        [2],
+        tmp_path,
+        stamp="t1",
+    )
+    assert len(out_paths) == 1
+    annotated = Path(out_paths[0])
+    assert annotated.name == "t1_indexed_mon2.png"
+    assert annotated.is_file()
+    img = cv2.imread(str(annotated))
+    assert img is not None
+    # Yellow pixel should appear near the labeled box region.
+    assert img[30:50, 20:60].max() > 0
+
+
+def test_format_ui_candidates_with_functions_appends_role() -> None:
+    detections = [
+        _detection_from_bbox((2240, 20, 30, 16), YOLO_CLASS_TEXT, text="搜尋"),
+        _detection_from_bbox((2550, 1040, 30, 16), YOLO_CLASS_TEXT, text="搜尋"),
+    ]
+    text = _format_ui_candidates_with_functions(
+        detections,
+        ["Outlook 郵件搜尋", "Windows 工作列搜尋"],
+    )
+    lines = text.split("\n")
+    assert lines[0].endswith("功能：Outlook 郵件搜尋")
+    assert lines[1].endswith("功能：Windows 工作列搜尋")
 
 
 def test_parse_anchor_nearby_indices_from_llm() -> None:
@@ -816,6 +952,16 @@ async def test_resolve_mouse_point_nearby_prefilter_skips_ollama(
     async def fail_ollama(*_args, **_kwargs):
         raise AssertionError("picker LLM should be skipped after nearby prefilter")
 
+    async def fake_describe(anchor, candidates, image_paths):
+        assert len(candidates) == 2
+        assert image_paths
+        return [f"role-{i}" for i in range(len(candidates))]
+
+    async def fake_repick(anchor, candidates, functions, image_paths, **_kwargs):
+        # Keep the nearby-prefiltered choice (chosen is first in similar list).
+        assert candidates[0] is correct
+        return 0, "kept-after-describe"
+
     monkeypatch.setattr(
         "cua_mcp.select_mouse_target.parse_mouse_target_instruction",
         fake_parse,
@@ -845,6 +991,14 @@ async def test_resolve_mouse_point_nearby_prefilter_skips_ollama(
         fail_ollama,
     )
     monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._describe_ui_candidate_functions",
+        fake_describe,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._select_center_with_functions",
+        fake_repick,
+    )
+    monkeypatch.setattr(
         "cua_mcp.select_mouse_target._run_manager",
         lambda: type(
             "M",
@@ -865,6 +1019,220 @@ async def test_resolve_mouse_point_nearby_prefilter_skips_ollama(
     assert (gx, gy) == (correct.cx, correct.cy)
     assert meta["selected_index"] == 0
     assert meta["target_text"] == "文件"
+    assert meta["disambiguation"] == "similar_function_describe"
+    assert meta["similar_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_resolve_mouse_point_function_describe_repick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When similar peers exist, describe + re-pick can override the first pick."""
+    import numpy as np
+
+    from cua_mcp.select_mouse_target import resolve_mouse_point
+
+    outlook = _detection_from_bbox((2240, 20, 30, 16), YOLO_CLASS_TEXT, text="搜尋")
+    taskbar = _detection_from_bbox((2550, 1040, 30, 16), YOLO_CLASS_TEXT, text="搜尋")
+    other = _detection_from_bbox((100, 100, 30, 16), YOLO_CLASS_TEXT, text="關閉")
+
+    describe_calls: list[list[str]] = []
+    repick_calls: list[dict[str, object]] = []
+
+    async def fake_parse(instruction: str):
+        return "搜尋欄位", 0, 0, []
+
+    def fake_filter(detections, anchor, nearby):
+        return [outlook, taskbar], []
+
+    async def fake_ollama(anchor, candidates, image_paths, **_kwargs):
+        assert candidates == [outlook, taskbar]
+        assert image_paths
+        return 1, "picked-taskbar"
+
+    async def fake_describe(anchor, candidates, image_paths):
+        describe_calls.append([f"{d.cx},{d.cy}" for d in candidates])
+        assert image_paths == ["shot.png"]
+        # chosen (taskbar) is first among peers
+        assert candidates[0] is taskbar
+        assert outlook in candidates
+        return [
+            "Windows 工作列搜尋" if d is taskbar else "Outlook 郵件搜尋欄"
+            for d in candidates
+        ]
+
+    async def fake_repick(anchor, candidates, functions, image_paths, **_kwargs):
+        repick_calls.append(
+            {
+                "n": len(candidates),
+                "functions": list(functions),
+                "images": list(image_paths),
+            }
+        )
+        assert image_paths == ["shot.png"]
+        assert candidates[0] is taskbar
+        outlook_idx = next(i for i, d in enumerate(candidates) if d is outlook)
+        return outlook_idx, "picked-outlook-after-describe"
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.parse_mouse_target_instruction",
+        fake_parse,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.selected_eye_monitor_indices",
+        lambda: [1],
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.capture_monitor_to_file",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.cv2.imread",
+        lambda *_args, **_kwargs: np.zeros((10, 10, 3), dtype=np.uint8),
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._collect_monitor_detections",
+        lambda *_args, **_kwargs: [outlook, taskbar, other],
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._filter_mouse_candidates",
+        fake_filter,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._select_center_with_ollama",
+        fake_ollama,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._describe_ui_candidate_functions",
+        fake_describe,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._select_center_with_functions",
+        fake_repick,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._run_manager",
+        lambda: type(
+            "M",
+            (),
+            {
+                "require_paths": staticmethod(
+                    lambda: type(
+                        "P", (), {"yolo_ocr_dir": __import__("pathlib").Path(".")}
+                    )()
+                ),
+                "log_info": staticmethod(lambda *_a, **_k: None),
+            },
+        )(),
+    )
+
+    import cua_mcp.select_mouse_target as smt
+
+    real_disambiguate = smt._maybe_disambiguate_similar_selection
+
+    async def disambiguate_with_fixed_images(**kwargs):
+        kwargs = dict(kwargs)
+        kwargs["image_paths"] = ["shot.png"]
+        kwargs["monitor_indices"] = [1]
+        kwargs["overlay_dir"] = __import__("pathlib").Path(".")
+        kwargs["overlay_stamp"] = "test"
+        # Skip real overlay I/O for the fake shot.png path.
+        monkeypatch.setattr(
+            "cua_mcp.select_mouse_target._write_indexed_bbox_overlay_images",
+            lambda *_a, **_k: ["shot.png"],
+        )
+        return await real_disambiguate(**kwargs)
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._maybe_disambiguate_similar_selection",
+        disambiguate_with_fixed_images,
+    )
+
+    gx, gy, meta = await resolve_mouse_point("搜尋欄位")
+    assert (gx, gy) == (outlook.cx, outlook.cy)
+    assert meta["target_text"] == "搜尋"
+    assert meta["disambiguation"] == "similar_function_describe"
+    assert meta["similar_count"] == 2
+    assert meta["initial_selected_index"] == 1
+    assert meta["selected_text"] == "picked-outlook-after-describe"
+    assert describe_calls
+    assert repick_calls
+    assert repick_calls[0]["images"] == ["shot.png"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_mouse_point_skips_describe_when_unique(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unique label → no describe/re-pick LLM calls."""
+    import numpy as np
+
+    from cua_mcp.select_mouse_target import resolve_mouse_point
+
+    only = _detection_from_bbox((100, 100, 30, 16), YOLO_CLASS_TEXT, text="唯一按鈕")
+    other = _detection_from_bbox((200, 200, 30, 16), YOLO_CLASS_TEXT, text="關閉")
+
+    async def fake_parse(instruction: str):
+        return "唯一按鈕", 0, 0, []
+
+    def fake_filter(detections, anchor, nearby):
+        return [only], []
+
+    async def fail_describe(*_args, **_kwargs):
+        raise AssertionError("describe should not run for unique labels")
+
+    async def fail_repick(*_args, **_kwargs):
+        raise AssertionError("re-pick should not run for unique labels")
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.parse_mouse_target_instruction",
+        fake_parse,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.selected_eye_monitor_indices",
+        lambda: [1],
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.capture_monitor_to_file",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.cv2.imread",
+        lambda *_args, **_kwargs: np.zeros((10, 10, 3), dtype=np.uint8),
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._collect_monitor_detections",
+        lambda *_args, **_kwargs: [only, other],
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._filter_mouse_candidates",
+        fake_filter,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._describe_ui_candidate_functions",
+        fail_describe,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._select_center_with_functions",
+        fail_repick,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._run_manager",
+        lambda: type(
+            "M",
+            (),
+            {
+                "require_paths": staticmethod(
+                    lambda: type("P", (), {"yolo_ocr_dir": __import__("pathlib").Path(".")})()
+                ),
+                "log_info": staticmethod(lambda *_a, **_k: None),
+            },
+        )(),
+    )
+
+    gx, gy, meta = await resolve_mouse_point("唯一按鈕")
+    assert (gx, gy) == (only.cx, only.cy)
+    assert "disambiguation" not in meta
 
 
 def test_format_ui_candidates_relational_uses_neighbor_phrases() -> None:

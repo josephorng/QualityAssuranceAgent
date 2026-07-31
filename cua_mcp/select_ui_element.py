@@ -40,6 +40,23 @@ _INDEX_JSON_SCHEMA: dict[str, Any] = {
     },
     "required": ["index", "text"],
 }
+_FUNCTION_DESCRIBE_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer"},
+                    "function": {"type": "string"},
+                },
+                "required": ["index", "function"],
+            },
+        }
+    },
+    "required": ["items"],
+}
 _TEXT_FILTER_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -114,6 +131,61 @@ def _parse_index_from_llm(raw: str, num_candidates: int) -> tuple[int, str]:
     if not isinstance(text, str) or not text.strip():
         raise ValueError(f'"text" must be a non-empty string; got {text!r}')
     return idx, text.strip()
+
+
+def _parse_function_descriptions_from_llm(
+    raw: str, num_candidates: int
+) -> list[str]:
+    """Parse describe reply into one function string per candidate index."""
+    out = parse_json_object(
+        raw,
+        empty_error=(
+            "Ollama UI function describer returned empty content; expected "
+            '{"items": [{"index": <int>, "function": "<string>"}, ...]}'
+        ),
+        decode_error_prefix="invalid JSON",
+    )
+    preview = (raw or "")[:240]
+    if not isinstance(out, dict) or "items" not in out:
+        raise ValueError(f'must include "items"; preview={preview!r}')
+    items = out["items"]
+    if not isinstance(items, list):
+        raise ValueError(f'"items" must be a list; preview={preview!r}')
+
+    by_index: dict[int, str] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError(f"each items entry must be an object; preview={preview!r}")
+        if "index" not in item or "function" not in item:
+            raise ValueError(
+                f'each items entry needs "index" and "function"; preview={preview!r}'
+            )
+        try:
+            idx = int(item["index"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f'"index" must be an integer; got {item.get("index")!r}'
+            ) from exc
+        if idx < 0 or idx >= num_candidates:
+            raise ValueError(
+                f'"index" out of range: {idx} (valid 0..{num_candidates - 1}); '
+                f"preview={preview!r}"
+            )
+        function = item["function"]
+        if not isinstance(function, str) or not function.strip():
+            raise ValueError(
+                f'"function" must be a non-empty string; got {function!r}'
+            )
+        if idx in by_index:
+            raise ValueError(f"duplicate index {idx} in items; preview={preview!r}")
+        by_index[idx] = function.strip()
+
+    missing = [i for i in range(num_candidates) if i not in by_index]
+    if missing:
+        raise ValueError(
+            f"missing function descriptions for indices {missing}; preview={preview!r}"
+        )
+    return [by_index[i] for i in range(num_candidates)]
 
 
 def _parse_keep_indices_from_llm(raw: str, max_len: int) -> list[int]:
@@ -403,6 +475,128 @@ def _format_ui_candidates_relational(
         clauses = [_relative_neighbor_phrase(anchor, d) for d in ranked[:2]]
         lines.append(f"{head}（{'、'.join(clauses)}）")
     return "\n".join(lines)
+
+
+def _format_ui_candidates_with_functions(
+    anchors: list[UiDetection],
+    functions: list[str],
+    *,
+    neighbors: list[UiDetection] | None = None,
+) -> str:
+    """Relational candidate rows with a trailing ``功能：…`` description each."""
+    if len(functions) != len(anchors):
+        raise ValueError(
+            f"functions length {len(functions)} != candidates {len(anchors)}"
+        )
+    base = _format_ui_candidates_relational(anchors, neighbors=neighbors)
+    lines = base.split("\n") if base else []
+    out: list[str] = []
+    for i, line in enumerate(lines):
+        fn = (functions[i] or "").strip() or "(unknown)"
+        out.append(f"{line} 功能：{fn}")
+    return "\n".join(out)
+
+
+async def _describe_ui_candidate_functions(
+    anchor_instruction: str,
+    candidates: list[UiDetection],
+    image_paths: list[str],
+) -> list[str]:
+    """Ask the multimodal LLM to describe each candidate's on-screen role."""
+    if not candidates:
+        raise ValueError("no candidates to describe")
+    candidates_text = _format_ui_candidates_relational(candidates)
+    prompt = get_prompt("ui_element_function_describe").format(
+        instruction=anchor_instruction,
+        candidates_text=candidates_text,
+    )
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "user",
+            "content": prompt,
+            "images": image_paths,
+        },
+    ]
+    n = len(candidates)
+    reply1 = await get_llm_client().chat_messages(
+        load_settings().brain_lm,
+        messages=messages,
+        tools=[],
+        response_format=_FUNCTION_DESCRIBE_JSON_SCHEMA,
+        think=True,
+    )
+    try:
+        return _parse_function_descriptions_from_llm(reply1.content, n)
+    except ValueError:
+        return await request_json_with_retry(
+            messages=messages,
+            response_schema=_FUNCTION_DESCRIBE_JSON_SCHEMA,
+            parse_reply=lambda raw: _parse_function_descriptions_from_llm(raw, n),
+            retry_instruction=get_prompt("ui_element_function_describe_retry"),
+            log_info=lambda m: _run_manager().log_info(
+                f"_describe_ui_candidate_functions: {m}"
+            ),
+        )
+
+
+async def _select_center_with_functions(
+    anchor_instruction: str,
+    anchor_candidates: list[UiDetection],
+    functions: list[str],
+    image_paths: list[str],
+    *,
+    neighbor_candidates: list[UiDetection] | None = None,
+    nearby_labels: list[str] | None = None,
+) -> tuple[int, str]:
+    """Pick among label-similar peers using function descriptions + screenshots."""
+    if not anchor_candidates:
+        raise ValueError("no candidates to pick from")
+    candidates_text = _format_ui_candidates_with_functions(
+        anchor_candidates,
+        functions,
+        neighbors=neighbor_candidates,
+    )
+    nearby_text = (
+        ", ".join(label.strip() for label in (nearby_labels or []) if label.strip())
+        or "(none)"
+    )
+    prompt = get_prompt("ui_element_selection_with_functions").format(
+        instruction=anchor_instruction,
+        nearby_text=nearby_text,
+        candidates_text=candidates_text,
+    )
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "user",
+            "content": prompt,
+            "images": image_paths,
+        },
+    ]
+    n = len(anchor_candidates)
+    reply1 = await get_llm_client().chat_messages(
+        load_settings().brain_lm,
+        messages=messages,
+        tools=[],
+        response_format=_INDEX_JSON_SCHEMA,
+        think=True,
+    )
+    try:
+        selection = _parse_index_from_llm(reply1.content, n)
+    except ValueError:
+        selection = None
+
+    if selection is not None:
+        return selection
+
+    return await request_json_with_retry(
+        messages=messages,
+        response_schema=_INDEX_JSON_SCHEMA,
+        parse_reply=lambda raw: _parse_index_from_llm(raw, n),
+        retry_instruction=get_prompt("ui_element_selection_retry"),
+        log_info=lambda m: _run_manager().log_info(
+            f"_select_center_with_functions: {m}"
+        ),
+    )
 
 
 async def _select_center_with_ollama(

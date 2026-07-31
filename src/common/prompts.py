@@ -537,4 +537,65 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "models": ["gemma4:e2b", "gemma3:4b"],
         }
     ],
+    "ui_element_function_describe": [
+        {
+            "image_usage": "required",
+            "prompt": (
+                "Describe the on-screen role/function of each UI candidate using the "
+                "screenshot(s). Numbered yellow boxes on the screenshot(s) mark each "
+                "candidate; the number matches Candidates [index N]. Candidates share "
+                "similar labels; distinguish them by app, chrome region, and purpose "
+                "(e.g. Windows taskbar search vs Outlook mail search).\n\n"
+                "Anchor instruction (context only):\n{instruction}\n\n"
+                "Candidates:\n{candidates_text}"
+            ),
+            "instructions": [
+                'Reply only with JSON: {{"items": [{{"index": <integer>, "function": "<string>"}}, ...]}}.',
+                "Include exactly one items entry for every Candidates [index N] (0-based).",
+                '"function" is a short description of what that control does on screen '
+                "(Traditional Chinese preferred; English app names allowed).",
+                "Match each index to the numbered box on the screenshot(s) before describing.",
+                "Use the screenshot(s) to judge location and role; do not invent indices.",
+                "Do not pick a winner; only describe each candidate.",
+            ],
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
+    "ui_element_function_describe_retry": [
+        {
+            "image_usage": "no_image",
+            "prompt": (
+                'Reply with ONLY: {{"items": [{{"index": <integer>, "function": "<string>"}}, ...]}} '
+                "with exactly one entry per Candidates index. No text before or after the JSON."
+            ),
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
+    "ui_element_selection_with_functions": [
+        {
+            "image_usage": "required",
+            "prompt": (
+                "Pick the candidate index from Candidates that best matches the Anchor. "
+                "Numbered yellow boxes on the screenshot(s) mark each candidate; the number "
+                "matches Candidates [index N]. Each candidate row includes label, "
+                "center=(x,y), optional neighbor clauses, and 功能：<role description>. "
+                "Use the numbered boxes, 功能 descriptions, and screenshot context to "
+                "disambiguate identical labels.\n\n"
+                "Anchor:\n{instruction}\n\n"
+                "Nearby:\n{nearby_text}\n\n"
+                "Candidates:\n{candidates_text}"
+            ),
+            "instructions": [
+                'Reply only with JSON: {{"index": <integer>, "text": "<string>"}}.',
+                '"index" is the [index] from the chosen candidate row (0-based).',
+                '"text" must be that same row\'s text context copied verbatim after [index N] '
+                "(label, optional center=(x,y), neighbor clauses, and 功能：… when present).",
+                "Prefer the candidate whose numbered box location and 功能 match the Anchor intent.",
+                "Nearby may be (none); when it is, rely on numbered boxes and 功能 descriptions.",
+                "Never invent an index; only use an index shown in the Candidates list.",
+                "index and text must describe the same Candidates row.",
+            ],
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
 }

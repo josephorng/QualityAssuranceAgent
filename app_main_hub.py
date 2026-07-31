@@ -1915,13 +1915,18 @@ class MainHub(ctk.CTk):
             return
         if self._smart_goal_path is not None and self._is_smart_dirty():
             self._smart_save()
+        if self._smart_goal_path is not None:
+            script_disk_path = self._smart_goal_path
+        else:
+            self._sync_smart_text_to_cache()
+            script_disk_path = self._smart_goal_cache_path()
         self._last_run_was_script_mode = False
         self._bridge = None
         args = _WorkerArgs(
             run_mode="smart",
             eye_monitor_indices=eye_indices,
             script_raw="",
-            script_disk_path=self._smart_goal_path,
+            script_disk_path=script_disk_path,
             use_tool_cache=False,
             smart_goal=goal,
         )
@@ -2158,7 +2163,7 @@ class MainHub(ctk.CTk):
                     runs_root=runs_root,
                     task=goal.splitlines()[0][:80] if goal else "smart",
                     runtime_mode=False,
-                    selected_script_path=None,
+                    selected_script_path=args.script_disk_path,
                     script_steps=None,
                     eye_monitor_indices=args.eye_monitor_indices,
                     clear_runs_root=False,

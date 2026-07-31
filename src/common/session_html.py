@@ -279,9 +279,10 @@ _INDEX_SCRIPT = """
     var buttons = Array.prototype.slice.call(document.querySelectorAll(".tabs button[data-tab]"));
     var panels = Array.prototype.slice.call(document.querySelectorAll(".tab-panel[data-tab]"));
     if (!buttons.length || !panels.length) return;
+    var allowed = { runs: true, smart: true, recordings: true };
 
     function activate(tabId) {
-      var resolved = tabId === "recordings" ? "recordings" : "runs";
+      var resolved = allowed[tabId] ? tabId : "runs";
       buttons.forEach(function (btn) {
         var active = btn.getAttribute("data-tab") === resolved;
         btn.classList.toggle("active", active);
@@ -306,7 +307,7 @@ _INDEX_SCRIPT = """
     });
 
     var hash = (window.location.hash || "").replace(/^#/, "");
-    activate(hash === "recordings" ? "recordings" : "runs");
+    activate(allowed[hash] ? hash : "runs");
   }
 
   function initPanel(panel) {
@@ -387,6 +388,9 @@ _INDEX_SCRIPT = """
     function introHelpText(count) {
       if (kind === "recordings") {
         return "共 " + count + " 筆錄製。勾選多筆後可批次回報或刪除；點選錄製名稱開啟事件紀錄；點選欄位標題可排序；🐛 可回報 bug；垃圾桶可刪除整份錄製資料夾。";
+      }
+      if (kind === "smart") {
+        return "共 " + count + " 筆智能模式報告。勾選多筆後可批次回報或刪除；點選目標開啟步驟紀錄；點選欄位標題可排序；🐛 可回報 bug；垃圾桶可刪除整份報告資料夾。";
       }
       return "共 " + count + " 筆報告。勾選多筆後可批次回報或刪除；點選執行名稱開啟步驟紀錄；點選欄位標題可排序；🐛 可回報 bug；垃圾桶可刪除整份報告資料夾。";
     }
@@ -1071,15 +1075,45 @@ def _reason_badge_class(reason: str, *, has_failures: bool) -> str:
 
 
 def _resolve_index_script_name(run_root: Path, report: dict[str, Any] | None) -> str:
+    """Prefer the saved instruction/script filename, then smart goal text, then folder name."""
+
+    def _filename_from(payload: dict[str, Any] | None) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        path = payload.get("script_path")
+        if isinstance(path, str) and path.strip():
+            return Path(path.strip()).name
+        name = payload.get("script_name")
+        if isinstance(name, str) and name.strip() and name.strip() != "智能模式":
+            return name.strip()
+        return None
+
+    def _smart_goal_from(payload: dict[str, Any] | None) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        goal = payload.get("smart_goal")
+        if isinstance(goal, str) and goal.strip():
+            return goal.strip()
+        return None
+
+    filename = _filename_from(report)
+    if filename:
+        return filename
+    goal = _smart_goal_from(report)
+    if goal:
+        return goal
     if isinstance(report, dict):
         name = report.get("script_name")
         if isinstance(name, str) and name.strip():
             return name.strip()
-        path = report.get("script_path")
-        if isinstance(path, str) and path.strip():
-            return Path(path.strip()).name
 
     meta = _resolve_script_metadata(run_root)
+    filename = _filename_from(meta)
+    if filename:
+        return filename
+    goal = _smart_goal_from(meta)
+    if goal:
+        return goal
     if meta.get("script_name"):
         return meta["script_name"]
 
@@ -1230,7 +1264,20 @@ def _iter_report_run_dirs(runs_root: Path) -> list[Path]:
         return []
     found: list[Path] = []
     for child in runs_root.iterdir():
-        if not child.is_dir() or _is_recording_run_dir(child):
+        if not child.is_dir() or _is_recording_run_dir(child) or _is_smart_run_dir(child):
+            continue
+        if (child / _HTML_NAME).is_file():
+            found.append(child)
+    found.sort(key=lambda path: (path.name, path.stat().st_mtime), reverse=True)
+    return found
+
+
+def _iter_smart_report_run_dirs(runs_root: Path) -> list[Path]:
+    if not runs_root.is_dir():
+        return []
+    found: list[Path] = []
+    for child in runs_root.iterdir():
+        if not child.is_dir() or _is_recording_run_dir(child) or not _is_smart_run_dir(child):
             continue
         if (child / _HTML_NAME).is_file():
             found.append(child)
@@ -1240,6 +1287,22 @@ def _iter_report_run_dirs(runs_root: Path) -> list[Path]:
 
 def _is_recording_run_dir(run_root: Path) -> bool:
     return run_root.name.startswith("recording_")
+
+
+def _is_smart_run_dir(run_root: Path) -> bool:
+    if run_root.name.startswith("smart_"):
+        return True
+    if (run_root / "smart_state.json").is_file():
+        return True
+    report = _load_run_report(run_root)
+    if not isinstance(report, dict):
+        return False
+    if report.get("run_mode") == "smart":
+        return True
+    if isinstance(report.get("smart_cycles"), list):
+        return True
+    goal = report.get("smart_goal")
+    return isinstance(goal, str) and bool(goal.strip())
 
 
 def _iter_recording_source_dirs(runs_root: Path) -> list[Path]:
@@ -1493,12 +1556,22 @@ def _render_bulk_bar() -> str:
     )
 
 
-def _render_runs_tab_panel(run_dirs: list[Path]) -> str:
+def _render_runs_tab_panel(
+    run_dirs: list[Path],
+    *,
+    tab_id: str = "runs",
+    hidden: bool = False,
+) -> str:
+    is_smart = tab_id == "smart"
+    noun = "智能模式報告" if is_smart else "報告"
+    name_column = "目標" if is_smart else "執行"
+    select_aria = "全選智能模式報告" if is_smart else "全選報告"
+    open_hint = "點選目標開啟步驟紀錄" if is_smart else "點選執行名稱開啟步驟紀錄"
     if run_dirs:
         rows = "".join(_render_index_row(run_dir) for run_dir in run_dirs)
         intro = (
-            f"共 {len(run_dirs)} 筆報告。勾選多筆後可批次回報或刪除；"
-            "點選執行名稱開啟步驟紀錄；"
+            f"共 {len(run_dirs)} 筆{noun}。勾選多筆後可批次回報或刪除；"
+            f"{open_hint}；"
             "點選欄位標題可排序；🐛 可回報 bug；"
             "垃圾桶可刪除整份報告資料夾。"
         )
@@ -1508,9 +1581,9 @@ def _render_runs_tab_panel(run_dirs: list[Path]) -> str:
             '<table class="reports">'
             "<thead><tr>"
             '<th class="no-sort select-col" title="全選">'
-            '<input type="checkbox" class="select-all" aria-label="全選報告">'
+            f'<input type="checkbox" class="select-all" aria-label="{select_aria}">'
             "</th>"
-            '<th data-type="text">執行</th>'
+            f'<th data-type="text">{name_column}</th>'
             '<th data-type="text">時間</th>'
             '<th data-type="text">結束原因</th>'
             '<th data-type="num">步驟</th>'
@@ -1525,11 +1598,17 @@ def _render_runs_tab_panel(run_dirs: list[Path]) -> str:
         )
     else:
         body = (
-            '<p class="intro">共 0 筆報告。完成一次執行後，報告會出現在此列表。</p>\n'
-            '<p class="empty">尚無報告。完成一次執行後，報告會出現在此列表。</p>'
+            f'<p class="intro">共 0 筆{noun}。完成一次'
+            f'{"智能模式" if is_smart else ""}執行後，報告會出現在此列表。</p>\n'
+            f'<p class="empty">尚無{noun}。完成一次'
+            f'{"智能模式" if is_smart else ""}執行後，報告會出現在此列表。</p>'
         )
-    return f'<section class="tab-panel" data-tab="runs" id="tab-runs">\n{body}\n</section>'
-
+    hidden_attr = " hidden" if hidden else ""
+    return (
+        f'<section class="tab-panel" data-tab="{tab_id}" id="tab-{tab_id}"{hidden_attr}>\n'
+        f"{body}\n"
+        f"</section>"
+    )
 
 def _render_recordings_tab_panel(recording_dirs: list[Path]) -> str:
     if recording_dirs:
@@ -1579,18 +1658,21 @@ def _backfill_recording_html(runs_root: Path) -> None:
 
 
 def write_runs_index_html(runs_root: Path) -> Path:
-    """Build ``index.html`` with tabs for agent runs and recordings."""
+    """Build ``index.html`` with tabs for agent runs, smart mode, and recordings."""
     runs_root = Path(runs_root)
     runs_root.mkdir(parents=True, exist_ok=True)
 
     _backfill_recording_html(runs_root)
 
     run_dirs = _iter_report_run_dirs(runs_root)
+    smart_dirs = _iter_smart_report_run_dirs(runs_root)
     recording_dirs = _iter_recording_report_dirs(runs_root)
     tabs = (
         '<nav class="tabs" role="tablist" aria-label="報告類型">'
         '<button type="button" class="active" data-tab="runs" role="tab" aria-selected="true"'
         ' aria-controls="tab-runs">執行報告</button>'
+        '<button type="button" data-tab="smart" role="tab" aria-selected="false"'
+        ' aria-controls="tab-smart">智能模式</button>'
         '<button type="button" data-tab="recordings" role="tab" aria-selected="false"'
         ' aria-controls="tab-recordings">錄製紀錄</button>'
         "</nav>"
@@ -1598,6 +1680,7 @@ def write_runs_index_html(runs_root: Path) -> Path:
     body = (
         f"{tabs}\n"
         f"{_render_runs_tab_panel(run_dirs)}\n"
+        f"{_render_runs_tab_panel(smart_dirs, tab_id='smart', hidden=True)}\n"
         f"{_render_recordings_tab_panel(recording_dirs)}\n"
     )
     script = f"<script>\n{_INDEX_SCRIPT}\n</script>\n"
@@ -1758,6 +1841,7 @@ def write_session_html_from_run(run_root: Path) -> Path:
 
     title = escape(_resolve_session_title(run_root))
     body = smart_html + "\n" + "\n".join(groups_html)
+    nav_href = "../index.html#smart" if _is_smart_run_dir(run_root) else "../index.html"
     html = (
         "<!DOCTYPE html>\n"
         '<html lang="zh-Hant">\n<head>\n'
@@ -1766,7 +1850,7 @@ def write_session_html_from_run(run_root: Path) -> Path:
         f"<title>{title}</title>\n"
         f"<style>\n{_STYLE}\n</style>\n"
         "</head>\n<body>\n"
-        '<p class="nav"><a href="../index.html">← 報告列表</a></p>\n'
+        f'<p class="nav"><a href="{nav_href}">← 報告列表</a></p>\n'
         f"<h1>{title}</h1>\n"
         '<p class="intro">依使用者指令分組的手部動作紀錄。點選指令可展開底下的動作列表。</p>\n'
         f"{body}\n"

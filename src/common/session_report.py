@@ -355,7 +355,14 @@ def _build_summary(
 def _resolve_script_metadata(run_root: Path) -> dict[str, str]:
     if os.environ.get(SMART_MODE_ENV, "").strip().lower() in ("1", "true", "yes"):
         goal = os.environ.get(SMART_GOAL_ENV, "").strip()
-        meta = {"run_mode": "smart", "script_name": "智能模式"}
+        meta: dict[str, str] = {"run_mode": "smart"}
+        script_path_raw = os.environ.get(SCRIPT_PATH_ENV, "").strip()
+        if script_path_raw:
+            path = Path(script_path_raw)
+            meta["script_path"] = str(path)
+            meta["script_name"] = path.name
+        else:
+            meta["script_name"] = "智能模式"
         if goal:
             meta["smart_goal"] = goal
         return meta

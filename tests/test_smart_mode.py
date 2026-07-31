@@ -336,8 +336,15 @@ def test_smart_coordinator_recovery_budget(tmp_path: Path, monkeypatch: pytest.M
     assert coordinator.state.recovery_attempts > 2
 
 
-def test_session_report_includes_smart_cycles(tmp_path: Path) -> None:
+def test_session_report_includes_smart_cycles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.common.runtime_context import SCRIPT_PATH_ENV, SMART_GOAL_ENV, SMART_MODE_ENV
     from src.common.session_report import build_session_report
+
+    monkeypatch.delenv(SMART_MODE_ENV, raising=False)
+    monkeypatch.delenv(SMART_GOAL_ENV, raising=False)
+    monkeypatch.delenv(SCRIPT_PATH_ENV, raising=False)
 
     (tmp_path / "smart_state.json").write_text(
         json.dumps({"goal": "Do X", "terminal_reason": "completed", "cycle": 1}),
@@ -357,3 +364,22 @@ def test_session_report_includes_smart_cycles(tmp_path: Path) -> None:
     assert report.get("smart_goal") == "Do X"
     assert len(report.get("smart_cycles", [])) == 1
     assert report["summary"].get("smart_cycle_count") == 1
+
+
+def test_session_report_records_smart_goal_filename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.common.runtime_context import SCRIPT_PATH_ENV, SMART_GOAL_ENV, SMART_MODE_ENV
+    from src.common.session_report import build_session_report
+
+    goal_file = tmp_path / "open_outlook.txt"
+    goal_file.write_text("Open Outlook\n", encoding="utf-8")
+    monkeypatch.setenv(SMART_MODE_ENV, "1")
+    monkeypatch.setenv(SMART_GOAL_ENV, "Open Outlook")
+    monkeypatch.setenv(SCRIPT_PATH_ENV, str(goal_file))
+
+    report = build_session_report(tmp_path, session_end_reason="completed")
+    assert report.get("run_mode") == "smart"
+    assert report.get("script_name") == "open_outlook.txt"
+    assert report.get("script_path") == str(goal_file)
+    assert report.get("smart_goal") == "Open Outlook"

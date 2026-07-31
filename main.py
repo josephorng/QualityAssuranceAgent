@@ -70,6 +70,8 @@ def prepare_run_session(
             raise ValueError("Smart mode requires a non-empty goal")
         os.environ[SMART_MODE_ENV] = "1"
         os.environ[SMART_GOAL_ENV] = goal
+        if selected_script_path is not None:
+            os.environ[SCRIPT_PATH_ENV] = str(selected_script_path)
     elif runtime_mode:
         os.environ[RUNTIME_COMMAND_MODE_ENV] = "1"
     else:

@@ -346,6 +346,7 @@ def test_write_session_html_merges_smart_cycle_with_executed_tools(tmp_path: Pat
     assert "Telegram is visible" in html
     assert "Telegram is open" in html
     assert "動作 1：double_click" in html
+    assert 'href="../index.html#smart"' in html
     first_cycle_end = html.index("</details>", html.index("Open Telegram first"))
     assert html.index("動作 1：double_click") < first_cycle_end
     assert html.index("The goal is complete") > first_cycle_end
@@ -755,13 +756,72 @@ def test_write_runs_index_lists_recordings_in_recordings_tab(tmp_path: Path) -> 
     html = write_runs_index_html(tmp_path).read_text(encoding="utf-8")
 
     assert 'data-tab="runs"' in html
+    assert 'data-tab="smart"' in html
     assert 'data-tab="recordings"' in html
+    assert ">智能模式<" in html
     assert 'href="task_20260721_100000_000001/session_steps.html"' in html
     assert 'href="recording_20260721_110000_000002/recording_steps.html"' in html
     assert "demo.txt" in html
     assert "recording_20260721_110000_000002" in html
     assert 'data-label="已分析"' in html
     assert 'data-label="事件"' in html
+
+
+def test_write_runs_index_lists_smart_runs_in_smart_tab(tmp_path: Path) -> None:
+    task = tmp_path / "task_20260721_100000_000001"
+    task.mkdir()
+    (task / "session_steps.html").write_text("<html></html>", encoding="utf-8")
+    (task / "report.json").write_text(
+        json.dumps({"script_name": "demo.txt", "started_at_utc": "2026-07-21T10:00:00+00:00"}),
+        encoding="utf-8",
+    )
+
+    smart = tmp_path / "smart_20260721_120000_000003"
+    smart.mkdir()
+    (smart / "session_steps.html").write_text("<html></html>", encoding="utf-8")
+    (smart / "report.json").write_text(
+        json.dumps(
+            {
+                "run_mode": "smart",
+                "script_name": "open_outlook.txt",
+                "script_path": str(tmp_path / "open_outlook.txt"),
+                "smart_goal": "打開 Outlook 並讀取最新郵件",
+                "started_at_utc": "2026-07-21T12:00:00+00:00",
+                "session_end_reason": "completed",
+                "summary": {
+                    "step_count": 2,
+                    "tool_call_count": 3,
+                    "failed_step_count": 0,
+                    "failed_tool_count": 0,
+                    "total_duration_seconds": 42.5,
+                    "smart_cycle_count": 2,
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_runs_index_html(tmp_path).read_text(encoding="utf-8")
+
+    assert 'data-tab="smart"' in html
+    assert 'id="tab-smart"' in html
+    assert 'href="smart_20260721_120000_000003/session_steps.html"' in html
+    assert "open_outlook.txt" in html
+    assert "打開 Outlook 並讀取最新郵件" not in html
+    assert "demo.txt" in html
+    assert ">目標<" in html
+
+    runs_panel_start = html.index('id="tab-runs"')
+    smart_panel_start = html.index('id="tab-smart"')
+    recordings_panel_start = html.index('id="tab-recordings"')
+    runs_panel = html[runs_panel_start:smart_panel_start]
+    smart_panel = html[smart_panel_start:recordings_panel_start]
+    assert 'href="task_20260721_100000_000001/session_steps.html"' in runs_panel
+    assert 'href="smart_20260721_120000_000003/session_steps.html"' not in runs_panel
+    assert 'href="smart_20260721_120000_000003/session_steps.html"' in smart_panel
+    assert 'href="task_20260721_100000_000001/session_steps.html"' not in smart_panel
+    assert "smart: true" in html
 
 
 def test_write_runs_index_backfills_missing_recording_html(tmp_path: Path) -> None:

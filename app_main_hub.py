@@ -253,6 +253,7 @@ class MainHub(ctk.CTk):
                 self._mode_tabs.set(selected_mode)
             except Exception:
                 pass
+        self._sync_tool_cache_checkbox_for_mode()
 
         self._status.configure(text="正在檢查 Ollama 與 Triton…")
         self._start_startup_probes()
@@ -459,6 +460,7 @@ class MainHub(ctk.CTk):
         except Exception:
             return
         self._persist_hub_ui_state()
+        self._sync_tool_cache_checkbox_for_mode()
         if selected != _MODE_TAB_QUEUE:
             return
         if self._confirm_proceed_with_unsaved_script():
@@ -835,7 +837,7 @@ class MainHub(ctk.CTk):
                 if self._smart_goal_path is not None
                 else None,
                 "selected_mode": selected_mode,
-                "use_tool_cache": self._tool_cache_enabled_for_run(),
+                "use_tool_cache": bool(self._use_tool_cache),
                 "recording_hotkey_enabled": self._recording_hotkey_enabled,
                 "queue_script_paths": [str(p) for p in self._queue_paths],
             }
@@ -1198,7 +1200,8 @@ class MainHub(ctk.CTk):
         self._use_tool_cache_checkbox.pack(pady=(0, 10))
         if self._use_tool_cache:
             self._use_tool_cache_checkbox.select()
-        btn_row = ctk.CTkFrame(row, fg_color="transparent")
+        self._actions_btn_row = ctk.CTkFrame(row, fg_color="transparent")
+        btn_row = self._actions_btn_row
         btn_row.pack()
         btn_row.grid_columnconfigure(0, weight=1)
         btn_row.grid_columnconfigure(5, weight=1)
@@ -1251,7 +1254,30 @@ class MainHub(ctk.CTk):
         self._use_tool_cache = self._use_tool_cache_checkbox.get() == 1
         self._persist_hub_ui_state()
 
+    def _sync_tool_cache_checkbox_for_mode(self) -> None:
+        """Hide tool-cache option in 智能模式; cache replay is not applicable there."""
+        checkbox = getattr(self, "_use_tool_cache_checkbox", None)
+        if checkbox is None:
+            return
+        try:
+            selected = self._mode_tabs.get()
+        except Exception:
+            return
+        if selected == _MODE_TAB_SMART:
+            checkbox.pack_forget()
+            return
+        btn_row = getattr(self, "_actions_btn_row", None)
+        if btn_row is not None:
+            checkbox.pack(pady=(0, 10), before=btn_row)
+        else:
+            checkbox.pack(pady=(0, 10))
+
     def _tool_cache_enabled_for_run(self) -> bool:
+        try:
+            if self._mode_tabs.get() == _MODE_TAB_SMART:
+                return False
+        except Exception:
+            pass
         return self._use_tool_cache_checkbox.get() == 1
 
     def _show_report_button(self, html_path: Path) -> None:
@@ -1896,7 +1922,7 @@ class MainHub(ctk.CTk):
             eye_monitor_indices=eye_indices,
             script_raw="",
             script_disk_path=self._smart_goal_path,
-            use_tool_cache=self._tool_cache_enabled_for_run(),
+            use_tool_cache=False,
             smart_goal=goal,
         )
         self._begin_worker_run(args)

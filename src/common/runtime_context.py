@@ -29,6 +29,9 @@ def get_smart_goal() -> str:
 
 
 def use_tool_cache_enabled() -> bool:
+    # Smart mode plans dynamic instructions; instruction-tool cache is not applicable.
+    if is_smart_mode():
+        return False
     raw = os.getenv(USE_TOOL_CACHE_ENV, "").strip().lower()
     return raw in ("1", "true", "yes")
 

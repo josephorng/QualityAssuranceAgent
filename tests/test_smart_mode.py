@@ -16,8 +16,10 @@ from src.common.prompting import get_prompt
 from src.common.runtime_context import (
     SMART_GOAL_ENV,
     SMART_MODE_ENV,
+    USE_TOOL_CACHE_ENV,
     is_smart_mode,
     get_smart_goal,
+    use_tool_cache_enabled,
 )
 from src.common.smart_mode import normalize_smart_goal, resolve_hub_run_mode
 from src.common.vllm_client import _content_with_images, _encode_image_data_url, _translate_messages_to_openai
@@ -103,6 +105,14 @@ def test_is_smart_mode_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert is_smart_mode() is True
     monkeypatch.setenv(SMART_GOAL_ENV, "do the thing")
     assert get_smart_goal() == "do the thing"
+
+
+def test_use_tool_cache_disabled_in_smart_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(USE_TOOL_CACHE_ENV, "1")
+    monkeypatch.delenv(SMART_MODE_ENV, raising=False)
+    assert use_tool_cache_enabled() is True
+    monkeypatch.setenv(SMART_MODE_ENV, "1")
+    assert use_tool_cache_enabled() is False
 
 
 def test_parse_planner_and_verifier() -> None:

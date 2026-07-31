@@ -42,13 +42,15 @@ mcp_server = FastMCP("ComputerUseAgent")
 @mcp_server.tool()
 def click(
     button: str = "left",
+    modifiers: list[str] | None = None,
     instruction: str = "",
 ):
     '''
     Single click at the current cursor (點擊 / 點選). Use after move_mouse.
     Do not use for double-click (連按兩下) — use double_click instead.
+    For Ctrl+click or Shift+click, pass modifiers=["ctrl"] or modifiers=["shift"].
     '''
-    return _click(button=button).update({"instruction": instruction})
+    return _click(button=button, modifiers=modifiers).update({"instruction": instruction})
 
 
 @mcp_server.tool()
@@ -277,13 +279,15 @@ def middle_click(
 
 @mcp_server.tool()
 def double_click(
+    modifiers: list[str] | None = None,
     instruction: str = "",
 ):
     '''
     Double-click at the current cursor position (連按兩下).
     Do not use for a normal single click (點擊 / 點選) — use click instead.
+    For Ctrl+double-click or Shift+double-click, pass modifiers=["ctrl"] or modifiers=["shift"].
     '''
-    return _double_click().update({"instruction": instruction})
+    return _double_click(modifiers=modifiers).update({"instruction": instruction})
 
 
 @mcp_server.tool()

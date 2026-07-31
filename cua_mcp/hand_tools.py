@@ -73,16 +73,35 @@ def click(
     button: str = "left",
     clicks: int = 1,
     interval: float = 0.0,
+    modifiers: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Click a screen coordinate, or the current cursor if x and y are omitted."""
-    if x is not None and y is not None:
-        pyautogui.click(x=x, y=y, button=button, clicks=clicks, interval=interval)
-        rx, ry = x, y
-    else:
-        pyautogui.click(button=button, clicks=clicks, interval=interval)
-        pos = pyautogui.position()
-        rx, ry = int(pos.x), int(pos.y)
-    return {"x": rx, "y": ry, "button": button, "clicks": clicks, "interval": interval}
+    """Click a screen coordinate, or the current cursor if x and y are omitted.
+
+    Optional ``modifiers`` (e.g. ``["ctrl"]``, ``["shift"]``) are held via
+    keyDown for the duration of the click, then released in reverse order.
+    """
+    held = [_canonicalize_key(m) for m in (modifiers or []) if str(m).strip()]
+    for key in held:
+        pyautogui.keyDown(key)
+    try:
+        if x is not None and y is not None:
+            pyautogui.click(x=x, y=y, button=button, clicks=clicks, interval=interval)
+            rx, ry = x, y
+        else:
+            pyautogui.click(button=button, clicks=clicks, interval=interval)
+            pos = pyautogui.position()
+            rx, ry = int(pos.x), int(pos.y)
+        return {
+            "x": rx,
+            "y": ry,
+            "button": button,
+            "clicks": clicks,
+            "interval": interval,
+            "modifiers": held,
+        }
+    finally:
+        for key in reversed(held):
+            pyautogui.keyUp(key)
 
 
 def type_text(

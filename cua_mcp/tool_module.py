@@ -9,6 +9,7 @@ from cua_mcp import hand_tools
 from cua_mcp.select_mouse_target import find_mouse_point, resolve_mouse_point
 from cua_mcp.visual_mouse import resolve_visual_mouse_point
 from cua_mcp.storage import store_clipboard_text, store_image, store_text, _current_run_paths
+from src.common.runtime_context import is_smart_mode
 
 
 def _with_unified_target_metadata(
@@ -28,8 +29,8 @@ def _with_unified_target_metadata(
     return merged
 
 
-def _click(button: str = "left") -> dict[str, Any]:
-    return hand_tools.click(button=button)
+def _click(button: str = "left", modifiers: list[str] | None = None) -> dict[str, Any]:
+    return hand_tools.click(button=button, modifiers=modifiers)
 
 
 def _type_text(text: str) -> dict[str, Any]:
@@ -140,8 +141,8 @@ def _middle_click() -> dict[str, Any]:
     return hand_tools.click(button="middle")
 
 
-def _double_click() -> dict[str, Any]:
-    return hand_tools.click(button="left", clicks=2, interval=0.1)
+def _double_click(modifiers: list[str] | None = None) -> dict[str, Any]:
+    return hand_tools.click(button="left", clicks=2, interval=0.1, modifiers=modifiers)
 
 
 def _triple_click() -> dict[str, Any]:
@@ -167,14 +168,21 @@ async def _drag(
     duration: float = 0.5,
     button: str = "left",
 ) -> dict[str, Any]:
-    x1, y1, start_meta = await resolve_mouse_point(
-        start_instruction,
-        nearby_objects=start_nearby_objects,
-    )
-    x2, y2, end_meta = await resolve_mouse_point(
-        destination_instruction,
-        nearby_objects=destination_nearby_objects,
-    )
+    if is_smart_mode():
+        # Smart mode: one-pass multimodal selection (same path as move_mouse_visual).
+        x1, y1, start_meta = await resolve_visual_mouse_point(start_instruction)
+        x2, y2, end_meta = await resolve_visual_mouse_point(destination_instruction)
+        default_kind = "visual_mouse_target"
+    else:
+        x1, y1, start_meta = await resolve_mouse_point(
+            start_instruction,
+            nearby_objects=start_nearby_objects,
+        )
+        x2, y2, end_meta = await resolve_mouse_point(
+            destination_instruction,
+            nearby_objects=destination_nearby_objects,
+        )
+        default_kind = "mouse_target"
     result = _drag_at_points(x1, y1, x2, y2, duration=duration, button=button)
     merged: dict[str, Any] = dict(result)
     merged["start_instruction"] = start_instruction
@@ -187,7 +195,7 @@ async def _drag(
     merged["destination_target"] = dict(end_meta)
     return _with_unified_target_metadata(
         merged,
-        target_kind=str(end_meta.get("target_kind", "mouse_target")),
+        target_kind=str(end_meta.get("target_kind", default_kind)),
         target_text=str(end_meta.get("target_text", "")),
         target_icons=end_meta.get("target_icons", []),
         target_bbox=end_meta.get("target_bbox"),

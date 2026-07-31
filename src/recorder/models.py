@@ -19,6 +19,7 @@ class RecordedEvent:
     cursor_xy: tuple[int, int] | None = None
     end_xy: tuple[int, int] | None = None
     button: str | None = None
+    modifiers: list[str] | None = None
     key: str | None = None
     keys: list[str] | None = None
     text: str | None = None
@@ -56,6 +57,7 @@ class RecordedEvent:
         end_offset = raw.get("end_monitor_offset")
         anchor = raw.get("anchor_click_xy")
         keys = raw.get("keys")
+        modifiers = raw.get("modifiers")
         return cls(
             index=int(raw["index"]),
             timestamp_utc=str(raw["timestamp_utc"]),
@@ -63,6 +65,7 @@ class RecordedEvent:
             cursor_xy=tuple(cursor) if isinstance(cursor, list) and len(cursor) == 2 else None,
             end_xy=tuple(end) if isinstance(end, list) and len(end) == 2 else None,
             button=raw.get("button"),
+            modifiers=list(modifiers) if isinstance(modifiers, list) else None,
             key=raw.get("key"),
             keys=list(keys) if isinstance(keys, list) else None,
             text=raw.get("text"),

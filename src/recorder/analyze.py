@@ -49,6 +49,12 @@ _POINTER_CLICK_ACTION_SUFFIX_BY_KIND = {
     "right_click": "，用右鍵點選。",
     "middle_click": "，並按中鍵一下。",
 }
+_POINTER_CLICK_MODIFIER_ACTION_BY_KIND = {
+    "click": "點擊",
+    "double_click": "連按兩下",
+    "right_click": "右鍵點選",
+    "middle_click": "中鍵點擊",
+}
 _GENERIC_CLICK_ANCHORS = frozenset(
     {"文字", "元素", "未知", "輸入欄", "按鈕", "滾動條"}
 )
@@ -393,6 +399,18 @@ def instruction_for_drag(
     return f"從{source_anchor}拖到{dest_anchor}"
 
 
+def _pointer_click_action_suffix(
+    kind: str,
+    modifiers: list[str] | None,
+) -> str | None:
+    if modifiers:
+        action = _POINTER_CLICK_MODIFIER_ACTION_BY_KIND.get(kind)
+        combo = _hotkey_display_combo([str(m) for m in modifiers])
+        if action and combo:
+            return f"，並{combo}+{action}。"
+    return _POINTER_CLICK_ACTION_SUFFIX_BY_KIND.get(kind)
+
+
 def _finalize_instruction(
     instruction: str,
     event: RecordedEvent,
@@ -408,7 +426,7 @@ def _finalize_instruction(
             destination if isinstance(destination, dict) else {},
         )
     instruction = append_nearby_context_comment(instruction, vision)
-    suffix = _POINTER_CLICK_ACTION_SUFFIX_BY_KIND.get(event.kind)
+    suffix = _pointer_click_action_suffix(event.kind, event.modifiers)
     if suffix:
         return instruction + suffix
     return instruction

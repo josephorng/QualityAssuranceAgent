@@ -520,3 +520,54 @@ def test_drag_end_capture_runs_once_at_drag_start(tmp_path) -> None:
     assert capture_calls["all"] == 1
     assert (run_dir / "screenshots" / "event_001_end.jpeg").is_file()
 
+
+def test_ctrl_click_records_modifiers(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key
+            from pynput.mouse import Button
+
+            session._on_key_press(Key.ctrl_l)
+            _left_click(session, 120, 240)
+            session._on_key_release(Key.ctrl_l)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "click"
+    assert raw["modifiers"] == ["ctrl"]
+
+
+def test_shift_double_click_records_modifiers(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key
+            from pynput.mouse import Button
+
+            session._on_key_press(Key.shift_l)
+            session._on_mouse_click(50, 60, Button.left, True)
+            session._on_mouse_click(50, 60, Button.left, False)
+            session._on_mouse_click(50, 60, Button.left, True)
+            session._on_mouse_click(50, 60, Button.left, False)
+            session._on_key_release(Key.shift_l)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "double_click"
+    assert raw["modifiers"] == ["shift"]
+

@@ -71,6 +71,21 @@ def test_recorded_event_round_trip_drag() -> None:
     assert restored.button == "left"
 
 
+def test_recorded_event_round_trip_modifiers() -> None:
+    event = RecordedEvent(
+        index=6,
+        timestamp_utc="2026-07-02T00:00:00+00:00",
+        kind="click",
+        cursor_xy=(100, 200),
+        button="left",
+        modifiers=["ctrl", "shift"],
+        screenshot_path="runs/test/screenshots/event_006.jpeg",
+    )
+    restored = RecordedEvent.from_dict(event.to_dict())
+    assert restored.modifiers == ["ctrl", "shift"]
+    assert restored.button == "left"
+
+
 def test_recorded_event_round_trip_drag_end_screenshot() -> None:
     event = RecordedEvent(
         index=5,

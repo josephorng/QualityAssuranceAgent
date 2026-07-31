@@ -113,6 +113,7 @@ class _QueuedEvent:
     monitor_index: int | None = None
     monitor_offset: tuple[int, int] | None = None
     button: str | None = None
+    modifiers: list[str] | None = None
     key: str | None = None
     keys: list[str] | None = None
     text: str | None = None
@@ -318,6 +319,17 @@ def _modifier_name(key: keyboard.Key | keyboard.KeyCode) -> str | None:
     return None
 
 
+_MODIFIER_TOKEN_ORDER = ("ctrl", "alt", "shift", "win")
+
+
+def _ordered_modifiers(mods: set[str] | list[str]) -> list[str] | None:
+    present = set(mods)
+    ordered = [name for name in _MODIFIER_TOKEN_ORDER if name in present]
+    extras = sorted(name for name in present if name not in _MODIFIER_TOKEN_ORDER)
+    result = ordered + extras
+    return result or None
+
+
 def _point_in_rect(x: int, y: int, rect: tuple[int, int, int, int] | None) -> bool:
     if rect is None:
         return False
@@ -459,6 +471,7 @@ class RecordingSession:
         self._pending_click_coords: tuple[int, int, str] | None = None
         self._pending_click_down_at: float | None = None
         self._pending_click_timestamp_utc: str | None = None
+        self._pending_click_modifiers: list[str] | None = None
         self._left_button_down = False
         self._left_press_dragging = False
         self._last_move_xy: tuple[int, int] | None = None
@@ -520,6 +533,7 @@ class RecordingSession:
             self._pending_click_coords = None
             self._pending_click_down_at = None
             self._pending_click_timestamp_utc = None
+            self._pending_click_modifiers = None
             self._left_button_down = False
             self._left_press_dragging = False
             self._last_move_xy = None
@@ -590,6 +604,7 @@ class RecordingSession:
             self._pending_click_timer = None
             self._pending_click_coords = None
             self._pending_click_down_at = None
+            self._pending_click_modifiers = None
             self._left_button_down = False
             self._left_press_dragging = False
             self._last_move_xy = None
@@ -718,6 +733,7 @@ class RecordingSession:
         cursor_xy: tuple[int, int],
         button: str | None = None,
         scroll_delta: int | None = None,
+        modifiers: list[str] | None = None,
         timestamp_utc: str | None = None,
     ) -> None:
         action_timestamp_utc = timestamp_utc or utc_now_iso()
@@ -745,6 +761,7 @@ class RecordingSession:
                 monitor_index=mon_idx,
                 monitor_offset=mon_offset,
                 button=button,
+                modifiers=modifiers,
                 scroll_delta=scroll_delta,
                 windows_before=windows_before or None,
             )
@@ -905,11 +922,16 @@ class RecordingSession:
             self._pending_click_coords = None
             self._pending_click_down_at = None
             self._pending_click_timestamp_utc = None
+            self._pending_click_modifiers = None
             self._left_button_down = False
             self._left_press_dragging = False
             self._last_move_xy = None
             self._pending_screenshot = None
             self._pending_windows_before = None
+
+    def _snapshot_pressed_modifiers(self) -> list[str] | None:
+        with self._lock:
+            return _ordered_modifiers(self._pressed_modifiers)
 
     def _schedule_deferred_click(self, x: int, y: int, button: str, down_at: float) -> None:
         delay = max(0.0, _DOUBLE_CLICK_INTERVAL_S - (time.monotonic() - down_at))
@@ -938,12 +960,14 @@ class RecordingSession:
             pending_shot = self._pending_screenshot
             pending_windows = self._pending_windows_before
             timestamp_utc = self._pending_click_timestamp_utc or utc_now_iso()
+            modifiers = self._pending_click_modifiers
             self._pending_screenshot = None
             self._pending_windows_before = None
             self._pending_click_timer = None
             self._pending_click_coords = None
             self._pending_click_down_at = None
             self._pending_click_timestamp_utc = None
+            self._pending_click_modifiers = None
             self._left_button_down = False
             self._left_press_dragging = False
             self._last_move_xy = None
@@ -964,6 +988,7 @@ class RecordingSession:
                 monitor_index=mon_idx,
                 monitor_offset=mon_offset,
                 button=button,
+                modifiers=modifiers,
                 windows_before=pending_windows,
             )
         )
@@ -989,6 +1014,7 @@ class RecordingSession:
             pending_windows = self._pending_windows_before
             pending_drag_end = self._pending_drag_end_captures
             timestamp_utc = self._pending_click_timestamp_utc or utc_now_iso()
+            modifiers = self._pending_click_modifiers
             self._pending_screenshot = None
             self._pending_windows_before = None
             self._pending_drag_end_captures = None
@@ -996,6 +1022,7 @@ class RecordingSession:
             self._pending_click_coords = None
             self._pending_click_down_at = None
             self._pending_click_timestamp_utc = None
+            self._pending_click_modifiers = None
             self._left_button_down = False
             self._left_press_dragging = False
             self._last_move_xy = None
@@ -1028,6 +1055,7 @@ class RecordingSession:
                 end_monitor_index=end_mon_idx,
                 end_monitor_offset=end_mon_offset,
                 button=button,
+                modifiers=modifiers,
                 windows_before=pending_windows,
             )
         )
@@ -1075,6 +1103,7 @@ class RecordingSession:
             cursor_xy=item.cursor_xy,
             end_xy=item.end_xy,
             button=item.button,
+            modifiers=item.modifiers,
             key=item.key,
             keys=item.keys,
             text=item.text,
@@ -1150,6 +1179,7 @@ class RecordingSession:
                     kind="double_click",
                     cursor_xy=(ix, iy),
                     button=btn,
+                    modifiers=self._snapshot_pressed_modifiers(),
                     timestamp_utc=action_timestamp_utc,
                 )
                 return
@@ -1160,6 +1190,7 @@ class RecordingSession:
             self._pending_click_coords = (ix, iy, btn)
             self._pending_click_down_at = now
             self._pending_click_timestamp_utc = action_timestamp_utc
+            self._pending_click_modifiers = _ordered_modifiers(self._pressed_modifiers)
             self._left_button_down = True
             self._left_press_dragging = False
             self._last_move_xy = (ix, iy)
@@ -1203,6 +1234,7 @@ class RecordingSession:
             kind=kind,
             cursor_xy=(ix, iy),
             button=btn,
+            modifiers=self._snapshot_pressed_modifiers(),
             timestamp_utc=timestamp_utc,
         )
 

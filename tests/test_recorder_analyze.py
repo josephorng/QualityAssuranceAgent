@@ -1221,6 +1221,75 @@ async def test_analyze_event_to_cache_click_appends_nearby_context(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_analyze_event_to_cache_ctrl_click_suffix(tmp_path: Path) -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(38, 636),
+        button="left",
+        modifiers=["ctrl"],
+        screenshot_path="",
+    )
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision=_VISION_WITH_NEARBY,
+        )
+
+    assert result is not None
+    assert result["instruction"] == (
+        "將滑鼠移到「Chrome」圖示（附近有「OneNote」文字、「Docker」圖示），並Ctrl+點擊。"
+    )
+    llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_analyze_event_to_cache_shift_double_click_suffix(tmp_path: Path) -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="double_click",
+        cursor_xy=(38, 636),
+        button="left",
+        modifiers=["shift"],
+        screenshot_path="",
+    )
+    vision = {
+        "used_vision": True,
+        "local_cursor": (38, 636),
+        "candidates": [
+            {
+                "bbox": [28, 626, 20, 20],
+                "center": [38, 636],
+                "class_name": "element",
+                "text": "chrome",
+                "icons": [{"chinese_id": "Chrome"}],
+            },
+        ],
+    }
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision=vision,
+        )
+
+    assert result is not None
+    assert result["instruction"] == "將滑鼠移到「Chrome」圖示，並Shift+連按兩下。"
+    llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_analyze_event_to_cache_click_enriches_offset_then_nearby(
     tmp_path: Path,
 ) -> None:

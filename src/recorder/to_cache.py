@@ -48,6 +48,7 @@ def event_summary_for_llm(event: RecordedEvent) -> str:
     payload: dict[str, Any] = {
         "kind": event.kind,
         "button": event.button,
+        "modifiers": event.modifiers,
         "key": event.key,
         "keys": event.keys,
         "text": event.text,

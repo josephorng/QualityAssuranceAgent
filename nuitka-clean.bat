@@ -11,7 +11,7 @@ SET OUTPUT_DIR=dist
 
 echo Stopping any running %APPNAME%.exe...
 taskkill /F /IM %APPNAME%.exe >nul 2>&1
-timeout /t 1 /nobreak >nul
+timeout /t 1 /nobreak <nul >nul 2>&1
 
 :: %OUTPUT_DIR% holds both packaged output and %ENTRYSCRIPT:.py=.build% cache.
 :: Also remove a legacy root-level cache if present from older builds.

@@ -915,7 +915,7 @@ async def _maybe_disambiguate_similar_selection(
 
     peer_centers = ", ".join(f"({d.cx},{d.cy})" for d in similar)
     _log_info(
-        "move_mouse similar peers for function describe "
+        "similar_function_describe peers "
         f"count={len(similar)} centers=[{peer_centers}] "
         f"initial_center=({chosen.cx},{chosen.cy})"
     )
@@ -942,7 +942,7 @@ async def _maybe_disambiguate_similar_selection(
     new_chosen = similar[pool_idx]
     changed = (new_chosen.cx, new_chosen.cy) != (chosen.cx, chosen.cy)
     _log_info(
-        "move_mouse function-describe re-pick "
+        "similar_function_describe re-pick "
         f"index={pool_idx} changed={changed} "
         f"center=[{new_chosen.cx},{new_chosen.cy}] "
         f"text={new_text!r}"
@@ -1068,19 +1068,7 @@ async def find_mouse_point(
             f"text={selected_text!r} center=[{chosen.cx},{chosen.cy}]"
         )
 
-    chosen, idx, selected_text, disambiguation_meta = await _maybe_disambiguate_similar_selection(
-        chosen=chosen,
-        initial_idx=idx,
-        selected_text=selected_text,
-        detections=detections,
-        image_paths=image_paths,
-        monitor_indices=list(monitor_indices),
-        overlay_dir=paths.yolo_ocr_dir,
-        overlay_stamp=f"{stamp}_sim",
-        anchor=anchor,
-        nearby_phrases=nearby_phrases,
-        nearby_matches=nearby_matches,
-    )
+    # similar_function_describe runs on move_mouse_visual only (see visual_mouse.py).
 
     resolved_x = chosen.cx + offset_dx
     resolved_y = chosen.cy + offset_dy
@@ -1114,8 +1102,6 @@ async def find_mouse_point(
     }
     if selected_text is not None:
         meta["selected_text"] = selected_text
-    if disambiguation_meta:
-        meta.update(disambiguation_meta)
     return resolved_x, resolved_y, meta
 
 

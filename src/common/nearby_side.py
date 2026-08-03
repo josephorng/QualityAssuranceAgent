@@ -351,6 +351,99 @@ def nearby_hints_to_labels(hints: list[NearbyHint] | None) -> list[str]:
     return [h.label for h in (hints or [])]
 
 
+def enrich_nearby_objects_from_goal(
+    goal: str,
+    nearby_objects: list[str] | None = None,
+    *,
+    only_upgrade_existing: bool = False,
+) -> list[str] | None:
+    """Restore directed sides stripped from tool args using the step goal.
+
+    Parses ``（在「…」的下面）``-style landmarks from ``goal``. When the goal has
+    directed sides, those win for matching labels; any extra LLM landmarks are
+    kept. With ``only_upgrade_existing=True``, only labels already present in
+    ``nearby_objects`` are upgraded (no injection of other goal landmarks).
+
+    Returns ``None`` when there is nothing to pass through (no goal sides and
+    ``nearby_objects`` is ``None``).
+    """
+    goal_directed = [
+        hint
+        for hint in extract_nearby_hints_from_instruction(goal or "")
+        if hint.side is not None
+    ]
+    if not goal_directed:
+        if nearby_objects is None:
+            return None
+        return list(nearby_objects)
+
+    if nearby_objects is None:
+        if only_upgrade_existing:
+            return None
+        return nearby_hints_to_phrases(goal_directed)
+
+    if only_upgrade_existing:
+        current_labels = {
+            hint.label for hint in normalize_nearby_hints(nearby_objects)
+        }
+        relevant = [hint for hint in goal_directed if hint.label in current_labels]
+        if not relevant:
+            return list(nearby_objects)
+        # Goal sides first so undirected duplicates upgrade.
+        return nearby_hints_to_phrases(merge_nearby_hints(relevant, nearby_objects))
+
+    # Goal sides first so undirected / wrong-sided LLM duplicates upgrade correctly.
+    return nearby_hints_to_phrases(merge_nearby_hints(goal_directed, nearby_objects))
+
+
+def enrich_tool_arguments_from_goal(
+    tool_name: str,
+    arguments: dict[str, Any],
+    goal: str,
+) -> dict[str, Any]:
+    """Shallow-copy ``arguments`` with nearby_* lists upgraded from ``goal`` sides."""
+    args = dict(arguments)
+    name = (tool_name or "").strip()
+
+    def _apply(key: str, *, inject_if_missing: bool, only_upgrade_existing: bool) -> None:
+        raw = args.get(key)
+        if raw is None and not inject_if_missing:
+            return
+        current = list(raw) if isinstance(raw, list) else None
+        enriched = enrich_nearby_objects_from_goal(
+            goal,
+            current,
+            only_upgrade_existing=only_upgrade_existing,
+        )
+        if enriched is None:
+            return
+        if current is None or enriched != current:
+            args[key] = enriched
+
+    if name in ("move_mouse", "check_object_exists"):
+        # Inject when the model omitted nearby_objects entirely but the goal
+        # still carries directed landmarks.
+        _apply(
+            "nearby_objects",
+            inject_if_missing=True,
+            only_upgrade_existing=False,
+        )
+    elif name == "drag":
+        # Only upgrade labels already present on each endpoint list so
+        # destination-only landmarks are not copied onto the drag source.
+        _apply(
+            "start_nearby_objects",
+            inject_if_missing=False,
+            only_upgrade_existing=True,
+        )
+        _apply(
+            "destination_nearby_objects",
+            inject_if_missing=False,
+            only_upgrade_existing=True,
+        )
+    return args
+
+
 def side_to_schema_value(side: Side | None) -> str | None:
     return None if side is None else side.value
 

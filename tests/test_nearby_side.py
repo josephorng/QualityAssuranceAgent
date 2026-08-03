@@ -7,6 +7,8 @@ from src.common.nearby_side import (
     NearbyHint,
     Side,
     anchor_satisfies_side,
+    enrich_nearby_objects_from_goal,
+    enrich_tool_arguments_from_goal,
     extract_nearby_hints_from_instruction,
     format_directed_phrase,
     format_nearby_context_comment,
@@ -110,3 +112,92 @@ def test_merge_nearby_hints_prefers_earlier_and_upgrades_side() -> None:
         NearbyHint("「Edge」圖示", Side.LEFT),
         NearbyHint("「Chrome」圖示", None),
     ]
+
+
+def test_enrich_nearby_objects_from_goal_restores_stripped_sides() -> None:
+    goal = "將滑鼠移到輸入欄（在「joseph」文字的下面、在「確定」文字的上面），並點擊滑鼠一下。"
+    enriched = enrich_nearby_objects_from_goal(
+        goal,
+        ["「joseph」文字", "「確定」文字"],
+    )
+    assert enriched == [
+        "在「joseph」文字的下面",
+        "在「確定」文字的上面",
+    ]
+
+
+def test_enrich_nearby_objects_from_goal_injects_when_nearby_omitted() -> None:
+    goal = "將滑鼠移到輸入欄（在「joseph」文字的下面、在「確定」文字的上面）"
+    assert enrich_nearby_objects_from_goal(goal, None) == [
+        "在「joseph」文字的下面",
+        "在「確定」文字的上面",
+    ]
+
+
+def test_enrich_nearby_objects_from_goal_keeps_extra_llm_landmarks() -> None:
+    goal = "點擊按鈕（在「確定」文字的上面）"
+    enriched = enrich_nearby_objects_from_goal(
+        goal,
+        ["「確定」文字", "「取消」文字"],
+    )
+    assert enriched == [
+        "在「確定」文字的上面",
+        "「取消」文字",
+    ]
+
+
+def test_enrich_nearby_objects_from_goal_noop_without_directed_sides() -> None:
+    goal = "將滑鼠移到輸入欄並點擊"
+    assert enrich_nearby_objects_from_goal(goal, ["「帳號」文字"]) == ["「帳號」文字"]
+    assert enrich_nearby_objects_from_goal(goal, None) is None
+
+
+def test_enrich_tool_arguments_from_goal_move_mouse() -> None:
+    goal = "將滑鼠移到輸入欄（在「joseph」文字的下面、在「確定」文字的上面）"
+    enriched = enrich_tool_arguments_from_goal(
+        "move_mouse",
+        {
+            "instruction": "輸入欄",
+            "nearby_objects": ["「joseph」文字", "「確定」文字"],
+        },
+        goal,
+    )
+    assert enriched["instruction"] == "輸入欄"
+    assert enriched["nearby_objects"] == [
+        "在「joseph」文字的下面",
+        "在「確定」文字的上面",
+    ]
+
+
+def test_enrich_tool_arguments_from_goal_drag() -> None:
+    goal = "從圖示拖到資料夾（在「Desktop」文字的右邊）"
+    enriched = enrich_tool_arguments_from_goal(
+        "drag",
+        {
+            "start_instruction": "圖示",
+            "destination_instruction": "資料夾",
+            "destination_nearby_objects": ["「Desktop」文字"],
+        },
+        goal,
+    )
+    assert enriched["destination_nearby_objects"] == ["在「Desktop」文字的右邊"]
+    assert "start_nearby_objects" not in enriched
+
+
+def test_enrich_tool_arguments_from_goal_drag_upgrades_matching_labels_only() -> None:
+    goal = "從圖示拖到資料夾（起點在「Chrome」圖示的左邊、終點在「Desktop」文字的右邊）"
+    enriched = enrich_tool_arguments_from_goal(
+        "drag",
+        {
+            "start_nearby_objects": ["「Chrome」圖示"],
+            "destination_nearby_objects": ["「Desktop」文字"],
+        },
+        goal,
+    )
+    assert enriched["start_nearby_objects"] == ["在「Chrome」圖示的左邊"]
+    assert enriched["destination_nearby_objects"] == ["在「Desktop」文字的右邊"]
+
+
+def test_enrich_tool_arguments_from_goal_ignores_other_tools() -> None:
+    args = {"button": "left", "instruction": "輸入欄"}
+    assert enrich_tool_arguments_from_goal("click", args, "（在「a」的下面）") == args

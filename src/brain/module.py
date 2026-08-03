@@ -30,6 +30,7 @@ from src.common.instruction_tool_cache import (
     upsert_tool_calls,
 )
 from src.common.llm_factory import get_llm_client
+from src.common.nearby_side import enrich_tool_arguments_from_goal
 from src.common.prompting import get_prompt
 from src.common.run_state import get_run_state_manager
 from src.common.runtime_context import (
@@ -344,6 +345,25 @@ class BrainModule:
             return None
         return image_paths[0]
 
+    def _enrich_tool_arguments(
+        self, tool_name: str, arguments: dict[str, Any], goal: str
+    ) -> dict[str, Any]:
+        """Restore directed nearby sides from the step goal when the model stripped them."""
+        enriched = enrich_tool_arguments_from_goal(tool_name, arguments, goal)
+        for key in (
+            "nearby_objects",
+            "start_nearby_objects",
+            "destination_nearby_objects",
+        ):
+            before = arguments.get(key)
+            after = enriched.get(key)
+            if after is not None and after != before:
+                self.manager.log_info(
+                    f"{tool_name}: restored nearby sides from goal "
+                    f"{key}={before!r} -> {after!r}"
+                )
+        return enriched
+
     async def _normalize_tool_name(self, tool_name: str, arguments: dict | None = None) -> str:
         """
         Normalize model-emitted tool names to canonical callable names.
@@ -562,6 +582,7 @@ class BrainModule:
                 self.manager.log_error(f"Cache replay: error normalizing tool name: {e}")
                 self._save_step_messages(messages)
                 return False
+            arguments = self._enrich_tool_arguments(normalized_name, arguments, goal)
             result = await self._hand.execute_tool_command(
                 ToolCommand(
                     action=normalized_name,
@@ -703,6 +724,9 @@ class BrainModule:
                         step_succeeded = False
                         abort_step = True
                         break
+                    arguments = self._enrich_tool_arguments(
+                        normalized_name, arguments, goal
+                    )
                     result = await self._hand.execute_tool_command(
                         ToolCommand(
                             action=normalized_name,

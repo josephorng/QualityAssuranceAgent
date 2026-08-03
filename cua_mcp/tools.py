@@ -197,9 +197,10 @@ async def move_mouse_visual(
     show the full indexed candidate list and screenshot(s) to the multimodal LLM once,
     then move to the center of the candidate selected by that LLM.
 
-    Use when normal move_mouse repeatedly fails to match a visible target. This tool
-    intentionally skips target parsing, similarity filtering, nearby-object filtering,
-    and additional disambiguation logic.
+    Use when normal move_mouse repeatedly fails to match a visible target. Skips
+    target parsing, similarity filtering, and nearby-object filtering. When the
+    chosen target has label-similar peers, runs similar_function_describe to
+    re-rank among those peers before moving.
     """
     duration: float = 0.2
     return await _move_mouse_visual(

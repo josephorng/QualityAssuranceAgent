@@ -952,15 +952,11 @@ async def test_resolve_mouse_point_nearby_prefilter_skips_ollama(
     async def fail_ollama(*_args, **_kwargs):
         raise AssertionError("picker LLM should be skipped after nearby prefilter")
 
-    async def fake_describe(anchor, candidates, image_paths):
-        assert len(candidates) == 2
-        assert image_paths
-        return [f"role-{i}" for i in range(len(candidates))]
+    async def fail_describe(*_args, **_kwargs):
+        raise AssertionError("similar_function_describe should not run on move_mouse")
 
-    async def fake_repick(anchor, candidates, functions, image_paths, **_kwargs):
-        # Keep the nearby-prefiltered choice (chosen is first in similar list).
-        assert candidates[0] is correct
-        return 0, "kept-after-describe"
+    async def fail_repick(*_args, **_kwargs):
+        raise AssertionError("similar_function_describe should not run on move_mouse")
 
     monkeypatch.setattr(
         "cua_mcp.select_mouse_target.parse_mouse_target_instruction",
@@ -992,11 +988,11 @@ async def test_resolve_mouse_point_nearby_prefilter_skips_ollama(
     )
     monkeypatch.setattr(
         "cua_mcp.select_mouse_target._describe_ui_candidate_functions",
-        fake_describe,
+        fail_describe,
     )
     monkeypatch.setattr(
         "cua_mcp.select_mouse_target._select_center_with_functions",
-        fake_repick,
+        fail_repick,
     )
     monkeypatch.setattr(
         "cua_mcp.select_mouse_target._run_manager",
@@ -1019,15 +1015,14 @@ async def test_resolve_mouse_point_nearby_prefilter_skips_ollama(
     assert (gx, gy) == (correct.cx, correct.cy)
     assert meta["selected_index"] == 0
     assert meta["target_text"] == "文件"
-    assert meta["disambiguation"] == "similar_function_describe"
-    assert meta["similar_count"] == 2
+    assert "disambiguation" not in meta
 
 
 @pytest.mark.asyncio
-async def test_resolve_mouse_point_function_describe_repick(
+async def test_resolve_mouse_point_does_not_run_function_describe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When similar peers exist, describe + re-pick can override the first pick."""
+    """similar_function_describe belongs on move_mouse_visual, not move_mouse."""
     import numpy as np
 
     from cua_mcp.select_mouse_target import resolve_mouse_point
@@ -1035,9 +1030,6 @@ async def test_resolve_mouse_point_function_describe_repick(
     outlook = _detection_from_bbox((2240, 20, 30, 16), YOLO_CLASS_TEXT, text="搜尋")
     taskbar = _detection_from_bbox((2550, 1040, 30, 16), YOLO_CLASS_TEXT, text="搜尋")
     other = _detection_from_bbox((100, 100, 30, 16), YOLO_CLASS_TEXT, text="關閉")
-
-    describe_calls: list[list[str]] = []
-    repick_calls: list[dict[str, object]] = []
 
     async def fake_parse(instruction: str):
         return "搜尋欄位", 0, 0, []
@@ -1047,32 +1039,13 @@ async def test_resolve_mouse_point_function_describe_repick(
 
     async def fake_ollama(anchor, candidates, image_paths, **_kwargs):
         assert candidates == [outlook, taskbar]
-        assert image_paths
         return 1, "picked-taskbar"
 
-    async def fake_describe(anchor, candidates, image_paths):
-        describe_calls.append([f"{d.cx},{d.cy}" for d in candidates])
-        assert image_paths == ["shot.png"]
-        # chosen (taskbar) is first among peers
-        assert candidates[0] is taskbar
-        assert outlook in candidates
-        return [
-            "Windows 工作列搜尋" if d is taskbar else "Outlook 郵件搜尋欄"
-            for d in candidates
-        ]
+    async def fail_describe(*_args, **_kwargs):
+        raise AssertionError("describe should not run on move_mouse")
 
-    async def fake_repick(anchor, candidates, functions, image_paths, **_kwargs):
-        repick_calls.append(
-            {
-                "n": len(candidates),
-                "functions": list(functions),
-                "images": list(image_paths),
-            }
-        )
-        assert image_paths == ["shot.png"]
-        assert candidates[0] is taskbar
-        outlook_idx = next(i for i, d in enumerate(candidates) if d is outlook)
-        return outlook_idx, "picked-outlook-after-describe"
+    async def fail_repick(*_args, **_kwargs):
+        raise AssertionError("re-pick should not run on move_mouse")
 
     monkeypatch.setattr(
         "cua_mcp.select_mouse_target.parse_mouse_target_instruction",
@@ -1104,11 +1077,11 @@ async def test_resolve_mouse_point_function_describe_repick(
     )
     monkeypatch.setattr(
         "cua_mcp.select_mouse_target._describe_ui_candidate_functions",
-        fake_describe,
+        fail_describe,
     )
     monkeypatch.setattr(
         "cua_mcp.select_mouse_target._select_center_with_functions",
-        fake_repick,
+        fail_repick,
     )
     monkeypatch.setattr(
         "cua_mcp.select_mouse_target._run_manager",
@@ -1126,38 +1099,11 @@ async def test_resolve_mouse_point_function_describe_repick(
         )(),
     )
 
-    import cua_mcp.select_mouse_target as smt
-
-    real_disambiguate = smt._maybe_disambiguate_similar_selection
-
-    async def disambiguate_with_fixed_images(**kwargs):
-        kwargs = dict(kwargs)
-        kwargs["image_paths"] = ["shot.png"]
-        kwargs["monitor_indices"] = [1]
-        kwargs["overlay_dir"] = __import__("pathlib").Path(".")
-        kwargs["overlay_stamp"] = "test"
-        # Skip real overlay I/O for the fake shot.png path.
-        monkeypatch.setattr(
-            "cua_mcp.select_mouse_target._write_indexed_bbox_overlay_images",
-            lambda *_a, **_k: ["shot.png"],
-        )
-        return await real_disambiguate(**kwargs)
-
-    monkeypatch.setattr(
-        "cua_mcp.select_mouse_target._maybe_disambiguate_similar_selection",
-        disambiguate_with_fixed_images,
-    )
-
     gx, gy, meta = await resolve_mouse_point("搜尋欄位")
-    assert (gx, gy) == (outlook.cx, outlook.cy)
-    assert meta["target_text"] == "搜尋"
-    assert meta["disambiguation"] == "similar_function_describe"
-    assert meta["similar_count"] == 2
-    assert meta["initial_selected_index"] == 1
-    assert meta["selected_text"] == "picked-outlook-after-describe"
-    assert describe_calls
-    assert repick_calls
-    assert repick_calls[0]["images"] == ["shot.png"]
+    assert (gx, gy) == (taskbar.cx, taskbar.cy)
+    assert meta["selected_index"] == 1
+    assert meta["selected_text"] == "picked-taskbar"
+    assert "disambiguation" not in meta
 
 
 @pytest.mark.asyncio

@@ -497,9 +497,9 @@ TOOL_FUNCTIONS: list[callable[..., Any]] = [
 def get_mode_tool_functions() -> list[callable[..., Any]]:
     """Return the action tools exposed to the model for the active run mode."""
     if is_smart_mode():
-        hidden_names = {"move_mouse_visual"}
-    elif not is_runtime_command_mode():
         hidden_names = {"move_mouse"}
+    elif not is_runtime_command_mode():
+        hidden_names = {"move_mouse_visual"}
     else:
         hidden_names = set()
     return [tool for tool in TOOL_FUNCTIONS if tool.__name__ not in hidden_names]

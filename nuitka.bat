@@ -40,6 +40,7 @@ python -m nuitka ^
     --include-data-files=cua_mcp/read_screen_text/model_config.json=cua_mcp/read_screen_text/model_config.json ^
     --include-data-files=cua_mcp/read_screen_text/icon_map.json=cua_mcp/read_screen_text/icon_map.json ^
     --include-package-data=opencc ^
+    --include-package-data=customtkinter ^
     --enable-plugin=tk-inter ^
     --windows-disable-console ^
     %ENTRYSCRIPT%

@@ -84,7 +84,7 @@ def test_visual_mouse_is_available_to_brain() -> None:
     assert "move_mouse_visual" in names
 
 
-def test_script_mode_hides_standard_move_mouse(
+def test_script_mode_hides_visual_move_mouse(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv(SMART_MODE_ENV, raising=False)
@@ -92,11 +92,11 @@ def test_script_mode_hides_standard_move_mouse(
 
     names = {tool.__name__ for tool in get_mode_tool_functions()}
 
-    assert "move_mouse" not in names
-    assert "move_mouse_visual" in names
+    assert "move_mouse" in names
+    assert "move_mouse_visual" not in names
 
 
-def test_smart_mode_hides_visual_move_mouse(
+def test_smart_mode_hides_standard_move_mouse(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(SMART_MODE_ENV, "1")
@@ -104,5 +104,5 @@ def test_smart_mode_hides_visual_move_mouse(
 
     names = {tool.__name__ for tool in get_mode_tool_functions()}
 
-    assert "move_mouse" in names
-    assert "move_mouse_visual" not in names
+    assert "move_mouse" not in names
+    assert "move_mouse_visual" in names

@@ -1548,10 +1548,11 @@ class OcrViewerApp:
             self.status_var.set("No image selected to copy")
             return
         dest_dir = YOLO_UNDONE_IMAGES
+        run = self._selected_run()
+        folder_name = run.name if run is not None else src.parent.name
         try:
             dest_dir.mkdir(parents=True, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            dest = dest_dir / f"cua_{timestamp}_{src.name}"
+            dest = dest_dir / f"cua_{folder_name}_{src.name}"
             shutil.copy2(src, dest)
             self.status_var.set(f"Copied to {dest}")
         except OSError as exc:

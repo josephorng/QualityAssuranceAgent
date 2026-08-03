@@ -5,23 +5,106 @@ import json
 import os
 import shutil
 import signal
+import sys
 import tempfile
 import threading
+import traceback
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.common.llm_factory import reset_llm_client
-from src.common.run_state import RunStateManager, RunPaths, reset_run_state_manager
-from src.runtime.coordinator import RuntimeCoordinator
-from src.common.runtime_context import (
-    RUNTIME_COMMAND_MODE_ENV,
-    SCRIPT_LINES_ENV,
-    SCRIPT_PATH_ENV,
-    SMART_GOAL_ENV,
-    SMART_MODE_ENV,
-    set_runtime_env,
-)
+CRASH_LOG_FILENAME = "ComputerAgent_crash.log"
+
+
+def _application_dir_for_crash_log() -> Path:
+    """Directory containing the distributed exe (onefile-safe), or project root in dev."""
+    # Nuitka onefile runs from a temp unpack dir; argv[0] is still the launched .exe.
+    if getattr(sys, "frozen", False) or globals().get("__compiled__") is not None:
+        if sys.argv:
+            launched = Path(sys.argv[0]).expanduser()
+            try:
+                launched = launched.resolve()
+            except OSError:
+                pass
+            if launched.suffix.lower() == ".exe" and launched.parent.is_dir():
+                return launched.parent
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def _crash_log_path() -> Path:
+    return _application_dir_for_crash_log() / CRASH_LOG_FILENAME
+
+
+def write_crash_log(
+    exc: BaseException | None = None,
+    *,
+    exc_info: tuple[type[BaseException], BaseException, Any] | None = None,
+) -> Path | None:
+    """Write a crash report to ComputerAgent_crash.log (exe dir, else %TEMP%)."""
+    if exc_info is not None:
+        tb_text = "".join(traceback.format_exception(*exc_info))
+    elif exc is not None:
+        tb_text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    else:
+        tb_text = "".join(traceback.format_exception(*sys.exc_info()))
+
+    lines = [
+        f"timestamp_utc={datetime.now(timezone.utc).isoformat()}",
+        f"executable={sys.executable!r}",
+        f"cwd={os.getcwd()!r}",
+        f"frozen={getattr(sys, 'frozen', False)!r}",
+        "",
+        tb_text.rstrip(),
+        "",
+    ]
+    text = "\n".join(lines)
+    candidates = [_crash_log_path(), Path(tempfile.gettempdir()) / CRASH_LOG_FILENAME]
+    for path in candidates:
+        try:
+            path.write_text(text, encoding="utf-8")
+            return path
+        except OSError:
+            continue
+    return None
+
+
+def _ensure_stdio_streams() -> None:
+    """Windows GUI builds (--windows-disable-console) leave stdout/stderr as None.
+
+    CustomTkinter writes font warnings to sys.stderr; without a stream that raises
+    AttributeError: 'NoneType' object has no attribute 'write'.
+    """
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8", errors="replace")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8", errors="replace")
+
+
+def _install_crash_logging() -> None:
+    """Log uncaught exceptions (main thread and other threads) to ComputerAgent_crash.log."""
+
+    def _excepthook(
+        exc_type: type[BaseException],
+        exc: BaseException,
+        tb: Any,
+    ) -> None:
+        write_crash_log(exc_info=(exc_type, exc, tb))
+        try:
+            dismiss_nuitka_onefile_splash()
+        except Exception:
+            pass
+        sys.__excepthook__(exc_type, exc, tb)
+
+    def _thread_excepthook(args: threading.ExceptHookArgs) -> None:
+        if args.exc_type is not None and args.exc_value is not None:
+            write_crash_log(exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+        previous(args)
+
+    previous = threading.excepthook
+    sys.excepthook = _excepthook
+    threading.excepthook = _thread_excepthook
 
 
 def clear_runs_folder(runs_root: Path) -> None:
@@ -45,8 +128,18 @@ def prepare_run_session(
     run_folder_name: str | None = None,
     smart_mode: bool = False,
     smart_goal: str | None = None,
-) -> tuple[RunStateManager, RunPaths, str]:
+) -> tuple[Any, Any, str]:
     """Create run directory, set process env for script/runtime/smart mode and monitor selection."""
+    from src.common.run_state import RunStateManager
+    from src.common.runtime_context import (
+        RUNTIME_COMMAND_MODE_ENV,
+        SCRIPT_LINES_ENV,
+        SCRIPT_PATH_ENV,
+        SMART_GOAL_ENV,
+        SMART_MODE_ENV,
+        set_runtime_env,
+    )
+
     if clear_runs_root:
         clear_runs_folder(runs_root)
     if not eye_monitor_indices:
@@ -112,12 +205,15 @@ def request_coordinator_cancel() -> bool:
 
 def run_coordinator_sync(*, smart_mode: bool = False) -> None:
     """Run one coordinator lifecycle; caller must set env and ``prepare_run_session`` first."""
+    from src.common.llm_factory import reset_llm_client
+    from src.common.run_state import reset_run_state_manager
+    from src.common.runtime_context import get_runtime_env
+    from src.runtime.coordinator import RuntimeCoordinator
+
     reset_run_state_manager()
     # ``asyncio.run`` closes its loop when the run ends; drop LLM clients so the next
     # run builds fresh async transports instead of reusing ones bound to a closed loop.
     reset_llm_client()
-
-    from src.common.runtime_context import get_runtime_env
 
     run_root, _ = get_runtime_env()
 
@@ -178,6 +274,7 @@ def analyze_screen_recording(
     should_cancel: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Analyze a finished screen recording session and write hub-script instructions."""
+    from src.common.llm_factory import reset_llm_client
     from src.recorder.orchestrator import analyze_recording_session
 
     # Mirror run_coordinator_sync: rebuild the LLM client from agent settings and
@@ -207,6 +304,22 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    if os.name == "nt":
-        signal.signal(signal.SIGINT, signal.default_int_handler)
-    main()
+    _ensure_stdio_streams()
+    _install_crash_logging()
+    try:
+        if os.name == "nt":
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+        main()
+    except KeyboardInterrupt:
+        raise
+    except SystemExit:
+        raise
+    except BaseException as exc:
+        log_path = write_crash_log(exc)
+        try:
+            dismiss_nuitka_onefile_splash()
+        except Exception:
+            pass
+        if log_path is not None:
+            print(f"Crash logged to: {log_path}", file=sys.stderr)
+        raise SystemExit(1) from exc

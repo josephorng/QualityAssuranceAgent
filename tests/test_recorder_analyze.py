@@ -1250,6 +1250,64 @@ async def test_analyze_event_to_cache_ctrl_click_suffix(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_analyze_event_to_cache_hold_suffix(tmp_path: Path) -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="hold",
+        cursor_xy=(38, 636),
+        button="left",
+        duration_seconds=1.2,
+        screenshot_path="",
+    )
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision=_VISION_WITH_NEARBY,
+        )
+
+    assert result is not None
+    assert result["instruction"] == (
+        "將滑鼠移到「Chrome」圖示（附近有「OneNote」文字、「Docker」圖示），並按住約1.2秒。"
+    )
+    llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_analyze_event_to_cache_right_hold_suffix(tmp_path: Path) -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="hold",
+        cursor_xy=(38, 636),
+        button="right",
+        duration_seconds=2.0,
+        screenshot_path="",
+    )
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision=_VISION_WITH_NEARBY,
+        )
+
+    assert result is not None
+    assert result["instruction"] == (
+        "將滑鼠移到「Chrome」圖示（附近有「OneNote」文字、「Docker」圖示），並用右鍵按住約2秒。"
+    )
+    llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_analyze_event_to_cache_shift_double_click_suffix(tmp_path: Path) -> None:
     event = RecordedEvent(
         index=1,

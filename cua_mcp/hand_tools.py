@@ -292,6 +292,24 @@ def hold_key_down(key: str, seconds: float) -> dict[str, Any]:
     return {"key": token, "seconds": seconds}
 
 
+def hold_mouse(
+    seconds: float,
+    button: str = "left",
+    modifiers: list[str] | None = None,
+) -> dict[str, Any]:
+    held = [_canonicalize_key(m) for m in (modifiers or []) if str(m).strip()]
+    for key in held:
+        pyautogui.keyDown(key)
+    try:
+        pyautogui.mouseDown(button=button)
+        sleep(seconds)
+        pyautogui.mouseUp(button=button)
+        return {"button": button, "seconds": seconds, "modifiers": held}
+    finally:
+        for key in reversed(held):
+            pyautogui.keyUp(key)
+
+
 def _list_windows_with_titles() -> list[tuple[Any, str]]:
     out: list[tuple[Any, str]] = []
     for w in gw.getAllWindows():

@@ -7,7 +7,7 @@ from typing import Any
 
 
 POINTER_EVENT_KINDS = frozenset(
-    {"click", "double_click", "right_click", "middle_click", "scroll", "drag"}
+    {"click", "double_click", "right_click", "middle_click", "scroll", "drag", "hold"}
 )
 
 
@@ -24,6 +24,7 @@ class RecordedEvent:
     keys: list[str] | None = None
     text: str | None = None
     scroll_delta: int | None = None
+    duration_seconds: float | None = None
     screenshot_path: str = ""
     monitor_index: int | None = None
     monitor_offset: tuple[int, int] | None = None
@@ -70,6 +71,11 @@ class RecordedEvent:
             keys=list(keys) if isinstance(keys, list) else None,
             text=raw.get("text"),
             scroll_delta=raw.get("scroll_delta"),
+            duration_seconds=(
+                float(raw["duration_seconds"])
+                if raw.get("duration_seconds") is not None
+                else None
+            ),
             screenshot_path=str(raw.get("screenshot_path", "")),
             monitor_index=raw.get("monitor_index"),
             monitor_offset=tuple(offset) if isinstance(offset, list) and len(offset) == 2 else None,

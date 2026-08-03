@@ -18,12 +18,27 @@ def test_validate_tool_calls_requires_type_text_text() -> None:
     assert "text" in err
 
 
-def test_validate_tool_calls_accepts_move_mouse_and_click() -> None:
+def test_validate_tool_calls_accepts_hold_mouse() -> None:
     calls = [
-        {"name": "move_mouse", "arguments": {"instruction": "移到 Submit"}},
-        {"name": "click", "arguments": {"button": "left", "instruction": "點擊"}},
+        {"name": "move_mouse", "arguments": {"instruction": "移到圖示"}},
+        {
+            "name": "hold_mouse",
+            "arguments": {
+                "seconds": 1.0,
+                "button": "left",
+                "instruction": "按住約1秒",
+            },
+        },
     ]
     assert validate_tool_calls(calls) is None
+
+
+def test_validate_tool_calls_requires_hold_mouse_seconds() -> None:
+    err = validate_tool_calls(
+        [{"name": "hold_mouse", "arguments": {"button": "left", "instruction": "按住"}}]
+    )
+    assert err is not None
+    assert "seconds" in err
 
 
 def test_validate_tool_calls_accepts_move_mouse_nearby_objects() -> None:

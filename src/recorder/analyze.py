@@ -40,7 +40,7 @@ _DRAG_OFFSET_PHRASE_RE = re.compile(
     r"(?:(?:左方|右方|上方|下方)\d+個像素)(?:、(?:(?:左方|右方|上方|下方)\d+個像素))*"
 )
 _CLICK_POINTER_KINDS = frozenset(
-    {"click", "double_click", "right_click", "middle_click"}
+    {"click", "double_click", "right_click", "middle_click", "hold"}
 )
 _CLICK_MOVE_PREFIX = "將滑鼠移到"
 _POINTER_CLICK_ACTION_SUFFIX_BY_KIND = {
@@ -399,10 +399,35 @@ def instruction_for_drag(
     return f"從{source_anchor}拖到{dest_anchor}"
 
 
+def _format_hold_duration_label(duration_seconds: float | None) -> str:
+    seconds = 1.0 if duration_seconds is None else max(float(duration_seconds), 0.1)
+    rounded = round(seconds, 1)
+    if rounded == int(rounded):
+        return str(int(rounded))
+    return f"{rounded:.1f}"
+
+
+def _hold_action_phrase(button: str | None, duration_seconds: float | None) -> str:
+    duration_label = _format_hold_duration_label(duration_seconds)
+    if button == "right":
+        return f"用右鍵按住約{duration_label}秒"
+    return f"按住約{duration_label}秒"
+
+
 def _pointer_click_action_suffix(
     kind: str,
     modifiers: list[str] | None,
+    *,
+    button: str | None = None,
+    duration_seconds: float | None = None,
 ) -> str | None:
+    if kind == "hold":
+        action = _hold_action_phrase(button, duration_seconds)
+        if modifiers:
+            combo = _hotkey_display_combo([str(m) for m in modifiers])
+            if combo:
+                return f"，並{combo}+{action}。"
+        return f"，並{action}。"
     if modifiers:
         action = _POINTER_CLICK_MODIFIER_ACTION_BY_KIND.get(kind)
         combo = _hotkey_display_combo([str(m) for m in modifiers])
@@ -426,7 +451,12 @@ def _finalize_instruction(
             destination if isinstance(destination, dict) else {},
         )
     instruction = append_nearby_context_comment(instruction, vision)
-    suffix = _pointer_click_action_suffix(event.kind, event.modifiers)
+    suffix = _pointer_click_action_suffix(
+        event.kind,
+        event.modifiers,
+        button=event.button,
+        duration_seconds=event.duration_seconds,
+    )
     if suffix:
         return instruction + suffix
     return instruction
@@ -540,6 +570,7 @@ async def analyze_event_to_cache(
         "double_click",
         "right_click",
         "middle_click",
+        "hold",
         "scroll",
         "drag",
     }:

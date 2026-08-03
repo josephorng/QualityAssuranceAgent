@@ -35,6 +35,8 @@ from src.recorder.window_snapshot import (
 _DOUBLE_CLICK_INTERVAL_S = 0.35
 _DOUBLE_CLICK_MAX_DIST_PX = 8
 _DRAG_THRESHOLD_PX = 8
+# Must exceed the double-click window so short presses still defer for double-click.
+_HOLD_THRESHOLD_S = 0.5
 _QUEUE_SENTINEL = object()
 _LISTENER_STARTUP_TIMEOUT_S = 2.0
 _SPECIAL_KEYS = frozenset(
@@ -118,6 +120,7 @@ class _QueuedEvent:
     keys: list[str] | None = None
     text: str | None = None
     scroll_delta: int | None = None
+    duration_seconds: float | None = None
     anchor_click_xy: tuple[int, int] | None = None
     end_xy: tuple[int, int] | None = None
     end_screenshot_path: str = ""
@@ -128,6 +131,10 @@ class _QueuedEvent:
 
 def _pending_capture_path(run_dir: Path) -> Path:
     return run_dir / "screenshots" / "_pending_capture.jpeg"
+
+
+def _pending_right_capture_path(run_dir: Path) -> Path:
+    return run_dir / "screenshots" / "_pending_right_capture.jpeg"
 
 
 def _pending_drag_end_capture_path(run_dir: Path, monitor_index: int) -> Path:
@@ -478,6 +485,12 @@ class RecordingSession:
         self._pending_screenshot: tuple[str, int, tuple[int, int]] | None = None
         self._pending_drag_end_captures: dict[int, tuple[str, int, tuple[int, int]]] | None = None
         self._pending_windows_before: tuple[WindowInfo, ...] | None = None
+        self._pending_right_coords: tuple[int, int] | None = None
+        self._pending_right_down_at: float | None = None
+        self._pending_right_timestamp_utc: str | None = None
+        self._pending_right_modifiers: list[str] | None = None
+        self._pending_right_screenshot: tuple[str, int, tuple[int, int]] | None = None
+        self._pending_right_windows_before: tuple[WindowInfo, ...] | None = None
         self._pending_text_chars: list[str] = []
         self._pending_text_meta: dict[str, Any] | None = None
         self._last_pointer_cursor_xy: tuple[int, int] | None = None
@@ -540,6 +553,12 @@ class RecordingSession:
             self._pending_screenshot = None
             self._pending_drag_end_captures = None
             self._pending_windows_before = None
+            self._pending_right_coords = None
+            self._pending_right_down_at = None
+            self._pending_right_timestamp_utc = None
+            self._pending_right_modifiers = None
+            self._pending_right_screenshot = None
+            self._pending_right_windows_before = None
             self._pending_text_chars = []
             self._pending_text_meta = None
             self._last_pointer_cursor_xy = None
@@ -598,21 +617,13 @@ class RecordingSession:
             started_at = self._started_at
             pending = self._pending_click_timer
             pending_coords = self._pending_click_coords
+            pending_down_at = self._pending_click_down_at
             left_press_dragging = self._left_press_dragging
             last_move_xy = self._last_move_xy
-            pending_drag_end = self._pending_drag_end_captures
+            pending_right_coords = self._pending_right_coords
+            pending_right_down_at = self._pending_right_down_at
             self._pending_click_timer = None
-            self._pending_click_coords = None
-            self._pending_click_down_at = None
-            self._pending_click_modifiers = None
-            self._left_button_down = False
-            self._left_press_dragging = False
-            self._last_move_xy = None
-            self._pending_screenshot = None
-            self._pending_drag_end_captures = None
-            self._pending_windows_before = None
 
-        _discard_pending_drag_end_capture_files(pending_drag_end)
         self._flush_pending_text_input()
         if pending is not None:
             pending.cancel()
@@ -621,7 +632,33 @@ class RecordingSession:
             self._flush_pending_drag(sx, sy, last_move_xy[0], last_move_xy[1], button)
         elif pending_coords is not None:
             x, y, button = pending_coords
-            self._flush_pending_click(x, y, button)
+            hold_duration = (
+                time.monotonic() - pending_down_at if pending_down_at is not None else 0.0
+            )
+            if hold_duration >= _HOLD_THRESHOLD_S:
+                self._flush_pending_hold(x, y, button, hold_duration)
+            else:
+                self._flush_pending_click(x, y, button)
+
+        if pending_right_coords is not None:
+            rx, ry = pending_right_coords
+            right_hold = (
+                time.monotonic() - pending_right_down_at
+                if pending_right_down_at is not None
+                else 0.0
+            )
+            if right_hold >= _HOLD_THRESHOLD_S:
+                self._flush_pending_right(rx, ry, kind="hold", duration_seconds=right_hold)
+            else:
+                self._flush_pending_right(rx, ry, kind="right_click")
+
+        with self._lock:
+            leftover_drag_end = self._pending_drag_end_captures
+            self._pending_drag_end_captures = None
+            self._clear_pending_right_gesture_locked()
+            self._pending_screenshot = None
+            self._pending_windows_before = None
+        _discard_pending_drag_end_capture_files(leftover_drag_end)
 
         for listener in listeners:
             try:
@@ -718,6 +755,18 @@ class RecordingSession:
         with self._lock:
             self._pending_screenshot = info
             self._pending_windows_before = windows_before
+
+    def _capture_pending_right_press(self, run_dir: Path, x: int, y: int) -> None:
+        """Capture the screen on right mouse-down before the click is delivered."""
+        pending_dest = _pending_right_capture_path(run_dir)
+        windows_before = self._snapshot_windows_before()
+        try:
+            info = _capture_screenshot_at_point(x, y, pending_dest)
+        except Exception:
+            info = None
+        with self._lock:
+            self._pending_right_screenshot = info
+            self._pending_right_windows_before = windows_before
 
     def _queue_event(self, item: _QueuedEvent) -> None:
         self._enqueue(item)
@@ -929,6 +978,32 @@ class RecordingSession:
             self._pending_screenshot = None
             self._pending_windows_before = None
 
+    def _clear_pending_right_gesture_locked(self) -> None:
+        self._pending_right_coords = None
+        self._pending_right_down_at = None
+        self._pending_right_timestamp_utc = None
+        self._pending_right_modifiers = None
+        self._pending_right_screenshot = None
+        self._pending_right_windows_before = None
+
+    def _discard_pending_right_capture_file(self) -> None:
+        with self._lock:
+            pending = self._pending_right_screenshot
+            self._pending_right_screenshot = None
+        if pending is None:
+            return
+        src = Path(pending[0])
+        if src.is_file():
+            try:
+                src.unlink()
+            except OSError:
+                pass
+
+    def _clear_pending_right_gesture(self) -> None:
+        self._discard_pending_right_capture_file()
+        with self._lock:
+            self._clear_pending_right_gesture_locked()
+
     def _snapshot_pressed_modifiers(self) -> list[str] | None:
         with self._lock:
             return _ordered_modifiers(self._pressed_modifiers)
@@ -989,6 +1064,107 @@ class RecordingSession:
                 monitor_offset=mon_offset,
                 button=button,
                 modifiers=modifiers,
+                windows_before=pending_windows,
+            )
+        )
+
+    def _flush_pending_hold(
+        self,
+        x: int,
+        y: int,
+        button: str,
+        duration_seconds: float,
+    ) -> None:
+        self._flush_pending_text_input()
+        self._discard_pending_drag_end_captures()
+        with self._lock:
+            run_dir = self._run_dir
+            if run_dir is None:
+                return
+            if self._pending_click_coords != (x, y, button):
+                return
+            index = self._next_index
+            self._next_index += 1
+            pending_shot = self._pending_screenshot
+            pending_windows = self._pending_windows_before
+            timestamp_utc = self._pending_click_timestamp_utc or utc_now_iso()
+            modifiers = self._pending_click_modifiers
+            self._pending_screenshot = None
+            self._pending_windows_before = None
+            self._pending_click_timer = None
+            self._pending_click_coords = None
+            self._pending_click_down_at = None
+            self._pending_click_timestamp_utc = None
+            self._pending_click_modifiers = None
+            self._left_button_down = False
+            self._left_press_dragging = False
+            self._last_move_xy = None
+        shot_path, mon_idx, mon_offset = _finalize_screenshot(
+            run_dir,
+            index,
+            (x, y),
+            pending_shot,
+        )
+        self._remember_pointer_cursor((x, y))
+        self._queue_event(
+            _QueuedEvent(
+                kind="hold",
+                cursor_xy=(x, y),
+                event_index=index,
+                timestamp_utc=timestamp_utc,
+                screenshot_path=shot_path,
+                monitor_index=mon_idx,
+                monitor_offset=mon_offset,
+                button=button,
+                modifiers=modifiers,
+                duration_seconds=round(float(duration_seconds), 3),
+                windows_before=pending_windows,
+            )
+        )
+
+    def _flush_pending_right(
+        self,
+        x: int,
+        y: int,
+        *,
+        kind: str,
+        duration_seconds: float | None = None,
+    ) -> None:
+        self._flush_pending_text_input()
+        with self._lock:
+            run_dir = self._run_dir
+            if run_dir is None:
+                return
+            if self._pending_right_coords != (x, y):
+                return
+            index = self._next_index
+            self._next_index += 1
+            pending_shot = self._pending_right_screenshot
+            pending_windows = self._pending_right_windows_before
+            timestamp_utc = self._pending_right_timestamp_utc or utc_now_iso()
+            modifiers = self._pending_right_modifiers
+            self._clear_pending_right_gesture_locked()
+        shot_path, mon_idx, mon_offset = _finalize_screenshot(
+            run_dir,
+            index,
+            (x, y),
+            pending_shot,
+        )
+        self._remember_pointer_cursor((x, y))
+        self._queue_event(
+            _QueuedEvent(
+                kind=kind,
+                cursor_xy=(x, y),
+                event_index=index,
+                timestamp_utc=timestamp_utc,
+                screenshot_path=shot_path,
+                monitor_index=mon_idx,
+                monitor_offset=mon_offset,
+                button="right",
+                modifiers=modifiers,
+                duration_seconds=(
+                    round(float(duration_seconds), 3) if duration_seconds is not None else None
+                ),
                 windows_before=pending_windows,
             )
         )
@@ -1108,6 +1284,7 @@ class RecordingSession:
             keys=item.keys,
             text=item.text,
             scroll_delta=item.scroll_delta,
+            duration_seconds=item.duration_seconds,
             screenshot_path=item.screenshot_path,
             monitor_index=item.monitor_index,
             monitor_offset=item.monitor_offset,
@@ -1210,10 +1387,45 @@ class RecordingSession:
         if dragging:
             self._flush_pending_drag(sx, sy, ix, iy, button)
             return
+        hold_duration = time.monotonic() - down_at if down_at is not None else 0.0
+        if hold_duration >= _HOLD_THRESHOLD_S:
+            self._flush_pending_hold(sx, sy, button, hold_duration)
+            return
         if down_at is None:
             self._flush_pending_click(sx, sy, button)
             return
         self._schedule_deferred_click(sx, sy, button, down_at)
+
+    def _on_right_mouse_down(
+        self,
+        ix: int,
+        iy: int,
+        *,
+        timestamp_utc: str | None = None,
+    ) -> None:
+        action_timestamp_utc = timestamp_utc or utc_now_iso()
+        self._clear_pending_right_gesture()
+        with self._lock:
+            run_dir = self._run_dir
+            self._pending_right_coords = (ix, iy)
+            self._pending_right_down_at = time.monotonic()
+            self._pending_right_timestamp_utc = action_timestamp_utc
+            self._pending_right_modifiers = _ordered_modifiers(self._pressed_modifiers)
+        if run_dir is not None:
+            self._capture_pending_right_press(run_dir, ix, iy)
+
+    def _on_right_mouse_up(self, ix: int, iy: int) -> None:
+        with self._lock:
+            pending_coords = self._pending_right_coords
+            down_at = self._pending_right_down_at
+        if pending_coords is None:
+            return
+        sx, sy = pending_coords
+        hold_duration = time.monotonic() - down_at if down_at is not None else 0.0
+        if hold_duration >= _HOLD_THRESHOLD_S:
+            self._flush_pending_right(sx, sy, kind="hold", duration_seconds=hold_duration)
+            return
+        self._flush_pending_right(sx, sy, kind="right_click")
 
     def _on_mouse_click(self, x: int, y: int, button: mouse.Button, pressed: bool) -> None:
         timestamp_utc = utc_now_iso()
@@ -1227,9 +1439,15 @@ class RecordingSession:
             else:
                 self._on_left_mouse_up(ix, iy)
             return
+        if btn == "right":
+            if pressed:
+                self._on_right_mouse_down(ix, iy, timestamp_utc=timestamp_utc)
+            else:
+                self._on_right_mouse_up(ix, iy)
+            return
         if not pressed:
             return
-        kind = "right_click" if btn == "right" else "middle_click" if btn == "middle" else "click"
+        kind = "middle_click" if btn == "middle" else "click"
         self._queue_pointer_event_immediate(
             kind=kind,
             cursor_xy=(ix, iy),

@@ -24,6 +24,7 @@ _RECORDING_KIND_LABELS = {
     "double_click": "雙擊",
     "right_click": "右鍵點擊",
     "middle_click": "中鍵點擊",
+    "hold": "按住",
     "drag": "拖曳",
     "scroll": "捲動",
     "text_input": "輸入文字",

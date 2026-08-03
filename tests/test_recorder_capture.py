@@ -9,6 +9,7 @@ from unittest.mock import patch
 from src.recorder.capture import (
     RecordingSession,
     _DOUBLE_CLICK_INTERVAL_S,
+    _HOLD_THRESHOLD_S,
     _finalize_drag_end_screenshot,
 )
 from src.recorder.window_snapshot import WindowInfo
@@ -146,11 +147,13 @@ def test_event_timestamp_is_captured_before_worker_persistence(tmp_path) -> None
                 from pynput.mouse import Button
 
                 session._on_mouse_click(900, 700, Button.right, True)
+                session._on_mouse_click(900, 700, Button.right, False)
         finally:
             session.stop()
 
     assert len(captured_items) == 1
     assert captured_items[0].timestamp_utc == "2026-07-30T03:00:03.125000+00:00"
+    assert captured_items[0].kind == "right_click"
 
 
 def test_typing_burst_coalesced_into_one_event(tmp_path) -> None:
@@ -570,4 +573,125 @@ def test_shift_double_click_records_modifiers(tmp_path) -> None:
     raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
     assert raw["kind"] == "double_click"
     assert raw["modifiers"] == ["shift"]
+
+
+def test_left_hold_records_hold_event(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.mouse import Button
+
+            session._on_mouse_click(120, 240, Button.left, True)
+            time.sleep(_HOLD_THRESHOLD_S + 0.05)
+            session._on_mouse_click(120, 240, Button.left, False)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "hold"
+    assert raw["button"] == "left"
+    assert raw["duration_seconds"] >= _HOLD_THRESHOLD_S
+
+
+def test_short_left_press_still_records_click(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.mouse import Button
+
+            session._on_mouse_click(120, 240, Button.left, True)
+            time.sleep(0.05)
+            session._on_mouse_click(120, 240, Button.left, False)
+            time.sleep(_DOUBLE_CLICK_INTERVAL_S + 0.05)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "click"
+    assert raw.get("duration_seconds") is None
+
+
+def test_left_hold_with_drag_still_records_drag(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.mouse import Button
+
+            session._on_mouse_click(100, 100, Button.left, True)
+            time.sleep(_HOLD_THRESHOLD_S + 0.05)
+            session._on_mouse_move(150, 150)
+            session._on_mouse_click(200, 200, Button.left, False)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "drag"
+
+
+def test_right_hold_records_hold_event(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.mouse import Button
+
+            session._on_mouse_click(300, 400, Button.right, True)
+            time.sleep(_HOLD_THRESHOLD_S + 0.05)
+            session._on_mouse_click(300, 400, Button.right, False)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "hold"
+    assert raw["button"] == "right"
+    assert raw["duration_seconds"] >= _HOLD_THRESHOLD_S
+
+
+def test_ctrl_hold_records_modifiers(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key
+            from pynput.mouse import Button
+
+            session._on_key_press(Key.ctrl_l)
+            session._on_mouse_click(120, 240, Button.left, True)
+            time.sleep(_HOLD_THRESHOLD_S + 0.05)
+            session._on_mouse_click(120, 240, Button.left, False)
+            session._on_key_release(Key.ctrl_l)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "hold"
+    assert raw["modifiers"] == ["ctrl"]
 

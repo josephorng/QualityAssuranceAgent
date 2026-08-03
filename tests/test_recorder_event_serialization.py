@@ -101,3 +101,20 @@ def test_recorded_event_round_trip_drag_end_screenshot() -> None:
     restored = RecordedEvent.from_dict(event.to_dict())
     assert restored.end_screenshot_path == "runs/test/screenshots/event_005_end.jpeg"
     assert restored.end_monitor_offset == (0, 0)
+
+
+def test_recorded_event_round_trip_hold() -> None:
+    event = RecordedEvent(
+        index=6,
+        timestamp_utc="2026-07-02T00:00:00+00:00",
+        kind="hold",
+        cursor_xy=(100, 200),
+        button="right",
+        duration_seconds=1.25,
+        screenshot_path="runs/test/screenshots/event_006.jpeg",
+        monitor_offset=(0, 0),
+    )
+    restored = RecordedEvent.from_dict(event.to_dict())
+    assert restored.kind == "hold"
+    assert restored.button == "right"
+    assert restored.duration_seconds == 1.25

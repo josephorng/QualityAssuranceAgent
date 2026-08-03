@@ -235,6 +235,14 @@ def _hold_key(key: str, seconds: float) -> dict[str, Any]:
     return hand_tools.hold_key_down(key, seconds)
 
 
+def _hold_mouse(
+    seconds: float,
+    button: str = "left",
+    modifiers: list[str] | None = None,
+) -> dict[str, Any]:
+    return hand_tools.hold_mouse(seconds=seconds, button=button, modifiers=modifiers)
+
+
 def _zoom(scroll_clicks: int) -> dict[str, Any]:
     return hand_tools.zoom_scroll(scroll_clicks)
 

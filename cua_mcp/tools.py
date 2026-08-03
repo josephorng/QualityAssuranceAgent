@@ -13,6 +13,7 @@ from cua_mcp.tool_module import (
     _double_click,
     _drag,
     _hold_key,
+    _hold_mouse,
     _hotkey,
     _key,
     _left_mouse_down,
@@ -361,6 +362,22 @@ def hold_key(
 
 
 @mcp_server.tool()
+def hold_mouse(
+    seconds: float,
+    button: str = "left",
+    modifiers: list[str] | None = None,
+    instruction: str = "",
+):
+    '''
+    Press and hold a mouse button for a duration, then release.
+    Optional modifiers (e.g. ["ctrl"], ["shift"]) are held for the duration.
+    '''
+    return _hold_mouse(seconds=seconds, button=button, modifiers=modifiers).update(
+        {"instruction": instruction}
+    )
+
+
+@mcp_server.tool()
 def zoom(
     scroll_clicks: int,
     instruction: str = "",
@@ -488,6 +505,7 @@ TOOL_FUNCTIONS: list[callable[..., Any]] = [
     left_mouse_up,
     scroll,
     hold_key,
+    hold_mouse,
     zoom,
     maximize_windows,
     close_windows,

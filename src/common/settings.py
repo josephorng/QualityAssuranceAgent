@@ -79,11 +79,83 @@ OLLAMA_PROBE_REMOTE_HOST = BACKEND_PRESETS["ollama_server"]["ollama_host"]
 _OLLAMA_PROBE_TIMEOUT_SECONDS = 2.5
 
 
+_USER_DATA_APP_NAME = "ComputerUseAgent"
+_DEFAULT_RUNS_NAME = "runs"
+
+
+def is_frozen_app() -> bool:
+    """True when running as a Nuitka/PyInstaller binary."""
+    return bool(getattr(sys, "frozen", False) or globals().get("__compiled__") is not None)
+
+
 def application_root() -> Path:
     """Project root in dev; directory containing the exe when frozen (Nuitka/PyInstaller)."""
-    if getattr(sys, "frozen", False):
+    if is_frozen_app():
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parents[2]
+
+
+def user_documents_dir() -> Path:
+    """User Documents folder (Windows known folder when available)."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class _GUID(ctypes.Structure):
+                _fields_ = [
+                    ("Data1", wintypes.DWORD),
+                    ("Data2", wintypes.WORD),
+                    ("Data3", wintypes.WORD),
+                    ("Data4", wintypes.BYTE * 8),
+                ]
+
+            # FOLDERID_Documents = {FDD39AD0-238F-46AF-ADB4-6C85480369C7}
+            folder_id = _GUID(
+                0xFDD39AD0,
+                0x238F,
+                0x46AF,
+                (wintypes.BYTE * 8)(0xAD, 0xB4, 0x6C, 0x85, 0x48, 0x03, 0x69, 0xC7),
+            )
+            path_ptr = ctypes.c_wchar_p()
+            hr = ctypes.windll.shell32.SHGetKnownFolderPath(
+                ctypes.byref(folder_id), 0, None, ctypes.byref(path_ptr)
+            )
+            if hr == 0 and path_ptr.value:
+                path = Path(path_ptr.value)
+                ctypes.windll.ole32.CoTaskMemFree(path_ptr)
+                return path
+            if path_ptr:
+                ctypes.windll.ole32.CoTaskMemFree(path_ptr)
+        except (AttributeError, OSError, ValueError, TypeError):
+            pass
+    return Path.home() / "Documents"
+
+
+def default_runs_dir() -> Path:
+    """Frozen: Documents/<app>/runs; dev: <project>/runs."""
+    if is_frozen_app():
+        return user_documents_dir() / _USER_DATA_APP_NAME / _DEFAULT_RUNS_NAME
+    return application_root() / _DEFAULT_RUNS_NAME
+
+
+def resolve_runs_dir(configured: str | Path | None = None) -> Path:
+    """Resolve ``runs_dir`` to an absolute path.
+
+    Absolute configured paths are used as-is. Empty / ``runs`` uses
+    :func:`default_runs_dir`. Other relative paths resolve against
+    :func:`application_root`.
+    """
+    if configured is None:
+        raw = str(Settings().runs_dir).strip()
+    else:
+        raw = str(configured).strip()
+    if not raw or raw in (".", _DEFAULT_RUNS_NAME):
+        return default_runs_dir().resolve()
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = application_root() / path
+    return path.resolve()
 
 
 ROOT_DIR = application_root()
@@ -92,13 +164,13 @@ ROOT_DIR = application_root()
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
-    llm_backend: str = "ollama_local"
-    ollama_host: str = "http://localhost:11434"
-    brain_lm: str = "gemma4:e4b"
-    runs_dir: str = "runs"
+    llm_backend: str = "vllm_server"
+    ollama_host: str = BACKEND_PRESETS["vllm_server"]["ollama_host"]
+    brain_lm: str = BACKEND_PRESETS["vllm_server"]["brain_lm"]
+    runs_dir: str = _DEFAULT_RUNS_NAME
     log_level: str = "INFO"
-    triton_http_url: str = VISION_BACKEND_PRESETS["triton_local"]["triton_http_url"]
-    vision_backend: str = "triton_local"
+    triton_http_url: str = VISION_BACKEND_PRESETS["triton_192_168_0_17"]["triton_http_url"]
+    vision_backend: str = "triton_192_168_0_17"
     triton_timeout_seconds: float = 20.0
     smart_max_cycles: int = 50
     smart_max_recovery_attempts: int = 3
@@ -136,7 +208,7 @@ def preset_for_backend(backend: str) -> dict[str, Any]:
 def default_agent_settings_dict() -> dict[str, Any]:
     """Built-in defaults for agent settings (no file required)."""
     base = Settings()
-    data = preset_for_backend("ollama_local")
+    data = preset_for_backend(base.llm_backend)
     data["vision_backend"] = base.vision_backend
     data["triton_http_url"] = preset_for_vision_backend(base.vision_backend)["triton_http_url"]
     return data
@@ -144,7 +216,7 @@ def default_agent_settings_dict() -> dict[str, Any]:
 
 def _runs_dir_from_env() -> Path:
     """Resolve runs_dir from .env / env only (not from agent_settings.json)."""
-    return Path(Settings().runs_dir)
+    return resolve_runs_dir(Settings().runs_dir)
 
 
 def agent_settings_path() -> Path:
@@ -169,7 +241,7 @@ def _overlay_agent_keys(target: dict[str, Any], raw: Any) -> dict[str, Any]:
     if isinstance(raw, dict):
         legacy_host = raw.get("vllm_host")
         if isinstance(legacy_host, str) and legacy_host.strip():
-            backend = canonicalize_llm_backend(str(out.get("llm_backend", "ollama_local")))
+            backend = canonicalize_llm_backend(str(out.get("llm_backend", Settings().llm_backend)))
             if backend == "ollama_server" or not str(out.get("ollama_host", "")).strip():
                 out["ollama_host"] = legacy_host.strip()
     return out
@@ -178,7 +250,7 @@ def _overlay_agent_keys(target: dict[str, Any], raw: Any) -> dict[str, Any]:
 def normalize_agent_settings_dict(data: dict[str, Any]) -> dict[str, Any]:
     """Apply fixed model/host preset for the selected backend; keep probed hosts."""
     base = Settings()
-    backend = canonicalize_llm_backend(str(data.get("llm_backend", "ollama_local")))
+    backend = canonicalize_llm_backend(str(data.get("llm_backend", base.llm_backend)))
     out = preset_for_backend(backend)
     vision_key = canonicalize_vision_backend(
         str(data.get("vision_backend", base.vision_backend))
@@ -314,7 +386,7 @@ def apply_startup_triton_probe() -> tuple[bool, str]:
 def apply_startup_ollama_host_probe() -> tuple[bool, str]:
     """Probe local then remote Ollama; persist chosen host when reachable."""
     data = load_agent_settings_dict()
-    backend = canonicalize_llm_backend(str(data.get("llm_backend", "ollama_local")))
+    backend = canonicalize_llm_backend(str(data.get("llm_backend", Settings().llm_backend)))
     if backend == "vllm_server":
         return True, f"vLLM 主機：{data['ollama_host']}"
 
@@ -380,7 +452,7 @@ def load_settings() -> Settings:
         "llm_backend": agent["llm_backend"],
         "ollama_host": agent["ollama_host"],
         "brain_lm": agent["brain_lm"],
-        "runs_dir": base.runs_dir,
+        "runs_dir": str(resolve_runs_dir(base.runs_dir)),
         "log_level": base.log_level,
         "triton_http_url": agent["triton_http_url"],
         "vision_backend": agent["vision_backend"],

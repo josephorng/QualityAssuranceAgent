@@ -30,6 +30,7 @@ from cua_mcp.select_ui_element import UiDetection
 from cua_mcp.yolo_onnx import DEFAULT_CONF_YOLOV26_END2END
 from src.common.io_utils import write_json
 from src.common.run_state import unique_run_folder_name
+from src.common.settings import resolve_runs_dir
 
 
 def _candidate_to_dict(candidate: UiDetection) -> dict[str, Any]:
@@ -148,12 +149,13 @@ def _analyze_capture(
 
 
 def create_fake_recording(
-    runs_root: Path = ROOT_DIR / "runs",
+    runs_root: Path | None = None,
     *,
     yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
 ) -> Path:
     """Capture and analyze the selected physical monitor, returning the run folder."""
-    run_dir = Path(runs_root) / unique_run_folder_name("fake_recording")
+    runs_root = Path(runs_root) if runs_root is not None else resolve_runs_dir()
+    run_dir = runs_root / unique_run_folder_name("fake_recording")
     screenshots_dir = run_dir / "screenshots"
     yolo_ocr_dir = run_dir / "yolo_ocr"
     yolo_ocr_dir.mkdir(parents=True, exist_ok=True)
@@ -198,8 +200,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--runs-root",
         type=Path,
-        default=ROOT_DIR / "runs",
-        help="Parent directory for the generated fake recording.",
+        default=None,
+        help="Parent directory for the generated fake recording (default: resolved runs dir).",
     )
     parser.add_argument(
         "--confidence",

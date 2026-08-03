@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from tkinter import ttk
 
-from src.common.settings import ROOT_DIR
+from src.common.settings import resolve_runs_dir
 
 
 LOG_LINE_RE = re.compile(r"^\[(?P<timestamp>[^\]]+)\]\s+\[(?P<source>[^\]]+)\]\s*(?P<message>.*)$")
@@ -324,7 +324,7 @@ class RunLogViewerApp:
 
 
 def run_app(runs_root: Path | None = None) -> None:
-    base = runs_root if runs_root is not None else ROOT_DIR / "runs"
+    base = runs_root if runs_root is not None else resolve_runs_dir()
     root = tk.Tk()
     RunLogViewerApp(root, base)
     root.mainloop()

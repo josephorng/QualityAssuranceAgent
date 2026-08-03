@@ -46,7 +46,9 @@ def get_runtime_env() -> tuple[Path, str]:
     run_id = os.getenv(RUN_ID_ENV, "")
     if not run_root:
         # Test/dev fallback so single services can boot directly.
-        fallback_root = Path("runs/default_run").resolve()
+        from src.common.settings import resolve_runs_dir
+
+        fallback_root = resolve_runs_dir() / "default_run"
         fallback_root.mkdir(parents=True, exist_ok=True)
         return fallback_root, run_id or "default_run"
     return Path(run_root), run_id or "default_run"

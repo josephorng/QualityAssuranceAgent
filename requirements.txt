@@ -18,4 +18,3 @@ pygetwindow
 pytest
 customtkinter>=5.2.0
 tritonclient[http]>=2.49
-onnxruntime>=1.16

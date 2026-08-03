@@ -53,7 +53,7 @@ _VISION_BACKEND_MENU_VALUES = [
 
 def _backend_to_label(backend: str) -> str:
     key = canonicalize_llm_backend(backend)
-    return _BACKEND_LABELS.get(key, _BACKEND_LABELS["ollama_local"])
+    return _BACKEND_LABELS.get(key, _BACKEND_LABELS["vllm_server"])
 
 
 def _label_to_backend(label: str) -> str:
@@ -63,7 +63,7 @@ def _label_to_backend(label: str) -> str:
     key = canonicalize_llm_backend(text)
     if key in BACKEND_PRESETS:
         return key
-    return "ollama_local"
+    return "vllm_server"
 
 
 def _vision_backend_to_label(backend: str) -> str:
@@ -78,7 +78,7 @@ def _label_to_vision_backend(label: str) -> str:
     key = canonicalize_vision_backend(text)
     if key in VISION_BACKEND_PRESETS:
         return key
-    return "triton_local"
+    return "triton_192_168_0_17"
 
 
 def _vision_preset_summary(backend: str) -> tuple[str, str]:
@@ -102,14 +102,14 @@ def open_agent_settings_dialog(
     import customtkinter as ctk
 
     initial = load_agent_settings_dict()
-    backend_initial = canonicalize_llm_backend(str(initial.get("llm_backend", "ollama_local")))
+    backend_initial = canonicalize_llm_backend(str(initial.get("llm_backend", "vllm_server")))
     if backend_initial not in BACKEND_PRESETS:
-        backend_initial = "ollama_local"
-    vision_initial = str(initial.get("vision_backend", "triton_local"))
+        backend_initial = "vllm_server"
+    vision_initial = str(initial.get("vision_backend", "triton_192_168_0_17"))
     try:
         vision_initial = canonicalize_vision_backend(vision_initial)
     except ValueError:
-        vision_initial = "triton_local"
+        vision_initial = "triton_192_168_0_17"
 
     dialog = ctk.CTkToplevel(master)
     dialog.title("代理設定")

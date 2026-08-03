@@ -8,7 +8,7 @@ from tkinter import ttk
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from src.common.io_utils import read_json
-from src.common.settings import ROOT_DIR
+from src.common.settings import resolve_runs_dir
 
 
 def _discover_runs(runs_root: Path) -> list[Path]:
@@ -546,7 +546,7 @@ class YoloUiViewerApp:
 
 
 def run_app(runs_root: Path | None = None) -> None:
-    base = runs_root if runs_root is not None else ROOT_DIR / "runs"
+    base = runs_root if runs_root is not None else resolve_runs_dir()
     root = tk.Tk()
     YoloUiViewerApp(root, base)
     root.mainloop()

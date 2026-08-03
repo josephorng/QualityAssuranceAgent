@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from src.common.settings import (
     apply_startup_ollama_host_probe,
     apply_startup_triton_probe,
@@ -135,3 +137,47 @@ def test_warm_vision_models_returns_status_without_raising(monkeypatch) -> None:
     ok, message = ocr_image.warm_vision_models(quiet=True, timeout_seconds=0.2)
     assert ok is False
     assert "Triton 無回應" in message
+
+
+def test_default_runs_dir_dev_uses_project_root(monkeypatch) -> None:
+    from src.common.settings import application_root, default_runs_dir
+
+    monkeypatch.setattr("src.common.settings.is_frozen_app", lambda: False)
+    assert default_runs_dir() == application_root() / "runs"
+
+
+def test_default_runs_dir_frozen_uses_documents(monkeypatch, tmp_path: Path) -> None:
+    from src.common.settings import default_runs_dir
+
+    monkeypatch.setattr("src.common.settings.is_frozen_app", lambda: True)
+    monkeypatch.setattr("src.common.settings.user_documents_dir", lambda: tmp_path)
+    assert default_runs_dir() == tmp_path / "QualityAssuranceAgent" / "runs"
+
+
+def test_resolve_runs_dir_absolute_and_relative(monkeypatch, tmp_path: Path) -> None:
+    from src.common.settings import application_root, resolve_runs_dir
+
+    monkeypatch.setattr("src.common.settings.is_frozen_app", lambda: False)
+    absolute = tmp_path / "custom_runs"
+    assert resolve_runs_dir(absolute) == absolute.resolve()
+    assert resolve_runs_dir("runs") == (application_root() / "runs").resolve()
+    assert resolve_runs_dir("alt_runs") == (application_root() / "alt_runs").resolve()
+
+
+def test_load_settings_runs_dir_is_absolute(monkeypatch) -> None:
+    from src.common.settings import application_root, load_settings
+
+    monkeypatch.setattr("src.common.settings.is_frozen_app", lambda: False)
+    monkeypatch.setattr(
+        "src.common.settings.load_agent_settings_dict",
+        lambda: {
+            "llm_backend": "vllm_server",
+            "brain_lm": "google/gemma-4-26B-A4B-it",
+            "ollama_host": "http://192.168.4.134:8000",
+            "vision_backend": "triton_192_168_0_17",
+            "triton_http_url": "http://192.168.0.17:9000",
+        },
+    )
+    settings = load_settings()
+    assert Path(settings.runs_dir).is_absolute()
+    assert Path(settings.runs_dir) == (application_root() / "runs").resolve()

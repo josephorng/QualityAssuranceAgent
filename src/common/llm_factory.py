@@ -30,7 +30,7 @@ _client_lock = Lock()
 
 def _build_client() -> LLMClient:
     settings = load_settings()
-    backend = canonicalize_llm_backend(settings.llm_backend or "ollama_local")
+    backend = canonicalize_llm_backend(settings.llm_backend or "vllm_server")
     if backend not in BACKEND_PRESETS:
         known = ", ".join(sorted(BACKEND_PRESETS))
         raise ValueError(f"Unknown llm_backend {backend!r} in agent settings; expected one of: {known}")

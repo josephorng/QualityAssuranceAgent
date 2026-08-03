@@ -162,13 +162,13 @@ def test_infer_retries_once_on_thread_affinity_error(monkeypatch: pytest.MonkeyP
 def test_yolo_raises_on_triton_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VISION_BACKEND", "triton")
     from cua_mcp.vision_triton import TritonUnavailableError
-    from cua_mcp.yolo_onnx import _run_yolo_raw_output, DEFAULT_YOLO_ONNX_PATH
+    from cua_mcp.yolo_onnx import _run_yolo_raw_output
 
     img = np.zeros((1, 3, 1280, 1280), dtype=np.float32)
 
     with patch("cua_mcp.vision_triton.infer_yolo", side_effect=TritonUnavailableError("down")):
         with pytest.raises(TritonUnavailableError, match="down"):
-            _run_yolo_raw_output(img, model_path=DEFAULT_YOLO_ONNX_PATH)
+            _run_yolo_raw_output(img)
 
 
 def test_get_ocr_predictor_does_not_require_onnx_file(

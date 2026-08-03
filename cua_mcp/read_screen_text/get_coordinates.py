@@ -89,9 +89,6 @@ def _yolo_classed_boxes(
             bgr,
             class_ids=set(class_ids),
             conf_threshold=conf_threshold,
-            on_session_created=lambda p: _log_info(
-                f"OCR initializing YOLO ONNX detector model_path={p}"
-            ),
         )
     except (RuntimeError, FileNotFoundError, OSError) as exc:
         _log_info(f"OCR YOLO unavailable: {type(exc).__name__}: {exc}")

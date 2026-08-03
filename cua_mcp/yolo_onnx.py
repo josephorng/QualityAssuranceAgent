@@ -1,41 +1,29 @@
 """
-YOLOv26 ONNX helpers — ONNX Runtime on CPU.
+YOLOv26 ONNX helpers — Triton inference + local preprocess/decode.
 
-Ultralytics-compatible preprocessing (default 640): ``LetterBox``–style resize–pad to a
-square tensor, BGR → RGB, ``NCHW``, ``float32 / 255``, then ``InferenceSession.run``. Box
+Ultralytics-compatible preprocessing (default 1280): ``LetterBox``–style resize–pad to a
+square tensor, BGR → RGB, ``NCHW``, ``float32 / 255``, then Triton ``infer_yolo``. Box
 coordinates are mapped back with the same ``scale_boxes`` math as ``ultralytics``
 (``padding=True``, ``ratio_pad=None``).
 
-Two post-process paths:
+End-to-end output ``(1, N, 6+)`` — ``x1,y1,x2,y2,score,cls``; NMS is in the graph.
+Classes: ``text`` (:data:`YOLO_CLASS_TEXT`), ``element`` (:data:`YOLO_CLASS_ELEMENT`),
+``input`` (:data:`YOLO_CLASS_INPUT`), and ``scrollbar`` (:data:`YOLO_CLASS_SCROLLBAR`).
 
-* **Raw head** ``(1, 4+nc, num_anchors)`` — decode ``cx,cy,w,h`` + class scores, optional
-  Python NMS (:func:`nms_indices_xyxy`).
-* **End-to-end** ``(1, N, 6+)`` with ``end2end=True`` — ``x1,y1,x2,y2,score,cls``; NMS is
-  in the graph. Used by :data:`DEFAULT_YOLO_ONNX_PATH` (``best.onnx``), classes
-  ``text`` (:data:`YOLO_CLASS_TEXT`), ``element`` (:data:`YOLO_CLASS_ELEMENT`),
-  ``input`` (:data:`YOLO_CLASS_INPUT`), and ``scrollbar`` (:data:`YOLO_CLASS_SCROLLBAR`).
-
-Tune defaults via ``DEFAULT_CONF_*`` / ``DEFAULT_IOU_*``, or pass keyword args per call.
-
-Shared :func:`run_best_onnx_end2end` / :func:`get_cached_cpu_session` keep one ONNX Runtime
-session per resolved model path (OCR text + UI element both use ``best.onnx``).
+Tune defaults via ``DEFAULT_CONF_*``, or pass keyword args per call.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-import threading
 import time
-from typing import Callable, Sequence
 
 import cv2
 import numpy as np
-import onnxruntime as ort
 
 YOLO_ONNX_INPUT_SIZE: int = 1280
 # Matches ``ultralytics.data.augment.LetterBox`` default ``padding_value``.
 YOLO_LETTERBOX_PAD_BGR: tuple[int, int, int] = (114, 114, 114)
-DEFAULT_PROVIDERS: Sequence[str] = ("CPUExecutionProvider",)
 
 # End-to-end decode (NMS in ONNX graph)
 DEFAULT_CONF_YOLOV26_END2END: float = 0.05
@@ -103,69 +91,9 @@ def _log_yolo_profile(message: str) -> None:
         pass
 
 
-def create_cpu_session(model_path: str | Path) -> tuple[ort.InferenceSession, str]:
-    """Build an ONNX Runtime session on CPU and return ``(session, input_tensor_name)``."""
-    path = Path(model_path)
-    session = ort.InferenceSession(str(path), providers=list(DEFAULT_PROVIDERS))
-    return session, session.get_inputs()[0].name
-
-
-_SESSION_BY_RESOLVED_PATH: dict[str, tuple[ort.InferenceSession, str]] = {}
-# Shared session is not safe for concurrent ``run``; serialize local ORT YOLO.
-_LOCAL_ORT_LOCK = threading.RLock()
-
-
-def get_cached_cpu_session(
-    model_path: str | Path,
-    *,
-    on_created: Callable[[Path], None] | None = None,
-) -> tuple[ort.InferenceSession, str]:
-    """
-    Return a cached CPU ``InferenceSession`` for ``model_path`` (one session per resolved path).
-
-    ``on_created`` runs at most once per path, immediately after the session is constructed.
-    """
-    path = Path(model_path).expanduser().resolve()
-    key = str(path)
-    with _LOCAL_ORT_LOCK:
-        if key not in _SESSION_BY_RESOLVED_PATH:
-            if not path.is_file():
-                raise FileNotFoundError(f"YOLO ONNX model not found: {path}")
-            _SESSION_BY_RESOLVED_PATH[key] = create_cpu_session(path)
-            if on_created is not None:
-                on_created(path)
-        return _SESSION_BY_RESOLVED_PATH[key]
-
-
-def _local_ort_infer_yolo(
-    img_data: np.ndarray,
-    *,
-    model_path: str | Path,
-    on_session_created: Callable[[Path], None] | None = None,
-) -> np.ndarray:
-    started = time.perf_counter()
-    with _LOCAL_ORT_LOCK:
-        session, input_name = get_cached_cpu_session(
-            model_path, on_created=on_session_created
-        )
-        outputs = session.run(None, {input_name: img_data})
-    elapsed = time.perf_counter() - started
-    _log_yolo_profile(
-        f"infer backend=ort_local shape={list(img_data.shape)} "
-        f"elapsed_s={elapsed:.3f}"
-    )
-    return outputs[0]
-
-
-def _run_yolo_raw_output(
-    img_data: np.ndarray,
-    *,
-    model_path: str | Path,
-    on_session_created: Callable[[Path], None] | None = None,
-) -> np.ndarray:
+def _run_yolo_raw_output(img_data: np.ndarray) -> np.ndarray:
     from cua_mcp.vision_triton import infer_yolo
 
-    del model_path, on_session_created
     started = time.perf_counter()
     out = infer_yolo(img_data)
     elapsed = time.perf_counter() - started
@@ -181,31 +109,20 @@ def run_yolo_onnx_end2end(
     *,
     class_ids: set[int],
     conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
-    model_path: str | Path | None = None,
-    on_session_created: Callable[[Path], None] | None = None,
     merge_touching_same_class: bool = DEFAULT_MERGE_TOUCHING_SAME_CLASS,
     merge_same_class_iou_threshold: float = DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Preprocess ``bgr``, run the packaged multi-class YOLOv26 end2end ONNX (default
-    :data:`DEFAULT_YOLO_ONNX_PATH`), and return :func:`decode_yolov26_end2end` outputs
-    ``(xyxy, scores, class_ids)`` filtered to ``class_ids``.
-
-    ``on_session_created`` runs only when a new cached session is built for the model path
-    (first use in the process, or first use of a new ``model_path``); later calls reuse the
-    session and do not invoke it again.
+    Preprocess ``bgr``, run YOLOv26 end2end via Triton, and return
+    :func:`decode_yolov26_end2end` outputs ``(xyxy, scores, class_ids)`` filtered to
+    ``class_ids``.
 
     Pass ``merge_touching_same_class=True`` to also fuse ``text`` and ``element`` boxes whose
     pairwise IoU exceeds ``merge_same_class_iou_threshold``. ``input`` and ``scrollbar`` are
     always merged at that threshold (see :data:`DEFAULT_MERGE_TOUCHING_CLASS_IDS`).
     """
-    path = DEFAULT_YOLO_ONNX_PATH if model_path is None else Path(model_path)
     img_data, h0, w0 = bgr_to_nchw_normalized(bgr)
-    raw = _run_yolo_raw_output(
-        img_data,
-        model_path=path,
-        on_session_created=on_session_created,
-    )
+    raw = _run_yolo_raw_output(img_data)
     return decode_yolov26_end2end(
         raw,
         h0,

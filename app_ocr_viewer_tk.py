@@ -20,7 +20,7 @@ from cua_mcp.read_screen_text.get_coordinates import get_coordinates_from_image_
 from cua_mcp.select_mouse_target import _build_candidates_from_bgr
 from cua_mcp.yolo_onnx import DEFAULT_CONF_YOLOV26_END2END
 from src.common.io_utils import read_json, write_json
-from src.common.settings import ROOT_DIR
+from src.common.settings import ROOT_DIR, resolve_runs_dir
 
 YOLO_UNDONE_IMAGES = Path(
     r"C:\Users\Joseph Hung\Documents\Repos\Git\YOLO\real_screenshot\undone\images"
@@ -2285,7 +2285,7 @@ class CombinedImageViewerApp:
         notebook.add(runs_tab, text="Run images")
         notebook.add(test_tab, text="Test images")
 
-        runs_base = runs_root if runs_root is not None else ROOT_DIR / "runs"
+        runs_base = runs_root if runs_root is not None else resolve_runs_dir()
         test_base = images_dir if images_dir is not None else DEFAULT_TEST_IMAGES_DIR
 
         self.runs_viewer = OcrViewerApp(

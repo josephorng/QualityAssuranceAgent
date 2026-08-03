@@ -235,7 +235,6 @@ def _build_candidates_from_bgr(
             bgr,
             class_ids=set(MOUSE_TARGET_CLASS_IDS),
             conf_threshold=yolo_conf_threshold,
-            on_session_created=lambda p: _log_info(f"move_mouse YOLO initializing model_path={p}"),
         )
     except Exception as exc:
         _log_info(f"move_mouse YOLO failed: {type(exc).__name__}: {exc}")

@@ -80,6 +80,31 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 }
 .instruction-group > summary .instruction-title { flex: 1 1 auto; min-width: 0; }
 .instruction-group[open] > summary { border-bottom: 1px solid #d0d7de; }
+.copy-instruction {
+  appearance: none; border: 1px solid #d0d7de; background: #f6f8fa;
+  cursor: pointer; border-radius: 6px; padding: .2rem .55rem;
+  font-size: .75rem; line-height: 1.2; font-family: inherit;
+  font-weight: 600; color: #57606a; flex: 0 0 auto;
+}
+.copy-instruction:hover { background: #eaeef2; color: #1f2328; }
+.copy-instruction.copied {
+  color: #116329; border-color: #4ac26b; background: #dafbe1;
+}
+.recording-toolbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .5rem;
+  margin: 0 0 1.25rem;
+}
+.copy-all-instructions {
+  appearance: none; border: 1px solid #d0d7de; background: #f6f8fa;
+  cursor: pointer; border-radius: 6px; padding: .35rem .75rem;
+  font-size: .85rem; line-height: 1.2; font-family: inherit;
+  font-weight: 600; color: #57606a;
+}
+.copy-all-instructions:hover:not(:disabled) { background: #eaeef2; color: #1f2328; }
+.copy-all-instructions:disabled { opacity: .45; cursor: not-allowed; }
+.copy-all-instructions.copied {
+  color: #116329; border-color: #4ac26b; background: #dafbe1;
+}
 .hand-ops {
   list-style: disc; margin: 0; padding: 1rem 1.5rem 1.25rem 2.5rem;
 }
@@ -119,6 +144,76 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 .shot img { width: 100%; height: auto; border: 1px solid #d0d7de; border-radius: 6px; background: #fff; }
 .shot .missing { color: #8c959f; font-style: italic; }
 @media (max-width: 720px) { .shots { grid-template-columns: 1fr; } }
+""".strip()
+
+_RECORDING_SCRIPT = """
+(function () {
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+    return new Promise(function (resolve, reject) {
+      var area = document.createElement("textarea");
+      area.value = text;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.left = "-9999px";
+      document.body.appendChild(area);
+      area.select();
+      try {
+        if (!document.execCommand("copy")) {
+          reject(new Error("copy failed"));
+          return;
+        }
+        resolve();
+      } catch (err) {
+        reject(err);
+      } finally {
+        document.body.removeChild(area);
+      }
+    });
+  }
+
+  function flashCopied(btn) {
+    var previous = btn.textContent;
+    btn.textContent = "已複製";
+    btn.classList.add("copied");
+    window.setTimeout(function () {
+      btn.textContent = previous;
+      btn.classList.remove("copied");
+    }, 1200);
+  }
+
+  Array.prototype.slice.call(document.querySelectorAll("button.copy-instruction")).forEach(function (btn) {
+    btn.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      var text = btn.getAttribute("data-instruction") || "";
+      if (!text) return;
+      copyText(text).then(function () {
+        flashCopied(btn);
+      }).catch(function () {
+        window.alert("無法複製指令，請手動選取文字。");
+      });
+    });
+  });
+
+  var copyAll = document.querySelector("button.copy-all-instructions");
+  if (copyAll) {
+    copyAll.addEventListener("click", function () {
+      var lines = Array.prototype.slice
+        .call(document.querySelectorAll("button.copy-instruction[data-instruction]"))
+        .map(function (btn) { return btn.getAttribute("data-instruction") || ""; })
+        .filter(function (text) { return !!text; });
+      if (!lines.length) return;
+      copyText(lines.join("\\n")).then(function () {
+        flashCopied(copyAll);
+      }).catch(function () {
+        window.alert("無法複製指令，請手動選取文字。");
+      });
+    });
+  }
+})();
 """.strip()
 
 _INDEX_STYLE = """
@@ -1475,12 +1570,15 @@ def _render_recording_event_html(*, run_root: Path, event: dict[str, Any]) -> st
     else:
         shots = _render_shot_html("截圖", shot, run_root)
 
+    copy_attr = escape(title, quote=True)
     return (
         f'<details class="instruction-group">'
         f"<summary>"
         f'<span class="instruction-number">{step_label}</span>'
         f'<span class="instruction-title">{escape(title)}</span>'
         f'<span class="badge neutral">{kind_badge}</span>'
+        f'<button type="button" class="copy-instruction" data-instruction="{copy_attr}" '
+        f'title="複製指令" aria-label="複製指令">複製</button>'
         f"</summary>"
         f'<div class="meta" style="padding: 1rem 1.5rem 0;"><dl>{meta_html}</dl></div>'
         f'<div class="shots" style="padding: 0 1.5rem 1.25rem;">{shots}</div>'
@@ -1875,6 +1973,7 @@ def write_recording_html_from_run(run_root: Path, *, update_index: bool = True) 
     ]
     title = escape(_resolve_recording_title(run_root))
     body = "\n".join(events_html) if events_html else '<p class="empty">尚無錄製事件。</p>'
+    copy_all_disabled = "" if events_html else " disabled"
     html = (
         "<!DOCTYPE html>\n"
         '<html lang="zh-Hant">\n<head>\n'
@@ -1886,7 +1985,12 @@ def write_recording_html_from_run(run_root: Path, *, update_index: bool = True) 
         '<p class="nav"><a href="../index.html#recordings">← 報告列表</a></p>\n'
         f"<h1>{title}</h1>\n"
         '<p class="intro">依錄製事件排列的操作紀錄。點選事件可展開細節與截圖。</p>\n'
+        '<div class="recording-toolbar">'
+        f'<button type="button" class="copy-all-instructions"{copy_all_disabled} '
+        'title="複製全部指令" aria-label="複製全部指令">複製全部指令</button>'
+        "</div>\n"
         f"{body}\n"
+        f"<script>\n{_RECORDING_SCRIPT}\n</script>\n"
         "</body>\n</html>\n"
     )
 

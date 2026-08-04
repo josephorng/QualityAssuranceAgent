@@ -87,6 +87,35 @@ def test_collect_nearby_hint_labels_prefers_text_over_icons() -> None:
     assert labels == ["「OneNote」文字", "「Slack」文字"]
 
 
+def test_collect_nearby_hint_labels_keeps_collecting_until_two_texts() -> None:
+    """Keep taking text landmarks until two are found, skipping closer icons."""
+    vision = {
+        "used_vision": True,
+        "candidates": [
+            {
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "Chrome"}],
+            },
+            {
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "Docker"}],
+            },
+            {"class_name": "text", "text": "OneNote"},
+            {
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "Edge"}],
+            },
+            {"class_name": "text", "text": "Slack"},
+            {"class_name": "text", "text": "Teams"},
+        ],
+    }
+    labels = collect_nearby_hint_labels(vision, instruction="點擊「Chrome」圖示")
+    assert labels == ["「OneNote」文字", "「Slack」文字"]
+
+
 def test_collect_nearby_hint_labels_skips_unknown_class() -> None:
     vision = {
         "used_vision": True,

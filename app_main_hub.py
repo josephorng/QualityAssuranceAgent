@@ -17,7 +17,7 @@ from tkinter import filedialog
 import tkinter as tk
 
 from main import analyze_screen_recording, dismiss_nuitka_onefile_splash, prepare_run_session, run_coordinator_sync
-from src.common.agent_settings_dialog import open_agent_settings_dialog
+from src.common.agent_settings_dialog import clamp_script_font_size, open_agent_settings_dialog
 from src.common.ctk_dialogs import (
     prompt_append_recording_instructions,
     prompt_script_continue_or_end,
@@ -58,7 +58,7 @@ _RUNTIME_COMMAND_LABEL = "逐步執行命令"
 _SMART_GOAL_CACHE_NAME = "smart_goal_cache.txt"
 _SMART_GOAL_CACHE_LABEL = "智能模式目標暫存"
 _HUB_UI_STATE_NAME = "hub_ui.json"
-_HUB_UI_VERSION = 2
+_HUB_UI_VERSION = 3
 _MODE_TAB_SINGLE = "單一腳本"
 _MODE_TAB_QUEUE = "佇列執行"
 _MODE_TAB_SMART = "智能模式"
@@ -68,6 +68,7 @@ def _default_hub_ui_dict() -> dict[str, Any]:
     return {
         "version": _HUB_UI_VERSION,
         "appearance_dark": True,
+        "script_font_size": 14,
         "selected_monitor_indices": [],
         "last_script_path": None,
         "last_smart_goal_path": None,
@@ -102,6 +103,17 @@ def _normalize_hub_ui_state(raw: Any) -> dict[str, Any]:
         return base
     base["version"] = int(raw.get("version", _HUB_UI_VERSION))
     base["appearance_dark"] = bool(raw.get("appearance_dark", True))
+    if "script_font_size" in raw:
+        base["script_font_size"] = clamp_script_font_size(raw.get("script_font_size"))
+    elif "ui_scale" in raw:
+        # Migrate legacy whole-app scale into editor point size (base 14).
+        try:
+            legacy_scale = float(raw.get("ui_scale") or 1.0)
+        except (TypeError, ValueError):
+            legacy_scale = 1.0
+        base["script_font_size"] = clamp_script_font_size(14 * legacy_scale)
+    else:
+        base["script_font_size"] = 14
     base["selected_monitor_indices"] = _coerce_int_list(raw.get("selected_monitor_indices"))
     lsp = raw.get("last_script_path")
     base["last_script_path"] = lsp if isinstance(lsp, str) or lsp is None else None
@@ -155,10 +167,13 @@ class MainHub(ctk.CTk):
         hub = _read_hub_ui_state()
         self._remember_monitor_indices: list[int] = list(hub["selected_monitor_indices"])
         self._appearance_dark = bool(hub["appearance_dark"])
+        self._script_font_size = clamp_script_font_size(hub.get("script_font_size", 14))
         self._use_tool_cache = bool(hub.get("use_tool_cache", False))
         self._recording_hotkey_enabled = bool(hub.get("recording_hotkey_enabled", True))
         ctk.set_appearance_mode("dark" if self._appearance_dark else "light")
         ctk.set_default_color_theme("dark-blue")
+        # Undo any previously saved whole-app widget scaling from the old setting.
+        ctk.set_widget_scaling(1.0)
 
         self._script_path: Path | None = None
         self._smart_goal_path: Path | None = None
@@ -219,6 +234,7 @@ class MainHub(ctk.CTk):
                 try:
                     self._script_text.delete("0.0", "end")
                     self._script_text.insert("0.0", text)
+                    self._reset_textbox_undo(self._script_text)
                 finally:
                     self._suppress_script_cache_sync = False
                 self._refresh_script_path_label()
@@ -235,6 +251,7 @@ class MainHub(ctk.CTk):
                 try:
                     self._smart_text.delete("0.0", "end")
                     self._smart_text.insert("0.0", sp.read_text(encoding="utf-8"))
+                    self._reset_textbox_undo(self._smart_text)
                 finally:
                     self._suppress_smart_cache_sync = False
                 self._refresh_smart_path_label()
@@ -349,6 +366,7 @@ class MainHub(ctk.CTk):
         try:
             self._script_text.delete("0.0", "end")
             self._script_text.insert("0.0", raw)
+            self._reset_textbox_undo(self._script_text)
         finally:
             self._suppress_script_cache_sync = False
         self._refresh_script_path_label()
@@ -370,6 +388,7 @@ class MainHub(ctk.CTk):
         self._script_text.delete("0.0", "end")
         if p.is_file():
             self._script_text.insert("0.0", p.read_text(encoding="utf-8"))
+        self._reset_textbox_undo(self._script_text)
         self._script_text.configure(state="disabled")
         self._mark_script_clean()
 
@@ -382,6 +401,7 @@ class MainHub(ctk.CTk):
         self._script_text.delete("0.0", "end")
         if p.is_file():
             self._script_text.insert("0.0", p.read_text(encoding="utf-8"))
+        self._reset_textbox_undo(self._script_text)
         self._script_text.configure(state="disabled")
         self._mark_script_clean()
 
@@ -394,6 +414,7 @@ class MainHub(ctk.CTk):
         try:
             self._script_text.delete("0.0", "end")
             self._script_text.insert("0.0", p.read_text(encoding="utf-8"))
+            self._reset_textbox_undo(self._script_text)
         finally:
             self._suppress_script_cache_sync = False
         self._refresh_script_path_label()
@@ -492,6 +513,7 @@ class MainHub(ctk.CTk):
         try:
             self._smart_text.delete("0.0", "end")
             self._smart_text.insert("0.0", raw)
+            self._reset_textbox_undo(self._smart_text)
         finally:
             self._suppress_smart_cache_sync = False
         self._refresh_smart_path_label()
@@ -567,6 +589,7 @@ class MainHub(ctk.CTk):
         try:
             self._smart_text.delete("0.0", "end")
             self._smart_text.insert("0.0", text)
+            self._reset_textbox_undo(self._smart_text)
         finally:
             self._suppress_smart_cache_sync = False
         self._refresh_smart_path_label()
@@ -632,6 +655,7 @@ class MainHub(ctk.CTk):
         self._suppress_smart_cache_sync = True
         try:
             self._smart_text.delete("0.0", "end")
+            self._reset_textbox_undo(self._smart_text)
         finally:
             self._suppress_smart_cache_sync = False
         cache_path = self._smart_goal_cache_path()
@@ -714,6 +738,41 @@ class MainHub(ctk.CTk):
             return
         self._script_text_last_wrap_width = width
         self._refresh_script_line_numbers()
+
+    @staticmethod
+    def _reset_textbox_undo(textbox: ctk.CTkTextbox) -> None:
+        """Clear undo/redo stacks after programmatic content replacement."""
+        try:
+            textbox.edit_reset()
+        except tk.TclError:
+            return
+
+    def _bind_textbox_undo_redo(self, textbox: ctk.CTkTextbox) -> None:
+        """Enable Ctrl+Z undo and Ctrl+Shift+Z redo while the editor is editable."""
+        tb = textbox._textbox
+
+        def _undo(_event: object = None) -> str:
+            if str(tb.cget("state")) != "normal":
+                return "break"
+            try:
+                tb.edit_undo()
+            except tk.TclError:
+                pass
+            return "break"
+
+        def _redo(_event: object = None) -> str:
+            if str(tb.cget("state")) != "normal":
+                return "break"
+            try:
+                tb.edit_redo()
+            except tk.TclError:
+                pass
+            return "break"
+
+        # Windows: Ctrl+Z → undo; Ctrl+Shift+Z → redo (Tk default redo is Ctrl+Y only).
+        tb.bind("<Control-z>", _undo)
+        tb.bind("<Control-Shift-z>", _redo)
+        tb.bind("<Control-Shift-Z>", _redo)
 
     def _bind_script_text_cache_sync(self) -> None:
         textbox = self._script_text._textbox
@@ -840,6 +899,7 @@ class MainHub(ctk.CTk):
             data = {
                 "version": _HUB_UI_VERSION,
                 "appearance_dark": self._appearance_dark,
+                "script_font_size": self._script_font_size,
                 "selected_monitor_indices": self._selected_monitor_indices(),
                 "last_script_path": str(self._script_path.resolve())
                 if self._script_path is not None
@@ -864,12 +924,33 @@ class MainHub(ctk.CTk):
             self._remember_monitor_indices = indices
             self._persist_hub_ui_state()
 
+        def _on_script_font_size_changed(size: int) -> None:
+            self._apply_script_font_size(size, persist=False)
+
+        def _on_saved() -> None:
+            self._persist_hub_ui_state()
+            self._status.configure(text="設定已儲存")
+
         open_agent_settings_dialog(
             self,
-            on_saved=lambda: self._status.configure(text="設定已儲存"),
+            on_saved=_on_saved,
             monitor_indices=self._remember_monitor_indices,
             on_monitors_changed=_on_monitors_changed,
+            script_font_size=self._script_font_size,
+            on_script_font_size_changed=_on_script_font_size_changed,
         )
+
+    def _apply_script_font_size(self, size: int, *, persist: bool = True) -> None:
+        self._script_font_size = clamp_script_font_size(size)
+        font = ctk.CTkFont(size=self._script_font_size)
+        if getattr(self, "_script_text", None) is not None:
+            self._script_text.configure(font=font)
+        if getattr(self, "_script_line_numbers", None) is not None:
+            self._script_line_numbers.configure(font=font)
+        if getattr(self, "_smart_text", None) is not None:
+            self._smart_text.configure(font=font)
+        if persist:
+            self._persist_hub_ui_state()
 
     def _toggle_appearance(self) -> None:
         self._appearance_dark = not self._appearance_dark
@@ -930,7 +1011,7 @@ class MainHub(ctk.CTk):
 
         editor = ctk.CTkFrame(parent, fg_color="transparent")
         editor.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        script_font = ctk.CTkFont(size=14)
+        script_font = ctk.CTkFont(size=self._script_font_size)
         self._script_line_numbers = ctk.CTkTextbox(
             editor,
             font=script_font,
@@ -943,9 +1024,10 @@ class MainHub(ctk.CTk):
         self._script_line_numbers.pack(side="left", fill="y", padx=(0, 4))
         self._script_line_numbers.insert("0.0", "1")
         self._script_line_numbers.configure(state="disabled")
-        self._script_text = ctk.CTkTextbox(editor, font=script_font, wrap="word")
+        self._script_text = ctk.CTkTextbox(editor, font=script_font, wrap="word", undo=True)
         self._script_text.pack(side="left", fill="both", expand=True)
         self._bind_script_text_cache_sync()
+        self._bind_textbox_undo_redo(self._script_text)
         self._script_controls.extend(
             [
                 b_open,
@@ -986,10 +1068,11 @@ class MainHub(ctk.CTk):
         self._smart_path_label.pack(anchor="w", padx=8, pady=(4, 8))
         editor = ctk.CTkFrame(parent, fg_color="transparent")
         editor.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        smart_font = ctk.CTkFont(size=14)
-        self._smart_text = ctk.CTkTextbox(editor, font=smart_font, wrap="word")
+        smart_font = ctk.CTkFont(size=self._script_font_size)
+        self._smart_text = ctk.CTkTextbox(editor, font=smart_font, wrap="word", undo=True)
         self._smart_text.pack(side="left", fill="both", expand=True)
         self._smart_text._textbox.bind("<<Modified>>", self._on_smart_text_modified)
+        self._bind_textbox_undo_redo(self._smart_text)
         self._smart_controls.extend([b_open, b_save, b_sas, b_clear, self._smart_text])
 
     def _build_queue_tab(self, parent: Any) -> None:
@@ -1121,6 +1204,7 @@ class MainHub(ctk.CTk):
             self._script_text.configure(state="normal")
             self._script_text.delete("0.0", "end")
             self._script_text.insert("0.0", text)
+            self._reset_textbox_undo(self._script_text)
         finally:
             self._suppress_script_cache_sync = False
         self._refresh_script_path_label()
@@ -1451,6 +1535,7 @@ class MainHub(ctk.CTk):
         try:
             self._script_text.delete("0.0", "end")
             self._script_text.insert("0.0", text)
+            self._reset_textbox_undo(self._script_text)
         finally:
             self._suppress_script_cache_sync = False
         self._refresh_script_path_label()
@@ -1513,6 +1598,7 @@ class MainHub(ctk.CTk):
             self._script_text.configure(state="normal")
             self._script_text.delete("0.0", "end")
             self._script_text.insert("0.0", body)
+            self._reset_textbox_undo(self._script_text)
         finally:
             self._suppress_script_cache_sync = False
         self._refresh_script_path_label()
@@ -1531,6 +1617,7 @@ class MainHub(ctk.CTk):
         self._suppress_script_cache_sync = True
         try:
             self._script_text.delete("0.0", "end")
+            self._reset_textbox_undo(self._script_text)
         finally:
             self._suppress_script_cache_sync = False
         self._refresh_script_path_label()
@@ -2006,6 +2093,7 @@ class MainHub(ctk.CTk):
             self._suppress_script_cache_sync = True
             try:
                 self._script_text.delete("0.0", "end")
+                self._reset_textbox_undo(self._script_text)
             finally:
                 self._suppress_script_cache_sync = False
             self._refresh_script_path_label()

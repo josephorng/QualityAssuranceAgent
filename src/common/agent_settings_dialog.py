@@ -50,6 +50,18 @@ _VISION_BACKEND_MENU_VALUES = [
     _VISION_BACKEND_LABELS["triton_192_168_0_17"],
 ]
 
+SCRIPT_FONT_SIZE_MIN = 10
+SCRIPT_FONT_SIZE_MAX = 28
+SCRIPT_FONT_SIZE_DEFAULT = 14
+
+
+def clamp_script_font_size(value: Any) -> int:
+    try:
+        size = int(round(float(value)))
+    except (TypeError, ValueError):
+        return SCRIPT_FONT_SIZE_DEFAULT
+    return max(SCRIPT_FONT_SIZE_MIN, min(SCRIPT_FONT_SIZE_MAX, size))
+
 
 def _backend_to_label(backend: str) -> str:
     key = canonicalize_llm_backend(backend)
@@ -98,6 +110,8 @@ def open_agent_settings_dialog(
     on_saved: Callable[[], None] | None = None,
     monitor_indices: list[int] | None = None,
     on_monitors_changed: Callable[[list[int]], None] | None = None,
+    script_font_size: int = SCRIPT_FONT_SIZE_DEFAULT,
+    on_script_font_size_changed: Callable[[int], None] | None = None,
 ) -> None:
     import customtkinter as ctk
 
@@ -110,6 +124,8 @@ def open_agent_settings_dialog(
         vision_initial = canonicalize_vision_backend(vision_initial)
     except ValueError:
         vision_initial = "triton_192_168_0_17"
+    initial_font_size = clamp_script_font_size(script_font_size)
+    saved_ok = False
 
     dialog = ctk.CTkToplevel(master)
     dialog.title("代理設定")
@@ -221,6 +237,48 @@ def open_agent_settings_dialog(
 
     _sync_vision_preset_labels()
 
+    # ── Script editor font size ─────────────────────────────────────
+    ui_section = ctk.CTkFrame(inner, fg_color="transparent")
+    ui_section.pack(fill="x", pady=(6, 0))
+    ctk.CTkLabel(
+        ui_section,
+        text="腳本編輯器",
+        font=ctk.CTkFont(size=16, weight="bold"),
+    ).pack(anchor="w", pady=(0, 4))
+    ctk.CTkLabel(
+        ui_section,
+        text="調整腳本與智能模式編輯框的字體大小。拖曳時即時預覽。",
+        font=ctk.CTkFont(size=12),
+        text_color=("gray30", "gray70"),
+    ).pack(anchor="w", pady=(0, 6))
+
+    font_row = ctk.CTkFrame(ui_section, fg_color="transparent")
+    font_row.pack(fill="x", pady=(0, 10))
+    ctk.CTkLabel(font_row, text="字體大小", width=120, anchor="w").pack(side="left")
+    font_value_label = ctk.CTkLabel(
+        font_row,
+        text=str(initial_font_size),
+        width=36,
+        anchor="e",
+    )
+    font_value_label.pack(side="right")
+
+    def _apply_font_size_preview(value: float) -> None:
+        size = clamp_script_font_size(value)
+        font_value_label.configure(text=str(size))
+        if on_script_font_size_changed is not None:
+            on_script_font_size_changed(size)
+
+    font_slider = ctk.CTkSlider(
+        font_row,
+        from_=SCRIPT_FONT_SIZE_MIN,
+        to=SCRIPT_FONT_SIZE_MAX,
+        number_of_steps=SCRIPT_FONT_SIZE_MAX - SCRIPT_FONT_SIZE_MIN,
+        command=_apply_font_size_preview,
+    )
+    font_slider.set(initial_font_size)
+    font_slider.pack(side="left", fill="x", expand=True, padx=(0, 10))
+
     # ── Monitor / screen selection ──────────────────────────────────
     monitor_section = ctk.CTkFrame(inner, fg_color="transparent")
     monitor_section.pack(fill="x", pady=(6, 0))
@@ -292,7 +350,7 @@ def open_agent_settings_dialog(
 
     ctk.CTkLabel(
         inner,
-        text="變更將於下次執行或錄製分析時生效。",
+        text="後端與螢幕設定將於下次執行或錄製分析時生效；腳本字體大小儲存後立即套用。",
         font=ctk.CTkFont(size=12),
         text_color=("gray30", "gray70"),
     ).pack(anchor="w", pady=(4, 14))
@@ -301,9 +359,13 @@ def open_agent_settings_dialog(
     btn_row.pack(fill="x")
 
     def _close() -> None:
+        nonlocal saved_ok
+        if not saved_ok and on_script_font_size_changed is not None:
+            on_script_font_size_changed(initial_font_size)
         dialog.destroy()
 
     def _save() -> None:
+        nonlocal saved_ok
         backend = _label_to_backend(backend_var.get())
         try:
             payload = preset_for_backend(backend)
@@ -318,10 +380,14 @@ def open_agent_settings_dialog(
         except OSError as e:
             show_ctk_message(dialog, "代理設定", f"無法儲存設定：\n{e}", kind="error")
             return
+        final_size = clamp_script_font_size(font_slider.get())
+        if on_script_font_size_changed is not None:
+            on_script_font_size_changed(final_size)
         if on_monitors_changed is not None:
             on_monitors_changed(_get_selected_monitor_indices())
         if on_saved is not None:
             on_saved()
+        saved_ok = True
         _close()
 
     def _on_probe_done(

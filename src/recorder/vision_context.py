@@ -24,6 +24,7 @@ from src.common.nearby_side import (
 from src.recorder.models import POINTER_EVENT_KINDS, RecordedEvent
 
 _NEAREST_CANDIDATE_LIMIT = 8
+_MIN_NEARBY_TEXT_LANDMARKS = 2
 _DRAG_OFFSET_THRESHOLD_PX = 5
 
 
@@ -93,10 +94,14 @@ def _nearest_candidates(
     local_y: int,
     *,
     limit: int = _NEAREST_CANDIDATE_LIMIT,
+    min_text_neighbors: int = _MIN_NEARBY_TEXT_LANDMARKS,
 ) -> list[UiDetection]:
     """Return up to ``limit`` detections sorted by point-to-bbox distance (closest first).
 
     When several boxes contain the cursor (distance 0), prefer the smallest bbox.
+    After the distance-limited set, append farther ``text`` detections until there
+    are at least ``min_text_neighbors`` text objects after the primary (when they
+    exist), so nearby-hint collection can prefer text landmarks.
     """
     if not detections:
         return []
@@ -104,7 +109,21 @@ def _nearest_candidates(
         detections,
         key=lambda d: _nearest_candidate_rank_key(d.bbox, local_x, local_y),
     )
-    return scored[:limit]
+    nearest = scored[:limit]
+    text_neighbors = sum(1 for det in nearest[1:] if det.class_id == YOLO_CLASS_TEXT)
+    if text_neighbors >= min_text_neighbors:
+        return nearest
+
+    in_nearest = set(id(det) for det in nearest)
+    for det in scored[1:]:
+        if text_neighbors >= min_text_neighbors:
+            break
+        if det.class_id != YOLO_CLASS_TEXT or id(det) in in_nearest:
+            continue
+        nearest.append(det)
+        in_nearest.add(id(det))
+        text_neighbors += 1
+    return nearest
 
 
 def _bbox_center_inside(
@@ -451,14 +470,16 @@ def collect_nearby_hints(
     vision: dict[str, Any],
     *,
     instruction: str,
-    max_count: int = 2,
+    max_count: int = _MIN_NEARBY_TEXT_LANDMARKS,
 ) -> list[NearbyHint]:
-    """Collect up to max_count nearby hints from candidates after the primary.
+    """Collect nearby hints from candidates after the primary.
 
-    Prefers text landmarks over icon landmarks; within a tier, keeps distance
-    order from ``candidates``. Uses the primary candidate bbox and each neighbor
-    center to assign an optional script side via the 9-section grid. Neighbors
-    whose center falls in the CENTER cell stay undirected (``side=None``).
+    Walks neighbors until at least ``max_count`` text landmarks are found
+    (preferring text over icons). If fewer than ``max_count`` text landmarks
+    exist, fills remaining slots with non-text neighbors. Within a tier, keeps
+    distance order from ``candidates``. Uses the primary candidate bbox and each
+    neighbor center to assign an optional script side via the 9-section grid.
+    Neighbors whose center falls in the CENTER cell stay undirected (``side=None``).
     """
     candidates = vision.get("candidates") or []
     if len(candidates) < 2:
@@ -493,8 +514,22 @@ def collect_nearby_hints(
 
     eligible.sort(key=lambda item: (item[0], item[1]))
 
+    selected: list[tuple[dict[str, Any], str]] = []
+    text_count = 0
+    for tier, _order, candidate, label in eligible:
+        if tier == 0:
+            selected.append((candidate, label))
+            text_count += 1
+            if text_count >= max_count:
+                break
+        elif text_count < max_count and len(selected) < max_count:
+            # Fill only after texts are exhausted (eligible is text-first).
+            selected.append((candidate, label))
+            if len(selected) >= max_count:
+                break
+
     hints: list[NearbyHint] = []
-    for _tier, _order, candidate, label in eligible[:max_count]:
+    for candidate, label in selected:
         side: Side | None = None
         if bbox is not None:
             center = _candidate_center(candidate)
@@ -508,7 +543,7 @@ def collect_nearby_hint_labels(
     vision: dict[str, Any],
     *,
     instruction: str,
-    max_count: int = 2,
+    max_count: int = _MIN_NEARBY_TEXT_LANDMARKS,
 ) -> list[str]:
     """Collect up to max_count nearby candidate labels, skipping the primary target."""
     return [

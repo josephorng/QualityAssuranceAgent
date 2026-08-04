@@ -65,6 +65,33 @@ def test_nearest_candidates_respects_limit() -> None:
     assert len(nearest) == 8
 
 
+def test_nearest_candidates_appends_text_neighbors_beyond_limit() -> None:
+    """Farther text detections are appended until two text neighbors exist."""
+    primary = _detection_from_bbox(
+        (0, 0, 10, 10),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "Chrome"}],
+    )
+    close_icons = [
+        _detection_from_bbox(
+            (20 + i * 20, 0, 10, 10),
+            YOLO_CLASS_ELEMENT,
+            icons=[{"chinese_id": f"Icon{i}"}],
+        )
+        for i in range(6)
+    ]
+    text_a = _detection_from_bbox((400, 0, 20, 10), YOLO_CLASS_TEXT, text="OneNote")
+    text_b = _detection_from_bbox((500, 0, 20, 10), YOLO_CLASS_TEXT, text="Slack")
+    detections = [primary, *close_icons, text_a, text_b]
+    nearest = _nearest_candidates(detections, 5, 5, limit=4)
+    assert nearest[0] is primary
+    assert len(nearest) == 6  # limit 4 + 2 appended texts
+    assert [d.text for d in nearest if d.class_id == YOLO_CLASS_TEXT] == [
+        "OneNote",
+        "Slack",
+    ]
+
+
 def test_nearest_candidates_prefers_smallest_containing_bbox() -> None:
     """Nested controls on a scrollbar thumb rank the inner icon above the scrollbar."""
     scrollbar = _detection_from_bbox((1411, 386, 24, 563), YOLO_CLASS_SCROLLBAR)

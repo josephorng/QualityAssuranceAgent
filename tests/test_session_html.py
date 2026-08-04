@@ -702,6 +702,11 @@ def test_write_recording_html_renders_events_and_instructions(tmp_path: Path) ->
 
     assert path == recording_html_path(run_root)
     assert "點擊「搜尋」按鈕" in html
+    assert 'class="copy-instruction"' in html
+    assert 'data-instruction="點擊「搜尋」按鈕"' in html
+    assert "button.copy-instruction" in html
+    assert 'class="copy-all-instructions"' in html
+    assert "複製全部指令" in html
     assert "點擊" in html
     assert "screenshots/event_001.jpeg" in html
     assert 'href="../index.html#recordings"' in html
@@ -738,6 +743,7 @@ def test_write_recording_html_escapes_markup(tmp_path: Path) -> None:
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     assert "輸入「&lt;b&gt;hi&lt;/b&gt;」" in html
+    assert 'data-instruction="輸入「&lt;b&gt;hi&lt;/b&gt;」"' in html
 
 
 def test_write_runs_index_lists_recordings_in_recordings_tab(tmp_path: Path) -> None:

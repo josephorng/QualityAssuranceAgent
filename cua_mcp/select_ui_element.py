@@ -318,14 +318,10 @@ def _visible_anchor_text(text: str | None) -> str:
 
 
 def _detection_anchor_label(d: UiDetection) -> str:
-    """Hub-style label such as 「文件」文字 or 「下載」圖示."""
-    for icon in d.icons or []:
-        if not isinstance(icon, dict):
-            continue
-        label = str(icon.get("chinese_id") or icon.get("id") or "").strip()
-        if label:
-            return f"「{label}」圖示"
+    """Hub-style label such as 「文件」文字 or 「下載」圖示.
 
+    Prefer visible OCR text (PUA stripped) over icon labels.
+    """
     visible = _visible_anchor_text(d.text)
     if visible:
         suffix = _ANCHOR_SUFFIX_BY_CLASS.get(d.class_name)
@@ -334,6 +330,13 @@ def _detection_anchor_label(d: UiDetection) -> str:
                 return f"「{visible}」文字所在的輸入欄"
             return f"「{visible}」{suffix}"
         return f"「{visible}」"
+
+    for icon in d.icons or []:
+        if not isinstance(icon, dict):
+            continue
+        label = str(icon.get("chinese_id") or icon.get("id") or "").strip()
+        if label:
+            return f"「{label}」圖示"
 
     return _ANCHOR_SUFFIX_BY_CLASS.get(d.class_name, d.class_name or "元素")
 

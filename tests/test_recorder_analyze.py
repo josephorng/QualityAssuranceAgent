@@ -38,13 +38,13 @@ _VISION_WITH_NEARBY = {
             "bbox": [28, 626, 20, 20],
             "center": [38, 636],
             "class_name": "element",
-            "text": "chrome",
+            "text": "",
             "icons": [{"chinese_id": "Chrome"}],
         },
         {"class_name": "text", "text": "OneNote"},
         {
             "class_name": "element",
-            "text": "docker",
+            "text": "",
             "icons": [{"chinese_id": "Docker"}],
         },
     ],
@@ -59,20 +59,48 @@ def test_collect_nearby_hint_labels_skips_primary_and_instruction_duplicates() -
     assert labels == ["「OneNote」文字", "「Docker」圖示"]
 
 
+def test_collect_nearby_hint_labels_prefers_text_over_icons() -> None:
+    """Text landmarks win even when icon neighbors are closer (earlier in list)."""
+    vision = {
+        "used_vision": True,
+        "candidates": [
+            {
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "Chrome"}],
+            },
+            {
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "Docker"}],
+            },
+            {
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "Edge"}],
+            },
+            {"class_name": "text", "text": "OneNote"},
+            {"class_name": "text", "text": "Slack"},
+        ],
+    }
+    labels = collect_nearby_hint_labels(vision, instruction="點擊「Chrome」圖示")
+    assert labels == ["「OneNote」文字", "「Slack」文字"]
+
+
 def test_collect_nearby_hint_labels_skips_unknown_class() -> None:
     vision = {
         "used_vision": True,
         "candidates": [
             {
                 "class_name": "element",
-                "text": "chrome",
+                "text": "",
                 "icons": [{"chinese_id": "Chrome"}],
             },
             {"class_name": "unknown", "text": "v"},
             {"class_name": "text", "text": "OneNote"},
             {
                 "class_name": "element",
-                "text": "docker",
+                "text": "",
                 "icons": [{"chinese_id": "Docker"}],
             },
         ],
@@ -105,7 +133,7 @@ def test_append_nearby_context_comment_directed_from_geometry() -> None:
                 "bbox": [40, 40, 20, 20],
                 "center": [50, 50],
                 "class_name": "element",
-                "text": "box",
+                "text": "",
                 "icons": [{"chinese_id": "矩形框線"}],
             },
             {
@@ -137,7 +165,7 @@ def test_append_drag_nearby_context_comments() -> None:
         "candidates": [
             {
                 "class_name": "element",
-                "text": "chrome",
+                "text": "",
                 "icons": [{"chinese_id": "Chrome"}],
             },
             {"class_name": "text", "text": "OneNote"},
@@ -148,7 +176,7 @@ def test_append_drag_nearby_context_comments() -> None:
             {"class_name": "text", "text": "Desktop"},
             {
                 "class_name": "element",
-                "text": "recycle",
+                "text": "",
                 "icons": [{"chinese_id": "Recycle Bin"}],
             },
         ],
@@ -547,7 +575,7 @@ def test_enrich_click_instruction_offset_replaces_nearby_with_pixels() -> None:
                 "bbox": [356, 828, 17, 15],
                 "center": [364, 835],
                 "class_name": "element",
-                "text": "folder",
+                "text": "",
                 "icons": [{"chinese_id": "資料夾"}],
             },
         ],
@@ -619,7 +647,7 @@ def test_instruction_for_drag_builds_from_nearest_candidates() -> None:
             {
                 "center": [38, 636],
                 "class_name": "element",
-                "text": "chrome",
+                "text": "",
                 "icons": [{"chinese_id": "Chrome"}],
             },
         ],
@@ -655,7 +683,7 @@ def test_instruction_for_drag_event_six_like_case() -> None:
             {
                 "center": [114, 30],
                 "class_name": "element",
-                "text": "edge-icon",
+                "text": "",
                 "icons": [{"chinese_id": "Edge"}],
             },
         ],
@@ -1005,7 +1033,7 @@ def test_enrich_drag_instruction_normalizes_source_destination_and_offset() -> N
             {
                 "center": [114, 30],
                 "class_name": "element",
-                "text": "edge-icon",
+                "text": "",
                 "icons": [{"chinese_id": "Edge"}],
             },
         ],
@@ -1026,7 +1054,7 @@ def test_enrich_drag_instruction_offset_replaces_partial_llm_offset() -> None:
             {
                 "center": [114, 30],
                 "class_name": "element",
-                "text": "edge-icon",
+                "text": "",
                 "icons": [{"chinese_id": "Edge"}],
             },
         ],
@@ -1070,7 +1098,7 @@ async def test_analyze_event_to_cache_drag_is_deterministic(tmp_path: Path) -> N
             {
                 "center": [38, 636],
                 "class_name": "element",
-                "text": "chrome",
+                "text": "",
                 "icons": [{"chinese_id": "Chrome"}],
             },
         ],
@@ -1326,7 +1354,7 @@ async def test_analyze_event_to_cache_shift_double_click_suffix(tmp_path: Path) 
                 "bbox": [28, 626, 20, 20],
                 "center": [38, 636],
                 "class_name": "element",
-                "text": "chrome",
+                "text": "",
                 "icons": [{"chinese_id": "Chrome"}],
             },
         ],
@@ -1373,7 +1401,7 @@ async def test_analyze_event_to_cache_click_enriches_offset_then_nearby(
                 "bbox": [356, 828, 17, 15],
                 "center": [364, 835],
                 "class_name": "element",
-                "text": "folder",
+                "text": "",
                 "icons": [{"chinese_id": "資料夾"}],
             },
             {
@@ -1398,7 +1426,7 @@ async def test_analyze_event_to_cache_click_enriches_offset_then_nearby(
     assert result is not None
     assert result["instruction"] == (
         "將滑鼠移到「自訂Office 範本」文字左方14個像素、下方39個像素的位置"
-        "（在「資料夾」圖示的右邊、附近有「WindowsPowerShell」文字），用右鍵點選。"
+        "（在「資料夾」圖示的右邊、在「WindowsPowerShell」文字的下面），用右鍵點選。"
     )
     llm_mock.assert_not_called()
 
@@ -1457,7 +1485,7 @@ async def test_analyze_event_to_cache_drag_appends_nearby_after_enrichment(tmp_p
             {
                 "center": [38, 636],
                 "class_name": "element",
-                "text": "chrome",
+                "text": "",
                 "icons": [{"chinese_id": "Chrome"}],
             },
             {"center": [100, 600], "class_name": "text", "text": "OneNote"},
@@ -1474,7 +1502,7 @@ async def test_analyze_event_to_cache_drag_appends_nearby_after_enrichment(tmp_p
                 {
                     "center": [250, 620],
                     "class_name": "element",
-                    "text": "recycle",
+                    "text": "",
                     "icons": [{"chinese_id": "Recycle Bin"}],
                 },
             ],

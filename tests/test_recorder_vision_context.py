@@ -488,10 +488,19 @@ def test_format_drag_candidate_anchor_text() -> None:
 def test_format_drag_candidate_anchor_icon() -> None:
     candidate = {
         "class_name": "element",
-        "text": "pua",
+        "text": "",
         "icons": [{"chinese_id": "Chrome"}],
     }
     assert format_drag_candidate_anchor(candidate) == "「Chrome」圖示"
+
+
+def test_format_drag_candidate_anchor_prefers_text_over_icon() -> None:
+    candidate = {
+        "class_name": "text",
+        "text": "\ue024速的網域 (3)",
+        "icons": [{"chinese_id": "下載"}],
+    }
+    assert format_drag_candidate_anchor(candidate) == "「速的網域 (3)」文字"
 
 
 def test_format_drag_candidate_anchor_element_text() -> None:

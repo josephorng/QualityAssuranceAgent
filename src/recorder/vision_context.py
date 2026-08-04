@@ -362,15 +362,12 @@ def _candidate_display_label(candidate: dict[str, Any]) -> str:
 
 
 def format_drag_candidate_anchor(candidate: dict[str, Any]) -> str | None:
-    """Return a hub-style drag anchor phrase like 「Chrome」圖示 or 「Desktop」文字."""
-    class_name = str(candidate.get("class_name") or "").strip()
+    """Return a hub-style drag anchor phrase like 「Desktop」文字 or 「Chrome」圖示.
 
-    for icon in candidate.get("icons") or []:
-        if not isinstance(icon, dict):
-            continue
-        label = str(icon.get("chinese_id") or icon.get("id") or "").strip()
-        if label:
-            return f"「{label}」圖示"
+    Prefer visible OCR text (PUA stripped) over icon labels so mixed text+icon
+    rows keep the readable caption (e.g. 「速的網域 (3)」文字, not 「下載」圖示).
+    """
+    class_name = str(candidate.get("class_name") or "").strip()
 
     visible = _visible_text(candidate.get("text"))
     if visible:
@@ -383,6 +380,13 @@ def format_drag_candidate_anchor(candidate: dict[str, Any]) -> str | None:
         if class_name == "input":
             return f"「{visible}」文字所在的輸入欄"
         return f"「{visible}」"
+
+    for icon in candidate.get("icons") or []:
+        if not isinstance(icon, dict):
+            continue
+        label = str(icon.get("chinese_id") or icon.get("id") or "").strip()
+        if label:
+            return f"「{label}」圖示"
 
     raw = str(candidate.get("text") or "").strip()
     if raw:
@@ -433,6 +437,16 @@ def _label_already_in_instruction(label: str, instruction: str) -> bool:
     return False
 
 
+def _nearby_hint_tier(candidate: dict[str, Any], label: str) -> int:
+    """Lower tier is preferred when selecting nearby landmarks (text before icons)."""
+    if label.endswith("圖示"):
+        return 2
+    class_name = str(candidate.get("class_name") or "").strip()
+    if class_name == "text" or label.endswith("文字"):
+        return 0
+    return 1
+
+
 def collect_nearby_hints(
     vision: dict[str, Any],
     *,
@@ -441,9 +455,10 @@ def collect_nearby_hints(
 ) -> list[NearbyHint]:
     """Collect up to max_count nearby hints from candidates after the primary.
 
-    Uses the primary candidate bbox and each neighbor center to assign an
-    optional script side via the 9-section grid. Neighbors whose center falls
-    in the CENTER cell stay undirected (``side=None``).
+    Prefers text landmarks over icon landmarks; within a tier, keeps distance
+    order from ``candidates``. Uses the primary candidate bbox and each neighbor
+    center to assign an optional script side via the 9-section grid. Neighbors
+    whose center falls in the CENTER cell stay undirected (``side=None``).
     """
     candidates = vision.get("candidates") or []
     if len(candidates) < 2:
@@ -463,9 +478,9 @@ def collect_nearby_hints(
             int(primary_bbox[3]),
         )
 
-    hints: list[NearbyHint] = []
+    eligible: list[tuple[int, int, dict[str, Any], str]] = []
     seen: set[str] = set()
-    for candidate in candidates[1:]:
+    for order, candidate in enumerate(candidates[1:]):
         if not isinstance(candidate, dict):
             continue
         label = _candidate_label_for_hint(candidate)
@@ -474,15 +489,18 @@ def collect_nearby_hints(
         if _label_already_in_instruction(label, instruction):
             continue
         seen.add(label)
+        eligible.append((_nearby_hint_tier(candidate, label), order, candidate, label))
 
+    eligible.sort(key=lambda item: (item[0], item[1]))
+
+    hints: list[NearbyHint] = []
+    for _tier, _order, candidate, label in eligible[:max_count]:
         side: Side | None = None
         if bbox is not None:
             center = _candidate_center(candidate)
             if center is not None:
                 side = side_from_anchor_bbox(bbox, center[0], center[1])
         hints.append(NearbyHint(label=label, side=side))
-        if len(hints) >= max_count:
-            break
     return hints
 
 
@@ -600,16 +618,19 @@ def format_drag_destination_offset_hints(destination: dict[str, Any]) -> str:
 
 
 def candidate_anchor_name(candidate: dict[str, Any]) -> str | None:
-    """Return the label used to match a candidate in drag offset lookup."""
+    """Return the label used to match a candidate in drag offset lookup.
+
+    Prefer visible OCR text over icon labels (same order as format_drag_candidate_anchor).
+    """
+    visible = _visible_text(candidate.get("text"))
+    if visible:
+        return visible
     for icon in candidate.get("icons") or []:
         if not isinstance(icon, dict):
             continue
         label = str(icon.get("chinese_id") or icon.get("id") or "").strip()
         if label:
             return label
-    visible = _visible_text(candidate.get("text"))
-    if visible:
-        return visible
     raw = str(candidate.get("text") or "").strip()
     return raw or None
 

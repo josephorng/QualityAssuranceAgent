@@ -326,6 +326,28 @@ def _minimize_change(before_win: WindowInfo, after_win: WindowInfo) -> WindowSta
     return None
 
 
+def _restore_change(before_win: WindowInfo, after_win: WindowInfo) -> WindowStateChange | None:
+    """Detect unminimize (including taskbar restore) or restore-from-maximize."""
+    title = before_win.title or f"hwnd:{before_win.hwnd}"
+    if after_win.is_minimized or _has_minimized_rect(after_win):
+        return None
+
+    was_minimized = before_win.is_minimized or _has_minimized_rect(before_win)
+    if was_minimized and before_win.area() < after_win.area():
+        confidence = "high" if before_win.is_minimized else "medium"
+        return WindowStateChange(action="restored", title=title, confidence=confidence)
+
+    # Maximized → normal (same growth check as the previous target-path logic).
+    if (
+        before_win.is_maximized
+        and not after_win.is_maximized
+        and before_win.area() < after_win.area()
+    ):
+        return WindowStateChange(action="restored", title=title, confidence="medium")
+
+    return None
+
+
 def _classify_target_change(before_win: WindowInfo, after_win: WindowInfo | None) -> WindowStateChange | None:
     title = before_win.title or f"hwnd:{before_win.hwnd}"
     if after_win is None:
@@ -338,9 +360,9 @@ def _classify_target_change(before_win: WindowInfo, after_win: WindowInfo | None
     if _looks_maximized(before_win, after_win):
         return WindowStateChange(action="maximize", title=title, confidence="high")
 
-    if (before_win.is_minimized or before_win.is_maximized) and not after_win.is_minimized and not after_win.is_maximized:
-        if before_win.area() < after_win.area():
-            return WindowStateChange(action="restored", title=title, confidence="medium")
+    restore = _restore_change(before_win, after_win)
+    if restore is not None:
+        return restore
 
     return None
 
@@ -358,6 +380,23 @@ def _pick_global_minimize(before: list[WindowInfo], after: list[WindowInfo]) -> 
     if len(transitions) == 1:
         title = transitions[0].title or f"hwnd:{transitions[0].hwnd}"
         return WindowStateChange(action="minimize", title=title, confidence="medium")
+    return None
+
+
+def _pick_global_restore(before: list[WindowInfo], after: list[WindowInfo]) -> WindowStateChange | None:
+    """Detect a single off-target restore (e.g. taskbar click unminimizes an app)."""
+    transitions: list[WindowInfo] = []
+    for before_win in before:
+        if not before_win.title:
+            continue
+        after_win = _find_match(before_win, after)
+        if after_win is None:
+            continue
+        if _restore_change(before_win, after_win) is not None:
+            transitions.append(after_win)
+    if len(transitions) == 1:
+        title = transitions[0].title or f"hwnd:{transitions[0].hwnd}"
+        return WindowStateChange(action="restored", title=title, confidence="medium")
     return None
 
 
@@ -446,6 +485,11 @@ def diff_snapshots_with_debug(
         debug["detection_path"] = "global_minimize"
         return WindowDiffResult(change=global_minimize, debug=debug)
 
+    global_restore = _pick_global_restore(before, after)
+    if global_restore is not None:
+        debug["detection_path"] = "global_restore"
+        return WindowDiffResult(change=global_restore, debug=debug)
+
     before_set = {_window_identity_key(w) for w in before if w.title}
     after_set = {_window_identity_key(w) for w in after if w.title}
     removed = before_set - after_set
@@ -486,6 +530,8 @@ def diff_snapshots_with_debug(
 # Windows shell host that often disappears as a side effect of unrelated clicks
 # (taskbar search, Start, etc.). Never treat it as the user's intended action.
 _IGNORED_WINDOW_CHANGE_TITLES = frozenset({"快顯主機"})
+# Hub app title; trailing restores are dropped during analysis (stop-recording artifact).
+_AGENT_APP_WINDOW_TITLE = "電腦使用代理"
 
 
 def _window_change_data(
@@ -499,6 +545,43 @@ def _window_change_data(
 def _should_ignore_window_change(data: dict[str, Any]) -> bool:
     title = str(data.get("title", "")).strip()
     return title in _IGNORED_WINDOW_CHANGE_TITLES
+
+
+def is_agent_app_restore(change: WindowStateChange | dict[str, Any] | None) -> bool:
+    """True when the change restores the Computer Use Agent hub window."""
+    if change is None:
+        return False
+    data = _window_change_data(change)
+    return (
+        str(data.get("action", "")).strip() == "restored"
+        and str(data.get("title", "")).strip() == _AGENT_APP_WINDOW_TITLE
+    )
+
+
+def resolve_window_change(
+    window_change: dict[str, Any] | None,
+    window_snapshot_debug: dict[str, Any] | None,
+    click_xy: tuple[int, int] | None = None,
+) -> dict[str, Any] | None:
+    """Prefer captured window_change; otherwise re-diff snapshot debug lists."""
+    if isinstance(window_change, dict):
+        return window_change
+    if not isinstance(window_snapshot_debug, dict):
+        return None
+    before_raw = window_snapshot_debug.get("windows_before")
+    after_raw = window_snapshot_debug.get("windows_after")
+    if not isinstance(before_raw, list) or not isinstance(after_raw, list):
+        return None
+    before: list[WindowInfo] = []
+    after: list[WindowInfo] = []
+    for raw in before_raw:
+        if isinstance(raw, dict) and "hwnd" in raw:
+            before.append(WindowInfo.from_dict(raw))
+    for raw in after_raw:
+        if isinstance(raw, dict) and "hwnd" in raw:
+            after.append(WindowInfo.from_dict(raw))
+    change = diff_snapshots(before, after, click_xy=click_xy)
+    return change.to_dict() if change is not None else None
 
 
 def instruction_for_window_change(change: WindowStateChange | dict[str, Any]) -> str | None:

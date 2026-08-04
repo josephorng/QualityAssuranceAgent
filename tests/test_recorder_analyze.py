@@ -88,7 +88,7 @@ def test_collect_nearby_hint_labels_prefers_text_over_icons() -> None:
 
 
 def test_collect_nearby_hint_labels_keeps_collecting_until_two_texts() -> None:
-    """Keep taking text landmarks until two are found, skipping closer icons."""
+    """Keep taking multi-char text landmarks until two are found, skipping closer icons."""
     vision = {
         "used_vision": True,
         "candidates": [
@@ -114,6 +114,30 @@ def test_collect_nearby_hint_labels_keeps_collecting_until_two_texts() -> None:
     }
     labels = collect_nearby_hint_labels(vision, instruction="點擊「Chrome」圖示")
     assert labels == ["「OneNote」文字", "「Slack」文字"]
+
+
+def test_collect_nearby_hint_labels_skips_single_char_text() -> None:
+    """Single-character text (often an icon miss) does not count as a text landmark."""
+    vision = {
+        "used_vision": True,
+        "candidates": [
+            {
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "展開節點"}],
+            },
+            {"class_name": "text", "text": "中"},
+            {
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "資料夾"}],
+            },
+            {"class_name": "text", "text": "報表"},
+            {"class_name": "text", "text": "設定"},
+        ],
+    }
+    labels = collect_nearby_hint_labels(vision, instruction="點擊「展開節點」圖示")
+    assert labels == ["「報表」文字", "「設定」文字"]
 
 
 def test_collect_nearby_hint_labels_skips_unknown_class() -> None:
@@ -572,6 +596,174 @@ async def test_analyze_recording_session_inserts_wait_only_over_three_seconds(
     assert "wait_instruction" not in second_analysis
     assert third_analysis["elapsed_since_previous_seconds"] == 3.25
     assert third_analysis["wait_instruction"] == "等待 4 秒"
+
+
+@pytest.mark.asyncio
+async def test_analyze_recording_session_drops_trailing_agent_restore(
+    tmp_path: Path,
+) -> None:
+    from src.common.run_state import reset_run_state_manager
+
+    reset_run_state_manager()
+    run_dir = tmp_path / "screen_record_drop_agent_restore"
+    (run_dir / "events").mkdir(parents=True)
+    events = [
+        RecordedEvent(
+            index=1,
+            timestamp_utc="2026-07-30T03:00:00+00:00",
+            kind="key_press",
+            key="enter",
+            screenshot_path="",
+        ),
+        RecordedEvent(
+            index=2,
+            timestamp_utc="2026-07-30T03:00:01+00:00",
+            kind="click",
+            cursor_xy=(612, 894),
+            button="left",
+            screenshot_path="",
+            window_change={
+                "action": "restored",
+                "title": "電腦使用代理",
+                "confidence": "medium",
+            },
+        ),
+    ]
+    event_paths: list[str] = []
+    for event in events:
+        relative_path = f"events/event_{event.index:03d}.json"
+        event_paths.append(relative_path)
+        (run_dir / relative_path).write_text(
+            json.dumps(event.to_dict(), ensure_ascii=False),
+            encoding="utf-8",
+        )
+    (run_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "started_at_utc": events[0].timestamp_utc,
+                "stopped_at_utc": events[-1].timestamp_utc,
+                "event_count": len(events),
+                "events": event_paths,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    no_vision = {"used_vision": False, "candidate_text": "", "local_cursor": None}
+    with patch(
+        "src.recorder.orchestrator.build_vision_context",
+        new=AsyncMock(return_value=no_vision),
+    ):
+        report = await analyze_recording_session(run_dir)
+
+    assert report["recorded"] == 1
+    assert report["cached"] == 1
+    assert report["instructions"] == ["按下 Enter 鍵"]
+    assert (run_dir / "analysis" / "event_001.json").is_file()
+    assert not (run_dir / "analysis" / "event_002.json").is_file()
+    import_log = (run_dir / "import.log").read_text(encoding="utf-8")
+    assert "dropping trailing agent restore event index=2" in import_log
+
+
+@pytest.mark.asyncio
+async def test_analyze_recording_session_drops_trailing_agent_restore_from_snapshot_debug(
+    tmp_path: Path,
+) -> None:
+    """Older captures may lack window_change; re-diff snapshot debug instead."""
+    from src.common.run_state import reset_run_state_manager
+
+    reset_run_state_manager()
+    run_dir = tmp_path / "screen_record_drop_agent_restore_debug"
+    (run_dir / "events").mkdir(parents=True)
+    taskbar = {
+        "hwnd": 65714,
+        "title": "",
+        "pid": 6324,
+        "left": 0,
+        "top": 880,
+        "width": 1918,
+        "height": 40,
+        "is_minimized": False,
+        "is_maximized": False,
+    }
+    events = [
+        RecordedEvent(
+            index=1,
+            timestamp_utc="2026-07-30T03:00:00+00:00",
+            kind="key_press",
+            key="tab",
+            screenshot_path="",
+        ),
+        RecordedEvent(
+            index=2,
+            timestamp_utc="2026-07-30T03:00:01+00:00",
+            kind="click",
+            cursor_xy=(612, 894),
+            button="left",
+            screenshot_path="",
+            window_snapshot_debug={
+                "windows_before": [
+                    {
+                        "hwnd": 459206,
+                        "title": "電腦使用代理",
+                        "pid": 9284,
+                        "left": -32000,
+                        "top": -32000,
+                        "width": 160,
+                        "height": 28,
+                        "is_minimized": True,
+                        "is_maximized": False,
+                    },
+                    taskbar,
+                ],
+                "windows_after": [
+                    {
+                        "hwnd": 459206,
+                        "title": "電腦使用代理",
+                        "pid": 9284,
+                        "left": 156,
+                        "top": 156,
+                        "width": 976,
+                        "height": 719,
+                        "is_minimized": False,
+                        "is_maximized": False,
+                    },
+                    taskbar,
+                ],
+            },
+        ),
+    ]
+    event_paths: list[str] = []
+    for event in events:
+        relative_path = f"events/event_{event.index:03d}.json"
+        event_paths.append(relative_path)
+        (run_dir / relative_path).write_text(
+            json.dumps(event.to_dict(), ensure_ascii=False),
+            encoding="utf-8",
+        )
+    (run_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "started_at_utc": events[0].timestamp_utc,
+                "stopped_at_utc": events[-1].timestamp_utc,
+                "event_count": len(events),
+                "events": event_paths,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    no_vision = {"used_vision": False, "candidate_text": "", "local_cursor": None}
+    with patch(
+        "src.recorder.orchestrator.build_vision_context",
+        new=AsyncMock(return_value=no_vision),
+    ):
+        report = await analyze_recording_session(run_dir)
+
+    assert report["instructions"] == ["按下 Tab 鍵"]
+    assert not (run_dir / "analysis" / "event_002.json").is_file()
 
 
 def test_enrich_drag_instruction_offset_appends_exact_pixels() -> None:

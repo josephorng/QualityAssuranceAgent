@@ -15,9 +15,10 @@ from src.recorder.models import RecordedEvent, SessionManifest
 from src.recorder.coalesce import coalesce_consecutive_text_inputs
 from src.recorder.text_resolve import event_with_resolved_text, resolve_text_input_text
 from src.recorder.vision_context import build_vision_context
+from src.recorder.window_snapshot import is_agent_app_restore, resolve_window_change
 
 
-_WAIT_THRESHOLD_SECONDS = 3.0
+_WAIT_THRESHOLD_SECONDS = 10.0
 
 
 def _elapsed_seconds(previous_timestamp_utc: str, current_timestamp_utc: str) -> float | None:
@@ -35,6 +36,30 @@ def _elapsed_seconds(previous_timestamp_utc: str, current_timestamp_utc: str) ->
 
 def _wait_instruction(elapsed_seconds: float) -> str:
     return f"等待 {ceil(elapsed_seconds)} 秒"
+
+
+def _drop_trailing_agent_restore(
+    events: list[RecordedEvent],
+    *,
+    log_info: Callable[[str], None] | None = None,
+) -> list[RecordedEvent]:
+    """Omit a final restore of the hub window (common stop-recording artifact)."""
+    if not events:
+        return events
+    last = events[-1]
+    change = resolve_window_change(
+        last.window_change,
+        last.window_snapshot_debug,
+        last.cursor_xy,
+    )
+    if not is_agent_app_restore(change):
+        return events
+    if log_info is not None:
+        log_info(
+            f"dropping trailing agent restore event index={last.index} "
+            f"title={change.get('title')!r}"
+        )
+    return events[:-1]
 
 
 def _load_events(run_dir: Path) -> list[RecordedEvent]:
@@ -96,6 +121,7 @@ async def analyze_recording_session(
             f"backend={settings.llm_backend} model={settings.brain_lm} host={settings.ollama_host}"
         )
         events = coalesce_consecutive_text_inputs(_load_events(run_dir))
+        events = _drop_trailing_agent_restore(events, log_info=log_info)
         log_info(f"analyze_recording_session start events={len(events)} run_id={run_id}")
 
         cached = 0

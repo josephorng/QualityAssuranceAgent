@@ -23,7 +23,6 @@ from src.common.nearby_side import (
 )
 from src.recorder.models import POINTER_EVENT_KINDS, RecordedEvent
 
-_NEAREST_CANDIDATE_LIMIT = 8
 _MIN_NEARBY_TEXT_LANDMARKS = 2
 _DRAG_OFFSET_THRESHOLD_PX = 5
 
@@ -88,20 +87,47 @@ def _nearest_candidate_rank_key(
     )
 
 
+def _visible_text(text: str | None) -> str:
+    """Strip Private Use Area icon glyphs and whitespace from OCR text."""
+    if not text:
+        return ""
+    return "".join(ch for ch in text if not is_pua_char(ch)).strip()
+
+
+def _is_multi_char_text_detection(det: UiDetection) -> bool:
+    """True for text-class detections whose visible OCR has more than one character."""
+    return det.class_id == YOLO_CLASS_TEXT and len(_visible_text(det.text)) > 1
+
+
+def _is_multi_char_text_candidate(candidate: dict[str, Any], label: str) -> bool:
+    """True when a candidate is a multi-character text landmark (not a 1-char icon miss)."""
+    visible = _visible_text(candidate.get("text"))
+    if len(visible) <= 1:
+        return False
+    class_name = str(candidate.get("class_name") or "").strip()
+    return class_name == "text" or label.endswith("文字")
+
+
 def _nearest_candidates(
     detections: list[UiDetection],
     local_x: int,
     local_y: int,
     *,
-    limit: int = _NEAREST_CANDIDATE_LIMIT,
-    min_text_neighbors: int = _MIN_NEARBY_TEXT_LANDMARKS,
+    limit: int | None = None,
+    min_multi_char_text_neighbors: int | None = _MIN_NEARBY_TEXT_LANDMARKS,
 ) -> list[UiDetection]:
-    """Return up to ``limit`` detections sorted by point-to-bbox distance (closest first).
+    """Return detections sorted by point-to-bbox distance (closest first).
 
     When several boxes contain the cursor (distance 0), prefer the smallest bbox.
-    After the distance-limited set, append farther ``text`` detections until there
-    are at least ``min_text_neighbors`` text objects after the primary (when they
-    exist), so nearby-hint collection can prefer text landmarks.
+
+    By default, always includes the nearest detection as primary, then keeps
+    appending neighbors until ``min_multi_char_text_neighbors`` text detections
+    with more than one visible character are included (icons misclassified as
+    text with 0–1 visible characters do not count). There is no fixed candidate
+    cap unless ``limit`` is set.
+
+    Pass ``min_multi_char_text_neighbors=None`` (or 0) to return the full
+    distance-ranked list (optionally truncated by ``limit``).
     """
     if not detections:
         return []
@@ -109,20 +135,19 @@ def _nearest_candidates(
         detections,
         key=lambda d: _nearest_candidate_rank_key(d.bbox, local_x, local_y),
     )
-    nearest = scored[:limit]
-    text_neighbors = sum(1 for det in nearest[1:] if det.class_id == YOLO_CLASS_TEXT)
-    if text_neighbors >= min_text_neighbors:
-        return nearest
+    if not min_multi_char_text_neighbors:
+        return scored if limit is None else scored[:limit]
 
-    in_nearest = set(id(det) for det in nearest)
+    nearest: list[UiDetection] = [scored[0]]
+    multi_char_texts = 0
     for det in scored[1:]:
-        if text_neighbors >= min_text_neighbors:
-            break
-        if det.class_id != YOLO_CLASS_TEXT or id(det) in in_nearest:
-            continue
         nearest.append(det)
-        in_nearest.add(id(det))
-        text_neighbors += 1
+        if _is_multi_char_text_detection(det):
+            multi_char_texts += 1
+            if multi_char_texts >= min_multi_char_text_neighbors:
+                break
+        if limit is not None and len(nearest) >= limit:
+            break
     return nearest
 
 
@@ -457,11 +482,14 @@ def _label_already_in_instruction(label: str, instruction: str) -> bool:
 
 
 def _nearby_hint_tier(candidate: dict[str, Any], label: str) -> int:
-    """Lower tier is preferred when selecting nearby landmarks (text before icons)."""
+    """Lower tier is preferred when selecting nearby landmarks.
+
+    Multi-character text landmarks rank first. Single-character text (often an
+    icon misclassified as text) and other non-icon labels are middle; icons last.
+    """
     if label.endswith("圖示"):
         return 2
-    class_name = str(candidate.get("class_name") or "").strip()
-    if class_name == "text" or label.endswith("文字"):
+    if _is_multi_char_text_candidate(candidate, label):
         return 0
     return 1
 
@@ -474,12 +502,12 @@ def collect_nearby_hints(
 ) -> list[NearbyHint]:
     """Collect nearby hints from candidates after the primary.
 
-    Walks neighbors until at least ``max_count`` text landmarks are found
-    (preferring text over icons). If fewer than ``max_count`` text landmarks
-    exist, fills remaining slots with non-text neighbors. Within a tier, keeps
-    distance order from ``candidates``. Uses the primary candidate bbox and each
-    neighbor center to assign an optional script side via the 9-section grid.
-    Neighbors whose center falls in the CENTER cell stay undirected (``side=None``).
+    Walks neighbors until at least ``max_count`` multi-character text landmarks
+    are found. If fewer exist, fills remaining slots with other neighbors.
+    Within a tier, keeps distance order from ``candidates``. Uses the primary
+    candidate bbox and each neighbor center to assign an optional script side
+    via the 9-section grid. Neighbors whose center falls in the CENTER cell
+    stay undirected (``side=None``).
     """
     candidates = vision.get("candidates") or []
     if len(candidates) < 2:
@@ -712,32 +740,21 @@ def primary_candidate_offset(vision: dict[str, Any]) -> str | None:
     return format_drag_relative_offset_phrase(drop_x - center[0], drop_y - center[1])
 
 
-def _visible_text(text: str | None) -> str:
-    """Strip Private Use Area icon glyphs and whitespace from OCR text."""
-    if not text:
-        return ""
-    return "".join(ch for ch in text if not is_pua_char(ch)).strip()
-
-
 def _destination_candidates(
     all_detections: list[UiDetection],
     end_local: tuple[int, int],
-    *,
-    limit: int = _NEAREST_CANDIDATE_LIMIT,
 ) -> list[UiDetection]:
     """Return destination candidates at the drop point.
 
     When the drop lands inside a text/element, pin that hit as index 0 and
-    append the usual nearest neighbors (deduped) up to ``limit``.
+    append the usual nearest neighbors (deduped).
     """
-    nearest = _nearest_candidates(
-        all_detections, end_local[0], end_local[1], limit=limit
-    )
+    nearest = _nearest_candidates(all_detections, end_local[0], end_local[1])
     hit = _destination_target_at_point(all_detections, end_local[0], end_local[1])
     if hit is None:
         return nearest
     others = [det for det in nearest if det != hit]
-    return [hit, *others][:limit]
+    return [hit, *others]
 
 
 def _candidate_dict_to_detection(candidate: dict[str, Any]) -> UiDetection:
@@ -824,7 +841,12 @@ def extract_nearest_text(
     local_y: int,
 ) -> str | None:
     """Return OCR from the nearest input field, then fall back to nearby text."""
-    nearest = _nearest_candidates(detections, local_x, local_y, limit=len(detections))
+    nearest = _nearest_candidates(
+        detections,
+        local_x,
+        local_y,
+        min_multi_char_text_neighbors=None,
+    )
     if not nearest:
         return None
 

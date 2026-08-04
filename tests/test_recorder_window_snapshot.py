@@ -11,6 +11,8 @@ from src.recorder.window_snapshot import (
     diff_snapshots_with_debug,
     format_window_change_hint,
     instruction_for_window_change,
+    is_agent_app_restore,
+    resolve_window_change,
     settle_delay_for_click,
 )
 
@@ -201,13 +203,176 @@ def test_diff_global_minimize_fallback_when_target_not_at_click() -> None:
     assert change == WindowStateChange(action="minimize", title="Google Chrome", confidence="medium")
 
 
+def test_diff_global_restore_from_taskbar_click() -> None:
+    """Taskbar click hits the shell strip, not the app; restore is off-target."""
+    taskbar = _win(65714, "", left=0, top=880, width=1918, height=40, pid=6324)
+    before = [
+        _win(1, "神網7", left=-8, top=-8, width=1934, height=896, is_maximized=True, pid=10424),
+        _win(
+            459206,
+            "電腦使用代理",
+            left=-32000,
+            top=-32000,
+            width=160,
+            height=28,
+            is_minimized=True,
+            pid=9284,
+        ),
+        taskbar,
+    ]
+    after = [
+        _win(459206, "電腦使用代理", left=156, top=156, width=976, height=719, pid=9284),
+        _win(1, "神網7", left=-8, top=-8, width=1934, height=896, is_maximized=True, pid=10424),
+        taskbar,
+    ]
+    result = diff_snapshots_with_debug(before, after, click_xy=(612, 894))
+    assert result.change == WindowStateChange(
+        action="restored", title="電腦使用代理", confidence="medium"
+    )
+    assert result.debug["detection_path"] == "global_restore"
+    assert result.debug["target_hwnd"] == 65714
+
+
+def test_diff_global_restore_from_iconic_rect_without_flag() -> None:
+    taskbar = _win(10, "", left=0, top=880, width=1920, height=40)
+    before = [
+        _win(
+            2,
+            "Google Chrome",
+            left=-32000,
+            top=-32000,
+            width=160,
+            height=28,
+            is_minimized=False,
+        ),
+        taskbar,
+    ]
+    after = [
+        _win(2, "Google Chrome", left=100, top=80, width=900, height=700),
+        taskbar,
+    ]
+    result = diff_snapshots_with_debug(before, after, click_xy=(100, 900))
+    assert result.change == WindowStateChange(
+        action="restored", title="Google Chrome", confidence="medium"
+    )
+    assert result.debug["detection_path"] == "global_restore"
+
+
+def test_diff_global_restore_to_maximized() -> None:
+    """Taskbar restore often returns a previously-maximized window as maximized."""
+    taskbar = _win(10, "", left=0, top=880, width=1920, height=40)
+    before = [
+        _win(
+            2,
+            "Excel",
+            left=-32000,
+            top=-32000,
+            width=160,
+            height=28,
+            is_minimized=True,
+        ),
+        taskbar,
+    ]
+    after = [
+        _win(2, "Excel", left=-8, top=-8, width=1936, height=1056, is_maximized=True),
+        taskbar,
+    ]
+    result = diff_snapshots_with_debug(before, after, click_xy=(200, 900))
+    assert result.change == WindowStateChange(action="restored", title="Excel", confidence="medium")
+    assert result.debug["detection_path"] == "global_restore"
+
+
+def test_diff_global_restore_skips_when_ambiguous() -> None:
+    taskbar = _win(10, "", left=0, top=880, width=1920, height=40)
+    before = [
+        _win(1, "App A", left=-32000, top=-32000, width=160, height=28, is_minimized=True),
+        _win(2, "App B", left=-32000, top=-32000, width=160, height=28, is_minimized=True),
+        taskbar,
+    ]
+    after = [
+        _win(1, "App A", left=50, top=50, width=400, height=300),
+        _win(2, "App B", left=500, top=50, width=400, height=300),
+        taskbar,
+    ]
+    result = diff_snapshots_with_debug(before, after, click_xy=(100, 900))
+    assert result.change is None
+    assert result.debug["detection_path"] is None
+
+
 def test_instruction_for_high_confidence_window_change() -> None:
     change = WindowStateChange(action="minimize", title="Google Chrome", confidence="high")
     assert instruction_for_window_change(change) == "最小化「Google Chrome」視窗"
     assert instruction_for_window_change({"action": "close", "title": "Notepad", "confidence": "high"}) == "關閉「Notepad」視窗"
     assert instruction_for_window_change({"action": "close", "title": "Notepad", "confidence": "medium"}) == "關閉「Notepad」視窗"
     assert instruction_for_window_change({"action": "minimize", "title": "Chrome", "confidence": "medium"}) == "最小化「Chrome」視窗"
+    assert instruction_for_window_change({"action": "restored", "title": "電腦使用代理", "confidence": "medium"}) == "還原「電腦使用代理」視窗"
     assert instruction_for_window_change({"action": "opened", "title": "X", "confidence": "medium"}) is None
+
+
+def test_is_agent_app_restore() -> None:
+    assert is_agent_app_restore(
+        {"action": "restored", "title": "電腦使用代理", "confidence": "medium"}
+    )
+    assert not is_agent_app_restore(
+        {"action": "restored", "title": "Google Chrome", "confidence": "medium"}
+    )
+    assert not is_agent_app_restore(
+        {"action": "minimize", "title": "電腦使用代理", "confidence": "high"}
+    )
+    assert not is_agent_app_restore(None)
+
+
+def test_resolve_window_change_prefers_captured_then_rediffs_debug() -> None:
+    captured = {"action": "minimize", "title": "Chrome", "confidence": "high"}
+    assert resolve_window_change(captured, None, (1, 1)) == captured
+
+    taskbar = {
+        "hwnd": 10,
+        "title": "",
+        "pid": 1,
+        "left": 0,
+        "top": 880,
+        "width": 1920,
+        "height": 40,
+        "is_minimized": False,
+        "is_maximized": False,
+    }
+    debug = {
+        "windows_before": [
+            {
+                "hwnd": 2,
+                "title": "電腦使用代理",
+                "pid": 9,
+                "left": -32000,
+                "top": -32000,
+                "width": 160,
+                "height": 28,
+                "is_minimized": True,
+                "is_maximized": False,
+            },
+            taskbar,
+        ],
+        "windows_after": [
+            {
+                "hwnd": 2,
+                "title": "電腦使用代理",
+                "pid": 9,
+                "left": 100,
+                "top": 100,
+                "width": 800,
+                "height": 600,
+                "is_minimized": False,
+                "is_maximized": False,
+            },
+            taskbar,
+        ],
+    }
+    resolved = resolve_window_change(None, debug, (100, 900))
+    assert resolved == {
+        "action": "restored",
+        "title": "電腦使用代理",
+        "confidence": "medium",
+    }
 
 
 def test_instruction_ignores_shell_experience_host_window() -> None:

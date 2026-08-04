@@ -670,10 +670,11 @@ def _prefilter_detections_by_similarity(
 ) -> tuple[list[int], list[int]]:
     """Return anchor/nearby index buckets using string similarity per query.
 
-    Anchor detections use the highest similarity score only; lower-scoring
-    partial matches are dropped unless they tie for first. Nearby buckets are
-    filled by testing each nearby label independently at ``threshold``. Indices
-    that match the anchor are excluded from nearby (anchor wins).
+    Both anchor and each nearby label keep only the highest similarity score
+    (ties kept). Lower-scoring partial matches above ``threshold`` are dropped
+    so near-miss OCR cousins (e.g. 「新竹總部」 for 「新竹公司」) cannot enter
+    the nearby landmark set. Indices that match the anchor are excluded from
+    nearby (anchor wins).
     """
     anchor_indices = _anchor_indices_by_top_similarity(
         detections, anchor, threshold=threshold
@@ -685,12 +686,15 @@ def _prefilter_detections_by_similarity(
     for query in nearby:
         if not (query or "").strip():
             continue
-        for i, det in enumerate(detections):
+        # Score against the full list so best is global; then skip anchors/dupes.
+        top = _anchor_indices_by_top_similarity(
+            detections, query, threshold=threshold
+        )
+        for i in top:
             if i in anchor_set or i in nearby_seen:
                 continue
-            if _detection_similarity_to_query(det, query) >= threshold:
-                nearby_indices.append(i)
-                nearby_seen.add(i)
+            nearby_indices.append(i)
+            nearby_seen.add(i)
 
     return anchor_indices, nearby_indices
 

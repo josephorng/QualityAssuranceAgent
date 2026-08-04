@@ -646,6 +646,46 @@ def test_prefilter_keeps_tied_top_anchor_scores() -> None:
     assert nearby_indices == []
 
 
+def test_prefilter_nearby_keeps_only_top_similarity_score() -> None:
+    """「新竹公司」must not also pull in lower-scoring 「新竹總部」as a landmark."""
+    from cua_mcp.select_mouse_target import _prefilter_detections_by_similarity
+
+    detections = [
+        _detection_from_bbox((0, 0, 9, 11), YOLO_CLASS_TEXT, text="", icons=[{"chinese_id": "展開節點"}]),
+        _detection_from_bbox((50, 0, 80, 14), YOLO_CLASS_TEXT, text="|龅速的網域 (3)"),
+        _detection_from_bbox((50, 30, 72, 13), YOLO_CLASS_TEXT, text="新竹公司 (17)"),
+        _detection_from_bbox((50, 90, 66, 13), YOLO_CLASS_TEXT, text="新竹總部 (6)"),
+        _detection_from_bbox((200, 0, 60, 12), YOLO_CLASS_TEXT, text="龜速的網域"),
+    ]
+    anchor_indices, nearby_indices = _prefilter_detections_by_similarity(
+        detections,
+        "「展開節點」圖示",
+        ["「龜速的網域 (3)」文字", "「新竹公司 (17)」文字"],
+    )
+    assert [detections[i].icons[0]["chinese_id"] for i in anchor_indices] == ["展開節點"]
+    assert [detections[i].text for i in nearby_indices] == [
+        "|龅速的網域 (3)",
+        "新竹公司 (17)",
+    ]
+
+
+def test_prefilter_nearby_keeps_tied_top_scores() -> None:
+    from cua_mcp.select_mouse_target import _prefilter_detections_by_similarity
+
+    detections = [
+        _detection_from_bbox((0, 0, 20, 20), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "資料夾"}]),
+        _detection_from_bbox((50, 0, 30, 15), YOLO_CLASS_TEXT, text="圖片"),
+        _detection_from_bbox((100, 0, 30, 15), YOLO_CLASS_TEXT, text="圖片"),
+        _detection_from_bbox((150, 0, 30, 15), YOLO_CLASS_TEXT, text="圖檔"),
+    ]
+    _, nearby_indices = _prefilter_detections_by_similarity(
+        detections,
+        "「資料夾」圖示",
+        ["「圖片」文字"],
+    )
+    assert [detections[i].text for i in nearby_indices] == ["圖片", "圖片"]
+
+
 def test_filter_mouse_candidates_splits_anchor_and_nearby_by_similarity() -> None:
     from cua_mcp.select_mouse_target import _filter_mouse_candidates
 

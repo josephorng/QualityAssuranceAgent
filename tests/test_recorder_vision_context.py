@@ -40,7 +40,7 @@ def test_nearest_candidates_sorted_by_distance() -> None:
         _detection_from_bbox((40, 40, 20, 20), YOLO_CLASS_TEXT, text="Far"),
         _detection_from_bbox((8, 8, 10, 10), YOLO_CLASS_TEXT, text="Near"),
     ]
-    nearest = _nearest_candidates(detections, 10, 10, limit=2)
+    nearest = _nearest_candidates(detections, 10, 10)
     assert nearest[0].text == "Near"
     assert nearest[1].text == "Far"
 
@@ -51,22 +51,24 @@ def test_nearest_candidates_uses_bbox_distance_not_center() -> None:
         _detection_from_bbox((30, 45, 40, 10), YOLO_CLASS_TEXT, text="Side label"),
         _detection_from_bbox((10, 0, 12, 200), YOLO_CLASS_ELEMENT, text="Scrollbar"),
     ]
-    nearest = _nearest_candidates(detections, 15, 50, limit=2)
+    nearest = _nearest_candidates(
+        detections, 15, 50, min_multi_char_text_neighbors=None, limit=2
+    )
     assert nearest[0].text == "Scrollbar"
     assert nearest[1].text == "Side label"
 
 
-def test_nearest_candidates_respects_limit() -> None:
+def test_nearest_candidates_collects_all_when_no_multi_char_text() -> None:
     detections = [
         _detection_from_bbox((i * 30, 0, 10, 10), YOLO_CLASS_ELEMENT)
         for i in range(12)
     ]
-    nearest = _nearest_candidates(detections, 0, 0, limit=8)
-    assert len(nearest) == 8
+    nearest = _nearest_candidates(detections, 0, 0)
+    assert len(nearest) == 12
 
 
-def test_nearest_candidates_appends_text_neighbors_beyond_limit() -> None:
-    """Farther text detections are appended until two text neighbors exist."""
+def test_nearest_candidates_stops_after_two_multi_char_texts() -> None:
+    """Keep collecting until two multi-char texts exist; 1-char text does not count."""
     primary = _detection_from_bbox(
         (0, 0, 10, 10),
         YOLO_CLASS_ELEMENT,
@@ -78,18 +80,26 @@ def test_nearest_candidates_appends_text_neighbors_beyond_limit() -> None:
             YOLO_CLASS_ELEMENT,
             icons=[{"chinese_id": f"Icon{i}"}],
         )
-        for i in range(6)
+        for i in range(3)
     ]
-    text_a = _detection_from_bbox((400, 0, 20, 10), YOLO_CLASS_TEXT, text="OneNote")
-    text_b = _detection_from_bbox((500, 0, 20, 10), YOLO_CLASS_TEXT, text="Slack")
-    detections = [primary, *close_icons, text_a, text_b]
-    nearest = _nearest_candidates(detections, 5, 5, limit=4)
+    single = _detection_from_bbox((200, 0, 10, 10), YOLO_CLASS_TEXT, text="中")
+    text_a = _detection_from_bbox((300, 0, 40, 10), YOLO_CLASS_TEXT, text="OneNote")
+    text_b = _detection_from_bbox((400, 0, 40, 10), YOLO_CLASS_TEXT, text="Slack")
+    farther_icon = _detection_from_bbox(
+        (500, 0, 10, 10),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "After"}],
+    )
+    detections = [primary, *close_icons, single, text_a, text_b, farther_icon]
+    nearest = _nearest_candidates(detections, 5, 5)
     assert nearest[0] is primary
-    assert len(nearest) == 6  # limit 4 + 2 appended texts
+    assert single in nearest
     assert [d.text for d in nearest if d.class_id == YOLO_CLASS_TEXT] == [
+        "中",
         "OneNote",
         "Slack",
     ]
+    assert farther_icon not in nearest
 
 
 def test_nearest_candidates_prefers_smallest_containing_bbox() -> None:
@@ -101,7 +111,9 @@ def test_nearest_candidates_prefers_smallest_containing_bbox() -> None:
         icons=[{"chinese_id": "向下三角"}],
     )
     detections = [scrollbar, thumb]
-    nearest = _nearest_candidates(detections, 1421, 947, limit=2)
+    nearest = _nearest_candidates(
+        detections, 1421, 947, min_multi_char_text_neighbors=None, limit=2
+    )
     assert nearest[0] is thumb
     assert nearest[1] is scrollbar
 

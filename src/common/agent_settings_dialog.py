@@ -140,17 +140,18 @@ def open_agent_settings_dialog(
     inner = ctk.CTkFrame(dialog, fg_color="transparent")
     inner.pack(fill="both", expand=True, padx=22, pady=22)
 
-    ctk.CTkLabel(
-        inner,
-        text="代理設定",
-        font=ctk.CTkFont(size=18, weight="bold"),
-    ).pack(anchor="w", pady=(0, 12))
+    tabs = ctk.CTkTabview(inner, width=560, height=340)
+    tabs.pack(fill="both", expand=True, pady=(0, 12))
+    tab_agent = tabs.add("代理設定")
+    tab_script = tabs.add("腳本編輯器")
+    tab_monitor = tabs.add("螢幕畫面")
 
     backend_var = ctk.StringVar(value=_backend_to_label(backend_initial))
     vision_var = ctk.StringVar(value=_vision_backend_to_label(vision_initial))
 
-    backend_row = ctk.CTkFrame(inner, fg_color="transparent")
-    backend_row.pack(fill="x", pady=(0, 10))
+    # ── Tab: 代理設定 ───────────────────────────────────────────────
+    backend_row = ctk.CTkFrame(tab_agent, fg_color="transparent")
+    backend_row.pack(fill="x", pady=(8, 10))
     ctk.CTkLabel(backend_row, text="LLM 後端", width=120, anchor="w").pack(side="left")
     ctk.CTkOptionMenu(
         backend_row,
@@ -163,7 +164,7 @@ def open_agent_settings_dialog(
     test_btn = ctk.CTkButton(backend_row, text="測試 LLM 連線", width=130)
     test_btn.pack(side="left", padx=(10, 0))
 
-    preset_box = ctk.CTkFrame(inner, fg_color=("gray90", "gray20"), corner_radius=8)
+    preset_box = ctk.CTkFrame(tab_agent, fg_color=("gray90", "gray20"), corner_radius=8)
     preset_box.pack(fill="x", pady=(0, 10))
     preset_inner = ctk.CTkFrame(preset_box, fg_color="transparent")
     preset_inner.pack(fill="x", padx=14, pady=12)
@@ -193,7 +194,7 @@ def open_agent_settings_dialog(
 
     _sync_preset_labels()
 
-    vision_row = ctk.CTkFrame(inner, fg_color="transparent")
+    vision_row = ctk.CTkFrame(tab_agent, fg_color="transparent")
     vision_row.pack(fill="x", pady=(0, 10))
     ctk.CTkLabel(vision_row, text="Vision 後端", width=120, anchor="w").pack(side="left")
     ctk.CTkOptionMenu(
@@ -207,7 +208,7 @@ def open_agent_settings_dialog(
     vision_test_btn = ctk.CTkButton(vision_row, text="測試 Vision 連線", width=130)
     vision_test_btn.pack(side="left", padx=(10, 0))
 
-    vision_preset_box = ctk.CTkFrame(inner, fg_color=("gray90", "gray20"), corner_radius=8)
+    vision_preset_box = ctk.CTkFrame(tab_agent, fg_color=("gray90", "gray20"), corner_radius=8)
     vision_preset_box.pack(fill="x", pady=(0, 10))
     vision_preset_inner = ctk.CTkFrame(vision_preset_box, fg_color="transparent")
     vision_preset_inner.pack(fill="x", padx=14, pady=12)
@@ -237,22 +238,22 @@ def open_agent_settings_dialog(
 
     _sync_vision_preset_labels()
 
-    # ── Script editor font size ─────────────────────────────────────
-    ui_section = ctk.CTkFrame(inner, fg_color="transparent")
-    ui_section.pack(fill="x", pady=(6, 0))
     ctk.CTkLabel(
-        ui_section,
-        text="腳本編輯器",
-        font=ctk.CTkFont(size=16, weight="bold"),
-    ).pack(anchor="w", pady=(0, 4))
+        tab_agent,
+        text="後端設定將於下次執行或錄製分析時生效。",
+        font=ctk.CTkFont(size=12),
+        text_color=("gray30", "gray70"),
+    ).pack(anchor="w", pady=(4, 0))
+
+    # ── Tab: 腳本編輯器 ─────────────────────────────────────────────
     ctk.CTkLabel(
-        ui_section,
+        tab_script,
         text="調整腳本與智能模式編輯框的字體大小。拖曳時即時預覽。",
         font=ctk.CTkFont(size=12),
         text_color=("gray30", "gray70"),
-    ).pack(anchor="w", pady=(0, 6))
+    ).pack(anchor="w", pady=(8, 10))
 
-    font_row = ctk.CTkFrame(ui_section, fg_color="transparent")
+    font_row = ctk.CTkFrame(tab_script, fg_color="transparent")
     font_row.pack(fill="x", pady=(0, 10))
     ctk.CTkLabel(font_row, text="字體大小", width=120, anchor="w").pack(side="left")
     font_value_label = ctk.CTkLabel(
@@ -279,23 +280,23 @@ def open_agent_settings_dialog(
     font_slider.set(initial_font_size)
     font_slider.pack(side="left", fill="x", expand=True, padx=(0, 10))
 
-    # ── Monitor / screen selection ──────────────────────────────────
-    monitor_section = ctk.CTkFrame(inner, fg_color="transparent")
-    monitor_section.pack(fill="x", pady=(6, 0))
     ctk.CTkLabel(
-        monitor_section,
-        text="螢幕畫面",
-        font=ctk.CTkFont(size=16, weight="bold"),
-    ).pack(anchor="w", pady=(0, 4))
+        tab_script,
+        text="字體大小儲存後立即套用。",
+        font=ctk.CTkFont(size=12),
+        text_color=("gray30", "gray70"),
+    ).pack(anchor="w", pady=(4, 0))
+
+    # ── Tab: 螢幕畫面 ───────────────────────────────────────────────
     ctk.CTkLabel(
-        monitor_section,
+        tab_monitor,
         text="勾選要納入截取的每台顯示器。",
         font=ctk.CTkFont(size=12),
         text_color=("gray30", "gray70"),
-    ).pack(anchor="w", pady=(0, 6))
+    ).pack(anchor="w", pady=(8, 10))
 
-    monitor_scroll = ctk.CTkScrollableFrame(monitor_section, height=120)
-    monitor_scroll.pack(fill="x", pady=(0, 4))
+    monitor_scroll = ctk.CTkScrollableFrame(tab_monitor, height=180)
+    monitor_scroll.pack(fill="both", expand=True, pady=(0, 8))
     _monitor_checkboxes: list[Any] = []
     _monitor_indices_list: list[int] = []
     remembered = list(monitor_indices or [])
@@ -335,7 +336,7 @@ def open_agent_settings_dialog(
 
     _rebuild_monitors()
 
-    monitor_btn_row = ctk.CTkFrame(monitor_section, fg_color="transparent")
+    monitor_btn_row = ctk.CTkFrame(tab_monitor, fg_color="transparent")
     monitor_btn_row.pack(fill="x", pady=(0, 6))
     ctk.CTkButton(
         monitor_btn_row, text="重新整理", width=100, command=_rebuild_monitors
@@ -349,11 +350,11 @@ def open_agent_settings_dialog(
         return out
 
     ctk.CTkLabel(
-        inner,
-        text="後端與螢幕設定將於下次執行或錄製分析時生效；腳本字體大小儲存後立即套用。",
+        tab_monitor,
+        text="螢幕設定將於下次執行或錄製分析時生效。",
         font=ctk.CTkFont(size=12),
         text_color=("gray30", "gray70"),
-    ).pack(anchor="w", pady=(4, 14))
+    ).pack(anchor="w", pady=(4, 0))
 
     btn_row = ctk.CTkFrame(inner, fg_color="transparent")
     btn_row.pack(fill="x")

@@ -1,5 +1,5 @@
 {
-    "next_pua": 57653,
+    "next_pua": 57654,
     "": {
         "id": "folder_icon",
         "chinese_id": "資料夾",
@@ -1264,5 +1264,10 @@
         "id": "backspace",
         "chinese_id": "倒退鍵",
         "description": "left-pointing tag shape containing an x mark, representing backspace or delete key"
+    },
+    "": {
+        "id": "division_sign",
+        "chinese_id": "除號",
+        "description": "Horizontal line with a dot directly above and a dot directly below, representing mathematical division"
     }
 }

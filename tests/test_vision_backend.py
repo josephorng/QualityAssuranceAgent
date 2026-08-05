@@ -200,6 +200,61 @@ def test_text_predictor_raises_on_triton_error(monkeypatch: pytest.MonkeyPatch) 
             predictor.predict_images(batch)
 
 
+def test_infer_crnn_requests_dual_outputs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VISION_BACKEND", "triton")
+    batch = np.zeros((1, 32, 8), dtype=np.float32)
+    text_ids = np.array([[1, 9999]], dtype=np.int64)
+    icon_ids = np.array([[8925, 9999]], dtype=np.int64)
+
+    mock_result = MagicMock()
+    mock_result.as_numpy.side_effect = lambda name: {
+        "text_ids": text_ids,
+        "icon_ids": icon_ids,
+    }[name]
+    mock_client = MagicMock()
+    mock_client.infer.return_value = mock_result
+
+    with patch("tritonclient.http.InferenceServerClient", return_value=mock_client):
+        from cua_mcp import vision_triton as vt
+
+        vt.reset_triton_client()
+        out_text, out_icon = vt.infer_crnn(batch)
+
+    assert np.array_equal(out_text, text_ids)
+    assert np.array_equal(out_icon, icon_ids)
+    call_kwargs = mock_client.infer.call_args.kwargs
+    assert len(call_kwargs["outputs"]) == 2
+    as_numpy_names = [c.args[0] for c in mock_result.as_numpy.call_args_list]
+    assert as_numpy_names == ["text_ids", "icon_ids"]
+    vt.reset_triton_client()
+
+
+def test_text_predictor_dual_mode_decode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VISION_BACKEND", "triton")
+    from cua_mcp.read_screen_text.inference_onnx import TextPredictor
+
+    predictor = TextPredictor(quiet=True)
+    blank = predictor.blank_idx
+    # Class 33 is 'A' in ASCII-based dicts; 8925 is a known PUA sample.
+    text_ids = np.array([[33, 33, blank], [blank, blank, blank]], dtype=np.int64)
+    icon_ids = np.array([[8925, blank, blank], [8925, blank, blank]], dtype=np.int64)
+    batch = np.zeros((2, 32, 8), dtype=np.float32)
+
+    with patch(
+        "cua_mcp.vision_triton.infer_crnn",
+        return_value=(text_ids, icon_ids),
+    ):
+        text_preds = predictor.predict_images(batch, mode="text")
+        icon_preds = predictor.predict_images(batch, mode="icon")
+        mixed = predictor.predict_images(batch, mode=["text", "icon"])
+
+    assert all(not any(0xE000 <= ord(ch) <= 0xF8FF for ch in s) for s in text_preds)
+    assert icon_preds[0]  # PUA token for icon stream
+    assert all(len(s) == 1 and 0xE000 <= ord(s) <= 0xF8FF for s in icon_preds if s)
+    assert mixed[0] == text_preds[0]
+    assert mixed[1] == icon_preds[1]
+
+
 def test_infer_timeout_error_message(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VISION_BACKEND", "triton")
     batch = np.zeros((1, 3, 1280, 1280), dtype=np.float32)

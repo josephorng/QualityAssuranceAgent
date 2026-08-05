@@ -22,7 +22,7 @@ from cua_mcp.icon_map import (
     is_unknown_icon_record,
     text_has_pua,
 )
-from cua_mcp.read_screen_text.ocr_image import _ocr_boxes_on_bgr
+from cua_mcp.read_screen_text.ocr_image import _ocr_boxes_on_bgr, ocr_mode_for_yolo_class
 from cua_mcp.select_ui_element import (
     UiDetection,
     _ANCHOR_SUFFIX_BY_CLASS,
@@ -262,7 +262,10 @@ def _build_candidates_from_bgr(
             non_ocr.append((bbox, cls_id))
 
     ocr_started = time.perf_counter()
-    ocr_preds = _ocr_boxes_on_bgr(bgr, ocr_boxes) if ocr_boxes else []
+    ocr_modes = [ocr_mode_for_yolo_class(cls_id) for cls_id in ocr_class_ids]
+    ocr_preds = (
+        _ocr_boxes_on_bgr(bgr, ocr_boxes, mode=ocr_modes) if ocr_boxes else []
+    )
     ocr_elapsed = time.perf_counter() - ocr_started
 
     candidates: list[UiDetection] = []

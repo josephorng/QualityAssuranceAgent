@@ -6,7 +6,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Sequence
 
 import numpy as np
 
@@ -34,7 +34,10 @@ __all__ = [
 YOLO_INPUT_NAME = "images"
 YOLO_OUTPUT_NAME = "output0"
 CRNN_INPUT_NAME = "input"
-CRNN_OUTPUT_NAME = "output"
+CRNN_OUTPUT_TEXT_IDS = "text_ids"
+CRNN_OUTPUT_ICON_IDS = "icon_ids"
+# Legacy single-stream name (pre dual top-1 export); kept for error messages only.
+CRNN_OUTPUT_NAME = CRNN_OUTPUT_TEXT_IDS
 
 _CLIENT_LOCAL = threading.local()
 
@@ -132,11 +135,15 @@ def _infer(
     model_name: str,
     input_name: str,
     input_array: np.ndarray,
-    output_name: str,
+    output_names: str | Sequence[str],
     *,
     _allow_thread_retry: bool = True,
-) -> np.ndarray:
+) -> np.ndarray | tuple[np.ndarray, ...]:
     import tritonclient.http as httpclient
+
+    names = [output_names] if isinstance(output_names, str) else list(output_names)
+    if not names:
+        raise ValueError("At least one Triton output name is required")
 
     shape = list(input_array.shape)
     started = time.perf_counter()
@@ -151,24 +158,30 @@ def _infer(
         if input_array.dtype == np.float64:
             input_array = input_array.astype(np.float32)
         infer_input.set_data_from_numpy(input_array)
-        infer_output = httpclient.InferRequestedOutput(output_name)
+        infer_outputs = [httpclient.InferRequestedOutput(name) for name in names]
         result = client.infer(
             model_name=model_name,
             inputs=[infer_input],
-            outputs=[infer_output],
+            outputs=infer_outputs,
             timeout=int(timeout),
         )
-        out = result.as_numpy(output_name)
-        if out is None:
-            raise TritonUnavailableError(
-                f"Triton model {model_name!r} returned no output {output_name!r}"
-            )
+        outs: list[np.ndarray] = []
+        for name in names:
+            out = result.as_numpy(name)
+            if out is None:
+                raise TritonUnavailableError(
+                    f"Triton model {model_name!r} returned no output {name!r}"
+                )
+            outs.append(out)
         elapsed = time.perf_counter() - started
+        out_shapes = [list(out.shape) for out in outs]
         _log_triton_profile(
             f"infer ok model={model_name} input={input_name} shape={shape} "
-            f"output={output_name} out_shape={list(out.shape)} elapsed_s={elapsed:.3f}"
+            f"outputs={names} out_shapes={out_shapes} elapsed_s={elapsed:.3f}"
         )
-        return out
+        if len(outs) == 1:
+            return outs[0]
+        return tuple(outs)
     except TritonUnavailableError as exc:
         elapsed = time.perf_counter() - started
         _log_triton_profile(
@@ -186,7 +199,7 @@ def _infer(
                 model_name,
                 input_name,
                 input_array,
-                output_name,
+                names,
                 _allow_thread_retry=False,
             )
         elapsed = time.perf_counter() - started
@@ -222,14 +235,20 @@ def infer_yolo(nchw_batch: np.ndarray) -> np.ndarray:
     )
 
 
-def infer_crnn(batch: np.ndarray) -> np.ndarray:
-    """Run CRNN OCR ONNX on Triton; return raw ``output`` token index array."""
+def infer_crnn(batch: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Run CRNN OCR on Triton; return ``(text_ids, icon_ids)`` each ``[batch, seq]``."""
     arr = np.asarray(batch, dtype=np.float32)
     if arr.ndim != 3:
         raise ValueError(f"CRNN input must be [batch, H, W], got shape {arr.shape}")
-    return _infer(
+    outputs = _infer(
         triton_crnn_model_name(),
         CRNN_INPUT_NAME,
         arr,
-        CRNN_OUTPUT_NAME,
+        (CRNN_OUTPUT_TEXT_IDS, CRNN_OUTPUT_ICON_IDS),
     )
+    if not isinstance(outputs, tuple) or len(outputs) != 2:
+        raise TritonUnavailableError(
+            "Triton CRNN must return both text_ids and icon_ids outputs"
+        )
+    text_ids, icon_ids = outputs
+    return text_ids, icon_ids

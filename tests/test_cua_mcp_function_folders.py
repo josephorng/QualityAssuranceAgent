@@ -21,6 +21,7 @@ FUNCTION_FOLDERS: dict[str, dict[str, object]] = {
             "ocr_image.py",
             "get_coordinates.py",
             "inference_onnx.py",
+            "constrained_decode.py",
             "char_dict.json",
             "char_decode_dict.json",
             "model_config.json",

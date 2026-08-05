@@ -12,7 +12,12 @@ input [
 
 output [
   {
-    name: "output"
+    name: "text_ids"
+    data_type: TYPE_INT64
+    dims: [ -1 ]
+  },
+  {
+    name: "icon_ids"
     data_type: TYPE_INT64
     dims: [ -1 ]
   }

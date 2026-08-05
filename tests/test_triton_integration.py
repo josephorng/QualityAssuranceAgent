@@ -29,6 +29,9 @@ def test_triton_yolo_infer_shape(triton_required: None) -> None:
 
 def test_triton_crnn_infer_shape(triton_required: None) -> None:
     batch = np.zeros((2, 32, 16), dtype=np.float32)
-    out = infer_crnn(batch)
-    assert out.ndim == 2
-    assert out.shape[0] == 2
+    text_ids, icon_ids = infer_crnn(batch)
+    assert text_ids.ndim == 2
+    assert icon_ids.ndim == 2
+    assert text_ids.shape[0] == 2
+    assert icon_ids.shape[0] == 2
+    assert text_ids.shape == icon_ids.shape

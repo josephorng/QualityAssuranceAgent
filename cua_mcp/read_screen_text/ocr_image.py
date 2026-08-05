@@ -10,12 +10,14 @@ from __future__ import annotations
 import os
 import threading
 import time
-from typing import Optional
+from typing import Optional, Sequence
 
 import cv2
 import numpy as np
 
 from cua_mcp.geometry import clip_box
+from cua_mcp.yolo_onnx import YOLO_CLASS_ELEMENT
+from .constrained_decode import DecodeMode
 from .inference_onnx import TextPredictor
 from src.common.run_state import get_run_state_manager
 
@@ -38,6 +40,25 @@ def _log_info(text: str) -> None:
 def _default_crnn_path() -> str:
     """Return the default ONNX CRNN model path inside this package."""
     return os.path.join(_PACKAGE_DIR, "ocr_model_finetuned.onnx")
+
+
+def ocr_mode_for_yolo_class(class_id: int) -> DecodeMode:
+    """Map YOLO class to CRNN decode stream: elements use icon_ids, else text_ids."""
+    if int(class_id) == YOLO_CLASS_ELEMENT:
+        return "icon"
+    return "text"
+
+
+def _normalize_crop_modes(
+    mode: DecodeMode | Sequence[DecodeMode],
+    count: int,
+) -> list[DecodeMode]:
+    if isinstance(mode, str):
+        return [mode] * count
+    modes = list(mode)
+    if len(modes) != count:
+        raise ValueError(f"mode length {len(modes)} does not match crop count {count}")
+    return modes
 
 
 def _get_ocr_predictor(
@@ -100,9 +121,13 @@ def _ocr_boxes_on_bgr(
     line_height: int = 32,
     ocr_model_path: Optional[str] = None,
     batch_size: int = _DEFAULT_CRNN_BATCH_SIZE,
+    mode: DecodeMode | Sequence[DecodeMode] = "text",
 ) -> list[list[str]]:
     """
     Run CRNN OCR on each ``(x, y, w, h)`` crop in ``boxes``.
+
+    ``mode`` selects the dual top-1 stream (``text_ids`` vs ``icon_ids``). Pass a
+    single mode for all boxes, or one mode per box.
 
     Returns one prediction list per box (same order as ``boxes``). Empty boxes yield ``[]``.
     """
@@ -127,6 +152,7 @@ def _ocr_boxes_on_bgr(
         predictor,
         line_height,
         batch_size=batch_size,
+        mode=mode,
     )
 
 
@@ -161,19 +187,21 @@ def _ocr_crops_batched(
     line_height: int,
     *,
     batch_size: int = _DEFAULT_CRNN_BATCH_SIZE,
+    mode: DecodeMode | Sequence[DecodeMode] = "text",
 ) -> list[list[str]]:
     """Run CRNN OCR on crops in width-sorted, zero-padded batches."""
     if batch_size < 1:
         batch_size = _DEFAULT_CRNN_BATCH_SIZE
 
     line_height = _effective_line_height(line_height)
+    crop_modes = _normalize_crop_modes(mode, len(crops))
     results: list[list[str]] = [[] for _ in crops]
-    valid: list[tuple[int, np.ndarray]] = []
+    valid: list[tuple[int, np.ndarray, DecodeMode]] = []
 
     for index, crop in enumerate(crops):
         line_image = _prepare_crop_line_image(crop, line_height)
         if line_image is not None:
-            valid.append((index, line_image))
+            valid.append((index, line_image, crop_modes[index]))
 
     valid.sort(key=lambda item: item[1].shape[1])
 
@@ -186,18 +214,19 @@ def _ocr_crops_batched(
         if not chunk:
             continue
 
-        max_w = max(image.shape[1] for _, image in chunk)
+        max_w = max(image.shape[1] for _, image, _ in chunk)
         batch = np.zeros((len(chunk), line_height, max_w), dtype=np.float32)
-        for row, (_, image) in enumerate(chunk):
+        chunk_modes = [row_mode for _, _, row_mode in chunk]
+        for row, (_, image, _) in enumerate(chunk):
             h_img, w_img = image.shape[:2]
             batch[row, :h_img, :w_img] = image
 
         try:
             batch_started = time.perf_counter()
-            predicted_texts = predictor.predict_images(batch)
+            predicted_texts = predictor.predict_images(batch, mode=chunk_modes)
             infer_total_s += time.perf_counter() - batch_started
             batch_count += 1
-            for row, (orig_index, _) in enumerate(chunk):
+            for row, (orig_index, _, _) in enumerate(chunk):
                 if predicted_texts and row < len(predicted_texts):
                     text = predicted_texts[row]
                     results[orig_index] = [text] if text else []
@@ -219,7 +248,11 @@ def _ocr_crop_predicted_texts(
     bgr_crop: np.ndarray,
     predictor: TextPredictor,
     line_height: int,
+    *,
+    mode: DecodeMode = "text",
 ) -> list[str]:
     """Run CRNN OCR on a single crop; return raw ``predict_images`` token strings."""
-    preds = _ocr_crops_batched([bgr_crop], predictor, line_height, batch_size=1)
+    preds = _ocr_crops_batched(
+        [bgr_crop], predictor, line_height, batch_size=1, mode=mode
+    )
     return preds[0] if preds else []

@@ -1,7 +1,15 @@
 import os
 import time
+from typing import Sequence
+
 import numpy as np
 import json
+
+from .constrained_decode import (
+    DecodeMode,
+    greedy_ctc_decode_ids,
+    select_mode_ids,
+)
 
 
 def _log_crnn_profile(message: str) -> None:
@@ -11,6 +19,17 @@ def _log_crnn_profile(message: str) -> None:
         get_run_state_manager().log_info(f"[vision/crnn] {message}")
     except RuntimeError:
         pass
+
+
+def _normalize_modes(mode: DecodeMode | Sequence[DecodeMode], batch_size: int) -> list[DecodeMode]:
+    if isinstance(mode, str):
+        return [mode] * batch_size
+    modes = list(mode)
+    if len(modes) != batch_size:
+        raise ValueError(
+            f"mode length {len(modes)} does not match batch size {batch_size}"
+        )
+    return modes
 
 
 class TextPredictor:
@@ -34,43 +53,67 @@ class TextPredictor:
 
         self.session = None
         self.input_name = None
+        self.blank_idx = int(self.config_dict["nclass"]) - 1
 
-    def decode_outputs(self, outputs):
+    def decode_outputs(
+        self,
+        text_ids,
+        icon_ids=None,
+        *,
+        mode: DecodeMode | Sequence[DecodeMode] = "text",
+    ):
         """
-        Decode the ONNX model outputs into text predictions.
-        
+        Decode dual top-1 ONNX/Triton id streams into text predictions.
+
         Args:
-            outputs: numpy array of shape [batch, seq_len, num_classes]
-            
+            text_ids: [batch, seq] text-constrained top-1 class ids
+            icon_ids: [batch, seq] icon/PUA-constrained top-1 class ids
+            mode: ``"text"`` / ``"icon"`` / ``"any"``, or one mode per batch row
+
         Returns:
             pred_chars: List of predicted character strings
-            avg_probs: List of confidence scores for each prediction
         """
-        pred_chars = []
-        
-        for seq_indices in outputs:
-            chars = []
-            prev_char = None
-            
-            # Convert indices to characters, skipping repeated and blank tokens
-            for idx in seq_indices:
-                idx = idx.item()
-                
-                # Skip if same as previous char or blank token (last class)
-                if idx == self.config_dict['nclass'] - 1 or idx == prev_char:
-                    prev_char = idx
-                    continue
-                    
-                prev_char = idx
-                # Get character from char_dict by finding key with matching value
-                char = self.char_decode_dict.get(str(idx), '')
-                chars.append(char)
-            
-            pred_chars.append(''.join(chars))
-        
+        if icon_ids is None:
+            # Back-compat for callers that still pass a single id stream.
+            icon_ids = text_ids
+
+        text_ids = np.asarray(text_ids)
+        icon_ids = np.asarray(icon_ids)
+        if text_ids.ndim == 1:
+            text_ids = text_ids[np.newaxis, ...]
+        if icon_ids.ndim == 1:
+            icon_ids = icon_ids[np.newaxis, ...]
+        if text_ids.shape != icon_ids.shape:
+            raise ValueError(
+                f"text_ids shape {text_ids.shape} != icon_ids shape {icon_ids.shape}"
+            )
+
+        modes = _normalize_modes(mode, text_ids.shape[0])
+        if len(set(modes)) == 1:
+            ids = select_mode_ids(text_ids, icon_ids, mode=modes[0])
+            return greedy_ctc_decode_ids(
+                ids, self.char_decode_dict, blank_idx=self.blank_idx
+            )
+
+        pred_chars: list[str] = []
+        for i, row_mode in enumerate(modes):
+            ids = select_mode_ids(
+                text_ids[i : i + 1], icon_ids[i : i + 1], mode=row_mode
+            )
+            pred_chars.extend(
+                greedy_ctc_decode_ids(
+                    ids, self.char_decode_dict, blank_idx=self.blank_idx
+                )
+            )
         return pred_chars
 
-    def predict_images(self, images, hxs=None):
+    def predict_images(
+        self,
+        images,
+        hxs=None,
+        *,
+        mode: DecodeMode | Sequence[DecodeMode] = "text",
+    ):
         # Input: [batch, line_height, width] float32 (line_height is typically 32).
         if isinstance(images, list):
             images = np.array(images)
@@ -85,16 +128,14 @@ class TextPredictor:
         from cua_mcp.vision_triton import infer_crnn
 
         started = time.perf_counter()
-        outputs = infer_crnn(images)
+        text_ids, icon_ids = infer_crnn(images)
         elapsed = time.perf_counter() - started
         _log_crnn_profile(
             f"infer backend=triton shape={list(images.shape)} "
             f"elapsed_s={elapsed:.3f}"
         )
 
-        pred_chars = self.decode_outputs(outputs)
-
-        return pred_chars
+        return self.decode_outputs(text_ids, icon_ids, mode=mode)
 
 class TextExtractor:
     """

@@ -37,10 +37,10 @@ from .ocr_image import (
     _get_ocr_predictor,
     _log_info,
     _ocr_crops_batched,
+    ocr_mode_for_yolo_class,
 )
 
 _OCR_DETECTION_CLASS_IDS = OCR_DETECTION_CLASS_IDS
-_OCR_CRNN_CLASS_IDS = frozenset({YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT})
 
 OcrRegion = tuple[tuple[int, int, int, int], tuple[int, int], list[str]]
 
@@ -208,12 +208,12 @@ def get_coordinates_from_image_path(
     Run YOLO + selective OCR on the image at ``image_path``.
 
     YOLO detects ``text``, ``element``, ``input``, and ``scrollbar``. Only ``text`` and ``element``
-    boxes are cropped and passed through CRNN; ``input`` and ``scrollbar`` are returned with empty
-    ``predicted_texts``.
+    boxes are cropped and passed through CRNN (``mode="text"`` / ``mode="icon"`` respectively);
+    ``input`` and ``scrollbar`` are returned with empty ``predicted_texts``.
 
     Returns a list of regions, each
     ``((x, y, w, h), (center_x, center_y), predicted_texts)`` where ``predicted_texts`` is the raw list from
-    ``TextPredictor.predict_images(..., beam_search=False)`` (reading order). On failure,
+    ``TextPredictor.predict_images`` (reading order). On failure,
     returns ``[]``. Use :func:`format_coordinate_text_from_regions` when you need
     the ``[cx,cy] text`` hint string for an LM.
     """
@@ -246,43 +246,60 @@ def get_coordinates_from_image_path(
     yolo_elapsed_ms = (time.perf_counter() - yolo_start) * 1000.0
     _log_info(f"OCR YOLO detected_boxes={len(classed_boxes)}")
 
-    ocr_boxes: list[tuple[int, int, int, int]] = []
+    # Keep text vs element separate so dual-stream decode modes stay correct
+    # after overlap merging.
+    text_boxes: list[tuple[int, int, int, int]] = []
+    element_boxes: list[tuple[int, int, int, int]] = []
     non_ocr_boxes: list[tuple[int, int, int, int]] = []
     for bbox, cls_id in classed_boxes:
-        if cls_id in _OCR_CRNN_CLASS_IDS:
-            ocr_boxes.append(bbox)
+        if cls_id == YOLO_CLASS_TEXT:
+            text_boxes.append(bbox)
+        elif cls_id == YOLO_CLASS_ELEMENT:
+            element_boxes.append(bbox)
         else:
             non_ocr_boxes.append(bbox)
 
     if not classed_boxes:
         _log_info("OCR using full-frame fallback box")
-        ocr_boxes = [(0, 0, img_w, img_h)]
+        text_boxes = [(0, 0, img_w, img_h)]
 
-    ocr_boxes = _merge_overlapping_boxes(ocr_boxes)
-    ocr_boxes = _sort_boxes_reading_order(ocr_boxes)
-    ocr_boxes = [_expand_box(x, y, w, h, img_w, img_h) for x, y, w, h in ocr_boxes]
+    ocr_classed: list[tuple[tuple[int, int, int, int], int]] = []
+    for boxes, cls_id in (
+        (text_boxes, YOLO_CLASS_TEXT),
+        (element_boxes, YOLO_CLASS_ELEMENT),
+    ):
+        merged = _sort_boxes_reading_order(_merge_overlapping_boxes(boxes))
+        for bbox in merged:
+            ocr_classed.append((bbox, cls_id))
 
-    box_crops: list[tuple[tuple[int, int, int, int], np.ndarray]] = []
-    for x, y, w, h in ocr_boxes:
+    ocr_classed = [
+        (_expand_box(x, y, w, h, img_w, img_h), cls_id)
+        for (x, y, w, h), cls_id in ocr_classed
+    ]
+
+    box_crops: list[tuple[tuple[int, int, int, int], np.ndarray, int]] = []
+    for (x, y, w, h), cls_id in ocr_classed:
         crop = bgr[y : y + h, x : x + w]
         if crop.size == 0:
             continue
-        box_crops.append(((x, y, w, h), crop))
+        box_crops.append(((x, y, w, h), crop, cls_id))
 
     ocr_elapsed_ms: float | None = None
     all_regions: list[OcrRegion] = []
     if box_crops:
         _log_info(f"OCR CRNN start boxes={len(box_crops)} batch_size={batch_size}")
         ocr_start = time.perf_counter()
+        crop_modes = [ocr_mode_for_yolo_class(cls_id) for _, _, cls_id in box_crops]
         all_preds = _ocr_crops_batched(
-            [crop for _, crop in box_crops],
+            [crop for _, crop, _ in box_crops],
             predictor,
             line_height,
             batch_size=batch_size,
+            mode=crop_modes,
         )
         ocr_elapsed_ms = (time.perf_counter() - ocr_start) * 1000.0
         for (x, y, w, h), preds in zip(
-            (box for box, _crop in box_crops),
+            (box for box, _crop, _cls in box_crops),
             all_preds,
             strict=True,
         ):

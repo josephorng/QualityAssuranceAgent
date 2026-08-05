@@ -167,5 +167,13 @@ def test_sample_images_available() -> None:
     assert images, "No OCR sample images found for batch regression tests"
 
 
+def test_ocr_mode_for_yolo_class() -> None:
+    from cua_mcp.read_screen_text.ocr_image import ocr_mode_for_yolo_class
+    from cua_mcp.yolo_onnx import YOLO_CLASS_ELEMENT, YOLO_CLASS_TEXT
+
+    assert ocr_mode_for_yolo_class(YOLO_CLASS_TEXT) == "text"
+    assert ocr_mode_for_yolo_class(YOLO_CLASS_ELEMENT) == "icon"
+
+
 def test_default_batch_size_constant() -> None:
     assert ocr_image._DEFAULT_CRNN_BATCH_SIZE == 64

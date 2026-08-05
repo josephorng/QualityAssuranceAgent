@@ -131,3 +131,27 @@ def test_parse_step_outcome_invalid_returns_none() -> None:
     assert brain._parse_step_outcome("The task is completed because...") is None
     assert brain._parse_step_outcome("") is None
     assert brain._parse_step_outcome('{"status":"maybe","reason":"x"}') is None
+
+
+def test_parse_step_outcome_recovers_unescaped_quotes_in_reason() -> None:
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = type(
+        "Mgr",
+        (),
+        {
+            "log_error": lambda self, msg: None,
+            "log_info": lambda self, msg: None,
+        },
+    )()
+
+    # Same failure mode as task_20260805_032319_689937 step 8: nested "click" breaks json.loads.
+    raw = (
+        '{"status":"completed","reason":"The user\'s instruction was to "click", '
+        'and the click action was executed successfully at the current cursor position. '
+        'Since no specific target was provided, the single click satisfies the goal."}'
+    )
+    outcome = brain._parse_step_outcome(raw)
+    assert outcome is not None
+    assert outcome.status == "completed"
+    assert "click" in outcome.reason
+    assert "satisfies the goal" in outcome.reason

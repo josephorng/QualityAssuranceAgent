@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from time import perf_counter
@@ -16,7 +17,7 @@ from cua_mcp.tools import (
 from ollama import Message
 from pydantic import ValidationError
 from src.common.io_utils import write_json
-from cua_mcp.llm_json import parse_json_object
+from cua_mcp.llm_json import extract_json_object_string, parse_json_object
 from src.common.models import (
     BrainStepOutcome,
     BrainTaskState,
@@ -441,6 +442,22 @@ class BrainModule:
             decode_error_prefix="Model JSON decode failed",
         )
 
+    @staticmethod
+    def _recover_step_outcome_payload(content: str) -> dict[str, Any] | None:
+        """Best-effort extract of status/reason when model JSON is malformed.
+
+        Handles common LLM mistakes such as unescaped quotes inside ``reason``.
+        """
+        text = extract_json_object_string(content)
+        status_match = re.search(r'"status"\s*:\s*"(completed|failed)"', text)
+        if not status_match:
+            return None
+        reason = ""
+        reason_match = re.search(r'"reason"\s*:\s*"(.*)"\s*}\s*$', text, re.DOTALL)
+        if reason_match:
+            reason = reason_match.group(1)
+        return {"status": status_match.group(1), "reason": reason}
+
     def _parse_step_outcome(self, content: str | None) -> BrainStepOutcome | None:
         """Parse a structured step finish reply, or None if content is missing/invalid."""
         if not (content or "").strip():
@@ -449,6 +466,16 @@ class BrainModule:
             payload = self._parse_json_object_from_model_content(content or "")
             return BrainStepOutcome.model_validate(payload)
         except (ValueError, ValidationError, TypeError) as e:
+            recovered = self._recover_step_outcome_payload(content or "")
+            if recovered is not None:
+                try:
+                    outcome = BrainStepOutcome.model_validate(recovered)
+                    self.manager.log_info(
+                        "Step outcome JSON was malformed; recovered status/reason via fallback parser"
+                    )
+                    return outcome
+                except (ValidationError, TypeError):
+                    pass
             self.manager.log_error(f"Step outcome JSON parse/validation failed: {e}")
             return None
 

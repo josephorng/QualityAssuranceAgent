@@ -67,8 +67,48 @@ def test_nearest_candidates_collects_all_when_no_multi_char_text() -> None:
     assert len(nearest) == 12
 
 
-def test_nearest_candidates_stops_after_two_multi_char_texts() -> None:
-    """Keep collecting until two multi-char texts exist; 1-char text does not count."""
+def test_nearest_candidates_grows_until_five_text_and_five_icon() -> None:
+    """Keep collecting until both text and icon quotas are filled."""
+    primary = _detection_from_bbox(
+        (0, 0, 10, 10),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "Chrome"}],
+    )
+    icons = [
+        _detection_from_bbox(
+            (20 + i * 20, 0, 10, 10),
+            YOLO_CLASS_ELEMENT,
+            icons=[{"chinese_id": f"Icon{i}"}],
+        )
+        for i in range(6)
+    ]
+    texts = [
+        _detection_from_bbox(
+            (200 + i * 40, 0, 40, 10),
+            YOLO_CLASS_TEXT,
+            text=f"Text{i}",
+        )
+        for i in range(6)
+    ]
+    extra = _detection_from_bbox(
+        (500, 0, 10, 10),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "After"}],
+    )
+    detections = [primary, *icons, *texts, extra]
+    nearest = _nearest_candidates(detections, 5, 5)
+    assert nearest[0] is primary
+    text_count = sum(
+        1 for d in nearest if d.class_id == YOLO_CLASS_TEXT and len(d.text or "") > 1
+    )
+    icon_count = sum(1 for d in nearest if d.icons)
+    assert text_count >= 5
+    assert icon_count >= 5
+    assert extra not in nearest
+
+
+def test_nearest_candidates_stops_after_two_multi_char_texts_when_configured() -> None:
+    """Legacy text-only quota still works when icon min is zero."""
     primary = _detection_from_bbox(
         (0, 0, 10, 10),
         YOLO_CLASS_ELEMENT,
@@ -91,7 +131,13 @@ def test_nearest_candidates_stops_after_two_multi_char_texts() -> None:
         icons=[{"chinese_id": "After"}],
     )
     detections = [primary, *close_icons, single, text_a, text_b, farther_icon]
-    nearest = _nearest_candidates(detections, 5, 5)
+    nearest = _nearest_candidates(
+        detections,
+        5,
+        5,
+        min_multi_char_text_neighbors=2,
+        min_icon_neighbors=0,
+    )
     assert nearest[0] is primary
     assert single in nearest
     assert [d.text for d in nearest if d.class_id == YOLO_CLASS_TEXT] == [

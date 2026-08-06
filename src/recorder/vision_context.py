@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -20,10 +21,14 @@ from src.common.nearby_side import (
     Side,
     format_nearby_context_comment,
     side_from_anchor_bbox,
+    side_to_schema_value,
+    side_to_zh,
 )
 from src.recorder.models import POINTER_EVENT_KINDS, RecordedEvent
 
 _MIN_NEARBY_TEXT_LANDMARKS = 2
+_MIN_NEARBY_TEXT_CANDIDATES = 5
+_MIN_NEARBY_ICON_CANDIDATES = 5
 _DRAG_OFFSET_THRESHOLD_PX = 5
 
 
@@ -99,6 +104,11 @@ def _is_multi_char_text_detection(det: UiDetection) -> bool:
     return det.class_id == YOLO_CLASS_TEXT and len(_visible_text(det.text)) > 1
 
 
+def _is_icon_detection(det: UiDetection) -> bool:
+    """True when a detection carries known icon metadata usable as a landmark."""
+    return bool(det.icons)
+
+
 def _is_multi_char_text_candidate(candidate: dict[str, Any], label: str) -> bool:
     """True when a candidate is a multi-character text landmark (not a 1-char icon miss)."""
     visible = _visible_text(candidate.get("text"))
@@ -114,20 +124,26 @@ def _nearest_candidates(
     local_y: int,
     *,
     limit: int | None = None,
-    min_multi_char_text_neighbors: int | None = _MIN_NEARBY_TEXT_LANDMARKS,
+    min_multi_char_text_neighbors: int | None = _MIN_NEARBY_TEXT_CANDIDATES,
+    min_icon_neighbors: int | None = _MIN_NEARBY_ICON_CANDIDATES,
 ) -> list[UiDetection]:
     """Return detections sorted by point-to-bbox distance (closest first).
 
     When several boxes contain the cursor (distance 0), prefer the smallest bbox.
 
     By default, always includes the nearest detection as primary, then keeps
-    appending neighbors until ``min_multi_char_text_neighbors`` text detections
-    with more than one visible character are included (icons misclassified as
-    text with 0–1 visible characters do not count). There is no fixed candidate
-    cap unless ``limit`` is set.
+    appending neighbors until both quotas are met:
+
+    - ``min_multi_char_text_neighbors`` multi-character text detections
+    - ``min_icon_neighbors`` detections with icon metadata
+
+    Icons misclassified as text with 0–1 visible characters do not count toward
+    the text quota. There is no fixed candidate cap unless ``limit`` is set; if
+    either quota cannot be filled from remaining detections, includes the rest.
 
     Pass ``min_multi_char_text_neighbors=None`` (or 0) to return the full
-    distance-ranked list (optionally truncated by ``limit``).
+    distance-ranked list (optionally truncated by ``limit``), ignoring icon
+    quotas as well.
     """
     if not detections:
         return []
@@ -138,14 +154,20 @@ def _nearest_candidates(
     if not min_multi_char_text_neighbors:
         return scored if limit is None else scored[:limit]
 
+    text_target = max(int(min_multi_char_text_neighbors), 0)
+    icon_target = max(int(min_icon_neighbors or 0), 0)
+
     nearest: list[UiDetection] = [scored[0]]
-    multi_char_texts = 0
+    multi_char_texts = 1 if _is_multi_char_text_detection(scored[0]) else 0
+    icon_count = 1 if _is_icon_detection(scored[0]) else 0
     for det in scored[1:]:
+        if multi_char_texts >= text_target and icon_count >= icon_target:
+            break
         nearest.append(det)
         if _is_multi_char_text_detection(det):
             multi_char_texts += 1
-            if multi_char_texts >= min_multi_char_text_neighbors:
-                break
+        if _is_icon_detection(det):
+            icon_count += 1
         if limit is not None and len(nearest) >= limit:
             break
     return nearest
@@ -580,6 +602,134 @@ def collect_nearby_hint_labels(
             vision, instruction=instruction, max_count=max_count
         )
     ]
+
+
+def list_nearby_landmark_options(
+    vision: dict[str, Any],
+    *,
+    instruction: str = "",
+) -> list[dict[str, Any]]:
+    """Return all labelable neighbor landmarks (no auto-pick cap).
+
+    Each option is ``{"label", "side", "display"}`` where ``side`` is the schema
+    string (e.g. ``lower_left``) or ``None``. Skips the primary candidate, unknown
+    / generic labels, and labels already present in the base instruction (after
+    nearby comments are stripped) so the click target itself is excluded.
+    """
+    from src.common.nearby_side import strip_nearby_context_comments
+
+    candidates = vision.get("candidates") or []
+    if len(candidates) < 2:
+        return []
+
+    primary = candidates[0]
+    if not isinstance(primary, dict):
+        return []
+    primary_bbox = primary.get("bbox")
+    bbox: tuple[int, int, int, int] | None = None
+    if isinstance(primary_bbox, (list, tuple)) and len(primary_bbox) == 4:
+        bbox = (
+            int(primary_bbox[0]),
+            int(primary_bbox[1]),
+            int(primary_bbox[2]),
+            int(primary_bbox[3]),
+        )
+
+    base_instruction = strip_nearby_context_comments(instruction) if instruction else ""
+
+    options: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in candidates[1:]:
+        if not isinstance(candidate, dict):
+            continue
+        label = _candidate_label_for_hint(candidate)
+        if not label or label in seen:
+            continue
+        if base_instruction and _label_already_in_instruction(label, base_instruction):
+            continue
+        seen.add(label)
+        side: Side | None = None
+        if bbox is not None:
+            center = _candidate_center(candidate)
+            if center is not None:
+                side = side_from_anchor_bbox(bbox, center[0], center[1])
+        if side is not None:
+            display = f"{label}（{side_to_zh(side)}）"
+        else:
+            display = label
+        options.append(
+            {
+                "label": label,
+                "side": side_to_schema_value(side),
+                "display": display,
+            }
+        )
+    return options
+
+
+def load_yolo_ocr_payload(
+    run_root: Path,
+    event_index: int,
+    *,
+    suffix: str = "",
+) -> dict[str, Any] | None:
+    """Load a persisted ``yolo_ocr/event_NNN{suffix}.json`` payload, if present."""
+    path = Path(run_root) / "yolo_ocr" / f"event_{int(event_index):03d}{suffix}.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def vision_from_yolo_ocr(
+    run_root: Path,
+    event_index: int,
+    *,
+    suffix: str = "",
+) -> dict[str, Any]:
+    """Build a minimal vision dict from persisted YOLO/OCR debug JSON."""
+    payload = load_yolo_ocr_payload(run_root, event_index, suffix=suffix)
+    if payload is None:
+        return {"used_vision": False, "candidates": []}
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        candidates = []
+    return {
+        "used_vision": True,
+        "candidate_text": str(payload.get("candidate_text") or ""),
+        "candidates": candidates,
+        "local_cursor": payload.get("local_cursor"),
+        "detection_count": payload.get("detection_count", len(candidates)),
+    }
+
+
+def load_recording_landmark_options(
+    run_root: Path,
+    event_index: int,
+    *,
+    kind: str,
+    instruction: str = "",
+) -> dict[str, list[dict[str, Any]]]:
+    """Load landmark option groups for a recording event.
+
+    Returns ``{"start": [...]}`` for click/scroll, or ``{"start": [...], "end": [...]}``
+    for drag (終點 from ``_end_filtered`` with ``_end`` fallback).
+    """
+    start_vision = vision_from_yolo_ocr(run_root, event_index, suffix="")
+    start_options = list_nearby_landmark_options(
+        start_vision, instruction=instruction
+    )
+    if kind != "drag":
+        return {"start": start_options}
+
+    end_vision = vision_from_yolo_ocr(run_root, event_index, suffix="_end_filtered")
+    if not end_vision.get("candidates"):
+        end_vision = vision_from_yolo_ocr(run_root, event_index, suffix="_end")
+    end_options = list_nearby_landmark_options(end_vision, instruction=instruction)
+    return {"start": start_options, "end": end_options}
 
 
 def append_nearby_context_comment(instruction: str, vision: dict[str, Any]) -> str:

@@ -713,6 +713,70 @@ def test_write_recording_html_renders_events_and_instructions(tmp_path: Path) ->
     assert "游標" in html
 
 
+def test_write_recording_html_renders_landmark_multiselect(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000020"
+    _write_recording_fixture(run_root)
+    instruction = (
+        "將滑鼠移到「搜尋」文字（在「已選取 2 個項目」文字的左下方），並點擊滑鼠一下。"
+    )
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {"event_index": 1, "instruction": instruction},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "yolo_ocr").mkdir(exist_ok=True)
+    (run_root / "yolo_ocr" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "candidates": [
+                    {
+                        "bbox": [40, 40, 20, 20],
+                        "center": [50, 50],
+                        "class_name": "text",
+                        "text": "搜尋",
+                    },
+                    {
+                        "bbox": [10, 90, 80, 14],
+                        "center": [50, 97],
+                        "class_name": "text",
+                        "text": "已選取 2 個項目",
+                    },
+                    {
+                        "bbox": [90, 90, 50, 14],
+                        "center": [115, 97],
+                        "class_name": "text",
+                        "text": "45 個項目",
+                    },
+                    {
+                        "bbox": [200, 40, 20, 20],
+                        "center": [210, 50],
+                        "class_name": "element",
+                        "text": "",
+                        "icons": [{"chinese_id": "Chrome"}],
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+
+    assert "附近地標" in html
+    assert 'class="apply-landmarks"' in html
+    assert 'data-label="「已選取 2 個項目」文字"' in html
+    assert 'data-label="「45 個項目」文字"' in html
+    assert 'data-label="「Chrome」圖示"' in html
+    assert 'data-label="「已選取 2 個項目」文字"' in html
+    assert "checked" in html
+    assert "套用地標" in html
+    assert "/api/runs/" in html
+
+
 def test_write_recording_html_escapes_markup(tmp_path: Path) -> None:
     run_root = tmp_path / "recording_20260721_120000_000002"
     _write_recording_fixture(run_root, with_analysis=False)

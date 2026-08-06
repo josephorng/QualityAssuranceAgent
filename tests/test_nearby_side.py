@@ -7,8 +7,10 @@ from src.common.nearby_side import (
     NearbyHint,
     Side,
     anchor_satisfies_side,
+    apply_nearby_landmarks,
     enrich_nearby_objects_from_goal,
     enrich_tool_arguments_from_goal,
+    extract_nearby_hints_by_location,
     extract_nearby_hints_from_instruction,
     format_directed_phrase,
     format_nearby_context_comment,
@@ -16,6 +18,7 @@ from src.common.nearby_side import (
     merge_nearby_hints,
     parse_nearby_hint_string,
     side_from_anchor_bbox,
+    strip_nearby_context_comments,
 )
 
 
@@ -101,6 +104,71 @@ def test_extract_nearby_hints_from_instruction() -> None:
         NearbyHint("「顯示已授權電腦」文字", Side.LEFT),
         NearbyHint("「顯示未安裝電腦」文字", None),
     ]
+
+
+def test_extract_preserves_enumeration_comma_inside_quoted_icon_label() -> None:
+    instruction = (
+        "將滑鼠移到「搜尋」文字（在「睛時多雲」文字的右邊、"
+        "在「搜尋、放大鏡」圖示的右邊），並點擊滑鼠一下。"
+    )
+    hints = extract_nearby_hints_from_instruction(instruction)
+    assert hints == [
+        NearbyHint("「睛時多雲」文字", Side.RIGHT),
+        NearbyHint("「搜尋、放大鏡」圖示", Side.RIGHT),
+    ]
+    selected = {hint.label for hint in extract_nearby_hints_by_location(instruction)["附近"]}
+    assert "「搜尋、放大鏡」圖示" in selected
+    assert "「睛時多雲」文字" in selected
+
+
+def test_strip_and_apply_nearby_landmarks_click() -> None:
+    instruction = (
+        "將滑鼠移到「搜尋」文字（在「45 個項目」文字的右下方），並點擊滑鼠一下。"
+    )
+    stripped = strip_nearby_context_comments(instruction)
+    assert stripped == "將滑鼠移到「搜尋」文字，並點擊滑鼠一下。"
+    reformatted = apply_nearby_landmarks(
+        instruction,
+        [
+            NearbyHint("「已選取 2 個項目」文字", Side.LOWER_LEFT),
+            NearbyHint("「45 個項目」文字", Side.LOWER_RIGHT),
+        ],
+        kind="click",
+    )
+    assert reformatted == (
+        "將滑鼠移到「搜尋」文字（在「已選取 2 個項目」文字的左下方、"
+        "在「45 個項目」文字的右下方），並點擊滑鼠一下。"
+    )
+    cleared = apply_nearby_landmarks(instruction, [], kind="click")
+    assert cleared == "將滑鼠移到「搜尋」文字，並點擊滑鼠一下。"
+
+
+def test_strip_and_apply_nearby_landmarks_drag() -> None:
+    instruction = (
+        "從「Chrome」圖示（起點附近有「OneNote」文字）拖到「Desktop」文字"
+        "（終點在「Recycle Bin」圖示的右邊）"
+    )
+    reformatted = apply_nearby_landmarks(
+        instruction,
+        [NearbyHint("「Edge」圖示", Side.LEFT)],
+        kind="drag",
+        end_hints=[NearbyHint("「Folder」文字", None)],
+    )
+    assert reformatted == (
+        "從「Chrome」圖示（起點在「Edge」圖示的左邊）拖到「Desktop」文字"
+        "（終點附近有「Folder」文字）"
+    )
+
+
+def test_extract_nearby_hints_by_location_drag() -> None:
+    instruction = (
+        "從「Chrome」圖示（起點附近有「OneNote」文字）拖到「Desktop」文字"
+        "（終點在「Recycle Bin」圖示的右邊）"
+    )
+    buckets = extract_nearby_hints_by_location(instruction)
+    assert buckets["起點"] == [NearbyHint("「OneNote」文字", None)]
+    assert buckets["終點"] == [NearbyHint("「Recycle Bin」圖示", Side.RIGHT)]
+    assert buckets["附近"] == []
 
 
 def test_merge_nearby_hints_prefers_earlier_and_upgrades_side() -> None:

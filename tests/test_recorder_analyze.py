@@ -212,6 +212,59 @@ def test_append_nearby_context_comment_directed_from_geometry() -> None:
     )
 
 
+def test_list_nearby_landmark_options_returns_all_neighbors() -> None:
+    from src.recorder.vision_context import list_nearby_landmark_options
+
+    vision = {
+        "used_vision": True,
+        "candidates": [
+            {
+                "bbox": [40, 40, 20, 20],
+                "center": [50, 50],
+                "class_name": "text",
+                "text": "搜尋",
+            },
+            {
+                "bbox": [90, 40, 40, 20],
+                "center": [110, 50],
+                "class_name": "text",
+                "text": "已選取 2 個項目",
+            },
+            {
+                "bbox": [10, 80, 30, 20],
+                "center": [25, 90],
+                "class_name": "text",
+                "text": "45 個項目",
+            },
+            {
+                "bbox": [200, 40, 20, 20],
+                "center": [210, 50],
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "Chrome"}],
+            },
+            {
+                "bbox": [300, 40, 10, 10],
+                "center": [305, 45],
+                "class_name": "unknown",
+                "text": None,
+            },
+        ],
+    }
+    options = list_nearby_landmark_options(
+        vision, instruction="將滑鼠移到「搜尋」文字"
+    )
+    labels = [item["label"] for item in options]
+    assert labels == [
+        "「已選取 2 個項目」文字",
+        "「45 個項目」文字",
+        "「Chrome」圖示",
+    ]
+    assert len(options) == 3
+    assert options[0]["side"] == "left"
+    assert "（左邊）" in options[0]["display"]
+
+
 def test_append_drag_nearby_context_comments() -> None:
     vision = {
         "used_vision": True,

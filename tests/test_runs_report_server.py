@@ -9,6 +9,7 @@ import pytest
 
 from src.common.runs_report_server import (
     RunsReportServer,
+    apply_recording_event_landmarks,
     delete_run_report_folder,
     ensure_runs_report_server,
     resolve_deletable_run_folder,
@@ -27,6 +28,86 @@ def _make_report_run(runs_root: Path, name: str) -> Path:
         encoding="utf-8",
     )
     (run_root / "note.txt").write_text("bug payload", encoding="utf-8")
+    return run_root
+
+
+def _make_recording_landmark_run(runs_root: Path, name: str) -> Path:
+    run_root = runs_root / name
+    run_root.mkdir(parents=True)
+    (run_root / "events").mkdir()
+    (run_root / "analysis").mkdir()
+    (run_root / "yolo_ocr").mkdir()
+    (run_root / "events" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "index": 1,
+                "timestamp_utc": "2026-07-21T04:00:00+00:00",
+                "kind": "click",
+                "cursor_xy": [10, 20],
+                "screenshot_path": "",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    instruction = (
+        "將滑鼠移到「搜尋」文字（在「已選取 2 個項目」文字的左下方），並點擊滑鼠一下。"
+    )
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": instruction,
+                "wait_instruction": "等待 2 秒",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "report.json").write_text(
+        json.dumps(
+            {
+                "run_id": name,
+                "recorded": 1,
+                "instructions": ["等待 2 秒", instruction],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "yolo_ocr" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "candidates": [
+                    {
+                        "bbox": [40, 40, 20, 20],
+                        "center": [50, 50],
+                        "class_name": "text",
+                        "text": "搜尋",
+                    },
+                    {
+                        "bbox": [10, 90, 80, 14],
+                        "center": [50, 97],
+                        "class_name": "text",
+                        "text": "已選取 2 個項目",
+                    },
+                    {
+                        "bbox": [90, 90, 50, 14],
+                        "center": [115, 97],
+                        "class_name": "text",
+                        "text": "45 個項目",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "session.json").write_text(
+        json.dumps({"run_id": name, "event_count": 1}),
+        encoding="utf-8",
+    )
     return run_root
 
 
@@ -162,3 +243,70 @@ def test_ensure_runs_report_server_reuses_same_root(tmp_path: Path) -> None:
         assert first.is_running()
     finally:
         stop_runs_report_server()
+
+
+def test_apply_recording_event_landmarks_persists_and_rebuilds(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    _make_recording_landmark_run(runs_root, "recording_landmark_edit")
+
+    result = apply_recording_event_landmarks(
+        runs_root,
+        "recording_landmark_edit",
+        1,
+        selected=[
+            {"label": "「45 個項目」文字", "side": "lower_right"},
+            {"label": "「已選取 2 個項目」文字", "side": "lower_left"},
+        ],
+    )
+
+    expected = (
+        "將滑鼠移到「搜尋」文字（在「45 個項目」文字的右下方、"
+        "在「已選取 2 個項目」文字的左下方），並點擊滑鼠一下。"
+    )
+    assert result["instruction"] == expected
+    analysis = json.loads(
+        (runs_root / "recording_landmark_edit" / "analysis" / "event_001.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert analysis["instruction"] == expected
+    assert analysis["landmarks"]["selected"][0]["label"] == "「45 個項目」文字"
+    report = json.loads(
+        (runs_root / "recording_landmark_edit" / "report.json").read_text(encoding="utf-8")
+    )
+    assert report["instructions"] == ["等待 2 秒", expected]
+    html = (runs_root / "recording_landmark_edit" / "recording_steps.html").read_text(
+        encoding="utf-8"
+    )
+    assert expected in html
+
+
+def test_runs_report_server_landmarks_endpoint(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    _make_recording_landmark_run(runs_root, "recording_http_landmarks")
+
+    server = RunsReportServer(runs_root)
+    try:
+        base = server.start()
+        body = json.dumps(
+            {
+                "selected": [
+                    {"label": "「45 個項目」文字", "side": "lower_right"},
+                ]
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            f"{base}/api/runs/recording_http_landmarks/events/1/landmarks",
+            method="POST",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            assert response.status == 200
+        assert payload["ok"] is True
+        assert "「45 個項目」文字的右下方" in payload["instruction"]
+        assert "並點擊滑鼠一下" in payload["instruction"]
+    finally:
+        server.stop()

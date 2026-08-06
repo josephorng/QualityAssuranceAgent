@@ -105,6 +105,43 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 .copy-all-instructions.copied {
   color: #116329; border-color: #4ac26b; background: #dafbe1;
 }
+.landmarks {
+  margin: 0 1.5rem 1rem; padding: .75rem 1rem;
+  border: 1px solid #d0d7de; border-radius: 8px; background: #f6f8fa;
+}
+.landmarks-title {
+  margin: 0 0 .5rem; font-size: .9rem; font-weight: 700; color: #57606a;
+}
+.landmarks-group { margin: 0 0 .75rem; }
+.landmarks-group:last-of-type { margin-bottom: .5rem; }
+.landmarks-group-label {
+  margin: 0 0 .35rem; font-size: .8rem; font-weight: 600; color: #8c959f;
+}
+.landmarks-list {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: .25rem;
+}
+.landmarks-list label {
+  display: flex; align-items: flex-start; gap: .45rem;
+  font-size: .85rem; font-weight: 500; cursor: pointer; color: #1f2328;
+}
+.landmarks-list input { margin-top: .2rem; flex: 0 0 auto; }
+.apply-landmarks {
+  appearance: none; border: 1px solid #0969da; background: #ddf4ff;
+  cursor: pointer; border-radius: 6px; padding: .3rem .7rem;
+  font-size: .8rem; line-height: 1.2; font-family: inherit;
+  font-weight: 600; color: #0969da;
+}
+.apply-landmarks:hover:not(:disabled) { background: #b6e3ff; }
+.apply-landmarks:disabled { opacity: .45; cursor: not-allowed; }
+.apply-landmarks.applied {
+  color: #116329; border-color: #4ac26b; background: #dafbe1;
+}
+.landmarks-status {
+  display: inline-block; margin-left: .5rem;
+  font-size: .75rem; color: #57606a; font-weight: 600;
+}
+.landmarks-status.error { color: #cf222e; }
 .hand-ops {
   list-style: disc; margin: 0; padding: 1rem 1.5rem 1.25rem 2.5rem;
 }
@@ -213,6 +250,86 @@ _RECORDING_SCRIPT = """
       });
     });
   }
+
+  function setLandmarksStatus(panel, text, isError) {
+    var status = panel.querySelector(".landmarks-status");
+    if (!status) return;
+    status.textContent = text || "";
+    if (isError) status.classList.add("error");
+    else status.classList.remove("error");
+  }
+
+  function selectedHints(panel, group) {
+    return Array.prototype.slice
+      .call(panel.querySelectorAll('input[data-landmark-group="' + group + '"]:checked'))
+      .map(function (input) {
+        var side = input.getAttribute("data-side");
+        return {
+          label: input.getAttribute("data-label") || "",
+          side: side === "" || side == null ? null : side
+        };
+      })
+      .filter(function (item) { return !!item.label; });
+  }
+
+  Array.prototype.slice.call(document.querySelectorAll("button.apply-landmarks")).forEach(function (btn) {
+    btn.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      var panel = btn.closest(".landmarks");
+      var group = btn.closest(".instruction-group");
+      if (!panel || !group) return;
+      if (window.location.protocol === "file:") {
+        setLandmarksStatus(panel, "請透過主程式開啟報告以套用地標。", true);
+        return;
+      }
+      var runId = group.getAttribute("data-run-id") || "";
+      var eventIndex = group.getAttribute("data-event-index") || "";
+      var kind = group.getAttribute("data-kind") || "";
+      if (!runId || !eventIndex) {
+        setLandmarksStatus(panel, "缺少事件資訊。", true);
+        return;
+      }
+      var body = { selected: selectedHints(panel, "start") };
+      if (kind === "drag") {
+        body.selected_end = selectedHints(panel, "end");
+      }
+      btn.disabled = true;
+      setLandmarksStatus(panel, "套用中…", false);
+      fetch("/api/runs/" + encodeURIComponent(runId) + "/events/" + encodeURIComponent(eventIndex) + "/landmarks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      })
+        .then(function (response) {
+          return response.json().then(function (payload) {
+            return { ok: response.ok, payload: payload };
+          });
+        })
+        .then(function (result) {
+          btn.disabled = false;
+          if (!result.ok || !result.payload || !result.payload.ok) {
+            var err = (result.payload && result.payload.error) || "套用失敗";
+            setLandmarksStatus(panel, err, true);
+            return;
+          }
+          var instruction = result.payload.instruction || "";
+          var title = group.querySelector(".instruction-title");
+          if (title) title.textContent = instruction;
+          var copyBtn = group.querySelector("button.copy-instruction");
+          if (copyBtn) copyBtn.setAttribute("data-instruction", instruction);
+          btn.classList.add("applied");
+          setLandmarksStatus(panel, "已套用", false);
+          window.setTimeout(function () {
+            btn.classList.remove("applied");
+          }, 1200);
+        })
+        .catch(function () {
+          btn.disabled = false;
+          setLandmarksStatus(panel, "無法連線主程式，請確認主程式正在執行。", true);
+        });
+    });
+  });
 })();
 """.strip()
 
@@ -1519,6 +1636,108 @@ def _load_recording_analysis(run_root: Path, event_index: int) -> dict[str, Any]
     return _load_json_dict(run_root / "analysis" / f"event_{event_index:03d}.json")
 
 
+def _selected_landmark_labels(instruction: str, location: str) -> set[str]:
+    from src.common.nearby_side import extract_nearby_hints_by_location
+
+    buckets = extract_nearby_hints_by_location(instruction)
+    return {hint.label for hint in buckets.get(location, [])}
+
+
+def _render_landmark_group_html(
+    *,
+    title: str,
+    group_key: str,
+    options: list[dict[str, Any]],
+    selected_labels: set[str],
+) -> str:
+    if not options:
+        return ""
+    items: list[str] = []
+    for option in options:
+        label = str(option.get("label") or "")
+        if not label:
+            continue
+        display = str(option.get("display") or label)
+        side = option.get("side")
+        side_attr = "" if side is None else str(side)
+        checked = " checked" if label in selected_labels else ""
+        items.append(
+            "<li>"
+            f'<label><input type="checkbox" data-landmark-group="{escape(group_key, quote=True)}" '
+            f'data-label="{escape(label, quote=True)}" '
+            f'data-side="{escape(side_attr, quote=True)}"{checked}>'
+            f"<span>{escape(display)}</span></label>"
+            "</li>"
+        )
+    if not items:
+        return ""
+    return (
+        f'<div class="landmarks-group">'
+        f'<div class="landmarks-group-label">{escape(title)}</div>'
+        f'<ul class="landmarks-list">{"".join(items)}</ul>'
+        f"</div>"
+    )
+
+
+def _render_landmarks_panel_html(
+    *,
+    run_root: Path,
+    event_index: int,
+    kind: str,
+    instruction: str,
+) -> str:
+    if kind not in {"click", "double_click", "right_click", "middle_click", "scroll", "drag", "hold"}:
+        return ""
+    if not instruction.strip():
+        return ""
+    from src.recorder.vision_context import load_recording_landmark_options
+
+    groups = load_recording_landmark_options(
+        run_root,
+        event_index,
+        kind=kind,
+        instruction=instruction,
+    )
+    start_options = groups.get("start") or []
+    end_options = groups.get("end") or []
+    if not start_options and not end_options:
+        return ""
+
+    if kind == "drag":
+        groups_html = (
+            _render_landmark_group_html(
+                title="起點",
+                group_key="start",
+                options=start_options,
+                selected_labels=_selected_landmark_labels(instruction, "起點"),
+            )
+            + _render_landmark_group_html(
+                title="終點",
+                group_key="end",
+                options=end_options,
+                selected_labels=_selected_landmark_labels(instruction, "終點"),
+            )
+        )
+    else:
+        groups_html = _render_landmark_group_html(
+            title="附近",
+            group_key="start",
+            options=start_options,
+            selected_labels=_selected_landmark_labels(instruction, "附近"),
+        )
+    if not groups_html:
+        return ""
+    return (
+        f'<div class="landmarks">'
+        f'<div class="landmarks-title">附近地標</div>'
+        f"{groups_html}"
+        f'<button type="button" class="apply-landmarks" title="依勾選地標重新產生指令">'
+        f"套用地標</button>"
+        f'<span class="landmarks-status" aria-live="polite"></span>'
+        f"</div>"
+    )
+
+
 def _render_recording_event_html(*, run_root: Path, event: dict[str, Any]) -> str:
     raw_index = event.get("index")
     index = raw_index if isinstance(raw_index, int) else 0
@@ -1535,6 +1754,7 @@ def _render_recording_event_html(*, run_root: Path, event: dict[str, Any]) -> st
     step_label = escape(f"{index}.")
     kind_badge = escape(kind_label)
     time_text = escape(_timestamp_text(event.get("timestamp_utc"))) or "—"
+    run_id = escape(run_root.name, quote=True)
 
     meta_rows: list[tuple[str, str]] = [("時間", time_text)]
     cursor = _format_xy(event.get("cursor_xy"))
@@ -1570,9 +1790,17 @@ def _render_recording_event_html(*, run_root: Path, event: dict[str, Any]) -> st
     else:
         shots = _render_shot_html("截圖", shot, run_root)
 
+    landmarks_html = _render_landmarks_panel_html(
+        run_root=run_root,
+        event_index=index,
+        kind=kind,
+        instruction=instruction,
+    )
+
     copy_attr = escape(title, quote=True)
     return (
-        f'<details class="instruction-group">'
+        f'<details class="instruction-group" data-run-id="{run_id}" '
+        f'data-event-index="{index}" data-kind="{escape(kind, quote=True)}">'
         f"<summary>"
         f'<span class="instruction-number">{step_label}</span>'
         f'<span class="instruction-title">{escape(title)}</span>'
@@ -1581,6 +1809,7 @@ def _render_recording_event_html(*, run_root: Path, event: dict[str, Any]) -> st
         f'title="複製指令" aria-label="複製指令">複製</button>'
         f"</summary>"
         f'<div class="meta" style="padding: 1rem 1.5rem 0;"><dl>{meta_html}</dl></div>'
+        f"{landmarks_html}"
         f'<div class="shots" style="padding: 0 1.5rem 1.25rem;">{shots}</div>'
         f"</details>"
     )

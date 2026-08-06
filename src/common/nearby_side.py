@@ -186,49 +186,168 @@ def _split_undirected_labels(body: str) -> list[str]:
     return [p for p in parts if p]
 
 
+def _trim_directed_label_fragment(label: str) -> str:
+    """Drop leading list fragments before a label, keeping 、 inside 「…」 quotes.
+
+    Directed matches may accidentally absorb a prior undirected clause joined by
+    ``、``. Split only on commas outside Chinese quotation marks so icon names
+    like ``「搜尋、放大鏡」圖示`` stay intact.
+    """
+    text = (label or "").strip()
+    if "、" not in text:
+        return text
+    segments: list[str] = []
+    buf: list[str] = []
+    in_quote = False
+    for ch in text:
+        if ch == "「":
+            in_quote = True
+            buf.append(ch)
+        elif ch == "」":
+            in_quote = False
+            buf.append(ch)
+        elif ch == "、" and not in_quote:
+            segment = "".join(buf).strip()
+            if segment:
+                segments.append(segment)
+            buf = []
+        else:
+            buf.append(ch)
+    trailing = "".join(buf).strip()
+    if trailing:
+        segments.append(trailing)
+    if not segments:
+        return text
+    return segments[-1]
+
+
+def _is_nearby_comment_inner(inner: str) -> bool:
+    """True when a Chinese parenthetical looks like a nearby-context comment."""
+    text = (inner or "").strip()
+    if not text:
+        return False
+    if _DIRECTED_IN_TEXT_RE.search(text):
+        return True
+    if _NEARBY_HAVE_RE.search(text):
+        return True
+    return False
+
+
 def extract_nearby_hints_from_instruction(instruction: str) -> list[NearbyHint]:
     """Deterministically extract nearby hints from parenthetical context comments."""
-    text = instruction or ""
-    hints: list[NearbyHint] = []
-    seen: set[str] = set()
+    by_location = extract_nearby_hints_by_location(instruction)
+    return merge_nearby_hints(
+        by_location.get("附近"),
+        by_location.get("起點"),
+        by_location.get("終點"),
+    )
 
-    def _add(hint: NearbyHint) -> None:
-        if not hint.label or hint.label in seen:
+
+def extract_nearby_hints_by_location(
+    instruction: str,
+) -> dict[str, list[NearbyHint]]:
+    """Extract nearby hints keyed by ``附近`` / ``起點`` / ``終點``."""
+    text = instruction or ""
+    buckets: dict[str, list[NearbyHint]] = {
+        "附近": [],
+        "起點": [],
+        "終點": [],
+    }
+    seen_by_loc: dict[str, set[str]] = {
+        "附近": set(),
+        "起點": set(),
+        "終點": set(),
+    }
+
+    def _add(location: str, hint: NearbyHint) -> None:
+        loc = location if location in buckets else "附近"
+        if not hint.label or hint.label in seen_by_loc[loc]:
             return
-        seen.add(hint.label)
-        hints.append(hint)
+        seen_by_loc[loc].add(hint.label)
+        buckets[loc].append(hint)
 
     for paren in _PAREN_RE.findall(text):
         inner = paren.strip()
         if not inner:
             continue
-        # Directed segments may share a comment with undirected ones, split by 、.
-        # Prefer whole-comment undirected pattern when no directed token present.
         directed_found = False
         for match in _DIRECTED_IN_TEXT_RE.finditer(inner):
-            label = (match.group("label") or "").strip()
-            # Label may accidentally include a leading location-less fragment; trim.
-            if "、" in label:
-                label = label.split("、")[-1].strip()
+            label = _trim_directed_label_fragment(match.group("label") or "")
             side = side_from_zh(match.group("side") or "")
+            loc = (match.group("loc") or "").strip() or "附近"
             if label and side is not None:
-                _add(NearbyHint(label=label, side=side))
+                _add(loc, NearbyHint(label=label, side=side))
                 directed_found = True
 
         for match in _NEARBY_HAVE_RE.finditer(inner):
+            loc = (match.group("loc") or "").strip() or "附近"
             for label in _split_undirected_labels(match.group("body") or ""):
-                # Skip labels that were already captured as directed in this comment.
-                if label in seen:
+                if label in seen_by_loc.get(loc, set()):
                     continue
-                # Drop trailing directed clause fragments if split poorly.
                 if _DIRECTED_IN_TEXT_RE.search(label):
                     continue
-                _add(NearbyHint(label=label, side=None))
+                _add(loc, NearbyHint(label=label, side=None))
 
         if not directed_found and "附近有" not in inner and "在" not in inner:
             continue
 
-    return hints
+    return buckets
+
+
+def strip_nearby_context_comments(instruction: str) -> str:
+    """Remove nearby-context parentheticals; keep the rest of the instruction."""
+
+    def _replace(match: re.Match[str]) -> str:
+        inner = match.group(1) or ""
+        if _is_nearby_comment_inner(inner):
+            return ""
+        return match.group(0)
+
+    return _PAREN_RE.sub(_replace, instruction or "")
+
+
+_CLICK_ACTION_SUFFIX_RE = re.compile(r"(，(?:並|用).+。)$")
+
+
+def _insert_nearby_before_click_suffix(instruction: str, comment: str) -> str:
+    """Insert ``comment`` before a trailing click/hold action suffix when present."""
+    match = _CLICK_ACTION_SUFFIX_RE.search(instruction)
+    if match:
+        return instruction[: match.start()] + comment + instruction[match.start() :]
+    return instruction + comment
+
+
+def apply_nearby_landmarks(
+    instruction: str,
+    hints: list[NearbyHint] | list[str] | list[Any] | None = None,
+    *,
+    kind: str = "click",
+    end_hints: list[NearbyHint] | list[str] | list[Any] | None = None,
+) -> str:
+    """Strip existing nearby comments and re-apply selected landmarks.
+
+    For ``drag``, ``hints`` are 起點 landmarks and ``end_hints`` are 終點.
+    For other pointer kinds, ``hints`` use location ``附近`` and are inserted
+    before any trailing ``，並…`` / ``，用…`` click suffix.
+    """
+    stripped = strip_nearby_context_comments(instruction)
+    if kind == "drag":
+        result = stripped
+        start_comment = format_nearby_context_comment(hints or [], location="起點")
+        if start_comment and "拖到" in result:
+            drag_at = result.index("拖到")
+            result = result[:drag_at] + start_comment + result[drag_at:]
+        elif start_comment:
+            result = result + start_comment
+        end_comment = format_nearby_context_comment(end_hints or [], location="終點")
+        if end_comment:
+            result = result + end_comment
+        return result
+
+    comment = format_nearby_context_comment(hints or [], location="附近")
+    if comment is None:
+        return stripped
+    return _insert_nearby_before_click_suffix(stripped, comment)
 
 
 def format_nearby_context_comment(

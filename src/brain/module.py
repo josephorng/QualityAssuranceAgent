@@ -87,6 +87,7 @@ class BrainStepResult:
     reason: str = ""
     step_finished: bool = False
     run_complete: bool = False
+    step_index: int | None = None
 
 
 class BrainModule:
@@ -843,6 +844,7 @@ class BrainModule:
                 return BrainStepResult(
                     reason=f"Script step {self._script_step_index + 1} failed",
                     step_finished=False,
+                    step_index=script_step_index,
                 )
 
             # verify_result = await self._verify_script_step(self._step_transcript_counter, self._script_step_index)
@@ -877,6 +879,7 @@ class BrainModule:
                 reason=f"Script step {self._script_step_index + 1} completed",
                 step_finished=True,
                 run_complete=run_complete,
+                step_index=script_step_index,
             )
         finally:
             self.manager.clear_step_log_context()

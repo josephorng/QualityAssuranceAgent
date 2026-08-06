@@ -5,7 +5,7 @@ from pathlib import Path
 
 from src.brain.module import BrainModule
 from src.common.io_utils import append_text, pop_last_nonempty_line
-from src.common.run_control import take_pause_log, wait_while_paused
+from src.common.run_control import notify_step_status, take_pause_log, wait_while_paused
 from src.common.run_state import get_run_state_manager
 from src.common.runtime_command_dialog import (
     prompt_runtime_command_popup,
@@ -64,6 +64,11 @@ class RuntimeCoordinator:
                 append_text(_runtime_command_script_path(run_root), cmd + "\n")
                 self.brain.prepare_runtime_step(cmd)
             step_result = await self.brain.process_step()
+            if step_result.step_index is not None:
+                notify_step_status(
+                    step_result.step_index,
+                    "ok" if step_result.step_finished else "fail",
+                )
             if not step_result.step_finished:
                 self.manager.log_info(step_result.reason or "Coordinator failed to process step")
                 self.manager.set_session_end_reason("step_failed")

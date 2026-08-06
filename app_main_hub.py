@@ -29,6 +29,7 @@ from src.common.run_control import (
     pause_run,
     reset_run_control,
     resume_run,
+    set_step_status_callback,
     wait_while_paused_blocking,
 )
 from src.common.run_state import get_run_state_manager, unique_run_folder_name
@@ -41,7 +42,7 @@ from src.common.runtime_command_dialog import (
     reset_runtime_user_ended_at_prompt,
 )
 from src.common.runtime_context import USE_TOOL_CACHE_ENV
-from src.common.script_helper import parse_executable_lines_from_text
+from src.common.script_helper import executable_source_line_numbers, parse_executable_lines_from_text
 from src.common.smart_mode import normalize_smart_goal, resolve_hub_run_mode
 from src.common.settings import (
     ROOT_DIR,
@@ -196,6 +197,9 @@ class MainHub(ctk.CTk):
         self._queue_results: list[tuple[str, str]] = []
         self._queue_status_by_index: dict[int, str] = {}
         self._queue_run_root_by_index: dict[int, Path] = {}
+        self._script_step_status_by_line: dict[int, str] = {}
+        self._script_step_line_numbers: list[int] = []
+        self._script_step_status_baseline = "\n"
         self._last_report_html: Path | None = None
         self._last_run_was_script_mode = False
         self._last_script_run_folder: str | None = None
@@ -378,6 +382,9 @@ class MainHub(ctk.CTk):
         self._script_text.insert("end", cmd + "\n")
         self._script_text.configure(state="disabled")
         self._mark_script_clean()
+        # Keep prior step icons; treat the appended runtime line as part of the status baseline.
+        self._script_step_status_baseline = self._script_editor_normalized_text()
+        self._refresh_script_line_numbers()
 
     def _pop_last_runtime_command_from_cache(self) -> None:
         p = self._runtime_commands_cache_path
@@ -391,6 +398,7 @@ class MainHub(ctk.CTk):
         self._reset_textbox_undo(self._script_text)
         self._script_text.configure(state="disabled")
         self._mark_script_clean()
+        self._prune_script_step_statuses_to_current_text()
 
     def _pop_last_runtime_command_from_script_file(self) -> None:
         p = self._script_path
@@ -404,6 +412,7 @@ class MainHub(ctk.CTk):
         self._reset_textbox_undo(self._script_text)
         self._script_text.configure(state="disabled")
         self._mark_script_clean()
+        self._prune_script_step_statuses_to_current_text()
 
     def _refresh_runtime_script_text_from_cache(self) -> None:
         """After a runtime-command run, reload the cache file into the script textbox (disk is source of truth)."""
@@ -419,6 +428,7 @@ class MainHub(ctk.CTk):
             self._suppress_script_cache_sync = False
         self._refresh_script_path_label()
         self._mark_script_clean()
+        self._prune_script_step_statuses_to_current_text()
 
     def _sync_script_text_to_runtime_cache(self) -> bool:
         """Write the script textbox to runtime_commands_cache.txt when no script file is open."""
@@ -680,6 +690,14 @@ class MainHub(ctk.CTk):
         textbox = self._script_text._textbox
         if textbox.edit_modified():
             textbox.edit_modified(False)
+            # Keep ✓/✗ until the next run, or until the script body actually changes.
+            # Re-enabling the editor after a run can fire <<Modified>> without content changes.
+            if (
+                not self._suppress_script_cache_sync
+                and self._script_step_status_by_line
+                and self._script_editor_normalized_text() != self._script_step_status_baseline
+            ):
+                self._clear_script_step_statuses()
             self._refresh_script_line_numbers()
             self._schedule_sync_script_text_to_runtime_cache()
 
@@ -688,12 +706,59 @@ class MainHub(ctk.CTk):
         textbox = self._script_text._textbox
         return max(1, int(float(textbox.index("end-1c"))))
 
+    def _clear_script_step_statuses(self) -> None:
+        self._script_step_status_by_line = {}
+        self._script_step_line_numbers = []
+        self._script_step_status_baseline = "\n"
+
+    def _reset_script_step_status_tracking(self, raw: str) -> None:
+        """Clear icons and map executable step indices to 1-based source lines for a script run."""
+        self._script_step_status_by_line = {}
+        self._script_step_line_numbers = executable_source_line_numbers(raw)
+        self._script_step_status_baseline = raw.rstrip() + "\n"
+        self._refresh_script_line_numbers()
+
+    def _prune_script_step_statuses_to_current_text(self) -> None:
+        """Drop status icons for lines that are no longer executable (e.g. after runtime undo)."""
+        raw = self._script_text.get("0.0", "end")
+        keep = set(executable_source_line_numbers(raw))
+        self._script_step_status_by_line = {
+            line: status
+            for line, status in self._script_step_status_by_line.items()
+            if line in keep
+        }
+        self._script_step_status_baseline = self._script_editor_normalized_text()
+        self._refresh_script_line_numbers()
+
+    def _on_step_status_from_worker(self, step_index: int, status: str) -> None:
+        """Apply a green check / red cross next to the matching script line (coordinator thread)."""
+        if status not in ("ok", "fail"):
+            return
+
+        def apply() -> None:
+            line: int | None = None
+            if self._script_step_line_numbers:
+                if 0 <= step_index < len(self._script_step_line_numbers):
+                    line = self._script_step_line_numbers[step_index]
+            else:
+                numbers = executable_source_line_numbers(self._script_text.get("0.0", "end"))
+                if numbers:
+                    line = numbers[-1]
+            if line is None:
+                return
+            self._script_step_status_by_line[line] = status
+            self._refresh_script_line_numbers()
+
+        self.after(0, apply)
+
     def _refresh_script_line_numbers(self) -> None:
         """Rebuild the read-only gutter so line numbers stay aligned with script text."""
         textbox = self._script_text._textbox
         line_count = self._script_line_count()
         # One number per logical line; blank rows for soft-wrapped display continuations.
         rows: list[str] = []
+        status_tags: list[tuple[str, int]] = []
+        gutter_row = 1
         for i in range(1, line_count + 1):
             start = f"{i}.0"
             end = f"{i}.end"
@@ -702,11 +767,21 @@ class MainHub(ctk.CTk):
                 display_lines = int(counted[0]) + 1 if counted else 1
             except (tk.TclError, TypeError, ValueError, IndexError):
                 display_lines = 1
-            rows.append(str(i))
+            status = self._script_step_status_by_line.get(i)
+            if status == "ok":
+                icon = "\u2713"
+            elif status == "fail":
+                icon = "\u2717"
+            else:
+                icon = " "
+            rows.append(f"{icon} {i}")
+            if status in ("ok", "fail"):
+                status_tags.append((status, gutter_row))
             rows.extend("" for _ in range(max(0, display_lines - 1)))
+            gutter_row += display_lines
         numbers = "\n".join(rows) if rows else "1"
         digit_width = max(2, len(str(line_count)))
-        gutter_width = 18 + digit_width * 10
+        gutter_width = 28 + digit_width * 10
 
         gutter = self._script_line_numbers
         gutter.configure(state="normal", width=gutter_width)
@@ -714,7 +789,14 @@ class MainHub(ctk.CTk):
         gutter.insert("0.0", numbers)
         gutter_tb = gutter._textbox
         gutter_tb.tag_configure("linenum", justify="right")
+        appearance = ctk.get_appearance_mode()
+        ok_fg = "#22c55e" if appearance == "Dark" else "#16a34a"
+        fail_fg = "#f87171" if appearance == "Dark" else "#b91c1c"
+        gutter_tb.tag_configure("ok", foreground=ok_fg)
+        gutter_tb.tag_configure("fail", foreground=fail_fg)
         gutter_tb.tag_add("linenum", "1.0", "end")
+        for status, row in status_tags:
+            gutter_tb.tag_add(status, f"{row}.0", f"{row}.1")
         gutter.configure(state="disabled")
         self._sync_script_line_number_scroll()
 
@@ -1133,6 +1215,8 @@ class MainHub(ctk.CTk):
                 text=f"{i + 1}. {p.name}",
                 anchor="w",
                 fg_color=fg,
+                # Neutral hover (not theme blue) so dark text stays readable in light mode.
+                hover_color=("gray65", "gray35"),
                 hover=not selected,
                 text_color=("gray10", "gray90"),
                 command=lambda idx=i: self._queue_select(idx),
@@ -1207,6 +1291,8 @@ class MainHub(ctk.CTk):
             self._reset_textbox_undo(self._script_text)
         finally:
             self._suppress_script_cache_sync = False
+        self._clear_script_step_statuses()
+        self._refresh_script_line_numbers()
         self._refresh_script_path_label()
         self._mark_script_clean()
         self._persist_hub_ui_state()
@@ -1538,6 +1624,8 @@ class MainHub(ctk.CTk):
             self._reset_textbox_undo(self._script_text)
         finally:
             self._suppress_script_cache_sync = False
+        self._clear_script_step_statuses()
+        self._refresh_script_line_numbers()
         self._refresh_script_path_label()
         self._mark_script_clean()
         self._persist_hub_ui_state()
@@ -1620,6 +1708,8 @@ class MainHub(ctk.CTk):
             self._reset_textbox_undo(self._script_text)
         finally:
             self._suppress_script_cache_sync = False
+        self._clear_script_step_statuses()
+        self._refresh_script_line_numbers()
         self._refresh_script_path_label()
         self._mark_script_clean()
         self._status.configure(text="", text_color=("gray20", "gray65"))
@@ -1915,6 +2005,8 @@ class MainHub(ctk.CTk):
 
     def _begin_worker_run(self, args: _WorkerArgs) -> None:
         reset_run_control()
+        if args.run_mode in ("script", "runtime"):
+            set_step_status_callback(self._on_step_status_from_worker)
         self._set_run_button_running()
         self._hide_report_button()
         self._settings_btn.configure(state="disabled")
@@ -1953,6 +2045,8 @@ class MainHub(ctk.CTk):
         self._user_requested_stop = False
         self._post_run_unlink = None
         self._last_run_was_script_mode = False
+        # Keep script-run icons; switch to last-line marking for new runtime commands.
+        self._script_step_line_numbers = []
 
         def on_runtime_command(cmd: str) -> None:
             append_text(transcript_path, cmd + "\n")
@@ -2076,6 +2170,7 @@ class MainHub(ctk.CTk):
                 script_disk_path = self._runtime_commands_cache_path
             self._last_run_was_script_mode = True
             self._bridge = None
+            self._reset_script_step_status_tracking(raw)
             args = _WorkerArgs(
                 run_mode="script",
                 eye_monitor_indices=eye_indices,
@@ -2097,6 +2192,8 @@ class MainHub(ctk.CTk):
             finally:
                 self._suppress_script_cache_sync = False
             self._refresh_script_path_label()
+            self._clear_script_step_statuses()
+            self._refresh_script_line_numbers()
             self._mark_script_clean()
 
             args = _WorkerArgs(

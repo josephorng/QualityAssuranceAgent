@@ -33,6 +33,17 @@ def parse_executable_lines_from_text(raw: str) -> list[str]:
     return lines
 
 
+def executable_source_line_numbers(raw: str) -> list[int]:
+    """Return 1-based source line numbers for executable script lines (skip blanks/comments)."""
+    numbers: list[int] = []
+    for index, line in enumerate(raw.splitlines(), start=1):
+        cleaned = line.strip()
+        if not cleaned or cleaned.startswith("#"):
+            continue
+        numbers.append(index)
+    return numbers
+
+
 def parse_script_lines(script_path: Path) -> list[str]:
     """Parse executable script lines, skipping blanks and comment lines starting with `#`."""
     return parse_executable_lines_from_text(script_path.read_text(encoding="utf-8"))

@@ -15,6 +15,11 @@ def test_parse_executable_lines_from_text_matches_file(tmp_path: Path) -> None:
     assert from_disk == from_text == ["open chrome", "search cats"]
 
 
+def test_executable_source_line_numbers_skips_blank_and_comments() -> None:
+    raw = "\n# comment line\nopen chrome\n   \n# another comment\nsearch cats\n"
+    assert script_helper.executable_source_line_numbers(raw) == [3, 6]
+
+
 def test_parse_script_lines_skips_blank_and_comments(tmp_path: Path) -> None:
     script = tmp_path / "sample.txt"
     script.write_text(

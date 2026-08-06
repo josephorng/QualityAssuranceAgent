@@ -28,7 +28,12 @@ class _FakeBrain:
     async def process_step(self) -> BrainStepResult:
         self.process_step_calls += 1
         if self.process_step_calls == 1:
-            return BrainStepResult(reason="mid-script", step_finished=True, run_complete=False)
+            return BrainStepResult(
+                reason="mid-script",
+                step_finished=True,
+                run_complete=False,
+                step_index=0,
+            )
         return BrainStepResult(reason="All script steps complete", step_finished=True, run_complete=True)
 
 
@@ -41,6 +46,43 @@ def test_runtime_coordinator_basic_cycle() -> None:
     asyncio.run(coordinator.run())
 
     assert coordinator.brain.process_step_calls == 2
+
+
+def test_runtime_coordinator_notifies_step_status() -> None:
+    run_control.reset_run_control()
+    events: list[tuple[int, str]] = []
+    run_control.set_step_status_callback(lambda index, status: events.append((index, status)))
+
+    class _StatusBrain:
+        def __init__(self) -> None:
+            self.process_step_calls = 0
+
+        async def process_step(self) -> BrainStepResult:
+            self.process_step_calls += 1
+            if self.process_step_calls == 1:
+                return BrainStepResult(
+                    reason="step ok",
+                    step_finished=True,
+                    run_complete=False,
+                    step_index=0,
+                )
+            if self.process_step_calls == 2:
+                return BrainStepResult(
+                    reason="step failed",
+                    step_finished=False,
+                    step_index=1,
+                )
+            return BrainStepResult(reason="unused", step_finished=True, run_complete=True)
+
+    coordinator = RuntimeCoordinator.__new__(RuntimeCoordinator)
+    coordinator.brain = _StatusBrain()
+    coordinator.manager = _FakeManager()
+
+    asyncio.run(coordinator.run())
+
+    assert events == [(0, "ok"), (1, "fail")]
+    assert coordinator.manager.session_end_reason == "step_failed"
+    run_control.reset_run_control()
 
 
 def test_runtime_coordinator_pauses_between_steps() -> None:
@@ -57,7 +99,12 @@ def test_runtime_coordinator_pauses_between_steps() -> None:
                 self.after_first_started.set()
                 # Hold the first step so the test can pause before the next loop iteration.
                 await asyncio.sleep(0.2)
-                return BrainStepResult(reason="mid-script", step_finished=True, run_complete=False)
+                return BrainStepResult(
+                    reason="mid-script",
+                    step_finished=True,
+                    run_complete=False,
+                    step_index=0,
+                )
             return BrainStepResult(
                 reason="All script steps complete",
                 step_finished=True,
@@ -96,6 +143,17 @@ def test_run_control_pause_resume_reset() -> None:
     run_control.pause_run()
     run_control.reset_run_control()
     assert not run_control.is_paused()
+
+
+def test_run_control_step_status_callback_reset() -> None:
+    run_control.reset_run_control()
+    events: list[tuple[int, str]] = []
+    run_control.set_step_status_callback(lambda index, status: events.append((index, status)))
+    run_control.notify_step_status(2, "ok")
+    assert events == [(2, "ok")]
+    run_control.reset_run_control()
+    run_control.notify_step_status(3, "fail")
+    assert events == [(2, "ok")]
 
 
 def test_wait_while_paused_blocking_unblocks_on_resume() -> None:

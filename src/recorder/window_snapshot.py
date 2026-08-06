@@ -3,7 +3,7 @@ from __future__ import annotations
 import ctypes
 import os
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Sequence
 
 # Windows-only: enumerate top-level windows and diff state around pointer events.
 # pygetwindow may miss some UWP/Electron windows; WindowFromPoint improves targeting.
@@ -13,8 +13,14 @@ _MAXIMIZE_AREA_GROWTH_RATIO = 1.4
 _MINIMIZE_AREA_SHRINK_RATIO = 0.15
 _MINIMIZED_COORD_THRESHOLD = -30000
 _TITLE_BAR_CLICK_Y_MAX = 80
+_DWMWA_CAPTION_BUTTON_BOUNDS = 5
+_FALLBACK_CAPTION_BUTTON_WIDTH = 46
+_FALLBACK_CAPTION_BUTTON_COUNT = 3
+_FALLBACK_CAPTION_HEIGHT = 32
 WINDOW_SETTLE_DELAY_S = 1.0
 WINDOW_SETTLE_TITLE_BAR_DELAY_S = 1.2
+
+CaptionBounds = tuple[int, int, int, int]
 
 
 @dataclass(frozen=True)
@@ -28,6 +34,8 @@ class WindowInfo:
     height: int
     is_minimized: bool
     is_maximized: bool
+    # Screen-space caption min/max/close strip when known (DWM); else hit-test falls back.
+    caption_button_bounds: CaptionBounds | None = None
 
     def area(self) -> int:
         return max(0, self.width) * max(0, self.height)
@@ -38,10 +46,22 @@ class WindowInfo:
         return self.left <= x < self.left + self.width and self.top <= y < self.top + self.height
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        if data.get("caption_button_bounds") is None:
+            data.pop("caption_button_bounds", None)
+        return data
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> WindowInfo:
+        bounds_raw = raw.get("caption_button_bounds")
+        bounds: CaptionBounds | None = None
+        if isinstance(bounds_raw, (list, tuple)) and len(bounds_raw) == 4:
+            bounds = (
+                int(bounds_raw[0]),
+                int(bounds_raw[1]),
+                int(bounds_raw[2]),
+                int(bounds_raw[3]),
+            )
         return cls(
             hwnd=int(raw["hwnd"]),
             title=str(raw.get("title", "")),
@@ -52,6 +72,7 @@ class WindowInfo:
             height=int(raw.get("height", 0)),
             is_minimized=bool(raw.get("is_minimized", False)),
             is_maximized=bool(raw.get("is_maximized", False)),
+            caption_button_bounds=bounds,
         )
 
 
@@ -60,9 +81,18 @@ class WindowStateChange:
     action: str
     title: str
     confidence: str
+    # Only set for close: True when click hit the title-bar caption button strip.
+    from_title_bar_close: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"action": self.action, "title": self.title, "confidence": self.confidence}
+        data: dict[str, Any] = {
+            "action": self.action,
+            "title": self.title,
+            "confidence": self.confidence,
+        }
+        if self.from_title_bar_close is not None:
+            data["from_title_bar_close"] = self.from_title_bar_close
+        return data
 
 
 @dataclass(frozen=True)
@@ -105,6 +135,121 @@ def _is_iconic(hwnd: int) -> bool:
     return bool(ctypes.windll.user32.IsIconic(int(hwnd)))
 
 
+def _sm_cycaption() -> int:
+    if os.name != "nt":
+        return _FALLBACK_CAPTION_HEIGHT
+    try:
+        value = int(ctypes.windll.user32.GetSystemMetrics(4))  # SM_CYCAPTION
+        return value if value > 0 else _FALLBACK_CAPTION_HEIGHT
+    except Exception:
+        return _FALLBACK_CAPTION_HEIGHT
+
+
+def _dwm_caption_button_bounds_screen(
+    hwnd: int,
+    window_left: int,
+    window_top: int,
+) -> CaptionBounds | None:
+    """Return caption button strip in screen coords, or None if DWM is unavailable."""
+    if os.name != "nt" or hwnd == 0:
+        return None
+    try:
+        from ctypes import wintypes
+
+        rect = wintypes.RECT()
+        hr = int(
+            ctypes.windll.dwmapi.DwmGetWindowAttribute(
+                wintypes.HWND(int(hwnd)),
+                ctypes.c_uint(_DWMWA_CAPTION_BUTTON_BOUNDS),
+                ctypes.byref(rect),
+                ctypes.sizeof(rect),
+            )
+        )
+        if hr != 0:
+            return None
+        # DWM returns window-relative coordinates.
+        left = int(rect.left) + int(window_left)
+        top = int(rect.top) + int(window_top)
+        right = int(rect.right) + int(window_left)
+        bottom = int(rect.bottom) + int(window_top)
+        if right <= left or bottom <= top:
+            return None
+        return (left, top, right, bottom)
+    except Exception:
+        return None
+
+
+def _fallback_caption_button_bounds(win: WindowInfo) -> CaptionBounds | None:
+    """Approximate min/max/close strip from window geometry when DWM bounds are missing."""
+    if win.width <= 0 or win.height <= 0:
+        return None
+    if win.is_minimized or win.left <= _MINIMIZED_COORD_THRESHOLD:
+        return None
+    height = min(_sm_cycaption() + 8, max(win.height // 4, _FALLBACK_CAPTION_HEIGHT))
+    strip_w = _FALLBACK_CAPTION_BUTTON_WIDTH * _FALLBACK_CAPTION_BUTTON_COUNT
+    strip_w = min(strip_w, max(win.width // 2, _FALLBACK_CAPTION_BUTTON_WIDTH))
+    left = win.left + win.width - strip_w
+    top = win.top
+    right = win.left + win.width
+    bottom = win.top + height
+    return (left, top, right, bottom)
+
+
+def caption_button_bounds_for_window(win: WindowInfo) -> CaptionBounds | None:
+    if win.caption_button_bounds is not None:
+        return win.caption_button_bounds
+    return _fallback_caption_button_bounds(win)
+
+
+def click_hits_caption_buttons(
+    click_xy: tuple[int, int] | None,
+    win: WindowInfo,
+) -> bool:
+    """True when click_xy is inside the window's caption button strip (min/max/close)."""
+    if click_xy is None:
+        return False
+    bounds = caption_button_bounds_for_window(win)
+    if bounds is None:
+        return False
+    x, y = int(click_xy[0]), int(click_xy[1])
+    left, top, right, bottom = bounds
+    return left <= x < right and top <= y < bottom
+
+
+def _title_bar_height(win: WindowInfo) -> int:
+    bounds = caption_button_bounds_for_window(win)
+    if bounds is not None:
+        return max(int(bounds[3]) - win.top, _FALLBACK_CAPTION_HEIGHT)
+    return _sm_cycaption() + 8
+
+
+def _make_window_info(
+    *,
+    hwnd: int,
+    title: str,
+    pid: int | None,
+    left: int,
+    top: int,
+    width: int,
+    height: int,
+    is_minimized: bool,
+    is_maximized: bool,
+) -> WindowInfo:
+    bounds = _dwm_caption_button_bounds_screen(hwnd, left, top)
+    return WindowInfo(
+        hwnd=hwnd,
+        title=title,
+        pid=pid,
+        left=left,
+        top=top,
+        width=width,
+        height=height,
+        is_minimized=is_minimized,
+        is_maximized=is_maximized,
+        caption_button_bounds=bounds,
+    )
+
+
 def _window_info_from_pygetwindow(w: Any) -> WindowInfo | None:
     try:
         hwnd = int(getattr(w, "_hWnd", 0) or 0)
@@ -122,7 +267,7 @@ def _window_info_from_pygetwindow(w: Any) -> WindowInfo | None:
         left = top = width = height = 0
     is_minimized = bool(getattr(w, "isMinimized", False)) or _is_iconic(hwnd)
     is_maximized = bool(getattr(w, "isMaximized", False)) or _is_zoomed(hwnd)
-    return WindowInfo(
+    return _make_window_info(
         hwnd=hwnd,
         title=title,
         pid=_pid_for_hwnd(hwnd),
@@ -199,7 +344,7 @@ def window_at_point(x: int, y: int) -> WindowInfo | None:
         height = int(rect.bottom - rect.top)
     except Exception:
         left = top = width = height = 0
-    return WindowInfo(
+    return _make_window_info(
         hwnd=root,
         title=title,
         pid=_pid_for_hwnd(root),
@@ -233,13 +378,33 @@ def _find_match(target: WindowInfo, windows: list[WindowInfo]) -> WindowInfo | N
     return None
 
 
-def _is_title_bar_click(click_xy: tuple[int, int] | None) -> bool:
-    return click_xy is not None and int(click_xy[1]) <= _TITLE_BAR_CLICK_Y_MAX
+def _is_title_bar_click(
+    click_xy: tuple[int, int] | None,
+    windows: Sequence[WindowInfo] | None = None,
+) -> bool:
+    """True when the click is in a window title-bar / caption strip."""
+    if click_xy is None:
+        return False
+    x, y = int(click_xy[0]), int(click_xy[1])
+    if windows:
+        containing = [w for w in windows if w.contains_point(x, y)]
+        if containing:
+            win = min(containing, key=lambda w: w.area())
+            if click_hits_caption_buttons(click_xy, win):
+                return True
+            # Untitled chrome (taskbar, shell strips) must not count as title-bar.
+            if win.title and win.top <= y < win.top + _title_bar_height(win):
+                return True
+    # Absolute screen fallback (primary-monitor title strip / legacy settle heuristic).
+    return y <= _TITLE_BAR_CLICK_Y_MAX
 
 
-def settle_delay_for_click(click_xy: tuple[int, int] | None) -> float:
+def settle_delay_for_click(
+    click_xy: tuple[int, int] | None,
+    windows: Sequence[WindowInfo] | None = None,
+) -> float:
     """Use a longer settle delay for title-bar clicks where animations are slower."""
-    if _is_title_bar_click(click_xy):
+    if _is_title_bar_click(click_xy, windows):
         return WINDOW_SETTLE_TITLE_BAR_DELAY_S
     return WINDOW_SETTLE_DELAY_S
 
@@ -262,7 +427,7 @@ def _pick_target_from_click(
 
     candidates = [w for w in before if w.contains_point(x, y)]
 
-    if _is_title_bar_click(click_xy):
+    if _is_title_bar_click(click_xy, before):
         live = window_at_point(x, y)
         if live is not None:
             matched = _find_match(live, before)
@@ -272,7 +437,8 @@ def _pick_target_from_click(
                 matched = _find_match(live, candidates)
                 if matched is not None:
                     return matched
-            if live.title:
+            elif live.title:
+                # Only invent a live hwnd when the snapshot has no containing window.
                 return live
 
     if not candidates:
@@ -348,10 +514,19 @@ def _restore_change(before_win: WindowInfo, after_win: WindowInfo) -> WindowStat
     return None
 
 
-def _classify_target_change(before_win: WindowInfo, after_win: WindowInfo | None) -> WindowStateChange | None:
+def _classify_target_change(
+    before_win: WindowInfo,
+    after_win: WindowInfo | None,
+    click_xy: tuple[int, int] | None = None,
+) -> WindowStateChange | None:
     title = before_win.title or f"hwnd:{before_win.hwnd}"
     if after_win is None:
-        return WindowStateChange(action="close", title=title, confidence="high")
+        return WindowStateChange(
+            action="close",
+            title=title,
+            confidence="high",
+            from_title_bar_close=click_hits_caption_buttons(click_xy, before_win),
+        )
 
     minimize = _minimize_change(before_win, after_win)
     if minimize is not None:
@@ -416,7 +591,7 @@ def _pick_opened_at_click(
 
 
 def _window_debug_entry(win: WindowInfo) -> dict[str, Any]:
-    return {
+    entry: dict[str, Any] = {
         "hwnd": win.hwnd,
         "title": win.title,
         "pid": win.pid,
@@ -427,6 +602,9 @@ def _window_debug_entry(win: WindowInfo) -> dict[str, Any]:
         "is_minimized": win.is_minimized,
         "is_maximized": win.is_maximized,
     }
+    if win.caption_button_bounds is not None:
+        entry["caption_button_bounds"] = list(win.caption_button_bounds)
+    return entry
 
 
 def _windows_debug_list(windows: list[WindowInfo]) -> list[dict[str, Any]]:
@@ -459,8 +637,8 @@ def diff_snapshots_with_debug(
         "windows_before": _windows_debug_list(before),
         "windows_after": _windows_debug_list(after),
         "target_hwnd": None,
-        "title_bar_click": _is_title_bar_click(click_xy),
-        "settle_delay_s": settle_delay_for_click(click_xy),
+        "title_bar_click": _is_title_bar_click(click_xy, before),
+        "settle_delay_s": settle_delay_for_click(click_xy, before),
         "detection_path": None,
     }
     if not before and not after:
@@ -470,7 +648,7 @@ def diff_snapshots_with_debug(
     if target is not None:
         debug["target_hwnd"] = target.hwnd
         after_match = _find_match(target, after)
-        change = _classify_target_change(target, after_match)
+        change = _classify_target_change(target, after_match, click_xy)
         if change is not None:
             debug["detection_path"] = "target"
             return WindowDiffResult(change=change, debug=debug)
@@ -505,7 +683,10 @@ def diff_snapshots_with_debug(
                     debug["detection_path"] = "identity_close"
                     return WindowDiffResult(
                         change=WindowStateChange(
-                            action="close", title=win.title, confidence="medium"
+                            action="close",
+                            title=win.title,
+                            confidence="medium",
+                            from_title_bar_close=click_hits_caption_buttons(click_xy, win),
                         ),
                         debug=debug,
                     )
@@ -601,6 +782,9 @@ def instruction_for_window_change(change: WindowStateChange | dict[str, Any]) ->
     if action == "maximize":
         return f"最大化「{title}」視窗"
     if action == "close":
+        # Only the title-bar caption X becomes a close instruction; 儲存/取消 stay clicks.
+        if not data.get("from_title_bar_close"):
+            return None
         return f"關閉「{title}」視窗"
     if action == "restored":
         return f"還原「{title}」視窗"
@@ -616,4 +800,9 @@ def format_window_change_hint(change: WindowStateChange | dict[str, Any] | None)
     action = data.get("action", "unknown")
     title = data.get("title", "")
     confidence = data.get("confidence", "unknown")
+    if action == "close" and not data.get("from_title_bar_close"):
+        return (
+            f"action=close (not title-bar X; prefer click label), "
+            f"title={title!r}, confidence={confidence}"
+        )
     return f"action={action}, title={title!r}, confidence={confidence}"

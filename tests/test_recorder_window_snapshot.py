@@ -7,6 +7,7 @@ import pytest
 from src.recorder.window_snapshot import (
     WindowInfo,
     WindowStateChange,
+    click_hits_caption_buttons,
     diff_snapshots,
     diff_snapshots_with_debug,
     format_window_change_hint,
@@ -34,6 +35,7 @@ def _win(
     is_minimized: bool = False,
     is_maximized: bool = False,
     pid: int | None = 1,
+    caption_button_bounds: tuple[int, int, int, int] | None = None,
 ) -> WindowInfo:
     return WindowInfo(
         hwnd=hwnd,
@@ -45,6 +47,7 @@ def _win(
         height=height,
         is_minimized=is_minimized,
         is_maximized=is_maximized,
+        caption_button_bounds=caption_button_bounds,
     )
 
 
@@ -69,7 +72,57 @@ def test_diff_detects_close_when_window_missing() -> None:
     before = [_win(200, "Notepad", left=50, top=50, width=600, height=400)]
     after: list[WindowInfo] = []
     change = diff_snapshots(before, after, click_xy=(300, 70))
-    assert change == WindowStateChange(action="close", title="Notepad", confidence="high")
+    assert change == WindowStateChange(
+        action="close",
+        title="Notepad",
+        confidence="high",
+        from_title_bar_close=False,
+    )
+
+
+def test_diff_close_marks_title_bar_caption_hit() -> None:
+    before = [
+        _win(
+            200,
+            "Notepad",
+            left=50,
+            top=50,
+            width=600,
+            height=400,
+            caption_button_bounds=(512, 50, 650, 82),
+        )
+    ]
+    after: list[WindowInfo] = []
+    change = diff_snapshots(before, after, click_xy=(630, 60))
+    assert change == WindowStateChange(
+        action="close",
+        title="Notepad",
+        confidence="high",
+        from_title_bar_close=True,
+    )
+
+
+def test_diff_close_save_button_is_not_title_bar_close() -> None:
+    before = [
+        _win(
+            200,
+            "另存新檔",
+            left=100,
+            top=200,
+            width=500,
+            height=300,
+            caption_button_bounds=(462, 200, 600, 232),
+        )
+    ]
+    after: list[WindowInfo] = []
+    # Center/bottom dialog button area (儲存), not caption X
+    change = diff_snapshots(before, after, click_xy=(280, 420))
+    assert change == WindowStateChange(
+        action="close",
+        title="另存新檔",
+        confidence="high",
+        from_title_bar_close=False,
+    )
 
 
 def test_diff_detects_maximize_by_flag() -> None:
@@ -111,7 +164,12 @@ def test_diff_medium_confidence_single_removed_window() -> None:
     ]
     after = [_win(1, "App A", left=0, top=0, width=400, height=300)]
     result = diff_snapshots_with_debug(before, after, click_xy=(900, 900))
-    assert result.change == WindowStateChange(action="close", title="App B", confidence="medium")
+    assert result.change == WindowStateChange(
+        action="close",
+        title="App B",
+        confidence="medium",
+        from_title_bar_close=False,
+    )
     assert result.debug["detection_path"] == "identity_close"
     assert [w["title"] for w in result.debug["windows_before"]] == ["App A", "App B"]
     assert [w["title"] for w in result.debug["windows_after"]] == ["App A"]
@@ -302,11 +360,86 @@ def test_diff_global_restore_skips_when_ambiguous() -> None:
 def test_instruction_for_high_confidence_window_change() -> None:
     change = WindowStateChange(action="minimize", title="Google Chrome", confidence="high")
     assert instruction_for_window_change(change) == "最小化「Google Chrome」視窗"
-    assert instruction_for_window_change({"action": "close", "title": "Notepad", "confidence": "high"}) == "關閉「Notepad」視窗"
-    assert instruction_for_window_change({"action": "close", "title": "Notepad", "confidence": "medium"}) == "關閉「Notepad」視窗"
+    assert (
+        instruction_for_window_change(
+            {
+                "action": "close",
+                "title": "Notepad",
+                "confidence": "high",
+                "from_title_bar_close": True,
+            }
+        )
+        == "關閉「Notepad」視窗"
+    )
+    assert (
+        instruction_for_window_change(
+            {
+                "action": "close",
+                "title": "Notepad",
+                "confidence": "medium",
+                "from_title_bar_close": True,
+            }
+        )
+        == "關閉「Notepad」視窗"
+    )
+    assert (
+        instruction_for_window_change(
+            {
+                "action": "close",
+                "title": "Notepad",
+                "confidence": "high",
+                "from_title_bar_close": False,
+            }
+        )
+        is None
+    )
+    assert instruction_for_window_change(
+        {"action": "close", "title": "Notepad", "confidence": "high"}
+    ) is None
     assert instruction_for_window_change({"action": "minimize", "title": "Chrome", "confidence": "medium"}) == "最小化「Chrome」視窗"
     assert instruction_for_window_change({"action": "restored", "title": "電腦使用代理", "confidence": "medium"}) == "還原「電腦使用代理」視窗"
     assert instruction_for_window_change({"action": "opened", "title": "X", "confidence": "medium"}) is None
+
+
+def test_click_hits_caption_buttons_uses_stored_and_fallback_bounds() -> None:
+    win = _win(
+        1,
+        "Dialog",
+        left=100,
+        top=200,
+        width=400,
+        height=300,
+        caption_button_bounds=(362, 200, 500, 232),
+    )
+    assert click_hits_caption_buttons((400, 210), win)
+    assert not click_hits_caption_buttons((200, 350), win)
+
+    fallback = _win(2, "App", left=0, top=0, width=800, height=600)
+    # Right-edge caption strip via geometry fallback
+    assert click_hits_caption_buttons((780, 10), fallback)
+    assert not click_hits_caption_buttons((100, 10), fallback)
+
+
+def test_format_hint_notes_non_caption_close() -> None:
+    assert format_window_change_hint(
+        {
+            "action": "close",
+            "title": "另存新檔",
+            "confidence": "high",
+            "from_title_bar_close": False,
+        }
+    ) == (
+        "action=close (not title-bar X; prefer click label), "
+        "title='另存新檔', confidence=high"
+    )
+    assert format_window_change_hint(
+        {
+            "action": "close",
+            "title": "Notepad",
+            "confidence": "high",
+            "from_title_bar_close": True,
+        }
+    ) == "action=close, title='Notepad', confidence=high"
 
 
 def test_is_agent_app_restore() -> None:
@@ -395,3 +528,6 @@ def test_instruction_ignores_shell_experience_host_window() -> None:
 
 def test_settle_delay_is_longer_for_title_bar_clicks() -> None:
     assert settle_delay_for_click((100, 40)) > settle_delay_for_click((100, 200))
+    win = _win(1, "App", left=0, top=400, width=800, height=400)
+    # Relative to window top (y=410), not absolute screen y<=80
+    assert settle_delay_for_click((100, 410), [win]) > settle_delay_for_click((100, 600), [win])

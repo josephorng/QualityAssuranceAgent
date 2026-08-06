@@ -322,7 +322,12 @@ async def test_analyze_event_to_cache_medium_close_is_deterministic(tmp_path: Pa
         cursor_xy=(640, 70),
         button="left",
         screenshot_path="",
-        window_change={"action": "close", "title": "連線資訊.txt - 記事本", "confidence": "medium"},
+        window_change={
+            "action": "close",
+            "title": "連線資訊.txt - 記事本",
+            "confidence": "medium",
+            "from_title_bar_close": True,
+        },
     )
 
     with patch(
@@ -336,6 +341,97 @@ async def test_analyze_event_to_cache_medium_close_is_deterministic(tmp_path: Pa
         )
 
     assert result == {"instruction": "關閉「連線資訊.txt - 記事本」視窗"}
+    llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_analyze_event_to_cache_non_caption_close_keeps_click(tmp_path: Path) -> None:
+    """儲存/取消 dismissals still detect close, but emit the click instruction."""
+    event = RecordedEvent(
+        index=4,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(280, 420),
+        button="left",
+        screenshot_path="",
+        window_change={
+            "action": "close",
+            "title": "另存新檔",
+            "confidence": "high",
+            "from_title_bar_close": False,
+        },
+    )
+    vision = {
+        "used_vision": True,
+        "local_cursor": (280, 420),
+        "candidate_text": "儲存",
+        "candidates": [
+            {
+                "bbox": [250, 410, 60, 24],
+                "center": [280, 422],
+                "class_name": "text",
+                "text": "儲存",
+            },
+        ],
+    }
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision=vision,
+        )
+
+    assert result is not None
+    assert result["instruction"] == "將滑鼠移到「儲存」文字，並點擊滑鼠一下。"
+    llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_analyze_event_to_cache_cancel_close_keeps_click(tmp_path: Path) -> None:
+    event = RecordedEvent(
+        index=5,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(360, 420),
+        button="left",
+        screenshot_path="",
+        window_change={
+            "action": "close",
+            "title": "確認",
+            "confidence": "high",
+            "from_title_bar_close": False,
+        },
+    )
+    vision = {
+        "used_vision": True,
+        "local_cursor": (360, 420),
+        "candidate_text": "取消",
+        "candidates": [
+            {
+                "bbox": [330, 410, 60, 24],
+                "center": [360, 422],
+                "class_name": "text",
+                "text": "取消",
+            },
+        ],
+    }
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision=vision,
+        )
+
+    assert result is not None
+    assert result["instruction"] == "將滑鼠移到「取消」文字，並點擊滑鼠一下。"
     llm_mock.assert_not_called()
 
 

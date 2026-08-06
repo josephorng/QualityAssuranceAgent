@@ -18,7 +18,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 from cua_mcp.icon_map import is_pua_char, lookup_pua_icon, text_has_pua, unknown_icon_record
 from cua_mcp.read_screen_text.get_coordinates import get_coordinates_from_image_path
 from cua_mcp.select_mouse_target import _build_candidates_from_bgr
-from cua_mcp.yolo_onnx import DEFAULT_CONF_YOLOV26_END2END
+from cua_mcp.yolo_onnx import DEFAULT_CONF_YOLOV26_END2END, YOLO_CLASS_NAMES
 from src.common.io_utils import read_json, write_json
 from src.common.settings import ROOT_DIR, resolve_runs_dir
 
@@ -259,7 +259,21 @@ def _normalize_lines(raw_lines: Any) -> list[OcrLine]:
                     x, y, w, h = (int(v) for v in box)
                 except (TypeError, ValueError):
                     continue
-                parsed.append(OcrLine(box=(x, y, w, h), text=str(item.get("text", "")).strip()))
+                class_name = str(item.get("class_name", "")).strip()
+                class_id = item.get("class_id")
+                line_type = (
+                    str(item.get("line_type", "")).strip()
+                    or ("ocr" if class_name == "text" else "element" if class_name else "ocr")
+                )
+                parsed.append(
+                    OcrLine(
+                        box=(x, y, w, h),
+                        text=str(item.get("text", "")).strip(),
+                        line_type=line_type,
+                        class_name=class_name,
+                        class_id=int(class_id) if isinstance(class_id, int) else None,
+                    )
+                )
     return parsed
 
 
@@ -488,13 +502,42 @@ def _yolo_ocr_paired_images(run_dir: Path) -> list[Path]:
     return _discover_run_images(run_dir)
 
 
+# Border outline by YOLO / picker class (selection stays red).
+_CLASS_OUTLINE_COLORS: dict[str, str] = {
+    "text": "lime",
+    "element": "dodgerblue",
+    "input": "orange",
+    "scrollbar": "mediumpurple",
+    "unknown": "gray",
+}
+
+
+def _yolo_class_key(line: OcrLine) -> str:
+    """Resolve a display class key from ``class_name``, ``class_id``, or ``line_type``."""
+    name = (line.class_name or "").strip().lower()
+    if name:
+        return name
+    if line.class_id is not None:
+        mapped = YOLO_CLASS_NAMES.get(line.class_id)
+        if mapped:
+            return mapped
+    if line.line_type == "ocr":
+        return "text"
+    if line.line_type == "element":
+        return "element"
+    return ""
+
+
 def _box_outline_for_line(line: OcrLine, *, is_selected: bool) -> str:
     if is_selected:
         return "red"
-    if _is_ui_object_line(line):
-        return "orange"
+    class_key = _yolo_class_key(line)
+    if class_key in _CLASS_OUTLINE_COLORS:
+        return _CLASS_OUTLINE_COLORS[class_key]
     if _is_icon_ocr_line(line):
         return "cyan"
+    if _is_ui_object_line(line):
+        return "orange"
     return "lime"
 
 
@@ -592,12 +635,16 @@ def _draw_overlays(
             draw.rectangle([(tx1 - pad, ty1 - pad), (tx2 + pad, ty2 + pad)], fill="black")
             if is_selected:
                 text_color = "red"
-            elif _is_ui_object_line(line):
-                text_color = "orange"
-            elif _is_icon_ocr_line(line):
-                text_color = "cyan"
             else:
-                text_color = "yellow"
+                class_key = _yolo_class_key(line)
+                if class_key in _CLASS_OUTLINE_COLORS:
+                    text_color = _CLASS_OUTLINE_COLORS[class_key]
+                elif _is_icon_ocr_line(line):
+                    text_color = "cyan"
+                elif _is_ui_object_line(line):
+                    text_color = "orange"
+                else:
+                    text_color = "yellow"
             draw.text((x, y), text, font=font, fill=text_color)
     return out
 

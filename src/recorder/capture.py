@@ -1250,7 +1250,7 @@ class RecordingSession:
     ) -> tuple[dict[str, Any] | None, str | None, dict[str, Any] | None]:
         if not item.windows_before:
             return None, None, None
-        time.sleep(settle_delay_for_click(item.cursor_xy))
+        time.sleep(settle_delay_for_click(item.cursor_xy, item.windows_before))
         try:
             windows_after = snapshot_top_level_windows()
         except Exception:

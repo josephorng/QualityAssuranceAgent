@@ -128,17 +128,16 @@ async def test_visual_mouse_runs_similar_function_describe_for_peers(
         return context
 
     async def fake_describe(anchor, peers, image_paths):
-        assert peers[0] is taskbar
-        assert outlook in peers
+        # Peers are reading-ordered: outlook (top) before taskbar (bottom).
+        assert peers == [outlook, taskbar]
         return [
-            "Windows 工作列搜尋" if d is taskbar else "Outlook 郵件搜尋欄"
+            "Outlook 郵件搜尋欄" if d is outlook else "Windows 工作列搜尋"
             for d in peers
         ]
 
     async def fake_repick(anchor, peers, functions, image_paths, **_kwargs):
-        assert peers[0] is taskbar
-        outlook_idx = next(i for i, d in enumerate(peers) if d is outlook)
-        return outlook_idx, "picked-outlook-after-describe"
+        assert peers == [outlook, taskbar]
+        return 0, "picked-outlook-after-describe"
 
     monkeypatch.setattr(
         "cua_mcp.visual_mouse.capture_screen_context",
@@ -186,6 +185,7 @@ async def test_visual_mouse_runs_similar_function_describe_for_peers(
     assert metadata["disambiguation"] == "similar_function_describe"
     assert metadata["similar_count"] == 2
     assert metadata["initial_selected_index"] == 1
+    assert metadata["selected_index"] == 0
     assert metadata["selected_text"] == "picked-outlook-after-describe"
     assert metadata["target_text"] == "搜尋"
 

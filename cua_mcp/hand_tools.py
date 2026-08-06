@@ -104,22 +104,38 @@ def click(
             pyautogui.keyUp(key)
 
 
+def _safe_clipboard_text() -> str | None:
+    """Best-effort read of the current clipboard as text. Returns None on failure."""
+    try:
+        return pyperclip.paste()
+    except Exception:
+        return None
+
+
 def type_text(
     text: str,
 ) -> dict[str, Any]:
     """Paste text via clipboard (Ctrl+V) at the current keyboard focus.
 
-    Does not move or click the mouse. Clears the clipboard afterward and does
-    not restore previous contents.
+    Does not move or click the mouse. Best-effort restores prior clipboard text
+    after pasting (non-text clipboard contents cannot be restored via pyperclip).
     """
-    # root = tk.Tk()
-    pyperclip.copy(text)
-    sleep(0.5)
-    pyautogui.hotkey("ctrl", "v")
-    sleep(0.05)
+    previous = _safe_clipboard_text()
+    try:
+        pyperclip.copy(text)
+        sleep(0.5)
+        pyautogui.hotkey("ctrl", "v")
+        sleep(0.05)
+    finally:
+        if previous is not None:
+            try:
+                pyperclip.copy(previous)
+            except Exception:
+                pass
     return {
         "text": text,
         "effective_mode": "paste",
+        "clipboard_restored": previous is not None,
     }
 
 

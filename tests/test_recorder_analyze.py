@@ -265,6 +265,47 @@ def test_list_nearby_landmark_options_returns_all_neighbors() -> None:
     assert "（左邊）" in options[0]["display"]
 
 
+def test_list_nearby_landmark_options_includes_input_and_scrollbar() -> None:
+    from src.recorder.vision_context import list_nearby_landmark_options
+
+    vision = {
+        "used_vision": True,
+        "candidates": [
+            {
+                "bbox": [40, 40, 20, 20],
+                "center": [50, 50],
+                "class_name": "text",
+                "text": "搜尋",
+            },
+            {
+                "bbox": [80, 40, 200, 30],
+                "center": [180, 55],
+                "class_name": "input",
+                "text": None,
+            },
+            {
+                "bbox": [300, 0, 16, 200],
+                "center": [308, 100],
+                "class_name": "scrollbar",
+                "text": None,
+            },
+            {
+                "bbox": [90, 90, 40, 14],
+                "center": [110, 97],
+                "class_name": "text",
+                "text": "標題",
+            },
+        ],
+    }
+    options = list_nearby_landmark_options(
+        vision, instruction="將滑鼠移到「搜尋」文字"
+    )
+    labels = [item["label"] for item in options]
+    assert "輸入欄" in labels
+    assert "滾動條" in labels
+    assert "「標題」文字" in labels
+
+
 def test_append_drag_nearby_context_comments() -> None:
     vision = {
         "used_vision": True,

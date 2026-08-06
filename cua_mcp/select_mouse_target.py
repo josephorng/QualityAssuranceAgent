@@ -424,8 +424,6 @@ def _detection_similarity_to_query(det: UiDetection, query: str) -> float:
 
 # Minimum SequenceMatcher score to keep a candidate before the LLM filter.
 _MOUSE_FILTER_SIMILARITY_THRESHOLD = 0.5
-# Max peers sent to the post-pick function-describe disambiguator.
-_SIMILAR_PEER_CAP = 12
 
 
 def _detections_label_similar(
@@ -451,32 +449,28 @@ def _detections_similar_to(
     detections: list[UiDetection],
     *,
     threshold: float = _MOUSE_FILTER_SIMILARITY_THRESHOLD,
-    cap: int = _SIMILAR_PEER_CAP,
 ) -> list[UiDetection]:
     """
-    Return YOLO detections label-similar to ``chosen``.
+    Return YOLO detections label-similar to ``chosen``, in reading order.
 
-    ``chosen`` is always first. Remaining peers follow ``detections`` order
-    (typically reading order). Blank detections never match. Result length is
-    capped at ``cap``.
+    Peers are sorted top-to-bottom then left-to-right so overlay box numbers and
+    LLM candidate ``[index N]`` rows match spatial ordinals (第一 / 第二 / …).
+    ``chosen`` is always included when it has match labels. Blank detections
+    never match.
     """
-    if cap < 1:
-        return []
     if not _detection_match_labels(chosen):
         return [chosen]
 
-    ordered: list[UiDetection] = [chosen]
+    peers: list[UiDetection] = [chosen]
     seen: set[int] = {id(chosen)}
     for det in detections:
         if id(det) in seen:
             continue
         if not _detections_label_similar(chosen, det, threshold=threshold):
             continue
-        ordered.append(det)
+        peers.append(det)
         seen.add(id(det))
-        if len(ordered) >= cap:
-            break
-    return ordered
+    return _sort_detections_reading_order(peers)
 
 
 def _monitor_index_from_image_path(path: str) -> int | None:

@@ -478,13 +478,18 @@ def format_drag_candidate_anchor(candidate: dict[str, Any]) -> str | None:
 
 
 def _candidate_label_for_hint(candidate: dict[str, Any]) -> str | None:
-    """Return a hub-style label for a nearby-context hint, or None if not meaningful."""
+    """Return a hub-style label for a nearby-context hint, or None if not meaningful.
+
+    Bare class labels ``輸入欄`` and ``滾動條`` are kept so empty inputs/scrollbars
+    can be selected as nearby landmarks. Generic ``文字`` / ``元素`` / ``未知`` /
+    ``按鈕`` alone are still dropped.
+    """
     if str(candidate.get("class_name") or "").strip() == "unknown":
         return None
     anchor = format_drag_candidate_anchor(candidate)
     if anchor is None:
         return None
-    generic_only = {"文字", "元素", "未知", "輸入欄", "按鈕", "滾動條"}
+    generic_only = {"文字", "元素", "未知", "按鈕"}
     if anchor in generic_only:
         return None
     if anchor.endswith("未知"):

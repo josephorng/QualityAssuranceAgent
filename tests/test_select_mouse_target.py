@@ -272,9 +272,21 @@ def test_detections_similar_to_groups_same_label() -> None:
 
     peers = _detections_similar_to(taskbar, detections)
     assert len(peers) == 3
-    assert peers[0] is taskbar
-    assert outlook in peers and left_bar in peers
+    # Reading order: top row first, then left-to-right on the bottom row.
+    assert peers == [outlook, left_bar, taskbar]
     assert other not in peers
+
+
+def test_detections_similar_to_reading_order_not_chosen_first() -> None:
+    """Similar peers are indexed in reading order even when chosen is lower on screen."""
+    first = _detection_from_bbox((100, 100, 80, 16), YOLO_CLASS_TEXT, text="104企業大師")
+    second = _detection_from_bbox((100, 160, 80, 16), YOLO_CLASS_TEXT, text="104企業大師")
+    third = _detection_from_bbox((100, 220, 80, 16), YOLO_CLASS_TEXT, text="104企業大師")
+    detections = [first, second, third]
+
+    peers = _detections_similar_to(third, detections)
+    assert peers == [first, second, third]
+    assert peers.index(third) == 2
 
 
 def test_detections_similar_to_unique_label_is_singleton() -> None:

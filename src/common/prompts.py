@@ -544,7 +544,8 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "prompt": (
                 "Describe the on-screen role/function of each UI candidate using the "
                 "screenshot(s). Numbered yellow boxes on the screenshot(s) mark each "
-                "candidate; the number matches Candidates [index N]. Candidates share "
+                "candidate; the number matches Candidates [index N] and follows reading "
+                "order (top-to-bottom, then left-to-right). Candidates share "
                 "similar labels; distinguish them by app, chrome region, and purpose "
                 "(e.g. Windows taskbar search vs Outlook mail search).\n\n"
                 "Anchor instruction (context only):\n{instruction}\n\n"
@@ -578,7 +579,9 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "prompt": (
                 "Pick the candidate index from Candidates that best matches the Anchor. "
                 "Numbered yellow boxes on the screenshot(s) mark each candidate; the number "
-                "matches Candidates [index N]. Each candidate row includes label, "
+                "matches Candidates [index N] and follows reading order (top-to-bottom, "
+                "then left-to-right), so ordinal phrases like 第一 / 第二 / first / second "
+                "map to those indices. Each candidate row includes label, "
                 "center=(x,y), optional neighbor clauses, and 功能：<role description>. "
                 "Use the numbered boxes, 功能 descriptions, and screenshot context to "
                 "disambiguate identical labels.\n\n"
@@ -591,6 +594,8 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 '"index" is the [index] from the chosen candidate row (0-based).',
                 '"text" must be that same row\'s text context copied verbatim after [index N] '
                 "(label, optional center=(x,y), neighbor clauses, and 功能：… when present).",
+                "When the Anchor asks for an ordinal (第一 / 第二 / first / second / …), "
+                "use the reading-order index (0 = topmost/leftmost among peers).",
                 "Prefer the candidate whose numbered box location and 功能 match the Anchor intent.",
                 "Nearby may be (none); when it is, rely on numbered boxes and 功能 descriptions.",
                 "Never invent an index; only use an index shown in the Candidates list.",

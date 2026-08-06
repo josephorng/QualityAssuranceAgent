@@ -36,7 +36,7 @@ async def resolve_visual_mouse_point(
     Unlike ``move_mouse``, this path skips target parsing, similarity filtering, and
     nearby-landmark filtering. After the one-pass pick, when other detections are
     label-similar to the chosen target, ``similar_function_describe`` re-ranks those
-    peers (describe functions + re-pick).
+    peers in reading order (describe functions + re-pick).
     """
     target = (instruction or "").strip()
     if not target:

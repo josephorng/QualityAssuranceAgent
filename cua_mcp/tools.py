@@ -172,8 +172,9 @@ async def move_mouse(
     instruction: primary target phrase (e.g. 「資料夾」圖示), including any relative
     pixel offsets in Traditional Chinese when needed (e.g. 「資料夾」圖示左方5個像素、下方55個像素的位置).
     nearby_objects: optional list of nearby landmark labels used to disambiguate the
-    target. When the goal gives a side (左邊/右邊/上面/下面/左上方/右上方/左下方/右下方),
-    keep it as a directed phrase (e.g. ["在「joseph」文字的下面", "在「確定」文字的上面"]);
+    target. When the goal gives a side (左邊/右邊/上面/下面/左上方/右上方/左下方/右下方/裡面),
+    keep it as a directed phrase (e.g. ["在「joseph」文字的下面", "在「確定」文字的上面",
+    "在輸入欄的裡面"]);
     do not strip the side down to an undirected label like ["「joseph」文字"].
     Undirected labels are fine only when the goal has no side
     (e.g. ["「Edge」圖示", "「Copilot」圖示"]). Prefer this over embedding

@@ -19,6 +19,7 @@ class Side(str, Enum):
     UPPER_RIGHT = "upper_right"
     LOWER_LEFT = "lower_left"
     LOWER_RIGHT = "lower_right"
+    INSIDE = "inside"
 
 
 class LandmarkCell(str, Enum):
@@ -57,6 +58,7 @@ _SIDE_TO_ZH: dict[Side, str] = {
     Side.UPPER_RIGHT: "右上方",
     Side.LOWER_LEFT: "左下方",
     Side.LOWER_RIGHT: "右下方",
+    Side.INSIDE: "裡面",
 }
 
 _ZH_TO_SIDE: dict[str, Side] = {zh: side for side, zh in _SIDE_TO_ZH.items()}
@@ -144,13 +146,40 @@ def side_from_anchor_bbox(
     return _CELL_TO_SCRIPT_SIDE[cell]
 
 
+def _point_inside_bbox_xywh(
+    x: int,
+    y: int,
+    bbox: tuple[int, int, int, int],
+) -> bool:
+    """True when ``(x, y)`` lies inside an axis-aligned ``(x, y, w, h)`` bbox."""
+    bx, by, bw, bh = bbox
+    return bx <= x < bx + bw and by <= y < by + bh
+
+
+def anchor_center_xy(bbox: tuple[int, int, int, int]) -> tuple[int, int]:
+    """Return the integer center of an ``(x, y, w, h)`` bbox."""
+    x, y, w, h = bbox
+    return x + w // 2, y + h // 2
+
+
 def anchor_satisfies_side(
     anchor_bbox: tuple[int, int, int, int],
     landmark_cx: int,
     landmark_cy: int,
     side: Side,
+    *,
+    landmark_bbox: tuple[int, int, int, int] | None = None,
 ) -> bool:
-    """True when the 9-grid + inversion yields ``side`` for this anchor/landmark pair."""
+    """True when geometry satisfies ``side`` for this anchor/landmark pair.
+
+    Directional sides use the 9-grid + inversion. ``Side.INSIDE`` requires the
+    anchor center to fall inside ``landmark_bbox``.
+    """
+    if side == Side.INSIDE:
+        if landmark_bbox is None:
+            return False
+        ax, ay = anchor_center_xy(anchor_bbox)
+        return _point_inside_bbox_xywh(ax, ay, landmark_bbox)
     return side_from_anchor_bbox(anchor_bbox, landmark_cx, landmark_cy) == side
 
 

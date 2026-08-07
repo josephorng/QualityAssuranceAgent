@@ -4,6 +4,7 @@ Browsers cannot delete folders from a ``file://`` page, so the hub opens the
 reports index via this loopback server and the page POSTs to ``/api/runs/<id>/delete``.
 Bug reports POST to ``/api/runs/<id>/bug`` to zip a run folder onto a network share.
 Recording landmark edits POST to ``/api/runs/<id>/events/<n>/landmarks``.
+Recording event deletes POST to ``/api/runs/<id>/events/<n>/delete``.
 """
 
 from __future__ import annotations
@@ -22,12 +23,20 @@ from urllib.parse import unquote, urlparse
 from src.common.io_utils import read_json, write_json
 from src.common.nearby_side import NearbyHint, apply_nearby_landmarks, normalize_nearby_hints
 from src.common.session_html import write_recording_html_from_run, write_runs_index_html
+from src.recorder.models import (
+    event_json_path,
+    screenshot_path_for_event,
+    screenshot_path_for_event_end,
+)
 
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,191}$")
 _DELETE_PATH_RE = re.compile(r"^/api/runs/([^/]+)/delete/?$")
 _BUG_PATH_RE = re.compile(r"^/api/runs/([^/]+)/bug/?$")
 _LANDMARKS_PATH_RE = re.compile(
     r"^/api/runs/([^/]+)/events/(\d+)/landmarks/?$"
+)
+_EVENT_DELETE_PATH_RE = re.compile(
+    r"^/api/runs/([^/]+)/events/(\d+)/delete/?$"
 )
 
 # Default destination for "report bug" zip copies (Windows UNC share).
@@ -198,6 +207,115 @@ def _rebuild_report_instructions(run_dir: Path, report: dict[str, Any]) -> list[
     return instructions
 
 
+def _unlink_if_under_run(run_dir: Path, path: Path) -> None:
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(run_dir.resolve())
+    except (OSError, ValueError):
+        return
+    if resolved.is_file():
+        try:
+            resolved.unlink()
+        except OSError:
+            pass
+
+
+def _resolve_event_media_path(run_dir: Path, raw: Any) -> Path | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    candidate = Path(raw.strip())
+    if not candidate.is_absolute():
+        candidate = run_dir / candidate
+    return candidate
+
+
+def _delete_recording_event_files(run_dir: Path, event_index: int, event: dict[str, Any]) -> None:
+    for key in ("screenshot_path", "end_screenshot_path"):
+        media = _resolve_event_media_path(run_dir, event.get(key))
+        if media is not None:
+            _unlink_if_under_run(run_dir, media)
+
+    for path in (
+        event_json_path(run_dir, event_index),
+        run_dir / "analysis" / f"event_{event_index:03d}.json",
+        screenshot_path_for_event(run_dir, event_index),
+        screenshot_path_for_event_end(run_dir, event_index),
+    ):
+        _unlink_if_under_run(run_dir, path)
+
+    yolo_dir = run_dir / "yolo_ocr"
+    if yolo_dir.is_dir():
+        prefix = f"event_{event_index:03d}"
+        for path in yolo_dir.glob(f"{prefix}*"):
+            if path.is_file():
+                _unlink_if_under_run(run_dir, path)
+
+
+def _remaining_recording_event_paths(run_dir: Path) -> list[Path]:
+    events_dir = run_dir / "events"
+    if not events_dir.is_dir():
+        return []
+    paths = [path for path in events_dir.glob("event_*.json") if path.is_file()]
+    paths.sort(key=lambda path: path.name)
+    return paths
+
+
+def delete_recording_event(
+    runs_root: Path,
+    run_id: str,
+    event_index: int,
+) -> dict[str, Any]:
+    """Delete one recorded event and rebuild report/HTML artifacts.
+
+    Returns ``{"event_index": ..., "remaining": ...}``. Raises ``ValueError``
+    for invalid input / missing events.
+    """
+    run_dir = resolve_deletable_run_folder(runs_root, run_id)
+    if not isinstance(event_index, int) or event_index < 1:
+        raise ValueError("invalid event index")
+
+    event_path = event_json_path(run_dir, event_index)
+    event = read_json(event_path, None)
+    if not isinstance(event, dict):
+        raise ValueError("event not found")
+
+    _delete_recording_event_files(run_dir, event_index, event)
+
+    remaining_paths = _remaining_recording_event_paths(run_dir)
+    remaining = len(remaining_paths)
+
+    session_path = run_dir / "session.json"
+    session = read_json(session_path, {})
+    if not isinstance(session, dict):
+        session = {}
+    session["event_count"] = remaining
+    session["events"] = [
+        path.relative_to(run_dir).as_posix() for path in remaining_paths
+    ]
+    write_json(session_path, session)
+
+    report_path = run_dir / "report.json"
+    report = read_json(report_path, {})
+    if not isinstance(report, dict):
+        report = {}
+    report["recorded"] = remaining
+    if "processed" in report:
+        report["processed"] = remaining
+    if "cached" in report:
+        analysis_dir = run_dir / "analysis"
+        cached = (
+            len(list(analysis_dir.glob("event_*.json")))
+            if analysis_dir.is_dir()
+            else 0
+        )
+        report["cached"] = cached
+    _rebuild_report_instructions(run_dir, report)
+    write_json(report_path, report)
+
+    write_recording_html_from_run(run_dir, update_index=True)
+    return {"event_index": event_index, "remaining": remaining}
+
+
 def apply_recording_event_landmarks(
     runs_root: Path,
     run_id: str,
@@ -326,6 +444,7 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
             delete_match = _DELETE_PATH_RE.fullmatch(path)
             bug_match = _BUG_PATH_RE.fullmatch(path)
             landmarks_match = _LANDMARKS_PATH_RE.fullmatch(path)
+            event_delete_match = _EVENT_DELETE_PATH_RE.fullmatch(path)
 
             if delete_match is not None:
                 run_id = delete_match.group(1)
@@ -369,6 +488,21 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
                         selected=body.get("selected"),
                         selected_end=body.get("selected_end"),
                     )
+                except ValueError as exc:
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                    return
+                except OSError as exc:
+                    self._send_json(500, {"ok": False, "error": str(exc)})
+                    return
+                self._send_json(200, {"ok": True, **result})
+                return
+
+            if event_delete_match is not None:
+                run_id = event_delete_match.group(1)
+                event_index_raw = event_delete_match.group(2)
+                try:
+                    event_index = int(event_index_raw)
+                    result = delete_recording_event(root, run_id, event_index)
                 except ValueError as exc:
                     self._send_json(400, {"ok": False, "error": str(exc)})
                     return

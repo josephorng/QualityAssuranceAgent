@@ -90,6 +90,14 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 .copy-instruction.copied {
   color: #116329; border-color: #4ac26b; background: #dafbe1;
 }
+.delete-instruction {
+  appearance: none; border: 1px solid #d0d7de; background: #f6f8fa;
+  cursor: pointer; border-radius: 6px; padding: .2rem .55rem;
+  font-size: .75rem; line-height: 1.2; font-family: inherit;
+  font-weight: 600; color: #57606a; flex: 0 0 auto;
+}
+.delete-instruction:hover { background: #ffebe9; color: #cf222e; border-color: #ff8182; }
+.delete-instruction:disabled { opacity: .45; cursor: not-allowed; }
 .recording-toolbar {
   display: flex; flex-wrap: wrap; align-items: center; gap: .5rem;
   margin: 0 0 1.25rem;
@@ -232,6 +240,55 @@ _RECORDING_SCRIPT = """
       }).catch(function () {
         window.alert("無法複製指令，請手動選取文字。");
       });
+    });
+  });
+
+  Array.prototype.slice.call(document.querySelectorAll("button.delete-instruction")).forEach(function (btn) {
+    btn.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      var group = btn.closest(".instruction-group");
+      if (!group) return;
+      if (window.location.protocol === "file:") {
+        window.alert("無法刪除：請從主程式的「報告列表」開啟此頁（需本機服務）。");
+        return;
+      }
+      var runId = group.getAttribute("data-run-id") || "";
+      var eventIndex = group.getAttribute("data-event-index") || "";
+      var titleEl = group.querySelector(".instruction-title");
+      var label = titleEl ? (titleEl.textContent || "").trim() : "";
+      if (!runId || !eventIndex) {
+        window.alert("缺少事件資訊。");
+        return;
+      }
+      var confirmText = label
+        ? ("確定刪除指令「" + label + "」？\\n將無法復原。")
+        : "確定刪除此筆指令？\\n將無法復原。";
+      if (!window.confirm(confirmText)) return;
+      btn.disabled = true;
+      fetch("/api/runs/" + encodeURIComponent(runId) + "/events/" + encodeURIComponent(eventIndex) + "/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}"
+      })
+        .then(function (response) {
+          return response.json().then(function (payload) {
+            return { ok: response.ok, payload: payload };
+          });
+        })
+        .then(function (result) {
+          if (!result.ok || !result.payload || !result.payload.ok) {
+            btn.disabled = false;
+            var err = (result.payload && result.payload.error) || "刪除失敗";
+            window.alert(err);
+            return;
+          }
+          window.location.reload();
+        })
+        .catch(function () {
+          btn.disabled = false;
+          window.alert("無法連線主程式，請確認主程式正在執行。");
+        });
     });
   });
 
@@ -1807,6 +1864,8 @@ def _render_recording_event_html(*, run_root: Path, event: dict[str, Any]) -> st
         f'<span class="badge neutral">{kind_badge}</span>'
         f'<button type="button" class="copy-instruction" data-instruction="{copy_attr}" '
         f'title="複製指令" aria-label="複製指令">複製</button>'
+        f'<button type="button" class="delete-instruction" '
+        f'title="刪除指令" aria-label="刪除指令">刪除</button>'
         f"</summary>"
         f'<div class="meta" style="padding: 1rem 1.5rem 0;"><dl>{meta_html}</dl></div>'
         f"{landmarks_html}"

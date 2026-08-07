@@ -34,7 +34,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Do not call move_mouse when the task only describes an action at the current cursor and does not name a target (e.g. triple-click, double-click, scroll, type text, press a key)—call that action tool directly.",
                 "Click tool mapping: 點擊 / 點選 / single click → click; 連按兩下 / double-click → double_click. Never use double_click for a normal 點擊. Ctrl+點擊 / Ctrl+click → click with modifiers=[\"ctrl\"]; Shift+點擊 / Shift+click → click with modifiers=[\"shift\"]; Ctrl/Shift+連按兩下 → double_click with the same modifiers.",
                 "Hold tool mapping: 按住 / hold / press and hold → hold_mouse with seconds from the goal (約N秒 → seconds=N). 用右鍵按住 → hold_mouse with button=\"right\". Ctrl+按住 / Shift+按住 → hold_mouse with modifiers=[\"ctrl\"] or [\"shift\"].",
-                "For move_mouse: put the primary target in instruction (e.g. 「資料夾」圖示). When the task lists nearby landmarks (附近有… / near … / 在「…」的左邊/右邊/上面/下面/左上方/右上方/左下方/右下方), pass them as nearby_objects. When the goal includes a side, keep it as a directed phrase (e.g. [\"在「joseph」文字的下面\", \"在「確定」文字的上面\"]); do not strip sides down to undirected labels. Undirected labels are fine only when the goal has no side (e.g. [\"「Edge」圖示\", \"「Copilot」圖示\"]). Prefer this over embedding them in instruction.",
+                "For move_mouse: put the primary target in instruction (e.g. 「資料夾」圖示). When the task lists nearby landmarks (附近有… / near … / 在「…」的左邊/右邊/上面/下面/左上方/右上方/左下方/右下方/裡面), pass them as nearby_objects. When the goal includes a side, keep it as a directed phrase (e.g. [\"在「joseph」文字的下面\", \"在「確定」文字的上面\", \"在輸入欄的裡面\"]); do not strip sides down to undirected labels. Undirected labels are fine only when the goal has no side (e.g. [\"「Edge」圖示\", \"「Copilot」圖示\"]). Prefer this over embedding them in instruction.",
                 "If normal move_mouse repeatedly returns ok=false for a target that is visibly present, call move_mouse_visual with a clear natural-language target description as the fallback.",
                 "For drag: put the source in start_instruction and the drop target in destination_instruction. When the task lists start landmarks (起點附近有… / 起點在…的左邊), pass them as start_nearby_objects; when it lists destination landmarks (附近有… / 終點附近有… / 在…的左邊 / near …), pass them as destination_nearby_objects (e.g. start_nearby_objects=[\"「Desktop」文字\"], destination_nearby_objects=[\"在「新增文字文件txt」文字的左邊\"]) instead of only embedding them in the instructions.",
                 "For scroll: positive clicks scroll down (往下滑), negative scroll up; use roughly 3–10 per screen of content.",
@@ -504,9 +504,9 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Each item is {{\"label\": \"...\", \"side\": ...}} where label keeps quoted names and type suffixes "
                 "(文字/圖示/元素/輸入欄/滾動條/按鈕), e.g. 「圖片」文字, 「Chrome」圖示, 輸入欄, 滾動條.",
                 "side is null for undirected 附近有… landmarks. For 在…的X邊 phrases, side is one of: "
-                "left, right, above, below, upper_left, upper_right, lower_left, lower_right "
+                "left, right, above, below, upper_left, upper_right, lower_left, lower_right, inside "
                 "(左邊→left, 右邊→right, 上面→above, 下面→below, 左上方→upper_left, 右上方→upper_right, "
-                "左下方→lower_left, 右下方→lower_right).",
+                "左下方→lower_left, 右下方→lower_right, 裡面→inside).",
                 "Do not treat pixel-offset clauses (左方N個像素 / 右方N個像素 / …) as nearby side.",
                 "Preserve order of appearance. Use an empty list when no nearby labels are stated.",
                 "Do not invent targets, offsets, or nearby labels not stated in the instruction.",

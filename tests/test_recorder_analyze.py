@@ -306,6 +306,112 @@ def test_list_nearby_landmark_options_includes_input_and_scrollbar() -> None:
     assert "「標題」文字" in labels
 
 
+def test_collect_nearby_hints_force_includes_containing_input() -> None:
+    from src.common.nearby_side import NearbyHint, Side
+    from src.recorder.vision_context import (
+        collect_nearby_hints,
+        list_nearby_landmark_options,
+    )
+
+    vision = {
+        "used_vision": True,
+        "local_cursor": [100, 50],
+        "candidates": [
+            {
+                "bbox": [90, 45, 30, 14],
+                "center": [105, 52],
+                "class_name": "text",
+                "text": "搜尋",
+            },
+            {
+                "bbox": [40, 30, 200, 50],
+                "center": [140, 55],
+                "class_name": "input",
+                "text": None,
+            },
+            {
+                "bbox": [300, 0, 40, 14],
+                "center": [320, 7],
+                "class_name": "text",
+                "text": "標題",
+            },
+            {
+                "bbox": [300, 40, 40, 14],
+                "center": [320, 47],
+                "class_name": "text",
+                "text": "副標",
+            },
+        ],
+    }
+    hints = collect_nearby_hints(vision, instruction="將滑鼠移到「搜尋」文字")
+    assert hints[0] == NearbyHint("輸入欄", Side.INSIDE)
+    assert [h.label for h in hints[1:]] == ["「標題」文字", "「副標」文字"]
+
+    options = list_nearby_landmark_options(
+        vision, instruction="將滑鼠移到「搜尋」文字"
+    )
+    by_label = {item["label"]: item for item in options}
+    assert by_label["輸入欄"]["side"] == "inside"
+    assert "（裡面）" in by_label["輸入欄"]["display"]
+
+
+def test_collect_nearby_hints_force_includes_containing_scrollbar() -> None:
+    from src.common.nearby_side import NearbyHint, Side
+    from src.recorder.vision_context import collect_nearby_hints
+
+    vision = {
+        "used_vision": True,
+        "local_cursor": [308, 80],
+        "candidates": [
+            {
+                "bbox": [300, 70, 16, 20],
+                "center": [308, 80],
+                "class_name": "text",
+                "text": "握柄",
+            },
+            {
+                "bbox": [300, 0, 16, 200],
+                "center": [308, 100],
+                "class_name": "scrollbar",
+                "text": None,
+            },
+            {
+                "bbox": [40, 40, 40, 14],
+                "center": [60, 47],
+                "class_name": "text",
+                "text": "旁標",
+            },
+        ],
+    }
+    hints = collect_nearby_hints(vision, instruction="將滑鼠移到「握柄」文字")
+    assert hints[0] == NearbyHint("滾動條", Side.INSIDE)
+
+
+def test_collect_nearby_hints_skips_container_when_it_is_primary() -> None:
+    from src.recorder.vision_context import collect_nearby_hints
+
+    vision = {
+        "used_vision": True,
+        "local_cursor": [140, 55],
+        "candidates": [
+            {
+                "bbox": [40, 30, 200, 50],
+                "center": [140, 55],
+                "class_name": "input",
+                "text": None,
+            },
+            {
+                "bbox": [40, 100, 40, 14],
+                "center": [60, 107],
+                "class_name": "text",
+                "text": "旁標",
+            },
+        ],
+    }
+    hints = collect_nearby_hints(vision, instruction="將滑鼠移到輸入欄")
+    assert all(h.label != "輸入欄" for h in hints)
+
+
 def test_append_drag_nearby_context_comments() -> None:
     vision = {
         "used_vision": True,

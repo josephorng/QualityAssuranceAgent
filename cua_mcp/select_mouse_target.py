@@ -819,7 +819,13 @@ def _hint_covered_by_neighbors(
         if _detection_similarity_to_query(neigh, hint.label) < threshold:
             continue
         if require_side and hint.side is not None:
-            if not anchor_satisfies_side(anchor.bbox, neigh.cx, neigh.cy, hint.side):
+            if not anchor_satisfies_side(
+                anchor.bbox,
+                neigh.cx,
+                neigh.cy,
+                hint.side,
+                landmark_bbox=neigh.bbox,
+            ):
                 continue
         return True
     return False

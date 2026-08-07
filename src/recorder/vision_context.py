@@ -30,6 +30,7 @@ _MIN_NEARBY_TEXT_LANDMARKS = 2
 _MIN_NEARBY_TEXT_CANDIDATES = 5
 _MIN_NEARBY_ICON_CANDIDATES = 5
 _DRAG_OFFSET_THRESHOLD_PX = 5
+_CONTAINER_LANDMARK_CLASSES = frozenset({"input", "scrollbar"})
 
 
 def _local_cursor(event: RecordedEvent) -> tuple[int, int] | None:
@@ -521,6 +522,89 @@ def _nearby_hint_tier(candidate: dict[str, Any], label: str) -> int:
     return 1
 
 
+def _as_bbox_xywh(value: Any) -> tuple[int, int, int, int] | None:
+    """Parse a candidate bbox list/tuple into ``(x, y, w, h)``, or None."""
+    if isinstance(value, (list, tuple)) and len(value) == 4:
+        return int(value[0]), int(value[1]), int(value[2]), int(value[3])
+    return None
+
+
+def _click_xy_from_vision(
+    vision: dict[str, Any],
+    *,
+    primary: dict[str, Any] | None = None,
+) -> tuple[int, int] | None:
+    """Return screenshot-local click coords, falling back to primary center."""
+    local = vision.get("local_cursor")
+    if isinstance(local, (list, tuple)) and len(local) == 2:
+        return int(local[0]), int(local[1])
+    if primary is not None:
+        return _candidate_center(primary)
+    return None
+
+
+def _neighbor_side_for_candidate(
+    candidate: dict[str, Any],
+    *,
+    primary_bbox: tuple[int, int, int, int] | None,
+    click_xy: tuple[int, int] | None,
+) -> Side | None:
+    """Assign a script side for a neighbor landmark.
+
+    When the click falls inside an ``input`` / ``scrollbar`` bbox, use
+    ``Side.INSIDE``. Otherwise fall back to the 9-section grid (or None).
+    """
+    class_name = str(candidate.get("class_name") or "").strip()
+    cand_bbox = _as_bbox_xywh(candidate.get("bbox"))
+    if (
+        class_name in _CONTAINER_LANDMARK_CLASSES
+        and click_xy is not None
+        and cand_bbox is not None
+        and _point_inside_bbox(click_xy[0], click_xy[1], cand_bbox)
+    ):
+        return Side.INSIDE
+    if primary_bbox is not None:
+        center = _candidate_center(candidate)
+        if center is not None:
+            return side_from_anchor_bbox(primary_bbox, center[0], center[1])
+    return None
+
+
+def _collect_containing_container_hints(
+    candidates: list[Any],
+    *,
+    instruction: str,
+    click_xy: tuple[int, int] | None,
+) -> list[NearbyHint]:
+    """Force-include 輸入欄 / 滾動條 landmarks that contain the click point.
+
+    Skips ``candidates[0]`` (the primary click target).
+    """
+    if click_xy is None or len(candidates) < 2:
+        return []
+    hints: list[NearbyHint] = []
+    seen: set[str] = set()
+    for candidate in candidates[1:]:
+        if not isinstance(candidate, dict):
+            continue
+        class_name = str(candidate.get("class_name") or "").strip()
+        if class_name not in _CONTAINER_LANDMARK_CLASSES:
+            continue
+        cand_bbox = _as_bbox_xywh(candidate.get("bbox"))
+        if cand_bbox is None:
+            continue
+        if not _point_inside_bbox(click_xy[0], click_xy[1], cand_bbox):
+            continue
+        label = _candidate_label_for_hint(candidate)
+        if not label or label in seen:
+            continue
+        if _label_already_in_instruction(label, instruction):
+            continue
+        seen.add(label)
+        hints.append(NearbyHint(label=label, side=Side.INSIDE))
+    return hints
+
+
 def collect_nearby_hints(
     vision: dict[str, Any],
     *,
@@ -535,6 +619,10 @@ def collect_nearby_hints(
     candidate bbox and each neighbor center to assign an optional script side
     via the 9-section grid. Neighbors whose center falls in the CENTER cell
     stay undirected (``side=None``).
+
+    When the click lies inside a non-primary ``input`` / ``scrollbar``, that
+    container is always prepended with ``side=inside`` (裡面), even if that
+    exceeds ``max_count``.
     """
     candidates = vision.get("candidates") or []
     if len(candidates) < 2:
@@ -543,19 +631,18 @@ def collect_nearby_hints(
     primary = candidates[0]
     if not isinstance(primary, dict):
         return []
-    primary_bbox = primary.get("bbox")
-    has_bbox = isinstance(primary_bbox, (list, tuple)) and len(primary_bbox) == 4
-    bbox: tuple[int, int, int, int] | None = None
-    if has_bbox:
-        bbox = (
-            int(primary_bbox[0]),
-            int(primary_bbox[1]),
-            int(primary_bbox[2]),
-            int(primary_bbox[3]),
-        )
+    primary_bbox = _as_bbox_xywh(primary.get("bbox"))
+    click_xy = _click_xy_from_vision(vision, primary=primary)
+
+    forced = _collect_containing_container_hints(
+        candidates,
+        instruction=instruction,
+        click_xy=click_xy,
+    )
+    forced_labels = {hint.label for hint in forced}
 
     eligible: list[tuple[int, int, dict[str, Any], str]] = []
-    seen: set[str] = set()
+    seen: set[str] = set(forced_labels)
     for order, candidate in enumerate(candidates[1:]):
         if not isinstance(candidate, dict):
             continue
@@ -583,13 +670,13 @@ def collect_nearby_hints(
             if len(selected) >= max_count:
                 break
 
-    hints: list[NearbyHint] = []
+    hints: list[NearbyHint] = list(forced)
     for candidate, label in selected:
-        side: Side | None = None
-        if bbox is not None:
-            center = _candidate_center(candidate)
-            if center is not None:
-                side = side_from_anchor_bbox(bbox, center[0], center[1])
+        side = _neighbor_side_for_candidate(
+            candidate,
+            primary_bbox=primary_bbox,
+            click_xy=click_xy,
+        )
         hints.append(NearbyHint(label=label, side=side))
     return hints
 
@@ -620,6 +707,8 @@ def list_nearby_landmark_options(
     string (e.g. ``lower_left``) or ``None``. Skips the primary candidate, unknown
     / generic labels, and labels already present in the base instruction (after
     nearby comments are stripped) so the click target itself is excluded.
+    When the click is inside a neighbor ``input`` / ``scrollbar``, ``side`` is
+    ``inside`` (裡面).
     """
     from src.common.nearby_side import strip_nearby_context_comments
 
@@ -630,15 +719,8 @@ def list_nearby_landmark_options(
     primary = candidates[0]
     if not isinstance(primary, dict):
         return []
-    primary_bbox = primary.get("bbox")
-    bbox: tuple[int, int, int, int] | None = None
-    if isinstance(primary_bbox, (list, tuple)) and len(primary_bbox) == 4:
-        bbox = (
-            int(primary_bbox[0]),
-            int(primary_bbox[1]),
-            int(primary_bbox[2]),
-            int(primary_bbox[3]),
-        )
+    primary_bbox = _as_bbox_xywh(primary.get("bbox"))
+    click_xy = _click_xy_from_vision(vision, primary=primary)
 
     base_instruction = strip_nearby_context_comments(instruction) if instruction else ""
 
@@ -653,11 +735,11 @@ def list_nearby_landmark_options(
         if base_instruction and _label_already_in_instruction(label, base_instruction):
             continue
         seen.add(label)
-        side: Side | None = None
-        if bbox is not None:
-            center = _candidate_center(candidate)
-            if center is not None:
-                side = side_from_anchor_bbox(bbox, center[0], center[1])
+        side = _neighbor_side_for_candidate(
+            candidate,
+            primary_bbox=primary_bbox,
+            click_xy=click_xy,
+        )
         if side is not None:
             display = f"{label}（{side_to_zh(side)}）"
         else:

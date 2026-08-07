@@ -849,15 +849,20 @@ class OcrViewerApp:
         ttk.Button(controls, text="Copy to undone/images", command=self._copy_current_image_to_undone).grid(
             row=3, column=2, columnspan=2, sticky="ew", pady=(6, 0)
         )
-        ttk.Label(controls, text="YOLO confidence").grid(row=4, column=0, sticky="w", pady=(6, 0))
+        ttk.Button(
+            controls,
+            text="Copy all run images to undone/images",
+            command=self._copy_all_run_images_to_undone,
+        ).grid(row=4, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        ttk.Label(controls, text="YOLO confidence").grid(row=5, column=0, sticky="w", pady=(6, 0))
         ttk.Entry(controls, textvariable=self.yolo_conf_var, width=10).grid(
-            row=4, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(6, 0)
+            row=5, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(6, 0)
         )
         ttk.Button(controls, text="Delete selected", command=self._delete_selected_detection).grid(
-            row=5, column=0, columnspan=4, sticky="ew", pady=(6, 0)
+            row=6, column=0, columnspan=4, sticky="ew", pady=(6, 0)
         )
         ttk.Button(controls, text="Reset Zoom", command=self._reset_zoom).grid(
-            row=6, column=0, columnspan=4, sticky="ew", pady=(6, 0)
+            row=7, column=0, columnspan=4, sticky="ew", pady=(6, 0)
         )
 
         canvas_wrap = ttk.Frame(self.parent, padding=8)
@@ -1604,6 +1609,28 @@ class OcrViewerApp:
             self.status_var.set(f"Copied to {dest}")
         except OSError as exc:
             self.status_var.set(f"Copy failed: {exc}")
+
+    def _copy_all_run_images_to_undone(self) -> None:
+        run = self._selected_run()
+        if run is None:
+            self.status_var.set("No run selected")
+            return
+        images = [p for p in self.current_run_images if p.is_file()]
+        if not images:
+            self.status_var.set("No images in run to copy")
+            return
+        dest_dir = YOLO_UNDONE_IMAGES
+        folder_name = run.name
+        copied = 0
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            for src in images:
+                dest = dest_dir / f"cua_{folder_name}_{src.name}"
+                shutil.copy2(src, dest)
+                copied += 1
+            self.status_var.set(f"Copied {copied} images to {dest_dir}")
+        except OSError as exc:
+            self.status_var.set(f"Copied {copied}/{len(images)} then failed: {exc}")
 
 def run_app(
     runs_root: Path | None = None,

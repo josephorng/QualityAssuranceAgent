@@ -965,6 +965,22 @@ def test_prefilter_anchors_by_nearby_respects_side() -> None:
     assert kept == [left_anchor]
 
 
+def test_prefilter_anchors_by_nearby_respects_inside_side() -> None:
+    from src.common.nearby_side import NearbyHint, Side
+
+    inside_anchor = _detection_from_bbox((50, 40, 20, 20), YOLO_CLASS_TEXT, text="搜尋")
+    outside_anchor = _detection_from_bbox((250, 40, 20, 20), YOLO_CLASS_TEXT, text="搜尋")
+    input_landmark = _detection_from_bbox(
+        (10, 10, 120, 80), YOLO_CLASS_INPUT, text=""
+    )
+    kept = _prefilter_anchors_by_nearby(
+        [outside_anchor, inside_anchor],
+        [input_landmark],
+        [NearbyHint(label="輸入欄", side=Side.INSIDE)],
+    )
+    assert kept == [inside_anchor]
+
+
 def test_prefilter_anchors_by_nearby_relaxes_side_when_none_match() -> None:
     from src.common.nearby_side import NearbyHint, Side
 

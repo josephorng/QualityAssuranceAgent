@@ -191,6 +191,7 @@ class MainHub(ctk.CTk):
         self._script_controls: list[Any] = []
         self._smart_controls: list[Any] = []
         self._queue_controls: list[Any] = []
+        self._queue_item_controls: list[Any] = []
         self._queue_paths: list[Path] = []
         self._queue_selected: int | None = None
         self._queue_mode_active = False
@@ -1170,22 +1171,33 @@ class MainHub(ctk.CTk):
         row.pack(fill="x", padx=8, pady=4)
         b_add = ctk.CTkButton(row, text="新增檔案…", width=100, command=self._queue_add_files)
         b_add.pack(side="left", padx=(0, 8))
-        b_up = ctk.CTkButton(row, text="上移", width=80, command=self._queue_move_up)
-        b_up.pack(side="left", padx=(0, 8))
-        b_down = ctk.CTkButton(row, text="下移", width=80, command=self._queue_move_down)
-        b_down.pack(side="left", padx=(0, 8))
-        b_remove = ctk.CTkButton(row, text="移除", width=80, command=self._queue_remove_selected)
-        b_remove.pack(side="left", padx=(0, 8))
         b_clear = ctk.CTkButton(row, text="清空", width=80, command=self._queue_clear)
         b_clear.pack(side="left")
         self._queue_list_frame = ctk.CTkScrollableFrame(parent)
         self._queue_list_frame.pack(fill="both", expand=True, padx=8, pady=(8, 8))
-        self._queue_controls.extend([b_add, b_up, b_down, b_remove, b_clear])
+        self._queue_controls.extend([b_add, b_clear])
+
+    def _queue_controls_busy(self) -> bool:
+        return self._worker_thread is not None and self._worker_thread.is_alive()
+
+    def _set_queue_control_widgets_state(self, state: str) -> None:
+        for w in self._queue_controls:
+            w.configure(state=state)
+        if state == "normal":
+            # Rebuild rows so first/last ↑/↓ stay correctly disabled.
+            self._refresh_queue_list()
+            return
+        for w in self._queue_item_controls:
+            try:
+                w.configure(state=state)
+            except Exception:
+                pass
 
     def _refresh_queue_list(self) -> None:
         frame = getattr(self, "_queue_list_frame", None)
         if frame is None:
             return
+        self._queue_item_controls = []
         for w in frame.winfo_children():
             w.destroy()
         if not self._queue_paths:
@@ -1196,6 +1208,8 @@ class MainHub(ctk.CTk):
                 text_color=("gray40", "gray60"),
             ).pack(anchor="w", padx=6, pady=6)
             return
+        busy = self._queue_controls_busy()
+        item_state = "disabled" if busy else "normal"
         for i, p in enumerate(self._queue_paths):
             selected = i == self._queue_selected
             fg = ("gray75", "gray28") if selected else "transparent"
@@ -1210,6 +1224,37 @@ class MainHub(ctk.CTk):
                 font=ctk.CTkFont(size=15, weight="bold"),
                 text_color=icon_color,
             ).pack(side="left", padx=(0, 2))
+            icon_btn_kw = {
+                "width": 28,
+                "fg_color": "transparent",
+                "hover_color": ("gray70", "gray35"),
+                "text_color": ("gray10", "gray90"),
+            }
+            b_up = ctk.CTkButton(
+                row,
+                text="\u2191",
+                command=lambda idx=i: self._queue_move_up(idx),
+                state="disabled" if busy or i <= 0 else "normal",
+                **icon_btn_kw,
+            )
+            b_up.pack(side="left", padx=(0, 2))
+            b_down = ctk.CTkButton(
+                row,
+                text="\u2193",
+                command=lambda idx=i: self._queue_move_down(idx),
+                state="disabled" if busy or i >= len(self._queue_paths) - 1 else "normal",
+                **icon_btn_kw,
+            )
+            b_down.pack(side="left", padx=(0, 2))
+            b_remove = ctk.CTkButton(
+                row,
+                text="\u2715",
+                command=lambda idx=i: self._queue_remove_at(idx),
+                state=item_state,
+                **icon_btn_kw,
+            )
+            b_remove.pack(side="left", padx=(0, 6))
+            self._queue_item_controls.extend([b_up, b_down, b_remove])
             btn = ctk.CTkButton(
                 row,
                 text=f"{i + 1}. {p.name}",
@@ -1236,8 +1281,10 @@ class MainHub(ctk.CTk):
                 text="編輯",
                 width=56,
                 command=lambda idx=i: self._queue_edit_file(idx),
+                state=item_state,
             )
             edit_btn.pack(side="left", padx=(6, 0))
+            self._queue_item_controls.append(edit_btn)
 
     @staticmethod
     def _queue_status_icon(status: str | None) -> tuple[str, tuple[str, str]]:
@@ -1319,45 +1366,45 @@ class MainHub(ctk.CTk):
         self._refresh_queue_list()
         self._persist_hub_ui_state()
 
-    def _queue_move_up(self) -> None:
-        i = self._queue_selected
-        if i is None or i <= 0:
+    def _queue_move_up(self, index: int) -> None:
+        if index <= 0 or index >= len(self._queue_paths):
             return
-        self._queue_paths[i - 1], self._queue_paths[i] = (
-            self._queue_paths[i],
-            self._queue_paths[i - 1],
+        self._queue_paths[index - 1], self._queue_paths[index] = (
+            self._queue_paths[index],
+            self._queue_paths[index - 1],
         )
-        self._queue_selected = i - 1
+        self._queue_selected = index - 1
         self._queue_status_by_index = {}
         self._queue_run_root_by_index = {}
         self._refresh_queue_list()
         self._persist_hub_ui_state()
 
-    def _queue_move_down(self) -> None:
-        i = self._queue_selected
-        if i is None or i >= len(self._queue_paths) - 1:
+    def _queue_move_down(self, index: int) -> None:
+        if index < 0 or index >= len(self._queue_paths) - 1:
             return
-        self._queue_paths[i + 1], self._queue_paths[i] = (
-            self._queue_paths[i],
-            self._queue_paths[i + 1],
+        self._queue_paths[index + 1], self._queue_paths[index] = (
+            self._queue_paths[index],
+            self._queue_paths[index + 1],
         )
-        self._queue_selected = i + 1
+        self._queue_selected = index + 1
         self._queue_status_by_index = {}
         self._queue_run_root_by_index = {}
         self._refresh_queue_list()
         self._persist_hub_ui_state()
 
-    def _queue_remove_selected(self) -> None:
-        i = self._queue_selected
-        if i is None or i >= len(self._queue_paths):
+    def _queue_remove_at(self, index: int) -> None:
+        if index < 0 or index >= len(self._queue_paths):
             return
-        del self._queue_paths[i]
+        del self._queue_paths[index]
         self._queue_status_by_index = {}
         self._queue_run_root_by_index = {}
         if not self._queue_paths:
             self._queue_selected = None
-        else:
-            self._queue_selected = min(i, len(self._queue_paths) - 1)
+        elif self._queue_selected is not None:
+            if self._queue_selected == index:
+                self._queue_selected = min(index, len(self._queue_paths) - 1)
+            elif self._queue_selected > index:
+                self._queue_selected -= 1
         self._refresh_queue_list()
         self._persist_hub_ui_state()
 
@@ -1546,8 +1593,7 @@ class MainHub(ctk.CTk):
             w.configure(state="normal")
         for w in self._smart_controls:
             w.configure(state="normal")
-        for w in self._queue_controls:
-            w.configure(state="normal")
+        self._set_queue_control_widgets_state("normal")
         self._use_tool_cache_checkbox.configure(state="normal")
         if self._record_btn is not None:
             self._record_btn.configure(text="開始錄製", state="normal", command=self._on_record_button)
@@ -1562,8 +1608,7 @@ class MainHub(ctk.CTk):
             w.configure(state="disabled")
         for w in self._smart_controls:
             w.configure(state="disabled")
-        for w in self._queue_controls:
-            w.configure(state="disabled")
+        self._set_queue_control_widgets_state("disabled")
         self._use_tool_cache_checkbox.configure(state="disabled")
         if self._record_btn is not None:
             self._record_btn.configure(text="停止錄製", state="normal", command=self._on_record_button)
@@ -1579,8 +1624,7 @@ class MainHub(ctk.CTk):
             w.configure(state="disabled")
         for w in self._smart_controls:
             w.configure(state="disabled")
-        for w in self._queue_controls:
-            w.configure(state="disabled")
+        self._set_queue_control_widgets_state("disabled")
         self._use_tool_cache_checkbox.configure(state="disabled")
         if self._record_btn is not None:
             self._record_btn.configure(text="停止分析", state="normal", command=self._on_record_button)
@@ -2014,8 +2058,7 @@ class MainHub(ctk.CTk):
             w.configure(state="disabled")
         for w in self._smart_controls:
             w.configure(state="disabled")
-        for w in self._queue_controls:
-            w.configure(state="disabled")
+        self._set_queue_control_widgets_state("disabled")
         self._use_tool_cache_checkbox.configure(state="disabled")
         self._status.configure(text="執行中…")
         self._worker_thread = threading.Thread(target=self._worker_main, args=(args,), daemon=True)

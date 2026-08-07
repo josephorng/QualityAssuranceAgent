@@ -10,6 +10,7 @@ import pytest
 from src.common.runs_report_server import (
     RunsReportServer,
     apply_recording_event_landmarks,
+    delete_recording_event,
     delete_run_report_folder,
     ensure_runs_report_server,
     resolve_deletable_run_folder,
@@ -308,5 +309,141 @@ def test_runs_report_server_landmarks_endpoint(tmp_path: Path) -> None:
         assert payload["ok"] is True
         assert "「45 個項目」文字的右下方" in payload["instruction"]
         assert "並點擊滑鼠一下" in payload["instruction"]
+    finally:
+        server.stop()
+
+
+def _make_recording_two_event_run(runs_root: Path, name: str) -> Path:
+    run_root = runs_root / name
+    run_root.mkdir(parents=True)
+    (run_root / "events").mkdir()
+    (run_root / "analysis").mkdir()
+    (run_root / "screenshots").mkdir()
+    (run_root / "yolo_ocr").mkdir()
+
+    shot1 = run_root / "screenshots" / "event_001.jpeg"
+    shot2 = run_root / "screenshots" / "event_002.jpeg"
+    shot1.write_bytes(b"\xff\xd8\xff\xd9")
+    shot2.write_bytes(b"\xff\xd8\xff\xd9")
+
+    for index, instruction in (
+        (1, "點擊「搜尋」按鈕"),
+        (2, "點擊「確定」按鈕"),
+    ):
+        (run_root / "events" / f"event_{index:03d}.json").write_text(
+            json.dumps(
+                {
+                    "index": index,
+                    "timestamp_utc": f"2026-07-21T04:00:0{index}+00:00",
+                    "kind": "click",
+                    "cursor_xy": [10, 20],
+                    "screenshot_path": str(run_root / "screenshots" / f"event_{index:03d}.jpeg"),
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        (run_root / "analysis" / f"event_{index:03d}.json").write_text(
+            json.dumps(
+                {"event_index": index, "instruction": instruction},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        (run_root / "yolo_ocr" / f"event_{index:03d}.json").write_text(
+            json.dumps({"event_index": index, "candidates": []}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    (run_root / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": name,
+                "started_at_utc": "2026-07-21T04:00:00+00:00",
+                "stopped_at_utc": "2026-07-21T04:01:00+00:00",
+                "event_count": 2,
+                "events": ["events/event_001.json", "events/event_002.json"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "report.json").write_text(
+        json.dumps(
+            {
+                "run_id": name,
+                "recorded": 2,
+                "processed": 2,
+                "cached": 2,
+                "instructions": ["點擊「搜尋」按鈕", "點擊「確定」按鈕"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return run_root
+
+
+def test_delete_recording_event_removes_files_and_rebuilds(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_two_event_run(runs_root, "recording_delete_event")
+
+    result = delete_recording_event(runs_root, "recording_delete_event", 1)
+
+    assert result == {"event_index": 1, "remaining": 1}
+    assert not (run_root / "events" / "event_001.json").exists()
+    assert not (run_root / "analysis" / "event_001.json").exists()
+    assert not (run_root / "screenshots" / "event_001.jpeg").exists()
+    assert not (run_root / "yolo_ocr" / "event_001.json").exists()
+    assert (run_root / "events" / "event_002.json").is_file()
+    assert (run_root / "analysis" / "event_002.json").is_file()
+
+    session = json.loads((run_root / "session.json").read_text(encoding="utf-8"))
+    assert session["event_count"] == 1
+    assert session["events"] == ["events/event_002.json"]
+
+    report = json.loads((run_root / "report.json").read_text(encoding="utf-8"))
+    assert report["recorded"] == 1
+    assert report["processed"] == 1
+    assert report["cached"] == 1
+    assert report["instructions"] == ["點擊「確定」按鈕"]
+
+    html = (run_root / "recording_steps.html").read_text(encoding="utf-8")
+    assert "點擊「確定」按鈕" in html
+    assert "點擊「搜尋」按鈕" not in html
+    assert 'class="delete-instruction"' in html
+
+
+def test_runs_report_server_event_delete_endpoint(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_two_event_run(runs_root, "recording_http_delete_event")
+
+    server = RunsReportServer(runs_root)
+    try:
+        base = server.start()
+        req = urllib.request.Request(
+            f"{base}/api/runs/recording_http_delete_event/events/2/delete",
+            method="POST",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            assert response.status == 200
+        assert payload["ok"] is True
+        assert payload["event_index"] == 2
+        assert payload["remaining"] == 1
+        assert not (run_root / "events" / "event_002.json").exists()
+        assert (run_root / "events" / "event_001.json").is_file()
+
+        missing = urllib.request.Request(
+            f"{base}/api/runs/recording_http_delete_event/events/2/delete",
+            method="POST",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(missing, timeout=5)
+        assert exc_info.value.code == 400
     finally:
         server.stop()

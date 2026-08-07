@@ -18,6 +18,7 @@ from src.common.nearby_side import (
     merge_nearby_hints,
     parse_nearby_hint_string,
     side_from_anchor_bbox,
+    side_to_zh,
     strip_nearby_context_comments,
 )
 
@@ -60,6 +61,31 @@ def test_side_inversion_table() -> None:
 def test_anchor_satisfies_side_round_trip() -> None:
     assert anchor_satisfies_side(_ANCHOR, 45, 35, Side.LEFT)
     assert not anchor_satisfies_side(_ANCHOR, 5, 35, Side.LEFT)
+
+
+def test_side_inside_phrase_and_parse() -> None:
+    phrase = format_directed_phrase("滾動條", Side.INSIDE)
+    assert phrase == "在滾動條的裡面"
+    assert parse_nearby_hint_string(phrase) == NearbyHint(
+        label="滾動條", side=Side.INSIDE
+    )
+    assert side_to_zh(Side.INSIDE) == "裡面"
+    assert format_nearby_context_comment(
+        [NearbyHint("輸入欄", Side.INSIDE)]
+    ) == "（在輸入欄的裡面）"
+
+
+def test_anchor_satisfies_side_inside() -> None:
+    landmark = (0, 0, 100, 80)
+    # Anchor center (25, 35) is inside landmark.
+    assert anchor_satisfies_side(
+        _ANCHOR, 50, 40, Side.INSIDE, landmark_bbox=landmark
+    )
+    outside_anchor = (120, 20, 30, 30)
+    assert not anchor_satisfies_side(
+        outside_anchor, 50, 40, Side.INSIDE, landmark_bbox=landmark
+    )
+    assert not anchor_satisfies_side(_ANCHOR, 50, 40, Side.INSIDE)
 
 
 def test_format_and_parse_directed_phrase() -> None:

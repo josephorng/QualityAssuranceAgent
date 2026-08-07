@@ -703,10 +703,15 @@ def test_write_recording_html_renders_events_and_instructions(tmp_path: Path) ->
     assert path == recording_html_path(run_root)
     assert "點擊「搜尋」按鈕" in html
     assert 'class="copy-instruction"' in html
+    assert 'class="delete-instruction"' in html
     assert 'data-instruction="點擊「搜尋」按鈕"' in html
     assert "button.copy-instruction" in html
+    assert "button.delete-instruction" in html
     assert 'class="copy-all-instructions"' in html
     assert "複製全部指令" in html
+    assert "刪除" in html
+    assert "/api/runs/" in html
+    assert "/delete" in html
     assert "點擊" in html
     assert "screenshots/event_001.jpeg" in html
     assert 'href="../index.html#recordings"' in html

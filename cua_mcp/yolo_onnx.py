@@ -6,7 +6,11 @@ square tensor, BGR → RGB, ``NCHW``, ``float32 / 255``, then Triton ``infer_yol
 coordinates are mapped back with the same ``scale_boxes`` math as ``ultralytics``
 (``padding=True``, ``ratio_pad=None``).
 
-End-to-end output ``(1, N, 6+)`` — ``x1,y1,x2,y2,score,cls``; NMS is in the graph.
+End-to-end output ``(1, N, 6+)`` — ``x1,y1,x2,y2,score,cls``; NMS is in the graph
+(Ultralytics default ``max_det`` ⇒ ``N`` ≈ :data:`YOLO_END2END_MAX_DET`). When a pass
+fills that buffer, :func:`run_yolo_onnx_end2end` recursively splits the image into an
+overlapping 2×2 quadtree, re-infers each tile, and merges results.
+
 Classes: ``text`` (:data:`YOLO_CLASS_TEXT`), ``element`` (:data:`YOLO_CLASS_ELEMENT`),
 ``input`` (:data:`YOLO_CLASS_INPUT`), and ``scrollbar`` (:data:`YOLO_CLASS_SCROLLBAR`).
 
@@ -27,6 +31,15 @@ YOLO_LETTERBOX_PAD_BGR: tuple[int, int, int] = (114, 114, 114)
 
 # End-to-end decode (NMS in ONNX graph)
 DEFAULT_CONF_YOLOV26_END2END: float = 0.05
+# Ultralytics end2end export default ``max_det`` / output slot count ``(1, N, 6+)``.
+YOLO_END2END_MAX_DET: int = 300
+
+# When valid conf detections fill :data:`YOLO_END2END_MAX_DET`, split into overlapping
+# 2×2 tiles and re-run (quadtree). Only tiles that still hit the cap recurse further.
+DEFAULT_QUADTREE_OVERLAP_FRAC: float = 0.125
+DEFAULT_QUADTREE_MAX_DEPTH: int = 3
+DEFAULT_QUADTREE_MIN_SIDE: int = 320
+DEFAULT_CROSS_TILE_NMS_IOU: float = 0.5
 
 # After decode, optionally merge same-class detections when pairwise IoU exceeds
 # :data:`DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD` (intersection/union); each merged group is the
@@ -104,6 +117,113 @@ def _run_yolo_raw_output(img_data: np.ndarray) -> np.ndarray:
     return out
 
 
+def _count_end2end_valid(det: np.ndarray, conf_threshold: float) -> int:
+    """Count raw end2end rows with ``score >= conf_threshold`` (no class filter)."""
+    if det.ndim != 3 or det.shape[-1] < 6:
+        return 0
+    scores = det[0, :, 4].astype(np.float32)
+    return int(np.count_nonzero(scores >= conf_threshold))
+
+
+def _overlapping_quad_rois(
+    h: int,
+    w: int,
+    overlap_frac: float = DEFAULT_QUADTREE_OVERLAP_FRAC,
+) -> list[tuple[int, int, int, int]]:
+    """
+    Four ``(x1, y1, x2, y2)`` ROIs from a mid split with overlap expanded toward edges.
+
+    ``overlap_frac`` is a fraction of each half-size (e.g. ``0.125`` ⇒ each tile grows by
+    12.5% of half-width / half-height into the opposite half). Clipped to image bounds.
+    """
+    mid_x = w // 2
+    mid_y = h // 2
+    ox = int(round(mid_x * float(overlap_frac)))
+    oy = int(round(mid_y * float(overlap_frac)))
+    # TL, TR, BL, BR
+    return [
+        (0, 0, min(w, mid_x + ox), min(h, mid_y + oy)),
+        (max(0, mid_x - ox), 0, w, min(h, mid_y + oy)),
+        (0, max(0, mid_y - oy), min(w, mid_x + ox), h),
+        (max(0, mid_x - ox), max(0, mid_y - oy), w, h),
+    ]
+
+
+def _offset_detections(xyxy: np.ndarray, ox: int, oy: int) -> np.ndarray:
+    """Translate ``xyxy`` by crop origin ``(ox, oy)``."""
+    if len(xyxy) == 0:
+        return xyxy
+    out = np.asarray(xyxy, dtype=np.int32).copy()
+    out[:, 0] += int(ox)
+    out[:, 1] += int(oy)
+    out[:, 2] += int(ox)
+    out[:, 3] += int(oy)
+    return out
+
+
+def _dedupe_cross_tile(
+    xyxy: np.ndarray,
+    scores: np.ndarray,
+    cls_ids: np.ndarray,
+    *,
+    iou_threshold: float = DEFAULT_CROSS_TILE_NMS_IOU,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per-class OpenCV NMS to drop duplicate boxes across overlapping tiles."""
+    if len(xyxy) == 0:
+        return (
+            np.zeros((0, 4), dtype=np.int32),
+            np.zeros((0,), dtype=np.float32),
+            np.zeros((0,), dtype=np.int64),
+        )
+
+    xyxy = np.asarray(xyxy, dtype=np.float32)
+    scores = np.asarray(scores, dtype=np.float32).reshape(-1)
+    cls_ids = np.asarray(cls_ids, dtype=np.int64).reshape(-1)
+
+    kept_xy: list[np.ndarray] = []
+    kept_sc: list[float] = []
+    kept_cls: list[int] = []
+
+    for c in sorted(int(x) for x in np.unique(cls_ids)):
+        idx = np.flatnonzero(cls_ids == c)
+        sub_xy = xyxy[idx]
+        sub_sc = scores[idx]
+        keep_local = nms_indices_xyxy(sub_xy, sub_sc, iou_threshold)
+        for li in keep_local:
+            kept_xy.append(sub_xy[li])
+            kept_sc.append(float(sub_sc[li]))
+            kept_cls.append(c)
+
+    if not kept_xy:
+        return (
+            np.zeros((0, 4), dtype=np.int32),
+            np.zeros((0,), dtype=np.float32),
+            np.zeros((0,), dtype=np.int64),
+        )
+    return (
+        np.round(np.stack(kept_xy, axis=0)).astype(np.int32),
+        np.asarray(kept_sc, dtype=np.float32),
+        np.asarray(kept_cls, dtype=np.int64),
+    )
+
+
+def _quadtree_can_split(
+    h: int,
+    w: int,
+    depth: int,
+    *,
+    max_depth: int = DEFAULT_QUADTREE_MAX_DEPTH,
+    min_side: int = DEFAULT_QUADTREE_MIN_SIDE,
+) -> bool:
+    """True if recursive 2×2 split is allowed at this depth/size."""
+    if depth >= max_depth:
+        return False
+    # After a mid split, each half (before overlap) must remain at least ``min_side``.
+    if h // 2 < min_side or w // 2 < min_side:
+        return False
+    return True
+
+
 def run_yolo_onnx_end2end(
     bgr: np.ndarray,
     *,
@@ -117,21 +237,113 @@ def run_yolo_onnx_end2end(
     :func:`decode_yolov26_end2end` outputs ``(xyxy, scores, class_ids)`` filtered to
     ``class_ids``.
 
+    When raw end2end detections with ``score >= conf_threshold`` fill the model buffer
+    (:data:`YOLO_END2END_MAX_DET`), the image is recursively split into overlapping 2×2
+    tiles; the truncated full-image pass is discarded and tile results are merged.
+
     Pass ``merge_touching_same_class=True`` to also fuse ``text`` and ``element`` boxes whose
     pairwise IoU exceeds ``merge_same_class_iou_threshold``. ``input`` and ``scrollbar`` are
     always merged at that threshold (see :data:`DEFAULT_MERGE_TOUCHING_CLASS_IDS`).
     """
-    img_data, h0, w0 = bgr_to_nchw_normalized(bgr)
-    raw = _run_yolo_raw_output(img_data)
-    return decode_yolov26_end2end(
-        raw,
-        h0,
-        w0,
-        conf_threshold=conf_threshold,
+    return _run_yolo_onnx_end2end_recursive(
+        bgr,
+        depth=0,
         class_ids=class_ids,
+        conf_threshold=conf_threshold,
         merge_touching_same_class=merge_touching_same_class,
         merge_same_class_iou_threshold=merge_same_class_iou_threshold,
     )
+
+
+def _run_yolo_onnx_end2end_recursive(
+    bgr: np.ndarray,
+    *,
+    depth: int,
+    class_ids: set[int],
+    conf_threshold: float,
+    merge_touching_same_class: bool,
+    merge_same_class_iou_threshold: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    img_data, h0, w0 = bgr_to_nchw_normalized(bgr)
+    raw = _run_yolo_raw_output(img_data)
+
+    max_det = YOLO_END2END_MAX_DET
+    if raw.ndim == 3 and raw.shape[1] > 0:
+        max_det = int(raw.shape[1])
+    valid = _count_end2end_valid(raw, conf_threshold)
+    hit_cap = valid >= max_det
+
+    if not hit_cap or not _quadtree_can_split(h0, w0, depth):
+        return decode_yolov26_end2end(
+            raw,
+            h0,
+            w0,
+            conf_threshold=conf_threshold,
+            class_ids=class_ids,
+            merge_touching_same_class=merge_touching_same_class,
+            merge_same_class_iou_threshold=merge_same_class_iou_threshold,
+        )
+
+    # Cap hit: discard truncated full-image decode; results come only from tiles.
+    rois = _overlapping_quad_rois(h0, w0, DEFAULT_QUADTREE_OVERLAP_FRAC)
+    _log_yolo_profile(
+        f"quadtree split depth={depth} size={w0}x{h0} "
+        f"valid={valid} max_det={max_det} tiles={len(rois)}"
+    )
+
+    all_xy: list[np.ndarray] = []
+    all_sc: list[np.ndarray] = []
+    all_cls: list[np.ndarray] = []
+    for x1, y1, x2, y2 in rois:
+        tile = bgr[y1:y2, x1:x2]
+        if tile.size == 0:
+            continue
+        t_xy, t_sc, t_cls = _run_yolo_onnx_end2end_recursive(
+            tile,
+            depth=depth + 1,
+            class_ids=class_ids,
+            conf_threshold=conf_threshold,
+            merge_touching_same_class=merge_touching_same_class,
+            merge_same_class_iou_threshold=merge_same_class_iou_threshold,
+        )
+        if len(t_xy) == 0:
+            continue
+        all_xy.append(_offset_detections(t_xy, x1, y1))
+        all_sc.append(t_sc)
+        all_cls.append(t_cls)
+
+    if not all_xy:
+        return (
+            np.zeros((0, 4), dtype=np.int32),
+            np.zeros((0,), dtype=np.float32),
+            np.zeros((0,), dtype=np.int64),
+        )
+
+    xyxy = np.concatenate(all_xy, axis=0)
+    scores = np.concatenate(all_sc, axis=0)
+    cls_arr = np.concatenate(all_cls, axis=0)
+
+    xyxy, scores, cls_arr = _dedupe_cross_tile(
+        xyxy,
+        scores,
+        cls_arr,
+        iou_threshold=DEFAULT_CROSS_TILE_NMS_IOU,
+    )
+
+    merge_ids = (
+        None
+        if merge_touching_same_class
+        else DEFAULT_MERGE_TOUCHING_CLASS_IDS
+    )
+    xyxy_f, scores, cls_arr = merge_touching_same_class_xyxy(
+        xyxy.astype(np.float32),
+        scores,
+        cls_arr,
+        min_iou=merge_same_class_iou_threshold,
+        merge_class_ids=merge_ids,
+    )
+    xyxy = np.round(xyxy_f).astype(np.int32)
+    return xyxy, scores, cls_arr
 
 
 def bgr_to_nchw_normalized(

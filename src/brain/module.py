@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from src.eye.module import EyeModule
     from src.hand.module import HandModule
 
-_MAX_INNER_DECIDE_STEPS = 100
+_MAX_INNER_DECIDE_STEPS = 10
 
 
 # Remove key-value pairs with None values in each message

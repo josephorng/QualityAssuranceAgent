@@ -284,17 +284,13 @@ def _remaining_recording_event_paths(run_dir: Path) -> list[Path]:
     return paths
 
 
-def delete_recording_event(
-    runs_root: Path,
-    run_id: str,
-    event_index: int,
-) -> dict[str, Any]:
-    """Delete one recorded event and rebuild report/HTML artifacts.
+def purge_recording_event_from_session(run_dir: Path, event_index: int) -> int:
+    """Delete one event's files and update ``session.json``.
 
-    Returns ``{"event_index": ..., "remaining": ...}``. Raises ``ValueError``
-    for invalid input / missing events.
+    Does not rebuild ``report.json`` or HTML. Returns the remaining event count.
+    Raises ``ValueError`` when the event is missing or the index is invalid.
     """
-    run_dir = resolve_deletable_run_folder(runs_root, run_id)
+    run_dir = Path(run_dir)
     if not isinstance(event_index, int) or event_index < 1:
         raise ValueError("invalid event index")
 
@@ -317,6 +313,21 @@ def delete_recording_event(
         path.relative_to(run_dir).as_posix() for path in remaining_paths
     ]
     write_json(session_path, session)
+    return remaining
+
+
+def delete_recording_event(
+    runs_root: Path,
+    run_id: str,
+    event_index: int,
+) -> dict[str, Any]:
+    """Delete one recorded event and rebuild report/HTML artifacts.
+
+    Returns ``{"event_index": ..., "remaining": ...}``. Raises ``ValueError``
+    for invalid input / missing events.
+    """
+    run_dir = resolve_deletable_run_folder(runs_root, run_id)
+    remaining = purge_recording_event_from_session(run_dir, event_index)
 
     report_path = run_dir / "report.json"
     report = read_json(report_path, {})

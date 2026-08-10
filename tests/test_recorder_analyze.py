@@ -958,8 +958,13 @@ async def test_analyze_recording_session_drops_trailing_agent_restore(
     assert report["instructions"] == ["按下 Enter 鍵"]
     assert (run_dir / "analysis" / "event_001.json").is_file()
     assert not (run_dir / "analysis" / "event_002.json").is_file()
+    assert not (run_dir / "events" / "event_002.json").exists()
+    session = json.loads((run_dir / "session.json").read_text(encoding="utf-8"))
+    assert session["event_count"] == 1
+    assert session["events"] == ["events/event_001.json"]
     import_log = (run_dir / "import.log").read_text(encoding="utf-8")
     assert "dropping trailing agent restore event index=2" in import_log
+    assert "purged trailing agent restore event index=2 remaining=1" in import_log
 
 
 @pytest.mark.asyncio
@@ -1060,6 +1065,10 @@ async def test_analyze_recording_session_drops_trailing_agent_restore_from_snaps
 
     assert report["instructions"] == ["按下 Tab 鍵"]
     assert not (run_dir / "analysis" / "event_002.json").is_file()
+    assert not (run_dir / "events" / "event_002.json").exists()
+    session = json.loads((run_dir / "session.json").read_text(encoding="utf-8"))
+    assert session["event_count"] == 1
+    assert session["events"] == ["events/event_001.json"]
 
 
 def test_enrich_drag_instruction_offset_appends_exact_pixels() -> None:

@@ -41,9 +41,14 @@ def _wait_instruction(elapsed_seconds: float) -> str:
 def _drop_trailing_agent_restore(
     events: list[RecordedEvent],
     *,
+    run_dir: Path | None = None,
     log_info: Callable[[str], None] | None = None,
 ) -> list[RecordedEvent]:
-    """Omit a final restore of the hub window (common stop-recording artifact)."""
+    """Omit a final restore of the hub window (common stop-recording artifact).
+
+    When ``run_dir`` is set, also deletes that event's raw files and updates
+    ``session.json`` so recording HTML no longer shows a bare kind-label step.
+    """
     if not events:
         return events
     last = events[-1]
@@ -59,6 +64,22 @@ def _drop_trailing_agent_restore(
             f"dropping trailing agent restore event index={last.index} "
             f"title={change.get('title')!r}"
         )
+    if run_dir is not None:
+        try:
+            from src.common.runs_report_server import purge_recording_event_from_session
+
+            remaining = purge_recording_event_from_session(run_dir, last.index)
+            if log_info is not None:
+                log_info(
+                    f"purged trailing agent restore event index={last.index} "
+                    f"remaining={remaining}"
+                )
+        except ValueError as exc:
+            if log_info is not None:
+                log_info(
+                    f"purge trailing agent restore event index={last.index} "
+                    f"skipped: {exc}"
+                )
     return events[:-1]
 
 
@@ -121,7 +142,11 @@ async def analyze_recording_session(
             f"backend={settings.llm_backend} model={settings.brain_lm} host={settings.ollama_host}"
         )
         events = coalesce_consecutive_text_inputs(_load_events(run_dir))
-        events = _drop_trailing_agent_restore(events, log_info=log_info)
+        events = _drop_trailing_agent_restore(
+            events,
+            run_dir=run_dir,
+            log_info=log_info,
+        )
         log_info(f"analyze_recording_session start events={len(events)} run_id={run_id}")
 
         cached = 0

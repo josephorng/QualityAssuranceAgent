@@ -1943,7 +1943,7 @@ async def test_analyze_event_to_cache_click_enriches_offset_then_nearby(
     assert result is not None
     assert result["instruction"] == (
         "將滑鼠移到「自訂Office 範本」文字左方14個像素、下方39個像素的位置"
-        "（在「資料夾」圖示的右邊、在「WindowsPowerShell」文字的下面），用右鍵點選。"
+        "（在「WindowsPowerShell」文字的下面、在「資料夾」圖示的右邊），用右鍵點選。"
     )
     llm_mock.assert_not_called()
 

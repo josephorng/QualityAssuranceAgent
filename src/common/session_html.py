@@ -130,6 +130,13 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 .landmarks-group-label {
   margin: 0 0 .35rem; font-size: .8rem; font-weight: 600; color: #8c959f;
 }
+.landmarks-side-groups {
+  display: flex; flex-direction: column; gap: .55rem;
+}
+.landmarks-side-group { margin: 0; }
+.landmarks-side-label {
+  margin: 0 0 .2rem; font-size: .75rem; font-weight: 700; color: #57606a;
+}
 .landmarks-list {
   list-style: none; margin: 0; padding: 0;
   display: flex; flex-direction: column; gap: .25rem;
@@ -1726,15 +1733,46 @@ def _selected_landmark_labels(instruction: str, location: str) -> set[str]:
     return {hint.label for hint in buckets.get(location, [])}
 
 
-def _render_landmark_group_html(
+_LANDMARK_SIDE_GROUP_ORDER: tuple[str | None, ...] = (
+    "left",
+    "right",
+    "above",
+    "below",
+    "upper_left",
+    "upper_right",
+    "lower_left",
+    "lower_right",
+    "inside",
+    None,
+)
+
+_LANDMARK_SIDE_GROUP_TITLES: dict[str | None, str] = {
+    "left": "左邊",
+    "right": "右邊",
+    "above": "上面",
+    "below": "下面",
+    "upper_left": "左上方",
+    "upper_right": "右上方",
+    "lower_left": "左下方",
+    "lower_right": "右下方",
+    "inside": "裡面",
+    None: "其他",
+}
+
+
+def _landmark_option_side_key(option: dict[str, Any]) -> str | None:
+    side = option.get("side")
+    if side is None or side == "":
+        return None
+    return str(side)
+
+
+def _render_landmark_checkbox_items(
     *,
-    title: str,
     group_key: str,
     options: list[dict[str, Any]],
     selected_labels: set[str],
-) -> str:
-    if not options:
-        return ""
+) -> list[str]:
     items: list[str] = []
     for option in options:
         label = str(option.get("label") or "")
@@ -1752,12 +1790,50 @@ def _render_landmark_group_html(
             f"<span>{escape(display)}</span></label>"
             "</li>"
         )
-    if not items:
+    return items
+
+
+def _render_landmark_group_html(
+    *,
+    title: str,
+    group_key: str,
+    options: list[dict[str, Any]],
+    selected_labels: set[str],
+) -> str:
+    if not options:
+        return ""
+
+    buckets: dict[str | None, list[dict[str, Any]]] = {}
+    for option in options:
+        if not str(option.get("label") or ""):
+            continue
+        buckets.setdefault(_landmark_option_side_key(option), []).append(option)
+
+    side_sections: list[str] = []
+    for side_key in _LANDMARK_SIDE_GROUP_ORDER:
+        side_options = buckets.get(side_key) or []
+        if not side_options:
+            continue
+        items = _render_landmark_checkbox_items(
+            group_key=group_key,
+            options=side_options,
+            selected_labels=selected_labels,
+        )
+        if not items:
+            continue
+        side_title = _LANDMARK_SIDE_GROUP_TITLES[side_key]
+        side_sections.append(
+            f'<div class="landmarks-side-group" data-side-group="{escape(side_key or "", quote=True)}">'
+            f'<div class="landmarks-side-label">{escape(side_title)}</div>'
+            f'<ul class="landmarks-list">{"".join(items)}</ul>'
+            f"</div>"
+        )
+    if not side_sections:
         return ""
     return (
         f'<div class="landmarks-group">'
         f'<div class="landmarks-group-label">{escape(title)}</div>'
-        f'<ul class="landmarks-list">{"".join(items)}</ul>'
+        f'<div class="landmarks-side-groups">{"".join(side_sections)}</div>'
         f"</div>"
     )
 

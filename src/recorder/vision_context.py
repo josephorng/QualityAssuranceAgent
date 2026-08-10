@@ -17,9 +17,11 @@ from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text
 from cua_mcp.yolo_onnx import YOLO_CLASS_ELEMENT, YOLO_CLASS_INPUT, YOLO_CLASS_TEXT
 from src.common.io_utils import write_json
 from src.common.nearby_side import (
+    LandmarkCell,
     NearbyHint,
     Side,
     format_nearby_context_comment,
+    landmark_cell_from_anchor_bbox,
     side_from_anchor_bbox,
     side_to_schema_value,
     side_to_zh,
@@ -31,6 +33,15 @@ _MIN_NEARBY_TEXT_CANDIDATES = 5
 _MIN_NEARBY_ICON_CANDIDATES = 5
 _DRAG_OFFSET_THRESHOLD_PX = 5
 _CONTAINER_LANDMARK_CLASSES = frozenset({"input", "scrollbar"})
+# Orthogonal bands around the primary click target (not diagonals / center).
+_CARDINAL_LANDMARK_CELLS = frozenset(
+    {
+        LandmarkCell.LEFT,
+        LandmarkCell.RIGHT,
+        LandmarkCell.ABOVE,
+        LandmarkCell.BELOW,
+    }
+)
 
 
 def _local_cursor(event: RecordedEvent) -> tuple[int, int] | None:
@@ -119,6 +130,46 @@ def _is_multi_char_text_candidate(candidate: dict[str, Any], label: str) -> bool
     return class_name == "text" or label.endswith("文字")
 
 
+def _detection_cardinal_cell(
+    primary_bbox: tuple[int, int, int, int],
+    det: UiDetection,
+) -> LandmarkCell | None:
+    """Return LEFT/RIGHT/ABOVE/BELOW when ``det`` sits on a cardinal side of primary."""
+    cell = landmark_cell_from_anchor_bbox(primary_bbox, det.cx, det.cy)
+    return cell if cell in _CARDINAL_LANDMARK_CELLS else None
+
+
+def _append_cardinal_side_neighbors(
+    nearest: list[UiDetection],
+    scored: list[UiDetection],
+    *,
+    limit: int | None,
+) -> list[UiDetection]:
+    """Append every remaining neighbor on the primary's left/right/above/below sides.
+
+    Distance order from ``scored`` is preserved. Diagonals and center-band
+    detections are left to the earlier quota pass. ``limit`` still caps the
+    final list when set.
+    """
+    if len(nearest) < 1 or len(scored) < 2:
+        return nearest
+    if limit is not None and len(nearest) >= limit:
+        return nearest
+
+    primary_bbox = nearest[0].bbox
+    kept_ids = {id(det) for det in nearest}
+    for det in scored[1:]:
+        if id(det) in kept_ids:
+            continue
+        if _detection_cardinal_cell(primary_bbox, det) is None:
+            continue
+        nearest.append(det)
+        kept_ids.add(id(det))
+        if limit is not None and len(nearest) >= limit:
+            break
+    return nearest
+
+
 def _nearest_candidates(
     detections: list[UiDetection],
     local_x: int,
@@ -137,6 +188,11 @@ def _nearest_candidates(
 
     - ``min_multi_char_text_neighbors`` multi-character text detections
     - ``min_icon_neighbors`` detections with icon metadata
+
+    After the quotas, also keeps **all** remaining neighbors whose centers fall
+    on the primary's left / right / above / below bands (9-grid cardinals), so
+    recording HTML can offer every orthogonal nearby choice. Diagonals are not
+    force-included beyond the distance quotas.
 
     Icons misclassified as text with 0–1 visible characters do not count toward
     the text quota. There is no fixed candidate cap unless ``limit`` is set; if
@@ -171,7 +227,7 @@ def _nearest_candidates(
             icon_count += 1
         if limit is not None and len(nearest) >= limit:
             break
-    return nearest
+    return _append_cardinal_side_neighbors(nearest, scored, limit=limit)
 
 
 def _bbox_center_inside(

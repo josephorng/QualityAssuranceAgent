@@ -774,6 +774,8 @@ def test_write_recording_html_renders_landmark_multiselect(tmp_path: Path) -> No
     assert "目標與地標" in html
     assert "點擊目標" in html
     assert 'class="landmarks-groups"' in html
+    assert 'class="landmarks-side-groups"' in html
+    assert 'data-side-group="' in html
     assert 'data-primary-index="0"' in html
     assert 'data-primary-index="1"' in html
     assert 'class="apply-landmarks"' in html

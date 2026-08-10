@@ -90,8 +90,9 @@ def test_nearest_candidates_grows_until_five_text_and_five_icon() -> None:
         )
         for i in range(6)
     ]
+    # Diagonal (lower-right) — not a cardinal band, so quota-only.
     extra = _detection_from_bbox(
-        (500, 0, 10, 10),
+        (500, 500, 10, 10),
         YOLO_CLASS_ELEMENT,
         icons=[{"chinese_id": "After"}],
     )
@@ -105,6 +106,9 @@ def test_nearest_candidates_grows_until_five_text_and_five_icon() -> None:
     assert text_count >= 5
     assert icon_count >= 5
     assert extra not in nearest
+    # All same-row (right-band) icons/texts are kept for HTML side choices.
+    assert all(det in nearest for det in icons)
+    assert all(det in nearest for det in texts)
 
 
 def test_nearest_candidates_stops_after_two_multi_char_texts_when_configured() -> None:
@@ -125,8 +129,9 @@ def test_nearest_candidates_stops_after_two_multi_char_texts_when_configured() -
     single = _detection_from_bbox((200, 0, 10, 10), YOLO_CLASS_TEXT, text="中")
     text_a = _detection_from_bbox((300, 0, 40, 10), YOLO_CLASS_TEXT, text="OneNote")
     text_b = _detection_from_bbox((400, 0, 40, 10), YOLO_CLASS_TEXT, text="Slack")
+    # Diagonal — excluded once text quota is met (not a cardinal neighbor).
     farther_icon = _detection_from_bbox(
-        (500, 0, 10, 10),
+        (500, 500, 10, 10),
         YOLO_CLASS_ELEMENT,
         icons=[{"chinese_id": "After"}],
     )
@@ -146,6 +151,43 @@ def test_nearest_candidates_stops_after_two_multi_char_texts_when_configured() -
         "Slack",
     ]
     assert farther_icon not in nearest
+    # Cardinal right-band icons beyond the quota are still retained.
+    assert all(det in nearest for det in close_icons)
+
+
+def test_nearest_candidates_keeps_all_cardinal_side_neighbors() -> None:
+    """Left/right/above/below of the primary stay available after quota fill."""
+    primary = _detection_from_bbox(
+        (100, 100, 20, 20),
+        YOLO_CLASS_TEXT,
+        text="Target",
+    )
+    left = _detection_from_bbox((40, 105, 30, 10), YOLO_CLASS_TEXT, text="LeftLabel")
+    right = _detection_from_bbox((160, 105, 30, 10), YOLO_CLASS_TEXT, text="RightLabel")
+    above = _detection_from_bbox((105, 40, 30, 10), YOLO_CLASS_TEXT, text="AboveLabel")
+    below = _detection_from_bbox((105, 160, 30, 10), YOLO_CLASS_TEXT, text="BelowLabel")
+    # Fill text+icon quotas with near diagonals so cardinals would otherwise drop.
+    fillers = [
+        _detection_from_bbox(
+            (130 + i * 15, 130 + i * 15, 12, 12),
+            YOLO_CLASS_ELEMENT,
+            icons=[{"chinese_id": f"Diag{i}"}],
+        )
+        for i in range(6)
+    ]
+    far_diagonal = _detection_from_bbox(
+        (400, 400, 10, 10),
+        YOLO_CLASS_TEXT,
+        text="FarCorner",
+    )
+    detections = [primary, left, right, above, below, *fillers, far_diagonal]
+    nearest = _nearest_candidates(detections, 110, 110)
+    assert nearest[0] is primary
+    assert left in nearest
+    assert right in nearest
+    assert above in nearest
+    assert below in nearest
+    assert far_diagonal not in nearest
 
 
 def test_nearest_candidates_prefers_smallest_containing_bbox() -> None:

@@ -812,11 +812,150 @@ def load_recording_landmark_options(
     if kind != "drag":
         return {"start": start_options}
 
-    end_vision = vision_from_yolo_ocr(run_root, event_index, suffix="_end_filtered")
-    if not end_vision.get("candidates"):
-        end_vision = vision_from_yolo_ocr(run_root, event_index, suffix="_end")
+    end_vision = drag_end_vision(run_root, event_index)
     end_options = list_nearby_landmark_options(end_vision, instruction=instruction)
     return {"start": start_options, "end": end_options}
+
+
+def drag_end_yolo_suffix(run_root: Path, event_index: int) -> str:
+    """Prefer ``_end_filtered`` when it has candidates; otherwise ``_end``."""
+    filtered = load_yolo_ocr_payload(
+        run_root, event_index, suffix="_end_filtered"
+    )
+    if isinstance(filtered, dict) and filtered.get("candidates"):
+        return "_end_filtered"
+    return "_end"
+
+
+def drag_end_vision(run_root: Path, event_index: int) -> dict[str, Any]:
+    """Load destination vision for a drag event (filtered file when present)."""
+    return vision_from_yolo_ocr(
+        run_root,
+        event_index,
+        suffix=drag_end_yolo_suffix(run_root, event_index),
+    )
+
+
+def list_primary_target_options(
+    vision: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Return selectable primary click/drag targets from ranked candidates.
+
+    Each option is ``{"index", "label", "display"}``. Index 0 is the current
+    primary. Candidates without a meaningful hub-style label are omitted.
+    """
+    candidates = vision.get("candidates") or []
+    if not isinstance(candidates, list) or not candidates:
+        return []
+
+    options: list[dict[str, Any]] = []
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, dict):
+            continue
+        label = _candidate_label_for_hint(candidate)
+        if not label:
+            continue
+        display = f"{label}（目前）" if index == 0 else label
+        options.append({"index": index, "label": label, "display": display})
+    return options
+
+
+def load_recording_primary_target_options(
+    run_root: Path,
+    event_index: int,
+    *,
+    kind: str,
+) -> dict[str, list[dict[str, Any]]]:
+    """Load primary-target option groups for a recording event.
+
+    Returns ``{"start": [...]}`` for click/scroll/hold, or
+    ``{"start": [...], "end": [...]}`` for drag.
+    """
+    start_options = list_primary_target_options(
+        vision_from_yolo_ocr(run_root, event_index, suffix="")
+    )
+    if kind != "drag":
+        return {"start": start_options}
+    end_options = list_primary_target_options(
+        drag_end_vision(run_root, event_index)
+    )
+    return {"start": start_options, "end": end_options}
+
+
+def _dict_to_detection(candidate: dict[str, Any]) -> UiDetection | None:
+    """Convert a persisted candidate dict into ``UiDetection``, if bbox is valid."""
+    bbox = candidate.get("bbox")
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return None
+    x, y, w, h = (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
+    center = candidate.get("center")
+    if isinstance(center, (list, tuple)) and len(center) == 2:
+        cx, cy = int(center[0]), int(center[1])
+    else:
+        cx, cy = x + w // 2, y + h // 2
+    class_id = candidate.get("class_id")
+    icons = candidate.get("icons")
+    return UiDetection(
+        bbox=(x, y, w, h),
+        cx=cx,
+        cy=cy,
+        class_id=int(class_id) if class_id is not None else 0,
+        class_name=str(candidate.get("class_name") or "element"),
+        text=candidate.get("text") if candidate.get("text") is not None else None,
+        icons=list(icons) if isinstance(icons, list) else None,
+    )
+
+
+def _candidate_text_from_dicts(candidates: list[Any]) -> str:
+    """Rebuild LLM-style candidate_text lines after reordering persisted candidates."""
+    detections: list[UiDetection] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        det = _dict_to_detection(candidate)
+        if det is not None:
+            detections.append(det)
+    if not detections:
+        return ""
+    return _format_ui_candidates_text(detections)
+
+
+def reorder_yolo_ocr_primary(
+    run_root: Path,
+    event_index: int,
+    primary_index: int,
+    *,
+    suffix: str = "",
+) -> dict[str, Any]:
+    """Move ``candidates[primary_index]`` to index 0 and persist ``yolo_ocr``.
+
+    Regenerates ``candidate_text`` to match the new order. Returns the updated
+    payload. Raises ``ValueError`` when the file/index is invalid. No-op write
+    when ``primary_index`` is already 0 (still returns the payload).
+    """
+    if not isinstance(primary_index, int) or primary_index < 0:
+        raise ValueError("invalid primary index")
+
+    path = Path(run_root) / "yolo_ocr" / f"event_{int(event_index):03d}{suffix}.json"
+    payload = load_yolo_ocr_payload(run_root, event_index, suffix=suffix)
+    if payload is None:
+        raise ValueError("yolo_ocr not found")
+
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        raise ValueError("no candidates")
+    if primary_index >= len(candidates):
+        raise ValueError("primary index out of range")
+
+    if primary_index != 0:
+        reordered = list(candidates)
+        chosen = reordered.pop(primary_index)
+        reordered.insert(0, chosen)
+        payload = dict(payload)
+        payload["candidates"] = reordered
+        payload["candidate_text"] = _candidate_text_from_dicts(reordered)
+        write_json(path, payload)
+    return payload
 
 
 def append_nearby_context_comment(instruction: str, vision: dict[str, Any]) -> str:

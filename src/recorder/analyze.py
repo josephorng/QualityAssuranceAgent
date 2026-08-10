@@ -462,6 +462,54 @@ def _finalize_instruction(
     return instruction
 
 
+def rebuild_pointer_instruction(
+    event: RecordedEvent,
+    vision: dict[str, Any],
+    destination: dict[str, Any] | None = None,
+    *,
+    include_nearby: bool = True,
+) -> str | None:
+    """Rebuild a hub-script pointer instruction from ranked vision candidates.
+
+    When ``include_nearby`` is False, omits nearby-context parentheticals so
+    callers can apply user-selected landmarks afterward. Click/hold kinds still
+    receive their action suffix (e.g. 「，並點擊滑鼠一下。」).
+    """
+    dest = destination if isinstance(destination, dict) else {}
+
+    if event.kind == "drag":
+        base = instruction_for_drag(vision, dest)
+        if base is None:
+            return None
+        if include_nearby:
+            return append_drag_nearby_context_comments(base, vision, dest)
+        return base
+
+    if event.kind in _CLICK_POINTER_KINDS:
+        base = instruction_for_click(event, vision)
+        if base is None:
+            return None
+        if include_nearby:
+            base = append_nearby_context_comment(base, vision)
+        suffix = _pointer_click_action_suffix(
+            event.kind,
+            event.modifiers,
+            button=event.button,
+            duration_seconds=event.duration_seconds,
+        )
+        return base + suffix if suffix else base
+
+    if event.kind == "scroll":
+        base = instruction_for_scroll(event, vision)
+        if base is None:
+            return None
+        if include_nearby:
+            return append_nearby_context_comment(base, vision)
+        return base
+
+    return None
+
+
 def _instruction_result(
     instruction: str,
     event: RecordedEvent,

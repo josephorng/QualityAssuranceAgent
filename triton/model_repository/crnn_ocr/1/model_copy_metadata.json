@@ -1,0 +1,7 @@
+{
+  "copied_at": "2026-08-10T15:22:56.180688+08:00",
+  "source_onnx": "C:\\Users\\Joseph Hung\\Documents\\Repos\\Git\\OCR\\model_weights\\crnn_cnn32residual_bn_liquid\\ocr_model_finetuned.onnx",
+  "destination_onnx": "C:\\Users\\Joseph Hung\\Documents\\Repos\\Git\\QualityAssuranceAgent\\triton\\model_repository\\crnn_ocr\\1\\model.onnx",
+  "source_run": "C:\\Users\\Joseph Hung\\Documents\\Repos\\Git\\OCR\\model_weights\\crnn_cnn32residual_bn_liquid",
+  "source_size_bytes": 72388957
+}

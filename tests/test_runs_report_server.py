@@ -265,6 +265,7 @@ def test_apply_recording_event_landmarks_persists_and_rebuilds(tmp_path: Path) -
         "在「已選取 2 個項目」文字的左下方），並點擊滑鼠一下。"
     )
     assert result["instruction"] == expected
+    assert result["rebuilt"] is False
     analysis = json.loads(
         (runs_root / "recording_landmark_edit" / "analysis" / "event_001.json").read_text(
             encoding="utf-8"
@@ -280,6 +281,48 @@ def test_apply_recording_event_landmarks_persists_and_rebuilds(tmp_path: Path) -
         encoding="utf-8"
     )
     assert expected in html
+
+
+def test_apply_recording_event_primary_target_reorders_and_rebuilds(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    _make_recording_landmark_run(runs_root, "recording_primary_swap")
+
+    result = apply_recording_event_landmarks(
+        runs_root,
+        "recording_primary_swap",
+        1,
+        selected=[
+            {"label": "「搜尋」文字", "side": "upper_left"},
+            {"label": "「已選取 2 個項目」文字", "side": "lower_left"},
+        ],
+        primary_index=2,
+    )
+
+    assert result["rebuilt"] is True
+    assert result["instruction"].startswith("將滑鼠移到「45 個項目」文字")
+    assert "並點擊滑鼠一下" in result["instruction"]
+    assert "「搜尋」文字" in result["instruction"]
+    assert "「已選取 2 個項目」文字" in result["instruction"]
+
+    yolo = json.loads(
+        (runs_root / "recording_primary_swap" / "yolo_ocr" / "event_001.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert yolo["candidates"][0]["text"] == "45 個項目"
+    assert yolo["candidates"][1]["text"] == "搜尋"
+    assert "[index 0] class=" in yolo["candidate_text"]
+    assert "45 個項目" in yolo["candidate_text"]
+
+    analysis = json.loads(
+        (runs_root / "recording_primary_swap" / "analysis" / "event_001.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert analysis["instruction"] == result["instruction"]
+    assert analysis["landmarks"]["primary_index"] == 0
+    selected_labels = {item["label"] for item in analysis["landmarks"]["selected"]}
+    assert "「45 個項目」文字" not in selected_labels
 
 
 def test_runs_report_server_landmarks_endpoint(tmp_path: Path) -> None:

@@ -771,14 +771,18 @@ def test_write_recording_html_renders_landmark_multiselect(tmp_path: Path) -> No
 
     html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
 
-    assert "附近地標" in html
+    assert "目標與地標" in html
+    assert "點擊目標" in html
+    assert 'class="landmarks-groups"' in html
+    assert 'data-primary-index="0"' in html
+    assert 'data-primary-index="1"' in html
     assert 'class="apply-landmarks"' in html
     assert 'data-label="「已選取 2 個項目」文字"' in html
     assert 'data-label="「45 個項目」文字"' in html
     assert 'data-label="「Chrome」圖示"' in html
     assert 'data-label="「已選取 2 個項目」文字"' in html
     assert "checked" in html
-    assert "套用地標" in html
+    assert "套用</button>" in html
     assert "/api/runs/" in html
 
 

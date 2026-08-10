@@ -3,7 +3,8 @@
 Browsers cannot delete folders from a ``file://`` page, so the hub opens the
 reports index via this loopback server and the page POSTs to ``/api/runs/<id>/delete``.
 Bug reports POST to ``/api/runs/<id>/bug`` to zip a run folder onto a network share.
-Recording landmark edits POST to ``/api/runs/<id>/events/<n>/landmarks``.
+Recording landmark edits POST to ``/api/runs/<id>/events/<n>/landmarks``
+(also accepts optional primary-target index swaps).
 Recording event deletes POST to ``/api/runs/<id>/events/<n>/delete``.
 """
 
@@ -23,10 +24,19 @@ from urllib.parse import unquote, urlparse
 from src.common.io_utils import read_json, write_json
 from src.common.nearby_side import NearbyHint, apply_nearby_landmarks, normalize_nearby_hints
 from src.common.session_html import write_recording_html_from_run, write_runs_index_html
+from src.recorder.analyze import rebuild_pointer_instruction
 from src.recorder.models import (
+    RecordedEvent,
     event_json_path,
     screenshot_path_for_event,
     screenshot_path_for_event_end,
+)
+from src.recorder.vision_context import (
+    drag_end_vision,
+    drag_end_yolo_suffix,
+    format_drag_candidate_anchor,
+    reorder_yolo_ocr_primary,
+    vision_from_yolo_ocr,
 )
 
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,191}$")
@@ -169,6 +179,20 @@ def _hints_from_selected_payload(raw: Any) -> list[NearbyHint]:
     if not isinstance(raw, list):
         return []
     return normalize_nearby_hints(raw)
+
+
+def _drop_primary_from_hints(
+    hints: list[NearbyHint],
+    vision: dict[str, Any],
+) -> list[NearbyHint]:
+    """Omit landmarks that duplicate the primary target label."""
+    candidates = vision.get("candidates") or []
+    if not candidates or not isinstance(candidates[0], dict):
+        return hints
+    primary_label = format_drag_candidate_anchor(candidates[0])
+    if not primary_label:
+        return hints
+    return [hint for hint in hints if hint.label != primary_label]
 
 
 def _load_recording_event_kind(run_dir: Path, event_index: int) -> str:
@@ -316,6 +340,17 @@ def delete_recording_event(
     return {"event_index": event_index, "remaining": remaining}
 
 
+def _optional_int_index(value: Any, *, field_name: str) -> int | None:
+    """Parse an optional primary-target index from a JSON body field."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"invalid {field_name}")
+    if value < 0:
+        raise ValueError(f"invalid {field_name}")
+    return value
+
+
 def apply_recording_event_landmarks(
     runs_root: Path,
     run_id: str,
@@ -323,10 +358,17 @@ def apply_recording_event_landmarks(
     *,
     selected: Any,
     selected_end: Any = None,
+    primary_index: Any = None,
+    primary_end_index: Any = None,
 ) -> dict[str, Any]:
-    """Reformat one event instruction from selected landmarks and persist files.
+    """Reformat one event instruction from selected landmarks/targets and persist.
 
-    Returns ``{"instruction": ...}``. Raises ``ValueError`` for invalid input.
+    When ``primary_index`` / ``primary_end_index`` move a non-zero candidate to
+    index 0, reorders the matching ``yolo_ocr`` file and rebuilds the base
+    instruction from vision helpers before applying landmark checkboxes.
+
+    Returns ``{"instruction": ..., "rebuilt": bool}``. Raises ``ValueError`` for
+    invalid input.
     """
     run_dir = resolve_deletable_run_folder(runs_root, run_id)
     if not isinstance(event_index, int) or event_index < 1:
@@ -352,10 +394,55 @@ def apply_recording_event_landmarks(
     }:
         raise ValueError("event does not support landmarks")
 
+    start_primary = _optional_int_index(primary_index, field_name="primary_index")
+    end_primary = (
+        _optional_int_index(primary_end_index, field_name="primary_end_index")
+        if kind == "drag"
+        else None
+    )
+
+    rebuilt = False
+    if start_primary is not None and start_primary != 0:
+        reorder_yolo_ocr_primary(run_dir, event_index, start_primary, suffix="")
+        rebuilt = True
+
+    if kind == "drag" and end_primary is not None and end_primary != 0:
+        reorder_yolo_ocr_primary(
+            run_dir,
+            event_index,
+            end_primary,
+            suffix=drag_end_yolo_suffix(run_dir, event_index),
+        )
+        rebuilt = True
+
     start_hints = _hints_from_selected_payload(selected)
     end_hints = _hints_from_selected_payload(selected_end) if kind == "drag" else []
+
+    if rebuilt:
+        event_path = event_json_path(run_dir, event_index)
+        event_payload = read_json(event_path, None)
+        if not isinstance(event_payload, dict):
+            raise ValueError("event not found")
+        event = RecordedEvent.from_dict(event_payload)
+        vision = vision_from_yolo_ocr(run_dir, event_index, suffix="")
+        destination = drag_end_vision(run_dir, event_index) if kind == "drag" else {}
+        rebuilt_instruction = rebuild_pointer_instruction(
+            event,
+            vision,
+            destination,
+            include_nearby=False,
+        )
+        if not rebuilt_instruction:
+            raise ValueError("unable to rebuild instruction for selected target")
+        instruction = rebuilt_instruction
+        start_hints = _drop_primary_from_hints(start_hints, vision)
+        if kind == "drag":
+            end_hints = _drop_primary_from_hints(end_hints, destination)
+    else:
+        instruction = instruction.strip()
+
     new_instruction = apply_nearby_landmarks(
-        instruction.strip(),
+        instruction,
         start_hints,
         kind=kind,
         end_hints=end_hints if kind == "drag" else None,
@@ -372,6 +459,12 @@ def apply_recording_event_landmarks(
             {"label": hint.label, "side": hint.side.value if hint.side else None}
             for hint in end_hints
         ]
+    if start_primary is not None:
+        landmarks_payload["primary_index"] = 0 if start_primary != 0 else start_primary
+    if kind == "drag" and end_primary is not None:
+        landmarks_payload["primary_end_index"] = (
+            0 if end_primary != 0 else end_primary
+        )
 
     analysis["instruction"] = new_instruction
     analysis["landmarks"] = landmarks_payload
@@ -385,7 +478,7 @@ def apply_recording_event_landmarks(
     write_json(report_path, report)
 
     write_recording_html_from_run(run_dir, update_index=False)
-    return {"instruction": new_instruction}
+    return {"instruction": new_instruction, "rebuilt": rebuilt}
 
 
 def zip_run_report_to_bug_share(
@@ -487,6 +580,8 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
                         event_index,
                         selected=body.get("selected"),
                         selected_end=body.get("selected_end"),
+                        primary_index=body.get("primary_index"),
+                        primary_end_index=body.get("primary_end_index"),
                     )
                 except ValueError as exc:
                     self._send_json(400, {"ok": False, "error": str(exc)})

@@ -120,8 +120,13 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 .landmarks-title {
   margin: 0 0 .5rem; font-size: .9rem; font-weight: 700; color: #57606a;
 }
-.landmarks-group { margin: 0 0 .75rem; }
-.landmarks-group:last-of-type { margin-bottom: .5rem; }
+.landmarks-groups {
+  display: flex; flex-wrap: wrap; align-items: flex-start;
+  gap: .85rem 1.25rem; margin: 0 0 .65rem;
+}
+.landmarks-group {
+  margin: 0; flex: 1 1 14rem; min-width: 12rem; max-width: 100%;
+}
 .landmarks-group-label {
   margin: 0 0 .35rem; font-size: .8rem; font-weight: 600; color: #8c959f;
 }
@@ -329,6 +334,17 @@ _RECORDING_SCRIPT = """
       .filter(function (item) { return !!item.label; });
   }
 
+  function selectedPrimaryIndex(panel, group) {
+    var checked = panel.querySelector(
+      'input[type="radio"][data-primary-group="' + group + '"]:checked'
+    );
+    if (!checked) return null;
+    var raw = checked.getAttribute("data-primary-index");
+    if (raw == null || raw === "") return null;
+    var value = parseInt(raw, 10);
+    return Number.isFinite(value) ? value : null;
+  }
+
   Array.prototype.slice.call(document.querySelectorAll("button.apply-landmarks")).forEach(function (btn) {
     btn.addEventListener("click", function (event) {
       event.preventDefault();
@@ -351,6 +367,12 @@ _RECORDING_SCRIPT = """
       if (kind === "drag") {
         body.selected_end = selectedHints(panel, "end");
       }
+      var primaryIndex = selectedPrimaryIndex(panel, "start");
+      if (primaryIndex != null) body.primary_index = primaryIndex;
+      if (kind === "drag") {
+        var primaryEndIndex = selectedPrimaryIndex(panel, "end");
+        if (primaryEndIndex != null) body.primary_end_index = primaryEndIndex;
+      }
       btn.disabled = true;
       setLandmarksStatus(panel, "套用中…", false);
       fetch("/api/runs/" + encodeURIComponent(runId) + "/events/" + encodeURIComponent(eventIndex) + "/landmarks", {
@@ -368,6 +390,10 @@ _RECORDING_SCRIPT = """
           if (!result.ok || !result.payload || !result.payload.ok) {
             var err = (result.payload && result.payload.error) || "套用失敗";
             setLandmarksStatus(panel, err, true);
+            return;
+          }
+          if (result.payload.rebuilt) {
+            window.location.reload();
             return;
           }
           var instruction = result.payload.instruction || "";
@@ -1736,6 +1762,47 @@ def _render_landmark_group_html(
     )
 
 
+def _render_primary_target_group_html(
+    *,
+    title: str,
+    group_key: str,
+    event_index: int,
+    options: list[dict[str, Any]],
+) -> str:
+    """Radio list for swapping the primary click/drag target (needs ≥2 options)."""
+    if len(options) < 2:
+        return ""
+    name = f"primary-{group_key}-{event_index}"
+    items: list[str] = []
+    for option in options:
+        try:
+            index = int(option.get("index"))
+        except (TypeError, ValueError):
+            continue
+        label = str(option.get("label") or "")
+        if not label:
+            continue
+        display = str(option.get("display") or label)
+        checked = " checked" if index == 0 else ""
+        items.append(
+            "<li>"
+            f'<label><input type="radio" name="{escape(name, quote=True)}" '
+            f'data-primary-group="{escape(group_key, quote=True)}" '
+            f'data-primary-index="{index}" '
+            f'data-label="{escape(label, quote=True)}"{checked}>'
+            f"<span>{escape(display)}</span></label>"
+            "</li>"
+        )
+    if len(items) < 2:
+        return ""
+    return (
+        f'<div class="landmarks-group">'
+        f'<div class="landmarks-group-label">{escape(title)}</div>'
+        f'<ul class="landmarks-list">{"".join(items)}</ul>'
+        f"</div>"
+    )
+
+
 def _render_landmarks_panel_html(
     *,
     run_root: Path,
@@ -1747,49 +1814,86 @@ def _render_landmarks_panel_html(
         return ""
     if not instruction.strip():
         return ""
-    from src.recorder.vision_context import load_recording_landmark_options
+    from src.recorder.vision_context import (
+        load_recording_landmark_options,
+        load_recording_primary_target_options,
+    )
 
-    groups = load_recording_landmark_options(
+    primary_groups = load_recording_primary_target_options(
+        run_root,
+        event_index,
+        kind=kind,
+    )
+    landmark_groups = load_recording_landmark_options(
         run_root,
         event_index,
         kind=kind,
         instruction=instruction,
     )
-    start_options = groups.get("start") or []
-    end_options = groups.get("end") or []
-    if not start_options and not end_options:
-        return ""
+    start_primary = primary_groups.get("start") or []
+    end_primary = primary_groups.get("end") or []
+    start_options = landmark_groups.get("start") or []
+    end_options = landmark_groups.get("end") or []
 
+    groups_html = ""
     if kind == "drag":
-        groups_html = (
-            _render_landmark_group_html(
-                title="起點",
-                group_key="start",
-                options=start_options,
-                selected_labels=_selected_landmark_labels(instruction, "起點"),
-            )
-            + _render_landmark_group_html(
-                title="終點",
-                group_key="end",
-                options=end_options,
-                selected_labels=_selected_landmark_labels(instruction, "終點"),
-            )
+        groups_html += _render_primary_target_group_html(
+            title="起點目標",
+            group_key="start",
+            event_index=event_index,
+            options=start_primary,
+        )
+        groups_html += _render_landmark_group_html(
+            title="起點地標",
+            group_key="start",
+            options=start_options,
+            selected_labels=_selected_landmark_labels(instruction, "起點"),
+        )
+        groups_html += _render_primary_target_group_html(
+            title="終點目標",
+            group_key="end",
+            event_index=event_index,
+            options=end_primary,
+        )
+        groups_html += _render_landmark_group_html(
+            title="終點地標",
+            group_key="end",
+            options=end_options,
+            selected_labels=_selected_landmark_labels(instruction, "終點"),
         )
     else:
-        groups_html = _render_landmark_group_html(
-            title="附近",
+        groups_html += _render_primary_target_group_html(
+            title="點擊目標",
+            group_key="start",
+            event_index=event_index,
+            options=start_primary,
+        )
+        groups_html += _render_landmark_group_html(
+            title="附近地標",
             group_key="start",
             options=start_options,
             selected_labels=_selected_landmark_labels(instruction, "附近"),
         )
+
     if not groups_html:
         return ""
+
+    has_primary = (
+        len(start_primary) >= 2
+        or (kind == "drag" and len(end_primary) >= 2)
+    )
+    panel_title = "目標與地標" if has_primary else "附近地標"
+    button_title = (
+        "依選取目標與地標重新產生指令"
+        if has_primary
+        else "依勾選地標重新產生指令"
+    )
     return (
         f'<div class="landmarks">'
-        f'<div class="landmarks-title">附近地標</div>'
-        f"{groups_html}"
-        f'<button type="button" class="apply-landmarks" title="依勾選地標重新產生指令">'
-        f"套用地標</button>"
+        f'<div class="landmarks-title">{escape(panel_title)}</div>'
+        f'<div class="landmarks-groups">{groups_html}</div>'
+        f'<button type="button" class="apply-landmarks" title="{escape(button_title, quote=True)}">'
+        f"套用</button>"
         f'<span class="landmarks-status" aria-live="polite"></span>'
         f"</div>"
     )

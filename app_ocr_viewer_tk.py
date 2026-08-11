@@ -17,7 +17,11 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from cua_mcp.icon_map import is_pua_char, lookup_pua_icon, text_has_pua, unknown_icon_record
 from cua_mcp.read_screen_text.get_coordinates import get_coordinates_from_image_path
-from cua_mcp.select_mouse_target import _build_candidates_from_bgr, _detection_from_bbox
+from cua_mcp.select_mouse_target import (
+    _build_candidates_from_bgr,
+    _dedupe_overlapping_detections,
+    _detection_from_bbox,
+)
 from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text
 from cua_mcp.yolo_onnx import (
     DEFAULT_CONF_YOLOV26_END2END,
@@ -216,6 +220,22 @@ def _split_scrollbar_original_lines(
         else:
             main.append(line)
     return main, originals
+
+
+def _dedupe_ocr_lines(lines: list[OcrLine]) -> list[OcrLine]:
+    """Drop heavily overlapping same-content boxes (agent ``_dedupe_overlapping_detections``).
+
+    ``scrollbar_original`` debug boxes are kept aside and appended unchanged so they
+    are not removed as duplicates of the fitted scrollbar.
+    """
+    main, originals = _split_scrollbar_original_lines(lines)
+    if len(main) < 2:
+        return [*main, *originals]
+    detections = [_ocr_line_to_ui_detection(line) for line in main]
+    kept = _dedupe_overlapping_detections(detections)
+    by_id = {id(det): idx for idx, det in enumerate(detections)}
+    deduped = [main[by_id[id(det)]] for det in kept]
+    return [*deduped, *originals]
 
 
 def _is_icon_ocr_line(line: OcrLine) -> bool:
@@ -853,8 +873,9 @@ class OcrViewerApp:
             self.activate_hotkeys()
 
     def _set_current_lines(self, lines: list[OcrLine]) -> None:
+        deduped = _dedupe_ocr_lines(lines)
         self.current_lines, self._original_scrollbar_lines = _split_scrollbar_original_lines(
-            lines
+            deduped
         )
 
     def _all_display_lines(self) -> list[OcrLine]:
@@ -2023,7 +2044,8 @@ class TestImagesViewerApp:
         self.current_image = Image.open(image_path).convert("RGB")
         self._view_zoom = 1.0
         json_path = image_path.with_suffix(".json")
-        self.current_lines, status = load_ocr_lines(json_path)
+        lines, status = load_ocr_lines(json_path)
+        self.current_lines = _dedupe_ocr_lines(lines)
         self.selected_line_idx = None
         self._populate_item_list()
         self.status_var.set(f"{image_path.name} — {status}")
@@ -2194,7 +2216,7 @@ class TestImagesViewerApp:
         return 2
 
     def _set_lines(self, lines: list[OcrLine], status: str) -> None:
-        self.current_lines = lines
+        self.current_lines = _dedupe_ocr_lines(lines)
         self.selected_line_idx = None
         self._populate_item_list()
         self._refresh_image()

@@ -22,22 +22,30 @@ from cua_mcp.yolo_onnx import (
 
 # Scrollbar arrow button icons (OCR / icon_map chinese_id). After YOLO+OCR, each
 # scrollbar bbox is extended/shrunk along its main axis to include the two end
-# buttons nearest the track ends.
-_SCROLL_ARROW_UP_IDS: frozenset[str] = frozenset({"向上三角", "向上V箭頭"})
-_SCROLL_ARROW_DOWN_IDS: frozenset[str] = frozenset({"向下三角", "向下V箭頭"})
-_SCROLL_ARROW_LEFT_IDS: frozenset[str] = frozenset({"向左三角", "向左V箭頭"})
-_SCROLL_ARROW_RIGHT_IDS: frozenset[str] = frozenset({"向右三角", "向右V箭頭"})
+# buttons nearest the track ends. Matched ends are then unified to the
+# canonical ``*滾動箭頭`` labels below.
+_SCROLL_ARROW_UP_ID = "向上滾動箭頭"
+_SCROLL_ARROW_DOWN_ID = "向下滾動箭頭"
+_SCROLL_ARROW_LEFT_ID = "向左滾動箭頭"
+_SCROLL_ARROW_RIGHT_ID = "向右滾動箭頭"
+_SCROLL_ARROW_UP_IDS: frozenset[str] = frozenset(
+    {"向上三角", "向上V箭頭", _SCROLL_ARROW_UP_ID}
+)
+_SCROLL_ARROW_DOWN_IDS: frozenset[str] = frozenset(
+    {"向下三角", "向下V箭頭", _SCROLL_ARROW_DOWN_ID}
+)
+_SCROLL_ARROW_LEFT_IDS: frozenset[str] = frozenset(
+    {"向左三角", "向左V箭頭", _SCROLL_ARROW_LEFT_ID}
+)
+_SCROLL_ARROW_RIGHT_IDS: frozenset[str] = frozenset(
+    {"向右三角", "向右V箭頭", _SCROLL_ARROW_RIGHT_ID}
+)
 _SCROLL_ARROW_VERTICAL_IDS: frozenset[str] = (
     _SCROLL_ARROW_UP_IDS | _SCROLL_ARROW_DOWN_IDS
 )
 _SCROLL_ARROW_HORIZONTAL_IDS: frozenset[str] = (
     _SCROLL_ARROW_LEFT_IDS | _SCROLL_ARROW_RIGHT_IDS
 )
-# Canonical labels used when reclassifying an unknown icon chosen as an end cap.
-_RECLASSIFY_UP_ID = "向上V箭頭"
-_RECLASSIFY_DOWN_ID = "向下V箭頭"
-_RECLASSIFY_LEFT_ID = "向左V箭頭"
-_RECLASSIFY_RIGHT_ID = "向右V箭頭"
 _UNKNOWN_ICON_CHINESE_ID: str = str(
     unknown_icon_record().get("chinese_id", "未知圖示")
 ).strip()
@@ -119,14 +127,15 @@ def _arrow_cross_axis_aligned(
     *,
     vertical: bool,
 ) -> bool:
-    """True when ``arrow`` sits on the scrollbar's track (cross-axis overlap/pad)."""
+    """True when ``arrow`` center lies within the scrollbar's cross-axis span.
+
+    Vertical tracks require ``arrow.cx`` in ``[sx, sx+sw]``; horizontal tracks
+    require ``arrow.cy`` in ``[sy, sy+sh]``.
+    """
     sx, sy, sw, sh = scrollbar_bbox
-    ax, ay, aw, ah = arrow.bbox
     if vertical:
-        pad = max(8, sw)
-        return ax < sx + sw + pad and ax + aw > sx - pad
-    pad = max(8, sh)
-    return ay < sy + sh + pad and ay + ah > sy - pad
+        return sx <= arrow.cx <= sx + sw
+    return sy <= arrow.cy <= sy + sh
 
 
 def _scrollbar_center(bbox: tuple[int, int, int, int]) -> tuple[int, int]:
@@ -249,21 +258,25 @@ def _rebuild_detection(
     )
 
 
-def _reclassify_unknown_end_arrow(
+def _unify_end_arrow_label(
     detections: list[UiDetection],
     picked: UiDetection,
     chinese_id: str,
 ) -> bool:
     """
-    If ``picked`` is an unknown icon in ``detections``, rewrite it as ``chinese_id``.
+    Rewrite ``picked`` in ``detections`` to the canonical scrollbar arrow label.
 
-    Returns True when a detection was updated.
+    Unknown icons are promoted to ``element``. Returns True when updated.
     """
-    if not _is_unknown_icon_detection(picked):
-        return False
     try:
         index = next(i for i, det in enumerate(detections) if det is picked)
     except StopIteration:
+        return False
+    current_ids = _detection_icon_chinese_ids(picked)
+    already_unified = current_ids == {chinese_id} and not _is_unknown_icon_detection(
+        picked
+    )
+    if already_unified and picked.class_id == YOLO_CLASS_ELEMENT:
         return False
     detections[index] = _rebuild_detection(
         picked.bbox,
@@ -282,14 +295,15 @@ def fit_scrollbar_bboxes_to_arrow_controls(
     """
     Extend/shrink each scrollbar bbox to include its two end arrow buttons.
 
-    Vertical scrollbars use ``向上三角`` / ``向下三角`` / ``向上V箭頭`` /
-    ``向下V箭頭``. Horizontal scrollbars use the left/right triangle and V-arrow
-    ids. Unknown icons (``未知圖示`` / class ``unknown``) are preferred over
-    other-direction arrows when the expected end icon is missing; those
-    unknowns are then reclassified to the matching V-arrow label for that end.
-    Matching arrows may be any distance along the track — the scrollbar extends
-    to them. When either end lacks a matching track-aligned arrow, that
-    scrollbar is left unchanged.
+    Vertical scrollbars match ``向上三角`` / ``向下三角`` / ``向上V箭頭`` /
+    ``向下V箭頭`` (and the unified ``*滾動箭頭`` labels). Horizontal
+    scrollbars use the left/right triangle and V-arrow ids. Unknown icons
+    (``未知圖示`` / class ``unknown``) are preferred over other-direction
+    arrows when the expected end icon is missing. Each matched end arrow is
+    then labeled ``向上滾動箭頭`` / ``向下滾動箭頭`` / ``向左滾動箭頭`` /
+    ``向右滾動箭頭``. Matching arrows may be any distance along the track —
+    the scrollbar extends to them. When either end lacks a matching
+    track-aligned arrow, that scrollbar is left unchanged.
     """
     if not detections:
         return detections
@@ -304,9 +318,9 @@ def fit_scrollbar_bboxes_to_arrow_controls(
 
     out = list(detections)
     adjusted = 0
-    reclassified = 0
+    unified = 0
     for idx in scrollbars:
-        # Rebuild pools from ``out`` so prior unknown reclassifications apply.
+        # Rebuild pools from ``out`` so prior end-arrow unifications apply.
         vertical_arrows = [
             det
             for det in out
@@ -344,10 +358,10 @@ def fit_scrollbar_bboxes_to_arrow_controls(
             new_bbox = _fit_bbox_to_arrows_1d(
                 sb.bbox, top, bottom, vertical=True
             )
-            if _reclassify_unknown_end_arrow(out, top, _RECLASSIFY_UP_ID):
-                reclassified += 1
-            if _reclassify_unknown_end_arrow(out, bottom, _RECLASSIFY_DOWN_ID):
-                reclassified += 1
+            if _unify_end_arrow_label(out, top, _SCROLL_ARROW_UP_ID):
+                unified += 1
+            if _unify_end_arrow_label(out, bottom, _SCROLL_ARROW_DOWN_ID):
+                unified += 1
         else:
             left = _pick_scrollbar_end_arrow(
                 horizontal_arrows,
@@ -370,10 +384,10 @@ def fit_scrollbar_bboxes_to_arrow_controls(
             new_bbox = _fit_bbox_to_arrows_1d(
                 sb.bbox, left, right, vertical=False
             )
-            if _reclassify_unknown_end_arrow(out, left, _RECLASSIFY_LEFT_ID):
-                reclassified += 1
-            if _reclassify_unknown_end_arrow(out, right, _RECLASSIFY_RIGHT_ID):
-                reclassified += 1
+            if _unify_end_arrow_label(out, left, _SCROLL_ARROW_LEFT_ID):
+                unified += 1
+            if _unify_end_arrow_label(out, right, _SCROLL_ARROW_RIGHT_ID):
+                unified += 1
 
         if new_bbox != sb.bbox:
             out[idx] = _rebuild_detection(
@@ -384,9 +398,9 @@ def fit_scrollbar_bboxes_to_arrow_controls(
             )
             adjusted += 1
 
-    if (adjusted or reclassified) and log_info is not None:
+    if (adjusted or unified) and log_info is not None:
         log_info(
             f"fit_scrollbar_bboxes_to_arrow_controls: adjusted={adjusted} "
-            f"reclassified_unknown={reclassified} scrollbars={len(scrollbars)}"
+            f"unified_labels={unified} scrollbars={len(scrollbars)}"
         )
     return out

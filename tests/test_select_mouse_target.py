@@ -528,6 +528,46 @@ def test_dedupe_keeps_non_overlapping_same_label() -> None:
     assert len(kept) == 2
 
 
+def test_dedupe_keeps_text_over_overlapping_unknown() -> None:
+    from cua_mcp.select_mouse_target import _dedupe_overlapping_detections
+
+    text = _detection_from_bbox((100, 100, 40, 16), YOLO_CLASS_TEXT, text="儲存")
+    unknown = _detection_from_bbox((101, 100, 40, 16), PICKER_CLASS_UNKNOWN)
+    kept = _dedupe_overlapping_detections([unknown, text])
+    assert len(kept) == 1
+    assert kept[0].class_id == YOLO_CLASS_TEXT
+    assert kept[0].text == "儲存"
+
+
+def test_dedupe_keeps_icons_over_overlapping_unknown() -> None:
+    from cua_mcp.select_mouse_target import _dedupe_overlapping_detections
+
+    element = _detection_from_bbox(
+        (100, 100, 20, 20),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "下載"}],
+    )
+    unknown = _detection_from_bbox((100, 100, 18, 18), PICKER_CLASS_UNKNOWN)
+    kept = _dedupe_overlapping_detections([unknown, element])
+    assert len(kept) == 1
+    assert kept[0].class_id == YOLO_CLASS_ELEMENT
+    assert kept[0].icons == [{"chinese_id": "下載"}]
+
+
+def test_dedupe_keeps_overlapping_element_icon_and_text_box() -> None:
+    from cua_mcp.select_mouse_target import _dedupe_overlapping_detections
+
+    element = _detection_from_bbox(
+        (100, 100, 24, 24),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "下載"}],
+    )
+    text = _detection_from_bbox((101, 102, 40, 16), YOLO_CLASS_TEXT, text="下載")
+    kept = _dedupe_overlapping_detections([element, text])
+    assert len(kept) == 2
+    classes = {d.class_id for d in kept}
+    assert classes == {YOLO_CLASS_ELEMENT, YOLO_CLASS_TEXT}
+
 def test_fit_vertical_scrollbar_extends_to_up_down_v_arrows() -> None:
     from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
 
@@ -597,6 +637,9 @@ def test_fit_horizontal_scrollbar_extends_to_left_right_arrows() -> None:
     assert fitted.bbox[3] == 16
     assert fitted.bbox[0] == 200
     assert fitted.bbox[0] + fitted.bbox[2] == 342
+    by_bbox = {d.bbox: d for d in out}
+    assert by_bbox[left.bbox].icons[0]["chinese_id"] == "向左滾動箭頭"
+    assert by_bbox[right.bbox].icons[0]["chinese_id"] == "向右滾動箭頭"
 
 
 def test_fit_scrollbar_skips_when_end_arrows_missing() -> None:
@@ -639,8 +682,10 @@ def test_fit_vertical_scrollbar_accepts_unknown_icon_as_end() -> None:
     )
     assert relabeled.class_name == "element"
     assert relabeled.class_id == YOLO_CLASS_ELEMENT
-    assert (relabeled.icons or [])[0]["chinese_id"] == "向下V箭頭"
+    assert (relabeled.icons or [])[0]["chinese_id"] == "向下滾動箭頭"
     assert (relabeled.icons or [])[0]["pua"] == "\uf000"
+    up_out = next(d for d in out if d.bbox == up.bbox)
+    assert (up_out.icons or [])[0]["chinese_id"] == "向上滾動箭頭"
 
 
 def test_fit_vertical_scrollbar_reclassifies_unknown_top_and_bottom() -> None:
@@ -662,8 +707,8 @@ def test_fit_vertical_scrollbar_reclassifies_unknown_top_and_bottom() -> None:
         [scrollbar, unknown_up, unknown_down]
     )
     by_bbox = {d.bbox: d for d in out}
-    assert by_bbox[unknown_up.bbox].icons[0]["chinese_id"] == "向上V箭頭"
-    assert by_bbox[unknown_down.bbox].icons[0]["chinese_id"] == "向下V箭頭"
+    assert by_bbox[unknown_up.bbox].icons[0]["chinese_id"] == "向上滾動箭頭"
+    assert by_bbox[unknown_down.bbox].icons[0]["chinese_id"] == "向下滾動箭頭"
     assert by_bbox[unknown_up.bbox].class_name == "element"
     assert by_bbox[unknown_down.bbox].class_name == "element"
 
@@ -718,7 +763,7 @@ def test_fit_vertical_scrollbar_prefers_unknown_over_wrong_direction() -> None:
     assert fitted.bbox[1] == 418
     assert fitted.bbox[1] + fitted.bbox[3] == 565
     relabeled = next(d for d in out if d.bbox == unknown_down.bbox)
-    assert (relabeled.icons or [])[0]["chinese_id"] == "向下V箭頭"
+    assert (relabeled.icons or [])[0]["chinese_id"] == "向下滾動箭頭"
 
 
 def test_fit_vertical_scrollbar_picks_closest_to_center_on_each_side() -> None:

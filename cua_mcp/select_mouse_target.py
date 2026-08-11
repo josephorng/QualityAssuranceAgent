@@ -171,12 +171,46 @@ def _detection_content_key(det: UiDetection) -> tuple[str, str]:
     return text, icon_ids
 
 
-def _detection_preference_score(det: UiDetection) -> tuple[int, int, int]:
-    """Higher score is kept when two overlapping detections share content."""
-    has_icons = 1 if det.icons else 0
-    has_text = 1 if (det.text or "").strip() else 0
+def _is_unknown_detection(det: UiDetection) -> bool:
+    return det.class_id == PICKER_CLASS_UNKNOWN or det.class_name == "unknown"
+
+
+def _has_actual_icon_labels(det: UiDetection) -> bool:
+    return bool(
+        det.icons
+        and any(str(ii.get("chinese_id", "")).strip() for ii in det.icons)
+    )
+
+
+def _has_actual_visible_text(det: UiDetection) -> bool:
+    text = (det.text or "").strip()
+    return bool(text and not _text_is_pua_only(text))
+
+
+def _is_element_with_icon_labels(det: UiDetection) -> bool:
+    return (
+        det.class_id == YOLO_CLASS_ELEMENT or det.class_name == "element"
+    ) and _has_actual_icon_labels(det)
+
+
+def _is_text_with_ocr_text(det: UiDetection) -> bool:
+    return (
+        det.class_id == YOLO_CLASS_TEXT or det.class_name == "text"
+    ) and _has_actual_visible_text(det)
+
+
+def _detection_preference_score(det: UiDetection) -> tuple[int, int, int, int, int]:
+    """Higher score is kept when two overlapping detections compete.
+
+    Prefer informative boxes over ``unknown``: icons / visible OCR text / ``text``
+    class rank above empty unknowns; larger area is the final tie-breaker.
+    """
+    not_unknown = 0 if _is_unknown_detection(det) else 1
+    has_icons = 1 if _has_actual_icon_labels(det) else 0
+    has_visible_text = 1 if _has_actual_visible_text(det) else 0
+    is_text_class = 1 if det.class_id == YOLO_CLASS_TEXT or det.class_name == "text" else 0
     area = int(det.bbox[2]) * int(det.bbox[3])
-    return (has_icons, has_text, area)
+    return (not_unknown, has_icons, has_visible_text, is_text_class, area)
 
 
 def _detections_are_content_duplicates(a: UiDetection, b: UiDetection) -> bool:
@@ -190,17 +224,33 @@ def _detections_are_content_duplicates(a: UiDetection, b: UiDetection) -> bool:
     return a.class_id == b.class_id
 
 
+def _detections_compete_for_overlap_dedupe(a: UiDetection, b: UiDetection) -> bool:
+    """True when overlap dedupe should keep only the more informative of ``a``/``b``."""
+    # Element icons and OCR text boxes are complementary — keep both.
+    if (
+        _is_element_with_icon_labels(a) and _is_text_with_ocr_text(b)
+    ) or (
+        _is_text_with_ocr_text(a) and _is_element_with_icon_labels(b)
+    ):
+        return False
+    if _detections_are_content_duplicates(a, b):
+        return True
+    # Ambiguous ``unknown`` under a richer OCR/text/element box → drop unknown.
+    return _is_unknown_detection(a) != _is_unknown_detection(b)
+
+
 def _dedupe_overlapping_detections(
     detections: list[UiDetection],
     *,
     iou_threshold: float = DEFAULT_DEDUPE_OVERLAP_IOU_THRESHOLD,
 ) -> list[UiDetection]:
     """
-    Keep one detection per heavily overlapping same-content group.
+    Keep one detection per heavily overlapping competing group.
 
     Candidates are compared by IoU of ``(x, y, w, h)`` boxes. When IoU exceeds
-    ``iou_threshold`` and content matches (same OCR text and icon labels, or
-    blank same-class boxes), only the preferred detection is kept.
+    ``iou_threshold`` and the pair competes (same OCR/icon content, blank
+    same-class, or ``unknown`` vs a more informative class), only the preferred
+    detection is kept — icons / visible text / ``text`` over ``unknown``.
     """
     if len(detections) < 2:
         return detections
@@ -215,7 +265,7 @@ def _dedupe_overlapping_detections(
         det = detections[i]
         if any(
             iou_xywh(det.bbox, detections[j].bbox) > iou_threshold
-            and _detections_are_content_duplicates(det, detections[j])
+            and _detections_compete_for_overlap_dedupe(det, detections[j])
             for j in kept
         ):
             continue

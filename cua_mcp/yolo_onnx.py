@@ -64,7 +64,7 @@ DEFAULT_MERGE_TOUCHING_CLASS_IDS = frozenset({
 # Synthetic picker IDs for OCR-derived UI candidates (not YOLO model class IDs).
 PICKER_CLASS_TEXT = 100
 PICKER_CLASS_OCR_ICON = 101
-# YOLO ``element`` whose OCR decode is plain text (not icon PUA) — ambiguous / unknown.
+# YOLO ``element`` with empty OCR, plain-text OCR, or unmapped PUA — ambiguous / unknown.
 PICKER_CLASS_UNKNOWN = 102
 
 YOLO_CLASS_NAMES: dict[int, str] = {

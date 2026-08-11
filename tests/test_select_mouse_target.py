@@ -412,10 +412,16 @@ def test_resolve_ocr_class_id_element_plain_text_becomes_unknown() -> None:
     assert _resolve_ocr_class_id(YOLO_CLASS_ELEMENT, "g") == PICKER_CLASS_UNKNOWN
 
 
-def test_resolve_ocr_class_id_keeps_element_for_known_pua_or_empty() -> None:
+def test_resolve_ocr_class_id_empty_element_becomes_unknown() -> None:
+    from cua_mcp.select_mouse_target import _resolve_ocr_class_id
+    from cua_mcp.yolo_onnx import PICKER_CLASS_UNKNOWN
+
+    assert _resolve_ocr_class_id(YOLO_CLASS_ELEMENT, "") == PICKER_CLASS_UNKNOWN
+
+
+def test_resolve_ocr_class_id_keeps_element_for_known_pua() -> None:
     from cua_mcp.select_mouse_target import _resolve_ocr_class_id
 
-    assert _resolve_ocr_class_id(YOLO_CLASS_ELEMENT, "") == YOLO_CLASS_ELEMENT
     assert _resolve_ocr_class_id(YOLO_CLASS_ELEMENT, "\ue002") == YOLO_CLASS_ELEMENT
     assert _resolve_ocr_class_id(YOLO_CLASS_TEXT, "OK") == YOLO_CLASS_TEXT
 
@@ -520,6 +526,239 @@ def test_dedupe_keeps_non_overlapping_same_label() -> None:
     b = _detection_from_bbox((300, 100, 12, 12), YOLO_CLASS_ELEMENT, icons=pin)
     kept = _dedupe_overlapping_detections([a, b])
     assert len(kept) == 2
+
+
+def test_fit_vertical_scrollbar_extends_to_up_down_v_arrows() -> None:
+    from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
+
+    # Track-only YOLO box; arrow buttons sit just outside the ends.
+    scrollbar = _detection_from_bbox((1680, 440, 20, 100), YOLO_CLASS_SCROLLBAR)
+    up = _detection_from_bbox(
+        (1683, 418, 12, 13),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上V箭頭"}],
+    )
+    down = _detection_from_bbox(
+        (1684, 555, 11, 10),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下V箭頭"}],
+    )
+    # Combo-box chevrons in the same column must not win.
+    combo = _detection_from_bbox(
+        (1679, 396, 16, 15),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下V箭頭"}],
+    )
+    out = fit_scrollbar_bboxes_to_arrow_controls([scrollbar, up, down, combo])
+    fitted = next(d for d in out if d.class_name == "scrollbar")
+    assert fitted.bbox[0] == 1680
+    assert fitted.bbox[2] == 20
+    assert fitted.bbox[1] == 418
+    assert fitted.bbox[1] + fitted.bbox[3] == 565
+    assert fitted.cy == 418 + (565 - 418) // 2
+
+
+def test_fit_vertical_scrollbar_shrinks_to_triangle_ends() -> None:
+    from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
+
+    scrollbar = _detection_from_bbox((100, 50, 16, 400), YOLO_CLASS_SCROLLBAR)
+    up = _detection_from_bbox(
+        (102, 100, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上三角"}],
+    )
+    down = _detection_from_bbox(
+        (102, 300, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下三角"}],
+    )
+    out = fit_scrollbar_bboxes_to_arrow_controls([scrollbar, up, down])
+    fitted = next(d for d in out if d.class_name == "scrollbar")
+    assert fitted.bbox == (100, 100, 16, 212)
+
+
+def test_fit_horizontal_scrollbar_extends_to_left_right_arrows() -> None:
+    from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
+
+    scrollbar = _detection_from_bbox((220, 500, 100, 16), YOLO_CLASS_SCROLLBAR)
+    left = _detection_from_bbox(
+        (200, 502, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向左V箭頭"}],
+    )
+    right = _detection_from_bbox(
+        (330, 502, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向右三角"}],
+    )
+    out = fit_scrollbar_bboxes_to_arrow_controls([scrollbar, left, right])
+    fitted = next(d for d in out if d.class_name == "scrollbar")
+    assert fitted.bbox[1] == 500
+    assert fitted.bbox[3] == 16
+    assert fitted.bbox[0] == 200
+    assert fitted.bbox[0] + fitted.bbox[2] == 342
+
+
+def test_fit_scrollbar_skips_when_end_arrows_missing() -> None:
+    from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
+
+    scrollbar = _detection_from_bbox((1680, 440, 20, 100), YOLO_CLASS_SCROLLBAR)
+    up = _detection_from_bbox(
+        (1683, 418, 12, 13),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上V箭頭"}],
+    )
+    out = fit_scrollbar_bboxes_to_arrow_controls([scrollbar, up])
+    assert out[0].bbox == scrollbar.bbox
+
+
+def test_fit_vertical_scrollbar_accepts_unknown_icon_as_end() -> None:
+    from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
+    from cua_mcp.yolo_onnx import PICKER_CLASS_UNKNOWN
+
+    scrollbar = _detection_from_bbox((1680, 440, 20, 100), YOLO_CLASS_SCROLLBAR)
+    up = _detection_from_bbox(
+        (1683, 418, 12, 13),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上V箭頭"}],
+    )
+    # Bottom end is an unrecognized icon (common when icon_map misses a glyph).
+    unknown_down = _detection_from_bbox(
+        (1684, 555, 11, 10),
+        PICKER_CLASS_UNKNOWN,
+        text="\uf000",
+    )
+    out = fit_scrollbar_bboxes_to_arrow_controls([scrollbar, up, unknown_down])
+    fitted = next(d for d in out if d.class_name == "scrollbar")
+    assert fitted.bbox[1] == 418
+    assert fitted.bbox[1] + fitted.bbox[3] == 565
+    relabeled = next(
+        d
+        for d in out
+        if d.bbox == unknown_down.bbox
+    )
+    assert relabeled.class_name == "element"
+    assert relabeled.class_id == YOLO_CLASS_ELEMENT
+    assert (relabeled.icons or [])[0]["chinese_id"] == "向下V箭頭"
+    assert (relabeled.icons or [])[0]["pua"] == "\uf000"
+
+
+def test_fit_vertical_scrollbar_reclassifies_unknown_top_and_bottom() -> None:
+    from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
+    from cua_mcp.yolo_onnx import PICKER_CLASS_UNKNOWN
+
+    scrollbar = _detection_from_bbox((1680, 440, 20, 100), YOLO_CLASS_SCROLLBAR)
+    unknown_up = _detection_from_bbox(
+        (1683, 418, 12, 13),
+        PICKER_CLASS_UNKNOWN,
+        text="\uf001",
+    )
+    unknown_down = _detection_from_bbox(
+        (1684, 555, 11, 10),
+        PICKER_CLASS_UNKNOWN,
+        text="\uf002",
+    )
+    out = fit_scrollbar_bboxes_to_arrow_controls(
+        [scrollbar, unknown_up, unknown_down]
+    )
+    by_bbox = {d.bbox: d for d in out}
+    assert by_bbox[unknown_up.bbox].icons[0]["chinese_id"] == "向上V箭頭"
+    assert by_bbox[unknown_down.bbox].icons[0]["chinese_id"] == "向下V箭頭"
+    assert by_bbox[unknown_up.bbox].class_name == "element"
+    assert by_bbox[unknown_down.bbox].class_name == "element"
+
+
+def test_fit_vertical_scrollbar_extends_far_without_gap_limit() -> None:
+    from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
+
+    # Arrows sit well beyond the old 48px gap; still extend to them.
+    scrollbar = _detection_from_bbox((1680, 500, 20, 80), YOLO_CLASS_SCROLLBAR)
+    up = _detection_from_bbox(
+        (1683, 300, 12, 13),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上V箭頭"}],
+    )
+    down = _detection_from_bbox(
+        (1684, 700, 11, 10),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下V箭頭"}],
+    )
+    out = fit_scrollbar_bboxes_to_arrow_controls([scrollbar, up, down])
+    fitted = next(d for d in out if d.class_name == "scrollbar")
+    assert fitted.bbox[1] == 300
+    assert fitted.bbox[1] + fitted.bbox[3] == 710
+
+
+def test_fit_vertical_scrollbar_prefers_unknown_over_wrong_direction() -> None:
+    from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
+    from cua_mcp.yolo_onnx import PICKER_CLASS_UNKNOWN
+
+    scrollbar = _detection_from_bbox((1680, 440, 20, 100), YOLO_CLASS_SCROLLBAR)
+    up = _detection_from_bbox(
+        (1683, 418, 12, 13),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上V箭頭"}],
+    )
+    # Closer to the bottom end than the unknown, but wrong direction for top
+    # priority: bottom should pick unknown before this down-arrow-as-fallback.
+    wrong_near_bottom = _detection_from_bbox(
+        (1684, 530, 11, 10),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上V箭頭"}],
+    )
+    unknown_down = _detection_from_bbox(
+        (1684, 555, 11, 10),
+        PICKER_CLASS_UNKNOWN,
+        text="\uf000",
+    )
+    out = fit_scrollbar_bboxes_to_arrow_controls(
+        [scrollbar, up, wrong_near_bottom, unknown_down]
+    )
+    fitted = next(d for d in out if d.class_name == "scrollbar")
+    assert fitted.bbox[1] == 418
+    assert fitted.bbox[1] + fitted.bbox[3] == 565
+    relabeled = next(d for d in out if d.bbox == unknown_down.bbox)
+    assert (relabeled.icons or [])[0]["chinese_id"] == "向下V箭頭"
+
+
+def test_fit_vertical_scrollbar_picks_closest_to_center_on_each_side() -> None:
+    from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
+
+    # Center at y=540. Farther preferred arrows should lose to nearer ones
+    # on the same side of the center.
+    scrollbar = _detection_from_bbox((1680, 500, 20, 80), YOLO_CLASS_SCROLLBAR)
+    near_up = _detection_from_bbox(
+        (1683, 480, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上V箭頭"}],
+    )
+    far_up = _detection_from_bbox(
+        (1683, 300, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上V箭頭"}],
+    )
+    near_down = _detection_from_bbox(
+        (1684, 600, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下V箭頭"}],
+    )
+    far_down = _detection_from_bbox(
+        (1684, 800, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下V箭頭"}],
+    )
+    # Below-center up-arrow must not be used for the top end.
+    up_on_bottom_side = _detection_from_bbox(
+        (1683, 560, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上V箭頭"}],
+    )
+    out = fit_scrollbar_bboxes_to_arrow_controls(
+        [scrollbar, far_up, near_up, near_down, far_down, up_on_bottom_side]
+    )
+    fitted = next(d for d in out if d.class_name == "scrollbar")
+    assert fitted.bbox[1] == 480
+    assert fitted.bbox[1] + fitted.bbox[3] == 612
 
 
 def test_iou_xywh_near_identical_boxes() -> None:

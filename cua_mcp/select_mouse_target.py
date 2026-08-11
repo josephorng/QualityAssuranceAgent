@@ -23,6 +23,7 @@ from cua_mcp.icon_map import (
     text_has_pua,
 )
 from cua_mcp.read_screen_text.ocr_image import _ocr_boxes_on_bgr, ocr_mode_for_yolo_class
+from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
 from cua_mcp.select_ui_element import (
     UiDetection,
     _ANCHOR_SUFFIX_BY_CLASS,
@@ -47,6 +48,7 @@ from cua_mcp.yolo_onnx import (
     PICKER_CLASS_UNKNOWN,
     YOLO_CLASS_ELEMENT,
     YOLO_CLASS_NAMES,
+    YOLO_CLASS_SCROLLBAR,
     YOLO_CLASS_TEXT,
     run_yolo_onnx_end2end,
 )
@@ -98,16 +100,17 @@ def _resolve_ocr_class_id(class_id: int, text_value: str) -> int:
     Reclassify ambiguous OCR results as ``unknown``.
 
     - PUA-only OCR with no known ``icon_map`` labels (any YOLO class)
+    - YOLO ``element`` with empty OCR (no glyph decoded)
     - YOLO ``element`` whose OCR decode is plain text (no PUA)
 
-    Known-icon PUA and empty element OCR keep their YOLO class.
+    Known-icon PUA keeps the YOLO class.
     """
     if text_value and _text_is_pua_only(text_value) and not _known_icons_for_text(text_value):
         return PICKER_CLASS_UNKNOWN
     if class_id != YOLO_CLASS_ELEMENT:
         return class_id
     if not text_value:
-        return class_id
+        return PICKER_CLASS_UNKNOWN
     if text_has_pua(text_value):
         return class_id
     return PICKER_CLASS_UNKNOWN
@@ -225,8 +228,13 @@ def _build_candidates_from_bgr(
     bgr: np.ndarray,
     *,
     yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
+    original_scrollbar_bboxes_out: list[tuple[int, int, int, int]] | None = None,
 ) -> list[UiDetection]:
-    """Run YOLO on ``bgr``, OCR text/element boxes, return local-coordinate candidates."""
+    """Run YOLO on ``bgr``, OCR text/element boxes, return local-coordinate candidates.
+
+    When ``original_scrollbar_bboxes_out`` is provided, appends each pre-fit
+    scrollbar bbox that differs from the post-fit box (for debug overlays).
+    """
     h, w = bgr.shape[:2]
     vision_started = time.perf_counter()
     yolo_started = time.perf_counter()
@@ -283,6 +291,20 @@ def _build_candidates_from_bgr(
 
     before_dedupe = len(candidates)
     candidates = _dedupe_overlapping_detections(candidates)
+    pre_fit_scrollbars: list[tuple[int, tuple[int, int, int, int]]] = []
+    if original_scrollbar_bboxes_out is not None:
+        pre_fit_scrollbars = [
+            (i, det.bbox)
+            for i, det in enumerate(candidates)
+            if det.class_id == YOLO_CLASS_SCROLLBAR or det.class_name == "scrollbar"
+        ]
+    candidates = fit_scrollbar_bboxes_to_arrow_controls(
+        candidates, log_info=_log_info
+    )
+    if original_scrollbar_bboxes_out is not None:
+        for i, old_bbox in pre_fit_scrollbars:
+            if i < len(candidates) and candidates[i].bbox != old_bbox:
+                original_scrollbar_bboxes_out.append(old_bbox)
     _log_info(
         "move_mouse vision profile "
         f"yolo_s={yolo_elapsed:.3f} ocr_s={ocr_elapsed:.3f} "

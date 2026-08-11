@@ -17,8 +17,15 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from cua_mcp.icon_map import is_pua_char, lookup_pua_icon, text_has_pua, unknown_icon_record
 from cua_mcp.read_screen_text.get_coordinates import get_coordinates_from_image_path
-from cua_mcp.select_mouse_target import _build_candidates_from_bgr
-from cua_mcp.yolo_onnx import DEFAULT_CONF_YOLOV26_END2END, YOLO_CLASS_NAMES
+from cua_mcp.select_mouse_target import _build_candidates_from_bgr, _detection_from_bbox
+from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text
+from cua_mcp.yolo_onnx import (
+    DEFAULT_CONF_YOLOV26_END2END,
+    YOLO_CLASS_ELEMENT,
+    YOLO_CLASS_NAMES,
+    YOLO_CLASS_SCROLLBAR,
+    YOLO_CLASS_TEXT,
+)
 from src.common.io_utils import read_json, write_json
 from src.common.settings import ROOT_DIR, resolve_runs_dir
 
@@ -35,7 +42,7 @@ UI_EXPORT_DEFAULT_DIR = Path(
     r"C:\Users\Joseph Hung\Documents\Repos\Git\OCR\data\train\elements"
 )
 OCR_VALIDATE_DIR = Path(
-    r"C:\Users\Joseph Hung\Documents\Repos\Git\OCR\data\validate\cua_validate"
+    r"C:\Users\Joseph Hung\Documents\Repos\Git\OCR\data\validate\cua_data"
 )
 # Same weights as ONNX export used by OCR (`cua_mcp/yolo_onnx.DEFAULT_YOLO_ONNX_PATH`).
 DEFAULT_ULTRALYTICS_PT_PATH = ROOT_DIR / "cua_mcp" / "best.pt"
@@ -143,6 +150,72 @@ def _display_label_for_line(line: OcrLine) -> str:
         return _ui_object_label(line)
     mapped = _display_text_with_icon_labels(line.text)
     return mapped if mapped else "<empty>"
+
+
+_CLASS_NAME_TO_ID: dict[str, int] = {name: cid for cid, name in YOLO_CLASS_NAMES.items()}
+
+
+def _class_id_for_line(line: OcrLine) -> int:
+    if isinstance(line.class_id, int):
+        return line.class_id
+    name = (line.class_name or "").strip().lower()
+    if name == "scrollbar_original":
+        return YOLO_CLASS_SCROLLBAR
+    if name in _CLASS_NAME_TO_ID:
+        return _CLASS_NAME_TO_ID[name]
+    if line.line_type == "ocr":
+        return YOLO_CLASS_TEXT
+    return YOLO_CLASS_ELEMENT
+
+
+def _ocr_line_to_ui_detection(line: OcrLine) -> UiDetection:
+    """Map a viewer line to ``UiDetection`` for the agent candidate formatter."""
+    class_id = _class_id_for_line(line)
+    icons = (
+        [{"chinese_id": cid} for cid in line.chinese_ids if cid]
+        if line.chinese_ids
+        else None
+    )
+    text = (line.text or "").strip() or None
+    det = _detection_from_bbox(line.box, class_id, text=text, icons=icons)
+    name = (line.class_name or "").strip()
+    if name and name != det.class_name:
+        return UiDetection(
+            bbox=det.bbox,
+            cx=det.cx,
+            cy=det.cy,
+            class_id=det.class_id,
+            class_name=name,
+            text=det.text,
+            icons=det.icons,
+        )
+    return det
+
+
+def _agent_format_detection_rows(lines: list[OcrLine]) -> list[str]:
+    """Same rows as the agent LLM candidate list (``_format_ui_candidates_text``)."""
+    if not lines:
+        return []
+    detections = [_ocr_line_to_ui_detection(line) for line in lines]
+    text = _format_ui_candidates_text(detections, include_geometry=True)
+    return text.split("\n") if text else []
+
+
+def _is_scrollbar_original_line(line: OcrLine) -> bool:
+    return (line.class_name or "").strip().lower() == "scrollbar_original"
+
+
+def _split_scrollbar_original_lines(
+    lines: list[OcrLine],
+) -> tuple[list[OcrLine], list[OcrLine]]:
+    main: list[OcrLine] = []
+    originals: list[OcrLine] = []
+    for line in lines:
+        if _is_scrollbar_original_line(line):
+            originals.append(line)
+        else:
+            main.append(line)
+    return main, originals
 
 
 def _is_icon_ocr_line(line: OcrLine) -> bool:
@@ -398,7 +471,12 @@ def load_yolo_lines(image_path: Path, *, yolo_conf_threshold: float) -> tuple[li
     if bgr is None:
         return [], "Could not read image for YOLO"
     try:
-        candidates = _build_candidates_from_bgr(bgr, yolo_conf_threshold=yolo_conf_threshold)
+        original_scrollbars: list[tuple[int, int, int, int]] = []
+        candidates = _build_candidates_from_bgr(
+            bgr,
+            yolo_conf_threshold=yolo_conf_threshold,
+            original_scrollbar_bboxes_out=original_scrollbars,
+        )
     except Exception as exc:
         return [], f"YOLO detect failed: {type(exc).__name__}: {exc}"
     lines: list[OcrLine] = []
@@ -416,6 +494,18 @@ def load_yolo_lines(image_path: Path, *, yolo_conf_threshold: float) -> tuple[li
                 class_name=det.class_name,
                 class_id=det.class_id,
                 chinese_ids=icon_labels,
+            )
+        )
+    # Pre-fit YOLO scrollbar boxes (when arrow-fit changed them) for debug.
+    for bbox in original_scrollbars:
+        lines.append(
+            OcrLine(
+                box=bbox,
+                text="",
+                line_type="element",
+                class_name="scrollbar_original",
+                class_id=YOLO_CLASS_SCROLLBAR,
+                chinese_ids=("scrollbar (original)",),
             )
         )
     return lines, f"Loaded {len(lines)} YOLO detections"
@@ -508,6 +598,7 @@ _CLASS_OUTLINE_COLORS: dict[str, str] = {
     "element": "dodgerblue",
     "input": "orange",
     "scrollbar": "mediumpurple",
+    "scrollbar_original": "violet",
     "unknown": "gray",
 }
 
@@ -742,6 +833,7 @@ class OcrViewerApp:
 
         self.show_boxes = tk.BooleanVar(value=True)
         self.show_labels = tk.BooleanVar(value=True)
+        self.show_original_scrollbar = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Ready")
         _dcf = DEFAULT_CONF_YOLOV26_END2END
         self.yolo_conf_var = tk.StringVar(value=f"{_dcf:g}")
@@ -753,14 +845,33 @@ class OcrViewerApp:
         self._lmb_press_xy: tuple[int, int] | None = None
         self._lmb_panning = False
         self._yolo_lines_cache: YoloLinesCache = {}
+        self._original_scrollbar_lines: list[OcrLine] = []
 
         self._build_ui()
         self._populate_runs()
         if bind_global_hotkeys:
             self.activate_hotkeys()
 
+    def _set_current_lines(self, lines: list[OcrLine]) -> None:
+        self.current_lines, self._original_scrollbar_lines = _split_scrollbar_original_lines(
+            lines
+        )
+
     def _all_display_lines(self) -> list[OcrLine]:
+        if self.show_original_scrollbar.get() and self._original_scrollbar_lines:
+            return [*self.current_lines, *self._original_scrollbar_lines]
         return self.current_lines
+
+    def _on_toggle_original_scrollbar(self) -> None:
+        display_len = len(self._all_display_lines())
+        if self.selected_line_idx is not None and self.selected_line_idx >= display_len:
+            self.selected_line_idx = None
+            self.item_list.select_clear(0, tk.END)
+        self._populate_item_list()
+        if self.selected_line_idx is not None:
+            self.item_list.select_set(self.selected_line_idx)
+            self.item_list.see(self.selected_line_idx)
+        self._refresh_image()
 
     def _line_at_display_index(self, idx: int) -> OcrLine | None:
         lines = self._all_display_lines()
@@ -811,7 +922,7 @@ class OcrViewerApp:
         item_wrap.grid(row=5, column=0, sticky="nsew")
         item_wrap.columnconfigure(0, weight=1)
         item_wrap.rowconfigure(0, weight=1)
-        self.item_list = tk.Listbox(item_wrap, exportselection=False, height=10, width=48)
+        self.item_list = tk.Listbox(item_wrap, exportselection=False, height=10, width=72)
         self.item_list.grid(row=0, column=0, sticky="nsew")
         self.item_scroll = ttk.Scrollbar(item_wrap, orient="vertical", command=self.item_list.yview)
         self.item_scroll.grid(row=0, column=1, sticky="ns")
@@ -826,6 +937,12 @@ class OcrViewerApp:
             controls.columnconfigure(col, weight=1)
         ttk.Checkbutton(controls, text="Boxes", variable=self.show_boxes, command=self._refresh_image).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(controls, text="Labels", variable=self.show_labels, command=self._refresh_image).grid(row=0, column=1, sticky="w")
+        ttk.Checkbutton(
+            controls,
+            text="Original scrollbar",
+            variable=self.show_original_scrollbar,
+            command=self._on_toggle_original_scrollbar,
+        ).grid(row=0, column=2, columnspan=2, sticky="w")
         ttk.Label(controls, text="Arrows").grid(row=1, column=0, sticky="w", pady=(6, 0))
         ttk.Radiobutton(
             controls,
@@ -957,7 +1074,7 @@ class OcrViewerApp:
             self._select_image_index(0)
         else:
             self.current_image = None
-            self.current_lines = []
+            self._set_current_lines([])
             self.item_list.delete(0, tk.END)
             self.canvas.delete("all")
             self.status_var.set(
@@ -990,16 +1107,17 @@ class OcrViewerApp:
         self._view_zoom = 1.0
         conf, err = _parse_conf_0_to_1(self.yolo_conf_var.get())
         if conf is None:
-            self.current_lines = []
+            self._set_current_lines([])
             status = f"Invalid confidence: {err}"
         else:
-            self.current_lines, status = resolve_image_lines(
+            lines, status = resolve_image_lines(
                 image_path,
                 yolo_conf_threshold=conf,
                 allow_yolo=False,
                 yolo_cache=self._yolo_lines_cache,
                 run_dir=run,
             )
+            self._set_current_lines(lines)
         self.selected_line_idx = None
         self._populate_item_list()
         self.status_var.set(f"{image_path.name} - {status}")
@@ -1189,10 +1307,8 @@ class OcrViewerApp:
 
     def _populate_item_list(self) -> None:
         self.item_list.delete(0, tk.END)
-        for idx, line in enumerate(self._all_display_lines()):
-            prefix = "OCR" if line.line_type == "ocr" else "OBJ"
-            label = _display_label_for_line(line)
-            self.item_list.insert(tk.END, f"{prefix} {idx + 1:03d}: {label}")
+        for row in _agent_format_detection_rows(self._all_display_lines()):
+            self.item_list.insert(tk.END, row)
 
     def _on_item_select(self, _event: object | None = None) -> None:
         selected = self.item_list.curselection()
@@ -1205,20 +1321,29 @@ class OcrViewerApp:
 
     def _delete_selected_detection(self, _event: object | None = None) -> str:
         idx = self.selected_line_idx
-        if idx is None or idx < 0 or idx >= len(self.current_lines):
+        display_lines = self._all_display_lines()
+        if idx is None or idx < 0 or idx >= len(display_lines):
             self.status_var.set("Select a detection to delete")
             return "break"
 
-        deleted = self.current_lines.pop(idx)
+        if idx < len(self.current_lines):
+            deleted = self.current_lines.pop(idx)
+        else:
+            original_idx = idx - len(self.current_lines)
+            deleted = self._original_scrollbar_lines.pop(original_idx)
+
         self.selected_line_idx = None
         self._populate_item_list()
-        if self.current_lines:
-            next_idx = min(idx, len(self.current_lines) - 1)
+        remaining = self._all_display_lines()
+        if remaining:
+            next_idx = min(idx, len(remaining) - 1)
             self.item_list.select_set(next_idx)
             self.item_list.see(next_idx)
             self.selected_line_idx = next_idx
         self._refresh_image()
-        self.status_var.set(f"Deleted detection #{idx + 1}: {_display_label_for_line(deleted)}")
+        deleted_row = _agent_format_detection_rows([deleted])
+        detail = deleted_row[0] if deleted_row else _display_label_for_line(deleted)
+        self.status_var.set(f"Deleted detection: {detail}")
         return "break"
 
     def _on_item_double_click(self, _event: object | None = None) -> None:
@@ -1588,7 +1713,7 @@ class OcrViewerApp:
             self.status_var.set(f"YOLO detections failed: {type(exc).__name__}: {exc}")
             return
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        self.current_lines = lines
+        self._set_current_lines(lines)
         self.selected_line_idx = None
         self._populate_item_list()
         self._refresh_image()
@@ -1906,9 +2031,8 @@ class TestImagesViewerApp:
 
     def _populate_item_list(self) -> None:
         self.item_list.delete(0, tk.END)
-        for idx, line in enumerate(self.current_lines):
-            label = _display_label_for_line(line)
-            self.item_list.insert(tk.END, f"{idx + 1:03d}: {label}")
+        for row in _agent_format_detection_rows(self.current_lines):
+            self.item_list.insert(tk.END, row)
 
     def _on_item_select(self, _event: object | None = None) -> None:
         selected = self.item_list.curselection()
@@ -1934,7 +2058,9 @@ class TestImagesViewerApp:
             self.item_list.see(next_idx)
             self.selected_line_idx = next_idx
         self._refresh_image()
-        self.status_var.set(f"Deleted detection #{idx + 1}: {_display_label_for_line(deleted)}")
+        deleted_row = _agent_format_detection_rows([deleted])
+        detail = deleted_row[0] if deleted_row else _display_label_for_line(deleted)
+        self.status_var.set(f"Deleted detection: {detail}")
         return "break"
 
     def _on_item_double_click(self, _event: object | None = None) -> None:

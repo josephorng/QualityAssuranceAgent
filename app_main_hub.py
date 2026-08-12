@@ -150,6 +150,8 @@ class _WorkerArgs:
     run_folder_name: str | None = None
     use_tool_cache: bool = False
     queue_paths: list[Path] | None = None
+    # Original UI indices aligned with queue_paths (for mid-queue starts / status icons).
+    queue_path_indices: list[int] | None = None
     smart_goal: str = ""
 
     @property
@@ -1276,6 +1278,14 @@ class MainHub(ctk.CTk):
                     command=lambda root=run_root: self._open_report_html(root / "session_steps.html"),
                 )
                 report_btn.pack(side="left", padx=(6, 0))
+            start_btn = ctk.CTkButton(
+                row,
+                text="開始執行",
+                width=88,
+                command=lambda idx=i: self._queue_start_from(idx),
+                state=item_state,
+            )
+            start_btn.pack(side="left", padx=(6, 0))
             edit_btn = ctk.CTkButton(
                 row,
                 text="編輯",
@@ -1284,7 +1294,7 @@ class MainHub(ctk.CTk):
                 state=item_state,
             )
             edit_btn.pack(side="left", padx=(6, 0))
-            self._queue_item_controls.append(edit_btn)
+            self._queue_item_controls.extend([start_btn, edit_btn])
 
     @staticmethod
     def _queue_status_icon(status: str | None) -> tuple[str, tuple[str, str]]:
@@ -1317,6 +1327,33 @@ class MainHub(ctk.CTk):
     def _queue_select(self, index: int) -> None:
         self._queue_selected = index
         self._refresh_queue_list()
+
+    def _queue_start_from(self, index: int) -> None:
+        """Start queue execution from the given list item through the end."""
+        if self._recording_session.is_active():
+            show_ctk_message(self, "執行", "請先停止錄製再開始執行。", kind="warning")
+            return
+        if self._recording_analysis_thread and self._recording_analysis_thread.is_alive():
+            show_ctk_message(self, "執行", "請等待錄製分析完成，或按「停止分析」。", kind="warning")
+            return
+        if self._worker_thread and self._worker_thread.is_alive():
+            return
+        if index < 0 or index >= len(self._queue_paths):
+            return
+        eye_indices = self._selected_monitor_indices()
+        if not eye_indices:
+            show_ctk_message(
+                self,
+                "顯示器",
+                "請至少選擇一台要截取的顯示器。",
+                kind="warning",
+            )
+            return
+        self._queue_selected = index
+        self._user_requested_stop = False
+        self._post_run_unlink = None
+        self._last_script_run_folder = None
+        self._start_queue_run(eye_indices, start_index=index)
 
     def _queue_edit_file(self, index: int) -> None:
         if self._worker_thread is not None and self._worker_thread.is_alive():
@@ -2111,16 +2148,22 @@ class MainHub(ctk.CTk):
         )
         self._begin_worker_run(args)
 
-    def _start_queue_run(self, eye_indices: list[int]) -> None:
-        paths = [p for p in self._queue_paths if p.is_file()]
-        if not paths:
-            show_ctk_message(
-                self,
-                "佇列執行",
-                "請先新增至少一個存在的腳本檔案。",
-                kind="warning",
+    def _start_queue_run(self, eye_indices: list[int], *, start_index: int = 0) -> None:
+        indexed = [
+            (i, p)
+            for i, p in enumerate(self._queue_paths)
+            if i >= start_index and p.is_file()
+        ]
+        if not indexed:
+            msg = (
+                "請先新增至少一個存在的腳本檔案。"
+                if not self._queue_paths
+                else "從此項目起沒有可執行的腳本檔案。"
             )
+            show_ctk_message(self, "佇列執行", msg, kind="warning")
             return
+        paths = [p for _, p in indexed]
+        path_indices = [i for i, _ in indexed]
         self._queue_mode_active = True
         self._queue_results = []
         self._queue_status_by_index = {}
@@ -2135,6 +2178,7 @@ class MainHub(ctk.CTk):
             script_disk_path=None,
             use_tool_cache=self._tool_cache_enabled_for_run(),
             queue_paths=list(paths),
+            queue_path_indices=list(path_indices),
         )
         self._begin_worker_run(args)
 
@@ -2303,6 +2347,7 @@ class MainHub(ctk.CTk):
 
     def _run_queue_worker(self, args: _WorkerArgs) -> None:
         paths = args.queue_paths or []
+        path_indices = args.queue_path_indices
         total = len(paths)
         results: list[tuple[str, str]] = []
         settings = load_settings()
@@ -2315,18 +2360,23 @@ class MainHub(ctk.CTk):
                 wait_while_paused_blocking()
                 if self._user_requested_stop:
                     break
+                ui_index = (
+                    path_indices[i - 1]
+                    if path_indices is not None and i - 1 < len(path_indices)
+                    else i - 1
+                )
                 name = script_path.name
                 try:
                     raw = script_path.read_text(encoding="utf-8")
                 except OSError as e:
                     results.append((name, "fail"))
-                    self._mark_queue_result(i - 1, "fail")
+                    self._mark_queue_result(ui_index, "fail")
                     self._set_queue_status(f"佇列執行 ({i}/{total})：{name} 無法讀取（{e}）")
                     continue
                 steps = parse_executable_lines_from_text(raw)
                 if not steps:
                     results.append((name, "skipped"))
-                    self._mark_queue_result(i - 1, "skipped")
+                    self._mark_queue_result(ui_index, "skipped")
                     self._set_queue_status(f"佇列執行 ({i}/{total})：{name} 無可執行步驟，略過")
                     continue
                 self._set_queue_status(f"佇列執行 ({i}/{total})：{name}")
@@ -2362,18 +2412,18 @@ class MainHub(ctk.CTk):
                     )
                     status = self._queue_status_from_session_end_reason(end_reason)
                     results.append((name, status))
-                    self._mark_queue_result(i - 1, status, run_root_for_row)
+                    self._mark_queue_result(ui_index, status, run_root_for_row)
                     if status == "fail":
                         self._set_queue_status(
                             f"佇列執行 ({i}/{total})：{name} 失敗（步驟未完成）"
                         )
                 except asyncio.CancelledError:
                     results.append((name, "stopped"))
-                    self._mark_queue_result(i - 1, "stopped", run_root_for_row)
+                    self._mark_queue_result(ui_index, "stopped", run_root_for_row)
                     break
                 except BaseException as e:  # noqa: BLE001 - continue queue on any script failure
                     results.append((name, "fail"))
-                    self._mark_queue_result(i - 1, "fail", run_root_for_row)
+                    self._mark_queue_result(ui_index, "fail", run_root_for_row)
                     self._set_queue_status(f"佇列執行 ({i}/{total})：{name} 失敗（{e}）")
         finally:
             os.environ.pop("CUA_WRITE_SESSION_REPORT", None)

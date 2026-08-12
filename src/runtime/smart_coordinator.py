@@ -24,9 +24,10 @@ from src.common.models import (
 )
 from src.common.prompting import get_prompt
 from src.common.run_control import take_pause_log, wait_while_paused
-from src.common.run_state import get_run_state_manager
+from src.common.run_state import get_run_state_manager, ts_name
 from src.common.runtime_context import get_smart_goal
 from src.common.settings import load_settings
+from src.eye.capture import capture_all_screens_to_file
 from src.eye.module import EyeModule
 from src.hand.module import HandModule
 
@@ -175,6 +176,22 @@ class SmartCoordinator:
     async def _capture_context(self) -> ScreenContext:
         await self._wait_if_paused()
         return await capture_screen_context()
+
+    def _prepare_verify_images(self, context: ScreenContext) -> list[str]:
+        """
+        Images attached to the verifier LLM call.
+
+        Multi-monitor selection matches the act/eye path: one stitched virtual-desktop
+        screenshot. Per-monitor captures remain available for OCR in ``context.ocr_text``.
+        """
+        if len(context.monitor_indices) <= 1:
+            return list(context.screenshot_paths)
+        paths = self.manager.require_paths()
+        dest = paths.yolo_ocr_dir / f"{ts_name()}_smart_verify_all.png"
+        capture_all_screens_to_file(dest)
+        stitched = str(dest.resolve())
+        context.screenshot_paths = [stitched]
+        return [stitched]
 
     async def _plan(
         self, context: ScreenContext
@@ -392,6 +409,7 @@ class SmartCoordinator:
             )
 
             verify_context = await self._capture_context()
+            self._prepare_verify_images(verify_context)
             try:
                 verify = await self._verify(
                     context=verify_context,

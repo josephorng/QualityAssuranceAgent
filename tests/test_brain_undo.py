@@ -155,3 +155,25 @@ def test_parse_step_outcome_recovers_unescaped_quotes_in_reason() -> None:
     assert outcome.status == "completed"
     assert "click" in outcome.reason
     assert "satisfies the goal" in outcome.reason
+
+
+def test_is_pseudo_end_tool_name() -> None:
+    assert BrainModule._is_pseudo_end_tool_name("finish") is True
+    assert BrainModule._is_pseudo_end_tool_name("Finish") is True
+    assert BrainModule._is_pseudo_end_tool_name("done") is True
+    assert BrainModule._is_pseudo_end_tool_name("click") is False
+    assert BrainModule._is_pseudo_end_tool_name(None) is False
+
+
+def test_parse_step_outcome_from_arguments() -> None:
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = type("Mgr", (), {"log_error": lambda self, msg: None})()
+
+    outcome = brain._parse_step_outcome_from_arguments(
+        {"status": "completed", "reason": "clicked successfully"}
+    )
+    assert outcome is not None
+    assert outcome.status == "completed"
+    assert outcome.reason == "clicked successfully"
+    assert brain._parse_step_outcome_from_arguments({"reason": "no status"}) is None
+    assert brain._parse_step_outcome_from_arguments(None) is None

@@ -568,3 +568,128 @@ async def test_loop_allows_completed_after_failed_tool_is_retried_successfully(
     assert await brain.loop() is True
     assert brain._hand.execute_tool_command.await_count == 3
     brain._append_failed_tool_call.assert_called_once_with("move_mouse", 1, 1)
+
+@pytest.mark.asyncio
+async def test_loop_treats_finish_tool_call_as_step_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invented finish tool must not be executed; status/reason args end the step."""
+    monkeypatch.setenv(USE_TOOL_CACHE_ENV, "0")
+
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = MagicMock()
+    brain.manager.log_info = MagicMock()
+    brain.manager.log_error = MagicMock()
+    brain._step_transcript_counter = 1
+    brain._script_step_index = 1
+    brain.run_id = "test_run"
+    brain.settings = MagicMock()
+    brain.settings.brain_lm = "test-model"
+    brain._hand = MagicMock()
+    brain._hand.execute_tool_command = AsyncMock()
+    brain._eye = MagicMock()
+    brain._eye.capture_separated_images = AsyncMock(return_value=["shot.png"])
+    brain.sanitize_message = BrainModule.sanitize_message.__get__(brain, BrainModule)
+    brain._save_step_messages = MagicMock()
+    brain._current_goal = MagicMock(return_value="點擊")
+    brain._enrich_tool_arguments = lambda name, args, _goal: args
+
+    finish_tool = Message(
+        role="assistant",
+        tool_calls=[
+            {
+                "function": {
+                    "name": "finish",
+                    "arguments": {
+                        "status": "completed",
+                        "reason": "click already executed",
+                    },
+                }
+            }
+        ],
+    )
+    brain.ollama = MagicMock(chat_messages=AsyncMock(return_value=finish_tool))
+    monkeypatch.setattr("src.brain.module.get_prompt", lambda name: "prompt {task}")
+    monkeypatch.setattr("src.brain.module.lookup_tool_calls", lambda _instruction: None)
+    monkeypatch.setattr("src.brain.module.upsert_tool_calls", MagicMock())
+
+    assert await brain.loop() is True
+    brain._hand.execute_tool_command.assert_not_awaited()
+    brain.manager.log_info.assert_any_call(
+        "Model emitted pseudo end tool 'finish'; treating arguments "
+        "as step outcome JSON (not executing)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_loop_ignores_finish_when_mixed_with_real_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """finish mixed with real tools is ignored; real tools still execute."""
+    monkeypatch.setenv(USE_TOOL_CACHE_ENV, "0")
+
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = MagicMock()
+    brain.manager.log_info = MagicMock()
+    brain.manager.log_error = MagicMock()
+    brain._step_transcript_counter = 1
+    brain._script_step_index = 1
+    brain.run_id = "test_run"
+    brain.settings = MagicMock()
+    brain.settings.brain_lm = "test-model"
+    brain._hand = MagicMock()
+    brain._normalize_tool_name = AsyncMock(side_effect=lambda name, _args=None: name)
+    brain._hand.execute_tool_command = AsyncMock(
+        return_value=ExecutionResult(
+            ok=True,
+            action="click",
+            args={"button": "left"},
+            message="executed",
+        )
+    )
+    brain._eye = MagicMock()
+    brain._eye.capture_separated_images = AsyncMock(return_value=["shot.png"])
+    brain.sanitize_execution_result = BrainModule.sanitize_execution_result.__get__(
+        brain, BrainModule
+    )
+    brain.sanitize_message = BrainModule.sanitize_message.__get__(brain, BrainModule)
+    brain._append_failed_tool_call = MagicMock()
+    brain._save_step_messages = MagicMock()
+    brain._current_goal = MagicMock(return_value="點擊")
+    brain._enrich_tool_arguments = lambda name, args, _goal: args
+
+    mixed = Message(
+        role="assistant",
+        tool_calls=[
+            {
+                "function": {
+                    "name": "click",
+                    "arguments": {"button": "left"},
+                }
+            },
+            {
+                "function": {
+                    "name": "finish",
+                    "arguments": {"status": "completed", "reason": "done"},
+                }
+            },
+        ],
+    )
+    completed = Message(
+        role="assistant",
+        content='{"status":"completed","reason":"clicked"}',
+    )
+    brain.ollama = MagicMock(
+        chat_messages=AsyncMock(side_effect=[mixed, completed])
+    )
+    monkeypatch.setattr("src.brain.module.sleep", lambda _seconds: None)
+    monkeypatch.setattr("src.brain.module.get_prompt", lambda name: "prompt {task}")
+    monkeypatch.setattr("src.brain.module.lookup_tool_calls", lambda _instruction: None)
+    monkeypatch.setattr("src.brain.module.upsert_tool_calls", MagicMock())
+
+    assert await brain.loop() is True
+    brain._hand.execute_tool_command.assert_awaited_once()
+    assert brain._hand.execute_tool_command.await_args.args[0].action == "click"
+    brain.manager.log_info.assert_any_call(
+        "Ignoring pseudo end tool(s) mixed with real tools: finish"
+    )

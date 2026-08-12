@@ -55,6 +55,8 @@ if TYPE_CHECKING:
     from src.hand.module import HandModule
 
 _MAX_INNER_DECIDE_STEPS = 10
+# Models sometimes invent these as tool calls when asked to end the step with JSON.
+_PSEUDO_END_TOOL_NAMES = frozenset({"finish", "done", "complete", "end", "end_step"})
 
 
 # Remove key-value pairs with None values in each message
@@ -459,6 +461,13 @@ class BrainModule:
             reason = reason_match.group(1)
         return {"status": status_match.group(1), "reason": reason}
 
+    @staticmethod
+    def _is_pseudo_end_tool_name(tool_name: str | None) -> bool:
+        """True for invented end-of-step tool names (not registered MCP tools)."""
+        if not tool_name:
+            return False
+        return tool_name.strip().lower() in _PSEUDO_END_TOOL_NAMES
+
     def _parse_step_outcome(self, content: str | None) -> BrainStepOutcome | None:
         """Parse a structured step finish reply, or None if content is missing/invalid."""
         if not (content or "").strip():
@@ -479,6 +488,50 @@ class BrainModule:
                     pass
             self.manager.log_error(f"Step outcome JSON parse/validation failed: {e}")
             return None
+
+    def _parse_step_outcome_from_arguments(
+        self, arguments: dict[str, Any] | None
+    ) -> BrainStepOutcome | None:
+        """Parse step outcome from a pseudo end-tool's arguments (status/reason)."""
+        if not isinstance(arguments, dict):
+            return None
+        try:
+            return BrainStepOutcome.model_validate(arguments)
+        except (ValidationError, TypeError):
+            status = arguments.get("status")
+            if status not in ("completed", "failed"):
+                return None
+            reason = arguments.get("reason", "")
+            if reason is None:
+                reason = ""
+            try:
+                return BrainStepOutcome(status=status, reason=str(reason))
+            except (ValidationError, TypeError):
+                return None
+
+    def _resolve_step_success_from_outcome(
+        self,
+        outcome: BrainStepOutcome | None,
+        unresolved_tool_failures: set[str],
+        *,
+        missing_outcome_message: str,
+    ) -> bool:
+        """Apply a parsed step outcome to success/failure, logging the decision."""
+        if outcome is None:
+            self.manager.log_error(missing_outcome_message)
+            return False
+        if outcome.status == "completed":
+            if unresolved_tool_failures:
+                failed = ", ".join(sorted(unresolved_tool_failures))
+                self.manager.log_info(
+                    f"Model marked completed but unresolved tool failure(s) remain "
+                    f"({failed}); treating step as failed. Model reason: {outcome.reason}"
+                )
+                return False
+            self.manager.log_info(f"Step marked completed by model: {outcome.reason}")
+            return True
+        self.manager.log_info(f"Step marked failed by model: {outcome.reason}")
+        return False
 
     def _apply_verify_branch(self, result: ScriptStepVerifyResult) -> bool:
         """Apply verification `branch` to `_script_step_index`. Returns whether all script lines are done."""
@@ -711,37 +764,73 @@ class BrainModule:
                 response_message_dict = stamp_message(self.sanitize_message(response_message))
                 messages.append(response_message_dict)
 
-                if not response_message.tool_calls:
+                raw_tool_calls = list(response_message.tool_calls or [])
+                real_tool_calls = [
+                    call
+                    for call in raw_tool_calls
+                    if not self._is_pseudo_end_tool_name(
+                        getattr(getattr(call, "function", None), "name", None)
+                    )
+                ]
+                pseudo_end_calls = [
+                    call
+                    for call in raw_tool_calls
+                    if self._is_pseudo_end_tool_name(
+                        getattr(getattr(call, "function", None), "name", None)
+                    )
+                ]
+
+                if not raw_tool_calls:
                     outcome = self._parse_step_outcome(
                         getattr(response_message, "content", None)
                     )
-                    if outcome is None:
-                        self.manager.log_error(
-                            "Decide loop finished without tools but step outcome JSON was missing/invalid"
-                        )
-                        step_succeeded = False
-                    elif outcome.status == "completed":
-                        if unresolved_tool_failures:
-                            failed = ", ".join(sorted(unresolved_tool_failures))
-                            self.manager.log_info(
-                                f"Model marked completed but unresolved tool failure(s) remain "
-                                f"({failed}); treating step as failed. Model reason: {outcome.reason}"
-                            )
-                            step_succeeded = False
-                        else:
-                            self.manager.log_info(
-                                f"Step marked completed by model: {outcome.reason}"
-                            )
-                            step_succeeded = True
-                    else:
-                        self.manager.log_info(
-                            f"Step marked failed by model: {outcome.reason}"
-                        )
-                        step_succeeded = False
+                    step_succeeded = self._resolve_step_success_from_outcome(
+                        outcome,
+                        unresolved_tool_failures,
+                        missing_outcome_message=(
+                            "Decide loop ended without tools but step outcome JSON was "
+                            "missing/invalid"
+                        ),
+                    )
                     break
 
+                if not real_tool_calls and pseudo_end_calls:
+                    end_call = pseudo_end_calls[0]
+                    end_name = getattr(end_call.function, "name", "finish")
+                    end_args = dict(getattr(end_call.function, "arguments", {}) or {})
+                    outcome = self._parse_step_outcome_from_arguments(end_args)
+                    if outcome is None:
+                        outcome = self._parse_step_outcome(
+                            getattr(response_message, "content", None)
+                        )
+                    self.manager.log_info(
+                        f"Model emitted pseudo end tool '{end_name}'; treating arguments "
+                        "as step outcome JSON (not executing)"
+                    )
+                    step_succeeded = self._resolve_step_success_from_outcome(
+                        outcome,
+                        unresolved_tool_failures,
+                        missing_outcome_message=(
+                            f"Pseudo end tool '{end_name}' lacked valid status/reason"
+                        ),
+                    )
+                    break
+
+                if pseudo_end_calls:
+                    ignored = ", ".join(
+                        sorted(
+                            {
+                                str(getattr(call.function, "name", "finish"))
+                                for call in pseudo_end_calls
+                            }
+                        )
+                    )
+                    self.manager.log_info(
+                        f"Ignoring pseudo end tool(s) mixed with real tools: {ignored}"
+                    )
+
                 abort_step = False
-                for tool_call in response_message.tool_calls:
+                for tool_call in real_tool_calls:
                     arguments = dict(tool_call.function.arguments)
                     try:
                         normalized_name = await self._normalize_tool_name(
@@ -782,7 +871,7 @@ class BrainModule:
                         )
                         unresolved_tool_failures.add(result.action)
                         # Do not run dependent follow-ups (e.g. click after failed move_mouse).
-                        # Continue the decide loop so the model can retry or finish as failed.
+                        # Continue the decide loop so the model can retry or end as failed.
                         break
                     unresolved_tool_failures.discard(result.action)
                 if abort_step:

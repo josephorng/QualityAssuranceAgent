@@ -46,11 +46,14 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
         {
             "image_usage": "optional",
             "prompt": (
-                "Now you need to decide the next action to take. Either call tool(s) to continue, "
-                "or finish with a JSON status object (no tool calls). Current task: {task}\n\n"
+                "Now decide the next action for CurrentTaskGoal. Either call one or more available "
+                "tools to continue, or end the step by returning a JSON status object with zero tool "
+                "calls. Current task: {task}\n\n"
             ),
             "instructions": [
-                'When finishing (no more tools), return strict JSON only: '
+                "There is no tool named finish, done, complete, or end. Ending the step must never be "
+                "a tool call—only plain assistant JSON content.",
+                'When ending the step (no more tools), return strict JSON only: '
                 '{{"status":"completed"|"failed","reason":"<short explanation>"}}. '
                 "No markdown, no prose outside the JSON object.",
                 'Use status "completed" only when CurrentTaskGoal is satisfied.',
@@ -59,12 +62,12 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "If the previous task is not executed, try new method to achieve the task.",
                 "If any tool returned ok=false, do not mark the step completed and do not assume "
                 "follow-up tools in the same turn succeeded against the intended target. Retry with a "
-                "new method; if no viable method remains, finish with status failed.",
+                "new method; if no viable method remains, return status failed JSON (no tool calls).",
                 "If check_object_exists was the previous tool: read exists and the full CurrentTaskGoal "
                 "to decide whether to continue. For 如果畫面上有… / if … is visible: continue with "
-                "follow-up tools only when exists=true; when exists=false, finish with status completed "
+                "follow-up tools only when exists=true; when exists=false, return status completed JSON "
                 "(conditional step satisfied, no further tools). For 如果畫面上沒有… / if … is not visible: "
-                "continue only when exists=false; when exists=true, finish with status completed. "
+                "continue only when exists=false; when exists=true, return status completed JSON. "
                 "Do not treat exists=false as completed unless the goal is one of those visibility conditionals.",
                 "When continuing after check_object_exists, issue the normal tools for the remainder of "
                 "the step (e.g. move_mouse then click).",

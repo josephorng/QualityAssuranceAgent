@@ -383,3 +383,62 @@ def test_session_report_records_smart_goal_filename(
     assert report.get("script_name") == "open_outlook.txt"
     assert report.get("script_path") == str(goal_file)
     assert report.get("smart_goal") == "Open Outlook"
+
+
+def test_prepare_verify_images_stitches_multi_monitor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cua_mcp.screen_context import ScreenContext
+
+    yolo_dir = tmp_path / "yolo_ocr"
+    yolo_dir.mkdir()
+    manager = _FakeManager(tmp_path)
+    manager.require_paths = lambda: SimpleNamespace(  # type: ignore[method-assign]
+        root=tmp_path,
+        yolo_ocr_dir=yolo_dir,
+    )
+
+    coordinator = SmartCoordinator.__new__(SmartCoordinator)
+    coordinator.manager = manager
+
+    context = ScreenContext(
+        screenshot_paths=["mon2.png", "mon1.png"],
+        ocr_text="ocr",
+        candidate_count=2,
+        monitor_indices=[2, 1],
+    )
+
+    captured: list[Path] = []
+
+    def fake_capture_all(dest: Path) -> None:
+        dest = Path(dest)
+        dest.write_bytes(b"stitched")
+        captured.append(dest)
+
+    monkeypatch.setattr(
+        "src.runtime.smart_coordinator.capture_all_screens_to_file",
+        fake_capture_all,
+    )
+    monkeypatch.setattr(
+        "src.runtime.smart_coordinator.ts_name",
+        lambda: "20260101_000000_000000",
+    )
+
+    paths = coordinator._prepare_verify_images(context)
+    assert len(paths) == 1
+    assert paths[0].endswith("_smart_verify_all.png")
+    assert context.screenshot_paths == paths
+    assert captured and captured[0].exists()
+
+
+def test_prepare_verify_images_keeps_single_monitor() -> None:
+    from cua_mcp.screen_context import ScreenContext
+
+    coordinator = SmartCoordinator.__new__(SmartCoordinator)
+    context = ScreenContext(
+        screenshot_paths=["mon1.png"],
+        ocr_text="ocr",
+        candidate_count=1,
+        monitor_indices=[1],
+    )
+    assert coordinator._prepare_verify_images(context) == ["mon1.png"]

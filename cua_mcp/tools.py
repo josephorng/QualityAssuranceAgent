@@ -44,14 +44,19 @@ mcp_server = FastMCP("ComputerUseAgent")
 def click(
     button: str = "left",
     modifiers: list[str] | None = None,
+    clicks: int = 1,
     instruction: str = "",
 ):
     '''
-    Single click at the current cursor (點擊 / 點選). Use after move_mouse.
-    Do not use for double-click (連按兩下) — use double_click instead.
+    Click at the current cursor (點擊 / 點選). Use after move_mouse.
+    Default is a single click. For 連按N下 when N is not 2 or 3, pass clicks=N
+    (e.g. 連按4下 → clicks=4). Prefer double_click for 連按2下 and triple_click
+    for 連按3下.
     For Ctrl+click or Shift+click, pass modifiers=["ctrl"] or modifiers=["shift"].
     '''
-    return _click(button=button, modifiers=modifiers).update({"instruction": instruction})
+    return _click(button=button, modifiers=modifiers, clicks=clicks).update(
+        {"instruction": instruction}
+    )
 
 
 @mcp_server.tool()
@@ -290,7 +295,7 @@ def double_click(
     instruction: str = "",
 ):
     '''
-    Double-click at the current cursor position (連按兩下).
+    Double-click at the current cursor position (連按2下).
     Do not use for a normal single click (點擊 / 點選) — use click instead.
     For Ctrl+double-click or Shift+double-click, pass modifiers=["ctrl"] or modifiers=["shift"].
     '''
@@ -299,12 +304,14 @@ def double_click(
 
 @mcp_server.tool()
 def triple_click(
+    modifiers: list[str] | None = None,
     instruction: str = "",
 ):
     '''
-    Triple-click at the current cursor position.
+    Triple-click at the current cursor position (連按3下).
+    For Ctrl+triple-click or Shift+triple-click, pass modifiers=["ctrl"] or modifiers=["shift"].
     '''
-    return _triple_click().update({"instruction": instruction})
+    return _triple_click(modifiers=modifiers).update({"instruction": instruction})
 
 
 @mcp_server.tool()

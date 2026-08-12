@@ -12,7 +12,10 @@ from src.common.runtime_context import set_runtime_env
 from src.common.settings import load_settings
 from src.recorder.analyze import analyze_event_to_cache
 from src.recorder.models import RecordedEvent, SessionManifest
-from src.recorder.coalesce import coalesce_consecutive_text_inputs
+from src.recorder.coalesce import (
+    coalesce_consecutive_same_location_clicks,
+    coalesce_consecutive_text_inputs,
+)
 from src.recorder.text_resolve import event_with_resolved_text, resolve_text_input_text
 from src.recorder.vision_context import build_vision_context
 from src.recorder.window_snapshot import is_agent_app_restore, resolve_window_change
@@ -141,7 +144,9 @@ async def analyze_recording_session(
             "analyze_recording_session llm "
             f"backend={settings.llm_backend} model={settings.brain_lm} host={settings.ollama_host}"
         )
-        events = coalesce_consecutive_text_inputs(_load_events(run_dir))
+        events = coalesce_consecutive_same_location_clicks(
+            coalesce_consecutive_text_inputs(_load_events(run_dir))
+        )
         events = _drop_trailing_agent_restore(
             events,
             run_dir=run_dir,

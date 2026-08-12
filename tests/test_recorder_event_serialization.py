@@ -118,3 +118,18 @@ def test_recorded_event_round_trip_hold() -> None:
     assert restored.kind == "hold"
     assert restored.button == "right"
     assert restored.duration_seconds == 1.25
+
+
+def test_recorded_event_round_trip_click_count() -> None:
+    event = RecordedEvent(
+        index=7,
+        timestamp_utc="2026-07-02T00:00:00+00:00",
+        kind="click",
+        cursor_xy=(100, 200),
+        button="left",
+        click_count=4,
+        screenshot_path="runs/test/screenshots/event_007.jpeg",
+    )
+    restored = RecordedEvent.from_dict(event.to_dict())
+    assert restored.kind == "click"
+    assert restored.click_count == 4

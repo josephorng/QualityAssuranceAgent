@@ -40,18 +40,20 @@ _DRAG_OFFSET_PHRASE_RE = re.compile(
     r"(?:(?:左方|右方|上方|下方)\d+個像素)(?:、(?:(?:左方|右方|上方|下方)\d+個像素))*"
 )
 _CLICK_POINTER_KINDS = frozenset(
-    {"click", "double_click", "right_click", "middle_click", "hold"}
+    {"click", "double_click", "triple_click", "right_click", "middle_click", "hold"}
 )
 _CLICK_MOVE_PREFIX = "將滑鼠移到"
 _POINTER_CLICK_ACTION_SUFFIX_BY_KIND = {
     "click": "，並點擊滑鼠一下。",
-    "double_click": "，並連按兩下。",
+    "double_click": "，並連按2下。",
+    "triple_click": "，並連按3下。",
     "right_click": "，用右鍵點選。",
     "middle_click": "，並按中鍵一下。",
 }
 _POINTER_CLICK_MODIFIER_ACTION_BY_KIND = {
     "click": "點擊",
-    "double_click": "連按兩下",
+    "double_click": "連按2下",
+    "triple_click": "連按3下",
     "right_click": "右鍵點選",
     "middle_click": "中鍵點擊",
 }
@@ -414,12 +416,37 @@ def _hold_action_phrase(button: str | None, duration_seconds: float | None) -> s
     return f"按住約{duration_label}秒"
 
 
+def _effective_left_click_count(kind: str, click_count: int | None) -> int | None:
+    if click_count is not None and int(click_count) > 0:
+        return int(click_count)
+    if kind == "click":
+        return 1
+    if kind == "double_click":
+        return 2
+    if kind == "triple_click":
+        return 3
+    return None
+
+
+def _left_multi_click_action_phrase(count: int) -> str:
+    if count <= 1:
+        return "點擊滑鼠一下"
+    return f"連按{count}下"
+
+
+def _left_multi_click_modifier_action(count: int) -> str:
+    if count <= 1:
+        return "點擊"
+    return f"連按{count}下"
+
+
 def _pointer_click_action_suffix(
     kind: str,
     modifiers: list[str] | None,
     *,
     button: str | None = None,
     duration_seconds: float | None = None,
+    click_count: int | None = None,
 ) -> str | None:
     if kind == "hold":
         action = _hold_action_phrase(button, duration_seconds)
@@ -428,6 +455,16 @@ def _pointer_click_action_suffix(
             if combo:
                 return f"，並{combo}+{action}。"
         return f"，並{action}。"
+    left_count = _effective_left_click_count(kind, click_count)
+    if left_count is not None:
+        if modifiers:
+            action = _left_multi_click_modifier_action(left_count)
+            combo = _hotkey_display_combo([str(m) for m in modifiers])
+            if combo:
+                return f"，並{combo}+{action}。"
+        if left_count <= 1:
+            return _POINTER_CLICK_ACTION_SUFFIX_BY_KIND["click"]
+        return f"，並{_left_multi_click_action_phrase(left_count)}。"
     if modifiers:
         action = _POINTER_CLICK_MODIFIER_ACTION_BY_KIND.get(kind)
         combo = _hotkey_display_combo([str(m) for m in modifiers])
@@ -456,6 +493,7 @@ def _finalize_instruction(
         event.modifiers,
         button=event.button,
         duration_seconds=event.duration_seconds,
+        click_count=event.click_count,
     )
     if suffix:
         return instruction + suffix
@@ -496,6 +534,7 @@ def rebuild_pointer_instruction(
             event.modifiers,
             button=event.button,
             duration_seconds=event.duration_seconds,
+            click_count=event.click_count,
         )
         return base + suffix if suffix else base
 
@@ -616,6 +655,7 @@ async def analyze_event_to_cache(
     if shot and Path(shot).is_file() and event.kind in {
         "click",
         "double_click",
+        "triple_click",
         "right_click",
         "middle_click",
         "hold",

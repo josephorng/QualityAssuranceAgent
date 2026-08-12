@@ -397,6 +397,7 @@ def apply_recording_event_landmarks(
     if kind not in {
         "click",
         "double_click",
+        "triple_click",
         "right_click",
         "middle_click",
         "scroll",

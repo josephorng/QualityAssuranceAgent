@@ -29,8 +29,18 @@ def _with_unified_target_metadata(
     return merged
 
 
-def _click(button: str = "left", modifiers: list[str] | None = None) -> dict[str, Any]:
-    return hand_tools.click(button=button, modifiers=modifiers)
+def _click(
+    button: str = "left",
+    modifiers: list[str] | None = None,
+    clicks: int = 1,
+) -> dict[str, Any]:
+    n = max(1, int(clicks))
+    return hand_tools.click(
+        button=button,
+        clicks=n,
+        interval=0.1 if n > 1 else 0.0,
+        modifiers=modifiers,
+    )
 
 
 def _type_text(text: str) -> dict[str, Any]:
@@ -145,8 +155,8 @@ def _double_click(modifiers: list[str] | None = None) -> dict[str, Any]:
     return hand_tools.click(button="left", clicks=2, interval=0.1, modifiers=modifiers)
 
 
-def _triple_click() -> dict[str, Any]:
-    return hand_tools.click(button="left", clicks=3, interval=0.1)
+def _triple_click(modifiers: list[str] | None = None) -> dict[str, Any]:
+    return hand_tools.click(button="left", clicks=3, interval=0.1, modifiers=modifiers)
 
 
 def _drag_at_points(

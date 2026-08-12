@@ -22,6 +22,7 @@ _FALLBACK_GOAL = "手部動作"
 _RECORDING_KIND_LABELS = {
     "click": "點擊",
     "double_click": "雙擊",
+    "triple_click": "連按3下",
     "right_click": "右鍵點擊",
     "middle_click": "中鍵點擊",
     "hold": "按住",
@@ -1886,7 +1887,7 @@ def _render_landmarks_panel_html(
     kind: str,
     instruction: str,
 ) -> str:
-    if kind not in {"click", "double_click", "right_click", "middle_click", "scroll", "drag", "hold"}:
+    if kind not in {"click", "double_click", "triple_click", "right_click", "middle_click", "scroll", "drag", "hold"}:
         return ""
     if not instruction.strip():
         return ""

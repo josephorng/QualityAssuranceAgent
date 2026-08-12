@@ -54,6 +54,7 @@ def event_summary_for_llm(event: RecordedEvent) -> str:
         "text": event.text,
         "scroll_delta": event.scroll_delta,
         "duration_seconds": event.duration_seconds,
+        "click_count": event.click_count,
         "cursor_xy": list(event.cursor_xy) if event.cursor_xy else None,
         "end_xy": list(event.end_xy) if event.end_xy else None,
         "window_change": event.window_change,

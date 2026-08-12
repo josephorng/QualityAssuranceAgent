@@ -817,7 +817,7 @@ def test_wait_instruction_ceilings_to_integer_seconds() -> None:
 
 
 @pytest.mark.asyncio
-async def test_analyze_recording_session_inserts_wait_only_over_three_seconds(
+async def test_analyze_recording_session_inserts_wait_only_over_threshold_seconds(
     tmp_path: Path,
 ) -> None:
     from src.common.run_state import reset_run_state_manager
@@ -835,14 +835,14 @@ async def test_analyze_recording_session_inserts_wait_only_over_three_seconds(
         ),
         RecordedEvent(
             index=2,
-            timestamp_utc="2026-07-30T03:00:03+00:00",
+            timestamp_utc="2026-07-30T03:00:10+00:00",
             kind="key_press",
             key="tab",
             screenshot_path="",
         ),
         RecordedEvent(
             index=3,
-            timestamp_utc="2026-07-30T03:00:06.250+00:00",
+            timestamp_utc="2026-07-30T03:00:20.250+00:00",
             kind="key_press",
             key="esc",
             screenshot_path="",
@@ -879,7 +879,7 @@ async def test_analyze_recording_session_inserts_wait_only_over_three_seconds(
     assert report["instructions"] == [
         "按下 Enter 鍵",
         "按下 Tab 鍵",
-        "等待 4 秒",
+        "等待 11 秒",
         "按下 Esc 鍵",
     ]
     second_analysis = json.loads(
@@ -888,10 +888,10 @@ async def test_analyze_recording_session_inserts_wait_only_over_three_seconds(
     third_analysis = json.loads(
         (run_dir / "analysis" / "event_003.json").read_text(encoding="utf-8")
     )
-    assert second_analysis["elapsed_since_previous_seconds"] == 3.0
+    assert second_analysis["elapsed_since_previous_seconds"] == 10.0
     assert "wait_instruction" not in second_analysis
-    assert third_analysis["elapsed_since_previous_seconds"] == 3.25
-    assert third_analysis["wait_instruction"] == "等待 4 秒"
+    assert third_analysis["elapsed_since_previous_seconds"] == 10.25
+    assert third_analysis["wait_instruction"] == "等待 11 秒"
 
 
 @pytest.mark.asyncio
@@ -1897,7 +1897,86 @@ async def test_analyze_event_to_cache_shift_double_click_suffix(tmp_path: Path) 
         )
 
     assert result is not None
-    assert result["instruction"] == "將滑鼠移到「Chrome」圖示，並Shift+連按兩下。"
+    assert result["instruction"] == "將滑鼠移到「Chrome」圖示，並Shift+連按2下。"
+    llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_analyze_event_to_cache_triple_click_suffix(tmp_path: Path) -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="triple_click",
+        cursor_xy=(38, 636),
+        button="left",
+        screenshot_path="",
+    )
+    vision = {
+        "used_vision": True,
+        "local_cursor": (38, 636),
+        "candidates": [
+            {
+                "bbox": [28, 626, 20, 20],
+                "center": [38, 636],
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "Chrome"}],
+            },
+        ],
+    }
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision=vision,
+        )
+
+    assert result is not None
+    assert result["instruction"] == "將滑鼠移到「Chrome」圖示，並連按3下。"
+    llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_analyze_event_to_cache_multi_click_count_suffix(tmp_path: Path) -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(38, 636),
+        button="left",
+        click_count=4,
+        screenshot_path="",
+    )
+    vision = {
+        "used_vision": True,
+        "local_cursor": (38, 636),
+        "candidates": [
+            {
+                "bbox": [28, 626, 20, 20],
+                "center": [38, 636],
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "Chrome"}],
+            },
+        ],
+    }
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision=vision,
+        )
+
+    assert result is not None
+    assert result["instruction"] == "將滑鼠移到「Chrome」圖示，並連按4下。"
     llm_mock.assert_not_called()
 
 

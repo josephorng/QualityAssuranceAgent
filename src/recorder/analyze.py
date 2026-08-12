@@ -307,6 +307,12 @@ def _key_display_name(token: str) -> str | None:
     cleaned = token.strip()
     if not cleaned:
         return None
+    # Older recordings stored Windows Ctrl+letter as ASCII control chars
+    # (Ctrl+A → \\u0001). Map those back so display is Ctrl+A, not Ctrl+.
+    if len(cleaned) == 1 and not cleaned.isprintable():
+        code = ord(cleaned)
+        if 1 <= code <= 26:
+            return chr(ord("A") + code - 1)
     lower = cleaned.lower()
     if lower in _KEY_DISPLAY_NAMES:
         return _KEY_DISPLAY_NAMES[lower]

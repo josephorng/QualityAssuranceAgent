@@ -101,6 +101,9 @@ _NUMPAD_VK_TO_CHAR: dict[int, str] = {
     110: ".",
     111: "/",
 }
+# Windows VK_A..VK_Z
+_VK_A = 65
+_VK_Z = 90
 
 IgnoreRectProvider = Callable[[], tuple[int, int, int, int] | None]
 
@@ -291,14 +294,44 @@ def _normalize_button(button: mouse.Button) -> str:
     return "left"
 
 
+def _ascii_control_to_letter(ch: str) -> str | None:
+    """Map Ctrl+letter ASCII control codes (SOH..SUB) back to a..z.
+
+    On Windows, pynput reports Ctrl+A as char='\\x01', Ctrl+C as '\\x03', etc.
+    """
+    if len(ch) != 1:
+        return None
+    code = ord(ch)
+    if 1 <= code <= 26:
+        return chr(ord("a") + code - 1)
+    return None
+
+
+def _vk_to_letter(vk: int) -> str | None:
+    if _VK_A <= vk <= _VK_Z:
+        return chr(ord("a") + (vk - _VK_A))
+    return None
+
+
 def _key_char(key: keyboard.Key | keyboard.KeyCode) -> str | None:
-    """Return the typed character for a key, including numpad VK fallbacks."""
+    """Return the typed character for a key, including numpad / Ctrl VK fallbacks."""
     if not isinstance(key, keyboard.KeyCode):
         return None
     if key.char:
-        return key.char
+        if key.char.isprintable():
+            return key.char
+        # Ctrl+letter arrives as a non-printable control character on Windows.
+        letter = _ascii_control_to_letter(key.char)
+        if letter:
+            return letter
     if key.vk is not None:
-        return _NUMPAD_VK_TO_CHAR.get(int(key.vk))
+        vk = int(key.vk)
+        numpad = _NUMPAD_VK_TO_CHAR.get(vk)
+        if numpad:
+            return numpad
+        letter = _vk_to_letter(vk)
+        if letter:
+            return letter
     return None
 
 

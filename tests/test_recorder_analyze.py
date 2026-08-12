@@ -1468,6 +1468,18 @@ def test_instruction_for_key_hotkey_ctrl_c() -> None:
     assert instruction_for_key(event) == "按下 Ctrl+C"
 
 
+def test_instruction_for_key_hotkey_legacy_ctrl_a_control_char() -> None:
+    """Older recordings stored Ctrl+A as keys=['ctrl', '\\u0001']."""
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="hotkey",
+        keys=["ctrl", "\u0001"],
+        screenshot_path="",
+    )
+    assert instruction_for_key(event) == "按下 Ctrl+A"
+
+
 def test_instruction_for_key_hotkey_orders_modifiers() -> None:
     event = RecordedEvent(
         index=1,

@@ -217,6 +217,61 @@ def test_numpad_vk_keys_recorded_as_text_input(tmp_path) -> None:
     assert raw["text"] == "123."
 
 
+def test_ctrl_letter_hotkey_uses_letter_not_control_char(tmp_path) -> None:
+    """Windows pynput reports Ctrl+A as char='\\x01'; store 'a' instead."""
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            session._on_key_press(Key.ctrl_l)
+            # Real Windows listener shape: vk=A with control-char payload.
+            session._on_key_press(KeyCode(vk=65, char="\x01"))
+            session._on_key_release(Key.ctrl_l)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "hotkey"
+    assert raw["keys"] == ["ctrl", "a"]
+
+
+def test_ctrl_c_hotkey_from_control_char_only(tmp_path) -> None:
+    """Even without vk, ASCII control chars map back to the letter."""
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            session._on_key_press(Key.ctrl_l)
+            session._on_key_press(KeyCode.from_char("\x03"))
+            session._on_key_release(Key.ctrl_l)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "hotkey"
+    assert raw["keys"] == ["ctrl", "c"]
+
+
 def test_slow_typing_stays_one_event_until_other_operation(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
 

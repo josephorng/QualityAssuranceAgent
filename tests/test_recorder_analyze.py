@@ -982,6 +982,114 @@ async def test_analyze_recording_session_drops_trailing_agent_restore(
 
 
 @pytest.mark.asyncio
+async def test_analyze_recording_session_persists_coalesced_clicks(tmp_path: Path) -> None:
+    from src.common.run_state import reset_run_state_manager
+
+    reset_run_state_manager()
+    run_dir = tmp_path / "screen_record_persist_coalesce"
+    (run_dir / "events").mkdir(parents=True)
+    (run_dir / "screenshots").mkdir()
+    events = [
+        RecordedEvent(
+            index=1,
+            timestamp_utc="2026-08-13T08:00:00+00:00",
+            kind="click",
+            cursor_xy=(100, 200),
+            button="left",
+            screenshot_path=str(run_dir / "screenshots" / "event_001.jpeg"),
+        ),
+        RecordedEvent(
+            index=2,
+            timestamp_utc="2026-08-13T08:00:00.300000+00:00",
+            kind="click",
+            cursor_xy=(101, 200),
+            button="left",
+            screenshot_path=str(run_dir / "screenshots" / "event_002.jpeg"),
+        ),
+        RecordedEvent(
+            index=3,
+            timestamp_utc="2026-08-13T08:00:00.600000+00:00",
+            kind="click",
+            cursor_xy=(102, 201),
+            button="left",
+            screenshot_path=str(run_dir / "screenshots" / "event_003.jpeg"),
+        ),
+        RecordedEvent(
+            index=4,
+            timestamp_utc="2026-08-13T08:00:05+00:00",
+            kind="click",
+            cursor_xy=(400, 400),
+            button="left",
+            screenshot_path=str(run_dir / "screenshots" / "event_004.jpeg"),
+        ),
+    ]
+    event_paths: list[str] = []
+    for event in events:
+        shot = Path(event.screenshot_path)
+        shot.write_bytes(b"jpeg")
+        relative_path = f"events/event_{event.index:03d}.json"
+        event_paths.append(relative_path)
+        (run_dir / relative_path).write_text(
+            json.dumps(event.to_dict(), ensure_ascii=False),
+            encoding="utf-8",
+        )
+    (run_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "started_at_utc": events[0].timestamp_utc,
+                "stopped_at_utc": events[-1].timestamp_utc,
+                "event_count": len(events),
+                "events": event_paths,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    async def _fake_analyze(event, **_kwargs):
+        if event.kind == "triple_click":
+            return {"instruction": "將滑鼠移到目標，並連按3下。"}
+        return {"instruction": "將滑鼠移到另一目標，並點擊滑鼠一下。"}
+
+    no_vision = {"used_vision": False, "candidate_text": "", "local_cursor": None}
+    with patch(
+        "src.recorder.orchestrator.build_vision_context",
+        new=AsyncMock(return_value=no_vision),
+    ), patch(
+        "src.recorder.orchestrator.analyze_event_to_cache",
+        new=AsyncMock(side_effect=_fake_analyze),
+    ), patch(
+        "src.recorder.orchestrator.infer_expected_outcome",
+        new=AsyncMock(return_value=None),
+    ):
+        report = await analyze_recording_session(run_dir)
+
+    assert report["recorded"] == 2
+    assert report["cached"] == 2
+    assert report["instructions"] == [
+        "將滑鼠移到目標，並連按3下。",
+        "將滑鼠移到另一目標，並點擊滑鼠一下。",
+    ]
+    assert (run_dir / "events" / "event_001.json").is_file()
+    assert not (run_dir / "events" / "event_002.json").exists()
+    assert not (run_dir / "events" / "event_003.json").exists()
+    assert (run_dir / "events" / "event_004.json").is_file()
+    kept = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert kept["kind"] == "triple_click"
+    session = json.loads((run_dir / "session.json").read_text(encoding="utf-8"))
+    assert session["event_count"] == 2
+    assert session["events"] == ["events/event_001.json", "events/event_004.json"]
+    html = (run_dir / "recording_steps.html").read_text(encoding="utf-8")
+    assert "將滑鼠移到目標，並連按3下。" in html
+    assert "將滑鼠移到另一目標，並點擊滑鼠一下。" in html
+    assert html.count('instruction-title">點擊<') == 0
+    assert "連按3下" in html
+    import_log = (run_dir / "import.log").read_text(encoding="utf-8")
+    assert "persisted coalesced events kept=2 purged=[2, 3]" in import_log
+
+
+@pytest.mark.asyncio
 async def test_analyze_recording_session_drops_trailing_agent_restore_from_snapshot_debug(
     tmp_path: Path,
 ) -> None:

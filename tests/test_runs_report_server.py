@@ -16,9 +16,11 @@ from src.common.runs_report_server import (
     ensure_runs_report_server,
     resolve_deletable_run_folder,
     stop_runs_report_server,
+    sync_recording_events,
     zip_run_report_to_bug_share,
 )
 from src.common.session_html import write_runs_index_html
+from src.recorder.models import RecordedEvent
 
 
 def _make_report_run(runs_root: Path, name: str) -> Path:
@@ -456,6 +458,70 @@ def test_delete_recording_event_removes_files_and_rebuilds(tmp_path: Path) -> No
     assert "點擊「確定」按鈕" in html
     assert "點擊「搜尋」按鈕" not in html
     assert 'class="delete-instruction"' in html
+
+
+def test_sync_recording_events_writes_survivors_and_purges_absorbed(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_sync_coalesce"
+    (run_root / "events").mkdir(parents=True)
+    (run_root / "screenshots").mkdir()
+    for index in (1, 2, 3):
+        shot = run_root / "screenshots" / f"event_{index:03d}.jpeg"
+        shot.write_bytes(b"jpeg")
+        (run_root / "events" / f"event_{index:03d}.json").write_text(
+            json.dumps(
+                {
+                    "index": index,
+                    "timestamp_utc": f"2026-08-13T08:00:0{index}+00:00",
+                    "kind": "click",
+                    "cursor_xy": [100, 200],
+                    "button": "left",
+                    "screenshot_path": str(shot),
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    (run_root / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_root.name,
+                "started_at_utc": "2026-08-13T08:00:00+00:00",
+                "stopped_at_utc": "2026-08-13T08:00:03+00:00",
+                "event_count": 3,
+                "events": [
+                    "events/event_001.json",
+                    "events/event_002.json",
+                    "events/event_003.json",
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    survivors = [
+        RecordedEvent(
+            index=1,
+            timestamp_utc="2026-08-13T08:00:01+00:00",
+            kind="triple_click",
+            cursor_xy=(100, 200),
+            button="left",
+            screenshot_path=str(run_root / "screenshots" / "event_001.jpeg"),
+        )
+    ]
+    result = sync_recording_events(run_root, survivors)
+
+    assert result == {"kept": 1, "purged": [2, 3], "remaining": 1}
+    assert (run_root / "events" / "event_001.json").is_file()
+    assert not (run_root / "events" / "event_002.json").exists()
+    assert not (run_root / "events" / "event_003.json").exists()
+    assert not (run_root / "screenshots" / "event_002.jpeg").exists()
+    assert not (run_root / "screenshots" / "event_003.jpeg").exists()
+    kept = json.loads((run_root / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert kept["kind"] == "triple_click"
+    session = json.loads((run_root / "session.json").read_text(encoding="utf-8"))
+    assert session["event_count"] == 1
+    assert session["events"] == ["events/event_001.json"]
 
 
 def test_runs_report_server_event_delete_endpoint(tmp_path: Path) -> None:

@@ -157,6 +157,22 @@ async def analyze_recording_session(
             run_dir=run_dir,
             log_info=log_info,
         )
+        try:
+            from src.common.runs_report_server import sync_recording_events
+
+            sync_result = sync_recording_events(run_dir, events)
+            purged = sync_result.get("purged") or []
+            if purged:
+                log_info(
+                    "persisted coalesced events "
+                    f"kept={sync_result.get('kept')} purged={purged}"
+                )
+            else:
+                log_info(
+                    f"persisted coalesced events kept={sync_result.get('kept')} purged=[]"
+                )
+        except Exception as exc:
+            log_info(f"persist coalesced events failed: {exc}")
         log_info(f"analyze_recording_session start events={len(events)} run_id={run_id}")
 
         cached = 0

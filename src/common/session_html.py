@@ -1782,7 +1782,14 @@ def _resolve_recording_screenshot(raw: str | None, run_root: Path) -> Path | Non
     return None
 
 
-def _recording_kind_label(kind: str) -> str:
+def _recording_kind_label(kind: str, click_count: Any = None) -> str:
+    if kind == "click":
+        try:
+            count = int(click_count) if click_count is not None else None
+        except (TypeError, ValueError):
+            count = None
+        if count is not None and count >= 2:
+            return f"連按{count}下"
     return _RECORDING_KIND_LABELS.get(kind, kind or "事件")
 
 
@@ -2148,7 +2155,7 @@ def _render_recording_event_html(*, run_root: Path, event: dict[str, Any]) -> st
     raw_index = event.get("index")
     index = raw_index if isinstance(raw_index, int) else 0
     kind = str(event.get("kind") or "")
-    kind_label = _recording_kind_label(kind)
+    kind_label = _recording_kind_label(kind, event.get("click_count"))
     analysis = _load_recording_analysis(run_root, index) if index else None
     instruction = ""
     if isinstance(analysis, dict):

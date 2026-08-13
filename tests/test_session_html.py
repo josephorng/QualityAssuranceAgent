@@ -721,6 +721,56 @@ def test_write_recording_html_renders_events_and_instructions(tmp_path: Path) ->
     assert "游標" in html
 
 
+def test_write_recording_html_badge_uses_click_count(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000031"
+    run_root.mkdir(parents=True)
+    (run_root / "events").mkdir()
+    (run_root / "events" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "index": 1,
+                "timestamp_utc": "2026-07-21T04:00:00+00:00",
+                "kind": "click",
+                "click_count": 5,
+                "cursor_xy": [10, 20],
+                "screenshot_path": "",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_root.name,
+                "started_at_utc": "2026-07-21T04:00:00+00:00",
+                "stopped_at_utc": "2026-07-21T04:01:00+00:00",
+                "event_count": 1,
+                "events": ["events/event_001.json"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "analysis").mkdir()
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": "將滑鼠移到「向右滾動箭頭」圖示，並連按5下。",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+
+    assert 'data-kind="click"' in html
+    assert '<span class="badge neutral">連按5下</span>' in html
+    assert "將滑鼠移到「向右滾動箭頭」圖示，並連按5下。" in html
+
+
 def test_write_recording_html_copy_includes_expected_outcome(tmp_path: Path) -> None:
     run_root = tmp_path / "recording_20260721_120000_000030"
     _write_recording_fixture(run_root)

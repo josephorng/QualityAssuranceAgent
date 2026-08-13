@@ -297,6 +297,21 @@ def _remaining_recording_event_paths(run_dir: Path) -> list[Path]:
     return paths
 
 
+def _rewrite_session_event_list(run_dir: Path) -> int:
+    remaining_paths = _remaining_recording_event_paths(run_dir)
+    remaining = len(remaining_paths)
+    session_path = run_dir / "session.json"
+    session = read_json(session_path, {})
+    if not isinstance(session, dict):
+        session = {}
+    session["event_count"] = remaining
+    session["events"] = [
+        path.relative_to(run_dir).as_posix() for path in remaining_paths
+    ]
+    write_json(session_path, session)
+    return remaining
+
+
 def purge_recording_event_from_session(run_dir: Path, event_index: int) -> int:
     """Delete one event's files and update ``session.json``.
 
@@ -313,20 +328,41 @@ def purge_recording_event_from_session(run_dir: Path, event_index: int) -> int:
         raise ValueError("event not found")
 
     _delete_recording_event_files(run_dir, event_index, event)
+    return _rewrite_session_event_list(run_dir)
 
-    remaining_paths = _remaining_recording_event_paths(run_dir)
-    remaining = len(remaining_paths)
 
-    session_path = run_dir / "session.json"
-    session = read_json(session_path, {})
-    if not isinstance(session, dict):
-        session = {}
-    session["event_count"] = remaining
-    session["events"] = [
-        path.relative_to(run_dir).as_posix() for path in remaining_paths
-    ]
-    write_json(session_path, session)
-    return remaining
+def sync_recording_events(run_dir: Path, events: list[RecordedEvent]) -> dict[str, Any]:
+    """Make on-disk events/session match ``events`` (survivors after coalesce).
+
+    Writes each survivor event JSON, deletes absorbed event files, and rewrites
+    ``session.json``. Returns ``{"kept": ..., "purged": [...], "remaining": ...}``.
+    """
+    run_dir = Path(run_dir)
+    (run_dir / "events").mkdir(parents=True, exist_ok=True)
+
+    keep_indices = {int(event.index) for event in events}
+    purged: list[int] = []
+    events_dir = run_dir / "events"
+    for path in list(events_dir.glob("event_*.json")):
+        if not path.is_file():
+            continue
+        raw = read_json(path, None)
+        if not isinstance(raw, dict):
+            continue
+        try:
+            index = int(raw.get("index", 0))
+        except (TypeError, ValueError):
+            continue
+        if index not in keep_indices:
+            _delete_recording_event_files(run_dir, index, raw)
+            purged.append(index)
+
+    for event in events:
+        write_json(event_json_path(run_dir, event.index), event.to_dict())
+
+    remaining = _rewrite_session_event_list(run_dir)
+    purged.sort()
+    return {"kept": len(events), "purged": purged, "remaining": remaining}
 
 
 def delete_recording_event(

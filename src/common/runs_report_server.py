@@ -206,11 +206,12 @@ def _load_recording_event_kind(run_dir: Path, event_index: int) -> str:
 
 
 def _rebuild_report_instructions(run_dir: Path, report: dict[str, Any]) -> list[str]:
-    """Rebuild ``instructions`` from analysis files (preserves wait lines)."""
+    """Rebuild ``instructions`` / ``expected_outcomes`` from analysis files (preserves wait lines)."""
     events_dir = run_dir / "events"
     analysis_dir = run_dir / "analysis"
     event_paths = sorted(events_dir.glob("event_*.json")) if events_dir.is_dir() else []
     instructions: list[str] = []
+    expected_outcomes: list[str | None] = []
     for event_path in event_paths:
         event = read_json(event_path, {})
         if not isinstance(event, dict):
@@ -224,10 +225,17 @@ def _rebuild_report_instructions(run_dir: Path, report: dict[str, Any]) -> list[
         wait = analysis.get("wait_instruction")
         if isinstance(wait, str) and wait.strip():
             instructions.append(wait.strip())
+            expected_outcomes.append(None)
         instruction = analysis.get("instruction")
         if isinstance(instruction, str) and instruction.strip():
             instructions.append(instruction.strip())
+            outcome = analysis.get("expected_outcome")
+            if isinstance(outcome, str) and outcome.strip():
+                expected_outcomes.append(outcome.strip())
+            else:
+                expected_outcomes.append(None)
     report["instructions"] = instructions
+    report["expected_outcomes"] = expected_outcomes
     return instructions
 
 

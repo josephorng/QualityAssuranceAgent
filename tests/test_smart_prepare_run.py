@@ -43,3 +43,32 @@ def test_prepare_run_session_smart_mode(tmp_path: Path, monkeypatch) -> None:
     assert os.environ[SCRIPT_PATH_ENV] == str(goal_file)
     assert RUNTIME_COMMAND_MODE_ENV not in os.environ or os.environ.get(RUNTIME_COMMAND_MODE_ENV) != "1"
     manager.log_info("ok")
+
+
+def test_prepare_run_session_loads_script_expected_outcomes(tmp_path: Path, monkeypatch) -> None:
+    from src.common.runtime_context import SCRIPT_LINES_ENV, SCRIPT_OUTCOMES_ENV, SCRIPT_PATH_ENV
+
+    monkeypatch.delenv(RUNTIME_COMMAND_MODE_ENV, raising=False)
+    monkeypatch.delenv(SMART_MODE_ENV, raising=False)
+    monkeypatch.delenv(SMART_GOAL_ENV, raising=False)
+    monkeypatch.delenv(SCRIPT_PATH_ENV, raising=False)
+    monkeypatch.delenv(SCRIPT_LINES_ENV, raising=False)
+    monkeypatch.delenv(SCRIPT_OUTCOMES_ENV, raising=False)
+
+    script = tmp_path / "with_outcomes.txt"
+    script.write_text(
+        "點擊「確定」\n# expected_outcome: 對話框已關閉\n輸入「hi」\n",
+        encoding="utf-8",
+    )
+    steps = ["點擊「確定」", "輸入「hi」"]
+    prepare_run_session(
+        runs_root=tmp_path,
+        task=steps[0],
+        runtime_mode=False,
+        selected_script_path=script,
+        script_steps=steps,
+        eye_monitor_indices=[1],
+        clear_runs_root=False,
+    )
+    assert os.environ[SCRIPT_LINES_ENV] == '["點擊「確定」", "輸入「hi」"]'
+    assert os.environ[SCRIPT_OUTCOMES_ENV] == '["對話框已關閉", null]'

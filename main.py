@@ -134,6 +134,7 @@ def prepare_run_session(
     from src.common.runtime_context import (
         RUNTIME_COMMAND_MODE_ENV,
         SCRIPT_LINES_ENV,
+        SCRIPT_OUTCOMES_ENV,
         SCRIPT_PATH_ENV,
         SMART_GOAL_ENV,
         SMART_MODE_ENV,
@@ -156,6 +157,7 @@ def prepare_run_session(
     os.environ.pop(SMART_GOAL_ENV, None)
     os.environ.pop(SCRIPT_PATH_ENV, None)
     os.environ.pop(SCRIPT_LINES_ENV, None)
+    os.environ.pop(SCRIPT_OUTCOMES_ENV, None)
 
     if smart_mode:
         goal = (smart_goal or task or "").strip()
@@ -172,6 +174,16 @@ def prepare_run_session(
             raise ValueError("Script mode requires selected_script_path and script_steps")
         os.environ[SCRIPT_PATH_ENV] = str(selected_script_path)
         os.environ[SCRIPT_LINES_ENV] = json.dumps(script_steps, ensure_ascii=False)
+        try:
+            script_raw = Path(selected_script_path).read_text(encoding="utf-8")
+        except OSError:
+            script_raw = "\n".join(script_steps)
+        from src.common.script_helper import parse_script_steps_with_outcomes
+
+        _steps, outcomes = parse_script_steps_with_outcomes(script_raw)
+        if len(outcomes) != len(script_steps):
+            outcomes = [None] * len(script_steps)
+        os.environ[SCRIPT_OUTCOMES_ENV] = json.dumps(outcomes, ensure_ascii=False)
     primary = eye_monitor_indices[0]
     os.environ["EYE_MONITOR_INDEX"] = str(primary)
     if len(eye_monitor_indices) > 1:

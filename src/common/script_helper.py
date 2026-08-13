@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+_EXPECTED_OUTCOME_PREFIX = "# expected_outcome:"
+
 
 def resolve_task(cli_task: str | None) -> str:
     """Return CLI task text when provided, otherwise prompt interactively until non-empty."""
@@ -24,12 +26,54 @@ def list_script_files(scripts_dir: Path) -> list[Path]:
 
 def parse_executable_lines_from_text(raw: str) -> list[str]:
     """Parse executable script lines from in-memory text (same rules as ``parse_script_lines``)."""
-    lines: list[str] = []
+    steps, _outcomes = parse_script_steps_with_outcomes(raw)
+    return steps
+
+
+def parse_expected_outcome_comment(line: str) -> str | None:
+    """Return the outcome text from a ``# expected_outcome:`` comment, else None."""
+    cleaned = line.strip()
+    if not cleaned.lower().startswith(_EXPECTED_OUTCOME_PREFIX):
+        return None
+    outcome = cleaned[len(_EXPECTED_OUTCOME_PREFIX) :].strip()
+    return outcome or None
+
+
+def parse_script_steps_with_outcomes(raw: str) -> tuple[list[str], list[str | None]]:
+    """Parse executable steps and optional following ``# expected_outcome:`` comments."""
+    steps: list[str] = []
+    outcomes: list[str | None] = []
     for line in raw.splitlines():
         cleaned = line.strip()
-        if not cleaned or cleaned.startswith("#"):
+        if not cleaned:
             continue
-        lines.append(cleaned)
+        outcome = parse_expected_outcome_comment(cleaned)
+        if outcome is not None:
+            if outcomes:
+                outcomes[-1] = outcome
+            continue
+        if cleaned.startswith("#"):
+            continue
+        steps.append(cleaned)
+        outcomes.append(None)
+    return steps, outcomes
+
+
+def format_script_lines_with_outcomes(
+    instructions: list[str],
+    expected_outcomes: list[str | None] | None = None,
+) -> list[str]:
+    """Build script text lines with optional ``# expected_outcome:`` comments after steps."""
+    lines: list[str] = []
+    outcomes = expected_outcomes or []
+    for index, instruction in enumerate(instructions):
+        text = instruction.strip()
+        if not text:
+            continue
+        lines.append(text)
+        outcome = outcomes[index] if index < len(outcomes) else None
+        if isinstance(outcome, str) and outcome.strip():
+            lines.append(f"{_EXPECTED_OUTCOME_PREFIX} {outcome.strip()}")
     return lines
 
 

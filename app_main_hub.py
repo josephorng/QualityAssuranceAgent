@@ -42,7 +42,11 @@ from src.common.runtime_command_dialog import (
     reset_runtime_user_ended_at_prompt,
 )
 from src.common.runtime_context import USE_TOOL_CACHE_ENV
-from src.common.script_helper import executable_source_line_numbers, parse_executable_lines_from_text
+from src.common.script_helper import (
+    executable_source_line_numbers,
+    format_script_lines_with_outcomes,
+    parse_executable_lines_from_text,
+)
 from src.common.smart_mode import normalize_smart_goal, resolve_hub_run_mode
 from src.common.settings import (
     ROOT_DIR,
@@ -2054,9 +2058,20 @@ class MainHub(ctk.CTk):
         recorded = int(report.get("recorded", 0))
         cancelled = bool(report.get("cancelled", False))
         instructions = report.get("instructions")
+        expected_outcomes_raw = report.get("expected_outcomes")
         lines: list[str] = []
         if isinstance(instructions, list):
-            lines = [str(x) for x in instructions if str(x).strip()]
+            instruction_lines = [str(x) for x in instructions if str(x).strip()]
+            outcomes: list[str | None] = []
+            if isinstance(expected_outcomes_raw, list):
+                for item in expected_outcomes_raw:
+                    if isinstance(item, str) and item.strip():
+                        outcomes.append(item.strip())
+                    else:
+                        outcomes.append(None)
+            while len(outcomes) < len(instruction_lines):
+                outcomes.append(None)
+            lines = format_script_lines_with_outcomes(instruction_lines, outcomes)
         if cancelled:
             processed = int(report.get("processed", 0))
             msg = (

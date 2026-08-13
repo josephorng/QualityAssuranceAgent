@@ -84,16 +84,18 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "image_usage": "use_image",
             "prompt": (
                 "You are verifying whether the current scripted task step is satisfied in the screenshot. "
-                "You will see the full numbered script and which step is current."
+                "You will see the full numbered script and which step is current.\n\n"
+                "ExpectedOutcome (recorded success criterion; may be empty):\n{expected_outcome}\n"
             ),
             "instructions": [
                 "Decide if the current step goal is actually accomplished on screen based on visible UI and text.",
+                "When ExpectedOutcome is provided and not '(none)', treat it as the primary success criterion; the step instruction describes the action that was attempted.",
                 'Return strict JSON only (no markdown), single object with keys: accomplished (bool), branch (string), target_step (number or null), reason (string).',
                 "branch must be one of: advance, retry, skip, goto.",
                 "Use branch advance only when accomplished is true (move to next script line).",
                 "When accomplished is false: use retry to repeat the same step, skip to abandon this line and move to the next, or goto to jump to a specific script line (use target_step as the 1-based line number from the numbered list).",
                 "For goto, target_step must be the line number shown before each script line (1 to N). Set target_step to null for other branches.",
-                "Do not invent UI elements; base conclusions on the image and script text only.",
+                "Do not invent UI elements; base conclusions on the image, ExpectedOutcome, and script text only.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
         }
@@ -348,6 +350,40 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "image_usage": "optional",
             "prompt": (
                 'Reply with ONLY: {{"instruction": "<string>"}}. '
+                "No text before or after the JSON."
+            ),
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
+    "recording_expected_outcome": [
+        {
+            "image_usage": "use_image",
+            "prompt": (
+                "You write a verification criterion for one recorded desktop action.\n\n"
+                "Action instruction:\n{instruction}\n\n"
+                "Two screenshots are attached in order:\n"
+                "1) Before: UI state immediately before this action.\n"
+                "2) After: UI state when the next recorded action began "
+                "(treated as the settled result of this action).\n\n"
+                "Compare the two images and describe what must be true on screen "
+                "to conclude this action succeeded.\n"
+            ),
+            "instructions": [
+                "Write one concise expected-outcome sentence in Traditional Chinese when possible.",
+                "Describe stable, checkable UI facts (dialog open/closed, field text, selected item, window title, menu visible/hidden).",
+                "Do not restate how to perform the action; do not include mouse/keyboard steps.",
+                "Do not mention absolute pixel coordinates, transient toasts/clocks, or cursor position.",
+                "If the screenshots show no reliable visual success signal for this action, set expected_outcome to null.",
+                'Return strict JSON only: {{"expected_outcome": "<string>"|null}}',
+            ],
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
+    "recording_expected_outcome_retry": [
+        {
+            "image_usage": "use_image",
+            "prompt": (
+                'Reply with ONLY: {{"expected_outcome": "<string>"|null}}. '
                 "No text before or after the JSON."
             ),
             "models": ["gemma4:e2b", "gemma3:4b"],

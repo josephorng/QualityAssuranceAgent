@@ -1995,6 +1995,10 @@ def _render_recording_event_html(*, run_root: Path, event: dict[str, Any]) -> st
     run_id = escape(run_root.name, quote=True)
 
     meta_rows: list[tuple[str, str]] = [("時間", time_text)]
+    if isinstance(analysis, dict):
+        expected_outcome = analysis.get("expected_outcome")
+        if isinstance(expected_outcome, str) and expected_outcome.strip():
+            meta_rows.append(("預期結果", escape(expected_outcome.strip())))
     cursor = _format_xy(event.get("cursor_xy"))
     if cursor:
         meta_rows.append(("游標", escape(cursor)))

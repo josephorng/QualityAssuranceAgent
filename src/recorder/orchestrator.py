@@ -10,7 +10,12 @@ from src.common.io_utils import append_text, read_json, write_json
 from src.common.run_state import get_run_state_manager, reset_run_state_manager
 from src.common.runtime_context import set_runtime_env
 from src.common.settings import load_settings
-from src.recorder.analyze import analyze_event_to_cache
+from src.recorder.analyze import (
+    after_screenshot_for_outcome,
+    analyze_event_to_cache,
+    before_screenshot_for_outcome,
+    infer_expected_outcome,
+)
 from src.recorder.models import RecordedEvent, SessionManifest
 from src.recorder.coalesce import (
     coalesce_consecutive_same_location_clicks,
@@ -160,13 +165,14 @@ async def analyze_recording_session(
         processed = 0
         errors: list[dict[str, Any]] = []
         instructions: list[str] = []
+        expected_outcomes: list[str | None] = []
         previous_instruction_event: RecordedEvent | None = None
         total = len(events)
 
         if on_progress is not None:
             on_progress(0, total)
 
-        for event in events:
+        for event_pos, event in enumerate(events):
             if should_cancel is not None and should_cancel():
                 cancelled = True
                 log_info("analyze_recording_session cancelled by user")
@@ -227,13 +233,33 @@ async def analyze_recording_session(
                     ):
                         wait_instruction = _wait_instruction(elapsed_since_previous)
                         instructions.append(wait_instruction)
+                        expected_outcomes.append(None)
+                next_event = (
+                    events[event_pos + 1] if event_pos + 1 < len(events) else None
+                )
+                before_shot = before_screenshot_for_outcome(event)
+                after_shot = after_screenshot_for_outcome(event, next_event)
+                expected_outcome: str | None = None
+                if before_shot is not None and after_shot is not None:
+                    expected_outcome = await infer_expected_outcome(
+                        instruction=instruction,
+                        before_screenshot=before_shot,
+                        after_screenshot=after_shot,
+                        log_info=log_info,
+                    )
                 instructions.append(instruction)
+                expected_outcomes.append(expected_outcome)
                 previous_instruction_event = event
                 write_json(
                     analysis_path,
                     {
                         "event_index": event.index,
                         "instruction": instruction,
+                        **(
+                            {"expected_outcome": expected_outcome}
+                            if expected_outcome is not None
+                            else {}
+                        ),
                         **(
                             {"elapsed_since_previous_seconds": elapsed_since_previous}
                             if elapsed_since_previous is not None
@@ -265,7 +291,13 @@ async def analyze_recording_session(
                         ),
                     },
                 )
-                log_info(f"cached event {event.index}: {instruction}")
+                if expected_outcome:
+                    log_info(
+                        f"cached event {event.index}: {instruction} "
+                        f"| expected_outcome={expected_outcome}"
+                    )
+                else:
+                    log_info(f"cached event {event.index}: {instruction}")
 
             processed += 1
             if on_progress is not None:
@@ -280,6 +312,7 @@ async def analyze_recording_session(
             "cancelled": cancelled,
             "errors": errors,
             "instructions": instructions,
+            "expected_outcomes": expected_outcomes,
         }
         write_json(run_dir / "report.json", report)
         try:

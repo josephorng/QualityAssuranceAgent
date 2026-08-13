@@ -29,6 +29,34 @@ def test_parse_script_lines_skips_blank_and_comments(tmp_path: Path) -> None:
     assert script_helper.parse_script_lines(script) == ["open chrome", "search cats"]
 
 
+def test_parse_script_steps_with_outcomes_reads_expected_outcome_comments() -> None:
+    raw = (
+        "點擊「確定」\n"
+        "# expected_outcome: 對話框已關閉\n"
+        "等待 2 秒\n"
+        "輸入「hello」\n"
+        "# expected_outcome: 輸入欄顯示 hello\n"
+    )
+    steps, outcomes = script_helper.parse_script_steps_with_outcomes(raw)
+    assert steps == ["點擊「確定」", "等待 2 秒", "輸入「hello」"]
+    assert outcomes == ["對話框已關閉", None, "輸入欄顯示 hello"]
+
+
+def test_format_script_lines_with_outcomes_round_trip() -> None:
+    lines = script_helper.format_script_lines_with_outcomes(
+        ["點擊「確定」", "等待 2 秒"],
+        ["對話框已關閉", None],
+    )
+    assert lines == [
+        "點擊「確定」",
+        "# expected_outcome: 對話框已關閉",
+        "等待 2 秒",
+    ]
+    steps, outcomes = script_helper.parse_script_steps_with_outcomes("\n".join(lines))
+    assert steps == ["點擊「確定」", "等待 2 秒"]
+    assert outcomes == ["對話框已關閉", None]
+
+
 def test_resolve_task_and_script_from_cli_task(monkeypatch, tmp_path: Path) -> None:
     task, script_path, lines = script_helper.resolve_task_and_script("typed task", tmp_path)
     assert task == "typed task"

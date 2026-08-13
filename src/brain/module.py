@@ -36,6 +36,7 @@ from src.common.prompting import get_prompt
 from src.common.run_state import get_run_state_manager
 from src.common.runtime_context import (
     SCRIPT_LINES_ENV,
+    SCRIPT_OUTCOMES_ENV,
     get_runtime_env,
     is_runtime_command_mode,
     is_smart_mode,
@@ -111,6 +112,11 @@ class BrainModule:
             []
             if is_runtime_command_mode() or is_smart_mode()
             else self._script_seed_steps()
+        )
+        self.script_expected_outcomes = (
+            []
+            if is_runtime_command_mode() or is_smart_mode()
+            else self._script_seed_outcomes(len(self.script_lines))
         )
         self._script_step_index = 0
         self._hand = hand
@@ -269,12 +275,39 @@ class BrainModule:
                 lines.append(cleaned)
         return lines
 
+    def _script_seed_outcomes(self, step_count: int) -> list[str | None]:
+        """Load optional expected outcomes aligned with script steps."""
+        raw = os.environ.get(SCRIPT_OUTCOMES_ENV, "")
+        outcomes: list[str | None] = [None] * step_count
+        if not raw:
+            return outcomes
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return outcomes
+        if not isinstance(parsed, list):
+            return outcomes
+        for index in range(min(step_count, len(parsed))):
+            item = parsed[index]
+            if isinstance(item, str) and item.strip():
+                outcomes[index] = item.strip()
+        return outcomes
+
+    def _current_expected_outcome(self) -> str:
+        if not self.script_expected_outcomes:
+            return ""
+        if self._script_step_index >= len(self.script_expected_outcomes):
+            return ""
+        value = self.script_expected_outcomes[self._script_step_index]
+        return value.strip() if isinstance(value, str) else ""
+
     def prepare_runtime_step(self, command: str) -> None:
         """Set a single script line for the next `process_step()` (runtime command mode)."""
         cleaned = command.strip()
         if not cleaned:
             raise ValueError("runtime step command must be non-empty")
         self.script_lines = [cleaned]
+        self.script_expected_outcomes = [None]
         self._script_step_index = 0
 
     async def execute_instruction(self, instruction: str) -> bool:
@@ -289,10 +322,12 @@ class BrainModule:
             raise ValueError("instruction must be non-empty")
 
         saved_lines = list(self.script_lines)
+        saved_outcomes = list(self.script_expected_outcomes)
         saved_index = self._script_step_index
         transcript_counter = self._step_transcript_counter
         script_step_index = 0
         self.script_lines = [cleaned]
+        self.script_expected_outcomes = [None]
         self._script_step_index = 0
         self.manager.set_step_log_context(transcript_counter, script_step_index)
         started_iso = datetime.now(timezone.utc).isoformat()
@@ -317,6 +352,7 @@ class BrainModule:
             return step_succeeded
         finally:
             self.script_lines = saved_lines
+            self.script_expected_outcomes = saved_outcomes
             self._script_step_index = saved_index
             self.manager.clear_step_log_context()
 
@@ -574,7 +610,9 @@ class BrainModule:
         if self._eye is None:
             raise RuntimeError("BrainModule requires eye=EyeModule(...) for step verification")
 
-        prompt = get_prompt("brain_verify_script_step")
+        prompt = get_prompt("brain_verify_script_step").format(
+            expected_outcome=self._current_expected_outcome() or "(none)",
+        )
         numbered = "\n".join(f"{i}. {line}" for i, line in enumerate(self.script_lines, start=1))
         current_1based = min(self._script_step_index + 1, len(self.script_lines))
         goal = self._current_goal()
@@ -936,20 +974,36 @@ class BrainModule:
                     step_index=script_step_index,
                 )
 
-            # verify_result = await self._verify_script_step(self._step_transcript_counter, self._script_step_index)
+            verify_result = await self._verify_script_step(
+                transcript_counter,
+                script_step_index,
+            )
+            finished_iso = datetime.now(timezone.utc).isoformat()
+            duration_seconds = round(perf_counter() - started_at, 3)
             self._step_transcript_counter += 1
-            # if verify_result is None:
-            #     return BrainStepResult(
-            #         reason="Script step verification failed (parse or empty response)",
-            #         step_finished=False,
-            #     )
+            if verify_result is None:
+                self._update_step_metadata(
+                    transcript_counter,
+                    script_step_index,
+                    {
+                        "started_at_utc": started_iso,
+                        "finished_at_utc": finished_iso,
+                        "duration_seconds": duration_seconds,
+                        "status": "failed",
+                        "step_index": script_step_index,
+                        "goal": self._current_goal(),
+                        "verify": None,
+                    },
+                )
+                return BrainStepResult(
+                    reason="Script step verification failed (parse or empty response)",
+                    step_finished=False,
+                    step_index=script_step_index,
+                )
 
-            # run_complete = self._apply_verify_branch(verify_result)
-            # return BrainStepResult(
-            #     reason=f"Verify: {verify_result.reason}",
-            #     step_finished=True,
-            #     run_complete=run_complete,
-            # )
+            step_goal = self._current_goal()
+            step_expected_outcome = self._current_expected_outcome() or None
+            run_complete = self._apply_verify_branch(verify_result)
             self._update_step_metadata(
                 transcript_counter,
                 script_step_index,
@@ -957,15 +1011,20 @@ class BrainModule:
                     "started_at_utc": started_iso,
                     "finished_at_utc": finished_iso,
                     "duration_seconds": duration_seconds,
-                    "status": "completed",
+                    "status": "completed" if verify_result.accomplished else "verify_failed",
                     "step_index": script_step_index,
-                    "goal": self._current_goal(),
+                    "goal": step_goal,
+                    "expected_outcome": step_expected_outcome,
+                    "verify": {
+                        "accomplished": verify_result.accomplished,
+                        "branch": verify_result.branch,
+                        "target_step": verify_result.target_step,
+                        "reason": verify_result.reason,
+                    },
                 },
             )
-            self._script_step_index += 1
-            run_complete = self._script_step_index >= len(self.script_lines)
             return BrainStepResult(
-                reason=f"Script step {self._script_step_index + 1} completed",
+                reason=f"Verify: {verify_result.reason}",
                 step_finished=True,
                 run_complete=run_complete,
                 step_index=script_step_index,

@@ -32,6 +32,14 @@ _INSTRUCTION_RESPONSE_SCHEMA: dict[str, Any] = {
     "required": ["instruction"],
 }
 
+_EXPECTED_OUTCOME_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "expected_outcome": {"type": ["string", "null"]},
+    },
+    "required": ["expected_outcome"],
+}
+
 _DRAG_ANCHOR_RE = re.compile(r"拖到「([^」]+)」")
 _DRAG_SOURCE_RE = re.compile(r"^從「[^」]+」(?:文字|圖示|檔案|資料夾|按鈕|元素)*(?=拖到)")
 _DRAG_DESTINATION_SUFFIX_RE = re.compile(r"(文字|圖示|檔案|資料夾|按鈕|元素)*")
@@ -702,3 +710,87 @@ async def analyze_event_to_cache(
         if log_info is not None:
             log_info(f"analyze_event_to_cache failed event={event.index}: {exc}")
         return None
+
+
+def _existing_screenshot_path(raw: str | None) -> str | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    path = Path(raw.strip())
+    return str(path) if path.is_file() else None
+
+
+def before_screenshot_for_outcome(event: RecordedEvent) -> str | None:
+    """Return the pre-action screenshot path used as the before frame for verification."""
+    return _existing_screenshot_path(event.screenshot_path)
+
+
+def after_screenshot_for_outcome(
+    event: RecordedEvent,
+    next_event: RecordedEvent | None,
+) -> str | None:
+    """Return the after frame: next event's before-shot, else this event's drag end shot."""
+    if next_event is not None:
+        next_before = _existing_screenshot_path(next_event.screenshot_path)
+        if next_before is not None:
+            return next_before
+    if event.kind == "drag":
+        return _existing_screenshot_path(event.end_screenshot_path)
+    return None
+
+
+def _parse_expected_outcome_reply(raw: str) -> dict[str, Any]:
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError("expected_outcome reply must be an object")
+    if "expected_outcome" not in data:
+        raise ValueError("expected_outcome missing")
+    value = data.get("expected_outcome")
+    if value is None:
+        return {"expected_outcome": None}
+    if not isinstance(value, str):
+        raise ValueError("expected_outcome must be string or null")
+    cleaned = value.strip()
+    return {"expected_outcome": cleaned or None}
+
+
+async def infer_expected_outcome(
+    *,
+    instruction: str,
+    before_screenshot: str,
+    after_screenshot: str,
+    log_info: Any = None,
+) -> str | None:
+    """Ask the LLM for a checkable success criterion from before/after screenshots."""
+    instruction = instruction.strip()
+    if not instruction:
+        return None
+    before_path = Path(before_screenshot)
+    after_path = Path(after_screenshot)
+    if not before_path.is_file() or not after_path.is_file():
+        return None
+    if before_path.resolve() == after_path.resolve():
+        return None
+
+    prompt = get_prompt("recording_expected_outcome").format(instruction=instruction)
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "user",
+            "content": prompt,
+            "images": [str(before_path), str(after_path)],
+        }
+    ]
+    try:
+        result = await request_json_with_retry(
+            messages=messages,
+            response_schema=_EXPECTED_OUTCOME_RESPONSE_SCHEMA,
+            parse_reply=_parse_expected_outcome_reply,
+            retry_instruction=get_prompt("recording_expected_outcome_retry"),
+            log_info=log_info,
+            append_image_sizes=True,
+        )
+    except (ValueError, json.JSONDecodeError) as exc:
+        if log_info is not None:
+            log_info(f"infer_expected_outcome failed: {exc}")
+        return None
+    outcome = result.get("expected_outcome")
+    return outcome if isinstance(outcome, str) and outcome.strip() else None

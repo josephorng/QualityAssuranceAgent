@@ -7,11 +7,14 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from src.recorder.analyze import (
+    after_screenshot_for_outcome,
     analyze_event_to_cache,
+    before_screenshot_for_outcome,
     enrich_click_instruction_offset,
     enrich_drag_instruction,
     enrich_drag_instruction_offset,
     enrich_drag_instruction_source,
+    infer_expected_outcome,
     instruction_for_click,
     instruction_for_drag,
     instruction_for_key,
@@ -882,6 +885,7 @@ async def test_analyze_recording_session_inserts_wait_only_over_threshold_second
         "等待 11 秒",
         "按下 Esc 鍵",
     ]
+    assert report["expected_outcomes"] == [None, None, None, None]
     second_analysis = json.loads(
         (run_dir / "analysis" / "event_002.json").read_text(encoding="utf-8")
     )
@@ -2143,3 +2147,135 @@ async def test_analyze_event_to_cache_drag_appends_nearby_after_enrichment(tmp_p
         "（終點附近有「Recycle Bin」圖示）"
     )
     llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_infer_expected_outcome_uses_before_after_screenshots(tmp_path: Path) -> None:
+    before = tmp_path / "before.jpeg"
+    after = tmp_path / "after.jpeg"
+    before.write_bytes(b"before")
+    after.write_bytes(b"after")
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(return_value={"expected_outcome": "對話框已開啟"}),
+    ) as llm_mock:
+        outcome = await infer_expected_outcome(
+            instruction="將滑鼠移到「開啟」按鈕，並點擊滑鼠一下。",
+            before_screenshot=str(before),
+            after_screenshot=str(after),
+        )
+
+    assert outcome == "對話框已開啟"
+    assert llm_mock.await_count == 1
+    messages = llm_mock.await_args.kwargs["messages"]
+    assert messages[0]["images"] == [str(before), str(after)]
+
+
+@pytest.mark.asyncio
+async def test_infer_expected_outcome_skips_identical_paths(tmp_path: Path) -> None:
+    shot = tmp_path / "same.jpeg"
+    shot.write_bytes(b"x")
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        outcome = await infer_expected_outcome(
+            instruction="點擊確定",
+            before_screenshot=str(shot),
+            after_screenshot=str(shot),
+        )
+    assert outcome is None
+    llm_mock.assert_not_called()
+
+
+def test_after_screenshot_prefers_next_event_before_shot(tmp_path: Path) -> None:
+    before = tmp_path / "event_001.jpeg"
+    next_before = tmp_path / "event_002.jpeg"
+    before.write_bytes(b"a")
+    next_before.write_bytes(b"b")
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        screenshot_path=str(before),
+    )
+    next_event = RecordedEvent(
+        index=2,
+        timestamp_utc="t2",
+        kind="click",
+        screenshot_path=str(next_before),
+    )
+    assert before_screenshot_for_outcome(event) == str(before)
+    assert after_screenshot_for_outcome(event, next_event) == str(next_before)
+
+
+@pytest.mark.asyncio
+async def test_analyze_recording_session_writes_expected_outcome(tmp_path: Path) -> None:
+    from src.common.run_state import reset_run_state_manager
+
+    reset_run_state_manager()
+    run_dir = tmp_path / "screen_record_expected_outcome"
+    shots = run_dir / "screenshots"
+    shots.mkdir(parents=True)
+    before = shots / "event_001.jpeg"
+    after = shots / "event_002.jpeg"
+    before.write_bytes(b"before-bytes")
+    after.write_bytes(b"after-bytes")
+    (run_dir / "events").mkdir(parents=True)
+    events = [
+        RecordedEvent(
+            index=1,
+            timestamp_utc="2026-07-30T03:00:00+00:00",
+            kind="key_press",
+            key="enter",
+            screenshot_path=str(before),
+        ),
+        RecordedEvent(
+            index=2,
+            timestamp_utc="2026-07-30T03:00:01+00:00",
+            kind="key_press",
+            key="tab",
+            screenshot_path=str(after),
+        ),
+    ]
+    event_paths: list[str] = []
+    for event in events:
+        relative_path = f"events/event_{event.index:03d}.json"
+        event_paths.append(relative_path)
+        (run_dir / relative_path).write_text(
+            json.dumps(event.to_dict(), ensure_ascii=False),
+            encoding="utf-8",
+        )
+    (run_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "started_at_utc": events[0].timestamp_utc,
+                "stopped_at_utc": events[-1].timestamp_utc,
+                "event_count": len(events),
+                "events": event_paths,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    no_vision = {"used_vision": False, "candidate_text": "", "local_cursor": None}
+    with patch(
+        "src.recorder.orchestrator.build_vision_context",
+        new=AsyncMock(return_value=no_vision),
+    ), patch(
+        "src.recorder.orchestrator.infer_expected_outcome",
+        new=AsyncMock(return_value="對話框已開啟"),
+    ) as outcome_mock:
+        report = await analyze_recording_session(run_dir)
+
+    assert report["instructions"] == ["按下 Enter 鍵", "按下 Tab 鍵"]
+    assert report["expected_outcomes"] == ["對話框已開啟", None]
+    first_analysis = json.loads(
+        (run_dir / "analysis" / "event_001.json").read_text(encoding="utf-8")
+    )
+    assert first_analysis["expected_outcome"] == "對話框已開啟"
+    assert outcome_mock.await_count == 1
+    assert outcome_mock.await_args.kwargs["before_screenshot"] == str(before)
+    assert outcome_mock.await_args.kwargs["after_screenshot"] == str(after)

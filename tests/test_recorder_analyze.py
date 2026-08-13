@@ -90,6 +90,55 @@ def test_collect_nearby_hint_labels_prefers_text_over_icons() -> None:
     assert labels == ["「OneNote」文字", "「Slack」文字"]
 
 
+def test_collect_nearby_hints_tier0_prefers_left_top_bottom_right() -> None:
+    """Tier-0 texts prefer left → top → bottom → right of the target over list order."""
+    from src.common.nearby_side import NearbyHint, Side
+    from src.recorder.vision_context import collect_nearby_hints
+
+    vision = {
+        "used_vision": True,
+        "candidates": [
+            {
+                "bbox": [100, 100, 20, 20],
+                "center": [110, 110],
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "目標"}],
+            },
+            # Closer in list but on the right — should lose to left/top.
+            {
+                "bbox": [140, 100, 40, 20],
+                "center": [160, 110],
+                "class_name": "text",
+                "text": "右側",
+            },
+            {
+                "bbox": [100, 140, 20, 20],
+                "center": [110, 150],
+                "class_name": "text",
+                "text": "下方",
+            },
+            {
+                "bbox": [100, 60, 20, 20],
+                "center": [110, 70],
+                "class_name": "text",
+                "text": "上方",
+            },
+            {
+                "bbox": [40, 100, 40, 20],
+                "center": [60, 110],
+                "class_name": "text",
+                "text": "左側",
+            },
+        ],
+    }
+    hints = collect_nearby_hints(vision, instruction="點擊「目標」圖示")
+    assert hints == [
+        NearbyHint("「左側」文字", Side.RIGHT),
+        NearbyHint("「上方」文字", Side.BELOW),
+    ]
+
+
 def test_collect_nearby_hint_labels_keeps_collecting_until_two_texts() -> None:
     """Keep taking multi-char text landmarks until two are found, skipping closer icons."""
     vision = {
@@ -348,7 +397,8 @@ def test_collect_nearby_hints_force_includes_containing_input() -> None:
     }
     hints = collect_nearby_hints(vision, instruction="將滑鼠移到「搜尋」文字")
     assert hints[0] == NearbyHint("輸入欄", Side.INSIDE)
-    assert [h.label for h in hints[1:]] == ["「標題」文字", "「副標」文字"]
+    # Cardinal right (副標) beats upper-right diagonal (標題) within Tier 0.
+    assert [h.label for h in hints[1:]] == ["「副標」文字", "「標題」文字"]
 
     options = list_nearby_landmark_options(
         vision, instruction="將滑鼠移到「搜尋」文字"

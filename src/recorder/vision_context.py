@@ -42,6 +42,15 @@ _CARDINAL_LANDMARK_CELLS = frozenset(
         LandmarkCell.BELOW,
     }
 )
+# Tier-0 text landmark preference by where the landmark sits relative to the target.
+# Lower rank is preferred: left → top → bottom → right; diagonals/center last.
+_TIER0_CELL_RANK: dict[LandmarkCell, int] = {
+    LandmarkCell.LEFT: 0,
+    LandmarkCell.ABOVE: 1,
+    LandmarkCell.BELOW: 2,
+    LandmarkCell.RIGHT: 3,
+}
+_TIER0_NON_CARDINAL_RANK = 4
 
 
 def _local_cursor(event: RecordedEvent) -> tuple[int, int] | None:
@@ -624,6 +633,21 @@ def _nearby_hint_tier(candidate: dict[str, Any], label: str) -> int:
     return 1
 
 
+def _tier0_cell_rank(
+    candidate: dict[str, Any],
+    *,
+    primary_bbox: tuple[int, int, int, int] | None,
+) -> int:
+    """Lower is preferred for Tier-0 text: left, top, bottom, then right of target."""
+    if primary_bbox is None:
+        return _TIER0_NON_CARDINAL_RANK
+    center = _candidate_center(candidate)
+    if center is None:
+        return _TIER0_NON_CARDINAL_RANK
+    cell = landmark_cell_from_anchor_bbox(primary_bbox, center[0], center[1])
+    return _TIER0_CELL_RANK.get(cell, _TIER0_NON_CARDINAL_RANK)
+
+
 def _as_bbox_xywh(value: Any) -> tuple[int, int, int, int] | None:
     """Parse a candidate bbox list/tuple into ``(x, y, w, h)``, or None."""
     if isinstance(value, (list, tuple)) and len(value) == 4:
@@ -717,10 +741,12 @@ def collect_nearby_hints(
 
     Walks neighbors until at least ``max_count`` multi-character text landmarks
     are found. If fewer exist, fills remaining slots with other neighbors.
-    Within a tier, keeps distance order from ``candidates``. Uses the primary
-    candidate bbox and each neighbor center to assign an optional script side
-    via the 9-section grid. Neighbors whose center falls in the CENTER cell
-    stay undirected (``side=None``).
+    Within Tier 0 (multi-char text), prefers landmarks on the left, then top,
+    then bottom, then right of the target; diagonals/center follow. Within the
+    same cell rank (and for lower tiers), keeps distance order from
+    ``candidates``. Uses the primary candidate bbox and each neighbor center to
+    assign an optional script side via the 9-section grid. Neighbors whose
+    center falls in the CENTER cell stay undirected (``side=None``).
 
     When the click lies inside a non-primary ``input`` / ``scrollbar``, that
     container is always prepended with ``side=inside`` (裡面), even if that
@@ -743,7 +769,8 @@ def collect_nearby_hints(
     )
     forced_labels = {hint.label for hint in forced}
 
-    eligible: list[tuple[int, int, dict[str, Any], str]] = []
+    # (tier, cell_rank, distance_order, candidate, label)
+    eligible: list[tuple[int, int, int, dict[str, Any], str]] = []
     seen: set[str] = set(forced_labels)
     for order, candidate in enumerate(candidates[1:]):
         if not isinstance(candidate, dict):
@@ -754,13 +781,19 @@ def collect_nearby_hints(
         if _label_already_in_instruction(label, instruction):
             continue
         seen.add(label)
-        eligible.append((_nearby_hint_tier(candidate, label), order, candidate, label))
+        tier = _nearby_hint_tier(candidate, label)
+        cell_rank = (
+            _tier0_cell_rank(candidate, primary_bbox=primary_bbox)
+            if tier == 0
+            else 0
+        )
+        eligible.append((tier, cell_rank, order, candidate, label))
 
-    eligible.sort(key=lambda item: (item[0], item[1]))
+    eligible.sort(key=lambda item: (item[0], item[1], item[2]))
 
     selected: list[tuple[dict[str, Any], str]] = []
     text_count = 0
-    for tier, _order, candidate, label in eligible:
+    for tier, _cell_rank, _order, candidate, label in eligible:
         if tier == 0:
             selected.append((candidate, label))
             text_count += 1

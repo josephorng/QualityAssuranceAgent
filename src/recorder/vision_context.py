@@ -92,18 +92,6 @@ def _bbox_area(bbox: tuple[int, int, int, int]) -> int:
     return int(bbox[2]) * int(bbox[3])
 
 
-def _nearest_candidate_rank_key(
-    bbox: tuple[int, int, int, int],
-    local_x: int,
-    local_y: int,
-) -> tuple[float, int]:
-    """Sort key: point-to-bbox distance, then smallest area (innermost hit)."""
-    return (
-        _point_to_bbox_distance_sq(local_x, local_y, bbox),
-        _bbox_area(bbox),
-    )
-
-
 def _visible_text(text: str | None) -> str:
     """Strip Private Use Area icon glyphs and whitespace from OCR text."""
     if not text:
@@ -116,9 +104,61 @@ def _is_multi_char_text_detection(det: UiDetection) -> bool:
     return det.class_id == YOLO_CLASS_TEXT and len(_visible_text(det.text)) > 1
 
 
+def _is_single_char_text_detection(det: UiDetection) -> bool:
+    """True for text-class detections whose visible OCR is exactly one character."""
+    return det.class_id == YOLO_CLASS_TEXT and len(_visible_text(det.text)) == 1
+
+
 def _is_icon_detection(det: UiDetection) -> bool:
     """True when a detection carries known icon metadata usable as a landmark."""
     return bool(det.icons)
+
+
+def _hit_content_priority(det: UiDetection) -> int:
+    """Lower is better when several boxes share the same click distance.
+
+    Priority:
+    1. text with visible length > 1
+    2. icon object
+    3. text with visible length == 1
+    4. others (scrollbar, input, empty element, …)
+    """
+    if _is_multi_char_text_detection(det):
+        return 0
+    if _is_icon_detection(det):
+        return 1
+    if _is_single_char_text_detection(det):
+        return 2
+    return 3
+
+
+def _nearest_candidate_rank_key(
+    bbox: tuple[int, int, int, int],
+    local_x: int,
+    local_y: int,
+    *,
+    content_priority: int = 3,
+) -> tuple[float, int, int]:
+    """Sort key: distance, then content priority, then smallest area."""
+    return (
+        _point_to_bbox_distance_sq(local_x, local_y, bbox),
+        content_priority,
+        _bbox_area(bbox),
+    )
+
+
+def _nearest_detection_rank_key(
+    det: UiDetection,
+    local_x: int,
+    local_y: int,
+) -> tuple[float, int, int]:
+    """Sort key for a detection at a click/drop point."""
+    return _nearest_candidate_rank_key(
+        det.bbox,
+        local_x,
+        local_y,
+        content_priority=_hit_content_priority(det),
+    )
 
 
 def _is_multi_char_text_candidate(candidate: dict[str, Any], label: str) -> bool:
@@ -181,7 +221,9 @@ def _nearest_candidates(
 ) -> list[UiDetection]:
     """Return detections sorted by point-to-bbox distance (closest first).
 
-    When several boxes contain the cursor (distance 0), prefer the smallest bbox.
+    When several boxes contain the cursor (distance 0), prefer by content:
+    multi-char text, then icon, then single-char text, then others; within a
+    tier, prefer the smallest bbox.
 
     By default, always includes the nearest detection as primary, then keeps
     appending neighbors until both quotas are met:
@@ -206,7 +248,7 @@ def _nearest_candidates(
         return []
     scored = sorted(
         detections,
-        key=lambda d: _nearest_candidate_rank_key(d.bbox, local_x, local_y),
+        key=lambda d: _nearest_detection_rank_key(d, local_x, local_y),
     )
     if not min_multi_char_text_neighbors:
         return scored if limit is None else scored[:limit]
@@ -268,7 +310,11 @@ def _destination_target_at_point(
     x: int,
     y: int,
 ) -> UiDetection | None:
-    """Return the innermost text/element whose bbox contains the drop point."""
+    """Return the preferred text/element whose bbox contains the drop point.
+
+    Uses the same content priority as click ranking (multi-char text, icon,
+    single-char text, then others), with smallest area as the final tie-breaker.
+    """
     hits = [
         det
         for det in all_detections
@@ -277,7 +323,7 @@ def _destination_target_at_point(
     ]
     if not hits:
         return None
-    return min(hits, key=lambda det: det.bbox[2] * det.bbox[3])
+    return min(hits, key=lambda det: (_hit_content_priority(det), _bbox_area(det.bbox)))
 
 
 def _nearest_candidate_by_class(

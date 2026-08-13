@@ -190,8 +190,8 @@ def test_nearest_candidates_keeps_all_cardinal_side_neighbors() -> None:
     assert far_diagonal not in nearest
 
 
-def test_nearest_candidates_prefers_smallest_containing_bbox() -> None:
-    """Nested controls on a scrollbar thumb rank the inner icon above the scrollbar."""
+def test_nearest_candidates_prefers_icon_over_scrollbar() -> None:
+    """Nested icon on a scrollbar thumb ranks above the scrollbar."""
     scrollbar = _detection_from_bbox((1411, 386, 24, 563), YOLO_CLASS_SCROLLBAR)
     thumb = _detection_from_bbox(
         (1415, 945, 14, 12),
@@ -204,6 +204,51 @@ def test_nearest_candidates_prefers_smallest_containing_bbox() -> None:
     )
     assert nearest[0] is thumb
     assert nearest[1] is scrollbar
+
+
+def test_nearest_candidates_prefers_content_priority_on_overlap() -> None:
+    """Overlapping hits: multi-char text > icon > single-char text > others."""
+    scrollbar = _detection_from_bbox((0, 0, 100, 100), YOLO_CLASS_SCROLLBAR)
+    single = _detection_from_bbox((10, 10, 20, 20), YOLO_CLASS_TEXT, text="中")
+    icon = _detection_from_bbox(
+        (15, 15, 30, 30),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "Chrome"}],
+    )
+    multi = _detection_from_bbox((5, 5, 80, 80), YOLO_CLASS_TEXT, text="Submit")
+    detections = [scrollbar, single, icon, multi]
+    nearest = _nearest_candidates(
+        detections, 25, 25, min_multi_char_text_neighbors=None, limit=4
+    )
+    assert [d for d in nearest] == [multi, icon, single, scrollbar]
+
+
+def test_nearest_candidates_prefers_icon_over_single_char_text() -> None:
+    icon = _detection_from_bbox(
+        (0, 0, 40, 40),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "設定"}],
+    )
+    single = _detection_from_bbox((5, 5, 10, 10), YOLO_CLASS_TEXT, text="×")
+    nearest = _nearest_candidates(
+        [single, icon], 10, 10, min_multi_char_text_neighbors=None, limit=2
+    )
+    assert nearest[0] is icon
+    assert nearest[1] is single
+
+
+def test_nearest_candidates_prefers_multi_char_text_over_icon() -> None:
+    icon = _detection_from_bbox(
+        (5, 5, 10, 10),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "下載"}],
+    )
+    multi = _detection_from_bbox((0, 0, 40, 40), YOLO_CLASS_TEXT, text="下載檔案")
+    nearest = _nearest_candidates(
+        [icon, multi], 10, 10, min_multi_char_text_neighbors=None, limit=2
+    )
+    assert nearest[0] is multi
+    assert nearest[1] is icon
 
 
 @pytest.mark.asyncio

@@ -59,10 +59,13 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 'Use status "completed" only when CurrentTaskGoal is satisfied.',
                 'Use status "failed" when the goal cannot be achieved (for example a required '
                 "click/move target is not on screen after tool failures, or no viable method remains).",
-                "If the previous task is not executed, try new method to achieve the task.",
                 "If any tool returned ok=false, do not mark the step completed and do not assume "
-                "follow-up tools in the same turn succeeded against the intended target. Retry with a "
-                "new method; if no viable method remains, return status failed JSON (no tool calls).",
+                "follow-up tools in the same turn succeeded against the intended target.",
+                "Retry only against targets named in CurrentTaskGoal (the same click/move, or "
+                "move_mouse_visual when that policy allows it).",
+                "Do not add clicks, typing, or moves to anything the goal does not name.",
+                "If the named target is not on screen, return status failed JSON with no tool calls "
+                "so verification can recover (for example by jumping to an earlier script line).",
                 "If check_object_exists was the previous tool: read exists and the full CurrentTaskGoal "
                 "to decide whether to continue. For 如果畫面上有… / if … is visible: continue with "
                 "follow-up tools only when exists=true; when exists=false, return status completed JSON "
@@ -90,10 +93,14 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "instructions": [
                 "Decide if the current step goal is actually accomplished on screen based on visible UI and text.",
                 "When ExpectedOutcome is provided and not '(none)', treat it as the primary success criterion; the step instruction describes the action that was attempted.",
+                "NumberedScript lists every line with its recorded expected outcome after '| expected:'. Use those prior outcomes to decide recovery.",
                 'Return strict JSON only (no markdown), single object with keys: accomplished (bool), branch (string), target_step (number or null), reason (string).',
                 "branch must be one of: advance, retry, skip, goto.",
                 "Use branch advance only when accomplished is true (move to next script line).",
-                "When accomplished is false: use retry to repeat the same step, skip to abandon this line and move to the next, or goto to jump to a specific script line (use target_step as the 1-based line number from the numbered list).",
+                "When accomplished is false: retry only if this step's target is still on screen (or prior lines' expected outcomes still hold) but this step's outcome is not met.",
+                "Use goto when a prior step's expected outcome is no longer true and this step cannot succeed from the current UI. Jump to the latest such prior line (target_step = that 1-based number).",
+                "If the current step names an on-screen target that is not visible, do not retry. If an earlier line's expected outcome would bring that target back, goto that line.",
+                "Use skip to abandon this line and move to the next when the line is irrelevant or impossible even after restoring prior UI.",
                 "For goto, target_step must be the line number shown before each script line (1 to N). Set target_step to null for other branches.",
                 "Do not invent UI elements; base conclusions on the image, ExpectedOutcome, and script text only.",
             ],

@@ -5,8 +5,24 @@ from typing import Any
 
 
 def extract_json_object_string(raw: str) -> str:
-    """Extract the first JSON object from possibly fenced/free-form model output."""
+    """Extract the last JSON object from possibly fenced/free-form model output."""
     text = (raw or "").strip()
+    decoder = json.JSONDecoder()
+    last: str | None = None
+    idx = 0
+    while True:
+        start = text.find("{", idx)
+        if start == -1:
+            break
+        try:
+            _, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            idx = start + 1
+            continue
+        last = text[start:end]
+        idx = end
+    if last is not None:
+        return last
     start, end = text.find("{"), text.rfind("}")
     if start != -1 and end != -1 and end > start:
         return text[start : end + 1]

@@ -301,6 +301,20 @@ class BrainModule:
         value = self.script_expected_outcomes[self._script_step_index]
         return value.strip() if isinstance(value, str) else ""
 
+    def _format_numbered_script(self) -> str:
+        """Numbered script lines with each step's recorded expected outcome."""
+        lines: list[str] = []
+        for index, line in enumerate(self.script_lines, start=1):
+            outcome: str | None = None
+            if index - 1 < len(self.script_expected_outcomes):
+                outcome = self.script_expected_outcomes[index - 1]
+            if isinstance(outcome, str) and outcome.strip():
+                outcome_text = outcome.strip()
+            else:
+                outcome_text = "(none)"
+            lines.append(f"{index}. {line}  | expected: {outcome_text}")
+        return "\n".join(lines)
+
     def prepare_runtime_step(self, command: str) -> None:
         """Set a single script line for the next `process_step()` (runtime command mode)."""
         cleaned = command.strip()
@@ -613,7 +627,7 @@ class BrainModule:
         prompt = get_prompt("brain_verify_script_step").format(
             expected_outcome=self._current_expected_outcome() or "(none)",
         )
-        numbered = "\n".join(f"{i}. {line}" for i, line in enumerate(self.script_lines, start=1))
+        numbered = self._format_numbered_script()
         current_1based = min(self._script_step_index + 1, len(self.script_lines))
         goal = self._current_goal()
         body = (
@@ -934,7 +948,11 @@ class BrainModule:
         return step_succeeded
 
     async def process_step(self) -> BrainStepResult:
-        """Run one script step: tool loop, then vision verification and index branching. Sets `run_complete` when the script is exhausted."""
+        """Run one script step: tool loop, then vision verification and index branching.
+
+        Verification still runs when the actor marks the step failed, so `goto`/`retry`
+        can recover. Sets `run_complete` when the script is exhausted.
+        """
         # await self._validate_tool_functions_match_mcp()
 
         if self._script_step_index >= len(self.script_lines):
@@ -952,26 +970,10 @@ class BrainModule:
             started_at = perf_counter()
 
             step_succeeded = await self.loop()
-            finished_iso = datetime.now(timezone.utc).isoformat()
-            duration_seconds = round(perf_counter() - started_at, 3)
-
             if not step_succeeded:
-                self._update_step_metadata(
-                    transcript_counter,
-                    script_step_index,
-                    {
-                        "started_at_utc": started_iso,
-                        "finished_at_utc": finished_iso,
-                        "duration_seconds": duration_seconds,
-                        "status": "failed",
-                        "step_index": script_step_index,
-                        "goal": self._current_goal(),
-                    },
-                )
-                return BrainStepResult(
-                    reason=f"Script step {self._script_step_index + 1} failed",
-                    step_finished=False,
-                    step_index=script_step_index,
+                self.manager.log_info(
+                    f"Script step {script_step_index + 1} actor failed; "
+                    "running verification for recovery"
                 )
 
             verify_result = await self._verify_script_step(
@@ -995,8 +997,13 @@ class BrainModule:
                         "verify": None,
                     },
                 )
+                reason = (
+                    f"Script step {script_step_index + 1} failed"
+                    if not step_succeeded
+                    else "Script step verification failed (parse or empty response)"
+                )
                 return BrainStepResult(
-                    reason="Script step verification failed (parse or empty response)",
+                    reason=reason,
                     step_finished=False,
                     step_index=script_step_index,
                 )
@@ -1004,6 +1011,12 @@ class BrainModule:
             step_goal = self._current_goal()
             step_expected_outcome = self._current_expected_outcome() or None
             run_complete = self._apply_verify_branch(verify_result)
+            if verify_result.accomplished:
+                status = "completed"
+            elif not step_succeeded:
+                status = "failed"
+            else:
+                status = "verify_failed"
             self._update_step_metadata(
                 transcript_counter,
                 script_step_index,
@@ -1011,7 +1024,7 @@ class BrainModule:
                     "started_at_utc": started_iso,
                     "finished_at_utc": finished_iso,
                     "duration_seconds": duration_seconds,
-                    "status": "completed" if verify_result.accomplished else "verify_failed",
+                    "status": status,
                     "step_index": script_step_index,
                     "goal": step_goal,
                     "expected_outcome": step_expected_outcome,

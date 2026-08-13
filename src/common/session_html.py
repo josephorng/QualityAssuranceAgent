@@ -1911,13 +1911,13 @@ def _resolve_recording_screenshot(raw: str | None, run_root: Path) -> Path | Non
     if not raw:
         return None
     candidate = Path(raw)
-    if candidate.is_absolute():
-        return candidate if candidate.is_file() else None
+    if candidate.is_absolute() and candidate.is_file():
+        return candidate
     for resolved in (
-        run_root / candidate,
+        run_root / candidate if not candidate.is_absolute() else None,
         run_root / "screenshots" / candidate.name,
     ):
-        if resolved.is_file():
+        if resolved is not None and resolved.is_file():
             return resolved
     return None
 
@@ -2309,7 +2309,12 @@ def _render_expected_outcome_panel_html(*, expected_outcome: str, show: bool) ->
     )
 
 
-def _render_recording_event_html(*, run_root: Path, event: dict[str, Any]) -> str:
+def _render_recording_event_html(
+    *,
+    run_root: Path,
+    event: dict[str, Any],
+    next_event: dict[str, Any] | None = None,
+) -> str:
     raw_index = event.get("index")
     index = raw_index if isinstance(raw_index, int) else 0
     kind = str(event.get("kind") or "")
@@ -2358,14 +2363,22 @@ def _render_recording_event_html(*, run_root: Path, event: dict[str, Any]) -> st
 
     meta_html = "".join(f"<dt>{escape(label)}</dt><dd>{value}</dd>" for label, value in meta_rows)
 
-    shot = _resolve_recording_screenshot(str(event.get("screenshot_path") or ""), run_root)
-    end_shot = _resolve_recording_screenshot(str(event.get("end_screenshot_path") or ""), run_root)
-    if kind == "drag" or end_shot is not None:
-        shots = _render_shot_html("開始截圖", shot, run_root) + _render_shot_html(
-            "結束截圖", end_shot, run_root
+    before = _resolve_recording_screenshot(str(event.get("screenshot_path") or ""), run_root)
+    after: Path | None = None
+    if next_event is not None:
+        after = _resolve_recording_screenshot(
+            str(next_event.get("screenshot_path") or ""),
+            run_root,
         )
-    else:
-        shots = _render_shot_html("截圖", shot, run_root)
+    if after is None:
+        # Drag events capture an end frame; use it when no following step exists.
+        after = _resolve_recording_screenshot(
+            str(event.get("end_screenshot_path") or ""),
+            run_root,
+        )
+    shots = _render_shot_html("動作前截圖", before, run_root) + _render_shot_html(
+        "動作後截圖", after, run_root
+    )
 
     landmarks_html = _render_landmarks_panel_html(
         run_root=run_root,
@@ -2796,7 +2809,12 @@ def write_recording_html_from_run(run_root: Path, *, update_index: bool = True) 
 
     events = _load_recording_events(run_root)
     events_html = [
-        _render_recording_event_html(run_root=run_root, event=event) for event in events
+        _render_recording_event_html(
+            run_root=run_root,
+            event=event,
+            next_event=events[index + 1] if index + 1 < len(events) else None,
+        )
+        for index, event in enumerate(events)
     ]
     title = escape(_resolve_recording_title(run_root))
     body = "\n".join(events_html) if events_html else '<p class="empty">尚無錄製事件。</p>'

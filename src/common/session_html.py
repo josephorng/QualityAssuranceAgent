@@ -195,6 +195,38 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
   font-size: .75rem; color: #57606a; font-weight: 600;
 }
 .typed-text-status.error { color: #cf222e; }
+.expected-outcome {
+  margin: 0 1.5rem 1rem; padding: .75rem 1rem;
+  border: 1px solid #d0d7de; border-radius: 8px; background: #f6f8fa;
+}
+.expected-outcome-title {
+  margin: 0 0 .5rem; font-size: .9rem; font-weight: 700; color: #57606a;
+}
+.expected-outcome-row {
+  display: flex; flex-wrap: wrap; align-items: flex-start; gap: .5rem;
+}
+.expected-outcome-input {
+  flex: 1 1 16rem; min-width: 12rem; min-height: 2.6rem; resize: vertical;
+  font-family: inherit; font-size: .9rem; line-height: 1.3;
+  padding: .35rem .55rem; border: 1px solid #d0d7de; border-radius: 6px;
+  background: #fff; color: #1f2328;
+}
+.apply-expected-outcome {
+  appearance: none; border: 1px solid #0969da; background: #ddf4ff;
+  cursor: pointer; border-radius: 6px; padding: .3rem .7rem;
+  font-size: .8rem; line-height: 1.2; font-family: inherit;
+  font-weight: 600; color: #0969da; flex: 0 0 auto;
+}
+.apply-expected-outcome:hover:not(:disabled) { background: #b6e3ff; }
+.apply-expected-outcome:disabled { opacity: .45; cursor: not-allowed; }
+.apply-expected-outcome.applied {
+  color: #116329; border-color: #4ac26b; background: #dafbe1;
+}
+.expected-outcome-status {
+  display: inline-block;
+  font-size: .75rem; color: #57606a; font-weight: 600;
+}
+.expected-outcome-status.error { color: #cf222e; }
 .hand-ops {
   list-style: disc; margin: 0; padding: 1rem 1.5rem 1.25rem 2.5rem;
 }
@@ -541,6 +573,89 @@ _RECORDING_SCRIPT = """
         .catch(function () {
           btn.disabled = false;
           setTypedTextStatus(panel, "無法連線主程式，請確認主程式正在執行。", true);
+        });
+  }
+
+  function setExpectedOutcomeStatus(panel, text, isError) {
+    var status = panel.querySelector(".expected-outcome-status");
+    if (!status) return;
+    status.textContent = text || "";
+    if (isError) status.classList.add("error");
+    else status.classList.remove("error");
+  }
+
+  Array.prototype.slice.call(document.querySelectorAll("button.apply-expected-outcome")).forEach(function (btn) {
+    btn.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      applyExpectedOutcome(btn);
+    });
+  });
+
+  Array.prototype.slice.call(document.querySelectorAll(".expected-outcome-input")).forEach(function (input) {
+    input.addEventListener("keydown", function (event) {
+      if (!(event.key === "Enter" && (event.ctrlKey || event.metaKey))) return;
+      event.preventDefault();
+      event.stopPropagation();
+      var panel = input.closest(".expected-outcome");
+      var btn = panel ? panel.querySelector("button.apply-expected-outcome") : null;
+      if (btn) applyExpectedOutcome(btn);
+    });
+  });
+
+  function applyExpectedOutcome(btn) {
+      var panel = btn.closest(".expected-outcome");
+      var group = btn.closest(".instruction-group");
+      if (!panel || !group) return;
+      var input = panel.querySelector(".expected-outcome-input");
+      if (!input) return;
+      if (window.location.protocol === "file:") {
+        setExpectedOutcomeStatus(panel, "請透過主程式開啟報告以修改預期結果。", true);
+        return;
+      }
+      var runId = group.getAttribute("data-run-id") || "";
+      var eventIndex = group.getAttribute("data-event-index") || "";
+      if (!runId || !eventIndex) {
+        setExpectedOutcomeStatus(panel, "缺少事件資訊。", true);
+        return;
+      }
+      var text = input.value || "";
+      btn.disabled = true;
+      setExpectedOutcomeStatus(panel, "套用中…", false);
+      fetch("/api/runs/" + encodeURIComponent(runId) + "/events/" + encodeURIComponent(eventIndex) + "/expected_outcome", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expected_outcome: text })
+      })
+        .then(function (response) {
+          return response.json().then(function (payload) {
+            return { ok: response.ok, payload: payload };
+          });
+        })
+        .then(function (result) {
+          btn.disabled = false;
+          if (!result.ok || !result.payload || !result.payload.ok) {
+            var err = (result.payload && result.payload.error) || "套用失敗";
+            setExpectedOutcomeStatus(panel, err, true);
+            return;
+          }
+          var saved = result.payload.expected_outcome;
+          if (saved == null) saved = "";
+          input.value = saved;
+          var copyBtn = group.querySelector("button.copy-instruction");
+          if (copyBtn) {
+            if (saved) copyBtn.setAttribute("data-expected-outcome", saved);
+            else copyBtn.removeAttribute("data-expected-outcome");
+          }
+          btn.classList.add("applied");
+          setExpectedOutcomeStatus(panel, "已套用", false);
+          window.setTimeout(function () {
+            btn.classList.remove("applied");
+          }, 1200);
+        })
+        .catch(function () {
+          btn.disabled = false;
+          setExpectedOutcomeStatus(panel, "無法連線主程式，請確認主程式正在執行。", true);
         });
   }
 })();
@@ -2151,6 +2266,24 @@ def _render_typed_text_panel_html(
     )
 
 
+def _render_expected_outcome_panel_html(*, expected_outcome: str, show: bool) -> str:
+    if not show:
+        return ""
+    return (
+        f'<div class="expected-outcome">'
+        f'<div class="expected-outcome-title">預期結果</div>'
+        f'<div class="expected-outcome-row">'
+        f'<textarea class="expected-outcome-input" rows="2" '
+        f'spellcheck="false" aria-label="預期結果">'
+        f"{escape(expected_outcome)}</textarea>"
+        f'<button type="button" class="apply-expected-outcome" '
+        f'title="儲存修改後的預期結果">套用</button>'
+        f'<span class="expected-outcome-status" aria-live="polite"></span>'
+        f"</div>"
+        f"</div>"
+    )
+
+
 def _render_recording_event_html(*, run_root: Path, event: dict[str, Any]) -> str:
     raw_index = event.get("index")
     index = raw_index if isinstance(raw_index, int) else 0
@@ -2176,8 +2309,6 @@ def _render_recording_event_html(*, run_root: Path, event: dict[str, Any]) -> st
             expected_outcome = raw_outcome.strip()
 
     meta_rows: list[tuple[str, str]] = [("時間", time_text)]
-    if expected_outcome:
-        meta_rows.append(("預期結果", escape(expected_outcome)))
     cursor = _format_xy(event.get("cursor_xy"))
     if cursor:
         meta_rows.append(("游標", escape(cursor)))
@@ -2222,6 +2353,10 @@ def _render_recording_event_html(*, run_root: Path, event: dict[str, Any]) -> st
         analysis=analysis if isinstance(analysis, dict) else None,
         instruction=instruction,
     )
+    expected_outcome_html = _render_expected_outcome_panel_html(
+        expected_outcome=expected_outcome,
+        show=bool(instruction) or bool(expected_outcome),
+    )
 
     copy_attr = escape(title, quote=True)
     outcome_attr = (
@@ -2243,6 +2378,7 @@ def _render_recording_event_html(*, run_root: Path, event: dict[str, Any]) -> st
         f'title="刪除指令" aria-label="刪除指令">刪除</button>'
         f"</summary>"
         f'<div class="meta" style="padding: 1rem 1.5rem 0;"><dl>{meta_html}</dl></div>'
+        f"{expected_outcome_html}"
         f"{typed_text_html}"
         f"{landmarks_html}"
         f'<div class="shots" style="padding: 0 1.5rem 1.25rem;">{shots}</div>'

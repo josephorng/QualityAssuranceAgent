@@ -791,9 +791,12 @@ def test_write_recording_html_copy_includes_expected_outcome(tmp_path: Path) -> 
     assert 'data-instruction="點擊「搜尋」按鈕"' in html
     assert 'data-expected-outcome="對話框顯示 &quot;搜尋&quot;"' in html
     assert "預期結果" in html
+    assert 'class="expected-outcome-input"' in html
+    assert 'class="apply-expected-outcome"' in html
     assert "對話框顯示" in html
     assert "function instructionCopyText" in html
     assert "# expected_outcome: " in html
+    assert "function applyExpectedOutcome" in html
 
 
 def test_write_recording_html_renders_landmark_multiselect(tmp_path: Path) -> None:

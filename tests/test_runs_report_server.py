@@ -9,6 +9,7 @@ import pytest
 
 from src.common.runs_report_server import (
     RunsReportServer,
+    apply_recording_event_expected_outcome,
     apply_recording_event_landmarks,
     apply_recording_event_text,
     delete_recording_event,
@@ -63,6 +64,7 @@ def _make_recording_landmark_run(runs_root: Path, name: str) -> Path:
                 "event_index": 1,
                 "instruction": instruction,
                 "wait_instruction": "等待 2 秒",
+                "expected_outcome": "搜尋結果已顯示",
             },
             ensure_ascii=False,
         ),
@@ -74,6 +76,7 @@ def _make_recording_landmark_run(runs_root: Path, name: str) -> Path:
                 "run_id": name,
                 "recorded": 1,
                 "instructions": ["等待 2 秒", instruction],
+                "expected_outcomes": [None, "搜尋結果已顯示"],
             },
             ensure_ascii=False,
         ),
@@ -693,5 +696,89 @@ def test_runs_report_server_text_endpoint(tmp_path: Path) -> None:
         assert payload["ok"] is True
         assert payload["text"] == "fixed value"
         assert payload["instruction"] == "輸入「fixed value」"
+    finally:
+        server.stop()
+
+
+def test_apply_recording_event_expected_outcome_persists_and_rebuilds(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    _make_recording_landmark_run(runs_root, "recording_outcome_edit")
+
+    result = apply_recording_event_expected_outcome(
+        runs_root,
+        "recording_outcome_edit",
+        1,
+        expected_outcome="  對話框已開啟  ",
+    )
+
+    assert result == {"expected_outcome": "對話框已開啟"}
+    analysis = json.loads(
+        (runs_root / "recording_outcome_edit" / "analysis" / "event_001.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert analysis["expected_outcome"] == "對話框已開啟"
+    report = json.loads(
+        (runs_root / "recording_outcome_edit" / "report.json").read_text(encoding="utf-8")
+    )
+    assert report["expected_outcomes"] == [None, "對話框已開啟"]
+    html = (runs_root / "recording_outcome_edit" / "recording_steps.html").read_text(
+        encoding="utf-8"
+    )
+    assert 'class="expected-outcome-input"' in html
+    assert "對話框已開啟" in html
+    assert 'data-expected-outcome="對話框已開啟"' in html
+
+
+def test_apply_recording_event_expected_outcome_clears_when_empty(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    _make_recording_landmark_run(runs_root, "recording_outcome_clear")
+
+    result = apply_recording_event_expected_outcome(
+        runs_root,
+        "recording_outcome_clear",
+        1,
+        expected_outcome="   ",
+    )
+
+    assert result == {"expected_outcome": None}
+    analysis = json.loads(
+        (runs_root / "recording_outcome_clear" / "analysis" / "event_001.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert analysis["expected_outcome"] is None
+    report = json.loads(
+        (runs_root / "recording_outcome_clear" / "report.json").read_text(encoding="utf-8")
+    )
+    assert report["expected_outcomes"] == [None, None]
+
+
+def test_runs_report_server_expected_outcome_endpoint(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    _make_recording_landmark_run(runs_root, "recording_http_outcome")
+
+    server = RunsReportServer(runs_root)
+    try:
+        base = server.start()
+        body = json.dumps(
+            {"expected_outcome": "畫面已更新"},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            f"{base}/api/runs/recording_http_outcome/events/1/expected_outcome",
+            method="POST",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            assert response.status == 200
+        assert payload["ok"] is True
+        assert payload["expected_outcome"] == "畫面已更新"
     finally:
         server.stop()

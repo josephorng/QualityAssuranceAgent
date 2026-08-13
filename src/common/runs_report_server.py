@@ -6,6 +6,7 @@ Bug reports POST to ``/api/runs/<id>/bug`` to zip a run folder onto a network sh
 Recording landmark edits POST to ``/api/runs/<id>/events/<n>/landmarks``
 (also accepts optional primary-target index swaps).
 Recording typed-text edits POST to ``/api/runs/<id>/events/<n>/text``.
+Recording expected-outcome edits POST to ``/api/runs/<id>/events/<n>/expected_outcome``.
 Recording event deletes POST to ``/api/runs/<id>/events/<n>/delete``.
 """
 
@@ -52,7 +53,11 @@ _EVENT_DELETE_PATH_RE = re.compile(
 _EVENT_TEXT_PATH_RE = re.compile(
     r"^/api/runs/([^/]+)/events/(\d+)/text/?$"
 )
+_EVENT_EXPECTED_OUTCOME_PATH_RE = re.compile(
+    r"^/api/runs/([^/]+)/events/(\d+)/expected_outcome/?$"
+)
 _TYPED_TEXT_MAX_LEN = 8192
+_EXPECTED_OUTCOME_MAX_LEN = 8192
 
 # Default destination for "report bug" zip copies (Windows UNC share).
 BUG_REPORT_SHARE_DIR = Path(r"\\192.168.0.9\Joseph\CUA-BUG")
@@ -607,6 +612,51 @@ def apply_recording_event_text(
     return {"text": cleaned, "instruction": instruction}
 
 
+def apply_recording_event_expected_outcome(
+    runs_root: Path,
+    run_id: str,
+    event_index: int,
+    *,
+    expected_outcome: Any,
+) -> dict[str, Any]:
+    """Replace verification text for one recorded event and persist artifacts.
+
+    Empty / whitespace-only values clear ``expected_outcome`` (stored as ``null``).
+    Returns ``{"expected_outcome": str|None}``. Raises ``ValueError`` for invalid input.
+    """
+    run_dir = resolve_deletable_run_folder(runs_root, run_id)
+    if not isinstance(event_index, int) or event_index < 1:
+        raise ValueError("invalid event index")
+    if not isinstance(expected_outcome, str):
+        raise ValueError("expected_outcome must be a string")
+    if len(expected_outcome) > _EXPECTED_OUTCOME_MAX_LEN:
+        raise ValueError("expected_outcome is too long")
+    cleaned = expected_outcome.strip() or None
+
+    event_path = event_json_path(run_dir, event_index)
+    event_payload = read_json(event_path, None)
+    if not isinstance(event_payload, dict):
+        raise ValueError("event not found")
+
+    analysis_path = run_dir / "analysis" / f"event_{event_index:03d}.json"
+    analysis = read_json(analysis_path, None)
+    if not isinstance(analysis, dict):
+        raise ValueError("analysis not found")
+
+    analysis["expected_outcome"] = cleaned
+    write_json(analysis_path, analysis)
+
+    report_path = run_dir / "report.json"
+    report = read_json(report_path, {})
+    if not isinstance(report, dict):
+        report = {}
+    _rebuild_report_instructions(run_dir, report)
+    write_json(report_path, report)
+
+    write_recording_html_from_run(run_dir, update_index=False)
+    return {"expected_outcome": cleaned}
+
+
 def zip_run_report_to_bug_share(
     runs_root: Path,
     run_id: str,
@@ -664,6 +714,7 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
             bug_match = _BUG_PATH_RE.fullmatch(path)
             landmarks_match = _LANDMARKS_PATH_RE.fullmatch(path)
             event_text_match = _EVENT_TEXT_PATH_RE.fullmatch(path)
+            event_outcome_match = _EVENT_EXPECTED_OUTCOME_PATH_RE.fullmatch(path)
             event_delete_match = _EVENT_DELETE_PATH_RE.fullmatch(path)
 
             if delete_match is not None:
@@ -730,6 +781,27 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
                         run_id,
                         event_index,
                         text=body.get("text"),
+                    )
+                except ValueError as exc:
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                    return
+                except OSError as exc:
+                    self._send_json(500, {"ok": False, "error": str(exc)})
+                    return
+                self._send_json(200, {"ok": True, **result})
+                return
+
+            if event_outcome_match is not None:
+                run_id = event_outcome_match.group(1)
+                event_index_raw = event_outcome_match.group(2)
+                try:
+                    event_index = int(event_index_raw)
+                    body = self._read_json_body()
+                    result = apply_recording_event_expected_outcome(
+                        root,
+                        run_id,
+                        event_index,
+                        expected_outcome=body.get("expected_outcome"),
                     )
                 except ValueError as exc:
                     self._send_json(400, {"ok": False, "error": str(exc)})

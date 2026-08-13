@@ -704,9 +704,11 @@ def test_write_recording_html_renders_events_and_instructions(tmp_path: Path) ->
     assert "點擊「搜尋」按鈕" in html
     assert 'class="copy-instruction"' in html
     assert 'class="delete-instruction"' in html
+    assert 'class="collapse-instruction"' in html
     assert 'data-instruction="點擊「搜尋」按鈕"' in html
     assert "button.copy-instruction" in html
     assert "button.delete-instruction" in html
+    assert "button.collapse-instruction" in html
     assert 'class="copy-all-instructions"' in html
     assert "複製全部指令" in html
     assert "instructionCopyText" in html

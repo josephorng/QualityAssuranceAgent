@@ -99,6 +99,17 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 }
 .delete-instruction:hover { background: #ffebe9; color: #cf222e; border-color: #ff8182; }
 .delete-instruction:disabled { opacity: .45; cursor: not-allowed; }
+.collapse-row {
+  display: flex; justify-content: center; align-items: center;
+  padding: 0 1.5rem .85rem;
+}
+.collapse-instruction {
+  appearance: none; border: 1px solid #d0d7de; background: #f6f8fa;
+  cursor: pointer; border-radius: 6px; padding: .25rem .7rem;
+  font-size: .7rem; line-height: 1; font-family: inherit;
+  color: #57606a; flex: 0 0 auto;
+}
+.collapse-instruction:hover { background: #eaeef2; color: #1f2328; }
 .recording-toolbar {
   display: flex; flex-wrap: wrap; align-items: center; gap: .5rem;
   margin: 0 0 1.25rem;
@@ -374,6 +385,20 @@ _RECORDING_SCRIPT = """
           btn.disabled = false;
           window.alert("無法連線主程式，請確認主程式正在執行。");
         });
+    });
+  });
+
+  Array.prototype.slice.call(document.querySelectorAll("button.collapse-instruction")).forEach(function (btn) {
+    btn.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      var group = btn.closest(".instruction-group");
+      if (!group) return;
+      group.open = false;
+      var summary = group.querySelector("summary");
+      if (summary && typeof summary.scrollIntoView === "function") {
+        summary.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
     });
   });
 
@@ -2381,7 +2406,11 @@ def _render_recording_event_html(*, run_root: Path, event: dict[str, Any]) -> st
         f"{expected_outcome_html}"
         f"{typed_text_html}"
         f"{landmarks_html}"
-        f'<div class="shots" style="padding: 0 1.5rem 1.25rem;">{shots}</div>'
+        f'<div class="shots" style="padding: 0 1.5rem 1rem;">{shots}</div>'
+        f'<div class="collapse-row">'
+        f'<button type="button" class="collapse-instruction" '
+        f'title="收合" aria-label="收合">▲</button>'
+        f"</div>"
         f"</details>"
     )
 

@@ -1536,6 +1536,17 @@ class RecordingSession:
         if token is None:
             return
 
+        typed = _key_char(key)
+        # Shift alone only changes case/symbols — treat printable keys as typing,
+        # not hotkeys. Ctrl/Alt/Win (+ optional Shift) remain hotkeys.
+        if mods == ["shift"]:
+            if typed and typed.isprintable():
+                self._append_text_input_char(typed, cursor_xy, timestamp_utc=timestamp_utc)
+                return
+            if key == keyboard.Key.space:
+                self._append_text_input_char(" ", cursor_xy, timestamp_utc=timestamp_utc)
+                return
+
         if mods:
             self._queue_keyboard_event_immediate(
                 kind="hotkey",
@@ -1545,7 +1556,6 @@ class RecordingSession:
             )
             return
 
-        typed = _key_char(key)
         if typed and typed.isprintable():
             self._append_text_input_char(typed, cursor_xy, timestamp_utc=timestamp_utc)
             return

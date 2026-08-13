@@ -272,6 +272,118 @@ def test_ctrl_c_hotkey_from_control_char_only(tmp_path) -> None:
     assert raw["keys"] == ["ctrl", "c"]
 
 
+def test_shift_letter_records_as_text_input(tmp_path) -> None:
+    """Shift+letter is uppercase typing, not a Shift+A hotkey."""
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            session._on_key_press(Key.shift_l)
+            session._on_key_press(KeyCode(vk=65, char="A"))
+            session._on_key_press(KeyCode(vk=66, char="B"))
+            session._on_key_release(Key.shift_l)
+            session._on_key_press(KeyCode.from_char("c"))
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "text_input"
+    assert raw["text"] == "ABc"
+
+
+def test_shift_symbol_records_as_text_input(tmp_path) -> None:
+    """Shift+1 → '!' should coalesce into text_input."""
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            session._on_key_press(Key.shift)
+            session._on_key_press(KeyCode(vk=49, char="!"))
+            session._on_key_release(Key.shift)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "text_input"
+    assert raw["text"] == "!"
+
+
+def test_shift_tab_still_hotkey(tmp_path) -> None:
+    """Shift+Tab is a chord, not typing."""
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key
+
+            session._on_key_press(Key.shift_r)
+            session._on_key_press(Key.tab)
+            session._on_key_release(Key.shift_r)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "hotkey"
+    assert raw["keys"] == ["shift", "tab"]
+
+
+def test_ctrl_shift_letter_still_hotkey(tmp_path) -> None:
+    """Ctrl+Shift+S remains a hotkey even though Shift is held."""
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            session._on_key_press(Key.ctrl_l)
+            session._on_key_press(Key.shift_l)
+            session._on_key_press(KeyCode(vk=83, char="S"))
+            session._on_key_release(Key.shift_l)
+            session._on_key_release(Key.ctrl_l)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "hotkey"
+    assert raw["keys"] == ["ctrl", "shift", "S"]
+
+
 def test_slow_typing_stays_one_event_until_other_operation(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
 

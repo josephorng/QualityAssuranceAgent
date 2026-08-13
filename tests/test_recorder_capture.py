@@ -384,6 +384,155 @@ def test_ctrl_shift_letter_still_hotkey(tmp_path) -> None:
     assert raw["keys"] == ["ctrl", "shift", "S"]
 
 
+def test_ctrl_v_with_text_records_as_text_input(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.pyperclip.paste",
+        return_value="hello world",
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            session._on_key_press(Key.ctrl_l)
+            session._on_key_press(KeyCode(vk=86, char="\x16"))
+            session._on_key_release(Key.ctrl_l)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "text_input"
+    assert raw["text"] == "hello world"
+
+
+def test_ctrl_v_empty_clipboard_stays_hotkey(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.pyperclip.paste",
+        return_value="",
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            session._on_key_press(Key.ctrl_l)
+            session._on_key_press(KeyCode(vk=86, char="\x16"))
+            session._on_key_release(Key.ctrl_l)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "hotkey"
+    assert raw["keys"] == ["ctrl", "v"]
+
+
+def test_ctrl_v_clipboard_read_failure_stays_hotkey(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.pyperclip.paste",
+        side_effect=RuntimeError("clipboard locked"),
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            session._on_key_press(Key.ctrl_l)
+            session._on_key_press(KeyCode(vk=86, char="\x16"))
+            session._on_key_release(Key.ctrl_l)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "hotkey"
+    assert raw["keys"] == ["ctrl", "v"]
+
+
+def test_ctrl_shift_v_with_text_records_as_text_input(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.pyperclip.paste",
+        return_value="plain text",
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            session._on_key_press(Key.ctrl_l)
+            session._on_key_press(Key.shift_l)
+            session._on_key_press(KeyCode(vk=86, char="V"))
+            session._on_key_release(Key.shift_l)
+            session._on_key_release(Key.ctrl_l)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "text_input"
+    assert raw["text"] == "plain text"
+
+
+def test_paste_coalesces_with_prior_typing(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.pyperclip.paste",
+        return_value=" world",
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            session._on_key_press(KeyCode.from_char("h"))
+            session._on_key_press(KeyCode.from_char("i"))
+            session._on_key_press(Key.ctrl_l)
+            session._on_key_press(KeyCode(vk=86, char="\x16"))
+            session._on_key_release(Key.ctrl_l)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "text_input"
+    assert raw["text"] == "hi world"
+
+
 def test_slow_typing_stays_one_event_until_other_operation(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
 

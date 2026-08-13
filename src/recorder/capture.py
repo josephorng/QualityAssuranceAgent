@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 import mss
 import pyautogui
+import pyperclip
 from pynput import keyboard, mouse
 
 from src.common.io_utils import append_text, write_json
@@ -368,6 +369,18 @@ def _ordered_modifiers(mods: set[str] | list[str]) -> list[str] | None:
     extras = sorted(name for name in present if name not in _MODIFIER_TOKEN_ORDER)
     result = ordered + extras
     return result or None
+
+
+def _safe_clipboard_text() -> str | None:
+    """Best-effort read of the current clipboard as text."""
+    try:
+        return pyperclip.paste()
+    except Exception:
+        return None
+
+
+def _is_paste_hotkey(mods: list[str], token: str) -> bool:
+    return "ctrl" in mods and token.lower() == "v"
 
 
 def _point_in_rect(x: int, y: int, rect: tuple[int, int, int, int] | None) -> bool:
@@ -963,6 +976,39 @@ class RecordingSession:
         with self._lock:
             self._pending_text_chars.append(char)
 
+    def _append_text_input_text(
+        self,
+        text: str,
+        cursor_xy: tuple[int, int] | None,
+        *,
+        timestamp_utc: str | None = None,
+    ) -> None:
+        if not text:
+            return
+        with self._lock:
+            run_dir = self._run_dir
+            if run_dir is None:
+                return
+            starting_burst = not self._pending_text_chars
+            if starting_burst:
+                index = self._next_index
+                self._next_index += 1
+            else:
+                index = None
+
+        if starting_burst:
+            with self._lock:
+                anchor_click_xy = self._last_pointer_cursor_xy
+                self._pending_text_meta = {
+                    "index": index,
+                    "cursor_xy": cursor_xy,
+                    "anchor_click_xy": anchor_click_xy,
+                    "timestamp_utc": timestamp_utc or utc_now_iso(),
+                }
+
+        with self._lock:
+            self._pending_text_chars.extend(text)
+
     def _cancel_pending_click_timer(self) -> None:
         with self._lock:
             pending = self._pending_click_timer
@@ -1548,6 +1594,15 @@ class RecordingSession:
                 return
 
         if mods:
+            if _is_paste_hotkey(mods, token):
+                pasted = _safe_clipboard_text()
+                if pasted is not None and pasted.strip():
+                    self._append_text_input_text(
+                        pasted,
+                        cursor_xy,
+                        timestamp_utc=timestamp_utc,
+                    )
+                    return
             self._queue_keyboard_event_immediate(
                 kind="hotkey",
                 cursor_xy=cursor_xy,

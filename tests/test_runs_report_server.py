@@ -10,6 +10,7 @@ import pytest
 from src.common.runs_report_server import (
     RunsReportServer,
     apply_recording_event_landmarks,
+    apply_recording_event_text,
     delete_recording_event,
     delete_run_report_folder,
     ensure_runs_report_server,
@@ -488,5 +489,143 @@ def test_runs_report_server_event_delete_endpoint(tmp_path: Path) -> None:
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             urllib.request.urlopen(missing, timeout=5)
         assert exc_info.value.code == 400
+    finally:
+        server.stop()
+
+
+def _make_recording_text_input_run(runs_root: Path, name: str) -> Path:
+    run_root = runs_root / name
+    run_root.mkdir(parents=True)
+    (run_root / "events").mkdir()
+    (run_root / "analysis").mkdir()
+    (run_root / "events" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "index": 1,
+                "timestamp_utc": "2026-07-21T04:00:00+00:00",
+                "kind": "text_input",
+                "text": "wrong ocr",
+                "screenshot_path": "",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    instruction = "輸入「wrong ocr」"
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": instruction,
+                "wait_instruction": "等待 2 秒",
+                "text_resolution": {
+                    "recorded_text": "wrng",
+                    "resolved_text": "wrong ocr",
+                    "source": "ocr",
+                    "reason": "vision-first OCR",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "report.json").write_text(
+        json.dumps(
+            {
+                "run_id": name,
+                "recorded": 1,
+                "instructions": ["等待 2 秒", instruction],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return run_root
+
+
+def test_apply_recording_event_text_persists_and_rebuilds(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    _make_recording_text_input_run(runs_root, "recording_text_edit")
+
+    result = apply_recording_event_text(
+        runs_root,
+        "recording_text_edit",
+        1,
+        text="  正確文字  ",
+    )
+
+    assert result == {"text": "正確文字", "instruction": "輸入「正確文字」"}
+    event = json.loads(
+        (runs_root / "recording_text_edit" / "events" / "event_001.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert event["text"] == "正確文字"
+    analysis = json.loads(
+        (runs_root / "recording_text_edit" / "analysis" / "event_001.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert analysis["instruction"] == "輸入「正確文字」"
+    assert analysis["text_resolution"]["resolved_text"] == "正確文字"
+    assert analysis["text_resolution"]["source"] == "user"
+    assert analysis["text_resolution"]["recorded_text"] == "wrng"
+    report = json.loads(
+        (runs_root / "recording_text_edit" / "report.json").read_text(encoding="utf-8")
+    )
+    assert report["instructions"] == ["等待 2 秒", "輸入「正確文字」"]
+    html = (runs_root / "recording_text_edit" / "recording_steps.html").read_text(
+        encoding="utf-8"
+    )
+    assert 'value="正確文字"' in html
+    assert "輸入「正確文字」" in html
+
+
+def test_apply_recording_event_text_rejects_non_text_input(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    _make_recording_landmark_run(runs_root, "recording_click_no_text")
+
+    with pytest.raises(ValueError, match="typed-text"):
+        apply_recording_event_text(
+            runs_root,
+            "recording_click_no_text",
+            1,
+            text="nope",
+        )
+
+
+def test_apply_recording_event_text_rejects_empty(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    _make_recording_text_input_run(runs_root, "recording_text_empty")
+
+    with pytest.raises(ValueError, match="empty"):
+        apply_recording_event_text(
+            runs_root,
+            "recording_text_empty",
+            1,
+            text="   ",
+        )
+
+
+def test_runs_report_server_text_endpoint(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    _make_recording_text_input_run(runs_root, "recording_http_text")
+
+    server = RunsReportServer(runs_root)
+    try:
+        base = server.start()
+        body = json.dumps({"text": "fixed value"}, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            f"{base}/api/runs/recording_http_text/events/1/text",
+            method="POST",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            assert response.status == 200
+        assert payload["ok"] is True
+        assert payload["text"] == "fixed value"
+        assert payload["instruction"] == "輸入「fixed value」"
     finally:
         server.stop()

@@ -242,12 +242,27 @@ def enrich_click_instruction_offset(
     return instruction[:insert_at] + offset_phrase + "的位置" + remainder
 
 
+_TEXT_INPUT_INSTRUCTION_PREFIX = "輸入「"
+_TEXT_INPUT_INSTRUCTION_SUFFIX = "」"
+
+
 def instruction_for_text_input(text: str) -> str | None:
     """Build a hub-script line for a typing-only recorded event."""
     cleaned = text.strip()
     if not cleaned:
         return None
-    return f"輸入「{cleaned}」"
+    return f"{_TEXT_INPUT_INSTRUCTION_PREFIX}{cleaned}{_TEXT_INPUT_INSTRUCTION_SUFFIX}"
+
+
+def typed_text_from_instruction(instruction: str) -> str | None:
+    """Extract the typed payload from ``輸入「...」``, or None if the shape does not match."""
+    text = instruction.strip()
+    if not text.startswith(_TEXT_INPUT_INSTRUCTION_PREFIX):
+        return None
+    if not text.endswith(_TEXT_INPUT_INSTRUCTION_SUFFIX):
+        return None
+    inner = text[len(_TEXT_INPUT_INSTRUCTION_PREFIX) : -len(_TEXT_INPUT_INSTRUCTION_SUFFIX)]
+    return inner if inner else None
 
 
 def _visible_input_field_text(vision: dict[str, Any]) -> str | None:

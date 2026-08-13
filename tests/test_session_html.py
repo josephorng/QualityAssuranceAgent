@@ -709,6 +709,9 @@ def test_write_recording_html_renders_events_and_instructions(tmp_path: Path) ->
     assert "button.delete-instruction" in html
     assert 'class="copy-all-instructions"' in html
     assert "複製全部指令" in html
+    assert "instructionCopyText" in html
+    assert "# expected_outcome: " in html
+    assert 'data-expected-outcome="' not in html
     assert "刪除" in html
     assert "/api/runs/" in html
     assert "/delete" in html
@@ -716,6 +719,31 @@ def test_write_recording_html_renders_events_and_instructions(tmp_path: Path) ->
     assert "screenshots/event_001.jpeg" in html
     assert 'href="../index.html#recordings"' in html
     assert "游標" in html
+
+
+def test_write_recording_html_copy_includes_expected_outcome(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000030"
+    _write_recording_fixture(run_root)
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": "點擊「搜尋」按鈕",
+                "expected_outcome": '對話框顯示 "搜尋"',
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+
+    assert 'data-instruction="點擊「搜尋」按鈕"' in html
+    assert 'data-expected-outcome="對話框顯示 &quot;搜尋&quot;"' in html
+    assert "預期結果" in html
+    assert "對話框顯示" in html
+    assert "function instructionCopyText" in html
+    assert "# expected_outcome: " in html
 
 
 def test_write_recording_html_renders_landmark_multiselect(tmp_path: Path) -> None:
@@ -816,9 +844,38 @@ def test_write_recording_html_escapes_markup(tmp_path: Path) -> None:
     html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
 
     assert "<script>alert(1)</script>" not in html
-    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert 'value="&lt;b&gt;hi&lt;/b&gt;"' in html
     assert "輸入「&lt;b&gt;hi&lt;/b&gt;」" in html
     assert 'data-instruction="輸入「&lt;b&gt;hi&lt;/b&gt;」"' in html
+    assert 'class="typed-text-input"' in html
+    assert 'class="apply-typed-text"' in html
+    assert "/events/" in html
+    assert "/text" in html
+
+
+def test_write_recording_html_renders_typed_text_editor_from_event(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000003"
+    _write_recording_fixture(run_root, with_analysis=False)
+    (run_root / "events" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "index": 1,
+                "timestamp_utc": "2026-07-21T04:00:00+00:00",
+                "kind": "text_input",
+                "text": "hello world",
+                "screenshot_path": "",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+
+    assert 'class="typed-text"' in html
+    assert 'value="hello world"' in html
+    assert "套用</button>" in html
+    assert "<dt>文字</dt>" not in html
 
 
 def test_write_runs_index_lists_recordings_in_recordings_tab(tmp_path: Path) -> None:
@@ -916,6 +973,32 @@ def test_write_runs_index_backfills_missing_recording_html(tmp_path: Path) -> No
     assert (recording / "recording_steps.html").is_file()
     assert 'href="recording_20260721_120000_000010/recording_steps.html"' in html
     assert "點擊「搜尋」按鈕" in (recording / "recording_steps.html").read_text(encoding="utf-8")
+
+
+def test_write_runs_index_refreshes_existing_recording_html(tmp_path: Path) -> None:
+    recording = tmp_path / "recording_20260721_120000_000012"
+    _write_recording_fixture(recording, with_html=False)
+    (recording / "events" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "index": 1,
+                "timestamp_utc": "2026-07-21T04:00:00+00:00",
+                "kind": "text_input",
+                "text": "hello",
+                "screenshot_path": "",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (recording / "recording_steps.html").write_text("<html>stale</html>", encoding="utf-8")
+
+    write_runs_index_html(tmp_path)
+
+    html = (recording / "recording_steps.html").read_text(encoding="utf-8")
+    assert "stale" not in html
+    assert 'class="typed-text-input"' in html
+    assert 'value="hello"' in html
 
 
 def test_write_runs_index_excludes_recording_from_runs_tab(tmp_path: Path) -> None:

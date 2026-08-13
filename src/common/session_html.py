@@ -163,6 +163,38 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
   font-size: .75rem; color: #57606a; font-weight: 600;
 }
 .landmarks-status.error { color: #cf222e; }
+.typed-text {
+  margin: 0 1.5rem 1rem; padding: .75rem 1rem;
+  border: 1px solid #d0d7de; border-radius: 8px; background: #f6f8fa;
+}
+.typed-text-title {
+  margin: 0 0 .5rem; font-size: .9rem; font-weight: 700; color: #57606a;
+}
+.typed-text-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .5rem;
+}
+.typed-text-input {
+  flex: 1 1 16rem; min-width: 12rem;
+  font-family: inherit; font-size: .9rem; line-height: 1.3;
+  padding: .35rem .55rem; border: 1px solid #d0d7de; border-radius: 6px;
+  background: #fff; color: #1f2328;
+}
+.apply-typed-text {
+  appearance: none; border: 1px solid #0969da; background: #ddf4ff;
+  cursor: pointer; border-radius: 6px; padding: .3rem .7rem;
+  font-size: .8rem; line-height: 1.2; font-family: inherit;
+  font-weight: 600; color: #0969da; flex: 0 0 auto;
+}
+.apply-typed-text:hover:not(:disabled) { background: #b6e3ff; }
+.apply-typed-text:disabled { opacity: .45; cursor: not-allowed; }
+.apply-typed-text.applied {
+  color: #116329; border-color: #4ac26b; background: #dafbe1;
+}
+.typed-text-status {
+  display: inline-block;
+  font-size: .75rem; color: #57606a; font-weight: 600;
+}
+.typed-text-status.error { color: #cf222e; }
 .hand-ops {
   list-style: disc; margin: 0; padding: 1rem 1.5rem 1.25rem 2.5rem;
 }
@@ -242,11 +274,19 @@ _RECORDING_SCRIPT = """
     }, 1200);
   }
 
+  function instructionCopyText(btn) {
+    var instruction = btn.getAttribute("data-instruction") || "";
+    if (!instruction) return "";
+    var outcome = (btn.getAttribute("data-expected-outcome") || "").trim();
+    if (!outcome) return instruction;
+    return instruction + "\\n# expected_outcome: " + outcome;
+  }
+
   Array.prototype.slice.call(document.querySelectorAll("button.copy-instruction")).forEach(function (btn) {
     btn.addEventListener("click", function (event) {
       event.preventDefault();
       event.stopPropagation();
-      var text = btn.getAttribute("data-instruction") || "";
+      var text = instructionCopyText(btn);
       if (!text) return;
       copyText(text).then(function () {
         flashCopied(btn);
@@ -310,7 +350,7 @@ _RECORDING_SCRIPT = """
     copyAll.addEventListener("click", function () {
       var lines = Array.prototype.slice
         .call(document.querySelectorAll("button.copy-instruction[data-instruction]"))
-        .map(function (btn) { return btn.getAttribute("data-instruction") || ""; })
+        .map(function (btn) { return instructionCopyText(btn); })
         .filter(function (text) { return !!text; });
       if (!lines.length) return;
       copyText(lines.join("\\n")).then(function () {
@@ -421,6 +461,88 @@ _RECORDING_SCRIPT = """
         });
     });
   });
+
+  function setTypedTextStatus(panel, text, isError) {
+    var status = panel.querySelector(".typed-text-status");
+    if (!status) return;
+    status.textContent = text || "";
+    if (isError) status.classList.add("error");
+    else status.classList.remove("error");
+  }
+
+  Array.prototype.slice.call(document.querySelectorAll("button.apply-typed-text")).forEach(function (btn) {
+    btn.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      applyTypedText(btn);
+    });
+  });
+
+  Array.prototype.slice.call(document.querySelectorAll(".typed-text-input")).forEach(function (input) {
+    input.addEventListener("keydown", function (event) {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      event.stopPropagation();
+      var panel = input.closest(".typed-text");
+      var btn = panel ? panel.querySelector("button.apply-typed-text") : null;
+      if (btn) applyTypedText(btn);
+    });
+  });
+
+  function applyTypedText(btn) {
+      var panel = btn.closest(".typed-text");
+      var group = btn.closest(".instruction-group");
+      if (!panel || !group) return;
+      var input = panel.querySelector(".typed-text-input");
+      if (!input) return;
+      if (window.location.protocol === "file:") {
+        setTypedTextStatus(panel, "請透過主程式開啟報告以修改文字。", true);
+        return;
+      }
+      var runId = group.getAttribute("data-run-id") || "";
+      var eventIndex = group.getAttribute("data-event-index") || "";
+      if (!runId || !eventIndex) {
+        setTypedTextStatus(panel, "缺少事件資訊。", true);
+        return;
+      }
+      var text = input.value || "";
+      btn.disabled = true;
+      setTypedTextStatus(panel, "套用中…", false);
+      fetch("/api/runs/" + encodeURIComponent(runId) + "/events/" + encodeURIComponent(eventIndex) + "/text", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: text })
+      })
+        .then(function (response) {
+          return response.json().then(function (payload) {
+            return { ok: response.ok, payload: payload };
+          });
+        })
+        .then(function (result) {
+          btn.disabled = false;
+          if (!result.ok || !result.payload || !result.payload.ok) {
+            var err = (result.payload && result.payload.error) || "套用失敗";
+            setTypedTextStatus(panel, err, true);
+            return;
+          }
+          var instruction = result.payload.instruction || "";
+          var saved = result.payload.text || "";
+          input.value = saved;
+          var title = group.querySelector(".instruction-title");
+          if (title && instruction) title.textContent = instruction;
+          var copyBtn = group.querySelector("button.copy-instruction");
+          if (copyBtn && instruction) copyBtn.setAttribute("data-instruction", instruction);
+          btn.classList.add("applied");
+          setTypedTextStatus(panel, "已套用", false);
+          window.setTimeout(function () {
+            btn.classList.remove("applied");
+          }, 1200);
+        })
+        .catch(function () {
+          btn.disabled = false;
+          setTypedTextStatus(panel, "無法連線主程式，請確認主程式正在執行。", true);
+        });
+  }
 })();
 """.strip()
 
@@ -1976,6 +2098,52 @@ def _render_landmarks_panel_html(
     )
 
 
+def _typed_text_for_editor(
+    event: dict[str, Any],
+    analysis: dict[str, Any] | None,
+    instruction: str,
+) -> str:
+    from src.recorder.analyze import typed_text_from_instruction
+
+    extracted = typed_text_from_instruction(instruction) if instruction else None
+    if extracted is not None:
+        return extracted
+    if isinstance(analysis, dict):
+        resolution = analysis.get("text_resolution")
+        if isinstance(resolution, dict):
+            resolved = resolution.get("resolved_text")
+            if isinstance(resolved, str) and resolved:
+                return resolved
+    text = event.get("text")
+    if isinstance(text, str):
+        return text
+    return ""
+
+
+def _render_typed_text_panel_html(
+    *,
+    event: dict[str, Any],
+    analysis: dict[str, Any] | None,
+    instruction: str,
+) -> str:
+    kind = str(event.get("kind") or "")
+    if kind != "text_input":
+        return ""
+    value = _typed_text_for_editor(event, analysis, instruction)
+    return (
+        f'<div class="typed-text">'
+        f'<div class="typed-text-title">輸入文字</div>'
+        f'<div class="typed-text-row">'
+        f'<input type="text" class="typed-text-input" value="{escape(value, quote=True)}" '
+        f'spellcheck="false" autocomplete="off" aria-label="輸入文字">'
+        f'<button type="button" class="apply-typed-text" title="儲存修改後的輸入文字">'
+        f"套用</button>"
+        f'<span class="typed-text-status" aria-live="polite"></span>'
+        f"</div>"
+        f"</div>"
+    )
+
+
 def _render_recording_event_html(*, run_root: Path, event: dict[str, Any]) -> str:
     raw_index = event.get("index")
     index = raw_index if isinstance(raw_index, int) else 0
@@ -1994,11 +2162,15 @@ def _render_recording_event_html(*, run_root: Path, event: dict[str, Any]) -> st
     time_text = escape(_timestamp_text(event.get("timestamp_utc"))) or "—"
     run_id = escape(run_root.name, quote=True)
 
-    meta_rows: list[tuple[str, str]] = [("時間", time_text)]
+    expected_outcome = ""
     if isinstance(analysis, dict):
-        expected_outcome = analysis.get("expected_outcome")
-        if isinstance(expected_outcome, str) and expected_outcome.strip():
-            meta_rows.append(("預期結果", escape(expected_outcome.strip())))
+        raw_outcome = analysis.get("expected_outcome")
+        if isinstance(raw_outcome, str) and raw_outcome.strip():
+            expected_outcome = raw_outcome.strip()
+
+    meta_rows: list[tuple[str, str]] = [("時間", time_text)]
+    if expected_outcome:
+        meta_rows.append(("預期結果", escape(expected_outcome)))
     cursor = _format_xy(event.get("cursor_xy"))
     if cursor:
         meta_rows.append(("游標", escape(cursor)))
@@ -2006,7 +2178,7 @@ def _render_recording_event_html(*, run_root: Path, event: dict[str, Any]) -> st
     if end_xy:
         meta_rows.append(("終點", escape(end_xy)))
     text = event.get("text")
-    if isinstance(text, str) and text:
+    if kind != "text_input" and isinstance(text, str) and text:
         meta_rows.append(("文字", escape(text)))
     key = event.get("key")
     if isinstance(key, str) and key:
@@ -2038,8 +2210,18 @@ def _render_recording_event_html(*, run_root: Path, event: dict[str, Any]) -> st
         kind=kind,
         instruction=instruction,
     )
+    typed_text_html = _render_typed_text_panel_html(
+        event=event,
+        analysis=analysis if isinstance(analysis, dict) else None,
+        instruction=instruction,
+    )
 
     copy_attr = escape(title, quote=True)
+    outcome_attr = (
+        f' data-expected-outcome="{escape(expected_outcome, quote=True)}"'
+        if expected_outcome
+        else ""
+    )
     return (
         f'<details class="instruction-group" data-run-id="{run_id}" '
         f'data-event-index="{index}" data-kind="{escape(kind, quote=True)}">'
@@ -2047,12 +2229,14 @@ def _render_recording_event_html(*, run_root: Path, event: dict[str, Any]) -> st
         f'<span class="instruction-number">{step_label}</span>'
         f'<span class="instruction-title">{escape(title)}</span>'
         f'<span class="badge neutral">{kind_badge}</span>'
-        f'<button type="button" class="copy-instruction" data-instruction="{copy_attr}" '
+        f'<button type="button" class="copy-instruction" data-instruction="{copy_attr}"'
+        f'{outcome_attr} '
         f'title="複製指令" aria-label="複製指令">複製</button>'
         f'<button type="button" class="delete-instruction" '
         f'title="刪除指令" aria-label="刪除指令">刪除</button>'
         f"</summary>"
         f'<div class="meta" style="padding: 1rem 1.5rem 0;"><dl>{meta_html}</dl></div>'
+        f"{typed_text_html}"
         f"{landmarks_html}"
         f'<div class="shots" style="padding: 0 1.5rem 1.25rem;">{shots}</div>'
         f"</details>"
@@ -2224,8 +2408,6 @@ def _render_recordings_tab_panel(recording_dirs: list[Path]) -> str:
 
 def _backfill_recording_html(runs_root: Path) -> None:
     for run_dir in _iter_recording_source_dirs(runs_root):
-        if (run_dir / _RECORDING_HTML_NAME).is_file():
-            continue
         write_recording_html_from_run(run_dir, update_index=False)
 
 

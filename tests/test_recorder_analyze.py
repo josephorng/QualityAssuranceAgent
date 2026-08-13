@@ -490,6 +490,16 @@ async def test_analyze_event_to_cache_text_input_is_deterministic(tmp_path: Path
     llm_mock.assert_not_called()
 
 
+def test_typed_text_from_instruction_round_trips() -> None:
+    from src.recorder.analyze import instruction_for_text_input, typed_text_from_instruction
+
+    instruction = instruction_for_text_input("hello」world")
+    assert instruction == "輸入「hello」world」"
+    assert typed_text_from_instruction(instruction) == "hello」world"
+    assert typed_text_from_instruction("點擊「搜尋」按鈕") is None
+    assert typed_text_from_instruction("輸入「」") is None
+
+
 @pytest.mark.asyncio
 async def test_analyze_event_to_cache_window_change_is_deterministic(tmp_path: Path) -> None:
     event = RecordedEvent(

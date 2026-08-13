@@ -5,6 +5,7 @@ reports index via this loopback server and the page POSTs to ``/api/runs/<id>/de
 Bug reports POST to ``/api/runs/<id>/bug`` to zip a run folder onto a network share.
 Recording landmark edits POST to ``/api/runs/<id>/events/<n>/landmarks``
 (also accepts optional primary-target index swaps).
+Recording typed-text edits POST to ``/api/runs/<id>/events/<n>/text``.
 Recording event deletes POST to ``/api/runs/<id>/events/<n>/delete``.
 """
 
@@ -24,7 +25,7 @@ from urllib.parse import unquote, urlparse
 from src.common.io_utils import read_json, write_json
 from src.common.nearby_side import NearbyHint, apply_nearby_landmarks, normalize_nearby_hints
 from src.common.session_html import write_recording_html_from_run, write_runs_index_html
-from src.recorder.analyze import rebuild_pointer_instruction
+from src.recorder.analyze import instruction_for_text_input, rebuild_pointer_instruction
 from src.recorder.models import (
     RecordedEvent,
     event_json_path,
@@ -48,6 +49,10 @@ _LANDMARKS_PATH_RE = re.compile(
 _EVENT_DELETE_PATH_RE = re.compile(
     r"^/api/runs/([^/]+)/events/(\d+)/delete/?$"
 )
+_EVENT_TEXT_PATH_RE = re.compile(
+    r"^/api/runs/([^/]+)/events/(\d+)/text/?$"
+)
+_TYPED_TEXT_MAX_LEN = 8192
 
 # Default destination for "report bug" zip copies (Windows UNC share).
 BUG_REPORT_SHARE_DIR = Path(r"\\192.168.0.9\Joseph\CUA-BUG")
@@ -501,6 +506,71 @@ def apply_recording_event_landmarks(
     return {"instruction": new_instruction, "rebuilt": rebuilt}
 
 
+def apply_recording_event_text(
+    runs_root: Path,
+    run_id: str,
+    event_index: int,
+    *,
+    text: Any,
+) -> dict[str, Any]:
+    """Replace typed text for one ``text_input`` event and persist instruction artifacts.
+
+    Returns ``{"text": ..., "instruction": ...}``. Raises ``ValueError`` for invalid input.
+    """
+    run_dir = resolve_deletable_run_folder(runs_root, run_id)
+    if not isinstance(event_index, int) or event_index < 1:
+        raise ValueError("invalid event index")
+    if not isinstance(text, str):
+        raise ValueError("text must be a string")
+    if len(text) > _TYPED_TEXT_MAX_LEN:
+        raise ValueError("text is too long")
+    cleaned = text.strip()
+    if not cleaned:
+        raise ValueError("text is empty")
+
+    event_path = event_json_path(run_dir, event_index)
+    event_payload = read_json(event_path, None)
+    if not isinstance(event_payload, dict):
+        raise ValueError("event not found")
+    kind = event_payload.get("kind")
+    if kind != "text_input":
+        raise ValueError("event does not support typed-text edits")
+
+    previous_text = event_payload.get("text")
+    event_payload["text"] = cleaned
+    write_json(event_path, event_payload)
+
+    instruction = instruction_for_text_input(cleaned)
+    if instruction is None:
+        raise ValueError("text is empty")
+
+    analysis_path = run_dir / "analysis" / f"event_{event_index:03d}.json"
+    analysis = read_json(analysis_path, None)
+    if isinstance(analysis, dict):
+        analysis["instruction"] = instruction
+        resolution = analysis.get("text_resolution")
+        if not isinstance(resolution, dict):
+            resolution = {}
+            analysis["text_resolution"] = resolution
+        if "recorded_text" not in resolution:
+            recorded = previous_text if isinstance(previous_text, str) else cleaned
+            resolution["recorded_text"] = recorded
+        resolution["resolved_text"] = cleaned
+        resolution["source"] = "user"
+        resolution["reason"] = "edited in recording_steps.html"
+        write_json(analysis_path, analysis)
+
+        report_path = run_dir / "report.json"
+        report = read_json(report_path, {})
+        if not isinstance(report, dict):
+            report = {}
+        _rebuild_report_instructions(run_dir, report)
+        write_json(report_path, report)
+
+    write_recording_html_from_run(run_dir, update_index=False)
+    return {"text": cleaned, "instruction": instruction}
+
+
 def zip_run_report_to_bug_share(
     runs_root: Path,
     run_id: str,
@@ -557,6 +627,7 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
             delete_match = _DELETE_PATH_RE.fullmatch(path)
             bug_match = _BUG_PATH_RE.fullmatch(path)
             landmarks_match = _LANDMARKS_PATH_RE.fullmatch(path)
+            event_text_match = _EVENT_TEXT_PATH_RE.fullmatch(path)
             event_delete_match = _EVENT_DELETE_PATH_RE.fullmatch(path)
 
             if delete_match is not None:
@@ -602,6 +673,27 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
                         selected_end=body.get("selected_end"),
                         primary_index=body.get("primary_index"),
                         primary_end_index=body.get("primary_end_index"),
+                    )
+                except ValueError as exc:
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                    return
+                except OSError as exc:
+                    self._send_json(500, {"ok": False, "error": str(exc)})
+                    return
+                self._send_json(200, {"ok": True, **result})
+                return
+
+            if event_text_match is not None:
+                run_id = event_text_match.group(1)
+                event_index_raw = event_text_match.group(2)
+                try:
+                    event_index = int(event_index_raw)
+                    body = self._read_json_body()
+                    result = apply_recording_event_text(
+                        root,
+                        run_id,
+                        event_index,
+                        text=body.get("text"),
                     )
                 except ValueError as exc:
                     self._send_json(400, {"ok": False, "error": str(exc)})

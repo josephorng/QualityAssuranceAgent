@@ -82,6 +82,9 @@ def fill_blank_ids(seq_indices: Sequence[Any], blank_idx: int) -> list[int]:
     for (left_t, left_id), (right_t, right_id) in zip(anchors, anchors[1:]):
         if right_t - left_t <= 1:
             continue
+        # Keep blanks between repeated characters so CTC can emit each one.
+        if left_id == right_id:
+            continue
         midpoint = (left_t + right_t + 1) // 2
         for t in range(left_t + 1, right_t):
             if seq[t] != blank_idx:

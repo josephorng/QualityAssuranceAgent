@@ -8,9 +8,55 @@ import pytest
 from cua_mcp.read_screen_text.constrained_decode import (
     CharSpan,
     fill_blank_ids,
+    greedy_ctc_decode_ids,
     greedy_ctc_decode_spans,
 )
 from cua_mcp.read_screen_text.inference_onnx import TextPredictor
+
+
+def test_fill_blank_ids_preserves_blanks_between_repeated_characters() -> None:
+    blank = 9999
+    o_id = 111
+    seq = [o_id, blank, blank, o_id]
+    filled = fill_blank_ids(seq, blank)
+    assert filled == [o_id, blank, blank, o_id]
+
+
+def test_greedy_ctc_decode_ids_keeps_consecutive_same_letters() -> None:
+    blank = 9999
+    char_dict = {
+        "71": "G",
+        "111": "o",
+        "103": "g",
+        "108": "l",
+        "101": "e",
+    }
+    # Two ``o`` peaks separated by blanks, as CTC emits for "Google".
+    ids = [[71, 111, blank, 111, 103, 108, 101]]
+    assert greedy_ctc_decode_ids(ids, char_dict, blank_idx=blank) == ["Google"]
+
+
+def test_decode_outputs_with_widths_keeps_consecutive_same_letters() -> None:
+    predictor = TextPredictor(quiet=True)
+    blank = predictor.blank_idx
+    g_id, o_id, g2_id, l_id, e_id = 39, 79, 71, 76, 69
+    text_ids = np.array(
+        [[g_id, o_id, blank, o_id, g2_id, l_id, e_id, blank, blank, blank]],
+        dtype=np.int64,
+    )
+    icon_ids = text_ids.copy()
+
+    texts, spans = predictor.decode_outputs(
+        text_ids,
+        icon_ids,
+        mode="text",
+        widths=[70],
+        padded_w=100,
+    )
+
+    assert texts == ["Google"]
+    assert len(spans[0]) == 6
+    assert [span.char for span in spans[0]] == list("Google")
 
 
 def test_fill_blank_ids_expands_gaps_with_midpoint_split() -> None:

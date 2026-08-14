@@ -165,7 +165,7 @@ class TextPredictor:
             filled = _fill_blank_batch(ids, self.blank_idx)
             pred_chars.extend(
                 greedy_ctc_decode_ids(
-                    filled, self.char_decode_dict, blank_idx=self.blank_idx
+                    ids, self.char_decode_dict, blank_idx=self.blank_idx
                 )
             )
             pred_spans.extend(

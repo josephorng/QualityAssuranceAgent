@@ -14,6 +14,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+from cua_mcp.char_target import resolve_char_screen_point
 from cua_mcp.geometry import clip_box, iou_xywh
 from cua_mcp.instruction_offset import parse_mouse_target_instruction
 from cua_mcp.icon_map import (
@@ -22,7 +23,11 @@ from cua_mcp.icon_map import (
     is_unknown_icon_record,
     text_has_pua,
 )
-from cua_mcp.read_screen_text.ocr_image import _ocr_boxes_on_bgr, ocr_mode_for_yolo_class
+from cua_mcp.read_screen_text.ocr_image import (
+    _ocr_boxes_on_bgr,
+    ocr_box_with_spans,
+    ocr_mode_for_yolo_class,
+)
 from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
 from cua_mcp.select_ui_element import (
     UiDetection,
@@ -830,6 +835,55 @@ def _detections_for_captured_monitor(
     return [_offset_detection(d, left, top) for d in local_candidates]
 
 
+def _monitor_capture_for_global_point(
+    captured: list[tuple[int, np.ndarray]],
+    global_x: int,
+    global_y: int,
+) -> tuple[int, np.ndarray, int, int] | None:
+    """Return ``(monitor_index, bgr, left, top)`` for a virtual-desktop point."""
+    for monitor_index, bgr in captured:
+        left, top = active_monitor_offset(monitor_index)
+        img_h, img_w = bgr.shape[:2]
+        if left <= global_x < left + img_w and top <= global_y < top + img_h:
+            return monitor_index, bgr, left, top
+    if captured:
+        monitor_index, bgr = captured[0]
+        left, top = active_monitor_offset(monitor_index)
+        return monitor_index, bgr, left, top
+    return None
+
+
+def _resolve_char_target_point(
+    chosen: UiDetection,
+    captured: list[tuple[int, np.ndarray]],
+    char_target: str,
+    *,
+    char_occurrence: int,
+) -> tuple[int, int] | None:
+    """Resolve a char-target instruction to global virtual-desktop coordinates."""
+    monitor_info = _monitor_capture_for_global_point(captured, chosen.cx, chosen.cy)
+    if monitor_info is None:
+        return None
+
+    _monitor_index, bgr, left, top = monitor_info
+    img_h, img_w = bgr.shape[:2]
+    bx, by, bw, bh = chosen.bbox
+    local_bbox = (bx - left, by - top, bw, bh)
+    mode = ocr_mode_for_yolo_class(chosen.class_id)
+    _text, spans = ocr_box_with_spans(bgr, local_bbox, mode=mode)
+    local_point = resolve_char_screen_point(
+        local_bbox,
+        spans,
+        char_target,
+        occurrence=char_occurrence,
+        img_w=img_w,
+        img_h=img_h,
+    )
+    if local_point is None:
+        return None
+    return local_point[0] + left, local_point[1] + top
+
+
 def _collect_monitor_detections(
     captured: list[tuple[int, np.ndarray]],
     *,
@@ -1059,8 +1113,8 @@ async def find_mouse_point(
         raise ValueError("instruction must be non-empty")
 
     # Parse anchor/offset/nearby once; filter splits anchor vs nearby; pick uses anchor only.
-    anchor, offset_dx, offset_dy, nearby_from_instruction = await parse_mouse_target_instruction(
-        instruction_text
+    anchor, offset_dx, offset_dy, nearby_from_instruction, char_target, char_occurrence = (
+        await parse_mouse_target_instruction(instruction_text)
     )
     nearby_hints = merge_nearby_hints(nearby_objects, nearby_from_instruction)
     nearby_labels = nearby_hints_to_labels(nearby_hints)
@@ -1151,7 +1205,29 @@ async def find_mouse_point(
 
     resolved_x = chosen.cx + offset_dx
     resolved_y = chosen.cy + offset_dy
-    if offset_dx or offset_dy:
+    char_center: dict[str, int] | None = None
+    if char_target:
+        char_point = _resolve_char_target_point(
+            chosen,
+            captured,
+            char_target,
+            char_occurrence=char_occurrence,
+        )
+        if char_point is not None:
+            resolved_x, resolved_y = char_point
+            char_center = {"x": resolved_x, "y": resolved_y}
+            _log_info(
+                "move_mouse char target applied "
+                f"char={char_target!r} occurrence={char_occurrence} "
+                f"resolved=[{resolved_x},{resolved_y}]"
+            )
+        else:
+            _log_info(
+                "move_mouse char target fallback to anchor center "
+                f"char={char_target!r} occurrence={char_occurrence} "
+                f"anchor=[{chosen.cx},{chosen.cy}]"
+            )
+    elif offset_dx or offset_dy:
         _log_info(
             "move_mouse relative offset applied "
             f"dx={offset_dx} dy={offset_dy} "
@@ -1165,6 +1241,8 @@ async def find_mouse_point(
         "image_center": {"x": chosen.cx, "y": chosen.cy},
         "resolved_center": {"x": resolved_x, "y": resolved_y},
         "relative_offset": {"dx": offset_dx, "dy": offset_dy},
+        "char_target": char_target,
+        "char_occurrence": char_occurrence,
         "anchor_instruction": instruction_text,
         "nearby_objects": nearby_phrases,
         "screenshot_path": image_path,
@@ -1181,6 +1259,8 @@ async def find_mouse_point(
     }
     if selected_text is not None:
         meta["selected_text"] = selected_text
+    if char_center is not None:
+        meta["resolved_char_center"] = char_center
     return resolved_x, resolved_y, meta
 
 

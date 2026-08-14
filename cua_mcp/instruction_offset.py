@@ -6,6 +6,7 @@ import json
 import re
 from typing import Any
 
+from cua_mcp.char_target import parse_char_target_instruction, text_anchor_from_full_text
 from cua_mcp.selection_engine import request_json_with_retry
 from src.common.nearby_side import (
     NearbyHint,
@@ -26,6 +27,8 @@ _OFFSET_RESPONSE_SCHEMA: dict[str, Any] = {
         "anchor": {"type": "string"},
         "dx": {"type": "integer"},
         "dy": {"type": "integer"},
+        "char": {"type": ["string", "null"]},
+        "char_occurrence": {"type": "integer"},
         "nearby": {
             "type": "array",
             "items": {
@@ -71,7 +74,17 @@ def _parse_nearby_items(nearby: Any) -> list[NearbyHint]:
     return normalize_nearby_hints(items)
 
 
-def _parse_offset_reply(raw: str) -> tuple[str, int, int, list[NearbyHint]]:
+def _parse_char_occurrence(raw: Any) -> int:
+    if raw is None:
+        return 0
+    if not isinstance(raw, int) or isinstance(raw, bool):
+        raise ValueError("char_occurrence must be an integer")
+    return max(0, raw)
+
+
+def _parse_offset_reply(
+    raw: str,
+) -> tuple[str, int, int, list[NearbyHint], str | None, int]:
     data = json.loads(raw)
     if not isinstance(data, dict):
         raise ValueError("response is not an object")
@@ -79,14 +92,18 @@ def _parse_offset_reply(raw: str) -> tuple[str, int, int, list[NearbyHint]]:
     dx = data.get("dx")
     dy = data.get("dy")
     nearby = data.get("nearby")
+    char = data.get("char")
+    char_occurrence = _parse_char_occurrence(data.get("char_occurrence"))
     if not isinstance(anchor, str):
         raise ValueError("anchor must be a string")
     if not isinstance(dx, int) or isinstance(dx, bool):
         raise ValueError("dx must be an integer")
     if not isinstance(dy, int) or isinstance(dy, bool):
         raise ValueError("dy must be an integer")
+    if char is not None and (not isinstance(char, str) or not char):
+        raise ValueError("char must be a non-empty string or null")
     nearby_hints = _parse_nearby_items(nearby)
-    return anchor.strip(), dx, dy, nearby_hints
+    return anchor.strip(), dx, dy, nearby_hints, char, char_occurrence
 
 
 def _strip_trailing_context_comment(text: str) -> str:
@@ -98,6 +115,32 @@ def _strip_context_comments(text: str) -> str:
     """Remove inline start and trailing nearby-context comments."""
     text = _strip_trailing_context_comment(text)
     return _INLINE_START_CONTEXT_COMMENT_RE.sub("", text).strip()
+
+
+def _normalize_char_target_fields(
+    anchor: str,
+    dx: int,
+    dy: int,
+    char: str | None,
+    char_occurrence: int,
+) -> tuple[str, int, int, str | None, int]:
+    """Normalize char-target instructions to YOLO anchor + char metadata."""
+    parsed = parse_char_target_instruction(anchor)
+    if parsed is not None:
+        full_text, parsed_char, parsed_occurrence = parsed
+        resolved_char = char or parsed_char
+        resolved_occurrence = char_occurrence if char is not None else parsed_occurrence
+        return (
+            text_anchor_from_full_text(full_text),
+            0,
+            0,
+            resolved_char,
+            resolved_occurrence,
+        )
+
+    if char:
+        return anchor, 0, 0, char, char_occurrence
+    return anchor, dx, dy, None, 0
 
 
 def _parse_relative_pixel_offset_regex(instruction: str) -> tuple[str, int, int]:
@@ -127,25 +170,44 @@ def _parse_relative_pixel_offset_regex(instruction: str) -> tuple[str, int, int]
     return anchor, dx, dy
 
 
+def _parse_mouse_target_regex(
+    instruction: str,
+) -> tuple[str, int, int, str | None, int]:
+    """Regex-only parse including char-target phrases."""
+    text = _strip_context_comments((instruction or "").strip())
+    if not text:
+        return "", 0, 0, None, 0
+
+    parsed = parse_char_target_instruction(text)
+    if parsed is not None:
+        full_text, char, occurrence = parsed
+        return text_anchor_from_full_text(full_text), 0, 0, char, occurrence
+
+    anchor, dx, dy = _parse_relative_pixel_offset_regex(instruction)
+    anchor, dx, dy, char, occurrence = _normalize_char_target_fields(
+        anchor, dx, dy, None, 0
+    )
+    return anchor, dx, dy, char, occurrence
+
+
 async def parse_mouse_target_instruction(
     instruction: str,
-) -> tuple[str, int, int, list[NearbyHint]]:
+) -> tuple[str, int, int, list[NearbyHint], str | None, int]:
     """
-    Split an instruction into anchor text, relative pixel offset, and nearby hints.
+    Split an instruction into anchor text, relative pixel offset, nearby hints,
+    and optional char target metadata.
 
-    Uses an LLM to extract anchor/dx/dy/nearby, with a regex fallback for
-    anchor/dx/dy on failure. Nearby hints are also recovered from parenthetical
-    comments on the regex path when possible.
-    Positive dx is right; positive dy is down.
+    Uses an LLM to extract anchor/dx/dy/nearby/char, with a regex fallback on
+    failure. Positive dx is right; positive dy is down.
     """
     text = (instruction or "").strip()
     if not text:
-        return "", 0, 0, []
+        return "", 0, 0, [], None, 0
 
     prompt = get_prompt("mouse_target_instruction").format(instruction=text)
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
     try:
-        anchor, dx, dy, nearby = await request_json_with_retry(
+        anchor, dx, dy, nearby, char, char_occurrence = await request_json_with_retry(
             messages=messages,
             response_schema=_OFFSET_RESPONSE_SCHEMA,
             parse_reply=_parse_offset_reply,
@@ -155,16 +217,21 @@ async def parse_mouse_target_instruction(
         )
         if not anchor:
             raise ValueError("anchor is empty")
+        anchor, dx, dy, char, char_occurrence = _normalize_char_target_fields(
+            anchor, dx, dy, char, char_occurrence
+        )
         _log_info(
             "parse_mouse_target_instruction LLM "
-            f"anchor={anchor!r} dx={dx} dy={dy} nearby={nearby!r}"
+            f"anchor={anchor!r} dx={dx} dy={dy} char={char!r} "
+            f"char_occurrence={char_occurrence} nearby={nearby!r}"
         )
-        return anchor, dx, dy, nearby
+        return anchor, dx, dy, nearby, char, char_occurrence
     except (ValueError, json.JSONDecodeError) as exc:
-        anchor, dx, dy = _parse_relative_pixel_offset_regex(text)
+        anchor, dx, dy, char, char_occurrence = _parse_mouse_target_regex(text)
         nearby = extract_nearby_hints_from_instruction(text)
         _log_info(
             "parse_mouse_target_instruction regex fallback "
-            f"({exc}) anchor={anchor!r} dx={dx} dy={dy} nearby={nearby!r}"
+            f"({exc}) anchor={anchor!r} dx={dx} dy={dy} char={char!r} "
+            f"char_occurrence={char_occurrence} nearby={nearby!r}"
         )
-        return anchor, dx, dy, nearby
+        return anchor, dx, dy, nearby, char, char_occurrence

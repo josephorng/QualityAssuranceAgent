@@ -10,6 +10,7 @@ import cv2
 if TYPE_CHECKING:
     import numpy as np
 
+from cua_mcp.char_target import detect_clicked_char, format_char_target_anchor
 from cua_mcp.icon_map import is_pua_char
 from cua_mcp.read_screen_text.ocr_image import _ocr_boxes_on_bgr
 from cua_mcp.select_mouse_target import _build_candidates_from_bgr
@@ -646,6 +647,55 @@ def _tier0_cell_rank(
         return _TIER0_NON_CARDINAL_RANK
     cell = landmark_cell_from_anchor_bbox(primary_bbox, center[0], center[1])
     return _TIER0_CELL_RANK.get(cell, _TIER0_NON_CARDINAL_RANK)
+
+
+def primary_candidate_char_target(vision: dict[str, Any]) -> tuple[str, int] | None:
+    """Return ``(char, occurrence_0based)`` from the primary candidate, if annotated."""
+    candidates = vision.get("candidates") or []
+    if not candidates:
+        return None
+    primary = candidates[0]
+    clicked_char = primary.get("clicked_char")
+    if not isinstance(clicked_char, str) or not clicked_char:
+        return None
+    raw_index = primary.get("clicked_char_index", 0)
+    try:
+        occurrence = int(raw_index)
+    except (TypeError, ValueError):
+        occurrence = 0
+    if occurrence < 0:
+        occurrence = 0
+    return clicked_char, occurrence
+
+
+def _annotate_clicked_char_target(
+    bgr: np.ndarray,
+    candidates: list[dict[str, Any]],
+    local_x: int,
+    local_y: int,
+) -> None:
+    """Store clicked character metadata on the primary text candidate when applicable."""
+    if not candidates:
+        return
+    primary = candidates[0]
+    if str(primary.get("class_name") or "").strip() != "text":
+        return
+    visible = _visible_text(primary.get("text"))
+    if len(visible) <= 1:
+        return
+    if not _drop_point_inside_candidate(local_x, local_y, primary):
+        return
+
+    bbox = _as_bbox_xywh(primary.get("bbox"))
+    if bbox is None:
+        return
+
+    detected = detect_clicked_char(bgr, bbox, local_x, text=visible)
+    if detected is None:
+        return
+    clicked_char, occurrence = detected
+    primary["clicked_char"] = clicked_char
+    primary["clicked_char_index"] = occurrence
 
 
 def _as_bbox_xywh(value: Any) -> tuple[int, int, int, int] | None:
@@ -1431,6 +1481,8 @@ def build_vision_context_at_point(
         candidate_text = _format_ui_candidates_text(nearest)
 
     candidate_dicts = [_detection_to_dict(d) for d in nearest]
+    if all_detections and candidate_dicts:
+        _annotate_clicked_char_target(bgr, candidate_dicts, local_x, local_y)
     payload: dict[str, Any] = {
         "event_index": event.index,
         "image_path": resolved_image_path,

@@ -535,9 +535,13 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Instruction:\n{instruction}\n"
             ),
             "instructions": [
-                'Return JSON only: {{"anchor": "<string>", "dx": <integer>, "dy": <integer>, "nearby": [{{"label": "<string>", "side": <string|null>}}, ...]}}.',
+                'Return JSON only: {{"anchor": "<string>", "dx": <integer>, "dy": <integer>, '
+                '"char": <string|null>, "char_occurrence": <integer>, '
+                '"nearby": [{{"label": "<string>", "side": <string|null>}}, ...]}}.',
                 "anchor: the on-screen target phrase for locating a UI element, without relative pixel offset clauses and without trailing 的位置.",
                 "Keep quoted labels and type suffixes when present, e.g. 「振銓」文字, 「Chrome」圖示, 「Submit」按鈕.",
+                "For character-level targets like 「搜尋」的「搜」字上 or 「Google」的第2個「o」字上, set anchor to the full char-target phrase, char to the single target character (e.g. 搜, o), and char_occurrence to 0-based index among identical characters (0 when omitted or unique).",
+                "When char is set, use dx=0 and dy=0.",
                 "dx: horizontal offset in pixels from the anchor center; positive means right (右方), negative means left (左方).",
                 "dy: vertical offset in pixels from the anchor center; positive means down (下方), negative means up (上方).",
                 "Convert phrases like 右方5個像素 to dx=5, 上方28個像素 to dy=-28, 下方57個像素 to dy=57.",
@@ -565,6 +569,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "image_usage": "no_image",
             "prompt": (
                 'Reply with ONLY: {{"anchor": "<string>", "dx": <integer>, "dy": <integer>, '
+                '"char": <string|null>, "char_occurrence": <integer>, '
                 '"nearby": [{{"label": "<string>", "side": <string|null>}}, ...]}}. '
                 "No text before or after the JSON."
             ),

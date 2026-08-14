@@ -100,6 +100,9 @@ def warm_vision_models(*, quiet: bool = True, timeout_seconds: float = 2.5) -> t
     return False, message
 
 
+OCR_BOX_MARGIN = 2
+
+
 def _expand_box(
     x: int,
     y: int,
@@ -108,10 +111,46 @@ def _expand_box(
     img_w: int,
     img_h: int,
     *,
-    margin: int = 2,
+    margin: int = OCR_BOX_MARGIN,
 ) -> tuple[int, int, int, int]:
     """Expand a box by ``margin`` pixels on all four sides, clamped to image bounds."""
     return clip_box(x - margin, y - margin, w + 2 * margin, h + 2 * margin, img_w, img_h)
+
+
+def ocr_box_with_spans(
+    bgr: np.ndarray,
+    bbox: tuple[int, int, int, int],
+    *,
+    line_height: int = 32,
+    ocr_model_path: Optional[str] = None,
+    mode: DecodeMode = "text",
+    margin: int = OCR_BOX_MARGIN,
+) -> tuple[str, list[CharSpan]]:
+    """Run CRNN OCR on one bbox; return ``(text, char_spans)``."""
+    img_h, img_w = bgr.shape[:2]
+    try:
+        predictor = _get_ocr_predictor(ocr_model_path)
+    except FileNotFoundError as exc:
+        _log_info(f"OCR ONNX OCR model missing: {exc}")
+        return "", []
+
+    expanded = _expand_box(*bbox, img_w, img_h, margin=margin)
+    x, y, w, h = expanded
+    crop = bgr[y : y + h, x : x + w]
+    if crop.size == 0:
+        return "", []
+
+    detailed = _ocr_crops_batched_detailed(
+        [crop],
+        predictor,
+        line_height,
+        batch_size=1,
+        mode=mode,
+    )
+    if not detailed:
+        return "", []
+    _, text, spans = detailed[0]
+    return text, spans
 
 
 def _ocr_boxes_on_bgr(

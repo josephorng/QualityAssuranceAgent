@@ -20,8 +20,11 @@ from src.recorder.vision_context import (
     format_field_context_hint,
     format_input_context_hint,
     format_scrollbar_context_hint,
+    primary_candidate_char_target,
     primary_candidate_offset,
+    _visible_text,
 )
+from cua_mcp.char_target import format_char_target_anchor
 from src.recorder.window_snapshot import format_window_change_hint, instruction_for_window_change
 
 _INSTRUCTION_RESPONSE_SCHEMA: dict[str, Any] = {
@@ -315,6 +318,15 @@ def instruction_for_click(
     """Build a hub-script click line from the nearest OCR/YOLO candidate."""
     if event.kind not in _CLICK_POINTER_KINDS:
         return None
+
+    char_target = primary_candidate_char_target(vision)
+    if char_target is not None:
+        candidates = vision.get("candidates") or []
+        visible = _visible_text(candidates[0].get("text")) if candidates else ""
+        if visible:
+            clicked_char, occurrence = char_target
+            anchor = format_char_target_anchor(visible, clicked_char, occurrence=occurrence)
+            return f"{_CLICK_MOVE_PREFIX}{anchor}"
 
     anchor = _click_target_anchor(vision)
     if not anchor:

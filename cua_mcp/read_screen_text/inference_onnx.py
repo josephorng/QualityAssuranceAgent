@@ -1,13 +1,16 @@
 import os
 import time
-from typing import Sequence
+from typing import Sequence, overload
 
 import numpy as np
 import json
 
 from .constrained_decode import (
+    CharSpan,
     DecodeMode,
+    _fill_blank_batch,
     greedy_ctc_decode_ids,
+    greedy_ctc_decode_spans,
     select_mode_ids,
 )
 
@@ -30,6 +33,12 @@ def _normalize_modes(mode: DecodeMode | Sequence[DecodeMode], batch_size: int) -
             f"mode length {len(modes)} does not match batch size {batch_size}"
         )
     return modes
+
+
+def _max_timesteps(seq_len: int, content_w: int, padded_w: int) -> int:
+    if padded_w <= 0:
+        return max(1, seq_len)
+    return max(1, int(seq_len * content_w / padded_w))
 
 
 class TextPredictor:
@@ -55,12 +64,36 @@ class TextPredictor:
         self.input_name = None
         self.blank_idx = int(self.config_dict["nclass"]) - 1
 
+    @overload
     def decode_outputs(
         self,
         text_ids,
         icon_ids=None,
         *,
         mode: DecodeMode | Sequence[DecodeMode] = "text",
+        widths: None = None,
+        padded_w: int | None = None,
+    ) -> list[str]: ...
+
+    @overload
+    def decode_outputs(
+        self,
+        text_ids,
+        icon_ids=None,
+        *,
+        mode: DecodeMode | Sequence[DecodeMode] = "text",
+        widths: Sequence[int],
+        padded_w: int | None = None,
+    ) -> tuple[list[str], list[list[CharSpan]]]: ...
+
+    def decode_outputs(
+        self,
+        text_ids,
+        icon_ids=None,
+        *,
+        mode: DecodeMode | Sequence[DecodeMode] = "text",
+        widths: Sequence[int] | None = None,
+        padded_w: int | None = None,
     ):
         """
         Decode dual top-1 ONNX/Triton id streams into text predictions.
@@ -69,12 +102,14 @@ class TextPredictor:
             text_ids: [batch, seq] text-constrained top-1 class ids
             icon_ids: [batch, seq] icon/PUA-constrained top-1 class ids
             mode: ``"text"`` / ``"icon"`` / ``"any"``, or one mode per batch row
+            widths: Optional per-row content widths (pixels) for padding-aware truncation
+            padded_w: Padded batch input width; required when ``widths`` is set
 
         Returns:
-            pred_chars: List of predicted character strings
+            When ``widths`` is None: list of predicted character strings.
+            When ``widths`` is set: ``(texts, char_ranges)`` tuple.
         """
         if icon_ids is None:
-            # Back-compat for callers that still pass a single id stream.
             icon_ids = text_ids
 
         text_ids = np.asarray(text_ids)
@@ -88,24 +123,81 @@ class TextPredictor:
                 f"text_ids shape {text_ids.shape} != icon_ids shape {icon_ids.shape}"
             )
 
-        modes = _normalize_modes(mode, text_ids.shape[0])
-        if len(set(modes)) == 1:
-            ids = select_mode_ids(text_ids, icon_ids, mode=modes[0])
-            return greedy_ctc_decode_ids(
-                ids, self.char_decode_dict, blank_idx=self.blank_idx
-            )
+        batch_size = text_ids.shape[0]
+        modes = _normalize_modes(mode, batch_size)
 
-        pred_chars: list[str] = []
-        for i, row_mode in enumerate(modes):
-            ids = select_mode_ids(
-                text_ids[i : i + 1], icon_ids[i : i + 1], mode=row_mode
-            )
-            pred_chars.extend(
-                greedy_ctc_decode_ids(
+        if widths is None:
+            if len(set(modes)) == 1:
+                ids = select_mode_ids(text_ids, icon_ids, mode=modes[0])
+                return greedy_ctc_decode_ids(
                     ids, self.char_decode_dict, blank_idx=self.blank_idx
                 )
+
+            pred_chars: list[str] = []
+            for i, row_mode in enumerate(modes):
+                ids = select_mode_ids(
+                    text_ids[i : i + 1], icon_ids[i : i + 1], mode=row_mode
+                )
+                pred_chars.extend(
+                    greedy_ctc_decode_ids(
+                        ids, self.char_decode_dict, blank_idx=self.blank_idx
+                    )
+                )
+            return pred_chars
+
+        width_list = list(widths)
+        if len(width_list) != batch_size:
+            raise ValueError(
+                f"widths length {len(width_list)} does not match batch size {batch_size}"
             )
-        return pred_chars
+        if padded_w is None or padded_w <= 0:
+            raise ValueError("padded_w must be a positive int when widths is set")
+
+        seq_len = int(text_ids.shape[1])
+        pred_chars: list[str] = []
+        pred_spans: list[list[CharSpan]] = []
+        for i, row_mode in enumerate(modes):
+            content_w = int(width_list[i])
+            max_t = _max_timesteps(seq_len, content_w, padded_w)
+            row_text = text_ids[i : i + 1, :max_t]
+            row_icon = icon_ids[i : i + 1, :max_t]
+            ids = select_mode_ids(row_text, row_icon, mode=row_mode)
+            filled = _fill_blank_batch(ids, self.blank_idx)
+            pred_chars.extend(
+                greedy_ctc_decode_ids(
+                    filled, self.char_decode_dict, blank_idx=self.blank_idx
+                )
+            )
+            pred_spans.extend(
+                greedy_ctc_decode_spans(
+                    filled,
+                    self.char_decode_dict,
+                    blank_idx=self.blank_idx,
+                    content_width=content_w,
+                    max_timesteps=max_t,
+                )
+            )
+        return pred_chars, pred_spans
+
+    @overload
+    def predict_images(
+        self,
+        images,
+        hxs=None,
+        *,
+        mode: DecodeMode | Sequence[DecodeMode] = "text",
+        widths: None = None,
+    ) -> list[str]: ...
+
+    @overload
+    def predict_images(
+        self,
+        images,
+        hxs=None,
+        *,
+        mode: DecodeMode | Sequence[DecodeMode] = "text",
+        widths: Sequence[int],
+    ) -> tuple[list[str], list[list[CharSpan]]]: ...
 
     def predict_images(
         self,
@@ -113,6 +205,7 @@ class TextPredictor:
         hxs=None,
         *,
         mode: DecodeMode | Sequence[DecodeMode] = "text",
+        widths: Sequence[int] | None = None,
     ):
         # Input: [batch, line_height, width] float32 (line_height is typically 32).
         if isinstance(images, list):
@@ -135,7 +228,13 @@ class TextPredictor:
             f"elapsed_s={elapsed:.3f}"
         )
 
-        return self.decode_outputs(text_ids, icon_ids, mode=mode)
+        return self.decode_outputs(
+            text_ids,
+            icon_ids,
+            mode=mode,
+            widths=widths,
+            padded_w=int(images.shape[2]),
+        )
 
 class TextExtractor:
     """

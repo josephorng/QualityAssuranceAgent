@@ -17,7 +17,7 @@ import numpy as np
 
 from cua_mcp.geometry import clip_box
 from cua_mcp.yolo_onnx import YOLO_CLASS_ELEMENT
-from .constrained_decode import DecodeMode
+from .constrained_decode import CharSpan, DecodeMode
 from .inference_onnx import TextPredictor
 from src.common.run_state import get_run_state_manager
 
@@ -190,12 +190,34 @@ def _ocr_crops_batched(
     mode: DecodeMode | Sequence[DecodeMode] = "text",
 ) -> list[list[str]]:
     """Run CRNN OCR on crops in width-sorted, zero-padded batches."""
+    detailed = _ocr_crops_batched_detailed(
+        crops,
+        predictor,
+        line_height,
+        batch_size=batch_size,
+        mode=mode,
+    )
+    results: list[list[str]] = [[] for _ in crops]
+    for index, text, _spans in detailed:
+        results[index] = [text] if text else []
+    return results
+
+
+def _ocr_crops_batched_detailed(
+    crops: list[np.ndarray],
+    predictor: TextPredictor,
+    line_height: int,
+    *,
+    batch_size: int = _DEFAULT_CRNN_BATCH_SIZE,
+    mode: DecodeMode | Sequence[DecodeMode] = "text",
+) -> list[tuple[int, str, list[CharSpan]]]:
+    """Run CRNN OCR; return ``(orig_index, text, char_spans)`` per valid crop."""
     if batch_size < 1:
         batch_size = _DEFAULT_CRNN_BATCH_SIZE
 
     line_height = _effective_line_height(line_height)
     crop_modes = _normalize_crop_modes(mode, len(crops))
-    results: list[list[str]] = [[] for _ in crops]
+    results: list[tuple[int, str, list[CharSpan]]] = []
     valid: list[tuple[int, np.ndarray, DecodeMode]] = []
 
     for index, crop in enumerate(crops):
@@ -217,19 +239,24 @@ def _ocr_crops_batched(
         max_w = max(image.shape[1] for _, image, _ in chunk)
         batch = np.zeros((len(chunk), line_height, max_w), dtype=np.float32)
         chunk_modes = [row_mode for _, _, row_mode in chunk]
+        row_widths = [int(image.shape[1]) for _, image, _ in chunk]
         for row, (_, image, _) in enumerate(chunk):
             h_img, w_img = image.shape[:2]
             batch[row, :h_img, :w_img] = image
 
         try:
             batch_started = time.perf_counter()
-            predicted_texts = predictor.predict_images(batch, mode=chunk_modes)
+            predicted_texts, span_batches = predictor.predict_images(
+                batch,
+                widths=row_widths,
+                mode=chunk_modes,
+            )
             infer_total_s += time.perf_counter() - batch_started
             batch_count += 1
             for row, (orig_index, _, _) in enumerate(chunk):
-                if predicted_texts and row < len(predicted_texts):
-                    text = predicted_texts[row]
-                    results[orig_index] = [text] if text else []
+                text = predicted_texts[row] if row < len(predicted_texts) else ""
+                spans = span_batches[row] if row < len(span_batches) else []
+                results.append((orig_index, text, spans))
         except Exception as exc:
             print(f"OCR _ocr_crops_batched error: {exc}")
 

@@ -117,6 +117,8 @@ class SessionManifest:
     stopped_at_utc: str | None = None
     event_count: int = 0
     events: list[str] = field(default_factory=list)
+    # Settled UI after the last action, captured before the hub window is restored.
+    final_after_screenshot: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -136,3 +138,7 @@ def screenshot_path_for_event(run_dir: Path, index: int) -> Path:
 
 def screenshot_path_for_event_end(run_dir: Path, index: int) -> Path:
     return run_dir / "screenshots" / f"event_{index:03d}_end.jpeg"
+
+
+def final_after_screenshot_path(run_dir: Path) -> Path:
+    return Path(run_dir) / "screenshots" / "final_after.jpeg"

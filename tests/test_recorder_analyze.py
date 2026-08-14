@@ -2378,6 +2378,44 @@ def test_after_screenshot_prefers_next_event_before_shot(tmp_path: Path) -> None
     assert after_screenshot_for_outcome(event, next_event) == str(next_before)
 
 
+def test_after_screenshot_uses_final_after_when_no_next(tmp_path: Path) -> None:
+    before = tmp_path / "event_001.jpeg"
+    final_after = tmp_path / "final_after.jpeg"
+    before.write_bytes(b"a")
+    final_after.write_bytes(b"final")
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        screenshot_path=str(before),
+    )
+    assert after_screenshot_for_outcome(event, None) is None
+    assert after_screenshot_for_outcome(
+        event,
+        None,
+        final_after_screenshot=str(final_after),
+    ) == str(final_after)
+
+
+def test_after_screenshot_prefers_next_over_final_after(tmp_path: Path) -> None:
+    next_before = tmp_path / "event_002.jpeg"
+    final_after = tmp_path / "final_after.jpeg"
+    next_before.write_bytes(b"next")
+    final_after.write_bytes(b"final")
+    event = RecordedEvent(index=1, timestamp_utc="t", kind="click", screenshot_path="")
+    next_event = RecordedEvent(
+        index=2,
+        timestamp_utc="t2",
+        kind="click",
+        screenshot_path=str(next_before),
+    )
+    assert after_screenshot_for_outcome(
+        event,
+        next_event,
+        final_after_screenshot=str(final_after),
+    ) == str(next_before)
+
+
 @pytest.mark.asyncio
 async def test_analyze_recording_session_writes_expected_outcome(tmp_path: Path) -> None:
     from src.common.run_state import reset_run_state_manager
@@ -2447,3 +2485,153 @@ async def test_analyze_recording_session_writes_expected_outcome(tmp_path: Path)
     assert outcome_mock.await_count == 1
     assert outcome_mock.await_args.kwargs["before_screenshot"] == str(before)
     assert outcome_mock.await_args.kwargs["after_screenshot"] == str(after)
+
+
+@pytest.mark.asyncio
+async def test_analyze_recording_session_uses_final_after_for_last_action(
+    tmp_path: Path,
+) -> None:
+    from src.common.run_state import reset_run_state_manager
+
+    reset_run_state_manager()
+    run_dir = tmp_path / "screen_record_final_after"
+    shots = run_dir / "screenshots"
+    shots.mkdir(parents=True)
+    before = shots / "event_001.jpeg"
+    final_after = shots / "final_after.jpeg"
+    before.write_bytes(b"before-bytes")
+    final_after.write_bytes(b"final-after-bytes")
+    (run_dir / "events").mkdir(parents=True)
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="2026-07-30T03:00:00+00:00",
+        kind="key_press",
+        key="enter",
+        screenshot_path=str(before),
+    )
+    (run_dir / "events" / "event_001.json").write_text(
+        json.dumps(event.to_dict(), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (run_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "started_at_utc": event.timestamp_utc,
+                "stopped_at_utc": event.timestamp_utc,
+                "event_count": 1,
+                "events": ["events/event_001.json"],
+                "final_after_screenshot": "screenshots/final_after.jpeg",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    no_vision = {"used_vision": False, "candidate_text": "", "local_cursor": None}
+    with patch(
+        "src.recorder.orchestrator.build_vision_context",
+        new=AsyncMock(return_value=no_vision),
+    ), patch(
+        "src.recorder.orchestrator.infer_expected_outcome",
+        new=AsyncMock(return_value="畫面已捲動"),
+    ) as outcome_mock:
+        report = await analyze_recording_session(run_dir)
+
+    assert report["expected_outcomes"] == ["畫面已捲動"]
+    assert outcome_mock.await_count == 1
+    assert outcome_mock.await_args.kwargs["before_screenshot"] == str(before)
+    assert outcome_mock.await_args.kwargs["after_screenshot"] == str(final_after)
+
+
+@pytest.mark.asyncio
+async def test_analyze_recording_session_drops_multiple_trailing_agent_restores(
+    tmp_path: Path,
+) -> None:
+    from src.common.run_state import reset_run_state_manager
+
+    reset_run_state_manager()
+    run_dir = tmp_path / "screen_record_drop_multi_agent_restore"
+    shots = run_dir / "screenshots"
+    shots.mkdir(parents=True)
+    (run_dir / "events").mkdir(parents=True)
+    before = shots / "event_001.jpeg"
+    restore_shot = shots / "event_002.jpeg"
+    before.write_bytes(b"before")
+    restore_shot.write_bytes(b"pre-restore-ui")
+    events = [
+        RecordedEvent(
+            index=1,
+            timestamp_utc="2026-07-30T03:00:00+00:00",
+            kind="key_press",
+            key="enter",
+            screenshot_path=str(before),
+        ),
+        RecordedEvent(
+            index=2,
+            timestamp_utc="2026-07-30T03:00:01+00:00",
+            kind="click",
+            cursor_xy=(612, 894),
+            button="left",
+            screenshot_path=str(restore_shot),
+            window_change={
+                "action": "restored",
+                "title": "電腦使用代理",
+                "confidence": "medium",
+            },
+        ),
+        RecordedEvent(
+            index=3,
+            timestamp_utc="2026-07-30T03:00:02+00:00",
+            kind="click",
+            cursor_xy=(612, 894),
+            button="left",
+            screenshot_path="",
+            window_change={
+                "action": "restored",
+                "title": "電腦使用代理",
+                "confidence": "medium",
+            },
+        ),
+    ]
+    event_paths: list[str] = []
+    for event in events:
+        relative_path = f"events/event_{event.index:03d}.json"
+        event_paths.append(relative_path)
+        (run_dir / relative_path).write_text(
+            json.dumps(event.to_dict(), ensure_ascii=False),
+            encoding="utf-8",
+        )
+    (run_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "started_at_utc": events[0].timestamp_utc,
+                "stopped_at_utc": events[-1].timestamp_utc,
+                "event_count": len(events),
+                "events": event_paths,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    no_vision = {"used_vision": False, "candidate_text": "", "local_cursor": None}
+    with patch(
+        "src.recorder.orchestrator.build_vision_context",
+        new=AsyncMock(return_value=no_vision),
+    ), patch(
+        "src.recorder.orchestrator.infer_expected_outcome",
+        new=AsyncMock(return_value="動作完成"),
+    ) as outcome_mock:
+        report = await analyze_recording_session(run_dir)
+
+    assert report["recorded"] == 1
+    assert report["instructions"] == ["按下 Enter 鍵"]
+    assert report["expected_outcomes"] == ["動作完成"]
+    assert not (run_dir / "events" / "event_002.json").exists()
+    assert not (run_dir / "events" / "event_003.json").exists()
+    final_after = run_dir / "screenshots" / "final_after.jpeg"
+    assert final_after.is_file()
+    assert final_after.read_bytes() == b"pre-restore-ui"
+    session = json.loads((run_dir / "session.json").read_text(encoding="utf-8"))
+    assert session["final_after_screenshot"] == "screenshots/final_after.jpeg"
+    assert outcome_mock.await_args.kwargs["after_screenshot"] == str(final_after)

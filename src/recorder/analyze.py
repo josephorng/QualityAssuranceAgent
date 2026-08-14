@@ -742,15 +742,23 @@ def before_screenshot_for_outcome(event: RecordedEvent) -> str | None:
 def after_screenshot_for_outcome(
     event: RecordedEvent,
     next_event: RecordedEvent | None,
+    *,
+    final_after_screenshot: str | None = None,
 ) -> str | None:
-    """Return the after frame: next event's before-shot, else this event's drag end shot."""
+    """Return the after frame for verification.
+
+    Prefer the next event's before-shot, then a drag end shot, then the
+    session-level final screenshot taken before the hub window is restored.
+    """
     if next_event is not None:
         next_before = _existing_screenshot_path(next_event.screenshot_path)
         if next_before is not None:
             return next_before
     if event.kind == "drag":
-        return _existing_screenshot_path(event.end_screenshot_path)
-    return None
+        end_shot = _existing_screenshot_path(event.end_screenshot_path)
+        if end_shot is not None:
+            return end_shot
+    return _existing_screenshot_path(final_after_screenshot)
 
 
 def _parse_expected_outcome_reply(raw: str) -> dict[str, Any]:

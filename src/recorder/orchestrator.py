@@ -16,7 +16,7 @@ from src.recorder.analyze import (
     before_screenshot_for_outcome,
     infer_expected_outcome,
 )
-from src.recorder.models import RecordedEvent, SessionManifest
+from src.recorder.models import RecordedEvent, final_after_screenshot_path
 from src.recorder.coalesce import (
     coalesce_consecutive_same_location_clicks,
     coalesce_consecutive_text_inputs,
@@ -27,6 +27,7 @@ from src.recorder.window_snapshot import is_agent_app_restore, resolve_window_ch
 
 
 _WAIT_THRESHOLD_SECONDS = 10.0
+_FINAL_AFTER_RELATIVE = "screenshots/final_after.jpeg"
 
 
 def _elapsed_seconds(previous_timestamp_utc: str, current_timestamp_utc: str) -> float | None:
@@ -46,49 +47,114 @@ def _wait_instruction(elapsed_seconds: float) -> str:
     return f"等待 {ceil(elapsed_seconds)} 秒"
 
 
+def _is_trailing_agent_restore(event: RecordedEvent) -> bool:
+    change = resolve_window_change(
+        event.window_change,
+        event.window_snapshot_debug,
+        event.cursor_xy,
+    )
+    return is_agent_app_restore(change)
+
+
+def _write_final_after_from_source(
+    run_dir: Path,
+    source_screenshot: str,
+    *,
+    log_info: Callable[[str], None] | None = None,
+) -> bool:
+    """Copy ``source_screenshot`` to the session final-after path and update session.json."""
+    src = Path(source_screenshot)
+    if not src.is_file():
+        return False
+    dest = final_after_screenshot_path(run_dir)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.resolve() != src.resolve():
+        dest.write_bytes(src.read_bytes())
+    session_path = run_dir / "session.json"
+    session = read_json(session_path, {})
+    if not isinstance(session, dict):
+        session = {}
+    session["final_after_screenshot"] = _FINAL_AFTER_RELATIVE
+    write_json(session_path, session)
+    if log_info is not None:
+        log_info(f"final after screenshot set from restore event path={dest}")
+    return True
+
+
 def _drop_trailing_agent_restore(
     events: list[RecordedEvent],
     *,
     run_dir: Path | None = None,
     log_info: Callable[[str], None] | None = None,
 ) -> list[RecordedEvent]:
-    """Omit a final restore of the hub window (common stop-recording artifact).
+    """Omit trailing restores of the hub window (common stop-recording artifacts).
 
-    When ``run_dir`` is set, also deletes that event's raw files and updates
-    ``session.json`` so recording HTML no longer shows a bare kind-label step.
+    Drops every consecutive trailing agent-restore event. When ``run_dir`` is set,
+    also deletes those events' raw files and prefers the earliest dropped restore
+    screenshot as the last action's after-frame (UI just before the hub restored).
     """
     if not events:
         return events
-    last = events[-1]
-    change = resolve_window_change(
-        last.window_change,
-        last.window_snapshot_debug,
-        last.cursor_xy,
-    )
-    if not is_agent_app_restore(change):
-        return events
-    if log_info is not None:
-        log_info(
-            f"dropping trailing agent restore event index={last.index} "
-            f"title={change.get('title')!r}"
-        )
-    if run_dir is not None:
-        try:
-            from src.common.runs_report_server import purge_recording_event_from_session
 
-            remaining = purge_recording_event_from_session(run_dir, last.index)
-            if log_info is not None:
-                log_info(
-                    f"purged trailing agent restore event index={last.index} "
-                    f"remaining={remaining}"
-                )
-        except ValueError as exc:
-            if log_info is not None:
-                log_info(
-                    f"purge trailing agent restore event index={last.index} "
-                    f"skipped: {exc}"
-                )
-    return events[:-1]
+    dropped: list[RecordedEvent] = []
+    while events and _is_trailing_agent_restore(events[-1]):
+        last = events[-1]
+        change = resolve_window_change(
+            last.window_change,
+            last.window_snapshot_debug,
+            last.cursor_xy,
+        )
+        if log_info is not None:
+            title = change.get("title") if isinstance(change, dict) else None
+            log_info(
+                f"dropping trailing agent restore event index={last.index} "
+                f"title={title!r}"
+            )
+        dropped.append(last)
+        events = events[:-1]
+
+    if dropped and run_dir is not None:
+        # dropped[0] is the last restore; dropped[-1] is the earliest (first restore click).
+        # Copy before purge — purge deletes the restore event's screenshot files.
+        first_restore = dropped[-1]
+        if first_restore.screenshot_path:
+            _write_final_after_from_source(
+                run_dir,
+                first_restore.screenshot_path,
+                log_info=log_info,
+            )
+        for last in dropped:
+            try:
+                from src.common.runs_report_server import purge_recording_event_from_session
+
+                remaining = purge_recording_event_from_session(run_dir, last.index)
+                if log_info is not None:
+                    log_info(
+                        f"purged trailing agent restore event index={last.index} "
+                        f"remaining={remaining}"
+                    )
+            except ValueError as exc:
+                if log_info is not None:
+                    log_info(
+                        f"purge trailing agent restore event index={last.index} "
+                        f"skipped: {exc}"
+                    )
+    return events
+
+
+def _resolve_final_after_screenshot(run_dir: Path) -> str | None:
+    """Return an existing final-after screenshot path for the last analyzed action."""
+    session = read_json(run_dir / "session.json", {})
+    if isinstance(session, dict):
+        raw = session.get("final_after_screenshot")
+        if isinstance(raw, str) and raw.strip():
+            candidate = Path(raw.strip())
+            if not candidate.is_file():
+                candidate = run_dir / raw.strip()
+            if candidate.is_file():
+                return str(candidate)
+    fallback = final_after_screenshot_path(run_dir)
+    return str(fallback) if fallback.is_file() else None
 
 
 def _load_events(run_dir: Path) -> list[RecordedEvent]:
@@ -173,6 +239,9 @@ async def analyze_recording_session(
                 )
         except Exception as exc:
             log_info(f"persist coalesced events failed: {exc}")
+        final_after_screenshot = _resolve_final_after_screenshot(run_dir)
+        if final_after_screenshot is not None:
+            log_info(f"final after screenshot ready path={final_after_screenshot}")
         log_info(f"analyze_recording_session start events={len(events)} run_id={run_id}")
 
         cached = 0
@@ -254,7 +323,11 @@ async def analyze_recording_session(
                     events[event_pos + 1] if event_pos + 1 < len(events) else None
                 )
                 before_shot = before_screenshot_for_outcome(event)
-                after_shot = after_screenshot_for_outcome(event, next_event)
+                after_shot = after_screenshot_for_outcome(
+                    event,
+                    next_event,
+                    final_after_screenshot=final_after_screenshot,
+                )
                 expected_outcome: str | None = None
                 if before_shot is not None and after_shot is not None:
                     expected_outcome = await infer_expected_outcome(

@@ -22,6 +22,7 @@ from src.recorder.models import (
     RecordedEvent,
     SessionManifest,
     event_json_path,
+    final_after_screenshot_path,
     screenshot_path_for_event,
     screenshot_path_for_event_end,
     utc_now_iso,
@@ -285,6 +286,38 @@ def _capture_screenshot_at_point(x: int, y: int, dest: Path) -> tuple[str, int, 
         img = Image.frombytes("RGB", shot.size, shot.rgb)
         img.save(dest, format="JPEG")
         return str(dest), mon_idx, (int(monitor["left"]), int(monitor["top"]))
+
+
+def capture_final_after_screenshot(
+    run_dir: Path,
+    events: list[RecordedEvent],
+) -> str | None:
+    """Capture settled UI after the last action (before the hub window is restored).
+
+    Uses the last event's end/cursor point to pick a monitor. Returns the saved
+    path, or ``None`` when capture fails.
+    """
+    dest = final_after_screenshot_path(run_dir)
+    anchor: tuple[int, int] | None = None
+    for event in reversed(events):
+        if event.end_xy is not None:
+            anchor = event.end_xy
+            break
+        if event.cursor_xy is not None:
+            anchor = event.cursor_xy
+            break
+    try:
+        if anchor is None:
+            with mss.mss() as sct:
+                monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+                anchor = (
+                    int(monitor["left"] + monitor["width"] // 2),
+                    int(monitor["top"] + monitor["height"] // 2),
+                )
+        path, _, _ = _capture_screenshot_at_point(anchor[0], anchor[1], dest)
+        return path
+    except Exception:
+        return None
 
 
 def _normalize_button(button: mouse.Button) -> str:
@@ -723,12 +756,22 @@ class RecordingSession:
         if run_dir is None or run_id is None or started_at is None:
             return None
 
+        # Capture settled UI before the hub restores (caller deiconifies after stop).
+        final_after = capture_final_after_screenshot(run_dir, events)
+        if final_after is not None:
+            self._log(run_dir, f"final after screenshot saved path={final_after}")
+        else:
+            self._log(run_dir, "final after screenshot capture failed")
+
         manifest = SessionManifest(
             run_id=run_id,
             started_at_utc=started_at,
             stopped_at_utc=utc_now_iso(),
             event_count=len(events),
             events=[f"events/event_{e.index:03d}.json" for e in events],
+            final_after_screenshot=(
+                "screenshots/final_after.jpeg" if final_after is not None else None
+            ),
         )
         write_json(run_dir / "session.json", manifest.to_dict())
         self._log(run_dir, f"recording stopped events={len(events)}")

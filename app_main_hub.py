@@ -43,9 +43,16 @@ from src.common.runtime_command_dialog import (
 )
 from src.common.runtime_context import USE_TOOL_CACHE_ENV
 from src.common.script_helper import (
+    collect_recording_script_text,
     executable_source_line_numbers,
     format_script_lines_with_outcomes,
+    is_recording_dir,
+    is_recording_script_path,
+    load_runnable_script_text,
     parse_executable_lines_from_text,
+    recording_run_dir,
+    resolve_runnable_script_path,
+    script_display_name,
 )
 from src.common.smart_mode import normalize_smart_goal, resolve_hub_run_mode
 from src.common.settings import (
@@ -236,22 +243,13 @@ class MainHub(ctk.CTk):
         self._build_script_section()
         last_script = hub.get("last_script_path")
         if isinstance(last_script, str) and last_script.strip():
-            p = Path(last_script)
-            if p.is_file():
-                self._script_path = p
-                self._runtime_commands_cache_path = None
-                text = p.read_text(encoding="utf-8")
-                self._suppress_script_cache_sync = True
-                try:
-                    self._script_text.delete("0.0", "end")
-                    self._script_text.insert("0.0", text)
-                    self._reset_textbox_undo(self._script_text)
-                finally:
-                    self._suppress_script_cache_sync = False
-                self._refresh_script_path_label()
+            p = resolve_runnable_script_path(Path(last_script))
+            if p.is_file() or is_recording_dir(p):
+                self._load_script_into_editor(p)
         if self._script_path is None:
             self._try_load_last_runtime_command_cache()
         self._mark_script_clean()
+        self._apply_script_editor_lock()
 
         last_smart = hub.get("last_smart_goal_path")
         if isinstance(last_smart, str) and last_smart.strip():
@@ -270,9 +268,12 @@ class MainHub(ctk.CTk):
         if self._smart_goal_path is None:
             self._try_load_smart_goal_cache()
 
-        self._queue_paths = [
-            Path(p) for p in hub.get("queue_script_paths", []) if Path(p).is_file()
-        ]
+        restored_queue: list[Path] = []
+        for raw_path in hub.get("queue_script_paths", []):
+            resolved = resolve_runnable_script_path(Path(raw_path))
+            if resolved.is_file() or is_recording_dir(resolved):
+                restored_queue.append(resolved)
+        self._queue_paths = restored_queue
         self._refresh_queue_list()
 
         selected_mode = hub.get("selected_mode")
@@ -355,11 +356,78 @@ class MainHub(ctk.CTk):
 
     def _refresh_script_path_label(self) -> None:
         if self._script_path is not None:
-            self._script_path_label.configure(text=str(self._script_path.resolve()))
+            display = script_display_name(self._script_path)
+            if is_recording_script_path(self._script_path):
+                self._script_path_label.configure(
+                    text=f"{display}（錄製，唯讀 — 請在錄製紀錄頁編輯）"
+                )
+            else:
+                self._script_path_label.configure(text=str(self._script_path.resolve()))
         elif self._runtime_commands_cache_path is not None:
             self._script_path_label.configure(text=_RUNTIME_COMMAND_LABEL)
         else:
             self._script_path_label.configure(text="未載入檔案")
+
+    def _is_recording_script_open(self) -> bool:
+        return self._script_path is not None and is_recording_script_path(self._script_path)
+
+    def _apply_script_editor_lock(self) -> None:
+        """Recording review HTML is the only editor; hub shows a read-only preview."""
+        if not hasattr(self, "_script_text"):
+            return
+        read_only = self._is_recording_script_open()
+        self._script_text.configure(state="disabled" if read_only else "normal")
+        save_state = "disabled" if read_only else "normal"
+        for attr in ("_script_save_btn", "_script_save_as_btn"):
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                try:
+                    btn.configure(state=save_state)
+                except Exception:
+                    pass
+
+    def _load_script_into_editor(self, path: Path) -> None:
+        """Load a script file or recording folder into the single-script editor."""
+        p = resolve_runnable_script_path(Path(path))
+        self._script_path = p
+        self._runtime_commands_cache_path = None
+        try:
+            text = load_runnable_script_text(p)
+        except OSError:
+            text = ""
+        self._suppress_script_cache_sync = True
+        try:
+            self._script_text.configure(state="normal")
+            self._script_text.delete("0.0", "end")
+            self._script_text.insert("0.0", text)
+            self._reset_textbox_undo(self._script_text)
+        finally:
+            self._suppress_script_cache_sync = False
+        self._clear_script_step_statuses()
+        self._refresh_script_line_numbers()
+        self._refresh_script_path_label()
+        self._mark_script_clean()
+        self._apply_script_editor_lock()
+        self._persist_hub_ui_state()
+
+    def _validate_recording_folder_for_script(self, folder: Path) -> Path | None:
+        """Return the recording folder if it is a valid recording, else None."""
+        run_dir = Path(folder)
+        if not self._is_recording_folder(run_dir):
+            return None
+        return run_dir
+
+    def _ask_recording_directory(self, *, title: str) -> Path | None:
+        settings = load_settings()
+        initial = Path(settings.runs_dir)
+        folder = filedialog.askdirectory(
+            parent=self,
+            title=title,
+            initialdir=str(initial) if initial.is_dir() else str(ROOT_DIR),
+        )
+        if not folder:
+            return None
+        return Path(folder)
 
     def _try_load_last_runtime_command_cache(self) -> None:
         """If no script file is open, show the last runtime command cache for editing and Save."""
@@ -458,6 +526,8 @@ class MainHub(ctk.CTk):
         self._script_baseline = self._script_editor_normalized_text()
 
     def _is_script_dirty(self) -> bool:
+        if self._is_recording_script_open():
+            return False
         return self._script_editor_normalized_text() != self._script_baseline
 
     def _confirm_proceed_with_unsaved_script(self) -> bool:
@@ -1073,10 +1143,16 @@ class MainHub(ctk.CTk):
         row.pack(fill="x", padx=8, pady=4)
         b_open = ctk.CTkButton(row, text="開啟", width=80, command=self._script_open)
         b_open.pack(side="left", padx=(0, 8))
+        b_open_rec = ctk.CTkButton(
+            row, text="開啟錄製…", width=100, command=self._script_open_recording
+        )
+        b_open_rec.pack(side="left", padx=(0, 8))
         b_save = ctk.CTkButton(row, text="儲存", width=80, command=self._script_save)
         b_save.pack(side="left", padx=(0, 8))
+        self._script_save_btn = b_save
         b_sas = ctk.CTkButton(row, text="另存新檔", width=100, command=self._script_save_as)
         b_sas.pack(side="left", padx=(0, 8))
+        self._script_save_as_btn = b_sas
         b_clear = ctk.CTkButton(row, text="開新檔案", width=100, command=self._script_clear)
         b_clear.pack(side="left", padx=(0, 8))
         self._record_btn = ctk.CTkButton(
@@ -1120,6 +1196,7 @@ class MainHub(ctk.CTk):
         self._script_controls.extend(
             [
                 b_open,
+                b_open_rec,
                 b_save,
                 b_sas,
                 b_clear,
@@ -1177,11 +1254,15 @@ class MainHub(ctk.CTk):
         row.pack(fill="x", padx=8, pady=4)
         b_add = ctk.CTkButton(row, text="新增檔案…", width=100, command=self._queue_add_files)
         b_add.pack(side="left", padx=(0, 8))
+        b_add_rec = ctk.CTkButton(
+            row, text="新增錄製…", width=100, command=self._queue_add_recording
+        )
+        b_add_rec.pack(side="left", padx=(0, 8))
         b_clear = ctk.CTkButton(row, text="清空", width=80, command=self._queue_clear)
         b_clear.pack(side="left")
         self._queue_list_frame = ctk.CTkScrollableFrame(parent)
         self._queue_list_frame.pack(fill="both", expand=True, padx=8, pady=(8, 8))
-        self._queue_controls.extend([b_add, b_clear])
+        self._queue_controls.extend([b_add, b_add_rec, b_clear])
 
     def _queue_controls_busy(self) -> bool:
         return self._worker_thread is not None and self._worker_thread.is_alive()
@@ -1263,7 +1344,7 @@ class MainHub(ctk.CTk):
             self._queue_item_controls.extend([b_up, b_down, b_remove])
             btn = ctk.CTkButton(
                 row,
-                text=f"{i + 1}. {p.name}",
+                text=f"{i + 1}. {script_display_name(p)}",
                 anchor="w",
                 fg_color=fg,
                 # Neutral hover (not theme blue) so dark text stays readable in light mode.
@@ -1364,31 +1445,18 @@ class MainHub(ctk.CTk):
             return
         if index < 0 or index >= len(self._queue_paths):
             return
-        p = self._queue_paths[index]
-        if not p.is_file():
+        p = resolve_runnable_script_path(self._queue_paths[index])
+        if not p.is_file() and not is_recording_dir(p):
             show_ctk_message(self, "編輯", f"找不到檔案：\n{p}", kind="error")
             return
-        self._script_path = p
-        self._runtime_commands_cache_path = None
-        text = p.read_text(encoding="utf-8")
-        self._suppress_script_cache_sync = True
-        try:
-            self._script_text.configure(state="normal")
-            self._script_text.delete("0.0", "end")
-            self._script_text.insert("0.0", text)
-            self._reset_textbox_undo(self._script_text)
-        finally:
-            self._suppress_script_cache_sync = False
-        self._clear_script_step_statuses()
-        self._refresh_script_line_numbers()
-        self._refresh_script_path_label()
-        self._mark_script_clean()
-        self._persist_hub_ui_state()
+        if not self._confirm_proceed_with_unsaved_script():
+            return
+        self._load_script_into_editor(p)
         try:
             self._mode_tabs.set("單一腳本")
         except Exception:
             pass
-        self._status.configure(text=f"已在單一腳本開啟 {p.name}")
+        self._status.configure(text=f"已在單一腳本開啟 {script_display_name(p)}")
 
     def _queue_add_files(self) -> None:
         initial = ROOT_DIR / "scripts"
@@ -1406,6 +1474,26 @@ class MainHub(ctk.CTk):
         self._queue_run_root_by_index = {}
         self._refresh_queue_list()
         self._persist_hub_ui_state()
+
+    def _queue_add_recording(self) -> None:
+        folder = self._ask_recording_directory(title="選擇錄製資料夾")
+        if folder is None:
+            return
+        script = self._validate_recording_folder_for_script(folder)
+        if script is None:
+            show_ctk_message(
+                self,
+                "新增錄製",
+                f"所選資料夾不是有效的錄製（需有 session.json）。",
+                kind="error",
+            )
+            return
+        self._queue_paths.append(script)
+        self._queue_status_by_index = {}
+        self._queue_run_root_by_index = {}
+        self._refresh_queue_list()
+        self._persist_hub_ui_state()
+        self._status.configure(text=f"已加入錄製 {script_display_name(script)}")
 
     def _queue_move_up(self, index: int) -> None:
         if index <= 0 or index >= len(self._queue_paths):
@@ -1639,6 +1727,7 @@ class MainHub(ctk.CTk):
         if self._record_btn is not None:
             self._record_btn.configure(text="開始錄製", state="normal", command=self._on_record_button)
         self._hide_analysis_progress()
+        self._apply_script_editor_lock()
 
     def _set_hub_controls_recording(self) -> None:
         self._run_btn.configure(state="disabled")
@@ -1689,6 +1778,8 @@ class MainHub(ctk.CTk):
         self._status.configure(text="正在停止分析…", text_color=("gray20", "gray65"))
 
     def _script_open(self) -> None:
+        if not self._confirm_proceed_with_unsaved_script():
+            return
         initial = ROOT_DIR / "scripts"
         path = filedialog.askopenfilename(
             parent=self,
@@ -1698,24 +1789,33 @@ class MainHub(ctk.CTk):
         )
         if not path:
             return
-        p = Path(path)
-        self._script_path = p
-        self._runtime_commands_cache_path = None
-        text = p.read_text(encoding="utf-8")
-        self._suppress_script_cache_sync = True
-        try:
-            self._script_text.delete("0.0", "end")
-            self._script_text.insert("0.0", text)
-            self._reset_textbox_undo(self._script_text)
-        finally:
-            self._suppress_script_cache_sync = False
-        self._clear_script_step_statuses()
-        self._refresh_script_line_numbers()
-        self._refresh_script_path_label()
-        self._mark_script_clean()
-        self._persist_hub_ui_state()
+        self._load_script_into_editor(Path(path))
+
+    def _script_open_recording(self) -> None:
+        if not self._confirm_proceed_with_unsaved_script():
+            return
+        folder = self._ask_recording_directory(title="開啟錄製資料夾")
+        if folder is None:
+            return
+        script = self._validate_recording_folder_for_script(folder)
+        if script is None:
+            show_ctk_message(
+                self,
+                "開啟錄製",
+                f"所選資料夾不是有效的錄製（需有 session.json）。",
+                kind="error",
+            )
+            return
+        self._load_script_into_editor(script)
+        self._status.configure(text=f"已開啟錄製 {script_display_name(script)}（唯讀）")
 
     def _script_save(self) -> bool:
+        if self._is_recording_script_open():
+            self._status.configure(
+                text="錄製腳本請在「錄製紀錄」頁面編輯並儲存",
+                text_color=("gray20", "gray65"),
+            )
+            return False
         if self._script_path is not None:
             body = self._script_text.get("0.0", "end").rstrip() + "\n"
             self._script_path.write_text(body, encoding="utf-8")
@@ -1729,6 +1829,12 @@ class MainHub(ctk.CTk):
         return self._script_save_as()
 
     def _script_save_as(self) -> bool:
+        if self._is_recording_script_open():
+            self._status.configure(
+                text="錄製腳本請在「錄製紀錄」頁面編輯並儲存",
+                text_color=("gray20", "gray65"),
+            )
+            return False
         path = filedialog.asksaveasfilename(
             parent=self,
             title="腳本另存新檔",
@@ -1739,13 +1845,11 @@ class MainHub(ctk.CTk):
         if not path:
             return False
         p = Path(path)
-        p.write_text(self._script_text.get("0.0", "end").rstrip() + "\n", encoding="utf-8")
-        self._script_path = p
-        self._runtime_commands_cache_path = None
-        self._refresh_script_path_label()
-        self._mark_script_clean()
+        # Unlock temporarily if needed to read text (should already be editable for non-recording).
+        body = self._script_text.get("0.0", "end").rstrip() + "\n"
+        p.write_text(body, encoding="utf-8")
+        self._load_script_into_editor(p)
         self._status.configure(text=f"已另存新檔 {p.name}")
-        self._persist_hub_ui_state()
         return True
 
     def _save_recording_instructions_as_new_script(self, lines: list[str]) -> bool:
@@ -1764,20 +1868,8 @@ class MainHub(ctk.CTk):
         body = "\n".join(lines).rstrip() + "\n"
         p = Path(path)
         p.write_text(body, encoding="utf-8")
-        self._script_path = p
-        self._runtime_commands_cache_path = None
-        self._suppress_script_cache_sync = True
-        try:
-            self._script_text.configure(state="normal")
-            self._script_text.delete("0.0", "end")
-            self._script_text.insert("0.0", body)
-            self._reset_textbox_undo(self._script_text)
-        finally:
-            self._suppress_script_cache_sync = False
-        self._refresh_script_path_label()
-        self._mark_script_clean()
+        self._load_script_into_editor(p)
         self._status.configure(text=f"已存成新檔並開啟 {p.name}")
-        self._persist_hub_ui_state()
         return True
 
     def _script_clear(self) -> None:
@@ -1797,6 +1889,7 @@ class MainHub(ctk.CTk):
         self._refresh_script_line_numbers()
         self._refresh_script_path_label()
         self._mark_script_clean()
+        self._apply_script_editor_lock()
         self._status.configure(text="", text_color=("gray20", "gray65"))
         self._persist_hub_ui_state()
 
@@ -2091,13 +2184,25 @@ class MainHub(ctk.CTk):
             return
         choice = prompt_append_recording_instructions(self, msg)
         if choice == "append":
+            if self._is_recording_script_open():
+                # Compose into a free editor; do not bind the hub to the recording folder.
+                self._script_path = None
+                self._runtime_commands_cache_path = None
             self._script_text.configure(state="normal")
             if self._script_text.get("0.0", "end").strip():
                 self._script_text.insert("end", "\n")
             self._script_text.insert("end", "\n".join(lines) + "\n")
             self._sync_script_text_to_runtime_cache()
-        elif choice == "save_as":
-            self._save_recording_instructions_as_new_script(lines)
+            self._refresh_script_path_label()
+            self._apply_script_editor_lock()
+        elif choice == "open_review":
+            run_id = report.get("run_id")
+            if isinstance(run_id, str) and run_id.strip():
+                runs_root = Path(load_settings().runs_dir)
+                html_path = runs_root / run_id.strip() / "recording_steps.html"
+                self._open_report_html(html_path)
+            else:
+                show_ctk_message(self, "錄製分析完成", "找不到錄製報告路徑。", kind="warning")
 
     def _begin_worker_run(self, args: _WorkerArgs) -> None:
         reset_run_control()
@@ -2128,7 +2233,7 @@ class MainHub(ctk.CTk):
         """After a script run completes, enter runtime step mode and append to the open script or cache."""
         if self._worker_thread and self._worker_thread.is_alive():
             return
-        if self._script_path is not None:
+        if self._script_path is not None and not is_recording_script_path(self._script_path):
             transcript_path = self._script_path
             on_undo = self._pop_last_runtime_command_from_script_file
         else:
@@ -2136,6 +2241,11 @@ class MainHub(ctk.CTk):
                 self._runtime_commands_cache_path = self._runtime_command_transcript_path()
             transcript_path = self._runtime_commands_cache_path
             on_undo = self._pop_last_runtime_command_from_cache
+            if self._is_recording_script_open():
+                # Do not append runtime steps into a recording folder.
+                self._script_path = None
+                self._apply_script_editor_lock()
+                self._refresh_script_path_label()
 
         self._user_requested_stop = False
         self._post_run_unlink = None
@@ -2250,6 +2360,10 @@ class MainHub(ctk.CTk):
 
         selected_tab = self._mode_tabs.get()
         raw = self._script_text.get("0.0", "end")
+        if self._is_recording_script_open() and self._script_path is not None:
+            rec = recording_run_dir(self._script_path)
+            if rec is not None:
+                raw = collect_recording_script_text(rec)
         steps = parse_executable_lines_from_text(raw)
         run_mode = resolve_hub_run_mode(
             selected_tab=selected_tab,
@@ -2380,9 +2494,10 @@ class MainHub(ctk.CTk):
                     if path_indices is not None and i - 1 < len(path_indices)
                     else i - 1
                 )
-                name = script_path.name
+                script_path = resolve_runnable_script_path(script_path)
+                name = script_display_name(script_path)
                 try:
-                    raw = script_path.read_text(encoding="utf-8")
+                    raw = load_runnable_script_text(script_path)
                 except OSError as e:
                     results.append((name, "fail"))
                     self._mark_queue_result(ui_index, "fail")
@@ -2507,13 +2622,18 @@ class MainHub(ctk.CTk):
             else:
                 script_path = args.script_disk_path
                 raw = args.script_raw
+                rec = recording_run_dir(script_path) if script_path is not None else None
+                if rec is not None:
+                    raw = collect_recording_script_text(rec)
+                    script_path = rec
                 steps = parse_executable_lines_from_text(raw)
-                if script_path is None:
-                    fd, tmp = tempfile.mkstemp(suffix=".txt", prefix="qa_script_", text=True)
-                    os.close(fd)
-                    script_path = Path(tmp)
-                    self._post_run_unlink = script_path
-                script_path.write_text(raw.rstrip() + "\n", encoding="utf-8")
+                if rec is None:
+                    if script_path is None:
+                        fd, tmp = tempfile.mkstemp(suffix=".txt", prefix="qa_script_", text=True)
+                        os.close(fd)
+                        script_path = Path(tmp)
+                        self._post_run_unlink = script_path
+                    script_path.write_text(raw.rstrip() + "\n", encoding="utf-8")
                 task = steps[0]
                 settings = load_settings()
                 runs_root = Path(settings.runs_dir)

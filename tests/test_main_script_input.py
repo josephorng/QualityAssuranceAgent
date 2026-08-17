@@ -57,6 +57,45 @@ def test_format_script_lines_with_outcomes_round_trip() -> None:
     assert outcomes == ["對話框已關閉", None]
 
 
+def test_recording_script_helpers(tmp_path: Path) -> None:
+    run_dir = tmp_path / "開啟神網"
+    run_dir.mkdir()
+    (run_dir / "session.json").write_text(
+        '{"run_id": "開啟神網", "events": ["events/event_001.json"]}',
+        encoding="utf-8",
+    )
+    events = run_dir / "events"
+    analysis = run_dir / "analysis"
+    events.mkdir()
+    analysis.mkdir()
+    (events / "event_001.json").write_text(
+        '{"index": 1, "kind": "click"}',
+        encoding="utf-8",
+    )
+    (analysis / "event_001.json").write_text(
+        '{"event_index": 1, "wait_instruction": "等待 2 秒",'
+        ' "instruction": "點擊「確定」", "expected_outcome": "對話框已關閉"}',
+        encoding="utf-8",
+    )
+    text = script_helper.collect_recording_script_text(run_dir)
+    assert text == "等待 2 秒\n點擊「確定」\n# expected_outcome: 對話框已關閉\n"
+    assert script_helper.is_recording_dir(run_dir)
+    assert script_helper.is_recording_script_path(run_dir)
+    assert script_helper.resolve_runnable_script_path(run_dir) == run_dir
+    assert script_helper.script_display_name(run_dir) == "開啟神網"
+    assert script_helper.load_runnable_script_text(run_dir) == text
+    legacy = run_dir / "script.txt"
+    legacy.write_text("stale\n", encoding="utf-8")
+    assert script_helper.resolve_runnable_script_path(legacy) == run_dir
+    assert script_helper.load_runnable_script_text(legacy) == text
+    plain = tmp_path / "scripts" / "plain.txt"
+    plain.parent.mkdir()
+    plain.write_text("step\n", encoding="utf-8")
+    assert not script_helper.is_recording_script_path(plain)
+    assert script_helper.resolve_runnable_script_path(plain) == plain
+    assert script_helper.script_display_name(plain) == "plain.txt"
+
+
 def test_resolve_task_and_script_from_cli_task(monkeypatch, tmp_path: Path) -> None:
     task, script_path, lines = script_helper.resolve_task_and_script("typed task", tmp_path)
     assert task == "typed task"

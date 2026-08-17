@@ -17,11 +17,13 @@ from src.common.runs_report_server import (
     delete_recording_event,
     delete_run_report_folder,
     ensure_runs_report_server,
+    rename_recording_folder,
     resolve_deletable_run_folder,
     stop_runs_report_server,
     sync_recording_events,
     zip_run_report_to_bug_share,
 )
+from src.common.script_helper import collect_recording_script_text
 from src.common.session_html import write_runs_index_html
 from src.recorder.models import RecordedEvent
 
@@ -1008,3 +1010,45 @@ def test_runs_report_server_add_event_endpoint(tmp_path: Path) -> None:
         assert exc_info.value.code == 400
     finally:
         server.stop()
+
+
+def test_apply_instruction_updates_collected_script_text(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_landmark_run(runs_root, "recording_script_apply")
+    result = apply_recording_event_instruction(
+        runs_root,
+        "recording_script_apply",
+        1,
+        instruction="點擊「新目標」",
+    )
+    assert result["instruction"] == "點擊「新目標」"
+    script = collect_recording_script_text(run_root)
+    assert "等待 2 秒" in script
+    assert "點擊「新目標」" in script
+    assert "# expected_outcome: 搜尋結果已顯示" in script
+    assert not (run_root / "script.txt").exists()
+
+
+def test_rename_recording_folder_moves_and_rejects_illegal(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_landmark_run(runs_root, "recording_to_rename")
+    (run_root / "recording_steps.html").write_text("<html></html>", encoding="utf-8")
+
+    result = rename_recording_folder(runs_root, "recording_to_rename", "開啟神網")
+    assert result == {"old_id": "recording_to_rename", "new_id": "開啟神網"}
+    assert not (runs_root / "recording_to_rename").exists()
+    assert (runs_root / "開啟神網" / "session.json").is_file()
+    assert (runs_root / "開啟神網" / "recording_steps.html").is_file()
+
+    with pytest.raises(ValueError, match="invalid"):
+        rename_recording_folder(runs_root, "開啟神網", "bad/name")
+    with pytest.raises(ValueError, match="already exists"):
+        _make_recording_landmark_run(runs_root, "other")
+        rename_recording_folder(runs_root, "開啟神網", "other")
+
+
+def test_resolve_deletable_run_folder_accepts_unicode(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    _make_recording_landmark_run(runs_root, "錄製 測試")
+    target = resolve_deletable_run_folder(runs_root, "錄製 測試")
+    assert target.name == "錄製 測試"

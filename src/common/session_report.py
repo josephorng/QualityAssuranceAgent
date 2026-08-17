@@ -359,8 +359,10 @@ def _resolve_script_metadata(run_root: Path) -> dict[str, str]:
         script_path_raw = os.environ.get(SCRIPT_PATH_ENV, "").strip()
         if script_path_raw:
             path = Path(script_path_raw)
+            from src.common.script_helper import script_display_name
+
             meta["script_path"] = str(path)
-            meta["script_name"] = path.name
+            meta["script_name"] = script_display_name(path)
         else:
             meta["script_name"] = "智能模式"
         if goal:
@@ -383,7 +385,9 @@ def _resolve_script_metadata(run_root: Path) -> dict[str, str]:
     script_path_raw = os.environ.get(SCRIPT_PATH_ENV, "").strip()
     if script_path_raw:
         path = Path(script_path_raw)
-        return {"script_path": str(path), "script_name": path.name}
+        from src.common.script_helper import script_display_name
+
+        return {"script_path": str(path), "script_name": script_display_name(path)}
 
     log_path = run_root / "run.log"
     if log_path.is_file():

@@ -8,7 +8,9 @@ from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
+from src.common.script_helper import script_display_name
 from src.common.session_report import _resolve_script_metadata, _resolve_started_at_utc
 
 _HTML_NAME = "session_steps.html"
@@ -134,6 +136,13 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 .copy-all-instructions.copied {
   color: #116329; border-color: #4ac26b; background: #dafbe1;
 }
+.rename-recording {
+  appearance: none; border: 1px solid #d0d7de; background: #f6f8fa;
+  cursor: pointer; border-radius: 6px; padding: .35rem .75rem;
+  font-size: .85rem; line-height: 1.2; font-family: inherit;
+  font-weight: 600; color: #57606a;
+}
+.rename-recording:hover:not(:disabled) { background: #eaeef2; color: #1f2328; }
 .add-recording-step {
   appearance: none; border: 1px solid #0969da; background: #ddf4ff;
   cursor: pointer; border-radius: 6px; padding: .35rem .75rem;
@@ -512,6 +521,51 @@ _RECORDING_SCRIPT = """
       }).catch(function () {
         window.alert("無法複製指令，請手動選取文字。");
       });
+    });
+  }
+
+  var renameBtn = document.querySelector("button.rename-recording");
+  if (renameBtn) {
+    renameBtn.addEventListener("click", function () {
+      if (window.location.protocol === "file:") {
+        window.alert("無法重新命名：請從主程式的「報告列表」開啟此頁（需本機服務）。");
+        return;
+      }
+      var runId = toolbarRunId();
+      if (!runId) {
+        window.alert("缺少錄製資訊。");
+        return;
+      }
+      var nextName = window.prompt("重新命名錄製資料夾：", runId);
+      if (nextName == null) return;
+      nextName = String(nextName).trim();
+      if (!nextName || nextName === runId) return;
+      renameBtn.disabled = true;
+      fetch("/api/runs/" + encodeURIComponent(runId) + "/rename", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: nextName })
+      })
+        .then(function (response) {
+          return response.json().then(function (payload) {
+            return { ok: response.ok && payload && payload.ok, payload: payload || {} };
+          }).catch(function () {
+            return { ok: false, payload: {} };
+          });
+        })
+        .then(function (result) {
+          renameBtn.disabled = false;
+          if (!result.ok) {
+            window.alert((result.payload && result.payload.error) || "重新命名失敗。");
+            return;
+          }
+          var newId = (result.payload && result.payload.new_id) || nextName;
+          window.location.href = "../" + encodeURIComponent(newId) + "/recording_steps.html";
+        })
+        .catch(function () {
+          renameBtn.disabled = false;
+          window.alert("無法連線主程式，請確認主程式正在執行。");
+        });
     });
   }
 
@@ -2047,7 +2101,7 @@ def _resolve_index_script_name(run_root: Path, report: dict[str, Any] | None) ->
             return None
         path = payload.get("script_path")
         if isinstance(path, str) and path.strip():
-            return Path(path.strip()).name
+            return script_display_name(Path(path.strip()))
         name = payload.get("script_name")
         if isinstance(name, str) and name.strip() and name.strip() != "智能模式":
             return name.strip()
@@ -2147,7 +2201,7 @@ def _sort_attr(value: Any) -> str:
 
 def _render_index_row(run_root: Path) -> str:
     run_id = run_root.name
-    href = escape(f"{run_id}/{_HTML_NAME}", quote=True)
+    href = escape(f"{quote(run_id, safe='')}/{_HTML_NAME}", quote=True)
     report = _load_run_report(run_root)
     script_name_raw = _resolve_index_script_name(run_root, report)
     script_name = escape(script_name_raw)
@@ -2251,7 +2305,8 @@ def _iter_smart_report_run_dirs(runs_root: Path) -> list[Path]:
 
 
 def _is_recording_run_dir(run_root: Path) -> bool:
-    return run_root.name.startswith("recording_")
+    """Recording folders are identified by ``session.json``, not a name prefix."""
+    return (Path(run_root) / "session.json").is_file()
 
 
 def _is_smart_run_dir(run_root: Path) -> bool:
@@ -2927,7 +2982,7 @@ def _render_recording_event_html(
 
 def _render_recording_index_row(run_root: Path) -> str:
     run_id = run_root.name
-    href = escape(f"{run_id}/{_RECORDING_HTML_NAME}", quote=True)
+    href = escape(f"{quote(run_id, safe='')}/{_RECORDING_HTML_NAME}", quote=True)
     manifest = _load_session_manifest(run_root)
     report = _load_run_report(run_root)
     run_time_raw = _resolve_recording_datetime(run_root, manifest)
@@ -3332,6 +3387,8 @@ def write_recording_html_from_run(run_root: Path, *, update_index: bool = True) 
         f'<div class="recording-toolbar" data-run-id="{run_id_attr}">'
         f'<button type="button" class="copy-all-instructions"{copy_all_disabled} '
         'title="複製全部指令" aria-label="複製全部指令">複製全部指令</button>'
+        '<button type="button" class="rename-recording" '
+        'title="重新命名" aria-label="重新命名">重新命名</button>'
         '<button type="button" class="add-recording-step" '
         'title="新增步驟" aria-label="新增步驟">新增步驟</button>'
         "</div>\n"

@@ -10,6 +10,7 @@ Recording expected-outcome edits POST to ``/api/runs/<id>/events/<n>/expected_ou
 Recording event deletes POST to ``/api/runs/<id>/events/<n>/delete``.
 Recording event inserts POST to ``/api/runs/<id>/events/add``.
 Recording instruction edits POST to ``/api/runs/<id>/events/<n>/instruction``.
+Recording folder rename POST to ``/api/runs/<id>/rename``.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from urllib.parse import unquote, urlparse
 
 from src.common.io_utils import read_json, write_json
 from src.common.nearby_side import NearbyHint, apply_nearby_landmarks, normalize_nearby_hints
+from src.common.script_helper import collect_recording_instructions
 from src.common.session_html import (
     recording_event_json_paths,
     write_recording_html_from_run,
@@ -54,9 +56,12 @@ from src.recorder.vision_context import (
     vision_from_yolo_ocr,
 )
 
-_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,191}$")
+# Allow Unicode folder names (CJK, spaces); reject path separators and Windows-illegal chars.
+_RUN_ID_ILLEGAL_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+_RUN_ID_MAX_LEN = 191
 _DELETE_PATH_RE = re.compile(r"^/api/runs/([^/]+)/delete/?$")
 _BUG_PATH_RE = re.compile(r"^/api/runs/([^/]+)/bug/?$")
+_RENAME_PATH_RE = re.compile(r"^/api/runs/([^/]+)/rename/?$")
 _LANDMARKS_PATH_RE = re.compile(
     r"^/api/runs/([^/]+)/events/(\d+)/landmarks/?$"
 )
@@ -196,10 +201,26 @@ def delete_run_report_folder(runs_root: Path, run_id: str) -> Path:
     return target
 
 
+def _is_valid_run_id(run_id: str) -> bool:
+    """Validate a direct-child folder name under the runs root."""
+    if not isinstance(run_id, str):
+        return False
+    cleaned = run_id.strip()
+    if not cleaned or cleaned in {".", ".."}:
+        return False
+    if len(cleaned) > _RUN_ID_MAX_LEN:
+        return False
+    if _RUN_ID_ILLEGAL_RE.search(cleaned):
+        return False
+    if Path(cleaned).name != cleaned:
+        return False
+    return True
+
+
 def resolve_deletable_run_folder(runs_root: Path, run_id: str) -> Path:
     """Validate ``run_id`` and return the absolute path of a deletable run folder."""
     runs_root = Path(runs_root).resolve()
-    if not isinstance(run_id, str) or not _RUN_ID_RE.fullmatch(run_id):
+    if not _is_valid_run_id(run_id):
         raise ValueError("invalid run id")
     if Path(run_id).name != run_id:
         raise ValueError("invalid run id")
@@ -214,6 +235,41 @@ def resolve_deletable_run_folder(runs_root: Path, run_id: str) -> Path:
     if not target.is_dir():
         raise ValueError("run folder not found")
     return target
+
+
+def rename_recording_folder(
+    runs_root: Path,
+    run_id: str,
+    new_name: Any,
+) -> dict[str, Any]:
+    """Rename a recording folder under ``runs_root`` and rebuild HTML/index.
+
+    Returns ``{"old_id": ..., "new_id": ...}``.
+    """
+    if not isinstance(new_name, str):
+        raise ValueError("name must be a string")
+    cleaned = new_name.strip()
+    if not _is_valid_run_id(cleaned):
+        raise ValueError("invalid run name")
+
+    runs_root = Path(runs_root).resolve()
+    source = resolve_deletable_run_folder(runs_root, run_id)
+    if cleaned == source.name:
+        return {"old_id": run_id, "new_id": cleaned}
+
+    dest = (runs_root / cleaned).resolve()
+    try:
+        dest.relative_to(runs_root)
+    except ValueError as exc:
+        raise ValueError("run folder is outside runs root") from exc
+    if dest.parent != runs_root:
+        raise ValueError("run folder must be a direct child of runs root")
+    if dest.exists():
+        raise ValueError("a folder with that name already exists")
+
+    source.rename(dest)
+    write_recording_html_from_run(dest, update_index=True)
+    return {"old_id": run_id, "new_id": cleaned}
 
 
 def _hints_from_selected_payload(raw: Any) -> list[NearbyHint]:
@@ -248,32 +304,7 @@ def _load_recording_event_kind(run_dir: Path, event_index: int) -> str:
 
 def _rebuild_report_instructions(run_dir: Path, report: dict[str, Any]) -> list[str]:
     """Rebuild ``instructions`` / ``expected_outcomes`` from analysis files (preserves wait lines)."""
-    analysis_dir = run_dir / "analysis"
-    event_paths = recording_event_json_paths(run_dir)
-    instructions: list[str] = []
-    expected_outcomes: list[str | None] = []
-    for event_path in event_paths:
-        event = read_json(event_path, {})
-        if not isinstance(event, dict):
-            continue
-        raw_index = event.get("index")
-        if not isinstance(raw_index, int):
-            continue
-        analysis = read_json(analysis_dir / f"event_{raw_index:03d}.json", {})
-        if not isinstance(analysis, dict):
-            continue
-        wait = analysis.get("wait_instruction")
-        if isinstance(wait, str) and wait.strip():
-            instructions.append(wait.strip())
-            expected_outcomes.append(None)
-        instruction = analysis.get("instruction")
-        if isinstance(instruction, str) and instruction.strip():
-            instructions.append(instruction.strip())
-            outcome = analysis.get("expected_outcome")
-            if isinstance(outcome, str) and outcome.strip():
-                expected_outcomes.append(outcome.strip())
-            else:
-                expected_outcomes.append(None)
+    instructions, expected_outcomes = collect_recording_instructions(run_dir)
     report["instructions"] = instructions
     report["expected_outcomes"] = expected_outcomes
     return instructions
@@ -1106,6 +1137,23 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
                     200,
                     {"ok": True, "run_id": run_id, "copied_to": str(dest)},
                 )
+                return
+
+            rename_match = _RENAME_PATH_RE.fullmatch(path)
+            if rename_match is not None:
+                run_id = rename_match.group(1)
+                try:
+                    body = self._read_json_body()
+                    result = rename_recording_folder(
+                        root, run_id, body.get("name")
+                    )
+                except ValueError as exc:
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                    return
+                except OSError as exc:
+                    self._send_json(500, {"ok": False, "error": str(exc)})
+                    return
+                self._send_json(200, {"ok": True, **result})
                 return
 
             if landmarks_match is not None:

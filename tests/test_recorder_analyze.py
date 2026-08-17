@@ -852,6 +852,7 @@ async def test_analyze_recording_session_writes_instructions(tmp_path: Path) -> 
     recording_html = run_dir / "recording_steps.html"
     assert recording_html.is_file()
     assert "輸入「打電話的時候」" in recording_html.read_text(encoding="utf-8")
+    assert not (run_dir / "script.txt").exists()
 
 
 def test_elapsed_seconds_requires_valid_ordered_timezone_aware_timestamps() -> None:

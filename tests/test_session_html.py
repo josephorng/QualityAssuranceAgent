@@ -711,6 +711,8 @@ def test_write_recording_html_renders_events_and_instructions(tmp_path: Path) ->
     assert "button.collapse-instruction" in html
     assert 'class="copy-all-instructions"' in html
     assert "複製全部指令" in html
+    assert 'class="rename-recording"' in html
+    assert "重新命名" in html
     assert "instructionCopyText" in html
     assert "# expected_outcome: " in html
     assert 'data-expected-outcome="' not in html
@@ -1070,6 +1072,23 @@ def test_write_runs_index_lists_recordings_in_recordings_tab(tmp_path: Path) -> 
     assert "recording_20260721_110000_000002" in html
     assert 'data-label="已分析"' in html
     assert 'data-label="事件"' in html
+
+
+def test_write_runs_index_lists_renamed_recording_without_prefix(tmp_path: Path) -> None:
+    recording = tmp_path / "開啟神網"
+    _write_recording_fixture(recording)
+    write_recording_html_from_run(recording)
+
+    html = write_runs_index_html(tmp_path).read_text(encoding="utf-8")
+    assert "開啟神網" in html
+    assert 'href="%E9%96%8B%E5%95%9F%E7%A5%9E%E7%B6%B2/recording_steps.html"' in html or (
+        "recording_steps.html" in html and "開啟神網" in html
+    )
+    # Must not appear as a normal execution report.
+    runs_panel_start = html.index('id="tab-runs"')
+    smart_panel_start = html.index('id="tab-smart"')
+    runs_panel = html[runs_panel_start:smart_panel_start]
+    assert "開啟神網" not in runs_panel
 
 
 def test_write_runs_index_lists_smart_runs_in_smart_tab(tmp_path: Path) -> None:

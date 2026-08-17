@@ -143,7 +143,7 @@ def prompt_script_continue_or_end(
 def prompt_append_recording_instructions(master: Any, message: str) -> str:
     """Ask what to do with generated recording instructions.
 
-    Returns ``append``, ``save_as``, or ``close`` (closing the dialog counts as close).
+    Returns ``append``, ``open_review``, or ``close`` (closing the dialog counts as close).
     """
     import customtkinter as ctk
 
@@ -177,8 +177,8 @@ def prompt_append_recording_instructions(master: Any, message: str) -> str:
         result["choice"] = "append"
         dialog.destroy()
 
-    def on_save_as() -> None:
-        result["choice"] = "save_as"
+    def on_open_review() -> None:
+        result["choice"] = "open_review"
         dialog.destroy()
 
     def on_close() -> None:
@@ -191,7 +191,7 @@ def prompt_append_recording_instructions(master: Any, message: str) -> str:
         master=btn_row, text="加入腳本", width=120, height=36, command=on_append
     ).pack(side="left", padx=(0, 10))
     ctk.CTkButton(
-        master=btn_row, text="存成新檔", width=120, height=36, command=on_save_as
+        master=btn_row, text="開啟錄製紀錄", width=140, height=36, command=on_open_review
     ).pack(side="left", padx=(0, 10))
     ctk.CTkButton(master=btn_row, text="關閉", width=120, height=36, command=on_close).pack(
         side="left"
@@ -210,7 +210,7 @@ def prompt_append_recording_instructions(master: Any, message: str) -> str:
     root = master.winfo_toplevel()
     root.wait_window(dialog)
     choice = result["choice"]
-    return choice if choice in ("append", "save_as", "close") else "close"
+    return choice if choice in ("append", "open_review", "close") else "close"
 
 
 def prompt_unsaved_script_changes(

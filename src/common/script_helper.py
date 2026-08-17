@@ -1,9 +1,135 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 _EXPECTED_OUTCOME_PREFIX = "# expected_outcome:"
+_LEGACY_RECORDING_SCRIPT_FILENAME = "script.txt"
+
+
+def is_recording_dir(path: Path) -> bool:
+    """True when ``path`` is a recording folder (has ``session.json``)."""
+    candidate = Path(path)
+    return candidate.is_dir() and (candidate / "session.json").is_file()
+
+
+def recording_run_dir(path: Path) -> Path | None:
+    """Return the recording folder for a dir or legacy ``script.txt`` inside one."""
+    candidate = Path(path)
+    if is_recording_dir(candidate):
+        return candidate
+    if (
+        candidate.is_file()
+        and candidate.name == _LEGACY_RECORDING_SCRIPT_FILENAME
+        and is_recording_dir(candidate.parent)
+    ):
+        return candidate.parent
+    return None
+
+
+def is_recording_script_path(path: Path) -> bool:
+    """True when ``path`` is a recording folder (or legacy ``script.txt`` inside one)."""
+    return recording_run_dir(path) is not None
+
+
+def resolve_runnable_script_path(path: Path) -> Path:
+    """Resolve a recording folder (or legacy ``script.txt``) to the recording dir.
+
+    Plain ``.txt`` script files are returned unchanged.
+    """
+    rec = recording_run_dir(path)
+    if rec is not None:
+        return rec
+    return Path(path)
+
+
+def script_display_name(path: Path) -> str:
+    """Human-facing name: recording folder name, else file name."""
+    rec = recording_run_dir(path)
+    if rec is not None:
+        return rec.name
+    return Path(path).name
+
+
+def _load_json_dict(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _recording_event_json_paths(run_dir: Path) -> list[Path]:
+    run_dir = Path(run_dir)
+    manifest = _load_json_dict(run_dir / "session.json")
+    if isinstance(manifest, dict) and isinstance(manifest.get("events"), list):
+        event_paths: list[Path] = []
+        seen: set[str] = set()
+        for item in manifest["events"]:
+            if not isinstance(item, str) or not item.strip():
+                continue
+            path = run_dir / item
+            if not path.is_file():
+                continue
+            key = str(path.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            event_paths.append(path)
+        return event_paths
+    events_dir = run_dir / "events"
+    if events_dir.is_dir():
+        return sorted(path for path in events_dir.glob("event_*.json") if path.is_file())
+    return []
+
+
+def collect_recording_instructions(run_dir: Path) -> tuple[list[str], list[str | None]]:
+    """Collect hub-script lines from recording analysis files (includes wait lines)."""
+    analysis_dir = Path(run_dir) / "analysis"
+    instructions: list[str] = []
+    expected_outcomes: list[str | None] = []
+    for event_path in _recording_event_json_paths(run_dir):
+        event = _load_json_dict(event_path)
+        if event is None:
+            continue
+        raw_index = event.get("index")
+        if not isinstance(raw_index, int):
+            continue
+        analysis = _load_json_dict(analysis_dir / f"event_{raw_index:03d}.json")
+        if analysis is None:
+            continue
+        wait = analysis.get("wait_instruction")
+        if isinstance(wait, str) and wait.strip():
+            instructions.append(wait.strip())
+            expected_outcomes.append(None)
+        instruction = analysis.get("instruction")
+        if isinstance(instruction, str) and instruction.strip():
+            instructions.append(instruction.strip())
+            outcome = analysis.get("expected_outcome")
+            if isinstance(outcome, str) and outcome.strip():
+                expected_outcomes.append(outcome.strip())
+            else:
+                expected_outcomes.append(None)
+    return instructions, expected_outcomes
+
+
+def collect_recording_script_text(run_dir: Path) -> str:
+    """Format collected recording instructions as hub-script text."""
+    instructions, outcomes = collect_recording_instructions(run_dir)
+    lines = format_script_lines_with_outcomes(instructions, outcomes)
+    return ("\n".join(lines).rstrip() + "\n") if lines else ""
+
+
+def load_runnable_script_text(path: Path) -> str:
+    """Read a ``.txt`` script, or collect instructions from a recording folder."""
+    rec = recording_run_dir(path)
+    if rec is not None:
+        return collect_recording_script_text(rec)
+    return Path(path).read_text(encoding="utf-8")
 
 
 def resolve_task(cli_task: str | None) -> str:

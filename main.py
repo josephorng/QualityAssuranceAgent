@@ -174,12 +174,20 @@ def prepare_run_session(
             raise ValueError("Script mode requires selected_script_path and script_steps")
         os.environ[SCRIPT_PATH_ENV] = str(selected_script_path)
         os.environ[SCRIPT_LINES_ENV] = json.dumps(script_steps, ensure_ascii=False)
-        try:
-            script_raw = Path(selected_script_path).read_text(encoding="utf-8")
-        except OSError:
-            script_raw = "\n".join(script_steps)
-        from src.common.script_helper import parse_script_steps_with_outcomes
+        from src.common.script_helper import (
+            collect_recording_script_text,
+            parse_script_steps_with_outcomes,
+            recording_run_dir,
+        )
 
+        rec = recording_run_dir(selected_script_path)
+        if rec is not None:
+            script_raw = collect_recording_script_text(rec)
+        else:
+            try:
+                script_raw = Path(selected_script_path).read_text(encoding="utf-8")
+            except OSError:
+                script_raw = "\n".join(script_steps)
         _steps, outcomes = parse_script_steps_with_outcomes(script_raw)
         if len(outcomes) != len(script_steps):
             outcomes = [None] * len(script_steps)

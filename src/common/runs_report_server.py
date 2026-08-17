@@ -8,11 +8,14 @@ Recording landmark edits POST to ``/api/runs/<id>/events/<n>/landmarks``
 Recording typed-text edits POST to ``/api/runs/<id>/events/<n>/text``.
 Recording expected-outcome edits POST to ``/api/runs/<id>/events/<n>/expected_outcome``.
 Recording event deletes POST to ``/api/runs/<id>/events/<n>/delete``.
+Recording event inserts POST to ``/api/runs/<id>/events/add``.
+Recording instruction edits POST to ``/api/runs/<id>/events/<n>/instruction``.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import tempfile
@@ -25,13 +28,23 @@ from urllib.parse import unquote, urlparse
 
 from src.common.io_utils import read_json, write_json
 from src.common.nearby_side import NearbyHint, apply_nearby_landmarks, normalize_nearby_hints
-from src.common.session_html import write_recording_html_from_run, write_runs_index_html
-from src.recorder.analyze import instruction_for_text_input, rebuild_pointer_instruction
+from src.common.session_html import (
+    recording_event_json_paths,
+    write_recording_html_from_run,
+    write_runs_index_html,
+)
+from src.recorder.analyze import (
+    instruction_for_key,
+    instruction_for_scroll,
+    instruction_for_text_input,
+    rebuild_pointer_instruction,
+)
 from src.recorder.models import (
     RecordedEvent,
     event_json_path,
     screenshot_path_for_event,
     screenshot_path_for_event_end,
+    utc_now_iso,
 )
 from src.recorder.vision_context import (
     drag_end_vision,
@@ -56,8 +69,26 @@ _EVENT_TEXT_PATH_RE = re.compile(
 _EVENT_EXPECTED_OUTCOME_PATH_RE = re.compile(
     r"^/api/runs/([^/]+)/events/(\d+)/expected_outcome/?$"
 )
+_EVENT_INSTRUCTION_PATH_RE = re.compile(
+    r"^/api/runs/([^/]+)/events/(\d+)/instruction/?$"
+)
+_EVENT_ADD_PATH_RE = re.compile(r"^/api/runs/([^/]+)/events/add/?$")
 _TYPED_TEXT_MAX_LEN = 8192
 _EXPECTED_OUTCOME_MAX_LEN = 8192
+_INSTRUCTION_MAX_LEN = 8192
+_ADDABLE_EVENT_KINDS = frozenset(
+    {
+        "click",
+        "double_click",
+        "right_click",
+        "text_input",
+        "key_press",
+        "hotkey",
+        "scroll",
+        "wait",
+        "manual",
+    }
+)
 
 # Default destination for "report bug" zip copies (Windows UNC share).
 BUG_REPORT_SHARE_DIR = Path(r"\\192.168.0.9\Joseph\CUA-BUG")
@@ -217,9 +248,8 @@ def _load_recording_event_kind(run_dir: Path, event_index: int) -> str:
 
 def _rebuild_report_instructions(run_dir: Path, report: dict[str, Any]) -> list[str]:
     """Rebuild ``instructions`` / ``expected_outcomes`` from analysis files (preserves wait lines)."""
-    events_dir = run_dir / "events"
     analysis_dir = run_dir / "analysis"
-    event_paths = sorted(events_dir.glob("event_*.json")) if events_dir.is_dir() else []
+    event_paths = recording_event_json_paths(run_dir)
     instructions: list[str] = []
     expected_outcomes: list[str | None] = []
     for event_path in event_paths:
@@ -302,16 +332,20 @@ def _remaining_recording_event_paths(run_dir: Path) -> list[Path]:
     return paths
 
 
-def _rewrite_session_event_list(run_dir: Path) -> int:
-    remaining_paths = _remaining_recording_event_paths(run_dir)
-    remaining = len(remaining_paths)
+def _rewrite_session_event_list(
+    run_dir: Path,
+    event_paths: list[Path] | None = None,
+) -> int:
+    if event_paths is None:
+        event_paths = recording_event_json_paths(run_dir)
+    remaining = len(event_paths)
     session_path = run_dir / "session.json"
     session = read_json(session_path, {})
     if not isinstance(session, dict):
         session = {}
     session["event_count"] = remaining
     session["events"] = [
-        path.relative_to(run_dir).as_posix() for path in remaining_paths
+        path.relative_to(run_dir).as_posix() for path in event_paths
     ]
     write_json(session_path, session)
     return remaining
@@ -365,7 +399,10 @@ def sync_recording_events(run_dir: Path, events: list[RecordedEvent]) -> dict[st
     for event in events:
         write_json(event_json_path(run_dir, event.index), event.to_dict())
 
-    remaining = _rewrite_session_event_list(run_dir)
+    remaining = _rewrite_session_event_list(
+        run_dir,
+        [event_json_path(run_dir, event.index) for event in events],
+    )
     purged.sort()
     return {"kept": len(events), "purged": purged, "remaining": remaining}
 
@@ -403,6 +440,286 @@ def delete_recording_event(
 
     write_recording_html_from_run(run_dir, update_index=True)
     return {"event_index": event_index, "remaining": remaining}
+
+
+def _optional_stripped_str(value: Any, *, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string")
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _parse_after_event_index(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("invalid after_event_index")
+    if value < 0:
+        raise ValueError("invalid after_event_index")
+    return value
+
+
+def _parse_hotkey_keys(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        parts = [item.strip() for item in value.replace(",", "+").split("+") if item.strip()]
+    elif isinstance(value, list):
+        parts = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        raise ValueError("keys must be a string or list")
+    return parts or None
+
+
+def _parse_scroll_delta(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("invalid scroll_delta")
+    if value == 0:
+        raise ValueError("scroll_delta must be non-zero")
+    return value
+
+
+def _parse_duration_seconds(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("invalid duration_seconds")
+    if value <= 0:
+        raise ValueError("duration_seconds must be positive")
+    return float(value)
+
+
+def _next_recording_event_index(run_dir: Path) -> int:
+    max_index = 0
+    for path in _remaining_recording_event_paths(run_dir):
+        payload = read_json(path, None)
+        if isinstance(payload, dict) and isinstance(payload.get("index"), int):
+            max_index = max(max_index, int(payload["index"]))
+            continue
+        match = re.fullmatch(r"event_(\d+)\.json", path.name)
+        if match is not None:
+            max_index = max(max_index, int(match.group(1)))
+    return max_index + 1
+
+
+def _copy_previous_screenshot(
+    run_dir: Path,
+    source_event: dict[str, Any] | None,
+    dest_index: int,
+) -> str:
+    if not isinstance(source_event, dict):
+        return ""
+    src = _resolve_event_media_path(run_dir, source_event.get("screenshot_path"))
+    if src is None or not src.is_file():
+        raw_index = source_event.get("index")
+        if isinstance(raw_index, int) and raw_index > 0:
+            fallback = screenshot_path_for_event(run_dir, raw_index)
+            if fallback.is_file():
+                src = fallback
+    if src is None or not src.is_file():
+        return ""
+    dest = screenshot_path_for_event(run_dir, dest_index)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest)
+    try:
+        return dest.relative_to(run_dir).as_posix()
+    except ValueError:
+        return str(dest)
+
+
+def _instruction_for_added_event(
+    *,
+    kind: str,
+    instruction: str | None,
+    text: str | None,
+    key: str | None,
+    keys: list[str] | None,
+    scroll_delta: int | None,
+    duration_seconds: float | None,
+) -> str:
+    if instruction:
+        return instruction
+    placeholder = RecordedEvent(index=1, timestamp_utc=utc_now_iso(), kind=kind)
+    if kind == "text_input":
+        generated = instruction_for_text_input(text or "")
+    elif kind in {"key_press", "hotkey"}:
+        placeholder.key = key
+        placeholder.keys = keys
+        generated = instruction_for_key(placeholder)
+    elif kind == "scroll":
+        placeholder.scroll_delta = scroll_delta
+        generated = instruction_for_scroll(placeholder, {})
+    elif kind == "wait" and duration_seconds is not None:
+        generated = f"等待 {math.ceil(duration_seconds)} 秒"
+    else:
+        generated = None
+    if not generated:
+        raise ValueError("instruction is empty")
+    return generated
+
+
+def add_recording_event(
+    runs_root: Path,
+    run_id: str,
+    *,
+    kind: Any,
+    after_event_index: Any = None,
+    instruction: Any = None,
+    expected_outcome: Any = None,
+    text: Any = None,
+    key: Any = None,
+    keys: Any = None,
+    scroll_delta: Any = None,
+    duration_seconds: Any = None,
+) -> dict[str, Any]:
+    """Insert a user-authored recording event and rebuild report/HTML artifacts."""
+    run_dir = resolve_deletable_run_folder(runs_root, run_id)
+    if not isinstance(kind, str) or not kind.strip():
+        raise ValueError("kind is required")
+    kind = kind.strip()
+    if kind not in _ADDABLE_EVENT_KINDS:
+        raise ValueError("unknown kind")
+
+    after = _parse_after_event_index(after_event_index)
+    ordered_paths = recording_event_json_paths(run_dir)
+    ordered_rels = [path.relative_to(run_dir).as_posix() for path in ordered_paths]
+    if after is not None and after > 0:
+        after_rel = event_json_path(run_dir, after).relative_to(run_dir).as_posix()
+        if after_rel not in ordered_rels:
+            raise ValueError("after_event_index not found")
+
+    typed_text = _optional_stripped_str(text, field_name="text")
+    key_name = _optional_stripped_str(key, field_name="key")
+    hotkey_keys = _parse_hotkey_keys(keys)
+    parsed_scroll = _parse_scroll_delta(scroll_delta)
+    parsed_duration = _parse_duration_seconds(duration_seconds)
+    parsed_instruction = _optional_stripped_str(instruction, field_name="instruction")
+    if parsed_instruction is not None and len(parsed_instruction) > _INSTRUCTION_MAX_LEN:
+        raise ValueError("instruction is too long")
+    if not isinstance(expected_outcome, (str, type(None))):
+        raise ValueError("expected_outcome must be a string")
+    if isinstance(expected_outcome, str) and len(expected_outcome) > _EXPECTED_OUTCOME_MAX_LEN:
+        raise ValueError("expected_outcome is too long")
+    cleaned_outcome = expected_outcome.strip() if isinstance(expected_outcome, str) else None
+    cleaned_outcome = cleaned_outcome or None
+
+    click_count: int | None = None
+    button: str | None = None
+    if kind == "click":
+        click_count = 1
+        button = "left"
+        if not parsed_instruction:
+            raise ValueError("instruction is empty")
+    elif kind == "double_click":
+        click_count = 2
+        button = "left"
+        if not parsed_instruction:
+            raise ValueError("instruction is empty")
+    elif kind == "right_click":
+        button = "right"
+        if not parsed_instruction:
+            raise ValueError("instruction is empty")
+    elif kind == "text_input":
+        if not typed_text:
+            raise ValueError("text is empty")
+    elif kind == "key_press":
+        if not key_name:
+            raise ValueError("key is empty")
+    elif kind == "hotkey":
+        if not hotkey_keys:
+            raise ValueError("keys is empty")
+    elif kind == "scroll":
+        if parsed_scroll is None:
+            raise ValueError("scroll_delta is required")
+    elif kind == "wait":
+        if parsed_duration is None:
+            raise ValueError("duration_seconds is required")
+    elif kind == "manual":
+        if not parsed_instruction:
+            raise ValueError("instruction is empty")
+
+    resolved_instruction = _instruction_for_added_event(
+        kind=kind,
+        instruction=parsed_instruction,
+        text=typed_text,
+        key=key_name,
+        keys=hotkey_keys,
+        scroll_delta=parsed_scroll,
+        duration_seconds=parsed_duration,
+    )
+    if len(resolved_instruction) > _INSTRUCTION_MAX_LEN:
+        raise ValueError("instruction is too long")
+
+    new_index = _next_recording_event_index(run_dir)
+    previous_event: dict[str, Any] | None = None
+    if after is None and ordered_paths:
+        previous_event = read_json(ordered_paths[-1], None)
+        previous_event = previous_event if isinstance(previous_event, dict) else None
+    elif after is not None and after > 0:
+        previous_event = read_json(event_json_path(run_dir, after), None)
+        previous_event = previous_event if isinstance(previous_event, dict) else None
+    screenshot_rel = _copy_previous_screenshot(run_dir, previous_event, new_index)
+
+    event = RecordedEvent(
+        index=new_index,
+        timestamp_utc=utc_now_iso(),
+        kind=kind,
+        button=button,
+        key=key_name,
+        keys=hotkey_keys,
+        text=typed_text,
+        scroll_delta=parsed_scroll,
+        duration_seconds=parsed_duration,
+        click_count=click_count,
+        screenshot_path=screenshot_rel,
+    )
+    (run_dir / "events").mkdir(parents=True, exist_ok=True)
+    (run_dir / "analysis").mkdir(parents=True, exist_ok=True)
+    write_json(event_json_path(run_dir, new_index), event.to_dict())
+    analysis_payload: dict[str, Any] = {
+        "event_index": new_index,
+        "instruction": resolved_instruction,
+        "expected_outcome": cleaned_outcome,
+    }
+    write_json(run_dir / "analysis" / f"event_{new_index:03d}.json", analysis_payload)
+
+    new_rel = event_json_path(run_dir, new_index).relative_to(run_dir).as_posix()
+    if after is None:
+        ordered_rels.append(new_rel)
+    elif after == 0:
+        ordered_rels.insert(0, new_rel)
+    else:
+        after_rel = event_json_path(run_dir, after).relative_to(run_dir).as_posix()
+        ordered_rels.insert(ordered_rels.index(after_rel) + 1, new_rel)
+    remaining = _rewrite_session_event_list(
+        run_dir,
+        [run_dir / rel for rel in ordered_rels],
+    )
+
+    report_path = run_dir / "report.json"
+    report = read_json(report_path, {})
+    if not isinstance(report, dict):
+        report = {}
+    report["recorded"] = remaining
+    if "processed" in report:
+        report["processed"] = remaining
+    if "cached" in report:
+        analysis_dir = run_dir / "analysis"
+        report["cached"] = (
+            len(list(analysis_dir.glob("event_*.json"))) if analysis_dir.is_dir() else 0
+        )
+    _rebuild_report_instructions(run_dir, report)
+    write_json(report_path, report)
+    write_recording_html_from_run(run_dir, update_index=True)
+    return {
+        "event_index": new_index,
+        "remaining": remaining,
+        "instruction": resolved_instruction,
+    }
 
 
 def _optional_int_index(value: Any, *, field_name: str) -> int | None:
@@ -657,6 +974,49 @@ def apply_recording_event_expected_outcome(
     return {"expected_outcome": cleaned}
 
 
+def apply_recording_event_instruction(
+    runs_root: Path,
+    run_id: str,
+    event_index: int,
+    *,
+    instruction: Any,
+) -> dict[str, Any]:
+    """Replace the hub-script instruction for one recorded event and persist artifacts."""
+    run_dir = resolve_deletable_run_folder(runs_root, run_id)
+    if not isinstance(event_index, int) or event_index < 1:
+        raise ValueError("invalid event index")
+    if not isinstance(instruction, str):
+        raise ValueError("instruction must be a string")
+    if len(instruction) > _INSTRUCTION_MAX_LEN:
+        raise ValueError("instruction is too long")
+    cleaned = instruction.strip()
+    if not cleaned:
+        raise ValueError("instruction is empty")
+
+    event_path = event_json_path(run_dir, event_index)
+    event_payload = read_json(event_path, None)
+    if not isinstance(event_payload, dict):
+        raise ValueError("event not found")
+
+    analysis_path = run_dir / "analysis" / f"event_{event_index:03d}.json"
+    analysis = read_json(analysis_path, None)
+    if not isinstance(analysis, dict):
+        analysis = {"event_index": event_index}
+
+    analysis["instruction"] = cleaned
+    write_json(analysis_path, analysis)
+
+    report_path = run_dir / "report.json"
+    report = read_json(report_path, {})
+    if not isinstance(report, dict):
+        report = {}
+    _rebuild_report_instructions(run_dir, report)
+    write_json(report_path, report)
+
+    write_recording_html_from_run(run_dir, update_index=False)
+    return {"instruction": cleaned}
+
+
 def zip_run_report_to_bug_share(
     runs_root: Path,
     run_id: str,
@@ -715,7 +1075,9 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
             landmarks_match = _LANDMARKS_PATH_RE.fullmatch(path)
             event_text_match = _EVENT_TEXT_PATH_RE.fullmatch(path)
             event_outcome_match = _EVENT_EXPECTED_OUTCOME_PATH_RE.fullmatch(path)
+            event_instruction_match = _EVENT_INSTRUCTION_PATH_RE.fullmatch(path)
             event_delete_match = _EVENT_DELETE_PATH_RE.fullmatch(path)
+            event_add_match = _EVENT_ADD_PATH_RE.fullmatch(path)
 
             if delete_match is not None:
                 run_id = delete_match.group(1)
@@ -802,6 +1164,53 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
                         run_id,
                         event_index,
                         expected_outcome=body.get("expected_outcome"),
+                    )
+                except ValueError as exc:
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                    return
+                except OSError as exc:
+                    self._send_json(500, {"ok": False, "error": str(exc)})
+                    return
+                self._send_json(200, {"ok": True, **result})
+                return
+
+            if event_instruction_match is not None:
+                run_id = event_instruction_match.group(1)
+                event_index_raw = event_instruction_match.group(2)
+                try:
+                    event_index = int(event_index_raw)
+                    body = self._read_json_body()
+                    result = apply_recording_event_instruction(
+                        root,
+                        run_id,
+                        event_index,
+                        instruction=body.get("instruction"),
+                    )
+                except ValueError as exc:
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                    return
+                except OSError as exc:
+                    self._send_json(500, {"ok": False, "error": str(exc)})
+                    return
+                self._send_json(200, {"ok": True, **result})
+                return
+
+            if event_add_match is not None:
+                run_id = event_add_match.group(1)
+                try:
+                    body = self._read_json_body()
+                    result = add_recording_event(
+                        root,
+                        run_id,
+                        kind=body.get("kind"),
+                        after_event_index=body.get("after_event_index"),
+                        instruction=body.get("instruction"),
+                        expected_outcome=body.get("expected_outcome"),
+                        text=body.get("text"),
+                        key=body.get("key"),
+                        keys=body.get("keys"),
+                        scroll_delta=body.get("scroll_delta"),
+                        duration_seconds=body.get("duration_seconds"),
                     )
                 except ValueError as exc:
                     self._send_json(400, {"ok": False, "error": str(exc)})

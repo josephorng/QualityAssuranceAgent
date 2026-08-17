@@ -715,6 +715,12 @@ def test_write_recording_html_renders_events_and_instructions(tmp_path: Path) ->
     assert "# expected_outcome: " in html
     assert 'data-expected-outcome="' not in html
     assert "刪除" in html
+    assert "新增步驟" in html
+    assert 'class="add-recording-step"' in html
+    assert 'class="add-instruction"' in html
+    assert 'id="add-step-dialog"' in html
+    assert 'id="event-1"' in html
+    assert 'class="step-instruction-input"' in html
     assert "/api/runs/" in html
     assert "/delete" in html
     assert "點擊" in html
@@ -1172,3 +1178,58 @@ def test_write_runs_index_excludes_recording_from_runs_tab(tmp_path: Path) -> No
 
     assert 'href="recording_20260721_130000_000011/recording_steps.html"' in html
     assert 'href="recording_20260721_130000_000011/session_steps.html"' not in html
+
+
+def test_write_recording_html_follows_session_order_for_display_numbers(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "recording_20260721_140000_000050"
+    run_root.mkdir(parents=True)
+    (run_root / "events").mkdir()
+    (run_root / "analysis").mkdir()
+    for index, instruction in ((1, "第一步"), (2, "第二步")):
+        (run_root / "events" / f"event_{index:03d}.json").write_text(
+            json.dumps(
+                {
+                    "index": index,
+                    "timestamp_utc": f"2026-07-21T04:00:0{index}+00:00",
+                    "kind": "click",
+                    "cursor_xy": [10, 20],
+                    "screenshot_path": "",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        (run_root / "analysis" / f"event_{index:03d}.json").write_text(
+            json.dumps({"event_index": index, "instruction": instruction}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    (run_root / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_root.name,
+                "started_at_utc": "2026-07-21T04:00:00+00:00",
+                "stopped_at_utc": "2026-07-21T04:01:00+00:00",
+                "event_count": 2,
+                "events": ["events/event_002.json", "events/event_001.json"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+    pos_two = html.index('data-event-index="2"')
+    pos_one = html.index('data-event-index="1"')
+    assert pos_two < pos_one
+
+    group_two = html.split('data-event-index="2"', 1)[1].split("</details>", 1)[0]
+    group_one = html.split('data-event-index="1"', 1)[1].split("</details>", 1)[0]
+    assert '<span class="instruction-number">1.</span>' in group_two
+    assert '<span class="instruction-number">2.</span>' in group_one
+    assert "第二步" in group_two
+    assert "第一步" in group_one
+    assert 'class="add-recording-step"' in html
+    assert 'id="add-step-dialog"' in html
+    assert "自訂指令" in html

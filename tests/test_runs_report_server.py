@@ -9,7 +9,9 @@ import pytest
 
 from src.common.runs_report_server import (
     RunsReportServer,
+    add_recording_event,
     apply_recording_event_expected_outcome,
+    apply_recording_event_instruction,
     apply_recording_event_landmarks,
     apply_recording_event_text,
     delete_recording_event,
@@ -780,5 +782,229 @@ def test_runs_report_server_expected_outcome_endpoint(tmp_path: Path) -> None:
             assert response.status == 200
         assert payload["ok"] is True
         assert payload["expected_outcome"] == "畫面已更新"
+    finally:
+        server.stop()
+
+
+def test_add_recording_event_appends_wait_text_and_manual(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_two_event_run(runs_root, "recording_add_append")
+
+    wait_result = add_recording_event(
+        runs_root,
+        "recording_add_append",
+        kind="wait",
+        duration_seconds=3,
+    )
+    assert wait_result["event_index"] == 3
+    assert wait_result["remaining"] == 3
+    assert wait_result["instruction"] == "等待 3 秒"
+
+    text_result = add_recording_event(
+        runs_root,
+        "recording_add_append",
+        kind="text_input",
+        text="  hello  ",
+    )
+    assert text_result["event_index"] == 4
+    assert text_result["instruction"] == "輸入「hello」"
+
+    manual_result = add_recording_event(
+        runs_root,
+        "recording_add_append",
+        kind="manual",
+        instruction="確認視窗已開啟",
+        expected_outcome="  對話框出現  ",
+    )
+    assert manual_result["event_index"] == 5
+    assert manual_result["instruction"] == "確認視窗已開啟"
+
+    session = json.loads((run_root / "session.json").read_text(encoding="utf-8"))
+    assert session["event_count"] == 5
+    assert session["events"] == [
+        "events/event_001.json",
+        "events/event_002.json",
+        "events/event_003.json",
+        "events/event_004.json",
+        "events/event_005.json",
+    ]
+
+    wait_event = json.loads((run_root / "events" / "event_003.json").read_text(encoding="utf-8"))
+    assert wait_event["kind"] == "wait"
+    assert wait_event["duration_seconds"] == 3.0
+    wait_analysis = json.loads(
+        (run_root / "analysis" / "event_003.json").read_text(encoding="utf-8")
+    )
+    assert wait_analysis["instruction"] == "等待 3 秒"
+
+    text_event = json.loads((run_root / "events" / "event_004.json").read_text(encoding="utf-8"))
+    assert text_event["kind"] == "text_input"
+    assert text_event["text"] == "hello"
+
+    manual_analysis = json.loads(
+        (run_root / "analysis" / "event_005.json").read_text(encoding="utf-8")
+    )
+    assert manual_analysis["expected_outcome"] == "對話框出現"
+
+    report = json.loads((run_root / "report.json").read_text(encoding="utf-8"))
+    assert report["instructions"] == [
+        "點擊「搜尋」按鈕",
+        "點擊「確定」按鈕",
+        "等待 3 秒",
+        "輸入「hello」",
+        "確認視窗已開啟",
+    ]
+    html = (run_root / "recording_steps.html").read_text(encoding="utf-8")
+    assert "等待 3 秒" in html
+    assert "輸入「hello」" in html
+    assert "確認視窗已開啟" in html
+    assert 'id="add-step-dialog"' in html
+    assert (run_root / "screenshots" / "event_003.jpeg").is_file()
+
+
+def test_add_recording_event_inserts_between_without_renumbering(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_two_event_run(runs_root, "recording_add_insert")
+
+    result = add_recording_event(
+        runs_root,
+        "recording_add_insert",
+        kind="wait",
+        after_event_index=1,
+        duration_seconds=2,
+    )
+    assert result["event_index"] == 3
+
+    session = json.loads((run_root / "session.json").read_text(encoding="utf-8"))
+    assert session["events"] == [
+        "events/event_001.json",
+        "events/event_003.json",
+        "events/event_002.json",
+    ]
+    report = json.loads((run_root / "report.json").read_text(encoding="utf-8"))
+    assert report["instructions"] == [
+        "點擊「搜尋」按鈕",
+        "等待 2 秒",
+        "點擊「確定」按鈕",
+    ]
+    html = (run_root / "recording_steps.html").read_text(encoding="utf-8")
+    first = html.split('data-event-index="1"', 1)[1]
+    wait_at = first.index('data-event-index="3"')
+    second_at = first.index('data-event-index="2"')
+    assert wait_at < second_at
+    number_after_wait = first[wait_at:].split('instruction-number">', 1)[1][:2]
+    assert number_after_wait == "2."
+    assert '<span class="instruction-number">1.</span>' in html
+    assert 'id="event-3"' in html
+
+
+def test_delete_recording_event_preserves_custom_session_order(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_two_event_run(runs_root, "recording_add_then_delete")
+    add_recording_event(
+        runs_root,
+        "recording_add_then_delete",
+        kind="manual",
+        after_event_index=1,
+        instruction="中間步驟",
+    )
+
+    result = delete_recording_event(runs_root, "recording_add_then_delete", 1)
+    assert result["remaining"] == 2
+
+    session = json.loads((run_root / "session.json").read_text(encoding="utf-8"))
+    assert session["events"] == ["events/event_003.json", "events/event_002.json"]
+    report = json.loads((run_root / "report.json").read_text(encoding="utf-8"))
+    assert report["instructions"] == ["中間步驟", "點擊「確定」按鈕"]
+
+
+def test_add_recording_event_rejects_unknown_kind_and_empty_instruction(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    _make_recording_two_event_run(runs_root, "recording_add_reject")
+
+    with pytest.raises(ValueError, match="unknown kind"):
+        add_recording_event(
+            runs_root,
+            "recording_add_reject",
+            kind="drag",
+            instruction="nope",
+        )
+    with pytest.raises(ValueError, match="instruction is empty"):
+        add_recording_event(
+            runs_root,
+            "recording_add_reject",
+            kind="click",
+            instruction="   ",
+        )
+    with pytest.raises(ValueError, match="instruction is empty"):
+        add_recording_event(
+            runs_root,
+            "recording_add_reject",
+            kind="manual",
+        )
+
+
+def test_apply_recording_event_instruction_persists(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_two_event_run(runs_root, "recording_edit_instruction")
+
+    result = apply_recording_event_instruction(
+        runs_root,
+        "recording_edit_instruction",
+        1,
+        instruction="  點擊「新目標」  ",
+    )
+    assert result == {"instruction": "點擊「新目標」"}
+    analysis = json.loads((run_root / "analysis" / "event_001.json").read_text(encoding="utf-8"))
+    assert analysis["instruction"] == "點擊「新目標」"
+    report = json.loads((run_root / "report.json").read_text(encoding="utf-8"))
+    assert report["instructions"][0] == "點擊「新目標」"
+
+
+def test_runs_report_server_add_event_endpoint(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_two_event_run(runs_root, "recording_http_add")
+
+    server = RunsReportServer(runs_root)
+    try:
+        base = server.start()
+        body = json.dumps(
+            {
+                "kind": "wait",
+                "after_event_index": 1,
+                "duration_seconds": 4,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            f"{base}/api/runs/recording_http_add/events/add",
+            method="POST",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            assert response.status == 200
+        assert payload["ok"] is True
+        assert payload["event_index"] == 3
+        assert payload["instruction"] == "等待 4 秒"
+        session = json.loads((run_root / "session.json").read_text(encoding="utf-8"))
+        assert session["events"] == [
+            "events/event_001.json",
+            "events/event_003.json",
+            "events/event_002.json",
+        ]
+
+        bad = urllib.request.Request(
+            f"{base}/api/runs/recording_http_add/events/add",
+            method="POST",
+            data=json.dumps({"kind": "nope"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(bad, timeout=5)
+        assert exc_info.value.code == 400
     finally:
         server.stop()

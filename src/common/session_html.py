@@ -32,6 +32,8 @@ _RECORDING_KIND_LABELS = {
     "key": "按鍵",
     "key_press": "按鍵",
     "hotkey": "快捷鍵",
+    "wait": "等待",
+    "manual": "自訂指令",
 }
 
 # Column order written by ``src.hand.module`` via ``append_csv_row``; used as a fallback for
@@ -99,6 +101,13 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 }
 .delete-instruction:hover { background: #ffebe9; color: #cf222e; border-color: #ff8182; }
 .delete-instruction:disabled { opacity: .45; cursor: not-allowed; }
+.add-instruction {
+  appearance: none; border: 1px solid #d0d7de; background: #f6f8fa;
+  cursor: pointer; border-radius: 6px; padding: .2rem .55rem;
+  font-size: .75rem; line-height: 1.2; font-family: inherit;
+  font-weight: 600; color: #57606a; flex: 0 0 auto;
+}
+.add-instruction:hover { background: #ddf4ff; color: #0969da; border-color: #54aeff; }
 .collapse-row {
   display: flex; justify-content: center; align-items: center;
   padding: 0 1.5rem .85rem;
@@ -125,6 +134,13 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 .copy-all-instructions.copied {
   color: #116329; border-color: #4ac26b; background: #dafbe1;
 }
+.add-recording-step {
+  appearance: none; border: 1px solid #0969da; background: #ddf4ff;
+  cursor: pointer; border-radius: 6px; padding: .35rem .75rem;
+  font-size: .85rem; line-height: 1.2; font-family: inherit;
+  font-weight: 600; color: #0969da;
+}
+.add-recording-step:hover { background: #b6e3ff; }
 .landmarks {
   margin: 0 1.5rem 1rem; padding: .75rem 1rem;
   border: 1px solid #d0d7de; border-radius: 8px; background: #f6f8fa;
@@ -238,6 +254,87 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
   font-size: .75rem; color: #57606a; font-weight: 600;
 }
 .expected-outcome-status.error { color: #cf222e; }
+.step-instruction {
+  margin: 0 1.5rem 1rem; padding: .75rem 1rem;
+  border: 1px solid #d0d7de; border-radius: 8px; background: #f6f8fa;
+}
+.step-instruction-title {
+  margin: 0 0 .5rem; font-size: .9rem; font-weight: 700; color: #57606a;
+}
+.step-instruction-row {
+  display: flex; flex-wrap: wrap; align-items: flex-start; gap: .5rem;
+}
+.step-instruction-input {
+  flex: 1 1 16rem; min-width: 12rem; min-height: 2.6rem; resize: vertical;
+  font-family: inherit; font-size: .9rem; line-height: 1.3;
+  padding: .35rem .55rem; border: 1px solid #d0d7de; border-radius: 6px;
+  background: #fff; color: #1f2328;
+}
+.apply-step-instruction {
+  appearance: none; border: 1px solid #0969da; background: #ddf4ff;
+  cursor: pointer; border-radius: 6px; padding: .3rem .7rem;
+  font-size: .8rem; line-height: 1.2; font-family: inherit;
+  font-weight: 600; color: #0969da; flex: 0 0 auto;
+}
+.apply-step-instruction:hover:not(:disabled) { background: #b6e3ff; }
+.apply-step-instruction:disabled { opacity: .45; cursor: not-allowed; }
+.apply-step-instruction.applied {
+  color: #116329; border-color: #4ac26b; background: #dafbe1;
+}
+.step-instruction-status {
+  display: inline-block;
+  font-size: .75rem; color: #57606a; font-weight: 600;
+}
+.step-instruction-status.error { color: #cf222e; }
+.add-step-dialog-backdrop {
+  display: none; position: fixed; inset: 0; z-index: 40;
+  align-items: center; justify-content: center;
+  background: rgba(31,35,40,.45); padding: 1.25rem;
+}
+.add-step-dialog-backdrop.open { display: flex; }
+.add-step-dialog {
+  width: min(34rem, 100%); max-height: 90vh; overflow: auto;
+  background: #fff; color: #1f2328; border-radius: 10px;
+  border: 1px solid #d0d7de; box-shadow: 0 8px 24px rgba(0,0,0,.12);
+  padding: 1.15rem 1.35rem 1.25rem;
+}
+.add-step-dialog h2 {
+  margin: 0 0 .85rem; font-size: 1.1rem;
+}
+.add-step-field { margin: 0 0 .75rem; }
+.add-step-field label {
+  display: block; margin: 0 0 .3rem;
+  font-size: .8rem; font-weight: 700; color: #57606a;
+}
+.add-step-field input,
+.add-step-field select,
+.add-step-field textarea {
+  width: 100%; font-family: inherit; font-size: .9rem;
+  padding: .35rem .55rem; border: 1px solid #d0d7de; border-radius: 6px;
+  background: #fff; color: #1f2328;
+}
+.add-step-field textarea { min-height: 4.2rem; resize: vertical; }
+.add-step-actions {
+  display: flex; justify-content: flex-end; gap: .5rem; margin-top: 1rem;
+}
+.add-step-actions button {
+  appearance: none; border-radius: 6px; padding: .35rem .75rem;
+  font-size: .85rem; line-height: 1.2; font-family: inherit; font-weight: 600;
+  cursor: pointer;
+}
+.add-step-cancel {
+  border: 1px solid #d0d7de; background: #f6f8fa; color: #57606a;
+}
+.add-step-cancel:hover { background: #eaeef2; color: #1f2328; }
+.add-step-submit {
+  border: 1px solid #0969da; background: #ddf4ff; color: #0969da;
+}
+.add-step-submit:hover:not(:disabled) { background: #b6e3ff; }
+.add-step-submit:disabled { opacity: .45; cursor: not-allowed; }
+.add-step-status {
+  margin: .25rem 0 0; font-size: .8rem; font-weight: 600; color: #57606a;
+}
+.add-step-status.error { color: #cf222e; }
 .hand-ops {
   list-style: disc; margin: 0; padding: 1rem 1.5rem 1.25rem 2.5rem;
 }
@@ -683,6 +780,308 @@ _RECORDING_SCRIPT = """
           setExpectedOutcomeStatus(panel, "無法連線主程式，請確認主程式正在執行。", true);
         });
   }
+
+  function setStepInstructionStatus(panel, text, isError) {
+    var status = panel.querySelector(".step-instruction-status");
+    if (!status) return;
+    status.textContent = text || "";
+    if (isError) status.classList.add("error");
+    else status.classList.remove("error");
+  }
+
+  Array.prototype.slice.call(document.querySelectorAll("button.apply-step-instruction")).forEach(function (btn) {
+    btn.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      applyStepInstruction(btn);
+    });
+  });
+
+  Array.prototype.slice.call(document.querySelectorAll(".step-instruction-input")).forEach(function (input) {
+    input.addEventListener("keydown", function (event) {
+      if (!(event.key === "Enter" && (event.ctrlKey || event.metaKey))) return;
+      event.preventDefault();
+      event.stopPropagation();
+      var panel = input.closest(".step-instruction");
+      var btn = panel ? panel.querySelector("button.apply-step-instruction") : null;
+      if (btn) applyStepInstruction(btn);
+    });
+  });
+
+  function applyStepInstruction(btn) {
+      var panel = btn.closest(".step-instruction");
+      var group = btn.closest(".instruction-group");
+      if (!panel || !group) return;
+      var input = panel.querySelector(".step-instruction-input");
+      if (!input) return;
+      if (window.location.protocol === "file:") {
+        setStepInstructionStatus(panel, "請透過主程式開啟報告以修改指令。", true);
+        return;
+      }
+      var runId = group.getAttribute("data-run-id") || "";
+      var eventIndex = group.getAttribute("data-event-index") || "";
+      if (!runId || !eventIndex) {
+        setStepInstructionStatus(panel, "缺少事件資訊。", true);
+        return;
+      }
+      var text = input.value || "";
+      btn.disabled = true;
+      setStepInstructionStatus(panel, "套用中…", false);
+      fetch("/api/runs/" + encodeURIComponent(runId) + "/events/" + encodeURIComponent(eventIndex) + "/instruction", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instruction: text })
+      })
+        .then(function (response) {
+          return response.json().then(function (payload) {
+            return { ok: response.ok, payload: payload };
+          });
+        })
+        .then(function (result) {
+          btn.disabled = false;
+          if (!result.ok || !result.payload || !result.payload.ok) {
+            var err = (result.payload && result.payload.error) || "套用失敗";
+            setStepInstructionStatus(panel, err, true);
+            return;
+          }
+          var saved = result.payload.instruction || "";
+          input.value = saved;
+          var title = group.querySelector(".instruction-title");
+          if (title && saved) title.textContent = saved;
+          var copyBtn = group.querySelector("button.copy-instruction");
+          if (copyBtn && saved) copyBtn.setAttribute("data-instruction", saved);
+          btn.classList.add("applied");
+          setStepInstructionStatus(panel, "已套用", false);
+          window.setTimeout(function () {
+            btn.classList.remove("applied");
+          }, 1200);
+        })
+        .catch(function () {
+          btn.disabled = false;
+          setStepInstructionStatus(panel, "無法連線主程式，請確認主程式正在執行。", true);
+        });
+  }
+
+  var addDialog = document.getElementById("add-step-dialog");
+  var addForm = addDialog ? addDialog.querySelector("form") : null;
+  var addStatus = addDialog ? addDialog.querySelector(".add-step-status") : null;
+  var instructionDirty = false;
+
+  function toolbarRunId() {
+    var toolbar = document.querySelector(".recording-toolbar");
+    return toolbar ? (toolbar.getAttribute("data-run-id") || "") : "";
+  }
+
+  function setAddStatus(text, isError) {
+    if (!addStatus) return;
+    addStatus.textContent = text || "";
+    if (isError) addStatus.classList.add("error");
+    else addStatus.classList.remove("error");
+  }
+
+  function fieldForKind(kind) {
+    return addForm ? addForm.querySelector('[data-kind-field="' + kind + '"]') : null;
+  }
+
+  function suggestedInstruction(kind) {
+    if (!addForm) return "";
+    if (kind === "text_input") {
+      var text = ((addForm.querySelector('[name="text"]') || {}).value || "").trim();
+      return text ? ("輸入「" + text + "」") : "";
+    }
+    if (kind === "key_press") {
+      var key = ((addForm.querySelector('[name="key"]') || {}).value || "").trim();
+      return key ? ("按下 " + key + " 鍵") : "";
+    }
+    if (kind === "hotkey") {
+      var combo = ((addForm.querySelector('[name="keys"]') || {}).value || "").trim();
+      return combo ? ("按下 " + combo) : "";
+    }
+    if (kind === "scroll") {
+      var delta = ((addForm.querySelector('[name="scroll_delta"]') || {}).value || "");
+      if (delta === "1") return "向上捲動";
+      if (delta === "-1") return "向下捲動";
+      return "";
+    }
+    if (kind === "wait") {
+      var seconds = ((addForm.querySelector('[name="duration_seconds"]') || {}).value || "").trim();
+      return seconds ? ("等待 " + seconds + " 秒") : "";
+    }
+    return "";
+  }
+
+  function syncKindFields() {
+    if (!addForm) return;
+    var kind = (addForm.querySelector('[name="kind"]') || {}).value || "click";
+    Array.prototype.slice.call(addForm.querySelectorAll("[data-kind-field]")).forEach(function (row) {
+      var match = row.getAttribute("data-kind-field") === kind;
+      row.hidden = !match;
+      Array.prototype.slice.call(row.querySelectorAll("input, select, textarea")).forEach(function (el) {
+        el.disabled = !match;
+      });
+    });
+    if (!instructionDirty) {
+      var instruction = addForm.querySelector('[name="instruction"]');
+      if (instruction) instruction.value = suggestedInstruction(kind);
+    }
+  }
+
+  function closeAddDialog() {
+    if (!addDialog) return;
+    addDialog.classList.remove("open");
+    addDialog.setAttribute("hidden", "");
+    setAddStatus("", false);
+  }
+
+  function openAddDialog(afterEventIndex) {
+    if (!addDialog || !addForm) return;
+    if (window.location.protocol === "file:") {
+      window.alert("無法新增：請從主程式的「報告列表」開啟此頁（需本機服務）。");
+      return;
+    }
+    addForm.reset();
+    instructionDirty = false;
+    addForm.setAttribute("data-after-event-index", afterEventIndex == null ? "" : String(afterEventIndex));
+    var kindSelect = addForm.querySelector('[name="kind"]');
+    if (kindSelect) kindSelect.value = "click";
+    syncKindFields();
+    setAddStatus("", false);
+    addDialog.removeAttribute("hidden");
+    addDialog.classList.add("open");
+    var first = addForm.querySelector('[name="kind"]');
+    if (first && typeof first.focus === "function") first.focus();
+  }
+
+  Array.prototype.slice.call(document.querySelectorAll("button.add-instruction")).forEach(function (btn) {
+    btn.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      var group = btn.closest(".instruction-group");
+      var eventIndex = group ? group.getAttribute("data-event-index") : "";
+      var parsed = eventIndex ? parseInt(eventIndex, 10) : NaN;
+      openAddDialog(Number.isFinite(parsed) ? parsed : null);
+    });
+  });
+
+  var addToolbar = document.querySelector("button.add-recording-step");
+  if (addToolbar) {
+    addToolbar.addEventListener("click", function (event) {
+      event.preventDefault();
+      openAddDialog(null);
+    });
+  }
+
+  if (addDialog) {
+    addDialog.addEventListener("click", function (event) {
+      if (event.target === addDialog) closeAddDialog();
+    });
+  }
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape" && addDialog && addDialog.classList.contains("open")) {
+      closeAddDialog();
+    }
+  });
+  if (addForm) {
+    var kindSelect = addForm.querySelector('[name="kind"]');
+    if (kindSelect) {
+      kindSelect.addEventListener("change", function () {
+        instructionDirty = false;
+        syncKindFields();
+      });
+    }
+    var instructionInput = addForm.querySelector('[name="instruction"]');
+    if (instructionInput) {
+      instructionInput.addEventListener("input", function () {
+        instructionDirty = true;
+      });
+    }
+    Array.prototype.slice.call(addForm.querySelectorAll("[data-kind-field] input, [data-kind-field] select")).forEach(function (el) {
+      el.addEventListener("input", function () {
+        if (!instructionDirty) syncKindFields();
+      });
+      el.addEventListener("change", function () {
+        if (!instructionDirty) syncKindFields();
+      });
+    });
+    var cancelBtn = addForm.querySelector("button.add-step-cancel");
+    if (cancelBtn) {
+      cancelBtn.addEventListener("click", function (event) {
+        event.preventDefault();
+        closeAddDialog();
+      });
+    }
+    addForm.addEventListener("submit", function (event) {
+      event.preventDefault();
+      var runId = toolbarRunId();
+      if (!runId) {
+        setAddStatus("缺少錄製資訊。", true);
+        return;
+      }
+      var kind = (addForm.querySelector('[name="kind"]') || {}).value || "";
+      var instruction = ((addForm.querySelector('[name="instruction"]') || {}).value || "").trim();
+      var expectedOutcome = ((addForm.querySelector('[name="expected_outcome"]') || {}).value || "");
+      var afterRaw = addForm.getAttribute("data-after-event-index") || "";
+      var body = { kind: kind, instruction: instruction, expected_outcome: expectedOutcome };
+      if (afterRaw !== "") {
+        var afterIndex = parseInt(afterRaw, 10);
+        if (Number.isFinite(afterIndex)) body.after_event_index = afterIndex;
+      }
+      if (kind === "text_input") {
+        body.text = ((addForm.querySelector('[name="text"]') || {}).value || "");
+      } else if (kind === "key_press") {
+        body.key = ((addForm.querySelector('[name="key"]') || {}).value || "");
+      } else if (kind === "hotkey") {
+        body.keys = ((addForm.querySelector('[name="keys"]') || {}).value || "");
+      } else if (kind === "scroll") {
+        var scrollRaw = ((addForm.querySelector('[name="scroll_delta"]') || {}).value || "");
+        body.scroll_delta = parseInt(scrollRaw, 10);
+      } else if (kind === "wait") {
+        var durationRaw = ((addForm.querySelector('[name="duration_seconds"]') || {}).value || "");
+        body.duration_seconds = Number(durationRaw);
+      }
+      var submitBtn = addForm.querySelector("button.add-step-submit");
+      if (submitBtn) submitBtn.disabled = true;
+      setAddStatus("新增中…", false);
+      fetch("/api/runs/" + encodeURIComponent(runId) + "/events/add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      })
+        .then(function (response) {
+          return response.json().then(function (payload) {
+            return { ok: response.ok, payload: payload };
+          });
+        })
+        .then(function (result) {
+          if (submitBtn) submitBtn.disabled = false;
+          if (!result.ok || !result.payload || !result.payload.ok) {
+            var err = (result.payload && result.payload.error) || "新增失敗";
+            setAddStatus(err, true);
+            return;
+          }
+          var newIndex = result.payload.event_index;
+          var hash = newIndex ? ("#event-" + newIndex) : "";
+          window.location.hash = hash;
+          window.location.reload();
+        })
+        .catch(function () {
+          if (submitBtn) submitBtn.disabled = false;
+          setAddStatus("無法連線主程式，請確認主程式正在執行。", true);
+        });
+    });
+  }
+
+  (function openHashedEvent() {
+    var hash = window.location.hash || "";
+    var match = hash.match(/^#event-(\\d+)$/);
+    if (!match) return;
+    var group = document.getElementById("event-" + match[1]);
+    if (!group) return;
+    group.open = true;
+    if (typeof group.scrollIntoView === "function") {
+      group.scrollIntoView({ block: "start" });
+    }
+  })();
 })();
 """.strip()
 
@@ -1968,27 +2367,38 @@ def _resolve_recording_datetime(run_root: Path, manifest: dict[str, Any] | None)
     return _resolve_index_run_datetime(run_root, None)
 
 
-def _load_recording_events(run_root: Path) -> list[dict[str, Any]]:
+def recording_event_json_paths(run_root: Path) -> list[Path]:
+    """Event JSON paths in ``session.json`` order, or filename order as fallback."""
+    run_root = Path(run_root)
     manifest = _load_session_manifest(run_root)
-    event_paths: list[Path] = []
-    if isinstance(manifest, dict):
-        raw_events = manifest.get("events")
-        if isinstance(raw_events, list):
-            for item in raw_events:
-                if isinstance(item, str) and item.strip():
-                    event_paths.append(run_root / item)
+    if isinstance(manifest, dict) and isinstance(manifest.get("events"), list):
+        event_paths: list[Path] = []
+        seen: set[str] = set()
+        for item in manifest["events"]:
+            if not isinstance(item, str) or not item.strip():
+                continue
+            path = run_root / item
+            if not path.is_file():
+                continue
+            key = str(path.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            event_paths.append(path)
+        return event_paths
 
-    if not event_paths:
-        events_dir = run_root / "events"
-        if events_dir.is_dir():
-            event_paths = sorted(events_dir.glob("event_*.json"))
+    events_dir = run_root / "events"
+    if events_dir.is_dir():
+        return sorted(path for path in events_dir.glob("event_*.json") if path.is_file())
+    return []
 
+
+def _load_recording_events(run_root: Path) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
-    for path in event_paths:
+    for path in recording_event_json_paths(run_root):
         payload = _load_json_dict(path)
         if payload is not None:
             events.append(payload)
-    events.sort(key=lambda event: int(event.get("index", 0)) if isinstance(event.get("index"), int) else 0)
     return events
 
 
@@ -2309,11 +2719,90 @@ def _render_expected_outcome_panel_html(*, expected_outcome: str, show: bool) ->
     )
 
 
+def _render_step_instruction_panel_html(*, instruction: str) -> str:
+    return (
+        f'<div class="step-instruction">'
+        f'<div class="step-instruction-title">指令</div>'
+        f'<div class="step-instruction-row">'
+        f'<textarea class="step-instruction-input" rows="2" '
+        f'spellcheck="false" aria-label="指令">'
+        f"{escape(instruction)}</textarea>"
+        f'<button type="button" class="apply-step-instruction" '
+        f'title="儲存修改後的指令">套用</button>'
+        f'<span class="step-instruction-status" aria-live="polite"></span>'
+        f"</div>"
+        f"</div>"
+    )
+
+
+def _recording_add_dialog_html() -> str:
+    return """
+<div class="add-step-dialog-backdrop" id="add-step-dialog" hidden>
+  <div class="add-step-dialog" role="dialog" aria-modal="true" aria-labelledby="add-step-title">
+    <h2 id="add-step-title">新增步驟</h2>
+    <form>
+      <div class="add-step-field">
+        <label for="add-step-kind">種類</label>
+        <select id="add-step-kind" name="kind">
+          <option value="click">點擊</option>
+          <option value="double_click">雙擊</option>
+          <option value="right_click">右鍵點擊</option>
+          <option value="text_input">輸入文字</option>
+          <option value="key_press">按鍵</option>
+          <option value="hotkey">快捷鍵</option>
+          <option value="scroll">捲動</option>
+          <option value="wait">等待</option>
+          <option value="manual">自訂指令</option>
+        </select>
+      </div>
+      <div class="add-step-field" data-kind-field="text_input" hidden>
+        <label for="add-step-text">輸入文字</label>
+        <input id="add-step-text" name="text" type="text" spellcheck="false" autocomplete="off">
+      </div>
+      <div class="add-step-field" data-kind-field="key_press" hidden>
+        <label for="add-step-key">按鍵</label>
+        <input id="add-step-key" name="key" type="text" spellcheck="false" autocomplete="off" placeholder="Enter">
+      </div>
+      <div class="add-step-field" data-kind-field="hotkey" hidden>
+        <label for="add-step-keys">快捷鍵</label>
+        <input id="add-step-keys" name="keys" type="text" spellcheck="false" autocomplete="off" placeholder="Ctrl+S">
+      </div>
+      <div class="add-step-field" data-kind-field="scroll" hidden>
+        <label for="add-step-scroll">方向</label>
+        <select id="add-step-scroll" name="scroll_delta">
+          <option value="-1">向下</option>
+          <option value="1">向上</option>
+        </select>
+      </div>
+      <div class="add-step-field" data-kind-field="wait" hidden>
+        <label for="add-step-wait">秒數</label>
+        <input id="add-step-wait" name="duration_seconds" type="number" min="1" step="1" value="1">
+      </div>
+      <div class="add-step-field">
+        <label for="add-step-instruction">指令</label>
+        <textarea id="add-step-instruction" name="instruction" rows="3" spellcheck="false"></textarea>
+      </div>
+      <div class="add-step-field">
+        <label for="add-step-outcome">預期結果（選填）</label>
+        <textarea id="add-step-outcome" name="expected_outcome" rows="2" spellcheck="false"></textarea>
+      </div>
+      <p class="add-step-status" aria-live="polite"></p>
+      <div class="add-step-actions">
+        <button type="button" class="add-step-cancel">取消</button>
+        <button type="submit" class="add-step-submit">新增</button>
+      </div>
+    </form>
+  </div>
+</div>
+""".strip()
+
+
 def _render_recording_event_html(
     *,
     run_root: Path,
     event: dict[str, Any],
     next_event: dict[str, Any] | None = None,
+    display_index: int | None = None,
 ) -> str:
     raw_index = event.get("index")
     index = raw_index if isinstance(raw_index, int) else 0
@@ -2327,7 +2816,8 @@ def _render_recording_event_html(
             instruction = raw_instruction.strip()
 
     title = instruction or kind_label
-    step_label = escape(f"{index}.")
+    shown_index = display_index if isinstance(display_index, int) and display_index > 0 else index
+    step_label = escape(f"{shown_index}.")
     kind_badge = escape(kind_label)
     time_text = escape(_timestamp_text(event.get("timestamp_utc"))) or "—"
     run_id = escape(run_root.name, quote=True)
@@ -2357,6 +2847,9 @@ def _render_recording_event_html(
     scroll_delta = event.get("scroll_delta")
     if isinstance(scroll_delta, int):
         meta_rows.append(("捲動", escape(str(scroll_delta))))
+    duration_seconds = event.get("duration_seconds")
+    if isinstance(duration_seconds, (int, float)):
+        meta_rows.append(("等待", escape(str(duration_seconds))))
     window_title = event.get("target_window_title")
     if isinstance(window_title, str) and window_title.strip():
         meta_rows.append(("視窗", escape(window_title.strip())))
@@ -2395,6 +2888,7 @@ def _render_recording_event_html(
         expected_outcome=expected_outcome,
         show=bool(instruction) or bool(expected_outcome),
     )
+    instruction_html = _render_step_instruction_panel_html(instruction=instruction)
 
     copy_attr = escape(title, quote=True)
     outcome_attr = (
@@ -2403,7 +2897,7 @@ def _render_recording_event_html(
         else ""
     )
     return (
-        f'<details class="instruction-group" data-run-id="{run_id}" '
+        f'<details class="instruction-group" id="event-{index}" data-run-id="{run_id}" '
         f'data-event-index="{index}" data-kind="{escape(kind, quote=True)}">'
         f"<summary>"
         f'<span class="instruction-number">{step_label}</span>'
@@ -2412,10 +2906,13 @@ def _render_recording_event_html(
         f'<button type="button" class="copy-instruction" data-instruction="{copy_attr}"'
         f'{outcome_attr} '
         f'title="複製指令" aria-label="複製指令">複製</button>'
+        f'<button type="button" class="add-instruction" '
+        f'title="在此步驟後新增" aria-label="新增步驟">新增</button>'
         f'<button type="button" class="delete-instruction" '
         f'title="刪除指令" aria-label="刪除指令">刪除</button>'
         f"</summary>"
         f'<div class="meta" style="padding: 1rem 1.5rem 0;"><dl>{meta_html}</dl></div>'
+        f"{instruction_html}"
         f"{expected_outcome_html}"
         f"{typed_text_html}"
         f"{landmarks_html}"
@@ -2813,12 +3310,14 @@ def write_recording_html_from_run(run_root: Path, *, update_index: bool = True) 
             run_root=run_root,
             event=event,
             next_event=events[index + 1] if index + 1 < len(events) else None,
+            display_index=index + 1,
         )
         for index, event in enumerate(events)
     ]
     title = escape(_resolve_recording_title(run_root))
     body = "\n".join(events_html) if events_html else '<p class="empty">尚無錄製事件。</p>'
     copy_all_disabled = "" if events_html else " disabled"
+    run_id_attr = escape(run_root.name, quote=True)
     html = (
         "<!DOCTYPE html>\n"
         '<html lang="zh-Hant">\n<head>\n'
@@ -2830,11 +3329,14 @@ def write_recording_html_from_run(run_root: Path, *, update_index: bool = True) 
         '<p class="nav"><a href="../index.html#recordings">← 報告列表</a></p>\n'
         f"<h1>{title}</h1>\n"
         '<p class="intro">依錄製事件排列的操作紀錄。點選事件可展開細節與截圖。</p>\n'
-        '<div class="recording-toolbar">'
+        f'<div class="recording-toolbar" data-run-id="{run_id_attr}">'
         f'<button type="button" class="copy-all-instructions"{copy_all_disabled} '
         'title="複製全部指令" aria-label="複製全部指令">複製全部指令</button>'
+        '<button type="button" class="add-recording-step" '
+        'title="新增步驟" aria-label="新增步驟">新增步驟</button>'
         "</div>\n"
         f"{body}\n"
+        f"{_recording_add_dialog_html()}\n"
         f"<script>\n{_RECORDING_SCRIPT}\n</script>\n"
         "</body>\n</html>\n"
     )

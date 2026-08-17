@@ -50,7 +50,7 @@ DEFAULT_CROSS_TILE_NMS_IOU: float = 0.5
 # to also merge ``text`` and ``element``.
 DEFAULT_MERGE_TOUCHING_SAME_CLASS: bool = False
 # Pairs of same-class boxes are linked (and merged transitively) when ``IoU >`` this value.
-DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD: float = 0.5
+DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD: float = 0.2
 
 # ``best.onnx`` classes (Ultralytics metadata: Text=0, Element=1, Input=2, Scrollbar=3)
 YOLO_CLASS_TEXT: int = 0

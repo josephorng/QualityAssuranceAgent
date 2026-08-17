@@ -231,8 +231,12 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
   font-size: .75rem; color: #57606a; font-weight: 600;
 }
 .typed-text-status.error { color: #cf222e; }
+.instruction-edit-panels {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem; padding: 0 1.5rem; margin: 0 0 1rem;
+}
 .expected-outcome {
-  margin: 0 1.5rem 1rem; padding: .75rem 1rem;
+  margin: 0; padding: .75rem 1rem;
   border: 1px solid #d0d7de; border-radius: 8px; background: #f6f8fa;
 }
 .expected-outcome-title {
@@ -264,7 +268,7 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 }
 .expected-outcome-status.error { color: #cf222e; }
 .step-instruction {
-  margin: 0 1.5rem 1rem; padding: .75rem 1rem;
+  margin: 0; padding: .75rem 1rem;
   border: 1px solid #d0d7de; border-radius: 8px; background: #f6f8fa;
 }
 .step-instruction-title {
@@ -1253,6 +1257,7 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 }
 .tab-panel[hidden] { display: none; }
 @media (max-width: 720px) {
+  .instruction-edit-panels { grid-template-columns: 1fr; }
   .reports, .reports thead, .reports tbody, .reports th, .reports td, .reports tr { display: block; }
   .reports thead { display: none; }
   .reports tr { border-top: 1px solid #d0d7de; padding: .5rem 0; }
@@ -2967,8 +2972,7 @@ def _render_recording_event_html(
         f'title="刪除指令" aria-label="刪除指令">刪除</button>'
         f"</summary>"
         f'<div class="meta" style="padding: 1rem 1.5rem 0;"><dl>{meta_html}</dl></div>'
-        f"{instruction_html}"
-        f"{expected_outcome_html}"
+        f'<div class="instruction-edit-panels">{instruction_html}{expected_outcome_html}</div>'
         f"{typed_text_html}"
         f"{landmarks_html}"
         f'<div class="shots" style="padding: 0 1.5rem 1rem;">{shots}</div>'

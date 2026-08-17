@@ -576,6 +576,7 @@ class RecordingSession:
         self._event_queue: queue.Queue[object] = queue.Queue()
         self._worker_thread: threading.Thread | None = None
         self._on_event: Callable[[], None] | None = None
+        self._finalizing = False
 
     def set_on_event(self, callback: Callable[[], None] | None) -> None:
         self._on_event = callback
@@ -583,6 +584,10 @@ class RecordingSession:
     def is_active(self) -> bool:
         with self._lock:
             return self._accepting_input
+
+    def is_finalizing(self) -> bool:
+        with self._lock:
+            return self._finalizing
 
     def event_count(self) -> int:
         with self._lock:
@@ -679,12 +684,16 @@ class RecordingSession:
         self._log(run_dir, "recording started")
         return run_dir
 
-    def stop(self) -> Path | None:
+    def begin_stop(self) -> Path | None:
+        """Stop capturing input and return promptly; call ``finalize_stop`` to finish."""
         listeners: list[mouse.Listener | keyboard.Listener] = []
         with self._lock:
+            if self._finalizing:
+                return self._run_dir
             if not self._accepting_input and self._run_dir is None:
                 return None
             self._accepting_input = False
+            self._finalizing = True
             if self._mouse_listener is not None:
                 listeners.append(self._mouse_listener)
                 self._mouse_listener = None
@@ -692,8 +701,6 @@ class RecordingSession:
                 listeners.append(self._keyboard_listener)
                 self._keyboard_listener = None
             run_dir = self._run_dir
-            run_id = self._run_id
-            started_at = self._started_at
             pending = self._pending_click_timer
             pending_coords = self._pending_click_coords
             pending_down_at = self._pending_click_down_at
@@ -746,7 +753,18 @@ class RecordingSession:
                 pass
 
         self._event_queue.put(_QUEUE_SENTINEL)
-        worker = self._worker_thread
+        return run_dir
+
+    def finalize_stop(self) -> Path | None:
+        """Wait for queued events, capture final screenshot, and write session artifacts."""
+        with self._lock:
+            if not self._finalizing:
+                return self._run_dir
+            run_dir = self._run_dir
+            run_id = self._run_id
+            started_at = self._started_at
+            worker = self._worker_thread
+
         if worker is not None and worker.is_alive():
             worker.join(timeout=15)
 
@@ -754,9 +772,11 @@ class RecordingSession:
             events = list(self._events)
 
         if run_dir is None or run_id is None or started_at is None:
+            with self._lock:
+                self._finalizing = False
             return None
 
-        # Capture settled UI before the hub restores (caller deiconifies after stop).
+        # Capture settled UI before the hub restores (caller deiconifies after finalize).
         final_after = capture_final_after_screenshot(run_dir, events)
         if final_after is not None:
             self._log(run_dir, f"final after screenshot saved path={final_after}")
@@ -781,7 +801,17 @@ class RecordingSession:
             write_recording_html_from_run(run_dir)
         except Exception as exc:
             self._log(run_dir, f"recording html write failed: {exc}")
+
+        with self._lock:
+            self._finalizing = False
         return run_dir
+
+    def stop(self) -> Path | None:
+        """Synchronously stop and finalize a recording session."""
+        self.begin_stop()
+        if not self.is_finalizing():
+            return None
+        return self.finalize_stop()
 
     def set_suppress_hotkey_keys(self, suppress: bool) -> None:
         with self._lock:

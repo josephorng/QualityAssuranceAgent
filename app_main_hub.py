@@ -226,6 +226,7 @@ class MainHub(ctk.CTk):
         self._recording_session.set_on_event(self._on_recording_event)
         self._recording_hotkey = RecordingHotkeyManager()
         self._recording_analysis_thread: threading.Thread | None = None
+        self._recording_finalize_thread: threading.Thread | None = None
         self._analysis_cancel_event = threading.Event()
         self._suppress_script_cache_sync = False
         self._sync_cache_after_id: str | None = None
@@ -1431,6 +1432,9 @@ class MainHub(ctk.CTk):
         if self._recording_session.is_active():
             show_ctk_message(self, "執行", "請先停止錄製再開始執行。", kind="warning")
             return
+        if self._is_recording_finalizing():
+            show_ctk_message(self, "執行", "請等待錄製完成。", kind="warning")
+            return
         if self._recording_analysis_thread and self._recording_analysis_thread.is_alive():
             show_ctk_message(self, "執行", "請等待錄製分析完成，或按「停止分析」。", kind="warning")
             return
@@ -1733,6 +1737,16 @@ class MainHub(ctk.CTk):
         thread = self._recording_analysis_thread
         return thread is not None and thread.is_alive()
 
+    def _is_recording_finalizing(self) -> bool:
+        thread = self._recording_finalize_thread
+        return (
+            self._recording_session.is_finalizing()
+            or (thread is not None and thread.is_alive())
+        )
+
+    def _is_recording_busy(self) -> bool:
+        return self._recording_session.is_active() or self._is_recording_finalizing()
+
     def _show_analysis_progress(self) -> None:
         if self._analysis_progress_frame is not None:
             self._analysis_progress_frame.pack(fill="x", pady=(20, 0))
@@ -1772,6 +1786,19 @@ class MainHub(ctk.CTk):
         self._use_tool_cache_checkbox.configure(state="disabled")
         if self._record_btn is not None:
             self._record_btn.configure(text="停止錄製", state="normal", command=self._on_record_button)
+        self._hide_analysis_progress()
+
+    def _set_hub_controls_finalizing(self) -> None:
+        self._run_btn.configure(state="disabled")
+        self._settings_btn.configure(state="disabled")
+        for w in self._script_controls:
+            w.configure(state="disabled")
+        for w in self._smart_controls:
+            w.configure(state="disabled")
+        self._set_queue_control_widgets_state("disabled")
+        self._use_tool_cache_checkbox.configure(state="disabled")
+        if self._record_btn is not None:
+            self._record_btn.configure(text="正在完成錄製…", state="disabled")
         self._hide_analysis_progress()
 
     def _set_hub_controls_analyzing(self) -> None:
@@ -1969,7 +1996,9 @@ class MainHub(ctk.CTk):
         if self._is_analysis_running():
             self._analysis_cancel_event.set()
         if self._recording_session.is_active():
-            self._stop_recording(analyze=False)
+            self._recording_session.stop()
+        elif self._is_recording_finalizing():
+            self._wait_for_recording_finalize()
         self._recording_hotkey.unregister()
         stop_runs_report_server()
         self.destroy()
@@ -2025,6 +2054,9 @@ class MainHub(ctk.CTk):
         if self._recording_session.is_active():
             show_ctk_message(self, "錄製分析", "請先停止錄製再分析。", kind="warning")
             return
+        if self._is_recording_finalizing():
+            show_ctk_message(self, "錄製分析", "請等待錄製完成。", kind="warning")
+            return
 
         settings = load_settings()
         initial = Path(settings.runs_dir)
@@ -2062,6 +2094,8 @@ class MainHub(ctk.CTk):
     def _toggle_recording(self) -> None:
         if self._is_analysis_running():
             return
+        if self._is_recording_finalizing():
+            return
         if self._worker_thread and self._worker_thread.is_alive():
             show_ctk_message(self, "錄製", "請先停止執行再開始錄製。", kind="warning")
             return
@@ -2072,6 +2106,8 @@ class MainHub(ctk.CTk):
 
     def _start_recording(self) -> None:
         if self._worker_thread and self._worker_thread.is_alive():
+            return
+        if self._is_recording_finalizing():
             return
         if self._recording_session.is_active():
             return
@@ -2110,9 +2146,47 @@ class MainHub(ctk.CTk):
         )
 
     def _stop_recording(self, *, analyze: bool) -> None:
-        if not self._recording_session.is_active():
+        if not self._recording_session.is_active() or self._is_recording_finalizing():
             return
-        run_dir = self._recording_session.stop()
+        self._recording_session.begin_stop()
+        self._set_hub_controls_finalizing()
+        self._status.configure(text="正在完成錄製…", text_color=("gray20", "gray65"))
+        self._start_recording_finalize_worker(analyze=analyze)
+
+    def _start_recording_finalize_worker(self, *, analyze: bool) -> None:
+        if self._recording_finalize_thread is not None and self._recording_finalize_thread.is_alive():
+            return
+
+        def worker() -> None:
+            try:
+                run_dir = self._recording_session.finalize_stop()
+                event_count = self._recording_session.event_count()
+                self.after(
+                    0,
+                    lambda: self._on_recording_finalize_done(run_dir, event_count, analyze),
+                )
+            except Exception as exc:
+                self.after(0, lambda: self._on_recording_finalize_failed(exc))
+
+        self._recording_finalize_thread = threading.Thread(
+            target=worker,
+            name="recording-finalize",
+            daemon=True,
+        )
+        self._recording_finalize_thread.start()
+
+    def _wait_for_recording_finalize(self) -> None:
+        thread = self._recording_finalize_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=20)
+
+    def _on_recording_finalize_done(
+        self,
+        run_dir: Path | None,
+        event_count: int,
+        analyze: bool,
+    ) -> None:
+        self._recording_finalize_thread = None
         try:
             self.deiconify()
             self.lift()
@@ -2122,12 +2196,22 @@ class MainHub(ctk.CTk):
             self._set_hub_controls_idle()
             self._status.configure(text="錄製已停止。")
             return
-        event_count = self._recording_session.event_count()
         if analyze and event_count > 0:
             self._start_recording_analysis(run_dir, event_count)
         else:
             self._set_hub_controls_idle()
             self._status.configure(text=f"錄製已停止（{event_count} 個事件）。")
+
+    def _on_recording_finalize_failed(self, exc: Exception) -> None:
+        self._recording_finalize_thread = None
+        try:
+            self.deiconify()
+            self.lift()
+        except Exception:
+            pass
+        self._set_hub_controls_idle()
+        show_ctk_message(self, "錄製", f"完成錄製失敗：{exc}", kind="error")
+        self._status.configure(text="完成錄製失敗。")
 
     def _start_recording_analysis(self, run_dir: Path, event_count: int) -> None:
         self._set_hub_controls_analyzing()
@@ -2369,6 +2453,9 @@ class MainHub(ctk.CTk):
     def _on_start_run(self) -> None:
         if self._recording_session.is_active():
             show_ctk_message(self, "執行", "請先停止錄製再開始執行。", kind="warning")
+            return
+        if self._is_recording_finalizing():
+            show_ctk_message(self, "執行", "請等待錄製完成。", kind="warning")
             return
         if self._recording_analysis_thread and self._recording_analysis_thread.is_alive():
             show_ctk_message(self, "執行", "請等待錄製分析完成，或按「停止分析」。", kind="warning")

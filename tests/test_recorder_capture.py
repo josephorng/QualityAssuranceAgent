@@ -1011,3 +1011,29 @@ def test_ctrl_hold_records_modifiers(tmp_path) -> None:
     assert raw["kind"] == "hold"
     assert raw["modifiers"] == ["ctrl"]
 
+
+def test_begin_stop_and_finalize_stop_write_session(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import KeyCode
+
+            session._on_key_press(KeyCode.from_char("x"))
+        finally:
+            assert session.is_active()
+            hinted = session.begin_stop()
+            assert hinted == run_dir
+            assert not session.is_active()
+            assert session.is_finalizing()
+            finalized = session.finalize_stop()
+
+    assert finalized == run_dir
+    assert not session.is_finalizing()
+    assert (run_dir / "session.json").is_file()
+    assert session.event_count() == 1
+

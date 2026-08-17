@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,31 @@ def is_recording_dir(path: Path) -> bool:
     """True when ``path`` is a recording folder (has ``session.json``)."""
     candidate = Path(path)
     return candidate.is_dir() and (candidate / "session.json").is_file()
+
+
+def partition_recording_dirs(
+    picked: Sequence[Path],
+    *,
+    existing: Sequence[Path] = (),
+) -> tuple[list[Path], list[Path]]:
+    """Split picked folders into new recordings vs invalid paths.
+
+    Duplicates (including folders already in ``existing``) are omitted from both lists.
+    """
+    seen = {str(Path(path).resolve()) for path in existing}
+    added: list[Path] = []
+    invalid: list[Path] = []
+    for raw in picked:
+        folder = Path(raw)
+        if not is_recording_dir(folder):
+            invalid.append(folder)
+            continue
+        key = str(folder.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        added.append(folder)
+    return added, invalid
 
 
 def recording_run_dir(path: Path) -> Path | None:

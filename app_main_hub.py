@@ -24,6 +24,7 @@ from src.common.ctk_dialogs import (
     prompt_unsaved_script_changes,
     show_ctk_message,
 )
+from src.common.folder_dialogs import ask_directories
 from src.common.io_utils import append_text, pop_last_nonempty_line, read_json, write_json
 from src.common.run_control import (
     pause_run,
@@ -50,6 +51,7 @@ from src.common.script_helper import (
     is_recording_script_path,
     load_runnable_script_text,
     parse_executable_lines_from_text,
+    partition_recording_dirs,
     recording_run_dir,
     resolve_runnable_script_path,
     script_display_name,
@@ -418,16 +420,27 @@ class MainHub(ctk.CTk):
         return run_dir
 
     def _ask_recording_directory(self, *, title: str) -> Path | None:
+        folders = self._ask_recording_directories(title=title, allow_multiple=False)
+        if not folders:
+            return None
+        return folders[0]
+
+    def _ask_recording_directories(
+        self, *, title: str, allow_multiple: bool = True
+    ) -> list[Path]:
         settings = load_settings()
         initial = Path(settings.runs_dir)
+        initialdir = str(initial) if initial.is_dir() else str(ROOT_DIR)
+        if allow_multiple:
+            return ask_directories(parent=self, title=title, initialdir=initialdir)
         folder = filedialog.askdirectory(
             parent=self,
             title=title,
-            initialdir=str(initial) if initial.is_dir() else str(ROOT_DIR),
+            initialdir=initialdir,
         )
         if not folder:
-            return None
-        return Path(folder)
+            return []
+        return [Path(folder)]
 
     def _try_load_last_runtime_command_cache(self) -> None:
         """If no script file is open, show the last runtime command cache for editing and Save."""
@@ -1244,7 +1257,7 @@ class MainHub(ctk.CTk):
     def _build_queue_tab(self, parent: Any) -> None:
         ctk.CTkLabel(
             parent,
-            text="加入多個腳本檔案，依序執行；若某個腳本失敗，會繼續執行下一個。",
+            text="加入多個腳本檔案或錄製資料夾，依序執行；若某個腳本失敗，會繼續執行下一個。",
             font=ctk.CTkFont(size=12),
             text_color=("gray30", "gray70"),
             wraplength=820,
@@ -1476,24 +1489,41 @@ class MainHub(ctk.CTk):
         self._persist_hub_ui_state()
 
     def _queue_add_recording(self) -> None:
-        folder = self._ask_recording_directory(title="選擇錄製資料夾")
-        if folder is None:
+        folders = self._ask_recording_directories(
+            title="選擇錄製資料夾（可按 Ctrl 選取多個）"
+        )
+        if not folders:
             return
-        script = self._validate_recording_folder_for_script(folder)
-        if script is None:
+        added, invalid = partition_recording_dirs(folders, existing=self._queue_paths)
+        for script in added:
+            self._queue_paths.append(script)
+        if added:
+            self._queue_status_by_index = {}
+            self._queue_run_root_by_index = {}
+            self._refresh_queue_list()
+            self._persist_hub_ui_state()
+            if len(added) == 1:
+                self._status.configure(text=f"已加入錄製 {script_display_name(added[0])}")
+            else:
+                self._status.configure(text=f"已加入 {len(added)} 個錄製")
+        elif not invalid:
+            self._status.configure(text="所選錄製已在佇列中")
+        if invalid and not added:
             show_ctk_message(
                 self,
                 "新增錄製",
-                f"所選資料夾不是有效的錄製（需有 session.json）。",
+                "所選資料夾不是有效的錄製（需有 session.json）。",
                 kind="error",
             )
             return
-        self._queue_paths.append(script)
-        self._queue_status_by_index = {}
-        self._queue_run_root_by_index = {}
-        self._refresh_queue_list()
-        self._persist_hub_ui_state()
-        self._status.configure(text=f"已加入錄製 {script_display_name(script)}")
+        if invalid:
+            skipped = "\n".join(p.name or str(p) for p in invalid)
+            show_ctk_message(
+                self,
+                "新增錄製",
+                f"已略過非錄製資料夾：\n{skipped}",
+                kind="warning",
+            )
 
     def _queue_move_up(self, index: int) -> None:
         if index <= 0 or index >= len(self._queue_paths):

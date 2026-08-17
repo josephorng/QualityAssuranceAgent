@@ -96,6 +96,23 @@ def test_recording_script_helpers(tmp_path: Path) -> None:
     assert script_helper.script_display_name(plain) == "plain.txt"
 
 
+def test_partition_recording_dirs_keeps_valid_and_skips_duplicates(tmp_path: Path) -> None:
+    rec_a = tmp_path / "rec_a"
+    rec_b = tmp_path / "rec_b"
+    rec_a.mkdir()
+    rec_b.mkdir()
+    (rec_a / "session.json").write_text("{}", encoding="utf-8")
+    (rec_b / "session.json").write_text("{}", encoding="utf-8")
+    other = tmp_path / "not_a_recording"
+    other.mkdir()
+    added, invalid = script_helper.partition_recording_dirs(
+        [rec_a, other, rec_a, rec_b],
+        existing=[rec_a],
+    )
+    assert added == [rec_b]
+    assert invalid == [other]
+
+
 def test_resolve_task_and_script_from_cli_task(monkeypatch, tmp_path: Path) -> None:
     task, script_path, lines = script_helper.resolve_task_and_script("typed task", tmp_path)
     assert task == "typed task"

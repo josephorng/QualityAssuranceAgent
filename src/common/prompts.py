@@ -362,6 +362,47 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "models": ["gemma4:e2b", "gemma3:4b"],
         }
     ],
+    "recording_nearby_landmark_select": [
+        {
+            "image_usage": "use_image",
+            "prompt": (
+                "Select nearby UI landmarks that will still identify the same click "
+                "target at playback. The screenshot is the UI at record time. Options "
+                "are already ranked (prefer earlier indices when equally stable). "
+                "Each row is [index N] <label>（<side>） where side is where the TARGET "
+                "sits relative to that landmark (左邊/右邊/上面/下面/左上方/右上方/"
+                "左下方/右下方/裡面), omitted when undirected.\n\n"
+                "Target instruction:\n{instruction}\n\n"
+                "Ranked nearby landmark options:\n{options_lines}\n"
+            ),
+            "instructions": [
+                'Return JSON only: {{"keep_indices": [<int>, ...]}}.',
+                "Keep a landmark only when BOTH are true: (1) its UI element and "
+                "text/icon content are chrome/static and will remain on screen at "
+                "playback (window/toolbar/tab/sidebar/dialog chrome, field labels); "
+                "(2) its layout relative to the TARGET is fixed in the same widget "
+                "(toolbar next to a toolbar button, label next to its field).",
+                "Reject timestamps, clocks, selection counts, notifications, "
+                "scrollable list/file rows, OCR noise, and neighbors that only sit "
+                "nearby because of the current scroll position or another window.",
+                "Pick at most 2 indices. An empty list is valid when none are stable.",
+                "Use [index N] values from the options list only. Never invent an index. "
+                "Never pick the primary target itself.",
+                "When two options are equally stable, prefer the earlier (already ranked) index.",
+            ],
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
+    "recording_nearby_landmark_select_retry": [
+        {
+            "image_usage": "use_image",
+            "prompt": (
+                'Reply with ONLY: {{"keep_indices": [<int>, ...]}}. '
+                "No text before or after the JSON."
+            ),
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
     "recording_expected_outcome": [
         {
             "image_usage": "use_image",

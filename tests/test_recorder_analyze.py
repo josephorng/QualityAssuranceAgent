@@ -168,6 +168,48 @@ def test_collect_nearby_hint_labels_keeps_collecting_until_two_texts() -> None:
     assert labels == ["「OneNote」文字", "「Slack」文字"]
 
 
+def test_list_prioritized_nearby_hints_returns_all_ranked() -> None:
+    """Uncapped ranking keeps every eligible neighbor after the primary."""
+    from src.recorder.vision_context import list_prioritized_nearby_hints
+
+    vision = {
+        "used_vision": True,
+        "candidates": [
+            {
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "Chrome"}],
+            },
+            {
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "Docker"}],
+            },
+            {"class_name": "text", "text": "OneNote"},
+            {
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "Edge"}],
+            },
+            {"class_name": "text", "text": "Slack"},
+            {"class_name": "text", "text": "Teams"},
+        ],
+    }
+    labels = [
+        hint.label
+        for hint in list_prioritized_nearby_hints(
+            vision, instruction="點擊「Chrome」圖示"
+        )
+    ]
+    assert labels == [
+        "「OneNote」文字",
+        "「Slack」文字",
+        "「Teams」文字",
+        "「Docker」圖示",
+        "「Edge」圖示",
+    ]
+
+
 def test_collect_nearby_hint_labels_skips_single_char_text() -> None:
     """Single-character text (often an icon miss) does not count as a text landmark."""
     vision = {
@@ -2007,6 +2049,39 @@ async def test_analyze_event_to_cache_click_appends_nearby_context(tmp_path: Pat
         "將滑鼠移到「Chrome」圖示（附近有「OneNote」文字、「Docker」圖示），並點擊滑鼠一下。"
     )
     llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_analyze_event_to_cache_click_uses_llm_landmarks(tmp_path: Path) -> None:
+    from src.common.nearby_side import NearbyHint
+
+    shot = tmp_path / "event.jpeg"
+    shot.write_bytes(b"jpeg")
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(38, 636),
+        button="left",
+        screenshot_path=str(shot),
+    )
+
+    with patch(
+        "src.recorder.analyze.select_stable_nearby_hints",
+        new=AsyncMock(return_value=[NearbyHint("「OneNote」文字")]),
+    ) as picker:
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision=_VISION_WITH_NEARBY,
+        )
+
+    assert result is not None
+    assert result["instruction"] == (
+        "將滑鼠移到「Chrome」圖示（附近有「OneNote」文字），並點擊滑鼠一下。"
+    )
+    picker.assert_called_once()
+    assert picker.await_args.kwargs["screenshot_path"] == str(shot)
 
 
 @pytest.mark.asyncio

@@ -15,8 +15,10 @@ from cua_mcp.icon_map import is_pua_char
 from cua_mcp.read_screen_text.ocr_image import _ocr_boxes_on_bgr
 from cua_mcp.select_mouse_target import _build_candidates_from_bgr
 from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text
+from cua_mcp.selection_engine import request_json_with_retry
 from cua_mcp.yolo_onnx import YOLO_CLASS_ELEMENT, YOLO_CLASS_INPUT, YOLO_CLASS_TEXT
 from src.common.io_utils import write_json
+from src.common.prompting import get_prompt
 from src.common.nearby_side import (
     LandmarkCell,
     NearbyHint,
@@ -52,6 +54,16 @@ _TIER0_CELL_RANK: dict[LandmarkCell, int] = {
     LandmarkCell.RIGHT: 3,
 }
 _TIER0_NON_CARDINAL_RANK = 4
+_NEARBY_LANDMARK_SELECT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "keep_indices": {
+            "type": "array",
+            "items": {"type": "integer"},
+        },
+    },
+    "required": ["keep_indices"],
+}
 
 
 def _local_cursor(event: RecordedEvent) -> tuple[int, int] | None:
@@ -781,34 +793,24 @@ def _collect_containing_container_hints(
     return hints
 
 
-def collect_nearby_hints(
+def _prioritized_nearby_parts(
     vision: dict[str, Any],
     *,
     instruction: str,
-    max_count: int = _MIN_NEARBY_TEXT_LANDMARKS,
-) -> list[NearbyHint]:
-    """Collect nearby hints from candidates after the primary.
+) -> tuple[list[NearbyHint], list[NearbyHint]]:
+    """Split containing-container hints from ranked eligible neighbors.
 
-    Walks neighbors until at least ``max_count`` multi-character text landmarks
-    are found. If fewer exist, fills remaining slots with other neighbors.
-    Within Tier 0 (multi-char text), prefers landmarks on the left, then top,
-    then bottom, then right of the target; diagonals/center follow. Within the
-    same cell rank (and for lower tiers), keeps distance order from
-    ``candidates``. Uses the primary candidate bbox and each neighbor center to
-    assign an optional script side via the 9-section grid. Neighbors whose
-    center falls in the CENTER cell stay undirected (``side=None``).
-
-    When the click lies inside a non-primary ``input`` / ``scrollbar``, that
-    container is always prepended with ``side=inside`` (裡面), even if that
-    exceeds ``max_count``.
+    Ranking matches ``collect_nearby_hints``: Tier 0 multi-char text first
+    (left → top → bottom → right, then diagonals/center), then other labels,
+    then icons. Within the same rank, keeps distance order from ``candidates``.
     """
     candidates = vision.get("candidates") or []
     if len(candidates) < 2:
-        return []
+        return [], []
 
     primary = candidates[0]
     if not isinstance(primary, dict):
-        return []
+        return [], []
     primary_bbox = _as_bbox_xywh(primary.get("bbox"))
     click_xy = _click_xy_from_vision(vision, primary=primary)
 
@@ -819,7 +821,6 @@ def collect_nearby_hints(
     )
     forced_labels = {hint.label for hint in forced}
 
-    # (tier, cell_rank, distance_order, candidate, label)
     eligible: list[tuple[int, int, int, dict[str, Any], str]] = []
     seen: set[str] = set(forced_labels)
     for order, candidate in enumerate(candidates[1:]):
@@ -841,29 +842,55 @@ def collect_nearby_hints(
 
     eligible.sort(key=lambda item: (item[0], item[1], item[2]))
 
-    selected: list[tuple[dict[str, Any], str]] = []
-    text_count = 0
-    for tier, _cell_rank, _order, candidate, label in eligible:
-        if tier == 0:
-            selected.append((candidate, label))
-            text_count += 1
-            if text_count >= max_count:
-                break
-        elif text_count < max_count and len(selected) < max_count:
-            # Fill only after texts are exhausted (eligible is text-first).
-            selected.append((candidate, label))
-            if len(selected) >= max_count:
-                break
-
-    hints: list[NearbyHint] = list(forced)
-    for candidate, label in selected:
+    ranked: list[NearbyHint] = []
+    for _tier, _cell_rank, _order, candidate, label in eligible:
         side = _neighbor_side_for_candidate(
             candidate,
             primary_bbox=primary_bbox,
             click_xy=click_xy,
         )
-        hints.append(NearbyHint(label=label, side=side))
-    return hints
+        ranked.append(NearbyHint(label=label, side=side))
+    return forced, ranked
+
+
+def list_prioritized_nearby_hints(
+    vision: dict[str, Any],
+    *,
+    instruction: str,
+) -> list[NearbyHint]:
+    """Return all nearby hints in rank order, with no auto-pick cap.
+
+    Containing ``input`` / ``scrollbar`` landmarks come first (``side=inside``),
+    then every other eligible neighbor in the same order ``collect_nearby_hints``
+    uses before cutting at ``max_count``.
+    """
+    forced, ranked = _prioritized_nearby_parts(vision, instruction=instruction)
+    return [*forced, *ranked]
+
+
+def collect_nearby_hints(
+    vision: dict[str, Any],
+    *,
+    instruction: str,
+    max_count: int = _MIN_NEARBY_TEXT_LANDMARKS,
+) -> list[NearbyHint]:
+    """Collect nearby hints from candidates after the primary.
+
+    Walks neighbors until at least ``max_count`` multi-character text landmarks
+    are found. If fewer exist, fills remaining slots with other neighbors.
+    Within Tier 0 (multi-char text), prefers landmarks on the left, then top,
+    then bottom, then right of the target; diagonals/center follow. Within the
+    same cell rank (and for lower tiers), keeps distance order from
+    ``candidates``. Uses the primary candidate bbox and each neighbor center to
+    assign an optional script side via the 9-section grid. Neighbors whose
+    center falls in the CENTER cell stay undirected (``side=None``).
+
+    When the click lies inside a non-primary ``input`` / ``scrollbar``, that
+    container is always prepended with ``side=inside`` (裡面), even if that
+    exceeds ``max_count``.
+    """
+    forced, ranked = _prioritized_nearby_parts(vision, instruction=instruction)
+    return [*forced, *ranked[:max_count]]
 
 
 def collect_nearby_hint_labels(
@@ -879,6 +906,112 @@ def collect_nearby_hint_labels(
             vision, instruction=instruction, max_count=max_count
         )
     ]
+
+
+def _format_ranked_nearby_option_line(index: int, hint: NearbyHint) -> str:
+    """Format one ranked neighbor as ``[index N] label（side）`` for the LLM."""
+    if hint.side is not None:
+        display = f"{hint.label}（{side_to_zh(hint.side)}）"
+    else:
+        display = hint.label
+    return f"[index {index}] {display}"
+
+
+def _parse_nearby_landmark_select_reply(raw: str) -> dict[str, Any]:
+    """Parse ``{"keep_indices": [int, ...]}`` from the landmark-select LLM."""
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError("nearby landmark select reply must be an object")
+    indices = data.get("keep_indices")
+    if not isinstance(indices, list):
+        raise ValueError("keep_indices must be a list")
+    cleaned: list[int] = []
+    for item in indices:
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise ValueError("keep_indices must contain integers")
+        cleaned.append(item)
+    return {"keep_indices": cleaned}
+
+
+def _map_keep_indices_to_hints(
+    ranked: list[NearbyHint],
+    keep_indices: list[int],
+    *,
+    max_count: int,
+) -> list[NearbyHint]:
+    """Keep ranked hints by LLM index order, dropping unknowns and duplicates."""
+    selected: list[NearbyHint] = []
+    seen: set[int] = set()
+    for index in keep_indices:
+        if index in seen or index < 0 or index >= len(ranked):
+            continue
+        seen.add(index)
+        selected.append(ranked[index])
+        if len(selected) >= max_count:
+            break
+    return selected
+
+
+async def select_stable_nearby_hints(
+    vision: dict[str, Any],
+    *,
+    instruction: str,
+    screenshot_path: str | None = None,
+    log_info: Any = None,
+    max_count: int = _MIN_NEARBY_TEXT_LANDMARKS,
+) -> list[NearbyHint]:
+    """Ask the LLM which ranked neighbors are stable landmarks.
+
+    Containing ``input`` / ``scrollbar`` hints are always kept. Remaining
+    neighbors are sent in rank order with the screenshot. On missing screenshot,
+    empty remaining options, or LLM/parse failure, falls back to
+    :func:`collect_nearby_hints`. A successful empty ``keep_indices`` keeps only
+    the forced containers.
+    """
+    forced, ranked = _prioritized_nearby_parts(vision, instruction=instruction)
+    fallback = [*forced, *ranked[:max_count]]
+    if not ranked:
+        return fallback
+
+    shot = Path(screenshot_path) if screenshot_path else None
+    if shot is None or not shot.is_file():
+        return fallback
+
+    options_lines = "\n".join(
+        _format_ranked_nearby_option_line(index, hint)
+        for index, hint in enumerate(ranked)
+    )
+    prompt = get_prompt("recording_nearby_landmark_select").format(
+        instruction=instruction,
+        options_lines=options_lines or "(none)",
+    )
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "user",
+            "content": prompt,
+            "images": [str(shot)],
+        }
+    ]
+    try:
+        result = await request_json_with_retry(
+            messages=messages,
+            response_schema=_NEARBY_LANDMARK_SELECT_SCHEMA,
+            parse_reply=_parse_nearby_landmark_select_reply,
+            retry_instruction=get_prompt("recording_nearby_landmark_select_retry"),
+            log_info=log_info,
+            append_image_sizes=True,
+        )
+    except (ValueError, json.JSONDecodeError) as exc:
+        if log_info is not None:
+            log_info(f"select_stable_nearby_hints failed: {exc}")
+        return fallback
+
+    selected = _map_keep_indices_to_hints(
+        ranked,
+        result["keep_indices"],
+        max_count=max_count,
+    )
+    return [*forced, *selected]
 
 
 def list_nearby_landmark_options(
@@ -1143,12 +1276,18 @@ def reorder_yolo_ocr_primary(
     return payload
 
 
-def append_nearby_context_comment(instruction: str, vision: dict[str, Any]) -> str:
+def append_nearby_context_comment(
+    instruction: str,
+    vision: dict[str, Any],
+    hints: list[NearbyHint] | None = None,
+) -> str:
     """Append a nearby-context parenthetical comment when vision data is available."""
     if not vision.get("used_vision"):
         return instruction
+    if hints is None:
+        hints = collect_nearby_hints(vision, instruction=instruction)
     comment = format_nearby_context_comment(
-        collect_nearby_hints(vision, instruction=instruction),
+        hints,
         location="附近",
     )
     if comment is None:
@@ -1160,22 +1299,28 @@ def append_drag_nearby_context_comments(
     instruction: str,
     vision: dict[str, Any],
     destination: dict[str, Any],
+    start_hints: list[NearbyHint] | None = None,
+    end_hints: list[NearbyHint] | None = None,
 ) -> str:
     """Insert start nearby comment before 拖到; append destination comment at end."""
     if not vision.get("used_vision"):
         return instruction
 
     result = instruction
+    if start_hints is None:
+        start_hints = collect_nearby_hints(vision, instruction=instruction)
     start_comment = format_nearby_context_comment(
-        collect_nearby_hints(vision, instruction=instruction),
+        start_hints,
         location="起點",
     )
     if start_comment and "拖到" in result:
         drag_at = result.index("拖到")
         result = result[:drag_at] + start_comment + result[drag_at:]
 
+    if end_hints is None:
+        end_hints = collect_nearby_hints(destination, instruction=instruction)
     dest_comment = format_nearby_context_comment(
-        collect_nearby_hints(destination, instruction=instruction),
+        end_hints,
         location="終點",
     )
     if dest_comment:

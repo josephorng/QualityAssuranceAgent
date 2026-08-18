@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import numpy as np
 import pytest
@@ -845,3 +846,195 @@ async def test_build_vision_context_drag_includes_destination_offset_hints(tmp_p
     destination = vision["destination"]
     assert "destination_offset_hints" in destination
     assert "「Desktop」" in destination["destination_offset_hints"]
+
+
+_VISION_FOR_LANDMARK_SELECT = {
+    "used_vision": True,
+    "local_cursor": [50, 50],
+    "candidates": [
+        {
+            "bbox": [40, 40, 20, 20],
+            "center": [50, 50],
+            "class_name": "element",
+            "text": "",
+            "icons": [{"chinese_id": "目標"}],
+        },
+        {
+            "bbox": [90, 40, 40, 20],
+            "center": [110, 50],
+            "class_name": "text",
+            "text": "已選取 2 個項目",
+        },
+        {
+            "bbox": [10, 40, 20, 20],
+            "center": [20, 50],
+            "class_name": "text",
+            "text": "檔案",
+        },
+        {
+            "bbox": [40, 10, 20, 20],
+            "center": [50, 20],
+            "class_name": "text",
+            "text": "工具列",
+        },
+    ],
+}
+
+
+def test_parse_nearby_landmark_select_reply_requires_int_indices() -> None:
+    from src.recorder.vision_context import _parse_nearby_landmark_select_reply
+
+    assert _parse_nearby_landmark_select_reply('{"keep_indices": [0, 2]}') == {
+        "keep_indices": [0, 2]
+    }
+    with pytest.raises(ValueError, match="keep_indices"):
+        _parse_nearby_landmark_select_reply('{"keep_indices": [true]}')
+    with pytest.raises(ValueError, match="object"):
+        _parse_nearby_landmark_select_reply("[0]")
+
+
+def test_map_keep_indices_to_hints_drops_unknowns_duplicates_and_caps() -> None:
+    from src.common.nearby_side import NearbyHint, Side
+    from src.recorder.vision_context import _map_keep_indices_to_hints
+
+    ranked = [
+        NearbyHint("「左」文字", Side.RIGHT),
+        NearbyHint("「上」文字", Side.BELOW),
+        NearbyHint("「右」文字", Side.LEFT),
+    ]
+    selected = _map_keep_indices_to_hints(
+        ranked,
+        [2, 2, 99, -1, 0, 1],
+        max_count=2,
+    )
+    assert selected == [
+        NearbyHint("「右」文字", Side.LEFT),
+        NearbyHint("「左」文字", Side.RIGHT),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_select_stable_nearby_hints_missing_screenshot_falls_back(
+    tmp_path: Path,
+) -> None:
+    from src.recorder.vision_context import (
+        collect_nearby_hints,
+        select_stable_nearby_hints,
+    )
+
+    with patch(
+        "src.recorder.vision_context.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        hints = await select_stable_nearby_hints(
+            _VISION_FOR_LANDMARK_SELECT,
+            instruction="點擊「目標」圖示",
+            screenshot_path=str(tmp_path / "missing.jpeg"),
+        )
+
+    llm_mock.assert_not_called()
+    assert hints == collect_nearby_hints(
+        _VISION_FOR_LANDMARK_SELECT, instruction="點擊「目標」圖示"
+    )
+
+
+@pytest.mark.asyncio
+async def test_select_stable_nearby_hints_maps_llm_indices(tmp_path: Path) -> None:
+    from src.common.nearby_side import NearbyHint, Side
+    from src.recorder.vision_context import (
+        _prioritized_nearby_parts,
+        select_stable_nearby_hints,
+    )
+
+    shot = tmp_path / "event.jpeg"
+    shot.write_bytes(b"jpeg")
+    _forced, ranked = _prioritized_nearby_parts(
+        _VISION_FOR_LANDMARK_SELECT, instruction="點擊「目標」圖示"
+    )
+    toolbar_index = next(
+        i for i, hint in enumerate(ranked) if "工具列" in hint.label
+    )
+
+    with patch(
+        "src.recorder.vision_context.request_json_with_retry",
+        new=AsyncMock(return_value={"keep_indices": [toolbar_index]}),
+    ):
+        hints = await select_stable_nearby_hints(
+            _VISION_FOR_LANDMARK_SELECT,
+            instruction="點擊「目標」圖示",
+            screenshot_path=str(shot),
+        )
+
+    assert hints == [NearbyHint("「工具列」文字", Side.BELOW)]
+
+
+@pytest.mark.asyncio
+async def test_select_stable_nearby_hints_llm_error_falls_back(tmp_path: Path) -> None:
+    from src.recorder.vision_context import (
+        collect_nearby_hints,
+        select_stable_nearby_hints,
+    )
+
+    shot = tmp_path / "event.jpeg"
+    shot.write_bytes(b"jpeg")
+
+    with patch(
+        "src.recorder.vision_context.request_json_with_retry",
+        new=AsyncMock(side_effect=ValueError("bad json")),
+    ):
+        hints = await select_stable_nearby_hints(
+            _VISION_FOR_LANDMARK_SELECT,
+            instruction="點擊「目標」圖示",
+            screenshot_path=str(shot),
+        )
+
+    assert hints == collect_nearby_hints(
+        _VISION_FOR_LANDMARK_SELECT, instruction="點擊「目標」圖示"
+    )
+
+
+@pytest.mark.asyncio
+async def test_select_stable_nearby_hints_empty_keep_keeps_only_containers(
+    tmp_path: Path,
+) -> None:
+    from src.common.nearby_side import NearbyHint, Side
+    from src.recorder.vision_context import select_stable_nearby_hints
+
+    shot = tmp_path / "event.jpeg"
+    shot.write_bytes(b"jpeg")
+    vision = {
+        "used_vision": True,
+        "local_cursor": [100, 50],
+        "candidates": [
+            {
+                "bbox": [90, 45, 30, 14],
+                "center": [105, 52],
+                "class_name": "text",
+                "text": "搜尋",
+            },
+            {
+                "bbox": [40, 30, 200, 50],
+                "center": [140, 55],
+                "class_name": "input",
+                "text": None,
+            },
+            {
+                "bbox": [300, 40, 40, 14],
+                "center": [320, 47],
+                "class_name": "text",
+                "text": "已選取 2 個項目",
+            },
+        ],
+    }
+
+    with patch(
+        "src.recorder.vision_context.request_json_with_retry",
+        new=AsyncMock(return_value={"keep_indices": []}),
+    ):
+        hints = await select_stable_nearby_hints(
+            vision,
+            instruction="將滑鼠移到「搜尋」文字",
+            screenshot_path=str(shot),
+        )
+
+    assert hints == [NearbyHint("輸入欄", Side.INSIDE)]

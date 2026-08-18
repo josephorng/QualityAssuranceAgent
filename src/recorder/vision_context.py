@@ -35,6 +35,8 @@ _MIN_NEARBY_TEXT_LANDMARKS = 2
 _MIN_NEARBY_TEXT_CANDIDATES = 5
 _MIN_NEARBY_ICON_CANDIDATES = 5
 _DRAG_OFFSET_THRESHOLD_PX = 5
+# OCR boxes hug glyphs; pad so a near-miss click still counts as on-target.
+_BBOX_HIT_TOLERANCE_PX = 4
 _CONTAINER_LANDMARK_CLASSES = frozenset({"input", "scrollbar"})
 # Orthogonal bands around the primary click target (not diagonals / center).
 _CARDINAL_LANDMARK_CELLS = frozenset(
@@ -316,13 +318,19 @@ def _drop_point_inside_candidate(
     drop_y: int,
     candidate: dict[str, Any],
 ) -> bool:
-    """True when the drop point falls inside a candidate's bbox dict."""
+    """True when the drop point falls inside a candidate's bbox, with a small pad.
+
+    OCR boxes hug glyphs tightly; a few pixels of padding treats near-miss clicks
+    (row padding above/below a label) as on-target.
+    """
     bbox = candidate.get("bbox")
     if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+        pad = _BBOX_HIT_TOLERANCE_PX
+        bx, by, bw, bh = (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
         return _point_inside_bbox(
             drop_x,
             drop_y,
-            (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])),
+            (bx - pad, by - pad, bw + 2 * pad, bh + 2 * pad),
         )
     return False
 

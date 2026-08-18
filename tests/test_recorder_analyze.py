@@ -1476,6 +1476,29 @@ def test_instruction_for_click_right_click_with_offset() -> None:
     )
 
 
+def test_instruction_for_click_omits_offset_when_within_bbox_tolerance() -> None:
+    event = RecordedEvent(
+        index=3,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(66, 271),
+        button="left",
+        screenshot_path="",
+    )
+    vision = {
+        "local_cursor": (66, 271),
+        "candidates": [
+            {
+                "bbox": [57, 272, 27, 12],
+                "center": [70, 278],
+                "class_name": "text",
+                "text": "下載",
+            },
+        ],
+    }
+    assert instruction_for_click(event, vision) == "將滑鼠移到「下載」文字"
+
+
 def test_instruction_for_click_double_click() -> None:
     event = RecordedEvent(
         index=5,

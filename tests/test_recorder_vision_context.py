@@ -10,6 +10,8 @@ from cua_mcp.select_mouse_target import _detection_from_bbox
 from cua_mcp.yolo_onnx import YOLO_CLASS_ELEMENT, YOLO_CLASS_SCROLLBAR, YOLO_CLASS_TEXT
 from src.recorder.models import RecordedEvent
 from src.recorder.vision_context import (
+    _BBOX_HIT_TOLERANCE_PX,
+    _drop_point_inside_candidate,
     _local_cursor,
     _nearest_candidates,
     build_vision_context,
@@ -21,6 +23,7 @@ from src.recorder.vision_context import (
     format_field_context_hint,
     format_input_context_hint,
     format_scrollbar_context_hint,
+    primary_candidate_offset,
 )
 
 
@@ -749,6 +752,30 @@ def test_candidate_offset_for_instruction_when_drop_inside_anchor() -> None:
         ],
     }
     assert candidate_offset_for_instruction(destination, "振銓") is None
+
+
+def test_drop_point_inside_candidate_allows_small_tolerance() -> None:
+    candidate = {"bbox": [57, 272, 27, 12], "center": [70, 278], "text": "下載"}
+    assert _drop_point_inside_candidate(66, 271, candidate)
+    assert _drop_point_inside_candidate(57, 272 - _BBOX_HIT_TOLERANCE_PX, candidate)
+    assert not _drop_point_inside_candidate(
+        57, 272 - _BBOX_HIT_TOLERANCE_PX - 1, candidate
+    )
+
+
+def test_primary_candidate_offset_none_when_click_within_bbox_tolerance() -> None:
+    vision = {
+        "local_cursor": (66, 271),
+        "candidates": [
+            {
+                "bbox": [57, 272, 27, 12],
+                "center": [70, 278],
+                "class_name": "text",
+                "text": "下載",
+            },
+        ],
+    }
+    assert primary_candidate_offset(vision) is None
 
 
 @pytest.mark.asyncio

@@ -14,7 +14,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import cv2
 import numpy as np
 
 from cua_mcp.geometry import boxes_overlap, clip_box, sort_by_reading_order
@@ -26,7 +25,7 @@ from cua_mcp.yolo_onnx import (
     YOLO_CLASS_TEXT,
     run_yolo_onnx_end2end,
 )
-from src.common.io_utils import write_json
+from src.common.io_utils import imread_bgr, write_json
 from src.common.monitor_prompt import selected_eye_monitor_indices
 from src.common.run_state import get_run_state_manager, ts_name
 from src.eye.capture import active_monitor_offset, capture_monitor_to_file
@@ -227,7 +226,7 @@ def get_coordinates_from_image_path(
         _log_info(f"OCR image file not found path={image_path}")
         return []
 
-    bgr = cv2.imread(image_path)
+    bgr = imread_bgr(image_path)
     if bgr is None:
         _log_info(f"OCR could not read image path={image_path}")
         return []
@@ -339,7 +338,7 @@ def get_text_boxes_from_path(
         _log_info(f"OCR get_text_boxes_from_path file not found path={image_path}")
         return []
 
-    bgr = cv2.imread(image_path)
+    bgr = imread_bgr(image_path)
     if bgr is None:
         _log_info(f"OCR get_text_boxes_from_path could not read image path={image_path}")
         return []

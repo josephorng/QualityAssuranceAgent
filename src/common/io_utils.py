@@ -51,6 +51,20 @@ def read_json(path: Path, default: Any) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def imread_bgr(path: str | os.PathLike[str]) -> Any:
+    """Read an OpenCV BGR image; Unicode paths work on Windows (unlike ``cv2.imread``)."""
+    import cv2
+    import numpy as np
+
+    try:
+        data = np.fromfile(os.fspath(path), dtype=np.uint8)
+    except OSError:
+        return None
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, cv2.IMREAD_COLOR)
+
+
 def open_path_with_default_app(path: Path) -> None:
     """Open a file or folder with the OS default application."""
     resolved = path.resolve()

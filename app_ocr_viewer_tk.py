@@ -12,7 +12,6 @@ from pathlib import Path
 from tkinter import filedialog, ttk
 from typing import Any
 
-import cv2
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from cua_mcp.icon_map import is_pua_char, lookup_pua_icon, text_has_pua, unknown_icon_record
@@ -30,7 +29,7 @@ from cua_mcp.yolo_onnx import (
     YOLO_CLASS_SCROLLBAR,
     YOLO_CLASS_TEXT,
 )
-from src.common.io_utils import read_json, write_json
+from src.common.io_utils import imread_bgr, read_json, write_json
 from src.common.settings import ROOT_DIR, resolve_runs_dir
 
 YOLO_UNDONE_IMAGES = Path(
@@ -487,7 +486,7 @@ def load_ocr_lines(json_path: Path) -> tuple[list[OcrLine], str]:
 
 
 def load_yolo_lines(image_path: Path, *, yolo_conf_threshold: float) -> tuple[list[OcrLine], str]:
-    bgr = cv2.imread(str(image_path))
+    bgr = imread_bgr(image_path)
     if bgr is None:
         return [], "Could not read image for YOLO"
     try:

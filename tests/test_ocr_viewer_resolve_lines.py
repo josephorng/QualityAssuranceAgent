@@ -16,6 +16,7 @@ from app_ocr_viewer_tk import (
     _discover_run_images,
     _smallest_box_hit_index,
     load_ocr_lines,
+    load_yolo_lines,
     resolve_image_lines,
 )
 
@@ -192,3 +193,20 @@ def test_load_ocr_lines_candidates_format(tmp_path: Path) -> None:
     assert len(lines) == 1
     assert lines[0].chinese_ids == ("加號",)
     assert "vision candidates" in status
+
+
+def test_load_yolo_lines_reads_unicode_path(tmp_path: Path) -> None:
+    from PIL import Image
+
+    folder = tmp_path / "中文目录"
+    folder.mkdir()
+    image_path = folder / "截图.png"
+    Image.new("RGB", (8, 8), (0, 128, 255)).save(image_path)
+
+    with patch("app_ocr_viewer_tk._build_candidates_from_bgr", return_value=[]) as build:
+        lines, status = load_yolo_lines(image_path, yolo_conf_threshold=0.5)
+
+    build.assert_called_once()
+    assert lines == []
+    assert "Could not read" not in status
+    assert "YOLO detections" in status

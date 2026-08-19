@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from src.common.io_utils import pop_last_nonempty_line
+from PIL import Image
+
+from src.common.io_utils import imread_bgr, pop_last_nonempty_line
 
 
 def test_pop_last_nonempty_line_empty_file(tmp_path: Path) -> None:
@@ -27,3 +29,21 @@ def test_pop_last_nonempty_line_trailing_blank_lines(tmp_path: Path) -> None:
 def test_pop_last_nonempty_line_missing_file(tmp_path: Path) -> None:
     path = tmp_path / "missing.txt"
     assert pop_last_nonempty_line(path) is None
+
+
+def test_imread_bgr_unicode_path(tmp_path: Path) -> None:
+    folder = tmp_path / "中文目录"
+    folder.mkdir()
+    path = folder / "截图.png"
+    Image.new("RGB", (6, 4), (255, 0, 0)).save(path)
+
+    bgr = imread_bgr(path)
+    assert bgr is not None
+    assert bgr.shape == (4, 6, 3)
+    # Pillow RGB red becomes OpenCV BGR.
+    assert int(bgr[0, 0, 2]) == 255
+    assert int(bgr[0, 0, 0]) == 0
+
+
+def test_imread_bgr_missing_file(tmp_path: Path) -> None:
+    assert imread_bgr(tmp_path / "missing.png") is None

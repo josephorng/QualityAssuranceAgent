@@ -18,6 +18,7 @@ from src.common.runs_report_server import (
     delete_run_report_folder,
     ensure_runs_report_server,
     rename_recording_folder,
+    rerun_recording_event_yolo_ocr,
     resolve_deletable_run_folder,
     stop_runs_report_server,
     sync_recording_events,
@@ -362,6 +363,117 @@ def test_runs_report_server_landmarks_endpoint(tmp_path: Path) -> None:
         assert payload["ok"] is True
         assert "「45 個項目」文字的右下方" in payload["instruction"]
         assert "並點擊滑鼠一下" in payload["instruction"]
+    finally:
+        server.stop()
+
+
+def test_rerun_recording_event_yolo_ocr_rebuilds_instruction(tmp_path: Path, monkeypatch) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_landmark_run(runs_root, "recording_yolo_retry")
+    (run_root / "yolo_ocr" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "candidates": [],
+                "detection_count": 0,
+                "yolo_error": "Triton infer timed out after 20s",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_yolo(event, *, run_dir, persist_debug=True):
+        del persist_debug
+        payload = {
+            "used_vision": True,
+            "candidate_text": "搜尋",
+            "candidates": [
+                {
+                    "bbox": [40, 40, 32, 16],
+                    "center": [56, 48],
+                    "class_name": "text",
+                    "text": "搜尋",
+                }
+            ],
+            "detection_count": 1,
+            "local_cursor": (56, 48),
+        }
+        (run_dir / "yolo_ocr" / "event_001.json").write_text(
+            json.dumps(
+                {
+                    "event_index": event.index,
+                    "candidates": payload["candidates"],
+                    "detection_count": 1,
+                    "candidate_text": "搜尋",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return payload
+
+    monkeypatch.setattr(
+        "src.common.runs_report_server.run_pointer_event_yolo_ocr",
+        fake_yolo,
+    )
+
+    result = rerun_recording_event_yolo_ocr(runs_root, "recording_yolo_retry", 1)
+    assert "搜尋" in result["instruction"]
+    assert result["candidate_count"] == 1
+    analysis = json.loads((run_root / "analysis" / "event_001.json").read_text(encoding="utf-8"))
+    assert analysis["instruction"] == result["instruction"]
+    assert analysis["vision"]["candidate_text"] == "搜尋"
+    assert "landmarks" not in analysis
+    html = (run_root / "recording_steps.html").read_text(encoding="utf-8")
+    assert "搜尋" in html
+
+
+def test_rerun_recording_event_yolo_ocr_raises_when_empty(tmp_path: Path, monkeypatch) -> None:
+    runs_root = tmp_path / "runs"
+    _make_recording_landmark_run(runs_root, "recording_yolo_empty")
+
+    monkeypatch.setattr(
+        "src.common.runs_report_server.run_pointer_event_yolo_ocr",
+        lambda *args, **kwargs: {
+            "used_vision": True,
+            "candidates": [],
+            "detection_count": 0,
+            "yolo_error": "Triton infer timed out after 20s",
+        },
+    )
+    with pytest.raises(RuntimeError, match="timed out"):
+        rerun_recording_event_yolo_ocr(runs_root, "recording_yolo_empty", 1)
+
+
+def test_runs_report_server_yolo_ocr_endpoint(tmp_path: Path, monkeypatch) -> None:
+    runs_root = tmp_path / "runs"
+    _make_recording_landmark_run(runs_root, "recording_http_yolo")
+
+    monkeypatch.setattr(
+        "src.common.runs_report_server.rerun_recording_event_yolo_ocr",
+        lambda *args, **kwargs: {
+            "instruction": "將滑鼠移到「搜尋」文字，並點擊滑鼠一下。",
+            "detection_count": 4,
+            "candidate_count": 4,
+        },
+    )
+
+    server = RunsReportServer(runs_root)
+    try:
+        base = server.start()
+        req = urllib.request.Request(
+            f"{base}/api/runs/recording_http_yolo/events/1/yolo_ocr",
+            method="POST",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            assert response.status == 200
+        assert payload["ok"] is True
+        assert payload["candidate_count"] == 4
+        assert "搜尋" in payload["instruction"]
     finally:
         server.stop()
 

@@ -5,8 +5,6 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import cv2
-
 if TYPE_CHECKING:
     import numpy as np
 
@@ -17,7 +15,7 @@ from cua_mcp.select_mouse_target import _build_candidates_from_bgr
 from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text
 from cua_mcp.selection_engine import request_json_with_retry
 from cua_mcp.yolo_onnx import YOLO_CLASS_ELEMENT, YOLO_CLASS_INPUT, YOLO_CLASS_TEXT
-from src.common.io_utils import write_json
+from src.common.io_utils import imread_bgr, write_json
 from src.common.prompting import get_prompt
 from src.common.nearby_side import (
     LandmarkCell,
@@ -29,7 +27,12 @@ from src.common.nearby_side import (
     side_to_schema_value,
     side_to_zh,
 )
-from src.recorder.models import POINTER_EVENT_KINDS, RecordedEvent
+from src.recorder.models import (
+    POINTER_EVENT_KINDS,
+    RecordedEvent,
+    screenshot_path_for_event,
+    screenshot_path_for_event_end,
+)
 
 _MIN_NEARBY_TEXT_LANDMARKS = 2
 _MIN_NEARBY_TEXT_CANDIDATES = 5
@@ -66,6 +69,42 @@ _NEARBY_LANDMARK_SELECT_SCHEMA: dict[str, Any] = {
     },
     "required": ["keep_indices"],
 }
+
+
+def resolve_event_screenshot_path(
+    event: RecordedEvent,
+    run_dir: Path,
+    *,
+    image_path: str | None = None,
+    debug_name: str | None = None,
+) -> Path | None:
+    """Resolve a screenshot that may still point at a pre-rename recording folder."""
+    end_shot = debug_name == "_end"
+    raw = image_path
+    if raw is None:
+        raw = event.end_screenshot_path if end_shot and event.end_screenshot_path else event.screenshot_path
+    fallback = (
+        screenshot_path_for_event_end(run_dir, event.index)
+        if end_shot
+        else screenshot_path_for_event(run_dir, event.index)
+    )
+    candidates: list[Path] = []
+    if raw:
+        stored = Path(raw)
+        candidates.append(stored)
+        candidates.append(run_dir / "screenshots" / stored.name)
+        if not stored.is_absolute():
+            candidates.append(run_dir / stored)
+    candidates.append(fallback)
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        if path.is_file():
+            return path
+    return None
 
 
 def _local_cursor(event: RecordedEvent) -> tuple[int, int] | None:
@@ -1614,18 +1653,47 @@ def build_vision_context_at_point(
         "detection_count": 0,
     }
 
-    resolved_image_path = image_path or event.screenshot_path
-    if not resolved_image_path or not Path(resolved_image_path).is_file():
+    resolved = resolve_event_screenshot_path(
+        event,
+        run_dir,
+        image_path=image_path,
+        debug_name=debug_name,
+    )
+    resolved_image_path = str(resolved) if resolved is not None else (image_path or event.screenshot_path or "")
+    load_error: str | None = None
+    bgr = None
+    if resolved is None:
+        load_error = "找不到截圖檔"
+    else:
+        bgr = imread_bgr(resolved)
+        if bgr is None:
+            load_error = "無法讀取截圖"
+
+    if load_error is not None:
+        empty["yolo_error"] = load_error
+        if persist_debug:
+            write_json(
+                run_dir / "yolo_ocr" / f"event_{event.index:03d}{debug_name or ''}.json",
+                {
+                    "event_index": event.index,
+                    "image_path": resolved_image_path,
+                    "cursor_xy": list(reference_xy) if reference_xy else None,
+                    "local_cursor": [local_x, local_y],
+                    "candidate_text": "",
+                    "candidates": [],
+                    "detection_count": 0,
+                    "yolo_error": load_error,
+                },
+            )
         return empty
 
-    bgr = cv2.imread(resolved_image_path)
-    if bgr is None:
-        return empty
-
+    assert bgr is not None
+    yolo_error: str | None = None
     try:
         all_detections = _build_candidates_from_bgr(bgr)
-    except RuntimeError:
+    except RuntimeError as exc:
         all_detections = []
+        yolo_error = str(exc)
 
     nearest: list[UiDetection] = []
     candidate_text = ""
@@ -1645,6 +1713,8 @@ def build_vision_context_at_point(
         "candidates": candidate_dicts,
         "detection_count": len(all_detections),
     }
+    if yolo_error:
+        payload["yolo_error"] = yolo_error
 
     if persist_debug:
         suffix = debug_name or ""
@@ -1659,6 +1729,7 @@ def build_vision_context_at_point(
         "detection_count": len(all_detections),
         "bgr": bgr,
         "all_detections": all_detections,
+        "yolo_error": yolo_error,
         "field_context": format_field_context_hint(
             {
                 "candidates": candidate_dicts,
@@ -1678,17 +1749,18 @@ def _compact_vision_point(result: dict[str, Any]) -> dict[str, Any]:
         "detection_count": result.get("detection_count", 0),
         "field_context": format_field_context_hint(result),
     }
+    if result.get("yolo_error"):
+        compact["yolo_error"] = result.get("yolo_error")
     return compact
 
 
-async def build_vision_context(
+def run_pointer_event_yolo_ocr(
     event: RecordedEvent,
     *,
     run_dir: Path,
     persist_debug: bool = True,
-    log_info: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """Run YOLO+OCR for pointer events; return context for the LLM."""
+    """Run YOLO+OCR for a pointer event and persist ``yolo_ocr`` JSON (no LLM)."""
     empty: dict[str, Any] = {
         "used_vision": False,
         "candidate_text": "",
@@ -1741,12 +1813,14 @@ async def build_vision_context(
                     "candidates": end_compact["candidates"],
                 },
             )
+        combined_error = start_compact.get("yolo_error") or end_result.get("yolo_error")
         return {
             **start_compact,
             "used_vision": bool(start_compact["used_vision"] or end_compact["used_vision"]),
             "destination": end_compact,
             "field_context": start_compact["field_context"],
             "destination_field_context": end_compact["field_context"],
+            **({"yolo_error": combined_error} if combined_error else {}),
         }
 
     local = _local_cursor(event)
@@ -1765,3 +1839,19 @@ async def build_vision_context(
     result.pop("all_detections", None)
     result["field_context"] = format_field_context_hint(result)
     return result
+
+
+async def build_vision_context(
+    event: RecordedEvent,
+    *,
+    run_dir: Path,
+    persist_debug: bool = True,
+    log_info: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Run YOLO+OCR for pointer events; return context for the LLM."""
+    _ = log_info
+    return run_pointer_event_yolo_ocr(
+        event,
+        run_dir=run_dir,
+        persist_debug=persist_debug,
+    )

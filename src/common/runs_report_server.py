@@ -10,6 +10,7 @@ Recording expected-outcome edits POST to ``/api/runs/<id>/events/<n>/expected_ou
 Recording event deletes POST to ``/api/runs/<id>/events/<n>/delete``.
 Recording event inserts POST to ``/api/runs/<id>/events/add``.
 Recording instruction edits POST to ``/api/runs/<id>/events/<n>/instruction``.
+Recording YOLO/OCR retry POST to ``/api/runs/<id>/events/<n>/yolo_ocr``.
 Recording folder rename POST to ``/api/runs/<id>/rename``.
 """
 
@@ -42,6 +43,7 @@ from src.recorder.analyze import (
     rebuild_pointer_instruction,
 )
 from src.recorder.models import (
+    POINTER_EVENT_KINDS,
     RecordedEvent,
     event_json_path,
     screenshot_path_for_event,
@@ -53,6 +55,7 @@ from src.recorder.vision_context import (
     drag_end_yolo_suffix,
     format_drag_candidate_anchor,
     reorder_yolo_ocr_primary,
+    run_pointer_event_yolo_ocr,
     vision_from_yolo_ocr,
 )
 
@@ -76,6 +79,9 @@ _EVENT_EXPECTED_OUTCOME_PATH_RE = re.compile(
 )
 _EVENT_INSTRUCTION_PATH_RE = re.compile(
     r"^/api/runs/([^/]+)/events/(\d+)/instruction/?$"
+)
+_EVENT_YOLO_OCR_PATH_RE = re.compile(
+    r"^/api/runs/([^/]+)/events/(\d+)/yolo_ocr/?$"
 )
 _EVENT_ADD_PATH_RE = re.compile(r"^/api/runs/([^/]+)/events/add/?$")
 _TYPED_TEXT_MAX_LEN = 8192
@@ -1048,6 +1054,78 @@ def apply_recording_event_instruction(
     return {"instruction": cleaned}
 
 
+def rerun_recording_event_yolo_ocr(
+    runs_root: Path,
+    run_id: str,
+    event_index: int,
+) -> dict[str, Any]:
+    """Re-run YOLO/OCR for one pointer event, rebuild the instruction, and persist.
+
+    Returns ``instruction``, ``detection_count``, and ``candidate_count``.
+    Raises ``ValueError`` for invalid input and ``RuntimeError`` when inference
+    fails or yields no usable targets.
+    """
+    run_dir = resolve_deletable_run_folder(runs_root, run_id)
+    if not isinstance(event_index, int) or event_index < 1:
+        raise ValueError("invalid event index")
+
+    event_path = event_json_path(run_dir, event_index)
+    event_payload = read_json(event_path, None)
+    if not isinstance(event_payload, dict):
+        raise ValueError("event not found")
+    event = RecordedEvent.from_dict(event_payload)
+    if event.kind not in POINTER_EVENT_KINDS:
+        raise ValueError("event does not support YOLO/OCR")
+
+    vision = run_pointer_event_yolo_ocr(event, run_dir=run_dir, persist_debug=True)
+    yolo_error = vision.get("yolo_error")
+    if yolo_error:
+        raise RuntimeError(str(yolo_error))
+
+    destination = vision.get("destination") if isinstance(vision.get("destination"), dict) else {}
+    start_candidates = vision.get("candidates") if isinstance(vision.get("candidates"), list) else []
+    end_candidates = (
+        destination.get("candidates") if isinstance(destination.get("candidates"), list) else []
+    )
+    if not start_candidates and (event.kind != "drag" or not end_candidates):
+        raise RuntimeError("YOLO/OCR 沒有偵測到目標。請確認 Triton 可用後再試。")
+
+    rebuilt = rebuild_pointer_instruction(
+        event,
+        vision,
+        destination,
+        include_nearby=True,
+    )
+    if not rebuilt:
+        raise RuntimeError("已寫入 YOLO/OCR，但無法自動重建指令。")
+
+    analysis_path = run_dir / "analysis" / f"event_{event_index:03d}.json"
+    analysis = read_json(analysis_path, None)
+    if not isinstance(analysis, dict):
+        analysis = {"event_index": event_index}
+    analysis["instruction"] = rebuilt
+    analysis["vision"] = {
+        "used_vision": vision.get("used_vision"),
+        "candidate_text": vision.get("candidate_text"),
+    }
+    analysis.pop("landmarks", None)
+    write_json(analysis_path, analysis)
+
+    report_path = run_dir / "report.json"
+    report = read_json(report_path, {})
+    if not isinstance(report, dict):
+        report = {}
+    _rebuild_report_instructions(run_dir, report)
+    write_json(report_path, report)
+
+    write_recording_html_from_run(run_dir, update_index=False)
+    return {
+        "instruction": rebuilt,
+        "detection_count": int(vision.get("detection_count") or len(start_candidates)),
+        "candidate_count": len(start_candidates),
+    }
+
+
 def zip_run_report_to_bug_share(
     runs_root: Path,
     run_id: str,
@@ -1107,6 +1185,7 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
             event_text_match = _EVENT_TEXT_PATH_RE.fullmatch(path)
             event_outcome_match = _EVENT_EXPECTED_OUTCOME_PATH_RE.fullmatch(path)
             event_instruction_match = _EVENT_INSTRUCTION_PATH_RE.fullmatch(path)
+            event_yolo_ocr_match = _EVENT_YOLO_OCR_PATH_RE.fullmatch(path)
             event_delete_match = _EVENT_DELETE_PATH_RE.fullmatch(path)
             event_add_match = _EVENT_ADD_PATH_RE.fullmatch(path)
 
@@ -1236,6 +1315,24 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
                     )
                 except ValueError as exc:
                     self._send_json(400, {"ok": False, "error": str(exc)})
+                    return
+                except OSError as exc:
+                    self._send_json(500, {"ok": False, "error": str(exc)})
+                    return
+                self._send_json(200, {"ok": True, **result})
+                return
+
+            if event_yolo_ocr_match is not None:
+                run_id = event_yolo_ocr_match.group(1)
+                event_index_raw = event_yolo_ocr_match.group(2)
+                try:
+                    event_index = int(event_index_raw)
+                    result = rerun_recording_event_yolo_ocr(root, run_id, event_index)
+                except ValueError as exc:
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                    return
+                except RuntimeError as exc:
+                    self._send_json(500, {"ok": False, "error": str(exc)})
                     return
                 except OSError as exc:
                     self._send_json(500, {"ok": False, "error": str(exc)})

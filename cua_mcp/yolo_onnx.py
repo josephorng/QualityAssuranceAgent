@@ -48,6 +48,9 @@ DEFAULT_CROSS_TILE_NMS_IOU: float = 0.5
 # ``input`` and ``scrollbar`` are always merged when IoU exceeds the threshold.
 # Set ``DEFAULT_MERGE_TOUCHING_SAME_CLASS`` True or pass ``merge_touching_same_class=True``
 # to also merge ``text`` and ``element``.
+#
+# After same-class merge, each ``input`` box is expanded to the axis-aligned union of
+# itself and every overlapping ``text`` box (text detections are left unchanged).
 DEFAULT_MERGE_TOUCHING_SAME_CLASS: bool = False
 # Pairs of same-class boxes are linked (and merged transitively) when ``IoU >`` this value.
 DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD: float = 0.2
@@ -243,7 +246,8 @@ def run_yolo_onnx_end2end(
 
     Pass ``merge_touching_same_class=True`` to also fuse ``text`` and ``element`` boxes whose
     pairwise IoU exceeds ``merge_same_class_iou_threshold``. ``input`` and ``scrollbar`` are
-    always merged at that threshold (see :data:`DEFAULT_MERGE_TOUCHING_CLASS_IDS`).
+    always merged at that threshold (see :data:`DEFAULT_MERGE_TOUCHING_CLASS_IDS`). Each
+    ``input`` box is then expanded to include every overlapping ``text`` box.
     """
     return _run_yolo_onnx_end2end_recursive(
         bgr,
@@ -341,6 +345,9 @@ def _run_yolo_onnx_end2end_recursive(
         cls_arr,
         min_iou=merge_same_class_iou_threshold,
         merge_class_ids=merge_ids,
+    )
+    xyxy_f, scores, cls_arr = expand_input_boxes_with_overlapping_text_xyxy(
+        xyxy_f, scores, cls_arr
     )
     xyxy = np.round(xyxy_f).astype(np.int32)
     return xyxy, scores, cls_arr
@@ -485,6 +492,13 @@ def scale_xyxy_letterboxed_to_original(
     return out
 
 
+def _boxes_overlap_xyxy(xy0: np.ndarray, xy1: np.ndarray) -> bool:
+    """True when two axis-aligned ``xyxy`` boxes share interior area (edge-touching is not overlap)."""
+    ax1, ay1, ax2, ay2 = (float(xy0[i]) for i in range(4))
+    bx1, by1, bx2, by2 = (float(xy1[i]) for i in range(4))
+    return ax1 < bx2 and bx1 < ax2 and ay1 < by2 and by1 < ay2
+
+
 def _iou_xyxy(xy0: np.ndarray, xy1: np.ndarray) -> float:
     """Intersection-over-union for axis-aligned ``xyxy`` boxes (returns ``0.0`` if disjoint or degenerate union)."""
     ax1, ay1, ax2, ay2 = (float(xy0[i]) for i in range(4))
@@ -597,6 +611,49 @@ def merge_touching_same_class_xyxy(
     )
 
 
+def expand_input_boxes_with_overlapping_text_xyxy(
+    xyxy: np.ndarray,
+    scores: np.ndarray,
+    cls_ids: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Expand each ``input`` box to the union of itself and every overlapping ``text`` box.
+
+    Overlap is any shared interior area. Overlap is tested against the original ``input``
+    box (not a growing union), so nearby labels that only touch the expanded result are
+    not pulled in. Text detections, scores, and class ids are left unchanged.
+    """
+    if len(xyxy) == 0:
+        return xyxy, scores, cls_ids
+
+    xyxy = np.asarray(xyxy, dtype=np.float32).copy()
+    scores = np.asarray(scores, dtype=np.float32).reshape(-1)
+    cls_ids = np.asarray(cls_ids, dtype=np.int64).reshape(-1)
+
+    input_idx = np.flatnonzero(cls_ids == YOLO_CLASS_INPUT)
+    text_idx = np.flatnonzero(cls_ids == YOLO_CLASS_TEXT)
+    if input_idx.size == 0 or text_idx.size == 0:
+        return xyxy, scores, cls_ids
+
+    for i in input_idx:
+        orig = xyxy[i]
+        x1, y1, x2, y2 = (float(orig[k]) for k in range(4))
+        expanded = False
+        for j in text_idx:
+            text_box = xyxy[j]
+            if not _boxes_overlap_xyxy(orig, text_box):
+                continue
+            x1 = min(x1, float(text_box[0]))
+            y1 = min(y1, float(text_box[1]))
+            x2 = max(x2, float(text_box[2]))
+            y2 = max(y2, float(text_box[3]))
+            expanded = True
+        if expanded:
+            xyxy[i] = np.array([x1, y1, x2, y2], dtype=np.float32)
+
+    return xyxy, scores, cls_ids
+
+
 def decode_yolov26_end2end(
     det: np.ndarray,
     orig_h: int,
@@ -615,7 +672,8 @@ def decode_yolov26_end2end(
     are merged transitively via :func:`merge_touching_same_class_xyxy`.
 
     ``input`` and ``scrollbar`` are always merged when IoU exceeds ``merge_same_class_iou_threshold``
-    (see :data:`DEFAULT_MERGE_TOUCHING_CLASS_IDS`).
+    (see :data:`DEFAULT_MERGE_TOUCHING_CLASS_IDS`). Each ``input`` box is then expanded to
+    include every overlapping ``text`` box via :func:`expand_input_boxes_with_overlapping_text_xyxy`.
 
     Returns:
         xyxy: (M, 4) np.ndarray of type int32 (ready for drawing/cropping)
@@ -670,6 +728,9 @@ def decode_yolov26_end2end(
         cls,
         min_iou=merge_same_class_iou_threshold,
         merge_class_ids=merge_ids,
+    )
+    xyxy, scores, cls = expand_input_boxes_with_overlapping_text_xyxy(
+        xyxy, scores, cls
     )
 
     # Convert to integer so it plays nice with cv2.rectangle / image slicers

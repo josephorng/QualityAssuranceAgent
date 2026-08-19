@@ -24,7 +24,73 @@ from src.recorder.vision_context import (
     format_input_context_hint,
     format_scrollbar_context_hint,
     primary_candidate_offset,
+    resolve_event_screenshot_path,
 )
+
+
+def test_resolve_event_screenshot_path_falls_back_to_run_dir(tmp_path: Path) -> None:
+    run_dir = tmp_path / "選擇文字測試"
+    (run_dir / "screenshots").mkdir(parents=True)
+    shot = run_dir / "screenshots" / "event_001.jpeg"
+    shot.write_bytes(b"jpeg")
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(10, 20),
+        screenshot_path=str(tmp_path / "recording_old" / "screenshots" / "event_001.jpeg"),
+    )
+    assert resolve_event_screenshot_path(event, run_dir) == shot
+
+
+def test_build_vision_context_at_point_uses_run_dir_screenshot_fallback(tmp_path: Path) -> None:
+    run_dir = tmp_path / "選擇文字測試"
+    (run_dir / "screenshots").mkdir(parents=True)
+    (run_dir / "screenshots" / "event_001.jpeg").write_bytes(b"x")
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(10, 20),
+        screenshot_path=str(tmp_path / "recording_old" / "screenshots" / "event_001.jpeg"),
+    )
+    fake_detections = [
+        _detection_from_bbox((0, 0, 20, 20), YOLO_CLASS_TEXT, text="搜尋"),
+    ]
+    with patch(
+        "src.recorder.vision_context.imread_bgr",
+        return_value=np.zeros((100, 100, 3), dtype=np.uint8),
+    ), patch(
+        "src.recorder.vision_context._build_candidates_from_bgr",
+        return_value=fake_detections,
+    ):
+        vision = build_vision_context_at_point(
+            event,
+            local_x=10,
+            local_y=10,
+            run_dir=run_dir,
+        )
+    assert vision["used_vision"] is True
+    assert vision["candidates"]
+    assert vision["candidates"][0]["text"] == "搜尋"
+
+
+def test_build_vision_context_at_point_records_missing_screenshot(tmp_path: Path) -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(10, 20),
+        screenshot_path=str(tmp_path / "missing.jpeg"),
+    )
+    vision = build_vision_context_at_point(
+        event,
+        local_x=10,
+        local_y=10,
+        run_dir=tmp_path,
+    )
+    assert vision["used_vision"] is False
+    assert vision["yolo_error"] == "找不到截圖檔"
 
 
 def test_local_cursor_uses_monitor_offset() -> None:
@@ -273,7 +339,7 @@ async def test_build_vision_context_formats_yolo_candidates(tmp_path) -> None:
         _detection_from_bbox((30, 0, 80, 20), YOLO_CLASS_TEXT, text="AWS"),
     ]
 
-    with patch("src.recorder.vision_context.cv2.imread", return_value=np.zeros((100, 100, 3), dtype=np.uint8)), patch(
+    with patch("src.recorder.vision_context.imread_bgr", return_value=np.zeros((100, 100, 3), dtype=np.uint8)), patch(
         "src.recorder.vision_context._build_candidates_from_bgr",
         return_value=fake_detections,
     ):
@@ -322,7 +388,7 @@ async def test_build_vision_context_drag_includes_start_and_destination(tmp_path
         return start_detections if call_count["n"] == 1 else end_detections
 
     with patch(
-        "src.recorder.vision_context.cv2.imread",
+        "src.recorder.vision_context.imread_bgr",
         return_value=np.zeros((100, 100, 3), dtype=np.uint8),
     ), patch(
         "src.recorder.vision_context._build_candidates_from_bgr",
@@ -374,7 +440,7 @@ async def test_drag_destination_keeps_nearest_candidates_without_exclusion(tmp_p
         return start_detections if call_count["n"] == 1 else end_detections
 
     with patch(
-        "src.recorder.vision_context.cv2.imread",
+        "src.recorder.vision_context.imread_bgr",
         return_value=np.zeros((100, 100, 3), dtype=np.uint8),
     ), patch(
         "src.recorder.vision_context._build_candidates_from_bgr",
@@ -434,7 +500,7 @@ async def test_drag_destination_lists_nearest_candidates_at_drop(tmp_path) -> No
         return start_detections if call_count["n"] == 1 else end_detections
 
     with patch(
-        "src.recorder.vision_context.cv2.imread",
+        "src.recorder.vision_context.imread_bgr",
         return_value=np.zeros((100, 100, 3), dtype=np.uint8),
     ), patch(
         "src.recorder.vision_context._build_candidates_from_bgr",
@@ -480,7 +546,7 @@ async def test_drag_destination_uses_nearest_when_drop_not_inside_text(tmp_path)
         return start_detections if call_count["n"] == 1 else end_detections
 
     with patch(
-        "src.recorder.vision_context.cv2.imread",
+        "src.recorder.vision_context.imread_bgr",
         return_value=np.zeros((100, 100, 3), dtype=np.uint8),
     ), patch(
         "src.recorder.vision_context._build_candidates_from_bgr",
@@ -521,7 +587,7 @@ def test_build_vision_context_at_point_uses_explicit_coords(tmp_path) -> None:
         _detection_from_bbox((8, 8, 10, 10), YOLO_CLASS_TEXT, text="你好"),
     ]
 
-    with patch("src.recorder.vision_context.cv2.imread", return_value=np.zeros((100, 100, 3), dtype=np.uint8)), patch(
+    with patch("src.recorder.vision_context.imread_bgr", return_value=np.zeros((100, 100, 3), dtype=np.uint8)), patch(
         "src.recorder.vision_context._build_candidates_from_bgr",
         return_value=fake_detections,
     ):
@@ -811,7 +877,7 @@ async def test_drag_destination_uses_hit_target_when_drop_inside_text(tmp_path) 
         return start_detections if call_count["n"] == 1 else end_detections
 
     with patch(
-        "src.recorder.vision_context.cv2.imread",
+        "src.recorder.vision_context.imread_bgr",
         return_value=np.zeros((100, 100, 3), dtype=np.uint8),
     ), patch(
         "src.recorder.vision_context._build_candidates_from_bgr",
@@ -862,7 +928,7 @@ async def test_build_vision_context_drag_includes_destination_offset_hints(tmp_p
         return start_detections if call_count["n"] == 1 else end_detections
 
     with patch(
-        "src.recorder.vision_context.cv2.imread",
+        "src.recorder.vision_context.imread_bgr",
         return_value=np.zeros((100, 100, 3), dtype=np.uint8),
     ), patch(
         "src.recorder.vision_context._build_candidates_from_bgr",

@@ -199,6 +199,25 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
   font-size: .75rem; color: #57606a; font-weight: 600;
 }
 .landmarks-status.error { color: #cf222e; }
+.vision-retry {
+  margin: 0 1.5rem 1rem; padding: .75rem .9rem;
+  border: 1px solid #d0d7de; border-radius: 8px; background: #f6f8fa;
+}
+.vision-retry.failed { border-color: #eac54f; background: #fff8c5; }
+.vision-retry-title { font-weight: 600; margin: 0 0 .35rem; }
+.vision-retry-note { margin: 0 0 .6rem; color: #57606a; font-size: .85rem; }
+.rerun-yolo-ocr {
+  appearance: none; border: 1px solid #0969da; background: #ddf4ff;
+  cursor: pointer; border-radius: 6px; padding: .3rem .7rem;
+  font-size: .8rem; line-height: 1.2; font-family: inherit;
+  font-weight: 600; color: #0969da;
+}
+.rerun-yolo-ocr:hover:not(:disabled) { background: #b6e3ff; }
+.rerun-yolo-ocr:disabled { opacity: .45; cursor: not-allowed; }
+.vision-retry-status {
+  margin-left: .6rem; font-size: .8rem; font-weight: 600; color: #57606a;
+}
+.vision-retry-status.error { color: #cf222e; }
 .typed-text {
   margin: 0 1.5rem 1rem; padding: .75rem 1rem;
   border: 1px solid #d0d7de; border-radius: 8px; background: #f6f8fa;
@@ -670,6 +689,58 @@ _RECORDING_SCRIPT = """
         .catch(function () {
           btn.disabled = false;
           setLandmarksStatus(panel, "無法連線主程式，請確認主程式正在執行。", true);
+        });
+    });
+  });
+
+  Array.prototype.slice.call(document.querySelectorAll("button.rerun-yolo-ocr")).forEach(function (btn) {
+    btn.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      var panel = btn.closest(".vision-retry");
+      var group = btn.closest(".instruction-group");
+      if (!panel || !group) return;
+      var status = panel.querySelector(".vision-retry-status");
+      function setStatus(text, isError) {
+        if (!status) return;
+        status.textContent = text || "";
+        if (isError) status.classList.add("error");
+        else status.classList.remove("error");
+      }
+      if (window.location.protocol === "file:") {
+        setStatus("請透過主程式開啟報告以重新偵測。", true);
+        return;
+      }
+      var runId = group.getAttribute("data-run-id") || "";
+      var eventIndex = group.getAttribute("data-event-index") || "";
+      if (!runId || !eventIndex) {
+        setStatus("缺少事件資訊。", true);
+        return;
+      }
+      btn.disabled = true;
+      setStatus("偵測中…可能需要數十秒。", false);
+      fetch("/api/runs/" + encodeURIComponent(runId) + "/events/" + encodeURIComponent(eventIndex) + "/yolo_ocr", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}"
+      })
+        .then(function (response) {
+          return response.json().then(function (payload) {
+            return { ok: response.ok, payload: payload };
+          });
+        })
+        .then(function (result) {
+          if (!result.ok || !result.payload || !result.payload.ok) {
+            btn.disabled = false;
+            var err = (result.payload && result.payload.error) || "重新偵測失敗";
+            setStatus(err, true);
+            return;
+          }
+          window.location.reload();
+        })
+        .catch(function () {
+          btn.disabled = false;
+          setStatus("無法連線主程式，請確認主程式正在執行。", true);
         });
     });
   });
@@ -2715,6 +2786,69 @@ def _render_landmarks_panel_html(
     )
 
 
+def _yolo_ocr_payload_has_candidates(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("yolo_error"):
+        return False
+    candidates = payload.get("candidates")
+    if isinstance(candidates, list) and candidates:
+        return True
+    count = payload.get("detection_count")
+    return isinstance(count, int) and count > 0
+
+
+def _recording_yolo_ocr_failed(run_root: Path, event_index: int, kind: str) -> bool:
+    from src.recorder.vision_context import load_yolo_ocr_payload
+
+    start = load_yolo_ocr_payload(run_root, event_index, suffix="")
+    if _yolo_ocr_payload_has_candidates(start):
+        return False
+    if kind == "drag":
+        end = load_yolo_ocr_payload(run_root, event_index, suffix="_end")
+        return not _yolo_ocr_payload_has_candidates(end)
+    return True
+
+
+def _render_yolo_retry_panel_html(
+    *,
+    run_root: Path,
+    event_index: int,
+    kind: str,
+) -> str:
+    from src.recorder.models import POINTER_EVENT_KINDS
+    from src.recorder.vision_context import load_yolo_ocr_payload
+
+    if kind not in POINTER_EVENT_KINDS:
+        return ""
+    failed = _recording_yolo_ocr_failed(run_root, event_index, kind)
+    payload = load_yolo_ocr_payload(run_root, event_index, suffix="")
+    error_text = ""
+    if isinstance(payload, dict):
+        raw_error = payload.get("yolo_error")
+        if isinstance(raw_error, str) and raw_error.strip():
+            error_text = raw_error.strip()
+    if failed:
+        note = "分析時 YOLO/OCR 沒有偵測到目標（常為 Triton 逾時）。可重新偵測後重建指令。"
+        if error_text:
+            note = f"分析時 YOLO/OCR 失敗：{error_text}"
+        title = "YOLO/OCR 未偵測到目標"
+        failed_class = " failed"
+    else:
+        note = "用此步驟的動作前截圖再跑一次 YOLO/OCR，並依新結果重建指令。"
+        title = "YOLO/OCR"
+        failed_class = ""
+    return (
+        f'<div class="vision-retry{failed_class}">'
+        f'<div class="vision-retry-title">{escape(title)}</div>'
+        f'<p class="vision-retry-note">{escape(note)}</p>'
+        f'<button type="button" class="rerun-yolo-ocr" title="重新偵測 YOLO/OCR">'
+        f"重新偵測 YOLO/OCR</button>"
+        f'<span class="vision-retry-status" aria-live="polite"></span>'
+        f"</div>"
+    )
+
+
 def _typed_text_for_editor(
     event: dict[str, Any],
     analysis: dict[str, Any] | None,
@@ -2939,6 +3073,11 @@ def _render_recording_event_html(
         kind=kind,
         instruction=instruction,
     )
+    yolo_retry_html = _render_yolo_retry_panel_html(
+        run_root=run_root,
+        event_index=index,
+        kind=kind,
+    )
     typed_text_html = _render_typed_text_panel_html(
         event=event,
         analysis=analysis if isinstance(analysis, dict) else None,
@@ -2974,6 +3113,7 @@ def _render_recording_event_html(
         f'<div class="meta" style="padding: 1rem 1.5rem 0;"><dl>{meta_html}</dl></div>'
         f'<div class="instruction-edit-panels">{instruction_html}{expected_outcome_html}</div>'
         f"{typed_text_html}"
+        f"{yolo_retry_html}"
         f"{landmarks_html}"
         f'<div class="shots" style="padding: 0 1.5rem 1rem;">{shots}</div>'
         f'<div class="collapse-row">'

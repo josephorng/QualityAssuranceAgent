@@ -983,6 +983,32 @@ def test_write_recording_html_renders_landmark_multiselect(tmp_path: Path) -> No
     assert "checked" in html
     assert "套用</button>" in html
     assert "/api/runs/" in html
+    assert 'class="rerun-yolo-ocr"' in html
+    assert "YOLO/OCR 未偵測到目標" not in html
+
+
+def test_write_recording_html_shows_yolo_retry_when_failed(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000021"
+    _write_recording_fixture(run_root)
+    (run_root / "yolo_ocr").mkdir(exist_ok=True)
+    (run_root / "yolo_ocr" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "candidates": [],
+                "detection_count": 0,
+                "yolo_error": "Triton infer timed out after 20s",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+    assert 'class="rerun-yolo-ocr"' in html
+    assert "vision-retry failed" in html
+    assert "YOLO/OCR 未偵測到目標" in html or "timed out" in html
+    assert "/events/" in html and "/yolo_ocr" in html
 
 
 def test_write_recording_html_escapes_markup(tmp_path: Path) -> None:
@@ -1015,6 +1041,7 @@ def test_write_recording_html_escapes_markup(tmp_path: Path) -> None:
     assert "<script>alert(1)</script>" not in html
     assert 'value="&lt;b&gt;hi&lt;/b&gt;"' in html
     assert "輸入「&lt;b&gt;hi&lt;/b&gt;」" in html
+    assert 'class="rerun-yolo-ocr"' not in html
     assert 'data-instruction="輸入「&lt;b&gt;hi&lt;/b&gt;」"' in html
     assert 'class="typed-text-input"' in html
     assert 'class="apply-typed-text"' in html

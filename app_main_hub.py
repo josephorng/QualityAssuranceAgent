@@ -872,7 +872,7 @@ class MainHub(ctk.CTk):
             gutter_row += display_lines
         numbers = "\n".join(rows) if rows else "1"
         digit_width = max(2, len(str(line_count)))
-        gutter_width = 28 + digit_width * 10
+        gutter_width = 28 + (digit_width + 2) * 10
 
         gutter = self._script_line_numbers
         gutter.configure(state="normal", width=gutter_width)

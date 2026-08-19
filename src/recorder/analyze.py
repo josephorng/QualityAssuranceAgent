@@ -832,6 +832,7 @@ async def infer_expected_outcome(
     instruction: str,
     before_screenshot: str,
     after_screenshot: str,
+    window_change_hint: str = "(none)",
     log_info: Any = None,
 ) -> str | None:
     """Ask the LLM for a checkable success criterion from before/after screenshots."""
@@ -845,7 +846,11 @@ async def infer_expected_outcome(
     if before_path.resolve() == after_path.resolve():
         return None
 
-    prompt = get_prompt("recording_expected_outcome").format(instruction=instruction)
+    hint = window_change_hint.strip() if isinstance(window_change_hint, str) else ""
+    prompt = get_prompt("recording_expected_outcome").format(
+        instruction=instruction,
+        window_change_hint=hint or "(none)",
+    )
     messages: list[dict[str, Any]] = [
         {
             "role": "user",

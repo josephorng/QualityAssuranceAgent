@@ -2487,6 +2487,34 @@ async def test_infer_expected_outcome_uses_before_after_screenshots(tmp_path: Pa
     assert llm_mock.await_count == 1
     messages = llm_mock.await_args.kwargs["messages"]
     assert messages[0]["images"] == [str(before), str(after)]
+    prompt = messages[0]["content"]
+    assert "WindowChangeHint" in prompt
+    assert "(none)" in prompt
+    assert "Do not return null for Enter/Esc/Tab/hotkeys" in prompt
+
+
+@pytest.mark.asyncio
+async def test_infer_expected_outcome_includes_window_change_hint(tmp_path: Path) -> None:
+    before = tmp_path / "before.jpeg"
+    after = tmp_path / "after.jpeg"
+    before.write_bytes(b"before")
+    after.write_bytes(b"after")
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(return_value={"expected_outcome": "「檔案總管」視窗已開啟"}),
+    ) as llm_mock:
+        outcome = await infer_expected_outcome(
+            instruction="按下 Enter 鍵",
+            before_screenshot=str(before),
+            after_screenshot=str(after),
+            window_change_hint="action=opened, title='常用 - 檔案總管', confidence=medium",
+        )
+
+    assert outcome == "「檔案總管」視窗已開啟"
+    prompt = llm_mock.await_args.kwargs["messages"][0]["content"]
+    assert "按下 Enter 鍵" in prompt
+    assert "常用 - 檔案總管" in prompt
 
 
 @pytest.mark.asyncio
@@ -2634,6 +2662,83 @@ async def test_analyze_recording_session_writes_expected_outcome(tmp_path: Path)
     assert outcome_mock.await_count == 1
     assert outcome_mock.await_args.kwargs["before_screenshot"] == str(before)
     assert outcome_mock.await_args.kwargs["after_screenshot"] == str(after)
+    assert outcome_mock.await_args.kwargs["window_change_hint"] == "(none)"
+
+
+@pytest.mark.asyncio
+async def test_analyze_recording_session_enter_uses_opened_window_outcome(
+    tmp_path: Path,
+) -> None:
+    from src.common.run_state import reset_run_state_manager
+
+    reset_run_state_manager()
+    run_dir = tmp_path / "screen_record_enter_window"
+    shots = run_dir / "screenshots"
+    shots.mkdir(parents=True)
+    before = shots / "event_001.jpeg"
+    after = shots / "event_002.jpeg"
+    before.write_bytes(b"before-bytes")
+    after.write_bytes(b"after-bytes")
+    (run_dir / "events").mkdir(parents=True)
+    events = [
+        RecordedEvent(
+            index=1,
+            timestamp_utc="2026-07-30T03:00:00+00:00",
+            kind="key_press",
+            key="enter",
+            screenshot_path=str(before),
+            window_change={
+                "action": "opened",
+                "title": "常用 - 檔案總管",
+                "confidence": "medium",
+            },
+        ),
+        RecordedEvent(
+            index=2,
+            timestamp_utc="2026-07-30T03:00:01+00:00",
+            kind="key_press",
+            key="tab",
+            screenshot_path=str(after),
+        ),
+    ]
+    event_paths: list[str] = []
+    for event in events:
+        relative_path = f"events/event_{event.index:03d}.json"
+        event_paths.append(relative_path)
+        (run_dir / relative_path).write_text(
+            json.dumps(event.to_dict(), ensure_ascii=False),
+            encoding="utf-8",
+        )
+    (run_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "started_at_utc": events[0].timestamp_utc,
+                "stopped_at_utc": events[-1].timestamp_utc,
+                "event_count": len(events),
+                "events": event_paths,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    no_vision = {"used_vision": False, "candidate_text": "", "local_cursor": None}
+    with patch(
+        "src.recorder.orchestrator.build_vision_context",
+        new=AsyncMock(return_value=no_vision),
+    ), patch(
+        "src.recorder.orchestrator.infer_expected_outcome",
+        new=AsyncMock(return_value="should-not-be-used"),
+    ) as outcome_mock:
+        report = await analyze_recording_session(run_dir)
+
+    assert report["instructions"] == ["按下 Enter 鍵", "按下 Tab 鍵"]
+    assert report["expected_outcomes"] == ["「常用 - 檔案總管」視窗已開啟", None]
+    first_analysis = json.loads(
+        (run_dir / "analysis" / "event_001.json").read_text(encoding="utf-8")
+    )
+    assert first_analysis["expected_outcome"] == "「常用 - 檔案總管」視窗已開啟"
+    assert outcome_mock.await_count == 0
 
 
 @pytest.mark.asyncio

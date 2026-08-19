@@ -947,11 +947,30 @@ class BrainModule:
 
         return step_succeeded
 
-    async def process_step(self) -> BrainStepResult:
-        """Run one script step: tool loop, then vision verification and index branching.
+    def _should_skip_vision_verify(self, step_succeeded: bool) -> bool:
+        """True when the actor succeeded and there is no recorded visual success criterion.
 
-        Verification still runs when the actor marks the step failed, so `goto`/`retry`
-        can recover. Sets `run_complete` when the script is exhausted.
+        `step_succeeded` already means the model marked completed and every tool
+        that failed was later retried successfully (no unresolved `ok=false`).
+        """
+        return bool(step_succeeded) and not self._current_expected_outcome()
+
+    @staticmethod
+    def _auto_advance_verify_result() -> ScriptStepVerifyResult:
+        return ScriptStepVerifyResult(
+            accomplished=True,
+            branch="advance",
+            target_step=None,
+            reason="Actor completed the step with all tools ok; no recorded expected outcome.",
+        )
+
+    async def process_step(self) -> BrainStepResult:
+        """Run one script step: tool loop, then verification and index branching.
+
+        Happy path: empty expected outcome + actor success (all tools ok) auto-advances
+        without a screenshot or verifier LLM. Recovery path: actor failure or a recorded
+        expected outcome still uses screenshot verification for `goto`/`retry`/`skip`.
+        Sets `run_complete` when the script is exhausted.
         """
         # await self._validate_tool_functions_match_mcp()
 
@@ -970,16 +989,22 @@ class BrainModule:
             started_at = perf_counter()
 
             step_succeeded = await self.loop()
-            if not step_succeeded:
+            if self._should_skip_vision_verify(step_succeeded):
                 self.manager.log_info(
-                    f"Script step {script_step_index + 1} actor failed; "
-                    "running verification for recovery"
+                    f"Script step {script_step_index + 1} skipping vision verification "
+                    "(empty expected outcome; actor tools succeeded)"
                 )
-
-            verify_result = await self._verify_script_step(
-                transcript_counter,
-                script_step_index,
-            )
+                verify_result = self._auto_advance_verify_result()
+            else:
+                if not step_succeeded:
+                    self.manager.log_info(
+                        f"Script step {script_step_index + 1} actor failed; "
+                        "running verification for recovery"
+                    )
+                verify_result = await self._verify_script_step(
+                    transcript_counter,
+                    script_step_index,
+                )
             finished_iso = datetime.now(timezone.utc).isoformat()
             duration_seconds = round(perf_counter() - started_at, 3)
             self._step_transcript_counter += 1

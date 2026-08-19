@@ -43,6 +43,14 @@ def test_format_numbered_script_includes_expected_outcomes() -> None:
     assert "2. click calc  | expected: (none)" in text
 
 
+def test_recording_expected_outcome_prompt_requires_enter_visual_result() -> None:
+    text = get_prompt("recording_expected_outcome")
+
+    assert "WindowChangeHint" in text
+    assert "Do not return null for Enter/Esc/Tab/hotkeys" in text
+    assert "{window_change_hint}" in text
+
+
 def test_brain_verify_script_step_prompt_has_goto_policy() -> None:
     text = get_prompt("brain_verify_script_step")
 
@@ -117,3 +125,70 @@ async def test_process_step_aborts_when_actor_fails_and_verify_unavailable() -> 
     metadata = brain._update_step_metadata.call_args.args[2]
     assert metadata["status"] == "failed"
     assert metadata["verify"] is None
+
+
+@pytest.mark.asyncio
+async def test_process_step_skips_vision_verify_when_expected_empty_and_actor_ok() -> None:
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = [None, None, None]
+    brain.loop = AsyncMock(return_value=True)
+    brain._verify_script_step = AsyncMock()
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert result.run_complete is False
+    assert brain._script_step_index == 2
+    brain._verify_script_step.assert_not_awaited()
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "completed"
+    assert metadata["expected_outcome"] is None
+    assert metadata["verify"]["branch"] == "advance"
+    assert metadata["verify"]["accomplished"] is True
+
+
+@pytest.mark.asyncio
+async def test_process_step_verifies_when_expected_empty_and_actor_failed() -> None:
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = [None, None, None]
+    brain.loop = AsyncMock(return_value=False)
+    brain._verify_script_step = AsyncMock(
+        return_value=ScriptStepVerifyResult(
+            accomplished=False,
+            branch="retry",
+            target_step=None,
+            reason="search panel closed",
+        )
+    )
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 1
+    brain._verify_script_step.assert_awaited_once()
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "failed"
+    assert metadata["verify"]["branch"] == "retry"
+
+
+@pytest.mark.asyncio
+async def test_process_step_verifies_when_expected_present_and_actor_ok() -> None:
+    brain = _brain_for_process_step()
+    brain.loop = AsyncMock(return_value=True)
+    brain._verify_script_step = AsyncMock(
+        return_value=ScriptStepVerifyResult(
+            accomplished=True,
+            branch="advance",
+            target_step=None,
+            reason="calculator window open",
+        )
+    )
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 2
+    brain._verify_script_step.assert_awaited_once()
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "completed"
+    assert metadata["expected_outcome"] == "calculator window open"

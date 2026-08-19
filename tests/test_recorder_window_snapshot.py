@@ -10,6 +10,7 @@ from src.recorder.window_snapshot import (
     click_hits_caption_buttons,
     diff_snapshots,
     diff_snapshots_with_debug,
+    expected_outcome_for_window_change,
     format_window_change_hint,
     instruction_for_window_change,
     is_agent_app_restore,
@@ -399,6 +400,43 @@ def test_instruction_for_high_confidence_window_change() -> None:
     assert instruction_for_window_change({"action": "minimize", "title": "Chrome", "confidence": "medium"}) == "最小化「Chrome」視窗"
     assert instruction_for_window_change({"action": "restored", "title": "電腦使用代理", "confidence": "medium"}) == "還原「電腦使用代理」視窗"
     assert instruction_for_window_change({"action": "opened", "title": "X", "confidence": "medium"}) is None
+
+
+def test_expected_outcome_for_window_change() -> None:
+    assert (
+        expected_outcome_for_window_change(
+            {"action": "opened", "title": "常用 - 檔案總管", "confidence": "medium"}
+        )
+        == "「常用 - 檔案總管」視窗已開啟"
+    )
+    assert (
+        expected_outcome_for_window_change(
+            WindowStateChange(action="restored", title="檔案總管", confidence="high")
+        )
+        == "「檔案總管」視窗已顯示"
+    )
+    assert (
+        expected_outcome_for_window_change(
+            {"action": "maximize", "title": "常用 - 檔案總管", "confidence": "high"}
+        )
+        == "「常用 - 檔案總管」視窗已最大化並佔滿螢幕"
+    )
+    assert (
+        expected_outcome_for_window_change(
+            {"action": "close", "title": "下載 - 檔案總管", "confidence": "high"}
+        )
+        == "「下載 - 檔案總管」視窗已關閉"
+    )
+    assert expected_outcome_for_window_change(None) is None
+    assert expected_outcome_for_window_change(
+        {"action": "opened", "title": "電腦使用代理", "confidence": "medium"}
+    ) is None
+    assert expected_outcome_for_window_change(
+        {"action": "restored", "title": "電腦使用代理", "confidence": "medium"}
+    ) is None
+    assert expected_outcome_for_window_change(
+        {"action": "opened", "title": "X", "confidence": "low"}
+    ) is None
 
 
 def test_click_hits_caption_buttons_uses_stored_and_fallback_bounds() -> None:

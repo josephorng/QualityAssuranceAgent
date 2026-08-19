@@ -409,6 +409,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "prompt": (
                 "You write a verification criterion for one recorded desktop action.\n\n"
                 "Action instruction:\n{instruction}\n\n"
+                "WindowChangeHint (OS window snapshot; may be none):\n{window_change_hint}\n\n"
                 "Two screenshots are attached in order:\n"
                 "1) Before: UI state immediately before this action.\n"
                 "2) After: UI state when the next recorded action began "
@@ -421,7 +422,9 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Describe stable, checkable UI facts (dialog open/closed, field text, selected item, window title, menu visible/hidden).",
                 "Do not restate how to perform the action; do not include mouse/keyboard steps.",
                 "Do not mention absolute pixel coordinates, transient toasts/clocks, or cursor position.",
-                "If the screenshots show no reliable visual success signal for this action, set expected_outcome to null.",
+                "When After shows a new, restored, or newly focused window, a closed overlay/search UI, submitted results, or another durable change, always write that result (e.g. 「檔案總管」視窗已開啟). Do not return null for Enter/Esc/Tab/hotkeys merely because the key press itself is invisible.",
+                "If WindowChangeHint names a real window result (opened/restored/closed/maximized), encode that fact in expected_outcome.",
+                "Set expected_outcome to null only when Before and After are visually the same and WindowChangeHint is none.",
                 'Return strict JSON only: {{"expected_outcome": "<string>"|null}}',
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],

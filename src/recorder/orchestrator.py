@@ -23,7 +23,12 @@ from src.recorder.coalesce import (
 )
 from src.recorder.text_resolve import event_with_resolved_text, resolve_text_input_text
 from src.recorder.vision_context import build_vision_context
-from src.recorder.window_snapshot import is_agent_app_restore, resolve_window_change
+from src.recorder.window_snapshot import (
+    expected_outcome_for_window_change,
+    format_window_change_hint,
+    is_agent_app_restore,
+    resolve_window_change,
+)
 
 
 _WAIT_THRESHOLD_SECONDS = 10.0
@@ -328,12 +333,22 @@ async def analyze_recording_session(
                     next_event,
                     final_after_screenshot=final_after_screenshot,
                 )
-                expected_outcome: str | None = None
-                if before_shot is not None and after_shot is not None:
+                window_change = resolve_window_change(
+                    event.window_change,
+                    event.window_snapshot_debug,
+                    event.cursor_xy,
+                )
+                expected_outcome = expected_outcome_for_window_change(window_change)
+                if (
+                    expected_outcome is None
+                    and before_shot is not None
+                    and after_shot is not None
+                ):
                     expected_outcome = await infer_expected_outcome(
                         instruction=instruction,
                         before_screenshot=before_shot,
                         after_screenshot=after_shot,
+                        window_change_hint=format_window_change_hint(window_change),
                         log_info=log_info,
                     )
                 instructions.append(instruction)

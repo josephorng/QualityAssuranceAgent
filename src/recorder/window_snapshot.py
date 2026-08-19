@@ -765,6 +765,41 @@ def resolve_window_change(
     return change.to_dict() if change is not None else None
 
 
+def expected_outcome_for_window_change(
+    change: WindowStateChange | dict[str, Any] | None,
+) -> str | None:
+    """Build a checkable success criterion from a confident window state change.
+
+    Used when recording key actions such as Enter that open/restore a window, so
+    replay verification has a real expected outcome instead of ``(none)``.
+    """
+    if change is None:
+        return None
+    data = _window_change_data(change)
+    if _should_ignore_window_change(data):
+        return None
+    if is_agent_app_restore(data):
+        return None
+    confidence = data.get("confidence")
+    if confidence not in {"high", "medium"}:
+        return None
+    action = str(data.get("action", "")).strip()
+    title = str(data.get("title", "")).strip()
+    if not title or title == _AGENT_APP_WINDOW_TITLE:
+        return None
+    if action == "opened":
+        return f"「{title}」視窗已開啟"
+    if action == "restored":
+        return f"「{title}」視窗已顯示"
+    if action == "maximize":
+        return f"「{title}」視窗已最大化並佔滿螢幕"
+    if action == "minimize":
+        return f"「{title}」視窗已最小化"
+    if action == "close":
+        return f"「{title}」視窗已關閉"
+    return None
+
+
 def instruction_for_window_change(change: WindowStateChange | dict[str, Any]) -> str | None:
     """Build a hub-script instruction for a confident window state change."""
     data = _window_change_data(change)

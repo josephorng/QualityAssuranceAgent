@@ -67,7 +67,7 @@ def test_coalesce_consecutive_text_inputs_keeps_breaks() -> None:
     assert merged[2].text == "cd"
 
 
-def test_coalesce_consecutive_text_inputs_keeps_first_anchor_and_last_screenshot() -> None:
+def test_coalesce_consecutive_text_inputs_keeps_first_before_and_last_after() -> None:
     events = [
         RecordedEvent(
             index=1,
@@ -78,6 +78,9 @@ def test_coalesce_consecutive_text_inputs_keeps_first_anchor_and_last_screenshot
             screenshot_path="first.jpeg",
             monitor_index=1,
             monitor_offset=(0, 0),
+            end_screenshot_path="first_end.jpeg",
+            end_monitor_index=1,
+            end_monitor_offset=(0, 0),
         ),
         RecordedEvent(
             index=2,
@@ -88,15 +91,21 @@ def test_coalesce_consecutive_text_inputs_keeps_first_anchor_and_last_screenshot
             screenshot_path="last.jpeg",
             monitor_index=2,
             monitor_offset=(100, 0),
+            end_screenshot_path="last_end.jpeg",
+            end_monitor_index=2,
+            end_monitor_offset=(100, 0),
         ),
     ]
     merged = coalesce_consecutive_text_inputs(events)
     assert len(merged) == 1
     assert merged[0].text == "ab"
     assert merged[0].anchor_click_xy == (10, 20)
-    assert merged[0].screenshot_path == "last.jpeg"
-    assert merged[0].monitor_index == 2
-    assert merged[0].monitor_offset == (100, 0)
+    assert merged[0].screenshot_path == "first.jpeg"
+    assert merged[0].monitor_index == 1
+    assert merged[0].monitor_offset == (0, 0)
+    assert merged[0].end_screenshot_path == "last_end.jpeg"
+    assert merged[0].end_monitor_index == 2
+    assert merged[0].end_monitor_offset == (100, 0)
 
 
 def test_coalesce_same_location_clicks_three_singles_to_triple() -> None:

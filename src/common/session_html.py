@@ -3052,13 +3052,17 @@ def _render_recording_event_html(
 
     before = _resolve_recording_screenshot(str(event.get("screenshot_path") or ""), run_root)
     after: Path | None = None
-    if next_event is not None:
+    if kind == "text_input":
+        after = _resolve_recording_screenshot(
+            str(event.get("end_screenshot_path") or ""),
+            run_root,
+        )
+    if after is None and next_event is not None:
         after = _resolve_recording_screenshot(
             str(next_event.get("screenshot_path") or ""),
             run_root,
         )
     if after is None:
-        # Drag events capture an end frame; use it when no following step exists.
         after = _resolve_recording_screenshot(
             str(event.get("end_screenshot_path") or ""),
             run_root,

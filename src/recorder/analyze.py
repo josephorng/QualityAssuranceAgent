@@ -800,7 +800,14 @@ def after_screenshot_for_outcome(
 
     Prefer the next event's before-shot, then a drag end shot, then the
     session-level final screenshot taken before the hub window is restored.
+
+    Typing events store their own flush frame on ``end_screenshot_path``;
+    use that instead of the following action's mouse-down shot.
     """
+    if event.kind == "text_input":
+        end_shot = _existing_screenshot_path(event.end_screenshot_path)
+        if end_shot is not None:
+            return end_shot
     if next_event is not None:
         next_before = _existing_screenshot_path(next_event.screenshot_path)
         if next_before is not None:

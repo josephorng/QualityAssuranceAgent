@@ -160,9 +160,10 @@ def test_typing_burst_coalesced_into_one_event(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
     captures: list[tuple[int, tuple[int, int]]] = []
 
-    def track_capture(run_dir, index, cursor_xy):
+    def track_capture(run_dir, index, cursor_xy, dest=None):
         captures.append((index, cursor_xy))
-        return str(run_dir / "screenshots" / f"event_{index:03d}.jpeg"), 1, (0, 0)
+        path = dest if dest is not None else run_dir / "screenshots" / f"event_{index:03d}.jpeg"
+        return str(path), 1, (0, 0)
 
     with _default_capture_window_patches(), patch("src.recorder.capture.pyautogui.position", return_value=type("P", (), {"x": 100, "y": 100})()), patch.object(
         RecordingSession,
@@ -175,17 +176,20 @@ def test_typing_burst_coalesced_into_one_event(tmp_path) -> None:
 
             for ch in "chrome":
                 session._on_key_press(KeyCode.from_char(ch))
-            assert captures == []
+            assert len(captures) == 1
+            assert captures[0][0] == 1
             session.stop()
         finally:
             if session.is_active():
                 session.stop()
 
     assert session.event_count() == 1
-    assert len(captures) == 1
+    assert len(captures) == 2
     raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
     assert raw["kind"] == "text_input"
     assert raw["text"] == "chrome"
+    assert raw["screenshot_path"].endswith("event_001.jpeg")
+    assert raw["end_screenshot_path"].endswith("event_001_end.jpeg")
 
 
 def test_numpad_vk_keys_recorded_as_text_input(tmp_path) -> None:
@@ -630,6 +634,42 @@ def test_left_click_uses_press_time_screenshot(tmp_path) -> None:
     assert session.event_count() == 1
     assert any(name.endswith("_pending_capture.jpeg") for name in captures)
     assert (run_dir / "screenshots" / "event_001.jpeg").is_file()
+
+
+def test_text_input_stores_before_on_first_key_and_after_on_flush(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+    dests: list[str] = []
+
+    def _track(x: int, y: int, dest):
+        dests.append(Path(dest).name)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"fake")
+        return str(dest), 1, (0, 0)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_track,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import KeyCode
+
+            session._on_key_press(KeyCode.from_char("a"))
+            session._on_key_press(KeyCode.from_char("b"))
+            session.stop()
+        finally:
+            if session.is_active():
+                session.stop()
+
+    assert dests[0] == "event_001.jpeg"
+    assert "event_001_end.jpeg" in dests
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["text"] == "ab"
+    assert raw["screenshot_path"].endswith("event_001.jpeg")
+    assert raw["end_screenshot_path"].endswith("event_001_end.jpeg")
 
 
 def test_text_input_stores_anchor_click_xy_after_pointer_event(tmp_path) -> None:

@@ -791,6 +791,75 @@ def test_write_recording_html_uses_next_event_screenshot_as_after(tmp_path: Path
     assert 'src="screenshots/event_001.jpeg"' not in second_group
 
 
+def test_write_recording_html_uses_text_input_end_screenshot_as_after(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000042"
+    run_root.mkdir(parents=True)
+    (run_root / "events").mkdir()
+    (run_root / "screenshots").mkdir()
+    before = _make_jpeg(run_root / "screenshots" / "event_001.jpeg")
+    typed_after = _make_jpeg(run_root / "screenshots" / "event_001_end.jpeg")
+    next_before = _make_jpeg(run_root / "screenshots" / "event_002.jpeg")
+    (run_root / "events" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "index": 1,
+                "timestamp_utc": "2026-07-21T04:00:01+00:00",
+                "kind": "text_input",
+                "text": "office",
+                "screenshot_path": str(before),
+                "end_screenshot_path": str(typed_after),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "events" / "event_002.json").write_text(
+        json.dumps(
+            {
+                "index": 2,
+                "timestamp_utc": "2026-07-21T04:00:02+00:00",
+                "kind": "click",
+                "cursor_xy": [10, 20],
+                "screenshot_path": str(next_before),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_root.name,
+                "started_at_utc": "2026-07-21T04:00:00+00:00",
+                "stopped_at_utc": "2026-07-21T04:01:00+00:00",
+                "event_count": 2,
+                "events": ["events/event_001.json", "events/event_002.json"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "analysis").mkdir()
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps({"event_index": 1, "instruction": "輸入「office」"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (run_root / "analysis" / "event_002.json").write_text(
+        json.dumps({"event_index": 2, "instruction": "點擊「確定」"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+    first_group = html.split('data-event-index="1"', 1)[1].split("</details>", 1)[0]
+
+    assert 'src="screenshots/event_001.jpeg"' in first_group
+    assert 'src="screenshots/event_001_end.jpeg"' in first_group
+    assert 'src="screenshots/event_002.jpeg"' not in first_group
+    assert first_group.index("screenshots/event_001.jpeg") < first_group.index(
+        "screenshots/event_001_end.jpeg"
+    )
+
+
 def test_write_recording_html_resolves_foreign_absolute_screenshot_paths(tmp_path: Path) -> None:
     run_root = tmp_path / "recording_20260721_120000_000041"
     run_root.mkdir(parents=True)

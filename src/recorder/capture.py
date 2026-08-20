@@ -850,12 +850,14 @@ class RecordingSession:
         run_dir: Path,
         index: int,
         cursor_xy: tuple[int, int],
+        *,
+        dest: Path | None = None,
     ) -> tuple[str, int, tuple[int, int]]:
-        dest = screenshot_path_for_event(run_dir, index)
+        target = dest if dest is not None else screenshot_path_for_event(run_dir, index)
         try:
-            return _capture_screenshot_at_point(cursor_xy[0], cursor_xy[1], dest)
+            return _capture_screenshot_at_point(cursor_xy[0], cursor_xy[1], target)
         except Exception:
-            return str(dest), 0, (0, 0)
+            return str(target), 0, (0, 0)
 
     def _snapshot_windows_before(self) -> tuple[WindowInfo, ...]:
         try:
@@ -994,29 +996,77 @@ class RecordingSession:
         except Exception:
             pass
 
-        shot_path = ""
-        mon_idx: int | None = None
-        mon_offset: tuple[int, int] | None = None
+        index = int(meta["index"])
+        end_shot_path = ""
+        end_mon_idx: int | None = None
+        end_mon_offset: tuple[int, int] | None = None
         if shot_xy is not None:
-            shot_path, mon_idx, mon_offset = self._capture_immediate_screenshot(
+            end_shot_path, end_mon_idx, end_mon_offset = self._capture_immediate_screenshot(
                 run_dir,
-                int(meta["index"]),
+                index,
                 shot_xy,
+                dest=screenshot_path_for_event_end(run_dir, index),
             )
 
         self._queue_event(
             _QueuedEvent(
                 kind="text_input",
                 cursor_xy=meta.get("cursor_xy"),
-                event_index=int(meta["index"]),
+                event_index=index,
                 timestamp_utc=str(meta["timestamp_utc"]),
-                screenshot_path=shot_path,
-                monitor_index=mon_idx,
-                monitor_offset=mon_offset,
+                screenshot_path=str(meta.get("screenshot_path") or ""),
+                monitor_index=meta.get("monitor_index"),
+                monitor_offset=meta.get("monitor_offset"),
+                end_screenshot_path=end_shot_path,
+                end_monitor_index=end_mon_idx,
+                end_monitor_offset=end_mon_offset,
                 text="".join(chars),
                 anchor_click_xy=meta.get("anchor_click_xy"),
             )
         )
+
+    def _begin_pending_text_input(
+        self,
+        cursor_xy: tuple[int, int] | None,
+        *,
+        timestamp_utc: str | None = None,
+    ) -> None:
+        """Reserve the text-input event and capture the before-first-key screenshot."""
+        with self._lock:
+            run_dir = self._run_dir
+            if run_dir is None:
+                return
+            index = self._next_index
+            self._next_index += 1
+            self._pending_text_meta = {
+                "index": index,
+                "cursor_xy": cursor_xy,
+                "anchor_click_xy": self._last_pointer_cursor_xy,
+                "timestamp_utc": timestamp_utc or utc_now_iso(),
+            }
+
+        shot_xy = cursor_xy
+        try:
+            pos = pyautogui.position()
+            shot_xy = (int(pos.x), int(pos.y))
+        except Exception:
+            pass
+        shot_path = ""
+        mon_idx: int | None = None
+        mon_offset: tuple[int, int] | None = None
+        if shot_xy is not None:
+            shot_path, mon_idx, mon_offset = self._capture_immediate_screenshot(
+                run_dir,
+                index,
+                shot_xy,
+            )
+        with self._lock:
+            meta = self._pending_text_meta
+            if meta is None or int(meta.get("index", -1)) != index:
+                return
+            meta["screenshot_path"] = shot_path
+            meta["monitor_index"] = mon_idx
+            meta["monitor_offset"] = mon_offset
 
     def _append_text_input_char(
         self,
@@ -1026,25 +1076,12 @@ class RecordingSession:
         timestamp_utc: str | None = None,
     ) -> None:
         with self._lock:
-            run_dir = self._run_dir
-            if run_dir is None:
+            if self._run_dir is None:
                 return
             starting_burst = not self._pending_text_chars
-            if starting_burst:
-                index = self._next_index
-                self._next_index += 1
-            else:
-                index = None
 
         if starting_burst:
-            with self._lock:
-                anchor_click_xy = self._last_pointer_cursor_xy
-                self._pending_text_meta = {
-                    "index": index,
-                    "cursor_xy": cursor_xy,
-                    "anchor_click_xy": anchor_click_xy,
-                    "timestamp_utc": timestamp_utc or utc_now_iso(),
-                }
+            self._begin_pending_text_input(cursor_xy, timestamp_utc=timestamp_utc)
 
         with self._lock:
             self._pending_text_chars.append(char)
@@ -1059,25 +1096,12 @@ class RecordingSession:
         if not text:
             return
         with self._lock:
-            run_dir = self._run_dir
-            if run_dir is None:
+            if self._run_dir is None:
                 return
             starting_burst = not self._pending_text_chars
-            if starting_burst:
-                index = self._next_index
-                self._next_index += 1
-            else:
-                index = None
 
         if starting_burst:
-            with self._lock:
-                anchor_click_xy = self._last_pointer_cursor_xy
-                self._pending_text_meta = {
-                    "index": index,
-                    "cursor_xy": cursor_xy,
-                    "anchor_click_xy": anchor_click_xy,
-                    "timestamp_utc": timestamp_utc or utc_now_iso(),
-                }
+            self._begin_pending_text_input(cursor_xy, timestamp_utc=timestamp_utc)
 
         with self._lock:
             self._pending_text_chars.extend(text)

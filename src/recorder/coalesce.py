@@ -10,7 +10,10 @@ _COALESCABLE_CLICK_KINDS = frozenset({"click", "double_click", "triple_click"})
 
 
 def coalesce_consecutive_text_inputs(events: list[RecordedEvent]) -> list[RecordedEvent]:
-    """Merge adjacent ``text_input`` events into one event with concatenated text."""
+    """Merge adjacent ``text_input`` events into one event with concatenated text.
+
+    Keep the first burst's before-screenshot and the last burst's after-screenshot.
+    """
     if not events:
         return []
 
@@ -29,9 +32,24 @@ def coalesce_consecutive_text_inputs(events: list[RecordedEvent]) -> list[Record
                 kind="text_input",
                 cursor_xy=prev.cursor_xy,
                 text=(prev.text or "") + event.text,
-                screenshot_path=event.screenshot_path or prev.screenshot_path,
-                monitor_index=event.monitor_index if event.monitor_index is not None else prev.monitor_index,
-                monitor_offset=event.monitor_offset if event.monitor_offset is not None else prev.monitor_offset,
+                screenshot_path=prev.screenshot_path or event.screenshot_path,
+                monitor_index=(
+                    prev.monitor_index if prev.monitor_index is not None else event.monitor_index
+                ),
+                monitor_offset=(
+                    prev.monitor_offset if prev.monitor_offset is not None else event.monitor_offset
+                ),
+                end_screenshot_path=event.end_screenshot_path or prev.end_screenshot_path,
+                end_monitor_index=(
+                    event.end_monitor_index
+                    if event.end_monitor_index is not None
+                    else prev.end_monitor_index
+                ),
+                end_monitor_offset=(
+                    event.end_monitor_offset
+                    if event.end_monitor_offset is not None
+                    else prev.end_monitor_offset
+                ),
                 anchor_click_xy=prev.anchor_click_xy or event.anchor_click_xy,
             )
             continue

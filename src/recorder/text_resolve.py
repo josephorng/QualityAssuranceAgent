@@ -8,8 +8,10 @@ from typing import Any
 from src.recorder.models import RecordedEvent
 from src.recorder.vision_context import (
     _global_to_local,
+    _global_to_local_end,
     build_vision_context_at_point,
     extract_nearest_text,
+    resolve_event_screenshot_path,
 )
 
 def _vision_for_llm(vision: dict[str, Any]) -> dict[str, Any]:
@@ -22,26 +24,44 @@ def _vision_for_llm(vision: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _strip_ocr_caret(text: str) -> str:
+    """Remove a trailing ``|`` that OCR often reads from the text caret."""
+    cleaned = text.rstrip()
+    if cleaned.endswith("|"):
+        cleaned = cleaned[:-1].rstrip()
+    return cleaned
+
+
 async def resolve_text_input_text(
     event: RecordedEvent,
     *,
     run_dir: Path,
     log_info: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """Resolve typing text with vision first, falling back to the recorded keystrokes."""
+    """Resolve typing text with OCR on the after-screenshot when available."""
     recorded_text = event.text or ""
     anchor = event.anchor_click_xy or event.cursor_xy
     if anchor is None:
         return {
             "text": recorded_text,
             "recorded_text": recorded_text,
+            "ocr_text": None,
             "source": "recorded",
             "meaningful": None,
             "reason": "vision unavailable: no anchor or cursor coordinates",
             "vision": None,
         }
 
-    local = _global_to_local(event, anchor)
+    use_after = resolve_event_screenshot_path(event, run_dir, debug_name="_end") is not None
+    if use_after:
+        local = _global_to_local_end(event, anchor)
+        debug_name = "_end"
+        reason = "after-screenshot OCR"
+    else:
+        local = _global_to_local(event, anchor)
+        debug_name = None
+        reason = "vision-first OCR"
+
     vision = build_vision_context_at_point(
         event,
         local_x=local[0],
@@ -49,31 +69,38 @@ async def resolve_text_input_text(
         run_dir=run_dir,
         persist_debug=True,
         reference_xy=anchor,
+        debug_name=debug_name,
     )
     bgr = vision.pop("bgr", None)
     all_detections = vision.pop("all_detections", [])
     ocr_text: str | None = None
     if bgr is not None and all_detections:
-        ocr_text = extract_nearest_text(bgr, all_detections, local[0], local[1])
+        raw_ocr = extract_nearest_text(bgr, all_detections, local[0], local[1])
+        if raw_ocr:
+            cleaned = _strip_ocr_caret(raw_ocr)
+            ocr_text = cleaned or None
 
     if ocr_text:
         if log_info is not None:
+            shot_label = "after" if use_after else "before"
             log_info(
                 f"resolve_text_input_text event={event.index} "
-                f"vision_first recorded={recorded_text!r} resolved={ocr_text!r}"
+                f"shot={shot_label} recorded={recorded_text!r} resolved={ocr_text!r}"
             )
         return {
             "text": ocr_text,
             "recorded_text": recorded_text,
+            "ocr_text": ocr_text,
             "source": "ocr",
             "meaningful": None,
-            "reason": "vision-first OCR",
+            "reason": reason,
             "vision": _vision_for_llm(vision),
         }
 
     return {
         "text": recorded_text,
         "recorded_text": recorded_text,
+        "ocr_text": None,
         "source": "recorded",
         "meaningful": None,
         "reason": "vision produced no text; kept recorded text",

@@ -278,6 +278,7 @@ async def analyze_recording_session(
                 )
                 text_resolution = {
                     "recorded_text": resolved.get("recorded_text"),
+                    "ocr_text": resolved.get("ocr_text"),
                     "resolved_text": resolved.get("text"),
                     "source": resolved.get("source"),
                     "meaningful": resolved.get("meaningful"),

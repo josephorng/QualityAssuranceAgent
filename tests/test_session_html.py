@@ -8,6 +8,7 @@ from pathlib import Path
 from PIL import Image
 
 from src.common.session_html import (
+    _typed_text_candidates,
     recording_html_path,
     runs_index_html_path,
     session_html_path,
@@ -791,14 +792,14 @@ def test_write_recording_html_uses_next_event_screenshot_as_after(tmp_path: Path
     assert 'src="screenshots/event_001.jpeg"' not in second_group
 
 
-def test_write_recording_html_uses_text_input_end_screenshot_as_after(tmp_path: Path) -> None:
+def test_write_recording_html_chains_typing_after_to_next_before(tmp_path: Path) -> None:
     run_root = tmp_path / "recording_20260721_120000_000042"
     run_root.mkdir(parents=True)
     (run_root / "events").mkdir()
     (run_root / "screenshots").mkdir()
     before = _make_jpeg(run_root / "screenshots" / "event_001.jpeg")
-    typed_after = _make_jpeg(run_root / "screenshots" / "event_001_end.jpeg")
-    next_before = _make_jpeg(run_root / "screenshots" / "event_002.jpeg")
+    shared_after = _make_jpeg(run_root / "screenshots" / "event_002.jpeg")
+    _make_jpeg(run_root / "screenshots" / "event_001_end.jpeg")
     (run_root / "events" / "event_001.json").write_text(
         json.dumps(
             {
@@ -807,7 +808,7 @@ def test_write_recording_html_uses_text_input_end_screenshot_as_after(tmp_path: 
                 "kind": "text_input",
                 "text": "office",
                 "screenshot_path": str(before),
-                "end_screenshot_path": str(typed_after),
+                "end_screenshot_path": str(shared_after),
             },
             ensure_ascii=False,
         ),
@@ -820,7 +821,7 @@ def test_write_recording_html_uses_text_input_end_screenshot_as_after(tmp_path: 
                 "timestamp_utc": "2026-07-21T04:00:02+00:00",
                 "kind": "click",
                 "cursor_xy": [10, 20],
-                "screenshot_path": str(next_before),
+                "screenshot_path": str(shared_after),
             },
             ensure_ascii=False,
         ),
@@ -853,10 +854,10 @@ def test_write_recording_html_uses_text_input_end_screenshot_as_after(tmp_path: 
     first_group = html.split('data-event-index="1"', 1)[1].split("</details>", 1)[0]
 
     assert 'src="screenshots/event_001.jpeg"' in first_group
-    assert 'src="screenshots/event_001_end.jpeg"' in first_group
-    assert 'src="screenshots/event_002.jpeg"' not in first_group
+    assert 'src="screenshots/event_002.jpeg"' in first_group
+    assert 'src="screenshots/event_001_end.jpeg"' not in first_group
     assert first_group.index("screenshots/event_001.jpeg") < first_group.index(
-        "screenshots/event_001_end.jpeg"
+        "screenshots/event_002.jpeg"
     )
 
 
@@ -1139,8 +1140,75 @@ def test_write_recording_html_renders_typed_text_editor_from_event(tmp_path: Pat
 
     assert 'class="typed-text"' in html
     assert 'value="hello world"' in html
+    assert "typed-text-choice" in html
+    assert "鍵盤：hello world" in html
     assert "套用</button>" in html
     assert "<dt>文字</dt>" not in html
+
+
+def test_write_recording_html_shows_ocr_and_recorded_text_choices(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000043"
+    _write_recording_fixture(run_root, with_analysis=False)
+    (run_root / "events" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "index": 1,
+                "timestamp_utc": "2026-07-21T04:00:00+00:00",
+                "kind": "text_input",
+                "text": "搜尋",
+                "screenshot_path": "",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "analysis").mkdir(exist_ok=True)
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": "輸入「搜尋」",
+                "text_resolution": {
+                    "recorded_text": "ooffice",
+                    "ocr_text": "搜尋",
+                    "resolved_text": "搜尋",
+                    "source": "ocr",
+                    "reason": "after-screenshot OCR",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+
+    assert 'value="搜尋"' in html
+    assert 'class="typed-text-choice selected"' in html
+    assert "OCR：搜尋" in html
+    assert "鍵盤：ooffice" in html
+    assert 'data-text="ooffice"' in html
+
+
+def test_typed_text_candidates_default_to_ocr_when_available() -> None:
+    event = {"kind": "text_input", "text": "搜尋"}
+    analysis = {
+        "text_resolution": {
+            "recorded_text": "ooffice",
+            "ocr_text": "office",
+            "resolved_text": "office",
+            "source": "ocr",
+        }
+    }
+    recorded, ocr, active, active_source = _typed_text_candidates(
+        event,
+        analysis,
+        "輸入「office」",
+    )
+    assert recorded == "ooffice"
+    assert ocr == "office"
+    assert active == "office"
+    assert active_source == "ocr"
 
 
 def test_write_runs_index_lists_recordings_in_recordings_tab(tmp_path: Path) -> None:

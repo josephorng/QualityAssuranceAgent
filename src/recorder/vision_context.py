@@ -135,6 +135,16 @@ def _global_to_local(event: RecordedEvent, global_xy: tuple[int, int]) -> tuple[
     return gx, gy
 
 
+def _global_to_local_end(event: RecordedEvent, global_xy: tuple[int, int]) -> tuple[int, int]:
+    """Map a global point into the after-screenshot's local coordinate space."""
+    gx, gy = global_xy
+    offset = event.end_monitor_offset if event.end_monitor_offset is not None else event.monitor_offset
+    if offset is not None:
+        ox, oy = offset
+        return gx - ox, gy - oy
+    return gx, gy
+
+
 def _point_to_bbox_distance_sq(
     local_x: int,
     local_y: int,

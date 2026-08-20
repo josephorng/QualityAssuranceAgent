@@ -636,6 +636,35 @@ def test_left_click_uses_press_time_screenshot(tmp_path) -> None:
     assert (run_dir / "screenshots" / "event_001.jpeg").is_file()
 
 
+def test_text_input_end_matches_next_click_before(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import KeyCode
+
+            session._on_key_press(KeyCode.from_char("a"))
+            _left_click(session, 500, 500)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 2
+    text_raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    click_raw = json.loads((run_dir / "events" / "event_002.json").read_text(encoding="utf-8"))
+    assert text_raw["kind"] == "text_input"
+    assert click_raw["kind"] == "click"
+    assert text_raw["end_screenshot_path"] == click_raw["screenshot_path"]
+    assert (run_dir / "screenshots" / "event_001_end.jpeg").is_file()
+    assert (run_dir / "screenshots" / "event_002.jpeg").is_file()
+
+
 def test_text_input_stores_before_on_first_key_and_after_on_flush(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
     dests: list[str] = []

@@ -225,6 +225,18 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 .typed-text-title {
   margin: 0 0 .5rem; font-size: .9rem; font-weight: 700; color: #57606a;
 }
+.typed-text-choices {
+  display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 .5rem;
+}
+.typed-text-choice {
+  appearance: none; border: 1px solid #d0d7de; background: #fff;
+  cursor: pointer; border-radius: 6px; padding: .25rem .55rem;
+  font-size: .8rem; line-height: 1.3; font-family: inherit; color: #1f2328;
+}
+.typed-text-choice:hover { border-color: #0969da; background: #f6f8fa; }
+.typed-text-choice.selected {
+  border-color: #0969da; background: #ddf4ff; font-weight: 600; color: #0969da;
+}
 .typed-text-row {
   display: flex; flex-wrap: wrap; align-items: center; gap: .5rem;
 }
@@ -761,6 +773,32 @@ _RECORDING_SCRIPT = """
     });
   });
 
+  function syncTypedTextChoiceSelection(panel, text) {
+    var matched = false;
+    Array.prototype.slice.call(panel.querySelectorAll("button.typed-text-choice")).forEach(function (choice) {
+      var choiceText = choice.getAttribute("data-text") || "";
+      var selected = choiceText === text;
+      if (selected) matched = true;
+      if (selected) choice.classList.add("selected");
+      else choice.classList.remove("selected");
+    });
+    return matched;
+  }
+
+  Array.prototype.slice.call(document.querySelectorAll("button.typed-text-choice")).forEach(function (btn) {
+    btn.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      var panel = btn.closest(".typed-text");
+      if (!panel) return;
+      var input = panel.querySelector(".typed-text-input");
+      if (!input) return;
+      input.value = btn.getAttribute("data-text") || "";
+      syncTypedTextChoiceSelection(panel, input.value);
+      setTypedTextStatus(panel, "", false);
+    });
+  });
+
   Array.prototype.slice.call(document.querySelectorAll(".typed-text-input")).forEach(function (input) {
     input.addEventListener("keydown", function (event) {
       if (event.key !== "Enter") return;
@@ -769,6 +807,12 @@ _RECORDING_SCRIPT = """
       var panel = input.closest(".typed-text");
       var btn = panel ? panel.querySelector("button.apply-typed-text") : null;
       if (btn) applyTypedText(btn);
+    });
+    input.addEventListener("input", function () {
+      var panel = input.closest(".typed-text");
+      if (!panel) return;
+      syncTypedTextChoiceSelection(panel, input.value);
+      setTypedTextStatus(panel, "", false);
     });
   });
 
@@ -811,6 +855,7 @@ _RECORDING_SCRIPT = """
           var instruction = result.payload.instruction || "";
           var saved = result.payload.text || "";
           input.value = saved;
+          syncTypedTextChoiceSelection(panel, saved);
           var title = group.querySelector(".instruction-title");
           if (title && instruction) title.textContent = instruction;
           var copyBtn = group.querySelector("button.copy-instruction");
@@ -2849,26 +2894,106 @@ def _render_yolo_retry_panel_html(
     )
 
 
+def _typed_text_candidates(
+    event: dict[str, Any],
+    analysis: dict[str, Any] | None,
+    instruction: str,
+) -> tuple[str, str, str, str]:
+    """Return ``(recorded, ocr, active, active_source)`` for the typed-text editor."""
+    from src.recorder.analyze import typed_text_from_instruction
+
+    recorded = ""
+    ocr = ""
+    active = ""
+    active_source = "ocr"
+
+    resolution: dict[str, Any] | None = None
+    if isinstance(analysis, dict):
+        raw_resolution = analysis.get("text_resolution")
+        if isinstance(raw_resolution, dict):
+            resolution = raw_resolution
+
+    if resolution is not None:
+        recorded = str(resolution.get("recorded_text") or "").strip()
+        ocr = str(resolution.get("ocr_text") or "").strip()
+        if not ocr and resolution.get("source") == "ocr":
+            ocr = str(resolution.get("resolved_text") or "").strip()
+        from src.recorder.text_resolve import _strip_ocr_caret
+
+        ocr = _strip_ocr_caret(ocr)
+        resolved = str(resolution.get("resolved_text") or "").strip()
+        source = str(resolution.get("source") or "")
+        if source != "user":
+            resolved = _strip_ocr_caret(resolved)
+        if source == "user" and resolved:
+            active = resolved
+            if resolved == ocr:
+                active_source = "ocr"
+            elif resolved == recorded:
+                active_source = "recorded"
+            else:
+                active_source = "custom"
+        elif ocr:
+            active = ocr
+            active_source = "ocr"
+        elif recorded:
+            active = recorded
+            active_source = "recorded"
+
+    if not recorded:
+        text = event.get("text")
+        if isinstance(text, str):
+            recorded = text.strip()
+
+    if not active:
+        extracted = typed_text_from_instruction(instruction) if instruction else None
+        if extracted:
+            active = extracted
+            if extracted == ocr:
+                active_source = "ocr"
+            elif extracted == recorded:
+                active_source = "recorded"
+            else:
+                active_source = "custom"
+        elif ocr:
+            active = ocr
+            active_source = "ocr"
+        elif recorded:
+            active = recorded
+            active_source = "recorded"
+
+    return recorded, ocr, active, active_source
+
+
 def _typed_text_for_editor(
     event: dict[str, Any],
     analysis: dict[str, Any] | None,
     instruction: str,
 ) -> str:
-    from src.recorder.analyze import typed_text_from_instruction
+    _recorded, _ocr, active, _active_source = _typed_text_candidates(
+        event,
+        analysis,
+        instruction,
+    )
+    return active
 
-    extracted = typed_text_from_instruction(instruction) if instruction else None
-    if extracted is not None:
-        return extracted
-    if isinstance(analysis, dict):
-        resolution = analysis.get("text_resolution")
-        if isinstance(resolution, dict):
-            resolved = resolution.get("resolved_text")
-            if isinstance(resolved, str) and resolved:
-                return resolved
-    text = event.get("text")
-    if isinstance(text, str):
-        return text
-    return ""
+
+def _render_typed_text_choice_button(
+    *,
+    label: str,
+    text: str,
+    source: str,
+    selected: bool,
+) -> str:
+    if not text:
+        return ""
+    selected_class = " selected" if selected else ""
+    return (
+        f'<button type="button" class="typed-text-choice{selected_class}" '
+        f'data-source="{escape(source)}" data-text="{escape(text, quote=True)}" '
+        f'title="使用{escape(label)}">'
+        f"{escape(label)}：{escape(text)}</button>"
+    )
 
 
 def _render_typed_text_panel_html(
@@ -2880,10 +3005,32 @@ def _render_typed_text_panel_html(
     kind = str(event.get("kind") or "")
     if kind != "text_input":
         return ""
-    value = _typed_text_for_editor(event, analysis, instruction)
+    recorded, ocr, value, active_source = _typed_text_candidates(
+        event,
+        analysis,
+        instruction,
+    )
+    choices = (
+        _render_typed_text_choice_button(
+            label="OCR",
+            text=ocr,
+            source="ocr",
+            selected=active_source == "ocr",
+        )
+        + _render_typed_text_choice_button(
+            label="鍵盤",
+            text=recorded,
+            source="recorded",
+            selected=active_source == "recorded",
+        )
+    )
+    choices_html = (
+        f'<div class="typed-text-choices">{choices}</div>' if choices else ""
+    )
     return (
         f'<div class="typed-text">'
         f'<div class="typed-text-title">輸入文字</div>'
+        f"{choices_html}"
         f'<div class="typed-text-row">'
         f'<input type="text" class="typed-text-input" value="{escape(value, quote=True)}" '
         f'spellcheck="false" autocomplete="off" aria-label="輸入文字">'
@@ -3052,12 +3199,7 @@ def _render_recording_event_html(
 
     before = _resolve_recording_screenshot(str(event.get("screenshot_path") or ""), run_root)
     after: Path | None = None
-    if kind == "text_input":
-        after = _resolve_recording_screenshot(
-            str(event.get("end_screenshot_path") or ""),
-            run_root,
-        )
-    if after is None and next_event is not None:
+    if next_event is not None:
         after = _resolve_recording_screenshot(
             str(next_event.get("screenshot_path") or ""),
             run_root,

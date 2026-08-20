@@ -2593,28 +2593,40 @@ def test_after_screenshot_prefers_next_over_final_after(tmp_path: Path) -> None:
     ) == str(next_before)
 
 
-def test_after_screenshot_for_text_input_prefers_end_shot(tmp_path: Path) -> None:
+def test_after_screenshot_for_text_input_prefers_next_before(tmp_path: Path) -> None:
     before = tmp_path / "event_001.jpeg"
-    typed_after = tmp_path / "event_001_end.jpeg"
-    next_before = tmp_path / "event_002.jpeg"
+    chained_after = tmp_path / "event_002.jpeg"
+    ocr_after = tmp_path / "event_001_end.jpeg"
     before.write_bytes(b"before")
-    typed_after.write_bytes(b"typed-after")
-    next_before.write_bytes(b"next")
+    chained_after.write_bytes(b"chained")
+    ocr_after.write_bytes(b"ocr")
     event = RecordedEvent(
         index=1,
         timestamp_utc="t",
         kind="text_input",
         screenshot_path=str(before),
-        end_screenshot_path=str(typed_after),
+        end_screenshot_path=str(chained_after),
     )
     next_event = RecordedEvent(
         index=2,
         timestamp_utc="t2",
         kind="click",
-        screenshot_path=str(next_before),
+        screenshot_path=str(chained_after),
     )
     assert before_screenshot_for_outcome(event) == str(before)
-    assert after_screenshot_for_outcome(event, next_event) == str(typed_after)
+    assert after_screenshot_for_outcome(event, next_event) == str(chained_after)
+
+
+def test_after_screenshot_for_text_input_falls_back_to_end_without_next(tmp_path: Path) -> None:
+    end_only = tmp_path / "event_001_end.jpeg"
+    end_only.write_bytes(b"end")
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="text_input",
+        end_screenshot_path=str(end_only),
+    )
+    assert after_screenshot_for_outcome(event, None) == str(end_only)
 
 
 @pytest.mark.asyncio

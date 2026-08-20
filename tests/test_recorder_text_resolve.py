@@ -8,8 +8,20 @@ import pytest
 from cua_mcp.select_mouse_target import _detection_from_bbox
 from cua_mcp.yolo_onnx import YOLO_CLASS_INPUT, YOLO_CLASS_TEXT
 from src.recorder.models import RecordedEvent
-from src.recorder.text_resolve import event_with_resolved_text, resolve_text_input_text
+from src.recorder.text_resolve import (
+    _strip_ocr_caret,
+    event_with_resolved_text,
+    resolve_text_input_text,
+)
 from src.recorder.vision_context import extract_nearest_text
+
+
+def test_strip_ocr_caret_removes_trailing_pipe() -> None:
+    assert _strip_ocr_caret("office|") == "office"
+    assert _strip_ocr_caret("office |") == "office"
+    assert _strip_ocr_caret("office") == "office"
+    assert _strip_ocr_caret("|") == ""
+    assert _strip_ocr_caret("a|b") == "a|b"
 
 
 def test_extract_nearest_text_prefers_nearest_with_text() -> None:
@@ -76,7 +88,85 @@ async def test_resolve_text_input_always_uses_vision_when_ocr_finds_text(tmp_pat
 
     assert resolved["text"] == "Chrome"
     assert resolved["source"] == "ocr"
+    assert resolved["ocr_text"] == "Chrome"
     assert resolved["meaningful"] is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_text_input_strips_trailing_caret_from_ocr(tmp_path) -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="text_input",
+        text="office",
+        cursor_xy=(10, 10),
+        screenshot_path="",
+    )
+    fake_vision = {
+        "used_vision": True,
+        "candidate_text": "candidate",
+        "local_cursor": (10, 10),
+        "candidates": [],
+        "detection_count": 1,
+        "bgr": np.zeros((100, 100, 3), dtype=np.uint8),
+        "all_detections": [
+            _detection_from_bbox((8, 8, 10, 10), YOLO_CLASS_TEXT, text="office|"),
+        ],
+    }
+    with patch(
+        "src.recorder.text_resolve.build_vision_context_at_point",
+        return_value=fake_vision,
+    ):
+        resolved = await resolve_text_input_text(event, run_dir=tmp_path)
+
+    assert resolved["text"] == "office"
+    assert resolved["ocr_text"] == "office"
+    assert resolved["source"] == "ocr"
+
+
+@pytest.mark.asyncio
+async def test_resolve_text_input_uses_after_screenshot_for_ocr(tmp_path) -> None:
+    before = tmp_path / "screenshots" / "event_001.jpeg"
+    after = tmp_path / "screenshots" / "event_001_end.jpeg"
+    before.parent.mkdir(parents=True)
+    before.write_bytes(b"before")
+    after.write_bytes(b"after")
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="text_input",
+        text="ooffice",
+        anchor_click_xy=(110, 210),
+        monitor_offset=(100, 200),
+        end_monitor_offset=(100, 200),
+        screenshot_path=str(before),
+        end_screenshot_path=str(after),
+    )
+    fake_vision = {
+        "used_vision": True,
+        "candidate_text": "candidate",
+        "local_cursor": (10, 10),
+        "candidates": [],
+        "detection_count": 1,
+        "bgr": np.zeros((100, 100, 3), dtype=np.uint8),
+        "all_detections": [
+            _detection_from_bbox((8, 8, 10, 10), YOLO_CLASS_TEXT, text="office"),
+        ],
+    }
+    with patch(
+        "src.recorder.text_resolve.build_vision_context_at_point",
+        return_value=fake_vision,
+    ) as build_mock, patch(
+        "src.recorder.text_resolve.extract_nearest_text",
+        return_value="office",
+    ):
+        resolved = await resolve_text_input_text(event, run_dir=tmp_path)
+
+    assert resolved["text"] == "office"
+    assert resolved["source"] == "ocr"
+    assert resolved["reason"] == "after-screenshot OCR"
+    build_mock.assert_called_once()
+    assert build_mock.call_args.kwargs["debug_name"] == "_end"
 
 
 @pytest.mark.asyncio
@@ -134,6 +224,7 @@ async def test_resolve_text_input_keeps_recorded_without_vision_coordinates(
 
     assert resolved["text"] == "nihao"
     assert resolved["source"] == "recorded"
+    assert resolved["ocr_text"] is None
     assert resolved["meaningful"] is None
     assert resolved["vision"] is None
 

@@ -454,7 +454,12 @@ def _pick_target_from_click(
     if live is not None:
         matched = _find_match(live, candidates)
         if matched is not None:
-            return matched
+            titled = [w for w in candidates if w.title]
+            # Taskbar/search clicks often hit an untitled shell strip via
+            # WindowFromPoint; prefer a real titled window when one also
+            # contains the click so transient strips are not treated as the target.
+            if matched.title or not titled:
+                return matched
 
     titled = [w for w in candidates if w.title]
     pool = titled or candidates
@@ -514,6 +519,11 @@ def _restore_change(before_win: WindowInfo, after_win: WindowInfo) -> WindowStat
     return None
 
 
+def _is_synthetic_window_title(title: str) -> bool:
+    """True for fallback titles like hwnd:65934 (not checkable at replay)."""
+    return title.startswith("hwnd:")
+
+
 def _classify_target_change(
     before_win: WindowInfo,
     after_win: WindowInfo | None,
@@ -521,6 +531,10 @@ def _classify_target_change(
 ) -> WindowStateChange | None:
     title = before_win.title or f"hwnd:{before_win.hwnd}"
     if after_win is None:
+        # Untitled shell windows (taskbar strips, etc.) often vanish as a side
+        # effect of Start/Search clicks; never treat that as a user close.
+        if not before_win.title.strip():
+            return None
         return WindowStateChange(
             action="close",
             title=title,
@@ -785,7 +799,7 @@ def expected_outcome_for_window_change(
         return None
     action = str(data.get("action", "")).strip()
     title = str(data.get("title", "")).strip()
-    if not title or title == _AGENT_APP_WINDOW_TITLE:
+    if not title or title == _AGENT_APP_WINDOW_TITLE or _is_synthetic_window_title(title):
         return None
     if action == "opened":
         return f"「{title}」視窗已開啟"

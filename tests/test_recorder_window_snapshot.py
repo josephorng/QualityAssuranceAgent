@@ -437,6 +437,30 @@ def test_expected_outcome_for_window_change() -> None:
     assert expected_outcome_for_window_change(
         {"action": "opened", "title": "X", "confidence": "low"}
     ) is None
+    # Synthetic hwnd titles are not checkable at replay (taskbar shell strips).
+    assert expected_outcome_for_window_change(
+        {"action": "close", "title": "hwnd:65934", "confidence": "high"}
+    ) is None
+
+
+def test_diff_ignores_untitled_taskbar_strip_close_on_search_click() -> None:
+    """Search/Start clicks can make an untitled taskbar hwnd vanish; not a close."""
+    before = [
+        _win(196998, "NVIDIA GeForce Overlay", left=0, top=0, width=1920, height=1080),
+        _win(66018, "Program Manager", left=0, top=-1, width=3840, height=1081),
+        _win(65934, "", left=0, top=1032, width=1920, height=48, pid=15728),
+    ]
+    after = [
+        _win(196998, "NVIDIA GeForce Overlay", left=0, top=0, width=1920, height=1080),
+        _win(66018, "Program Manager", left=0, top=-1, width=3840, height=1081),
+    ]
+    live = _win(65934, "", left=0, top=1032, width=1920, height=48, pid=15728)
+    with patch("src.recorder.window_snapshot.window_at_point", return_value=live):
+        result = diff_snapshots_with_debug(before, after, click_xy=(558, 1070))
+    assert result.change is None
+    assert expected_outcome_for_window_change(
+        {"action": "close", "title": "hwnd:65934", "confidence": "high"}
+    ) is None
 
 
 def test_click_hits_caption_buttons_uses_stored_and_fallback_bounds() -> None:

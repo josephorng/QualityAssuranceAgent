@@ -2905,7 +2905,7 @@ def _typed_text_candidates(
     recorded = ""
     ocr = ""
     active = ""
-    active_source = "ocr"
+    active_source = "recorded"
 
     resolution: dict[str, Any] | None = None
     if isinstance(analysis, dict):
@@ -2933,12 +2933,12 @@ def _typed_text_candidates(
                 active_source = "recorded"
             else:
                 active_source = "custom"
-        elif ocr:
-            active = ocr
-            active_source = "ocr"
         elif recorded:
             active = recorded
             active_source = "recorded"
+        elif ocr:
+            active = ocr
+            active_source = "ocr"
 
     if not recorded:
         text = event.get("text")
@@ -2949,18 +2949,18 @@ def _typed_text_candidates(
         extracted = typed_text_from_instruction(instruction) if instruction else None
         if extracted:
             active = extracted
-            if extracted == ocr:
-                active_source = "ocr"
-            elif extracted == recorded:
+            if extracted == recorded:
                 active_source = "recorded"
+            elif extracted == ocr:
+                active_source = "ocr"
             else:
                 active_source = "custom"
-        elif ocr:
-            active = ocr
-            active_source = "ocr"
         elif recorded:
             active = recorded
             active_source = "recorded"
+        elif ocr:
+            active = ocr
+            active_source = "ocr"
 
     return recorded, ocr, active, active_source
 

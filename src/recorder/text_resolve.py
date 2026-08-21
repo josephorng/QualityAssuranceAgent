@@ -38,7 +38,7 @@ async def resolve_text_input_text(
     run_dir: Path,
     log_info: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """Resolve typing text with OCR on the after-screenshot when available."""
+    """Resolve typing text, preferring recorded keystrokes; OCR kept as alternate."""
     recorded_text = event.text or ""
     anchor = event.anchor_click_xy or event.cursor_xy
     if anchor is None:
@@ -56,11 +56,11 @@ async def resolve_text_input_text(
     if use_after:
         local = _global_to_local_end(event, anchor)
         debug_name = "_end"
-        reason = "after-screenshot OCR"
+        ocr_reason = "after-screenshot OCR"
     else:
         local = _global_to_local(event, anchor)
         debug_name = None
-        reason = "vision-first OCR"
+        ocr_reason = "vision-first OCR"
 
     vision = build_vision_context_at_point(
         event,
@@ -80,6 +80,29 @@ async def resolve_text_input_text(
             cleaned = _strip_ocr_caret(raw_ocr)
             ocr_text = cleaned or None
 
+    vision_for_llm = _vision_for_llm(vision)
+    if recorded_text:
+        if log_info is not None:
+            shot_label = "after" if use_after else "before"
+            log_info(
+                f"resolve_text_input_text event={event.index} "
+                f"shot={shot_label} recorded={recorded_text!r} ocr={ocr_text!r} "
+                f"resolved={recorded_text!r} source=recorded"
+            )
+        return {
+            "text": recorded_text,
+            "recorded_text": recorded_text,
+            "ocr_text": ocr_text,
+            "source": "recorded",
+            "meaningful": None,
+            "reason": (
+                f"prefer recorded text; {ocr_reason} available as alternate"
+                if ocr_text
+                else "prefer recorded text; vision produced no OCR alternate"
+            ),
+            "vision": vision_for_llm,
+        }
+
     if ocr_text:
         if log_info is not None:
             shot_label = "after" if use_after else "before"
@@ -93,8 +116,8 @@ async def resolve_text_input_text(
             "ocr_text": ocr_text,
             "source": "ocr",
             "meaningful": None,
-            "reason": reason,
-            "vision": _vision_for_llm(vision),
+            "reason": f"recorded text empty; used {ocr_reason}",
+            "vision": vision_for_llm,
         }
 
     return {
@@ -104,7 +127,7 @@ async def resolve_text_input_text(
         "source": "recorded",
         "meaningful": None,
         "reason": "vision produced no text; kept recorded text",
-        "vision": _vision_for_llm(vision),
+        "vision": vision_for_llm,
     }
 
 

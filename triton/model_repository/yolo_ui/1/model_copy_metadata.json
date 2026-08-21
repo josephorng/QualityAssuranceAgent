@@ -1,7 +1,7 @@
 {
-  "copied_at": "2026-08-18T09:41:11.727684+08:00",
+  "copied_at": "2026-08-20T10:09:20.083101+08:00",
   "source_onnx": "C:\\Users\\Joseph Hung\\Documents\\Repos\\Git\\YOLO\\runs\\detect\\real_screenshot\\train-nano\\weights\\best.onnx",
   "destination_onnx": "C:\\Users\\Joseph Hung\\Documents\\Repos\\Git\\QualityAssuranceAgent\\triton\\model_repository\\yolo_ui\\1\\model.onnx",
   "source_run": "C:\\Users\\Joseph Hung\\Documents\\Repos\\Git\\YOLO\\runs\\detect\\real_screenshot\\train-nano",
-  "source_size_bytes": 10276060
+  "source_size_bytes": 10475698
 }

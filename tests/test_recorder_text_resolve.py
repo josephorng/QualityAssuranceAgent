@@ -60,7 +60,7 @@ def test_extract_nearest_text_prefers_input_ocr_over_nearby_page_text() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resolve_text_input_always_uses_vision_when_ocr_finds_text(tmp_path) -> None:
+async def test_resolve_text_input_prefers_recorded_when_ocr_finds_text(tmp_path) -> None:
     event = RecordedEvent(
         index=1,
         timestamp_utc="t",
@@ -86,9 +86,10 @@ async def test_resolve_text_input_always_uses_vision_when_ocr_finds_text(tmp_pat
     ):
         resolved = await resolve_text_input_text(event, run_dir=tmp_path)
 
-    assert resolved["text"] == "Chrome"
-    assert resolved["source"] == "ocr"
+    assert resolved["text"] == "chrome"
+    assert resolved["source"] == "recorded"
     assert resolved["ocr_text"] == "Chrome"
+    assert resolved["recorded_text"] == "chrome"
     assert resolved["meaningful"] is None
 
 
@@ -121,7 +122,7 @@ async def test_resolve_text_input_strips_trailing_caret_from_ocr(tmp_path) -> No
 
     assert resolved["text"] == "office"
     assert resolved["ocr_text"] == "office"
-    assert resolved["source"] == "ocr"
+    assert resolved["source"] == "recorded"
 
 
 @pytest.mark.asyncio
@@ -162,15 +163,16 @@ async def test_resolve_text_input_uses_after_screenshot_for_ocr(tmp_path) -> Non
     ):
         resolved = await resolve_text_input_text(event, run_dir=tmp_path)
 
-    assert resolved["text"] == "office"
-    assert resolved["source"] == "ocr"
-    assert resolved["reason"] == "after-screenshot OCR"
+    assert resolved["text"] == "ooffice"
+    assert resolved["source"] == "recorded"
+    assert resolved["ocr_text"] == "office"
+    assert "after-screenshot OCR" in resolved["reason"]
     build_mock.assert_called_once()
     assert build_mock.call_args.kwargs["debug_name"] == "_end"
 
 
 @pytest.mark.asyncio
-async def test_resolve_text_input_uses_ocr_with_anchor(
+async def test_resolve_text_input_keeps_ocr_alternate_with_anchor(
     tmp_path,
 ) -> None:
     shot = tmp_path / "event.jpeg"
@@ -204,9 +206,44 @@ async def test_resolve_text_input_uses_ocr_with_anchor(
     ):
         resolved = await resolve_text_input_text(event, run_dir=tmp_path)
 
-    assert resolved["text"] == "你好"
-    assert resolved["source"] == "ocr"
+    assert resolved["text"] == "nihao"
+    assert resolved["source"] == "recorded"
+    assert resolved["ocr_text"] == "你好"
     assert resolved["meaningful"] is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_text_input_falls_back_to_ocr_when_recorded_empty(
+    tmp_path,
+) -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="text_input",
+        text="",
+        cursor_xy=(10, 10),
+        screenshot_path="",
+    )
+    fake_vision = {
+        "used_vision": True,
+        "candidate_text": "candidate",
+        "local_cursor": (10, 10),
+        "candidates": [],
+        "detection_count": 1,
+        "bgr": np.zeros((100, 100, 3), dtype=np.uint8),
+        "all_detections": [
+            _detection_from_bbox((8, 8, 10, 10), YOLO_CLASS_TEXT, text="Chrome"),
+        ],
+    }
+    with patch(
+        "src.recorder.text_resolve.build_vision_context_at_point",
+        return_value=fake_vision,
+    ):
+        resolved = await resolve_text_input_text(event, run_dir=tmp_path)
+
+    assert resolved["text"] == "Chrome"
+    assert resolved["source"] == "ocr"
+    assert resolved["ocr_text"] == "Chrome"
 
 
 @pytest.mark.asyncio

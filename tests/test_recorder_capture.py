@@ -587,6 +587,171 @@ def test_functional_key_flushes_text_then_records_key(tmp_path) -> None:
     assert enter_event["key"] == "enter"
 
 
+def test_backspace_edits_pending_text_input(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            session._on_key_press(KeyCode.from_char("a"))
+            session._on_key_press(KeyCode.from_char("b"))
+            session._on_key_press(Key.backspace)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "text_input"
+    assert raw["text"] == "a"
+
+
+def test_left_arrow_and_delete_edit_pending_text_input(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            for ch in "abc":
+                session._on_key_press(KeyCode.from_char(ch))
+            session._on_key_press(Key.left)
+            session._on_key_press(Key.left)
+            session._on_key_press(Key.delete)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "text_input"
+    assert raw["text"] == "ac"
+
+
+def test_left_arrow_then_type_inserts_at_caret(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            session._on_key_press(KeyCode.from_char("a"))
+            session._on_key_press(KeyCode.from_char("b"))
+            session._on_key_press(Key.left)
+            session._on_key_press(KeyCode.from_char("X"))
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "text_input"
+    assert raw["text"] == "aXb"
+
+
+def test_home_and_end_edit_pending_text_input(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            for ch in "abc":
+                session._on_key_press(KeyCode.from_char(ch))
+            session._on_key_press(Key.home)
+            session._on_key_press(KeyCode.from_char("X"))
+            session._on_key_press(Key.end)
+            session._on_key_press(KeyCode.from_char("Y"))
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "text_input"
+    assert raw["text"] == "XabcY"
+
+
+def test_backspace_without_typing_records_key_press(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key
+
+            session._on_key_press(Key.backspace)
+            session._on_key_press(Key.left)
+            session._on_key_press(Key.home)
+            session._on_key_press(Key.end)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 4
+    keys = []
+    for i in range(1, 5):
+        raw = json.loads((run_dir / "events" / f"event_{i:03d}.json").read_text(encoding="utf-8"))
+        assert raw["kind"] == "key_press"
+        keys.append(raw["key"])
+    assert keys == ["backspace", "left", "home", "end"]
+
+
+def test_delete_all_pending_chars_emits_no_text_input(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            session._on_key_press(KeyCode.from_char("a"))
+            session._on_key_press(KeyCode.from_char("b"))
+            session._on_key_press(Key.backspace)
+            session._on_key_press(Key.backspace)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 0
+    assert not (run_dir / "events" / "event_001.json").is_file()
+
+
 def test_mouse_click_inside_ignore_rect_is_skipped(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
     hub_rect = (0, 0, 500, 500)

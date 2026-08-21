@@ -1155,7 +1155,7 @@ def test_write_recording_html_shows_ocr_and_recorded_text_choices(tmp_path: Path
                 "index": 1,
                 "timestamp_utc": "2026-07-21T04:00:00+00:00",
                 "kind": "text_input",
-                "text": "搜尋",
+                "text": "ooffice",
                 "screenshot_path": "",
             },
             ensure_ascii=False,
@@ -1167,13 +1167,13 @@ def test_write_recording_html_shows_ocr_and_recorded_text_choices(tmp_path: Path
         json.dumps(
             {
                 "event_index": 1,
-                "instruction": "輸入「搜尋」",
+                "instruction": "輸入「ooffice」",
                 "text_resolution": {
                     "recorded_text": "ooffice",
                     "ocr_text": "搜尋",
-                    "resolved_text": "搜尋",
-                    "source": "ocr",
-                    "reason": "after-screenshot OCR",
+                    "resolved_text": "ooffice",
+                    "source": "recorded",
+                    "reason": "prefer recorded text; after-screenshot OCR available as alternate",
                 },
             },
             ensure_ascii=False,
@@ -1183,32 +1183,32 @@ def test_write_recording_html_shows_ocr_and_recorded_text_choices(tmp_path: Path
 
     html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
 
-    assert 'value="搜尋"' in html
+    assert 'value="ooffice"' in html
     assert 'class="typed-text-choice selected"' in html
     assert "OCR：搜尋" in html
     assert "鍵盤：ooffice" in html
-    assert 'data-text="ooffice"' in html
+    assert 'data-text="搜尋"' in html
 
 
-def test_typed_text_candidates_default_to_ocr_when_available() -> None:
-    event = {"kind": "text_input", "text": "搜尋"}
+def test_typed_text_candidates_default_to_recorded_when_available() -> None:
+    event = {"kind": "text_input", "text": "ooffice"}
     analysis = {
         "text_resolution": {
             "recorded_text": "ooffice",
             "ocr_text": "office",
-            "resolved_text": "office",
-            "source": "ocr",
+            "resolved_text": "ooffice",
+            "source": "recorded",
         }
     }
     recorded, ocr, active, active_source = _typed_text_candidates(
         event,
         analysis,
-        "輸入「office」",
+        "輸入「ooffice」",
     )
     assert recorded == "ooffice"
     assert ocr == "office"
-    assert active == "office"
-    assert active_source == "ocr"
+    assert active == "ooffice"
+    assert active_source == "recorded"
 
 
 def test_write_runs_index_lists_recordings_in_recordings_tab(tmp_path: Path) -> None:

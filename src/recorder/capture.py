@@ -571,6 +571,7 @@ class RecordingSession:
         self._pending_right_screenshot: tuple[str, int, tuple[int, int]] | None = None
         self._pending_right_windows_before: tuple[WindowInfo, ...] | None = None
         self._pending_text_chars: list[str] = []
+        self._pending_text_caret: int = 0
         self._pending_text_meta: dict[str, Any] | None = None
         self._last_pointer_cursor_xy: tuple[int, int] | None = None
         self._event_queue: queue.Queue[object] = queue.Queue()
@@ -1008,6 +1009,7 @@ class RecordingSession:
             meta = self._pending_text_meta
             run_dir = self._run_dir
             self._pending_text_chars = []
+            self._pending_text_caret = 0
             self._pending_text_meta = None
         if not chars or meta is None or run_dir is None:
             return
@@ -1072,6 +1074,8 @@ class RecordingSession:
                 return
             index = self._next_index
             self._next_index += 1
+            self._pending_text_chars = []
+            self._pending_text_caret = 0
             self._pending_text_meta = {
                 "index": index,
                 "cursor_xy": cursor_xy,
@@ -1112,13 +1116,15 @@ class RecordingSession:
         with self._lock:
             if self._run_dir is None:
                 return
-            starting_burst = not self._pending_text_chars
+            starting_burst = self._pending_text_meta is None
 
         if starting_burst:
             self._begin_pending_text_input(cursor_xy, timestamp_utc=timestamp_utc)
 
         with self._lock:
-            self._pending_text_chars.append(char)
+            caret = max(0, min(self._pending_text_caret, len(self._pending_text_chars)))
+            self._pending_text_chars[caret:caret] = [char]
+            self._pending_text_caret = caret + 1
 
     def _append_text_input_text(
         self,
@@ -1132,13 +1138,50 @@ class RecordingSession:
         with self._lock:
             if self._run_dir is None:
                 return
-            starting_burst = not self._pending_text_chars
+            starting_burst = self._pending_text_meta is None
 
         if starting_burst:
             self._begin_pending_text_input(cursor_xy, timestamp_utc=timestamp_utc)
 
         with self._lock:
-            self._pending_text_chars.extend(text)
+            caret = max(0, min(self._pending_text_caret, len(self._pending_text_chars)))
+            self._pending_text_chars[caret:caret] = list(text)
+            self._pending_text_caret = caret + len(text)
+
+    def _edit_pending_text_input(self, key: keyboard.Key | keyboard.KeyCode) -> bool:
+        """Apply in-burst Backspace/Delete/Left/Right/Home/End. Returns True if handled."""
+        if key not in (
+            keyboard.Key.backspace,
+            keyboard.Key.delete,
+            keyboard.Key.left,
+            keyboard.Key.right,
+            keyboard.Key.home,
+            keyboard.Key.end,
+        ):
+            return False
+        with self._lock:
+            if self._pending_text_meta is None:
+                return False
+            caret = max(0, min(self._pending_text_caret, len(self._pending_text_chars)))
+            if key == keyboard.Key.backspace:
+                if caret > 0:
+                    del self._pending_text_chars[caret - 1]
+                    self._pending_text_caret = caret - 1
+                else:
+                    self._pending_text_caret = caret
+            elif key == keyboard.Key.delete:
+                if caret < len(self._pending_text_chars):
+                    del self._pending_text_chars[caret]
+                self._pending_text_caret = caret
+            elif key == keyboard.Key.left:
+                self._pending_text_caret = max(0, caret - 1)
+            elif key == keyboard.Key.right:
+                self._pending_text_caret = min(len(self._pending_text_chars), caret + 1)
+            elif key == keyboard.Key.home:
+                self._pending_text_caret = 0
+            else:  # end
+                self._pending_text_caret = len(self._pending_text_chars)
+            return True
 
     def _cancel_pending_click_timer(self) -> None:
         with self._lock:
@@ -1780,6 +1823,9 @@ class RecordingSession:
 
         if key == keyboard.Key.space:
             self._append_text_input_char(" ", cursor_xy, timestamp_utc=timestamp_utc)
+            return
+
+        if not mods and self._edit_pending_text_input(key):
             return
 
         if key in _SPECIAL_KEYS or isinstance(key, keyboard.Key):

@@ -17,6 +17,9 @@ _DWMWA_CAPTION_BUTTON_BOUNDS = 5
 _FALLBACK_CAPTION_BUTTON_WIDTH = 46
 _FALLBACK_CAPTION_BUTTON_COUNT = 3
 _FALLBACK_CAPTION_HEIGHT = 32
+# DWM caption button rects are often a few px short of the real hit target
+# (esp. maximized Chrome: recorded clicks land below the reported bottom).
+_CAPTION_HIT_SLACK_PX = 12
 WINDOW_SETTLE_DELAY_S = 1.0
 WINDOW_SETTLE_TITLE_BAR_DELAY_S = 1.2
 
@@ -213,10 +216,13 @@ def click_hits_caption_buttons(
         return False
     x, y = int(click_xy[0]), int(click_xy[1])
     left, top, right, bottom = bounds
-    # Inclusive on all edges: DWM caption rects are often tight/exclusive on
-    # bottom-right, and recorded clicks can land exactly on that boundary
-    # (e.g. y == bottom) while still hitting the real title-bar X.
-    return left <= x <= right and top <= y <= bottom
+    slack = _CAPTION_HIT_SLACK_PX
+    # Inclusive edges plus slack: DWM rects are tight (and sometimes short of
+    # the painted X), so recorded clicks on/just outside the rect still count.
+    return (
+        left - slack <= x <= right + slack
+        and top - slack <= y <= bottom + slack
+    )
 
 
 def _title_bar_height(win: WindowInfo) -> int:

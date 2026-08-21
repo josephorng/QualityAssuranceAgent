@@ -483,7 +483,7 @@ def test_click_hits_caption_buttons_uses_stored_and_fallback_bounds() -> None:
 
 
 def test_click_hits_caption_buttons_includes_bottom_right_edge() -> None:
-    """Clicks on DWM rect edges must count (exclusive < bottom missed real X clicks)."""
+    """DWM caption rects are tight; edge and slightly-below clicks still count."""
     win = _win(
         1773306,
         "OANDA Lab - Google Chrome",
@@ -496,8 +496,10 @@ def test_click_hits_caption_buttons_includes_bottom_right_edge() -> None:
     )
     assert click_hits_caption_buttons((3814, 21), win)  # y == bottom
     assert click_hits_caption_buttons((3839, 21), win)  # right+bottom corner
-    assert not click_hits_caption_buttons((3814, 22), win)
-    assert not click_hits_caption_buttons((3840, 21), win)
+    # Maximized Chrome: click can land a few px below DWM bottom (real X).
+    assert click_hits_caption_buttons((3810, 23), win)
+    assert not click_hits_caption_buttons((3814, 40), win)  # well below caption
+    assert not click_hits_caption_buttons((3600, 21), win)  # left of caption strip
 
 
 def test_format_hint_notes_non_caption_close() -> None:

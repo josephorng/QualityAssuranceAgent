@@ -232,6 +232,16 @@ def _build_step_records(
             "timing": timing,
             "time_profile": _build_time_profile(messages, step_timing.get("finished_at_utc")),
         }
+        expected_outcome = step_timing.get("expected_outcome")
+        if isinstance(expected_outcome, str) and expected_outcome.strip():
+            record["expected_outcome"] = expected_outcome.strip()
+        elif expected_outcome is None and "expected_outcome" in step_timing:
+            record["expected_outcome"] = None
+        verify = step_timing.get("verify")
+        if isinstance(verify, dict):
+            record["verify"] = verify
+        elif verify is None and "verify" in step_timing:
+            record["verify"] = None
         records.append(record)
     return records
 

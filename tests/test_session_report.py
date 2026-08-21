@@ -19,6 +19,8 @@ def _write_step(
     goal: str,
     messages: list[dict],
     status: str = "completed",
+    expected_outcome: str | None = None,
+    verify: dict | None = None,
 ) -> None:
     steps_dir.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -32,6 +34,10 @@ def _write_step(
             "goal": goal,
         },
     }
+    if expected_outcome is not None:
+        payload["step_timing"]["expected_outcome"] = expected_outcome
+    if verify is not None:
+        payload["step_timing"]["verify"] = verify
     (steps_dir / f"{transcript_counter}_{script_step_index}.json").write_text(
         json.dumps(payload),
         encoding="utf-8",
@@ -88,6 +94,14 @@ def test_build_session_report_aggregates_steps_tools_and_profile(tmp_path: Path)
                 "content": json.dumps({"action": "click", "ok": True, "args": {"x": 1, "y": 2}}),
             },
         ],
+        expected_outcome="Explorer window is open",
+        verify={
+            "accomplished": True,
+            "branch": "advance",
+            "target_step": None,
+            "clearly_unmet": False,
+            "reason": "Explorer is visible",
+        },
     )
     _write_step(
         steps_dir,
@@ -143,6 +157,15 @@ def test_build_session_report_aggregates_steps_tools_and_profile(tmp_path: Path)
 
     assert report["steps"][0]["goal"] == "Open File Explorer"
     assert report["steps"][1]["goal"] == "Type hello"
+    assert report["steps"][0]["expected_outcome"] == "Explorer window is open"
+    assert report["steps"][0]["verify"] == {
+        "accomplished": True,
+        "branch": "advance",
+        "target_step": None,
+        "clearly_unmet": False,
+        "reason": "Explorer is visible",
+    }
+    assert report["steps"][1].get("verify") is None or "verify" not in report["steps"][1]
 
     profile = report["steps"][0]["time_profile"]
     assert profile[0]["kind"] == "llm_inference"

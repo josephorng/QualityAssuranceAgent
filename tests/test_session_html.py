@@ -271,6 +271,63 @@ def test_write_session_html_groups_hand_operations_by_user_instruction(tmp_path:
     assert "<details open" not in html
 
 
+def test_write_session_html_includes_verification_result(tmp_path: Path) -> None:
+    run_root = tmp_path / "task_verify_html"
+    _write_step(
+        run_root,
+        transcript_counter=0,
+        script_step_index=0,
+        goal="點擊「搜尋」",
+        started_at="2026-06-11T06:00:00+00:00",
+        finished_at="2026-06-11T06:00:10+00:00",
+    )
+    step_path = run_root / "steps" / "0_0.json"
+    payload = json.loads(step_path.read_text(encoding="utf-8"))
+    payload["step_timing"].update(
+        {
+            "status": "verify_failed",
+            "expected_outcome": "搜尋介面已開啟。",
+            "verify": {
+                "accomplished": False,
+                "branch": "retry",
+                "target_step": None,
+                "clearly_unmet": True,
+                "reason": "Search panel is still closed",
+            },
+        }
+    )
+    step_path.write_text(json.dumps(payload), encoding="utf-8")
+    _write_hand_csv(
+        run_root,
+        [
+            {
+                "timestamp": "2026-06-11T06:00:05+00:00",
+                "action": "click",
+                "args": {"instruction": "「搜尋」"},
+                "ok": True,
+                "screenshot_name": "",
+                "screenshot_before_path": "",
+                "screenshot_after_path": "",
+                "message": "executed",
+            }
+        ],
+    )
+
+    html = write_session_html_from_run(run_root).read_text(encoding="utf-8")
+
+    assert '<span class="badge fail">retry</span>' in html
+    assert 'session-verify-title">驗證結果' in html
+    assert "<dt>Status</dt><dd>verify_failed</dd>" in html
+    assert "預期結果：搜尋介面已開啟。" in html
+    assert "session-expected-outcome" not in html
+    assert "<dt>Accomplished</dt><dd>false</dd>" in html
+    assert "<dt>Branch</dt><dd>retry</dd>" in html
+    assert "<dt>Clearly unmet</dt><dd>true</dd>" in html
+    assert "<dt>Reason</dt><dd>Search panel is still closed</dd>" in html
+    assert "動作 1：click" in html
+    assert "<dt>Expected</dt>" not in html
+
+
 def test_write_session_html_merges_smart_cycle_with_executed_tools(tmp_path: Path) -> None:
     run_root = tmp_path / "smart_20260730_090228_245442"
     timestamp = "2026-07-30T09:02:46+00:00"

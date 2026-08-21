@@ -84,6 +84,21 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
   flex: 0 0 auto; color: #57606a; font-variant-numeric: tabular-nums;
 }
 .instruction-group > summary .instruction-title { flex: 1 1 auto; min-width: 0; }
+.instruction-group > summary .instruction-summary-text {
+  flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: .2rem;
+}
+.instruction-group > summary .instruction-summary-text .instruction-title {
+  flex: 0 1 auto;
+}
+.instruction-group > summary .instruction-expected {
+  font-size: .82rem; font-weight: 500; color: #57606a; line-height: 1.35;
+}
+.instruction-group > summary .instruction-expected-empty {
+  color: #8c959f; font-style: italic;
+}
+.instruction-group > summary .instruction-badges {
+  display: inline-flex; flex-wrap: wrap; gap: .35rem; flex: 0 0 auto;
+}
 .instruction-group[open] > summary { border-bottom: 1px solid #d0d7de; }
 .copy-instruction {
   appearance: none; border: 1px solid #d0d7de; background: #f6f8fa;
@@ -392,12 +407,20 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
   font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
 }
 .smart-cycle-meta { padding: 1rem 1.5rem 0; }
+.session-verify {
+  margin: 1rem 1.5rem 0; padding: .75rem 1rem;
+  border: 1px solid #d0d7de; border-radius: 8px; background: #f6f8fa;
+}
+.session-verify-title {
+  margin: 0 0 .5rem; font-size: .9rem; font-weight: 700; color: #57606a;
+}
+.session-verify .meta { margin: 0; }
 .executed-tools { border-top: 1px solid #d0d7de; }
 .executed-tools h3 { font-size: 1rem; margin: 0; padding: 1rem 1.5rem 0; }
 .meta { margin: 0 0 1rem; }
 .meta dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; margin: 0; }
 .meta dt { color: #57606a; font-weight: 600; }
-.meta dd { margin: 0; }
+.meta dd { margin: 0; word-break: break-word; white-space: pre-wrap; }
 .badge { display: inline-block; padding: .1rem .55rem; border-radius: 999px; font-size: .8rem; font-weight: 600; }
 .badge.ok { background: #dafbe1; color: #116329; }
 .badge.fail { background: #ffebe9; color: #cf222e; }
@@ -2037,6 +2060,71 @@ def _hand_operation_from_row(
     }
 
 
+_MISSING = object()
+
+
+def _step_verify_meta_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Extract expected outcome / verify / status from a step JSON or report step record."""
+    meta: dict[str, Any] = {}
+    step_timing = payload.get("step_timing")
+    timing_source = step_timing if isinstance(step_timing, dict) else {}
+
+    if "expected_outcome" in timing_source:
+        expected_outcome = timing_source.get("expected_outcome")
+    elif "expected_outcome" in payload:
+        expected_outcome = payload.get("expected_outcome")
+    else:
+        expected_outcome = _MISSING
+    if expected_outcome is not _MISSING:
+        if isinstance(expected_outcome, str):
+            meta["expected_outcome"] = expected_outcome.strip()
+        else:
+            meta["expected_outcome"] = None
+
+    if "verify" in timing_source:
+        verify = timing_source.get("verify")
+    elif "verify" in payload:
+        verify = payload.get("verify")
+    else:
+        verify = _MISSING
+    if verify is not _MISSING:
+        meta["verify"] = verify if isinstance(verify, dict) else None
+
+    status = None
+    if isinstance(timing_source.get("status"), str):
+        status = timing_source.get("status")
+    timing = payload.get("timing")
+    if status is None and isinstance(timing, dict) and isinstance(timing.get("status"), str):
+        status = timing.get("status")
+    if isinstance(status, str) and status.strip():
+        meta["status"] = status.strip()
+    return meta
+
+
+def _load_step_verify_meta(run_root: Path) -> dict[tuple[int, int], dict[str, Any]]:
+    """Load verification metadata from ``steps/*.json`` (source of truth for debugging)."""
+    steps_dir = run_root / "steps"
+    if not steps_dir.is_dir():
+        return {}
+    loaded: dict[tuple[int, int], dict[str, Any]] = {}
+    for path in sorted(steps_dir.glob("*.json")):
+        stem = path.stem
+        if "_" not in stem:
+            continue
+        left, right = stem.split("_", 1)
+        try:
+            key = (int(left), int(right))
+        except ValueError:
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            loaded[key] = _step_verify_meta_from_payload(payload)
+    return loaded
+
+
 def _load_instruction_groups(run_root: Path) -> list[dict[str, Any]]:
     hand_rows = _iter_hand_csv_rows(run_root)
     if not hand_rows:
@@ -2047,9 +2135,11 @@ def _load_instruction_groups(run_root: Path) -> list[dict[str, Any]]:
     tool_results = (
         report.get("tool_results") if isinstance(report.get("tool_results"), list) else []
     )
+    step_file_meta = _load_step_verify_meta(run_root)
 
     order: list[tuple[int, int]] = []
     goals: dict[tuple[int, int], str] = {}
+    verify_meta: dict[tuple[int, int], dict[str, Any]] = {}
     for step in steps:
         if not isinstance(step, dict):
             continue
@@ -2063,6 +2153,14 @@ def _load_instruction_groups(run_root: Path) -> list[dict[str, Any]]:
         goal = step.get("goal")
         if isinstance(goal, str) and goal.strip():
             goals[key] = goal.strip()
+        report_meta = _step_verify_meta_from_payload(step)
+        file_meta = step_file_meta.get(key, {})
+        # Prefer step JSON (always current) over an older report.json.
+        verify_meta[key] = {**report_meta, **file_meta} if file_meta else report_meta
+
+    for key, file_meta in step_file_meta.items():
+        if key not in verify_meta:
+            verify_meta[key] = file_meta
 
     operations = [
         _hand_operation_from_row(run_root=run_root, operation_number=index, row=row)
@@ -2100,7 +2198,9 @@ def _load_instruction_groups(run_root: Path) -> list[dict[str, Any]]:
     grouped: list[dict[str, Any]] = []
     for key in order:
         goal = goals.get(key) or f"指令 {key[0] + 1}"
-        grouped.append({"goal": goal, "operations": groups[key]})
+        entry: dict[str, Any] = {"goal": goal, "operations": groups[key]}
+        entry.update(verify_meta.get(key, {}))
+        grouped.append(entry)
 
     if ungrouped:
         grouped.append({"goal": _UNGROUPED_GOAL, "operations": ungrouped})
@@ -2147,18 +2247,138 @@ def _render_hand_operation_html(*, run_root: Path, operation: dict[str, Any]) ->
     )
 
 
+def _verify_badge_class(
+    *,
+    verify: dict[str, Any] | None,
+    status: str | None,
+    has_failure: bool,
+) -> str:
+    if isinstance(verify, dict):
+        if verify.get("accomplished") is True or verify.get("branch") == "advance":
+            return "ok"
+        if verify.get("accomplished") is False or verify.get("branch") in {
+            "retry",
+            "goto",
+            "skip",
+            "stop",
+            "replan",
+            "backtrack",
+        }:
+            return "fail"
+    if isinstance(status, str):
+        normalized = status.strip().lower()
+        if normalized in {"completed", "success", "ok"}:
+            return "ok"
+        if normalized in {"failed", "verify_failed", "error"}:
+            return "fail"
+    return "fail" if has_failure else "neutral"
+
+
+def _render_verify_panel_html(
+    *,
+    verify: Any = None,
+    status: Any = None,
+) -> str:
+    """Render verifier decision for a scripted instruction group."""
+    has_verify = isinstance(verify, dict)
+    has_status = isinstance(status, str) and bool(status.strip())
+    if not has_verify and not has_status:
+        return ""
+
+    rows: list[str] = []
+    if has_status:
+        rows.append(f"<dt>Status</dt><dd>{escape(status.strip())}</dd>")
+
+    if has_verify:
+        accomplished = verify.get("accomplished")
+        if accomplished is True:
+            accomplished_text = "true"
+        elif accomplished is False:
+            accomplished_text = "false"
+        else:
+            accomplished_text = "—"
+        rows.append(f"<dt>Accomplished</dt><dd>{escape(accomplished_text)}</dd>")
+        branch = verify.get("branch")
+        rows.append(f"<dt>Branch</dt><dd>{escape(str(branch) if branch is not None else '—')}</dd>")
+        target_step = verify.get("target_step")
+        if target_step is not None:
+            rows.append(f"<dt>Target step</dt><dd>{escape(str(target_step))}</dd>")
+        if "clearly_unmet" in verify:
+            clearly = verify.get("clearly_unmet")
+            if clearly is True:
+                clearly_text = "true"
+            elif clearly is False:
+                clearly_text = "false"
+            else:
+                clearly_text = "—"
+            rows.append(f"<dt>Clearly unmet</dt><dd>{escape(clearly_text)}</dd>")
+        reason = verify.get("reason") or verify.get("outcome")
+        rows.append(f"<dt>Reason</dt><dd>{escape(str(reason) if reason else '—')}</dd>")
+        updated_state = verify.get("updated_state")
+        if isinstance(updated_state, str) and updated_state.strip():
+            rows.append(f"<dt>Updated state</dt><dd>{escape(updated_state.strip())}</dd>")
+
+    return (
+        f'<div class="session-verify">'
+        f'<div class="session-verify-title">驗證結果</div>'
+        f'<div class="meta"><dl>{"".join(rows)}</dl></div>'
+        f"</div>"
+    )
+
+
 def _render_instruction_group_html(
     *,
     run_root: Path,
     goal: str,
     operations: list[dict[str, Any]],
     step_number: int,
+    expected_outcome: Any = None,
+    verify: Any = None,
+    status: Any = None,
 ) -> str:
     operation_count = len(operations)
     count_label = escape(f"{operation_count} 個動作")
     has_failure = any(not operation.get("ok", False) for operation in operations)
-    summary_badge_class = "fail" if has_failure else "neutral"
+    verify_dict = verify if isinstance(verify, dict) else None
+    status_text = status.strip() if isinstance(status, str) else None
+    summary_badge_class = _verify_badge_class(
+        verify=verify_dict,
+        status=status_text,
+        has_failure=has_failure,
+    )
     step_label = escape(f"{step_number}.")
+    has_expected = isinstance(expected_outcome, str) and bool(expected_outcome.strip())
+    show_empty_expected = (not has_expected) and isinstance(verify_dict, dict)
+
+    if isinstance(verify_dict, dict) and verify_dict.get("branch"):
+        primary_badge = escape(str(verify_dict.get("branch")))
+    elif status_text:
+        primary_badge = escape(status_text)
+    else:
+        primary_badge = count_label
+
+    badges = (
+        f'<span class="instruction-badges">'
+        f'<span class="badge {summary_badge_class}">{primary_badge}</span>'
+    )
+    if primary_badge != count_label:
+        badges += f'<span class="badge neutral">{count_label}</span>'
+    badges += "</span>"
+
+    if has_expected:
+        expected_summary = (
+            f'<span class="instruction-expected">'
+            f"預期結果：{escape(expected_outcome.strip())}"
+            f"</span>"
+        )
+    elif show_empty_expected:
+        expected_summary = (
+            '<span class="instruction-expected instruction-expected-empty">'
+            "預期結果：（無）"
+            "</span>"
+        )
+    else:
+        expected_summary = ""
 
     if operations:
         items = "".join(
@@ -2169,13 +2389,22 @@ def _render_instruction_group_html(
     else:
         body = '<p class="args-empty" style="padding: 1rem 1.5rem;">（無手部動作）</p>'
 
+    verify_panel = _render_verify_panel_html(
+        verify=verify,
+        status=status,
+    )
+
     return (
         f'<details class="instruction-group">'
         f"<summary>"
         f'<span class="instruction-number">{step_label}</span>'
+        f'<span class="instruction-summary-text">'
         f'<span class="instruction-title">{escape(goal)}</span>'
-        f'<span class="badge {summary_badge_class}">{count_label}</span>'
+        f"{expected_summary}"
+        f"</span>"
+        f"{badges}"
         f"</summary>"
+        f"{verify_panel}"
         f"{body}"
         f"</details>"
     )
@@ -3611,6 +3840,9 @@ def write_session_html_from_run(run_root: Path) -> Path:
             goal=group["goal"],
             operations=group["operations"],
             step_number=index,
+            expected_outcome=group.get("expected_outcome"),
+            verify=group.get("verify"),
+            status=group.get("status"),
         )
         for index, group in enumerate(remaining_groups, start=smart_actor_count + 1)
     ]

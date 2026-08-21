@@ -82,11 +82,10 @@ def _point_from_rect(
     *,
     last_click_xy: ScreenPoint | None,
 ) -> ScreenPoint:
+    # Only reuse the last click when it actually landed inside the focused field.
+    # Otherwise prefer the caret/UIA rect center (e.g. guest-mode click then type
+    # in a newly focused omnibox on another monitor).
     if last_click_xy is not None and _point_in_rect(last_click_xy, rect):
-        return last_click_xy
-    # Click outside the reported focus rect usually means caret/UIA latched onto the
-    # wrong control; prefer the click that opened the field over a distant center.
-    if last_click_xy is not None:
         return last_click_xy
     return _rect_center(rect)
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from src.recorder.focus_point import resolve_typing_screen_xy
 
 
-def test_resolve_typing_prefers_last_click_when_outside_focus_rect() -> None:
+def test_resolve_typing_prefers_rect_center_when_last_click_outside_focus_rect() -> None:
     caret = (100, 200, 120, 220)  # center 110, 210; click far away
     point = resolve_typing_screen_xy(
         last_click_xy=(2416, 240),
@@ -13,7 +13,7 @@ def test_resolve_typing_prefers_last_click_when_outside_focus_rect() -> None:
         caret_rect_fn=lambda: caret,
         uia_rect_fn=lambda: None,
     )
-    assert point == (2416, 240)
+    assert point == (110, 210)
 
 
 def test_resolve_typing_rejects_huge_uia_rect_for_last_click() -> None:

@@ -5,11 +5,22 @@ from __future__ import annotations
 import ctypes
 import os
 from ctypes import wintypes
+from dataclasses import dataclass
 from typing import Callable
+
 
 # Screen rect: left, top, right, bottom (inclusive edges for containment).
 ScreenRect = tuple[int, int, int, int]
 ScreenPoint = tuple[int, int]
+
+
+@dataclass(frozen=True)
+class TypingFocus:
+    """Typing focus point plus the caret/UIA rect that produced it (when known)."""
+
+    point: ScreenPoint | None
+    rect: ScreenRect | None = None
+
 
 _CLSCTX_INPROC_SERVER = 1
 _COINIT_MULTITHREADED = 0x0
@@ -88,21 +99,6 @@ def _point_from_rect(
     if last_click_xy is not None and _point_in_rect(last_click_xy, rect):
         return last_click_xy
     return _rect_center(rect)
-
-
-def _rect_area(rect: ScreenRect) -> int:
-    left, top, right, bottom = rect
-    return max(0, right - left) * max(0, bottom - top)
-
-
-def _rect_is_huge(rect: ScreenRect) -> bool:
-    """True when the rect looks like a desktop/window shell rather than a field."""
-    left, top, right, bottom = rect
-    width = right - left
-    height = bottom - top
-    if width >= 1200 or height >= 800:
-        return True
-    return _rect_area(rect) >= 800 * 600
 
 
 def _caret_screen_rect() -> ScreenRect | None:
@@ -222,18 +218,18 @@ def _uia_focused_screen_rect() -> ScreenRect | None:
                 pass
 
 
-def resolve_typing_screen_xy(
+def resolve_typing_focus(
     *,
     last_click_xy: ScreenPoint | None = None,
     mouse_xy: ScreenPoint | None = None,
     caret_rect_fn: Callable[[], ScreenRect | None] | None = None,
     uia_rect_fn: Callable[[], ScreenRect | None] | None = None,
-) -> ScreenPoint | None:
+) -> TypingFocus:
     """Resolve where typing is focused on screen.
 
     Priority:
     1. System caret rect (GetGUIThreadInfo)
-    2. UIA focused-element bounds
+    2. UIA focused-element bounds (accepted even when window-sized)
     3. Within a valid rect: last click if inside, else rect center
     4. Last resort: last click, else mouse position
     """
@@ -253,11 +249,27 @@ def resolve_typing_screen_xy(
 
     if _rect_is_valid(rect):
         assert rect is not None
-        # Oversized UIA/desktop bounds are not useful for field targeting.
-        if _rect_is_huge(rect) and last_click_xy is not None:
-            return last_click_xy
-        return _point_from_rect(rect, last_click_xy=last_click_xy)
+        return TypingFocus(
+            point=_point_from_rect(rect, last_click_xy=last_click_xy),
+            rect=rect,
+        )
 
     if last_click_xy is not None:
-        return last_click_xy
-    return mouse_xy
+        return TypingFocus(point=last_click_xy, rect=None)
+    return TypingFocus(point=mouse_xy, rect=None)
+
+
+def resolve_typing_screen_xy(
+    *,
+    last_click_xy: ScreenPoint | None = None,
+    mouse_xy: ScreenPoint | None = None,
+    caret_rect_fn: Callable[[], ScreenRect | None] | None = None,
+    uia_rect_fn: Callable[[], ScreenRect | None] | None = None,
+) -> ScreenPoint | None:
+    """Resolve the typing focus point (see ``resolve_typing_focus``)."""
+    return resolve_typing_focus(
+        last_click_xy=last_click_xy,
+        mouse_xy=mouse_xy,
+        caret_rect_fn=caret_rect_fn,
+        uia_rect_fn=uia_rect_fn,
+    ).point

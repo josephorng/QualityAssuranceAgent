@@ -306,6 +306,83 @@ async def test_resolve_text_input_keeps_recorded_without_vision_coordinates(
     assert resolved["vision"] is None
 
 
+@pytest.mark.asyncio
+async def test_resolve_text_input_lists_ocr_options_inside_focus_rect(tmp_path) -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="text_input",
+        text="gk6ak7g4wl4xu4?",
+        cursor_xy=(960, 540),
+        monitor_offset=(0, 0),
+        focus_rect=(0, 0, 1920, 1080),
+        screenshot_path="",
+    )
+    fake_vision = {
+        "used_vision": True,
+        "candidate_text": "candidate",
+        "local_cursor": (960, 540),
+        "candidates": [],
+        "detection_count": 3,
+        "bgr": np.zeros((1080, 1920, 3), dtype=np.uint8),
+        "all_detections": [
+            _detection_from_bbox((900, 80, 200, 24), YOLO_CLASS_TEXT, text="什麼是套利?"),
+            _detection_from_bbox((500, 1050, 40, 16), YOLO_CLASS_TEXT, text="搜尋"),
+            _detection_from_bbox((40, 40, 80, 20), YOLO_CLASS_TEXT, text="Google"),
+        ],
+    }
+    with patch(
+        "src.recorder.text_resolve.build_vision_context_at_point",
+        return_value=fake_vision,
+    ):
+        resolved = await resolve_text_input_text(event, run_dir=tmp_path)
+
+    assert resolved["source"] == "recorded"
+    assert resolved["ocr_options"] == ["Google", "什麼是套利?", "搜尋"]
+    # Nearest in-rect text to caret (960,540) is the omnibox query, not taskbar 搜尋.
+    assert resolved["ocr_text"] == "什麼是套利?"
+
+
+@pytest.mark.asyncio
+async def test_resolve_text_input_ignores_ocr_outside_focus_rect(tmp_path) -> None:
+    """Omnibox strip focus must not import taskbar / nearest-screen OCR."""
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="text_input",
+        text="gk6ka7g4wl4xu4",
+        cursor_xy=(1497, 84),
+        monitor_offset=(0, 0),
+        focus_rect=(226, 67, 1561, 100),
+        screenshot_path="",
+    )
+    fake_vision = {
+        "used_vision": True,
+        "candidate_text": "candidate",
+        "local_cursor": (1497, 84),
+        "candidates": [],
+        "detection_count": 3,
+        "bgr": np.zeros((1080, 1920, 3), dtype=np.uint8),
+        "all_detections": [
+            _detection_from_bbox((228, 74, 91, 19), YOLO_CLASS_TEXT, text="什麼是套利"),
+            _detection_from_bbox((490, 1049, 34, 16), YOLO_CLASS_TEXT, text="搜尋"),
+            _detection_from_bbox((1601, 77, 58, 15), YOLO_CLASS_TEXT, text="AI 模式"),
+        ],
+    }
+    with patch(
+        "src.recorder.text_resolve.build_vision_context_at_point",
+        return_value=fake_vision,
+    ), patch(
+        "src.recorder.text_resolve.extract_nearest_text",
+        return_value="搜尋",
+    ) as nearest_mock:
+        resolved = await resolve_text_input_text(event, run_dir=tmp_path)
+
+    nearest_mock.assert_not_called()
+    assert resolved["ocr_options"] == ["什麼是套利"]
+    assert resolved["ocr_text"] == "什麼是套利"
+
+
 def test_event_with_resolved_text_replaces_text_field() -> None:
     event = RecordedEvent(index=1, timestamp_utc="t", kind="text_input", text="nihao")
     updated = event_with_resolved_text(event, {"text": "你好"})

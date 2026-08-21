@@ -12,6 +12,7 @@ from src.recorder.capture import (
     _HOLD_THRESHOLD_S,
     _finalize_drag_end_screenshot,
 )
+from src.recorder.focus_point import TypingFocus
 from src.recorder.window_snapshot import WindowInfo
 
 
@@ -35,13 +36,15 @@ def _default_capture_window_patches():
         def join(self, timeout: float | None = None) -> None:
             return None
 
-    def _fake_resolve_typing_screen_xy(
+    def _fake_resolve_typing_focus(
         *,
         last_click_xy=None,
         mouse_xy=None,
         **_kwargs,
     ):
-        return last_click_xy or mouse_xy
+        from src.recorder.focus_point import TypingFocus
+
+        return TypingFocus(point=last_click_xy or mouse_xy, rect=None)
 
     with patch("src.recorder.capture.mouse.Listener", DummyListener), patch(
         "src.recorder.capture.keyboard.Listener",
@@ -50,8 +53,8 @@ def _default_capture_window_patches():
         "src.recorder.capture.settle_delay_for_click",
         return_value=0.0,
     ), patch(
-        "src.recorder.capture.resolve_typing_screen_xy",
-        side_effect=_fake_resolve_typing_screen_xy,
+        "src.recorder.capture.resolve_typing_focus",
+        side_effect=_fake_resolve_typing_focus,
     ):
         yield
 
@@ -828,8 +831,8 @@ def test_text_input_end_uses_typing_focus_end_shot(tmp_path) -> None:
         "src.recorder.capture.pyautogui.position",
         return_value=type("P", (), {"x": 100, "y": 100})(),
     ), patch(
-        "src.recorder.capture.resolve_typing_screen_xy",
-        return_value=(2416, 240),
+        "src.recorder.capture.resolve_typing_focus",
+        return_value=TypingFocus(point=(2416, 240), rect=(1920, 0, 3840, 1080)),
     ), patch(
         "src.recorder.capture._capture_screenshot_at_point",
         side_effect=_track,
@@ -905,8 +908,8 @@ def test_text_input_uses_focus_point_not_anchor_click(tmp_path) -> None:
         "src.recorder.capture._capture_screenshot_at_point",
         side_effect=_mock_screenshot,
     ), patch(
-        "src.recorder.capture.resolve_typing_screen_xy",
-        return_value=(555, 666),
+        "src.recorder.capture.resolve_typing_focus",
+        return_value=TypingFocus(point=(555, 666), rect=(500, 600, 700, 720)),
     ) as resolve_mock:
         run_dir = session.start()
         try:
@@ -921,6 +924,7 @@ def test_text_input_uses_focus_point_not_anchor_click(tmp_path) -> None:
     text_event = json.loads((run_dir / "events" / "event_002.json").read_text(encoding="utf-8"))
     assert text_event["kind"] == "text_input"
     assert text_event["cursor_xy"] == [555, 666]
+    assert text_event["focus_rect"] == [500, 600, 700, 720]
     assert text_event["anchor_click_xy"] is None
     resolve_mock.assert_called()
     assert resolve_mock.call_args.kwargs["last_click_xy"] == (400, 300)

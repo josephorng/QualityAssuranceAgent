@@ -3127,12 +3127,13 @@ def _typed_text_candidates(
     event: dict[str, Any],
     analysis: dict[str, Any] | None,
     instruction: str,
-) -> tuple[str, str, str, str]:
-    """Return ``(recorded, ocr, active, active_source)`` for the typed-text editor."""
+) -> tuple[str, list[str], str, str]:
+    """Return ``(recorded, ocr_options, active, active_source)`` for the typed-text editor."""
     from src.recorder.analyze import typed_text_from_instruction
+    from src.recorder.text_resolve import _strip_ocr_caret
 
     recorded = ""
-    ocr = ""
+    ocr_options: list[str] = []
     active = ""
     active_source = "recorded"
 
@@ -3144,19 +3145,25 @@ def _typed_text_candidates(
 
     if resolution is not None:
         recorded = str(resolution.get("recorded_text") or "").strip()
+        raw_options = resolution.get("ocr_options")
+        if isinstance(raw_options, list):
+            for item in raw_options:
+                text = _strip_ocr_caret(str(item or "").strip())
+                if text and text not in ocr_options:
+                    ocr_options.append(text)
         ocr = str(resolution.get("ocr_text") or "").strip()
         if not ocr and resolution.get("source") == "ocr":
             ocr = str(resolution.get("resolved_text") or "").strip()
-        from src.recorder.text_resolve import _strip_ocr_caret
-
         ocr = _strip_ocr_caret(ocr)
+        if ocr and ocr not in ocr_options:
+            ocr_options.insert(0, ocr)
         resolved = str(resolution.get("resolved_text") or "").strip()
         source = str(resolution.get("source") or "")
         if source != "user":
             resolved = _strip_ocr_caret(resolved)
         if source == "user" and resolved:
             active = resolved
-            if resolved == ocr:
+            if resolved in ocr_options:
                 active_source = "ocr"
             elif resolved == recorded:
                 active_source = "recorded"
@@ -3165,8 +3172,8 @@ def _typed_text_candidates(
         elif recorded:
             active = recorded
             active_source = "recorded"
-        elif ocr:
-            active = ocr
+        elif ocr_options:
+            active = ocr_options[0]
             active_source = "ocr"
 
     if not recorded:
@@ -3180,18 +3187,18 @@ def _typed_text_candidates(
             active = extracted
             if extracted == recorded:
                 active_source = "recorded"
-            elif extracted == ocr:
+            elif extracted in ocr_options:
                 active_source = "ocr"
             else:
                 active_source = "custom"
         elif recorded:
             active = recorded
             active_source = "recorded"
-        elif ocr:
-            active = ocr
+        elif ocr_options:
+            active = ocr_options[0]
             active_source = "ocr"
 
-    return recorded, ocr, active, active_source
+    return recorded, ocr_options, active, active_source
 
 
 def _typed_text_for_editor(
@@ -3199,7 +3206,7 @@ def _typed_text_for_editor(
     analysis: dict[str, Any] | None,
     instruction: str,
 ) -> str:
-    _recorded, _ocr, active, _active_source = _typed_text_candidates(
+    _recorded, _ocr_options, active, _active_source = _typed_text_candidates(
         event,
         analysis,
         instruction,
@@ -3234,25 +3241,30 @@ def _render_typed_text_panel_html(
     kind = str(event.get("kind") or "")
     if kind != "text_input":
         return ""
-    recorded, ocr, value, active_source = _typed_text_candidates(
+    recorded, ocr_options, value, active_source = _typed_text_candidates(
         event,
         analysis,
         instruction,
     )
-    choices = (
-        _render_typed_text_choice_button(
-            label="OCR",
-            text=ocr,
-            source="ocr",
-            selected=active_source == "ocr",
+    choice_parts: list[str] = []
+    for ocr_text in ocr_options:
+        choice_parts.append(
+            _render_typed_text_choice_button(
+                label="OCR",
+                text=ocr_text,
+                source="ocr",
+                selected=active_source == "ocr" and value == ocr_text,
+            )
         )
-        + _render_typed_text_choice_button(
+    choice_parts.append(
+        _render_typed_text_choice_button(
             label="鍵盤",
             text=recorded,
             source="recorded",
             selected=active_source == "recorded",
         )
     )
+    choices = "".join(choice_parts)
     choices_html = (
         f'<div class="typed-text-choices">{choices}</div>' if choices else ""
     )

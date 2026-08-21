@@ -42,6 +42,8 @@ class RecordedEvent:
     end_monitor_index: int | None = None
     end_monitor_offset: tuple[int, int] | None = None
     anchor_click_xy: tuple[int, int] | None = None
+    # Caret/UIA focus bounds in global screen coords (left, top, right, bottom).
+    focus_rect: tuple[int, int, int, int] | None = None
     window_change: dict[str, Any] | None = None
     target_window_title: str | None = None
     window_snapshot_debug: dict[str, Any] | None = None
@@ -58,6 +60,8 @@ class RecordedEvent:
             data["end_monitor_offset"] = list(self.end_monitor_offset)
         if self.anchor_click_xy is not None:
             data["anchor_click_xy"] = list(self.anchor_click_xy)
+        if self.focus_rect is not None:
+            data["focus_rect"] = list(self.focus_rect)
         return data
 
     @classmethod
@@ -67,6 +71,7 @@ class RecordedEvent:
         offset = raw.get("monitor_offset")
         end_offset = raw.get("end_monitor_offset")
         anchor = raw.get("anchor_click_xy")
+        focus = raw.get("focus_rect")
         keys = raw.get("keys")
         modifiers = raw.get("modifiers")
         return cls(
@@ -100,6 +105,11 @@ class RecordedEvent:
                 tuple(end_offset) if isinstance(end_offset, list) and len(end_offset) == 2 else None
             ),
             anchor_click_xy=tuple(anchor) if isinstance(anchor, list) and len(anchor) == 2 else None,
+            focus_rect=(
+                tuple(int(v) for v in focus)
+                if isinstance(focus, list) and len(focus) == 4
+                else None
+            ),
             window_change=raw.get("window_change") if isinstance(raw.get("window_change"), dict) else None,
             target_window_title=raw.get("target_window_title"),
             window_snapshot_debug=(

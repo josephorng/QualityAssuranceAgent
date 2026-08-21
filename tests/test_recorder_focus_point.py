@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.recorder.focus_point import resolve_typing_screen_xy
+from src.recorder.focus_point import resolve_typing_focus, resolve_typing_screen_xy
 
 
 def test_resolve_typing_prefers_rect_center_when_last_click_outside_focus_rect() -> None:
@@ -16,15 +16,16 @@ def test_resolve_typing_prefers_rect_center_when_last_click_outside_focus_rect()
     assert point == (110, 210)
 
 
-def test_resolve_typing_rejects_huge_uia_rect_for_last_click() -> None:
+def test_resolve_typing_accepts_huge_uia_rect_and_returns_center() -> None:
     huge = (0, 0, 1920, 1080)
-    point = resolve_typing_screen_xy(
-        last_click_xy=(400, 300),
+    focus = resolve_typing_focus(
+        last_click_xy=(2416, 240),  # outside the UIA window
         mouse_xy=(1, 1),
         caret_rect_fn=lambda: None,
         uia_rect_fn=lambda: huge,
     )
-    assert point == (400, 300)
+    assert focus.point == (960, 540)
+    assert focus.rect == huge
 
 
 def test_resolve_typing_prefers_last_click_inside_caret_rect() -> None:

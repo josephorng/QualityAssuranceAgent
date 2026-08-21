@@ -1228,6 +1228,7 @@ def test_write_recording_html_shows_ocr_and_recorded_text_choices(tmp_path: Path
                 "text_resolution": {
                     "recorded_text": "ooffice",
                     "ocr_text": "搜尋",
+                    "ocr_options": ["什麼是套利?", "搜尋"],
                     "resolved_text": "ooffice",
                     "source": "recorded",
                     "reason": "prefer recorded text; after-screenshot OCR available as alternate",
@@ -1242,8 +1243,10 @@ def test_write_recording_html_shows_ocr_and_recorded_text_choices(tmp_path: Path
 
     assert 'value="ooffice"' in html
     assert 'class="typed-text-choice selected"' in html
+    assert "OCR：什麼是套利?" in html
     assert "OCR：搜尋" in html
     assert "鍵盤：ooffice" in html
+    assert 'data-text="什麼是套利?"' in html
     assert 'data-text="搜尋"' in html
 
 
@@ -1257,13 +1260,13 @@ def test_typed_text_candidates_default_to_recorded_when_available() -> None:
             "source": "recorded",
         }
     }
-    recorded, ocr, active, active_source = _typed_text_candidates(
+    recorded, ocr_options, active, active_source = _typed_text_candidates(
         event,
         analysis,
         "輸入「ooffice」",
     )
     assert recorded == "ooffice"
-    assert ocr == "office"
+    assert ocr_options == ["office"]
     assert active == "ooffice"
     assert active_source == "recorded"
 

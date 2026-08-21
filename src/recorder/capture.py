@@ -18,7 +18,7 @@ from src.common.io_utils import append_text, write_json
 from src.common.run_state import unique_run_folder_name
 from src.common.settings import load_settings
 from src.eye.capture import resolve_monitor_index
-from src.recorder.focus_point import resolve_typing_screen_xy
+from src.recorder.focus_point import resolve_typing_focus
 from src.recorder.models import (
     RecordedEvent,
     SessionManifest,
@@ -128,6 +128,7 @@ class _QueuedEvent:
     scroll_delta: int | None = None
     duration_seconds: float | None = None
     anchor_click_xy: tuple[int, int] | None = None
+    focus_rect: tuple[int, int, int, int] | None = None
     end_xy: tuple[int, int] | None = None
     end_screenshot_path: str = ""
     end_monitor_index: int | None = None
@@ -1062,6 +1063,7 @@ class RecordingSession:
                 end_monitor_offset=end_mon_offset,
                 text="".join(chars),
                 anchor_click_xy=None,
+                focus_rect=meta.get("focus_rect"),
             )
         )
 
@@ -1088,10 +1090,11 @@ class RecordingSession:
             self._pending_text_chars = []
             self._pending_text_caret = 0
 
-        focus_xy = resolve_typing_screen_xy(
+        typing_focus = resolve_typing_focus(
             last_click_xy=last_click_xy,
             mouse_xy=mouse_xy,
         )
+        focus_xy = typing_focus.point
         with self._lock:
             if self._run_dir is None:
                 return
@@ -1099,6 +1102,7 @@ class RecordingSession:
                 "index": index,
                 "cursor_xy": focus_xy,
                 "anchor_click_xy": None,
+                "focus_rect": typing_focus.rect,
                 "timestamp_utc": timestamp_utc or utc_now_iso(),
             }
 
@@ -1574,6 +1578,7 @@ class RecordingSession:
             end_monitor_index=item.end_monitor_index,
             end_monitor_offset=item.end_monitor_offset,
             anchor_click_xy=item.anchor_click_xy,
+            focus_rect=item.focus_rect,
             window_change=window_change,
             target_window_title=target_title,
             window_snapshot_debug=snapshot_debug,

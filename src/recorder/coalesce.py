@@ -51,6 +51,7 @@ def coalesce_consecutive_text_inputs(events: list[RecordedEvent]) -> list[Record
                     else prev.end_monitor_offset
                 ),
                 anchor_click_xy=prev.anchor_click_xy or event.anchor_click_xy,
+                focus_rect=prev.focus_rect or event.focus_rect,
             )
             continue
         merged.append(event)

@@ -17,7 +17,7 @@ from cua_mcp.tools import (
 from ollama import Message
 from pydantic import ValidationError
 from src.common.io_utils import write_json
-from cua_mcp.llm_json import extract_json_object_string, parse_json_object
+from cua_mcp.llm_json import extract_json_object_string, parse_json_object, repair_json_object_text
 from src.common.models import (
     BrainStepOutcome,
     BrainTaskState,
@@ -44,6 +44,18 @@ from src.common.runtime_context import (
 )
 from src.common.settings import load_settings
 from time import sleep
+
+SCRIPT_STEP_VERIFY_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "accomplished": {"type": "boolean"},
+        "branch": {"type": "string", "enum": ["advance", "retry", "skip", "goto"]},
+        "target_step": {"type": ["integer", "null"]},
+        "clearly_unmet": {"type": "boolean"},
+        "reason": {"type": "string"},
+    },
+    "required": ["accomplished", "branch", "clearly_unmet", "reason"],
+}
 
 ROLE_USER = "user"
 ROLE_TOOL = "tool"
@@ -501,7 +513,7 @@ class BrainModule:
 
         Handles common LLM mistakes such as unescaped quotes inside ``reason``.
         """
-        text = extract_json_object_string(content)
+        text = repair_json_object_text(content) or extract_json_object_string(content)
         status_match = re.search(r'"status"\s*:\s*"(completed|failed)"', text)
         if not status_match:
             return None
@@ -510,6 +522,59 @@ class BrainModule:
         if reason_match:
             reason = reason_match.group(1)
         return {"status": status_match.group(1), "reason": reason}
+
+    @staticmethod
+    def _recover_verify_result_payload(content: str) -> dict[str, Any] | None:
+        """Best-effort extract of verify fields when model JSON is malformed."""
+        text = repair_json_object_text(content) or extract_json_object_string(content)
+        accomplished_match = re.search(r'"accomplished"\s*:\s*(true|false)', text, re.IGNORECASE)
+        branch_match = re.search(
+            r'"branch"\s*:\s*"(advance|retry|skip|goto)"',
+            text,
+            re.IGNORECASE,
+        )
+        if not accomplished_match or not branch_match:
+            return None
+        clearly_match = re.search(r'"clearly_unmet"\s*:\s*(true|false)', text, re.IGNORECASE)
+        target_match = re.search(r'"target_step"\s*:\s*(null|\d+)', text, re.IGNORECASE)
+        reason = ""
+        reason_match = re.search(r'"reason"\s*:\s*"(.*)"\s*[,}\]]\s*$', text, re.DOTALL)
+        if reason_match:
+            reason = reason_match.group(1)
+        else:
+            reason_match = re.search(r'"reason"\s*:\s*"(.*)', text, re.DOTALL)
+            if reason_match:
+                reason = reason_match.group(1).rstrip().rstrip('"}]')
+        target_raw = target_match.group(1) if target_match else None
+        target_step = None if target_raw is None or target_raw.lower() == "null" else int(target_raw)
+        return {
+            "accomplished": accomplished_match.group(1).lower() == "true",
+            "branch": branch_match.group(1).lower(),
+            "clearly_unmet": (
+                clearly_match.group(1).lower() == "true" if clearly_match else False
+            ),
+            "target_step": target_step,
+            "reason": reason,
+        }
+
+    def _parse_verify_result_from_content(self, content: str) -> ScriptStepVerifyResult | None:
+        """Parse verify JSON, falling back to schema scrape on malformed output."""
+        try:
+            payload = self._parse_json_object_from_model_content(content)
+            return ScriptStepVerifyResult.model_validate(payload)
+        except (json.JSONDecodeError, ValueError, ValidationError, TypeError) as e:
+            recovered = self._recover_verify_result_payload(content)
+            if recovered is not None:
+                try:
+                    result = ScriptStepVerifyResult.model_validate(recovered)
+                    self.manager.log_info(
+                        "Verify JSON was malformed; recovered fields via fallback parser"
+                    )
+                    return result
+                except (ValidationError, TypeError, ValueError):
+                    pass
+            self.manager.log_error(f"Verify step JSON parse/validation failed: {e}")
+            return None
 
     @staticmethod
     def _is_pseudo_end_tool_name(tool_name: str | None) -> bool:
@@ -692,24 +757,65 @@ class BrainModule:
             self.settings.brain_lm,
             messages=messages,
             tools=VERIFICATION_TOOLS,
+            response_format=SCRIPT_STEP_VERIFY_JSON_SCHEMA,
         )
         if response_message:
             messages.append(stamp_message(response_message.model_dump()))
+        if not response_message or not response_message.content:
+            self._append_step_messages(
+                messages,
+                transcript_counter,
+                script_step_index,
+                attribute_name="verification",
+            )
+            self.manager.log_error("Ollama verify step returned empty content")
+            return None
+
+        parsed = self._parse_verify_result_from_content(response_message.content)
+        if parsed is not None:
+            self._append_step_messages(
+                messages,
+                transcript_counter,
+                script_step_index,
+                attribute_name="verification",
+            )
+            return parsed
+
+        # One LLM rewrite when local repair / schema scrape still fail.
+        self.manager.log_info(
+            "Verify JSON unparseable after local repair; requesting one rewrite"
+        )
+        repair_user = stamp_message(
+            {
+                "role": ROLE_USER,
+                "content": (
+                    "Your previous reply was not valid JSON. "
+                    "Reply with ONLY one valid JSON object (no markdown) with keys: "
+                    "accomplished (bool), branch (advance|retry|skip|goto), "
+                    "target_step (number|null), clearly_unmet (bool), reason (string). "
+                    "Keep the same judgment; only fix the JSON syntax."
+                ),
+            }
+        )
+        messages.append(repair_user)
+        repair_message = await self.ollama.chat_messages(
+            self.settings.brain_lm,
+            messages=messages,
+            tools=[],
+            response_format=SCRIPT_STEP_VERIFY_JSON_SCHEMA,
+        )
+        if repair_message:
+            messages.append(stamp_message(repair_message.model_dump()))
         self._append_step_messages(
             messages,
             transcript_counter,
             script_step_index,
             attribute_name="verification",
         )
-        if not response_message or not response_message.content:
-            self.manager.log_error("Ollama verify step returned empty content")
+        if not repair_message or not repair_message.content:
+            self.manager.log_error("Verify JSON repair rewrite returned empty content")
             return None
-        try:
-            payload = self._parse_json_object_from_model_content(response_message.content)
-            return ScriptStepVerifyResult.model_validate(payload)
-        except (json.JSONDecodeError, ValueError, ValidationError) as e:
-            self.manager.log_error(f"Verify step JSON parse/validation failed: {e}")
-            return None
+        return self._parse_verify_result_from_content(repair_message.content)
 
     async def _try_replay_cached_tools(
         self,
@@ -1009,7 +1115,9 @@ class BrainModule:
         without a screenshot or verifier LLM. Recovery path: actor failure or a recorded
         expected outcome still uses screenshot verification for `goto`/`retry`/`skip`.
         After actor success, ambiguous verifier retries (`clearly_unmet=false`) are coerced
-        to advance to reduce flaky false negatives.
+        to advance to reduce flaky false negatives. If verification JSON is still
+        unparseable after local repair and one rewrite, actor success soft-fails to
+        advance instead of aborting the run.
         Sets `run_complete` when the script is exhausted.
         """
         # await self._validate_tool_functions_match_mcp()
@@ -1046,6 +1154,21 @@ class BrainModule:
                     script_step_index,
                     actor_succeeded=step_succeeded,
                 )
+                if verify_result is None and step_succeeded:
+                    self.manager.log_info(
+                        "Verify unavailable after actor success; soft-fail advancing "
+                        "(parse/empty response)"
+                    )
+                    verify_result = ScriptStepVerifyResult(
+                        accomplished=True,
+                        branch="advance",
+                        target_step=None,
+                        clearly_unmet=False,
+                        reason=(
+                            "Actor succeeded; verification JSON unparseable. "
+                            "Soft-fail advance."
+                        ),
+                    )
                 if verify_result is not None:
                     verify_result = self._coerce_verify_result_for_actor_success(
                         verify_result,
@@ -1068,13 +1191,8 @@ class BrainModule:
                         "verify": None,
                     },
                 )
-                reason = (
-                    f"Script step {script_step_index + 1} failed"
-                    if not step_succeeded
-                    else "Script step verification failed (parse or empty response)"
-                )
                 return BrainStepResult(
-                    reason=reason,
+                    reason=f"Script step {script_step_index + 1} failed",
                     step_finished=False,
                     step_index=script_step_index,
                 )

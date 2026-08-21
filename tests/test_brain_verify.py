@@ -248,6 +248,57 @@ async def test_process_step_aborts_when_actor_fails_and_verify_unavailable() -> 
 
 
 @pytest.mark.asyncio
+async def test_process_step_soft_fails_advance_when_actor_ok_and_verify_unavailable() -> None:
+    brain = _brain_for_process_step()
+    brain.loop = AsyncMock(return_value=True)
+    brain._verify_script_step = AsyncMock(return_value=None)
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 2
+    brain._verify_script_step.assert_awaited_once()
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "completed"
+    assert metadata["verify"]["branch"] == "advance"
+    assert metadata["verify"]["accomplished"] is True
+    assert "unparseable" in metadata["verify"]["reason"]
+
+
+def test_parse_verify_result_repairs_wrong_closing_bracket() -> None:
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = MagicMock()
+    brain.manager.log_info = MagicMock()
+    brain.manager.log_error = MagicMock()
+    raw = (
+        "```json\n"
+        '{"accomplished": false, "branch": "retry", "target_step": 1, '
+        '"clearly_unmet": false, "reason": "The search menu is not yet open."]\n'
+        "```"
+    )
+    result = brain._parse_verify_result_from_content(raw)
+    assert result is not None
+    assert result.branch == "retry"
+    assert result.target_step == 1
+    assert result.clearly_unmet is False
+    assert result.accomplished is False
+
+
+def test_recover_verify_result_payload_scrapes_fields() -> None:
+    raw = (
+        'almost json {"accomplished": true, "branch": "advance", '
+        '"clearly_unmet": false, "target_step": null, "reason": "panel open"'
+    )
+    payload = BrainModule._recover_verify_result_payload(raw)
+    assert payload is not None
+    assert payload["accomplished"] is True
+    assert payload["branch"] == "advance"
+    assert payload["clearly_unmet"] is False
+    result = ScriptStepVerifyResult.model_validate(payload)
+    assert result.branch == "advance"
+
+
+@pytest.mark.asyncio
 async def test_process_step_skips_vision_verify_when_expected_empty_and_actor_ok() -> None:
     brain = _brain_for_process_step()
     brain.script_expected_outcomes = [None, None, None]

@@ -615,10 +615,47 @@ class BrainModule:
         )
         return run_complete
 
+    def _coerce_verify_result_for_actor_success(
+        self,
+        result: ScriptStepVerifyResult,
+        *,
+        actor_succeeded: bool,
+    ) -> ScriptStepVerifyResult:
+        """Prefer advance after actor success unless the outcome is clearly unmet.
+
+        Flaky ``retry`` answers (uncertain / not clearly_unmet) become advance so a
+        successful tool loop is not undone by a weak vision false negative. ``goto`` /
+        ``skip`` and clearly unmet retries are left unchanged.
+        """
+        if not actor_succeeded:
+            return result
+        if result.accomplished:
+            if result.branch != "advance":
+                return result.model_copy(update={"branch": "advance", "target_step": None})
+            return result
+        if result.branch == "retry" and not result.clearly_unmet:
+            self.manager.log_info(
+                "Verify: actor succeeded; coercing ambiguous retry to advance "
+                f"(clearly_unmet=false). {result.reason}"
+            )
+            return ScriptStepVerifyResult(
+                accomplished=True,
+                branch="advance",
+                target_step=None,
+                clearly_unmet=False,
+                reason=(
+                    "Actor succeeded; outcome not clearly unmet. "
+                    f"Original: {result.reason}"
+                ),
+            )
+        return result
+
     async def _verify_script_step(
         self,
         transcript_counter: int,
         script_step_index: int,
+        *,
+        actor_succeeded: bool,
     ) -> ScriptStepVerifyResult | None:
         """Capture a fresh screenshot and ask the LLM (no tools) for `ScriptStepVerifyResult` JSON, or None on failure."""
         if self._eye is None:
@@ -626,6 +663,7 @@ class BrainModule:
 
         prompt = get_prompt("brain_verify_script_step").format(
             expected_outcome=self._current_expected_outcome() or "(none)",
+            actor_succeeded="true" if actor_succeeded else "false",
         )
         numbered = self._format_numbered_script()
         current_1based = min(self._script_step_index + 1, len(self.script_lines))
@@ -970,6 +1008,8 @@ class BrainModule:
         Happy path: empty expected outcome + actor success (all tools ok) auto-advances
         without a screenshot or verifier LLM. Recovery path: actor failure or a recorded
         expected outcome still uses screenshot verification for `goto`/`retry`/`skip`.
+        After actor success, ambiguous verifier retries (`clearly_unmet=false`) are coerced
+        to advance to reduce flaky false negatives.
         Sets `run_complete` when the script is exhausted.
         """
         # await self._validate_tool_functions_match_mcp()
@@ -1004,7 +1044,13 @@ class BrainModule:
                 verify_result = await self._verify_script_step(
                     transcript_counter,
                     script_step_index,
+                    actor_succeeded=step_succeeded,
                 )
+                if verify_result is not None:
+                    verify_result = self._coerce_verify_result_for_actor_success(
+                        verify_result,
+                        actor_succeeded=step_succeeded,
+                    )
             finished_iso = datetime.now(timezone.utc).isoformat()
             duration_seconds = round(perf_counter() - started_at, 3)
             self._step_transcript_counter += 1
@@ -1057,6 +1103,7 @@ class BrainModule:
                         "accomplished": verify_result.accomplished,
                         "branch": verify_result.branch,
                         "target_step": verify_result.target_step,
+                        "clearly_unmet": verify_result.clearly_unmet,
                         "reason": verify_result.reason,
                     },
                 },

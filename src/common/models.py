@@ -69,6 +69,13 @@ class ScriptStepVerifyResult(BaseModel):
         default=None,
         description="1-based line number in the script when branch is goto",
     )
+    clearly_unmet: bool = Field(
+        default=False,
+        description=(
+            "True only when ExpectedOutcome is visibly contradicted by the screenshot; "
+            "false when uncertain or the outcome appears met"
+        ),
+    )
     reason: str = ""
 
     @model_validator(mode="after")

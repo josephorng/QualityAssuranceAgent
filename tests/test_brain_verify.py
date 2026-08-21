@@ -58,6 +58,126 @@ def test_brain_verify_script_step_prompt_has_goto_policy() -> None:
     assert "do not retry" in text
     assert "Jump to the latest such prior line" in text
     assert "prior step's expected outcome is no longer true" in text
+    assert "{actor_succeeded}" in text
+    assert "clearly_unmet" in text
+    assert "prefer accomplished true and branch advance" in text
+    assert "Search/Start flyout" in text
+
+
+def test_coerce_verify_result_advances_ambiguous_retry_after_actor_success() -> None:
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = MagicMock()
+    brain.manager.log_info = MagicMock()
+
+    coerced = brain._coerce_verify_result_for_actor_success(
+        ScriptStepVerifyResult(
+            accomplished=False,
+            branch="retry",
+            target_step=None,
+            clearly_unmet=False,
+            reason="search bar visible but unsure about panel",
+        ),
+        actor_succeeded=True,
+    )
+
+    assert coerced.accomplished is True
+    assert coerced.branch == "advance"
+    assert coerced.clearly_unmet is False
+    assert "not clearly unmet" in coerced.reason
+
+
+def test_coerce_verify_result_keeps_clearly_unmet_retry_after_actor_success() -> None:
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = MagicMock()
+    brain.manager.log_info = MagicMock()
+
+    original = ScriptStepVerifyResult(
+        accomplished=False,
+        branch="retry",
+        target_step=None,
+        clearly_unmet=True,
+        reason="search panel still closed",
+    )
+    coerced = brain._coerce_verify_result_for_actor_success(
+        original,
+        actor_succeeded=True,
+    )
+
+    assert coerced is original
+    assert coerced.branch == "retry"
+    assert coerced.clearly_unmet is True
+
+
+def test_coerce_verify_result_does_not_coerce_when_actor_failed() -> None:
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = MagicMock()
+    brain.manager.log_info = MagicMock()
+
+    original = ScriptStepVerifyResult(
+        accomplished=False,
+        branch="retry",
+        target_step=None,
+        clearly_unmet=False,
+        reason="tools failed",
+    )
+    coerced = brain._coerce_verify_result_for_actor_success(
+        original,
+        actor_succeeded=False,
+    )
+
+    assert coerced is original
+
+
+@pytest.mark.asyncio
+async def test_process_step_coerces_ambiguous_retry_when_actor_ok() -> None:
+    brain = _brain_for_process_step()
+    brain.loop = AsyncMock(return_value=True)
+    brain._verify_script_step = AsyncMock(
+        return_value=ScriptStepVerifyResult(
+            accomplished=False,
+            branch="retry",
+            target_step=None,
+            clearly_unmet=False,
+            reason="ambiguous search UI",
+        )
+    )
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 2
+    brain._verify_script_step.assert_awaited_once()
+    assert brain._verify_script_step.await_args.kwargs["actor_succeeded"] is True
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "completed"
+    assert metadata["verify"]["branch"] == "advance"
+    assert metadata["verify"]["accomplished"] is True
+    assert metadata["verify"]["clearly_unmet"] is False
+
+
+@pytest.mark.asyncio
+async def test_process_step_keeps_clearly_unmet_retry_when_actor_ok() -> None:
+    brain = _brain_for_process_step()
+    brain.loop = AsyncMock(return_value=True)
+    brain._verify_script_step = AsyncMock(
+        return_value=ScriptStepVerifyResult(
+            accomplished=False,
+            branch="retry",
+            target_step=None,
+            clearly_unmet=True,
+            reason="calculator still closed",
+        )
+    )
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 1
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "verify_failed"
+    assert metadata["verify"]["branch"] == "retry"
+    assert metadata["verify"]["clearly_unmet"] is True
+    assert metadata["verify"]["accomplished"] is False
 
 
 def test_parse_verify_result_uses_last_json_object() -> None:

@@ -88,21 +88,29 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "prompt": (
                 "You are verifying whether the current scripted task step is satisfied in the screenshot. "
                 "You will see the full numbered script and which step is current.\n\n"
-                "ExpectedOutcome (recorded success criterion; may be empty):\n{expected_outcome}\n"
+                "ExpectedOutcome (recorded success criterion; may be empty):\n{expected_outcome}\n\n"
+                "ActorSucceeded (actor finished this step with tools ok): {actor_succeeded}\n"
             ),
             "instructions": [
-                "Decide if the current step goal is actually accomplished on screen based on visible UI and text.",
+                "Scan every monitor in the screenshot(s). Overlays, menus, and dialogs may appear on only one display.",
                 "When ExpectedOutcome is provided and not '(none)', treat it as the primary success criterion; the step instruction describes the action that was attempted.",
+                "Mark accomplished true when the screenshot shows positive evidence that ExpectedOutcome holds (or, if ExpectedOutcome is '(none)', that the step goal's visible effect holds).",
+                "For outcomes like search/Start interface open (搜尋介面已開啟): treat as met when the Search/Start flyout, results panel, or equivalent overlay is visible — not merely when the taskbar search box or magnifying-glass glyph is present.",
+                "Do not require extra focus, hover, or 'fully opened' conditions beyond what ExpectedOutcome states. If the described UI result is already visible, accomplished is true.",
+                "Prefer visible positive evidence over inferring that a click or move did not happen.",
                 "NumberedScript lists every line with its recorded expected outcome after '| expected:'. Use those prior outcomes to decide recovery.",
-                'Return strict JSON only (no markdown), single object with keys: accomplished (bool), branch (string), target_step (number or null), reason (string).',
+                'Return strict JSON only (no markdown), single object with keys: accomplished (bool), branch (string), target_step (number or null), clearly_unmet (bool), reason (string).',
                 "branch must be one of: advance, retry, skip, goto.",
                 "Use branch advance only when accomplished is true (move to next script line).",
-                "When accomplished is false: retry only if this step's target is still on screen (or prior lines' expected outcomes still hold) but this step's outcome is not met.",
+                "Set clearly_unmet true only when ExpectedOutcome (or the step goal, if no outcome) is visibly contradicted by the screenshot. If uncertain or evidence is weak, set clearly_unmet false.",
+                "When ActorSucceeded is true: prefer accomplished true and branch advance unless the outcome is clearly unmet. Do not choose retry on doubt, ambiguity, or missing secondary cues. Use retry only when clearly_unmet is true and the step target is still available.",
+                "When ActorSucceeded is false: use retry/goto/skip for recovery as needed; still set clearly_unmet honestly from the screenshot.",
+                "When accomplished is false: retry only if clearly_unmet is true and this step's target is still on screen (or prior lines' expected outcomes still hold) but this step's outcome is not met.",
                 "Use goto when a prior step's expected outcome is no longer true and this step cannot succeed from the current UI. Jump to the latest such prior line (target_step = that 1-based number).",
                 "If the current step names an on-screen target that is not visible, do not retry. If an earlier line's expected outcome would bring that target back, goto that line.",
                 "Use skip to abandon this line and move to the next when the line is irrelevant or impossible even after restoring prior UI.",
                 "For goto, target_step must be the line number shown before each script line (1 to N). Set target_step to null for other branches.",
-                "Do not invent UI elements; base conclusions on the image, ExpectedOutcome, and script text only.",
+                "Do not invent UI elements; base conclusions on the image, ExpectedOutcome, ActorSucceeded, and script text only.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
         }

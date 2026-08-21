@@ -18,6 +18,7 @@ from src.common.io_utils import append_text, write_json
 from src.common.run_state import unique_run_folder_name
 from src.common.settings import load_settings
 from src.eye.capture import resolve_monitor_index
+from src.recorder.focus_point import resolve_typing_screen_xy
 from src.recorder.models import (
     RecordedEvent,
     SessionManifest,
@@ -987,15 +988,24 @@ class RecordingSession:
         text_index: int,
         x: int,
         y: int,
-    ) -> None:
-        """Capture the OCR-only post-typing frame before the next pointer shot."""
+    ) -> tuple[str, int, tuple[int, int]] | None:
+        """Capture the OCR-only post-typing frame at the typing focus point."""
         dest = screenshot_path_for_event_end(run_dir, text_index)
         if dest.is_file():
-            return
+            try:
+                mon_idx, left, top, _, _ = _monitor_at_point(x, y)
+                return str(dest), mon_idx, (left, top)
+            except Exception:
+                return str(dest), 0, (0, 0)
         try:
-            _capture_screenshot_at_point(x, y, dest)
+            return self._capture_immediate_screenshot(
+                run_dir,
+                text_index,
+                (x, y),
+                dest=dest,
+            )
         except Exception:
-            return
+            return None
 
     def _flush_pending_text_input(
         self,
@@ -1015,34 +1025,28 @@ class RecordingSession:
             return
 
         shot_xy = meta.get("cursor_xy")
-        try:
-            pos = pyautogui.position()
-            shot_xy = (int(pos.x), int(pos.y))
-        except Exception:
-            pass
-
         index = int(meta["index"])
+
+        # OCR / after-frame for typing must be on the typing focus monitor, not the
+        # next pointer event's monitor (which can be a different display).
         end_shot_path = ""
         end_mon_idx: int | None = None
         end_mon_offset: tuple[int, int] | None = None
-        if shared_end_index is not None:
+        if shot_xy is not None:
+            ocr_shot = self._capture_typing_ocr_end_shot(
+                run_dir,
+                index,
+                int(shot_xy[0]),
+                int(shot_xy[1]),
+            )
+            if ocr_shot is not None:
+                end_shot_path, end_mon_idx, end_mon_offset = ocr_shot
+
+        # Optional shared next-action path is only a fallback when OCR end capture failed.
+        if not end_shot_path and shared_end_index is not None:
             end_shot_path = str(screenshot_path_for_event(run_dir, shared_end_index))
             end_mon_idx = shared_end_monitor
             end_mon_offset = shared_end_offset
-        elif shot_xy is not None:
-            end_shot_path, end_mon_idx, end_mon_offset = self._capture_immediate_screenshot(
-                run_dir,
-                index,
-                shot_xy,
-                dest=screenshot_path_for_event_end(run_dir, index),
-            )
-
-        ocr_dest = screenshot_path_for_event_end(run_dir, index)
-        if not ocr_dest.is_file() and shot_xy is not None:
-            try:
-                _capture_screenshot_at_point(shot_xy[0], shot_xy[1], ocr_dest)
-            except Exception:
-                pass
 
         self._queue_event(
             _QueuedEvent(
@@ -1057,7 +1061,7 @@ class RecordingSession:
                 end_monitor_index=end_mon_idx,
                 end_monitor_offset=end_mon_offset,
                 text="".join(chars),
-                anchor_click_xy=meta.get("anchor_click_xy"),
+                anchor_click_xy=None,
             )
         )
 
@@ -1068,35 +1072,44 @@ class RecordingSession:
         timestamp_utc: str | None = None,
     ) -> None:
         """Reserve the text-input event and capture the before-first-key screenshot."""
+        mouse_xy = cursor_xy
+        try:
+            pos = pyautogui.position()
+            mouse_xy = (int(pos.x), int(pos.y))
+        except Exception:
+            pass
         with self._lock:
             run_dir = self._run_dir
             if run_dir is None:
                 return
+            last_click_xy = self._last_pointer_cursor_xy
             index = self._next_index
             self._next_index += 1
             self._pending_text_chars = []
             self._pending_text_caret = 0
+
+        focus_xy = resolve_typing_screen_xy(
+            last_click_xy=last_click_xy,
+            mouse_xy=mouse_xy,
+        )
+        with self._lock:
+            if self._run_dir is None:
+                return
             self._pending_text_meta = {
                 "index": index,
-                "cursor_xy": cursor_xy,
-                "anchor_click_xy": self._last_pointer_cursor_xy,
+                "cursor_xy": focus_xy,
+                "anchor_click_xy": None,
                 "timestamp_utc": timestamp_utc or utc_now_iso(),
             }
 
-        shot_xy = cursor_xy
-        try:
-            pos = pyautogui.position()
-            shot_xy = (int(pos.x), int(pos.y))
-        except Exception:
-            pass
         shot_path = ""
         mon_idx: int | None = None
         mon_offset: tuple[int, int] | None = None
-        if shot_xy is not None:
+        if focus_xy is not None:
             shot_path, mon_idx, mon_offset = self._capture_immediate_screenshot(
                 run_dir,
                 index,
-                shot_xy,
+                focus_xy,
             )
         with self._lock:
             meta = self._pending_text_meta
@@ -1647,7 +1660,14 @@ class RecordingSession:
             and has_pending_text
             and text_meta is not None
         ):
-            self._capture_typing_ocr_end_shot(run_dir, int(text_meta["index"]), ix, iy)
+            focus_xy = text_meta.get("cursor_xy")
+            if isinstance(focus_xy, (tuple, list)) and len(focus_xy) == 2:
+                self._capture_typing_ocr_end_shot(
+                    run_dir,
+                    int(text_meta["index"]),
+                    int(focus_xy[0]),
+                    int(focus_xy[1]),
+                )
         if run_dir is not None:
             self._capture_pending_left_press(run_dir, ix, iy)
 
@@ -1695,7 +1715,14 @@ class RecordingSession:
             and has_pending_text
             and text_meta is not None
         ):
-            self._capture_typing_ocr_end_shot(run_dir, int(text_meta["index"]), ix, iy)
+            focus_xy = text_meta.get("cursor_xy")
+            if isinstance(focus_xy, (tuple, list)) and len(focus_xy) == 2:
+                self._capture_typing_ocr_end_shot(
+                    run_dir,
+                    int(text_meta["index"]),
+                    int(focus_xy[0]),
+                    int(focus_xy[1]),
+                )
         if run_dir is not None:
             self._capture_pending_right_press(run_dir, ix, iy)
 

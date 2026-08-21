@@ -5,7 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from src.recorder.models import RecordedEvent
+from src.recorder.models import RecordedEvent, screenshot_path_for_event_end
 from src.recorder.vision_context import (
     _global_to_local,
     _global_to_local_end,
@@ -40,7 +40,7 @@ async def resolve_text_input_text(
 ) -> dict[str, Any]:
     """Resolve typing text, preferring recorded keystrokes; OCR kept as alternate."""
     recorded_text = event.text or ""
-    anchor = event.anchor_click_xy or event.cursor_xy
+    anchor = event.cursor_xy or event.anchor_click_xy
     if anchor is None:
         return {
             "text": recorded_text,
@@ -48,19 +48,30 @@ async def resolve_text_input_text(
             "ocr_text": None,
             "source": "recorded",
             "meaningful": None,
-            "reason": "vision unavailable: no anchor or cursor coordinates",
+            "reason": "vision unavailable: no cursor or anchor coordinates",
             "vision": None,
         }
 
-    use_after = resolve_event_screenshot_path(event, run_dir, debug_name="_end") is not None
-    if use_after:
-        local = _global_to_local_end(event, anchor)
+    # Prefer the dedicated typing end frame (captured at focus on the typing monitor).
+    # Shared next-action screenshots can be on another monitor and break OCR anchoring.
+    typing_end = screenshot_path_for_event_end(run_dir, event.index)
+    if typing_end.is_file():
+        local = _global_to_local(event, anchor)
         debug_name = "_end"
         ocr_reason = "after-screenshot OCR"
+        ocr_image_path = str(typing_end)
     else:
-        local = _global_to_local(event, anchor)
-        debug_name = None
-        ocr_reason = "vision-first OCR"
+        use_after = resolve_event_screenshot_path(event, run_dir, debug_name="_end") is not None
+        if use_after:
+            local = _global_to_local_end(event, anchor)
+            debug_name = "_end"
+            ocr_reason = "after-screenshot OCR"
+            ocr_image_path = None
+        else:
+            local = _global_to_local(event, anchor)
+            debug_name = None
+            ocr_reason = "vision-first OCR"
+            ocr_image_path = None
 
     vision = build_vision_context_at_point(
         event,
@@ -70,6 +81,7 @@ async def resolve_text_input_text(
         persist_debug=True,
         reference_xy=anchor,
         debug_name=debug_name,
+        image_path=ocr_image_path,
     )
     bgr = vision.pop("bgr", None)
     all_detections = vision.pop("all_detections", [])
@@ -81,9 +93,10 @@ async def resolve_text_input_text(
             ocr_text = cleaned or None
 
     vision_for_llm = _vision_for_llm(vision)
+    used_after = debug_name == "_end"
     if recorded_text:
         if log_info is not None:
-            shot_label = "after" if use_after else "before"
+            shot_label = "after" if used_after else "before"
             log_info(
                 f"resolve_text_input_text event={event.index} "
                 f"shot={shot_label} recorded={recorded_text!r} ocr={ocr_text!r} "
@@ -105,7 +118,7 @@ async def resolve_text_input_text(
 
     if ocr_text:
         if log_info is not None:
-            shot_label = "after" if use_after else "before"
+            shot_label = "after" if used_after else "before"
             log_info(
                 f"resolve_text_input_text event={event.index} "
                 f"shot={shot_label} recorded={recorded_text!r} resolved={ocr_text!r}"

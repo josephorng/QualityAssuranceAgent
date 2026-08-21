@@ -35,12 +35,23 @@ def _default_capture_window_patches():
         def join(self, timeout: float | None = None) -> None:
             return None
 
+    def _fake_resolve_typing_screen_xy(
+        *,
+        last_click_xy=None,
+        mouse_xy=None,
+        **_kwargs,
+    ):
+        return last_click_xy or mouse_xy
+
     with patch("src.recorder.capture.mouse.Listener", DummyListener), patch(
         "src.recorder.capture.keyboard.Listener",
         DummyListener,
     ), patch("src.recorder.capture.snapshot_top_level_windows", return_value=[]), patch(
         "src.recorder.capture.settle_delay_for_click",
         return_value=0.0,
+    ), patch(
+        "src.recorder.capture.resolve_typing_screen_xy",
+        side_effect=_fake_resolve_typing_screen_xy,
     ):
         yield
 
@@ -801,15 +812,30 @@ def test_left_click_uses_press_time_screenshot(tmp_path) -> None:
     assert (run_dir / "screenshots" / "event_001.jpeg").is_file()
 
 
-def test_text_input_end_matches_next_click_before(tmp_path) -> None:
+def test_text_input_end_uses_typing_focus_end_shot(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
+    ocr_points: list[tuple[int, int]] = []
+
+    def _track(x: int, y: int, dest):
+        name = Path(dest).name
+        if name.endswith("_end.jpeg"):
+            ocr_points.append((x, y))
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"fake")
+        return str(dest), 1, (1920, -1)
 
     with _default_capture_window_patches(), patch(
         "src.recorder.capture.pyautogui.position",
         return_value=type("P", (), {"x": 100, "y": 100})(),
     ), patch(
+        "src.recorder.capture.resolve_typing_screen_xy",
+        return_value=(2416, 240),
+    ), patch(
         "src.recorder.capture._capture_screenshot_at_point",
-        side_effect=_mock_screenshot,
+        side_effect=_track,
+    ), patch(
+        "src.recorder.capture._monitor_at_point",
+        return_value=(1, 1920, -1, 1920, 1080),
     ):
         run_dir = session.start()
         try:
@@ -825,9 +851,12 @@ def test_text_input_end_matches_next_click_before(tmp_path) -> None:
     click_raw = json.loads((run_dir / "events" / "event_002.json").read_text(encoding="utf-8"))
     assert text_raw["kind"] == "text_input"
     assert click_raw["kind"] == "click"
-    assert text_raw["end_screenshot_path"] == click_raw["screenshot_path"]
+    assert text_raw["end_screenshot_path"].endswith("event_001_end.jpeg")
+    assert text_raw["end_monitor_offset"] == [1920, -1]
+    assert text_raw["cursor_xy"] == [2416, 240]
     assert (run_dir / "screenshots" / "event_001_end.jpeg").is_file()
-    assert (run_dir / "screenshots" / "event_002.jpeg").is_file()
+    assert ocr_points
+    assert ocr_points[0] == (2416, 240)
 
 
 def test_text_input_stores_before_on_first_key_and_after_on_flush(tmp_path) -> None:
@@ -866,17 +895,22 @@ def test_text_input_stores_before_on_first_key_and_after_on_flush(tmp_path) -> N
     assert raw["end_screenshot_path"].endswith("event_001_end.jpeg")
 
 
-def test_text_input_stores_anchor_click_xy_after_pointer_event(tmp_path) -> None:
+def test_text_input_uses_focus_point_not_anchor_click(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
 
-    with _default_capture_window_patches(), patch("src.recorder.capture.pyautogui.position", return_value=type("P", (), {"x": 100, "y": 100})()), patch(
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
         "src.recorder.capture._capture_screenshot_at_point",
         side_effect=_mock_screenshot,
-    ):
+    ), patch(
+        "src.recorder.capture.resolve_typing_screen_xy",
+        return_value=(555, 666),
+    ) as resolve_mock:
         run_dir = session.start()
         try:
             from pynput.keyboard import Key, KeyCode
-            from pynput.mouse import Button
 
             _left_click(session, 400, 300)
             session._on_key_press(KeyCode.from_char("a"))
@@ -886,7 +920,10 @@ def test_text_input_stores_anchor_click_xy_after_pointer_event(tmp_path) -> None
 
     text_event = json.loads((run_dir / "events" / "event_002.json").read_text(encoding="utf-8"))
     assert text_event["kind"] == "text_input"
-    assert text_event["anchor_click_xy"] == [400, 300]
+    assert text_event["cursor_xy"] == [555, 666]
+    assert text_event["anchor_click_xy"] is None
+    resolve_mock.assert_called()
+    assert resolve_mock.call_args.kwargs["last_click_xy"] == (400, 300)
 
 
 def test_pointer_click_persists_window_change(tmp_path) -> None:

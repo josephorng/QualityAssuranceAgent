@@ -172,6 +172,46 @@ async def test_resolve_text_input_uses_after_screenshot_for_ocr(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_resolve_text_input_prefers_cursor_xy_over_anchor(
+    tmp_path,
+) -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="text_input",
+        text="typed",
+        cursor_xy=(50, 60),
+        anchor_click_xy=(110, 210),
+        monitor_offset=(0, 0),
+        screenshot_path="",
+    )
+    fake_vision = {
+        "used_vision": True,
+        "candidate_text": "candidate",
+        "local_cursor": (50, 60),
+        "candidates": [],
+        "detection_count": 1,
+        "bgr": np.zeros((100, 100, 3), dtype=np.uint8),
+        "all_detections": [
+            _detection_from_bbox((8, 8, 10, 10), YOLO_CLASS_TEXT, text="typed"),
+        ],
+    }
+    with patch(
+        "src.recorder.text_resolve.build_vision_context_at_point",
+        return_value=fake_vision,
+    ) as build_mock, patch(
+        "src.recorder.text_resolve.extract_nearest_text",
+        return_value="typed",
+    ):
+        resolved = await resolve_text_input_text(event, run_dir=tmp_path)
+
+    assert resolved["text"] == "typed"
+    assert build_mock.call_args.kwargs["reference_xy"] == (50, 60)
+    assert build_mock.call_args.kwargs["local_x"] == 50
+    assert build_mock.call_args.kwargs["local_y"] == 60
+
+
+@pytest.mark.asyncio
 async def test_resolve_text_input_keeps_ocr_alternate_with_anchor(
     tmp_path,
 ) -> None:

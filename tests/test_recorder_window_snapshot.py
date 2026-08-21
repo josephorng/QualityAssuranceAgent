@@ -482,6 +482,24 @@ def test_click_hits_caption_buttons_uses_stored_and_fallback_bounds() -> None:
     assert not click_hits_caption_buttons((100, 10), fallback)
 
 
+def test_click_hits_caption_buttons_includes_bottom_right_edge() -> None:
+    """Clicks on DWM rect edges must count (exclusive < bottom missed real X clicks)."""
+    win = _win(
+        1773306,
+        "OANDA Lab - Google Chrome",
+        left=1912,
+        top=-9,
+        width=1936,
+        height=1048,
+        is_maximized=True,
+        caption_button_bounds=(3693, -9, 3839, 21),
+    )
+    assert click_hits_caption_buttons((3814, 21), win)  # y == bottom
+    assert click_hits_caption_buttons((3839, 21), win)  # right+bottom corner
+    assert not click_hits_caption_buttons((3814, 22), win)
+    assert not click_hits_caption_buttons((3840, 21), win)
+
+
 def test_format_hint_notes_non_caption_close() -> None:
     assert format_window_change_hint(
         {

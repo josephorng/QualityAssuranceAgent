@@ -213,7 +213,10 @@ def click_hits_caption_buttons(
         return False
     x, y = int(click_xy[0]), int(click_xy[1])
     left, top, right, bottom = bounds
-    return left <= x < right and top <= y < bottom
+    # Inclusive on all edges: DWM caption rects are often tight/exclusive on
+    # bottom-right, and recorded clicks can land exactly on that boundary
+    # (e.g. y == bottom) while still hitting the real title-bar X.
+    return left <= x <= right and top <= y <= bottom
 
 
 def _title_bar_height(win: WindowInfo) -> int:

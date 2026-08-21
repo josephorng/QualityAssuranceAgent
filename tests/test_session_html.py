@@ -713,6 +713,8 @@ def test_write_runs_index_includes_report_json_summary(tmp_path: Path) -> None:
     assert 'data-sort="95.4"' in html
     assert "點選欄位標題可排序" in html
     assert "sortable" in html
+    assert '預設依時間由新到舊' in html
+    assert 'isTimeColumn' in html
     assert 'class="delete-run"' in html
     assert 'class="bug-run"' in html
     assert 'class="select-run"' in html

@@ -1515,6 +1515,25 @@ _INDEX_SCRIPT = """
       return sortAsc ? cmp : -cmp;
     }
 
+    function applySort(col, ascending) {
+      var th = headers[col];
+      if (!th || th.classList.contains("no-sort")) return;
+      var type = th.getAttribute("data-type") || "text";
+      sortCol = col;
+      sortAsc = ascending;
+      headers.forEach(function (header) {
+        header.removeAttribute("aria-sort");
+      });
+      th.setAttribute("aria-sort", sortAsc ? "ascending" : "descending");
+      var rows = Array.prototype.slice.call(tbody.rows);
+      rows.sort(function (a, b) { return compareRows(a, b, type); });
+      rows.forEach(function (row) { tbody.appendChild(row); });
+    }
+
+    function isTimeColumn(th) {
+      return (th.textContent || "").trim() === "時間";
+    }
+
     headers.forEach(function (th, col) {
       if (th.classList.contains("no-sort")) return;
       th.classList.add("sortable");
@@ -1523,20 +1542,12 @@ _INDEX_SCRIPT = """
       th.setAttribute("title", "點選排序");
 
       function sortByColumn() {
-        var type = th.getAttribute("data-type") || "text";
         if (sortCol === col) {
-          sortAsc = !sortAsc;
+          applySort(col, !sortAsc);
         } else {
-          sortCol = col;
-          sortAsc = true;
+          // 時間：預設新→舊；其他欄位：預設升冪
+          applySort(col, !isTimeColumn(th));
         }
-        headers.forEach(function (header) {
-          header.removeAttribute("aria-sort");
-        });
-        th.setAttribute("aria-sort", sortAsc ? "ascending" : "descending");
-        var rows = Array.prototype.slice.call(tbody.rows);
-        rows.sort(function (a, b) { return compareRows(a, b, type); });
-        rows.forEach(function (row) { tbody.appendChild(row); });
       }
 
       th.addEventListener("click", sortByColumn);
@@ -1547,6 +1558,17 @@ _INDEX_SCRIPT = """
         }
       });
     });
+
+    // 預設依時間由新到舊
+    var defaultTimeCol = -1;
+    headers.forEach(function (th, col) {
+      if (!th.classList.contains("no-sort") && isTimeColumn(th)) {
+        defaultTimeCol = col;
+      }
+    });
+    if (defaultTimeCol >= 0) {
+      applySort(defaultTimeCol, false);
+    }
 
     function introHelpText(count) {
       if (kind === "recordings") {

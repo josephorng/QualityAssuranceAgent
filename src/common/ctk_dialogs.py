@@ -140,14 +140,22 @@ def prompt_script_continue_or_end(
     return bool(result["continue"])
 
 
-def prompt_append_recording_instructions(master: Any, message: str) -> str:
+def prompt_append_recording_instructions(
+    master: Any,
+    message: str,
+    *,
+    folder_name: str = "",
+    allow_append: bool = True,
+) -> tuple[str, str]:
     """Ask what to do with generated recording instructions.
 
-    Returns ``append``, ``open_review``, or ``close`` (closing the dialog counts as close).
+    Returns ``(choice, folder_name)``. ``choice`` is ``append``, ``open_review``,
+    or ``close`` (closing the dialog counts as close). ``folder_name`` is the
+    trimmed value from the recording-folder field (may be empty).
     """
     import customtkinter as ctk
 
-    result = {"choice": "close"}
+    result: dict[str, str] = {"choice": "close", "folder_name": folder_name.strip()}
 
     dialog = ctk.CTkToplevel(master)
     dialog.title("錄製分析完成")
@@ -168,28 +176,60 @@ def prompt_append_recording_instructions(master: Any, message: str) -> str:
         wraplength=420,
         justify="left",
         font=ctk.CTkFont(size=14),
-    ).pack(anchor="w", pady=(0, 18))
+    ).pack(anchor="w", pady=(0, 14))
+
+    ctk.CTkLabel(
+        master=inner,
+        text="錄製資料夾名稱",
+        font=ctk.CTkFont(size=13),
+        text_color=("gray30", "gray70"),
+    ).pack(anchor="w", pady=(0, 6))
+    name_entry = ctk.CTkEntry(
+        master=inner,
+        width=420,
+        height=36,
+        font=ctk.CTkFont(size=14),
+        placeholder_text="例如：開啟神網",
+    )
+    name_entry.pack(fill="x", pady=(0, 18))
+    if folder_name.strip():
+        name_entry.insert(0, folder_name.strip())
 
     btn_row = ctk.CTkFrame(inner, fg_color="transparent")
     btn_row.pack()
 
-    def on_append() -> None:
-        result["choice"] = "append"
+    def _finish(choice: str) -> None:
+        name = name_entry.get().strip()
+        original = folder_name.strip()
+        if name and name != original:
+            illegal = '\\/:*?"<>|'
+            if name in {".", ".."} or any(ch in name for ch in illegal) or len(name) > 191:
+                show_ctk_message(
+                    dialog,
+                    "錄製分析完成",
+                    '資料夾名稱無效（不可為 . 或 ..，也不可含 \\ / : * ? " < > |）。',
+                    kind="warning",
+                )
+                return
+        result["choice"] = choice
+        result["folder_name"] = name
         dialog.destroy()
+
+    def on_append() -> None:
+        _finish("append")
 
     def on_open_review() -> None:
-        result["choice"] = "open_review"
-        dialog.destroy()
+        _finish("open_review")
 
     def on_close() -> None:
-        result["choice"] = "close"
-        dialog.destroy()
+        _finish("close")
 
     dialog.protocol("WM_DELETE_WINDOW", on_close)
 
-    ctk.CTkButton(
-        master=btn_row, text="加入腳本", width=120, height=36, command=on_append
-    ).pack(side="left", padx=(0, 10))
+    if allow_append:
+        ctk.CTkButton(
+            master=btn_row, text="加入腳本", width=120, height=36, command=on_append
+        ).pack(side="left", padx=(0, 10))
     ctk.CTkButton(
         master=btn_row, text="開啟錄製紀錄", width=140, height=36, command=on_open_review
     ).pack(side="left", padx=(0, 10))
@@ -202,6 +242,15 @@ def prompt_append_recording_instructions(master: Any, message: str) -> str:
     except Exception:
         pass
 
+    def _focus_name() -> None:
+        name_entry.focus_set()
+        try:
+            name_entry.select_range(0, "end")
+        except Exception:
+            pass
+
+    dialog.after(80, _focus_name)
+
     dialog.update_idletasks()
     w, h = dialog.winfo_reqwidth(), dialog.winfo_reqheight()
     sw, sh = dialog.winfo_screenwidth(), dialog.winfo_screenheight()
@@ -210,7 +259,9 @@ def prompt_append_recording_instructions(master: Any, message: str) -> str:
     root = master.winfo_toplevel()
     root.wait_window(dialog)
     choice = result["choice"]
-    return choice if choice in ("append", "open_review", "close") else "close"
+    if choice not in ("append", "open_review", "close"):
+        choice = "close"
+    return choice, result.get("folder_name", "")
 
 
 def prompt_unsaved_script_changes(

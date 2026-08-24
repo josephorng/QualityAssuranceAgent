@@ -35,7 +35,11 @@ from src.common.run_control import (
 )
 from src.common.run_state import get_run_state_manager, unique_run_folder_name
 from src.common.session_html import write_runs_index_html
-from src.common.runs_report_server import ensure_runs_report_server, stop_runs_report_server
+from src.common.runs_report_server import (
+    ensure_runs_report_server,
+    rename_recording_folder,
+    stop_runs_report_server,
+)
 from src.common.session_report import should_write_session_report, write_session_report
 from src.common.runtime_command_dialog import (
     RuntimeCommandHubBridge,
@@ -76,6 +80,35 @@ _HUB_UI_VERSION = 3
 _MODE_TAB_SINGLE = "單一腳本"
 _MODE_TAB_QUEUE = "佇列執行"
 _MODE_TAB_SMART = "智能模式"
+
+_RECORDING_FOLDER_RENAME_ERRORS = {
+    "invalid run name": "資料夾名稱無效（不可為空白，也不可含 \\ / : * ? \" < > |）。",
+    "a folder with that name already exists": "已有相同名稱的資料夾。",
+    "run folder not found": "找不到錄製資料夾。",
+    "invalid run id": "找不到錄製資料夾。",
+    "name must be a string": "資料夾名稱無效。",
+}
+
+
+def _recording_folder_rename_error_text(exc: BaseException) -> str:
+    text = str(exc).strip()
+    return _RECORDING_FOLDER_RENAME_ERRORS.get(text, f"無法重新命名資料夾：{text}")
+
+
+def _resolved_path_key(path: Path) -> str:
+    try:
+        return str(Path(path).resolve())
+    except OSError:
+        return str(path)
+
+
+def _path_is_recording_folder(path: Path, folder_key: str) -> bool:
+    """True when ``path`` is the recording folder (or legacy script.txt inside it)."""
+    key = _resolved_path_key(path)
+    if key == folder_key:
+        return True
+    resolved = Path(key)
+    return resolved.name == "script.txt" and str(resolved.parent) == folder_key
 
 
 def _default_hub_ui_dict() -> dict[str, Any]:
@@ -2293,11 +2326,17 @@ class MainHub(ctk.CTk):
             f"已寫入快取 {cached} 筆，略過 {skipped} 筆。"
         )
         self._status.configure(text=f"已寫入快取 {cached} 筆（略過 {skipped}）。")
-        if not lines:
-            show_ctk_message(self, "錄製分析完成", msg, kind="info")
-            return
-        choice = prompt_append_recording_instructions(self, msg)
-        if choice == "append":
+        run_id_raw = report.get("run_id")
+        current_name = run_id_raw.strip() if isinstance(run_id_raw, str) else ""
+        choice, folder_name = prompt_append_recording_instructions(
+            self,
+            msg,
+            folder_name=current_name,
+            allow_append=bool(lines),
+        )
+        if current_name:
+            current_name = self._rename_recording_folder_from_dialog(current_name, folder_name)
+        if choice == "append" and lines:
             if self._is_recording_script_open():
                 # Compose into a free editor; do not bind the hub to the recording folder.
                 self._script_path = None
@@ -2310,13 +2349,72 @@ class MainHub(ctk.CTk):
             self._refresh_script_path_label()
             self._apply_script_editor_lock()
         elif choice == "open_review":
-            run_id = report.get("run_id")
-            if isinstance(run_id, str) and run_id.strip():
+            if current_name:
                 runs_root = Path(load_settings().runs_dir)
-                html_path = runs_root / run_id.strip() / "recording_steps.html"
+                html_path = runs_root / current_name / "recording_steps.html"
                 self._open_report_html(html_path)
             else:
                 show_ctk_message(self, "錄製分析完成", "找不到錄製報告路徑。", kind="warning")
+
+    def _rename_recording_folder_from_dialog(self, run_id: str, new_name: str) -> str:
+        """Rename the recording folder if the dialog name differs. Returns the effective id."""
+        cleaned = new_name.strip()
+        if not cleaned or cleaned == run_id:
+            return run_id
+        runs_root = Path(load_settings().runs_dir)
+        try:
+            result = rename_recording_folder(runs_root, run_id, cleaned)
+        except ValueError as exc:
+            show_ctk_message(
+                self,
+                "錄製分析完成",
+                _recording_folder_rename_error_text(exc),
+                kind="warning",
+            )
+            return run_id
+        except OSError as exc:
+            show_ctk_message(
+                self,
+                "錄製分析完成",
+                f"無法重新命名資料夾：{exc}",
+                kind="error",
+            )
+            return run_id
+        new_id = str(result.get("new_id") or cleaned)
+        self._retarget_recording_folder_refs(runs_root / run_id, runs_root / new_id)
+        return new_id
+
+    def _retarget_recording_folder_refs(self, old_dir: Path, new_dir: Path) -> None:
+        """Update editor/queue paths after a recording folder rename."""
+        old_key = _resolved_path_key(old_dir)
+        try:
+            new_resolved = new_dir.resolve()
+        except OSError:
+            new_resolved = new_dir
+
+        changed = False
+        if self._script_path is not None and _path_is_recording_folder(
+            self._script_path, old_key
+        ):
+            self._script_path = new_resolved
+            self._refresh_script_path_label()
+            changed = True
+
+        new_queue: list[Path] = []
+        queue_changed = False
+        for path in self._queue_paths:
+            if _path_is_recording_folder(path, old_key):
+                new_queue.append(new_resolved)
+                queue_changed = True
+            else:
+                new_queue.append(path)
+        if queue_changed:
+            self._queue_paths = new_queue
+            self._refresh_queue_list()
+            changed = True
+
+        if changed:
+            self._persist_hub_ui_state()
 
     def _begin_worker_run(self, args: _WorkerArgs) -> None:
         reset_run_control()

@@ -362,6 +362,11 @@ async def analyze_recording_session(
                         "event_index": event.index,
                         "instruction": instruction,
                         **(
+                            {"use_char_target": result["use_char_target"]}
+                            if "use_char_target" in result
+                            else {}
+                        ),
+                        **(
                             {"expected_outcome": expected_outcome}
                             if expected_outcome is not None
                             else {}

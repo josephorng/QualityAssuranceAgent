@@ -25,7 +25,7 @@ from src.recorder.vision_context import (
     select_stable_nearby_hints,
     _visible_text,
 )
-from cua_mcp.char_target import format_char_target_anchor
+from cua_mcp.char_target import format_char_target_anchor, parse_char_target_instruction
 from src.recorder.window_snapshot import format_window_change_hint, instruction_for_window_change
 
 _INSTRUCTION_RESPONSE_SCHEMA: dict[str, Any] = {
@@ -312,22 +312,49 @@ def _click_target_anchor(vision: dict[str, Any]) -> str | None:
     return anchor
 
 
+def use_char_target_enabled(
+    analysis: dict[str, Any] | None,
+    *,
+    instruction: str | None = None,
+) -> bool:
+    """Whether a click instruction should pin to the recorded character.
+
+    An explicit ``use_char_target`` field wins. Otherwise infer from an existing
+    ``「X」的「Y」字上`` phrase so older recordings keep their current wording.
+    New analysis defaults to False (parent text only).
+    """
+    if isinstance(analysis, dict) and "use_char_target" in analysis:
+        return bool(analysis.get("use_char_target"))
+    text = instruction
+    if not isinstance(text, str):
+        raw = analysis.get("instruction") if isinstance(analysis, dict) else None
+        text = raw if isinstance(raw, str) else ""
+    return parse_char_target_instruction(text) is not None
+
+
 def instruction_for_click(
     event: RecordedEvent,
     vision: dict[str, Any],
+    *,
+    use_char_target: bool = False,
 ) -> str | None:
-    """Build a hub-script click line from the nearest OCR/YOLO candidate."""
+    """Build a hub-script click line from the nearest OCR/YOLO candidate.
+
+    Character-level phrases (``「搜尋」的「搜」字上``) are opt-in via
+    ``use_char_target``. The default is the parent OCR/YOLO label.
+    """
     if event.kind not in _CLICK_POINTER_KINDS:
         return None
 
-    char_target = primary_candidate_char_target(vision)
-    if char_target is not None:
-        candidates = vision.get("candidates") or []
-        visible = _visible_text(candidates[0].get("text")) if candidates else ""
-        if visible:
-            clicked_char, occurrence = char_target
-            anchor = format_char_target_anchor(visible, clicked_char, occurrence=occurrence)
-            return f"{_CLICK_MOVE_PREFIX}{anchor}"
+    if use_char_target:
+        char_target = primary_candidate_char_target(vision)
+        if char_target is not None:
+            candidates = vision.get("candidates") or []
+            visible = _visible_text(candidates[0].get("text")) if candidates else ""
+            if visible:
+                clicked_char, occurrence = char_target
+                anchor = format_char_target_anchor(visible, clicked_char, occurrence=occurrence)
+                return f"{_CLICK_MOVE_PREFIX}{anchor}"
 
     anchor = _click_target_anchor(vision)
     if not anchor:
@@ -571,6 +598,7 @@ def rebuild_pointer_instruction(
     destination: dict[str, Any] | None = None,
     *,
     include_nearby: bool = True,
+    use_char_target: bool = False,
 ) -> str | None:
     """Rebuild a hub-script pointer instruction from ranked vision candidates.
 
@@ -589,7 +617,7 @@ def rebuild_pointer_instruction(
         return base
 
     if event.kind in _CLICK_POINTER_KINDS:
-        base = instruction_for_click(event, vision)
+        base = instruction_for_click(event, vision, use_char_target=use_char_target)
         if base is None:
             return None
         if include_nearby:
@@ -621,7 +649,7 @@ async def _instruction_result(
     destination: dict[str, Any] | None = None,
     *,
     log_info: Any = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     return {
         "instruction": await _finalize_instruction(
             instruction,
@@ -670,9 +698,12 @@ async def analyze_event_to_cache(
     if event.kind in _CLICK_POINTER_KINDS:
         click_instruction = instruction_for_click(event, vision)
         if click_instruction is not None:
-            return await _instruction_result(
+            payload = await _instruction_result(
                 click_instruction, event, vision, destination, log_info=log_info
             )
+            if primary_candidate_char_target(vision) is not None:
+                payload["use_char_target"] = False
+            return payload
 
     if event.kind == "scroll":
         scroll_instruction = instruction_for_scroll(event, vision)

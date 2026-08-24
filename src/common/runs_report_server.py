@@ -10,6 +10,7 @@ Recording expected-outcome edits POST to ``/api/runs/<id>/events/<n>/expected_ou
 Recording event deletes POST to ``/api/runs/<id>/events/<n>/delete``.
 Recording event inserts POST to ``/api/runs/<id>/events/add``.
 Recording instruction edits POST to ``/api/runs/<id>/events/<n>/instruction``.
+Recording character-target edits POST to ``/api/runs/<id>/events/<n>/char_target``.
 Recording YOLO/OCR retry POST to ``/api/runs/<id>/events/<n>/yolo_ocr``.
 Recording folder rename POST to ``/api/runs/<id>/rename``.
 """
@@ -28,8 +29,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from cua_mcp.char_target import parse_char_target_instruction
 from src.common.io_utils import read_json, write_json
-from src.common.nearby_side import NearbyHint, apply_nearby_landmarks, normalize_nearby_hints
+from src.common.nearby_side import (
+    NearbyHint,
+    apply_nearby_landmarks,
+    extract_nearby_hints_from_instruction,
+    normalize_nearby_hints,
+)
 from src.common.script_helper import collect_recording_instructions
 from src.common.session_html import (
     recording_event_json_paths,
@@ -41,6 +48,7 @@ from src.recorder.analyze import (
     instruction_for_scroll,
     instruction_for_text_input,
     rebuild_pointer_instruction,
+    use_char_target_enabled,
 )
 from src.recorder.models import (
     POINTER_EVENT_KINDS,
@@ -54,6 +62,7 @@ from src.recorder.vision_context import (
     drag_end_vision,
     drag_end_yolo_suffix,
     format_drag_candidate_anchor,
+    primary_candidate_char_target,
     reorder_yolo_ocr_primary,
     run_pointer_event_yolo_ocr,
     vision_from_yolo_ocr,
@@ -80,6 +89,9 @@ _EVENT_EXPECTED_OUTCOME_PATH_RE = re.compile(
 _EVENT_INSTRUCTION_PATH_RE = re.compile(
     r"^/api/runs/([^/]+)/events/(\d+)/instruction/?$"
 )
+_EVENT_CHAR_TARGET_PATH_RE = re.compile(
+    r"^/api/runs/([^/]+)/events/(\d+)/char_target/?$"
+)
 _EVENT_YOLO_OCR_PATH_RE = re.compile(
     r"^/api/runs/([^/]+)/events/(\d+)/yolo_ocr/?$"
 )
@@ -98,6 +110,16 @@ _ADDABLE_EVENT_KINDS = frozenset(
         "scroll",
         "wait",
         "manual",
+    }
+)
+_CHAR_TARGET_EVENT_KINDS = frozenset(
+    {
+        "click",
+        "double_click",
+        "triple_click",
+        "right_click",
+        "middle_click",
+        "hold",
     }
 )
 
@@ -851,6 +873,7 @@ def apply_recording_event_landmarks(
             vision,
             destination,
             include_nearby=False,
+            use_char_target=use_char_target_enabled(analysis),
         )
         if not rebuilt_instruction:
             raise ValueError("unable to rebuild instruction for selected target")
@@ -1041,6 +1064,7 @@ def apply_recording_event_instruction(
         analysis = {"event_index": event_index}
 
     analysis["instruction"] = cleaned
+    analysis["use_char_target"] = parse_char_target_instruction(cleaned) is not None
     write_json(analysis_path, analysis)
 
     report_path = run_dir / "report.json"
@@ -1051,7 +1075,83 @@ def apply_recording_event_instruction(
     write_json(report_path, report)
 
     write_recording_html_from_run(run_dir, update_index=False)
-    return {"instruction": cleaned}
+    return {
+        "instruction": cleaned,
+        "use_char_target": analysis["use_char_target"],
+    }
+
+
+def apply_recording_event_char_target(
+    runs_root: Path,
+    run_id: str,
+    event_index: int,
+    *,
+    use_char_target: Any,
+) -> dict[str, Any]:
+    """Rebuild one click instruction with or without the recorded character.
+
+    Returns ``{"instruction": ..., "use_char_target": bool}``.
+    Raises ``ValueError`` for invalid input.
+    """
+    if not isinstance(use_char_target, bool):
+        raise ValueError("use_char_target must be a boolean")
+
+    run_dir = resolve_deletable_run_folder(runs_root, run_id)
+    if not isinstance(event_index, int) or event_index < 1:
+        raise ValueError("invalid event index")
+
+    kind = _load_recording_event_kind(run_dir, event_index)
+    if kind not in _CHAR_TARGET_EVENT_KINDS:
+        raise ValueError("event does not support character targeting")
+
+    analysis_path = run_dir / "analysis" / f"event_{event_index:03d}.json"
+    analysis = read_json(analysis_path, None)
+    if not isinstance(analysis, dict):
+        raise ValueError("analysis not found")
+
+    event_path = event_json_path(run_dir, event_index)
+    event_payload = read_json(event_path, None)
+    if not isinstance(event_payload, dict):
+        raise ValueError("event not found")
+    event = RecordedEvent.from_dict(event_payload)
+
+    vision = vision_from_yolo_ocr(run_dir, event_index, suffix="")
+    if primary_candidate_char_target(vision) is None:
+        raise ValueError("clicked character is not available")
+
+    rebuilt = rebuild_pointer_instruction(
+        event,
+        vision,
+        None,
+        include_nearby=False,
+        use_char_target=use_char_target,
+    )
+    if not rebuilt:
+        raise ValueError("unable to rebuild instruction for character target")
+
+    landmarks_payload = analysis.get("landmarks")
+    if isinstance(landmarks_payload, dict):
+        start_hints = _hints_from_selected_payload(landmarks_payload.get("selected"))
+    else:
+        current = analysis.get("instruction")
+        start_hints = extract_nearby_hints_from_instruction(
+            current if isinstance(current, str) else ""
+        )
+
+    new_instruction = apply_nearby_landmarks(rebuilt, start_hints, kind=kind)
+    analysis["instruction"] = new_instruction
+    analysis["use_char_target"] = use_char_target
+    write_json(analysis_path, analysis)
+
+    report_path = run_dir / "report.json"
+    report = read_json(report_path, {})
+    if not isinstance(report, dict):
+        report = {}
+    _rebuild_report_instructions(run_dir, report)
+    write_json(report_path, report)
+
+    write_recording_html_from_run(run_dir, update_index=False)
+    return {"instruction": new_instruction, "use_char_target": use_char_target}
 
 
 def rerun_recording_event_yolo_ocr(
@@ -1077,6 +1177,12 @@ def rerun_recording_event_yolo_ocr(
     if event.kind not in POINTER_EVENT_KINDS:
         raise ValueError("event does not support YOLO/OCR")
 
+    analysis_path = run_dir / "analysis" / f"event_{event_index:03d}.json"
+    analysis = read_json(analysis_path, None)
+    if not isinstance(analysis, dict):
+        analysis = {"event_index": event_index}
+    use_char_target = use_char_target_enabled(analysis)
+
     vision = run_pointer_event_yolo_ocr(event, run_dir=run_dir, persist_debug=True)
     yolo_error = vision.get("yolo_error")
     if yolo_error:
@@ -1095,20 +1201,21 @@ def rerun_recording_event_yolo_ocr(
         vision,
         destination,
         include_nearby=True,
+        use_char_target=use_char_target,
     )
     if not rebuilt:
         raise RuntimeError("已寫入 YOLO/OCR，但無法自動重建指令。")
 
-    analysis_path = run_dir / "analysis" / f"event_{event_index:03d}.json"
-    analysis = read_json(analysis_path, None)
-    if not isinstance(analysis, dict):
-        analysis = {"event_index": event_index}
     analysis["instruction"] = rebuilt
     analysis["vision"] = {
         "used_vision": vision.get("used_vision"),
         "candidate_text": vision.get("candidate_text"),
     }
     analysis.pop("landmarks", None)
+    if primary_candidate_char_target(vision) is not None:
+        analysis["use_char_target"] = use_char_target
+    else:
+        analysis.pop("use_char_target", None)
     write_json(analysis_path, analysis)
 
     report_path = run_dir / "report.json"
@@ -1185,6 +1292,7 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
             event_text_match = _EVENT_TEXT_PATH_RE.fullmatch(path)
             event_outcome_match = _EVENT_EXPECTED_OUTCOME_PATH_RE.fullmatch(path)
             event_instruction_match = _EVENT_INSTRUCTION_PATH_RE.fullmatch(path)
+            event_char_target_match = _EVENT_CHAR_TARGET_PATH_RE.fullmatch(path)
             event_yolo_ocr_match = _EVENT_YOLO_OCR_PATH_RE.fullmatch(path)
             event_delete_match = _EVENT_DELETE_PATH_RE.fullmatch(path)
             event_add_match = _EVENT_ADD_PATH_RE.fullmatch(path)
@@ -1312,6 +1420,27 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
                         run_id,
                         event_index,
                         instruction=body.get("instruction"),
+                    )
+                except ValueError as exc:
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                    return
+                except OSError as exc:
+                    self._send_json(500, {"ok": False, "error": str(exc)})
+                    return
+                self._send_json(200, {"ok": True, **result})
+                return
+
+            if event_char_target_match is not None:
+                run_id = event_char_target_match.group(1)
+                event_index_raw = event_char_target_match.group(2)
+                try:
+                    event_index = int(event_index_raw)
+                    body = self._read_json_body()
+                    result = apply_recording_event_char_target(
+                        root,
+                        run_id,
+                        event_index,
+                        use_char_target=body.get("use_char_target"),
                     )
                 except ValueError as exc:
                     self._send_json(400, {"ok": False, "error": str(exc)})

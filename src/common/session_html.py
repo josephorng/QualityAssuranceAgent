@@ -345,6 +345,38 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
   font-size: .75rem; color: #57606a; font-weight: 600;
 }
 .step-instruction-status.error { color: #cf222e; }
+.char-target {
+  margin: 0 1.5rem 1rem; padding: .75rem 1rem;
+  border: 1px solid #d0d7de; border-radius: 8px; background: #f6f8fa;
+}
+.char-target-title {
+  margin: 0 0 .5rem; font-size: .9rem; font-weight: 700; color: #57606a;
+}
+.char-target-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .5rem;
+}
+.char-target-row label {
+  display: flex; align-items: flex-start; gap: .45rem;
+  font-size: .85rem; font-weight: 500; cursor: pointer; color: #1f2328;
+  flex: 1 1 16rem;
+}
+.char-target-row input { margin-top: .2rem; flex: 0 0 auto; }
+.apply-char-target {
+  appearance: none; border: 1px solid #0969da; background: #ddf4ff;
+  cursor: pointer; border-radius: 6px; padding: .3rem .7rem;
+  font-size: .8rem; line-height: 1.2; font-family: inherit;
+  font-weight: 600; color: #0969da; flex: 0 0 auto;
+}
+.apply-char-target:hover:not(:disabled) { background: #b6e3ff; }
+.apply-char-target:disabled { opacity: .45; cursor: not-allowed; }
+.apply-char-target.applied {
+  color: #116329; border-color: #4ac26b; background: #dafbe1;
+}
+.char-target-status {
+  display: inline-block;
+  font-size: .75rem; color: #57606a; font-weight: 600;
+}
+.char-target-status.error { color: #cf222e; }
 .add-step-dialog-backdrop {
   display: none; position: fixed; inset: 0; z-index: 40;
   align-items: center; justify-content: center;
@@ -1047,6 +1079,10 @@ _RECORDING_SCRIPT = """
           if (title && saved) title.textContent = saved;
           var copyBtn = group.querySelector("button.copy-instruction");
           if (copyBtn && saved) copyBtn.setAttribute("data-instruction", saved);
+          var charBox = group.querySelector("input.use-char-target");
+          if (charBox && Object.prototype.hasOwnProperty.call(result.payload, "use_char_target")) {
+            charBox.checked = !!result.payload.use_char_target;
+          }
           btn.classList.add("applied");
           setStepInstructionStatus(panel, "已套用", false);
           window.setTimeout(function () {
@@ -1057,6 +1093,80 @@ _RECORDING_SCRIPT = """
           btn.disabled = false;
           setStepInstructionStatus(panel, "無法連線主程式，請確認主程式正在執行。", true);
         });
+  }
+
+  function setCharTargetStatus(panel, text, isError) {
+    var status = panel.querySelector(".char-target-status");
+    if (!status) return;
+    status.textContent = text || "";
+    if (isError) status.classList.add("error");
+    else status.classList.remove("error");
+  }
+
+  function applyCharTarget(btn) {
+      var panel = btn.closest(".char-target");
+      var group = btn.closest(".instruction-group");
+      if (!panel || !group) return;
+      var checkbox = panel.querySelector("input.use-char-target");
+      if (!checkbox) return;
+      if (window.location.protocol === "file:") {
+        setCharTargetStatus(panel, "請透過主程式開啟報告以修改點擊字元。", true);
+        return;
+      }
+      var runId = group.getAttribute("data-run-id") || "";
+      var eventIndex = group.getAttribute("data-event-index") || "";
+      if (!runId || !eventIndex) {
+        setCharTargetStatus(panel, "缺少事件資訊。", true);
+        return;
+      }
+      btn.disabled = true;
+      setCharTargetStatus(panel, "套用中…", false);
+      fetch("/api/runs/" + encodeURIComponent(runId) + "/events/" + encodeURIComponent(eventIndex) + "/char_target", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ use_char_target: !!checkbox.checked })
+      })
+        .then(function (response) {
+          return response.json().then(function (payload) {
+            return { ok: response.ok, payload: payload };
+          });
+        })
+        .then(function (result) {
+          btn.disabled = false;
+          if (!result.ok || !result.payload || !result.payload.ok) {
+            var err = (result.payload && result.payload.error) || "套用失敗";
+            setCharTargetStatus(panel, err, true);
+            return;
+          }
+          var instruction = result.payload.instruction || "";
+          if (Object.prototype.hasOwnProperty.call(result.payload, "use_char_target")) {
+            checkbox.checked = !!result.payload.use_char_target;
+          }
+          var title = group.querySelector(".instruction-title");
+          if (title && instruction) title.textContent = instruction;
+          var copyBtn = group.querySelector("button.copy-instruction");
+          if (copyBtn && instruction) copyBtn.setAttribute("data-instruction", instruction);
+          var instructionInput = group.querySelector(".step-instruction-input");
+          if (instructionInput && instruction) instructionInput.value = instruction;
+          btn.classList.add("applied");
+          setCharTargetStatus(panel, "已套用", false);
+          window.setTimeout(function () {
+            btn.classList.remove("applied");
+          }, 1200);
+        })
+        .catch(function () {
+          btn.disabled = false;
+          setCharTargetStatus(panel, "無法連線主程式，請確認主程式正在執行。", true);
+        });
+  }
+
+  Array.prototype.slice.call(document.querySelectorAll("button.apply-char-target")).forEach(function (btn) {
+    btn.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      applyCharTarget(btn);
+    });
+  });
   }
 
   var addDialog = document.getElementById("add-step-dialog");
@@ -3305,6 +3415,52 @@ def _render_typed_text_panel_html(
     )
 
 
+def _render_char_target_panel_html(
+    *,
+    run_root: Path,
+    event_index: int,
+    kind: str,
+    analysis: dict[str, Any] | None,
+    instruction: str,
+) -> str:
+    if kind not in {
+        "click",
+        "double_click",
+        "triple_click",
+        "right_click",
+        "middle_click",
+        "hold",
+    }:
+        return ""
+    if not instruction.strip():
+        return ""
+    from cua_mcp.char_target import format_char_target_anchor
+    from src.recorder.analyze import use_char_target_enabled
+    from src.recorder.vision_context import recording_primary_char_target
+
+    option = recording_primary_char_target(run_root, event_index)
+    if option is None:
+        return ""
+    visible, clicked_char, occurrence = option
+    phrase = format_char_target_anchor(visible, clicked_char, occurrence=occurrence)
+    checked = use_char_target_enabled(analysis, instruction=instruction)
+    checked_attr = " checked" if checked else ""
+    return (
+        f'<div class="char-target">'
+        f'<div class="char-target-title">點擊字元</div>'
+        f'<div class="char-target-row">'
+        f'<label>'
+        f'<input type="checkbox" class="use-char-target"{checked_attr}>'
+        f'指定點擊字元：{escape(phrase)}'
+        f"</label>"
+        f'<button type="button" class="apply-char-target" title="依勾選重新產生指令">'
+        f"套用</button>"
+        f'<span class="char-target-status" aria-live="polite"></span>'
+        f"</div>"
+        f"</div>"
+    )
+
+
 def _render_expected_outcome_panel_html(*, expected_outcome: str, show: bool) -> str:
     if not show:
         return ""
@@ -3497,6 +3653,13 @@ def _render_recording_event_html(
         show=bool(instruction) or bool(expected_outcome),
     )
     instruction_html = _render_step_instruction_panel_html(instruction=instruction)
+    char_target_html = _render_char_target_panel_html(
+        run_root=run_root,
+        event_index=index,
+        kind=kind,
+        analysis=analysis if isinstance(analysis, dict) else None,
+        instruction=instruction,
+    )
 
     copy_attr = escape(title, quote=True)
     outcome_attr = (
@@ -3521,6 +3684,7 @@ def _render_recording_event_html(
         f"</summary>"
         f'<div class="meta" style="padding: 1rem 1.5rem 0;"><dl>{meta_html}</dl></div>'
         f'<div class="instruction-edit-panels">{instruction_html}{expected_outcome_html}</div>'
+        f"{char_target_html}"
         f"{typed_text_html}"
         f"{yolo_retry_html}"
         f"{landmarks_html}"

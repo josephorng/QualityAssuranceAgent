@@ -19,6 +19,8 @@ from src.recorder.analyze import (
     instruction_for_drag,
     instruction_for_key,
     instruction_for_scroll,
+    rebuild_pointer_instruction,
+    use_char_target_enabled,
 )
 from src.recorder.models import RecordedEvent
 from src.recorder.orchestrator import (
@@ -1522,6 +1524,31 @@ def test_instruction_for_click_double_click() -> None:
     assert instruction_for_click(event, vision) == "將滑鼠移到「文件」文字"
 
 
+def test_instruction_for_click_defaults_to_parent_text() -> None:
+    event = RecordedEvent(
+        index=7,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(610, 1057),
+        button="left",
+        screenshot_path="",
+    )
+    vision = {
+        "local_cursor": (610, 1057),
+        "candidates": [
+            {
+                "bbox": [602, 1049, 33, 16],
+                "center": [619, 1057],
+                "class_name": "text",
+                "text": "搜尋",
+                "clicked_char": "搜",
+                "clicked_char_index": 0,
+            },
+        ],
+    }
+    assert instruction_for_click(event, vision) == "將滑鼠移到「搜尋」文字"
+
+
 def test_instruction_for_click_char_target_unique() -> None:
     event = RecordedEvent(
         index=7,
@@ -1544,7 +1571,9 @@ def test_instruction_for_click_char_target_unique() -> None:
             },
         ],
     }
-    assert instruction_for_click(event, vision) == "將滑鼠移到「搜尋」的「搜」字上"
+    assert instruction_for_click(event, vision, use_char_target=True) == (
+        "將滑鼠移到「搜尋」的「搜」字上"
+    )
 
 
 def test_instruction_for_click_char_target_duplicate() -> None:
@@ -1569,7 +1598,47 @@ def test_instruction_for_click_char_target_duplicate() -> None:
             },
         ],
     }
-    assert instruction_for_click(event, vision) == "將滑鼠移到「Google」的第2個「o」字上"
+    assert instruction_for_click(event, vision, use_char_target=True) == (
+        "將滑鼠移到「Google」的第2個「o」字上"
+    )
+
+
+def test_use_char_target_enabled_defaults_false_without_phrase() -> None:
+    assert use_char_target_enabled(None) is False
+    assert use_char_target_enabled({"instruction": "將滑鼠移到「搜尋」文字"}) is False
+    assert use_char_target_enabled({"use_char_target": False, "instruction": "將滑鼠移到「搜尋」的「搜」字上"}) is False
+    assert use_char_target_enabled({"use_char_target": True}) is True
+    assert use_char_target_enabled({"instruction": "將滑鼠移到「搜尋」的「搜」字上"}) is True
+
+
+def test_rebuild_pointer_instruction_char_target_opt_in() -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(610, 1057),
+        button="left",
+        screenshot_path="",
+    )
+    vision = {
+        "local_cursor": (610, 1057),
+        "candidates": [
+            {
+                "bbox": [602, 1049, 33, 16],
+                "center": [619, 1057],
+                "class_name": "text",
+                "text": "搜尋",
+                "clicked_char": "搜",
+                "clicked_char_index": 0,
+            },
+        ],
+    }
+    assert rebuild_pointer_instruction(event, vision, include_nearby=False) == (
+        "將滑鼠移到「搜尋」文字，並點擊滑鼠一下。"
+    )
+    assert rebuild_pointer_instruction(
+        event, vision, include_nearby=False, use_char_target=True
+    ) == "將滑鼠移到「搜尋」的「搜」字上，並點擊滑鼠一下。"
 
 
 def test_instruction_for_click_input_field_with_visible_text() -> None:
@@ -2071,6 +2140,49 @@ async def test_analyze_event_to_cache_click_appends_nearby_context(tmp_path: Pat
     assert result["instruction"] == (
         "將滑鼠移到「Chrome」圖示（附近有「OneNote」文字、「Docker」圖示），並點擊滑鼠一下。"
     )
+    llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_analyze_event_to_cache_click_defaults_to_parent_text(
+    tmp_path: Path,
+) -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(610, 1057),
+        button="left",
+        screenshot_path="",
+    )
+    vision = {
+        "used_vision": True,
+        "local_cursor": (610, 1057),
+        "candidates": [
+            {
+                "bbox": [602, 1049, 33, 16],
+                "center": [619, 1057],
+                "class_name": "text",
+                "text": "搜尋",
+                "clicked_char": "搜",
+                "clicked_char_index": 0,
+            },
+        ],
+    }
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision=vision,
+        )
+
+    assert result is not None
+    assert result["instruction"] == "將滑鼠移到「搜尋」文字，並點擊滑鼠一下。"
+    assert result["use_char_target"] is False
     llm_mock.assert_not_called()
 
 

@@ -1116,6 +1116,118 @@ def test_write_recording_html_renders_landmark_multiselect(tmp_path: Path) -> No
     assert "YOLO/OCR 未偵測到目標" not in html
 
 
+def test_write_recording_html_renders_char_target_checkbox(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000044"
+    _write_recording_fixture(run_root)
+    instruction = "將滑鼠移到「搜尋」文字，並點擊滑鼠一下。"
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {"event_index": 1, "instruction": instruction, "use_char_target": False},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "yolo_ocr").mkdir(exist_ok=True)
+    (run_root / "yolo_ocr" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "candidates": [
+                    {
+                        "bbox": [40, 40, 20, 20],
+                        "center": [50, 50],
+                        "class_name": "text",
+                        "text": "搜尋",
+                        "clicked_char": "搜",
+                        "clicked_char_index": 0,
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+    assert "點擊字元" in html
+    assert 'class="use-char-target"' in html
+    assert 'class="apply-char-target"' in html
+    assert "指定點擊字元：「搜尋」的「搜」字上" in html
+    assert "/char_target" in html
+    assert 'class="use-char-target" checked' not in html
+
+
+def test_write_recording_html_checks_char_target_when_enabled(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000045"
+    _write_recording_fixture(run_root)
+    instruction = "將滑鼠移到「搜尋」的「搜」字上，並點擊滑鼠一下。"
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {"event_index": 1, "instruction": instruction, "use_char_target": True},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "yolo_ocr").mkdir(exist_ok=True)
+    (run_root / "yolo_ocr" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "candidates": [
+                    {
+                        "bbox": [40, 40, 20, 20],
+                        "center": [50, 50],
+                        "class_name": "text",
+                        "text": "搜尋",
+                        "clicked_char": "搜",
+                        "clicked_char_index": 0,
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+    assert 'class="use-char-target" checked' in html
+
+
+def test_write_recording_html_infers_char_target_from_legacy_instruction(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000046"
+    _write_recording_fixture(run_root)
+    instruction = "將滑鼠移到「搜尋」的「搜」字上，並點擊滑鼠一下。"
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps({"event_index": 1, "instruction": instruction}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (run_root / "yolo_ocr").mkdir(exist_ok=True)
+    (run_root / "yolo_ocr" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "candidates": [
+                    {
+                        "bbox": [40, 40, 20, 20],
+                        "center": [50, 50],
+                        "class_name": "text",
+                        "text": "搜尋",
+                        "clicked_char": "搜",
+                        "clicked_char_index": 0,
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+    assert 'class="use-char-target" checked' in html
+
+
 def test_write_recording_html_shows_yolo_retry_when_failed(tmp_path: Path) -> None:
     run_root = tmp_path / "recording_20260721_120000_000021"
     _write_recording_fixture(run_root)

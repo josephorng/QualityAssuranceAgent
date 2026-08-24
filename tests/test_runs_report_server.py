@@ -10,6 +10,7 @@ import pytest
 from src.common.runs_report_server import (
     RunsReportServer,
     add_recording_event,
+    apply_recording_event_char_target,
     apply_recording_event_expected_outcome,
     apply_recording_event_instruction,
     apply_recording_event_landmarks,
@@ -334,6 +335,104 @@ def test_apply_recording_event_primary_target_reorders_and_rebuilds(tmp_path: Pa
     assert analysis["landmarks"]["primary_index"] == 0
     selected_labels = {item["label"] for item in analysis["landmarks"]["selected"]}
     assert "「45 個項目」文字" not in selected_labels
+
+
+def _add_clicked_char(run_root: Path, *, char: str = "搜", index: int = 0) -> None:
+    yolo_path = run_root / "yolo_ocr" / "event_001.json"
+    payload = json.loads(yolo_path.read_text(encoding="utf-8"))
+    payload["candidates"][0]["clicked_char"] = char
+    payload["candidates"][0]["clicked_char_index"] = index
+    yolo_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def test_apply_recording_event_char_target_rebuilds_parent_and_char(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_landmark_run(runs_root, "recording_char_target")
+    _add_clicked_char(run_root)
+
+    enabled = apply_recording_event_char_target(
+        runs_root,
+        "recording_char_target",
+        1,
+        use_char_target=True,
+    )
+    expected_char = (
+        "將滑鼠移到「搜尋」的「搜」字上（在「已選取 2 個項目」文字的左下方），並點擊滑鼠一下。"
+    )
+    assert enabled["instruction"] == expected_char
+    assert enabled["use_char_target"] is True
+    analysis = json.loads(
+        (run_root / "analysis" / "event_001.json").read_text(encoding="utf-8")
+    )
+    assert analysis["instruction"] == expected_char
+    assert analysis["use_char_target"] is True
+
+    disabled = apply_recording_event_char_target(
+        runs_root,
+        "recording_char_target",
+        1,
+        use_char_target=False,
+    )
+    expected_parent = (
+        "將滑鼠移到「搜尋」文字（在「已選取 2 個項目」文字的左下方），並點擊滑鼠一下。"
+    )
+    assert disabled["instruction"] == expected_parent
+    assert disabled["use_char_target"] is False
+    analysis = json.loads(
+        (run_root / "analysis" / "event_001.json").read_text(encoding="utf-8")
+    )
+    assert analysis["use_char_target"] is False
+    assert analysis["instruction"] == expected_parent
+
+
+def test_apply_recording_event_primary_rebuild_skips_char_target_by_default(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_landmark_run(runs_root, "recording_char_rebuild")
+    yolo_path = run_root / "yolo_ocr" / "event_001.json"
+    payload = json.loads(yolo_path.read_text(encoding="utf-8"))
+    payload["candidates"][2]["clicked_char"] = "項"
+    payload["candidates"][2]["clicked_char_index"] = 0
+    yolo_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    result = apply_recording_event_landmarks(
+        runs_root,
+        "recording_char_rebuild",
+        1,
+        selected=[{"label": "「搜尋」文字", "side": "upper_left"}],
+        primary_index=2,
+    )
+    assert result["rebuilt"] is True
+    assert result["instruction"].startswith("將滑鼠移到「45 個項目」文字")
+    assert "的「項」字上" not in result["instruction"]
+
+
+def test_runs_report_server_char_target_endpoint(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_landmark_run(runs_root, "recording_http_char")
+    _add_clicked_char(run_root)
+
+    server = RunsReportServer(runs_root)
+    try:
+        base = server.start()
+        body = json.dumps({"use_char_target": True}, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            f"{base}/api/runs/recording_http_char/events/1/char_target",
+            method="POST",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            assert response.status == 200
+        assert payload["ok"] is True
+        assert payload["use_char_target"] is True
+        assert "「搜尋」的「搜」字上" in payload["instruction"]
+    finally:
+        server.stop()
 
 
 def test_runs_report_server_landmarks_endpoint(tmp_path: Path) -> None:
@@ -1070,7 +1169,10 @@ def test_apply_recording_event_instruction_persists(tmp_path: Path) -> None:
         1,
         instruction="  點擊「新目標」  ",
     )
-    assert result == {"instruction": "點擊「新目標」"}
+    assert result == {
+        "instruction": "點擊「新目標」",
+        "use_char_target": False,
+    }
     analysis = json.loads((run_root / "analysis" / "event_001.json").read_text(encoding="utf-8"))
     assert analysis["instruction"] == "點擊「新目標」"
     report = json.loads((run_root / "report.json").read_text(encoding="utf-8"))

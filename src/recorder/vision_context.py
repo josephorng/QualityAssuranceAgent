@@ -737,6 +737,25 @@ def primary_candidate_char_target(vision: dict[str, Any]) -> tuple[str, int] | N
     return clicked_char, occurrence
 
 
+def recording_primary_char_target(
+    run_root: Path,
+    event_index: int,
+) -> tuple[str, str, int] | None:
+    """Return ``(visible_text, char, occurrence)`` for the primary click target."""
+    vision = vision_from_yolo_ocr(run_root, event_index)
+    parsed = primary_candidate_char_target(vision)
+    if parsed is None:
+        return None
+    candidates = vision.get("candidates") or []
+    if not candidates or not isinstance(candidates[0], dict):
+        return None
+    visible = _visible_text(candidates[0].get("text"))
+    if not visible:
+        return None
+    clicked_char, occurrence = parsed
+    return visible, clicked_char, occurrence
+
+
 def _annotate_clicked_char_target(
     bgr: np.ndarray,
     candidates: list[dict[str, Any]],

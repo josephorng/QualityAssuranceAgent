@@ -94,6 +94,13 @@ def test_recording_script_helpers(tmp_path: Path) -> None:
     assert not script_helper.is_recording_script_path(plain)
     assert script_helper.resolve_runnable_script_path(plain) == plain
     assert script_helper.script_display_name(plain) == "plain.txt"
+    assert script_helper.is_runnable_script_path(run_dir)
+    assert script_helper.is_runnable_script_path(legacy)
+    assert script_helper.is_runnable_script_path(plain)
+    assert not script_helper.is_runnable_script_path(tmp_path / "missing.txt")
+    empty_dir = tmp_path / "empty_dir"
+    empty_dir.mkdir()
+    assert not script_helper.is_runnable_script_path(empty_dir)
 
 
 def test_partition_recording_dirs_keeps_valid_and_skips_duplicates(tmp_path: Path) -> None:

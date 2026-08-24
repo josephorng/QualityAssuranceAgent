@@ -60,6 +60,12 @@ def is_recording_script_path(path: Path) -> bool:
     return recording_run_dir(path) is not None
 
 
+def is_runnable_script_path(path: Path) -> bool:
+    """True when ``path`` is an existing script file or recording folder."""
+    resolved = resolve_runnable_script_path(path)
+    return resolved.is_file() or is_recording_dir(resolved)
+
+
 def resolve_runnable_script_path(path: Path) -> Path:
     """Resolve a recording folder (or legacy ``script.txt``) to the recording dir.
 

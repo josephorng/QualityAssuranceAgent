@@ -51,8 +51,8 @@ from src.common.script_helper import (
     collect_recording_script_text,
     executable_source_line_numbers,
     format_script_lines_with_outcomes,
-    is_recording_dir,
     is_recording_script_path,
+    is_runnable_script_path,
     load_runnable_script_text,
     parse_executable_lines_from_text,
     partition_recording_dirs,
@@ -280,7 +280,7 @@ class MainHub(ctk.CTk):
         last_script = hub.get("last_script_path")
         if isinstance(last_script, str) and last_script.strip():
             p = resolve_runnable_script_path(Path(last_script))
-            if p.is_file() or is_recording_dir(p):
+            if is_runnable_script_path(p):
                 self._load_script_into_editor(p)
         if self._script_path is None:
             self._try_load_last_runtime_command_cache()
@@ -307,7 +307,7 @@ class MainHub(ctk.CTk):
         restored_queue: list[Path] = []
         for raw_path in hub.get("queue_script_paths", []):
             resolved = resolve_runnable_script_path(Path(raw_path))
-            if resolved.is_file() or is_recording_dir(resolved):
+            if is_runnable_script_path(resolved):
                 restored_queue.append(resolved)
         self._queue_paths = restored_queue
         self._refresh_queue_list()
@@ -1496,7 +1496,7 @@ class MainHub(ctk.CTk):
         if index < 0 or index >= len(self._queue_paths):
             return
         p = resolve_runnable_script_path(self._queue_paths[index])
-        if not p.is_file() and not is_recording_dir(p):
+        if not is_runnable_script_path(p):
             show_ctk_message(self, "編輯", f"找不到檔案：\n{p}", kind="error")
             return
         if not self._confirm_proceed_with_unsaved_script():
@@ -2489,7 +2489,7 @@ class MainHub(ctk.CTk):
         indexed = [
             (i, p)
             for i, p in enumerate(self._queue_paths)
-            if i >= start_index and p.is_file()
+            if i >= start_index and is_runnable_script_path(p)
         ]
         if not indexed:
             msg = (

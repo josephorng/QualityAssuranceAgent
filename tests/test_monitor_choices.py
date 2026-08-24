@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from src.common.monitor_prompt import EyeMonitorChoice, list_eye_monitor_choices
-from src.common.run_state import unique_run_folder_name
+from src.common.run_state import unique_named_run_folder, unique_run_folder_name
 
 
 def test_list_eye_monitor_choices_no_physical(monkeypatch) -> None:
@@ -31,3 +31,13 @@ def test_unique_run_folder_name(monkeypatch) -> None:
     assert unique_run_folder_name() == "task_fixed_ts"
     assert unique_run_folder_name("recording") == "recording_fixed_ts"
     assert unique_run_folder_name("runtime_command") == "runtime_command_fixed_ts"
+
+
+def test_unique_named_run_folder_preserves_label(monkeypatch) -> None:
+    monkeypatch.setattr("src.common.run_state.ts_name", lambda: "fixed_ts")
+    assert unique_named_run_folder("打開神網") == "打開神網_fixed_ts"
+    assert unique_named_run_folder("bad/name:here") == "bad_name_here_fixed_ts"
+    assert unique_named_run_folder("   ") == "task_fixed_ts"
+    assert unique_named_run_folder("x" * 300).startswith("x")
+    assert unique_named_run_folder("x" * 300).endswith("_fixed_ts")
+    assert len(unique_named_run_folder("x" * 300)) <= 191

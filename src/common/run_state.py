@@ -9,6 +9,8 @@ from pathlib import Path
 from src.common.io_utils import append_text, write_json
 
 _RUN_FOLDER_PREFIX_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+_RUN_FOLDER_ILLEGAL_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+_RUN_FOLDER_MAX_LEN = 191
 
 
 def ts_name() -> str:
@@ -26,6 +28,27 @@ def unique_run_folder_name(name: str = "task") -> str:
     if not _RUN_FOLDER_PREFIX_RE.fullmatch(prefix):
         prefix = "task"
     return f"{prefix}_{ts_name()}"
+
+
+def unique_named_run_folder(base_name: str) -> str:
+    """Unique folder name that preserves a human label: ``{base_name}_{timestamp}``.
+
+    Used when a task report should mirror a recording folder name (including
+    non-ASCII). Illegal path characters are replaced; length is capped to match
+    run-id validation. Empty/invalid labels fall back to ``unique_run_folder_name``.
+    """
+    stamp = ts_name()
+    cleaned = _RUN_FOLDER_ILLEGAL_RE.sub("_", str(base_name).strip()).strip(" ._")
+    if not cleaned or cleaned in {".", ".."}:
+        return unique_run_folder_name()
+    max_base = _RUN_FOLDER_MAX_LEN - 1 - len(stamp)
+    if max_base < 1:
+        return unique_run_folder_name()
+    if len(cleaned) > max_base:
+        cleaned = cleaned[:max_base].rstrip(" ._")
+    if not cleaned:
+        return unique_run_folder_name()
+    return f"{cleaned}_{stamp}"
 
 
 _B64_BODY_CHARS = frozenset(

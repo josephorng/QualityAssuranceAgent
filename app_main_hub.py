@@ -33,7 +33,11 @@ from src.common.run_control import (
     set_step_status_callback,
     wait_while_paused_blocking,
 )
-from src.common.run_state import get_run_state_manager, unique_run_folder_name
+from src.common.run_state import (
+    get_run_state_manager,
+    unique_named_run_folder,
+    unique_run_folder_name,
+)
 from src.common.session_html import write_runs_index_html
 from src.common.runs_report_server import (
     ensure_runs_report_server,
@@ -2727,6 +2731,10 @@ class MainHub(ctk.CTk):
                 self._set_queue_status(f"佇列執行 ({i}/{total})：{name}")
                 run_root_for_row: Path | None = None
                 try:
+                    rec = recording_run_dir(script_path)
+                    folder_name = (
+                        unique_named_run_folder(rec.name) if rec is not None else None
+                    )
                     manager, paths_obj, run_id = prepare_run_session(
                         runs_root=runs_root,
                         task=steps[0],
@@ -2735,7 +2743,7 @@ class MainHub(ctk.CTk):
                         script_steps=steps,
                         eye_monitor_indices=args.eye_monitor_indices,
                         clear_runs_root=False,
-                        run_folder_name=None,
+                        run_folder_name=folder_name,
                     )
                     run_root_for_row = paths_obj.root
                     self._active_run_root = paths_obj.root
@@ -2852,6 +2860,9 @@ class MainHub(ctk.CTk):
                 task = steps[0]
                 settings = load_settings()
                 runs_root = Path(settings.runs_dir)
+                folder_name = (
+                    unique_named_run_folder(rec.name) if rec is not None else None
+                )
                 manager, paths, run_id = prepare_run_session(
                     runs_root=runs_root,
                     task=task,
@@ -2860,7 +2871,7 @@ class MainHub(ctk.CTk):
                     script_steps=steps,
                     eye_monitor_indices=args.eye_monitor_indices,
                     clear_runs_root=False,
-                    run_folder_name=None,
+                    run_folder_name=folder_name,
                 )
                 self._active_run_root = paths.root
                 manager.log_info("Master starting coordinator module runtime")

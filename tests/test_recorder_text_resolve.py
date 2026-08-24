@@ -9,6 +9,7 @@ from cua_mcp.select_mouse_target import _detection_from_bbox
 from cua_mcp.yolo_onnx import YOLO_CLASS_INPUT, YOLO_CLASS_TEXT
 from src.recorder.models import RecordedEvent
 from src.recorder.text_resolve import (
+    _is_caret_thin_rect,
     _strip_ocr_caret,
     event_with_resolved_text,
     resolve_text_input_text,
@@ -381,6 +382,97 @@ async def test_resolve_text_input_ignores_ocr_outside_focus_rect(tmp_path) -> No
     nearest_mock.assert_not_called()
     assert resolved["ocr_options"] == ["什麼是套利"]
     assert resolved["ocr_text"] == "什麼是套利"
+
+
+def test_is_caret_thin_rect_detects_caret_strip() -> None:
+    assert _is_caret_thin_rect((321, 383, 322, 403))
+    assert not _is_caret_thin_rect((226, 67, 1561, 100))
+
+
+@pytest.mark.asyncio
+async def test_resolve_text_input_caret_thin_uses_input_bbox_clip(tmp_path) -> None:
+    """Caret-sized focus must expand via YOLO Input, not stay empty."""
+    # Mirrors Save As filename: caret 1×20px, typed text left of caret, type
+    # dropdown slightly below, taskbar search elsewhere.
+    event = RecordedEvent(
+        index=15,
+        timestamp_utc="t",
+        kind="text_input",
+        text="wl6m06au/6wu0 2k7wu0 fu4",
+        cursor_xy=(321, 393),
+        monitor_offset=(0, 0),
+        focus_rect=(321, 383, 322, 403),
+        screenshot_path="",
+    )
+    fake_vision = {
+        "used_vision": True,
+        "candidate_text": "candidate",
+        "local_cursor": (321, 393),
+        "candidates": [],
+        "detection_count": 5,
+        "bgr": np.zeros((1080, 960, 3), dtype=np.uint8),
+        "all_detections": [
+            _detection_from_bbox((43, 409, 904, 26), YOLO_CLASS_INPUT),
+            _detection_from_bbox((139, 386, 93, 15), YOLO_CLASS_TEXT, text="桃園明天的天"),
+            _detection_from_bbox((38, 387, 89, 16), YOLO_CLASS_TEXT, text="檔案名稱(N):"),
+            _detection_from_bbox((138, 416, 106, 18), YOLO_CLASS_TEXT, text="文字文件 (*.txt)"),
+            _detection_from_bbox((490, 1049, 34, 16), YOLO_CLASS_TEXT, text="搜尋"),
+        ],
+    }
+    with patch(
+        "src.recorder.text_resolve.build_vision_context_at_point",
+        return_value=fake_vision,
+    ), patch(
+        "src.recorder.text_resolve.extract_nearest_text",
+        return_value="搜尋",
+    ) as nearest_mock:
+        resolved = await resolve_text_input_text(event, run_dir=tmp_path)
+
+    nearest_mock.assert_not_called()
+    assert resolved["source"] == "recorded"
+    assert resolved["ocr_text"] == "桃園明天的天"
+    assert "桃園明天的天" in resolved["ocr_options"]
+    assert "搜尋" not in resolved["ocr_options"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_text_input_caret_thin_without_input_falls_back(
+    tmp_path,
+) -> None:
+    """Caret-thin with no Input detection falls back to nearest-text helper."""
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="text_input",
+        text="abc",
+        cursor_xy=(100, 100),
+        monitor_offset=(0, 0),
+        focus_rect=(100, 90, 101, 110),
+        screenshot_path="",
+    )
+    fake_vision = {
+        "used_vision": True,
+        "candidate_text": "candidate",
+        "local_cursor": (100, 100),
+        "candidates": [],
+        "detection_count": 1,
+        "bgr": np.zeros((200, 200, 3), dtype=np.uint8),
+        "all_detections": [
+            _detection_from_bbox((80, 90, 40, 16), YOLO_CLASS_TEXT, text="fallback"),
+        ],
+    }
+    with patch(
+        "src.recorder.text_resolve.build_vision_context_at_point",
+        return_value=fake_vision,
+    ), patch(
+        "src.recorder.text_resolve.extract_nearest_text",
+        return_value="fallback",
+    ) as nearest_mock:
+        resolved = await resolve_text_input_text(event, run_dir=tmp_path)
+
+    nearest_mock.assert_called_once()
+    assert resolved["ocr_text"] == "fallback"
+    assert resolved["ocr_options"] == ["fallback"]
 
 
 def test_event_with_resolved_text_replaces_text_field() -> None:

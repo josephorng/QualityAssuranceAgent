@@ -15,10 +15,8 @@ from cua_mcp.icon_map import is_pua_char
 from cua_mcp.read_screen_text.ocr_image import _ocr_boxes_on_bgr
 from cua_mcp.select_mouse_target import _build_candidates_from_bgr
 from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text
-from cua_mcp.selection_engine import request_json_with_retry
 from cua_mcp.yolo_onnx import YOLO_CLASS_ELEMENT, YOLO_CLASS_INPUT, YOLO_CLASS_TEXT
 from src.common.io_utils import imread_bgr, write_json
-from src.common.prompting import get_prompt
 from src.common.nearby_side import (
     LandmarkCell,
     NearbyHint,
@@ -61,16 +59,6 @@ _TIER0_CELL_RANK: dict[LandmarkCell, int] = {
     LandmarkCell.RIGHT: 3,
 }
 _TIER0_NON_CARDINAL_RANK = 4
-_NEARBY_LANDMARK_SELECT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "keep_indices": {
-            "type": "array",
-            "items": {"type": "integer"},
-        },
-    },
-    "required": ["keep_indices"],
-}
 
 
 def resolve_event_screenshot_path(
@@ -984,112 +972,6 @@ def collect_nearby_hint_labels(
             vision, instruction=instruction, max_count=max_count
         )
     ]
-
-
-def _format_ranked_nearby_option_line(index: int, hint: NearbyHint) -> str:
-    """Format one ranked neighbor as ``[index N] label（side）`` for the LLM."""
-    if hint.side is not None:
-        display = f"{hint.label}（{side_to_zh(hint.side)}）"
-    else:
-        display = hint.label
-    return f"[index {index}] {display}"
-
-
-def _parse_nearby_landmark_select_reply(raw: str) -> dict[str, Any]:
-    """Parse ``{"keep_indices": [int, ...]}`` from the landmark-select LLM."""
-    data = json.loads(raw)
-    if not isinstance(data, dict):
-        raise ValueError("nearby landmark select reply must be an object")
-    indices = data.get("keep_indices")
-    if not isinstance(indices, list):
-        raise ValueError("keep_indices must be a list")
-    cleaned: list[int] = []
-    for item in indices:
-        if isinstance(item, bool) or not isinstance(item, int):
-            raise ValueError("keep_indices must contain integers")
-        cleaned.append(item)
-    return {"keep_indices": cleaned}
-
-
-def _map_keep_indices_to_hints(
-    ranked: list[NearbyHint],
-    keep_indices: list[int],
-    *,
-    max_count: int,
-) -> list[NearbyHint]:
-    """Keep ranked hints by LLM index order, dropping unknowns and duplicates."""
-    selected: list[NearbyHint] = []
-    seen: set[int] = set()
-    for index in keep_indices:
-        if index in seen or index < 0 or index >= len(ranked):
-            continue
-        seen.add(index)
-        selected.append(ranked[index])
-        if len(selected) >= max_count:
-            break
-    return selected
-
-
-async def select_stable_nearby_hints(
-    vision: dict[str, Any],
-    *,
-    instruction: str,
-    screenshot_path: str | None = None,
-    log_info: Any = None,
-    max_count: int = _MIN_NEARBY_TEXT_LANDMARKS,
-) -> list[NearbyHint]:
-    """Ask the LLM which ranked neighbors are stable landmarks.
-
-    Containing ``input`` / ``scrollbar`` hints are always kept. Remaining
-    neighbors are sent in rank order with the screenshot. On missing screenshot,
-    empty remaining options, or LLM/parse failure, falls back to
-    :func:`collect_nearby_hints`. A successful empty ``keep_indices`` keeps only
-    the forced containers.
-    """
-    forced, ranked = _prioritized_nearby_parts(vision, instruction=instruction)
-    fallback = [*forced, *ranked[:max_count]]
-    if not ranked:
-        return fallback
-
-    shot = Path(screenshot_path) if screenshot_path else None
-    if shot is None or not shot.is_file():
-        return fallback
-
-    options_lines = "\n".join(
-        _format_ranked_nearby_option_line(index, hint)
-        for index, hint in enumerate(ranked)
-    )
-    prompt = get_prompt("recording_nearby_landmark_select").format(
-        instruction=instruction,
-        options_lines=options_lines or "(none)",
-    )
-    messages: list[dict[str, Any]] = [
-        {
-            "role": "user",
-            "content": prompt,
-            "images": [str(shot)],
-        }
-    ]
-    try:
-        result = await request_json_with_retry(
-            messages=messages,
-            response_schema=_NEARBY_LANDMARK_SELECT_SCHEMA,
-            parse_reply=_parse_nearby_landmark_select_reply,
-            retry_instruction=get_prompt("recording_nearby_landmark_select_retry"),
-            log_info=log_info,
-            append_image_sizes=True,
-        )
-    except (ValueError, json.JSONDecodeError) as exc:
-        if log_info is not None:
-            log_info(f"select_stable_nearby_hints failed: {exc}")
-        return fallback
-
-    selected = _map_keep_indices_to_hints(
-        ranked,
-        result["keep_indices"],
-        max_count=max_count,
-    )
-    return [*forced, *selected]
 
 
 def list_nearby_landmark_options(

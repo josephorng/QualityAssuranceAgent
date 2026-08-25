@@ -2411,9 +2411,7 @@ async def test_analyze_event_to_cache_click_defaults_to_parent_text(
 
 
 @pytest.mark.asyncio
-async def test_analyze_event_to_cache_click_uses_llm_landmarks(tmp_path: Path) -> None:
-    from src.common.nearby_side import NearbyHint
-
+async def test_analyze_event_to_cache_click_uses_ranked_landmarks(tmp_path: Path) -> None:
     shot = tmp_path / "event.jpeg"
     shot.write_bytes(b"jpeg")
     event = RecordedEvent(
@@ -2426,9 +2424,9 @@ async def test_analyze_event_to_cache_click_uses_llm_landmarks(tmp_path: Path) -
     )
 
     with patch(
-        "src.recorder.analyze.select_stable_nearby_hints",
-        new=AsyncMock(return_value=[NearbyHint("「OneNote」文字")]),
-    ) as picker:
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
         result = await analyze_event_to_cache(
             event,
             run_dir=tmp_path,
@@ -2437,10 +2435,9 @@ async def test_analyze_event_to_cache_click_uses_llm_landmarks(tmp_path: Path) -
 
     assert result is not None
     assert result["instruction"] == (
-        "將滑鼠移到「Chrome」圖示（附近有「OneNote」文字），並點擊滑鼠一下。"
+        "將滑鼠移到「Chrome」圖示（附近有「OneNote」文字、「Docker」圖示），並點擊滑鼠一下。"
     )
-    picker.assert_called_once()
-    assert picker.await_args.kwargs["screenshot_path"] == str(shot)
+    llm_mock.assert_not_called()
 
 
 @pytest.mark.asyncio

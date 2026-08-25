@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 from pathlib import Path
@@ -23,7 +22,6 @@ from src.recorder.vision_context import (
     format_scrollbar_context_hint,
     primary_candidate_char_target,
     primary_candidate_offset,
-    select_stable_nearby_hints,
     _visible_text,
 )
 from cua_mcp.char_target import format_char_target_anchor, parse_char_target_instruction
@@ -543,46 +541,18 @@ def _pointer_click_action_suffix(
     return _POINTER_CLICK_ACTION_SUFFIX_BY_KIND.get(kind)
 
 
-async def _finalize_instruction(
+def _finalize_instruction(
     instruction: str,
     event: RecordedEvent,
     vision: dict[str, Any] | None,
     destination: dict[str, Any] | None = None,
-    *,
-    log_info: Any = None,
 ) -> str:
     if event.kind not in POINTER_EVENT_KINDS or vision is None:
         return instruction
     if event.kind == "drag":
         dest = destination if isinstance(destination, dict) else {}
-        start_hints, end_hints = await asyncio.gather(
-            select_stable_nearby_hints(
-                vision,
-                instruction=instruction,
-                screenshot_path=event.screenshot_path,
-                log_info=log_info,
-            ),
-            select_stable_nearby_hints(
-                dest,
-                instruction=instruction,
-                screenshot_path=event.end_screenshot_path or event.screenshot_path,
-                log_info=log_info,
-            ),
-        )
-        return append_drag_nearby_context_comments(
-            instruction,
-            vision,
-            dest,
-            start_hints=start_hints,
-            end_hints=end_hints,
-        )
-    hints = await select_stable_nearby_hints(
-        vision,
-        instruction=instruction,
-        screenshot_path=event.screenshot_path,
-        log_info=log_info,
-    )
-    instruction = append_nearby_context_comment(instruction, vision, hints=hints)
+        return append_drag_nearby_context_comments(instruction, vision, dest)
+    instruction = append_nearby_context_comment(instruction, vision)
     suffix = _pointer_click_action_suffix(
         event.kind,
         event.modifiers,
@@ -645,21 +615,18 @@ def rebuild_pointer_instruction(
     return None
 
 
-async def _instruction_result(
+def _instruction_result(
     instruction: str,
     event: RecordedEvent,
     vision: dict[str, Any] | None,
     destination: dict[str, Any] | None = None,
-    *,
-    log_info: Any = None,
 ) -> dict[str, Any]:
     return {
-        "instruction": await _finalize_instruction(
+        "instruction": _finalize_instruction(
             instruction,
             event,
             vision,
             destination,
-            log_info=log_info,
         )
     }
 
@@ -694,15 +661,13 @@ async def analyze_event_to_cache(
     if event.kind == "drag":
         drag_instruction = instruction_for_drag(vision, destination)
         if drag_instruction is not None:
-            return await _instruction_result(
-                drag_instruction, event, vision, destination, log_info=log_info
-            )
+            return _instruction_result(drag_instruction, event, vision, destination)
 
     if event.kind in _CLICK_POINTER_KINDS:
         click_instruction = instruction_for_click(event, vision)
         if click_instruction is not None:
-            payload = await _instruction_result(
-                click_instruction, event, vision, destination, log_info=log_info
+            payload = _instruction_result(
+                click_instruction, event, vision, destination
             )
             if primary_candidate_char_target(vision) is not None:
                 payload["use_char_target"] = False
@@ -711,8 +676,8 @@ async def analyze_event_to_cache(
     if event.kind == "scroll":
         scroll_instruction = instruction_for_scroll(event, vision)
         if scroll_instruction is not None:
-            return await _instruction_result(
-                scroll_instruction, event, vision, destination, log_info=log_info
+            return _instruction_result(
+                scroll_instruction, event, vision, destination
             )
 
     local = vision.get("local_cursor")
@@ -792,19 +757,15 @@ async def analyze_event_to_cache(
                 vision=vision,
                 destination=destination,
             )
-            return await _instruction_result(
-                instruction, event, vision, destination, log_info=log_info
-            )
+            return _instruction_result(instruction, event, vision, destination)
         if event.kind in _CLICK_POINTER_KINDS:
             instruction = enrich_click_instruction_offset(
                 result["instruction"],
                 vision,
             )
-            return await _instruction_result(
-                instruction, event, vision, destination, log_info=log_info
-            )
-        return await _instruction_result(
-            result["instruction"], event, vision, destination, log_info=log_info
+            return _instruction_result(instruction, event, vision, destination)
+        return _instruction_result(
+            result["instruction"], event, vision, destination
         )
     except (ValueError, json.JSONDecodeError) as exc:
         if log_info is not None:

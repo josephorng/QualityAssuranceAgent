@@ -11,6 +11,7 @@ import pyperclip
 
 import pyautogui
 import pygetwindow as gw
+from src.common.io_utils import imread_bgr
 from src.common.llm_factory import get_llm_client
 from src.common.prompting import get_prompt
 from src.common.settings import load_settings
@@ -641,12 +642,7 @@ def detect_objects(image_path: str) -> dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"image not found: {image_path}")
 
-    try:
-        import cv2
-    except ImportError as exc:
-        raise RuntimeError("OpenCV (cv2) is required for detect_objects") from exc
-
-    image = cv2.imread(str(path))
+    image = imread_bgr(path)
     if image is None:
         raise ValueError(f"unable to decode image: {image_path}")
 

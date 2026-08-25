@@ -39,6 +39,7 @@ from cua_mcp.select_ui_element import (
     _select_center_with_ollama,
     _sort_detections_reading_order,
 )
+from src.common.io_utils import imread_bgr, imwrite_bgr
 from src.common.nearby_side import (
     NearbyHint,
     anchor_satisfies_side,
@@ -664,7 +665,7 @@ def _write_indexed_bbox_overlay_images(
             annotated.append(image_path)
             continue
 
-        bgr = cv2.imread(image_path)
+        bgr = imread_bgr(image_path)
         if bgr is None:
             _log_info(
                 "move_mouse indexed overlay could not read "
@@ -691,7 +692,7 @@ def _write_indexed_bbox_overlay_images(
             drawn_here += 1
 
         out_path = output_dir / f"{stamp}_indexed_mon{monitor_index}.png"
-        if not cv2.imwrite(str(out_path), canvas):
+        if not imwrite_bgr(out_path, canvas):
             _log_info(
                 "move_mouse indexed overlay write failed "
                 f"path={out_path}"
@@ -1135,7 +1136,7 @@ async def find_mouse_point(
         image_path = str(out.resolve())
         image_paths.append(image_path)
 
-        bgr = cv2.imread(image_path)
+        bgr = imread_bgr(image_path)
         if bgr is None:
             _log_info(f"move_mouse could not read captured image path={image_path}")
             continue

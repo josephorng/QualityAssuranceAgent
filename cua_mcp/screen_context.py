@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-import cv2
 import numpy as np
 
 from cua_mcp.select_mouse_target import _collect_monitor_detections
@@ -15,6 +14,7 @@ from cua_mcp.select_ui_element import (
     _sort_detections_reading_order,
 )
 from cua_mcp.yolo_onnx import DEFAULT_CONF_YOLOV26_END2END
+from src.common.io_utils import imread_bgr
 from src.common.monitor_prompt import selected_eye_monitor_indices
 from src.common.run_state import get_run_state_manager, ts_name
 from src.eye.capture import capture_monitor_to_file
@@ -61,7 +61,7 @@ async def capture_screen_context(
         capture_monitor_to_file(out, monitor_index)
         image_path = str(out.resolve())
         image_paths.append(image_path)
-        bgr = cv2.imread(image_path)
+        bgr = imread_bgr(image_path)
         if bgr is None:
             continue
         captured.append((monitor_index, bgr))

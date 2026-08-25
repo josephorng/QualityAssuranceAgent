@@ -65,6 +65,21 @@ def imread_bgr(path: str | os.PathLike[str]) -> Any:
     return cv2.imdecode(data, cv2.IMREAD_COLOR)
 
 
+def imwrite_bgr(path: str | os.PathLike[str], image: Any) -> bool:
+    """Write an OpenCV BGR image; Unicode paths work on Windows (unlike ``cv2.imwrite``)."""
+    import cv2
+
+    ensure_parent(Path(path))
+    ok, encoded = cv2.imencode(Path(path).suffix or ".png", image)
+    if not ok:
+        return False
+    try:
+        encoded.tofile(os.fspath(path))
+    except OSError:
+        return False
+    return True
+
+
 def open_path_with_default_app(path: Path) -> None:
     """Open a file or folder with the OS default application."""
     resolved = path.resolve()

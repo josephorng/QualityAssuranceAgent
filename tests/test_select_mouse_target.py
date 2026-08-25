@@ -90,7 +90,7 @@ async def test_resolve_mouse_point_merges_nearby_objects(monkeypatch: pytest.Mon
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
-        "cua_mcp.select_mouse_target.cv2.imread",
+        "cua_mcp.select_mouse_target.imread_bgr",
         lambda *_args, **_kwargs: np.zeros((10, 10, 3), dtype=np.uint8),
     )
     monkeypatch.setattr(
@@ -325,11 +325,11 @@ def test_local_bbox_on_monitor_clips_and_rejects_offscreen() -> None:
 def test_write_indexed_bbox_overlay_images(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     import numpy as np
 
+    from src.common.io_utils import imread_bgr, imwrite_bgr
+
     src = tmp_path / "cap_mon2.png"
     blank = np.zeros((120, 200, 3), dtype=np.uint8)
-    import cv2
-
-    assert cv2.imwrite(str(src), blank)
+    assert imwrite_bgr(src, blank)
 
     monkeypatch.setattr(
         "cua_mcp.select_mouse_target._monitor_geometry",
@@ -353,7 +353,7 @@ def test_write_indexed_bbox_overlay_images(tmp_path, monkeypatch: pytest.MonkeyP
     annotated = Path(out_paths[0])
     assert annotated.name == "t1_indexed_mon2.png"
     assert annotated.is_file()
-    img = cv2.imread(str(annotated))
+    img = imread_bgr(annotated)
     assert img is not None
     # Yellow pixel should appear near the labeled box region.
     assert img[30:50, 20:60].max() > 0
@@ -1323,7 +1323,7 @@ async def test_resolve_mouse_point_nearby_prefilter_skips_ollama(
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
-        "cua_mcp.select_mouse_target.cv2.imread",
+        "cua_mcp.select_mouse_target.imread_bgr",
         lambda *_args, **_kwargs: np.zeros((10, 10, 3), dtype=np.uint8),
     )
     monkeypatch.setattr(
@@ -1412,7 +1412,7 @@ async def test_resolve_mouse_point_does_not_run_function_describe(
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
-        "cua_mcp.select_mouse_target.cv2.imread",
+        "cua_mcp.select_mouse_target.imread_bgr",
         lambda *_args, **_kwargs: np.zeros((10, 10, 3), dtype=np.uint8),
     )
     monkeypatch.setattr(
@@ -1495,7 +1495,7 @@ async def test_resolve_mouse_point_skips_describe_when_unique(
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
-        "cua_mcp.select_mouse_target.cv2.imread",
+        "cua_mcp.select_mouse_target.imread_bgr",
         lambda *_args, **_kwargs: np.zeros((10, 10, 3), dtype=np.uint8),
     )
     monkeypatch.setattr(
@@ -1694,7 +1694,7 @@ async def test_resolve_mouse_point_char_target_uses_span_center(
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
-        "cua_mcp.select_mouse_target.cv2.imread",
+        "cua_mcp.select_mouse_target.imread_bgr",
         lambda *_args, **_kwargs: np.zeros((100, 100, 3), dtype=np.uint8),
     )
     monkeypatch.setattr(

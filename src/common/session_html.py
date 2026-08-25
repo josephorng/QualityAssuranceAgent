@@ -171,6 +171,9 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
   margin: 0 1.5rem 1rem; padding: .75rem 1rem;
   border: 1px solid #d0d7de; border-radius: 8px; background: #f6f8fa;
 }
+.landmarks.is-dirty {
+  border-color: #0969da; background: #f0f7ff;
+}
 .landmarks-title {
   margin: 0 0 .5rem; font-size: .9rem; font-weight: 700; color: #57606a;
 }
@@ -208,6 +211,9 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 }
 .apply-landmarks:hover:not(:disabled) { background: #b6e3ff; }
 .apply-landmarks:disabled { opacity: .45; cursor: not-allowed; }
+.apply-landmarks.dirty:not(:disabled) {
+  box-shadow: 0 0 0 2px rgba(9, 105, 218, 0.28);
+}
 .apply-landmarks.applied {
   color: #116329; border-color: #4ac26b; background: #dafbe1;
 }
@@ -215,6 +221,7 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
   display: inline-block; margin-left: .5rem;
   font-size: .75rem; color: #57606a; font-weight: 600;
 }
+.landmarks-status.pending { color: #0969da; }
 .landmarks-status.error { color: #cf222e; }
 .vision-retry {
   margin: 0 1.5rem 1rem; padding: .75rem .9rem;
@@ -661,12 +668,14 @@ _RECORDING_SCRIPT = """
     });
   }
 
-  function setLandmarksStatus(panel, text, isError) {
+  function setLandmarksStatus(panel, text, isError, isPending) {
     var status = panel.querySelector(".landmarks-status");
     if (!status) return;
     status.textContent = text || "";
     if (isError) status.classList.add("error");
     else status.classList.remove("error");
+    if (isPending) status.classList.add("pending");
+    else status.classList.remove("pending");
   }
 
   function selectedHints(panel, group) {
@@ -693,24 +702,71 @@ _RECORDING_SCRIPT = """
     return Number.isFinite(value) ? value : null;
   }
 
-  Array.prototype.slice.call(document.querySelectorAll("button.apply-landmarks")).forEach(function (btn) {
-    btn.addEventListener("click", function (event) {
-      event.preventDefault();
-      event.stopPropagation();
+  function landmarkSelectionSnapshot(panel, kind) {
+    var snap = {
+      selected: selectedHints(panel, "start"),
+      primary_index: selectedPrimaryIndex(panel, "start")
+    };
+    if (kind === "drag") {
+      snap.selected_end = selectedHints(panel, "end");
+      snap.primary_end_index = selectedPrimaryIndex(panel, "end");
+    }
+    return JSON.stringify(snap);
+  }
+
+  function landmarksPanelKind(panel) {
+    var group = panel.closest(".instruction-group");
+    return group ? (group.getAttribute("data-kind") || "") : "";
+  }
+
+  function syncLandmarksDirty(panel, options) {
+    options = options || {};
+    var btn = panel.querySelector("button.apply-landmarks");
+    var kind = landmarksPanelKind(panel);
+    var baseline = panel.getAttribute("data-baseline") || "";
+    var current = landmarkSelectionSnapshot(panel, kind);
+    var dirty = current !== baseline;
+    var applying = panel.getAttribute("data-applying") === "1";
+    if (dirty) panel.classList.add("is-dirty");
+    else panel.classList.remove("is-dirty");
+    if (btn) {
+      if (dirty) btn.classList.add("dirty");
+      else btn.classList.remove("dirty");
+      if (!applying) btn.disabled = !dirty;
+    }
+    if (options.skipStatus) return dirty;
+    var status = panel.querySelector(".landmarks-status");
+    var text = status ? (status.textContent || "") : "";
+    if (status && status.classList.contains("error")) return dirty;
+    if (text === "套用中…" || text === "已套用") return dirty;
+    if (dirty) setLandmarksStatus(panel, "尚未套用", false, true);
+    else if (text === "尚未套用") setLandmarksStatus(panel, "", false, false);
+    return dirty;
+  }
+
+  function rememberLandmarksBaseline(panel) {
+    var kind = landmarksPanelKind(panel);
+    panel.setAttribute("data-baseline", landmarkSelectionSnapshot(panel, kind));
+    syncLandmarksDirty(panel, { skipStatus: true });
+  }
+
+  function applyLandmarks(btn) {
       var panel = btn.closest(".landmarks");
       var group = btn.closest(".instruction-group");
       if (!panel || !group) return;
+      if (panel.getAttribute("data-applying") === "1") return;
       if (window.location.protocol === "file:") {
-        setLandmarksStatus(panel, "請透過主程式開啟報告以套用地標。", true);
+        setLandmarksStatus(panel, "請透過主程式開啟報告以套用地標。", true, false);
         return;
       }
       var runId = group.getAttribute("data-run-id") || "";
       var eventIndex = group.getAttribute("data-event-index") || "";
       var kind = group.getAttribute("data-kind") || "";
       if (!runId || !eventIndex) {
-        setLandmarksStatus(panel, "缺少事件資訊。", true);
+        setLandmarksStatus(panel, "缺少事件資訊。", true, false);
         return;
       }
+      if (!syncLandmarksDirty(panel, { skipStatus: true })) return;
       var body = { selected: selectedHints(panel, "start") };
       if (kind === "drag") {
         body.selected_end = selectedHints(panel, "end");
@@ -721,8 +777,9 @@ _RECORDING_SCRIPT = """
         var primaryEndIndex = selectedPrimaryIndex(panel, "end");
         if (primaryEndIndex != null) body.primary_end_index = primaryEndIndex;
       }
+      panel.setAttribute("data-applying", "1");
       btn.disabled = true;
-      setLandmarksStatus(panel, "套用中…", false);
+      setLandmarksStatus(panel, "套用中…", false, false);
       fetch("/api/runs/" + encodeURIComponent(runId) + "/events/" + encodeURIComponent(eventIndex) + "/landmarks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -734,10 +791,11 @@ _RECORDING_SCRIPT = """
           });
         })
         .then(function (result) {
-          btn.disabled = false;
+          panel.removeAttribute("data-applying");
           if (!result.ok || !result.payload || !result.payload.ok) {
             var err = (result.payload && result.payload.error) || "套用失敗";
-            setLandmarksStatus(panel, err, true);
+            setLandmarksStatus(panel, err, true, false);
+            syncLandmarksDirty(panel, { skipStatus: true });
             return;
           }
           if (result.payload.rebuilt) {
@@ -749,16 +807,53 @@ _RECORDING_SCRIPT = """
           if (title) title.textContent = instruction;
           var copyBtn = group.querySelector("button.copy-instruction");
           if (copyBtn) copyBtn.setAttribute("data-instruction", instruction);
+          rememberLandmarksBaseline(panel);
           btn.classList.add("applied");
-          setLandmarksStatus(panel, "已套用", false);
+          setLandmarksStatus(panel, "已套用", false, false);
+          syncLandmarksDirty(panel, { skipStatus: true });
           window.setTimeout(function () {
             btn.classList.remove("applied");
+            var status = panel.querySelector(".landmarks-status");
+            if (status && status.textContent === "已套用") {
+              setLandmarksStatus(panel, "", false, false);
+            }
           }, 1200);
         })
         .catch(function () {
-          btn.disabled = false;
-          setLandmarksStatus(panel, "無法連線主程式，請確認主程式正在執行。", true);
+          panel.removeAttribute("data-applying");
+          setLandmarksStatus(panel, "無法連線主程式，請確認主程式正在執行。", true, false);
+          syncLandmarksDirty(panel, { skipStatus: true });
         });
+  }
+
+  Array.prototype.slice.call(document.querySelectorAll(".landmarks")).forEach(function (panel) {
+    rememberLandmarksBaseline(panel);
+    syncLandmarksDirty(panel);
+    panel.addEventListener("change", function (event) {
+      var target = event.target;
+      if (!target || !target.matches) return;
+      if (
+        !target.matches('input[data-landmark-group]') &&
+        !target.matches('input[data-primary-group]')
+      ) {
+        return;
+      }
+      syncLandmarksDirty(panel);
+    });
+    panel.addEventListener("keydown", function (event) {
+      if (event.key !== "Enter" || !(event.ctrlKey || event.metaKey)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      var btn = panel.querySelector("button.apply-landmarks");
+      if (btn) applyLandmarks(btn);
+    });
+  });
+
+  Array.prototype.slice.call(document.querySelectorAll("button.apply-landmarks")).forEach(function (btn) {
+    btn.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      applyLandmarks(btn);
     });
   });
 
@@ -3287,15 +3382,16 @@ def _render_landmarks_panel_html(
     )
     panel_title = "目標與地標" if has_primary else "附近地標"
     button_title = (
-        "依選取目標與地標重新產生指令"
+        "依選取目標與地標重新產生指令（Ctrl+Enter）"
         if has_primary
-        else "依勾選地標重新產生指令"
+        else "依勾選地標重新產生指令（Ctrl+Enter）"
     )
     return (
         f'<div class="landmarks">'
         f'<div class="landmarks-title">{escape(panel_title)}</div>'
         f'<div class="landmarks-groups">{groups_html}</div>'
-        f'<button type="button" class="apply-landmarks" title="{escape(button_title, quote=True)}">'
+        f'<button type="button" class="apply-landmarks" disabled '
+        f'title="{escape(button_title, quote=True)}">'
         f"套用</button>"
         f'<span class="landmarks-status" aria-live="polite"></span>'
         f"</div>"

@@ -1111,6 +1111,8 @@ def test_write_recording_html_renders_landmark_multiselect(tmp_path: Path) -> No
     assert 'data-primary-index="0"' in html
     assert 'data-primary-index="1"' in html
     assert 'class="apply-landmarks"' in html
+    assert "Ctrl+Enter" in html
+    assert "syncLandmarksDirty" in html
     assert 'data-label="「已選取 2 個項目」文字"' in html
     assert 'data-label="「45 個項目」文字"' in html
     assert 'data-label="「Chrome」圖示"' in html

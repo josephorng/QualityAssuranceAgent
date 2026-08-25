@@ -1312,3 +1312,63 @@ def test_begin_stop_and_finalize_stop_write_session(tmp_path) -> None:
     assert (run_dir / "session.json").is_file()
     assert session.event_count() == 1
 
+
+def test_continue_recording_appends_into_existing_folder(tmp_path) -> None:
+    existing = tmp_path / "opened_recording"
+    (existing / "events").mkdir(parents=True)
+    (existing / "screenshots").mkdir()
+    (existing / "yolo_ocr").mkdir()
+    seed = {
+        "index": 1,
+        "timestamp_utc": "2026-01-01T00:00:00+00:00",
+        "kind": "click",
+        "cursor_xy": [10, 10],
+        "screenshot_path": "screenshots/event_001.jpeg",
+    }
+    (existing / "events" / "event_001.json").write_text(
+        json.dumps(seed),
+        encoding="utf-8",
+    )
+    (existing / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": "opened_recording",
+                "started_at_utc": "2026-01-01T00:00:00+00:00",
+                "stopped_at_utc": "2026-01-01T00:01:00+00:00",
+                "event_count": 1,
+                "events": ["events/event_001.json"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    session = RecordingSession(runs_root=tmp_path / "unused_root")
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.capture_final_after_screenshot",
+        return_value=None,
+    ):
+        run_dir = session.start(existing_run_dir=existing)
+        try:
+            assert run_dir == existing
+            _left_click(session, 50, 60)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    assert (existing / "events" / "event_002.json").is_file()
+    raw = json.loads((existing / "events" / "event_002.json").read_text(encoding="utf-8"))
+    assert raw["index"] == 2
+    assert raw["kind"] == "click"
+    manifest = json.loads((existing / "session.json").read_text(encoding="utf-8"))
+    assert manifest["run_id"] == "opened_recording"
+    assert manifest["started_at_utc"] == "2026-01-01T00:00:00+00:00"
+    assert manifest["event_count"] == 2
+    assert manifest["events"] == [
+        "events/event_001.json",
+        "events/event_002.json",
+    ]
+

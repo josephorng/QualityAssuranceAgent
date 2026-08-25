@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from src.common.io_utils import read_json
 
 
 POINTER_EVENT_KINDS = frozenset(
@@ -152,3 +155,27 @@ def screenshot_path_for_event_end(run_dir: Path, index: int) -> Path:
 
 def final_after_screenshot_path(run_dir: Path) -> Path:
     return Path(run_dir) / "screenshots" / "final_after.jpeg"
+
+
+def recording_event_paths(run_dir: Path) -> list[Path]:
+    """Return sorted ``events/event_*.json`` paths under ``run_dir``."""
+    events_dir = Path(run_dir) / "events"
+    if not events_dir.is_dir():
+        return []
+    paths = [path for path in events_dir.glob("event_*.json") if path.is_file()]
+    paths.sort(key=lambda path: path.name)
+    return paths
+
+
+def next_recording_event_index(run_dir: Path) -> int:
+    """Return the next 1-based event index for appending into ``run_dir``."""
+    max_index = 0
+    for path in recording_event_paths(run_dir):
+        payload = read_json(path, None)
+        if isinstance(payload, dict) and isinstance(payload.get("index"), int):
+            max_index = max(max_index, int(payload["index"]))
+            continue
+        match = re.fullmatch(r"event_(\d+)\.json", path.name)
+        if match is not None:
+            max_index = max(max_index, int(match.group(1)))
+    return max_index + 1

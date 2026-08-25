@@ -14,7 +14,7 @@ import pyautogui
 import pyperclip
 from pynput import keyboard, mouse
 
-from src.common.io_utils import append_text, write_json
+from src.common.io_utils import append_text, read_json, write_json
 from src.common.run_state import unique_run_folder_name
 from src.common.settings import load_settings
 from src.eye.capture import resolve_monitor_index
@@ -24,6 +24,8 @@ from src.recorder.models import (
     SessionManifest,
     event_json_path,
     final_after_screenshot_path,
+    next_recording_event_index,
+    recording_event_paths,
     screenshot_path_for_event,
     screenshot_path_for_event_end,
     utc_now_iso,
@@ -605,6 +607,7 @@ class RecordingSession:
         *,
         ignore_rect: tuple[int, int, int, int] | None = None,
         ignore_rect_provider: IgnoreRectProvider | None = None,
+        existing_run_dir: Path | None = None,
     ) -> Path:
         if ignore_rect_provider is not None:
             provider = ignore_rect_provider
@@ -616,17 +619,38 @@ class RecordingSession:
         with self._lock:
             if self._accepting_input:
                 raise RuntimeError("Recording is already active")
-            run_id = unique_run_folder_name("recording")
-            run_dir = self._runs_root / run_id
-            run_dir.mkdir(parents=True, exist_ok=True)
-            (run_dir / "events").mkdir(exist_ok=True)
-            (run_dir / "screenshots").mkdir(exist_ok=True)
-            (run_dir / "yolo_ocr").mkdir(exist_ok=True)
+            if existing_run_dir is not None:
+                run_dir = Path(existing_run_dir)
+                if not run_dir.is_dir():
+                    raise RuntimeError(f"Recording folder not found: {run_dir}")
+                run_id = run_dir.name
+                (run_dir / "events").mkdir(exist_ok=True)
+                (run_dir / "screenshots").mkdir(exist_ok=True)
+                (run_dir / "yolo_ocr").mkdir(exist_ok=True)
+                next_index = next_recording_event_index(run_dir)
+                session = read_json(run_dir / "session.json", {})
+                started_at = utc_now_iso()
+                if isinstance(session, dict):
+                    raw_started = session.get("started_at_utc")
+                    if isinstance(raw_started, str) and raw_started.strip():
+                        started_at = raw_started.strip()
+                    raw_run_id = session.get("run_id")
+                    if isinstance(raw_run_id, str) and raw_run_id.strip():
+                        run_id = raw_run_id.strip()
+            else:
+                run_id = unique_run_folder_name("recording")
+                run_dir = self._runs_root / run_id
+                run_dir.mkdir(parents=True, exist_ok=True)
+                (run_dir / "events").mkdir(exist_ok=True)
+                (run_dir / "screenshots").mkdir(exist_ok=True)
+                (run_dir / "yolo_ocr").mkdir(exist_ok=True)
+                next_index = 1
+                started_at = utc_now_iso()
             self._run_dir = run_dir
             self._run_id = run_id
             self._events = []
-            self._next_index = 1
-            self._started_at = utc_now_iso()
+            self._next_index = next_index
+            self._started_at = started_at
             self._ignore_rect_provider = provider
             self._accepting_input = True
             self._pressed_modifiers = set()
@@ -684,7 +708,10 @@ class RecordingSession:
             self.stop()
             raise RuntimeError(error_message)
 
-        self._log(run_dir, "recording started")
+        self._log(
+            run_dir,
+            "recording continued" if existing_run_dir is not None else "recording started",
+        )
         return run_dir
 
     def begin_stop(self) -> Path | None:
@@ -786,18 +813,19 @@ class RecordingSession:
         else:
             self._log(run_dir, "final after screenshot capture failed")
 
+        event_paths = recording_event_paths(run_dir)
         manifest = SessionManifest(
             run_id=run_id,
             started_at_utc=started_at,
             stopped_at_utc=utc_now_iso(),
-            event_count=len(events),
-            events=[f"events/event_{e.index:03d}.json" for e in events],
+            event_count=len(event_paths),
+            events=[path.relative_to(run_dir).as_posix() for path in event_paths],
             final_after_screenshot=(
                 "screenshots/final_after.jpeg" if final_after is not None else None
             ),
         )
         write_json(run_dir / "session.json", manifest.to_dict())
-        self._log(run_dir, f"recording stopped events={len(events)}")
+        self._log(run_dir, f"recording stopped events={len(event_paths)}")
         try:
             from src.common.session_html import write_recording_html_from_run
 

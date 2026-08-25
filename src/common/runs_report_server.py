@@ -54,6 +54,7 @@ from src.recorder.models import (
     POINTER_EVENT_KINDS,
     RecordedEvent,
     event_json_path,
+    next_recording_event_index,
     screenshot_path_for_event,
     screenshot_path_for_event_end,
     utc_now_iso,
@@ -579,16 +580,7 @@ def _instruction_for_condition(
 
 
 def _next_recording_event_index(run_dir: Path) -> int:
-    max_index = 0
-    for path in _remaining_recording_event_paths(run_dir):
-        payload = read_json(path, None)
-        if isinstance(payload, dict) and isinstance(payload.get("index"), int):
-            max_index = max(max_index, int(payload["index"]))
-            continue
-        match = re.fullmatch(r"event_(\d+)\.json", path.name)
-        if match is not None:
-            max_index = max(max_index, int(match.group(1)))
-    return max_index + 1
+    return next_recording_event_index(run_dir)
 
 
 def _copy_previous_screenshot(

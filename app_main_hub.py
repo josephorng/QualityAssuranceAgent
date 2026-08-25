@@ -411,6 +411,21 @@ class MainHub(ctk.CTk):
     def _is_recording_script_open(self) -> bool:
         return self._script_path is not None and is_recording_script_path(self._script_path)
 
+    def _record_button_idle_label(self) -> str:
+        return "繼續錄製" if self._is_recording_script_open() else "開始錄製"
+
+    def _refresh_record_button_idle_label(self) -> None:
+        if self._record_btn is None:
+            return
+        if self._recording_session.is_active() or self._is_recording_finalizing():
+            return
+        if self._is_analysis_running():
+            return
+        try:
+            self._record_btn.configure(text=self._record_button_idle_label())
+        except Exception:
+            pass
+
     def _apply_script_editor_lock(self) -> None:
         """Recording review HTML is the only editor; hub shows a read-only preview."""
         if not hasattr(self, "_script_text"):
@@ -448,6 +463,7 @@ class MainHub(ctk.CTk):
         self._refresh_script_path_label()
         self._mark_script_clean()
         self._apply_script_editor_lock()
+        self._refresh_record_button_idle_label()
         self._persist_hub_ui_state()
 
     def _validate_recording_folder_for_script(self, folder: Path) -> Path | None:
@@ -1806,7 +1822,11 @@ class MainHub(ctk.CTk):
         self._set_queue_control_widgets_state("normal")
         self._use_tool_cache_checkbox.configure(state="normal")
         if self._record_btn is not None:
-            self._record_btn.configure(text="開始錄製", state="normal", command=self._on_record_button)
+            self._record_btn.configure(
+                text=self._record_button_idle_label(),
+                state="normal",
+                command=self._on_record_button,
+            )
         self._hide_analysis_progress()
         self._apply_script_editor_lock()
 
@@ -1989,6 +2009,7 @@ class MainHub(ctk.CTk):
         self._refresh_script_path_label()
         self._mark_script_clean()
         self._apply_script_editor_lock()
+        self._refresh_record_button_idle_label()
         self._status.configure(text="", text_color=("gray20", "gray65"))
         self._persist_hub_ui_state()
 
@@ -2153,10 +2174,14 @@ class MainHub(ctk.CTk):
             return
         if self._recording_session.is_active():
             return
+        existing_run_dir: Path | None = None
+        if self._is_recording_script_open() and self._script_path is not None:
+            existing_run_dir = Path(self._script_path)
         try:
             self._recording_session.set_suppress_hotkey_keys(True)
             run_dir = self._recording_session.start(
                 ignore_rect_provider=self._recording_ignore_rect_provider,
+                existing_run_dir=existing_run_dir,
             )
         except Exception as exc:
             self._recording_session.set_suppress_hotkey_keys(False)
@@ -2166,8 +2191,9 @@ class MainHub(ctk.CTk):
             self.after(400, lambda: self._recording_session.set_suppress_hotkey_keys(False))
 
         self._set_hub_controls_recording()
+        verb = "繼續錄製中" if existing_run_dir is not None else "錄製中"
         self._status.configure(
-            text=f"錄製中 (0 個事件)… {run_dir.name}",
+            text=f"{verb} (0 個事件)… {run_dir.name}",
             text_color=("gray20", "gray65"),
         )
         try:
@@ -2239,10 +2265,13 @@ class MainHub(ctk.CTk):
             self._status.configure(text="錄製已停止。")
             return
         if analyze and event_count > 0:
-            self._start_recording_analysis(run_dir, event_count)
+            total_events = self._count_recording_events(run_dir)
+            self._start_recording_analysis(run_dir, max(event_count, total_events))
         else:
             self._set_hub_controls_idle()
             self._status.configure(text=f"錄製已停止（{event_count} 個事件）。")
+            if self._is_recording_script_open() and run_dir is not None:
+                self._load_script_into_editor(run_dir)
 
     def _on_recording_finalize_failed(self, exc: Exception) -> None:
         self._recording_finalize_thread = None
@@ -2297,9 +2326,13 @@ class MainHub(ctk.CTk):
             )
             self.after(0, lambda: self._status.configure(text="錄製分析失敗。"))
             return
-        self.after(0, lambda: self._on_recording_analysis_done(report))
+        self.after(0, lambda: self._on_recording_analysis_done(report, run_dir))
 
-    def _on_recording_analysis_done(self, report: dict[str, Any]) -> None:
+    def _on_recording_analysis_done(
+        self,
+        report: dict[str, Any],
+        run_dir: Path | None = None,
+    ) -> None:
         self._recording_analysis_thread = None
         self._set_hub_controls_idle()
         cached = int(report.get("cached", 0))
@@ -2329,6 +2362,8 @@ class MainHub(ctk.CTk):
             )
             self._status.configure(text=f"分析已停止（{processed}/{recorded}）。")
             show_ctk_message(self, "錄製分析已停止", msg, kind="warning")
+            if self._is_recording_script_open() and self._script_path is not None:
+                self._load_script_into_editor(self._script_path)
             return
         msg = (
             f"錄製 {recorded} 個事件。\n"
@@ -2337,42 +2372,116 @@ class MainHub(ctk.CTk):
         self._status.configure(text=f"已寫入快取 {cached} 筆（略過 {skipped}）。")
         run_id_raw = report.get("run_id")
         current_name = run_id_raw.strip() if isinstance(run_id_raw, str) else ""
+        if not current_name and run_dir is not None:
+            current_name = run_dir.name
+        continue_open = self._is_recording_script_open()
         choice, folder_name = prompt_append_recording_instructions(
             self,
             msg,
             folder_name=current_name,
-            allow_append=bool(lines),
+            allow_append=not continue_open and (
+                (run_dir is not None and Path(run_dir).is_dir()) or bool(current_name)
+            ),
         )
         if current_name:
-            current_name = self._rename_recording_folder_from_dialog(current_name, folder_name)
-        if choice == "append" and lines:
-            if self._is_recording_script_open():
-                # Compose into a free editor; do not bind the hub to the recording folder.
-                self._script_path = None
-                self._runtime_commands_cache_path = None
-            self._script_text.configure(state="normal")
-            if self._script_text.get("0.0", "end").strip():
-                self._script_text.insert("end", "\n")
-            self._script_text.insert("end", "\n".join(lines) + "\n")
-            self._sync_script_text_to_runtime_cache()
-            self._refresh_script_path_label()
-            self._apply_script_editor_lock()
-        elif choice == "open_review":
-            if current_name:
-                runs_root = Path(load_settings().runs_dir)
-                html_path = runs_root / current_name / "recording_steps.html"
-                self._open_report_html(html_path)
+            current_name = self._rename_recording_folder_from_dialog(
+                current_name,
+                folder_name,
+                run_dir=run_dir,
+            )
+        folder = self._resolve_analyzed_recording_folder(current_name, run_dir)
+        if continue_open:
+            target = self._script_path
+            if target is None:
+                target = folder
+            if target is not None and Path(target).is_dir():
+                self._load_script_into_editor(Path(target))
+            if choice == "open_review":
+                self._open_recording_review_html(folder, current_name)
+            return
+        if choice == "append":
+            if folder is not None and self._is_recording_folder(folder):
+                self._load_script_into_editor(folder)
+                self._status.configure(
+                    text=f"已開啟錄製 {script_display_name(folder)}（唯讀）"
+                )
             else:
-                show_ctk_message(self, "錄製分析完成", "找不到錄製報告路徑。", kind="warning")
+                show_ctk_message(
+                    self,
+                    "錄製分析完成",
+                    "找不到錄製資料夾，無法加入腳本。",
+                    kind="warning",
+                )
+        elif choice == "open_review":
+            self._open_recording_review_html(folder, current_name)
 
-    def _rename_recording_folder_from_dialog(self, run_id: str, new_name: str) -> str:
+    def _resolve_analyzed_recording_folder(
+        self,
+        run_id: str,
+        run_dir: Path | None,
+    ) -> Path | None:
+        """Return the on-disk folder for an analyzed recording after optional rename."""
+        if self._script_path is not None and is_recording_script_path(self._script_path):
+            if not run_id or Path(self._script_path).name == run_id:
+                return Path(self._script_path)
+        if run_dir is not None:
+            candidate = Path(run_dir)
+            if run_id and candidate.name != run_id:
+                renamed = candidate.parent / run_id
+                if renamed.is_dir():
+                    return renamed
+            if candidate.is_dir():
+                return candidate
+        if not run_id:
+            return None
+        settings = load_settings()
+        for root in (Path(settings.runs_dir), Path(settings.recordings_dir)):
+            candidate = root / run_id
+            if candidate.is_dir():
+                return candidate
+        return None
+
+    def _open_recording_review_html(
+        self,
+        folder: Path | None,
+        run_id: str,
+    ) -> None:
+        html_path: Path | None = None
+        if folder is not None:
+            candidate = Path(folder) / "recording_steps.html"
+            if candidate.is_file():
+                html_path = candidate
+        if html_path is None and run_id:
+            settings = load_settings()
+            for root in (Path(settings.runs_dir), Path(settings.recordings_dir)):
+                candidate = root / run_id / "recording_steps.html"
+                if candidate.is_file():
+                    html_path = candidate
+                    break
+        if html_path is None:
+            show_ctk_message(self, "錄製分析完成", "找不到錄製報告路徑。", kind="warning")
+            return
+        self._open_report_html(html_path)
+
+    def _rename_recording_folder_from_dialog(
+        self,
+        run_id: str,
+        new_name: str,
+        *,
+        run_dir: Path | None = None,
+    ) -> str:
         """Rename the recording folder if the dialog name differs. Returns the effective id."""
         cleaned = new_name.strip()
         if not cleaned or cleaned == run_id:
             return run_id
-        runs_root = Path(load_settings().runs_dir)
+        if run_dir is not None and Path(run_dir).is_dir():
+            runs_root = Path(run_dir).parent
+            source_id = Path(run_dir).name
+        else:
+            runs_root = Path(load_settings().runs_dir)
+            source_id = run_id
         try:
-            result = rename_recording_folder(runs_root, run_id, cleaned)
+            result = rename_recording_folder(runs_root, source_id, cleaned)
         except ValueError as exc:
             show_ctk_message(
                 self,
@@ -2390,7 +2499,7 @@ class MainHub(ctk.CTk):
             )
             return run_id
         new_id = str(result.get("new_id") or cleaned)
-        self._retarget_recording_folder_refs(runs_root / run_id, runs_root / new_id)
+        self._retarget_recording_folder_refs(runs_root / source_id, runs_root / new_id)
         return new_id
 
     def _retarget_recording_folder_refs(self, old_dir: Path, new_dir: Path) -> None:

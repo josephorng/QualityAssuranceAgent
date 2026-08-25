@@ -28,6 +28,21 @@ from src.recorder.vision_context import (
 )
 
 
+def _parallel_safe_drag_fakes(start_detections, end_detections):
+    """Distinguish start vs end frames without depending on call order (parallel drag)."""
+    start_img = np.zeros((100, 100, 3), dtype=np.uint8)
+    end_img = np.full((100, 100, 3), 1, dtype=np.uint8)
+
+    def fake_imread(path):
+        name = Path(path).name.lower()
+        return end_img if "end" in name else start_img
+
+    def fake_build(bgr, **_kwargs):
+        return end_detections if int(bgr[0, 0, 0]) == 1 else start_detections
+
+    return fake_imread, fake_build
+
+
 def test_resolve_event_screenshot_path_falls_back_to_run_dir(tmp_path: Path) -> None:
     run_dir = tmp_path / "選擇文字測試"
     (run_dir / "screenshots").mkdir(parents=True)
@@ -380,19 +395,14 @@ async def test_build_vision_context_drag_includes_start_and_destination(tmp_path
     end_detections = [
         _detection_from_bbox((200, 8, 40, 10), YOLO_CLASS_TEXT, text="100%"),
     ]
-
-    call_count = {"n": 0}
-
-    def _fake_build(_bgr, **_kwargs):
-        call_count["n"] += 1
-        return start_detections if call_count["n"] == 1 else end_detections
+    fake_imread, fake_build = _parallel_safe_drag_fakes(start_detections, end_detections)
 
     with patch(
         "src.recorder.vision_context.imread_bgr",
-        return_value=np.zeros((100, 100, 3), dtype=np.uint8),
+        side_effect=fake_imread,
     ), patch(
         "src.recorder.vision_context._build_candidates_from_bgr",
-        side_effect=_fake_build,
+        side_effect=fake_build,
     ):
         vision = await build_vision_context(event, run_dir=tmp_path, persist_debug=True)
 
@@ -432,19 +442,14 @@ async def test_drag_destination_keeps_nearest_candidates_without_exclusion(tmp_p
         _detection_from_bbox((8, 8, 60, 20), YOLO_CLASS_TEXT, text="報告.pdf"),
         _detection_from_bbox((200, 8, 80, 20), YOLO_CLASS_TEXT, text="文件"),
     ]
-
-    call_count = {"n": 0}
-
-    def _fake_build(_bgr, **_kwargs):
-        call_count["n"] += 1
-        return start_detections if call_count["n"] == 1 else end_detections
+    fake_imread, fake_build = _parallel_safe_drag_fakes(start_detections, end_detections)
 
     with patch(
         "src.recorder.vision_context.imread_bgr",
-        return_value=np.zeros((100, 100, 3), dtype=np.uint8),
+        side_effect=fake_imread,
     ), patch(
         "src.recorder.vision_context._build_candidates_from_bgr",
-        side_effect=_fake_build,
+        side_effect=fake_build,
     ):
         vision = await build_vision_context(event, run_dir=tmp_path, persist_debug=True)
 
@@ -492,19 +497,14 @@ async def test_drag_destination_lists_nearest_candidates_at_drop(tmp_path) -> No
         _detection_from_bbox((157, 681, 55, 13), YOLO_CLASS_TEXT, text="Chrome"),
         _detection_from_bbox((162, 580, 56, 15), YOLO_CLASS_TEXT, text="Desktop"),
     ]
-
-    call_count = {"n": 0}
-
-    def _fake_build(_bgr, **_kwargs):
-        call_count["n"] += 1
-        return start_detections if call_count["n"] == 1 else end_detections
+    fake_imread, fake_build = _parallel_safe_drag_fakes(start_detections, end_detections)
 
     with patch(
         "src.recorder.vision_context.imread_bgr",
-        return_value=np.zeros((100, 100, 3), dtype=np.uint8),
+        side_effect=fake_imread,
     ), patch(
         "src.recorder.vision_context._build_candidates_from_bgr",
-        side_effect=_fake_build,
+        side_effect=fake_build,
     ):
         vision = await build_vision_context(event, run_dir=tmp_path, persist_debug=False)
 
@@ -538,19 +538,14 @@ async def test_drag_destination_uses_nearest_when_drop_not_inside_text(tmp_path)
         _detection_from_bbox((171, 665, 35, 15), YOLO_CLASS_TEXT, text="振銓"),
         _detection_from_bbox((162, 580, 56, 15), YOLO_CLASS_TEXT, text="Desktop"),
     ]
-
-    call_count = {"n": 0}
-
-    def _fake_build(_bgr, **_kwargs):
-        call_count["n"] += 1
-        return start_detections if call_count["n"] == 1 else end_detections
+    fake_imread, fake_build = _parallel_safe_drag_fakes(start_detections, end_detections)
 
     with patch(
         "src.recorder.vision_context.imread_bgr",
-        return_value=np.zeros((100, 100, 3), dtype=np.uint8),
+        side_effect=fake_imread,
     ), patch(
         "src.recorder.vision_context._build_candidates_from_bgr",
-        side_effect=_fake_build,
+        side_effect=fake_build,
     ):
         vision = await build_vision_context(event, run_dir=tmp_path, persist_debug=False)
 
@@ -869,19 +864,14 @@ async def test_drag_destination_uses_hit_target_when_drop_inside_text(tmp_path) 
         _detection_from_bbox((171, 665, 35, 15), YOLO_CLASS_TEXT, text="振銓"),
         _detection_from_bbox((162, 580, 56, 15), YOLO_CLASS_TEXT, text="Desktop"),
     ]
-
-    call_count = {"n": 0}
-
-    def _fake_build(_bgr, **_kwargs):
-        call_count["n"] += 1
-        return start_detections if call_count["n"] == 1 else end_detections
+    fake_imread, fake_build = _parallel_safe_drag_fakes(start_detections, end_detections)
 
     with patch(
         "src.recorder.vision_context.imread_bgr",
-        return_value=np.zeros((100, 100, 3), dtype=np.uint8),
+        side_effect=fake_imread,
     ), patch(
         "src.recorder.vision_context._build_candidates_from_bgr",
-        side_effect=_fake_build,
+        side_effect=fake_build,
     ):
         vision = await build_vision_context(event, run_dir=tmp_path, persist_debug=False)
 
@@ -920,19 +910,14 @@ async def test_build_vision_context_drag_includes_destination_offset_hints(tmp_p
     end_detections = [
         _detection_from_bbox((162, 580, 56, 15), YOLO_CLASS_TEXT, text="Desktop"),
     ]
-
-    call_count = {"n": 0}
-
-    def _fake_build(_bgr, **_kwargs):
-        call_count["n"] += 1
-        return start_detections if call_count["n"] == 1 else end_detections
+    fake_imread, fake_build = _parallel_safe_drag_fakes(start_detections, end_detections)
 
     with patch(
         "src.recorder.vision_context.imread_bgr",
-        return_value=np.zeros((100, 100, 3), dtype=np.uint8),
+        side_effect=fake_imread,
     ), patch(
         "src.recorder.vision_context._build_candidates_from_bgr",
-        side_effect=_fake_build,
+        side_effect=fake_build,
     ):
         vision = await build_vision_context(event, run_dir=tmp_path, persist_debug=False)
 

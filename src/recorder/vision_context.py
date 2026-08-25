@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -1806,27 +1808,33 @@ def run_pointer_event_yolo_ocr(
         if start_local is None or end_local is None:
             return empty
 
-        start_result = build_vision_context_at_point(
-            event,
-            local_x=start_local[0],
-            local_y=start_local[1],
-            run_dir=run_dir,
-            persist_debug=persist_debug,
-            reference_xy=event.cursor_xy,
-            image_path=event.screenshot_path,
-            debug_name="",
-        )
         end_image = event.end_screenshot_path or event.screenshot_path
-        end_result = build_vision_context_at_point(
-            event,
-            local_x=end_local[0],
-            local_y=end_local[1],
-            run_dir=run_dir,
-            persist_debug=persist_debug,
-            reference_xy=event.end_xy,
-            image_path=end_image,
-            debug_name="_end",
-        )
+        # Start/end frames are independent images — run YOLO+OCR concurrently.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            start_future = pool.submit(
+                build_vision_context_at_point,
+                event,
+                local_x=start_local[0],
+                local_y=start_local[1],
+                run_dir=run_dir,
+                persist_debug=persist_debug,
+                reference_xy=event.cursor_xy,
+                image_path=event.screenshot_path,
+                debug_name="",
+            )
+            end_future = pool.submit(
+                build_vision_context_at_point,
+                event,
+                local_x=end_local[0],
+                local_y=end_local[1],
+                run_dir=run_dir,
+                persist_debug=persist_debug,
+                reference_xy=event.end_xy,
+                image_path=end_image,
+                debug_name="_end",
+            )
+            start_result = start_future.result()
+            end_result = end_future.result()
         start_compact = _compact_vision_point(start_result)
         end_compact = _build_filtered_destination_vision(
             end_result,
@@ -1877,9 +1885,14 @@ async def build_vision_context(
     persist_debug: bool = True,
     log_info: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """Run YOLO+OCR for pointer events; return context for the LLM."""
+    """Run YOLO+OCR for pointer events; return context for the LLM.
+
+    Offloads blocking Triton HTTP to a worker thread so the event loop can
+    overlap LLM work and other events' vision.
+    """
     _ = log_info
-    return run_pointer_event_yolo_ocr(
+    return await asyncio.to_thread(
+        run_pointer_event_yolo_ocr,
         event,
         run_dir=run_dir,
         persist_debug=persist_debug,

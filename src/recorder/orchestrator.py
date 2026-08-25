@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import os
+import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from math import ceil
 from pathlib import Path
@@ -33,6 +37,18 @@ from src.recorder.window_snapshot import (
 
 _WAIT_THRESHOLD_SECONDS = 10.0
 _FINAL_AFTER_RELATIVE = "screenshots/final_after.jpeg"
+# Cap concurrent Triton YOLO+OCR jobs so the GPU is not flooded.
+_DEFAULT_VISION_WORKERS = 3
+
+
+def _vision_max_workers() -> int:
+    raw = os.environ.get("RECORDING_VISION_WORKERS", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return _DEFAULT_VISION_WORKERS
 
 
 def _elapsed_seconds(previous_timestamp_utc: str, current_timestamp_utc: str) -> float | None:
@@ -196,6 +212,93 @@ def _bind_run_state_for_analysis(run_dir: Path, run_id: str) -> None:
         manager.init_run("screen_recording_analysis", run_folder_name=run_dir.name)
 
 
+@dataclass
+class _PreparedEvent:
+    event: RecordedEvent
+    event_for_llm: RecordedEvent
+    vision: dict[str, Any]
+    text_resolution: dict[str, Any] | None
+
+
+async def _prepare_event_vision(
+    event: RecordedEvent,
+    *,
+    run_dir: Path,
+    log_info: Callable[[str], None],
+) -> _PreparedEvent:
+    """Resolve typing text (if needed) and run YOLO+OCR for one event."""
+    text_resolution: dict[str, Any] | None = None
+    event_for_llm = event
+    if event.kind == "text_input":
+        resolved = await resolve_text_input_text(
+            event,
+            run_dir=run_dir,
+            log_info=log_info,
+        )
+        text_resolution = {
+            "recorded_text": resolved.get("recorded_text"),
+            "ocr_text": resolved.get("ocr_text"),
+            "ocr_options": list(resolved.get("ocr_options") or []),
+            "resolved_text": resolved.get("text"),
+            "source": resolved.get("source"),
+            "meaningful": resolved.get("meaningful"),
+            "reason": resolved.get("reason"),
+        }
+        event_for_llm = event_with_resolved_text(event, resolved)
+        vision = resolved.get("vision") or await build_vision_context(
+            event_for_llm,
+            run_dir=run_dir,
+            log_info=log_info,
+        )
+    else:
+        vision = await build_vision_context(
+            event,
+            run_dir=run_dir,
+            log_info=log_info,
+        )
+    return _PreparedEvent(
+        event=event,
+        event_for_llm=event_for_llm,
+        vision=vision,
+        text_resolution=text_resolution,
+    )
+
+
+async def _prepare_all_event_visions(
+    events: list[RecordedEvent],
+    *,
+    run_dir: Path,
+    log_info: Callable[[str], None],
+    should_cancel: Callable[[], bool] | None,
+    max_workers: int,
+) -> tuple[list[_PreparedEvent | None], bool]:
+    """Run vision for events in parallel (bounded). Returns (results, cancelled)."""
+    sem = asyncio.Semaphore(max_workers)
+    cancelled = False
+    results: list[_PreparedEvent | None] = [None] * len(events)
+
+    async def _one(pos: int, event: RecordedEvent) -> None:
+        nonlocal cancelled
+        if should_cancel is not None and should_cancel():
+            cancelled = True
+            return
+        async with sem:
+            if should_cancel is not None and should_cancel():
+                cancelled = True
+                return
+            log_info(f"vision event {event.index} kind={event.kind}")
+            results[pos] = await _prepare_event_vision(
+                event,
+                run_dir=run_dir,
+                log_info=log_info,
+            )
+
+    await asyncio.gather(*[_one(pos, event) for pos, event in enumerate(events)])
+    if cancelled:
+        log_info("analyze_recording_session cancelled during vision phase")
+    return results, cancelled
+
+
 async def analyze_recording_session(
     run_dir: Path,
     *,
@@ -210,16 +313,21 @@ async def analyze_recording_session(
     if isinstance(manifest_raw, dict) and isinstance(manifest_raw.get("run_id"), str):
         run_id = manifest_raw["run_id"]
 
+    log_lock = threading.Lock()
+
     def log_info(text: str) -> None:
-        append_text(log_path, f"{text}\n")
+        with log_lock:
+            append_text(log_path, f"{text}\n")
 
     _bind_run_state_for_analysis(run_dir, run_id)
     try:
         settings = load_settings()
+        vision_workers = _vision_max_workers()
         log_info(
             "analyze_recording_session llm "
             f"backend={settings.llm_backend} model={settings.brain_lm} host={settings.ollama_host}"
         )
+        log_info(f"analyze_recording_session vision_workers={vision_workers}")
         events = coalesce_consecutive_same_location_clicks(
             coalesce_consecutive_text_inputs(_load_events(run_dir))
         )
@@ -262,41 +370,35 @@ async def analyze_recording_session(
         if on_progress is not None:
             on_progress(0, total)
 
+        prepared_list, vision_cancelled = await _prepare_all_event_visions(
+            events,
+            run_dir=run_dir,
+            log_info=log_info,
+            should_cancel=should_cancel,
+            max_workers=vision_workers,
+        )
+        if vision_cancelled:
+            cancelled = True
+
         for event_pos, event in enumerate(events):
             if should_cancel is not None and should_cancel():
                 cancelled = True
                 log_info("analyze_recording_session cancelled by user")
                 break
+
+            prepared = prepared_list[event_pos]
+            if prepared is None:
+                # Vision skipped due to cancel; stop LLM phase in session order.
+                cancelled = True
+                log_info(
+                    f"skipping event {event.index}: vision not prepared (cancelled)"
+                )
+                break
+
             log_info(f"processing event {event.index} kind={event.kind}")
-            text_resolution: dict[str, Any] | None = None
-            event_for_llm = event
-            if event.kind == "text_input":
-                resolved = await resolve_text_input_text(
-                    event,
-                    run_dir=run_dir,
-                    log_info=log_info,
-                )
-                text_resolution = {
-                    "recorded_text": resolved.get("recorded_text"),
-                    "ocr_text": resolved.get("ocr_text"),
-                    "ocr_options": list(resolved.get("ocr_options") or []),
-                    "resolved_text": resolved.get("text"),
-                    "source": resolved.get("source"),
-                    "meaningful": resolved.get("meaningful"),
-                    "reason": resolved.get("reason"),
-                }
-                event_for_llm = event_with_resolved_text(event, resolved)
-                vision = resolved.get("vision") or await build_vision_context(
-                    event_for_llm,
-                    run_dir=run_dir,
-                    log_info=log_info,
-                )
-            else:
-                vision = await build_vision_context(
-                    event,
-                    run_dir=run_dir,
-                    log_info=log_info,
-                )
+            vision = prepared.vision
+            event_for_llm = prepared.event_for_llm
+            text_resolution = prepared.text_resolution
             analysis_path = run_dir / "analysis" / f"event_{event.index:03d}.json"
             analysis_path.parent.mkdir(parents=True, exist_ok=True)
 

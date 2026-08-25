@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -306,7 +307,8 @@ async def resolve_text_input_text(
             ocr_image_path = None
             use_end = False
 
-    vision = build_vision_context_at_point(
+    vision = await asyncio.to_thread(
+        build_vision_context_at_point,
         event,
         local_x=local[0],
         local_y=local[1],

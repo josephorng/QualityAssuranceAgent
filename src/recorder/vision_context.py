@@ -51,12 +51,12 @@ _CARDINAL_LANDMARK_CELLS = frozenset(
     }
 )
 # Tier-0 text landmark preference by where the landmark sits relative to the target.
-# Lower rank is preferred: left → top → bottom → right; diagonals/center last.
+# Lower rank is preferred: left → right → top → bottom; diagonals/center last.
 _TIER0_CELL_RANK: dict[LandmarkCell, int] = {
     LandmarkCell.LEFT: 0,
-    LandmarkCell.ABOVE: 1,
-    LandmarkCell.BELOW: 2,
-    LandmarkCell.RIGHT: 3,
+    LandmarkCell.RIGHT: 1,
+    LandmarkCell.ABOVE: 2,
+    LandmarkCell.BELOW: 3,
 }
 _TIER0_NON_CARDINAL_RANK = 4
 
@@ -698,7 +698,7 @@ def _tier0_cell_rank(
     *,
     primary_bbox: tuple[int, int, int, int] | None,
 ) -> int:
-    """Lower is preferred for Tier-0 text: left, top, bottom, then right of target."""
+    """Lower is preferred for Tier-0 text: left, right, top, then bottom of target."""
     if primary_bbox is None:
         return _TIER0_NON_CARDINAL_RANK
     center = _candidate_center(candidate)
@@ -867,7 +867,7 @@ def _prioritized_nearby_parts(
     """Split containing-container hints from ranked eligible neighbors.
 
     Ranking matches ``collect_nearby_hints``: Tier 0 multi-char text first
-    (left → top → bottom → right, then diagonals/center), then other labels,
+    (left → right → top → bottom, then diagonals/center), then other labels,
     then icons. Within the same rank, keeps distance order from ``candidates``.
     """
     candidates = vision.get("candidates") or []
@@ -944,8 +944,8 @@ def collect_nearby_hints(
 
     Walks neighbors until at least ``max_count`` multi-character text landmarks
     are found. If fewer exist, fills remaining slots with other neighbors.
-    Within Tier 0 (multi-char text), prefers landmarks on the left, then top,
-    then bottom, then right of the target; diagonals/center follow. Within the
+    Within Tier 0 (multi-char text), prefers landmarks on the left, then right,
+    then top, then bottom of the target; diagonals/center follow. Within the
     same cell rank (and for lower tiers), keeps distance order from
     ``candidates``. Uses the primary candidate bbox and each neighbor center to
     assign an optional script side via the 9-section grid. Neighbors whose

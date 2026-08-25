@@ -94,8 +94,8 @@ def test_collect_nearby_hint_labels_prefers_text_over_icons() -> None:
     assert labels == ["「OneNote」文字", "「Slack」文字"]
 
 
-def test_collect_nearby_hints_tier0_prefers_left_top_bottom_right() -> None:
-    """Tier-0 texts prefer left → top → bottom → right of the target over list order."""
+def test_collect_nearby_hints_tier0_prefers_left_right_top_bottom() -> None:
+    """Tier-0 texts prefer left → right → top → bottom of the target over list order."""
     from src.common.nearby_side import NearbyHint, Side
     from src.recorder.vision_context import collect_nearby_hints
 
@@ -109,7 +109,7 @@ def test_collect_nearby_hints_tier0_prefers_left_top_bottom_right() -> None:
                 "text": "",
                 "icons": [{"chinese_id": "目標"}],
             },
-            # Closer in list but on the right — should lose to left/top.
+            # Earlier in list but on the right — still beats top/bottom; loses to left.
             {
                 "bbox": [140, 100, 40, 20],
                 "center": [160, 110],
@@ -139,7 +139,7 @@ def test_collect_nearby_hints_tier0_prefers_left_top_bottom_right() -> None:
     hints = collect_nearby_hints(vision, instruction="點擊「目標」圖示")
     assert hints == [
         NearbyHint("「左側」文字", Side.RIGHT),
-        NearbyHint("「上方」文字", Side.BELOW),
+        NearbyHint("「右側」文字", Side.LEFT),
     ]
 
 

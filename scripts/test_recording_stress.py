@@ -32,7 +32,7 @@ def try_start(label: str, session: RecordingSession) -> bool:
         return False
 
 
-runs = ROOT / "runs" / "_pynput_test"
+runs = ROOT / "recordings" / "_pynput_test"
 session = RecordingSession(runs_root=runs)
 
 print("=== rapid start/stop ===")

@@ -1422,6 +1422,23 @@ def test_write_runs_index_lists_recordings_in_recordings_tab(tmp_path: Path) -> 
     assert 'data-label="事件"' in html
 
 
+def test_write_runs_index_lists_sibling_recordings_folder(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    recordings_root = tmp_path / "recordings"
+    runs_root.mkdir()
+    recordings_root.mkdir()
+
+    recording = recordings_root / "recording_20260721_120000_000003"
+    _write_recording_fixture(recording)
+    write_recording_html_from_run(recording, update_index=False)
+
+    html = write_runs_index_html(
+        runs_root, recordings_root=recordings_root
+    ).read_text(encoding="utf-8")
+    assert 'href="../recordings/recording_20260721_120000_000003/recording_steps.html"' in html
+    assert "recording_20260721_120000_000003" in html
+
+
 def test_write_runs_index_lists_renamed_recording_without_prefix(tmp_path: Path) -> None:
     recording = tmp_path / "開啟神網"
     _write_recording_fixture(recording)

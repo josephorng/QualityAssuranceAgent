@@ -67,6 +67,7 @@ _LLM_PROBE_TIMEOUT_SECONDS = 2.5
 
 _USER_DATA_APP_NAME = "ComputerUseAgent"
 _DEFAULT_RUNS_NAME = "runs"
+_DEFAULT_RECORDINGS_NAME = "recordings"
 
 
 def is_frozen_app() -> bool:
@@ -125,6 +126,13 @@ def default_runs_dir() -> Path:
     return application_root() / _DEFAULT_RUNS_NAME
 
 
+def default_recordings_dir() -> Path:
+    """Frozen: Documents/<app>/recordings; dev: <project>/recordings."""
+    if is_frozen_app():
+        return user_documents_dir() / _USER_DATA_APP_NAME / _DEFAULT_RECORDINGS_NAME
+    return application_root() / _DEFAULT_RECORDINGS_NAME
+
+
 def resolve_runs_dir(configured: str | Path | None = None) -> Path:
     """Resolve ``runs_dir`` to an absolute path.
 
@@ -144,6 +152,41 @@ def resolve_runs_dir(configured: str | Path | None = None) -> Path:
     return path.resolve()
 
 
+def resolve_recordings_dir(configured: str | Path | None = None) -> Path:
+    """Resolve ``recordings_dir`` to an absolute path.
+
+    Absolute configured paths are used as-is. Empty / ``recordings`` uses
+    :func:`default_recordings_dir`. Other relative paths resolve against
+    :func:`application_root`.
+    """
+    if configured is None:
+        raw = str(Settings().recordings_dir).strip()
+    else:
+        raw = str(configured).strip()
+    if not raw or raw in (".", _DEFAULT_RECORDINGS_NAME):
+        return default_recordings_dir().resolve()
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = application_root() / path
+    return path.resolve()
+
+
+def reports_serve_root(
+    runs_root: str | Path | None = None,
+    recordings_root: str | Path | None = None,
+) -> Path:
+    """HTTP document root for report pages (common parent when dirs are siblings)."""
+    runs = Path(runs_root).resolve() if runs_root is not None else resolve_runs_dir()
+    recordings = (
+        Path(recordings_root).resolve()
+        if recordings_root is not None
+        else resolve_recordings_dir()
+    )
+    if runs.parent == recordings.parent:
+        return runs.parent
+    return runs
+
+
 ROOT_DIR = application_root()
 
 
@@ -154,6 +197,7 @@ class Settings(BaseSettings):
     ollama_host: str = BACKEND_PRESETS["vllm_server"]["ollama_host"]
     brain_lm: str = BACKEND_PRESETS["vllm_server"]["brain_lm"]
     runs_dir: str = _DEFAULT_RUNS_NAME
+    recordings_dir: str = _DEFAULT_RECORDINGS_NAME
     log_level: str = "INFO"
     triton_http_url: str = VISION_BACKEND_PRESETS["triton_192_168_0_17"]["triton_http_url"]
     vision_backend: str = "triton_192_168_0_17"
@@ -388,6 +432,7 @@ def load_settings() -> Settings:
         "ollama_host": agent["ollama_host"],
         "brain_lm": agent["brain_lm"],
         "runs_dir": str(resolve_runs_dir(base.runs_dir)),
+        "recordings_dir": str(resolve_recordings_dir(base.recordings_dir)),
         "log_level": base.log_level,
         "triton_http_url": agent["triton_http_url"],
         "vision_backend": agent["vision_backend"],

@@ -25,7 +25,7 @@ def main() -> int:
     print(f"Admin: {is_admin()}")
 
     hotkey = RecordingHotkeyManager()
-    session = RecordingSession(runs_root=ROOT / "runs" / "_pynput_test")
+    session = RecordingSession(runs_root=ROOT / "recordings" / "_pynput_test")
 
     try:
         hotkey.register(lambda: print("hotkey fired"))

@@ -542,7 +542,7 @@ class RecordingSession:
 
     def __init__(self, runs_root: Path | None = None) -> None:
         settings = load_settings()
-        self._runs_root = Path(runs_root or settings.runs_dir)
+        self._runs_root = Path(runs_root or settings.recordings_dir)
         self._lock = threading.Lock()
         self._accepting_input = False
         self._run_dir: Path | None = None

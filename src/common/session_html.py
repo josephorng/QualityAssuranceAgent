@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import csv
 import json
+import os
 import re
 from datetime import datetime, timezone
 from html import escape
@@ -2900,6 +2901,44 @@ def _iter_recording_report_dirs(runs_root: Path) -> list[Path]:
     return found
 
 
+def _default_recordings_root_for_index(runs_root: Path) -> Path:
+    """When indexing the primary runs dir, also include the configured recordings dir."""
+    try:
+        from src.common.settings import resolve_recordings_dir, resolve_runs_dir
+
+        if Path(runs_root).resolve() == resolve_runs_dir():
+            return resolve_recordings_dir()
+    except Exception:
+        pass
+    return Path(runs_root)
+
+
+def _merge_recording_report_dirs(
+    runs_root: Path, recordings_root: Path
+) -> list[Path]:
+    by_name: dict[str, Path] = {}
+    for root in (Path(runs_root), Path(recordings_root)):
+        for child in _iter_recording_report_dirs(root):
+            # Prefer the dedicated recordings folder when names collide.
+            if child.name not in by_name or root.resolve() == Path(recordings_root).resolve():
+                by_name[child.name] = child
+    found = list(by_name.values())
+    found.sort(key=lambda path: (path.name, path.stat().st_mtime), reverse=True)
+    return found
+
+
+def _href_relative_to_index(target: Path, index_dir: Path) -> str:
+    """Build a URL-safe relative href from ``index_dir`` to ``target``."""
+    rel = Path(os.path.relpath(target, index_dir)).as_posix()
+    parts = []
+    for part in rel.split("/"):
+        if part in {".", ".."}:
+            parts.append(part)
+        else:
+            parts.append(quote(part, safe=""))
+    return "/".join(parts)
+
+
 def _load_json_dict(path: Path) -> dict[str, Any] | None:
     if not path.is_file():
         return None
@@ -3807,9 +3846,12 @@ def _render_recording_event_html(
     )
 
 
-def _render_recording_index_row(run_root: Path) -> str:
+def _render_recording_index_row(run_root: Path, *, index_dir: Path) -> str:
     run_id = run_root.name
-    href = escape(f"{quote(run_id, safe='')}/{_RECORDING_HTML_NAME}", quote=True)
+    href = escape(
+        _href_relative_to_index(run_root / _RECORDING_HTML_NAME, index_dir),
+        quote=True,
+    )
     manifest = _load_session_manifest(run_root)
     report = _load_run_report(run_root)
     run_time_raw = _resolve_recording_datetime(run_root, manifest)
@@ -3930,9 +3972,14 @@ def _render_runs_tab_panel(
         f"</section>"
     )
 
-def _render_recordings_tab_panel(recording_dirs: list[Path]) -> str:
+def _render_recordings_tab_panel(
+    recording_dirs: list[Path], *, index_dir: Path
+) -> str:
     if recording_dirs:
-        rows = "".join(_render_recording_index_row(run_dir) for run_dir in recording_dirs)
+        rows = "".join(
+            _render_recording_index_row(run_dir, index_dir=index_dir)
+            for run_dir in recording_dirs
+        )
         intro = (
             f"共 {len(recording_dirs)} 筆錄製。勾選多筆後可批次回報或刪除；"
             "點選錄製名稱開啟事件紀錄；"
@@ -3975,16 +4022,25 @@ def _backfill_recording_html(runs_root: Path) -> None:
         write_recording_html_from_run(run_dir, update_index=False)
 
 
-def write_runs_index_html(runs_root: Path) -> Path:
+def write_runs_index_html(
+    runs_root: Path, *, recordings_root: Path | None = None
+) -> Path:
     """Build ``index.html`` with tabs for agent runs, smart mode, and recordings."""
     runs_root = Path(runs_root)
     runs_root.mkdir(parents=True, exist_ok=True)
+    if recordings_root is None:
+        recordings_root = _default_recordings_root_for_index(runs_root)
+    else:
+        recordings_root = Path(recordings_root)
+    recordings_root.mkdir(parents=True, exist_ok=True)
 
     _backfill_recording_html(runs_root)
+    if recordings_root.resolve() != runs_root.resolve():
+        _backfill_recording_html(recordings_root)
 
     run_dirs = _iter_report_run_dirs(runs_root)
     smart_dirs = _iter_smart_report_run_dirs(runs_root)
-    recording_dirs = _iter_recording_report_dirs(runs_root)
+    recording_dirs = _merge_recording_report_dirs(runs_root, recordings_root)
     tabs = (
         '<nav class="tabs" role="tablist" aria-label="報告類型">'
         '<button type="button" class="active" data-tab="runs" role="tab" aria-selected="true"'
@@ -3999,7 +4055,7 @@ def write_runs_index_html(runs_root: Path) -> Path:
         f"{tabs}\n"
         f"{_render_runs_tab_panel(run_dirs)}\n"
         f"{_render_runs_tab_panel(smart_dirs, tab_id='smart', hidden=True)}\n"
-        f"{_render_recordings_tab_panel(recording_dirs)}\n"
+        f"{_render_recordings_tab_panel(recording_dirs, index_dir=runs_root)}\n"
     )
     script = f"<script>\n{_INDEX_SCRIPT}\n</script>\n"
     title = "工作階段報告列表"
@@ -4231,5 +4287,15 @@ def write_recording_html_from_run(run_root: Path, *, update_index: bool = True) 
     path = recording_html_path(run_root)
     path.write_text(html, encoding="utf-8")
     if update_index:
-        write_runs_index_html(run_root.parent)
+        parent = run_root.parent.resolve()
+        write_runs_index_html(parent)
+        try:
+            from src.common.settings import resolve_recordings_dir, resolve_runs_dir
+
+            recordings = resolve_recordings_dir()
+            primary = resolve_runs_dir()
+            if parent == recordings and parent != primary:
+                write_runs_index_html(primary, recordings_root=recordings)
+        except Exception:
+            pass
     return path

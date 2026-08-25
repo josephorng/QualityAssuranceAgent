@@ -165,6 +165,21 @@ def test_default_runs_dir_frozen_uses_documents(monkeypatch, tmp_path: Path) -> 
     assert default_runs_dir() == tmp_path / "ComputerUseAgent" / "runs"
 
 
+def test_default_recordings_dir_dev_uses_project_root(monkeypatch) -> None:
+    from src.common.settings import application_root, default_recordings_dir
+
+    monkeypatch.setattr("src.common.settings.is_frozen_app", lambda: False)
+    assert default_recordings_dir() == application_root() / "recordings"
+
+
+def test_default_recordings_dir_frozen_uses_documents(monkeypatch, tmp_path: Path) -> None:
+    from src.common.settings import default_recordings_dir
+
+    monkeypatch.setattr("src.common.settings.is_frozen_app", lambda: True)
+    monkeypatch.setattr("src.common.settings.user_documents_dir", lambda: tmp_path)
+    assert default_recordings_dir() == tmp_path / "ComputerUseAgent" / "recordings"
+
+
 def test_resolve_runs_dir_absolute_and_relative(monkeypatch, tmp_path: Path) -> None:
     from src.common.settings import application_root, resolve_runs_dir
 
@@ -173,6 +188,30 @@ def test_resolve_runs_dir_absolute_and_relative(monkeypatch, tmp_path: Path) -> 
     assert resolve_runs_dir(absolute) == absolute.resolve()
     assert resolve_runs_dir("runs") == (application_root() / "runs").resolve()
     assert resolve_runs_dir("alt_runs") == (application_root() / "alt_runs").resolve()
+
+
+def test_resolve_recordings_dir_absolute_and_relative(monkeypatch, tmp_path: Path) -> None:
+    from src.common.settings import application_root, resolve_recordings_dir
+
+    monkeypatch.setattr("src.common.settings.is_frozen_app", lambda: False)
+    absolute = tmp_path / "custom_recordings"
+    assert resolve_recordings_dir(absolute) == absolute.resolve()
+    assert resolve_recordings_dir("recordings") == (
+        application_root() / "recordings"
+    ).resolve()
+    assert resolve_recordings_dir("alt_recordings") == (
+        application_root() / "alt_recordings"
+    ).resolve()
+
+
+def test_reports_serve_root_uses_common_parent(tmp_path: Path) -> None:
+    from src.common.settings import reports_serve_root
+
+    runs = tmp_path / "runs"
+    recordings = tmp_path / "recordings"
+    runs.mkdir()
+    recordings.mkdir()
+    assert reports_serve_root(runs, recordings) == tmp_path.resolve()
 
 
 def test_load_settings_runs_dir_is_absolute(monkeypatch) -> None:
@@ -192,3 +231,7 @@ def test_load_settings_runs_dir_is_absolute(monkeypatch) -> None:
     settings = load_settings()
     assert Path(settings.runs_dir).is_absolute()
     assert Path(settings.runs_dir) == (application_root() / "runs").resolve()
+    assert Path(settings.recordings_dir).is_absolute()
+    assert Path(settings.recordings_dir) == (
+        application_root() / "recordings"
+    ).resolve()

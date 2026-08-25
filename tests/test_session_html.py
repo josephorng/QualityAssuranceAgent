@@ -781,6 +781,8 @@ def test_write_recording_html_renders_events_and_instructions(tmp_path: Path) ->
     assert 'class="add-recording-step"' in html
     assert 'class="add-instruction"' in html
     assert 'id="add-step-dialog"' in html
+    assert 'value="condition"' in html
+    assert "條件" in html
     assert 'id="event-1"' in html
     assert 'class="step-instruction-input"' in html
     assert "/api/runs/" in html

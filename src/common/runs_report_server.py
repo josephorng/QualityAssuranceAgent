@@ -109,6 +109,7 @@ _ADDABLE_EVENT_KINDS = frozenset(
         "hotkey",
         "scroll",
         "wait",
+        "condition",
         "manual",
     }
 )
@@ -552,6 +553,31 @@ def _parse_duration_seconds(value: Any) -> float | None:
     return float(value)
 
 
+def _parse_condition_presence(value: Any) -> str:
+    if value is None:
+        return "has"
+    if not isinstance(value, str):
+        raise ValueError("invalid presence")
+    cleaned = value.strip().lower()
+    if cleaned in {"has", "有", "visible", "exists"}:
+        return "has"
+    if cleaned in {"missing", "沒有", "not_visible", "absent", "none"}:
+        return "missing"
+    raise ValueError("presence must be has or missing")
+
+
+def _instruction_for_condition(
+    *,
+    presence: str,
+    target: str,
+    then_action: str | None,
+) -> str:
+    prefix = "如果畫面上沒有" if presence == "missing" else "如果畫面上有"
+    if then_action:
+        return f"{prefix}{target}，則{then_action}"
+    return f"{prefix}{target}"
+
+
 def _next_recording_event_index(run_dir: Path) -> int:
     max_index = 0
     for path in _remaining_recording_event_paths(run_dir):
@@ -599,6 +625,8 @@ def _instruction_for_added_event(
     keys: list[str] | None,
     scroll_delta: int | None,
     duration_seconds: float | None,
+    presence: str | None = None,
+    then_action: str | None = None,
 ) -> str:
     if instruction:
         return instruction
@@ -614,6 +642,12 @@ def _instruction_for_added_event(
         generated = instruction_for_scroll(placeholder, {})
     elif kind == "wait" and duration_seconds is not None:
         generated = f"等待 {math.ceil(duration_seconds)} 秒"
+    elif kind == "condition" and text:
+        generated = _instruction_for_condition(
+            presence=presence or "has",
+            target=text,
+            then_action=then_action,
+        )
     else:
         generated = None
     if not generated:
@@ -634,6 +668,8 @@ def add_recording_event(
     keys: Any = None,
     scroll_delta: Any = None,
     duration_seconds: Any = None,
+    presence: Any = None,
+    then_action: Any = None,
 ) -> dict[str, Any]:
     """Insert a user-authored recording event and rebuild report/HTML artifacts."""
     run_dir = resolve_deletable_run_folder(runs_root, run_id)
@@ -657,6 +693,8 @@ def add_recording_event(
     parsed_scroll = _parse_scroll_delta(scroll_delta)
     parsed_duration = _parse_duration_seconds(duration_seconds)
     parsed_instruction = _optional_stripped_str(instruction, field_name="instruction")
+    parsed_then = _optional_stripped_str(then_action, field_name="then_action")
+    parsed_presence: str | None = None
     if parsed_instruction is not None and len(parsed_instruction) > _INSTRUCTION_MAX_LEN:
         raise ValueError("instruction is too long")
     if not isinstance(expected_outcome, (str, type(None))):
@@ -697,6 +735,10 @@ def add_recording_event(
     elif kind == "wait":
         if parsed_duration is None:
             raise ValueError("duration_seconds is required")
+    elif kind == "condition":
+        if not typed_text:
+            raise ValueError("text is empty")
+        parsed_presence = _parse_condition_presence(presence)
     elif kind == "manual":
         if not parsed_instruction:
             raise ValueError("instruction is empty")
@@ -709,6 +751,8 @@ def add_recording_event(
         keys=hotkey_keys,
         scroll_delta=parsed_scroll,
         duration_seconds=parsed_duration,
+        presence=parsed_presence,
+        then_action=parsed_then,
     )
     if len(resolved_instruction) > _INSTRUCTION_MAX_LEN:
         raise ValueError("instruction is too long")
@@ -736,9 +780,14 @@ def add_recording_event(
         click_count=click_count,
         screenshot_path=screenshot_rel,
     )
+    event_payload = event.to_dict()
+    if kind == "condition":
+        event_payload["presence"] = parsed_presence or "has"
+        if parsed_then:
+            event_payload["then_action"] = parsed_then
     (run_dir / "events").mkdir(parents=True, exist_ok=True)
     (run_dir / "analysis").mkdir(parents=True, exist_ok=True)
-    write_json(event_json_path(run_dir, new_index), event.to_dict())
+    write_json(event_json_path(run_dir, new_index), event_payload)
     analysis_payload: dict[str, Any] = {
         "event_index": new_index,
         "instruction": resolved_instruction,
@@ -1548,6 +1597,8 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
                         keys=body.get("keys"),
                         scroll_delta=body.get("scroll_delta"),
                         duration_seconds=body.get("duration_seconds"),
+                        presence=body.get("presence"),
+                        then_action=body.get("then_action"),
                     )
                 except ValueError as exc:
                     self._send_json(400, {"ok": False, "error": str(exc)})

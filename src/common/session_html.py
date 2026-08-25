@@ -35,6 +35,7 @@ _RECORDING_KIND_LABELS = {
     "key_press": "按鍵",
     "hotkey": "快捷鍵",
     "wait": "等待",
+    "condition": "條件",
     "manual": "自訂指令",
 }
 
@@ -1272,6 +1273,14 @@ _RECORDING_SCRIPT = """
       var seconds = ((addForm.querySelector('[name="duration_seconds"]') || {}).value || "").trim();
       return seconds ? ("等待 " + seconds + " 秒") : "";
     }
+    if (kind === "condition") {
+      var presence = ((addForm.querySelector('[name="presence"]') || {}).value || "has");
+      var target = ((addForm.querySelector('[name="condition_target"]') || {}).value || "").trim();
+      var thenAction = ((addForm.querySelector('[name="then_action"]') || {}).value || "").trim();
+      if (!target) return "";
+      var prefix = presence === "missing" ? "如果畫面上沒有" : "如果畫面上有";
+      return thenAction ? (prefix + target + "，則" + thenAction) : (prefix + target);
+    }
     return "";
   }
 
@@ -1403,6 +1412,10 @@ _RECORDING_SCRIPT = """
       } else if (kind === "wait") {
         var durationRaw = ((addForm.querySelector('[name="duration_seconds"]') || {}).value || "");
         body.duration_seconds = Number(durationRaw);
+      } else if (kind === "condition") {
+        body.presence = ((addForm.querySelector('[name="presence"]') || {}).value || "has");
+        body.text = ((addForm.querySelector('[name="condition_target"]') || {}).value || "");
+        body.then_action = ((addForm.querySelector('[name="then_action"]') || {}).value || "");
       }
       var submitBtn = addForm.querySelector("button.add-step-submit");
       if (submitBtn) submitBtn.disabled = true;
@@ -3571,6 +3584,7 @@ def _recording_add_dialog_html() -> str:
           <option value="hotkey">快捷鍵</option>
           <option value="scroll">捲動</option>
           <option value="wait">等待</option>
+          <option value="condition">條件</option>
           <option value="manual">自訂指令</option>
         </select>
       </div>
@@ -3596,6 +3610,21 @@ def _recording_add_dialog_html() -> str:
       <div class="add-step-field" data-kind-field="wait" hidden>
         <label for="add-step-wait">秒數</label>
         <input id="add-step-wait" name="duration_seconds" type="number" min="1" step="1" value="1">
+      </div>
+      <div class="add-step-field" data-kind-field="condition" hidden>
+        <label for="add-step-presence">條件</label>
+        <select id="add-step-presence" name="presence">
+          <option value="has">畫面上有</option>
+          <option value="missing">畫面上沒有</option>
+        </select>
+      </div>
+      <div class="add-step-field" data-kind-field="condition" hidden>
+        <label for="add-step-condition-target">目標</label>
+        <input id="add-step-condition-target" name="condition_target" type="text" spellcheck="false" autocomplete="off" placeholder="「確定」文字">
+      </div>
+      <div class="add-step-field" data-kind-field="condition" hidden>
+        <label for="add-step-then-action">則（選填）</label>
+        <input id="add-step-then-action" name="then_action" type="text" spellcheck="false" autocomplete="off" placeholder="點擊「確定」文字">
       </div>
       <div class="add-step-field">
         <label for="add-step-instruction">指令</label>
@@ -3655,10 +3684,21 @@ def _render_recording_event_html(
     if end_xy:
         meta_rows.append(("終點", escape(end_xy)))
     text = event.get("text")
-    if kind != "text_input" and isinstance(text, str) and text:
+    if kind == "condition":
+        presence = event.get("presence")
+        if presence == "missing":
+            meta_rows.append(("條件", "畫面上沒有"))
+        elif presence == "has" or (isinstance(text, str) and text):
+            meta_rows.append(("條件", "畫面上有"))
+        if isinstance(text, str) and text:
+            meta_rows.append(("目標", escape(text)))
+        then_action = event.get("then_action")
+        if isinstance(then_action, str) and then_action.strip():
+            meta_rows.append(("則", escape(then_action.strip())))
+    elif kind != "text_input" and isinstance(text, str) and text:
         meta_rows.append(("文字", escape(text)))
     key = event.get("key")
-    if isinstance(key, str) and key:
+    if kind != "condition" and isinstance(key, str) and key:
         meta_rows.append(("按鍵", escape(key)))
     keys = event.get("keys")
     if isinstance(keys, list) and keys:

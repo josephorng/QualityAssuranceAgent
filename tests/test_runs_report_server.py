@@ -1136,14 +1136,29 @@ def test_add_recording_event_appends_wait_text_and_manual(tmp_path: Path) -> Non
     assert manual_result["event_index"] == 5
     assert manual_result["instruction"] == "確認視窗已開啟"
 
+    condition_result = add_recording_event(
+        runs_root,
+        "recording_add_append",
+        kind="condition",
+        text="「取代目的地中的檔案」文字",
+        presence="has",
+        then_action="點擊「取代目的地中的檔案」文字",
+    )
+    assert condition_result["event_index"] == 6
+    assert (
+        condition_result["instruction"]
+        == "如果畫面上有「取代目的地中的檔案」文字，則點擊「取代目的地中的檔案」文字"
+    )
+
     session = json.loads((run_root / "session.json").read_text(encoding="utf-8"))
-    assert session["event_count"] == 5
+    assert session["event_count"] == 6
     assert session["events"] == [
         "events/event_001.json",
         "events/event_002.json",
         "events/event_003.json",
         "events/event_004.json",
         "events/event_005.json",
+        "events/event_006.json",
     ]
 
     wait_event = json.loads((run_root / "events" / "event_003.json").read_text(encoding="utf-8"))
@@ -1163,6 +1178,14 @@ def test_add_recording_event_appends_wait_text_and_manual(tmp_path: Path) -> Non
     )
     assert manual_analysis["expected_outcome"] == "對話框出現"
 
+    condition_event = json.loads(
+        (run_root / "events" / "event_006.json").read_text(encoding="utf-8")
+    )
+    assert condition_event["kind"] == "condition"
+    assert condition_event["text"] == "「取代目的地中的檔案」文字"
+    assert condition_event["presence"] == "has"
+    assert condition_event["then_action"] == "點擊「取代目的地中的檔案」文字"
+
     report = json.loads((run_root / "report.json").read_text(encoding="utf-8"))
     assert report["instructions"] == [
         "點擊「搜尋」按鈕",
@@ -1170,13 +1193,41 @@ def test_add_recording_event_appends_wait_text_and_manual(tmp_path: Path) -> Non
         "等待 3 秒",
         "輸入「hello」",
         "確認視窗已開啟",
+        "如果畫面上有「取代目的地中的檔案」文字，則點擊「取代目的地中的檔案」文字",
     ]
     html = (run_root / "recording_steps.html").read_text(encoding="utf-8")
     assert "等待 3 秒" in html
     assert "輸入「hello」" in html
     assert "確認視窗已開啟" in html
+    assert "如果畫面上有「取代目的地中的檔案」文字，則點擊「取代目的地中的檔案」文字" in html
+    assert "條件" in html
+    assert 'value="condition"' in html
     assert 'id="add-step-dialog"' in html
     assert (run_root / "screenshots" / "event_003.jpeg").is_file()
+
+
+def test_add_recording_event_condition_missing_without_then(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_two_event_run(runs_root, "recording_add_condition")
+
+    result = add_recording_event(
+        runs_root,
+        "recording_add_condition",
+        kind="condition",
+        text="「載入中」文字",
+        presence="missing",
+    )
+    assert result["instruction"] == "如果畫面上沒有「載入中」文字"
+
+    event = json.loads((run_root / "events" / "event_003.json").read_text(encoding="utf-8"))
+    assert event["kind"] == "condition"
+    assert event["presence"] == "missing"
+    assert "then_action" not in event
+
+    html = (run_root / "recording_steps.html").read_text(encoding="utf-8")
+    assert "如果畫面上沒有「載入中」文字" in html
+    assert "畫面上沒有" in html
+    assert 'data-kind="condition"' in html
 
 
 def test_add_recording_event_inserts_between_without_renumbering(tmp_path: Path) -> None:

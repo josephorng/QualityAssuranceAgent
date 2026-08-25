@@ -39,16 +39,27 @@ _WAIT_THRESHOLD_SECONDS = 10.0
 _FINAL_AFTER_RELATIVE = "screenshots/final_after.jpeg"
 # Cap concurrent Triton YOLO+OCR jobs so the GPU is not flooded.
 _DEFAULT_VISION_WORKERS = 3
+# Cap concurrent LLM calls so local Ollama/vLLM is not flooded.
+_DEFAULT_LLM_WORKERS = 3
+_UNSET: Any = object()
 
 
-def _vision_max_workers() -> int:
-    raw = os.environ.get("RECORDING_VISION_WORKERS", "").strip()
+def _env_max_workers(env_name: str, default: int) -> int:
+    raw = os.environ.get(env_name, "").strip()
     if raw:
         try:
             return max(1, int(raw))
         except ValueError:
             pass
-    return _DEFAULT_VISION_WORKERS
+    return default
+
+
+def _vision_max_workers() -> int:
+    return _env_max_workers("RECORDING_VISION_WORKERS", _DEFAULT_VISION_WORKERS)
+
+
+def _llm_max_workers() -> int:
+    return _env_max_workers("RECORDING_LLM_WORKERS", _DEFAULT_LLM_WORKERS)
 
 
 def _elapsed_seconds(previous_timestamp_utc: str, current_timestamp_utc: str) -> float | None:
@@ -299,6 +310,163 @@ async def _prepare_all_event_visions(
     return results, cancelled
 
 
+async def _analyze_all_event_instructions(
+    prepared_list: list[_PreparedEvent | None],
+    *,
+    run_dir: Path,
+    log_info: Callable[[str], None],
+    should_cancel: Callable[[], bool] | None,
+    max_workers: int,
+    on_instruction_done: Callable[[], None] | None = None,
+) -> tuple[list[Any], bool]:
+    """Run instruction LLM for prepared events in parallel (bounded).
+
+    Returns a list aligned with ``prepared_list``: ``_UNSET`` if never started
+    (cancel), ``None`` if LLM failed, or the analyze_event_to_cache payload.
+    """
+    sem = asyncio.Semaphore(max_workers)
+    cancelled = False
+    results: list[Any] = [_UNSET] * len(prepared_list)
+
+    async def _one(pos: int, prepared: _PreparedEvent) -> None:
+        nonlocal cancelled
+        if should_cancel is not None and should_cancel():
+            cancelled = True
+            return
+        async with sem:
+            if should_cancel is not None and should_cancel():
+                cancelled = True
+                return
+            event = prepared.event
+            log_info(f"processing event {event.index} kind={event.kind}")
+            results[pos] = await analyze_event_to_cache(
+                prepared.event_for_llm,
+                run_dir=run_dir,
+                vision=prepared.vision,
+                log_info=log_info,
+            )
+            if on_instruction_done is not None:
+                on_instruction_done()
+
+    tasks = []
+    for pos, prepared in enumerate(prepared_list):
+        if prepared is None:
+            continue
+        tasks.append(_one(pos, prepared))
+    if tasks:
+        await asyncio.gather(*tasks)
+    if cancelled:
+        log_info("analyze_recording_session cancelled during instruction LLM phase")
+    return results, cancelled
+
+
+async def _infer_all_expected_outcomes(
+    jobs: list[tuple[int, str, str, str, str]],
+    *,
+    log_info: Callable[[str], None],
+    should_cancel: Callable[[], bool] | None,
+    max_workers: int,
+) -> tuple[dict[int, str | None], bool]:
+    """Run expected-outcome LLM jobs in parallel. ``jobs`` are (pos, instruction, before, after, hint)."""
+    sem = asyncio.Semaphore(max_workers)
+    cancelled = False
+    outcomes: dict[int, str | None] = {}
+
+    async def _one(
+        pos: int,
+        instruction: str,
+        before_shot: str,
+        after_shot: str,
+        window_change_hint: str,
+    ) -> None:
+        nonlocal cancelled
+        if should_cancel is not None and should_cancel():
+            cancelled = True
+            return
+        async with sem:
+            if should_cancel is not None and should_cancel():
+                cancelled = True
+                return
+            outcomes[pos] = await infer_expected_outcome(
+                instruction=instruction,
+                before_screenshot=before_shot,
+                after_screenshot=after_shot,
+                window_change_hint=window_change_hint,
+                log_info=log_info,
+            )
+
+    if jobs:
+        await asyncio.gather(
+            *[
+                _one(pos, instruction, before_shot, after_shot, hint)
+                for pos, instruction, before_shot, after_shot, hint in jobs
+            ]
+        )
+    if cancelled:
+        log_info("analyze_recording_session cancelled during expected-outcome LLM phase")
+    return outcomes, cancelled
+
+
+def _write_event_analysis(
+    analysis_path: Path,
+    *,
+    event: RecordedEvent,
+    result: dict[str, Any],
+    instruction: str,
+    vision: dict[str, Any],
+    expected_outcome: str | None,
+    elapsed_since_previous: float | None,
+    wait_instruction: str | None,
+    text_resolution: dict[str, Any] | None,
+) -> None:
+    write_json(
+        analysis_path,
+        {
+            "event_index": event.index,
+            "instruction": instruction,
+            **(
+                {"use_char_target": result["use_char_target"]}
+                if "use_char_target" in result
+                else {}
+            ),
+            **(
+                {"expected_outcome": expected_outcome}
+                if expected_outcome is not None
+                else {}
+            ),
+            **(
+                {"elapsed_since_previous_seconds": elapsed_since_previous}
+                if elapsed_since_previous is not None
+                else {}
+            ),
+            **(
+                {"wait_instruction": wait_instruction}
+                if wait_instruction is not None
+                else {}
+            ),
+            "vision": {
+                "used_vision": vision.get("used_vision"),
+                "candidate_text": vision.get("candidate_text"),
+            },
+            **(
+                {"text_resolution": text_resolution}
+                if text_resolution is not None
+                else {}
+            ),
+            **(
+                {"window_change": event.window_change}
+                if event.window_change is not None
+                else {}
+            ),
+            **(
+                {"window_snapshot_debug": event.window_snapshot_debug}
+                if event.window_snapshot_debug is not None
+                else {}
+            ),
+        },
+    )
+
+
 async def analyze_recording_session(
     run_dir: Path,
     *,
@@ -323,11 +491,15 @@ async def analyze_recording_session(
     try:
         settings = load_settings()
         vision_workers = _vision_max_workers()
+        llm_workers = _llm_max_workers()
         log_info(
             "analyze_recording_session llm "
             f"backend={settings.llm_backend} model={settings.brain_lm} host={settings.ollama_host}"
         )
-        log_info(f"analyze_recording_session vision_workers={vision_workers}")
+        log_info(
+            f"analyze_recording_session vision_workers={vision_workers} "
+            f"llm_workers={llm_workers}"
+        )
         events = coalesce_consecutive_same_location_clicks(
             coalesce_consecutive_text_inputs(_load_events(run_dir))
         )
@@ -364,8 +536,8 @@ async def analyze_recording_session(
         errors: list[dict[str, Any]] = []
         instructions: list[str] = []
         expected_outcomes: list[str | None] = []
-        previous_instruction_event: RecordedEvent | None = None
         total = len(events)
+        progress_lock = threading.Lock()
 
         if on_progress is not None:
             on_progress(0, total)
@@ -380,6 +552,72 @@ async def analyze_recording_session(
         if vision_cancelled:
             cancelled = True
 
+        def _bump_instruction_progress() -> None:
+            nonlocal processed
+            with progress_lock:
+                processed += 1
+                if on_progress is not None:
+                    on_progress(processed, total)
+
+        instruction_results, llm_cancelled = await _analyze_all_event_instructions(
+            prepared_list,
+            run_dir=run_dir,
+            log_info=log_info,
+            should_cancel=should_cancel,
+            max_workers=llm_workers,
+            on_instruction_done=_bump_instruction_progress,
+        )
+        if llm_cancelled:
+            cancelled = True
+
+        # Build expected-outcome jobs for events that got an instruction.
+        outcome_jobs: list[tuple[int, str, str, str, str]] = []
+        deterministic_outcomes: dict[int, str | None] = {}
+        for event_pos, event in enumerate(events):
+            prepared = prepared_list[event_pos]
+            result = instruction_results[event_pos]
+            if prepared is None or result is _UNSET or result is None:
+                continue
+            instruction = result["instruction"]
+            next_event = events[event_pos + 1] if event_pos + 1 < len(events) else None
+            before_shot = before_screenshot_for_outcome(event)
+            after_shot = after_screenshot_for_outcome(
+                event,
+                next_event,
+                final_after_screenshot=final_after_screenshot,
+            )
+            window_change = resolve_window_change(
+                event.window_change,
+                event.window_snapshot_debug,
+                event.cursor_xy,
+            )
+            expected_outcome = expected_outcome_for_window_change(window_change)
+            if expected_outcome is not None:
+                deterministic_outcomes[event_pos] = expected_outcome
+            elif before_shot is not None and after_shot is not None:
+                outcome_jobs.append(
+                    (
+                        event_pos,
+                        instruction,
+                        before_shot,
+                        after_shot,
+                        format_window_change_hint(window_change),
+                    )
+                )
+            else:
+                deterministic_outcomes[event_pos] = None
+
+        inferred_outcomes, outcome_cancelled = await _infer_all_expected_outcomes(
+            outcome_jobs,
+            log_info=log_info,
+            should_cancel=should_cancel,
+            max_workers=llm_workers,
+        )
+        if outcome_cancelled:
+            cancelled = True
+
+        # Ordered assemble: waits, report lists, per-event analysis JSON.
+        previous_instruction_event: RecordedEvent | None = None
         for event_pos, event in enumerate(events):
             if should_cancel is not None and should_cancel():
                 cancelled = True
@@ -388,133 +626,76 @@ async def analyze_recording_session(
 
             prepared = prepared_list[event_pos]
             if prepared is None:
-                # Vision skipped due to cancel; stop LLM phase in session order.
                 cancelled = True
                 log_info(
                     f"skipping event {event.index}: vision not prepared (cancelled)"
                 )
                 break
 
-            log_info(f"processing event {event.index} kind={event.kind}")
+            result = instruction_results[event_pos]
+            if result is _UNSET:
+                cancelled = True
+                log_info(
+                    f"skipping event {event.index}: instruction LLM not started (cancelled)"
+                )
+                break
+
             vision = prepared.vision
-            event_for_llm = prepared.event_for_llm
             text_resolution = prepared.text_resolution
             analysis_path = run_dir / "analysis" / f"event_{event.index:03d}.json"
             analysis_path.parent.mkdir(parents=True, exist_ok=True)
 
-            result = await analyze_event_to_cache(
-                event_for_llm,
-                run_dir=run_dir,
-                vision=vision,
-                log_info=log_info,
-            )
             if result is None:
                 skipped += 1
                 errors.append({"event_index": event.index, "error": "llm_analysis_failed"})
-            else:
-                instruction = result["instruction"]
-                cached += 1
-                elapsed_since_previous: float | None = None
-                wait_instruction: str | None = None
-                if previous_instruction_event is not None:
-                    elapsed_since_previous = _elapsed_seconds(
-                        previous_instruction_event.timestamp_utc,
-                        event.timestamp_utc,
-                    )
-                    if (
-                        elapsed_since_previous is not None
-                        and elapsed_since_previous > _WAIT_THRESHOLD_SECONDS
-                    ):
-                        wait_instruction = _wait_instruction(elapsed_since_previous)
-                        instructions.append(wait_instruction)
-                        expected_outcomes.append(None)
-                next_event = (
-                    events[event_pos + 1] if event_pos + 1 < len(events) else None
-                )
-                before_shot = before_screenshot_for_outcome(event)
-                after_shot = after_screenshot_for_outcome(
-                    event,
-                    next_event,
-                    final_after_screenshot=final_after_screenshot,
-                )
-                window_change = resolve_window_change(
-                    event.window_change,
-                    event.window_snapshot_debug,
-                    event.cursor_xy,
-                )
-                expected_outcome = expected_outcome_for_window_change(window_change)
-                if (
-                    expected_outcome is None
-                    and before_shot is not None
-                    and after_shot is not None
-                ):
-                    expected_outcome = await infer_expected_outcome(
-                        instruction=instruction,
-                        before_screenshot=before_shot,
-                        after_screenshot=after_shot,
-                        window_change_hint=format_window_change_hint(window_change),
-                        log_info=log_info,
-                    )
-                instructions.append(instruction)
-                expected_outcomes.append(expected_outcome)
-                previous_instruction_event = event
-                write_json(
-                    analysis_path,
-                    {
-                        "event_index": event.index,
-                        "instruction": instruction,
-                        **(
-                            {"use_char_target": result["use_char_target"]}
-                            if "use_char_target" in result
-                            else {}
-                        ),
-                        **(
-                            {"expected_outcome": expected_outcome}
-                            if expected_outcome is not None
-                            else {}
-                        ),
-                        **(
-                            {"elapsed_since_previous_seconds": elapsed_since_previous}
-                            if elapsed_since_previous is not None
-                            else {}
-                        ),
-                        **(
-                            {"wait_instruction": wait_instruction}
-                            if wait_instruction is not None
-                            else {}
-                        ),
-                        "vision": {
-                            "used_vision": vision.get("used_vision"),
-                            "candidate_text": vision.get("candidate_text"),
-                        },
-                        **(
-                            {"text_resolution": text_resolution}
-                            if text_resolution is not None
-                            else {}
-                        ),
-                        **(
-                            {"window_change": event.window_change}
-                            if event.window_change is not None
-                            else {}
-                        ),
-                        **(
-                            {"window_snapshot_debug": event.window_snapshot_debug}
-                            if event.window_snapshot_debug is not None
-                            else {}
-                        ),
-                    },
-                )
-                if expected_outcome:
-                    log_info(
-                        f"cached event {event.index}: {instruction} "
-                        f"| expected_outcome={expected_outcome}"
-                    )
-                else:
-                    log_info(f"cached event {event.index}: {instruction}")
+                continue
 
-            processed += 1
-            if on_progress is not None:
-                on_progress(processed, total)
+            instruction = result["instruction"]
+            cached += 1
+            elapsed_since_previous: float | None = None
+            wait_instruction: str | None = None
+            if previous_instruction_event is not None:
+                elapsed_since_previous = _elapsed_seconds(
+                    previous_instruction_event.timestamp_utc,
+                    event.timestamp_utc,
+                )
+                if (
+                    elapsed_since_previous is not None
+                    and elapsed_since_previous > _WAIT_THRESHOLD_SECONDS
+                ):
+                    wait_instruction = _wait_instruction(elapsed_since_previous)
+                    instructions.append(wait_instruction)
+                    expected_outcomes.append(None)
+
+            if event_pos in deterministic_outcomes:
+                expected_outcome = deterministic_outcomes[event_pos]
+            else:
+                expected_outcome = inferred_outcomes.get(event_pos)
+
+            instructions.append(instruction)
+            expected_outcomes.append(expected_outcome)
+            previous_instruction_event = event
+            _write_event_analysis(
+                analysis_path,
+                event=event,
+                result=result,
+                instruction=instruction,
+                vision=vision,
+                expected_outcome=expected_outcome,
+                elapsed_since_previous=elapsed_since_previous,
+                wait_instruction=wait_instruction,
+                text_resolution=text_resolution,
+            )
+            if expected_outcome:
+                log_info(
+                    f"cached event {event.index}: {instruction} "
+                    f"| expected_outcome={expected_outcome}"
+                )
+            else:
+                log_info(f"cached event {event.index}: {instruction}")
+
+        if on_progress is not None and cancelled and processed < total:
+            on_progress(processed, total)
 
         report = {
             "run_id": run_id,

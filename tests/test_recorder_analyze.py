@@ -25,6 +25,7 @@ from src.recorder.analyze import (
 from src.recorder.models import RecordedEvent
 from src.recorder.orchestrator import (
     _elapsed_seconds,
+    _llm_max_workers,
     _vision_max_workers,
     _wait_instruction,
     analyze_recording_session,
@@ -936,6 +937,17 @@ def test_vision_max_workers_env_override(monkeypatch: pytest.MonkeyPatch) -> Non
     assert _vision_max_workers() == 3
 
 
+def test_llm_max_workers_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RECORDING_LLM_WORKERS", raising=False)
+    assert _llm_max_workers() == 3
+    monkeypatch.setenv("RECORDING_LLM_WORKERS", "4")
+    assert _llm_max_workers() == 4
+    monkeypatch.setenv("RECORDING_LLM_WORKERS", "0")
+    assert _llm_max_workers() == 1
+    monkeypatch.setenv("RECORDING_LLM_WORKERS", "nope")
+    assert _llm_max_workers() == 3
+
+
 @pytest.mark.asyncio
 async def test_analyze_recording_session_runs_vision_in_parallel(tmp_path: Path) -> None:
     """Vision prep for independent events should overlap (bounded concurrency)."""
@@ -1000,6 +1012,76 @@ async def test_analyze_recording_session_runs_vision_in_parallel(tmp_path: Path)
 
     assert report["cached"] == 3
     assert max_active >= 2
+
+
+@pytest.mark.asyncio
+async def test_analyze_recording_session_runs_llm_in_parallel(tmp_path: Path) -> None:
+    """Instruction LLM for independent events should overlap (bounded concurrency)."""
+    import asyncio
+
+    from src.common.run_state import reset_run_state_manager
+
+    reset_run_state_manager()
+    run_dir = tmp_path / "screen_record_parallel_llm"
+    (run_dir / "events").mkdir(parents=True)
+    events = [
+        RecordedEvent(
+            index=i,
+            timestamp_utc=f"2026-07-30T03:00:0{i}+00:00",
+            kind="click",
+            cursor_xy=(10 * i, 10 * i),
+            screenshot_path="",
+        )
+        for i in range(1, 4)
+    ]
+    event_paths: list[str] = []
+    for event in events:
+        relative_path = f"events/event_{event.index:03d}.json"
+        event_paths.append(relative_path)
+        (run_dir / relative_path).write_text(
+            json.dumps(event.to_dict(), ensure_ascii=False),
+            encoding="utf-8",
+        )
+    (run_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "started_at_utc": events[0].timestamp_utc,
+                "stopped_at_utc": events[-1].timestamp_utc,
+                "event_count": len(events),
+                "events": event_paths,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    active = 0
+    max_active = 0
+    lock = asyncio.Lock()
+    no_vision = {"used_vision": False, "candidate_text": "", "local_cursor": None}
+
+    async def slow_analyze(event, **_kwargs):
+        nonlocal active, max_active
+        async with lock:
+            active += 1
+            max_active = max(max_active, active)
+        await asyncio.sleep(0.05)
+        async with lock:
+            active -= 1
+        return {"instruction": f"點擊事件 {event.index}"}
+
+    with patch(
+        "src.recorder.orchestrator.build_vision_context",
+        new=AsyncMock(return_value=no_vision),
+    ), patch(
+        "src.recorder.orchestrator.analyze_event_to_cache",
+        new=slow_analyze,
+    ), patch.dict("os.environ", {"RECORDING_LLM_WORKERS": "3"}):
+        report = await analyze_recording_session(run_dir)
+
+    assert report["cached"] == 3
+    assert max_active >= 2
+    assert report["instructions"] == ["點擊事件 1", "點擊事件 2", "點擊事件 3"]
 
 
 @pytest.mark.asyncio

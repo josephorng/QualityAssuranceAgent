@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -554,17 +555,19 @@ async def _finalize_instruction(
         return instruction
     if event.kind == "drag":
         dest = destination if isinstance(destination, dict) else {}
-        start_hints = await select_stable_nearby_hints(
-            vision,
-            instruction=instruction,
-            screenshot_path=event.screenshot_path,
-            log_info=log_info,
-        )
-        end_hints = await select_stable_nearby_hints(
-            dest,
-            instruction=instruction,
-            screenshot_path=event.end_screenshot_path or event.screenshot_path,
-            log_info=log_info,
+        start_hints, end_hints = await asyncio.gather(
+            select_stable_nearby_hints(
+                vision,
+                instruction=instruction,
+                screenshot_path=event.screenshot_path,
+                log_info=log_info,
+            ),
+            select_stable_nearby_hints(
+                dest,
+                instruction=instruction,
+                screenshot_path=event.end_screenshot_path or event.screenshot_path,
+                log_info=log_info,
+            ),
         )
         return append_drag_nearby_context_comments(
             instruction,

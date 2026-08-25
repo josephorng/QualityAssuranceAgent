@@ -43,22 +43,6 @@ VISION_BACKEND_PRESETS: dict[str, dict[str, str]] = {
 
 # Fixed model/host pairs per backend (edited only via backend choice in the hub dialog).
 BACKEND_PRESETS: dict[str, dict[str, str]] = {
-    "ollama_local": {
-        "llm_backend": "ollama_local",
-        "brain_lm": "gemma4:e4b",
-        "ollama_host": "http://localhost:11434",
-    },
-    "ollama_local_12b": {
-        "llm_backend": "ollama_local_12b",
-        "brain_lm": "gemma4:12b",
-        "ollama_host": "http://localhost:11434",
-    },
-    "ollama_server": {
-        "llm_backend": "ollama_server",
-        "brain_lm": "gemma4:26b-a4b-it-q4_K_M",
-        "ollama_host": "http://192.168.13.8:11434",
-        # "ollama_host": "http://192.168.13.101:11434",
-    },
     "vllm_server": {
         "llm_backend": "vllm_server",
         "brain_lm": "google/gemma-4-26B-A4B-it",
@@ -66,17 +50,19 @@ BACKEND_PRESETS: dict[str, dict[str, str]] = {
     },
 }
 
+# Legacy Ollama / short names all resolve to the sole Gemma 4 vLLM preset.
 _LEGACY_LLM_BACKEND_ALIASES: dict[str, str] = {
-    "ollama": "ollama_local",
+    "ollama": "vllm_server",
+    "ollama_local": "vllm_server",
+    "ollama_local_12b": "vllm_server",
+    "ollama_server": "vllm_server",
     "vllm": "vllm_server",
 }
 
 _LEGACY_CONSTANTS_PATH = "constants.json"
 _AGENT_SETTINGS_FILENAME = "agent_settings.json"
 
-OLLAMA_PROBE_LOCAL_HOST = BACKEND_PRESETS["ollama_local"]["ollama_host"]
-OLLAMA_PROBE_REMOTE_HOST = BACKEND_PRESETS["ollama_server"]["ollama_host"]
-_OLLAMA_PROBE_TIMEOUT_SECONDS = 2.5
+_LLM_PROBE_TIMEOUT_SECONDS = 2.5
 
 
 _USER_DATA_APP_NAME = "ComputerUseAgent"
@@ -177,7 +163,7 @@ class Settings(BaseSettings):
 
 
 def canonicalize_llm_backend(backend: str) -> str:
-    """Map legacy ``ollama`` / ``vllm`` names to ``ollama_local`` / ``ollama_server``."""
+    """Map legacy Ollama / short names to the sole ``vllm_server`` preset."""
     key = str(backend).strip().lower()
     return _LEGACY_LLM_BACKEND_ALIASES.get(key, key)
 
@@ -241,14 +227,13 @@ def _overlay_agent_keys(target: dict[str, Any], raw: Any) -> dict[str, Any]:
     if isinstance(raw, dict):
         legacy_host = raw.get("vllm_host")
         if isinstance(legacy_host, str) and legacy_host.strip():
-            backend = canonicalize_llm_backend(str(out.get("llm_backend", Settings().llm_backend)))
-            if backend == "ollama_server" or not str(out.get("ollama_host", "")).strip():
+            if not str(out.get("ollama_host", "")).strip():
                 out["ollama_host"] = legacy_host.strip()
     return out
 
 
 def normalize_agent_settings_dict(data: dict[str, Any]) -> dict[str, Any]:
-    """Apply fixed model/host preset for the selected backend; keep probed hosts."""
+    """Apply fixed model/host preset for the selected backend."""
     base = Settings()
     backend = canonicalize_llm_backend(str(data.get("llm_backend", base.llm_backend)))
     out = preset_for_backend(backend)
@@ -258,29 +243,10 @@ def normalize_agent_settings_dict(data: dict[str, Any]) -> dict[str, Any]:
     vision_preset = preset_for_vision_backend(vision_key)
     out["vision_backend"] = vision_key
     out["triton_http_url"] = normalize_triton_http_url(vision_preset["triton_http_url"])
-    if backend == "vllm_server":
-        return out
-    host = data.get("ollama_host") or data.get("vllm_host")
-    if isinstance(host, str) and host.strip():
-        out["ollama_host"] = host.strip()
     return out
 
 
-def ollama_host_responds(host: str, *, timeout_seconds: float = _OLLAMA_PROBE_TIMEOUT_SECONDS) -> bool:
-    """Return True if an Ollama server responds at ``host`` (GET /api/tags)."""
-    base = host.strip().rstrip("/")
-    if not base:
-        return False
-    url = f"{base}/api/tags"
-    req = urllib.request.Request(url, method="GET")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
-            return 200 <= int(resp.status) < 300
-    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
-        return False
-
-
-def vllm_host_responds(host: str, *, timeout_seconds: float = _OLLAMA_PROBE_TIMEOUT_SECONDS) -> bool:
+def vllm_host_responds(host: str, *, timeout_seconds: float = _LLM_PROBE_TIMEOUT_SECONDS) -> bool:
     """Return True if an OpenAI-compatible vLLM server responds at ``host`` (GET /v1/models)."""
     base = host.strip().rstrip("/")
     if not base:
@@ -300,19 +266,15 @@ def probe_llm_backend(backend: str) -> tuple[bool, str]:
     preset = preset_for_backend(key)
     host = str(preset["ollama_host"])
     model = str(preset["brain_lm"])
-    if key == "vllm_server":
-        if vllm_host_responds(host):
-            return True, f"連線成功\n主機：{host}\n模型：{model}"
-        return False, f"無法連線至 vLLM\n主機：{host}"
-    if ollama_host_responds(host):
+    if vllm_host_responds(host):
         return True, f"連線成功\n主機：{host}\n模型：{model}"
-    return False, f"無法連線至 Ollama\n主機：{host}"
+    return False, f"無法連線至 vLLM\n主機：{host}"
 
 
 def triton_health_responds(
     triton_http_url: str,
     *,
-    timeout_seconds: float = _OLLAMA_PROBE_TIMEOUT_SECONDS,
+    timeout_seconds: float = _LLM_PROBE_TIMEOUT_SECONDS,
 ) -> bool:
     """Return True when Triton responds to ``GET /v2/health/ready``."""
     base = normalize_triton_http_url(triton_http_url)
@@ -352,25 +314,12 @@ def probe_vision_backend(
 
 def select_reachable_ollama_host(
     *,
-    local_host: str = OLLAMA_PROBE_LOCAL_HOST,
-    remote_host: str = OLLAMA_PROBE_REMOTE_HOST,
+    local_host: str = "",
+    remote_host: str = "",
 ) -> str | None:
-    """Prefer ``local_host`` when it responds; else ``remote_host``; else None."""
-    local = local_host.strip().rstrip("/")
-    remote = remote_host.strip().rstrip("/")
-    if ollama_host_responds(local):
-        return local
-    if ollama_host_responds(remote):
-        return remote
+    """Deprecated: Ollama backends were removed. Always returns None."""
+    _ = (local_host, remote_host)
     return None
-
-
-def _ollama_host_probe_status_message(host: str) -> str:
-    local = OLLAMA_PROBE_LOCAL_HOST.rstrip("/")
-    chosen = host.rstrip("/")
-    if chosen == local:
-        return f"Ollama 主機：本機 ({host})"
-    return f"Ollama 主機：公司主機 ({host})"
 
 
 def apply_startup_triton_probe() -> tuple[bool, str]:
@@ -384,24 +333,10 @@ def apply_startup_triton_probe() -> tuple[bool, str]:
 
 
 def apply_startup_ollama_host_probe() -> tuple[bool, str]:
-    """Probe local then remote Ollama; persist chosen host when reachable."""
+    """Report the configured vLLM Gemma 4 host at startup (no Ollama probing)."""
     data = load_agent_settings_dict()
-    backend = canonicalize_llm_backend(str(data.get("llm_backend", Settings().llm_backend)))
-    if backend == "vllm_server":
-        return True, f"vLLM 主機：{data['ollama_host']}"
-
-    chosen = select_reachable_ollama_host()
-    if chosen is None:
-        return (
-            False,
-            "錯誤：無法連線至 Ollama（本機與公司主機皆無回應）",
-        )
-    data["ollama_host"] = chosen
-    try:
-        save_agent_settings_dict(data)
-    except OSError:
-        pass
-    return True, _ollama_host_probe_status_message(chosen)
+    host = str(data.get("ollama_host") or BACKEND_PRESETS["vllm_server"]["ollama_host"])
+    return True, f"vLLM 主機：{host}"
 
 
 def load_agent_settings_dict() -> dict[str, Any]:

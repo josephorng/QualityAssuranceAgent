@@ -3,6 +3,7 @@ from pathlib import Path
 from src.common.settings import (
     apply_startup_ollama_host_probe,
     apply_startup_triton_probe,
+    canonicalize_llm_backend,
     normalize_agent_settings_dict,
     probe_llm_backend,
     probe_vision_backend,
@@ -22,7 +23,16 @@ def test_normalize_vllm_server_ignores_probed_ollama_host() -> None:
     assert "debug" not in out
 
 
-def test_startup_probe_skips_ollama_for_vllm_server(
+def test_legacy_ollama_backends_map_to_vllm_server() -> None:
+    for legacy in ("ollama", "ollama_local", "ollama_local_12b", "ollama_server", "vllm"):
+        assert canonicalize_llm_backend(legacy) == "vllm_server"
+    out = normalize_agent_settings_dict({"llm_backend": "ollama_local"})
+    assert out["llm_backend"] == "vllm_server"
+    assert out["brain_lm"] == "google/gemma-4-26B-A4B-it"
+    assert out["ollama_host"] == "http://192.168.4.134:8000"
+
+
+def test_startup_probe_reports_vllm_host(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
@@ -47,13 +57,13 @@ def test_startup_probe_skips_ollama_for_vllm_server(
     assert "192.168.4.134:8000" in message
 
 
-def test_probe_llm_backend_ollama_success(monkeypatch) -> None:
-    monkeypatch.setattr("src.common.settings.ollama_host_responds", lambda host: True)
-    ok, message = probe_llm_backend("ollama_local")
+def test_probe_llm_backend_vllm_success(monkeypatch) -> None:
+    monkeypatch.setattr("src.common.settings.vllm_host_responds", lambda host: True)
+    ok, message = probe_llm_backend("vllm_server")
     assert ok is True
     assert "連線成功" in message
-    assert "localhost:11434" in message
-    assert "gemma4:e4b" in message
+    assert "192.168.4.134:8000" in message
+    assert "google/gemma-4-26B-A4B-it" in message
 
 
 def test_probe_llm_backend_vllm_failure(monkeypatch) -> None:
@@ -67,19 +77,20 @@ def test_probe_llm_backend_vllm_failure(monkeypatch) -> None:
 def test_normalize_agent_settings_includes_vision_fields() -> None:
     out = normalize_agent_settings_dict(
         {
-            "llm_backend": "ollama_local",
+            "llm_backend": "vllm_server",
             "vision_backend": "triton_local",
             "triton_http_url": "http://localhost:9000/",
         }
     )
     assert out["vision_backend"] == "triton_local"
     assert out["triton_http_url"] == "http://127.0.0.1:9000"
+    assert out["llm_backend"] == "vllm_server"
 
 
 def test_normalize_agent_settings_remote_vision_preset() -> None:
     out = normalize_agent_settings_dict(
         {
-            "llm_backend": "ollama_local",
+            "llm_backend": "vllm_server",
             "vision_backend": "triton_192_168_0_17",
         }
     )
@@ -151,7 +162,7 @@ def test_default_runs_dir_frozen_uses_documents(monkeypatch, tmp_path: Path) -> 
 
     monkeypatch.setattr("src.common.settings.is_frozen_app", lambda: True)
     monkeypatch.setattr("src.common.settings.user_documents_dir", lambda: tmp_path)
-    assert default_runs_dir() == tmp_path / "QualityAssuranceAgent" / "runs"
+    assert default_runs_dir() == tmp_path / "ComputerUseAgent" / "runs"
 
 
 def test_resolve_runs_dir_absolute_and_relative(monkeypatch, tmp_path: Path) -> None:

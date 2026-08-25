@@ -1167,7 +1167,6 @@ _RECORDING_SCRIPT = """
       applyCharTarget(btn);
     });
   });
-  }
 
   var addDialog = document.getElementById("add-step-dialog");
   var addForm = addDialog ? addDialog.querySelector("form") : null;

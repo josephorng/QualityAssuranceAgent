@@ -1035,6 +1035,9 @@ def test_write_recording_html_copy_includes_expected_outcome(tmp_path: Path) -> 
 
     assert 'data-instruction="點擊「搜尋」按鈕"' in html
     assert 'data-expected-outcome="對話框顯示 &quot;搜尋&quot;"' in html
+    assert 'class="instruction-expected"' in html
+    assert "預期結果：對話框顯示" in html
+    assert 'class="instruction-summary-text"' in html
     assert "預期結果" in html
     assert 'class="expected-outcome-input"' in html
     assert 'class="apply-expected-outcome"' in html
@@ -1042,6 +1045,7 @@ def test_write_recording_html_copy_includes_expected_outcome(tmp_path: Path) -> 
     assert "function instructionCopyText" in html
     assert "# expected_outcome: " in html
     assert "function applyExpectedOutcome" in html
+    assert "instruction-expected" in html
 
 
 def test_write_recording_html_renders_landmark_multiselect(tmp_path: Path) -> None:
@@ -1357,11 +1361,15 @@ def test_write_recording_html_shows_ocr_and_recorded_text_choices(tmp_path: Path
 
     assert 'value="ooffice"' in html
     assert 'class="typed-text-choice selected"' in html
+    assert 'data-selected-source="recorded"' in html
     assert "OCR：什麼是套利?" in html
     assert "OCR：搜尋" in html
     assert "鍵盤：ooffice" in html
     assert 'data-text="什麼是套利?"' in html
     assert 'data-text="搜尋"' in html
+    assert "choice_text" in html
+    assert "selectTypedTextChoice" in html
+    assert "updateTypedTextChoiceLabel" in html
 
 
 def test_typed_text_candidates_default_to_recorded_when_available() -> None:

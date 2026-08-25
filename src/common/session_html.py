@@ -837,7 +837,36 @@ _RECORDING_SCRIPT = """
       if (selected) choice.classList.add("selected");
       else choice.classList.remove("selected");
     });
+    if (matched) {
+      var selectedBtn = panel.querySelector("button.typed-text-choice.selected");
+      if (selectedBtn) {
+        panel.setAttribute("data-selected-source", selectedBtn.getAttribute("data-source") || "");
+      }
+    }
     return matched;
+  }
+
+  function selectTypedTextChoice(panel, choice) {
+    Array.prototype.slice.call(panel.querySelectorAll("button.typed-text-choice")).forEach(function (btn) {
+      if (btn === choice) btn.classList.add("selected");
+      else btn.classList.remove("selected");
+    });
+    if (choice) {
+      panel.setAttribute("data-selected-source", choice.getAttribute("data-source") || "");
+    }
+  }
+
+  function selectedTypedTextChoice(panel) {
+    return panel.querySelector("button.typed-text-choice.selected");
+  }
+
+  function updateTypedTextChoiceLabel(choice, text) {
+    if (!choice) return;
+    var source = choice.getAttribute("data-source") || "";
+    var label = source === "recorded" ? "鍵盤" : "OCR";
+    choice.setAttribute("data-text", text);
+    choice.textContent = label + "：" + text;
+    choice.setAttribute("title", "使用" + label);
   }
 
   Array.prototype.slice.call(document.querySelectorAll("button.typed-text-choice")).forEach(function (btn) {
@@ -849,7 +878,7 @@ _RECORDING_SCRIPT = """
       var input = panel.querySelector(".typed-text-input");
       if (!input) return;
       input.value = btn.getAttribute("data-text") || "";
-      syncTypedTextChoiceSelection(panel, input.value);
+      selectTypedTextChoice(panel, btn);
       setTypedTextStatus(panel, "", false);
     });
   });
@@ -866,7 +895,7 @@ _RECORDING_SCRIPT = """
     input.addEventListener("input", function () {
       var panel = input.closest(".typed-text");
       if (!panel) return;
-      syncTypedTextChoiceSelection(panel, input.value);
+      // Keep OCR / 鍵盤 sticky selection while editing so Apply can update that source.
       setTypedTextStatus(panel, "", false);
     });
   });
@@ -888,12 +917,22 @@ _RECORDING_SCRIPT = """
         return;
       }
       var text = input.value || "";
+      var selected = selectedTypedTextChoice(panel);
+      var source = selected
+        ? (selected.getAttribute("data-source") || "")
+        : (panel.getAttribute("data-selected-source") || "");
+      var choiceText = selected ? (selected.getAttribute("data-text") || "") : "";
+      var body = { text: text };
+      if (source === "ocr" || source === "recorded") {
+        body.source = source;
+        if (choiceText) body.choice_text = choiceText;
+      }
       btn.disabled = true;
       setTypedTextStatus(panel, "套用中…", false);
       fetch("/api/runs/" + encodeURIComponent(runId) + "/events/" + encodeURIComponent(eventIndex) + "/text", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: text })
+        body: JSON.stringify(body)
       })
         .then(function (response) {
           return response.json().then(function (payload) {
@@ -910,7 +949,12 @@ _RECORDING_SCRIPT = """
           var instruction = result.payload.instruction || "";
           var saved = result.payload.text || "";
           input.value = saved;
-          syncTypedTextChoiceSelection(panel, saved);
+          if (selected) {
+            updateTypedTextChoiceLabel(selected, saved);
+            selectTypedTextChoice(panel, selected);
+          } else {
+            syncTypedTextChoiceSelection(panel, saved);
+          }
           var title = group.querySelector(".instruction-title");
           if (title && instruction) title.textContent = instruction;
           var copyBtn = group.querySelector("button.copy-instruction");
@@ -997,6 +1041,21 @@ _RECORDING_SCRIPT = """
           if (copyBtn) {
             if (saved) copyBtn.setAttribute("data-expected-outcome", saved);
             else copyBtn.removeAttribute("data-expected-outcome");
+          }
+          var summaryText = group.querySelector(".instruction-summary-text");
+          var expectedEl = group.querySelector(".instruction-expected");
+          if (saved) {
+            if (!expectedEl && summaryText) {
+              expectedEl = document.createElement("span");
+              expectedEl.className = "instruction-expected";
+              summaryText.appendChild(expectedEl);
+            }
+            if (expectedEl) {
+              expectedEl.classList.remove("instruction-expected-empty");
+              expectedEl.textContent = "預期結果：" + saved;
+            }
+          } else if (expectedEl) {
+            expectedEl.remove();
           }
           btn.classList.add("applied");
           setExpectedOutcomeStatus(panel, "已套用", false);
@@ -3399,8 +3458,9 @@ def _render_typed_text_panel_html(
     choices_html = (
         f'<div class="typed-text-choices">{choices}</div>' if choices else ""
     )
+    selected_source = active_source if active_source in {"ocr", "recorded"} else ""
     return (
-        f'<div class="typed-text">'
+        f'<div class="typed-text" data-selected-source="{escape(selected_source, quote=True)}">'
         f'<div class="typed-text-title">輸入文字</div>'
         f"{choices_html}"
         f'<div class="typed-text-row">'
@@ -3666,12 +3726,23 @@ def _render_recording_event_html(
         if expected_outcome
         else ""
     )
+    if expected_outcome:
+        expected_summary = (
+            f'<span class="instruction-expected">'
+            f"預期結果：{escape(expected_outcome)}"
+            f"</span>"
+        )
+    else:
+        expected_summary = ""
     return (
         f'<details class="instruction-group" id="event-{index}" data-run-id="{run_id}" '
         f'data-event-index="{index}" data-kind="{escape(kind, quote=True)}">'
         f"<summary>"
         f'<span class="instruction-number">{step_label}</span>'
+        f'<span class="instruction-summary-text">'
         f'<span class="instruction-title">{escape(title)}</span>'
+        f"{expected_summary}"
+        f"</span>"
         f'<span class="badge neutral">{kind_badge}</span>'
         f'<button type="button" class="copy-instruction" data-instruction="{copy_attr}"'
         f'{outcome_attr} '

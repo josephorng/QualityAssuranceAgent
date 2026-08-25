@@ -838,7 +838,11 @@ def test_apply_recording_event_text_persists_and_rebuilds(tmp_path: Path) -> Non
         text="  正確文字  ",
     )
 
-    assert result == {"text": "正確文字", "instruction": "輸入「正確文字」"}
+    assert result == {
+        "text": "正確文字",
+        "instruction": "輸入「正確文字」",
+        "source": None,
+    }
     event = json.loads(
         (runs_root / "recording_text_edit" / "events" / "event_001.json").read_text(
             encoding="utf-8"
@@ -863,6 +867,70 @@ def test_apply_recording_event_text_persists_and_rebuilds(tmp_path: Path) -> Non
     )
     assert 'value="正確文字"' in html
     assert "輸入「正確文字」" in html
+
+
+def test_apply_recording_event_text_updates_selected_ocr_choice(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_text_input_run(runs_root, "recording_text_ocr_edit")
+    analysis_path = run_root / "analysis" / "event_001.json"
+    analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+    analysis["text_resolution"]["ocr_text"] = "wrong ocr"
+    analysis["text_resolution"]["ocr_options"] = ["wrong ocr", "搜尋"]
+    analysis_path.write_text(
+        json.dumps(analysis, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    result = apply_recording_event_text(
+        runs_root,
+        "recording_text_ocr_edit",
+        1,
+        text="正確文字",
+        source="ocr",
+        choice_text="wrong ocr",
+    )
+
+    assert result["source"] == "ocr"
+    analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+    assert analysis["text_resolution"]["ocr_text"] == "正確文字"
+    assert analysis["text_resolution"]["ocr_options"] == ["正確文字", "搜尋"]
+    assert analysis["text_resolution"]["recorded_text"] == "wrng"
+    assert analysis["text_resolution"]["resolved_text"] == "正確文字"
+    html = (run_root / "recording_steps.html").read_text(encoding="utf-8")
+    assert "OCR：正確文字" in html
+    assert "鍵盤：wrng" in html
+    assert 'data-selected-source="ocr"' in html
+
+
+def test_apply_recording_event_text_updates_selected_recorded_choice(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_text_input_run(runs_root, "recording_text_kb_edit")
+    analysis_path = run_root / "analysis" / "event_001.json"
+    analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+    analysis["text_resolution"]["source"] = "recorded"
+    analysis["text_resolution"]["resolved_text"] = "wrng"
+    analysis_path.write_text(
+        json.dumps(analysis, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    result = apply_recording_event_text(
+        runs_root,
+        "recording_text_kb_edit",
+        1,
+        text="fixed typed",
+        source="recorded",
+    )
+
+    assert result["source"] == "recorded"
+    analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+    assert analysis["text_resolution"]["recorded_text"] == "fixed typed"
+    assert analysis["text_resolution"]["resolved_text"] == "fixed typed"
+    html = (run_root / "recording_steps.html").read_text(encoding="utf-8")
+    assert "鍵盤：fixed typed" in html
+    assert 'data-selected-source="recorded"' in html
 
 
 def test_apply_recording_event_text_rejects_non_text_input(tmp_path: Path) -> None:
@@ -911,6 +979,42 @@ def test_runs_report_server_text_endpoint(tmp_path: Path) -> None:
         assert payload["ok"] is True
         assert payload["text"] == "fixed value"
         assert payload["instruction"] == "輸入「fixed value」"
+        assert payload.get("source") is None
+    finally:
+        server.stop()
+
+
+def test_runs_report_server_text_endpoint_with_source(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_text_input_run(runs_root, "recording_http_text_source")
+    analysis_path = run_root / "analysis" / "event_001.json"
+    analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+    analysis["text_resolution"]["ocr_text"] = "wrong ocr"
+    analysis_path.write_text(
+        json.dumps(analysis, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    server = RunsReportServer(runs_root)
+    try:
+        base = server.start()
+        body = json.dumps(
+            {"text": "fixed value", "source": "ocr", "choice_text": "wrong ocr"},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            f"{base}/api/runs/recording_http_text_source/events/1/text",
+            method="POST",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            assert response.status == 200
+        assert payload["ok"] is True
+        assert payload["source"] == "ocr"
+        analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+        assert analysis["text_resolution"]["ocr_text"] == "fixed value"
     finally:
         server.stop()
 

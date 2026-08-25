@@ -924,16 +924,56 @@ def apply_recording_event_landmarks(
     return {"instruction": new_instruction, "rebuilt": rebuilt}
 
 
+def _replace_ocr_choice_text(
+    resolution: dict[str, Any],
+    cleaned: str,
+    *,
+    choice_text: str | None,
+) -> None:
+    """Update ``ocr_text`` / ``ocr_options`` so the selected OCR choice shows ``cleaned``."""
+    previous_resolved = str(resolution.get("resolved_text") or "").strip()
+    old_ocr = str(resolution.get("ocr_text") or "").strip()
+    target = (choice_text or "").strip() or previous_resolved or old_ocr
+    resolution["ocr_text"] = cleaned
+    options = resolution.get("ocr_options")
+    if not isinstance(options, list):
+        resolution["ocr_options"] = [cleaned]
+        return
+    new_options: list[str] = []
+    replaced = False
+    seen: set[str] = set()
+    for item in options:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        if not replaced and target and text == target:
+            text = cleaned
+            replaced = True
+        if text in seen:
+            continue
+        seen.add(text)
+        new_options.append(text)
+    if not replaced and cleaned and cleaned not in seen:
+        new_options.insert(0, cleaned)
+    resolution["ocr_options"] = new_options
+
+
 def apply_recording_event_text(
     runs_root: Path,
     run_id: str,
     event_index: int,
     *,
     text: Any,
+    source: Any = None,
+    choice_text: Any = None,
 ) -> dict[str, Any]:
     """Replace typed text for one ``text_input`` event and persist instruction artifacts.
 
-    Returns ``{"text": ..., "instruction": ...}``. Raises ``ValueError`` for invalid input.
+    When ``source`` is ``\"ocr\"`` or ``\"recorded\"``, also update that choice so the
+    HTML OCR / 鍵盤 buttons stay in sync with the applied value.
+
+    Returns ``{"text": ..., "instruction": ..., "source": ...}``. Raises ``ValueError``
+    for invalid input.
     """
     run_dir = resolve_deletable_run_folder(runs_root, run_id)
     if not isinstance(event_index, int) or event_index < 1:
@@ -945,6 +985,15 @@ def apply_recording_event_text(
     cleaned = text.strip()
     if not cleaned:
         raise ValueError("text is empty")
+
+    selected_source = ""
+    if isinstance(source, str):
+        selected_source = source.strip().lower()
+    if selected_source and selected_source not in {"ocr", "recorded"}:
+        raise ValueError("source must be ocr or recorded")
+    selected_choice = choice_text.strip() if isinstance(choice_text, str) else None
+    if selected_choice == "":
+        selected_choice = None
 
     event_path = event_json_path(run_dir, event_index)
     event_payload = read_json(event_path, None)
@@ -973,6 +1022,14 @@ def apply_recording_event_text(
         if "recorded_text" not in resolution:
             recorded = previous_text if isinstance(previous_text, str) else cleaned
             resolution["recorded_text"] = recorded
+        if selected_source == "recorded":
+            resolution["recorded_text"] = cleaned
+        elif selected_source == "ocr":
+            _replace_ocr_choice_text(
+                resolution,
+                cleaned,
+                choice_text=selected_choice,
+            )
         resolution["resolved_text"] = cleaned
         resolution["source"] = "user"
         resolution["reason"] = "edited in recording_steps.html"
@@ -986,7 +1043,11 @@ def apply_recording_event_text(
         write_json(report_path, report)
 
     write_recording_html_from_run(run_dir, update_index=False)
-    return {"text": cleaned, "instruction": instruction}
+    return {
+        "text": cleaned,
+        "instruction": instruction,
+        "source": selected_source or None,
+    }
 
 
 def apply_recording_event_expected_outcome(
@@ -1378,6 +1439,8 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
                         run_id,
                         event_index,
                         text=body.get("text"),
+                        source=body.get("source"),
+                        choice_text=body.get("choice_text"),
                     )
                 except ValueError as exc:
                     self._send_json(400, {"ok": False, "error": str(exc)})

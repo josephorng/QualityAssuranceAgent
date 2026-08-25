@@ -1858,8 +1858,13 @@ class MainHub(ctk.CTk):
         if self._analysis_progress is not None and total > 0:
             self._analysis_progress.set(current / total)
         settings = load_settings()
+        if total > 0:
+            pct = int(round(100.0 * current / total))
+            status = f"分析錄製中 ({pct}%)… {settings.brain_lm}"
+        else:
+            status = f"分析錄製中… {settings.brain_lm}"
         self._status.configure(
-            text=f"分析錄製中 ({current}/{total})… {settings.brain_lm}",
+            text=status,
             text_color=("gray20", "gray65"),
         )
 
@@ -2254,10 +2259,10 @@ class MainHub(ctk.CTk):
         self._set_hub_controls_analyzing()
         settings = load_settings()
         self._status.configure(
-            text=f"分析錄製中 (0/{event_count})… {settings.brain_lm}",
+            text=f"分析錄製中 (0%)… {settings.brain_lm}",
             text_color=("gray20", "gray65"),
         )
-        self._update_analysis_progress(0, event_count)
+        self._update_analysis_progress(0, max(1, event_count * 3))
         self._recording_analysis_thread = threading.Thread(
             target=self._analyze_recording_worker,
             args=(run_dir,),

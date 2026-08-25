@@ -1085,6 +1085,70 @@ async def test_analyze_recording_session_runs_llm_in_parallel(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_analyze_recording_session_reports_multi_phase_progress(tmp_path: Path) -> None:
+    """Progress advances through vision, instruction, and outcome units (3 per event)."""
+    from src.common.run_state import reset_run_state_manager
+    from src.recorder.orchestrator import _PROGRESS_UNITS_PER_EVENT
+
+    reset_run_state_manager()
+    run_dir = tmp_path / "screen_record_progress"
+    (run_dir / "events").mkdir(parents=True)
+    events = [
+        RecordedEvent(
+            index=i,
+            timestamp_utc=f"2026-07-30T03:00:0{i}+00:00",
+            kind="key_press",
+            key="enter",
+            screenshot_path="",
+        )
+        for i in range(1, 3)
+    ]
+    event_paths: list[str] = []
+    for event in events:
+        relative_path = f"events/event_{event.index:03d}.json"
+        event_paths.append(relative_path)
+        (run_dir / relative_path).write_text(
+            json.dumps(event.to_dict(), ensure_ascii=False),
+            encoding="utf-8",
+        )
+    (run_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "started_at_utc": events[0].timestamp_utc,
+                "stopped_at_utc": events[-1].timestamp_utc,
+                "event_count": len(events),
+                "events": event_paths,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    ticks: list[tuple[int, int]] = []
+    no_vision = {"used_vision": False, "candidate_text": "", "local_cursor": None}
+
+    with patch(
+        "src.recorder.orchestrator.build_vision_context",
+        new=AsyncMock(return_value=no_vision),
+    ):
+        report = await analyze_recording_session(
+            run_dir,
+            on_progress=lambda cur, tot: ticks.append((cur, tot)),
+        )
+
+    assert report["cached"] == 2
+    assert ticks[0] == (0, 2 * _PROGRESS_UNITS_PER_EVENT)
+    assert ticks[-1] == (2 * _PROGRESS_UNITS_PER_EVENT, 2 * _PROGRESS_UNITS_PER_EVENT)
+    # Must advance during vision (before all instruction units would finish alone).
+    assert any(cur > 0 for cur, _tot in ticks[:-1])
+    assert any(cur >= 2 for cur, _tot in ticks)  # both vision units
+    # Monotonic non-decreasing
+    for prev, nxt in zip(ticks, ticks[1:]):
+        assert nxt[0] >= prev[0]
+        assert nxt[1] == prev[1]
+
+
+@pytest.mark.asyncio
 async def test_analyze_recording_session_inserts_wait_only_over_threshold_seconds(
     tmp_path: Path,
 ) -> None:

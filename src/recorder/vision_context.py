@@ -10,10 +10,10 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import numpy as np
 
-from cua_mcp.char_target import detect_clicked_char, format_char_target_anchor
+from cua_mcp.char_target import detect_clicked_char
 from cua_mcp.icon_map import is_pua_char
 from cua_mcp.read_screen_text.ocr_image import _ocr_boxes_on_bgr
-from cua_mcp.select_mouse_target import _build_candidates_from_bgr
+from cua_mcp.select_mouse_target import _detect_mouse_targets_from_bgr
 from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text
 from cua_mcp.yolo_onnx import YOLO_CLASS_ELEMENT, YOLO_CLASS_INPUT, YOLO_CLASS_TEXT
 from src.common.io_utils import imread_bgr, write_json
@@ -1603,7 +1603,7 @@ def build_vision_context_at_point(
     assert bgr is not None
     yolo_error: str | None = None
     try:
-        all_detections = _build_candidates_from_bgr(bgr)
+        all_detections = _detect_mouse_targets_from_bgr(bgr)
     except RuntimeError as exc:
         all_detections = []
         yolo_error = str(exc)

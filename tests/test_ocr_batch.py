@@ -12,7 +12,7 @@ from cua_mcp.read_screen_text.get_coordinates import (
     _merge_overlapping_boxes,
     _sort_boxes_reading_order,
     _yolo_boxes,
-    get_coordinates_from_image_path,
+    ocr_regions_from_image_path,
 )
 from cua_mcp.read_screen_text.ocr_image import (
     _expand_box,
@@ -112,8 +112,8 @@ def test_ocr_crops_batched_padding() -> None:
     ids=lambda p: Path(p).name,
 )
 def test_batch_matches_serial_on_sample_images(image_path: Path) -> None:
-    serial_regions = get_coordinates_from_image_path(str(image_path), batch_size=1)
-    batch_regions = get_coordinates_from_image_path(str(image_path), batch_size=64)
+    serial_regions = ocr_regions_from_image_path(str(image_path), batch_size=1)
+    batch_regions = ocr_regions_from_image_path(str(image_path), batch_size=64)
 
     assert len(batch_regions) == len(serial_regions)
     for batch_region, serial_region in zip(batch_regions, serial_regions, strict=True):

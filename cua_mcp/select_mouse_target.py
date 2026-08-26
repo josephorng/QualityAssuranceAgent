@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 
 from cua_mcp.char_target import resolve_char_screen_point
-from cua_mcp.geometry import clip_box, iou_xywh
+from cua_mcp.geometry import clip_box, iou_xywh, merge_overlapping_boxes
 from cua_mcp.instruction_offset import parse_mouse_target_instruction
 from cua_mcp.icon_map import (
     describe_text_icons,
@@ -280,13 +280,18 @@ def _dedupe_overlapping_detections(
     return [detections[i] for i in kept]
 
 
-def _build_candidates_from_bgr(
+def _detect_mouse_targets_from_bgr(
     bgr: np.ndarray,
     *,
     yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
     original_scrollbar_bboxes_out: list[tuple[int, int, int, int]] | None = None,
 ) -> list[UiDetection]:
-    """Run YOLO on ``bgr``, OCR text/element boxes, return local-coordinate candidates.
+    """Detect mouse-target UI elements on ``bgr`` via YOLO + OCR.
+
+    Returns local-coordinate ``UiDetection`` candidates (text, icons, inputs,
+    scrollbars) for move_mouse / recording vision. Overlapping ``text`` /
+    ``element`` boxes are merged per class before OCR; results are sorted in
+    reading order.
 
     When ``original_scrollbar_bboxes_out`` is provided, appends each pre-fit
     scrollbar bbox that differs from the post-fit box (for debug overlays).
@@ -312,18 +317,31 @@ def _build_candidates_from_bgr(
         )
         return []
 
-    ocr_boxes: list[tuple[int, int, int, int]] = []
-    ocr_class_ids: list[int] = []
+    # Keep text vs element separate so dual-stream decode modes stay correct
+    # after overlap merging.
+    text_boxes: list[tuple[int, int, int, int]] = []
+    element_boxes: list[tuple[int, int, int, int]] = []
     non_ocr: list[tuple[tuple[int, int, int, int], int]] = []
 
     for row, cls_id in zip(xyxy, class_ids, strict=True):
         cls_id = int(cls_id)
         bbox = _xyxy_row_to_bbox(row, w, h)
-        if cls_id in (YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT):
-            ocr_boxes.append(bbox)
-            ocr_class_ids.append(cls_id)
+        if cls_id == YOLO_CLASS_TEXT:
+            text_boxes.append(bbox)
+        elif cls_id == YOLO_CLASS_ELEMENT:
+            element_boxes.append(bbox)
         else:
             non_ocr.append((bbox, cls_id))
+
+    ocr_boxes: list[tuple[int, int, int, int]] = []
+    ocr_class_ids: list[int] = []
+    for boxes, cls_id in (
+        (text_boxes, YOLO_CLASS_TEXT),
+        (element_boxes, YOLO_CLASS_ELEMENT),
+    ):
+        for bbox in merge_overlapping_boxes(boxes):
+            ocr_boxes.append(bbox)
+            ocr_class_ids.append(cls_id)
 
     ocr_started = time.perf_counter()
     ocr_modes = [ocr_mode_for_yolo_class(cls_id) for cls_id in ocr_class_ids]
@@ -345,8 +363,7 @@ def _build_candidates_from_bgr(
             _detection_from_bbox(bbox, resolved_cls, text=text_value or None)
         )
 
-    before_dedupe = len(candidates)
-    candidates = _dedupe_overlapping_detections(candidates)
+    candidates = _sort_detections_reading_order(candidates)
     pre_fit_scrollbars: list[tuple[int, tuple[int, int, int, int]]] = []
     if original_scrollbar_bboxes_out is not None:
         pre_fit_scrollbars = [
@@ -366,7 +383,7 @@ def _build_candidates_from_bgr(
         f"yolo_s={yolo_elapsed:.3f} ocr_s={ocr_elapsed:.3f} "
         f"total_s={time.perf_counter() - vision_started:.3f} "
         f"yolo_boxes={len(xyxy)} ocr_boxes={len(ocr_boxes)} "
-        f"candidates={len(candidates)} deduped_from={before_dedupe}"
+        f"candidates={len(candidates)}"
     )
 
     return candidates
@@ -828,7 +845,7 @@ def _detections_for_captured_monitor(
     yolo_conf_threshold: float,
 ) -> list[UiDetection]:
     """YOLO+OCR on one monitor image, then map boxes into virtual-desktop coords."""
-    local_candidates = _build_candidates_from_bgr(
+    local_candidates = _detect_mouse_targets_from_bgr(
         bgr,
         yolo_conf_threshold=yolo_conf_threshold,
     )

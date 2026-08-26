@@ -15,10 +15,10 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from cua_mcp.icon_map import is_pua_char, lookup_pua_icon, text_has_pua, unknown_icon_record
-from cua_mcp.read_screen_text.get_coordinates import get_coordinates_from_image_path
+from cua_mcp.read_screen_text.get_coordinates import ocr_regions_from_image_path
 from cua_mcp.select_mouse_target import (
-    _build_candidates_from_bgr,
     _dedupe_overlapping_detections,
+    _detect_mouse_targets_from_bgr,
     _detection_from_bbox,
 )
 from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text
@@ -491,7 +491,7 @@ def load_yolo_lines(image_path: Path, *, yolo_conf_threshold: float) -> tuple[li
         return [], "Could not read image for YOLO"
     try:
         original_scrollbars: list[tuple[int, int, int, int]] = []
-        candidates = _build_candidates_from_bgr(
+        candidates = _detect_mouse_targets_from_bgr(
             bgr,
             yolo_conf_threshold=yolo_conf_threshold,
             original_scrollbar_bboxes_out=original_scrollbars,
@@ -2234,7 +2234,7 @@ class TestImagesViewerApp:
         self.root.update_idletasks()
         t0 = time.perf_counter()
         try:
-            regions = get_coordinates_from_image_path(str(src), yolo_conf_threshold=conf)
+            regions = ocr_regions_from_image_path(str(src), yolo_conf_threshold=conf)
         except Exception as exc:
             self.status_var.set(f"YOLO text regions failed: {type(exc).__name__}: {exc}")
             return

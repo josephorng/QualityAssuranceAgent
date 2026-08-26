@@ -203,7 +203,7 @@ def test_load_yolo_lines_reads_unicode_path(tmp_path: Path) -> None:
     image_path = folder / "截图.png"
     Image.new("RGB", (8, 8), (0, 128, 255)).save(image_path)
 
-    with patch("app_ocr_viewer_tk._build_candidates_from_bgr", return_value=[]) as build:
+    with patch("app_ocr_viewer_tk._detect_mouse_targets_from_bgr", return_value=[]) as build:
         lines, status = load_yolo_lines(image_path, yolo_conf_threshold=0.5)
 
     build.assert_called_once()

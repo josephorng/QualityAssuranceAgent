@@ -16,7 +16,7 @@ from typing import Optional
 
 import numpy as np
 
-from cua_mcp.geometry import boxes_overlap, clip_box, sort_by_reading_order
+from cua_mcp.geometry import clip_box, merge_overlapping_boxes, sort_by_reading_order
 from cua_mcp.yolo_onnx import (
     DEFAULT_CONF_YOLOV26_END2END,
     MOUSE_TARGET_CLASS_IDS,
@@ -26,9 +26,7 @@ from cua_mcp.yolo_onnx import (
     run_yolo_onnx_end2end,
 )
 from src.common.io_utils import imread_bgr, write_json
-from src.common.monitor_prompt import selected_eye_monitor_indices
-from src.common.run_state import get_run_state_manager, ts_name
-from src.eye.capture import active_monitor_offset, capture_monitor_to_file
+from src.common.run_state import get_run_state_manager
 
 from .ocr_image import (
     _DEFAULT_CRNN_BATCH_SIZE,
@@ -136,52 +134,8 @@ def _sort_boxes_reading_order(boxes: list[tuple[int, int, int, int]]) -> list[tu
     )
 
 
-def _merge_two_boxes(
-    a: tuple[int, int, int, int],
-    b: tuple[int, int, int, int],
-) -> tuple[int, int, int, int]:
-    """Return the smallest box containing both boxes."""
-    ax1, ay1, aw, ah = a
-    bx1, by1, bw, bh = b
-    ax2, ay2 = ax1 + aw, ay1 + ah
-    bx2, by2 = bx1 + bw, by1 + bh
-    x1, y1 = min(ax1, bx1), min(ay1, by1)
-    x2, y2 = max(ax2, bx2), max(ay2, by2)
-    return x1, y1, x2 - x1, y2 - y1
-
-
-def _merge_overlapping_boxes(
-    boxes: list[tuple[int, int, int, int]],
-) -> list[tuple[int, int, int, int]]:
-    """Merge all transitive overlaps into single bounding boxes."""
-    if len(boxes) < 2:
-        return boxes
-    merged = list(boxes)
-    changed = True
-    while changed:
-        changed = False
-        next_boxes: list[tuple[int, int, int, int]] = []
-        while merged:
-            current = merged.pop()
-            merged_with_current = False
-            for i, other in enumerate(merged):
-                if boxes_overlap(current, other):
-                    current = _merge_two_boxes(current, other)
-                    merged.pop(i)
-                    merged.append(current)
-                    changed = True
-                    merged_with_current = True
-                    break
-            if not merged_with_current:
-                next_boxes.append(current)
-        merged = next_boxes
-    return merged
-
-
-def _offset_region(region: OcrRegion, left: int, top: int) -> OcrRegion:
-    """Shift a region's bbox and center into global desktop coordinates."""
-    (x, y, w, h), (cx, cy), preds = region
-    return ((x + left, y + top, w, h), (cx + left, cy + top), preds)
+# Re-export for tests / callers that still import the private name.
+_merge_overlapping_boxes = merge_overlapping_boxes
 
 
 def format_coordinate_text_from_regions(
@@ -195,7 +149,7 @@ def format_coordinate_text_from_regions(
     return "\n".join(lines)
 
 
-def get_coordinates_from_image_path(
+def ocr_regions_from_image_path(
     image_path: str,
     *,
     line_height: int = 32,
@@ -204,11 +158,12 @@ def get_coordinates_from_image_path(
     batch_size: int = _DEFAULT_CRNN_BATCH_SIZE,
 ) -> list[OcrRegion]:
     """
-    Run YOLO + selective OCR on the image at ``image_path``.
+    Run YOLO + selective OCR on the image at ``image_path`` and return screen-text regions.
 
-    YOLO detects ``text``, ``element``, ``input``, and ``scrollbar``. Only ``text`` and ``element``
-    boxes are cropped and passed through CRNN (``mode="text"`` / ``mode="icon"`` respectively);
-    ``input`` and ``scrollbar`` are returned with empty ``predicted_texts``.
+    Overlapping ``text`` / ``element`` boxes are merged before CRNN. YOLO also detects
+    ``input`` and ``scrollbar``; those are returned with empty ``predicted_texts``.
+    Only ``text`` and ``element`` boxes are cropped and passed through CRNN
+    (``mode="text"`` / ``mode="icon"`` respectively).
 
     Returns a list of regions, each
     ``((x, y, w, h), (center_x, center_y), predicted_texts)`` where ``predicted_texts`` is the raw list from
@@ -217,7 +172,7 @@ def get_coordinates_from_image_path(
     the ``[cx,cy] text`` hint string for an LM.
     """
     _log_info(
-        f"OCR get_coordinates_from_path start image_path={image_path} line_height={line_height}"
+        f"OCR ocr_regions_from_image_path start image_path={image_path} line_height={line_height}"
     )
     if not image_path or not isinstance(image_path, str):
         _log_info("OCR invalid image_path argument")
@@ -316,7 +271,7 @@ def get_coordinates_from_image_path(
         yolo_elapsed_ms=yolo_elapsed_ms,
         ocr_elapsed_ms=ocr_elapsed_ms,
     )
-    _log_info(f"OCR get_coordinates_from_path done regions={len(all_regions)}")
+    _log_info(f"OCR ocr_regions_from_image_path done regions={len(all_regions)}")
     return all_regions
 
 
@@ -350,69 +305,3 @@ def get_text_boxes_from_path(
     )
     _log_info(f"OCR get_text_boxes_from_path boxes={len(boxes)}")
     return boxes
-
-
-def get_coordinates_from_selected_monitors(
-    *,
-    line_height: int = 32,
-    ocr_model_path: Optional[str] = None,
-    yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
-    batch_size: int = _DEFAULT_CRNN_BATCH_SIZE,
-) -> tuple[list[OcrRegion], list[str]]:
-    """
-    Capture each selected monitor, run YOLO + OCR per image, and merge regions in global coords.
-
-    Returns ``(merged_regions, image_paths)`` where centers and bboxes are in virtual-desktop
-    pixel space (suitable for pyautogui). When only one monitor is selected, behavior matches
-    single-monitor OCR with the appropriate desktop offset applied.
-    """
-    paths = get_run_state_manager().require_paths()
-    monitor_indices = selected_eye_monitor_indices()
-    stamp = ts_name()
-    merged_regions: list[OcrRegion] = []
-    image_paths: list[str] = []
-
-    _log_info(f"OCR get_coordinates_from_selected_monitors monitors={monitor_indices}")
-    for monitor_index in monitor_indices:
-        name = f"{stamp}_mon{monitor_index}.png"
-        out = paths.yolo_ocr_dir / name
-        capture_monitor_to_file(out, monitor_index)
-        image_path = str(out.resolve())
-        image_paths.append(image_path)
-
-        regions = get_coordinates_from_image_path(
-            image_path,
-            line_height=line_height,
-            ocr_model_path=ocr_model_path,
-            yolo_conf_threshold=yolo_conf_threshold,
-            batch_size=batch_size,
-        )
-        left, top = active_monitor_offset(monitor_index)
-        merged_regions.extend(_offset_region(region, left, top) for region in regions)
-
-    merged_regions.sort(key=lambda item: (item[1][1], item[1][0]))
-    _log_info(
-        f"OCR get_coordinates_from_selected_monitors done monitors={len(monitor_indices)} "
-        f"regions={len(merged_regions)}"
-    )
-    return merged_regions, image_paths
-
-
-def get_coordinates(
-    *,
-    line_height: int = 32,
-    crnn_model_path: Optional[str] = None,
-    batch_size: int = _DEFAULT_CRNN_BATCH_SIZE,
-) -> list[OcrRegion]:
-    """
-    Capture selected monitor(s) to this run's ``yolo_ocr/`` folder, then run YOLO + ONNX CRNN OCR.
-
-    Writes ``<timestamp>_mon<N>.png`` per monitor and persists OCR JSON beside each image.
-    See :func:`get_coordinates_from_image_path` for per-region tuples (local coords per image).
-    """
-    regions, _image_paths = get_coordinates_from_selected_monitors(
-        line_height=line_height,
-        ocr_model_path=crnn_model_path,
-        batch_size=batch_size,
-    )
-    return regions

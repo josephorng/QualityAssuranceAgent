@@ -21,6 +21,48 @@ def boxes_overlap(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) ->
     return ax < bx2 and bx < ax2 and ay < by2 and by < ay2
 
 
+def merge_two_boxes(
+    a: tuple[int, int, int, int],
+    b: tuple[int, int, int, int],
+) -> tuple[int, int, int, int]:
+    """Return the smallest axis-aligned box containing both ``(x, y, w, h)`` boxes."""
+    ax1, ay1, aw, ah = a
+    bx1, by1, bw, bh = b
+    ax2, ay2 = ax1 + aw, ay1 + ah
+    bx2, by2 = bx1 + bw, by1 + bh
+    x1, y1 = min(ax1, bx1), min(ay1, by1)
+    x2, y2 = max(ax2, bx2), max(ay2, by2)
+    return x1, y1, x2 - x1, y2 - y1
+
+
+def merge_overlapping_boxes(
+    boxes: list[tuple[int, int, int, int]],
+) -> list[tuple[int, int, int, int]]:
+    """Merge all transitive overlaps into single bounding boxes."""
+    if len(boxes) < 2:
+        return boxes
+    merged = list(boxes)
+    changed = True
+    while changed:
+        changed = False
+        next_boxes: list[tuple[int, int, int, int]] = []
+        while merged:
+            current = merged.pop()
+            merged_with_current = False
+            for i, other in enumerate(merged):
+                if boxes_overlap(current, other):
+                    current = merge_two_boxes(current, other)
+                    merged.pop(i)
+                    merged.append(current)
+                    changed = True
+                    merged_with_current = True
+                    break
+            if not merged_with_current:
+                next_boxes.append(current)
+        merged = next_boxes
+    return merged
+
+
 def iou_xywh(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
     """Intersection-over-union for ``(x, y, w, h)`` boxes; 0 when either has no area."""
     ax, ay, aw, ah = a

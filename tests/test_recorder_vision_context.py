@@ -76,7 +76,7 @@ def test_build_vision_context_at_point_uses_run_dir_screenshot_fallback(tmp_path
         "src.recorder.vision_context.imread_bgr",
         return_value=np.zeros((100, 100, 3), dtype=np.uint8),
     ), patch(
-        "src.recorder.vision_context._build_candidates_from_bgr",
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
         return_value=fake_detections,
     ):
         vision = build_vision_context_at_point(
@@ -355,7 +355,7 @@ async def test_build_vision_context_formats_yolo_candidates(tmp_path) -> None:
     ]
 
     with patch("src.recorder.vision_context.imread_bgr", return_value=np.zeros((100, 100, 3), dtype=np.uint8)), patch(
-        "src.recorder.vision_context._build_candidates_from_bgr",
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
         return_value=fake_detections,
     ):
         vision = await build_vision_context(event, run_dir=tmp_path, persist_debug=True)
@@ -401,7 +401,7 @@ async def test_build_vision_context_drag_includes_start_and_destination(tmp_path
         "src.recorder.vision_context.imread_bgr",
         side_effect=fake_imread,
     ), patch(
-        "src.recorder.vision_context._build_candidates_from_bgr",
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
         side_effect=fake_build,
     ):
         vision = await build_vision_context(event, run_dir=tmp_path, persist_debug=True)
@@ -448,7 +448,7 @@ async def test_drag_destination_keeps_nearest_candidates_without_exclusion(tmp_p
         "src.recorder.vision_context.imread_bgr",
         side_effect=fake_imread,
     ), patch(
-        "src.recorder.vision_context._build_candidates_from_bgr",
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
         side_effect=fake_build,
     ):
         vision = await build_vision_context(event, run_dir=tmp_path, persist_debug=True)
@@ -503,7 +503,7 @@ async def test_drag_destination_lists_nearest_candidates_at_drop(tmp_path) -> No
         "src.recorder.vision_context.imread_bgr",
         side_effect=fake_imread,
     ), patch(
-        "src.recorder.vision_context._build_candidates_from_bgr",
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
         side_effect=fake_build,
     ):
         vision = await build_vision_context(event, run_dir=tmp_path, persist_debug=False)
@@ -544,7 +544,7 @@ async def test_drag_destination_uses_nearest_when_drop_not_inside_text(tmp_path)
         "src.recorder.vision_context.imread_bgr",
         side_effect=fake_imread,
     ), patch(
-        "src.recorder.vision_context._build_candidates_from_bgr",
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
         side_effect=fake_build,
     ):
         vision = await build_vision_context(event, run_dir=tmp_path, persist_debug=False)
@@ -583,7 +583,7 @@ def test_build_vision_context_at_point_uses_explicit_coords(tmp_path) -> None:
     ]
 
     with patch("src.recorder.vision_context.imread_bgr", return_value=np.zeros((100, 100, 3), dtype=np.uint8)), patch(
-        "src.recorder.vision_context._build_candidates_from_bgr",
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
         return_value=fake_detections,
     ):
         vision = build_vision_context_at_point(
@@ -870,7 +870,7 @@ async def test_drag_destination_uses_hit_target_when_drop_inside_text(tmp_path) 
         "src.recorder.vision_context.imread_bgr",
         side_effect=fake_imread,
     ), patch(
-        "src.recorder.vision_context._build_candidates_from_bgr",
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
         side_effect=fake_build,
     ):
         vision = await build_vision_context(event, run_dir=tmp_path, persist_debug=False)
@@ -916,7 +916,7 @@ async def test_build_vision_context_drag_includes_destination_offset_hints(tmp_p
         "src.recorder.vision_context.imread_bgr",
         side_effect=fake_imread,
     ), patch(
-        "src.recorder.vision_context._build_candidates_from_bgr",
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
         side_effect=fake_build,
     ):
         vision = await build_vision_context(event, run_dir=tmp_path, persist_debug=False)

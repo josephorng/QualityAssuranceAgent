@@ -24,7 +24,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from cua_mcp.read_screen_text.ocr_image import _log_info
-from cua_mcp.select_mouse_target import _build_candidates_from_bgr
+from cua_mcp.select_mouse_target import _detect_mouse_targets_from_bgr
 from cua_mcp.select_ui_element import UiDetection
 from cua_mcp.yolo_onnx import DEFAULT_CONF_YOLOV26_END2END
 from src.common.io_utils import imread_bgr, write_json
@@ -114,7 +114,7 @@ def _analyze_capture(
     if bgr is None:
         raise RuntimeError(f"Could not read captured image: {image_path}")
 
-    candidates = _build_candidates_from_bgr(
+    candidates = _detect_mouse_targets_from_bgr(
         bgr,
         yolo_conf_threshold=yolo_conf_threshold,
     )

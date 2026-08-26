@@ -1636,7 +1636,7 @@ def test_collect_monitor_detections_preserves_order_and_offsets(
         ]
 
     monkeypatch.setattr(
-        "cua_mcp.select_mouse_target._build_candidates_from_bgr",
+        "cua_mcp.select_mouse_target._detect_mouse_targets_from_bgr",
         fake_build,
     )
     monkeypatch.setattr(

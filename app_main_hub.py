@@ -73,6 +73,8 @@ from src.common.settings import (
 )
 from src.recorder.capture import RecordingSession
 from src.recorder.hotkey import RecordingHotkeyManager
+from src.recorder.models import RecordedEvent
+from src.recorder.vision_prefetch import VisionPrefetchWorker
 
 # Step-mode runtime command transcript (append during run); not hub UI preferences.
 _RUNTIME_COMMAND_TRANSCRIPT_NAME = "runtime_commands_cache.txt"
@@ -264,6 +266,7 @@ class MainHub(ctk.CTk):
         self._recording_hotkey = RecordingHotkeyManager()
         self._recording_analysis_thread: threading.Thread | None = None
         self._recording_finalize_thread: threading.Thread | None = None
+        self._vision_prefetch = VisionPrefetchWorker()
         self._analysis_cancel_event = threading.Event()
         self._suppress_script_cache_sync = False
         self._sync_cache_after_id: str | None = None
@@ -2115,8 +2118,10 @@ class MainHub(ctk.CTk):
             self._analysis_cancel_event.set()
         if self._recording_session.is_active():
             self._recording_session.stop()
+            self._vision_prefetch.drain_and_stop(timeout=5.0)
         elif self._is_recording_finalizing():
             self._wait_for_recording_finalize()
+            self._vision_prefetch.drain_and_stop(timeout=5.0)
         self._recording_hotkey.unregister()
         stop_runs_report_server()
         self.destroy()
@@ -2246,6 +2251,7 @@ class MainHub(ctk.CTk):
             self.after(400, lambda: self._recording_session.set_suppress_hotkey_keys(False))
 
         self._set_hub_controls_recording()
+        self._vision_prefetch.start(run_dir)
         verb = "繼續錄製中" if existing_run_dir is not None else "錄製中"
         self._status.configure(
             text=f"{verb} (0 個事件)… {run_dir.name}",
@@ -2256,7 +2262,8 @@ class MainHub(ctk.CTk):
         except Exception:
             pass
 
-    def _on_recording_event(self) -> None:
+    def _on_recording_event(self, event: RecordedEvent) -> None:
+        self._vision_prefetch.enqueue(event)
         count = self._recording_session.event_count()
         run_dir = self._recording_session.run_dir()
         name = run_dir.name if run_dir is not None else ""
@@ -2284,11 +2291,13 @@ class MainHub(ctk.CTk):
             try:
                 run_dir = self._recording_session.finalize_stop()
                 event_count = self._recording_session.event_count()
+                self._vision_prefetch.drain_and_stop()
                 self.after(
                     0,
                     lambda: self._on_recording_finalize_done(run_dir, event_count, analyze),
                 )
             except Exception as exc:
+                self._vision_prefetch.drain_and_stop(timeout=5.0)
                 self.after(0, lambda: self._on_recording_finalize_failed(exc))
 
         self._recording_finalize_thread = threading.Thread(

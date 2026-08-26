@@ -580,10 +580,10 @@ class RecordingSession:
         self._last_pointer_cursor_xy: tuple[int, int] | None = None
         self._event_queue: queue.Queue[object] = queue.Queue()
         self._worker_thread: threading.Thread | None = None
-        self._on_event: Callable[[], None] | None = None
+        self._on_event: Callable[[RecordedEvent], None] | None = None
         self._finalizing = False
 
-    def set_on_event(self, callback: Callable[[], None] | None) -> None:
+    def set_on_event(self, callback: Callable[[RecordedEvent], None] | None) -> None:
         self._on_event = callback
 
     def is_active(self) -> bool:
@@ -851,10 +851,10 @@ class RecordingSession:
     def _log(self, run_dir: Path, text: str) -> None:
         append_text(run_dir / "record.log", f"{utc_now_iso()} {text}\n")
 
-    def _notify_event(self) -> None:
+    def _notify_event(self, event: RecordedEvent) -> None:
         if self._on_event is not None:
             try:
-                self._on_event()
+                self._on_event(event)
             except Exception:
                 pass
 
@@ -1616,7 +1616,7 @@ class RecordingSession:
                 return
             write_json(event_json_path(run_dir, event.index), event.to_dict())
             self._events.append(event)
-        self._notify_event()
+        self._notify_event(event)
 
     def _emit_pending_click(self, x: int, y: int, button: str) -> None:
         self._flush_pending_click(x, y, button)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -65,6 +66,240 @@ _TIER0_CELL_RANK: dict[LandmarkCell, int] = {
     LandmarkCell.BELOW: 3,
 }
 _TIER0_NON_CARDINAL_RANK = 4
+
+
+def vision_source_fingerprint(event: RecordedEvent) -> str:
+    """Stable hash of event fields that affect YOLO/OCR / text-resolve reuse."""
+    payload = {
+        "index": int(event.index),
+        "kind": str(event.kind),
+        "screenshot_path": str(event.screenshot_path or ""),
+        "end_screenshot_path": str(event.end_screenshot_path or ""),
+        "cursor_xy": list(event.cursor_xy) if event.cursor_xy is not None else None,
+        "end_xy": list(event.end_xy) if event.end_xy is not None else None,
+        "text": event.text,
+        "click_count": event.click_count,
+        "focus_rect": list(event.focus_rect) if event.focus_rect is not None else None,
+        "anchor_click_xy": (
+            list(event.anchor_click_xy) if event.anchor_click_xy is not None else None
+        ),
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def text_resolution_cache_path(run_dir: Path, event_index: int) -> Path:
+    return Path(run_dir) / "yolo_ocr" / f"event_{int(event_index):03d}_text_resolution.json"
+
+
+def save_text_resolution_cache(
+    run_dir: Path,
+    event: RecordedEvent,
+    text_resolution: dict[str, Any],
+) -> None:
+    """Persist text-input resolve fields for mid-recording prefetch reuse."""
+    write_json(
+        text_resolution_cache_path(run_dir, event.index),
+        {
+            "source_fingerprint": vision_source_fingerprint(event),
+            "text_resolution": dict(text_resolution),
+        },
+    )
+
+
+def load_text_resolution_cache(
+    event: RecordedEvent,
+    run_dir: Path,
+) -> dict[str, Any] | None:
+    """Return cached text_resolution when fingerprint still matches."""
+    path = text_resolution_cache_path(run_dir, event.index)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("source_fingerprint") != vision_source_fingerprint(event):
+        return None
+    text_resolution = payload.get("text_resolution")
+    return text_resolution if isinstance(text_resolution, dict) else None
+
+
+def _payload_fingerprint_matches(payload: dict[str, Any] | None, fingerprint: str) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return payload.get("source_fingerprint") == fingerprint
+
+
+def _payload_worth_reusing(payload: dict[str, Any]) -> bool:
+    """True when cached YOLO/OCR is usable (skip transient empty load failures)."""
+    candidates = payload.get("candidates")
+    if isinstance(candidates, list) and candidates:
+        return True
+    if payload.get("yolo_error"):
+        return False
+    # Successful run with zero detections is still a cache hit.
+    return "candidates" in payload
+
+
+def _vision_from_yolo_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild compact LLM-facing vision from a persisted yolo_ocr payload."""
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        candidates = []
+    local = payload.get("local_cursor")
+    if isinstance(local, (list, tuple)) and len(local) == 2:
+        local_cursor: tuple[int, int] | list[Any] | None = (int(local[0]), int(local[1]))
+    else:
+        local_cursor = local
+    vision: dict[str, Any] = {
+        "used_vision": True,
+        "candidate_text": str(payload.get("candidate_text") or ""),
+        "local_cursor": local_cursor,
+        "candidates": candidates,
+        "detection_count": payload.get("detection_count", len(candidates)),
+        "field_context": format_field_context_hint(
+            {
+                "candidates": candidates,
+                "local_cursor": local_cursor,
+            }
+        ),
+    }
+    if payload.get("yolo_error"):
+        vision["yolo_error"] = payload.get("yolo_error")
+    return vision
+
+
+def try_rebuild_vision_from_cache(
+    event: RecordedEvent,
+    run_dir: Path,
+) -> dict[str, Any] | None:
+    """Rebuild pointer-event vision from fingerprinted ``yolo_ocr`` files, or None."""
+    if event.kind not in POINTER_EVENT_KINDS:
+        return None
+    fingerprint = vision_source_fingerprint(event)
+    run_root = Path(run_dir)
+
+    if event.kind == "drag":
+        start_payload = load_yolo_ocr_payload(run_root, event.index, suffix="")
+        end_payload = load_yolo_ocr_payload(run_root, event.index, suffix="_end")
+        if not _payload_fingerprint_matches(start_payload, fingerprint):
+            return None
+        if not _payload_fingerprint_matches(end_payload, fingerprint):
+            return None
+        assert start_payload is not None and end_payload is not None
+        if not _payload_worth_reusing(start_payload):
+            return None
+        if not _payload_worth_reusing(end_payload) and not load_yolo_ocr_payload(
+            run_root, event.index, suffix="_end_filtered"
+        ):
+            return None
+
+        start_compact = _vision_from_yolo_payload(start_payload)
+        filtered_payload = load_yolo_ocr_payload(
+            run_root, event.index, suffix="_end_filtered"
+        )
+        end_local = _local_end_cursor(event)
+        if (
+            isinstance(filtered_payload, dict)
+            and _payload_fingerprint_matches(filtered_payload, fingerprint)
+            and isinstance(filtered_payload.get("candidates"), list)
+        ):
+            local = filtered_payload.get("local_cursor")
+            if isinstance(local, (list, tuple)) and len(local) == 2:
+                dest_local = (int(local[0]), int(local[1]))
+            elif end_local is not None:
+                dest_local = end_local
+            else:
+                dest_local = (0, 0)
+            end_compact = {
+                "used_vision": True,
+                "candidate_text": str(filtered_payload.get("candidate_text") or ""),
+                "local_cursor": dest_local,
+                "candidates": list(filtered_payload.get("candidates") or []),
+                "detection_count": filtered_payload.get(
+                    "detection_count",
+                    len(filtered_payload.get("candidates") or []),
+                ),
+                "field_context": format_field_context_hint(
+                    {
+                        "candidates": list(filtered_payload.get("candidates") or []),
+                        "local_cursor": dest_local,
+                    }
+                ),
+            }
+            end_compact["destination_offset_hints"] = format_drag_destination_offset_hints(
+                end_compact
+            )
+        elif end_local is not None:
+            end_result = _vision_from_yolo_payload(end_payload)
+            end_compact = _build_filtered_destination_vision(
+                end_result,
+                end_local=end_local,
+            )
+        else:
+            return None
+
+        combined_error = start_compact.get("yolo_error") or end_payload.get("yolo_error")
+        return {
+            **start_compact,
+            "used_vision": bool(
+                start_compact.get("used_vision") or end_compact.get("used_vision")
+            ),
+            "destination": end_compact,
+            "field_context": start_compact["field_context"],
+            "destination_field_context": end_compact["field_context"],
+            **({"yolo_error": combined_error} if combined_error else {}),
+        }
+
+    start_payload = load_yolo_ocr_payload(run_root, event.index, suffix="")
+    if not _payload_fingerprint_matches(start_payload, fingerprint):
+        return None
+    assert start_payload is not None
+    if not _payload_worth_reusing(start_payload):
+        return None
+    return _vision_from_yolo_payload(start_payload)
+
+
+def try_rebuild_text_input_from_cache(
+    event: RecordedEvent,
+    run_dir: Path,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Return ``(text_resolution, vision)`` from cache when fingerprints match."""
+    if event.kind != "text_input":
+        return None
+    text_resolution = load_text_resolution_cache(event, run_dir)
+    if text_resolution is None:
+        return None
+    fingerprint = vision_source_fingerprint(event)
+    # Prefer the typing end frame payload when present.
+    for suffix in ("_end", ""):
+        payload = load_yolo_ocr_payload(Path(run_dir), event.index, suffix=suffix)
+        if not _payload_fingerprint_matches(payload, fingerprint):
+            continue
+        assert payload is not None
+        if not _payload_worth_reusing(payload) and not text_resolution.get("resolved_text"):
+            continue
+        vision = _vision_from_yolo_payload(payload)
+        # Match text_resolve._vision_for_llm shape (no field_context required).
+        vision_for_llm = {
+            "used_vision": vision.get("used_vision"),
+            "candidate_text": vision.get("candidate_text"),
+            "local_cursor": vision.get("local_cursor"),
+            "candidates": vision.get("candidates"),
+            "detection_count": vision.get("detection_count"),
+        }
+        return text_resolution, vision_for_llm
+    # Text resolution alone is enough when vision was unavailable.
+    return text_resolution, {
+        "used_vision": False,
+        "candidate_text": "",
+        "local_cursor": None,
+        "candidates": [],
+        "detection_count": 0,
+    }
 
 
 def resolve_event_screenshot_path(
@@ -1596,6 +1831,7 @@ def build_vision_context_at_point(
     reference_xy: tuple[int, int] | None = None,
     image_path: str | None = None,
     debug_name: str | None = None,
+    source_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     """Run YOLO+OCR and rank candidates nearest to explicit screenshot-local coords."""
     empty: dict[str, Any] = {
@@ -1605,6 +1841,7 @@ def build_vision_context_at_point(
         "candidates": [],
         "detection_count": 0,
     }
+    fingerprint = source_fingerprint or vision_source_fingerprint(event)
 
     resolved = resolve_event_screenshot_path(
         event,
@@ -1636,6 +1873,7 @@ def build_vision_context_at_point(
                     "candidates": [],
                     "detection_count": 0,
                     "yolo_error": load_error,
+                    "source_fingerprint": fingerprint,
                 },
             )
         return empty
@@ -1665,6 +1903,7 @@ def build_vision_context_at_point(
         "candidate_text": candidate_text,
         "candidates": candidate_dicts,
         "detection_count": len(all_detections),
+        "source_fingerprint": fingerprint,
     }
     if yolo_error:
         payload["yolo_error"] = yolo_error
@@ -1724,6 +1963,8 @@ def run_pointer_event_yolo_ocr(
     if event.kind not in POINTER_EVENT_KINDS:
         return empty
 
+    fingerprint = vision_source_fingerprint(event)
+
     if event.kind == "drag":
         start_local = _local_cursor(event)
         end_local = _local_end_cursor(event)
@@ -1743,6 +1984,7 @@ def run_pointer_event_yolo_ocr(
                 reference_xy=event.cursor_xy,
                 image_path=event.screenshot_path,
                 debug_name="",
+                source_fingerprint=fingerprint,
             )
             end_future = pool.submit(
                 build_vision_context_at_point,
@@ -1754,6 +1996,7 @@ def run_pointer_event_yolo_ocr(
                 reference_xy=event.end_xy,
                 image_path=end_image,
                 debug_name="_end",
+                source_fingerprint=fingerprint,
             )
             start_result = start_future.result()
             end_result = end_future.result()
@@ -1770,6 +2013,8 @@ def run_pointer_event_yolo_ocr(
                     "local_cursor": list(end_local),
                     "candidate_text": end_compact["candidate_text"],
                     "candidates": end_compact["candidates"],
+                    "detection_count": end_compact.get("detection_count", 0),
+                    "source_fingerprint": fingerprint,
                 },
             )
         combined_error = start_compact.get("yolo_error") or end_result.get("yolo_error")
@@ -1793,6 +2038,7 @@ def run_pointer_event_yolo_ocr(
         run_dir=run_dir,
         persist_debug=persist_debug,
         reference_xy=event.cursor_xy,
+        source_fingerprint=fingerprint,
     )
     result.pop("bgr", None)
     result.pop("all_detections", None)

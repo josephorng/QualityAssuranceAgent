@@ -18,6 +18,7 @@ from src.recorder.vision_context import (
     build_vision_context_at_point,
     extract_nearest_text,
     resolve_event_screenshot_path,
+    vision_source_fingerprint,
 )
 
 # System caret is typically 1–3px on one axis; real edit fields are wider/taller.
@@ -317,6 +318,7 @@ async def resolve_text_input_text(
         reference_xy=anchor,
         debug_name=debug_name,
         image_path=ocr_image_path,
+        source_fingerprint=vision_source_fingerprint(event),
     )
     bgr = vision.pop("bgr", None)
     all_detections = vision.pop("all_detections", [])

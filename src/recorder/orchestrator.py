@@ -26,7 +26,12 @@ from src.recorder.coalesce import (
     coalesce_consecutive_text_inputs,
 )
 from src.recorder.text_resolve import event_with_resolved_text, resolve_text_input_text
-from src.recorder.vision_context import build_vision_context
+from src.recorder.vision_context import (
+    build_vision_context,
+    save_text_resolution_cache,
+    try_rebuild_text_input_from_cache,
+    try_rebuild_vision_from_cache,
+)
 from src.recorder.window_snapshot import (
     expected_outcome_for_window_change,
     format_window_change_hint,
@@ -273,16 +278,33 @@ class _PreparedEvent:
     text_resolution: dict[str, Any] | None
 
 
-async def _prepare_event_vision(
+async def prepare_event_vision(
     event: RecordedEvent,
     *,
     run_dir: Path,
     log_info: Callable[[str], None],
 ) -> _PreparedEvent:
-    """Resolve typing text (if needed) and run YOLO+OCR for one event."""
+    """Resolve typing text (if needed) and run YOLO+OCR for one event.
+
+    Reuses fingerprinted ``yolo_ocr`` / text-resolution caches when present.
+    """
     text_resolution: dict[str, Any] | None = None
     event_for_llm = event
     if event.kind == "text_input":
+        cached_text = try_rebuild_text_input_from_cache(event, run_dir)
+        if cached_text is not None:
+            text_resolution, vision = cached_text
+            resolved_text = text_resolution.get("resolved_text")
+            if resolved_text is None:
+                resolved_text = text_resolution.get("recorded_text") or event.text or ""
+            event_for_llm = event_with_resolved_text(event, {"text": resolved_text})
+            log_info(f"vision cache hit event={event.index} kind=text_input")
+            return _PreparedEvent(
+                event=event,
+                event_for_llm=event_for_llm,
+                vision=vision,
+                text_resolution=text_resolution,
+            )
         resolved = await resolve_text_input_text(
             event,
             run_dir=run_dir,
@@ -297,6 +319,7 @@ async def _prepare_event_vision(
             "meaningful": resolved.get("meaningful"),
             "reason": resolved.get("reason"),
         }
+        save_text_resolution_cache(run_dir, event, text_resolution)
         event_for_llm = event_with_resolved_text(event, resolved)
         vision = resolved.get("vision") or await build_vision_context(
             event_for_llm,
@@ -304,6 +327,15 @@ async def _prepare_event_vision(
             log_info=log_info,
         )
     else:
+        cached_vision = try_rebuild_vision_from_cache(event, run_dir)
+        if cached_vision is not None:
+            log_info(f"vision cache hit event={event.index} kind={event.kind}")
+            return _PreparedEvent(
+                event=event,
+                event_for_llm=event,
+                vision=cached_vision,
+                text_resolution=None,
+            )
         vision = await build_vision_context(
             event,
             run_dir=run_dir,
@@ -315,6 +347,10 @@ async def _prepare_event_vision(
         vision=vision,
         text_resolution=text_resolution,
     )
+
+
+# Backward-compatible private alias.
+_prepare_event_vision = prepare_event_vision
 
 
 async def _prepare_all_event_visions(

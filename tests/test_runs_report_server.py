@@ -1266,6 +1266,39 @@ def test_add_recording_event_inserts_between_without_renumbering(tmp_path: Path)
     assert 'id="event-3"' in html
 
 
+def test_add_recording_event_wait_clears_virtual_wait_instruction(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_two_event_run(runs_root, "recording_add_wait_clear")
+    analysis_path = run_root / "analysis" / "event_002.json"
+    analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+    analysis["wait_instruction"] = "等待 11 秒"
+    analysis["elapsed_since_previous_seconds"] = 10.25
+    analysis_path.write_text(json.dumps(analysis, ensure_ascii=False), encoding="utf-8")
+
+    result = add_recording_event(
+        runs_root,
+        "recording_add_wait_clear",
+        kind="wait",
+        after_event_index=1,
+        duration_seconds=11,
+    )
+    assert result["instruction"] == "等待 11 秒"
+
+    cleared = json.loads(analysis_path.read_text(encoding="utf-8"))
+    assert "wait_instruction" not in cleared
+    report = json.loads((run_root / "report.json").read_text(encoding="utf-8"))
+    assert report["instructions"] == [
+        "點擊「搜尋」按鈕",
+        "等待 11 秒",
+        "點擊「確定」按鈕",
+    ]
+    html = (run_root / "recording_steps.html").read_text(encoding="utf-8")
+    assert html.count('data-kind="wait"') == 1
+    wait_group = html.split('data-kind="wait"', 1)[1].split("</details>", 1)[0]
+    assert "等待 11 秒" in wait_group
+    assert 'data-instruction="等待 11 秒"' in wait_group
+
+
 def test_delete_recording_event_preserves_custom_session_order(tmp_path: Path) -> None:
     runs_root = tmp_path / "runs"
     run_root = _make_recording_two_event_run(runs_root, "recording_add_then_delete")

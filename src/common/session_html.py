@@ -7,6 +7,7 @@ import os
 import re
 from datetime import datetime, timezone
 from html import escape
+from math import ceil
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -127,6 +128,14 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
   font-weight: 600; color: #57606a; flex: 0 0 auto;
 }
 .add-instruction:hover { background: #ddf4ff; color: #0969da; border-color: #54aeff; }
+.add-wait-instruction {
+  appearance: none; border: 1px solid #d0d7de; background: #f6f8fa;
+  cursor: pointer; border-radius: 6px; padding: .2rem .55rem;
+  font-size: .75rem; line-height: 1.2; font-family: inherit;
+  font-weight: 600; color: #57606a; flex: 0 0 auto;
+}
+.add-wait-instruction:hover { background: #fff8c5; color: #9a6700; border-color: #d4a72c; }
+.add-wait-instruction:disabled { opacity: .45; cursor: not-allowed; }
 .collapse-row {
   display: flex; justify-content: center; align-items: center;
   padding: 0 1.5rem .85rem;
@@ -1430,6 +1439,60 @@ _RECORDING_SCRIPT = """
       var eventIndex = group ? group.getAttribute("data-event-index") : "";
       var parsed = eventIndex ? parseInt(eventIndex, 10) : NaN;
       openAddDialog(Number.isFinite(parsed) ? parsed : null);
+    });
+  });
+
+  Array.prototype.slice.call(document.querySelectorAll("button.add-wait-instruction")).forEach(function (btn) {
+    btn.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (window.location.protocol === "file:") {
+        window.alert("無法新增：請從主程式的「報告列表」開啟此頁（需本機服務）。");
+        return;
+      }
+      var group = btn.closest(".instruction-group");
+      var runId = (group && group.getAttribute("data-run-id")) || toolbarRunId();
+      var afterRaw = btn.getAttribute("data-after-event-index") || "";
+      var durationRaw = btn.getAttribute("data-duration-seconds") || "";
+      var afterIndex = parseInt(afterRaw, 10);
+      var duration = Number(durationRaw);
+      if (!runId || !Number.isFinite(afterIndex) || !(duration > 0)) {
+        window.alert("缺少等待資訊。");
+        return;
+      }
+      var seconds = Math.ceil(duration);
+      if (!window.confirm("確定在此步驟前加入等待 " + seconds + " 秒？")) return;
+      btn.disabled = true;
+      fetch("/api/runs/" + encodeURIComponent(runId) + "/events/add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: "wait",
+          after_event_index: afterIndex,
+          duration_seconds: seconds
+        })
+      })
+        .then(function (response) {
+          return response.json().then(function (payload) {
+            return { ok: response.ok, payload: payload };
+          });
+        })
+        .then(function (result) {
+          if (!result.ok || !result.payload || !result.payload.ok) {
+            btn.disabled = false;
+            var err = (result.payload && result.payload.error) || "新增失敗";
+            window.alert(err);
+            return;
+          }
+          var newIndex = result.payload.event_index;
+          var hash = newIndex ? ("#event-" + newIndex) : "";
+          window.location.hash = hash;
+          window.location.reload();
+        })
+        .catch(function () {
+          btn.disabled = false;
+          window.alert("無法連線主程式，請確認主程式正在執行。");
+        });
     });
   });
 
@@ -3148,6 +3211,39 @@ def _load_recording_analysis(run_root: Path, event_index: int) -> dict[str, Any]
     return _load_json_dict(run_root / "analysis" / f"event_{event_index:03d}.json")
 
 
+def _recording_elapsed_wait_seconds(
+    previous_event: dict[str, Any] | None,
+    event: dict[str, Any],
+    analysis: dict[str, Any] | None,
+) -> int | None:
+    """Return ceil'd wait seconds for the gap before ``event``, or ``None``."""
+    if previous_event is None:
+        return None
+    elapsed: float | None = None
+    if isinstance(analysis, dict):
+        raw = analysis.get("elapsed_since_previous_seconds")
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0:
+            elapsed = float(raw)
+    if elapsed is None:
+        prev_ts = previous_event.get("timestamp_utc")
+        curr_ts = event.get("timestamp_utc")
+        if isinstance(prev_ts, str) and isinstance(curr_ts, str):
+            try:
+                previous = datetime.fromisoformat(prev_ts.replace("Z", "+00:00"))
+                current = datetime.fromisoformat(curr_ts.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if previous.tzinfo is None or current.tzinfo is None:
+                return None
+            delta = (current - previous).total_seconds()
+            if delta > 0:
+                elapsed = delta
+    if elapsed is None or elapsed <= 0:
+        return None
+    seconds = int(ceil(elapsed))
+    return seconds if seconds >= 1 else None
+
+
 def _selected_landmark_labels(instruction: str, location: str) -> set[str]:
     from src.common.nearby_side import extract_nearby_hints_by_location
 
@@ -3784,6 +3880,7 @@ def _render_recording_event_html(
     *,
     run_root: Path,
     event: dict[str, Any],
+    previous_event: dict[str, Any] | None = None,
     next_event: dict[str, Any] | None = None,
     display_index: int | None = None,
 ) -> str:
@@ -3848,6 +3945,14 @@ def _render_recording_event_html(
     if isinstance(window_title, str) and window_title.strip():
         meta_rows.append(("視窗", escape(window_title.strip())))
 
+    wait_seconds = (
+        None
+        if kind == "wait"
+        else _recording_elapsed_wait_seconds(previous_event, event, analysis)
+    )
+    if wait_seconds is not None:
+        meta_rows.append(("間隔", escape(f"{wait_seconds} 秒")))
+
     meta_html = "".join(f"<dt>{escape(label)}</dt><dd>{value}</dd>" for label, value in meta_rows)
 
     before = _resolve_recording_screenshot(str(event.get("screenshot_path") or ""), run_root)
@@ -3909,6 +4014,21 @@ def _render_recording_event_html(
         )
     else:
         expected_summary = ""
+
+    add_wait_html = ""
+    if wait_seconds is not None and previous_event is not None:
+        prev_raw = previous_event.get("index")
+        prev_index = prev_raw if isinstance(prev_raw, int) else None
+        if prev_index is not None and prev_index >= 1:
+            add_wait_html = (
+                f'<button type="button" class="add-wait-instruction" '
+                f'data-after-event-index="{prev_index}" '
+                f'data-duration-seconds="{wait_seconds}" '
+                f'title="在此步驟前加入等待 {wait_seconds} 秒" '
+                f'aria-label="加入等待 {wait_seconds} 秒">'
+                f"加入等待</button>"
+            )
+
     return (
         f'<details class="instruction-group" id="event-{index}" data-run-id="{run_id}" '
         f'data-event-index="{index}" data-kind="{escape(kind, quote=True)}">'
@@ -3922,6 +4042,7 @@ def _render_recording_event_html(
         f'<button type="button" class="copy-instruction" data-instruction="{copy_attr}"'
         f'{outcome_attr} '
         f'title="複製指令" aria-label="複製指令">複製</button>'
+        f"{add_wait_html}"
         f'<button type="button" class="add-instruction" '
         f'title="在此步驟後新增" aria-label="新增步驟">新增</button>'
         f'<button type="button" class="delete-instruction" '
@@ -4346,6 +4467,7 @@ def write_recording_html_from_run(run_root: Path, *, update_index: bool = True) 
         _render_recording_event_html(
             run_root=run_root,
             event=event,
+            previous_event=events[index - 1] if index > 0 else None,
             next_event=events[index + 1] if index + 1 < len(events) else None,
             display_index=index + 1,
         )

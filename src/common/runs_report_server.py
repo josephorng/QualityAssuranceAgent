@@ -608,6 +608,18 @@ def _copy_previous_screenshot(
         return str(dest)
 
 
+def _clear_analysis_wait_instruction(run_dir: Path, event_index: int) -> None:
+    """Drop a virtual ``wait_instruction`` so a real wait event is not duplicated."""
+    if event_index < 1:
+        return
+    analysis_path = run_dir / "analysis" / f"event_{event_index:03d}.json"
+    analysis = read_json(analysis_path, None)
+    if not isinstance(analysis, dict) or "wait_instruction" not in analysis:
+        return
+    analysis.pop("wait_instruction", None)
+    write_json(analysis_path, analysis)
+
+
 def _instruction_for_added_event(
     *,
     kind: str,
@@ -758,6 +770,29 @@ def add_recording_event(
         previous_event = read_json(event_json_path(run_dir, after), None)
         previous_event = previous_event if isinstance(previous_event, dict) else None
     screenshot_rel = _copy_previous_screenshot(run_dir, previous_event, new_index)
+
+    if kind == "wait":
+        # Materializing a wait before the next step should replace any virtual wait line.
+        follow_index: int | None = None
+        if after is None:
+            follow_index = None
+        elif after == 0:
+            if ordered_paths:
+                first = read_json(ordered_paths[0], None)
+                if isinstance(first, dict) and isinstance(first.get("index"), int):
+                    follow_index = first["index"]
+        else:
+            after_rel = event_json_path(run_dir, after).relative_to(run_dir).as_posix()
+            try:
+                after_pos = ordered_rels.index(after_rel)
+            except ValueError:
+                after_pos = -1
+            if 0 <= after_pos < len(ordered_rels) - 1:
+                following = read_json(run_dir / ordered_rels[after_pos + 1], None)
+                if isinstance(following, dict) and isinstance(following.get("index"), int):
+                    follow_index = following["index"]
+        if follow_index is not None:
+            _clear_analysis_wait_instruction(run_dir, follow_index)
 
     event = RecordedEvent(
         index=new_index,

@@ -780,6 +780,7 @@ def test_write_recording_html_renders_events_and_instructions(tmp_path: Path) ->
     assert "新增步驟" in html
     assert 'class="add-recording-step"' in html
     assert 'class="add-instruction"' in html
+    assert 'class="add-wait-instruction"' not in html
     assert 'id="add-step-dialog"' in html
     assert 'value="condition"' in html
     assert "條件" in html
@@ -851,6 +852,83 @@ def test_write_recording_html_uses_next_event_screenshot_as_after(tmp_path: Path
     assert 'src="screenshots/event_002.jpeg"' in second_group
     assert "無螢幕截圖" in second_group
     assert 'src="screenshots/event_001.jpeg"' not in second_group
+
+
+def test_write_recording_html_adds_wait_button_from_elapsed(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000041"
+    run_root.mkdir(parents=True)
+    (run_root / "events").mkdir()
+    (run_root / "analysis").mkdir()
+    (run_root / "screenshots").mkdir()
+    shot1 = _make_jpeg(run_root / "screenshots" / "event_001.jpeg")
+    shot2 = _make_jpeg(run_root / "screenshots" / "event_002.jpeg")
+    (run_root / "events" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "index": 1,
+                "timestamp_utc": "2026-07-21T04:00:00+00:00",
+                "kind": "click",
+                "cursor_xy": [10, 20],
+                "screenshot_path": str(shot1),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "events" / "event_002.json").write_text(
+        json.dumps(
+            {
+                "index": 2,
+                "timestamp_utc": "2026-07-21T04:00:03.250000+00:00",
+                "kind": "click",
+                "cursor_xy": [30, 40],
+                "screenshot_path": str(shot2),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps({"event_index": 1, "instruction": "點擊「搜尋」"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (run_root / "analysis" / "event_002.json").write_text(
+        json.dumps(
+            {
+                "event_index": 2,
+                "instruction": "點擊「確定」",
+                "elapsed_since_previous_seconds": 3.25,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_root.name,
+                "started_at_utc": "2026-07-21T04:00:00+00:00",
+                "stopped_at_utc": "2026-07-21T04:01:00+00:00",
+                "event_count": 2,
+                "events": ["events/event_001.json", "events/event_002.json"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+    first_group = html.split('data-event-index="1"', 1)[1].split("</details>", 1)[0]
+    second_group = html.split('data-event-index="2"', 1)[1].split("</details>", 1)[0]
+
+    assert 'class="add-wait-instruction"' not in first_group
+    assert 'class="add-wait-instruction"' in second_group
+    assert 'data-after-event-index="1"' in second_group
+    assert 'data-duration-seconds="4"' in second_group
+    assert "加入等待" in second_group
+    assert "間隔" in second_group
+    assert "4 秒" in second_group
+    assert "button.add-wait-instruction" in html
 
 
 def test_write_recording_html_chains_typing_after_to_next_before(tmp_path: Path) -> None:

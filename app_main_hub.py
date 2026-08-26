@@ -1556,6 +1556,13 @@ class MainHub(ctk.CTk):
         if not is_runnable_script_path(p):
             show_ctk_message(self, "編輯", f"找不到檔案：\n{p}", kind="error")
             return
+        if is_recording_script_path(p):
+            rec = recording_run_dir(p)
+            if rec is None:
+                show_ctk_message(self, "編輯", f"找不到檔案：\n{p}", kind="error")
+                return
+            self._open_recording_review_html(rec, rec.name)
+            return
         if not self._confirm_proceed_with_unsaved_script():
             return
         self._load_script_into_editor(p)

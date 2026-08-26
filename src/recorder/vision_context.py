@@ -35,19 +35,25 @@ from src.recorder.models import (
 )
 
 _MIN_NEARBY_TEXT_LANDMARKS = 2
-_MIN_NEARBY_TEXT_CANDIDATES = 5
+_MIN_NEARBY_TEXT_CANDIDATES = 8
 _MIN_NEARBY_ICON_CANDIDATES = 5
+# Prefer at least this many multi-char text neighbors in each directional cell.
+_MIN_MULTI_CHAR_TEXT_PER_SIDE = 2
 _DRAG_OFFSET_THRESHOLD_PX = 5
 # OCR boxes hug glyphs; pad so a near-miss click still counts as on-target.
 _BBOX_HIT_TOLERANCE_PX = 4
 _CONTAINER_LANDMARK_CLASSES = frozenset({"input", "scrollbar"})
-# Orthogonal bands around the primary click target (not diagonals / center).
-_CARDINAL_LANDMARK_CELLS = frozenset(
+# All eight directed sides used for recording HTML landmark side groups.
+_DIRECTIONAL_LANDMARK_CELLS = frozenset(
     {
         LandmarkCell.LEFT,
         LandmarkCell.RIGHT,
         LandmarkCell.ABOVE,
         LandmarkCell.BELOW,
+        LandmarkCell.UPPER_LEFT,
+        LandmarkCell.UPPER_RIGHT,
+        LandmarkCell.LOWER_LEFT,
+        LandmarkCell.LOWER_RIGHT,
     }
 )
 # Tier-0 text landmark preference by where the landmark sits relative to the target.
@@ -233,26 +239,34 @@ def _is_multi_char_text_candidate(candidate: dict[str, Any], label: str) -> bool
     return class_name == "text" or label.endswith("文字")
 
 
-def _detection_cardinal_cell(
+def _detection_directional_cell(
     primary_bbox: tuple[int, int, int, int],
     det: UiDetection,
 ) -> LandmarkCell | None:
-    """Return LEFT/RIGHT/ABOVE/BELOW when ``det`` sits on a cardinal side of primary."""
+    """Return the 9-grid cell when ``det`` sits on a directed side of primary.
+
+    Center-band neighbors return ``None`` (they stay undirected / 「其他」).
+    """
     cell = landmark_cell_from_anchor_bbox(primary_bbox, det.cx, det.cy)
-    return cell if cell in _CARDINAL_LANDMARK_CELLS else None
+    return cell if cell in _DIRECTIONAL_LANDMARK_CELLS else None
 
 
-def _append_cardinal_side_neighbors(
+def _append_directional_side_neighbors(
     nearest: list[UiDetection],
     scored: list[UiDetection],
     *,
     limit: int | None,
+    min_multi_char_text_per_side: int = _MIN_MULTI_CHAR_TEXT_PER_SIDE,
 ) -> list[UiDetection]:
-    """Append every remaining neighbor on the primary's left/right/above/below sides.
+    """Grow ``nearest`` so recording HTML has rich per-side landmark choices.
 
-    Distance order from ``scored`` is preserved. Diagonals and center-band
-    detections are left to the earlier quota pass. ``limit`` still caps the
-    final list when set.
+    1. Prefer at least ``min_multi_char_text_per_side`` multi-character text
+       neighbors in each of the eight directed cells (上/下/左/右/左上/…).
+    2. Then append every remaining neighbor on those eight sides (any type),
+       preserving distance order from ``scored``.
+
+    Center-band detections are left to the earlier quota pass. ``limit`` still
+    caps the final list when set.
     """
     if len(nearest) < 1 or len(scored) < 2:
         return nearest
@@ -261,10 +275,35 @@ def _append_cardinal_side_neighbors(
 
     primary_bbox = nearest[0].bbox
     kept_ids = {id(det) for det in nearest}
+    text_target = max(int(min_multi_char_text_per_side), 0)
+
+    per_side_text: dict[LandmarkCell, int] = {
+        cell: 0 for cell in _DIRECTIONAL_LANDMARK_CELLS
+    }
+    for det in nearest[1:]:
+        cell = _detection_directional_cell(primary_bbox, det)
+        if cell is not None and _is_multi_char_text_detection(det):
+            per_side_text[cell] += 1
+
+    if text_target > 0:
+        for det in scored[1:]:
+            if id(det) in kept_ids:
+                continue
+            if not _is_multi_char_text_detection(det):
+                continue
+            cell = _detection_directional_cell(primary_bbox, det)
+            if cell is None or per_side_text[cell] >= text_target:
+                continue
+            nearest.append(det)
+            kept_ids.add(id(det))
+            per_side_text[cell] += 1
+            if limit is not None and len(nearest) >= limit:
+                return nearest
+
     for det in scored[1:]:
         if id(det) in kept_ids:
             continue
-        if _detection_cardinal_cell(primary_bbox, det) is None:
+        if _detection_directional_cell(primary_bbox, det) is None:
             continue
         nearest.append(det)
         kept_ids.add(id(det))
@@ -294,10 +333,11 @@ def _nearest_candidates(
     - ``min_multi_char_text_neighbors`` multi-character text detections
     - ``min_icon_neighbors`` detections with icon metadata
 
-    After the quotas, also keeps **all** remaining neighbors whose centers fall
-    on the primary's left / right / above / below bands (9-grid cardinals), so
-    recording HTML can offer every orthogonal nearby choice. Diagonals are not
-    force-included beyond the distance quotas.
+    After the quotas, prefers at least
+    ``_MIN_MULTI_CHAR_TEXT_PER_SIDE`` multi-character text neighbors in each of
+    the eight directed 9-grid sides, then keeps **all** remaining neighbors on
+    those sides (cardinals and diagonals) so recording HTML can offer every
+    directed nearby choice. Center-band neighbors stay quota-only.
 
     Icons misclassified as text with 0–1 visible characters do not count toward
     the text quota. There is no fixed candidate cap unless ``limit`` is set; if
@@ -332,7 +372,7 @@ def _nearest_candidates(
             icon_count += 1
         if limit is not None and len(nearest) >= limit:
             break
-    return _append_cardinal_side_neighbors(nearest, scored, limit=limit)
+    return _append_directional_side_neighbors(nearest, scored, limit=limit)
 
 
 def _bbox_center_inside(

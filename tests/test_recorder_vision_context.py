@@ -152,7 +152,7 @@ def test_nearest_candidates_collects_all_when_no_multi_char_text() -> None:
     assert len(nearest) == 12
 
 
-def test_nearest_candidates_grows_until_five_text_and_five_icon() -> None:
+def test_nearest_candidates_grows_until_eight_text_and_five_icon() -> None:
     """Keep collecting until both text and icon quotas are filled."""
     primary = _detection_from_bbox(
         (0, 0, 10, 10),
@@ -173,24 +173,17 @@ def test_nearest_candidates_grows_until_five_text_and_five_icon() -> None:
             YOLO_CLASS_TEXT,
             text=f"Text{i}",
         )
-        for i in range(6)
+        for i in range(8)
     ]
-    # Diagonal (lower-right) — not a cardinal band, so quota-only.
-    extra = _detection_from_bbox(
-        (500, 500, 10, 10),
-        YOLO_CLASS_ELEMENT,
-        icons=[{"chinese_id": "After"}],
-    )
-    detections = [primary, *icons, *texts, extra]
+    detections = [primary, *icons, *texts]
     nearest = _nearest_candidates(detections, 5, 5)
     assert nearest[0] is primary
     text_count = sum(
         1 for d in nearest if d.class_id == YOLO_CLASS_TEXT and len(d.text or "") > 1
     )
     icon_count = sum(1 for d in nearest if d.icons)
-    assert text_count >= 5
+    assert text_count >= 8
     assert icon_count >= 5
-    assert extra not in nearest
     # All same-row (right-band) icons/texts are kept for HTML side choices.
     assert all(det in nearest for det in icons)
     assert all(det in nearest for det in texts)
@@ -214,13 +207,7 @@ def test_nearest_candidates_stops_after_two_multi_char_texts_when_configured() -
     single = _detection_from_bbox((200, 0, 10, 10), YOLO_CLASS_TEXT, text="中")
     text_a = _detection_from_bbox((300, 0, 40, 10), YOLO_CLASS_TEXT, text="OneNote")
     text_b = _detection_from_bbox((400, 0, 40, 10), YOLO_CLASS_TEXT, text="Slack")
-    # Diagonal — excluded once text quota is met (not a cardinal neighbor).
-    farther_icon = _detection_from_bbox(
-        (500, 500, 10, 10),
-        YOLO_CLASS_ELEMENT,
-        icons=[{"chinese_id": "After"}],
-    )
-    detections = [primary, *close_icons, single, text_a, text_b, farther_icon]
+    detections = [primary, *close_icons, single, text_a, text_b]
     nearest = _nearest_candidates(
         detections,
         5,
@@ -235,13 +222,12 @@ def test_nearest_candidates_stops_after_two_multi_char_texts_when_configured() -
         "OneNote",
         "Slack",
     ]
-    assert farther_icon not in nearest
     # Cardinal right-band icons beyond the quota are still retained.
     assert all(det in nearest for det in close_icons)
 
 
-def test_nearest_candidates_keeps_all_cardinal_side_neighbors() -> None:
-    """Left/right/above/below of the primary stay available after quota fill."""
+def test_nearest_candidates_keeps_all_directional_side_neighbors() -> None:
+    """All eight directed sides of the primary stay available after quota fill."""
     primary = _detection_from_bbox(
         (100, 100, 20, 20),
         YOLO_CLASS_TEXT,
@@ -251,28 +237,165 @@ def test_nearest_candidates_keeps_all_cardinal_side_neighbors() -> None:
     right = _detection_from_bbox((160, 105, 30, 10), YOLO_CLASS_TEXT, text="RightLabel")
     above = _detection_from_bbox((105, 40, 30, 10), YOLO_CLASS_TEXT, text="AboveLabel")
     below = _detection_from_bbox((105, 160, 30, 10), YOLO_CLASS_TEXT, text="BelowLabel")
-    # Fill text+icon quotas with near diagonals so cardinals would otherwise drop.
+    upper_left = _detection_from_bbox(
+        (40, 40, 30, 10), YOLO_CLASS_TEXT, text="UpperLeftA"
+    )
+    upper_right = _detection_from_bbox(
+        (160, 40, 30, 10), YOLO_CLASS_TEXT, text="UpperRightA"
+    )
+    lower_left = _detection_from_bbox(
+        (40, 160, 30, 10), YOLO_CLASS_TEXT, text="LowerLeftA"
+    )
+    lower_right = _detection_from_bbox(
+        (160, 160, 30, 10), YOLO_CLASS_TEXT, text="LowerRightA"
+    )
+    # Nested center-cell icons (away from the click) fill the global icon quota.
     fillers = [
         _detection_from_bbox(
-            (130 + i * 15, 130 + i * 15, 12, 12),
+            (101 + (i % 3) * 3, 101 + (i // 3) * 3, 2, 2),
             YOLO_CLASS_ELEMENT,
-            icons=[{"chinese_id": f"Diag{i}"}],
+            icons=[{"chinese_id": f"Mid{i}"}],
         )
         for i in range(6)
     ]
-    far_diagonal = _detection_from_bbox(
-        (400, 400, 10, 10),
-        YOLO_CLASS_TEXT,
-        text="FarCorner",
-    )
-    detections = [primary, left, right, above, below, *fillers, far_diagonal]
+    detections = [
+        primary,
+        left,
+        right,
+        above,
+        below,
+        upper_left,
+        upper_right,
+        lower_left,
+        lower_right,
+        *fillers,
+    ]
     nearest = _nearest_candidates(detections, 110, 110)
     assert nearest[0] is primary
-    assert left in nearest
-    assert right in nearest
-    assert above in nearest
-    assert below in nearest
-    assert far_diagonal not in nearest
+    for side_det in (
+        left,
+        right,
+        above,
+        below,
+        upper_left,
+        upper_right,
+        lower_left,
+        lower_right,
+    ):
+        assert side_det in nearest
+
+
+def test_nearest_candidates_keeps_two_multi_char_texts_per_side() -> None:
+    """Prefer at least two multi-char text landmarks on each directed side."""
+    primary = _detection_from_bbox(
+        (100, 100, 20, 20),
+        YOLO_CLASS_TEXT,
+        text="Target",
+    )
+    # Two multi-char texts on every directed side, plus a third on lower-right.
+    sides = {
+        "Left": [(20, 105), (50, 108)],
+        "Right": [(160, 105), (190, 108)],
+        "Above": [(105, 20), (108, 50)],
+        "Below": [(105, 160), (108, 190)],
+        "UL": [(20, 20), (50, 50)],
+        "UR": [(160, 20), (190, 50)],
+        "LL": [(20, 160), (50, 190)],
+        "LR": [(160, 160), (190, 190), (220, 220)],
+    }
+    side_texts: list = []
+    for prefix, centers in sides.items():
+        for i, (cx, cy) in enumerate(centers):
+            side_texts.append(
+                _detection_from_bbox(
+                    (cx - 15, cy - 5, 30, 10),
+                    YOLO_CLASS_TEXT,
+                    text=f"{prefix}{i}",
+                )
+            )
+    # Nested center-cell icons that would otherwise fill the global quota first.
+    fillers = [
+        _detection_from_bbox(
+            (101 + (i % 3) * 3, 101 + (i // 3) * 3, 2, 2),
+            YOLO_CLASS_ELEMENT,
+            icons=[{"chinese_id": f"Mid{i}"}],
+        )
+        for i in range(8)
+    ]
+    nearest = _nearest_candidates(
+        [primary, *fillers, *side_texts],
+        110,
+        110,
+    )
+    assert nearest[0] is primary
+    from src.common.nearby_side import LandmarkCell, landmark_cell_from_anchor_bbox
+
+    primary_bbox = primary.bbox
+    per_side: dict[LandmarkCell, int] = {}
+    for det in nearest[1:]:
+        if det.class_id != YOLO_CLASS_TEXT or len(det.text or "") <= 1:
+            continue
+        cell = landmark_cell_from_anchor_bbox(primary_bbox, det.cx, det.cy)
+        per_side[cell] = per_side.get(cell, 0) + 1
+    for cell in (
+        LandmarkCell.LEFT,
+        LandmarkCell.RIGHT,
+        LandmarkCell.ABOVE,
+        LandmarkCell.BELOW,
+        LandmarkCell.UPPER_LEFT,
+        LandmarkCell.UPPER_RIGHT,
+        LandmarkCell.LOWER_LEFT,
+        LandmarkCell.LOWER_RIGHT,
+    ):
+        assert per_side.get(cell, 0) >= 2, f"{cell} has {per_side.get(cell, 0)}"
+    # Extra third lower-right text is also kept (all directed sides retained).
+    assert sum(1 for d in nearest if (d.text or "").startswith("LR")) == 3
+
+
+def test_nearest_candidates_skips_extra_center_cell_beyond_quota() -> None:
+    """Center-band neighbors are not force-kept after global quotas are met."""
+    primary = _detection_from_bbox(
+        (100, 100, 80, 80),
+        YOLO_CLASS_ELEMENT,
+    )
+    # Close nested multi-char texts + icons fill both quotas near the click.
+    # Keep them off the click point so primary stays rank-0.
+    close_texts = [
+        _detection_from_bbox(
+            (110 + (i % 4) * 4, 110 + (i // 4) * 4, 3, 3),
+            YOLO_CLASS_TEXT,
+            text=f"Tx{i}",
+        )
+        for i in range(8)
+    ]
+    close_icons = [
+        _detection_from_bbox(
+            (130 + i * 3, 110, 2, 2),
+            YOLO_CLASS_ELEMENT,
+            icons=[{"chinese_id": f"Near{i}"}],
+        )
+        for i in range(5)
+    ]
+    # Still inside the primary (center cell), but farther from the click.
+    far_center_icon = _detection_from_bbox(
+        (170, 170, 4, 4),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "FarCen"}],
+    )
+    # Directed-side texts must remain available for HTML.
+    side_text = _detection_from_bbox(
+        (40, 135, 30, 10), YOLO_CLASS_TEXT, text="LeftSide"
+    )
+    nearest = _nearest_candidates(
+        [primary, *close_texts, *close_icons, far_center_icon, side_text],
+        120,
+        120,
+    )
+    assert nearest[0] is primary
+    assert all(det in nearest for det in close_texts)
+    assert all(det in nearest for det in close_icons)
+    assert side_text in nearest
+    assert far_center_icon not in nearest
 
 
 def test_nearest_candidates_prefers_icon_over_scrollbar() -> None:

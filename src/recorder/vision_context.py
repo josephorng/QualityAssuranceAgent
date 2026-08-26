@@ -1209,6 +1209,46 @@ def list_prioritized_nearby_hints(
     return [*forced, *ranked]
 
 
+def _pick_side_diverse_hints(
+    ranked: list[NearbyHint],
+    *,
+    max_count: int,
+) -> list[NearbyHint]:
+    """Pick up to ``max_count`` hints, preferring distinct directed sides.
+
+    Keeps rank order. A second (or later) candidate with the same non-None
+    ``side`` as an already-picked hint is skipped while a different-side
+    option remains. If diversity cannot fill ``max_count``, remaining slots
+    are filled from unused ranked hints regardless of side.
+    """
+    if max_count <= 0 or not ranked:
+        return []
+
+    picked: list[NearbyHint] = []
+    used_sides: set[Side] = set()
+    for hint in ranked:
+        if len(picked) >= max_count:
+            break
+        if hint.side is not None and hint.side in used_sides:
+            continue
+        picked.append(hint)
+        if hint.side is not None:
+            used_sides.add(hint.side)
+
+    if len(picked) >= max_count:
+        return picked
+
+    picked_labels = {hint.label for hint in picked}
+    for hint in ranked:
+        if len(picked) >= max_count:
+            break
+        if hint.label in picked_labels:
+            continue
+        picked.append(hint)
+        picked_labels.add(hint.label)
+    return picked
+
+
 def collect_nearby_hints(
     vision: dict[str, Any],
     *,
@@ -1222,16 +1262,18 @@ def collect_nearby_hints(
     Within Tier 0 (multi-char text), prefers landmarks on the left, then right,
     then top, then bottom of the target; diagonals/center follow. Within the
     same cell rank (and for lower tiers), keeps distance order from
-    ``candidates``. Uses the primary candidate bbox and each neighbor center to
-    assign an optional script side via the 9-section grid. Neighbors whose
-    center falls in the CENTER cell stay undirected (``side=None``).
+    ``candidates``. Auto-picks prefer landmarks on different directed sides
+    (e.g. left+right rather than two on the right). Uses the primary candidate
+    bbox and each neighbor center to assign an optional script side via the
+    9-section grid. Neighbors whose center falls in the CENTER cell stay
+    undirected (``side=None``).
 
     When the click lies inside a non-primary ``input`` / ``scrollbar``, that
     container is always prepended with ``side=inside`` (裡面), even if that
     exceeds ``max_count``.
     """
     forced, ranked = _prioritized_nearby_parts(vision, instruction=instruction)
-    return [*forced, *ranked[:max_count]]
+    return [*forced, *_pick_side_diverse_hints(ranked, max_count=max_count)]
 
 
 def collect_nearby_hint_labels(

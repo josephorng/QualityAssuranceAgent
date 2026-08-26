@@ -143,6 +143,86 @@ def test_collect_nearby_hints_tier0_prefers_left_right_top_bottom() -> None:
     ]
 
 
+def test_collect_nearby_hints_prefers_different_sides() -> None:
+    """Default auto-pick skips a same-side neighbor when another side exists."""
+    from src.common.nearby_side import NearbyHint, Side
+    from src.recorder.vision_context import collect_nearby_hints
+
+    vision = {
+        "used_vision": True,
+        "candidates": [
+            {
+                "bbox": [100, 100, 20, 20],
+                "center": [110, 110],
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "空心圓圈"}],
+            },
+            # Both on the left of the target → same script side (右邊).
+            {
+                "bbox": [40, 100, 40, 20],
+                "center": [60, 110],
+                "class_name": "text",
+                "text": "電腦GCB原則列表",
+            },
+            {
+                "bbox": [10, 100, 40, 20],
+                "center": [30, 110],
+                "class_name": "text",
+                "text": "你電腦資產",
+            },
+            # Farther, but on the opposite side — preferred over a second 右邊.
+            {
+                "bbox": [160, 100, 40, 20],
+                "center": [180, 110],
+                "class_name": "text",
+                "text": "其他選項",
+            },
+        ],
+    }
+    hints = collect_nearby_hints(vision, instruction="點擊「空心圓圈」圖示")
+    assert hints == [
+        NearbyHint("「電腦GCB原則列表」文字", Side.RIGHT),
+        NearbyHint("「其他選項」文字", Side.LEFT),
+    ]
+
+
+def test_collect_nearby_hints_allows_same_side_when_no_alternative() -> None:
+    """Fall back to two same-side landmarks when no other side is available."""
+    from src.common.nearby_side import NearbyHint, Side
+    from src.recorder.vision_context import collect_nearby_hints
+
+    vision = {
+        "used_vision": True,
+        "candidates": [
+            {
+                "bbox": [100, 100, 20, 20],
+                "center": [110, 110],
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "空心圓圈"}],
+            },
+            {
+                "bbox": [40, 100, 40, 20],
+                "center": [60, 110],
+                "class_name": "text",
+                "text": "電腦GCB原則列表",
+            },
+            {
+                "bbox": [10, 100, 40, 20],
+                "center": [30, 110],
+                "class_name": "text",
+                "text": "你電腦資產",
+            },
+        ],
+    }
+    hints = collect_nearby_hints(vision, instruction="點擊「空心圓圈」圖示")
+    assert hints == [
+        NearbyHint("「電腦GCB原則列表」文字", Side.RIGHT),
+        NearbyHint("「你電腦資產」文字", Side.RIGHT),
+    ]
+
+
 def test_collect_nearby_hint_labels_keeps_collecting_until_two_texts() -> None:
     """Keep taking multi-char text landmarks until two are found, skipping closer icons."""
     vision = {

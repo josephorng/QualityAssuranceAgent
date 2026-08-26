@@ -40,6 +40,7 @@ _RECORDING_KIND_LABELS = {
     "condition": "條件",
     "manual": "自訂指令",
 }
+_RECORDING_LAST_STEP_WAIT_SECONDS = 3
 
 # Column order written by ``src.hand.module`` via ``append_csv_row``; used as a fallback for
 # older ``hand.csv`` files that were saved without a header row.
@@ -1612,7 +1613,7 @@ _RECORDING_SCRIPT = """
         return;
       }
       var seconds = Math.ceil(duration);
-      if (!window.confirm("確定在此步驟前加入等待 " + seconds + " 秒？")) return;
+      if (!window.confirm("確定在此步驟後加入等待 " + seconds + " 秒？")) return;
       btn.disabled = true;
       fetch("/api/runs/" + encodeURIComponent(runId) + "/events/add", {
         method: "POST",
@@ -4031,7 +4032,6 @@ def _render_recording_event_html(
     *,
     run_root: Path,
     event: dict[str, Any],
-    previous_event: dict[str, Any] | None = None,
     next_event: dict[str, Any] | None = None,
     display_index: int | None = None,
 ) -> str:
@@ -4096,13 +4096,22 @@ def _render_recording_event_html(
     if isinstance(window_title, str) and window_title.strip():
         meta_rows.append(("視窗", escape(window_title.strip())))
 
-    wait_seconds = (
-        None
-        if kind == "wait"
-        else _recording_elapsed_wait_seconds(previous_event, event, analysis)
-    )
-    if wait_seconds is not None:
-        meta_rows.append(("間隔", escape(f"{wait_seconds} 秒")))
+    # Gap after this step (from next event's elapsed / timestamps), used for
+    # 「加入等待」 which inserts a wait after the current step.
+    after_wait_seconds: int | None = None
+    if kind != "wait" and next_event is not None:
+        next_raw = next_event.get("index")
+        next_index = next_raw if isinstance(next_raw, int) else None
+        next_analysis = (
+            _load_recording_analysis(run_root, next_index) if next_index else None
+        )
+        after_wait_seconds = _recording_elapsed_wait_seconds(
+            event,
+            next_event,
+            next_analysis if isinstance(next_analysis, dict) else None,
+        )
+    if after_wait_seconds is not None:
+        meta_rows.append(("間隔", escape(f"{after_wait_seconds} 秒")))
 
     meta_html = "".join(f"<dt>{escape(label)}</dt><dd>{value}</dd>" for label, value in meta_rows)
 
@@ -4167,18 +4176,21 @@ def _render_recording_event_html(
         expected_summary = ""
 
     add_wait_html = ""
-    if wait_seconds is not None and previous_event is not None:
-        prev_raw = previous_event.get("index")
-        prev_index = prev_raw if isinstance(prev_raw, int) else None
-        if prev_index is not None and prev_index >= 1:
-            add_wait_html = (
-                f'<button type="button" class="add-wait-instruction" '
-                f'data-after-event-index="{prev_index}" '
-                f'data-duration-seconds="{wait_seconds}" '
-                f'title="在此步驟前加入等待 {wait_seconds} 秒" '
-                f'aria-label="加入等待 {wait_seconds} 秒">'
-                f"加入等待</button>"
-            )
+    add_wait_seconds: int | None = None
+    if index >= 1:
+        if next_event is None:
+            add_wait_seconds = _RECORDING_LAST_STEP_WAIT_SECONDS
+        elif kind != "wait":
+            add_wait_seconds = after_wait_seconds
+    if add_wait_seconds is not None:
+        add_wait_html = (
+            f'<button type="button" class="add-wait-instruction" '
+            f'data-after-event-index="{index}" '
+            f'data-duration-seconds="{add_wait_seconds}" '
+            f'title="在此步驟後加入等待 {add_wait_seconds} 秒" '
+            f'aria-label="加入等待 {add_wait_seconds} 秒">'
+            f"加入等待</button>"
+        )
 
     return (
         f'<details class="instruction-group" id="event-{index}" data-run-id="{run_id}" '
@@ -4620,7 +4632,6 @@ def write_recording_html_from_run(run_root: Path, *, update_index: bool = True) 
         _render_recording_event_html(
             run_root=run_root,
             event=event,
-            previous_event=events[index - 1] if index > 0 else None,
             next_event=events[index + 1] if index + 1 < len(events) else None,
             display_index=index + 1,
         )

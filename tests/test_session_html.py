@@ -787,7 +787,9 @@ def test_write_recording_html_renders_events_and_instructions(tmp_path: Path) ->
     assert "新增步驟" in html
     assert 'class="add-recording-step"' in html
     assert 'class="add-instruction"' in html
-    assert 'class="add-wait-instruction"' not in html
+    assert 'class="add-wait-instruction"' in html
+    assert 'data-after-event-index="1"' in html
+    assert 'data-duration-seconds="3"' in html
     assert 'id="add-step-dialog"' in html
     assert 'value="condition"' in html
     assert "條件" in html
@@ -928,14 +930,19 @@ def test_write_recording_html_adds_wait_button_from_elapsed(tmp_path: Path) -> N
     first_group = html.split('data-event-index="1"', 1)[1].split("</details>", 1)[0]
     second_group = html.split('data-event-index="2"', 1)[1].split("</details>", 1)[0]
 
-    assert 'class="add-wait-instruction"' not in first_group
+    assert 'class="add-wait-instruction"' in first_group
+    assert 'data-after-event-index="1"' in first_group
+    assert 'data-duration-seconds="4"' in first_group
+    assert "在此步驟後加入等待 4 秒" in first_group
+    assert "間隔" in first_group
+    assert "4 秒" in first_group
     assert 'class="add-wait-instruction"' in second_group
-    assert 'data-after-event-index="1"' in second_group
-    assert 'data-duration-seconds="4"' in second_group
-    assert "加入等待" in second_group
-    assert "間隔" in second_group
-    assert "4 秒" in second_group
+    assert 'data-after-event-index="2"' in second_group
+    assert 'data-duration-seconds="3"' in second_group
+    assert "在此步驟後加入等待 3 秒" in second_group
+    assert "加入等待" in first_group
     assert "button.add-wait-instruction" in html
+    assert "確定在此步驟後加入等待" in html
 
 
 def test_write_recording_html_chains_typing_after_to_next_before(tmp_path: Path) -> None:

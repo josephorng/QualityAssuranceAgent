@@ -16,6 +16,7 @@ from src.common.runs_report_server import (
     apply_recording_event_landmarks,
     apply_recording_event_text,
     delete_recording_event,
+    delete_recording_events,
     delete_run_report_folder,
     ensure_runs_report_server,
     rename_recording_folder,
@@ -772,6 +773,130 @@ def test_runs_report_server_event_delete_endpoint(tmp_path: Path) -> None:
         )
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             urllib.request.urlopen(missing, timeout=5)
+        assert exc_info.value.code == 400
+    finally:
+        server.stop()
+
+
+def _make_recording_three_event_run(runs_root: Path, name: str) -> Path:
+    run_root = _make_recording_two_event_run(runs_root, name)
+    shot3 = run_root / "screenshots" / "event_003.jpeg"
+    shot3.write_bytes(b"\xff\xd8\xff\xd9")
+    (run_root / "events" / "event_003.json").write_text(
+        json.dumps(
+            {
+                "index": 3,
+                "timestamp_utc": "2026-07-21T04:00:03+00:00",
+                "kind": "click",
+                "cursor_xy": [30, 40],
+                "screenshot_path": str(shot3),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "analysis" / "event_003.json").write_text(
+        json.dumps(
+            {"event_index": 3, "instruction": "點擊「取消」按鈕"},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "yolo_ocr" / "event_003.json").write_text(
+        json.dumps({"event_index": 3, "candidates": []}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    session = json.loads((run_root / "session.json").read_text(encoding="utf-8"))
+    session["event_count"] = 3
+    session["events"] = [
+        "events/event_001.json",
+        "events/event_002.json",
+        "events/event_003.json",
+    ]
+    (run_root / "session.json").write_text(
+        json.dumps(session, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    report = json.loads((run_root / "report.json").read_text(encoding="utf-8"))
+    report["recorded"] = 3
+    report["processed"] = 3
+    report["cached"] = 3
+    report["instructions"] = [
+        "點擊「搜尋」按鈕",
+        "點擊「確定」按鈕",
+        "點擊「取消」按鈕",
+    ]
+    (run_root / "report.json").write_text(
+        json.dumps(report, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return run_root
+
+
+def test_delete_recording_events_bulk_removes_files_and_rebuilds(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_three_event_run(runs_root, "recording_bulk_delete")
+
+    result = delete_recording_events(runs_root, "recording_bulk_delete", [1, 3, 1])
+
+    assert result == {
+        "event_indices": [1, 3],
+        "deleted": 2,
+        "remaining": 1,
+    }
+    assert not (run_root / "events" / "event_001.json").exists()
+    assert not (run_root / "events" / "event_003.json").exists()
+    assert (run_root / "events" / "event_002.json").is_file()
+    assert not (run_root / "screenshots" / "event_001.jpeg").exists()
+    assert not (run_root / "screenshots" / "event_003.jpeg").exists()
+
+    session = json.loads((run_root / "session.json").read_text(encoding="utf-8"))
+    assert session["event_count"] == 1
+    assert session["events"] == ["events/event_002.json"]
+
+    report = json.loads((run_root / "report.json").read_text(encoding="utf-8"))
+    assert report["recorded"] == 1
+    assert report["instructions"] == ["點擊「確定」按鈕"]
+
+    html = (run_root / "recording_steps.html").read_text(encoding="utf-8")
+    assert "點擊「確定」按鈕" in html
+    assert "點擊「搜尋」按鈕" not in html
+    assert "點擊「取消」按鈕" not in html
+    assert 'class="select-step"' in html
+    assert 'class="bulk-delete-steps"' in html
+
+
+def test_runs_report_server_events_bulk_delete_endpoint(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_three_event_run(runs_root, "recording_http_bulk_delete")
+
+    server = RunsReportServer(runs_root)
+    try:
+        base = server.start()
+        req = urllib.request.Request(
+            f"{base}/api/runs/recording_http_bulk_delete/events/delete",
+            method="POST",
+            data=json.dumps({"event_indices": [1, 3]}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            assert response.status == 200
+        assert payload["ok"] is True
+        assert payload["deleted"] == 2
+        assert payload["remaining"] == 1
+        assert payload["event_indices"] == [1, 3]
+        assert (run_root / "events" / "event_002.json").is_file()
+        assert not (run_root / "events" / "event_001.json").exists()
+
+        bad = urllib.request.Request(
+            f"{base}/api/runs/recording_http_bulk_delete/events/delete",
+            method="POST",
+            data=json.dumps({"event_indices": [9]}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(bad, timeout=5)
         assert exc_info.value.code == 400
     finally:
         server.stop()

@@ -151,6 +151,30 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
   display: flex; flex-wrap: wrap; align-items: center; gap: .5rem;
   margin: 0 0 1.25rem;
 }
+.recording-toolbar .select-all-steps-label {
+  display: inline-flex; align-items: center; gap: .4rem;
+  font-size: .85rem; font-weight: 600; color: #57606a; cursor: pointer;
+  user-select: none; margin-right: .15rem;
+}
+.recording-toolbar .select-all-steps-label input { margin: 0; }
+.recording-toolbar .bulk-step-count {
+  color: #57606a; font-size: .85rem; min-width: 5rem;
+}
+.bulk-delete-steps {
+  appearance: none; border: 1px solid #ff8182; background: #ffebe9;
+  cursor: pointer; border-radius: 6px; padding: .35rem .75rem;
+  font-size: .85rem; line-height: 1.2; font-family: inherit;
+  font-weight: 600; color: #cf222e;
+}
+.bulk-delete-steps:hover:not(:disabled) { background: #ffd7d5; }
+.bulk-delete-steps:disabled { opacity: .45; cursor: not-allowed; }
+.instruction-group.selected {
+  border-color: #0969da;
+  box-shadow: 0 0 0 1px #0969da, 0 1px 2px rgba(0,0,0,.04);
+}
+.instruction-group > summary .select-step {
+  flex: 0 0 auto; margin: 0; cursor: pointer;
+}
 .copy-all-instructions {
   appearance: none; border: 1px solid #d0d7de; background: #f6f8fa;
   cursor: pointer; border-radius: 6px; padding: .35rem .75rem;
@@ -601,6 +625,133 @@ _RECORDING_SCRIPT = """
         });
     });
   });
+
+  (function initStepSelection() {
+    var selectAll = document.querySelector("input.select-all-steps");
+    var bulkCount = document.querySelector(".bulk-step-count");
+    var bulkDelete = document.querySelector("button.bulk-delete-steps");
+    var stepChecks = Array.prototype.slice.call(document.querySelectorAll("input.select-step"));
+    var bulkBusy = false;
+
+    function syncGroupSelected(checkbox) {
+      var group = checkbox.closest(".instruction-group");
+      if (!group) return;
+      if (checkbox.checked) group.classList.add("selected");
+      else group.classList.remove("selected");
+    }
+
+    function updateBulkBar() {
+      var selected = stepChecks.filter(function (cb) { return cb.checked; });
+      var count = selected.length;
+      var total = stepChecks.length;
+      if (bulkCount) bulkCount.textContent = "已選 " + count + " 筆";
+      if (bulkDelete) bulkDelete.disabled = bulkBusy || count === 0;
+      if (selectAll) {
+        selectAll.disabled = bulkBusy || total === 0;
+        selectAll.checked = total > 0 && count === total;
+        selectAll.indeterminate = count > 0 && count < total;
+      }
+      stepChecks.forEach(function (cb) { cb.disabled = bulkBusy; });
+    }
+
+    function setBulkBusy(busy) {
+      bulkBusy = busy;
+      updateBulkBar();
+      Array.prototype.slice.call(document.querySelectorAll("button.delete-instruction")).forEach(function (btn) {
+        btn.disabled = busy;
+      });
+    }
+
+    stepChecks.forEach(function (checkbox) {
+      checkbox.addEventListener("click", function (event) {
+        event.stopPropagation();
+      });
+      checkbox.addEventListener("change", function () {
+        syncGroupSelected(checkbox);
+        updateBulkBar();
+      });
+      syncGroupSelected(checkbox);
+    });
+
+    if (selectAll) {
+      selectAll.addEventListener("change", function () {
+        var checked = !!selectAll.checked;
+        stepChecks.forEach(function (cb) {
+          cb.checked = checked;
+          syncGroupSelected(cb);
+        });
+        updateBulkBar();
+      });
+    }
+
+    if (bulkDelete) {
+      bulkDelete.addEventListener("click", function (event) {
+        event.preventDefault();
+        if (window.location.protocol === "file:") {
+          window.alert("無法刪除：請從主程式的「報告列表」開啟此頁（需本機服務）。");
+          return;
+        }
+        var selected = stepChecks.filter(function (cb) { return cb.checked; });
+        if (!selected.length) return;
+        var runId = toolbarRunId();
+        if (!runId) {
+          var firstGroup = selected[0].closest(".instruction-group");
+          runId = firstGroup ? (firstGroup.getAttribute("data-run-id") || "") : "";
+        }
+        if (!runId) {
+          window.alert("缺少事件資訊。");
+          return;
+        }
+        var indices = [];
+        var labels = [];
+        selected.forEach(function (cb) {
+          var group = cb.closest(".instruction-group");
+          if (!group) return;
+          var idx = parseInt(group.getAttribute("data-event-index") || "", 10);
+          if (!Number.isFinite(idx)) return;
+          indices.push(idx);
+          var titleEl = group.querySelector(".instruction-title");
+          var label = titleEl ? (titleEl.textContent || "").trim() : ("#" + idx);
+          if (label) labels.push(label);
+        });
+        if (!indices.length) {
+          window.alert("缺少事件資訊。");
+          return;
+        }
+        var summary = labels.slice(0, 8).join("、");
+        if (labels.length > 8) summary += "…等 " + labels.length + " 筆";
+        var confirmText = "確定刪除選取的 " + indices.length + " 筆步驟？\\n"
+          + summary + "\\n將無法復原。";
+        if (!window.confirm(confirmText)) return;
+        setBulkBusy(true);
+        fetch("/api/runs/" + encodeURIComponent(runId) + "/events/delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ event_indices: indices })
+        })
+          .then(function (response) {
+            return response.json().then(function (payload) {
+              return { ok: response.ok, payload: payload };
+            });
+          })
+          .then(function (result) {
+            if (!result.ok || !result.payload || !result.payload.ok) {
+              setBulkBusy(false);
+              var err = (result.payload && result.payload.error) || "刪除失敗";
+              window.alert(err);
+              return;
+            }
+            window.location.reload();
+          })
+          .catch(function () {
+            setBulkBusy(false);
+            window.alert("無法連線主程式，請確認主程式正在執行。");
+          });
+      });
+    }
+
+    updateBulkBar();
+  })();
 
   Array.prototype.slice.call(document.querySelectorAll("button.collapse-instruction")).forEach(function (btn) {
     btn.addEventListener("click", function (event) {
@@ -4033,6 +4184,8 @@ def _render_recording_event_html(
         f'<details class="instruction-group" id="event-{index}" data-run-id="{run_id}" '
         f'data-event-index="{index}" data-kind="{escape(kind, quote=True)}">'
         f"<summary>"
+        f'<input type="checkbox" class="select-step" '
+        f'aria-label="選取步驟 {step_label}" title="選取步驟">'
         f'<span class="instruction-number">{step_label}</span>'
         f'<span class="instruction-summary-text">'
         f'<span class="instruction-title">{escape(title)}</span>'
@@ -4489,6 +4642,13 @@ def write_recording_html_from_run(run_root: Path, *, update_index: bool = True) 
         f"<h1>{title}</h1>\n"
         '<p class="intro">依錄製事件排列的操作紀錄。點選事件可展開細節與截圖。</p>\n'
         f'<div class="recording-toolbar" data-run-id="{run_id_attr}">'
+        f'<label class="select-all-steps-label">'
+        f'<input type="checkbox" class="select-all-steps" aria-label="全選步驟"'
+        f'{copy_all_disabled}>'
+        f"全選</label>"
+        f'<span class="bulk-step-count">已選 0 筆</span>'
+        f'<button type="button" class="bulk-delete-steps" disabled '
+        f'title="刪除選取的步驟" aria-label="刪除選取的步驟">刪除選取</button>'
         f'<button type="button" class="copy-all-instructions"{copy_all_disabled} '
         'title="複製全部指令" aria-label="複製全部指令">複製全部指令</button>'
         '<button type="button" class="rename-recording" '

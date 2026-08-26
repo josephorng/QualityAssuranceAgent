@@ -8,6 +8,8 @@ Recording landmark edits POST to ``/api/runs/<id>/events/<n>/landmarks``
 Recording typed-text edits POST to ``/api/runs/<id>/events/<n>/text``.
 Recording expected-outcome edits POST to ``/api/runs/<id>/events/<n>/expected_outcome``.
 Recording event deletes POST to ``/api/runs/<id>/events/<n>/delete``.
+Recording bulk event deletes POST to ``/api/runs/<id>/events/delete`` with
+``{"event_indices": [1, 2, ...]}``.
 Recording event inserts POST to ``/api/runs/<id>/events/add``.
 Recording instruction edits POST to ``/api/runs/<id>/events/<n>/instruction``.
 Recording character-target edits POST to ``/api/runs/<id>/events/<n>/char_target``.
@@ -80,6 +82,9 @@ _LANDMARKS_PATH_RE = re.compile(
 )
 _EVENT_DELETE_PATH_RE = re.compile(
     r"^/api/runs/([^/]+)/events/(\d+)/delete/?$"
+)
+_EVENTS_BULK_DELETE_PATH_RE = re.compile(
+    r"^/api/runs/([^/]+)/events/delete/?$"
 )
 _EVENT_TEXT_PATH_RE = re.compile(
     r"^/api/runs/([^/]+)/events/(\d+)/text/?$"
@@ -412,23 +417,49 @@ def _rewrite_session_event_list(
     return remaining
 
 
+def purge_recording_events_from_session(
+    run_dir: Path,
+    event_indices: list[int],
+) -> int:
+    """Delete one or more events' files and update ``session.json``.
+
+    Does not rebuild ``report.json`` or HTML. Returns the remaining event count.
+    Raises ``ValueError`` when indices are empty/invalid or any event is missing.
+    """
+    run_dir = Path(run_dir)
+    if not event_indices:
+        raise ValueError("event_indices is empty")
+
+    unique: list[int] = []
+    seen: set[int] = set()
+    for raw in event_indices:
+        if not isinstance(raw, int) or isinstance(raw, bool) or raw < 1:
+            raise ValueError("invalid event index")
+        if raw in seen:
+            continue
+        seen.add(raw)
+        unique.append(raw)
+
+    pending: list[tuple[int, dict[str, Any]]] = []
+    for event_index in unique:
+        event_path = event_json_path(run_dir, event_index)
+        event = read_json(event_path, None)
+        if not isinstance(event, dict):
+            raise ValueError(f"event not found: {event_index}")
+        pending.append((event_index, event))
+
+    for event_index, event in pending:
+        _delete_recording_event_files(run_dir, event_index, event)
+    return _rewrite_session_event_list(run_dir)
+
+
 def purge_recording_event_from_session(run_dir: Path, event_index: int) -> int:
     """Delete one event's files and update ``session.json``.
 
     Does not rebuild ``report.json`` or HTML. Returns the remaining event count.
     Raises ``ValueError`` when the event is missing or the index is invalid.
     """
-    run_dir = Path(run_dir)
-    if not isinstance(event_index, int) or event_index < 1:
-        raise ValueError("invalid event index")
-
-    event_path = event_json_path(run_dir, event_index)
-    event = read_json(event_path, None)
-    if not isinstance(event, dict):
-        raise ValueError("event not found")
-
-    _delete_recording_event_files(run_dir, event_index, event)
-    return _rewrite_session_event_list(run_dir)
+    return purge_recording_events_from_session(run_dir, [event_index])
 
 
 def sync_recording_events(run_dir: Path, events: list[RecordedEvent]) -> dict[str, Any]:
@@ -468,19 +499,7 @@ def sync_recording_events(run_dir: Path, events: list[RecordedEvent]) -> dict[st
     return {"kept": len(events), "purged": purged, "remaining": remaining}
 
 
-def delete_recording_event(
-    runs_root: Path,
-    run_id: str,
-    event_index: int,
-) -> dict[str, Any]:
-    """Delete one recorded event and rebuild report/HTML artifacts.
-
-    Returns ``{"event_index": ..., "remaining": ...}``. Raises ``ValueError``
-    for invalid input / missing events.
-    """
-    run_dir = resolve_deletable_run_folder(runs_root, run_id)
-    remaining = purge_recording_event_from_session(run_dir, event_index)
-
+def _rebuild_recording_after_event_purge(run_dir: Path, remaining: int) -> None:
     report_path = run_dir / "report.json"
     report = read_json(report_path, {})
     if not isinstance(report, dict):
@@ -498,9 +517,50 @@ def delete_recording_event(
         report["cached"] = cached
     _rebuild_report_instructions(run_dir, report)
     write_json(report_path, report)
-
     write_recording_html_from_run(run_dir, update_index=True)
-    return {"event_index": event_index, "remaining": remaining}
+
+
+def delete_recording_events(
+    runs_root: Path,
+    run_id: str,
+    event_indices: list[int],
+) -> dict[str, Any]:
+    """Delete one or more recorded events and rebuild report/HTML once.
+
+    Returns ``{"event_indices": [...], "deleted": n, "remaining": ...}``.
+    Raises ``ValueError`` for invalid input / missing events.
+    """
+    run_dir = resolve_deletable_run_folder(runs_root, run_id)
+    unique: list[int] = []
+    seen: set[int] = set()
+    for raw in event_indices:
+        if not isinstance(raw, int) or isinstance(raw, bool) or raw < 1:
+            raise ValueError("invalid event index")
+        if raw in seen:
+            continue
+        seen.add(raw)
+        unique.append(raw)
+    remaining = purge_recording_events_from_session(run_dir, unique)
+    _rebuild_recording_after_event_purge(run_dir, remaining)
+    return {
+        "event_indices": unique,
+        "deleted": len(unique),
+        "remaining": remaining,
+    }
+
+
+def delete_recording_event(
+    runs_root: Path,
+    run_id: str,
+    event_index: int,
+) -> dict[str, Any]:
+    """Delete one recorded event and rebuild report/HTML artifacts.
+
+    Returns ``{"event_index": ..., "remaining": ...}``. Raises ``ValueError``
+    for invalid input / missing events.
+    """
+    result = delete_recording_events(runs_root, run_id, [event_index])
+    return {"event_index": event_index, "remaining": result["remaining"]}
 
 
 def _optional_stripped_str(value: Any, *, field_name: str) -> str | None:
@@ -1432,6 +1492,7 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
             event_char_target_match = _EVENT_CHAR_TARGET_PATH_RE.fullmatch(path)
             event_yolo_ocr_match = _EVENT_YOLO_OCR_PATH_RE.fullmatch(path)
             event_delete_match = _EVENT_DELETE_PATH_RE.fullmatch(path)
+            events_bulk_delete_match = _EVENTS_BULK_DELETE_PATH_RE.fullmatch(path)
             event_add_match = _EVENT_ADD_PATH_RE.fullmatch(path)
 
             if delete_match is not None:
@@ -1627,6 +1688,28 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
                         presence=body.get("presence"),
                         then_action=body.get("then_action"),
                     )
+                except ValueError as exc:
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                    return
+                except OSError as exc:
+                    self._send_json(500, {"ok": False, "error": str(exc)})
+                    return
+                self._send_json(200, {"ok": True, **result})
+                return
+
+            if events_bulk_delete_match is not None:
+                run_id = events_bulk_delete_match.group(1)
+                try:
+                    body = self._read_json_body()
+                    raw_indices = body.get("event_indices")
+                    if not isinstance(raw_indices, list):
+                        raise ValueError("event_indices must be a list")
+                    event_indices: list[int] = []
+                    for item in raw_indices:
+                        if isinstance(item, bool) or not isinstance(item, int):
+                            raise ValueError("invalid event index")
+                        event_indices.append(item)
+                    result = delete_recording_events(root, run_id, event_indices)
                 except ValueError as exc:
                     self._send_json(400, {"ok": False, "error": str(exc)})
                     return

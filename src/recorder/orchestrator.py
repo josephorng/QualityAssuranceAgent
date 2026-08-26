@@ -43,9 +43,9 @@ from src.recorder.window_snapshot import (
 _WAIT_THRESHOLD_SECONDS = 10.0
 _FINAL_AFTER_RELATIVE = "screenshots/final_after.jpeg"
 # Cap concurrent Triton YOLO+OCR jobs so the GPU is not flooded.
-_DEFAULT_VISION_WORKERS = 3
+_DEFAULT_VISION_WORKERS = 4
 # Cap concurrent LLM calls so local Ollama/vLLM is not flooded.
-_DEFAULT_LLM_WORKERS = 3
+_DEFAULT_LLM_WORKERS = 4
 _UNSET: Any = object()
 # Each event contributes vision + instruction + expected-outcome work units.
 _PROGRESS_UNITS_PER_EVENT = 3

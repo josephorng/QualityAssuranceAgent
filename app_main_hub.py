@@ -271,6 +271,7 @@ class MainHub(ctk.CTk):
         self._smart_sync_cache_after_id: str | None = None
         self._script_baseline = "\n"
         self._record_btn: ctk.CTkButton | None = None
+        self._recording_report_btn: ctk.CTkButton | None = None
         self._analyze_recording_btn: ctk.CTkButton | None = None
         self._analysis_progress_frame: ctk.CTkFrame | None = None
         self._analysis_progress: ctk.CTkProgressBar | None = None
@@ -432,14 +433,43 @@ class MainHub(ctk.CTk):
             return
         read_only = self._is_recording_script_open()
         self._script_text.configure(state="disabled" if read_only else "normal")
-        save_state = "disabled" if read_only else "normal"
-        for attr in ("_script_save_btn", "_script_save_as_btn"):
-            btn = getattr(self, attr, None)
-            if btn is not None:
-                try:
-                    btn.configure(state=save_state)
-                except Exception:
-                    pass
+        self._refresh_script_toolbar_for_recording()
+
+    def _refresh_script_toolbar_for_recording(self) -> None:
+        """Toggle save / report buttons for recording vs plain script."""
+        recording = self._is_recording_script_open()
+        clear_btn = getattr(self, "_script_clear_btn", None)
+        save_btn = getattr(self, "_script_save_btn", None)
+        save_as_btn = getattr(self, "_script_save_as_btn", None)
+        report_btn = self._recording_report_btn
+
+        def _pack_before_clear(btn: Any) -> None:
+            if btn is None or btn.winfo_ismapped():
+                return
+            if clear_btn is not None:
+                btn.pack(side="left", padx=(0, 8), before=clear_btn)
+            else:
+                btn.pack(side="left", padx=(0, 8))
+
+        if recording:
+            if save_btn is not None:
+                save_btn.pack_forget()
+            if save_as_btn is not None:
+                save_as_btn.pack_forget()
+            _pack_before_clear(report_btn)
+        else:
+            if report_btn is not None:
+                report_btn.pack_forget()
+            _pack_before_clear(save_btn)
+            _pack_before_clear(save_as_btn)
+
+    def _on_open_recording_report(self) -> None:
+        if not self._is_recording_script_open() or self._script_path is None:
+            return
+        rec = recording_run_dir(self._script_path)
+        if rec is None:
+            return
+        self._open_recording_review_html(rec, rec.name)
 
     def _load_script_into_editor(self, path: Path) -> None:
         """Load a script file or recording folder into the single-script editor."""
@@ -1211,9 +1241,13 @@ class MainHub(ctk.CTk):
         b_open = ctk.CTkButton(row, text="開啟", width=80, command=self._script_open)
         b_open.pack(side="left", padx=(0, 8))
         b_open_rec = ctk.CTkButton(
-            row, text="開啟錄製…", width=100, command=self._script_open_recording
+            row, text="開啟錄製", width=100, command=self._script_open_recording
         )
         b_open_rec.pack(side="left", padx=(0, 8))
+        self._recording_report_btn = ctk.CTkButton(
+            row, text="錄製報告", width=100, command=self._on_open_recording_report
+        )
+        # Shown only while a recording folder is the open script.
         b_save = ctk.CTkButton(row, text="儲存", width=80, command=self._script_save)
         b_save.pack(side="left", padx=(0, 8))
         self._script_save_btn = b_save
@@ -1222,6 +1256,7 @@ class MainHub(ctk.CTk):
         self._script_save_as_btn = b_sas
         b_clear = ctk.CTkButton(row, text="開新檔案", width=100, command=self._script_clear)
         b_clear.pack(side="left", padx=(0, 8))
+        self._script_clear_btn = b_clear
         self._record_btn = ctk.CTkButton(
             row, text="開始錄製", width=100, command=self._on_record_button
         )
@@ -1264,6 +1299,7 @@ class MainHub(ctk.CTk):
             [
                 b_open,
                 b_open_rec,
+                self._recording_report_btn,
                 b_save,
                 b_sas,
                 b_clear,
@@ -1272,6 +1308,7 @@ class MainHub(ctk.CTk):
                 self._script_text,
             ]
         )
+        self._refresh_script_toolbar_for_recording()
 
     def _build_smart_mode_tab(self, parent: Any) -> None:
         ctk.CTkLabel(
@@ -1745,15 +1782,26 @@ class MainHub(ctk.CTk):
             show_ctk_message(self, "報告", f"無法開啟報告：\n{e}", kind="error")
 
     def _report_http_url(self, html_path: Path) -> str:
-        """Serve reports over localhost so the index page can delete run folders."""
-        runs_root = Path(load_settings().runs_dir).resolve()
+        """Serve reports over localhost so interactive report APIs work.
+
+        Tries ``runs_dir`` then ``recordings_dir`` so recording reports open via the
+        hub server instead of a raw ``file://`` path.
+        """
+        settings = load_settings()
+        runs_root = Path(settings.runs_dir).resolve()
+        recordings_root = Path(settings.recordings_dir).resolve()
         resolved = html_path.resolve()
-        try:
-            relative = resolved.relative_to(runs_root).as_posix()
-        except ValueError:
-            return resolved.as_uri()
-        server = ensure_runs_report_server(runs_root)
-        return f"{server.base_url}/{relative}"
+        candidates: list[Path] = [runs_root]
+        if recordings_root != runs_root:
+            candidates.append(recordings_root)
+        for serve_root in candidates:
+            try:
+                relative = resolved.relative_to(serve_root).as_posix()
+            except ValueError:
+                continue
+            server = ensure_runs_report_server(serve_root)
+            return f"{server.base_url}/{relative}"
+        return resolved.as_uri()
 
     def _open_last_report(self) -> None:
         if self._last_report_html is None:
@@ -2451,6 +2499,15 @@ class MainHub(ctk.CTk):
             candidate = Path(folder) / "recording_steps.html"
             if candidate.is_file():
                 html_path = candidate
+            elif Path(folder).is_dir():
+                try:
+                    from src.common.session_html import write_recording_html_from_run
+
+                    html_path = write_recording_html_from_run(
+                        Path(folder), update_index=False
+                    )
+                except Exception:
+                    html_path = None
         if html_path is None and run_id:
             settings = load_settings()
             for root in (Path(settings.runs_dir), Path(settings.recordings_dir)):
@@ -2458,8 +2515,8 @@ class MainHub(ctk.CTk):
                 if candidate.is_file():
                     html_path = candidate
                     break
-        if html_path is None:
-            show_ctk_message(self, "錄製分析完成", "找不到錄製報告路徑。", kind="warning")
+        if html_path is None or not html_path.is_file():
+            show_ctk_message(self, "錄製報告", "找不到錄製報告路徑。", kind="warning")
             return
         self._open_report_html(html_path)
 

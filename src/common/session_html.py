@@ -3416,15 +3416,15 @@ _LANDMARK_SIDE_GROUP_ORDER: tuple[str | None, ...] = (
 )
 
 _LANDMARK_SIDE_GROUP_TITLES: dict[str | None, str] = {
-    "left": "左邊",
-    "right": "右邊",
-    "above": "上面",
-    "below": "下面",
-    "upper_left": "左上方",
-    "upper_right": "右上方",
-    "lower_left": "左下方",
-    "lower_right": "右下方",
-    "inside": "裡面",
+    "left": "目標的左邊",
+    "right": "目標的右邊",
+    "above": "目標的上面",
+    "below": "目標的下面",
+    "upper_left": "目標的左上方",
+    "upper_right": "目標的右上方",
+    "lower_left": "目標的左下方",
+    "lower_right": "目標的右下方",
+    "inside": "目標的裡面",
     None: "其他",
 }
 

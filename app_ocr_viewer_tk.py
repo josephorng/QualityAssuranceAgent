@@ -30,7 +30,7 @@ from cua_mcp.yolo_onnx import (
     YOLO_CLASS_TEXT,
 )
 from src.common.io_utils import imread_bgr, read_json, write_json
-from src.common.settings import ROOT_DIR, resolve_runs_dir
+from src.common.settings import ROOT_DIR, resolve_recordings_dir, resolve_runs_dir
 
 YOLO_UNDONE_IMAGES = Path(
     r"C:\Users\Joseph Hung\Documents\Repos\Git\YOLO\real_screenshot\undone\images"
@@ -835,10 +835,12 @@ class OcrViewerApp:
         *,
         manage_window: bool = True,
         bind_global_hotkeys: bool = True,
+        session_list_label: str = "Runs",
     ):
         self.parent = parent
         self.root = parent.winfo_toplevel()
         self.runs_root = runs_root
+        self._session_list_label = session_list_label
         self._manage_window = manage_window
         self._bind_global_hotkeys = bind_global_hotkeys
         self._hotkeys_active = False
@@ -913,7 +915,7 @@ class OcrViewerApp:
         left.grid(row=0, column=0, sticky="ns")
         left.columnconfigure(0, weight=1)
 
-        ttk.Label(left, text="Runs").grid(row=0, column=0, sticky="w")
+        ttk.Label(left, text=self._session_list_label).grid(row=0, column=0, sticky="w")
         run_wrap = ttk.Frame(left)
         run_wrap.grid(row=1, column=0, sticky="nsew")
         run_wrap.columnconfigure(0, weight=1)
@@ -1074,7 +1076,8 @@ class OcrViewerApp:
             self.run_list.select_set(0)
             self._on_run_select()
         else:
-            self.status_var.set(f"No runs found at {self.runs_root}")
+            label = self._session_list_label.lower()
+            self.status_var.set(f"No {label} found at {self.runs_root}")
 
     def _selected_run(self) -> Path | None:
         selected = self.run_list.curselection()
@@ -1780,6 +1783,7 @@ class OcrViewerApp:
 def run_app(
     runs_root: Path | None = None,
     *,
+    recordings_root: Path | None = None,
     images_dir: Path | None = None,
     initial_tab: str = "runs",
 ) -> None:
@@ -1787,6 +1791,7 @@ def run_app(
     CombinedImageViewerApp(
         root,
         runs_root=runs_root,
+        recordings_root=recordings_root,
         images_dir=images_dir,
         initial_tab=initial_tab,
     )
@@ -2481,13 +2486,14 @@ class TestImagesViewerApp:
 
 
 class CombinedImageViewerApp:
-    """Notebook shell with Run images and Test images tabs."""
+    """Notebook shell with Run, Recordings, and Test images tabs."""
 
     def __init__(
         self,
         root: tk.Tk,
         *,
         runs_root: Path | None = None,
+        recordings_root: Path | None = None,
         images_dir: Path | None = None,
         initial_tab: str = "runs",
     ):
@@ -2502,11 +2508,16 @@ class CombinedImageViewerApp:
         self.notebook = notebook
 
         runs_tab = ttk.Frame(notebook)
+        recordings_tab = ttk.Frame(notebook)
         test_tab = ttk.Frame(notebook)
         notebook.add(runs_tab, text="Run images")
+        notebook.add(recordings_tab, text="Recordings")
         notebook.add(test_tab, text="Test images")
 
         runs_base = runs_root if runs_root is not None else resolve_runs_dir()
+        recordings_base = (
+            recordings_root if recordings_root is not None else resolve_recordings_dir()
+        )
         test_base = images_dir if images_dir is not None else DEFAULT_TEST_IMAGES_DIR
 
         self.runs_viewer = OcrViewerApp(
@@ -2515,16 +2526,28 @@ class CombinedImageViewerApp:
             manage_window=False,
             bind_global_hotkeys=False,
         )
+        self.recordings_viewer = OcrViewerApp(
+            recordings_tab,
+            recordings_base,
+            manage_window=False,
+            bind_global_hotkeys=False,
+            session_list_label="Recordings",
+        )
         self.test_viewer = TestImagesViewerApp(
             test_tab,
             test_base,
             manage_window=False,
             bind_global_hotkeys=False,
         )
-        self._viewers = (self.runs_viewer, self.test_viewer)
+        self._viewers = (self.runs_viewer, self.recordings_viewer, self.test_viewer)
+        self._tab_frames = {
+            "runs": runs_tab,
+            "recordings": recordings_tab,
+            "test": test_tab,
+        }
         notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
-        if initial_tab == "test":
-            notebook.select(test_tab)
+        if initial_tab in self._tab_frames:
+            notebook.select(self._tab_frames[initial_tab])
         self._on_tab_changed()
 
     def _on_tab_changed(self, _event: object | None = None) -> None:

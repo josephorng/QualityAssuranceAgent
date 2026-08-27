@@ -259,6 +259,58 @@ def test_ensure_runs_report_server_reuses_same_root(tmp_path: Path) -> None:
         stop_runs_report_server()
 
 
+def test_report_server_serves_sibling_recording_from_index_href(tmp_path: Path) -> None:
+    """Index under runs/ links to ../recordings/...; serve from common parent."""
+    runs_root = tmp_path / "runs"
+    recordings_root = tmp_path / "recordings"
+    runs_root.mkdir()
+    _make_recording_landmark_run(recordings_root, "demo_rec")
+    write_runs_index_html(runs_root, recordings_root=recordings_root)
+    index_html = (runs_root / "index.html").read_text(encoding="utf-8")
+    assert 'href="../recordings/demo_rec/recording_steps.html"' in index_html
+
+    stop_runs_report_server()
+    try:
+        server = ensure_runs_report_server(tmp_path)
+        with urllib.request.urlopen(
+            f"{server.base_url}/runs/index.html"
+        ) as response:
+            assert response.status == 200
+            body = response.read().decode("utf-8")
+            assert "demo_rec" in body
+        with urllib.request.urlopen(
+            f"{server.base_url}/recordings/demo_rec/recording_steps.html"
+        ) as response:
+            assert response.status == 200
+            page = response.read().decode("utf-8")
+            assert "demo_rec" in page
+            assert "尚無錄製事件" in page or "instruction-group" in page or "錄製" in page
+    finally:
+        stop_runs_report_server()
+
+
+def test_resolve_deletable_run_folder_finds_sibling_recording(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs_root = tmp_path / "runs"
+    recordings_root = tmp_path / "recordings"
+    runs_root.mkdir()
+    recording = recordings_root / "sibling_rec"
+    recording.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        "src.common.settings.resolve_runs_dir",
+        lambda configured=None: runs_root.resolve(),
+    )
+    monkeypatch.setattr(
+        "src.common.settings.resolve_recordings_dir",
+        lambda configured=None: recordings_root.resolve(),
+    )
+
+    found = resolve_deletable_run_folder(tmp_path, "sibling_rec")
+    assert found == recording.resolve()
+
+
 def test_apply_recording_event_landmarks_persists_and_rebuilds(tmp_path: Path) -> None:
     runs_root = tmp_path / "runs"
     _make_recording_landmark_run(runs_root, "recording_landmark_edit")

@@ -231,8 +231,9 @@ def delete_run_report_folder(runs_root: Path, run_id: str) -> Path:
     Raises ``ValueError`` for invalid ids / path traversal / missing folders.
     """
     target = resolve_deletable_run_folder(runs_root, run_id)
+    parent = target.parent
     shutil.rmtree(target)
-    write_runs_index_html(Path(runs_root).resolve())
+    _rebuild_reports_index(api_root=runs_root, mutated_parent=parent)
     return target
 
 
@@ -252,24 +253,100 @@ def _is_valid_run_id(run_id: str) -> bool:
     return True
 
 
+def _report_folder_bases(api_root: Path) -> list[Path]:
+    """Containers that may hold run/recording folders for the given API root.
+
+    When the hub serves the common parent of ``runs`` and ``recordings``, look in
+    both configured dirs. Otherwise keep the legacy single-root behavior.
+    """
+    root = Path(api_root).resolve()
+    bases = [root]
+    try:
+        from src.common.settings import (
+            reports_serve_root,
+            resolve_recordings_dir,
+            resolve_runs_dir,
+        )
+
+        runs = resolve_runs_dir()
+        recordings = resolve_recordings_dir()
+        if root == reports_serve_root(runs, recordings):
+            for extra in (runs, recordings):
+                resolved = Path(extra).resolve()
+                if resolved not in bases:
+                    bases.append(resolved)
+    except Exception:
+        pass
+    return bases
+
+
+def _rebuild_reports_index(*, api_root: Path, mutated_parent: Path) -> None:
+    """Rebuild ``index.html`` after a run/recording folder mutation."""
+    serve = Path(api_root).resolve()
+    parent = Path(mutated_parent).resolve()
+    try:
+        from src.common.settings import (
+            reports_serve_root,
+            resolve_recordings_dir,
+            resolve_runs_dir,
+        )
+
+        runs = resolve_runs_dir()
+        recordings = resolve_recordings_dir()
+        if serve == reports_serve_root(runs, recordings):
+            write_runs_index_html(runs, recordings_root=recordings)
+            if (
+                parent == Path(recordings).resolve()
+                and Path(recordings).resolve() != Path(runs).resolve()
+            ):
+                write_runs_index_html(parent)
+            return
+    except Exception:
+        pass
+    write_runs_index_html(parent)
+
+
+def _static_allowed_roots(serve_root: Path) -> list[Path]:
+    """Limit static file serving to runs/recordings when serving their parent."""
+    root = Path(serve_root).resolve()
+    try:
+        from src.common.settings import (
+            reports_serve_root,
+            resolve_recordings_dir,
+            resolve_runs_dir,
+        )
+
+        runs = Path(resolve_runs_dir()).resolve()
+        recordings = Path(resolve_recordings_dir()).resolve()
+        if root == reports_serve_root(runs, recordings) and runs != recordings:
+            return [runs, recordings]
+    except Exception:
+        pass
+    return [root]
+
+
 def resolve_deletable_run_folder(runs_root: Path, run_id: str) -> Path:
     """Validate ``run_id`` and return the absolute path of a deletable run folder."""
-    runs_root = Path(runs_root).resolve()
     if not _is_valid_run_id(run_id):
         raise ValueError("invalid run id")
     if Path(run_id).name != run_id:
         raise ValueError("invalid run id")
 
-    target = (runs_root / run_id).resolve()
-    try:
-        target.relative_to(runs_root)
-    except ValueError as exc:
-        raise ValueError("run folder is outside runs root") from exc
-    if target.parent != runs_root:
-        raise ValueError("run folder must be a direct child of runs root")
-    if not target.is_dir():
-        raise ValueError("run folder not found")
-    return target
+    last_error = "run folder not found"
+    for base in _report_folder_bases(runs_root):
+        target = (base / run_id).resolve()
+        try:
+            target.relative_to(base)
+        except ValueError:
+            last_error = "run folder is outside runs root"
+            continue
+        if target.parent != base:
+            last_error = "run folder must be a direct child of runs root"
+            continue
+        if target.is_dir():
+            return target
+        last_error = "run folder not found"
+    raise ValueError(last_error)
 
 
 def rename_recording_folder(
@@ -287,17 +364,17 @@ def rename_recording_folder(
     if not _is_valid_run_id(cleaned):
         raise ValueError("invalid run name")
 
-    runs_root = Path(runs_root).resolve()
     source = resolve_deletable_run_folder(runs_root, run_id)
     if cleaned == source.name:
         return {"old_id": run_id, "new_id": cleaned}
 
-    dest = (runs_root / cleaned).resolve()
+    container = source.parent
+    dest = (container / cleaned).resolve()
     try:
-        dest.relative_to(runs_root)
+        dest.relative_to(container)
     except ValueError as exc:
         raise ValueError("run folder is outside runs root") from exc
-    if dest.parent != runs_root:
+    if dest.parent != container:
         raise ValueError("run folder must be a direct child of runs root")
     if dest.exists():
         raise ValueError("a folder with that name already exists")
@@ -1471,10 +1548,22 @@ def zip_run_report_to_bug_share(
 
 def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
     root = runs_root.resolve()
+    allowed_roots = _static_allowed_roots(root)
+    denied_path = str((root / ".runs-report-denied" / "missing").resolve())
 
     class RunsReportHandler(SimpleHTTPRequestHandler):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, directory=str(root), **kwargs)
+
+        def translate_path(self, path: str) -> str:  # noqa: A003
+            translated = Path(super().translate_path(path)).resolve()
+            for allowed in allowed_roots:
+                try:
+                    translated.relative_to(allowed)
+                except ValueError:
+                    continue
+                return str(translated)
+            return denied_path
 
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
             # Keep hub console quiet during normal browsing.

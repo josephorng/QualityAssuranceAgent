@@ -70,6 +70,7 @@ from src.common.settings import (
     apply_startup_ollama_host_probe,
     apply_startup_triton_probe,
     load_settings,
+    reports_serve_root,
 )
 from src.recorder.capture import RecordingSession
 from src.recorder.hotkey import RecordingHotkeyManager
@@ -1794,22 +1795,25 @@ class MainHub(ctk.CTk):
     def _report_http_url(self, html_path: Path) -> str:
         """Serve reports over localhost so interactive report APIs work.
 
-        Tries ``runs_dir`` then ``recordings_dir`` so recording reports open via the
-        hub server instead of a raw ``file://`` path.
+        Uses the common parent of ``runs_dir`` and ``recordings_dir`` when they are
+        siblings so index links like ``../recordings/<id>/recording_steps.html``
+        resolve instead of 404ing under a runs-only document root.
         """
         settings = load_settings()
         runs_root = Path(settings.runs_dir).resolve()
         recordings_root = Path(settings.recordings_dir).resolve()
         resolved = html_path.resolve()
-        candidates: list[Path] = [runs_root]
-        if recordings_root != runs_root:
-            candidates.append(recordings_root)
-        for serve_root in candidates:
+        serve_root = reports_serve_root(runs_root, recordings_root)
+        candidates: list[Path] = [serve_root]
+        for extra in (runs_root, recordings_root):
+            if extra not in candidates:
+                candidates.append(extra)
+        for root in candidates:
             try:
-                relative = resolved.relative_to(serve_root).as_posix()
+                relative = resolved.relative_to(root).as_posix()
             except ValueError:
                 continue
-            server = ensure_runs_report_server(serve_root)
+            server = ensure_runs_report_server(root)
             return f"{server.base_url}/{relative}"
         return resolved.as_uri()
 

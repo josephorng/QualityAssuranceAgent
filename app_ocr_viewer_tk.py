@@ -241,11 +241,16 @@ def _is_icon_ocr_line(line: OcrLine) -> bool:
     return line.line_type == "ocr" and text_has_pua(line.text)
 
 
-def _is_single_pua_icon_text(text: str) -> bool:
-    """True when ``text`` is a lone PUA glyph (exactly one icon, no other characters)."""
-    pua_chars = [ch for ch in text if is_pua_char(ch)]
+def _is_pua_icon_identity_text(text: str) -> bool:
+    """True when ``text`` is PUA-only (one or more icons, no other characters).
+
+    Matches ``_detect_mouse_targets_from_bgr`` / ``_text_is_pua_only``: multi-icon
+    crops stay icon identity, not mixed text.
+    """
+    if not text or not text_has_pua(text):
+        return False
     non_pua = "".join(ch for ch in text if not is_pua_char(ch)).strip()
-    return len(pua_chars) == 1 and not non_pua
+    return not non_pua
 
 
 def _export_dest_for_icon_identity(is_icon: bool) -> Path:
@@ -254,8 +259,8 @@ def _export_dest_for_icon_identity(is_icon: bool) -> Path:
 
 
 def _export_dest_for_text(text: str) -> Path:
-    """Train export folder: single-icon PUA → ``icons``; pure text or mixed PUA+text → ``cua_data``."""
-    return _export_dest_for_icon_identity(_is_single_pua_icon_text(text))
+    """Train export folder: PUA-only icons → ``icons``; pure text or mixed PUA+text → ``cua_data``."""
+    return _export_dest_for_icon_identity(_is_pua_icon_identity_text(text))
 
 
 def _undo_export_files(paths: list[Path]) -> int:
@@ -1399,7 +1404,7 @@ class OcrViewerApp:
         text_entry = ttk.Entry(dialog, textvariable=text_var, width=72)
         text_entry.grid(row=0, column=1, columnspan=2, sticky="ew", padx=10, pady=(10, 6))
 
-        is_icon = _is_single_pua_icon_text(line.text)
+        is_icon = _is_pua_icon_identity_text(line.text)
         icon_var = tk.BooleanVar(value=is_icon)
 
         def _on_icon_toggle() -> None:
@@ -1650,7 +1655,7 @@ class OcrViewerApp:
     ) -> list[Path]:
         """Backward-compatible wrapper for OCR export callers."""
         if export_as_icon is None:
-            export_as_icon = _is_single_pua_icon_text(corrected_text)
+            export_as_icon = _is_pua_icon_identity_text(corrected_text)
         return self._export_display_item(
             display_idx,
             dest_dir,
@@ -2154,7 +2159,7 @@ class TestImagesViewerApp:
         def _export_current() -> None:
             _save_text()
             corrected = text_var.get().strip()
-            if _is_single_pua_icon_text(corrected):
+            if _is_pua_icon_identity_text(corrected):
                 dest_dir = OCR_EXPORT_ICONS_DIR
             else:
                 dest_dir = Path(dest_var.get().strip())
@@ -2213,7 +2218,7 @@ class TestImagesViewerApp:
         stem = f"{base_name}_item{idx + 1:03d}"
         out_img = dest_dir / f"{stem}.png"
         crop.save(out_img)
-        if _is_single_pua_icon_text(corrected_text):
+        if _is_pua_icon_identity_text(corrected_text):
             return 1
         out_txt = dest_dir / f"{stem}.txt"
         out_txt.write_text(corrected_text, encoding="utf-8")

@@ -436,6 +436,60 @@ def test_resolve_ocr_class_id_unknown_pua_only_becomes_unknown() -> None:
     assert _resolve_ocr_class_id(YOLO_CLASS_TEXT, "\ue01a") == PICKER_CLASS_UNKNOWN
 
 
+def test_split_multi_icon_element_two_pua_spans(monkeypatch: pytest.MonkeyPatch) -> None:
+    import numpy as np
+    from cua_mcp.read_screen_text.constrained_decode import CharSpan
+    from cua_mcp.select_mouse_target import _split_multi_icon_element_detection
+
+    pua_a, pua_b = "\ue000", "\ue001"
+    text = pua_a + pua_b
+    bbox = (100, 50, 60, 20)
+    spans = [
+        CharSpan(char=pua_a, t_start=0, t_end=0, x_start=0.0, x_end=48.0),
+        CharSpan(char=pua_b, t_start=1, t_end=1, x_start=48.0, x_end=96.0),
+    ]
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.ocr_box_with_spans",
+        lambda *_args, **_kwargs: (text, spans),
+    )
+    bgr = np.zeros((200, 400, 3), dtype=np.uint8)
+    split = _split_multi_icon_element_detection(bgr, bbox, text)
+    assert split is not None
+    assert len(split) == 2
+    assert split[0].text == pua_a
+    assert split[1].text == pua_b
+    assert split[0].icons and len(split[0].icons) == 1
+    assert split[1].icons and len(split[1].icons) == 1
+    assert split[0].icons[0]["chinese_id"] == "資料夾"
+    assert split[1].icons[0]["chinese_id"] == "檔案"
+    assert split[0].bbox[0] < split[1].bbox[0]
+
+
+def test_split_multi_icon_element_span_ocr_failure_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    from cua_mcp.select_mouse_target import _split_multi_icon_element_detection
+
+    text = "\ue000\ue001"
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.ocr_box_with_spans",
+        lambda *_args, **_kwargs: ("", []),
+    )
+    bgr = np.zeros((40, 80, 3), dtype=np.uint8)
+    assert _split_multi_icon_element_detection(bgr, (0, 0, 40, 20), text) is None
+
+
+def test_split_multi_icon_element_single_icon_and_non_pua_skip() -> None:
+    import numpy as np
+    from cua_mcp.select_mouse_target import _split_multi_icon_element_detection
+
+    bgr = np.zeros((40, 80, 3), dtype=np.uint8)
+    assert _split_multi_icon_element_detection(bgr, (0, 0, 20, 20), "\ue000") is None
+    assert _split_multi_icon_element_detection(bgr, (0, 0, 40, 20), "OK\ue000") is None
+    assert _split_multi_icon_element_detection(bgr, (0, 0, 40, 20), "搜尋") is None
+
+
 def test_detection_from_bbox_unknown() -> None:
     from cua_mcp.yolo_onnx import PICKER_CLASS_UNKNOWN
 

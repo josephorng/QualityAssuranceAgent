@@ -38,6 +38,10 @@ from src.recorder.models import (
 _MIN_NEARBY_TEXT_LANDMARKS = 2
 _MIN_NEARBY_TEXT_CANDIDATES = 8
 _MIN_NEARBY_ICON_CANDIDATES = 5
+# Recording HTML「點擊目標」radio list: closest labeled candidates only.
+_MAX_PRIMARY_TARGET_OPTIONS = 10
+# Recording HTML「附近地標」: max options per directed side (closest to click).
+_MAX_NEARBY_LANDMARK_OPTIONS_PER_SIDE = 10
 # Prefer at least this many multi-char text neighbors in each directional cell.
 _MIN_MULTI_CHAR_TEXT_PER_SIDE = 2
 _DRAG_OFFSET_THRESHOLD_PX = 5
@@ -1296,7 +1300,7 @@ def list_nearby_landmark_options(
     *,
     instruction: str = "",
 ) -> list[dict[str, Any]]:
-    """Return all labelable neighbor landmarks (no auto-pick cap).
+    """Return labelable neighbor landmarks for the recording HTML picker.
 
     Each option is ``{"label", "side", "display"}`` where ``side`` is the schema
     string (e.g. ``lower_left``) or ``None``. Skips the primary candidate, unknown
@@ -1304,6 +1308,10 @@ def list_nearby_landmark_options(
     nearby comments are stripped) so the click target itself is excluded.
     When the click is inside a neighbor ``input`` / ``scrollbar``, ``side`` is
     ``inside`` (裡面).
+
+    Per directed side (and ``inside`` / undirected), keeps at most
+    ``_MAX_NEARBY_LANDMARK_OPTIONS_PER_SIDE`` options, preferring those closest
+    to the click (``local_cursor``, else primary center).
     """
     from src.common.nearby_side import strip_nearby_context_comments
 
@@ -1319,9 +1327,10 @@ def list_nearby_landmark_options(
 
     base_instruction = strip_nearby_context_comments(instruction) if instruction else ""
 
-    options: list[dict[str, Any]] = []
+    # (distance_sq, order, option) — rank within each side by click distance.
+    pending: list[tuple[float, int, dict[str, Any]]] = []
     seen: set[str] = set()
-    for candidate in candidates[1:]:
+    for order, candidate in enumerate(candidates[1:]):
         if not isinstance(candidate, dict):
             continue
         label = _candidate_label_for_hint(candidate)
@@ -1339,14 +1348,38 @@ def list_nearby_landmark_options(
             display = f"{label}（{side_to_zh(side)}）"
         else:
             display = label
-        options.append(
-            {
-                "label": label,
-                "side": side_to_schema_value(side),
-                "display": display,
-            }
+        bbox = _as_bbox_xywh(candidate.get("bbox"))
+        if click_xy is not None and bbox is not None:
+            dist_sq = _point_to_bbox_distance_sq(click_xy[0], click_xy[1], bbox)
+        else:
+            dist_sq = float(order)
+        pending.append(
+            (
+                dist_sq,
+                order,
+                {
+                    "label": label,
+                    "side": side_to_schema_value(side),
+                    "display": display,
+                },
+            )
         )
-    return options
+
+    by_side: dict[str | None, list[tuple[float, int, dict[str, Any]]]] = {}
+    for item in pending:
+        side_key = item[2].get("side")
+        if side_key is None or side_key == "":
+            bucket: str | None = None
+        else:
+            bucket = str(side_key)
+        by_side.setdefault(bucket, []).append(item)
+
+    kept: list[tuple[float, int, dict[str, Any]]] = []
+    for items in by_side.values():
+        items.sort(key=lambda row: (row[0], row[1]))
+        kept.extend(items[:_MAX_NEARBY_LANDMARK_OPTIONS_PER_SIDE])
+    kept.sort(key=lambda row: (row[0], row[1]))
+    return [option for _, _, option in kept]
 
 
 def load_yolo_ocr_payload(
@@ -1438,13 +1471,15 @@ def list_primary_target_options(
 
     Each option is ``{"index", "label", "display"}``. Index 0 is the current
     primary. Candidates without a meaningful hub-style label are omitted.
+    Only the ``_MAX_PRIMARY_TARGET_OPTIONS`` candidates nearest the click
+    (``candidates`` order) are considered.
     """
     candidates = vision.get("candidates") or []
     if not isinstance(candidates, list) or not candidates:
         return []
 
     options: list[dict[str, Any]] = []
-    for index, candidate in enumerate(candidates):
+    for index, candidate in enumerate(candidates[:_MAX_PRIMARY_TARGET_OPTIONS]):
         if not isinstance(candidate, dict):
             continue
         label = _candidate_label_for_hint(candidate)

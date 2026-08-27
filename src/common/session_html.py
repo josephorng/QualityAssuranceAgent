@@ -222,11 +222,31 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
   margin: 0 0 .35rem; font-size: .8rem; font-weight: 600; color: #8c959f;
 }
 .landmarks-side-groups {
-  display: flex; flex-direction: column; gap: .55rem;
+  display: flex; flex-direction: column; gap: .35rem;
 }
-.landmarks-side-group { margin: 0; }
-.landmarks-side-label {
-  margin: 0 0 .2rem; font-size: .75rem; font-weight: 700; color: #57606a;
+.landmarks-side-group {
+  margin: 0; border: 1px solid #d8dee4; border-radius: 6px; background: #fff;
+}
+.landmarks-side-group > summary {
+  display: flex; align-items: center; gap: .35rem;
+  cursor: pointer; user-select: none; list-style: none;
+  margin: 0; padding: .3rem .45rem;
+  font-size: .75rem; font-weight: 700; color: #57606a;
+}
+.landmarks-side-group > summary::-webkit-details-marker { display: none; }
+.landmarks-side-group > summary::before {
+  content: "▶"; flex: 0 0 auto; font-size: .65rem; color: #8c959f;
+  transition: transform .15s ease;
+}
+.landmarks-side-group[open] > summary::before { transform: rotate(90deg); }
+.landmarks-side-group > summary .landmarks-side-count {
+  margin-left: auto; font-weight: 600; color: #8c959f;
+}
+.landmarks-side-group > summary .landmarks-side-count.has-selected {
+  color: #0969da;
+}
+.landmarks-side-group .landmarks-list {
+  padding: 0 .45rem .4rem;
 }
 .landmarks-list {
   list-style: none; margin: 0; padding: 0;
@@ -3417,15 +3437,15 @@ _LANDMARK_SIDE_GROUP_ORDER: tuple[str | None, ...] = (
 )
 
 _LANDMARK_SIDE_GROUP_TITLES: dict[str | None, str] = {
-    "left": "目標的左邊",
-    "right": "目標的右邊",
-    "above": "目標的上面",
-    "below": "目標的下面",
-    "upper_left": "目標的左上方",
-    "upper_right": "目標的右上方",
-    "lower_left": "目標的左下方",
-    "lower_right": "目標的右下方",
-    "inside": "目標的裡面",
+    "left": "點擊位置的的右邊",
+    "right": "點擊位置的的左邊",
+    "above": "點擊位置的的下面",
+    "below": "點擊位置的的上面",
+    "upper_left": "點擊位置的的右下方",
+    "upper_right": "點擊位置的的左下方",
+    "lower_left": "點擊位置的的右上方",
+    "lower_right": "點擊位置的的左上方",
+    "inside": "點擊位置的的裡面",
     None: "其他",
 }
 
@@ -3492,11 +3512,26 @@ def _render_landmark_group_html(
         if not items:
             continue
         side_title = _LANDMARK_SIDE_GROUP_TITLES[side_key]
+        selected_count = sum(
+            1
+            for option in side_options
+            if str(option.get("label") or "") in selected_labels
+        )
+        count_class = "landmarks-side-count"
+        if selected_count:
+            count_class += " has-selected"
+            count_text = f"{selected_count}/{len(items)}"
+        else:
+            count_text = str(len(items))
         side_sections.append(
-            f'<div class="landmarks-side-group" data-side-group="{escape(side_key or "", quote=True)}">'
-            f'<div class="landmarks-side-label">{escape(side_title)}</div>'
+            f'<details class="landmarks-side-group" '
+            f'data-side-group="{escape(side_key or "", quote=True)}">'
+            f"<summary>"
+            f"<span>{escape(side_title)}</span>"
+            f'<span class="{count_class}">{escape(count_text)}</span>'
+            f"</summary>"
             f'<ul class="landmarks-list">{"".join(items)}</ul>'
-            f"</div>"
+            f"</details>"
         )
     if not side_sections:
         return ""

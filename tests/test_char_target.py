@@ -5,6 +5,7 @@ from cua_mcp.char_target import (
     occurrence_index,
     parse_char_target_instruction,
     resolve_char_screen_point,
+    screen_bbox_from_span,
     span_at_local_x,
     text_anchor_from_full_text,
 )
@@ -84,3 +85,26 @@ def test_resolve_char_screen_point_missing_char() -> None:
         )
         is None
     )
+
+
+def test_screen_bbox_from_span_left_and_right_halves() -> None:
+    # margin=0 so expanded crop == bbox; line_w scales with crop (60x20 → line_w=96).
+    bbox = (100, 200, 60, 20)
+    left = CharSpan(char="A", t_start=0, t_end=0, x_start=0.0, x_end=48.0)
+    right = CharSpan(char="B", t_start=1, t_end=1, x_start=48.0, x_end=96.0)
+    left_box = screen_bbox_from_span(bbox, left, img_w=1000, img_h=1000, margin=0)
+    right_box = screen_bbox_from_span(bbox, right, img_w=1000, img_h=1000, margin=0)
+    assert left_box == (100, 200, 30, 20)
+    assert right_box == (130, 200, 30, 20)
+    assert left_box[0] + left_box[2] == right_box[0]
+
+
+def test_screen_bbox_from_span_clips_to_image() -> None:
+    bbox = (0, 0, 10, 10)
+    # Span extends past crop in line coords; result must stay inside image.
+    span = CharSpan(char="X", t_start=0, t_end=0, x_start=0.0, x_end=1000.0)
+    box = screen_bbox_from_span(bbox, span, img_w=20, img_h=20, margin=2)
+    x, y, w, h = box
+    assert x >= 0 and y >= 0
+    assert x + w <= 20 and y + h <= 20
+    assert w >= 1 and h >= 1

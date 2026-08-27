@@ -14,7 +14,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from cua_mcp.char_target import resolve_char_screen_point
+from cua_mcp.char_target import resolve_char_screen_point, screen_bbox_from_span
 from cua_mcp.geometry import clip_box, iou_xywh, merge_overlapping_boxes
 from cua_mcp.instruction_offset import parse_mouse_target_instruction
 from cua_mcp.icon_map import (
@@ -280,6 +280,39 @@ def _dedupe_overlapping_detections(
     return [detections[i] for i in kept]
 
 
+def _pua_char_count(text: str) -> int:
+    return sum(1 for ch in text or "" if is_pua_char(ch))
+
+
+def _split_multi_icon_element_detection(
+    bgr: np.ndarray,
+    bbox: tuple[int, int, int, int],
+    text_value: str,
+) -> list[UiDetection] | None:
+    """Split a PUA-only multi-icon element box into one detection per icon.
+
+    Returns ``None`` when splitting does not apply or span OCR yields no usable
+    PUA spans (caller should keep the combined detection).
+    """
+    if not _text_is_pua_only(text_value) or _pua_char_count(text_value) < 2:
+        return None
+    mode = ocr_mode_for_yolo_class(YOLO_CLASS_ELEMENT)
+    _decoded, spans = ocr_box_with_spans(bgr, bbox, mode=mode)
+    if not spans:
+        return None
+    img_h, img_w = bgr.shape[:2]
+    split: list[UiDetection] = []
+    for span in spans:
+        if not is_pua_char(span.char):
+            continue
+        child_bbox = screen_bbox_from_span(bbox, span, img_w=img_w, img_h=img_h)
+        resolved_cls = _resolve_ocr_class_id(YOLO_CLASS_ELEMENT, span.char)
+        split.append(
+            _detection_from_bbox(child_bbox, resolved_cls, text=span.char)
+        )
+    return split if split else None
+
+
 def _detect_mouse_targets_from_bgr(
     bgr: np.ndarray,
     *,
@@ -291,7 +324,8 @@ def _detect_mouse_targets_from_bgr(
     Returns local-coordinate ``UiDetection`` candidates (text, icons, inputs,
     scrollbars) for move_mouse / recording vision. Overlapping ``text`` /
     ``element`` boxes are merged per class before OCR; results are sorted in
-    reading order.
+    reading order. PUA-only element OCR with 2+ icons is split into one
+    single-icon detection per glyph (via character spans).
 
     When ``original_scrollbar_bboxes_out`` is provided, appends each pre-fit
     scrollbar bbox that differs from the post-fit box (for debug overlays).
@@ -358,6 +392,11 @@ def _detect_mouse_targets_from_bgr(
         text_value = "".join(preds).strip()
         if cls_id == YOLO_CLASS_TEXT and not text_value:
             continue
+        if cls_id == YOLO_CLASS_ELEMENT:
+            split = _split_multi_icon_element_detection(bgr, bbox, text_value)
+            if split is not None:
+                candidates.extend(split)
+                continue
         resolved_cls = _resolve_ocr_class_id(cls_id, text_value)
         candidates.append(
             _detection_from_bbox(bbox, resolved_cls, text=text_value or None)

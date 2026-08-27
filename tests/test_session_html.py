@@ -1200,6 +1200,11 @@ def test_write_recording_html_renders_landmark_multiselect(tmp_path: Path) -> No
     assert 'class="landmarks-groups"' in html
     assert 'class="landmarks-side-groups"' in html
     assert 'data-side-group="' in html
+    assert '<details class="landmarks-side-group"' in html
+    assert "landmarks-side-group\" open" not in html
+    assert "landmarks-side-group' open" not in html
+    assert "<summary>" in html
+    assert 'class="landmarks-side-count' in html
     assert 'data-primary-index="0"' in html
     assert 'data-primary-index="1"' in html
     assert 'class="apply-landmarks"' in html

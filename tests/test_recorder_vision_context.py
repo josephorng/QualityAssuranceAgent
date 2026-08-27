@@ -1047,3 +1047,28 @@ async def test_build_vision_context_drag_includes_destination_offset_hints(tmp_p
     destination = vision["destination"]
     assert "destination_offset_hints" in destination
     assert "「Desktop」" in destination["destination_offset_hints"]
+
+
+def test_list_primary_target_options_limits_to_ten_closest() -> None:
+    from src.recorder.vision_context import (
+        _MAX_PRIMARY_TARGET_OPTIONS,
+        list_primary_target_options,
+    )
+
+    candidates = [
+        {
+            "bbox": [i * 30, 0, 20, 14],
+            "center": [i * 30 + 10, 7],
+            "class_name": "text",
+            "text": f"項目{i}",
+        }
+        for i in range(15)
+    ]
+    options = list_primary_target_options({"candidates": candidates})
+
+    assert _MAX_PRIMARY_TARGET_OPTIONS == 10
+    assert len(options) == 10
+    assert [opt["index"] for opt in options] == list(range(10))
+    assert options[0]["display"] == "「項目0」文字（目前）"
+    assert options[9]["label"] == "「項目9」文字"
+    assert all(opt["index"] < 10 for opt in options)

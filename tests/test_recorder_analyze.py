@@ -433,14 +433,69 @@ def test_list_nearby_landmark_options_returns_all_neighbors() -> None:
         vision, instruction="將滑鼠移到「搜尋」文字"
     )
     labels = [item["label"] for item in options]
+    # Ordered by distance to primary center when local_cursor is absent.
     assert labels == [
-        "「已選取 2 個項目」文字",
         "「45 個項目」文字",
+        "「已選取 2 個項目」文字",
         "「Chrome」圖示",
     ]
     assert len(options) == 3
-    assert options[0]["side"] == "left"
-    assert "（左邊）" in options[0]["display"]
+    assert options[1]["side"] == "left"
+    assert "（左邊）" in options[1]["display"]
+
+
+def test_list_nearby_landmark_options_limits_to_ten_closest_per_side() -> None:
+    from src.recorder.vision_context import (
+        _MAX_NEARBY_LANDMARK_OPTIONS_PER_SIDE,
+        list_nearby_landmark_options,
+    )
+
+    primary = {
+        "bbox": [100, 100, 20, 20],
+        "center": [110, 110],
+        "class_name": "text",
+        "text": "目標",
+    }
+    # 15 neighbors to the right of primary → schema side "left" (landmark is left of click).
+    right_of_primary = [
+        {
+            "bbox": [200 + i * 40, 100, 30, 14],
+            "center": [215 + i * 40, 107],
+            "class_name": "text",
+            "text": f"右鄰{i}",
+        }
+        for i in range(15)
+    ]
+    # 3 neighbors to the left of primary → schema side "right".
+    left_of_primary = [
+        {
+            "bbox": [10 + i * 25, 103, 20, 14],
+            "center": [20 + i * 25, 110],
+            "class_name": "text",
+            "text": f"左鄰{i}",
+        }
+        for i in range(3)
+    ]
+    vision = {
+        "used_vision": True,
+        "local_cursor": [110, 110],
+        # Farthest right neighbors first so distance ranking (not list order) decides.
+        "candidates": [primary, *reversed(right_of_primary), *left_of_primary],
+    }
+    options = list_nearby_landmark_options(
+        vision, instruction="將滑鼠移到「目標」文字"
+    )
+    by_side: dict[str | None, list[str]] = {}
+    for item in options:
+        by_side.setdefault(item["side"], []).append(item["label"])
+
+    assert _MAX_NEARBY_LANDMARK_OPTIONS_PER_SIDE == 10
+    assert len(by_side["left"]) == 10
+    assert by_side["left"] == [f"「右鄰{i}」文字" for i in range(10)]
+    assert len(by_side["right"]) == 3
+    # Closest to click first (左鄰2 is nearest the primary).
+    assert by_side["right"] == [f"「左鄰{i}」文字" for i in (2, 1, 0)]
+    assert len(options) == 13
 
 
 def test_list_nearby_landmark_options_includes_input_and_scrollbar() -> None:

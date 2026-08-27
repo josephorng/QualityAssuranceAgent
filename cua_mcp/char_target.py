@@ -98,6 +98,46 @@ def _screen_x_from_span(
     return expanded_x + span_center_line / line_w * crop_w
 
 
+def _screen_x_edge_from_line_x(
+    expanded_x: int,
+    crop_w: int,
+    crop_h: int,
+    line_x: float,
+    *,
+    line_height: int = _DEFAULT_LINE_HEIGHT,
+) -> float:
+    line_w = _line_image_width(crop_w, crop_h, line_height=line_height)
+    return expanded_x + line_x / line_w * crop_w
+
+
+def screen_bbox_from_span(
+    bbox: tuple[int, int, int, int],
+    span: CharSpan,
+    *,
+    img_w: int,
+    img_h: int,
+    margin: int = OCR_BOX_MARGIN,
+    line_height: int = _DEFAULT_LINE_HEIGHT,
+) -> tuple[int, int, int, int]:
+    """Map a char span's line-image x-range to a screenshot-local ``(x, y, w, h)`` box.
+
+    Uses the full expanded OCR crop height (same vertical band as the parent box).
+    """
+    expanded_x, expanded_y, crop_w, crop_h = expand_ocr_box(
+        bbox, img_w, img_h, margin=margin
+    )
+    x0 = _screen_x_edge_from_line_x(
+        expanded_x, crop_w, crop_h, span.x_start, line_height=line_height
+    )
+    x1 = _screen_x_edge_from_line_x(
+        expanded_x, crop_w, crop_h, span.x_end, line_height=line_height
+    )
+    left = int(round(min(x0, x1)))
+    right = int(round(max(x0, x1)))
+    width = max(1, right - left)
+    return clip_box(left, expanded_y, width, crop_h, img_w, img_h)
+
+
 def _line_x_from_screen_x(
     expanded_x: int,
     crop_w: int,

@@ -15,6 +15,10 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from cua_mcp.icon_map import is_pua_char, lookup_pua_icon, text_has_pua, unknown_icon_record
+from cua_mcp.input_box_rectangles import (
+    LineSegmentParams,
+    detect_horizontal_rectangles,
+)
 from cua_mcp.read_screen_text.get_coordinates import ocr_regions_from_image_path
 from cua_mcp.select_mouse_target import (
     _dedupe_overlapping_detections,
@@ -721,6 +725,187 @@ def _save_test_image_ocr_json(
     return out_path
 
 
+# key, label, from, to, default, display decimals, step
+_LINE_PARAM_SLIDERS: tuple[tuple[str, str, float, float, float, int, float], ...] = (
+    ("blur_ksize", "Blur ksize", 1, 31, 5, 0, 2),
+    ("canny_low", "Canny low", 0, 255, 50, 0, 1),
+    ("canny_high", "Canny high", 0, 255, 150, 0, 1),
+    ("rho", "Hough rho", 0.5, 10.0, 1.0, 1, 0.5),
+    ("theta_deg", "Theta (deg)", 0.1, 10.0, 1.0, 1, 0.1),
+    ("threshold", "Threshold", 1, 300, 100, 0, 1),
+    ("min_line_length", "minLineLength", 0, 300, 20, 0, 1),
+    ("max_line_gap", "maxLineGap", 0, 100, 0, 0, 1),
+)
+
+_LINE_PARAM_TOOLTIPS: dict[str, str] = {
+    "blur_ksize": (
+        "高斯模糊核心大小（奇數）。數值越大越能抑制雜訊，"
+        "但也可能把輸入框短邊這類細線糊掉。"
+    ),
+    "canny_low": (
+        "Canny 下限滯後閾值。低於此值的弱邊緣會被忽略，"
+        "除非與強邊緣相連。"
+    ),
+    "canny_high": (
+        "Canny 上限滯後閾值。高於此值視為強邊緣。"
+        "調高可只保留高對比邊界。"
+    ),
+    "rho": (
+        "Hough 距離解析度（像素）。越小線段定位越精準；"
+        "越大則較粗略、較快。"
+    ),
+    "theta_deg": (
+        "Hough 角度解析度（度）。越小越能分辨接近水平／"
+        "略微傾斜等細微方向差異。"
+    ),
+    "threshold": (
+        "被認定為直線所需的最低票數。調低可找出更多／較弱線段；"
+        "調高則只保留較明顯、較長的線。"
+    ),
+    "min_line_length": (
+        "可接受的最短線段長度（像素）。調低較容易抓到輸入框"
+        "較短的左右邊；調高可過濾雜訊小段。"
+    ),
+    "max_line_gap": (
+        "合併共線碎段時允許的最大間隙（像素）。"
+        "虛線或斷開邊框可調高此值。"
+    ),
+}
+
+
+class _WidgetTooltip:
+    """Simple delayed hover tooltip for Tk / ttk widgets."""
+
+    def __init__(self, widget: tk.Misc, text: str, *, delay_ms: int = 450) -> None:
+        self.widget = widget
+        self.text = text
+        self.delay_ms = delay_ms
+        self._after_id: str | None = None
+        self._tip: tk.Toplevel | None = None
+        widget.bind("<Enter>", self._on_enter, add="+")
+        widget.bind("<Leave>", self._on_leave, add="+")
+        widget.bind("<ButtonPress>", self._on_leave, add="+")
+
+    def _on_enter(self, _event: object | None = None) -> None:
+        self._cancel()
+        self._after_id = self.widget.after(self.delay_ms, self._show)
+
+    def _on_leave(self, _event: object | None = None) -> None:
+        self._cancel()
+        self._hide()
+
+    def _cancel(self) -> None:
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+
+    def _show(self) -> None:
+        self._after_id = None
+        if self._tip is not None or not self.text:
+            return
+        try:
+            x = self.widget.winfo_rootx() + 12
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        except tk.TclError:
+            return
+        tip = tk.Toplevel(self.widget)
+        tip.wm_overrideredirect(True)
+        tip.wm_geometry(f"+{x}+{y}")
+        try:
+            tip.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        label = tk.Label(
+            tip,
+            text=self.text,
+            justify="left",
+            background="#ffffe0",
+            foreground="#222222",
+            relief="solid",
+            borderwidth=1,
+            padx=6,
+            pady=4,
+            wraplength=280,
+            font=("Segoe UI", 9),
+        )
+        label.pack()
+        self._tip = tip
+
+    def _hide(self) -> None:
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except tk.TclError:
+                pass
+            self._tip = None
+
+
+def _attach_tooltip(widget: tk.Misc, text: str) -> _WidgetTooltip:
+    return _WidgetTooltip(widget, text)
+
+_LINE_SEGMENT_PARAMS_PATH = ROOT_DIR / "line_segment_params.json"
+
+
+def _line_segment_params_path() -> Path:
+    return _LINE_SEGMENT_PARAMS_PATH
+
+
+def _clamp_line_segment_param(key: str, value: float) -> float:
+    for slider_key, _label, lo, hi, _default, _decimals, _step in _LINE_PARAM_SLIDERS:
+        if slider_key != key:
+            continue
+        return max(lo, min(hi, float(value)))
+    return float(value)
+
+
+def _load_line_segment_params() -> LineSegmentParams:
+    """Load saved slider values, falling back to defaults for missing/invalid fields."""
+    defaults = LineSegmentParams()
+    raw = read_json(_line_segment_params_path(), default={})
+    if not isinstance(raw, dict):
+        return defaults
+
+    def _num(key: str, fallback: float) -> float:
+        value = raw.get(key, fallback)
+        try:
+            return _clamp_line_segment_param(key, float(value))
+        except (TypeError, ValueError):
+            return fallback
+
+    blur = int(round(_num("blur_ksize", defaults.blur_ksize)))
+    if blur % 2 == 0:
+        blur = max(1, blur - 1)
+    return LineSegmentParams(
+        blur_ksize=blur,
+        canny_low=int(round(_num("canny_low", defaults.canny_low))),
+        canny_high=int(round(_num("canny_high", defaults.canny_high))),
+        rho=float(_num("rho", defaults.rho)),
+        theta_deg=float(_num("theta_deg", defaults.theta_deg)),
+        threshold=int(round(_num("threshold", defaults.threshold))),
+        min_line_length=int(round(_num("min_line_length", defaults.min_line_length))),
+        max_line_gap=int(round(_num("max_line_gap", defaults.max_line_gap))),
+    )
+
+
+def _save_line_segment_params(params: LineSegmentParams) -> None:
+    write_json(
+        _line_segment_params_path(),
+        {
+            "blur_ksize": int(params.blur_ksize),
+            "canny_low": int(params.canny_low),
+            "canny_high": int(params.canny_high),
+            "rho": float(params.rho),
+            "theta_deg": float(params.theta_deg),
+            "threshold": int(params.threshold),
+            "min_line_length": int(params.min_line_length),
+            "max_line_gap": int(params.max_line_gap),
+        },
+    )
+
+
 def _draw_overlays(
     image: Image.Image,
     lines: list[OcrLine],
@@ -728,6 +913,16 @@ def _draw_overlays(
     show_labels: bool,
     selected_idx: int | None = None,
     overlay_font: ImageFont.ImageFont | ImageFont.FreeTypeFont | None = None,
+    line_segments: list[tuple[int, int, int, int]] | None = None,
+    line_segment_color: str = "lime",
+    merged_segments: list[tuple[int, int, int, int]] | None = None,
+    merged_segment_color: str = "orange",
+    candidate_segments: list[tuple[int, int, int, int]] | None = None,
+    candidate_segment_color: str = "magenta",
+    rectangle_boxes: list[tuple[int, int, int, int]] | None = None,
+    rectangle_box_color: str = "blue",
+    selected_rectangle_idx: int | None = None,
+    selected_rectangle_color: str = "red",
 ) -> Image.Image:
     out = image.copy()
     draw = ImageDraw.Draw(out)
@@ -761,6 +956,24 @@ def _draw_overlays(
                 else:
                     text_color = "yellow"
             draw.text((x, y), text, font=font, fill=text_color)
+
+    def _draw_segs(
+        segs: list[tuple[int, int, int, int]] | None, color: str, width: int = 2
+    ) -> None:
+        if not segs:
+            return
+        for x1, y1, x2, y2 in segs:
+            draw.line([(x1, y1), (x2, y2)], fill=color, width=width)
+
+    _draw_segs(line_segments, line_segment_color)
+    _draw_segs(merged_segments, merged_segment_color)
+    _draw_segs(candidate_segments, candidate_segment_color)
+    if rectangle_boxes:
+        for idx, (x0, y0, x1, y1) in enumerate(rectangle_boxes):
+            is_sel = selected_rectangle_idx is not None and idx == selected_rectangle_idx
+            color = selected_rectangle_color if is_sel else rectangle_box_color
+            width = 4 if is_sel else 3
+            draw.rectangle([(x0, y0), (x1, y1)], outline=color, width=width)
     return out
 
 
@@ -2490,8 +2703,744 @@ class TestImagesViewerApp:
             self.canvas.yview_scroll(int(-(event.delta / 120)), "units")
 
 
+class LineSegmentsViewerApp:
+    """Browse images and tune Canny / Hough line-segment detection.
+
+    ``mode="folder"`` browses a flat image directory (Test images).
+    ``mode="sessions"`` browses run/recording session folders like the YOLO tab.
+    """
+
+    _MIN_ZOOM = 0.125
+    _MAX_ZOOM = 32.0
+    _ZOOM_STEP = 1.15
+    _PAN_CLICK_THRESHOLD_SQ = 4 * 4
+    _RMB_ZOOM_PER_PIXEL = 1.0012
+    _PARAM_DETECT_DEBOUNCE_MS = 2000
+
+    def __init__(
+        self,
+        parent: tk.Misc,
+        source_root: Path,
+        *,
+        mode: str = "folder",
+        session_list_label: str = "Runs",
+        manage_window: bool = True,
+        bind_global_hotkeys: bool = True,
+    ):
+        if mode not in ("folder", "sessions"):
+            raise ValueError(f"Unsupported LineSegmentsViewerApp mode: {mode!r}")
+        self.parent = parent
+        self.root = parent.winfo_toplevel()
+        self.source_root = source_root
+        self.mode = mode
+        self._session_list_label = session_list_label
+        self._manage_window = manage_window
+        self._bind_global_hotkeys = bind_global_hotkeys
+        self._hotkeys_active = False
+        self.session_dirs: list[Path] = (
+            _discover_runs(source_root) if mode == "sessions" else []
+        )
+        self.image_paths: list[Path] = []
+        self.current_display: ImageTk.PhotoImage | None = None
+        self.current_image: Image.Image | None = None
+        self.raw_line_segments: list[tuple[int, int, int, int]] = []
+        self.merged_line_segments: list[tuple[int, int, int, int]] = []
+        self.candidate_line_segments: list[tuple[int, int, int, int]] = []
+        self.rectangle_boxes: list[tuple[int, int, int, int]] = []
+        self.selected_rectangle_idx: int | None = None
+        self.show_raw_lines = tk.BooleanVar(value=False)
+        self.show_merged_lines = tk.BooleanVar(value=False)
+        self.show_candidate_lines = tk.BooleanVar(value=False)
+        self.show_rectangles = tk.BooleanVar(value=True)
+
+        self.status_var = tk.StringVar(value="Ready")
+        self.folder_var = tk.StringVar(value=str(source_root))
+        self.param_vars: dict[str, tk.DoubleVar] = {}
+        self.param_value_vars: dict[str, tk.StringVar] = {}
+        self._param_decimals: dict[str, int] = {}
+        self._suppress_param_events = True
+        self._detect_after_id: str | None = None
+        saved = _load_line_segment_params()
+        saved_values = {
+            "blur_ksize": float(saved.blur_ksize),
+            "canny_low": float(saved.canny_low),
+            "canny_high": float(saved.canny_high),
+            "rho": float(saved.rho),
+            "theta_deg": float(saved.theta_deg),
+            "threshold": float(saved.threshold),
+            "min_line_length": float(saved.min_line_length),
+            "max_line_gap": float(saved.max_line_gap),
+        }
+        for key, _label, _lo, _hi, default, decimals, _step in _LINE_PARAM_SLIDERS:
+            self.param_vars[key] = tk.DoubleVar(value=saved_values.get(key, float(default)))
+            self.param_value_vars[key] = tk.StringVar()
+            self._param_decimals[key] = decimals
+            self._update_param_value_label(key)
+
+        self._view_zoom = 1.0
+        self._rmb_last_x: int | None = None
+        self._render_scale = 1.0
+        self._lmb_press_xy: tuple[int, int] | None = None
+        self._lmb_panning = False
+
+        self._ui_font = _configure_ui_fonts(self.root, UI_FONT_SIZE)
+        self._build_ui()
+        self._suppress_param_events = False
+        if self.mode == "folder":
+            self._reload_folder_images()
+        else:
+            self._populate_session_list()
+        if bind_global_hotkeys:
+            self.activate_hotkeys()
+
+    def _build_ui(self) -> None:
+        if self._manage_window and isinstance(self.parent, tk.Tk):
+            self.parent.title("Line Segments")
+            self.parent.geometry("1280x840")
+        self.parent.columnconfigure(1, weight=1)
+        self.parent.rowconfigure(0, weight=1)
+
+        left = ttk.Frame(self.parent, padding=8)
+        left.grid(row=0, column=0, sticky="ns")
+        left.columnconfigure(0, weight=1)
+
+        row = 0
+        if self.mode == "folder":
+            folder_row = ttk.Frame(left)
+            folder_row.grid(row=row, column=0, sticky="ew")
+            folder_row.columnconfigure(0, weight=1)
+            ttk.Entry(folder_row, textvariable=self.folder_var).grid(row=0, column=0, sticky="ew")
+            ttk.Button(folder_row, text="Browse…", command=self._browse_folder).grid(
+                row=0, column=1, padx=(6, 0)
+            )
+            row += 1
+        else:
+            ttk.Label(left, text=self._session_list_label).grid(row=row, column=0, sticky="w")
+            row += 1
+            session_wrap = ttk.Frame(left)
+            session_wrap.grid(row=row, column=0, sticky="ew")
+            session_wrap.columnconfigure(0, weight=1)
+            self.session_list = tk.Listbox(
+                session_wrap, exportselection=False, height=5, width=36, font=self._ui_font
+            )
+            self.session_list.grid(row=0, column=0, sticky="nsew")
+            self.session_scroll = ttk.Scrollbar(
+                session_wrap, orient="vertical", command=self.session_list.yview
+            )
+            self.session_scroll.grid(row=0, column=1, sticky="ns")
+            self.session_list.configure(yscrollcommand=self.session_scroll.set)
+            self.session_list.bind("<<ListboxSelect>>", self._on_session_select)
+            row += 1
+
+        ttk.Label(left, text="Images").grid(row=row, column=0, sticky="w", pady=(8, 0))
+        row += 1
+        left.rowconfigure(row, weight=1)
+        image_wrap = ttk.Frame(left)
+        image_wrap.grid(row=row, column=0, sticky="nsew")
+        image_wrap.columnconfigure(0, weight=1)
+        image_wrap.rowconfigure(0, weight=1)
+        self.image_list = tk.Listbox(
+            image_wrap, exportselection=False, height=6, width=36, font=self._ui_font
+        )
+        self.image_list.grid(row=0, column=0, sticky="nsew")
+        self.image_scroll = ttk.Scrollbar(
+            image_wrap, orient="vertical", command=self.image_list.yview
+        )
+        self.image_scroll.grid(row=0, column=1, sticky="ns")
+        self.image_list.configure(yscrollcommand=self.image_scroll.set)
+        self.image_list.bind("<<ListboxSelect>>", self._on_image_select)
+        row += 1
+
+        params = ttk.LabelFrame(left, text="Line segment parameters", padding=6)
+        params.grid(row=row, column=0, sticky="ew", pady=(8, 0))
+        params.columnconfigure(1, weight=1)
+        self._param_steps: dict[str, float] = {}
+        self._param_bounds: dict[str, tuple[float, float]] = {}
+        for prow, (key, label, lo, hi, _default, _decimals, step) in enumerate(
+            _LINE_PARAM_SLIDERS
+        ):
+            self._param_steps[key] = float(step)
+            self._param_bounds[key] = (float(lo), float(hi))
+            name = ttk.Label(params, text=label)
+            name.grid(row=prow, column=0, sticky="w", pady=1)
+            scale = ttk.Scale(
+                params,
+                from_=lo,
+                to=hi,
+                orient="horizontal",
+                variable=self.param_vars[key],
+                command=lambda _v, k=key: self._on_param_scale(k),
+            )
+            scale.grid(row=prow, column=1, sticky="ew", padx=(6, 2), pady=1)
+            dec_btn = ttk.Button(
+                params,
+                text="◀",
+                width=2,
+                command=lambda k=key: self._nudge_param(k, -1),
+            )
+            dec_btn.grid(row=prow, column=2, sticky="e", padx=(2, 0), pady=1)
+            value_label = ttk.Label(params, textvariable=self.param_value_vars[key], width=5)
+            value_label.grid(row=prow, column=3, sticky="e", pady=1)
+            inc_btn = ttk.Button(
+                params,
+                text="▶",
+                width=2,
+                command=lambda k=key: self._nudge_param(k, 1),
+            )
+            inc_btn.grid(row=prow, column=4, sticky="e", padx=(0, 0), pady=1)
+            tip = _LINE_PARAM_TOOLTIPS.get(key, "")
+            if tip:
+                _attach_tooltip(name, tip)
+                _attach_tooltip(scale, tip)
+                _attach_tooltip(value_label, tip)
+                _attach_tooltip(dec_btn, tip)
+                _attach_tooltip(inc_btn, tip)
+        row += 1
+
+        controls = ttk.Frame(left)
+        controls.grid(row=row, column=0, sticky="ew", pady=(8, 0))
+        for col in range(2):
+            controls.columnconfigure(col, weight=1)
+        ttk.Checkbutton(
+            controls,
+            text="Raw lines",
+            variable=self.show_raw_lines,
+            command=self._refresh_image,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(
+            controls,
+            text="Merged",
+            variable=self.show_merged_lines,
+            command=self._refresh_image,
+        ).grid(row=0, column=1, sticky="w")
+        ttk.Checkbutton(
+            controls,
+            text="H-pair candidates",
+            variable=self.show_candidate_lines,
+            command=self._refresh_image,
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(
+            controls,
+            text="Rectangles",
+            variable=self.show_rectangles,
+            command=self._refresh_image,
+        ).grid(row=1, column=1, sticky="w", pady=(4, 0))
+        ttk.Button(controls, text="Detect", command=self._detect_line_segments_now).grid(
+            row=2, column=0, sticky="ew", pady=(6, 0), padx=(0, 3)
+        )
+        ttk.Button(controls, text="Clear overlay", command=self._clear_line_segments).grid(
+            row=2, column=1, sticky="ew", pady=(6, 0), padx=(3, 0)
+        )
+
+        canvas_wrap = ttk.Frame(self.parent, padding=8)
+        canvas_wrap.grid(row=0, column=1, sticky="nsew")
+        canvas_wrap.rowconfigure(0, weight=1)
+        canvas_wrap.columnconfigure(0, weight=1)
+        self.canvas = tk.Canvas(canvas_wrap, bg="#1e1e1e", highlightthickness=0)
+        self.v_scroll = ttk.Scrollbar(canvas_wrap, orient="vertical", command=self.canvas.yview)
+        self.h_scroll = ttk.Scrollbar(canvas_wrap, orient="horizontal", command=self.canvas.xview)
+        self.canvas.configure(yscrollcommand=self.v_scroll.set, xscrollcommand=self.h_scroll.set)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.v_scroll.grid(row=0, column=1, sticky="ns")
+        self.h_scroll.grid(row=1, column=0, sticky="ew")
+        self.canvas.bind("<ButtonPress-3>", self._on_rmb_press)
+        self.canvas.bind("<B3-Motion>", self._on_rmb_drag)
+        self.canvas.bind("<ButtonRelease-3>", self._on_rmb_release)
+        self.canvas.bind("<ButtonPress-1>", self._on_lmb_press)
+        self.canvas.bind("<B1-Motion>", self._on_lmb_motion)
+        self.canvas.bind("<ButtonRelease-1>", self._on_lmb_release)
+        self.canvas.bind("<ButtonPress-2>", self._on_mmb_press)
+        self.canvas.bind("<B2-Motion>", self._on_mmb_drag)
+        self.canvas.bind("<MouseWheel>", self._on_canvas_mousewheel)
+
+        status = ttk.Label(self.parent, textvariable=self.status_var, anchor="w")
+        status.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 8))
+        self.parent.bind("<Configure>", lambda _e: self._refresh_image())
+
+    def activate_hotkeys(self) -> None:
+        if self._hotkeys_active:
+            return
+        self.root.bind("<Control-plus>", self._on_zoom_in_hotkey)
+        self.root.bind("<Control-equal>", self._on_zoom_in_hotkey)
+        self.root.bind("<Control-minus>", self._on_zoom_out_hotkey)
+        self.root.bind("<Control-0>", self._on_reset_zoom_hotkey)
+        self._hotkeys_active = True
+
+    def deactivate_hotkeys(self) -> None:
+        if not self._hotkeys_active:
+            return
+        for key in ("<Control-plus>", "<Control-equal>", "<Control-minus>", "<Control-0>"):
+            self.root.unbind(key)
+        self._hotkeys_active = False
+
+    def _browse_folder(self) -> None:
+        chosen = filedialog.askdirectory(
+            initialdir=self.folder_var.get() or str(self.source_root)
+        )
+        if not chosen:
+            return
+        self.source_root = Path(chosen)
+        self.folder_var.set(str(self.source_root))
+        self._reload_folder_images()
+
+    def _populate_session_list(self) -> None:
+        self.session_dirs = _discover_runs(self.source_root)
+        self.session_list.delete(0, tk.END)
+        for session in self.session_dirs:
+            self.session_list.insert(tk.END, session.name)
+        if self.session_dirs:
+            self.session_list.select_set(0)
+            self._on_session_select()
+        else:
+            self.image_paths = []
+            self.image_list.delete(0, tk.END)
+            self.current_image = None
+            self._clear_segment_state()
+            self.canvas.delete("all")
+            label = self._session_list_label.lower()
+            self.status_var.set(f"No {label} found in {self.source_root}")
+
+    def _on_session_select(self, _event: object | None = None) -> None:
+        selected = self.session_list.curselection()
+        if not selected:
+            return
+        session = self.session_dirs[selected[0]]
+        self.image_paths = _yolo_ocr_paired_images(session)
+        self.image_list.delete(0, tk.END)
+        for img in self.image_paths:
+            self.image_list.insert(tk.END, img.name)
+        if self.image_paths:
+            self.image_list.select_set(0)
+            self._on_image_select()
+        else:
+            self._cancel_pending_detect()
+            self.current_image = None
+            self._clear_segment_state()
+            self.canvas.delete("all")
+            self.status_var.set(f"No images found for {session.name}")
+
+    def _reload_folder_images(self) -> None:
+        self.image_paths = _discover_folder_images(self.source_root)
+        self.image_list.delete(0, tk.END)
+        for img in self.image_paths:
+            self.image_list.insert(tk.END, img.name)
+        if self.image_paths:
+            self.image_list.select_set(0)
+            self._on_image_select()
+        else:
+            self.current_image = None
+            self._clear_segment_state()
+            self.canvas.delete("all")
+            self.status_var.set(f"No images in {self.source_root}")
+    def _selected_image_index(self) -> int | None:
+        selected = self.image_list.curselection()
+        if not selected:
+            return None
+        return selected[0]
+
+    def _current_image_path(self) -> Path | None:
+        idx = self._selected_image_index()
+        if idx is None or idx >= len(self.image_paths):
+            return None
+        return self.image_paths[idx]
+
+    def _on_image_select(self, _event: object | None = None) -> None:
+        image_path = self._current_image_path()
+        if image_path is None:
+            return
+        self._cancel_pending_detect()
+        self.current_image = Image.open(image_path).convert("RGB")
+        self._clear_segment_state()
+        self._view_zoom = 1.0
+        self.status_var.set(image_path.name)
+        self._refresh_image()
+
+    def _update_param_value_label(self, key: str) -> None:
+        value = float(self.param_vars[key].get())
+        if key == "blur_ksize":
+            snapped = int(round(value))
+            if snapped % 2 == 0:
+                snapped = max(1, snapped - 1)
+            self.param_value_vars[key].set(str(snapped))
+            return
+        decimals = self._param_decimals[key]
+        if decimals <= 0:
+            self.param_value_vars[key].set(str(int(round(value))))
+        else:
+            self.param_value_vars[key].set(f"{value:.{decimals}f}")
+
+    def _on_param_scale(self, key: str) -> None:
+        if key == "blur_ksize":
+            snapped = int(round(float(self.param_vars[key].get())))
+            if snapped % 2 == 0:
+                snapped = max(1, snapped - 1)
+            current = float(self.param_vars[key].get())
+            if abs(current - snapped) > 1e-6:
+                was_suppressed = self._suppress_param_events
+                self._suppress_param_events = True
+                try:
+                    self.param_vars[key].set(float(snapped))
+                finally:
+                    self._suppress_param_events = was_suppressed
+        self._update_param_value_label(key)
+        if self._suppress_param_events:
+            return
+        self._schedule_detect()
+
+    def _nudge_param(self, key: str, direction: int) -> None:
+        """Increment or decrement ``key`` by one configured unit."""
+        lo, hi = self._param_bounds[key]
+        step = self._param_steps[key]
+        current = float(self.param_vars[key].get())
+        if key == "blur_ksize":
+            current = int(round(current))
+            if current % 2 == 0:
+                current = max(1, current - 1)
+        decimals = self._param_decimals[key]
+        nxt = current + (step * direction)
+        nxt = max(lo, min(hi, nxt))
+        if decimals <= 0:
+            nxt = float(int(round(nxt)))
+        else:
+            nxt = round(nxt, decimals)
+        if key == "blur_ksize":
+            snapped = int(round(nxt))
+            if snapped % 2 == 0:
+                snapped = max(1, snapped + (1 if direction > 0 else -1))
+            nxt = float(max(int(lo), min(int(hi), snapped)))
+            if int(nxt) % 2 == 0:
+                nxt = float(max(1, int(nxt) - 1))
+        if abs(nxt - current) < 1e-9:
+            return
+        self.param_vars[key].set(nxt)
+        self._update_param_value_label(key)
+        if not self._suppress_param_events:
+            self._schedule_detect()
+
+    def _cancel_pending_detect(self) -> None:
+        if self._detect_after_id is not None:
+            try:
+                self.root.after_cancel(self._detect_after_id)
+            except tk.TclError:
+                pass
+            self._detect_after_id = None
+
+    def _schedule_detect(self) -> None:
+        self._cancel_pending_detect()
+        try:
+            _save_line_segment_params(self._read_params())
+        except OSError:
+            pass
+        self.status_var.set("Parameters changed — detecting in 2s...")
+        self._detect_after_id = self.root.after(
+            self._PARAM_DETECT_DEBOUNCE_MS, self._debounced_detect
+        )
+
+    def _debounced_detect(self) -> None:
+        self._detect_after_id = None
+        self._detect_line_segments()
+
+    def _detect_line_segments_now(self) -> None:
+        self._cancel_pending_detect()
+        self._detect_line_segments()
+
+    def _read_params(self) -> LineSegmentParams:
+        blur = int(round(float(self.param_vars["blur_ksize"].get())))
+        if blur % 2 == 0:
+            blur = max(1, blur - 1)
+        return LineSegmentParams(
+            blur_ksize=blur,
+            canny_low=int(round(float(self.param_vars["canny_low"].get()))),
+            canny_high=int(round(float(self.param_vars["canny_high"].get()))),
+            rho=float(self.param_vars["rho"].get()),
+            theta_deg=float(self.param_vars["theta_deg"].get()),
+            threshold=int(round(float(self.param_vars["threshold"].get()))),
+            min_line_length=int(round(float(self.param_vars["min_line_length"].get()))),
+            max_line_gap=int(round(float(self.param_vars["max_line_gap"].get()))),
+        )
+
+    def _clear_segment_state(self) -> None:
+        self.raw_line_segments = []
+        self.merged_line_segments = []
+        self.candidate_line_segments = []
+        self.rectangle_boxes = []
+        self.selected_rectangle_idx = None
+
+    def _clear_line_segments(self) -> None:
+        self._cancel_pending_detect()
+        self._clear_segment_state()
+        self._refresh_image()
+        self.status_var.set("Cleared line segment overlay")
+
+    def _detect_line_segments(self) -> None:
+        params = self._read_params()
+        try:
+            _save_line_segment_params(params)
+        except OSError:
+            pass
+        if self.current_image is None:
+            self.status_var.set("No image selected for line segment detection")
+            return
+        self.status_var.set("Detecting line segments...")
+        self.root.update_idletasks()
+        t0 = time.perf_counter()
+        try:
+            result = detect_horizontal_rectangles(self.current_image, params)
+            self.raw_line_segments = result.raw_segments
+            self.merged_line_segments = result.merged_segments
+            self.candidate_line_segments = result.candidate_segments
+            self.rectangle_boxes = result.rectangles
+            self.selected_rectangle_idx = None
+        except Exception as exc:
+            self.status_var.set(f"Line segment detection failed: {type(exc).__name__}: {exc}")
+            return
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        self._refresh_image()
+        self.status_var.set(
+            f"Found {len(self.raw_line_segments)} raw, "
+            f"{len(self.merged_line_segments)} merged, "
+            f"{len(self.candidate_line_segments)} candidate, "
+            f"{len(self.rectangle_boxes)} rectangle(s) "
+            f"in {elapsed_ms:.0f} ms"
+        )
+
+    def _refresh_image(self) -> None:
+        if self.current_image is None:
+            return
+        rendered = _draw_overlays(
+            self.current_image,
+            [],
+            show_boxes=False,
+            show_labels=False,
+            line_segments=self.raw_line_segments if self.show_raw_lines.get() else None,
+            line_segment_color="lime",
+            merged_segments=(
+                self.merged_line_segments if self.show_merged_lines.get() else None
+            ),
+            merged_segment_color="orange",
+            candidate_segments=(
+                self.candidate_line_segments if self.show_candidate_lines.get() else None
+            ),
+            candidate_segment_color="magenta",
+            rectangle_boxes=(
+                self.rectangle_boxes if self.show_rectangles.get() else None
+            ),
+            rectangle_box_color="blue",
+            selected_rectangle_idx=self.selected_rectangle_idx,
+            selected_rectangle_color="red",
+        )
+        canvas_w = max(100, self.canvas.winfo_width())
+        canvas_h = max(100, self.canvas.winfo_height())
+        img_w, img_h = rendered.size
+        fit = min(canvas_w / img_w, canvas_h / img_h, 1.0)
+        scale = max(1e-6, fit * self._view_zoom)
+        self._render_scale = scale
+        new_size = (max(1, int(img_w * scale)), max(1, int(img_h * scale)))
+        if new_size != (img_w, img_h):
+            rendered = rendered.resize(new_size, Image.Resampling.LANCZOS)
+        self.current_display = ImageTk.PhotoImage(rendered)
+        self.canvas.delete("all")
+        self.canvas.create_image(0, 0, image=self.current_display, anchor="nw")
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _prev_image(self) -> None:
+        idx = self._selected_image_index()
+        if idx is None:
+            return
+        nxt = max(0, idx - 1)
+        self.image_list.select_clear(0, tk.END)
+        self.image_list.select_set(nxt)
+        self.image_list.see(nxt)
+        self._on_image_select()
+
+    def _next_image(self) -> None:
+        idx = self._selected_image_index()
+        if idx is None:
+            return
+        nxt = min(len(self.image_paths) - 1, idx + 1)
+        self.image_list.select_clear(0, tk.END)
+        self.image_list.select_set(nxt)
+        self.image_list.see(nxt)
+        self._on_image_select()
+
+    def _apply_zoom_factor(self, factor: float) -> None:
+        self._view_zoom = max(self._MIN_ZOOM, min(self._MAX_ZOOM, self._view_zoom * factor))
+        self._refresh_image()
+
+    def _zoom_in(self) -> None:
+        self._apply_zoom_factor(self._ZOOM_STEP)
+
+    def _zoom_out(self) -> None:
+        self._apply_zoom_factor(1.0 / self._ZOOM_STEP)
+
+    def _reset_zoom(self) -> None:
+        self._view_zoom = 1.0
+        self._refresh_image()
+
+    def _on_zoom_in_hotkey(self, _event: object | None = None) -> str:
+        self._zoom_in()
+        return "break"
+
+    def _on_zoom_out_hotkey(self, _event: object | None = None) -> str:
+        self._zoom_out()
+        return "break"
+
+    def _on_reset_zoom_hotkey(self, _event: object | None = None) -> str:
+        self._reset_zoom()
+        return "break"
+
+    def _on_rmb_press(self, event: tk.Event[tk.Canvas]) -> None:
+        if self.current_image is None:
+            self._rmb_last_x = None
+            return
+        self._rmb_last_x = int(event.x)
+
+    def _on_rmb_drag(self, event: tk.Event[tk.Canvas]) -> None:
+        if self._rmb_last_x is None or self.current_image is None:
+            return
+        x = int(event.x)
+        dx = x - self._rmb_last_x
+        self._rmb_last_x = x
+        if dx == 0:
+            return
+        z = self._view_zoom * (self._RMB_ZOOM_PER_PIXEL**dx)
+        self._view_zoom = max(self._MIN_ZOOM, min(self._MAX_ZOOM, z))
+        self._refresh_image()
+
+    def _on_rmb_release(self, _event: tk.Event[tk.Canvas]) -> None:
+        self._rmb_last_x = None
+
+    def _on_lmb_press(self, event: tk.Event[tk.Canvas]) -> None:
+        if self.current_image is None:
+            return
+        self._lmb_press_xy = (int(event.x), int(event.y))
+        self._lmb_panning = False
+
+    def _on_lmb_motion(self, event: tk.Event[tk.Canvas]) -> None:
+        if self._lmb_press_xy is None:
+            return
+        x0, y0 = self._lmb_press_xy
+        x, y = int(event.x), int(event.y)
+        if not self._lmb_panning:
+            if (x - x0) ** 2 + (y - y0) ** 2 < self._PAN_CLICK_THRESHOLD_SQ:
+                return
+            self.canvas.scan_mark(x0, y0)
+            self._lmb_panning = True
+        self.canvas.scan_dragto(x, y, gain=1)
+
+    def _on_lmb_release(self, event: tk.Event[tk.Canvas]) -> None:
+        if self._lmb_press_xy is None:
+            return
+        try:
+            if not self._lmb_panning:
+                self._select_rectangle_at_canvas_event(event)
+        finally:
+            self._lmb_press_xy = None
+            self._lmb_panning = False
+
+    def _rectangle_hit_index_at_canvas(self, event: tk.Event[tk.Canvas]) -> int | None:
+        if self.current_image is None or not self.rectangle_boxes:
+            return None
+        if not self.show_rectangles.get():
+            return None
+        canvas_x = self.canvas.canvasx(int(event.x))
+        canvas_y = self.canvas.canvasy(int(event.y))
+        img_x = int(canvas_x / max(self._render_scale, 1e-6))
+        img_y = int(canvas_y / max(self._render_scale, 1e-6))
+        best_idx: int | None = None
+        best_area: float | None = None
+        for idx, (x0, y0, x1, y1) in enumerate(self.rectangle_boxes):
+            if x0 <= img_x <= x1 and y0 <= img_y <= y1:
+                area = float(max(1, x1 - x0) * max(1, y1 - y0))
+                if best_area is None or area < best_area:
+                    best_area = area
+                    best_idx = idx
+        return best_idx
+
+    def _select_rectangle_at_canvas_event(self, event: tk.Event[tk.Canvas]) -> None:
+        selected_idx = self._rectangle_hit_index_at_canvas(event)
+        self.selected_rectangle_idx = selected_idx
+        self._refresh_image()
+        if selected_idx is None:
+            return
+        x0, y0, x1, y1 = self.rectangle_boxes[selected_idx]
+        self.status_var.set(
+            f"Selected rectangle {selected_idx + 1}/{len(self.rectangle_boxes)} "
+            f"({x0},{y0})-({x1},{y1})"
+        )
+        self.canvas.focus_set()
+
+    def _on_mmb_press(self, event: tk.Event[tk.Canvas]) -> None:
+        self.canvas.scan_mark(int(event.x), int(event.y))
+
+    def _on_mmb_drag(self, event: tk.Event[tk.Canvas]) -> None:
+        self.canvas.scan_dragto(int(event.x), int(event.y), gain=1)
+
+    def _on_canvas_mousewheel(self, event: tk.Event[tk.Canvas]) -> None:
+        if event.state & 0x0004:
+            if event.delta > 0:
+                self._apply_zoom_factor(self._ZOOM_STEP)
+            elif event.delta < 0:
+                self._apply_zoom_factor(1.0 / self._ZOOM_STEP)
+            return
+        if event.state & 0x0001:
+            self.canvas.xview_scroll(int(-(event.delta / 120)), "units")
+        else:
+            self.canvas.yview_scroll(int(-(event.delta / 120)), "units")
+
+
+class SourceTabShell:
+    """Nested notebook: YOLO detection + Line segments for one image source."""
+
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        make_yolo: Any,
+        make_lines: Any,
+    ):
+        self.parent = parent
+        self._hotkeys_active = False
+
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
+        self.notebook = ttk.Notebook(parent)
+        self.notebook.grid(row=0, column=0, sticky="nsew")
+
+        yolo_frame = ttk.Frame(self.notebook)
+        lines_frame = ttk.Frame(self.notebook)
+        self.notebook.add(yolo_frame, text="YOLO detection")
+        self.notebook.add(lines_frame, text="Line segments")
+
+        self.yolo_viewer = make_yolo(yolo_frame)
+        self.lines_viewer = make_lines(lines_frame)
+        self._viewers = (self.yolo_viewer, self.lines_viewer)
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_subtab_changed)
+
+    def activate_hotkeys(self) -> None:
+        self._hotkeys_active = True
+        self._on_subtab_changed()
+
+    def deactivate_hotkeys(self) -> None:
+        self._hotkeys_active = False
+        for viewer in self._viewers:
+            viewer.deactivate_hotkeys()
+
+    def _on_subtab_changed(self, _event: object | None = None) -> None:
+        if not self._hotkeys_active:
+            for viewer in self._viewers:
+                viewer.deactivate_hotkeys()
+            return
+        selected = self.notebook.index(self.notebook.select())
+        for idx, viewer in enumerate(self._viewers):
+            if idx == selected:
+                viewer.activate_hotkeys()
+            else:
+                viewer.deactivate_hotkeys()
+
+
 class CombinedImageViewerApp:
-    """Notebook shell with Run, Recordings, and Test images tabs."""
+    """Notebook shell: Run / Recordings / Test, each with YOLO + Line segments."""
 
     def __init__(
         self,
@@ -2525,26 +3474,58 @@ class CombinedImageViewerApp:
         )
         test_base = images_dir if images_dir is not None else DEFAULT_TEST_IMAGES_DIR
 
-        self.runs_viewer = OcrViewerApp(
+        self.runs_shell = SourceTabShell(
             runs_tab,
-            runs_base,
-            manage_window=False,
-            bind_global_hotkeys=False,
+            make_yolo=lambda frame: OcrViewerApp(
+                frame,
+                runs_base,
+                manage_window=False,
+                bind_global_hotkeys=False,
+            ),
+            make_lines=lambda frame: LineSegmentsViewerApp(
+                frame,
+                runs_base,
+                mode="sessions",
+                session_list_label="Runs",
+                manage_window=False,
+                bind_global_hotkeys=False,
+            ),
         )
-        self.recordings_viewer = OcrViewerApp(
+        self.recordings_shell = SourceTabShell(
             recordings_tab,
-            recordings_base,
-            manage_window=False,
-            bind_global_hotkeys=False,
-            session_list_label="Recordings",
+            make_yolo=lambda frame: OcrViewerApp(
+                frame,
+                recordings_base,
+                manage_window=False,
+                bind_global_hotkeys=False,
+                session_list_label="Recordings",
+            ),
+            make_lines=lambda frame: LineSegmentsViewerApp(
+                frame,
+                recordings_base,
+                mode="sessions",
+                session_list_label="Recordings",
+                manage_window=False,
+                bind_global_hotkeys=False,
+            ),
         )
-        self.test_viewer = TestImagesViewerApp(
+        self.test_shell = SourceTabShell(
             test_tab,
-            test_base,
-            manage_window=False,
-            bind_global_hotkeys=False,
+            make_yolo=lambda frame: TestImagesViewerApp(
+                frame,
+                test_base,
+                manage_window=False,
+                bind_global_hotkeys=False,
+            ),
+            make_lines=lambda frame: LineSegmentsViewerApp(
+                frame,
+                test_base,
+                mode="folder",
+                manage_window=False,
+                bind_global_hotkeys=False,
+            ),
         )
-        self._viewers = (self.runs_viewer, self.recordings_viewer, self.test_viewer)
+        self._viewers = (self.runs_shell, self.recordings_shell, self.test_shell)
         self._tab_frames = {
             "runs": runs_tab,
             "recordings": recordings_tab,

@@ -1,0 +1,10 @@
+{
+  "blur_ksize": 5,
+  "canny_low": 5,
+  "canny_high": 35,
+  "rho": 1.0,
+  "theta_deg": 1.0,
+  "threshold": 5,
+  "min_line_length": 15,
+  "max_line_gap": 0
+}

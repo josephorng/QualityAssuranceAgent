@@ -146,6 +146,10 @@ def _pending_right_capture_path(run_dir: Path) -> Path:
     return run_dir / "screenshots" / "_pending_right_capture.jpeg"
 
 
+def _pending_pre_type_capture_path(run_dir: Path) -> Path:
+    return run_dir / "screenshots" / "_pending_pre_type.jpeg"
+
+
 def _pending_drag_end_capture_path(run_dir: Path, monitor_index: int) -> Path:
     return run_dir / "screenshots" / f"_pending_drag_end_mon{monitor_index}.jpeg"
 
@@ -577,6 +581,9 @@ class RecordingSession:
         self._pending_text_chars: list[str] = []
         self._pending_text_caret: int = 0
         self._pending_text_meta: dict[str, Any] | None = None
+        # Empty-field frame captured after focus settles (click/Tab/etc.), consumed
+        # as the text_input before-shot so we do not race the first typed glyph.
+        self._pending_pre_type_screenshot: tuple[str, int, tuple[int, int]] | None = None
         self._last_pointer_cursor_xy: tuple[int, int] | None = None
         self._event_queue: queue.Queue[object] = queue.Queue()
         self._worker_thread: threading.Thread | None = None
@@ -672,6 +679,7 @@ class RecordingSession:
             self._pending_right_windows_before = None
             self._pending_text_chars = []
             self._pending_text_meta = None
+            self._pending_pre_type_screenshot = None
             self._last_pointer_cursor_xy = None
             pending = self._pending_click_timer
             self._pending_click_timer = None
@@ -774,7 +782,16 @@ class RecordingSession:
             self._clear_pending_right_gesture_locked()
             self._pending_screenshot = None
             self._pending_windows_before = None
+            leftover_pre_type = self._pending_pre_type_screenshot
+            self._pending_pre_type_screenshot = None
         _discard_pending_drag_end_capture_files(leftover_drag_end)
+        if leftover_pre_type is not None:
+            pending_pre = Path(leftover_pre_type[0])
+            if pending_pre.is_file():
+                try:
+                    pending_pre.unlink()
+                except OSError:
+                    pass
 
         for listener in listeners:
             try:
@@ -1010,6 +1027,7 @@ class RecordingSession:
                 text=text,
             )
         )
+        self._refresh_pending_pre_type(cursor_xy)
 
     def _capture_typing_ocr_end_shot(
         self,
@@ -1035,6 +1053,72 @@ class RecordingSession:
             )
         except Exception:
             return None
+
+    def _discard_pending_pre_type_locked(self) -> None:
+        pending = self._pending_pre_type_screenshot
+        self._pending_pre_type_screenshot = None
+        if pending is None:
+            return
+        path = Path(pending[0])
+        if path.is_file():
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+    def _refresh_pending_pre_type(
+        self,
+        cursor_xy: tuple[int, int] | None = None,
+    ) -> None:
+        """Capture an empty-field frame after focus settles for the next text_input."""
+        with self._lock:
+            run_dir = self._run_dir
+            if (
+                run_dir is None
+                or not self._accepting_input
+                or self._finalizing
+                or self._pending_text_meta is not None
+            ):
+                return
+            last_click_xy = self._last_pointer_cursor_xy
+            self._discard_pending_pre_type_locked()
+
+        mouse_xy = cursor_xy or last_click_xy
+        try:
+            pos = pyautogui.position()
+            mouse_xy = (int(pos.x), int(pos.y))
+        except Exception:
+            pass
+
+        typing_focus = resolve_typing_focus(
+            last_click_xy=last_click_xy,
+            mouse_xy=mouse_xy,
+        )
+        focus_xy = typing_focus.point
+        if focus_xy is None:
+            return
+
+        pending_dest = _pending_pre_type_capture_path(run_dir)
+        try:
+            info = _capture_screenshot_at_point(focus_xy[0], focus_xy[1], pending_dest)
+        except Exception:
+            return
+
+        with self._lock:
+            if (
+                self._run_dir is None
+                or not self._accepting_input
+                or self._finalizing
+                or self._pending_text_meta is not None
+            ):
+                path = Path(info[0])
+                if path.is_file():
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+                return
+            self._pending_pre_type_screenshot = info
 
     def _flush_pending_text_input(
         self,
@@ -1101,7 +1185,11 @@ class RecordingSession:
         *,
         timestamp_utc: str | None = None,
     ) -> None:
-        """Reserve the text-input event and capture the before-first-key screenshot."""
+        """Reserve the text-input event and attach the before-typing screenshot.
+
+        Prefer a pre-captured empty-field frame (taken after the focusing click /
+        key), falling back to a live grab only when none is available.
+        """
         mouse_xy = cursor_xy
         try:
             pos = pyautogui.position()
@@ -1117,6 +1205,8 @@ class RecordingSession:
             self._next_index += 1
             self._pending_text_chars = []
             self._pending_text_caret = 0
+            pending_pre_type = self._pending_pre_type_screenshot
+            self._pending_pre_type_screenshot = None
 
         typing_focus = resolve_typing_focus(
             last_click_xy=last_click_xy,
@@ -1138,11 +1228,19 @@ class RecordingSession:
         mon_idx: int | None = None
         mon_offset: tuple[int, int] | None = None
         if focus_xy is not None:
-            shot_path, mon_idx, mon_offset = self._capture_immediate_screenshot(
+            shot_path, mon_idx, mon_offset = _finalize_screenshot(
                 run_dir,
                 index,
                 focus_xy,
+                pending_pre_type,
             )
+        elif pending_pre_type is not None:
+            leftover = Path(pending_pre_type[0])
+            if leftover.is_file():
+                try:
+                    leftover.unlink()
+                except OSError:
+                    pass
         with self._lock:
             meta = self._pending_text_meta
             if meta is None or int(meta.get("index", -1)) != index:
@@ -1369,6 +1467,7 @@ class RecordingSession:
                 windows_before=pending_windows,
             )
         )
+        self._refresh_pending_pre_type((x, y))
 
     def _flush_pending_hold(
         self,
@@ -1427,6 +1526,7 @@ class RecordingSession:
                 windows_before=pending_windows,
             )
         )
+        self._refresh_pending_pre_type((x, y))
 
     def _flush_pending_right(
         self,
@@ -1478,6 +1578,7 @@ class RecordingSession:
                 windows_before=pending_windows,
             )
         )
+        self._refresh_pending_pre_type((x, y))
 
     def _flush_pending_drag(
         self,
@@ -1549,6 +1650,7 @@ class RecordingSession:
                 windows_before=pending_windows,
             )
         )
+        self._refresh_pending_pre_type((x2, y2))
 
     def _worker_loop(self) -> None:
         while True:

@@ -172,17 +172,32 @@ def test_event_timestamp_is_captured_before_worker_persistence(tmp_path) -> None
 
 def test_typing_burst_coalesced_into_one_event(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
-    captures: list[tuple[int, tuple[int, int]]] = []
+    before_dests: list[str] = []
+    end_captures: list[tuple[int, tuple[int, int]]] = []
 
-    def track_capture(run_dir, index, cursor_xy, dest=None):
-        captures.append((index, cursor_xy))
+    def track_point(x: int, y: int, dest):
+        before_dests.append(Path(dest).name)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"fake")
+        return str(dest), 1, (0, 0)
+
+    def track_immediate(run_dir, index, cursor_xy, dest=None):
+        end_captures.append((index, cursor_xy))
         path = dest if dest is not None else run_dir / "screenshots" / f"event_{index:03d}.jpeg"
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_bytes(b"fake")
         return str(path), 1, (0, 0)
 
-    with _default_capture_window_patches(), patch("src.recorder.capture.pyautogui.position", return_value=type("P", (), {"x": 100, "y": 100})()), patch.object(
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=track_point,
+    ), patch.object(
         RecordingSession,
         "_capture_immediate_screenshot",
-        side_effect=track_capture,
+        side_effect=track_immediate,
     ):
         run_dir = session.start()
         try:
@@ -190,15 +205,16 @@ def test_typing_burst_coalesced_into_one_event(tmp_path) -> None:
 
             for ch in "chrome":
                 session._on_key_press(KeyCode.from_char(ch))
-            assert len(captures) == 1
-            assert captures[0][0] == 1
+            assert before_dests == ["event_001.jpeg"]
+            assert end_captures == []
             session.stop()
         finally:
             if session.is_active():
                 session.stop()
 
     assert session.event_count() == 1
-    assert len(captures) == 2
+    assert len(end_captures) == 1
+    assert end_captures[0][0] == 1
     raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
     assert raw["kind"] == "text_input"
     assert raw["text"] == "chrome"
@@ -896,6 +912,90 @@ def test_text_input_stores_before_on_first_key_and_after_on_flush(tmp_path) -> N
     assert raw["text"] == "ab"
     assert raw["screenshot_path"].endswith("event_001.jpeg")
     assert raw["end_screenshot_path"].endswith("event_001_end.jpeg")
+
+
+def test_text_input_reuses_pre_type_screenshot_from_prior_click(tmp_path) -> None:
+    """After a focusing click, typing before-shot comes from the pre-type frame."""
+    session = RecordingSession(runs_root=tmp_path)
+    captures: list[tuple[int, int, str]] = []
+
+    def _track(x: int, y: int, dest):
+        name = Path(dest).name
+        captures.append((x, y, name))
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # Distinct payload so we can prove the typing before-shot is the pre-type file.
+        dest.write_bytes(name.encode("utf-8"))
+        return str(dest), 1, (0, 0)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_track,
+    ), patch(
+        "src.recorder.capture.resolve_typing_focus",
+        return_value=TypingFocus(point=(555, 666), rect=(500, 600, 700, 720)),
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import KeyCode
+
+            _left_click(session, 400, 300)
+            session._on_key_press(KeyCode.from_char("a"))
+            session._on_key_press(KeyCode.from_char("b"))
+            session.stop()
+        finally:
+            if session.is_active():
+                session.stop()
+
+    names = [name for _, _, name in captures]
+    assert "_pending_pre_type.jpeg" in names
+    # Typing before-shot must reuse the pending file (no live event_002.jpeg grab).
+    assert "event_002.jpeg" not in names
+    pre_type_points = [(x, y) for x, y, name in captures if name == "_pending_pre_type.jpeg"]
+    assert pre_type_points == [(555, 666)]
+
+    text_raw = json.loads((run_dir / "events" / "event_002.json").read_text(encoding="utf-8"))
+    assert text_raw["kind"] == "text_input"
+    assert text_raw["text"] == "ab"
+    before = Path(text_raw["screenshot_path"])
+    assert before.name == "event_002.jpeg"
+    assert before.read_bytes() == b"_pending_pre_type.jpeg"
+    assert not (run_dir / "screenshots" / "_pending_pre_type.jpeg").exists()
+
+
+def test_text_input_falls_back_to_live_before_without_pre_type(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+    dests: list[str] = []
+
+    def _track(x: int, y: int, dest):
+        dests.append(Path(dest).name)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"live")
+        return str(dest), 1, (0, 0)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_track,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import KeyCode
+
+            session._on_key_press(KeyCode.from_char("x"))
+            session.stop()
+        finally:
+            if session.is_active():
+                session.stop()
+
+    assert "_pending_pre_type.jpeg" not in dests
+    assert dests[0] == "event_001.jpeg"
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert Path(raw["screenshot_path"]).read_bytes() == b"live"
 
 
 def test_text_input_uses_focus_point_not_anchor_click(tmp_path) -> None:

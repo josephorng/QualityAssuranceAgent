@@ -420,12 +420,20 @@ async def _analyze_all_event_instructions(
                 return
             event = prepared.event
             log_info(f"processing event {event.index} kind={event.kind}")
-            results[pos] = await analyze_event_to_cache(
-                prepared.event_for_llm,
-                run_dir=run_dir,
-                vision=prepared.vision,
-                log_info=log_info,
-            )
+            try:
+                results[pos] = await analyze_event_to_cache(
+                    prepared.event_for_llm,
+                    run_dir=run_dir,
+                    vision=prepared.vision,
+                    log_info=log_info,
+                )
+            except Exception as exc:
+                # Belt-and-suspenders: keep sibling instruction jobs alive.
+                log_info(
+                    f"instruction LLM job failed event={event.index}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                results[pos] = None
             if on_instruction_done is not None:
                 on_instruction_done()
 
@@ -469,13 +477,21 @@ async def _infer_all_expected_outcomes(
             if should_cancel is not None and should_cancel():
                 cancelled = True
                 return
-            outcomes[pos] = await infer_expected_outcome(
-                instruction=instruction,
-                before_screenshot=before_shot,
-                after_screenshot=after_shot,
-                window_change_hint=window_change_hint,
-                log_info=log_info,
-            )
+            try:
+                outcomes[pos] = await infer_expected_outcome(
+                    instruction=instruction,
+                    before_screenshot=before_shot,
+                    after_screenshot=after_shot,
+                    window_change_hint=window_change_hint,
+                    log_info=log_info,
+                )
+            except Exception as exc:
+                # Soft-fail isolation: one timeout must not abort sibling jobs.
+                log_info(
+                    f"expected-outcome LLM job failed pos={pos}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                outcomes[pos] = None
             if on_outcome_done is not None:
                 on_outcome_done()
 

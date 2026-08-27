@@ -3002,6 +3002,125 @@ async def test_infer_expected_outcome_skips_identical_paths(tmp_path: Path) -> N
     llm_mock.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_infer_expected_outcome_soft_fails_on_timeout(tmp_path: Path) -> None:
+    import httpx
+
+    before = tmp_path / "before.jpeg"
+    after = tmp_path / "after.jpeg"
+    before.write_bytes(b"before")
+    after.write_bytes(b"after")
+    logs: list[str] = []
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(side_effect=httpx.ReadTimeout("timed out")),
+    ):
+        outcome = await infer_expected_outcome(
+            instruction="將滑鼠移到「開啟」按鈕，並點擊滑鼠一下。",
+            before_screenshot=str(before),
+            after_screenshot=str(after),
+            log_info=logs.append,
+        )
+
+    assert outcome is None
+    assert any("infer_expected_outcome failed" in line for line in logs)
+    assert any("ReadTimeout" in line for line in logs)
+
+
+@pytest.mark.asyncio
+async def test_analyze_recording_session_continues_when_one_outcome_times_out(
+    tmp_path: Path,
+) -> None:
+    """One hung expected-outcome call must not abort sibling events or the report."""
+    import httpx
+
+    from src.common.run_state import reset_run_state_manager
+
+    reset_run_state_manager()
+    run_dir = tmp_path / "screen_record_outcome_timeout"
+    shots = run_dir / "screenshots"
+    shots.mkdir(parents=True)
+    before1 = shots / "event_001.jpeg"
+    before2 = shots / "event_002.jpeg"
+    final_after = shots / "final_after.jpeg"
+    before1.write_bytes(b"b1")
+    before2.write_bytes(b"b2")
+    final_after.write_bytes(b"final")
+    (run_dir / "events").mkdir(parents=True)
+    events = [
+        RecordedEvent(
+            index=1,
+            timestamp_utc="2026-07-30T03:00:00+00:00",
+            kind="key_press",
+            key="enter",
+            screenshot_path=str(before1),
+        ),
+        RecordedEvent(
+            index=2,
+            timestamp_utc="2026-07-30T03:00:01+00:00",
+            kind="key_press",
+            key="tab",
+            screenshot_path=str(before2),
+        ),
+    ]
+    event_paths: list[str] = []
+    for event in events:
+        relative_path = f"events/event_{event.index:03d}.json"
+        event_paths.append(relative_path)
+        (run_dir / relative_path).write_text(
+            json.dumps(event.to_dict(), ensure_ascii=False),
+            encoding="utf-8",
+        )
+    (run_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "started_at_utc": events[0].timestamp_utc,
+                "stopped_at_utc": events[-1].timestamp_utc,
+                "event_count": len(events),
+                "events": event_paths,
+                "final_after_screenshot": "screenshots/final_after.jpeg",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    call_count = {"n": 0}
+
+    async def flaky_outcome(*, instruction: str, **_kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise httpx.ReadTimeout("hung on first outcome")
+        return "第二步已完成"
+
+    with patch(
+        "src.recorder.orchestrator.build_vision_context",
+        new=AsyncMock(return_value={"used_vision": False, "candidate_text": ""}),
+    ), patch(
+        "src.recorder.orchestrator.analyze_event_to_cache",
+        new=AsyncMock(
+            side_effect=[
+                {"instruction": "按下 Enter 鍵"},
+                {"instruction": "按下 Tab 鍵"},
+            ]
+        ),
+    ), patch(
+        "src.recorder.orchestrator.infer_expected_outcome",
+        new=AsyncMock(side_effect=flaky_outcome),
+    ):
+        report = await analyze_recording_session(run_dir)
+
+    assert report["cached"] == 2
+    assert report["cancelled"] is False
+    assert report["instructions"] == ["按下 Enter 鍵", "按下 Tab 鍵"]
+    # First outcome soft-failed to None; second succeeded.
+    assert report["expected_outcomes"] == [None, "第二步已完成"]
+    assert (run_dir / "report.json").is_file()
+    assert (run_dir / "analysis" / "event_001.json").is_file()
+    assert (run_dir / "analysis" / "event_002.json").is_file()
+
+
 def test_after_screenshot_prefers_next_event_before_shot(tmp_path: Path) -> None:
     before = tmp_path / "event_001.jpeg"
     next_before = tmp_path / "event_002.jpeg"

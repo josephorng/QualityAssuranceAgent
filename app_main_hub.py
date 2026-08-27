@@ -2186,7 +2186,7 @@ class MainHub(ctk.CTk):
             return
 
         settings = load_settings()
-        initial = Path(settings.runs_dir)
+        initial = Path(settings.recordings_dir)
         folder = filedialog.askdirectory(
             parent=self,
             title="選擇錄製資料夾",

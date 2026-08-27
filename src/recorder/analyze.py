@@ -767,9 +767,14 @@ async def analyze_event_to_cache(
         return _instruction_result(
             result["instruction"], event, vision, destination
         )
-    except (ValueError, json.JSONDecodeError) as exc:
+    except Exception as exc:
+        # Soft-fail: timeouts/HTTP errors must not abort the whole analyze run.
+        # asyncio.CancelledError is BaseException and still propagates.
         if log_info is not None:
-            log_info(f"analyze_event_to_cache failed event={event.index}: {exc}")
+            log_info(
+                f"analyze_event_to_cache failed event={event.index}: "
+                f"{type(exc).__name__}: {exc}"
+            )
         return None
 
 
@@ -866,9 +871,11 @@ async def infer_expected_outcome(
             log_info=log_info,
             append_image_sizes=True,
         )
-    except (ValueError, json.JSONDecodeError) as exc:
+    except Exception as exc:
+        # Soft-fail: one hung/timed-out vLLM call must not abort Analyze.
+        # asyncio.CancelledError is BaseException and still propagates.
         if log_info is not None:
-            log_info(f"infer_expected_outcome failed: {exc}")
+            log_info(f"infer_expected_outcome failed: {type(exc).__name__}: {exc}")
         return None
     outcome = result.get("expected_outcome")
     return outcome if isinstance(outcome, str) and outcome.strip() else None

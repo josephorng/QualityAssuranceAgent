@@ -443,8 +443,23 @@ class VLLMClient(LLMClient):
             f"headers=\n{headers}"
         )
 
-        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-            response = await client.post(self._endpoint, headers=headers, json=payload)
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                response = await client.post(
+                    self._endpoint, headers=headers, json=payload
+                )
+        except httpx.TimeoutException as exc:
+            get_run_state_manager().log_info(
+                f"VLLM chat_messages timeout after {self.timeout_seconds}s "
+                f"endpoint={self._endpoint}: {exc}"
+            )
+            raise
+        except httpx.HTTPError as exc:
+            get_run_state_manager().log_info(
+                f"VLLM chat_messages transport error endpoint={self._endpoint}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            raise
         if response.is_error:
             get_run_state_manager().log_info(
                 f"VLLM chat_messages error status={response.status_code} body={response.text}"

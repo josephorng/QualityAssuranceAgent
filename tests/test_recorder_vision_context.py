@@ -14,6 +14,7 @@ from src.recorder.vision_context import (
     _drop_point_inside_candidate,
     _local_cursor,
     _nearest_candidates,
+    annotate_scrollbar_track,
     build_vision_context,
     build_vision_context_at_point,
     candidate_offset_for_instruction,
@@ -25,6 +26,7 @@ from src.recorder.vision_context import (
     format_scrollbar_context_hint,
     primary_candidate_offset,
     resolve_event_screenshot_path,
+    scrollbar_track_percent_phrase,
 )
 
 
@@ -1072,3 +1074,105 @@ def test_list_primary_target_options_limits_to_ten_closest() -> None:
     assert options[0]["display"] == "「項目0」文字（目前）"
     assert options[9]["label"] == "「項目9」文字"
     assert all(opt["index"] < 10 for opt in options)
+
+
+def test_annotate_scrollbar_track_vertical_percent() -> None:
+    from cua_mcp.scrollbar_arrows import scrollbar_axis_percent
+
+    scrollbar = _detection_from_bbox((100, 0, 20, 100), YOLO_CLASS_SCROLLBAR)
+    vision = {
+        "candidates": [
+            {
+                "bbox": [105, 40, 10, 10],
+                "center": [110, 45],
+                "class_name": "element",
+                "text": None,
+                "icons": [{"chinese_id": "某個圖示"}],
+            },
+            {
+                "bbox": list(scrollbar.bbox),
+                "center": [110, 50],
+                "class_name": "scrollbar",
+                "text": None,
+            },
+        ]
+    }
+    track = annotate_scrollbar_track(
+        vision,
+        local_x=110,
+        local_y=60,
+        all_detections=[scrollbar],
+    )
+    assert track is not None
+    assert track["axis"] == "vertical"
+    assert track["percent"] == scrollbar_axis_percent(110, 60, scrollbar.bbox)
+    assert vision["candidates"][0]["class_name"] == "scrollbar"
+    assert scrollbar_track_percent_phrase(vision) == f"的{track['percent']}%處"
+
+
+def test_annotate_scrollbar_track_skips_end_arrow() -> None:
+    scrollbar = _detection_from_bbox((100, 0, 20, 100), YOLO_CLASS_SCROLLBAR)
+    arrow = _detection_from_bbox(
+        (100, 0, 20, 16),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上滾動箭頭"}],
+    )
+    vision = {
+        "candidates": [
+            {
+                "bbox": list(arrow.bbox),
+                "center": [110, 8],
+                "class_name": "element",
+                "icons": [{"chinese_id": "向上滾動箭頭"}],
+            },
+            {
+                "bbox": list(scrollbar.bbox),
+                "center": [110, 50],
+                "class_name": "scrollbar",
+            },
+        ]
+    }
+    track = annotate_scrollbar_track(
+        vision,
+        local_x=110,
+        local_y=8,
+        all_detections=[scrollbar, arrow],
+    )
+    assert track is None
+    assert "scrollbar_track" not in vision
+
+
+def test_annotate_scrollbar_track_horizontal_and_outside_cast() -> None:
+    from cua_mcp.scrollbar_arrows import point_from_scrollbar_percent
+
+    bbox = (0, 100, 200, 16)
+    vision = {
+        "candidates": [
+            {
+                "bbox": list(bbox),
+                "center": [100, 108],
+                "class_name": "scrollbar",
+            }
+        ]
+    }
+    track = annotate_scrollbar_track(
+        vision,
+        local_x=50,
+        local_y=108,
+        all_detections=[_detection_from_bbox(bbox, YOLO_CLASS_SCROLLBAR)],
+    )
+    assert track is not None
+    assert track["axis"] == "horizontal"
+    assert track["percent"] == 25
+
+    end_vision: dict = {"candidates": []}
+    end_track = annotate_scrollbar_track(
+        end_vision,
+        local_x=500,
+        local_y=0,
+        require_point_inside=False,
+        scrollbar_bbox=bbox,
+    )
+    assert end_track is not None
+    assert end_track["percent"] == 100
+    assert point_from_scrollbar_percent(bbox, 100)[0] == 199

@@ -46,6 +46,9 @@ _SCROLL_ARROW_VERTICAL_IDS: frozenset[str] = (
 _SCROLL_ARROW_HORIZONTAL_IDS: frozenset[str] = (
     _SCROLL_ARROW_LEFT_IDS | _SCROLL_ARROW_RIGHT_IDS
 )
+_SCROLL_ARROW_ALL_IDS: frozenset[str] = (
+    _SCROLL_ARROW_VERTICAL_IDS | _SCROLL_ARROW_HORIZONTAL_IDS
+)
 _UNKNOWN_ICON_CHINESE_ID: str = str(
     unknown_icon_record().get("chinese_id", "未知圖示")
 ).strip()
@@ -404,3 +407,76 @@ def fit_scrollbar_bboxes_to_arrow_controls(
             f"unified_labels={unified} scrollbars={len(scrollbars)}"
         )
     return out
+
+
+def _icon_chinese_ids_from_candidate(candidate: Any) -> set[str]:
+    """Return non-empty ``chinese_id`` values from a dict or ``UiDetection``."""
+    if isinstance(candidate, UiDetection):
+        return _detection_icon_chinese_ids(candidate)
+    if not isinstance(candidate, dict):
+        return set()
+    return {
+        str(icon.get("chinese_id", "")).strip()
+        for icon in (candidate.get("icons") or [])
+        if isinstance(icon, dict) and str(icon.get("chinese_id", "")).strip()
+    }
+
+
+def is_scrollbar_end_arrow_candidate(candidate: Any) -> bool:
+    """True when ``candidate`` is a scrollbar end-cap arrow icon.
+
+    Matches canonical ``*滾動箭頭`` labels and pre-unify triangle/V ids.
+    """
+    return bool(_icon_chinese_ids_from_candidate(candidate) & _SCROLL_ARROW_ALL_IDS)
+
+
+def scrollbar_orientation(bbox: tuple[int, int, int, int] | list[int]) -> str:
+    """Return ``"vertical"`` when height >= width, else ``"horizontal"``."""
+    x, y, w, h = (int(v) for v in bbox[:4])
+    _ = x, y
+    return "vertical" if h >= w else "horizontal"
+
+
+def point_in_bbox(
+    x: int,
+    y: int,
+    bbox: tuple[int, int, int, int] | list[int],
+) -> bool:
+    """True when ``(x, y)`` lies inside an axis-aligned ``(x, y, w, h)`` bbox."""
+    bx, by, bw, bh = (int(v) for v in bbox[:4])
+    return bx <= int(x) < bx + bw and by <= int(y) < by + bh
+
+
+def scrollbar_axis_percent(
+    x: int,
+    y: int,
+    bbox: tuple[int, int, int, int] | list[int],
+) -> int:
+    """Return 0–100 position along the scrollbar's main axis (full fitted bbox).
+
+    Vertical bars use ``y``; horizontal bars use ``x``. The cross-axis
+    coordinate is ignored so drag releases outside the bar still project.
+    """
+    bx, by, bw, bh = (int(v) for v in bbox[:4])
+    if scrollbar_orientation((bx, by, bw, bh)) == "vertical":
+        span = max(1, bh)
+        frac = (int(y) - by) / span
+    else:
+        span = max(1, bw)
+        frac = (int(x) - bx) / span
+    return int(max(0, min(100, round(frac * 100))))
+
+
+def point_from_scrollbar_percent(
+    bbox: tuple[int, int, int, int] | list[int],
+    percent: int,
+) -> tuple[int, int]:
+    """Map a 0–100 track percent to a pixel on the scrollbar (cross-axis center)."""
+    bx, by, bw, bh = (int(v) for v in bbox[:4])
+    pct = max(0, min(100, int(percent)))
+    if scrollbar_orientation((bx, by, bw, bh)) == "vertical":
+        # Use inclusive end so 100% lands on the last pixel of the track.
+        y = by + int(round(pct / 100 * max(0, bh - 1)))
+        return bx + bw // 2, y
+    x = bx + int(round(pct / 100 * max(0, bw - 1)))
+    return x, by + bh // 2

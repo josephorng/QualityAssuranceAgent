@@ -18,6 +18,7 @@ from src.common.prompting import get_prompt
 from src.common.run_state import get_run_state_manager
 
 _OFFSET_TOKEN_RE = re.compile(r"(右方|左方|上方|下方)(\d+)個像素")
+_TRACK_PERCENT_RE = re.compile(r"的(\d+)%處")
 _TRAILING_CONTEXT_COMMENT_RE = re.compile(r"(?:（[^）]*）)+$")
 _INLINE_START_CONTEXT_COMMENT_RE = re.compile(r"（起點(?:附近|在)[^）]*）")
 
@@ -27,6 +28,7 @@ _OFFSET_RESPONSE_SCHEMA: dict[str, Any] = {
         "anchor": {"type": "string"},
         "dx": {"type": "integer"},
         "dy": {"type": "integer"},
+        "track_percent": {"type": ["integer", "null"]},
         "char": {"type": ["string", "null"]},
         "char_occurrence": {"type": "integer"},
         "nearby": {
@@ -82,9 +84,35 @@ def _parse_char_occurrence(raw: Any) -> int:
     return max(0, raw)
 
 
+def _parse_track_percent(raw: Any) -> int | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, int) or isinstance(raw, bool):
+        raise ValueError("track_percent must be an integer or null")
+    return max(0, min(100, raw))
+
+
+def _extract_track_percent_regex(text: str) -> tuple[str, int | None]:
+    """Pull ``的N%處`` from text; prefer the percent after ``拖到`` when present."""
+    if "拖到" in text:
+        drag_at = text.index("拖到")
+        dest_part = text[drag_at:]
+        dest_matches = list(_TRACK_PERCENT_RE.finditer(dest_part))
+        if dest_matches:
+            percent = int(dest_matches[-1].group(1))
+            cleaned = _TRACK_PERCENT_RE.sub("", text)
+            return cleaned, max(0, min(100, percent))
+    matches = list(_TRACK_PERCENT_RE.finditer(text))
+    if not matches:
+        return text, None
+    percent = int(matches[-1].group(1))
+    cleaned = _TRACK_PERCENT_RE.sub("", text)
+    return cleaned, max(0, min(100, percent))
+
+
 def _parse_offset_reply(
     raw: str,
-) -> tuple[str, int, int, list[NearbyHint], str | None, int]:
+) -> tuple[str, int, int, list[NearbyHint], str | None, int, int | None]:
     data = json.loads(raw)
     if not isinstance(data, dict):
         raise ValueError("response is not an object")
@@ -94,6 +122,7 @@ def _parse_offset_reply(
     nearby = data.get("nearby")
     char = data.get("char")
     char_occurrence = _parse_char_occurrence(data.get("char_occurrence"))
+    track_percent = _parse_track_percent(data.get("track_percent"))
     if not isinstance(anchor, str):
         raise ValueError("anchor must be a string")
     if not isinstance(dx, int) or isinstance(dx, bool):
@@ -103,7 +132,14 @@ def _parse_offset_reply(
     if char is not None and (not isinstance(char, str) or not char):
         raise ValueError("char must be a non-empty string or null")
     nearby_hints = _parse_nearby_items(nearby)
-    return anchor.strip(), dx, dy, nearby_hints, char, char_occurrence
+    if track_percent is None:
+        _, regex_percent = _extract_track_percent_regex(anchor)
+        if regex_percent is not None:
+            track_percent = regex_percent
+            anchor = _TRACK_PERCENT_RE.sub("", anchor).strip()
+    if track_percent is not None:
+        dx, dy = 0, 0
+    return anchor.strip(), dx, dy, nearby_hints, char, char_occurrence, track_percent
 
 
 def _strip_trailing_context_comment(text: str) -> str:
@@ -172,42 +208,55 @@ def _parse_relative_pixel_offset_regex(instruction: str) -> tuple[str, int, int]
 
 def _parse_mouse_target_regex(
     instruction: str,
-) -> tuple[str, int, int, str | None, int]:
-    """Regex-only parse including char-target phrases."""
+) -> tuple[str, int, int, str | None, int, int | None]:
+    """Regex-only parse including char-target phrases and scrollbar track %."""
     text = _strip_context_comments((instruction or "").strip())
     if not text:
-        return "", 0, 0, None, 0
+        return "", 0, 0, None, 0, None
 
     parsed = parse_char_target_instruction(text)
     if parsed is not None:
         full_text, char, occurrence = parsed
-        return text_anchor_from_full_text(full_text), 0, 0, char, occurrence
+        return text_anchor_from_full_text(full_text), 0, 0, char, occurrence, None
 
-    anchor, dx, dy = _parse_relative_pixel_offset_regex(instruction)
+    text_wo_percent, track_percent = _extract_track_percent_regex(text)
+    anchor, dx, dy = _parse_relative_pixel_offset_regex(text_wo_percent)
+    if track_percent is not None:
+        dx, dy = 0, 0
     anchor, dx, dy, char, occurrence = _normalize_char_target_fields(
         anchor, dx, dy, None, 0
     )
-    return anchor, dx, dy, char, occurrence
+    return anchor, dx, dy, char, occurrence, track_percent
 
 
 async def parse_mouse_target_instruction(
     instruction: str,
-) -> tuple[str, int, int, list[NearbyHint], str | None, int]:
+) -> tuple[str, int, int, list[NearbyHint], str | None, int, int | None]:
     """
     Split an instruction into anchor text, relative pixel offset, nearby hints,
-    and optional char target metadata.
+    optional char target metadata, and optional scrollbar track percent.
 
-    Uses an LLM to extract anchor/dx/dy/nearby/char, with a regex fallback on
-    failure. Positive dx is right; positive dy is down.
+    Uses an LLM to extract anchor/dx/dy/nearby/char/track_percent, with a regex
+    fallback on failure. Positive dx is right; positive dy is down.
+    ``track_percent`` is 0–100 along a scrollbar main axis when the instruction
+    contains ``的N%處``.
     """
     text = (instruction or "").strip()
     if not text:
-        return "", 0, 0, [], None, 0
+        return "", 0, 0, [], None, 0, None
 
     prompt = get_prompt("mouse_target_instruction").format(instruction=text)
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
     try:
-        anchor, dx, dy, nearby, char, char_occurrence = await request_json_with_retry(
+        (
+            anchor,
+            dx,
+            dy,
+            nearby,
+            char,
+            char_occurrence,
+            track_percent,
+        ) = await request_json_with_retry(
             messages=messages,
             response_schema=_OFFSET_RESPONSE_SCHEMA,
             parse_reply=_parse_offset_reply,
@@ -220,18 +269,28 @@ async def parse_mouse_target_instruction(
         anchor, dx, dy, char, char_occurrence = _normalize_char_target_fields(
             anchor, dx, dy, char, char_occurrence
         )
+        if track_percent is None:
+            _, regex_percent = _extract_track_percent_regex(text)
+            track_percent = regex_percent
+        if track_percent is not None:
+            dx, dy = 0, 0
+            anchor = _TRACK_PERCENT_RE.sub("", anchor).strip()
         _log_info(
             "parse_mouse_target_instruction LLM "
             f"anchor={anchor!r} dx={dx} dy={dy} char={char!r} "
-            f"char_occurrence={char_occurrence} nearby={nearby!r}"
+            f"char_occurrence={char_occurrence} track_percent={track_percent!r} "
+            f"nearby={nearby!r}"
         )
-        return anchor, dx, dy, nearby, char, char_occurrence
+        return anchor, dx, dy, nearby, char, char_occurrence, track_percent
     except (ValueError, json.JSONDecodeError) as exc:
-        anchor, dx, dy, char, char_occurrence = _parse_mouse_target_regex(text)
+        anchor, dx, dy, char, char_occurrence, track_percent = _parse_mouse_target_regex(
+            text
+        )
         nearby = extract_nearby_hints_from_instruction(text)
         _log_info(
             "parse_mouse_target_instruction regex fallback "
             f"({exc}) anchor={anchor!r} dx={dx} dy={dy} char={char!r} "
-            f"char_occurrence={char_occurrence} nearby={nearby!r}"
+            f"char_occurrence={char_occurrence} track_percent={track_percent!r} "
+            f"nearby={nearby!r}"
         )
-        return anchor, dx, dy, nearby, char, char_occurrence
+        return anchor, dx, dy, nearby, char, char_occurrence, track_percent

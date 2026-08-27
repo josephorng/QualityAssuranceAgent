@@ -2121,6 +2121,115 @@ def test_instruction_for_click_empty_scrollbar() -> None:
     assert instruction_for_click(event, vision) == "將滑鼠移到滾動條"
 
 
+def test_instruction_for_click_scrollbar_track_percent() -> None:
+    event = RecordedEvent(
+        index=3,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(2115, 577),
+        button="left",
+        screenshot_path="",
+    )
+    vision = {
+        "local_cursor": (2115, 577),
+        "scrollbar_track": {
+            "bbox": [2104, 156, 22, 842],
+            "axis": "vertical",
+            "percent": 60,
+            "anchor_class": "scrollbar",
+        },
+        "candidates": [
+            {
+                "bbox": [2104, 156, 22, 842],
+                "center": [2115, 577],
+                "class_name": "scrollbar",
+                "text": None,
+            },
+        ],
+    }
+    assert instruction_for_click(event, vision) == "將滑鼠移到滾動條的60%處"
+
+
+def test_instruction_for_click_scrollbar_track_percent_with_adjacent() -> None:
+    event = RecordedEvent(
+        index=2,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(3611, 358),
+        button="left",
+        screenshot_path="",
+    )
+    vision = {
+        "local_cursor": (3611, 358),
+        "scrollbar_track": {
+            "bbox": [3600, 272, 21, 172],
+            "axis": "vertical",
+            "percent": 45,
+            "anchor_class": "scrollbar",
+        },
+        "field_context": "滾動條旁可見內容: 「資產總覽」",
+        "candidates": [
+            {
+                "bbox": [3600, 272, 21, 172],
+                "center": [3611, 358],
+                "class_name": "scrollbar",
+                "text": None,
+            },
+            {
+                "bbox": [3500, 320, 60, 14],
+                "center": [3530, 327],
+                "class_name": "text",
+                "text": "資產總覽",
+            },
+        ],
+    }
+    assert (
+        instruction_for_click(event, vision)
+        == "將滑鼠移到「資產總覽」文字區域的滾動條的45%處"
+    )
+
+
+def test_instruction_for_drag_scrollbar_track_percent() -> None:
+    vision = {
+        "local_cursor": (100, 20),
+        "scrollbar_track": {
+            "bbox": [90, 0, 20, 100],
+            "axis": "vertical",
+            "percent": 20,
+            "anchor_class": "scrollbar",
+        },
+        "candidates": [
+            {
+                "bbox": [90, 0, 20, 100],
+                "center": [100, 50],
+                "class_name": "scrollbar",
+                "text": None,
+            },
+        ],
+    }
+    destination = {
+        "local_cursor": (100, 80),
+        "scrollbar_track": {
+            "bbox": [90, 0, 20, 100],
+            "axis": "vertical",
+            "percent": 80,
+            "anchor_class": "scrollbar",
+        },
+        "candidates": [
+            {
+                "bbox": [90, 0, 20, 100],
+                "center": [100, 50],
+                "class_name": "scrollbar",
+                "text": None,
+            },
+        ],
+    }
+    assert (
+        instruction_for_drag(vision, destination)
+        == "從滾動條的20%處拖到滾動條的80%處"
+    )
+
+
 def test_instruction_for_scroll_on_scrollbar() -> None:
     event = RecordedEvent(
         index=4,

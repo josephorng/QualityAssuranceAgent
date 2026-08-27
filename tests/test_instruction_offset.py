@@ -70,10 +70,19 @@ async def test_parse_relative_pixel_offset_uses_llm() -> None:
                 [NearbyHint(label="「圖片」文字", side=None)],
                 None,
                 0,
+                None,
             ),
         ),
     ) as mock_request:
-        anchor, dx, dy, nearby, char, char_occurrence = await parse_mouse_target_instruction(
+        (
+            anchor,
+            dx,
+            dy,
+            nearby,
+            char,
+            char_occurrence,
+            track_percent,
+        ) = await parse_mouse_target_instruction(
             "「振銓」文字右方5個像素、上方28個像素的位置（附近有「圖片」文字）"
         )
 
@@ -83,6 +92,7 @@ async def test_parse_relative_pixel_offset_uses_llm() -> None:
     assert nearby == [NearbyHint(label="「圖片」文字", side=None)]
     assert char is None
     assert char_occurrence == 0
+    assert track_percent is None
     mock_request.assert_awaited_once()
 
 
@@ -104,6 +114,7 @@ async def test_parse_relative_pixel_offset_passes_raw_instruction_to_llm() -> No
                 ],
                 None,
                 0,
+                None,
             ),
         ),
     ) as mock_request:
@@ -120,7 +131,15 @@ async def test_parse_relative_pixel_offset_empty_instruction_skips_llm() -> None
         "cua_mcp.instruction_offset.request_json_with_retry",
         new=AsyncMock(),
     ) as mock_request:
-        anchor, dx, dy, nearby, char, char_occurrence = await parse_mouse_target_instruction("   ")
+        (
+            anchor,
+            dx,
+            dy,
+            nearby,
+            char,
+            char_occurrence,
+            track_percent,
+        ) = await parse_mouse_target_instruction("   ")
 
     assert anchor == ""
     assert dx == 0
@@ -128,6 +147,7 @@ async def test_parse_relative_pixel_offset_empty_instruction_skips_llm() -> None
     assert nearby == []
     assert char is None
     assert char_occurrence == 0
+    assert track_percent is None
     mock_request.assert_not_awaited()
 
 
@@ -139,7 +159,15 @@ async def test_parse_relative_pixel_offset_falls_back_to_regex() -> None:
         "cua_mcp.instruction_offset.request_json_with_retry",
         new=AsyncMock(side_effect=ValueError("bad llm reply")),
     ):
-        anchor, dx, dy, nearby, char, char_occurrence = await parse_mouse_target_instruction(
+        (
+            anchor,
+            dx,
+            dy,
+            nearby,
+            char,
+            char_occurrence,
+            track_percent,
+        ) = await parse_mouse_target_instruction(
             "「iniseape」文字下方57個像素的位置（附近有「圖片」文字）"
         )
 
@@ -149,12 +177,13 @@ async def test_parse_relative_pixel_offset_falls_back_to_regex() -> None:
     assert nearby == [NearbyHint(label="「圖片」文字", side=None)]
     assert char is None
     assert char_occurrence == 0
+    assert track_percent is None
 
     with patch(
         "cua_mcp.instruction_offset.request_json_with_retry",
         new=AsyncMock(side_effect=ValueError("bad llm reply")),
     ):
-        _, _, _, directed, _, _ = await parse_mouse_target_instruction(
+        _, _, _, directed, _, _, _ = await parse_mouse_target_instruction(
             "「矩形框線」圖示（在「顯示已授權電腦」文字的左邊）"
         )
     assert directed == [
@@ -163,7 +192,7 @@ async def test_parse_relative_pixel_offset_falls_back_to_regex() -> None:
 
 
 def test_parse_mouse_target_regex_char_target() -> None:
-    anchor, dx, dy, char, char_occurrence = _parse_mouse_target_regex(
+    anchor, dx, dy, char, char_occurrence, track_percent = _parse_mouse_target_regex(
         "將滑鼠移到「搜尋」的「搜」字上，並點擊滑鼠一下。"
     )
     assert anchor == "「搜尋」文字"
@@ -171,15 +200,40 @@ def test_parse_mouse_target_regex_char_target() -> None:
     assert dy == 0
     assert char == "搜"
     assert char_occurrence == 0
+    assert track_percent is None
 
 
 def test_parse_mouse_target_regex_duplicate_char() -> None:
-    anchor, dx, dy, char, char_occurrence = _parse_mouse_target_regex(
+    anchor, dx, dy, char, char_occurrence, track_percent = _parse_mouse_target_regex(
         "將滑鼠移到「Google」的第2個「o」字上"
     )
     assert anchor == "「Google」文字"
     assert char == "o"
     assert char_occurrence == 1
+    assert track_percent is None
+
+
+def test_parse_mouse_target_regex_scrollbar_track_percent() -> None:
+    anchor, dx, dy, char, char_occurrence, track_percent = _parse_mouse_target_regex(
+        "將滑鼠移到滾動條的60%處（在「資產總覽」文字的右邊）"
+    )
+    assert anchor == "將滑鼠移到滾動條"
+    assert dx == 0
+    assert dy == 0
+    assert char is None
+    assert track_percent == 60
+
+
+def test_parse_mouse_target_regex_scrollbar_drag_end_percent() -> None:
+    anchor, dx, dy, char, char_occurrence, track_percent = _parse_mouse_target_regex(
+        "從滾動條的20%處拖到滾動條的80%處"
+    )
+    assert "拖到滾動條" in anchor
+    assert "的20%處" not in anchor
+    assert "的80%處" not in anchor
+    assert track_percent == 80
+    assert dx == 0
+    assert dy == 0
 
 
 @pytest.mark.asyncio
@@ -194,10 +248,19 @@ async def test_parse_mouse_target_instruction_char_target_llm() -> None:
                 [],
                 "搜",
                 0,
+                None,
             ),
         ),
     ):
-        anchor, dx, dy, nearby, char, char_occurrence = await parse_mouse_target_instruction(
+        (
+            anchor,
+            dx,
+            dy,
+            nearby,
+            char,
+            char_occurrence,
+            track_percent,
+        ) = await parse_mouse_target_instruction(
             "將滑鼠移到「搜尋」的「搜」字上"
         )
 
@@ -207,3 +270,36 @@ async def test_parse_mouse_target_instruction_char_target_llm() -> None:
     assert char == "搜"
     assert char_occurrence == 0
     assert nearby == []
+    assert track_percent is None
+
+
+@pytest.mark.asyncio
+async def test_parse_mouse_target_instruction_track_percent_llm() -> None:
+    with patch(
+        "cua_mcp.instruction_offset.request_json_with_retry",
+        new=AsyncMock(
+            return_value=(
+                "滾動條",
+                0,
+                0,
+                [],
+                None,
+                0,
+                60,
+            ),
+        ),
+    ):
+        (
+            anchor,
+            dx,
+            dy,
+            nearby,
+            char,
+            char_occurrence,
+            track_percent,
+        ) = await parse_mouse_target_instruction("將滑鼠移到滾動條的60%處")
+
+    assert anchor == "滾動條"
+    assert dx == 0
+    assert dy == 0
+    assert track_percent == 60

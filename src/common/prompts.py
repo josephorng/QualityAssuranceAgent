@@ -347,8 +347,9 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Use the nearest matching candidate row to name the target (OCR text and/or icon labels).",
                 "When field context shows visible text inside an 輸入欄(Input), name the target with that text plus 輸入欄, e.g. 將滑鼠移到「間間Gemini」文字所在的輸入欄. When the nearest candidate is an empty 輸入欄(Input) with no visible OCR text, name it as 輸入欄 (do not fall back to a nearby icon or text).",
                 "When field context shows scrollable content beside a 滾動條(Scrollbar), name the target with that content plus 滾動條, e.g. 將滑鼠移到「資產總覽」文字區域的滾動條. When the nearest candidate is a 滾動條(Scrollbar) with no adjacent content label, name it as 滾動條 (do not fall back to a nearby icon or text).",
-                "For pointer clicks (click, double_click, triple_click, right_click, middle_click, hold): return only the move-target portion starting with 將滑鼠移到. Do not include nearby comments or the trailing action phrase; post-processing adds those (including Ctrl+/Shift+ click phrasing when RecordedEvent.modifiers is set, 連按N下 when kind is double_click/triple_click or click_count≥2, and 按住約N秒 / 用右鍵按住約N秒 when kind=hold using duration_seconds). If the click is on the anchor, e.g. 將滑鼠移到「Submit」按鈕, 將滑鼠移到「間間Gemini」文字所在的輸入欄, 將滑鼠移到輸入欄, 將滑鼠移到「資產總覽」文字區域的滾動條, or 將滑鼠移到滾動條. If the click is off the anchor, append the relative pixel offset from the offset hints, e.g. 將滑鼠移到「自訂Office 範本」文字下方39個像素的位置. Use the exact pixel counts from the hints. Do not use vague 附近 for the primary target when an offset is available.",
-                "For drag events: name the start target and destination anchor from candidates. Append the relative pixel offset from the offset hints to the destination anchor, e.g. 從「Chrome」圖示拖到「Desktop」文字下方49個像素的位置. Use the exact pixel counts from the hints for the anchor you name. If offset is negligible, omit it. If destination candidates are empty, describe the drop area directionally (e.g. 右側空白區域).",
+                "When the click/drag is on a scrollbar track (not an end arrow), append 的N%處 using the recorded track percent along the full scrollbar, e.g. 將滑鼠移到滾動條的60%處 or 將滑鼠移到「資產總覽」文字區域的滾動條的60%處. For track drags: 從滾動條的20%處拖到滾動條的80%處 (same scrollbar anchor for start and end). Do not also append relative pixel offsets when 的N%處 is used.",
+                "For pointer clicks (click, double_click, triple_click, right_click, middle_click, hold): return only the move-target portion starting with 將滑鼠移到. Do not include nearby comments or the trailing action phrase; post-processing adds those (including Ctrl+/Shift+ click phrasing when RecordedEvent.modifiers is set, 連按N下 when kind is double_click/triple_click or click_count≥2, and 按住約N秒 / 用右鍵按住約N秒 when kind=hold using duration_seconds). If the click is on the anchor, e.g. 將滑鼠移到「Submit」按鈕, 將滑鼠移到「間間Gemini」文字所在的輸入欄, 將滑鼠移到輸入欄, 將滑鼠移到「資產總覽」文字區域的滾動條, 將滑鼠移到滾動條的60%處, or 將滑鼠移到滾動條. If the click is off the anchor, append the relative pixel offset from the offset hints, e.g. 將滑鼠移到「自訂Office 範本」文字下方39個像素的位置. Use the exact pixel counts from the hints. Do not use vague 附近 for the primary target when an offset is available.",
+                "For drag events: name the start target and destination anchor from candidates. Append the relative pixel offset from the offset hints to the destination anchor, e.g. 從「Chrome」圖示拖到「Desktop」文字下方49個像素的位置. Use the exact pixel counts from the hints for the anchor you name. If offset is negligible, omit it. If destination candidates are empty, describe the drop area directionally (e.g. 右側空白區域). For scrollbar-track drags with percents, prefer 從…的N%處拖到…的M%處 and omit pixel offsets.",
                 "For scroll: describe direction and target area, e.g. 在檔案清單區域向下捲動.",
                 "For special keys: e.g. 按下 Enter 鍵.",
                 "For modifier combos: e.g. 按下 Ctrl+C.",
@@ -547,17 +548,18 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             ),
             "instructions": [
                 'Return JSON only: {{"anchor": "<string>", "dx": <integer>, "dy": <integer>, '
-                '"char": <string|null>, "char_occurrence": <integer>, '
+                '"track_percent": <integer|null>, "char": <string|null>, "char_occurrence": <integer>, '
                 '"nearby": [{{"label": "<string>", "side": <string|null>}}, ...]}}.',
-                "anchor: the on-screen target phrase for locating a UI element, without relative pixel offset clauses and without trailing 的位置.",
+                "anchor: the on-screen target phrase for locating a UI element, without relative pixel offset clauses, without 的N%處, and without trailing 的位置.",
                 "Keep quoted labels and type suffixes when present, e.g. 「振銓」文字, 「Chrome」圖示, 「Submit」按鈕.",
                 "For character-level targets like 「搜尋」的「搜」字上 or 「Google」的第2個「o」字上, set anchor to the full char-target phrase, char to the single target character (e.g. 搜, o), and char_occurrence to 0-based index among identical characters (0 when omitted or unique).",
-                "When char is set, use dx=0 and dy=0.",
+                "When char is set, use dx=0 and dy=0 and track_percent=null.",
+                "track_percent: when the instruction includes 的N%處 on a scrollbar (e.g. 滾動條的60%處), set track_percent to that integer 0–100 and use dx=0, dy=0. Otherwise null.",
                 "dx: horizontal offset in pixels from the anchor center; positive means right (右方), negative means left (左方).",
                 "dy: vertical offset in pixels from the anchor center; positive means down (下方), negative means up (上方).",
                 "Convert phrases like 右方5個像素 to dx=5, 上方28個像素 to dy=-28, 下方57個像素 to dy=57.",
                 "When no relative pixel offset is stated, use dx=0 and dy=0.",
-                "If the instruction is a drag sentence (從…拖到…), extract only the destination target and its offset.",
+                "If the instruction is a drag sentence (從…拖到…), extract only the destination target and its offset or track_percent.",
                 "Ignore trailing （...） contextual comments when extracting anchor and offsets.",
                 "Ignore inline （起點附近...） / （起點在...） comments between the drag source and 拖到 when extracting anchor and offsets.",
                 "nearby: list of objects from contextual comments such as （附近有…）, （起點附近有…）, （終點附近有…）, "
@@ -568,7 +570,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "left, right, above, below, upper_left, upper_right, lower_left, lower_right, inside "
                 "(左邊→left, 右邊→right, 上面→above, 下面→below, 左上方→upper_left, 右上方→upper_right, "
                 "左下方→lower_left, 右下方→lower_right, 裡面→inside).",
-                "Do not treat pixel-offset clauses (左方N個像素 / 右方N個像素 / …) as nearby side.",
+                "Do not treat pixel-offset clauses (左方N個像素 / 右方N個像素 / …) or 的N%處 as nearby side.",
                 "Preserve order of appearance. Use an empty list when no nearby labels are stated.",
                 "Do not invent targets, offsets, or nearby labels not stated in the instruction.",
             ],
@@ -580,7 +582,7 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "image_usage": "no_image",
             "prompt": (
                 'Reply with ONLY: {{"anchor": "<string>", "dx": <integer>, "dy": <integer>, '
-                '"char": <string|null>, "char_occurrence": <integer>, '
+                '"track_percent": <integer|null>, "char": <string|null>, "char_occurrence": <integer>, '
                 '"nearby": [{{"label": "<string>", "side": <string|null>}}, ...]}}. '
                 "No text before or after the JSON."
             ),

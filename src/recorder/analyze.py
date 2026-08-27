@@ -22,6 +22,7 @@ from src.recorder.vision_context import (
     format_scrollbar_context_hint,
     primary_candidate_char_target,
     primary_candidate_offset,
+    scrollbar_track_percent_phrase,
     _visible_text,
 )
 from cua_mcp.char_target import format_char_target_anchor, parse_char_target_instruction
@@ -171,6 +172,8 @@ def enrich_drag_instruction_offset(
     """Normalize drag instructions to the exact OCR-derived relative pixel offset."""
     if "拖到" not in instruction:
         return instruction
+    if scrollbar_track_percent_phrase(destination):
+        return instruction
 
     match = _DRAG_ANCHOR_RE.search(instruction)
     if not match:
@@ -197,6 +200,11 @@ def enrich_drag_instruction(
     destination: dict[str, Any],
 ) -> str:
     """Normalize drag source, destination, and relative pixel offset from vision."""
+    if scrollbar_track_percent_phrase(vision) and scrollbar_track_percent_phrase(
+        destination
+    ):
+        # Track-% drag instructions are already fully specified; do not rewrite.
+        return instruction
     instruction = enrich_drag_instruction_source(instruction, vision)
     instruction = enrich_drag_instruction_destination(instruction, destination)
     return enrich_drag_instruction_offset(instruction, destination)
@@ -207,6 +215,8 @@ def enrich_click_instruction_offset(
     vision: dict[str, Any],
 ) -> str:
     """Replace vague 附近 with OCR-derived relative pixel offset when click is off-target."""
+    if scrollbar_track_percent_phrase(vision):
+        return instruction
     candidates = vision.get("candidates") or []
     if not candidates:
         return instruction
@@ -359,6 +369,10 @@ def instruction_for_click(
     if not anchor:
         return None
 
+    track_phrase = scrollbar_track_percent_phrase(vision)
+    if track_phrase:
+        return f"{_CLICK_MOVE_PREFIX}{anchor}{track_phrase}"
+
     offset_phrase = primary_candidate_offset(vision)
     if offset_phrase:
         return f"{_CLICK_MOVE_PREFIX}{anchor}{offset_phrase}的位置"
@@ -448,6 +462,17 @@ def instruction_for_drag(
     destination: dict[str, Any],
 ) -> str | None:
     """Build a hub-script drag line from nearest OCR/YOLO candidates."""
+    start_track = scrollbar_track_percent_phrase(vision)
+    end_track = scrollbar_track_percent_phrase(destination)
+    if start_track and end_track:
+        source_anchor = _click_target_anchor(vision)
+        if not source_anchor:
+            source_candidates = vision.get("candidates") or []
+            if source_candidates:
+                source_anchor = format_drag_candidate_anchor(source_candidates[0])
+        if source_anchor:
+            return f"從{source_anchor}{start_track}拖到{source_anchor}{end_track}"
+
     source_candidates = vision.get("candidates") or []
     dest_candidates = destination.get("candidates") or []
     if not source_candidates or not dest_candidates:

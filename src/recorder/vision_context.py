@@ -14,9 +14,20 @@ if TYPE_CHECKING:
 from cua_mcp.char_target import detect_clicked_char
 from cua_mcp.icon_map import is_pua_char
 from cua_mcp.read_screen_text.ocr_image import _ocr_boxes_on_bgr
+from cua_mcp.scrollbar_arrows import (
+    is_scrollbar_end_arrow_candidate,
+    point_in_bbox,
+    scrollbar_axis_percent,
+    scrollbar_orientation,
+)
 from cua_mcp.select_mouse_target import _detect_mouse_targets_from_bgr
 from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text
-from cua_mcp.yolo_onnx import YOLO_CLASS_ELEMENT, YOLO_CLASS_INPUT, YOLO_CLASS_TEXT
+from cua_mcp.yolo_onnx import (
+    YOLO_CLASS_ELEMENT,
+    YOLO_CLASS_INPUT,
+    YOLO_CLASS_SCROLLBAR,
+    YOLO_CLASS_TEXT,
+)
 from src.common.io_utils import imread_bgr, write_json
 from src.common.nearby_side import (
     LandmarkCell,
@@ -173,6 +184,9 @@ def _vision_from_yolo_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
     if payload.get("yolo_error"):
         vision["yolo_error"] = payload.get("yolo_error")
+    track = payload.get("scrollbar_track")
+    if isinstance(track, dict):
+        vision["scrollbar_track"] = track
     return vision
 
 
@@ -234,6 +248,9 @@ def try_rebuild_vision_from_cache(
                     }
                 ),
             }
+            filtered_track = filtered_payload.get("scrollbar_track")
+            if isinstance(filtered_track, dict):
+                end_compact["scrollbar_track"] = filtered_track
             end_compact["destination_offset_hints"] = format_drag_destination_offset_hints(
                 end_compact
             )
@@ -245,6 +262,21 @@ def try_rebuild_vision_from_cache(
             )
         else:
             return None
+
+        start_track = start_compact.get("scrollbar_track")
+        if (
+            isinstance(start_track, dict)
+            and "bbox" in start_track
+            and end_local is not None
+            and not isinstance(end_compact.get("scrollbar_track"), dict)
+        ):
+            annotate_scrollbar_track(
+                end_compact,
+                local_x=end_local[0],
+                local_y=end_local[1],
+                require_point_inside=False,
+                scrollbar_bbox=start_track["bbox"],
+            )
 
         combined_error = start_compact.get("yolo_error") or end_payload.get("yolo_error")
         return {
@@ -1985,12 +2017,30 @@ def build_vision_context_at_point(
     if yolo_error:
         payload["yolo_error"] = yolo_error
 
+    vision_for_track: dict[str, Any] = {
+        "candidates": candidate_dicts,
+        "candidate_text": candidate_text,
+    }
+    track = annotate_scrollbar_track(
+        vision_for_track,
+        local_x=local_x,
+        local_y=local_y,
+        all_detections=all_detections or None,
+        require_point_inside=True,
+    )
+    if track is not None:
+        payload["scrollbar_track"] = track
+        payload["candidates"] = vision_for_track["candidates"]
+        payload["candidate_text"] = vision_for_track.get("candidate_text") or candidate_text
+        candidate_dicts = payload["candidates"]
+        candidate_text = payload["candidate_text"]
+
     if persist_debug:
         suffix = debug_name or ""
         debug_path = run_dir / "yolo_ocr" / f"event_{event.index:03d}{suffix}.json"
         write_json(debug_path, payload)
 
-    return {
+    result: dict[str, Any] = {
         "used_vision": True,
         "candidate_text": candidate_text,
         "local_cursor": (local_x, local_y),
@@ -2006,6 +2056,9 @@ def build_vision_context_at_point(
             }
         ),
     }
+    if track is not None:
+        result["scrollbar_track"] = track
+    return result
 
 
 def _compact_vision_point(result: dict[str, Any]) -> dict[str, Any]:
@@ -2020,7 +2073,166 @@ def _compact_vision_point(result: dict[str, Any]) -> dict[str, Any]:
     }
     if result.get("yolo_error"):
         compact["yolo_error"] = result.get("yolo_error")
+    track = result.get("scrollbar_track")
+    if isinstance(track, dict):
+        compact["scrollbar_track"] = track
     return compact
+
+
+def _candidate_bbox_tuple(candidate: dict[str, Any] | UiDetection) -> tuple[int, int, int, int] | None:
+    """Return ``(x, y, w, h)`` from a candidate dict or detection."""
+    if isinstance(candidate, UiDetection):
+        return tuple(int(v) for v in candidate.bbox)
+    bbox = candidate.get("bbox") if isinstance(candidate, dict) else None
+    if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+        return int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+    return None
+
+
+def _find_containing_scrollbar(
+    detections: list[UiDetection] | list[dict[str, Any]],
+    local_x: int,
+    local_y: int,
+) -> UiDetection | dict[str, Any] | None:
+    """Return the smallest scrollbar bbox containing ``(local_x, local_y)``."""
+    hits: list[tuple[int, UiDetection | dict[str, Any]]] = []
+    for det in detections:
+        if isinstance(det, UiDetection):
+            if det.class_name != "scrollbar":
+                continue
+            bbox = det.bbox
+        else:
+            if str(det.get("class_name") or "").strip() != "scrollbar":
+                continue
+            bbox_t = _candidate_bbox_tuple(det)
+            if bbox_t is None:
+                continue
+            bbox = bbox_t
+        if point_in_bbox(local_x, local_y, bbox):
+            hits.append((int(bbox[2]) * int(bbox[3]), det))
+    if not hits:
+        return None
+    hits.sort(key=lambda item: item[0])
+    return hits[0][1]
+
+
+def _point_hits_scrollbar_end_arrow(
+    detections: list[UiDetection] | list[dict[str, Any]],
+    local_x: int,
+    local_y: int,
+) -> bool:
+    """True when the point lands inside a scrollbar end-arrow icon bbox."""
+    for det in detections:
+        bbox = _candidate_bbox_tuple(det)
+        if bbox is None:
+            continue
+        if point_in_bbox(local_x, local_y, bbox) and is_scrollbar_end_arrow_candidate(det):
+            return True
+    return False
+
+
+def _promote_scrollbar_in_candidates(
+    candidates: list[dict[str, Any]],
+    scrollbar: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Move ``scrollbar`` to index 0 (or insert it) so instructions name the track."""
+    sb_bbox = _candidate_bbox_tuple(scrollbar)
+    if sb_bbox is None:
+        return candidates
+    others: list[dict[str, Any]] = []
+    matched: dict[str, Any] | None = None
+    for cand in candidates:
+        if _candidate_bbox_tuple(cand) == sb_bbox:
+            matched = cand
+            continue
+        others.append(cand)
+    primary = matched if matched is not None else scrollbar
+    return [primary, *others]
+
+
+def annotate_scrollbar_track(
+    vision: dict[str, Any],
+    *,
+    local_x: int,
+    local_y: int,
+    all_detections: list[UiDetection] | None = None,
+    require_point_inside: bool = True,
+    scrollbar_bbox: tuple[int, int, int, int] | list[int] | None = None,
+) -> dict[str, Any] | None:
+    """Annotate ``vision`` with ``scrollbar_track`` when the press is on the track.
+
+    Skips end-arrow hits. When ``require_point_inside`` is False (drag release),
+    projects onto ``scrollbar_bbox`` even if the point is outside the bar.
+    Promotes the scrollbar candidate to primary so thumb icons do not win wording.
+    """
+    pool: list[Any] = list(all_detections or [])
+    if not pool:
+        pool = list(vision.get("candidates") or [])
+
+    if require_point_inside:
+        if _point_hits_scrollbar_end_arrow(pool, local_x, local_y):
+            vision.pop("scrollbar_track", None)
+            return None
+        found = _find_containing_scrollbar(pool, local_x, local_y)
+        if found is None:
+            vision.pop("scrollbar_track", None)
+            return None
+        bbox = _candidate_bbox_tuple(found)
+        if bbox is None:
+            vision.pop("scrollbar_track", None)
+            return None
+        scrollbar_dict = (
+            _detection_to_dict(found) if isinstance(found, UiDetection) else dict(found)
+        )
+    else:
+        if scrollbar_bbox is None:
+            vision.pop("scrollbar_track", None)
+            return None
+        bbox = (int(scrollbar_bbox[0]), int(scrollbar_bbox[1]),
+                int(scrollbar_bbox[2]), int(scrollbar_bbox[3]))
+        scrollbar_dict = {
+            "bbox": list(bbox),
+            "center": [bbox[0] + bbox[2] // 2, bbox[1] + bbox[3] // 2],
+            "class_id": YOLO_CLASS_SCROLLBAR,
+            "class_name": "scrollbar",
+            "text": None,
+            "icons": None,
+        }
+        # Prefer an existing scrollbar candidate with the same bbox when present.
+        for cand in vision.get("candidates") or []:
+            if (
+                str(cand.get("class_name") or "").strip() == "scrollbar"
+                and _candidate_bbox_tuple(cand) == bbox
+            ):
+                scrollbar_dict = dict(cand)
+                break
+
+    percent = scrollbar_axis_percent(local_x, local_y, bbox)
+    track = {
+        "bbox": list(bbox),
+        "axis": scrollbar_orientation(bbox),
+        "percent": percent,
+        "anchor_class": "scrollbar",
+    }
+    vision["scrollbar_track"] = track
+    candidates = list(vision.get("candidates") or [])
+    vision["candidates"] = _promote_scrollbar_in_candidates(candidates, scrollbar_dict)
+    if vision.get("candidates"):
+        vision["candidate_text"] = _candidate_text_from_dicts(vision["candidates"])
+    return track
+
+
+def scrollbar_track_percent_phrase(vision: dict[str, Any]) -> str | None:
+    """Return ``的N%處`` when vision has a scrollbar track percent, else None."""
+    track = vision.get("scrollbar_track")
+    if not isinstance(track, dict):
+        return None
+    percent = track.get("percent")
+    if not isinstance(percent, int) or isinstance(percent, bool):
+        return None
+    if percent < 0 or percent > 100:
+        return None
+    return f"的{percent}%處"
 
 
 def run_pointer_event_yolo_ocr(
@@ -2082,6 +2294,18 @@ def run_pointer_event_yolo_ocr(
             end_result,
             end_local=end_local,
         )
+        start_track = start_compact.get("scrollbar_track")
+        if isinstance(start_track, dict) and "bbox" in start_track:
+            annotate_scrollbar_track(
+                end_compact,
+                local_x=end_local[0],
+                local_y=end_local[1],
+                all_detections=end_result.get("all_detections")
+                if isinstance(end_result.get("all_detections"), list)
+                else None,
+                require_point_inside=False,
+                scrollbar_bbox=start_track["bbox"],
+            )
         if persist_debug:
             write_json(
                 run_dir / "yolo_ocr" / f"event_{event.index:03d}_end_filtered.json",
@@ -2092,6 +2316,11 @@ def run_pointer_event_yolo_ocr(
                     "candidates": end_compact["candidates"],
                     "detection_count": end_compact.get("detection_count", 0),
                     "source_fingerprint": fingerprint,
+                    **(
+                        {"scrollbar_track": end_compact["scrollbar_track"]}
+                        if isinstance(end_compact.get("scrollbar_track"), dict)
+                        else {}
+                    ),
                 },
             )
         combined_error = start_compact.get("yolo_error") or end_result.get("yolo_error")

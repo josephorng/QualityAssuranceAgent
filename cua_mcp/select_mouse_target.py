@@ -17,6 +17,7 @@ import numpy as np
 from cua_mcp.char_target import resolve_char_screen_point, screen_bbox_from_span
 from cua_mcp.geometry import clip_box, iou_xywh, merge_overlapping_boxes
 from cua_mcp.instruction_offset import parse_mouse_target_instruction
+from cua_mcp.scrollbar_arrows import point_from_scrollbar_percent
 from cua_mcp.icon_map import (
     describe_text_icons,
     is_pua_char,
@@ -1170,9 +1171,15 @@ async def find_mouse_point(
         raise ValueError("instruction must be non-empty")
 
     # Parse anchor/offset/nearby once; filter splits anchor vs nearby; pick uses anchor only.
-    anchor, offset_dx, offset_dy, nearby_from_instruction, char_target, char_occurrence = (
-        await parse_mouse_target_instruction(instruction_text)
-    )
+    (
+        anchor,
+        offset_dx,
+        offset_dy,
+        nearby_from_instruction,
+        char_target,
+        char_occurrence,
+        track_percent,
+    ) = await parse_mouse_target_instruction(instruction_text)
     nearby_hints = merge_nearby_hints(nearby_objects, nearby_from_instruction)
     nearby_labels = nearby_hints_to_labels(nearby_hints)
     nearby_phrases = nearby_hints_to_phrases(nearby_hints)
@@ -1284,6 +1291,30 @@ async def find_mouse_point(
                 f"char={char_target!r} occurrence={char_occurrence} "
                 f"anchor=[{chosen.cx},{chosen.cy}]"
             )
+    elif track_percent is not None:
+        scrollbar = chosen
+        if chosen.class_name != "scrollbar":
+            scrollbar = next(
+                (det for det in anchor_matches if det.class_name == "scrollbar"),
+                chosen,
+            )
+        if scrollbar.class_name == "scrollbar":
+            resolved_x, resolved_y = point_from_scrollbar_percent(
+                scrollbar.bbox, track_percent
+            )
+            chosen = scrollbar
+            _log_info(
+                "move_mouse scrollbar track percent applied "
+                f"percent={track_percent} "
+                f"bbox={list(scrollbar.bbox)} "
+                f"resolved=[{resolved_x},{resolved_y}]"
+            )
+        elif offset_dx or offset_dy:
+            _log_info(
+                "move_mouse relative offset applied "
+                f"dx={offset_dx} dy={offset_dy} "
+                f"anchor=[{chosen.cx},{chosen.cy}] resolved=[{resolved_x},{resolved_y}]"
+            )
     elif offset_dx or offset_dy:
         _log_info(
             "move_mouse relative offset applied "
@@ -1298,6 +1329,7 @@ async def find_mouse_point(
         "image_center": {"x": chosen.cx, "y": chosen.cy},
         "resolved_center": {"x": resolved_x, "y": resolved_y},
         "relative_offset": {"dx": offset_dx, "dy": offset_dy},
+        "track_percent": track_percent,
         "char_target": char_target,
         "char_occurrence": char_occurrence,
         "anchor_instruction": instruction_text,

@@ -71,7 +71,7 @@ async def test_resolve_mouse_point_merges_nearby_objects(monkeypatch: pytest.Mon
 
     async def fake_parse(instruction: str):
         assert "資料夾" in instruction
-        return "「資料夾」圖示", 0, 0, ["「Chrome」圖示"], None, 0
+        return "「資料夾」圖示", 0, 0, ["「Chrome」圖示"], None, 0, None
 
     def fake_filter(detections, anchor, nearby):
         captured_nearby["labels"] = list(nearby)
@@ -1350,7 +1350,7 @@ async def test_resolve_mouse_point_nearby_prefilter_skips_ollama(
     landmark_img = _detection_from_bbox((55, 334, 28, 14), YOLO_CLASS_TEXT, text="圖片")
 
     async def fake_parse(instruction: str):
-        return "文件", 0, 0, [], None, 0
+        return "文件", 0, 0, [], None, 0, None
 
     def fake_filter(detections, anchor, nearby):
         return [wrong, correct], [landmark_mu, landmark_img]
@@ -1438,7 +1438,7 @@ async def test_resolve_mouse_point_does_not_run_function_describe(
     other = _detection_from_bbox((100, 100, 30, 16), YOLO_CLASS_TEXT, text="關閉")
 
     async def fake_parse(instruction: str):
-        return "搜尋欄位", 0, 0, [], None, 0
+        return "搜尋欄位", 0, 0, [], None, 0, None
 
     def fake_filter(detections, anchor, nearby):
         return [outlook, taskbar], []
@@ -1525,7 +1525,7 @@ async def test_resolve_mouse_point_skips_describe_when_unique(
     other = _detection_from_bbox((200, 200, 30, 16), YOLO_CLASS_TEXT, text="關閉")
 
     async def fake_parse(instruction: str):
-        return "唯一按鈕", 0, 0, [], None, 0
+        return "唯一按鈕", 0, 0, [], None, 0, None
 
     def fake_filter(detections, anchor, nearby):
         return [only], []
@@ -1724,7 +1724,7 @@ async def test_resolve_mouse_point_char_target_uses_span_center(
 
     async def fake_parse(instruction: str):
         assert "搜" in instruction
-        return "「搜尋」文字", 0, 0, [], "搜", 0
+        return "「搜尋」文字", 0, 0, [], "搜", 0, None
 
     def fake_filter(detections, anchor, nearby):
         return [detections[0]], []
@@ -1786,3 +1786,66 @@ async def test_resolve_mouse_point_char_target_uses_span_center(
     assert meta["char_target"] == "搜"
     assert meta["resolved_char_center"] == {"x": gx, "y": gy}
     assert (gx, gy) != (det.cx, det.cy)
+
+
+@pytest.mark.asyncio
+async def test_resolve_mouse_point_scrollbar_track_percent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+
+    from cua_mcp.scrollbar_arrows import point_from_scrollbar_percent
+    from cua_mcp.select_mouse_target import resolve_mouse_point
+
+    det = _detection_from_bbox((100, 0, 20, 100), YOLO_CLASS_SCROLLBAR)
+
+    async def fake_parse(instruction: str):
+        assert "60%" in instruction
+        return "滾動條", 0, 0, [], None, 0, 60
+
+    def fake_filter(detections, anchor, nearby):
+        return [detections[0]], []
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.parse_mouse_target_instruction",
+        fake_parse,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.selected_eye_monitor_indices",
+        lambda: [1],
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.capture_monitor_to_file",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.imread_bgr",
+        lambda *_args, **_kwargs: np.zeros((200, 200, 3), dtype=np.uint8),
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._collect_monitor_detections",
+        lambda *_args, **_kwargs: [det],
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._filter_mouse_candidates",
+        fake_filter,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._run_manager",
+        lambda: type(
+            "M",
+            (),
+            {
+                "require_paths": staticmethod(
+                    lambda: type("P", (), {"yolo_ocr_dir": Path(".")})()
+                ),
+                "log_info": staticmethod(lambda *_a, **_k: None),
+            },
+        )(),
+    )
+
+    gx, gy, meta = await resolve_mouse_point("將滑鼠移到滾動條的60%處")
+    expected = point_from_scrollbar_percent(det.bbox, 60)
+    assert (gx, gy) == expected
+    assert meta["track_percent"] == 60
+    assert meta["relative_offset"] == {"dx": 0, "dy": 0}

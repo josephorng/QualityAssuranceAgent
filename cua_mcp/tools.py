@@ -175,7 +175,8 @@ async def move_mouse(
     the mouse cursor to the best match for the instruction.
 
     instruction: primary target phrase (e.g. 「資料夾」圖示), including any relative
-    pixel offsets in Traditional Chinese when needed (e.g. 「資料夾」圖示左方5個像素、下方55個像素的位置).
+    pixel offsets in Traditional Chinese when needed (e.g. 「資料夾」圖示左方5個像素、下方55個像素的位置),
+    or a scrollbar track percent (e.g. 滾動條的60%處 / 「資產總覽」文字區域的滾動條的60%處).
     nearby_objects: optional list of nearby landmark labels used to disambiguate the
     target. When the goal gives a side (左邊/右邊/上面/下面/左上方/右上方/左下方/右下方/裡面),
     keep it as a directed phrase (e.g. ["在「joseph」文字的下面", "在「確定」文字的上面",
@@ -250,8 +251,8 @@ async def drag(
     '''
     Drag from the UI target matching start_instruction to the target matching
     destination_instruction. It will move the mouse cursor to the start_instruction and then drag to the destination_instruction.
-    start_instruction: the source phrase, including any relative pixel offsets in Traditional Chinese (e.g. 「OneNote」文字左方5個像素、下方55個像素的位置)
-    destination_instruction: the destination phrase, including any relative pixel offsets in Traditional Chinese (e.g. 「OneNote」文字左方5個像素、下方55個像素的位置)
+    start_instruction: the source phrase, including any relative pixel offsets in Traditional Chinese (e.g. 「OneNote」文字左方5個像素、下方55個像素的位置) or scrollbar track percent (e.g. 滾動條的20%處)
+    destination_instruction: the destination phrase, including any relative pixel offsets in Traditional Chinese (e.g. 「OneNote」文字左方5個像素、下方55個像素的位置) or scrollbar track percent (e.g. 滾動條的80%處)
     start_nearby_objects: optional list of nearby landmark labels used to disambiguate the
     drag source (e.g. ["「Desktop」文字"]). Prefer this over embedding （起點附近有…）
     comments inside start_instruction.

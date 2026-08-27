@@ -516,7 +516,7 @@ class MainHub(ctk.CTk):
         self, *, title: str, allow_multiple: bool = True
     ) -> list[Path]:
         settings = load_settings()
-        initial = Path(settings.runs_dir)
+        initial = Path(settings.recordings_dir)
         initialdir = str(initial) if initial.is_dir() else str(ROOT_DIR)
         if allow_multiple:
             return ask_directories(parent=self, title=title, initialdir=initialdir)

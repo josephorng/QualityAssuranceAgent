@@ -29,6 +29,7 @@ from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text
 from cua_mcp.yolo_onnx import (
     DEFAULT_CONF_YOLOV26_END2END,
     YOLO_CLASS_ELEMENT,
+    YOLO_CLASS_INPUT,
     YOLO_CLASS_NAMES,
     YOLO_CLASS_SCROLLBAR,
     YOLO_CLASS_TEXT,
@@ -168,6 +169,8 @@ def _class_id_for_line(line: OcrLine) -> int:
     name = (line.class_name or "").strip().lower()
     if name == "scrollbar_original":
         return YOLO_CLASS_SCROLLBAR
+    if name == "input_original":
+        return YOLO_CLASS_INPUT
     if name in _CLASS_NAME_TO_ID:
         return _CLASS_NAME_TO_ID[name]
     if line.line_type == "ocr":
@@ -212,33 +215,40 @@ def _is_scrollbar_original_line(line: OcrLine) -> bool:
     return (line.class_name or "").strip().lower() == "scrollbar_original"
 
 
-def _split_scrollbar_original_lines(
+def _is_input_original_line(line: OcrLine) -> bool:
+    return (line.class_name or "").strip().lower() == "input_original"
+
+
+def _split_debug_original_lines(
     lines: list[OcrLine],
-) -> tuple[list[OcrLine], list[OcrLine]]:
+) -> tuple[list[OcrLine], list[OcrLine], list[OcrLine]]:
     main: list[OcrLine] = []
-    originals: list[OcrLine] = []
+    scrollbar_originals: list[OcrLine] = []
+    input_originals: list[OcrLine] = []
     for line in lines:
         if _is_scrollbar_original_line(line):
-            originals.append(line)
+            scrollbar_originals.append(line)
+        elif _is_input_original_line(line):
+            input_originals.append(line)
         else:
             main.append(line)
-    return main, originals
+    return main, scrollbar_originals, input_originals
 
 
 def _dedupe_ocr_lines(lines: list[OcrLine]) -> list[OcrLine]:
     """Drop heavily overlapping same-content boxes (agent ``_dedupe_overlapping_detections``).
 
-    ``scrollbar_original`` debug boxes are kept aside and appended unchanged so they
-    are not removed as duplicates of the fitted scrollbar.
+    ``scrollbar_original`` / ``input_original`` debug boxes are kept aside and
+    appended unchanged so they are not removed as duplicates of the fitted box.
     """
-    main, originals = _split_scrollbar_original_lines(lines)
+    main, scrollbar_originals, input_originals = _split_debug_original_lines(lines)
     if len(main) < 2:
-        return [*main, *originals]
+        return [*main, *scrollbar_originals, *input_originals]
     detections = [_ocr_line_to_ui_detection(line) for line in main]
     kept = _dedupe_overlapping_detections(detections)
     by_id = {id(det): idx for idx, det in enumerate(detections)}
     deduped = [main[by_id[id(det)]] for det in kept]
-    return [*deduped, *originals]
+    return [*deduped, *scrollbar_originals, *input_originals]
 
 
 def _is_icon_ocr_line(line: OcrLine) -> bool:
@@ -500,10 +510,12 @@ def load_yolo_lines(image_path: Path, *, yolo_conf_threshold: float) -> tuple[li
         return [], "Could not read image for YOLO"
     try:
         original_scrollbars: list[tuple[int, int, int, int]] = []
+        original_inputs: list[tuple[int, int, int, int]] = []
         candidates = _detect_mouse_targets_from_bgr(
             bgr,
             yolo_conf_threshold=yolo_conf_threshold,
             original_scrollbar_bboxes_out=original_scrollbars,
+            original_input_bboxes_out=original_inputs,
         )
     except Exception as exc:
         return [], f"YOLO detect failed: {type(exc).__name__}: {exc}"
@@ -534,6 +546,17 @@ def load_yolo_lines(image_path: Path, *, yolo_conf_threshold: float) -> tuple[li
                 class_name="scrollbar_original",
                 class_id=YOLO_CLASS_SCROLLBAR,
                 chinese_ids=("scrollbar (original)",),
+            )
+        )
+    for bbox in original_inputs:
+        lines.append(
+            OcrLine(
+                box=bbox,
+                text="",
+                line_type="element",
+                class_name="input_original",
+                class_id=YOLO_CLASS_INPUT,
+                chinese_ids=("input (original)",),
             )
         )
     return lines, f"Loaded {len(lines)} YOLO detections"
@@ -625,6 +648,7 @@ _CLASS_OUTLINE_COLORS: dict[str, str] = {
     "text": "lime",
     "element": "dodgerblue",
     "input": "orange",
+    "input_original": "gold",
     "scrollbar": "mediumpurple",
     "scrollbar_original": "violet",
     "unknown": "gray",
@@ -931,7 +955,9 @@ def _draw_overlays(
         x, y, w, h = line.box
         x2, y2 = x + w, y + h
         is_selected = selected_idx is not None and idx == selected_idx
-        if show_boxes:
+        class_key = _yolo_class_key(line)
+        draw_box = show_boxes or class_key in ("scrollbar_original", "input_original")
+        if draw_box:
             outline = _box_outline_for_line(line, is_selected=is_selected)
             width = 2 if is_selected or _is_ui_object_line(line) else 1
             draw.rectangle([(x, y), (x2, y2)], outline=outline, width=width)
@@ -1071,8 +1097,9 @@ class OcrViewerApp:
         self._ultralytics_model_holder: list[Any] = []
 
         self.show_boxes = tk.BooleanVar(value=True)
-        self.show_labels = tk.BooleanVar(value=True)
         self.show_original_scrollbar = tk.BooleanVar(value=False)
+        self.show_original_input = tk.BooleanVar(value=False)
+        self.show_rectangles = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Ready")
         _dcf = DEFAULT_CONF_YOLOV26_END2END
         self.yolo_conf_var = tk.StringVar(value=f"{_dcf:g}")
@@ -1085,6 +1112,8 @@ class OcrViewerApp:
         self._lmb_panning = False
         self._yolo_lines_cache: YoloLinesCache = {}
         self._original_scrollbar_lines: list[OcrLine] = []
+        self._original_input_lines: list[OcrLine] = []
+        self.input_box_rectangles: list[tuple[int, int, int, int]] = []
 
         self._build_ui()
         self._populate_runs()
@@ -1093,16 +1122,19 @@ class OcrViewerApp:
 
     def _set_current_lines(self, lines: list[OcrLine]) -> None:
         deduped = _dedupe_ocr_lines(lines)
-        self.current_lines, self._original_scrollbar_lines = _split_scrollbar_original_lines(
-            deduped
+        self.current_lines, self._original_scrollbar_lines, self._original_input_lines = (
+            _split_debug_original_lines(deduped)
         )
 
     def _all_display_lines(self) -> list[OcrLine]:
+        lines = list(self.current_lines)
         if self.show_original_scrollbar.get() and self._original_scrollbar_lines:
-            return [*self.current_lines, *self._original_scrollbar_lines]
-        return self.current_lines
+            lines.extend(self._original_scrollbar_lines)
+        if self.show_original_input.get() and self._original_input_lines:
+            lines.extend(self._original_input_lines)
+        return lines
 
-    def _on_toggle_original_scrollbar(self) -> None:
+    def _on_toggle_debug_originals(self) -> None:
         display_len = len(self._all_display_lines())
         if self.selected_line_idx is not None and self.selected_line_idx >= display_len:
             self.selected_line_idx = None
@@ -1112,6 +1144,37 @@ class OcrViewerApp:
             self.item_list.select_set(self.selected_line_idx)
             self.item_list.see(self.selected_line_idx)
         self._refresh_image()
+
+    def _horizontal_scrollbar_boxes_from_lines(self) -> list[tuple[int, int, int, int]]:
+        from cua_mcp.scrollbar_arrows import scrollbar_orientation
+
+        boxes: list[tuple[int, int, int, int]] = []
+        for line in self.current_lines:
+            if _yolo_class_key(line) != "scrollbar":
+                continue
+            if scrollbar_orientation(line.box) != "horizontal":
+                continue
+            boxes.append(line.box)
+        return boxes
+
+    def _detect_input_box_rectangles(self) -> None:
+        self.input_box_rectangles = []
+        if self.current_image is None:
+            return
+        try:
+            result = detect_horizontal_rectangles(
+                self.current_image,
+                _load_line_segment_params(),
+                horizontal_scrollbar_boxes=self._horizontal_scrollbar_boxes_from_lines(),
+            )
+            self.input_box_rectangles = result.rectangles
+        except Exception:
+            self.input_box_rectangles = []
+
+    def _input_box_rectangle_overlay(self) -> list[tuple[int, int, int, int]] | None:
+        if not self.show_rectangles.get() or not self.input_box_rectangles:
+            return None
+        return self.input_box_rectangles
 
     def _line_at_display_index(self, idx: int) -> OcrLine | None:
         lines = self._all_display_lines()
@@ -1176,13 +1239,24 @@ class OcrViewerApp:
         for col in range(4):
             controls.columnconfigure(col, weight=1)
         ttk.Checkbutton(controls, text="Boxes", variable=self.show_boxes, command=self._refresh_image).grid(row=0, column=0, sticky="w")
-        ttk.Checkbutton(controls, text="Labels", variable=self.show_labels, command=self._refresh_image).grid(row=0, column=1, sticky="w")
         ttk.Checkbutton(
             controls,
             text="Original scrollbar",
             variable=self.show_original_scrollbar,
-            command=self._on_toggle_original_scrollbar,
-        ).grid(row=0, column=2, columnspan=2, sticky="w")
+            command=self._on_toggle_debug_originals,
+        ).grid(row=0, column=1, sticky="w")
+        ttk.Checkbutton(
+            controls,
+            text="Rectangles",
+            variable=self.show_rectangles,
+            command=self._refresh_image,
+        ).grid(row=0, column=2, sticky="w")
+        ttk.Checkbutton(
+            controls,
+            text="Original input",
+            variable=self.show_original_input,
+            command=self._on_toggle_debug_originals,
+        ).grid(row=0, column=3, sticky="w")
         ttk.Label(controls, text="Arrows").grid(row=1, column=0, sticky="w", pady=(6, 0))
         ttk.Radiobutton(
             controls,
@@ -1361,6 +1435,7 @@ class OcrViewerApp:
             self._set_current_lines(lines)
         self.selected_line_idx = None
         self._populate_item_list()
+        self._detect_input_box_rectangles()
         self.status_var.set(f"{image_path.name} - {status}")
         self._refresh_image()
 
@@ -1569,9 +1644,17 @@ class OcrViewerApp:
 
         if idx < len(self.current_lines):
             deleted = self.current_lines.pop(idx)
+        elif self.show_original_scrollbar.get() and idx < len(self.current_lines) + len(
+            self._original_scrollbar_lines
+        ):
+            deleted = self._original_scrollbar_lines.pop(idx - len(self.current_lines))
         else:
-            original_idx = idx - len(self.current_lines)
-            deleted = self._original_scrollbar_lines.pop(original_idx)
+            scrollbar_count = (
+                len(self._original_scrollbar_lines) if self.show_original_scrollbar.get() else 0
+            )
+            deleted = self._original_input_lines.pop(
+                idx - len(self.current_lines) - scrollbar_count
+            )
 
         self.selected_line_idx = None
         self._populate_item_list()
@@ -1883,8 +1966,10 @@ class OcrViewerApp:
             self.current_image,
             self._all_display_lines(),
             show_boxes=self.show_boxes.get(),
-            show_labels=self.show_labels.get(),
+            show_labels=False,
             selected_idx=self.selected_line_idx,
+            rectangle_boxes=self._input_box_rectangle_overlay(),
+            rectangle_box_color="blue",
         )
 
         canvas_w = max(100, self.canvas.winfo_width())
@@ -1957,6 +2042,7 @@ class OcrViewerApp:
         self._set_current_lines(lines)
         self.selected_line_idx = None
         self._populate_item_list()
+        self._detect_input_box_rectangles()
         self._refresh_image()
         self.status_var.set(f"{status} in {elapsed_ms:.0f} ms")
 

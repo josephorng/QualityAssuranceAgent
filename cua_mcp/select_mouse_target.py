@@ -321,6 +321,7 @@ def _detect_mouse_targets_from_bgr(
     *,
     yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
     original_scrollbar_bboxes_out: list[tuple[int, int, int, int]] | None = None,
+    original_input_bboxes_out: list[tuple[int, int, int, int]] | None = None,
 ) -> list[UiDetection]:
     """Detect mouse-target UI elements on ``bgr`` via YOLO + OCR.
 
@@ -336,6 +337,9 @@ def _detect_mouse_targets_from_bgr(
 
     When ``original_scrollbar_bboxes_out`` is provided, appends each pre-fit
     scrollbar bbox that differs from the post-fit box (for debug overlays).
+
+    When ``original_input_bboxes_out`` is provided, appends each pre-merge
+    YOLO ``input`` bbox that is absent from the post-merge input list.
     """
     h, w = bgr.shape[:2]
     vision_started = time.perf_counter()
@@ -378,6 +382,7 @@ def _detect_mouse_targets_from_bgr(
         if cls_id == YOLO_CLASS_SCROLLBAR
         and scrollbar_orientation(bbox) == "horizontal"
     ]
+    pre_merge_inputs = list(input_boxes) if original_input_bboxes_out is not None else []
     try:
         input_boxes = merge_yolo_inputs_with_line_rectangles(
             bgr,
@@ -390,6 +395,11 @@ def _detect_mouse_targets_from_bgr(
         _log_info(
             f"move_mouse input-box line refine failed: {type(exc).__name__}: {exc}"
         )
+    if original_input_bboxes_out is not None:
+        merged_inputs = set(input_boxes)
+        for bbox in pre_merge_inputs:
+            if bbox not in merged_inputs:
+                original_input_bboxes_out.append(bbox)
     line_elapsed = time.perf_counter() - line_started
     non_ocr: list[tuple[tuple[int, int, int, int], int]] = [
         (bbox, YOLO_CLASS_INPUT) for bbox in input_boxes

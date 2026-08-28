@@ -1363,7 +1363,7 @@ class MainHub(ctk.CTk):
         b_add = ctk.CTkButton(row, text="新增檔案…", width=100, command=self._queue_add_files)
         b_add.pack(side="left", padx=(0, 8))
         b_add_rec = ctk.CTkButton(
-            row, text="新增錄製…", width=100, command=self._queue_add_recording
+            row, text="加入錄製", width=100, command=self._queue_add_recording
         )
         b_add_rec.pack(side="left", padx=(0, 8))
         b_clear = ctk.CTkButton(row, text="清空", width=80, command=self._queue_clear)
@@ -1616,7 +1616,7 @@ class MainHub(ctk.CTk):
         if invalid and not added:
             show_ctk_message(
                 self,
-                "新增錄製",
+                "加入錄製",
                 "所選資料夾不是有效的錄製（需有 session.json）。",
                 kind="error",
             )
@@ -1625,7 +1625,7 @@ class MainHub(ctk.CTk):
             skipped = "\n".join(p.name or str(p) for p in invalid)
             show_ctk_message(
                 self,
-                "新增錄製",
+                "加入錄製",
                 f"已略過非錄製資料夾：\n{skipped}",
                 kind="warning",
             )
@@ -2466,6 +2466,8 @@ class MainHub(ctk.CTk):
                 self._load_script_into_editor(Path(target))
             if choice == "open_review":
                 self._open_recording_review_html(folder, current_name)
+            elif choice == "add_queue":
+                self._append_recording_to_queue(folder)
             return
         if choice == "append":
             if folder is not None and self._is_recording_folder(folder):
@@ -2482,6 +2484,34 @@ class MainHub(ctk.CTk):
                 )
         elif choice == "open_review":
             self._open_recording_review_html(folder, current_name)
+        elif choice == "add_queue":
+            self._append_recording_to_queue(folder)
+
+    def _append_recording_to_queue(self, folder: Path | None) -> None:
+        """Add a recording folder to the queue and open the queue tab."""
+        if folder is None or not self._is_recording_folder(folder):
+            show_ctk_message(
+                self,
+                "錄製分析完成",
+                "找不到錄製資料夾，無法加入佇列。",
+                kind="warning",
+            )
+            return
+        added, _invalid = partition_recording_dirs([folder], existing=self._queue_paths)
+        if added:
+            for script in added:
+                self._queue_paths.append(script)
+            self._queue_status_by_index = {}
+            self._queue_run_root_by_index = {}
+            self._refresh_queue_list()
+            self._persist_hub_ui_state()
+            self._status.configure(text=f"已加入錄製 {script_display_name(added[0])}")
+        else:
+            self._status.configure(text="所選錄製已在佇列中")
+        try:
+            self._mode_tabs.set(_MODE_TAB_QUEUE)
+        except Exception:
+            pass
 
     def _resolve_analyzed_recording_folder(
         self,

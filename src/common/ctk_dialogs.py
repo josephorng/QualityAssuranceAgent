@@ -149,9 +149,9 @@ def prompt_append_recording_instructions(
 ) -> tuple[str, str]:
     """Ask what to do with generated recording instructions.
 
-    Returns ``(choice, folder_name)``. ``choice`` is ``append``, ``open_review``,
-    or ``close`` (closing the dialog counts as close). ``folder_name`` is the
-    trimmed value from the recording-folder field (may be empty).
+    Returns ``(choice, folder_name)``. ``choice`` is ``append``, ``add_queue``,
+    ``open_review``, or ``close`` (closing the dialog counts as close).
+    ``folder_name`` is the trimmed value from the recording-folder field (may be empty).
     """
     import customtkinter as ctk
 
@@ -218,6 +218,9 @@ def prompt_append_recording_instructions(
     def on_append() -> None:
         _finish("append")
 
+    def on_add_queue() -> None:
+        _finish("add_queue")
+
     def on_open_review() -> None:
         _finish("open_review")
 
@@ -230,6 +233,9 @@ def prompt_append_recording_instructions(
         ctk.CTkButton(
             master=btn_row, text="加入腳本", width=120, height=36, command=on_append
         ).pack(side="left", padx=(0, 10))
+    ctk.CTkButton(
+        master=btn_row, text="加入佇列", width=120, height=36, command=on_add_queue
+    ).pack(side="left", padx=(0, 10))
     ctk.CTkButton(
         master=btn_row, text="開啟錄製紀錄", width=140, height=36, command=on_open_review
     ).pack(side="left", padx=(0, 10))
@@ -259,7 +265,7 @@ def prompt_append_recording_instructions(
     root = master.winfo_toplevel()
     root.wait_window(dialog)
     choice = result["choice"]
-    if choice not in ("append", "open_review", "close"):
+    if choice not in ("append", "add_queue", "open_review", "close"):
         choice = "close"
     return choice, result.get("folder_name", "")
 

@@ -18,12 +18,12 @@ from PIL import Image
 @dataclass
 class LineSegmentParams:
     blur_ksize: int = 5
-    canny_low: int = 50
-    canny_high: int = 150
+    canny_low: int = 5
+    canny_high: int = 35
     rho: float = 1.0
     theta_deg: float = 1.0
-    threshold: int = 100
-    min_line_length: int = 20
+    threshold: int = 5
+    min_line_length: int = 15
     max_line_gap: int = 0
 
 

@@ -202,7 +202,7 @@
     },
     "": {
         "id": "paperclip_attachment",
-        "chinese_id": "附件",
+        "chinese_id": "附件、迴紋針",
         "description": "The upper looped portion of a classic paperclip silhouette, angled diagonally, commonly used to denote a file attachment or link action."
     },
     "": {
@@ -242,7 +242,7 @@
     },
     "": {
         "id": "empty_circle_outline",
-        "chinese_id": "空心圓圈",
+        "chinese_id": "空心圓圈、單選鈕",
         "description": "thin outline of a circle"
     },
     "": {
@@ -332,7 +332,7 @@
     },
     "": {
         "id": "empty_square_outline_box",
-        "chinese_id": "方框",
+        "chinese_id": "方框、矩形框線",
         "description": "A single, empty square with a thin border/outline/outline-only shape, might be a checkbox."
     },
     "": {
@@ -672,7 +672,7 @@
     },
     "": {
         "id": "help_question_mark",
-        "chinese_id": "說明",
+        "chinese_id": "說明、問號",
         "description": "A clean icon featuring a dark question mark centered inside a solid light grey circular background, universally used to represent help documentation, customer support, or information queries."
     },
     "": {
@@ -1109,11 +1109,6 @@
         "id": "gift_box",
         "chinese_id": "禮物",
         "description": "A square gift box outline with a vertical line through the middle and a small bow shape on top, universally representing presents, rewards, bonuses, or holiday perks."
-    },
-    "": {
-        "id": "rectangular_frame_outline",
-        "chinese_id": "矩形框線",
-        "description": "A rectangular frame or boundary silhouette with an inner rectangular area, commonly used to represent a screen, window outline, picture frame, or a generic placeholder border."
     },
     "": {
         "id": "twitter_logo",

@@ -189,6 +189,8 @@ def pair_horizontal_rectangles(
     pos_tol: float,
     min_width_over_height: float = 5.0,
     min_overlap_frac: float = 0.95,
+    min_height: float = 15.0,
+    horizontal_scrollbar_boxes: list[tuple[int, int, int, int]] | None = None,
 ) -> tuple[
     list[tuple[int, int, int, int]],
     list[tuple[int, int, int, int]],
@@ -200,6 +202,9 @@ def pair_horizontal_rectangles(
     - ``merged``: after near-collinear merge of horizontals
     - ``candidates``: horizontal sides of accepted pairs
     - ``rectangles``: axis-aligned boxes ``(x0, y0, x1, y1)`` for each pair
+
+    Pairs shorter than ``min_height`` (default 15px) are rejected.
+    Rectangles overlapping a horizontal scrollbar are removed last.
     """
     axis: list[_AxisSeg] = []
     for x1, y1, x2, y2 in segments:
@@ -221,7 +226,7 @@ def pair_horizontal_rectangles(
     for i, h1 in enumerate(axis):
         for h2 in axis[i + 1 :]:
             height = abs(h1.mid_y - h2.mid_y)
-            if height < 1.0:
+            if height <= min_height:
                 continue
             x_lo = max(h1.xmin, h2.xmin)
             x_hi = min(h1.xmax, h2.xmax)
@@ -248,11 +253,97 @@ def pair_horizontal_rectangles(
             candidates.add(h2)
             completed.add((x0, y0, x1, y1))
 
+    rectangles = _drop_rectangles_containing_others(sorted(completed))
+    if horizontal_scrollbar_boxes:
+        rectangles = _drop_rectangles_overlapping_horizontal_scrollbars(
+            rectangles,
+            horizontal_scrollbar_boxes,
+        )
     return (
         merged,
         [seg.as_tuple() for seg in candidates],
-        sorted(completed),
+        rectangles,
     )
+
+
+def _xyxy_to_xywh_box(box: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    x0, y0, x1, y1 = box
+    return x0, y0, x1 - x0, y1 - y0
+
+
+def _drop_rectangles_overlapping_horizontal_scrollbars(
+    rectangles: list[tuple[int, int, int, int]],
+    scrollbar_boxes: list[tuple[int, int, int, int]],
+) -> list[tuple[int, int, int, int]]:
+    """Remove rectangles that overlap any horizontal scrollbar ``(x, y, w, h)``."""
+    from cua_mcp.geometry import boxes_overlap
+    from cua_mcp.scrollbar_arrows import scrollbar_orientation
+
+    horizontal = [
+        sb
+        for sb in scrollbar_boxes
+        if scrollbar_orientation(sb) == "horizontal"
+    ]
+    if not horizontal or not rectangles:
+        return list(rectangles)
+    keep: list[tuple[int, int, int, int]] = []
+    for rect in rectangles:
+        rect_xywh = _xyxy_to_xywh_box(rect)
+        if any(boxes_overlap(rect_xywh, sb) for sb in horizontal):
+            continue
+        keep.append(rect)
+    return keep
+
+
+def _drop_xywh_boxes_overlapping_horizontal_scrollbars(
+    boxes: list[tuple[int, int, int, int]],
+    scrollbar_boxes: list[tuple[int, int, int, int]],
+) -> list[tuple[int, int, int, int]]:
+    """Remove ``(x, y, w, h)`` boxes that overlap any horizontal scrollbar."""
+    from cua_mcp.geometry import boxes_overlap
+    from cua_mcp.scrollbar_arrows import scrollbar_orientation
+
+    horizontal = [
+        sb
+        for sb in scrollbar_boxes
+        if scrollbar_orientation(sb) == "horizontal"
+    ]
+    if not horizontal or not boxes:
+        return list(boxes)
+    return [
+        box
+        for box in boxes
+        if not any(boxes_overlap(box, sb) for sb in horizontal)
+    ]
+
+
+def _xyxy_contains(
+    outer: tuple[int, int, int, int],
+    inner: tuple[int, int, int, int],
+) -> bool:
+    """True if ``outer`` fully contains ``inner`` and is strictly larger."""
+    ox0, oy0, ox1, oy1 = outer
+    ix0, iy0, ix1, iy1 = inner
+    if not (ox0 <= ix0 and oy0 <= iy0 and ox1 >= ix1 and oy1 >= iy1):
+        return False
+    return (ox1 - ox0) * (oy1 - oy0) > (ix1 - ix0) * (iy1 - iy0)
+
+
+def _drop_rectangles_containing_others(
+    rectangles: list[tuple[int, int, int, int]],
+) -> list[tuple[int, int, int, int]]:
+    """Remove any rectangle that fully contains another rectangle."""
+    if len(rectangles) < 2:
+        return list(rectangles)
+    keep: list[tuple[int, int, int, int]] = []
+    for i, rect in enumerate(rectangles):
+        if any(
+            j != i and _xyxy_contains(rect, other)
+            for j, other in enumerate(rectangles)
+        ):
+            continue
+        keep.append(rect)
+    return keep
 
 
 def _image_to_gray(image: Image.Image | np.ndarray) -> np.ndarray:
@@ -279,6 +370,8 @@ def detect_horizontal_rectangles(
     *,
     min_width_over_height: float = 5.0,
     min_overlap_frac: float = 0.95,
+    min_height: float = 17.5,
+    horizontal_scrollbar_boxes: list[tuple[int, int, int, int]] | None = None,
 ) -> HorizontalRectangleResult:
     """Detect Hough segments and pair them into flat horizontal rectangles.
 
@@ -317,6 +410,8 @@ def detect_horizontal_rectangles(
         pos_tol=pos_tol,
         min_width_over_height=min_width_over_height,
         min_overlap_frac=min_overlap_frac,
+        min_height=min_height,
+        horizontal_scrollbar_boxes=horizontal_scrollbar_boxes,
     )
     return HorizontalRectangleResult(raw, merged, candidates, rectangles)
 
@@ -328,3 +423,104 @@ def extract_input_box_rectangles(
 ) -> list[tuple[int, int, int, int]]:
     """Return only completed rectangle boxes ``(x0, y0, x1, y1)``."""
     return detect_horizontal_rectangles(image, params, **kwargs).rectangles
+
+
+DEFAULT_INPUT_RECT_IOU_THRESHOLD: float = 0.3
+
+
+def _xyxy_to_xywh(
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int,
+    *,
+    img_w: int | None = None,
+    img_h: int | None = None,
+) -> tuple[int, int, int, int] | None:
+    """Convert ``(x0, y0, x1, y1)`` to clipped ``(x, y, w, h)``, or ``None`` if empty."""
+    from cua_mcp.geometry import clip_box
+
+    if x1 <= x0 or y1 <= y0:
+        return None
+    x, y, w, h = x0, y0, x1 - x0, y1 - y0
+    if img_w is not None and img_h is not None:
+        x, y, w, h = clip_box(x, y, w, h, img_w, img_h)
+    if w <= 0 or h <= 0:
+        return None
+    return x, y, w, h
+
+
+def merge_yolo_inputs_with_line_rectangles(
+    image: Image.Image | np.ndarray,
+    yolo_input_boxes: list[tuple[int, int, int, int]],
+    *,
+    iou_threshold: float = DEFAULT_INPUT_RECT_IOU_THRESHOLD,
+    params: LineSegmentParams | None = None,
+    img_w: int | None = None,
+    img_h: int | None = None,
+    horizontal_scrollbar_boxes: list[tuple[int, int, int, int]] | None = None,
+) -> list[tuple[int, int, int, int]]:
+    """Add Hough input-box rectangles and merge with YOLO inputs on high IoU.
+
+    - Line rectangles with no matching YOLO input (IoU ≤ threshold) are kept
+      as new input boxes.
+    - When IoU with a YOLO input exceeds ``iou_threshold``, the pair is merged
+      into their union bounding box (each YOLO / rectangle used at most once).
+    - Unmatched YOLO inputs are kept as-is.
+    - Any box overlapping a horizontal scrollbar is dropped.
+
+    Boxes are ``(x, y, w, h)``.
+    """
+    from cua_mcp.geometry import iou_xywh, merge_two_boxes
+
+    if img_w is None or img_h is None:
+        arr = np.asarray(image)
+        if arr.ndim >= 2:
+            img_h = int(arr.shape[0])
+            img_w = int(arr.shape[1])
+
+    scrollbars = horizontal_scrollbar_boxes or []
+    rect_boxes: list[tuple[int, int, int, int]] = []
+    for x0, y0, x1, y1 in extract_input_box_rectangles(
+        image,
+        params,
+        horizontal_scrollbar_boxes=scrollbars,
+    ):
+        box = _xyxy_to_xywh(x0, y0, x1, y1, img_w=img_w, img_h=img_h)
+        if box is not None:
+            rect_boxes.append(box)
+
+    if not rect_boxes:
+        merged_inputs = list(yolo_input_boxes)
+    elif not yolo_input_boxes:
+        merged_inputs = rect_boxes
+    else:
+        used_yolo: set[int] = set()
+        merged_inputs = []
+
+        for rect in rect_boxes:
+            best_i: int | None = None
+            best_iou = 0.0
+            for i, yolo in enumerate(yolo_input_boxes):
+                if i in used_yolo:
+                    continue
+                iou = iou_xywh(rect, yolo)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_i = i
+            if best_i is not None and best_iou > iou_threshold:
+                merged_inputs.append(merge_two_boxes(rect, yolo_input_boxes[best_i]))
+                used_yolo.add(best_i)
+            else:
+                merged_inputs.append(rect)
+
+        for i, yolo in enumerate(yolo_input_boxes):
+            if i not in used_yolo:
+                merged_inputs.append(yolo)
+
+    if scrollbars:
+        merged_inputs = _drop_xywh_boxes_overlapping_horizontal_scrollbars(
+            merged_inputs,
+            scrollbars,
+        )
+    return merged_inputs

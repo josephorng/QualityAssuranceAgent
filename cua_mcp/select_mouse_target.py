@@ -16,6 +16,7 @@ import numpy as np
 
 from cua_mcp.char_target import resolve_char_screen_point, screen_bbox_from_span
 from cua_mcp.geometry import clip_box, iou_xywh, merge_overlapping_boxes
+from cua_mcp.input_box_rectangles import merge_yolo_inputs_with_line_rectangles
 from cua_mcp.instruction_offset import parse_mouse_target_instruction
 from cua_mcp.scrollbar_arrows import point_from_scrollbar_percent
 from cua_mcp.icon_map import (
@@ -29,7 +30,7 @@ from cua_mcp.read_screen_text.ocr_image import (
     ocr_box_with_spans,
     ocr_mode_for_yolo_class,
 )
-from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
+from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls, scrollbar_orientation
 from cua_mcp.select_ui_element import (
     UiDetection,
     _ANCHOR_SUFFIX_BY_CLASS,
@@ -54,6 +55,7 @@ from cua_mcp.yolo_onnx import (
     MOUSE_TARGET_CLASS_IDS,
     PICKER_CLASS_UNKNOWN,
     YOLO_CLASS_ELEMENT,
+    YOLO_CLASS_INPUT,
     YOLO_CLASS_NAMES,
     YOLO_CLASS_SCROLLBAR,
     YOLO_CLASS_TEXT,
@@ -328,6 +330,10 @@ def _detect_mouse_targets_from_bgr(
     reading order. PUA-only element OCR with 2+ icons is split into one
     single-icon detection per glyph (via character spans).
 
+    After YOLO, horizontal line-pair rectangles are detected and added as
+    ``input`` boxes; each is merged with a YOLO input when IoU exceeds the
+    line-refine threshold (union bbox).
+
     When ``original_scrollbar_bboxes_out`` is provided, appends each pre-fit
     scrollbar bbox that differs from the post-fit box (for debug overlays).
     """
@@ -345,28 +351,58 @@ def _detect_mouse_targets_from_bgr(
         raise RuntimeError(f"move_mouse YOLO predict failed: {exc}") from exc
     yolo_elapsed = time.perf_counter() - yolo_started
 
-    if xyxy.size == 0:
-        _log_info(
-            f"move_mouse vision profile yolo_s={yolo_elapsed:.3f} ocr_s=0.000 "
-            f"total_s={time.perf_counter() - vision_started:.3f} detections=0"
-        )
-        return []
-
     # Keep text vs element separate so dual-stream decode modes stay correct
     # after overlap merging.
     text_boxes: list[tuple[int, int, int, int]] = []
     element_boxes: list[tuple[int, int, int, int]] = []
-    non_ocr: list[tuple[tuple[int, int, int, int], int]] = []
+    input_boxes: list[tuple[int, int, int, int]] = []
+    other_non_ocr: list[tuple[tuple[int, int, int, int], int]] = []
 
-    for row, cls_id in zip(xyxy, class_ids, strict=True):
-        cls_id = int(cls_id)
-        bbox = _xyxy_row_to_bbox(row, w, h)
-        if cls_id == YOLO_CLASS_TEXT:
-            text_boxes.append(bbox)
-        elif cls_id == YOLO_CLASS_ELEMENT:
-            element_boxes.append(bbox)
-        else:
-            non_ocr.append((bbox, cls_id))
+    if xyxy.size != 0:
+        for row, cls_id in zip(xyxy, class_ids, strict=True):
+            cls_id = int(cls_id)
+            bbox = _xyxy_row_to_bbox(row, w, h)
+            if cls_id == YOLO_CLASS_TEXT:
+                text_boxes.append(bbox)
+            elif cls_id == YOLO_CLASS_ELEMENT:
+                element_boxes.append(bbox)
+            elif cls_id == YOLO_CLASS_INPUT:
+                input_boxes.append(bbox)
+            else:
+                other_non_ocr.append((bbox, cls_id))
+
+    line_started = time.perf_counter()
+    horizontal_scrollbar_boxes = [
+        bbox
+        for bbox, cls_id in other_non_ocr
+        if cls_id == YOLO_CLASS_SCROLLBAR
+        and scrollbar_orientation(bbox) == "horizontal"
+    ]
+    try:
+        input_boxes = merge_yolo_inputs_with_line_rectangles(
+            bgr,
+            input_boxes,
+            img_w=w,
+            img_h=h,
+            horizontal_scrollbar_boxes=horizontal_scrollbar_boxes,
+        )
+    except Exception as exc:
+        _log_info(
+            f"move_mouse input-box line refine failed: {type(exc).__name__}: {exc}"
+        )
+    line_elapsed = time.perf_counter() - line_started
+    non_ocr: list[tuple[tuple[int, int, int, int], int]] = [
+        (bbox, YOLO_CLASS_INPUT) for bbox in input_boxes
+    ]
+    non_ocr.extend(other_non_ocr)
+
+    if not text_boxes and not element_boxes and not non_ocr:
+        _log_info(
+            f"move_mouse vision profile yolo_s={yolo_elapsed:.3f} "
+            f"line_s={line_elapsed:.3f} ocr_s=0.000 "
+            f"total_s={time.perf_counter() - vision_started:.3f} detections=0"
+        )
+        return []
 
     ocr_boxes: list[tuple[int, int, int, int]] = []
     ocr_class_ids: list[int] = []
@@ -420,9 +456,11 @@ def _detect_mouse_targets_from_bgr(
                 original_scrollbar_bboxes_out.append(old_bbox)
     _log_info(
         "move_mouse vision profile "
-        f"yolo_s={yolo_elapsed:.3f} ocr_s={ocr_elapsed:.3f} "
+        f"yolo_s={yolo_elapsed:.3f} line_s={line_elapsed:.3f} "
+        f"ocr_s={ocr_elapsed:.3f} "
         f"total_s={time.perf_counter() - vision_started:.3f} "
-        f"yolo_boxes={len(xyxy)} ocr_boxes={len(ocr_boxes)} "
+        f"yolo_boxes={0 if xyxy.size == 0 else len(xyxy)} "
+        f"input_boxes={len(input_boxes)} ocr_boxes={len(ocr_boxes)} "
         f"candidates={len(candidates)}"
     )
 

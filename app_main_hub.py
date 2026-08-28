@@ -1261,10 +1261,6 @@ class MainHub(ctk.CTk):
         b_clear = ctk.CTkButton(row, text="開新檔案", width=100, command=self._script_clear)
         b_clear.pack(side="left", padx=(0, 8))
         self._script_clear_btn = b_clear
-        self._record_btn = ctk.CTkButton(
-            row, text="開始錄製", width=100, command=self._on_record_button
-        )
-        self._record_btn.pack(side="left", padx=(0, 8))
         self._analyze_recording_btn = ctk.CTkButton(
             row,
             text="分析錄製",
@@ -1307,7 +1303,6 @@ class MainHub(ctk.CTk):
                 b_save,
                 b_sas,
                 b_clear,
-                self._record_btn,
                 self._analyze_recording_btn,
                 self._script_text,
             ]
@@ -1696,7 +1691,7 @@ class MainHub(ctk.CTk):
         btn_row = self._actions_btn_row
         btn_row.pack()
         btn_row.grid_columnconfigure(0, weight=1)
-        btn_row.grid_columnconfigure(5, weight=1)
+        btn_row.grid_columnconfigure(6, weight=1)
         self._pause_btn = ctk.CTkButton(
             btn_row,
             text="暫停",
@@ -1714,6 +1709,15 @@ class MainHub(ctk.CTk):
             command=self._on_start_run,
         )
         self._run_btn.grid(row=0, column=2)
+        self._record_btn = ctk.CTkButton(
+            btn_row,
+            text="開始錄製",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            height=44,
+            width=120,
+            command=self._on_record_button,
+        )
+        self._record_btn.grid(row=0, column=3, padx=(12, 0))
         self._open_report_btn = ctk.CTkButton(
             btn_row,
             text="開啟報告",
@@ -1730,7 +1734,7 @@ class MainHub(ctk.CTk):
             width=120,
             command=self._open_reports_index,
         )
-        self._open_reports_index_btn.grid(row=0, column=4, padx=(12, 0), sticky="w")
+        self._open_reports_index_btn.grid(row=0, column=5, padx=(12, 0), sticky="w")
         self._analysis_progress_frame = ctk.CTkFrame(row, fg_color="transparent")
         self._analysis_progress = ctk.CTkProgressBar(
             self._analysis_progress_frame,
@@ -1776,7 +1780,7 @@ class MainHub(ctk.CTk):
         if not html_path.is_file():
             return
         self._last_report_html = html_path
-        self._open_report_btn.grid(row=0, column=3, padx=(12, 0), sticky="w")
+        self._open_report_btn.grid(row=0, column=4, padx=(12, 0), sticky="w")
 
     def _hide_report_button(self) -> None:
         self._last_report_html = None
@@ -2654,6 +2658,8 @@ class MainHub(ctk.CTk):
             w.configure(state="disabled")
         self._set_queue_control_widgets_state("disabled")
         self._use_tool_cache_checkbox.configure(state="disabled")
+        if self._record_btn is not None:
+            self._record_btn.configure(state="disabled")
         self._status.configure(text="執行中…")
         self._worker_thread = threading.Thread(target=self._worker_main, args=(args,), daemon=True)
         self._worker_thread.start()

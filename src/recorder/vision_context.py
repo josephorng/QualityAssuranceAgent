@@ -963,19 +963,15 @@ def format_drag_candidate_anchor(candidate: dict[str, Any]) -> str | None:
 def _candidate_label_for_hint(candidate: dict[str, Any]) -> str | None:
     """Return a hub-style label for a nearby-context hint, or None if not meaningful.
 
-    Bare class labels ``輸入欄`` and ``滾動條`` are kept so empty inputs/scrollbars
-    can be selected as nearby landmarks. Generic ``文字`` / ``元素`` / ``未知`` /
-    ``按鈕`` alone are still dropped.
+    Bare class labels ``輸入欄``, ``滾動條``, and ``未知`` are kept so empty
+    inputs/scrollbars/ambiguous elements can be selected in recording HTML.
+    Generic ``文字`` / ``元素`` / ``按鈕`` alone are still dropped.
     """
-    if str(candidate.get("class_name") or "").strip() == "unknown":
-        return None
     anchor = format_drag_candidate_anchor(candidate)
     if anchor is None:
         return None
-    generic_only = {"文字", "元素", "未知", "按鈕"}
+    generic_only = {"文字", "元素", "按鈕"}
     if anchor in generic_only:
-        return None
-    if anchor.endswith("未知"):
         return None
     return anchor
 
@@ -1335,8 +1331,8 @@ def list_nearby_landmark_options(
     """Return labelable neighbor landmarks for the recording HTML picker.
 
     Each option is ``{"label", "side", "display"}`` where ``side`` is the schema
-    string (e.g. ``lower_left``) or ``None``. Skips the primary candidate, unknown
-    / generic labels, and labels already present in the base instruction (after
+    string (e.g. ``lower_left``) or ``None``. Skips the primary candidate, generic
+    labels, and labels already present in the base instruction (after
     nearby comments are stripped) so the click target itself is excluded.
     When the click is inside a neighbor ``input`` / ``scrollbar``, ``side`` is
     ``inside`` (裡面).

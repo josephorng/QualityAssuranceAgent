@@ -873,6 +873,67 @@ def test_format_drag_candidate_anchor_unknown_text() -> None:
     assert format_drag_candidate_anchor({"class_name": "unknown", "text": "搜"}) == "「搜」未知"
 
 
+def test_candidate_label_for_hint_includes_unknown() -> None:
+    from src.recorder.vision_context import _candidate_label_for_hint
+
+    assert _candidate_label_for_hint({"class_name": "unknown", "text": "搜"}) == "「搜」未知"
+    assert _candidate_label_for_hint({"class_name": "unknown", "text": ""}) == "未知"
+
+
+def test_list_primary_target_options_includes_unknown() -> None:
+    from src.recorder.vision_context import list_primary_target_options
+
+    options = list_primary_target_options(
+        {
+            "candidates": [
+                {"class_name": "unknown", "text": "搜", "bbox": [0, 0, 20, 20]},
+                {"class_name": "text", "text": "設定", "bbox": [30, 0, 20, 20]},
+            ]
+        }
+    )
+    assert len(options) == 2
+    assert options[0] == {
+        "index": 0,
+        "label": "「搜」未知",
+        "display": "「搜」未知（目前）",
+    }
+    assert options[1]["label"] == "「設定」文字"
+
+
+def test_list_nearby_landmark_options_includes_unknown() -> None:
+    from src.recorder.vision_context import list_nearby_landmark_options
+
+    options = list_nearby_landmark_options(
+        {
+            "local_cursor": [10, 10],
+            "candidates": [
+                {
+                    "bbox": [0, 0, 20, 20],
+                    "center": [10, 10],
+                    "class_name": "element",
+                    "text": "",
+                    "icons": [{"chinese_id": "Chrome"}],
+                },
+                {
+                    "bbox": [40, 0, 20, 20],
+                    "center": [50, 10],
+                    "class_name": "unknown",
+                    "text": "v",
+                },
+                {
+                    "bbox": [0, 40, 40, 20],
+                    "center": [20, 50],
+                    "class_name": "text",
+                    "text": "OneNote",
+                },
+            ],
+        },
+        instruction="點擊「Chrome」圖示",
+    )
+    labels = [opt["label"] for opt in options]
+    assert "「v」未知" in labels
+
+
 def test_format_drag_destination_offset_hints_desktop_like() -> None:
     destination = {
         "local_cursor": (189, 638),

@@ -318,7 +318,7 @@ def test_collect_nearby_hint_labels_skips_single_char_text() -> None:
     assert labels == ["「報表」文字", "「設定」文字"]
 
 
-def test_collect_nearby_hint_labels_skips_unknown_class() -> None:
+def test_collect_nearby_hint_labels_includes_unknown_class() -> None:
     vision = {
         "used_vision": True,
         "candidates": [
@@ -337,8 +337,8 @@ def test_collect_nearby_hint_labels_skips_unknown_class() -> None:
         ],
     }
     labels = collect_nearby_hint_labels(vision, instruction="點擊「Chrome」圖示")
-    assert labels == ["「OneNote」文字", "「Docker」圖示"]
-    assert not any("未知" in label for label in labels)
+    assert "「v」未知" in labels
+    assert "「OneNote」文字" in labels
 
 
 def test_format_nearby_context_comment() -> None:
@@ -438,8 +438,9 @@ def test_list_nearby_landmark_options_returns_all_neighbors() -> None:
         "「45 個項目」文字",
         "「已選取 2 個項目」文字",
         "「Chrome」圖示",
+        "未知",
     ]
-    assert len(options) == 3
+    assert len(options) == 4
     assert options[1]["side"] == "left"
     assert "（左邊）" in options[1]["display"]
 

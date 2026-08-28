@@ -460,18 +460,18 @@ def merge_yolo_inputs_with_line_rectangles(
     img_h: int | None = None,
     horizontal_scrollbar_boxes: list[tuple[int, int, int, int]] | None = None,
 ) -> list[tuple[int, int, int, int]]:
-    """Add Hough input-box rectangles and merge with YOLO inputs on high IoU.
+    """Add Hough input-box rectangles and refine YOLO inputs on high IoU.
 
     - Line rectangles with no matching YOLO input (IoU ≤ threshold) are kept
       as new input boxes.
-    - When IoU with a YOLO input exceeds ``iou_threshold``, the pair is merged
-      into their union bounding box (each YOLO / rectangle used at most once).
+    - When IoU with a YOLO input exceeds ``iou_threshold``, the YOLO box is
+      replaced by the line rectangle (each YOLO / rectangle used at most once).
     - Unmatched YOLO inputs are kept as-is.
     - Any box overlapping a horizontal scrollbar is dropped.
 
     Boxes are ``(x, y, w, h)``.
     """
-    from cua_mcp.geometry import iou_xywh, merge_two_boxes
+    from cua_mcp.geometry import iou_xywh
 
     if img_w is None or img_h is None:
         arr = np.asarray(image)
@@ -509,7 +509,7 @@ def merge_yolo_inputs_with_line_rectangles(
                     best_iou = iou
                     best_i = i
             if best_i is not None and best_iou > iou_threshold:
-                merged_inputs.append(merge_two_boxes(rect, yolo_input_boxes[best_i]))
+                merged_inputs.append(rect)
                 used_yolo.add(best_i)
             else:
                 merged_inputs.append(rect)

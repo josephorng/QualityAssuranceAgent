@@ -7,7 +7,7 @@ pieces, then pair parallels with high overlap and large width/height.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import cv2
@@ -25,6 +25,10 @@ class LineSegmentParams:
     threshold: int = 5
     min_line_length: int = 15
     max_line_gap: int = 0
+    min_width_over_height: float = 5.0
+    min_overlap_frac: float = 0.9
+    min_height: float = 10.0
+    vertical_merge_gap: float = 60.0
 
 
 @dataclass(frozen=True)
@@ -35,6 +39,7 @@ class HorizontalRectangleResult:
     merged_segments: list[tuple[int, int, int, int]]
     candidate_segments: list[tuple[int, int, int, int]]
     rectangles: list[tuple[int, int, int, int]]  # (x0, y0, x1, y1)
+    vertical_merged_segments: list[tuple[int, int, int, int]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -183,13 +188,144 @@ def _merge_collinear_axis_segments(
     return merged
 
 
+def _extract_merged_axis_segments(
+    segments: list[tuple[int, int, int, int]],
+    orient: str,
+    *,
+    pos_tol: float,
+    gap_tol: float,
+) -> list[tuple[int, int, int, int]]:
+    """Classify raw Hough segments and merge collinear ones for ``orient`` (``h`` or ``v``)."""
+    axis: list[_AxisSeg] = []
+    for x1, y1, x2, y2 in segments:
+        seg = _classify_axis_segment(int(x1), int(y1), int(x2), int(y2))
+        if seg is not None and seg.orient == orient:
+            axis.append(seg)
+    if not axis:
+        return []
+    merged = _merge_collinear_axis_segments(axis, pos_tol=pos_tol, gap_tol=gap_tol)
+    return [seg.as_tuple() for seg in merged]
+
+
+def _detect_vertical_merged_segments(
+    edges: np.ndarray,
+    params: LineSegmentParams,
+    *,
+    pos_tol: float,
+) -> list[tuple[int, int, int, int]]:
+    """Detect and merge near-vertical segments, bridging table grid breaks."""
+    merge_gap = max(
+        float(params.vertical_merge_gap),
+        float(max(8, int(params.max_line_gap) + 6)),
+        10.0,
+    )
+    close_h = max(5, min(int(round(merge_gap / 2)), 80))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, close_h))
+    v_edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+    hough_gap = max(int(params.max_line_gap), int(round(merge_gap / 2)))
+    lines = cv2.HoughLinesP(
+        v_edges,
+        rho=max(0.1, float(params.rho)),
+        theta=np.deg2rad(max(0.1, float(params.theta_deg))),
+        threshold=max(1, int(params.threshold)),
+        minLineLength=max(0, int(params.min_line_length)),
+        maxLineGap=max(0, hough_gap),
+    )
+    if lines is None:
+        return []
+    raw = [
+        (int(x1), int(y1), int(x2), int(y2))
+        for x1, y1, x2, y2 in lines[:, 0]
+    ]
+    return _extract_merged_axis_segments(
+        raw, "v", pos_tol=pos_tol, gap_tol=merge_gap
+    )
+
+
+def _horizontal_overlap_passes(
+    h1: _AxisSeg,
+    h2: _AxisSeg,
+    *,
+    min_overlap_frac: float,
+) -> bool:
+    x_lo = max(h1.xmin, h2.xmin)
+    x_hi = min(h1.xmax, h2.xmax)
+    overlap = float(x_hi - x_lo)
+    if overlap <= 0:
+        return False
+    return (
+        overlap >= min_overlap_frac * h1.length
+        and overlap >= min_overlap_frac * h2.length
+    )
+
+
+def _horizontal_pair_rectangle(
+    h1: _AxisSeg,
+    h2: _AxisSeg,
+    *,
+    min_width_over_height: float,
+    min_height: float,
+) -> tuple[int, int, int, int] | None:
+    height = abs(h1.mid_y - h2.mid_y)
+    if height <= min_height:
+        return None
+    x_lo = min(h1.xmin, h2.xmin)
+    x_hi = max(h1.xmax, h2.xmax)
+    width = float(x_hi - x_lo)
+    if width <= 0:
+        return None
+    if width / height < min_width_over_height:
+        return None
+    y_lo = min(h1.mid_y, h2.mid_y)
+    y_hi = max(h1.mid_y, h2.mid_y)
+    x0 = int(round(x_lo))
+    y0 = int(round(y_lo))
+    x1 = int(round(x_hi))
+    y1 = int(round(y_hi))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return (x0, y0, x1, y1)
+
+
+def _nearest_overlap_neighbor(
+    axis: list[_AxisSeg],
+    idx: int,
+    *,
+    direction: str,
+    min_overlap_frac: float,
+) -> int | None:
+    """Return closest line above (``direction='above'``) or below with enough overlap."""
+    line = axis[idx]
+    best: int | None = None
+    best_dist = float("inf")
+    for j, other in enumerate(axis):
+        if j == idx:
+            continue
+        if direction == "above":
+            if other.mid_y >= line.mid_y:
+                continue
+            dist = line.mid_y - other.mid_y
+        else:
+            if other.mid_y <= line.mid_y:
+                continue
+            dist = other.mid_y - line.mid_y
+        if not _horizontal_overlap_passes(
+            line, other, min_overlap_frac=min_overlap_frac
+        ):
+            continue
+        if dist < best_dist:
+            best_dist = dist
+            best = j
+    return best
+
+
 def pair_horizontal_rectangles(
     segments: list[tuple[int, int, int, int]],
     *,
     pos_tol: float,
     min_width_over_height: float = 5.0,
     min_overlap_frac: float = 0.95,
-    min_height: float = 15.0,
+    min_height: float = 10.0,
     horizontal_scrollbar_boxes: list[tuple[int, int, int, int]] | None = None,
 ) -> tuple[
     list[tuple[int, int, int, int]],
@@ -203,7 +339,14 @@ def pair_horizontal_rectangles(
     - ``candidates``: horizontal sides of accepted pairs
     - ``rectangles``: axis-aligned boxes ``(x0, y0, x1, y1)`` for each pair
 
-    Pairs shorter than ``min_height`` (default 15px) are rejected.
+    Pairing strategy:
+    1. For each horizontal, collect overlap-valid neighbors and keep the nearest
+       line above and the nearest line below.
+    2. Drop lines with no such neighbor still in play.
+    3. Repeatedly pair any line that has exactly one remaining neighbor until no
+       more forced pairs exist.
+
+    Pairs shorter than ``min_height`` (default 10px) are rejected.
     Rectangles overlapping a horizontal scrollbar are removed last.
     """
     axis: list[_AxisSeg] = []
@@ -220,38 +363,78 @@ def pair_horizontal_rectangles(
     if len(axis) < 2:
         return merged, [], []
 
-    candidates: set[_AxisSeg] = set()
+    axis = sorted(axis, key=lambda s: (s.mid_y, s.xmin))
+
+    above: list[int | None] = [
+        _nearest_overlap_neighbor(
+            axis, i, direction="above", min_overlap_frac=min_overlap_frac
+        )
+        for i in range(len(axis))
+    ]
+    below: list[int | None] = [
+        _nearest_overlap_neighbor(
+            axis, i, direction="below", min_overlap_frac=min_overlap_frac
+        )
+        for i in range(len(axis))
+    ]
+
+    active = set(range(len(axis)))
+
+    def _active_candidates(idx: int) -> set[int]:
+        cands: set[int] = set()
+        up = above[idx]
+        down = below[idx]
+        if up is not None and up in active:
+            cands.add(up)
+        if down is not None and down in active:
+            cands.add(down)
+        return cands
+
+    def _prune_lines_without_candidates() -> bool:
+        removed = False
+        while True:
+            to_remove = {i for i in active if not _active_candidates(i)}
+            if not to_remove:
+                return removed
+            active.difference_update(to_remove)
+            removed = True
+
+    candidate_segments: set[_AxisSeg] = set()
     completed: set[tuple[int, int, int, int]] = set()
 
-    for i, h1 in enumerate(axis):
-        for h2 in axis[i + 1 :]:
-            height = abs(h1.mid_y - h2.mid_y)
-            if height <= min_height:
+    _prune_lines_without_candidates()
+
+    while True:
+        singles = [i for i in active if len(_active_candidates(i)) == 1]
+        if not singles:
+            break
+        progress = False
+        for i in singles:
+            neighbors = _active_candidates(i)
+            if len(neighbors) != 1:
                 continue
-            x_lo = max(h1.xmin, h2.xmin)
-            x_hi = min(h1.xmax, h2.xmax)
-            overlap = float(x_hi - x_lo)
-            if overlap <= 0:
+            j = next(iter(neighbors))
+            if j not in active:
                 continue
-            if (
-                overlap < min_overlap_frac * h1.length
-                or overlap < min_overlap_frac * h2.length
-            ):
-                continue
-            width = overlap
-            if width / height < min_width_over_height:
-                continue
-            y_lo = min(h1.mid_y, h2.mid_y)
-            y_hi = max(h1.mid_y, h2.mid_y)
-            x0 = int(round(x_lo))
-            y0 = int(round(y_lo))
-            x1 = int(round(x_hi))
-            y1 = int(round(y_hi))
-            if x1 <= x0 or y1 <= y0:
-                continue
-            candidates.add(h1)
-            candidates.add(h2)
-            completed.add((x0, y0, x1, y1))
+            rect = _horizontal_pair_rectangle(
+                axis[i],
+                axis[j],
+                min_width_over_height=min_width_over_height,
+                min_height=min_height,
+            )
+            if rect is None:
+                active.discard(i)
+                progress = True
+                break
+            candidate_segments.add(axis[i])
+            candidate_segments.add(axis[j])
+            completed.add(rect)
+            active.difference_update((i, j))
+            progress = True
+            break
+        if not progress:
+            break
+        _prune_lines_without_candidates()
 
     rectangles = _drop_rectangles_containing_others(sorted(completed))
     if horizontal_scrollbar_boxes:
@@ -261,7 +444,7 @@ def pair_horizontal_rectangles(
         )
     return (
         merged,
-        [seg.as_tuple() for seg in candidates],
+        [seg.as_tuple() for seg in candidate_segments],
         rectangles,
     )
 
@@ -368,9 +551,6 @@ def detect_horizontal_rectangles(
     image: Image.Image | np.ndarray,
     params: LineSegmentParams | None = None,
     *,
-    min_width_over_height: float = 5.0,
-    min_overlap_frac: float = 0.95,
-    min_height: float = 17.5,
     horizontal_scrollbar_boxes: list[tuple[int, int, int, int]] | None = None,
 ) -> HorizontalRectangleResult:
     """Detect Hough segments and pair them into flat horizontal rectangles.
@@ -405,15 +585,20 @@ def detect_horizontal_rectangles(
         for x1, y1, x2, y2 in lines[:, 0]
     ]
     pos_tol = float(max(8, int(p.max_line_gap) + 6))
+    vertical_merged = _detect_vertical_merged_segments(
+        edges, p, pos_tol=pos_tol
+    )
     merged, candidates, rectangles = pair_horizontal_rectangles(
         raw,
         pos_tol=pos_tol,
-        min_width_over_height=min_width_over_height,
-        min_overlap_frac=min_overlap_frac,
-        min_height=min_height,
+        min_width_over_height=float(p.min_width_over_height),
+        min_overlap_frac=float(p.min_overlap_frac),
+        min_height=float(p.min_height),
         horizontal_scrollbar_boxes=horizontal_scrollbar_boxes,
     )
-    return HorizontalRectangleResult(raw, merged, candidates, rectangles)
+    return HorizontalRectangleResult(
+        raw, merged, candidates, rectangles, vertical_merged
+    )
 
 
 def extract_input_box_rectangles(

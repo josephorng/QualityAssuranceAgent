@@ -6,5 +6,9 @@
   "theta_deg": 1.0,
   "threshold": 5,
   "min_line_length": 15,
-  "max_line_gap": 0
+  "max_line_gap": 0,
+  "min_width_over_height": 5.0,
+  "min_overlap_frac": 0.9,
+  "min_height": 10.0,
+  "vertical_merge_gap": 60.0
 }

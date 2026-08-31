@@ -12,7 +12,10 @@ from pathlib import Path
 from tkinter import filedialog, ttk
 from typing import Any
 
+import cv2
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageTk
+from skimage.segmentation import slic
 
 from cua_mcp.icon_map import is_pua_char, lookup_pua_icon, text_has_pua, unknown_icon_record
 from cua_mcp.input_box_rectangles import (
@@ -28,11 +31,14 @@ from cua_mcp.select_mouse_target import (
 from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text
 from cua_mcp.yolo_onnx import (
     DEFAULT_CONF_YOLOV26_END2END,
+    MOUSE_TARGET_CLASS_IDS,
+    OCR_DETECTION_CLASS_IDS,
     YOLO_CLASS_ELEMENT,
     YOLO_CLASS_INPUT,
     YOLO_CLASS_NAMES,
     YOLO_CLASS_SCROLLBAR,
     YOLO_CLASS_TEXT,
+    run_yolo_onnx_end2end,
 )
 from src.common.io_utils import imread_bgr, read_json, write_json
 from src.common.settings import ROOT_DIR, resolve_recordings_dir, resolve_runs_dir
@@ -759,6 +765,10 @@ _LINE_PARAM_SLIDERS: tuple[tuple[str, str, float, float, float, int, float], ...
     ("threshold", "Threshold", 1, 300, 100, 0, 1),
     ("min_line_length", "minLineLength", 0, 300, 20, 0, 1),
     ("max_line_gap", "maxLineGap", 0, 100, 0, 0, 1),
+    ("min_height", "Min height", 1, 100, 10.0, 1, 0.5),
+    ("min_overlap_frac", "Min overlap", 0.0, 1.0, 0.95, 2, 0.01),
+    ("min_width_over_height", "Min W/H", 0.5, 50.0, 5.0, 1, 0.5),
+    ("vertical_merge_gap", "V merge gap", 0, 200, 60.0, 0, 5),
 )
 
 _LINE_PARAM_TOOLTIPS: dict[str, str] = {
@@ -793,6 +803,22 @@ _LINE_PARAM_TOOLTIPS: dict[str, str] = {
     "max_line_gap": (
         "合併共線碎段時允許的最大間隙（像素）。"
         "虛線或斷開邊框可調高此值。"
+    ),
+    "min_height": (
+        "相鄰水平線配對時，兩線之間的最小垂直距離（像素）。"
+        "低於此值視為同一條線，不會形成矩形。"
+    ),
+    "min_overlap_frac": (
+        "兩條水平線在 X 軸上重疊長度，須各自達線段長度的此比例才配對。"
+        "調低可接受較短的重疊；調高要求更完整的對齊。"
+    ),
+    "min_width_over_height": (
+        "配對矩形寬度 ÷ 高度的最低比例。輸入框通常很扁，"
+        "預設較高以過濾非輸入框的形狀。"
+    ),
+    "vertical_merge_gap": (
+        "合併垂直線段時允許的最大 Y 間隙（像素）。表格直線常因"
+        "水平格線而斷成多段；調高可串接同一欄的碎段。"
     ),
 }
 
@@ -911,7 +937,995 @@ def _load_line_segment_params() -> LineSegmentParams:
         threshold=int(round(_num("threshold", defaults.threshold))),
         min_line_length=int(round(_num("min_line_length", defaults.min_line_length))),
         max_line_gap=int(round(_num("max_line_gap", defaults.max_line_gap))),
+        min_width_over_height=float(
+            _num("min_width_over_height", defaults.min_width_over_height)
+        ),
+        min_overlap_frac=float(_num("min_overlap_frac", defaults.min_overlap_frac)),
+        min_height=float(_num("min_height", defaults.min_height)),
+        vertical_merge_gap=float(
+            _num("vertical_merge_gap", defaults.vertical_merge_gap)
+        ),
     )
+
+
+@dataclass(frozen=True)
+class ColorSegmentParams:
+    num_colors: int = 120
+    slic_compactness: float = 10.0
+    min_area_frac: float = 0.003
+    blur_ksize: int = 5
+    mask_text_icons: bool = True
+    require_yolo_objects: bool = True
+    merge_superpixels: bool = True
+    merge_similar: bool = False
+    merge_color_dist: float = 10.0
+    split_large_regions: bool = True
+    split_max_area_frac: float = 0.06
+    edge_canny_low: int = 30
+    edge_canny_high: int = 100
+    edge_dilate: int = 2
+
+
+@dataclass(frozen=True)
+class ColorRegion:
+    region_id: int
+    bbox: tuple[int, int, int, int]
+    mean_color: tuple[int, int, int]
+    area: int
+
+
+@dataclass
+class ColorSegmentResult:
+    regions: list[ColorRegion]
+    quantized: Image.Image
+    label_map: np.ndarray
+    masked_box_count: int = 0
+    regions_before_yolo_filter: int = 0
+    prepared: Image.Image | None = None
+    mask_boxes: list[tuple[int, int, int, int]] | None = None
+
+
+_COLOR_PARAM_SLIDERS: tuple[tuple[str, str, float, float, float, int, float], ...] = (
+    ("num_colors", "Segment count", 0, 300, 120, 0, 5),
+    ("min_area_frac", "Min area %", 0.05, 20.0, 0.3, 2, 0.05),
+    ("blur_ksize", "Blur ksize", 1, 31, 5, 0, 2),
+    ("edge_canny_low", "Canny low", 5, 150, 30, 0, 5),
+    ("edge_canny_high", "Canny high", 30, 255, 100, 0, 5),
+    ("edge_dilate", "Edge dilate", 0, 8, 2, 0, 1),
+    ("slic_compactness", "SLIC compact", 1.0, 30.0, 10.0, 0, 1),
+    ("split_max_area_frac", "Split above %", 2.0, 40.0, 6.0, 1, 0.5),
+    ("merge_color_dist", "Merge dist", 2.0, 40.0, 10.0, 0, 1),
+)
+
+_COLOR_PARAM_TOOLTIPS: dict[str, str] = {
+    "num_colors": (
+        "Superpixel count (0 uses 1). Higher values yield more candidate regions."
+    ),
+    "min_area_frac": (
+        "Minimum region size as a percentage of total image area. Smaller blobs "
+        "are discarded so only large color regions remain."
+    ),
+    "blur_ksize": (
+        "Gaussian blur kernel (odd). Smooths fine texture before segmentation so "
+        "clustering follows broad color blocks rather than pixel noise."
+    ),
+    "edge_canny_low": (
+        "Spatial split. Canny lower threshold. Lower values detect more subtle "
+        "panel borders and input-box lines."
+    ),
+    "edge_canny_high": (
+        "Spatial split. Canny upper threshold. Raise to keep only strong "
+        "structural borders."
+    ),
+    "edge_dilate": (
+        "Spatial split. Dilate detected edge pixels so thin lines become solid "
+        "walls when splitting oversized regions."
+    ),
+    "slic_compactness": (
+        "Spatial only. Lower values follow color edges more tightly; higher "
+        "values produce more grid-like superpixels."
+    ),
+    "split_max_area_frac": (
+        "Regions larger than this percentage of the image are split again using "
+        "internal edges, even when they share one flat color."
+    ),
+    "merge_color_dist": (
+        "LAB color distance for merging only adjacent superpixels or regions. "
+        "Non-adjacent same-color areas are never merged."
+    ),
+}
+
+_COLOR_SEGMENT_PARAMS_PATH = ROOT_DIR / "color_segment_params.json"
+
+
+def _color_segment_params_path() -> Path:
+    return _COLOR_SEGMENT_PARAMS_PATH
+
+
+def _clamp_color_segment_param(key: str, value: float) -> float:
+    for slider_key, _label, lo, hi, _default, _decimals, _step in _COLOR_PARAM_SLIDERS:
+        if slider_key != key:
+            continue
+        return max(lo, min(hi, float(value)))
+    return float(value)
+
+
+def _load_color_segment_params() -> ColorSegmentParams:
+    defaults = ColorSegmentParams()
+    raw = read_json(_color_segment_params_path(), default={})
+    if not isinstance(raw, dict):
+        return defaults
+
+    def _num(key: str, fallback: float) -> float:
+        value = raw.get(key, fallback)
+        try:
+            return _clamp_color_segment_param(key, float(value))
+        except (TypeError, ValueError):
+            return fallback
+
+    blur = int(round(_num("blur_ksize", defaults.blur_ksize)))
+    if blur % 2 == 0:
+        blur = max(1, blur - 1)
+    min_area_pct = _num("min_area_frac", defaults.min_area_frac * 100.0)
+    split_pct = _num("split_max_area_frac", defaults.split_max_area_frac * 100.0)
+    return ColorSegmentParams(
+        num_colors=max(0, int(round(_num("num_colors", defaults.num_colors)))),
+        slic_compactness=float(_num("slic_compactness", defaults.slic_compactness)),
+        min_area_frac=max(0.0001, min_area_pct / 100.0),
+        blur_ksize=blur,
+        mask_text_icons=bool(raw.get("mask_text_icons", defaults.mask_text_icons)),
+        require_yolo_objects=bool(
+            raw.get("require_yolo_objects", defaults.require_yolo_objects)
+        ),
+        merge_superpixels=bool(raw.get("merge_superpixels", defaults.merge_superpixels)),
+        merge_similar=bool(raw.get("merge_similar", defaults.merge_similar)),
+        merge_color_dist=float(_num("merge_color_dist", defaults.merge_color_dist)),
+        split_large_regions=bool(raw.get("split_large_regions", defaults.split_large_regions)),
+        split_max_area_frac=max(0.01, split_pct / 100.0),
+        edge_canny_low=int(round(_num("edge_canny_low", defaults.edge_canny_low))),
+        edge_canny_high=int(round(_num("edge_canny_high", defaults.edge_canny_high))),
+        edge_dilate=max(0, int(round(_num("edge_dilate", defaults.edge_dilate)))),
+    )
+
+
+def _save_color_segment_params(params: ColorSegmentParams) -> None:
+    write_json(
+        _color_segment_params_path(),
+        {
+            "num_colors": int(params.num_colors),
+            "slic_compactness": float(params.slic_compactness),
+            "min_area_frac": round(params.min_area_frac * 100.0, 3),
+            "blur_ksize": int(params.blur_ksize),
+            "mask_text_icons": bool(params.mask_text_icons),
+            "require_yolo_objects": bool(params.require_yolo_objects),
+            "merge_superpixels": bool(params.merge_superpixels),
+            "merge_similar": bool(params.merge_similar),
+            "merge_color_dist": float(params.merge_color_dist),
+            "split_large_regions": bool(params.split_large_regions),
+            "split_max_area_frac": round(params.split_max_area_frac * 100.0, 2),
+            "edge_canny_low": int(params.edge_canny_low),
+            "edge_canny_high": int(params.edge_canny_high),
+            "edge_dilate": int(params.edge_dilate),
+        },
+    )
+
+
+def _xyxy_row_to_xywh(row: np.ndarray, img_w: int, img_h: int) -> tuple[int, int, int, int]:
+    x0 = max(0, min(img_w - 1, int(round(float(row[0])))))
+    y0 = max(0, min(img_h - 1, int(round(float(row[1])))))
+    x1 = max(0, min(img_w, int(round(float(row[2])))))
+    y1 = max(0, min(img_h, int(round(float(row[3])))))
+    return x0, y0, max(1, x1 - x0), max(1, y1 - y0)
+
+
+_COLOR_SEGMENT_MASK_CLASS_IDS = (
+    OCR_DETECTION_CLASS_IDS | {YOLO_CLASS_INPUT, YOLO_CLASS_SCROLLBAR}
+)
+_COLOR_SEGMENT_FILTER_CLASS_IDS = OCR_DETECTION_CLASS_IDS
+
+
+def _line_counts_as_mask_target(
+    line: OcrLine, class_ids: set[int]
+) -> bool:
+    if line.class_name in ("scrollbar_original", "input_original"):
+        return False
+    if line.class_id is not None:
+        return int(line.class_id) in class_ids
+    if line.class_name in ("text", "element", "input", "scrollbar"):
+        return True
+    return line.line_type != "ocr"
+
+
+def _lines_to_mask_boxes(
+    lines: list[OcrLine],
+    *,
+    class_ids: set[int] | frozenset[int] | None = None,
+) -> list[tuple[int, int, int, int]]:
+    detect_classes = set(class_ids or _COLOR_SEGMENT_MASK_CLASS_IDS)
+    boxes: list[tuple[int, int, int, int]] = []
+    for line in lines:
+        if not _line_counts_as_mask_target(line, detect_classes):
+            continue
+        x, y, w, h = line.box
+        if w > 0 and h > 0:
+            boxes.append((int(x), int(y), int(w), int(h)))
+    return boxes
+
+
+def _resolve_color_segment_box_sets(
+    rgb: np.ndarray,
+    *,
+    image_path: Path | None = None,
+    run_dir: Path | None = None,
+    mask_class_ids: frozenset[int] | set[int] = _COLOR_SEGMENT_MASK_CLASS_IDS,
+    filter_class_ids: frozenset[int] | set[int] = _COLOR_SEGMENT_FILTER_CLASS_IDS,
+    yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
+) -> tuple[list[tuple[int, int, int, int]], list[tuple[int, int, int, int]]]:
+    """Resolve mask and text/icon filter boxes from one sidecar or YOLO pass when possible."""
+    mask_classes = set(mask_class_ids)
+    filter_classes = set(filter_class_ids)
+
+    if image_path is not None:
+        try:
+            lines, _status = resolve_image_lines(
+                image_path,
+                yolo_conf_threshold=yolo_conf_threshold,
+                allow_yolo=True,
+                run_dir=run_dir,
+            )
+            mask_boxes = _lines_to_mask_boxes(lines, class_ids=mask_classes)
+            filter_boxes = _lines_to_mask_boxes(lines, class_ids=filter_classes)
+            if mask_boxes or filter_boxes:
+                return mask_boxes, filter_boxes
+        except Exception:
+            pass
+
+        try:
+            bgr = imread_bgr(image_path)
+            if bgr is not None:
+                candidates = _detect_mouse_targets_from_bgr(
+                    bgr,
+                    yolo_conf_threshold=yolo_conf_threshold,
+                )
+                mask_boxes = [
+                    det.bbox
+                    for det in candidates
+                    if int(det.class_id) in mask_classes
+                ]
+                filter_boxes = [
+                    det.bbox
+                    for det in candidates
+                    if int(det.class_id) in filter_classes
+                ]
+                if mask_boxes or filter_boxes:
+                    return mask_boxes, filter_boxes
+        except Exception:
+            pass
+
+    try:
+        return _detect_yolo_ui_box_sets(
+            rgb,
+            mask_class_ids=mask_classes,
+            filter_class_ids=filter_classes,
+        )
+    except Exception:
+        return [], []
+
+
+def _resolve_color_segment_yolo_boxes(
+    rgb: np.ndarray,
+    *,
+    image_path: Path | None = None,
+    run_dir: Path | None = None,
+    class_ids: frozenset[int] | set[int] | None = None,
+    yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
+) -> list[tuple[int, int, int, int]]:
+    """Resolve UI boxes from sidecar JSON when available, else live YOLO."""
+    detect_classes = set(class_ids or MOUSE_TARGET_CLASS_IDS)
+
+    if image_path is not None:
+        try:
+            lines, _status = resolve_image_lines(
+                image_path,
+                yolo_conf_threshold=yolo_conf_threshold,
+                allow_yolo=True,
+                run_dir=run_dir,
+            )
+            boxes = _lines_to_mask_boxes(lines, class_ids=detect_classes)
+            if boxes:
+                return boxes
+        except Exception:
+            pass
+
+        try:
+            bgr = imread_bgr(image_path)
+            if bgr is not None:
+                candidates = _detect_mouse_targets_from_bgr(
+                    bgr,
+                    yolo_conf_threshold=yolo_conf_threshold,
+                )
+                boxes = [
+                    det.bbox
+                    for det in candidates
+                    if int(det.class_id) in detect_classes
+                ]
+                if boxes:
+                    return boxes
+        except Exception:
+            pass
+
+    try:
+        return _detect_yolo_ui_boxes(rgb, class_ids=detect_classes)
+    except Exception:
+        return []
+
+
+def _detect_yolo_ui_box_sets(
+    rgb: np.ndarray,
+    *,
+    mask_class_ids: set[int],
+    filter_class_ids: set[int],
+) -> tuple[list[tuple[int, int, int, int]], list[tuple[int, int, int, int]]]:
+    """Run YOLO once and split detections into mask vs text/icon filter boxes."""
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    detect_classes = mask_class_ids | filter_class_ids
+    xyxy, _scores, class_ids = run_yolo_onnx_end2end(
+        bgr,
+        class_ids=detect_classes,
+        conf_threshold=DEFAULT_CONF_YOLOV26_END2END,
+    )
+    h, w = rgb.shape[:2]
+    if xyxy.size == 0:
+        return [], []
+    mask_boxes: list[tuple[int, int, int, int]] = []
+    filter_boxes: list[tuple[int, int, int, int]] = []
+    for row, class_id in zip(xyxy, class_ids, strict=False):
+        cls = int(class_id)
+        box = _xyxy_row_to_xywh(row, w, h)
+        if cls in mask_class_ids:
+            mask_boxes.append(box)
+        if cls in filter_class_ids:
+            filter_boxes.append(box)
+    return mask_boxes, filter_boxes
+
+
+def _detect_yolo_ui_boxes(
+    rgb: np.ndarray,
+    *,
+    class_ids: frozenset[int] | set[int] | None = None,
+) -> list[tuple[int, int, int, int]]:
+    """Run YOLO and return UI object boxes as ``(x, y, w, h)``."""
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    detect_classes = set(class_ids or MOUSE_TARGET_CLASS_IDS)
+    xyxy, _scores, _class_ids = run_yolo_onnx_end2end(
+        bgr,
+        class_ids=detect_classes,
+        conf_threshold=DEFAULT_CONF_YOLOV26_END2END,
+    )
+    h, w = rgb.shape[:2]
+    if xyxy.size == 0:
+        return []
+    return [_xyxy_row_to_xywh(row, w, h) for row in xyxy]
+
+
+def _detect_text_icon_boxes(rgb: np.ndarray) -> list[tuple[int, int, int, int]]:
+    """YOLO text, element, input, and scrollbar boxes — flatten UI detail before clustering."""
+    return _detect_yolo_ui_boxes(rgb, class_ids=_COLOR_SEGMENT_MASK_CLASS_IDS)
+
+
+def _region_contains_text_or_icon(
+    region_mask: np.ndarray,
+    boxes: list[tuple[int, int, int, int]],
+) -> bool:
+    """True when any text/icon box pixel lies inside the region mask."""
+    if not boxes or not np.any(region_mask):
+        return False
+    h, w = region_mask.shape[:2]
+    for bx, by, bw, bh in boxes:
+        x0 = max(0, int(bx))
+        y0 = max(0, int(by))
+        x1 = min(w, x0 + max(1, int(bw)))
+        y1 = min(h, y0 + max(1, int(bh)))
+        if np.any(region_mask[y0:y1, x0:x1]):
+            return True
+    return False
+
+
+def _filter_regions_with_yolo_objects(
+    regions: list[ColorRegion],
+    label_map: np.ndarray,
+    yolo_boxes: list[tuple[int, int, int, int]],
+) -> tuple[list[ColorRegion], np.ndarray]:
+    """Drop regions that do not contain any detected text or icon pixels."""
+    if not regions or not yolo_boxes:
+        return regions, label_map
+    kept: list[ColorRegion] = []
+    filtered_map = np.full_like(label_map, -1)
+    for new_id, region in enumerate(regions):
+        region_mask = label_map == region.region_id
+        if not _region_contains_text_or_icon(region_mask, yolo_boxes):
+            continue
+        kept.append(
+            ColorRegion(
+                region_id=new_id,
+                bbox=region.bbox,
+                mean_color=region.mean_color,
+                area=region.area,
+            )
+        )
+        filtered_map[region_mask] = new_id
+    return kept, filtered_map
+
+
+def _fill_boxes_with_local_background(
+    rgb: np.ndarray,
+    boxes: list[tuple[int, int, int, int]],
+    *,
+    ring_px: int = 5,
+) -> np.ndarray:
+    """Replace text/icon boxes with the median color sampled from a ring around each box."""
+    if not boxes:
+        return rgb
+    out = rgb.copy()
+    h, w = out.shape[:2]
+    for x, y, bw, bh in boxes:
+        x0, y0 = max(0, x), max(0, y)
+        x1, y1 = min(w, x + bw), min(h, y + bh)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        rx0 = max(0, x0 - ring_px)
+        ry0 = max(0, y0 - ring_px)
+        rx1 = min(w, x1 + ring_px)
+        ry1 = min(h, y1 + ring_px)
+        patch = out[ry0:ry1, rx0:rx1]
+        ring_mask = np.ones(patch.shape[:2], dtype=bool)
+        ring_mask[(y0 - ry0) : (y1 - ry0), (x0 - rx0) : (x1 - rx0)] = False
+        ring_pixels = patch[ring_mask]
+        if ring_pixels.size == 0:
+            fill = out[max(0, y0 - 1) : y0, x0:x1].reshape(-1, 3)
+            if fill.size == 0:
+                fill = out[y0:y1, max(0, x0 - 1) : x0].reshape(-1, 3)
+        else:
+            fill = ring_pixels
+        if fill.size == 0:
+            continue
+        out[y0:y1, x0:x1] = np.median(fill, axis=0).astype(np.uint8)
+    return out
+
+
+def _lab_color_distance(c1: tuple[int, int, int], c2: tuple[int, int, int]) -> float:
+    a = cv2.cvtColor(np.uint8([[c1]]), cv2.COLOR_RGB2LAB)[0, 0].astype(np.float32)
+    b = cv2.cvtColor(np.uint8([[c2]]), cv2.COLOR_RGB2LAB)[0, 0].astype(np.float32)
+    return float(np.linalg.norm(a - b))
+
+
+def _bbox_gap(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> int:
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    dx = max(0, max(ax0, bx0) - min(ax1, bx1) - 1)
+    dy = max(0, max(ay0, by0) - min(ay1, by1) - 1)
+    return max(dx, dy)
+
+
+def _union_bbox(
+    a: tuple[int, int, int, int], b: tuple[int, int, int, int]
+) -> tuple[int, int, int, int]:
+    return (
+        min(a[0], b[0]),
+        min(a[1], b[1]),
+        max(a[2], b[2]),
+        max(a[3], b[3]),
+    )
+
+
+def _merge_similar_color_regions(
+    regions: list[ColorRegion],
+    label_map: np.ndarray,
+    *,
+    color_dist: float,
+    max_gap: int,
+    max_area_frac: float = 0.15,
+) -> tuple[list[ColorRegion], np.ndarray]:
+    if len(regions) < 2:
+        return regions, label_map
+
+    img_area = max(1, int(label_map.shape[0] * label_map.shape[1]))
+    max_area = max(1, int(img_area * max_area_frac))
+    parent = {region.region_id: region.region_id for region in regions}
+
+    def find(region_id: int) -> int:
+        root = region_id
+        while parent[root] != root:
+            parent[root] = parent[parent[root]]
+            root = parent[root]
+        return root
+
+    def union(left_id: int, right_id: int) -> None:
+        left_root = find(left_id)
+        right_root = find(right_id)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    for i, left in enumerate(regions):
+        for right in regions[i + 1 :]:
+            if _lab_color_distance(left.mean_color, right.mean_color) > color_dist:
+                continue
+            if _bbox_gap(left.bbox, right.bbox) > max_gap:
+                continue
+            if left.area + right.area > max_area:
+                continue
+            union(left.region_id, right.region_id)
+
+    groups: dict[int, list[ColorRegion]] = {}
+    for region in regions:
+        groups.setdefault(find(region.region_id), []).append(region)
+
+    merged_regions: list[ColorRegion] = []
+    merged_label_map = np.full_like(label_map, -1)
+    for new_id, group in enumerate(groups.values()):
+        merge_mask = np.zeros(label_map.shape, dtype=bool)
+        merged_bbox = group[0].bbox
+        total_area = 0
+        colors: list[tuple[int, int, int]] = []
+        for region in group:
+            merge_mask |= label_map == region.region_id
+            merged_bbox = _union_bbox(merged_bbox, region.bbox)
+            total_area += region.area
+            colors.append(region.mean_color)
+        mean_color = tuple(
+            int(v) for v in np.mean(np.array(colors, dtype=np.float32), axis=0)
+        )
+        merged_label_map[merge_mask] = new_id
+        merged_regions.append(
+            ColorRegion(
+                region_id=new_id,
+                bbox=merged_bbox,
+                mean_color=mean_color,
+                area=total_area,
+            )
+        )
+
+    merged_regions.sort(key=lambda region: region.area, reverse=True)
+    final_label_map = np.full_like(merged_label_map, -1)
+    final_regions: list[ColorRegion] = []
+    for new_id, region in enumerate(merged_regions):
+        old_id = region.region_id
+        final_label_map[merged_label_map == old_id] = new_id
+        final_regions.append(
+            ColorRegion(
+                region_id=new_id,
+                bbox=region.bbox,
+                mean_color=region.mean_color,
+                area=region.area,
+            )
+        )
+    return final_regions, final_label_map
+
+
+def _prepare_segmentation_image(
+    rgb: np.ndarray,
+    params: ColorSegmentParams,
+    *,
+    image_path: Path | None = None,
+    run_dir: Path | None = None,
+) -> tuple[np.ndarray, int, list[tuple[int, int, int, int]], list[tuple[int, int, int, int]], np.ndarray]:
+    work = rgb.copy()
+    masked_boxes = 0
+    mask_boxes, text_icon_boxes = _resolve_color_segment_box_sets(
+        work,
+        image_path=image_path,
+        run_dir=run_dir,
+    )
+    if params.mask_text_icons and mask_boxes:
+        masked_boxes = len(mask_boxes)
+        work = _fill_boxes_with_local_background(work, mask_boxes)
+    masked_before_blur = work.copy()
+    blur_k = int(params.blur_ksize)
+    if blur_k > 1:
+        if blur_k % 2 == 0:
+            blur_k += 1
+        work = cv2.GaussianBlur(work, (blur_k, blur_k), 0)
+    return work, masked_boxes, mask_boxes, text_icon_boxes, masked_before_blur
+
+
+def _regions_from_label_map(
+    rgb: np.ndarray,
+    label_map: np.ndarray,
+    *,
+    min_area: int,
+) -> tuple[list[ColorRegion], np.ndarray]:
+    h, w = label_map.shape[:2]
+    out_map = np.full((h, w), -1, dtype=np.int32)
+    regions: list[ColorRegion] = []
+    next_region_id = 0
+    for label_id in np.unique(label_map):
+        if label_id < 0:
+            continue
+        mask = (label_map == label_id).astype(np.uint8)
+        n_comp, comp_map, stats, _centroids = cv2.connectedComponentsWithStats(
+            mask, connectivity=8
+        )
+        for comp_id in range(1, n_comp):
+            area = int(stats[comp_id, cv2.CC_STAT_AREA])
+            if area < min_area:
+                continue
+            x = int(stats[comp_id, cv2.CC_STAT_LEFT])
+            y = int(stats[comp_id, cv2.CC_STAT_TOP])
+            bw = int(stats[comp_id, cv2.CC_STAT_WIDTH])
+            bh = int(stats[comp_id, cv2.CC_STAT_HEIGHT])
+            comp_mask = comp_map == comp_id
+            mean_color = tuple(int(v) for v in rgb[comp_mask].mean(axis=0))
+            out_map[comp_mask] = next_region_id
+            regions.append(
+                ColorRegion(
+                    region_id=next_region_id,
+                    bbox=(x, y, x + bw - 1, y + bh - 1),
+                    mean_color=mean_color,
+                    area=area,
+                )
+            )
+            next_region_id += 1
+    return regions, out_map
+
+
+def _quantized_from_label_map(
+    rgb: np.ndarray, label_map: np.ndarray, regions: list[ColorRegion]
+) -> Image.Image:
+    h, w = label_map.shape[:2]
+    quantized = rgb.copy()
+    for region in regions:
+        mask = label_map == region.region_id
+        if not np.any(mask):
+            continue
+        quantized[mask] = np.array(region.mean_color, dtype=np.uint8)
+    return Image.fromarray(quantized, mode="RGB")
+
+
+def _adjacent_label_pairs(labels: np.ndarray) -> set[tuple[int, int]]:
+    pairs: set[tuple[int, int]] = set()
+    left = labels[:, :-1]
+    right = labels[:, 1:]
+    mask = left != right
+    for a, b in zip(left[mask], right[mask], strict=False):
+        pairs.add((min(int(a), int(b)), max(int(a), int(b))))
+    top = labels[:-1, :]
+    bottom = labels[1:, :]
+    mask = top != bottom
+    for a, b in zip(top[mask], bottom[mask], strict=False):
+        pairs.add((min(int(a), int(b)), max(int(a), int(b))))
+    return pairs
+
+
+def _bbox_from_mask(mask: np.ndarray) -> tuple[int, int, int, int]:
+    ys, xs = np.where(mask)
+    if ys.size == 0:
+        return (0, 0, 0, 0)
+    return (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()))
+
+
+def _split_mask_by_internal_edges(
+    rgb: np.ndarray,
+    mask: np.ndarray,
+    *,
+    min_area: int,
+    canny_low: int,
+    canny_high: int,
+    edge_dilate: int,
+) -> list[np.ndarray]:
+    """Split one region mask using Canny edges as barriers (same color, separate panels)."""
+    if not np.any(mask):
+        return []
+    ys, xs = np.where(mask)
+    y0, y1 = int(ys.min()), int(ys.max())
+    x0, x1 = int(xs.min()), int(xs.max())
+    crop_rgb = rgb[y0 : y1 + 1, x0 : x1 + 1]
+    crop_mask = mask[y0 : y1 + 1, x0 : x1 + 1]
+    gray = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    edges = cv2.Canny(gray, int(canny_low), int(canny_high))
+    edges = cv2.bitwise_and(edges, edges, mask=crop_mask.astype(np.uint8))
+    dilate_k = max(1, int(edge_dilate) * 2 + 1)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (dilate_k, dilate_k))
+    edges = cv2.dilate(edges, kernel, iterations=1)
+    interior = crop_mask & (edges == 0)
+    n_comp, comp_map, stats, _centroids = cv2.connectedComponentsWithStats(
+        interior.astype(np.uint8),
+        connectivity=8,
+    )
+    sub_masks: list[np.ndarray] = []
+    for comp_id in range(1, n_comp):
+        area = int(stats[comp_id, cv2.CC_STAT_AREA])
+        if area < min_area:
+            continue
+        full = np.zeros(mask.shape, dtype=bool)
+        full[y0 : y1 + 1, x0 : x1 + 1] = comp_map == comp_id
+        sub_masks.append(full)
+    return sub_masks if len(sub_masks) > 1 else [mask]
+
+
+def _split_oversized_regions(
+    rgb: np.ndarray,
+    regions: list[ColorRegion],
+    label_map: np.ndarray,
+    params: ColorSegmentParams,
+) -> tuple[list[ColorRegion], np.ndarray]:
+    if not params.split_large_regions or not regions:
+        return regions, label_map
+    h, w = label_map.shape[:2]
+    img_area = max(1, h * w)
+    min_area = max(1, int(img_area * params.min_area_frac))
+    max_area = max(min_area + 1, int(img_area * params.split_max_area_frac))
+    pending: list[tuple[np.ndarray, tuple[int, int, int] | None]] = []
+    for region in regions:
+        mask = label_map == region.region_id
+        if int(mask.sum()) <= max_area:
+            pending.append((mask, region.mean_color))
+            continue
+        sub_masks = _split_mask_by_internal_edges(
+            rgb,
+            mask,
+            min_area=min_area,
+            canny_low=params.edge_canny_low,
+            canny_high=params.edge_canny_high,
+            edge_dilate=params.edge_dilate,
+        )
+        for sub_mask in sub_masks:
+            if int(sub_mask.sum()) < min_area:
+                continue
+            pixels = rgb[sub_mask]
+            mean_color = tuple(int(v) for v in pixels.mean(axis=0))
+            pending.append((sub_mask, mean_color))
+
+    new_map = np.full((h, w), -1, dtype=np.int32)
+    new_regions: list[ColorRegion] = []
+    for region_id, (mask, mean_color) in enumerate(pending):
+        area = int(mask.sum())
+        if area < min_area:
+            continue
+        x0, y0, x1, y1 = _bbox_from_mask(mask)
+        new_map[mask] = region_id
+        new_regions.append(
+            ColorRegion(
+                region_id=region_id,
+                bbox=(x0, y0, x1, y1),
+                mean_color=mean_color or (0, 0, 0),
+                area=area,
+            )
+        )
+    return new_regions, new_map
+
+
+def _run_slic_pipeline(
+    rgb: np.ndarray, work: np.ndarray, params: ColorSegmentParams
+) -> tuple[list[ColorRegion], np.ndarray, Image.Image]:
+    h, w = rgb.shape[:2]
+    min_area = max(1, int(h * w * params.min_area_frac))
+    n_segments = max(1, int(params.num_colors))
+    superpixels = slic(
+        work,
+        n_segments=n_segments,
+        compactness=float(params.slic_compactness),
+        start_label=0,
+        channel_axis=-1,
+    ).astype(np.int32)
+    label_map = superpixels
+    if params.merge_superpixels:
+        label_map = _merge_labels_by_color(
+            label_map,
+            rgb,
+            color_dist=float(params.merge_color_dist),
+        )
+    regions, label_map = _regions_from_label_map(rgb, label_map, min_area=min_area)
+    if params.merge_similar and regions:
+        merge_gap = 8
+        regions, label_map = _merge_similar_color_regions(
+            regions,
+            label_map,
+            color_dist=float(params.merge_color_dist),
+            max_gap=merge_gap,
+            max_area_frac=0.15,
+        )
+    quantized = _quantized_from_label_map(rgb, label_map, regions)
+    return regions, label_map, quantized
+
+
+def _segment_image_by_spatial(
+    rgb: np.ndarray, work: np.ndarray, params: ColorSegmentParams
+) -> tuple[list[ColorRegion], np.ndarray, Image.Image]:
+    regions, label_map, quantized = _run_slic_pipeline(rgb, work, params)
+    regions, label_map = _split_oversized_regions(rgb, regions, label_map, params)
+    if params.split_large_regions:
+        # One more pass in case splits still left very large same-color panels.
+        regions, label_map = _split_oversized_regions(rgb, regions, label_map, params)
+    quantized = _quantized_from_label_map(rgb, label_map, regions)
+    return regions, label_map, quantized
+
+
+def _merge_labels_by_color(
+    labels: np.ndarray,
+    rgb: np.ndarray,
+    *,
+    color_dist: float,
+) -> np.ndarray:
+    unique_ids = [int(v) for v in np.unique(labels) if int(v) >= 0]
+    if len(unique_ids) < 2:
+        return labels.astype(np.int32)
+    means: dict[int, tuple[int, int, int]] = {}
+    for label_id in unique_ids:
+        pixels = rgb[labels == label_id]
+        if pixels.size == 0:
+            continue
+        means[label_id] = tuple(int(v) for v in pixels.mean(axis=0))
+
+    parent = {label_id: label_id for label_id in means}
+
+    def find(label_id: int) -> int:
+        root = label_id
+        while parent[root] != root:
+            parent[root] = parent[parent[root]]
+            root = parent[root]
+        return root
+
+    def union(left_id: int, right_id: int) -> None:
+        left_root = find(left_id)
+        right_root = find(right_id)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    for left_id, right_id in _adjacent_label_pairs(labels):
+        if left_id not in means or right_id not in means:
+            continue
+        if _lab_color_distance(means[left_id], means[right_id]) <= color_dist:
+            union(left_id, right_id)
+
+    remap = {label_id: find(label_id) for label_id in means}
+    roots = sorted(set(remap.values()))
+    root_to_new = {root: idx for idx, root in enumerate(roots)}
+    merged = labels.astype(np.int32).copy()
+    for label_id, root in remap.items():
+        merged[labels == label_id] = root_to_new[root]
+    return merged
+
+
+def segment_image_by_color(
+    image: Image.Image,
+    params: ColorSegmentParams | None = None,
+    *,
+    image_path: Path | None = None,
+    run_dir: Path | None = None,
+) -> ColorSegmentResult:
+    """Segment an image into large color regions using the spatial method."""
+    p = params or ColorSegmentParams()
+    rgb = np.asarray(image.convert("RGB"))
+    work, masked_boxes, mask_boxes, text_icon_boxes, masked_before_blur = (
+        _prepare_segmentation_image(
+            rgb, p, image_path=image_path, run_dir=run_dir
+        )
+    )
+    regions, label_map, quantized = _segment_image_by_spatial(rgb, work, p)
+
+    regions_before_yolo_filter = len(regions)
+    if p.require_yolo_objects and text_icon_boxes:
+        regions, label_map = _filter_regions_with_yolo_objects(
+            regions, label_map, text_icon_boxes
+        )
+        quantized = _quantized_from_label_map(rgb, label_map, regions)
+
+    regions.sort(key=lambda region: region.area, reverse=True)
+    final_label_map = np.full_like(label_map, -1)
+    final_regions: list[ColorRegion] = []
+    for new_id, region in enumerate(regions):
+        old_id = region.region_id
+        final_label_map[label_map == old_id] = new_id
+        final_regions.append(
+            ColorRegion(
+                region_id=new_id,
+                bbox=region.bbox,
+                mean_color=region.mean_color,
+                area=region.area,
+            )
+        )
+    return ColorSegmentResult(
+        regions=final_regions,
+        quantized=quantized,
+        label_map=final_label_map,
+        masked_box_count=masked_boxes,
+        regions_before_yolo_filter=regions_before_yolo_filter,
+        prepared=Image.fromarray(masked_before_blur.astype(np.uint8), mode="RGB"),
+        mask_boxes=list(mask_boxes),
+    )
+
+
+_REGION_OUTLINE_COLORS: tuple[str, ...] = (
+    "lime",
+    "orange",
+    "cyan",
+    "magenta",
+    "yellow",
+    "deepskyblue",
+    "violet",
+    "springgreen",
+    "coral",
+    "gold",
+)
+
+
+def _draw_color_segment_overlays(
+    image: Image.Image,
+    result: ColorSegmentResult | None,
+    *,
+    show_quantized: bool,
+    show_masked_input: bool = False,
+    show_boxes: bool,
+    show_labels: bool,
+    selected_region_id: int | None = None,
+    masked_input_override: Image.Image | None = None,
+    mask_boxes_override: list[tuple[int, int, int, int]] | None = None,
+) -> Image.Image:
+    if result is None and not show_masked_input:
+        return image.copy()
+    if show_masked_input:
+        prepared = masked_input_override
+        if prepared is None and result is not None:
+            prepared = result.prepared
+        if prepared is not None:
+            out = prepared.copy()
+        else:
+            out = image.copy()
+        mask_boxes = mask_boxes_override
+        if mask_boxes is None and result is not None:
+            mask_boxes = result.mask_boxes
+        if mask_boxes:
+            draw = ImageDraw.Draw(out)
+            for x, y, bw, bh in mask_boxes:
+                draw.rectangle(
+                    [(x, y), (x + bw, y + bh)],
+                    outline="red",
+                    width=2,
+                )
+        if not show_boxes and not show_labels:
+            return out
+        if result is None:
+            return out
+        draw = ImageDraw.Draw(out)
+        for region in result.regions:
+            x0, y0, x1, y1 = region.bbox
+            is_sel = selected_region_id == region.region_id
+            color = (
+                "lime"
+                if is_sel
+                else _REGION_OUTLINE_COLORS[
+                    region.region_id % len(_REGION_OUTLINE_COLORS)
+                ]
+            )
+            if show_boxes:
+                draw.rectangle(
+                    [(x0, y0), (x1, y1)], outline=color, width=4 if is_sel else 2
+                )
+            if show_labels:
+                label = f"#{region.region_id + 1}"
+                draw.text((x0 + 2, y0 + 2), label, fill=color)
+        return out
+    if result is None:
+        return image.copy()
+    out = result.quantized.copy() if show_quantized else image.copy()
+    if not show_boxes and not show_labels:
+        return out
+    draw = ImageDraw.Draw(out)
+    for region in result.regions:
+        x0, y0, x1, y1 = region.bbox
+        is_sel = selected_region_id == region.region_id
+        color = (
+            "red"
+            if is_sel
+            else _REGION_OUTLINE_COLORS[region.region_id % len(_REGION_OUTLINE_COLORS)]
+        )
+        if show_boxes:
+            draw.rectangle([(x0, y0), (x1, y1)], outline=color, width=4 if is_sel else 2)
+        if show_labels:
+            label = f"#{region.region_id + 1}"
+            draw.text((x0 + 2, y0 + 2), label, fill=color)
+    return out
 
 
 def _save_line_segment_params(params: LineSegmentParams) -> None:
@@ -926,6 +1940,10 @@ def _save_line_segment_params(params: LineSegmentParams) -> None:
             "threshold": int(params.threshold),
             "min_line_length": int(params.min_line_length),
             "max_line_gap": int(params.max_line_gap),
+            "min_width_over_height": float(params.min_width_over_height),
+            "min_overlap_frac": float(params.min_overlap_frac),
+            "min_height": float(params.min_height),
+            "vertical_merge_gap": float(params.vertical_merge_gap),
         },
     )
 
@@ -943,6 +1961,8 @@ def _draw_overlays(
     merged_segment_color: str = "orange",
     candidate_segments: list[tuple[int, int, int, int]] | None = None,
     candidate_segment_color: str = "magenta",
+    vertical_segments: list[tuple[int, int, int, int]] | None = None,
+    vertical_segment_color: str = "cyan",
     rectangle_boxes: list[tuple[int, int, int, int]] | None = None,
     rectangle_box_color: str = "blue",
     selected_rectangle_idx: int | None = None,
@@ -994,6 +2014,7 @@ def _draw_overlays(
     _draw_segs(line_segments, line_segment_color)
     _draw_segs(merged_segments, merged_segment_color)
     _draw_segs(candidate_segments, candidate_segment_color)
+    _draw_segs(vertical_segments, vertical_segment_color)
     if rectangle_boxes:
         for idx, (x0, y0, x1, y1) in enumerate(rectangle_boxes):
             is_sel = selected_rectangle_idx is not None and idx == selected_rectangle_idx
@@ -1195,34 +2216,37 @@ class OcrViewerApp:
         left = ttk.Frame(self.parent, padding=8)
         left.grid(row=0, column=0, sticky="ns")
         left.columnconfigure(0, weight=1)
+        left.columnconfigure(1, weight=1)
 
         ttk.Label(left, text=self._session_list_label).grid(row=0, column=0, sticky="w")
+        ttk.Label(left, text="YOLO Images").grid(row=0, column=1, sticky="w", padx=(8, 0))
+        left.rowconfigure(1, weight=1)
         run_wrap = ttk.Frame(left)
         run_wrap.grid(row=1, column=0, sticky="nsew")
         run_wrap.columnconfigure(0, weight=1)
         run_wrap.rowconfigure(0, weight=1)
-        self.run_list = tk.Listbox(run_wrap, exportselection=False, height=8, width=48)
+        self.run_list = tk.Listbox(run_wrap, exportselection=False, height=10, width=24)
         self.run_list.grid(row=0, column=0, sticky="nsew")
         self.run_scroll = ttk.Scrollbar(run_wrap, orient="vertical", command=self.run_list.yview)
         self.run_scroll.grid(row=0, column=1, sticky="ns")
         self.run_list.configure(yscrollcommand=self.run_scroll.set)
         self.run_list.bind("<<ListboxSelect>>", self._on_run_select)
 
-        ttk.Label(left, text="YOLO Images").grid(row=2, column=0, sticky="w", pady=(8, 0))
         image_wrap = ttk.Frame(left)
-        image_wrap.grid(row=3, column=0, sticky="nsew")
+        image_wrap.grid(row=1, column=1, sticky="nsew", padx=(8, 0))
         image_wrap.columnconfigure(0, weight=1)
         image_wrap.rowconfigure(0, weight=1)
-        self.image_list = tk.Listbox(image_wrap, exportselection=False, height=10, width=48)
+        self.image_list = tk.Listbox(image_wrap, exportselection=False, height=10, width=24)
         self.image_list.grid(row=0, column=0, sticky="nsew")
         self.image_scroll = ttk.Scrollbar(image_wrap, orient="vertical", command=self.image_list.yview)
         self.image_scroll.grid(row=0, column=1, sticky="ns")
         self.image_list.configure(yscrollcommand=self.image_scroll.set)
         self.image_list.bind("<<ListboxSelect>>", self._on_image_select)
 
-        ttk.Label(left, text="YOLO Detections").grid(row=4, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(left, text="YOLO Detections").grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
         item_wrap = ttk.Frame(left)
-        item_wrap.grid(row=5, column=0, sticky="nsew")
+        item_wrap.grid(row=3, column=0, columnspan=2, sticky="nsew")
+        left.rowconfigure(3, weight=1)
         item_wrap.columnconfigure(0, weight=1)
         item_wrap.rowconfigure(0, weight=1)
         self.item_list = tk.Listbox(item_wrap, exportselection=False, height=10, width=72)
@@ -1235,7 +2259,7 @@ class OcrViewerApp:
         self.item_list.bind("<Delete>", self._delete_selected_detection)
 
         controls = ttk.Frame(left)
-        controls.grid(row=6, column=0, sticky="ew", pady=(8, 0))
+        controls.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         for col in range(4):
             controls.columnconfigure(col, weight=1)
         ttk.Checkbutton(controls, text="Boxes", variable=self.show_boxes, command=self._refresh_image).grid(row=0, column=0, sticky="w")
@@ -2161,25 +3185,36 @@ class TestImagesViewerApp:
         left = ttk.Frame(self.parent, padding=8)
         left.grid(row=0, column=0, sticky="ns")
         left.columnconfigure(0, weight=1)
+        left.columnconfigure(1, weight=1)
 
-        folder_row = ttk.Frame(left)
-        folder_row.grid(row=0, column=0, sticky="ew")
-        folder_row.columnconfigure(0, weight=1)
-        ttk.Entry(folder_row, textvariable=self.folder_var).grid(row=0, column=0, sticky="ew")
-        ttk.Button(folder_row, text="Browse…", command=self._browse_folder).grid(
-            row=0, column=1, padx=(6, 0)
+        ttk.Label(left, text="Folder").grid(row=0, column=0, sticky="w")
+        ttk.Label(left, text="Images").grid(row=0, column=1, sticky="w", padx=(8, 0))
+        left.rowconfigure(1, weight=1)
+        folder_wrap = ttk.Frame(left)
+        folder_wrap.grid(row=1, column=0, sticky="nsew")
+        folder_wrap.columnconfigure(0, weight=1)
+        ttk.Entry(folder_wrap, textvariable=self.folder_var).grid(row=0, column=0, sticky="ew")
+        ttk.Button(folder_wrap, text="Browse…", command=self._browse_folder).grid(
+            row=1, column=0, sticky="ew", pady=(4, 0)
         )
 
-        ttk.Label(left, text="Images").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        image_wrap = ttk.Frame(left)
+        image_wrap.grid(row=1, column=1, sticky="nsew", padx=(8, 0))
+        image_wrap.columnconfigure(0, weight=1)
+        image_wrap.rowconfigure(0, weight=1)
         self.image_list = tk.Listbox(
-            left, exportselection=False, height=14, width=40, font=self._ui_font
+            image_wrap, exportselection=False, height=10, width=24, font=self._ui_font
         )
-        self.image_list.grid(row=2, column=0, sticky="nsew")
+        self.image_list.grid(row=0, column=0, sticky="nsew")
+        self.image_scroll = ttk.Scrollbar(image_wrap, orient="vertical", command=self.image_list.yview)
+        self.image_scroll.grid(row=0, column=1, sticky="ns")
+        self.image_list.configure(yscrollcommand=self.image_scroll.set)
         self.image_list.bind("<<ListboxSelect>>", self._on_image_select)
 
-        ttk.Label(left, text="OCR / detection items").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(left, text="OCR / detection items").grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
         item_wrap = ttk.Frame(left)
-        item_wrap.grid(row=4, column=0, sticky="nsew")
+        item_wrap.grid(row=3, column=0, columnspan=2, sticky="nsew")
+        left.rowconfigure(3, weight=1)
         item_wrap.columnconfigure(0, weight=1)
         item_wrap.rowconfigure(0, weight=1)
         self.item_list = tk.Listbox(
@@ -2194,7 +3229,7 @@ class TestImagesViewerApp:
         self.item_list.bind("<Delete>", self._delete_selected_detection)
 
         controls = ttk.Frame(left)
-        controls.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        controls.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         for col in range(4):
             controls.columnconfigure(col, weight=1)
         ttk.Checkbutton(
@@ -2832,11 +3867,13 @@ class LineSegmentsViewerApp:
         self.raw_line_segments: list[tuple[int, int, int, int]] = []
         self.merged_line_segments: list[tuple[int, int, int, int]] = []
         self.candidate_line_segments: list[tuple[int, int, int, int]] = []
+        self.vertical_line_segments: list[tuple[int, int, int, int]] = []
         self.rectangle_boxes: list[tuple[int, int, int, int]] = []
         self.selected_rectangle_idx: int | None = None
         self.show_raw_lines = tk.BooleanVar(value=False)
         self.show_merged_lines = tk.BooleanVar(value=False)
         self.show_candidate_lines = tk.BooleanVar(value=False)
+        self.show_vertical_lines = tk.BooleanVar(value=False)
         self.show_rectangles = tk.BooleanVar(value=True)
 
         self.status_var = tk.StringVar(value="Ready")
@@ -2856,6 +3893,10 @@ class LineSegmentsViewerApp:
             "threshold": float(saved.threshold),
             "min_line_length": float(saved.min_line_length),
             "max_line_gap": float(saved.max_line_gap),
+            "min_width_over_height": float(saved.min_width_over_height),
+            "min_overlap_frac": float(saved.min_overlap_frac),
+            "min_height": float(saved.min_height),
+            "vertical_merge_gap": float(saved.vertical_merge_gap),
         }
         for key, _label, _lo, _hi, default, decimals, _step in _LINE_PARAM_SLIDERS:
             self.param_vars[key] = tk.DoubleVar(value=saved_values.get(key, float(default)))
@@ -2889,25 +3930,47 @@ class LineSegmentsViewerApp:
         left = ttk.Frame(self.parent, padding=8)
         left.grid(row=0, column=0, sticky="ns")
         left.columnconfigure(0, weight=1)
+        left.columnconfigure(1, weight=1)
 
         row = 0
         if self.mode == "folder":
-            folder_row = ttk.Frame(left)
-            folder_row.grid(row=row, column=0, sticky="ew")
-            folder_row.columnconfigure(0, weight=1)
-            ttk.Entry(folder_row, textvariable=self.folder_var).grid(row=0, column=0, sticky="ew")
-            ttk.Button(folder_row, text="Browse…", command=self._browse_folder).grid(
-                row=0, column=1, padx=(6, 0)
+            ttk.Label(left, text="Folder").grid(row=row, column=0, sticky="w")
+            ttk.Label(left, text="Images").grid(row=row, column=1, sticky="w", padx=(8, 0))
+            row += 1
+            left.rowconfigure(row, weight=1)
+            folder_wrap = ttk.Frame(left)
+            folder_wrap.grid(row=row, column=0, sticky="nsew")
+            folder_wrap.columnconfigure(0, weight=1)
+            ttk.Entry(folder_wrap, textvariable=self.folder_var).grid(row=0, column=0, sticky="ew")
+            ttk.Button(folder_wrap, text="Browse…", command=self._browse_folder).grid(
+                row=1, column=0, sticky="ew", pady=(4, 0)
             )
+            image_wrap = ttk.Frame(left)
+            image_wrap.grid(row=row, column=1, sticky="nsew", padx=(8, 0))
+            image_wrap.columnconfigure(0, weight=1)
+            image_wrap.rowconfigure(0, weight=1)
+            self.image_list = tk.Listbox(
+                image_wrap, exportselection=False, height=10, width=24, font=self._ui_font
+            )
+            self.image_list.grid(row=0, column=0, sticky="nsew")
+            self.image_scroll = ttk.Scrollbar(
+                image_wrap, orient="vertical", command=self.image_list.yview
+            )
+            self.image_scroll.grid(row=0, column=1, sticky="ns")
+            self.image_list.configure(yscrollcommand=self.image_scroll.set)
+            self.image_list.bind("<<ListboxSelect>>", self._on_image_select)
             row += 1
         else:
             ttk.Label(left, text=self._session_list_label).grid(row=row, column=0, sticky="w")
+            ttk.Label(left, text="Images").grid(row=row, column=1, sticky="w", padx=(8, 0))
             row += 1
+            left.rowconfigure(row, weight=1)
             session_wrap = ttk.Frame(left)
-            session_wrap.grid(row=row, column=0, sticky="ew")
+            session_wrap.grid(row=row, column=0, sticky="nsew")
             session_wrap.columnconfigure(0, weight=1)
+            session_wrap.rowconfigure(0, weight=1)
             self.session_list = tk.Listbox(
-                session_wrap, exportselection=False, height=5, width=36, font=self._ui_font
+                session_wrap, exportselection=False, height=10, width=24, font=self._ui_font
             )
             self.session_list.grid(row=0, column=0, sticky="nsew")
             self.session_scroll = ttk.Scrollbar(
@@ -2916,29 +3979,24 @@ class LineSegmentsViewerApp:
             self.session_scroll.grid(row=0, column=1, sticky="ns")
             self.session_list.configure(yscrollcommand=self.session_scroll.set)
             self.session_list.bind("<<ListboxSelect>>", self._on_session_select)
+            image_wrap = ttk.Frame(left)
+            image_wrap.grid(row=row, column=1, sticky="nsew", padx=(8, 0))
+            image_wrap.columnconfigure(0, weight=1)
+            image_wrap.rowconfigure(0, weight=1)
+            self.image_list = tk.Listbox(
+                image_wrap, exportselection=False, height=10, width=24, font=self._ui_font
+            )
+            self.image_list.grid(row=0, column=0, sticky="nsew")
+            self.image_scroll = ttk.Scrollbar(
+                image_wrap, orient="vertical", command=self.image_list.yview
+            )
+            self.image_scroll.grid(row=0, column=1, sticky="ns")
+            self.image_list.configure(yscrollcommand=self.image_scroll.set)
+            self.image_list.bind("<<ListboxSelect>>", self._on_image_select)
             row += 1
 
-        ttk.Label(left, text="Images").grid(row=row, column=0, sticky="w", pady=(8, 0))
-        row += 1
-        left.rowconfigure(row, weight=1)
-        image_wrap = ttk.Frame(left)
-        image_wrap.grid(row=row, column=0, sticky="nsew")
-        image_wrap.columnconfigure(0, weight=1)
-        image_wrap.rowconfigure(0, weight=1)
-        self.image_list = tk.Listbox(
-            image_wrap, exportselection=False, height=6, width=36, font=self._ui_font
-        )
-        self.image_list.grid(row=0, column=0, sticky="nsew")
-        self.image_scroll = ttk.Scrollbar(
-            image_wrap, orient="vertical", command=self.image_list.yview
-        )
-        self.image_scroll.grid(row=0, column=1, sticky="ns")
-        self.image_list.configure(yscrollcommand=self.image_scroll.set)
-        self.image_list.bind("<<ListboxSelect>>", self._on_image_select)
-        row += 1
-
         params = ttk.LabelFrame(left, text="Line segment parameters", padding=6)
-        params.grid(row=row, column=0, sticky="ew", pady=(8, 0))
+        params.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         params.columnconfigure(1, weight=1)
         self._param_steps: dict[str, float] = {}
         self._param_bounds: dict[str, tuple[float, float]] = {}
@@ -2984,7 +4042,7 @@ class LineSegmentsViewerApp:
         row += 1
 
         controls = ttk.Frame(left)
-        controls.grid(row=row, column=0, sticky="ew", pady=(8, 0))
+        controls.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         for col in range(2):
             controls.columnconfigure(col, weight=1)
         ttk.Checkbutton(
@@ -3007,15 +4065,21 @@ class LineSegmentsViewerApp:
         ).grid(row=1, column=0, sticky="w", pady=(4, 0))
         ttk.Checkbutton(
             controls,
+            text="Vertical lines",
+            variable=self.show_vertical_lines,
+            command=self._refresh_image,
+        ).grid(row=1, column=1, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(
+            controls,
             text="Rectangles",
             variable=self.show_rectangles,
             command=self._refresh_image,
-        ).grid(row=1, column=1, sticky="w", pady=(4, 0))
+        ).grid(row=2, column=0, sticky="w", pady=(4, 0))
         ttk.Button(controls, text="Detect", command=self._detect_line_segments_now).grid(
-            row=2, column=0, sticky="ew", pady=(6, 0), padx=(0, 3)
+            row=3, column=0, sticky="ew", pady=(6, 0), padx=(0, 3)
         )
         ttk.Button(controls, text="Clear overlay", command=self._clear_line_segments).grid(
-            row=2, column=1, sticky="ew", pady=(6, 0), padx=(3, 0)
+            row=3, column=1, sticky="ew", pady=(6, 0), padx=(3, 0)
         )
 
         canvas_wrap = ttk.Frame(self.parent, padding=8)
@@ -3243,12 +4307,17 @@ class LineSegmentsViewerApp:
             threshold=int(round(float(self.param_vars["threshold"].get()))),
             min_line_length=int(round(float(self.param_vars["min_line_length"].get()))),
             max_line_gap=int(round(float(self.param_vars["max_line_gap"].get()))),
+            min_width_over_height=float(self.param_vars["min_width_over_height"].get()),
+            min_overlap_frac=float(self.param_vars["min_overlap_frac"].get()),
+            min_height=float(self.param_vars["min_height"].get()),
+            vertical_merge_gap=float(self.param_vars["vertical_merge_gap"].get()),
         )
 
     def _clear_segment_state(self) -> None:
         self.raw_line_segments = []
         self.merged_line_segments = []
         self.candidate_line_segments = []
+        self.vertical_line_segments = []
         self.rectangle_boxes = []
         self.selected_rectangle_idx = None
 
@@ -3275,6 +4344,7 @@ class LineSegmentsViewerApp:
             self.raw_line_segments = result.raw_segments
             self.merged_line_segments = result.merged_segments
             self.candidate_line_segments = result.candidate_segments
+            self.vertical_line_segments = result.vertical_merged_segments
             self.rectangle_boxes = result.rectangles
             self.selected_rectangle_idx = None
         except Exception as exc:
@@ -3285,6 +4355,7 @@ class LineSegmentsViewerApp:
         self.status_var.set(
             f"Found {len(self.raw_line_segments)} raw, "
             f"{len(self.merged_line_segments)} merged, "
+            f"{len(self.vertical_line_segments)} vertical, "
             f"{len(self.candidate_line_segments)} candidate, "
             f"{len(self.rectangle_boxes)} rectangle(s) "
             f"in {elapsed_ms:.0f} ms"
@@ -3308,6 +4379,10 @@ class LineSegmentsViewerApp:
                 self.candidate_line_segments if self.show_candidate_lines.get() else None
             ),
             candidate_segment_color="magenta",
+            vertical_segments=(
+                self.vertical_line_segments if self.show_vertical_lines.get() else None
+            ),
+            vertical_segment_color="cyan",
             rectangle_boxes=(
                 self.rectangle_boxes if self.show_rectangles.get() else None
             ),
@@ -3475,8 +4550,875 @@ class LineSegmentsViewerApp:
             self.canvas.yview_scroll(int(-(event.delta / 120)), "units")
 
 
+class ColorSegmentViewerApp:
+    """Browse images and segment them into large color-based regions."""
+
+    _MIN_ZOOM = 0.125
+    _MAX_ZOOM = 32.0
+    _ZOOM_STEP = 1.15
+    _PAN_CLICK_THRESHOLD_SQ = 4 * 4
+    _RMB_ZOOM_PER_PIXEL = 1.0012
+    _PARAM_DETECT_DEBOUNCE_MS = 2000
+
+    def __init__(
+        self,
+        parent: tk.Misc,
+        source_root: Path,
+        *,
+        mode: str = "folder",
+        session_list_label: str = "Runs",
+        manage_window: bool = True,
+        bind_global_hotkeys: bool = True,
+    ):
+        if mode not in ("folder", "sessions"):
+            raise ValueError(f"Unsupported ColorSegmentViewerApp mode: {mode!r}")
+        self.parent = parent
+        self.root = parent.winfo_toplevel()
+        self.source_root = source_root
+        self.mode = mode
+        self._session_list_label = session_list_label
+        self._manage_window = manage_window
+        self._bind_global_hotkeys = bind_global_hotkeys
+        self._hotkeys_active = False
+        self.session_dirs: list[Path] = (
+            _discover_runs(source_root) if mode == "sessions" else []
+        )
+        self.image_paths: list[Path] = []
+        self.current_display: ImageTk.PhotoImage | None = None
+        self.current_image: Image.Image | None = None
+        self.segment_result: ColorSegmentResult | None = None
+        self.selected_region_id: int | None = None
+        self.show_quantized = tk.BooleanVar(value=True)
+        self.show_masked_input = tk.BooleanVar(value=False)
+        self.show_boxes = tk.BooleanVar(value=True)
+        self.show_labels = tk.BooleanVar(value=True)
+        self.mask_text_icons = tk.BooleanVar(value=True)
+        self.require_yolo_objects = tk.BooleanVar(value=True)
+        self.merge_superpixels = tk.BooleanVar(value=True)
+        self.merge_similar = tk.BooleanVar(value=False)
+        self.split_large_regions = tk.BooleanVar(value=True)
+
+        self.status_var = tk.StringVar(value="Ready")
+        self.folder_var = tk.StringVar(value=str(source_root))
+        self.param_vars: dict[str, tk.DoubleVar] = {}
+        self.param_value_vars: dict[str, tk.StringVar] = {}
+        self._param_decimals: dict[str, int] = {}
+        self._suppress_param_events = True
+        self._detect_after_id: str | None = None
+        self._mask_preview: Image.Image | None = None
+        self._mask_preview_boxes: list[tuple[int, int, int, int]] = []
+        saved = _load_color_segment_params()
+        self.mask_text_icons.set(saved.mask_text_icons)
+        self.require_yolo_objects.set(saved.require_yolo_objects)
+        self.merge_superpixels.set(saved.merge_superpixels)
+        self.merge_similar.set(saved.merge_similar)
+        self.split_large_regions.set(saved.split_large_regions)
+        saved_values = {
+            "num_colors": float(saved.num_colors),
+            "min_area_frac": float(saved.min_area_frac * 100.0),
+            "blur_ksize": float(saved.blur_ksize),
+            "edge_canny_low": float(saved.edge_canny_low),
+            "edge_canny_high": float(saved.edge_canny_high),
+            "edge_dilate": float(saved.edge_dilate),
+            "slic_compactness": float(saved.slic_compactness),
+            "split_max_area_frac": float(saved.split_max_area_frac * 100.0),
+            "merge_color_dist": float(saved.merge_color_dist),
+        }
+        for key, _label, _lo, _hi, default, decimals, _step in _COLOR_PARAM_SLIDERS:
+            self.param_vars[key] = tk.DoubleVar(value=saved_values.get(key, float(default)))
+            self.param_value_vars[key] = tk.StringVar()
+            self._param_decimals[key] = decimals
+            self._update_param_value_label(key)
+
+        self._view_zoom = 1.0
+        self._rmb_last_x: int | None = None
+        self._render_scale = 1.0
+        self._lmb_press_xy: tuple[int, int] | None = None
+        self._lmb_panning = False
+
+        self._ui_font = _configure_ui_fonts(self.root, UI_FONT_SIZE)
+        self._build_ui()
+        self._suppress_param_events = False
+        if self.mode == "folder":
+            self._reload_folder_images()
+        else:
+            self._populate_session_list()
+        if bind_global_hotkeys:
+            self.activate_hotkeys()
+
+    def _build_ui(self) -> None:
+        if self._manage_window and isinstance(self.parent, tk.Tk):
+            self.parent.title("Color Segments")
+            self.parent.geometry("1280x840")
+        self.parent.columnconfigure(1, weight=1)
+        self.parent.rowconfigure(0, weight=1)
+
+        left = ttk.Frame(self.parent, padding=8)
+        left.grid(row=0, column=0, sticky="ns")
+        left.columnconfigure(0, weight=1)
+        left.columnconfigure(1, weight=1)
+
+        row = 0
+        if self.mode == "folder":
+            ttk.Label(left, text="Folder").grid(row=row, column=0, sticky="w")
+            ttk.Label(left, text="Images").grid(row=row, column=1, sticky="w", padx=(8, 0))
+            row += 1
+            left.rowconfigure(row, weight=1)
+            folder_wrap = ttk.Frame(left)
+            folder_wrap.grid(row=row, column=0, sticky="nsew")
+            folder_wrap.columnconfigure(0, weight=1)
+            ttk.Entry(folder_wrap, textvariable=self.folder_var).grid(row=0, column=0, sticky="ew")
+            ttk.Button(folder_wrap, text="Browse…", command=self._browse_folder).grid(
+                row=1, column=0, sticky="ew", pady=(4, 0)
+            )
+            image_wrap = ttk.Frame(left)
+            image_wrap.grid(row=row, column=1, sticky="nsew", padx=(8, 0))
+            image_wrap.columnconfigure(0, weight=1)
+            image_wrap.rowconfigure(0, weight=1)
+            self.image_list = tk.Listbox(
+                image_wrap, exportselection=False, height=10, width=24, font=self._ui_font
+            )
+            self.image_list.grid(row=0, column=0, sticky="nsew")
+            self.image_scroll = ttk.Scrollbar(
+                image_wrap, orient="vertical", command=self.image_list.yview
+            )
+            self.image_scroll.grid(row=0, column=1, sticky="ns")
+            self.image_list.configure(yscrollcommand=self.image_scroll.set)
+            self.image_list.bind("<<ListboxSelect>>", self._on_image_select)
+            row += 1
+        else:
+            ttk.Label(left, text=self._session_list_label).grid(row=row, column=0, sticky="w")
+            ttk.Label(left, text="Images").grid(row=row, column=1, sticky="w", padx=(8, 0))
+            row += 1
+            left.rowconfigure(row, weight=1)
+            session_wrap = ttk.Frame(left)
+            session_wrap.grid(row=row, column=0, sticky="nsew")
+            session_wrap.columnconfigure(0, weight=1)
+            session_wrap.rowconfigure(0, weight=1)
+            self.session_list = tk.Listbox(
+                session_wrap, exportselection=False, height=10, width=24, font=self._ui_font
+            )
+            self.session_list.grid(row=0, column=0, sticky="nsew")
+            self.session_scroll = ttk.Scrollbar(
+                session_wrap, orient="vertical", command=self.session_list.yview
+            )
+            self.session_scroll.grid(row=0, column=1, sticky="ns")
+            self.session_list.configure(yscrollcommand=self.session_scroll.set)
+            self.session_list.bind("<<ListboxSelect>>", self._on_session_select)
+            image_wrap = ttk.Frame(left)
+            image_wrap.grid(row=row, column=1, sticky="nsew", padx=(8, 0))
+            image_wrap.columnconfigure(0, weight=1)
+            image_wrap.rowconfigure(0, weight=1)
+            self.image_list = tk.Listbox(
+                image_wrap, exportselection=False, height=10, width=24, font=self._ui_font
+            )
+            self.image_list.grid(row=0, column=0, sticky="nsew")
+            self.image_scroll = ttk.Scrollbar(
+                image_wrap, orient="vertical", command=self.image_list.yview
+            )
+            self.image_scroll.grid(row=0, column=1, sticky="ns")
+            self.image_list.configure(yscrollcommand=self.image_scroll.set)
+            self.image_list.bind("<<ListboxSelect>>", self._on_image_select)
+            row += 1
+
+        params = ttk.LabelFrame(left, text="Color segment parameters", padding=6)
+        params.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        params.columnconfigure(1, weight=1)
+        self._param_steps: dict[str, float] = {}
+        self._param_bounds: dict[str, tuple[float, float]] = {}
+        for prow, (key, label, lo, hi, _default, _decimals, step) in enumerate(
+            _COLOR_PARAM_SLIDERS
+        ):
+            self._param_steps[key] = float(step)
+            self._param_bounds[key] = (float(lo), float(hi))
+            name = ttk.Label(params, text=label)
+            name.grid(row=prow, column=0, sticky="w", pady=1)
+            scale = ttk.Scale(
+                params,
+                from_=lo,
+                to=hi,
+                orient="horizontal",
+                variable=self.param_vars[key],
+                command=lambda _v, k=key: self._on_param_scale(k),
+            )
+            scale.grid(row=prow, column=1, sticky="ew", padx=(6, 2), pady=1)
+            dec_btn = ttk.Button(
+                params,
+                text="◀",
+                width=2,
+                command=lambda k=key: self._nudge_param(k, -1),
+            )
+            dec_btn.grid(row=prow, column=2, sticky="e", padx=(2, 0), pady=1)
+            value_label = ttk.Label(params, textvariable=self.param_value_vars[key], width=5)
+            value_label.grid(row=prow, column=3, sticky="e", pady=1)
+            inc_btn = ttk.Button(
+                params,
+                text="▶",
+                width=2,
+                command=lambda k=key: self._nudge_param(k, 1),
+            )
+            inc_btn.grid(row=prow, column=4, sticky="e", padx=(0, 0), pady=1)
+            tip = _COLOR_PARAM_TOOLTIPS.get(key, "")
+            if tip:
+                _attach_tooltip(name, tip)
+                _attach_tooltip(scale, tip)
+                _attach_tooltip(value_label, tip)
+                _attach_tooltip(dec_btn, tip)
+                _attach_tooltip(inc_btn, tip)
+        row += 1
+
+        controls = ttk.Frame(left)
+        controls.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        for col in range(2):
+            controls.columnconfigure(col, weight=1)
+        ttk.Checkbutton(
+            controls,
+            text="Quantized colors",
+            variable=self.show_quantized,
+            command=self._refresh_image,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(
+            controls,
+            text="Masked input",
+            variable=self.show_masked_input,
+            command=self._on_masked_input_toggled,
+        ).grid(row=0, column=1, sticky="w")
+        ttk.Checkbutton(
+            controls,
+            text="Region boxes",
+            variable=self.show_boxes,
+            command=self._refresh_image,
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(
+            controls,
+            text="Region labels",
+            variable=self.show_labels,
+            command=self._refresh_image,
+        ).grid(row=1, column=1, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(
+            controls,
+            text="Mask text/icons/inputs/scrollbars",
+            variable=self.mask_text_icons,
+            command=self._on_segment_option_changed,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(
+            controls,
+            text="Require text/icon in region",
+            variable=self.require_yolo_objects,
+            command=self._on_segment_option_changed,
+        ).grid(row=3, column=0, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(
+            controls,
+            text="Merge superpixels",
+            variable=self.merge_superpixels,
+            command=self._on_segment_option_changed,
+        ).grid(row=3, column=1, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(
+            controls,
+            text="Split large regions",
+            variable=self.split_large_regions,
+            command=self._on_segment_option_changed,
+        ).grid(row=4, column=1, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(
+            controls,
+            text="Merge similar",
+            variable=self.merge_similar,
+            command=self._on_segment_option_changed,
+        ).grid(row=4, column=0, sticky="w", pady=(4, 0))
+        ttk.Button(controls, text="Segment", command=self._segment_now).grid(
+            row=5, column=0, sticky="ew", pady=(6, 0), padx=(0, 3)
+        )
+        ttk.Button(controls, text="Clear overlay", command=self._clear_segmentation).grid(
+            row=5, column=1, sticky="ew", pady=(6, 0), padx=(3, 0)
+        )
+
+        canvas_wrap = ttk.Frame(self.parent, padding=8)
+        canvas_wrap.grid(row=0, column=1, sticky="nsew")
+        canvas_wrap.rowconfigure(0, weight=1)
+        canvas_wrap.columnconfigure(0, weight=1)
+        self.canvas = tk.Canvas(canvas_wrap, bg="#1e1e1e", highlightthickness=0)
+        self.v_scroll = ttk.Scrollbar(canvas_wrap, orient="vertical", command=self.canvas.yview)
+        self.h_scroll = ttk.Scrollbar(canvas_wrap, orient="horizontal", command=self.canvas.xview)
+        self.canvas.configure(yscrollcommand=self.v_scroll.set, xscrollcommand=self.h_scroll.set)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.v_scroll.grid(row=0, column=1, sticky="ns")
+        self.h_scroll.grid(row=1, column=0, sticky="ew")
+        self.canvas.bind("<ButtonPress-3>", self._on_rmb_press)
+        self.canvas.bind("<B3-Motion>", self._on_rmb_drag)
+        self.canvas.bind("<ButtonRelease-3>", self._on_rmb_release)
+        self.canvas.bind("<ButtonPress-1>", self._on_lmb_press)
+        self.canvas.bind("<B1-Motion>", self._on_lmb_motion)
+        self.canvas.bind("<ButtonRelease-1>", self._on_lmb_release)
+        self.canvas.bind("<ButtonPress-2>", self._on_mmb_press)
+        self.canvas.bind("<B2-Motion>", self._on_mmb_drag)
+        self.canvas.bind("<MouseWheel>", self._on_canvas_mousewheel)
+
+        status = ttk.Label(self.parent, textvariable=self.status_var, anchor="w")
+        status.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 8))
+        self.parent.bind("<Configure>", lambda _e: self._refresh_image())
+
+    def activate_hotkeys(self) -> None:
+        if self._hotkeys_active:
+            return
+        self.root.bind("<Control-plus>", self._on_zoom_in_hotkey)
+        self.root.bind("<Control-equal>", self._on_zoom_in_hotkey)
+        self.root.bind("<Control-minus>", self._on_zoom_out_hotkey)
+        self.root.bind("<Control-0>", self._on_reset_zoom_hotkey)
+        self._hotkeys_active = True
+
+    def deactivate_hotkeys(self) -> None:
+        if not self._hotkeys_active:
+            return
+        for key in ("<Control-plus>", "<Control-equal>", "<Control-minus>", "<Control-0>"):
+            self.root.unbind(key)
+        self._hotkeys_active = False
+
+    def _browse_folder(self) -> None:
+        chosen = filedialog.askdirectory(
+            initialdir=self.folder_var.get() or str(self.source_root)
+        )
+        if not chosen:
+            return
+        self.source_root = Path(chosen)
+        self.folder_var.set(str(self.source_root))
+        self._reload_folder_images()
+
+    def _populate_session_list(self) -> None:
+        self.session_dirs = _discover_runs(self.source_root)
+        self.session_list.delete(0, tk.END)
+        for session in self.session_dirs:
+            self.session_list.insert(tk.END, session.name)
+        if self.session_dirs:
+            self.session_list.select_set(0)
+            self._on_session_select()
+        else:
+            self.image_paths = []
+            self.image_list.delete(0, tk.END)
+            self.current_image = None
+            self._clear_segment_state()
+            self.canvas.delete("all")
+            label = self._session_list_label.lower()
+            self.status_var.set(f"No {label} found in {self.source_root}")
+
+    def _on_session_select(self, _event: object | None = None) -> None:
+        selected = self.session_list.curselection()
+        if not selected:
+            return
+        session = self.session_dirs[selected[0]]
+        self.image_paths = _yolo_ocr_paired_images(session)
+        self.image_list.delete(0, tk.END)
+        for img in self.image_paths:
+            self.image_list.insert(tk.END, img.name)
+        if self.image_paths:
+            self.image_list.select_set(0)
+            self._on_image_select()
+        else:
+            self._cancel_pending_detect()
+            self.current_image = None
+            self._clear_segment_state()
+            self.canvas.delete("all")
+            self.status_var.set(f"No images found for {session.name}")
+
+    def _reload_folder_images(self) -> None:
+        self.image_paths = _discover_folder_images(self.source_root)
+        self.image_list.delete(0, tk.END)
+        for img in self.image_paths:
+            self.image_list.insert(tk.END, img.name)
+        if self.image_paths:
+            self.image_list.select_set(0)
+            self._on_image_select()
+        else:
+            self.current_image = None
+            self._clear_segment_state()
+            self.canvas.delete("all")
+            self.status_var.set(f"No images in {self.source_root}")
+
+    def _selected_run(self) -> Path | None:
+        if self.mode != "sessions":
+            return None
+        selected = self.session_list.curselection()
+        if not selected:
+            return None
+        return self.session_dirs[selected[0]]
+
+    def _selected_image_index(self) -> int | None:
+        selected = self.image_list.curselection()
+        if not selected:
+            return None
+        return selected[0]
+
+    def _current_image_path(self) -> Path | None:
+        idx = self._selected_image_index()
+        if idx is None or idx >= len(self.image_paths):
+            return None
+        return self.image_paths[idx]
+
+    def _on_image_select(self, _event: object | None = None) -> None:
+        image_path = self._current_image_path()
+        if image_path is None:
+            return
+        self._cancel_pending_detect()
+        self.current_image = Image.open(image_path).convert("RGB")
+        self._clear_segment_state()
+        self._view_zoom = 1.0
+        self.status_var.set(image_path.name)
+        self._refresh_image()
+        self._schedule_detect()
+
+    def _on_segment_option_changed(self) -> None:
+        if self._suppress_param_events:
+            return
+        self._invalidate_mask_preview()
+        self._schedule_detect()
+
+    def _invalidate_mask_preview(self) -> None:
+        self._mask_preview = None
+        self._mask_preview_boxes = []
+
+    def _on_masked_input_toggled(self) -> None:
+        self._invalidate_mask_preview()
+        self._refresh_image()
+
+    def _get_mask_preview(
+        self,
+    ) -> tuple[Image.Image | None, list[tuple[int, int, int, int]]]:
+        if self.current_image is None:
+            return None, []
+        rgb = np.asarray(self.current_image.convert("RGB"))
+        params = self._read_params()
+        image_path = self._current_image_path()
+        run_dir = self._selected_run()
+        try:
+            _work, _masked_count, _mask_boxes, _text_icon_boxes, masked_before_blur = (
+                _prepare_segmentation_image(
+                    rgb,
+                    params,
+                    image_path=image_path,
+                    run_dir=run_dir,
+                )
+            )
+        except Exception:
+            return self.current_image.copy(), []
+        return (
+            Image.fromarray(masked_before_blur.astype(np.uint8), mode="RGB"),
+            list(_mask_boxes),
+        )
+
+    def _update_param_value_label(self, key: str) -> None:
+        value = float(self.param_vars[key].get())
+        if key in ("blur_ksize",):
+            snapped = int(round(value))
+            if key == "blur_ksize" and snapped % 2 == 0:
+                snapped = max(1, snapped - 1)
+            self.param_value_vars[key].set(str(snapped))
+            return
+        decimals = self._param_decimals[key]
+        if decimals <= 0:
+            self.param_value_vars[key].set(str(int(round(value))))
+        else:
+            self.param_value_vars[key].set(f"{value:.{decimals}f}")
+
+    def _on_param_scale(self, key: str) -> None:
+        if key in ("blur_ksize",):
+            snapped = int(round(float(self.param_vars[key].get())))
+            if key == "blur_ksize" and snapped % 2 == 0:
+                snapped = max(1, snapped - 1)
+            current = float(self.param_vars[key].get())
+            if abs(current - snapped) > 1e-6:
+                was_suppressed = self._suppress_param_events
+                self._suppress_param_events = True
+                try:
+                    self.param_vars[key].set(float(snapped))
+                finally:
+                    self._suppress_param_events = was_suppressed
+        self._update_param_value_label(key)
+        if self._suppress_param_events:
+            return
+        self._invalidate_mask_preview()
+        self._schedule_detect()
+
+    def _nudge_param(self, key: str, direction: int) -> None:
+        lo, hi = self._param_bounds[key]
+        step = self._param_steps[key]
+        current = float(self.param_vars[key].get())
+        if key == "blur_ksize":
+            current = int(round(current))
+            if current % 2 == 0:
+                current = max(1, current - 1)
+        decimals = self._param_decimals[key]
+        nxt = current + (step * direction)
+        nxt = max(lo, min(hi, nxt))
+        if decimals <= 0:
+            nxt = float(int(round(nxt)))
+        else:
+            nxt = round(nxt, decimals)
+        if key == "blur_ksize":
+            snapped = int(round(nxt))
+            if snapped % 2 == 0:
+                snapped = max(1, snapped + (1 if direction > 0 else -1))
+            nxt = float(max(int(lo), min(int(hi), snapped)))
+            if int(nxt) % 2 == 0:
+                nxt = float(max(1, int(nxt) - 1))
+        if abs(nxt - current) < 1e-9:
+            return
+        self.param_vars[key].set(nxt)
+        self._update_param_value_label(key)
+        if not self._suppress_param_events:
+            self._schedule_detect()
+
+    def _cancel_pending_detect(self) -> None:
+        if self._detect_after_id is not None:
+            try:
+                self.root.after_cancel(self._detect_after_id)
+            except tk.TclError:
+                pass
+            self._detect_after_id = None
+
+    def _schedule_detect(self) -> None:
+        self._cancel_pending_detect()
+        try:
+            _save_color_segment_params(self._read_params())
+        except OSError:
+            pass
+        self.status_var.set("Parameters changed — segmenting in 2s...")
+        self._detect_after_id = self.root.after(
+            self._PARAM_DETECT_DEBOUNCE_MS, self._debounced_segment
+        )
+
+    def _debounced_segment(self) -> None:
+        self._detect_after_id = None
+        self._run_segmentation()
+
+    def _segment_now(self) -> None:
+        self._cancel_pending_detect()
+        self._run_segmentation()
+
+    def _read_params(self) -> ColorSegmentParams:
+        blur = int(round(float(self.param_vars["blur_ksize"].get())))
+        if blur % 2 == 0:
+            blur = max(1, blur - 1)
+        return ColorSegmentParams(
+            num_colors=max(0, int(round(float(self.param_vars["num_colors"].get())))),
+            slic_compactness=float(self.param_vars["slic_compactness"].get()),
+            min_area_frac=max(
+                0.0001, float(self.param_vars["min_area_frac"].get()) / 100.0
+            ),
+            blur_ksize=blur,
+            mask_text_icons=bool(self.mask_text_icons.get()),
+            require_yolo_objects=bool(self.require_yolo_objects.get()),
+            merge_superpixels=bool(self.merge_superpixels.get()),
+            merge_similar=bool(self.merge_similar.get()),
+            merge_color_dist=float(self.param_vars["merge_color_dist"].get()),
+            split_large_regions=bool(self.split_large_regions.get()),
+            split_max_area_frac=max(
+                0.01, float(self.param_vars["split_max_area_frac"].get()) / 100.0
+            ),
+            edge_canny_low=int(round(float(self.param_vars["edge_canny_low"].get()))),
+            edge_canny_high=int(round(float(self.param_vars["edge_canny_high"].get()))),
+            edge_dilate=max(0, int(round(float(self.param_vars["edge_dilate"].get())))),
+        )
+
+    def _clear_segment_state(self) -> None:
+        self.segment_result = None
+        self.selected_region_id = None
+        self._invalidate_mask_preview()
+
+    def _clear_segmentation(self) -> None:
+        self._cancel_pending_detect()
+        self._clear_segment_state()
+        self._refresh_image()
+        self.status_var.set("Cleared color segment overlay")
+
+    def _run_segmentation(self) -> None:
+        params = self._read_params()
+        try:
+            _save_color_segment_params(params)
+        except OSError:
+            pass
+        if self.current_image is None:
+            self.status_var.set("No image selected for color segmentation")
+            return
+        self.status_var.set("Segmenting by color...")
+        self.root.update_idletasks()
+        t0 = time.perf_counter()
+        try:
+            self.segment_result = segment_image_by_color(
+                self.current_image,
+                params,
+                image_path=self._current_image_path(),
+                run_dir=self._selected_run(),
+            )
+            self.selected_region_id = None
+            self._invalidate_mask_preview()
+        except Exception as exc:
+            self.status_var.set(f"Color segmentation failed: {type(exc).__name__}: {exc}")
+            return
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        region_count = len(self.segment_result.regions)
+        masked = self.segment_result.masked_box_count
+        self._refresh_image()
+        mask_note = ""
+        if params.mask_text_icons:
+            if masked > 0:
+                mask_note = f", masked {masked} UI detail box(es)"
+            else:
+                mask_note = ", masked 0 UI detail boxes (no YOLO detections found)"
+        yolo_filter_note = ""
+        if params.require_yolo_objects:
+            before = self.segment_result.regions_before_yolo_filter
+            removed = max(0, before - region_count)
+            if removed > 0:
+                yolo_filter_note = f", {removed} region(s) without text/icon removed"
+        self.status_var.set(
+            f"Found {region_count} color region(s) "
+            f"({params.num_colors} segments){mask_note}{yolo_filter_note} "
+            f"in {elapsed_ms:.0f} ms"
+        )
+
+    def _refresh_image(self) -> None:
+        if self.current_image is None:
+            return
+        show_masked = bool(self.show_masked_input.get())
+        masked_override: Image.Image | None = None
+        mask_boxes_override: list[tuple[int, int, int, int]] | None = None
+        if show_masked:
+            masked_override, mask_boxes_override = self._get_mask_preview()
+        rendered = _draw_color_segment_overlays(
+            self.current_image,
+            self.segment_result,
+            show_quantized=self.show_quantized.get(),
+            show_masked_input=show_masked,
+            show_boxes=self.show_boxes.get(),
+            show_labels=self.show_labels.get(),
+            selected_region_id=self.selected_region_id,
+            masked_input_override=masked_override,
+            mask_boxes_override=mask_boxes_override,
+        )
+        canvas_w = max(100, self.canvas.winfo_width())
+        canvas_h = max(100, self.canvas.winfo_height())
+        img_w, img_h = rendered.size
+        fit = min(canvas_w / img_w, canvas_h / img_h, 1.0)
+        scale = max(1e-6, fit * self._view_zoom)
+        self._render_scale = scale
+        new_size = (max(1, int(img_w * scale)), max(1, int(img_h * scale)))
+        if new_size != (img_w, img_h):
+            rendered = rendered.resize(new_size, Image.Resampling.LANCZOS)
+        self.current_display = ImageTk.PhotoImage(rendered)
+        self.canvas.delete("all")
+        self.canvas.create_image(0, 0, image=self.current_display, anchor="nw")
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _apply_zoom_factor(self, factor: float) -> None:
+        self._view_zoom = max(self._MIN_ZOOM, min(self._MAX_ZOOM, self._view_zoom * factor))
+        self._refresh_image()
+
+    def _zoom_in(self) -> None:
+        self._apply_zoom_factor(self._ZOOM_STEP)
+
+    def _zoom_out(self) -> None:
+        self._apply_zoom_factor(1.0 / self._ZOOM_STEP)
+
+    def _reset_zoom(self) -> None:
+        self._view_zoom = 1.0
+        self._refresh_image()
+
+    def _on_zoom_in_hotkey(self, _event: object | None = None) -> str:
+        self._zoom_in()
+        return "break"
+
+    def _on_zoom_out_hotkey(self, _event: object | None = None) -> str:
+        self._zoom_out()
+        return "break"
+
+    def _on_reset_zoom_hotkey(self, _event: object | None = None) -> str:
+        self._reset_zoom()
+        return "break"
+
+    def _on_rmb_press(self, event: tk.Event[tk.Canvas]) -> None:
+        if self.current_image is None:
+            self._rmb_last_x = None
+            return
+        self._rmb_last_x = int(event.x)
+
+    def _on_rmb_drag(self, event: tk.Event[tk.Canvas]) -> None:
+        if self._rmb_last_x is None or self.current_image is None:
+            return
+        x = int(event.x)
+        dx = x - self._rmb_last_x
+        self._rmb_last_x = x
+        if dx == 0:
+            return
+        z = self._view_zoom * (self._RMB_ZOOM_PER_PIXEL**dx)
+        self._view_zoom = max(self._MIN_ZOOM, min(self._MAX_ZOOM, z))
+        self._refresh_image()
+
+    def _on_rmb_release(self, _event: tk.Event[tk.Canvas]) -> None:
+        self._rmb_last_x = None
+
+    def _on_lmb_press(self, event: tk.Event[tk.Canvas]) -> None:
+        if self.current_image is None:
+            return
+        self._lmb_press_xy = (int(event.x), int(event.y))
+        self._lmb_panning = False
+
+    def _on_lmb_motion(self, event: tk.Event[tk.Canvas]) -> None:
+        if self._lmb_press_xy is None:
+            return
+        x0, y0 = self._lmb_press_xy
+        x, y = int(event.x), int(event.y)
+        if not self._lmb_panning:
+            if (x - x0) ** 2 + (y - y0) ** 2 < self._PAN_CLICK_THRESHOLD_SQ:
+                return
+            self.canvas.scan_mark(x0, y0)
+            self._lmb_panning = True
+        self.canvas.scan_dragto(x, y, gain=1)
+
+    def _on_lmb_release(self, event: tk.Event[tk.Canvas]) -> None:
+        if self._lmb_press_xy is None:
+            return
+        try:
+            if not self._lmb_panning:
+                self._select_region_at_canvas_event(event)
+        finally:
+            self._lmb_press_xy = None
+            self._lmb_panning = False
+
+    def _region_hit_at_canvas(self, event: tk.Event[tk.Canvas]) -> int | None:
+        if self.current_image is None or self.segment_result is None:
+            return None
+        if not self.show_boxes.get():
+            return None
+        canvas_x = self.canvas.canvasx(int(event.x))
+        canvas_y = self.canvas.canvasy(int(event.y))
+        img_x = int(canvas_x / max(self._render_scale, 1e-6))
+        img_y = int(canvas_y / max(self._render_scale, 1e-6))
+        best_id: int | None = None
+        best_area: float | None = None
+        for region in self.segment_result.regions:
+            x0, y0, x1, y1 = region.bbox
+            if x0 <= img_x <= x1 and y0 <= img_y <= y1:
+                area = float(region.area)
+                if best_area is None or area < best_area:
+                    best_area = area
+                    best_id = region.region_id
+        return best_id
+
+    def _select_region_at_canvas_event(self, event: tk.Event[tk.Canvas]) -> None:
+        selected_id = self._region_hit_at_canvas(event)
+        self.selected_region_id = selected_id
+        self._refresh_image()
+        if selected_id is None or self.segment_result is None:
+            return
+        region = next(
+            (item for item in self.segment_result.regions if item.region_id == selected_id),
+            None,
+        )
+        if region is None:
+            return
+        x0, y0, x1, y1 = region.bbox
+        r, g, b = region.mean_color
+        self.status_var.set(
+            f"Region #{selected_id + 1}: ({x0},{y0})-({x1},{y1}), "
+            f"area={region.area}px, rgb=({r},{g},{b})"
+        )
+        self.canvas.focus_set()
+
+    def _on_mmb_press(self, event: tk.Event[tk.Canvas]) -> None:
+        self.canvas.scan_mark(int(event.x), int(event.y))
+
+    def _on_mmb_drag(self, event: tk.Event[tk.Canvas]) -> None:
+        self.canvas.scan_dragto(int(event.x), int(event.y), gain=1)
+
+    def _on_canvas_mousewheel(self, event: tk.Event[tk.Canvas]) -> None:
+        if event.state & 0x0004:
+            if event.delta > 0:
+                self._apply_zoom_factor(self._ZOOM_STEP)
+            elif event.delta < 0:
+                self._apply_zoom_factor(1.0 / self._ZOOM_STEP)
+            return
+        if event.state & 0x0001:
+            self.canvas.xview_scroll(int(-(event.delta / 120)), "units")
+        else:
+            self.canvas.yview_scroll(int(-(event.delta / 120)), "units")
+
+
 class SourceTabShell:
-    """Nested notebook: YOLO detection + Line segments for one image source."""
+    """Nested notebook: YOLO detection + Line segments + Color segments for one image source."""
+
+    @staticmethod
+    def _resolve_image_index(paths: list[Path], target: Path) -> int | None:
+        try:
+            target_resolved = target.resolve()
+        except OSError:
+            target_resolved = target
+        for idx, path in enumerate(paths):
+            try:
+                if path.resolve() == target_resolved:
+                    return idx
+            except OSError:
+                continue
+        for idx, path in enumerate(paths):
+            if path.name == target.name:
+                return idx
+        return None
+
+    @classmethod
+    def _sync_viewer_image_from_yolo(cls, yolo_viewer: Any, target_viewer: Any) -> None:
+        """Keep line/color tabs on the same session + image as the YOLO tab."""
+        if not hasattr(yolo_viewer, "_current_image_path"):
+            return
+        image_path = yolo_viewer._current_image_path()
+        if image_path is None:
+            return
+
+        session_path: Path | None = None
+        if hasattr(yolo_viewer, "_selected_run"):
+            session_path = yolo_viewer._selected_run()
+
+        if getattr(target_viewer, "mode", None) == "sessions":
+            if session_path is None or not hasattr(target_viewer, "session_list"):
+                return
+            session_idx: int | None = None
+            for idx, session in enumerate(target_viewer.session_dirs):
+                try:
+                    if session.resolve() == session_path.resolve():
+                        session_idx = idx
+                        break
+                except OSError:
+                    if session == session_path:
+                        session_idx = idx
+                        break
+            if session_idx is None:
+                return
+            selected_session = target_viewer.session_list.curselection()
+            if not selected_session or selected_session[0] != session_idx:
+                target_viewer.session_list.select_clear(0, tk.END)
+                target_viewer.session_list.select_set(session_idx)
+                target_viewer._on_session_select()
+            image_idx = cls._resolve_image_index(target_viewer.image_paths, image_path)
+            if image_idx is None:
+                return
+            selected_image = target_viewer.image_list.curselection()
+            if selected_image and selected_image[0] == image_idx:
+                return
+            target_viewer.image_list.select_clear(0, tk.END)
+            target_viewer.image_list.select_set(image_idx)
+            target_viewer.image_list.see(image_idx)
+            target_viewer._on_image_select()
+            return
+
+        if not hasattr(target_viewer, "image_paths"):
+            return
+        image_idx = cls._resolve_image_index(target_viewer.image_paths, image_path)
+        if image_idx is None:
+            return
+        selected_image = target_viewer.image_list.curselection()
+        if selected_image and selected_image[0] == image_idx:
+            return
+        target_viewer.image_list.select_clear(0, tk.END)
+        target_viewer.image_list.select_set(image_idx)
+        target_viewer.image_list.see(image_idx)
+        target_viewer._on_image_select()
 
     def __init__(
         self,
@@ -3484,6 +5426,7 @@ class SourceTabShell:
         *,
         make_yolo: Any,
         make_lines: Any,
+        make_color: Any,
     ):
         self.parent = parent
         self._hotkeys_active = False
@@ -3495,12 +5438,15 @@ class SourceTabShell:
 
         yolo_frame = ttk.Frame(self.notebook)
         lines_frame = ttk.Frame(self.notebook)
+        color_frame = ttk.Frame(self.notebook)
         self.notebook.add(yolo_frame, text="YOLO detection")
         self.notebook.add(lines_frame, text="Line segments")
+        self.notebook.add(color_frame, text="Color segments")
 
         self.yolo_viewer = make_yolo(yolo_frame)
         self.lines_viewer = make_lines(lines_frame)
-        self._viewers = (self.yolo_viewer, self.lines_viewer)
+        self.color_viewer = make_color(color_frame)
+        self._viewers = (self.yolo_viewer, self.lines_viewer, self.color_viewer)
         self.notebook.bind("<<NotebookTabChanged>>", self._on_subtab_changed)
 
     def activate_hotkeys(self) -> None:
@@ -3520,13 +5466,15 @@ class SourceTabShell:
         selected = self.notebook.index(self.notebook.select())
         for idx, viewer in enumerate(self._viewers):
             if idx == selected:
+                if idx != 0:
+                    self._sync_viewer_image_from_yolo(self.yolo_viewer, viewer)
                 viewer.activate_hotkeys()
             else:
                 viewer.deactivate_hotkeys()
 
 
 class CombinedImageViewerApp:
-    """Notebook shell: Run / Recordings / Test, each with YOLO + Line segments."""
+    """Notebook shell: Run / Recordings / Test, each with YOLO + Line + Color segments."""
 
     def __init__(
         self,
@@ -3576,6 +5524,14 @@ class CombinedImageViewerApp:
                 manage_window=False,
                 bind_global_hotkeys=False,
             ),
+            make_color=lambda frame: ColorSegmentViewerApp(
+                frame,
+                runs_base,
+                mode="sessions",
+                session_list_label="Runs",
+                manage_window=False,
+                bind_global_hotkeys=False,
+            ),
         )
         self.recordings_shell = SourceTabShell(
             recordings_tab,
@@ -3594,6 +5550,14 @@ class CombinedImageViewerApp:
                 manage_window=False,
                 bind_global_hotkeys=False,
             ),
+            make_color=lambda frame: ColorSegmentViewerApp(
+                frame,
+                recordings_base,
+                mode="sessions",
+                session_list_label="Recordings",
+                manage_window=False,
+                bind_global_hotkeys=False,
+            ),
         )
         self.test_shell = SourceTabShell(
             test_tab,
@@ -3604,6 +5568,13 @@ class CombinedImageViewerApp:
                 bind_global_hotkeys=False,
             ),
             make_lines=lambda frame: LineSegmentsViewerApp(
+                frame,
+                test_base,
+                mode="folder",
+                manage_window=False,
+                bind_global_hotkeys=False,
+            ),
+            make_color=lambda frame: ColorSegmentViewerApp(
                 frame,
                 test_base,
                 mode="folder",

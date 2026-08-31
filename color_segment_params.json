@@ -1,0 +1,16 @@
+{
+  "num_colors": 0,
+  "slic_compactness": 8.0,
+  "min_area_frac": 0.15,
+  "blur_ksize": 9,
+  "mask_text_icons": true,
+  "require_yolo_objects": true,
+  "merge_superpixels": true,
+  "merge_similar": true,
+  "merge_color_dist": 8.0,
+  "split_large_regions": true,
+  "split_max_area_frac": 17.5,
+  "edge_canny_low": 5,
+  "edge_canny_high": 120,
+  "edge_dilate": 2
+}

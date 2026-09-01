@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 from PIL import Image
 
+from cua_mcp.yolo_onnx import YOLO_CLASS_INPUT
 from cua_mcp.color_spatial_segment import (
     ColorRegion,
     ColorSegmentParams,
@@ -91,6 +92,34 @@ def test_filter_regions_drops_single_detection_regions() -> None:
         SegmentDetection((10, 10, 20, 20), 0, "text", "a"),
         SegmentDetection((50, 10, 20, 20), 0, "text", "b"),
         SegmentDetection((110, 10, 20, 20), 0, "text", "c"),
+    ]
+    kept, filtered_map = _filter_regions_with_text_icons(
+        regions,
+        label_map,
+        text_icon_boxes,
+        detections=detections,
+        min_detections_per_region=2,
+    )
+    assert len(kept) == 1
+    assert kept[0].bbox == (0, 0, 99, 99)
+    assert np.all(filtered_map[:, :100] == 0)
+    assert np.all(filtered_map[:, 100:] == -1)
+
+
+def test_filter_regions_ignores_non_text_icon_detections_for_count() -> None:
+    label_map = np.zeros((100, 200), dtype=np.int32)
+    label_map[:, :100] = 0
+    label_map[:, 100:] = 1
+    regions = [
+        ColorRegion(region_id=0, bbox=(0, 0, 99, 99), mean_color=(40, 80, 120), area=10000),
+        ColorRegion(region_id=1, bbox=(100, 0, 199, 99), mean_color=(40, 80, 120), area=10000),
+    ]
+    text_icon_boxes = [(10, 10, 20, 20), (110, 10, 20, 20), (110, 40, 20, 20)]
+    detections = [
+        SegmentDetection((10, 10, 20, 20), 0, "text", "a"),
+        SegmentDetection((50, 10, 20, 20), 0, "text", "b"),
+        SegmentDetection((110, 10, 20, 20), 0, "text", "c"),
+        SegmentDetection((110, 40, 20, 20), YOLO_CLASS_INPUT, "input"),
     ]
     kept, filtered_map = _filter_regions_with_text_icons(
         regions,

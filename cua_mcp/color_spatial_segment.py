@@ -1453,9 +1453,12 @@ def _filter_regions_with_text_icons(
 ) -> tuple[list[ColorRegion], np.ndarray]:
     if not regions or not text_icon_boxes:
         return regions, label_map
+    text_icon_detections = (
+        _detections_for_classes(detections, FILTER_CLASS_IDS) if detections else []
+    )
     det_counts = (
-        _detection_counts_by_region(label_map, detections, regions=regions)
-        if detections
+        _detection_counts_by_region(label_map, text_icon_detections, regions=regions)
+        if text_icon_detections
         else {}
     )
     min_count = max(1, int(min_detections_per_region))

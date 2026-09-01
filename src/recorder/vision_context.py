@@ -8,10 +8,22 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import cv2
+from PIL import Image
+
 if TYPE_CHECKING:
     import numpy as np
 
 from cua_mcp.char_target import detect_clicked_char
+from cua_mcp.color_spatial_segment import (
+    ColorSegmentResult,
+    SegmentDetection,
+    color_segment_to_json_dict,
+    load_color_segment_params,
+    reorder_detections_for_landmark,
+    segment_image_by_color,
+    spatial_region_rank_for_detections,
+)
 from cua_mcp.icon_map import is_pua_char
 from cua_mcp.read_screen_text.ocr_image import _ocr_boxes_on_bgr
 from cua_mcp.scrollbar_arrows import (
@@ -591,6 +603,7 @@ def _nearest_candidates(
     limit: int | None = None,
     min_multi_char_text_neighbors: int | None = _MIN_NEARBY_TEXT_CANDIDATES,
     min_icon_neighbors: int | None = _MIN_NEARBY_ICON_CANDIDATES,
+    segment_result: ColorSegmentResult | None = None,
 ) -> list[UiDetection]:
     """Return detections sorted by point-to-bbox distance (closest first).
 
@@ -624,6 +637,15 @@ def _nearest_candidates(
         detections,
         key=lambda d: _nearest_detection_rank_key(d, local_x, local_y),
     )
+    if segment_result is not None and len(scored) > 1:
+        primary = scored[0]
+        neighbors = reorder_detections_for_landmark(
+            tuple(int(v) for v in primary.bbox),
+            segment_result,
+            scored[1:],
+            lambda det: tuple(int(v) for v in det.bbox),
+        )
+        scored = [primary, *neighbors]
     if not min_multi_char_text_neighbors:
         return scored if limit is None else scored[:limit]
 
@@ -1211,12 +1233,13 @@ def _prioritized_nearby_parts(
             if tier == 0
             else 0
         )
-        eligible.append((tier, cell_rank, order, candidate, label))
+        spatial_rank = int(candidate.get("spatial_region_rank", 0))
+        eligible.append((spatial_rank, tier, cell_rank, order, candidate, label))
 
-    eligible.sort(key=lambda item: (item[0], item[1], item[2]))
+    eligible.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
 
     ranked: list[NearbyHint] = []
-    for _tier, _cell_rank, _order, candidate, label in eligible:
+    for _spatial, _tier, _cell_rank, _order, candidate, label in eligible:
         side = _neighbor_side_for_candidate(
             candidate,
             primary_bbox=primary_bbox,
@@ -1355,8 +1378,8 @@ def list_nearby_landmark_options(
 
     base_instruction = strip_nearby_context_comments(instruction) if instruction else ""
 
-    # (distance_sq, order, option) — rank within each side by click distance.
-    pending: list[tuple[float, int, dict[str, Any]]] = []
+    # (spatial_rank, distance_sq, order, option) — rank within each side by region then distance.
+    pending: list[tuple[int, float, int, dict[str, Any]]] = []
     seen: set[str] = set()
     for order, candidate in enumerate(candidates[1:]):
         if not isinstance(candidate, dict):
@@ -1381,8 +1404,10 @@ def list_nearby_landmark_options(
             dist_sq = _point_to_bbox_distance_sq(click_xy[0], click_xy[1], bbox)
         else:
             dist_sq = float(order)
+        spatial_rank = int(candidate.get("spatial_region_rank", 0))
         pending.append(
             (
+                spatial_rank,
                 dist_sq,
                 order,
                 {
@@ -1393,21 +1418,21 @@ def list_nearby_landmark_options(
             )
         )
 
-    by_side: dict[str | None, list[tuple[float, int, dict[str, Any]]]] = {}
+    by_side: dict[str | None, list[tuple[int, float, int, dict[str, Any]]]] = {}
     for item in pending:
-        side_key = item[2].get("side")
+        side_key = item[3].get("side")
         if side_key is None or side_key == "":
             bucket: str | None = None
         else:
             bucket = str(side_key)
         by_side.setdefault(bucket, []).append(item)
 
-    kept: list[tuple[float, int, dict[str, Any]]] = []
+    kept: list[tuple[int, float, int, dict[str, Any]]] = []
     for items in by_side.values():
-        items.sort(key=lambda row: (row[0], row[1]))
+        items.sort(key=lambda row: (row[0], row[1], row[2]))
         kept.extend(items[:_MAX_NEARBY_LANDMARK_OPTIONS_PER_SIDE])
-    kept.sort(key=lambda row: (row[0], row[1]))
-    return [option for _, _, option in kept]
+    kept.sort(key=lambda row: (row[0], row[1], row[2]))
+    return [option for _, _, _, option in kept]
 
 
 def load_yolo_ocr_payload(
@@ -1860,7 +1885,20 @@ def _build_filtered_destination_vision(
     return vision
 
 
-def _detection_to_dict(det: UiDetection) -> dict[str, Any]:
+def _ui_detection_to_segment(det: UiDetection) -> SegmentDetection:
+    return SegmentDetection(
+        box=tuple(int(v) for v in det.bbox),
+        class_id=int(det.class_id),
+        class_name=str(det.class_name or ""),
+        text=str(det.text or "").strip(),
+    )
+
+
+def _detection_to_dict(
+    det: UiDetection,
+    *,
+    spatial_region_rank: int = 0,
+) -> dict[str, Any]:
     """Serialize a ``UiDetection`` into a JSON-friendly candidate dict."""
     return {
         "bbox": list(det.bbox),
@@ -1869,6 +1907,7 @@ def _detection_to_dict(det: UiDetection) -> dict[str, Any]:
         "class_name": det.class_name,
         "text": det.text,
         "icons": det.icons,
+        "spatial_region_rank": int(spatial_region_rank),
     }
 
 
@@ -1993,11 +2032,43 @@ def build_vision_context_at_point(
 
     nearest: list[UiDetection] = []
     candidate_text = ""
+    segment_result: ColorSegmentResult | None = None
     if all_detections:
-        nearest = _nearest_candidates(all_detections, local_x, local_y)
+        segment_detections = [_ui_detection_to_segment(det) for det in all_detections]
+        try:
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            segment_result = segment_image_by_color(
+                Image.fromarray(rgb, mode="RGB"),
+                params=load_color_segment_params(),
+                detections=segment_detections,
+            )
+        except Exception:
+            segment_result = None
+        nearest = _nearest_candidates(
+            all_detections,
+            local_x,
+            local_y,
+            segment_result=segment_result,
+        )
         candidate_text = _format_ui_candidates_text(nearest)
 
-    candidate_dicts = [_detection_to_dict(d) for d in nearest]
+    spatial_ranks: dict[tuple[int, int, int, int], int] = {}
+    if segment_result is not None and nearest:
+        landmark_box = tuple(int(v) for v in nearest[0].bbox)
+        spatial_ranks = spatial_region_rank_for_detections(
+            landmark_box,
+            segment_result,
+            [_ui_detection_to_segment(det) for det in all_detections],
+            cursor_xy=(local_x, local_y),
+        )
+
+    candidate_dicts = [
+        _detection_to_dict(
+            det,
+            spatial_region_rank=spatial_ranks.get(tuple(int(v) for v in det.bbox), 0),
+        )
+        for det in nearest
+    ]
     if all_detections and candidate_dicts:
         _annotate_clicked_char_target(bgr, candidate_dicts, local_x, local_y)
     payload: dict[str, Any] = {
@@ -2010,6 +2081,17 @@ def build_vision_context_at_point(
         "detection_count": len(all_detections),
         "source_fingerprint": fingerprint,
     }
+    if segment_result is not None:
+        landmark_box_for_segment: tuple[int, int, int, int] | None = None
+        if nearest:
+            landmark_box_for_segment = tuple(int(v) for v in nearest[0].bbox)
+        else:
+            landmark_box_for_segment = (local_x - 1, local_y - 1, 2, 2)
+        payload["color_segment"] = color_segment_to_json_dict(
+            segment_result,
+            landmark_box=landmark_box_for_segment,
+            cursor_xy=(local_x, local_y),
+        )
     if yolo_error:
         payload["yolo_error"] = yolo_error
 

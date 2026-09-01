@@ -10,7 +10,7 @@ python-dotenv
 Pillow
 numpy
 ultralytics>=8.3.0
-scikit-image
+opencv-contrib-python>=4.6.0
 mss
 pyautogui
 pynput

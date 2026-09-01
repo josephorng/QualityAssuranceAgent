@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -27,7 +28,27 @@ from src.recorder.vision_context import (
     primary_candidate_offset,
     resolve_event_screenshot_path,
     scrollbar_track_percent_phrase,
+    list_nearby_landmark_options,
 )
+
+
+def _split_color_segment_result():
+    from PIL import Image
+
+    from cua_mcp.color_spatial_segment import ColorRegion, ColorSegmentResult
+
+    label_map = np.zeros((100, 200), dtype=np.int32)
+    label_map[:, :100] = 0
+    label_map[:, 100:] = 1
+    regions = [
+        ColorRegion(region_id=0, bbox=(0, 0, 99, 99), mean_color=(40, 80, 120), area=10000),
+        ColorRegion(region_id=1, bbox=(100, 0, 199, 99), mean_color=(40, 80, 120), area=10000),
+    ]
+    return ColorSegmentResult(
+        regions=regions,
+        quantized=Image.new("RGB", (200, 100)),
+        label_map=label_map,
+    )
 
 
 def _parallel_safe_drag_fakes(start_detections, end_detections):
@@ -130,6 +151,96 @@ def test_nearest_candidates_sorted_by_distance() -> None:
     nearest = _nearest_candidates(detections, 10, 10)
     assert nearest[0].text == "Near"
     assert nearest[1].text == "Far"
+
+
+def test_nearest_candidates_spatial_neighbor_reorder() -> None:
+    result = _split_color_segment_result()
+    primary = _detection_from_bbox((10, 10, 30, 30), YOLO_CLASS_TEXT, text="primary")
+    left_near = _detection_from_bbox((50, 10, 20, 20), YOLO_CLASS_TEXT, text="left")
+    right_near = _detection_from_bbox((110, 10, 20, 20), YOLO_CLASS_TEXT, text="right")
+    nearest = _nearest_candidates(
+        [primary, right_near, left_near],
+        25,
+        25,
+        min_multi_char_text_neighbors=3,
+        min_icon_neighbors=0,
+        segment_result=result,
+    )
+    texts = [det.text for det in nearest]
+    assert texts[0] == "primary"
+    assert texts.index("left") < texts.index("right")
+
+
+def test_build_vision_context_at_point_passes_yolo_detections_to_segment(tmp_path: Path) -> None:
+    run_dir = tmp_path / "spatial_segment"
+    (run_dir / "screenshots").mkdir(parents=True)
+    (run_dir / "screenshots" / "event_001.jpeg").write_bytes(b"x")
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(25, 25),
+        screenshot_path=str(run_dir / "screenshots" / "event_001.jpeg"),
+    )
+    fake_detections = [
+        _detection_from_bbox((10, 10, 30, 30), YOLO_CLASS_TEXT, text="primary"),
+        _detection_from_bbox((110, 10, 20, 20), YOLO_CLASS_TEXT, text="right"),
+        _detection_from_bbox((50, 10, 20, 20), YOLO_CLASS_TEXT, text="left"),
+    ]
+    segment_result = _split_color_segment_result()
+    with patch(
+        "src.recorder.vision_context.imread_bgr",
+        return_value=np.zeros((100, 200, 3), dtype=np.uint8),
+    ), patch(
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
+        return_value=fake_detections,
+    ), patch(
+        "src.recorder.vision_context.segment_image_by_color",
+        return_value=segment_result,
+    ) as mock_segment:
+        vision = build_vision_context_at_point(
+            event,
+            local_x=25,
+            local_y=25,
+            run_dir=run_dir,
+            persist_debug=False,
+        )
+    mock_segment.assert_called_once()
+    passed = mock_segment.call_args.kwargs["detections"]
+    assert len(passed) == len(fake_detections)
+    assert vision["candidates"][0]["spatial_region_rank"] == 0
+    assert vision["candidates"][0]["text"] == "primary"
+
+
+def test_list_nearby_landmark_options_prefers_same_color_region() -> None:
+    options = list_nearby_landmark_options(
+        {
+            "local_cursor": [20, 20],
+            "candidates": [
+                {
+                    "bbox": [0, 0, 40, 40],
+                    "class_name": "text",
+                    "text": "Primary",
+                    "spatial_region_rank": 0,
+                },
+                {
+                    "bbox": [50, 10, 30, 20],
+                    "class_name": "text",
+                    "text": "SamePanel",
+                    "spatial_region_rank": 0,
+                },
+                {
+                    "bbox": [110, 10, 30, 20],
+                    "class_name": "text",
+                    "text": "OtherPanel",
+                    "spatial_region_rank": 1,
+                },
+            ],
+        },
+        instruction="",
+    )
+    labels = [opt["label"] for opt in options]
+    assert labels.index("「SamePanel」文字") < labels.index("「OtherPanel」文字")
 
 
 def test_nearest_candidates_uses_bbox_distance_not_center() -> None:
@@ -495,6 +606,19 @@ async def test_build_vision_context_formats_yolo_candidates(tmp_path) -> None:
     assert "text='AWS'" in text
     assert len(vision["candidates"]) == 2
     assert (tmp_path / "yolo_ocr" / "event_001.json").is_file()
+    payload = json.loads(
+        (tmp_path / "yolo_ocr" / "event_001.json").read_text(encoding="utf-8")
+    )
+    color_seg = payload.get("color_segment")
+    assert isinstance(color_seg, dict)
+    assert isinstance(color_seg.get("regions"), list)
+    if color_seg["regions"]:
+        region = color_seg["regions"][0]
+        assert "region_id" in region
+        assert "bbox" in region
+        assert "mean_color" in region
+        assert "area" in region
+        assert "spatial_region_rank" in region
 
 
 @pytest.mark.asyncio

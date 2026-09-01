@@ -28,6 +28,7 @@ class LineSegmentParams:
     min_width_over_height: float = 5.0
     min_overlap_frac: float = 0.9
     min_height: float = 10.0
+    max_height: float = 60.0
     vertical_merge_gap: float = 60.0
 
 
@@ -265,9 +266,10 @@ def _horizontal_pair_rectangle(
     *,
     min_width_over_height: float,
     min_height: float,
+    max_height: float,
 ) -> tuple[int, int, int, int] | None:
     height = abs(h1.mid_y - h2.mid_y)
-    if height <= min_height:
+    if height <= min_height or height > max_height:
         return None
     x_lo = min(h1.xmin, h2.xmin)
     x_hi = max(h1.xmax, h2.xmax)
@@ -326,6 +328,7 @@ def pair_horizontal_rectangles(
     min_width_over_height: float = 5.0,
     min_overlap_frac: float = 0.95,
     min_height: float = 10.0,
+    max_height: float = 60.0,
     horizontal_scrollbar_boxes: list[tuple[int, int, int, int]] | None = None,
 ) -> tuple[
     list[tuple[int, int, int, int]],
@@ -346,7 +349,8 @@ def pair_horizontal_rectangles(
     3. Repeatedly pair any line that has exactly one remaining neighbor until no
        more forced pairs exist.
 
-    Pairs shorter than ``min_height`` (default 10px) are rejected.
+    Pairs shorter than ``min_height`` (default 10px) or taller than
+    ``max_height`` (default 60px) are rejected.
     Rectangles overlapping a horizontal scrollbar are removed last.
     """
     axis: list[_AxisSeg] = []
@@ -421,6 +425,7 @@ def pair_horizontal_rectangles(
                 axis[j],
                 min_width_over_height=min_width_over_height,
                 min_height=min_height,
+                max_height=max_height,
             )
             if rect is None:
                 active.discard(i)
@@ -594,6 +599,7 @@ def detect_horizontal_rectangles(
         min_width_over_height=float(p.min_width_over_height),
         min_overlap_frac=float(p.min_overlap_frac),
         min_height=float(p.min_height),
+        max_height=float(p.max_height),
         horizontal_scrollbar_boxes=horizontal_scrollbar_boxes,
     )
     return HorizontalRectangleResult(

@@ -51,6 +51,7 @@ from src.recorder.analyze import (
     instruction_for_text_input,
     rebuild_pointer_instruction,
     use_char_target_enabled,
+    use_expected_outcome_enabled,
 )
 from src.recorder.models import (
     POINTER_EVENT_KINDS,
@@ -956,6 +957,9 @@ def add_recording_event(
         "event_index": new_index,
         "instruction": resolved_instruction,
         "expected_outcome": cleaned_outcome,
+        "use_expected_outcome": use_expected_outcome_enabled(
+            {"expected_outcome": cleaned_outcome}
+        ),
     }
     write_json(run_dir / "analysis" / f"event_{new_index:03d}.json", analysis_payload)
 
@@ -1269,11 +1273,15 @@ def apply_recording_event_expected_outcome(
     event_index: int,
     *,
     expected_outcome: Any,
+    use_expected_outcome: Any = None,
 ) -> dict[str, Any]:
     """Replace verification text for one recorded event and persist artifacts.
 
     Empty / whitespace-only values clear ``expected_outcome`` (stored as ``null``).
-    Returns ``{"expected_outcome": str|None}``. Raises ``ValueError`` for invalid input.
+    When ``use_expected_outcome`` is omitted, saving non-empty text enables verification;
+    clearing text disables it.
+    Returns ``{"expected_outcome": str|None, "use_expected_outcome": bool}``.
+    Raises ``ValueError`` for invalid input.
     """
     run_dir = resolve_deletable_run_folder(runs_root, run_id)
     if not isinstance(event_index, int) or event_index < 1:
@@ -1283,6 +1291,12 @@ def apply_recording_event_expected_outcome(
     if len(expected_outcome) > _EXPECTED_OUTCOME_MAX_LEN:
         raise ValueError("expected_outcome is too long")
     cleaned = expected_outcome.strip() or None
+    if use_expected_outcome is not None and not isinstance(use_expected_outcome, bool):
+        raise ValueError("use_expected_outcome must be a boolean")
+    if use_expected_outcome is None:
+        enabled = bool(cleaned)
+    else:
+        enabled = use_expected_outcome
 
     event_path = event_json_path(run_dir, event_index)
     event_payload = read_json(event_path, None)
@@ -1295,6 +1309,7 @@ def apply_recording_event_expected_outcome(
         raise ValueError("analysis not found")
 
     analysis["expected_outcome"] = cleaned
+    analysis["use_expected_outcome"] = enabled
     write_json(analysis_path, analysis)
 
     report_path = run_dir / "report.json"
@@ -1305,7 +1320,7 @@ def apply_recording_event_expected_outcome(
     write_json(report_path, report)
 
     write_recording_html_from_run(run_dir, update_index=False)
-    return {"expected_outcome": cleaned}
+    return {"expected_outcome": cleaned, "use_expected_outcome": enabled}
 
 
 def apply_recording_event_instruction(
@@ -1688,6 +1703,7 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
                         run_id,
                         event_index,
                         expected_outcome=body.get("expected_outcome"),
+                        use_expected_outcome=body.get("use_expected_outcome"),
                     )
                 except ValueError as exc:
                     self._send_json(400, {"ok": False, "error": str(exc)})

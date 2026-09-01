@@ -6,6 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from src.recorder.analyze import use_expected_outcome_enabled
+
 _EXPECTED_OUTCOME_PREFIX = "# expected_outcome:"
 _LEGACY_RECORDING_SCRIPT_FILENAME = "script.txt"
 
@@ -141,9 +143,12 @@ def collect_recording_instructions(run_dir: Path) -> tuple[list[str], list[str |
         instruction = analysis.get("instruction")
         if isinstance(instruction, str) and instruction.strip():
             instructions.append(instruction.strip())
-            outcome = analysis.get("expected_outcome")
-            if isinstance(outcome, str) and outcome.strip():
-                expected_outcomes.append(outcome.strip())
+            if use_expected_outcome_enabled(analysis):
+                outcome = analysis.get("expected_outcome")
+                if isinstance(outcome, str) and outcome.strip():
+                    expected_outcomes.append(outcome.strip())
+                else:
+                    expected_outcomes.append(None)
             else:
                 expected_outcomes.append(None)
     return instructions, expected_outcomes

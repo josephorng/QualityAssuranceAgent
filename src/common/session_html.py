@@ -354,6 +354,10 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 .expected-outcome-row {
   display: flex; flex-wrap: wrap; align-items: flex-start; gap: .5rem;
 }
+.expected-outcome-row label {
+  display: inline-flex; align-items: center; gap: .35rem;
+  font-size: .85rem; color: #1f2328; font-weight: 600;
+}
 .expected-outcome-input {
   flex: 1 1 16rem; min-width: 12rem; min-height: 2.6rem; resize: vertical;
   font-family: inherit; font-size: .9rem; line-height: 1.3;
@@ -579,8 +583,9 @@ _RECORDING_SCRIPT = """
   function instructionCopyText(btn) {
     var instruction = btn.getAttribute("data-instruction") || "";
     if (!instruction) return "";
+    var useOutcome = btn.getAttribute("data-use-expected-outcome") === "1";
     var outcome = (btn.getAttribute("data-expected-outcome") || "").trim();
-    if (!outcome) return instruction;
+    if (!useOutcome || !outcome) return instruction;
     return instruction + "\\n# expected_outcome: " + outcome;
   }
 
@@ -1281,6 +1286,7 @@ _RECORDING_SCRIPT = """
       var group = btn.closest(".instruction-group");
       if (!panel || !group) return;
       var input = panel.querySelector(".expected-outcome-input");
+      var checkbox = panel.querySelector("input.use-expected-outcome");
       if (!input) return;
       if (window.location.protocol === "file:") {
         setExpectedOutcomeStatus(panel, "請透過主程式開啟報告以修改預期結果。", true);
@@ -1293,12 +1299,13 @@ _RECORDING_SCRIPT = """
         return;
       }
       var text = input.value || "";
+      var enabled = checkbox ? !!checkbox.checked : false;
       btn.disabled = true;
       setExpectedOutcomeStatus(panel, "套用中…", false);
       fetch("/api/runs/" + encodeURIComponent(runId) + "/events/" + encodeURIComponent(eventIndex) + "/expected_outcome", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ expected_outcome: text })
+        body: JSON.stringify({ expected_outcome: text, use_expected_outcome: enabled })
       })
         .then(function (response) {
           return response.json().then(function (payload) {
@@ -1315,14 +1322,21 @@ _RECORDING_SCRIPT = """
           var saved = result.payload.expected_outcome;
           if (saved == null) saved = "";
           input.value = saved;
+          var enabled = !!result.payload.use_expected_outcome;
+          if (checkbox) checkbox.checked = enabled;
           var copyBtn = group.querySelector("button.copy-instruction");
           if (copyBtn) {
-            if (saved) copyBtn.setAttribute("data-expected-outcome", saved);
-            else copyBtn.removeAttribute("data-expected-outcome");
+            if (enabled && saved) {
+              copyBtn.setAttribute("data-expected-outcome", saved);
+              copyBtn.setAttribute("data-use-expected-outcome", "1");
+            } else {
+              copyBtn.removeAttribute("data-expected-outcome");
+              copyBtn.setAttribute("data-use-expected-outcome", "0");
+            }
           }
           var summaryText = group.querySelector(".instruction-summary-text");
           var expectedEl = group.querySelector(".instruction-expected");
-          if (saved) {
+          if (enabled && saved) {
             if (!expectedEl && summaryText) {
               expectedEl = document.createElement("span");
               expectedEl.className = "instruction-expected";
@@ -3951,12 +3965,24 @@ def _render_char_target_panel_html(
     )
 
 
-def _render_expected_outcome_panel_html(*, expected_outcome: str, show: bool) -> str:
+def _render_expected_outcome_panel_html(
+    *,
+    expected_outcome: str,
+    use_expected_outcome: bool,
+    show: bool,
+) -> str:
     if not show:
         return ""
+    checked_attr = " checked" if use_expected_outcome else ""
     return (
         f'<div class="expected-outcome">'
         f'<div class="expected-outcome-title">預期結果</div>'
+        f'<div class="expected-outcome-row">'
+        f'<label>'
+        f'<input type="checkbox" class="use-expected-outcome"{checked_attr}>'
+        f"啟用預期結果驗證"
+        f"</label>"
+        f"</div>"
         f'<div class="expected-outcome-row">'
         f'<textarea class="expected-outcome-input" rows="2" '
         f'spellcheck="false" aria-label="預期結果">'
@@ -4089,10 +4115,14 @@ def _render_recording_event_html(
     run_id = escape(run_root.name, quote=True)
 
     expected_outcome = ""
+    use_expected_outcome = False
     if isinstance(analysis, dict):
         raw_outcome = analysis.get("expected_outcome")
         if isinstance(raw_outcome, str) and raw_outcome.strip():
             expected_outcome = raw_outcome.strip()
+        from src.recorder.analyze import use_expected_outcome_enabled
+
+        use_expected_outcome = use_expected_outcome_enabled(analysis)
 
     meta_rows: list[tuple[str, str]] = [("時間", time_text)]
     cursor = _format_xy(event.get("cursor_xy"))
@@ -4184,6 +4214,7 @@ def _render_recording_event_html(
     )
     expected_outcome_html = _render_expected_outcome_panel_html(
         expected_outcome=expected_outcome,
+        use_expected_outcome=use_expected_outcome,
         show=bool(instruction) or bool(expected_outcome),
     )
     instruction_html = _render_step_instruction_panel_html(instruction=instruction)
@@ -4201,7 +4232,12 @@ def _render_recording_event_html(
         if expected_outcome
         else ""
     )
-    if expected_outcome:
+    use_outcome_attr = (
+        ' data-use-expected-outcome="1"'
+        if use_expected_outcome and expected_outcome
+        else ' data-use-expected-outcome="0"'
+    )
+    if use_expected_outcome and expected_outcome:
         expected_summary = (
             f'<span class="instruction-expected">'
             f"預期結果：{escape(expected_outcome)}"
@@ -4240,7 +4276,7 @@ def _render_recording_event_html(
         f"</span>"
         f'<span class="badge neutral">{kind_badge}</span>'
         f'<button type="button" class="copy-instruction" data-instruction="{copy_attr}"'
-        f'{outcome_attr} '
+        f'{outcome_attr}{use_outcome_attr} '
         f'title="複製指令" aria-label="複製指令">複製</button>'
         f"{add_wait_html}"
         f'<button type="button" class="add-instruction" '

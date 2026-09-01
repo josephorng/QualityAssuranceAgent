@@ -1129,6 +1129,7 @@ def test_write_recording_html_copy_includes_expected_outcome(tmp_path: Path) -> 
 
     assert 'data-instruction="點擊「搜尋」按鈕"' in html
     assert 'data-expected-outcome="對話框顯示 &quot;搜尋&quot;"' in html
+    assert 'data-use-expected-outcome="1"' in html
     assert 'class="instruction-expected"' in html
     assert "預期結果：對話框顯示" in html
     assert 'class="instruction-summary-text"' in html

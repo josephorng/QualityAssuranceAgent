@@ -1209,7 +1209,7 @@ def test_apply_recording_event_expected_outcome_persists_and_rebuilds(
         expected_outcome="  對話框已開啟  ",
     )
 
-    assert result == {"expected_outcome": "對話框已開啟"}
+    assert result == {"expected_outcome": "對話框已開啟", "use_expected_outcome": True}
     analysis = json.loads(
         (runs_root / "recording_outcome_edit" / "analysis" / "event_001.json").read_text(
             encoding="utf-8"
@@ -1241,7 +1241,7 @@ def test_apply_recording_event_expected_outcome_clears_when_empty(
         expected_outcome="   ",
     )
 
-    assert result == {"expected_outcome": None}
+    assert result == {"expected_outcome": None, "use_expected_outcome": False}
     analysis = json.loads(
         (runs_root / "recording_outcome_clear" / "analysis" / "event_001.json").read_text(
             encoding="utf-8"

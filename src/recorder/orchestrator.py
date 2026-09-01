@@ -14,12 +14,7 @@ from src.common.io_utils import append_text, read_json, write_json
 from src.common.run_state import get_run_state_manager, reset_run_state_manager
 from src.common.runtime_context import set_runtime_env
 from src.common.settings import load_settings
-from src.recorder.analyze import (
-    after_screenshot_for_outcome,
-    analyze_event_to_cache,
-    before_screenshot_for_outcome,
-    infer_expected_outcome,
-)
+from src.recorder.analyze import analyze_event_to_cache
 from src.recorder.models import RecordedEvent, final_after_screenshot_path
 from src.recorder.coalesce import (
     coalesce_consecutive_same_location_clicks,
@@ -32,12 +27,7 @@ from src.recorder.vision_context import (
     try_rebuild_text_input_from_cache,
     try_rebuild_vision_from_cache,
 )
-from src.recorder.window_snapshot import (
-    expected_outcome_for_window_change,
-    format_window_change_hint,
-    is_agent_app_restore,
-    resolve_window_change,
-)
+from src.recorder.window_snapshot import is_agent_app_restore, resolve_window_change
 
 
 _WAIT_THRESHOLD_SECONDS = 10.0
@@ -47,8 +37,8 @@ _DEFAULT_VISION_WORKERS = 4
 # Cap concurrent LLM calls so local Ollama/vLLM is not flooded.
 _DEFAULT_LLM_WORKERS = 4
 _UNSET: Any = object()
-# Each event contributes vision + instruction + expected-outcome work units.
-_PROGRESS_UNITS_PER_EVENT = 3
+# Each event contributes vision + instruction work units.
+_PROGRESS_UNITS_PER_EVENT = 2
 
 
 def _env_max_workers(env_name: str, default: int) -> int:
@@ -70,7 +60,7 @@ def _llm_max_workers() -> int:
 
 
 class _AnalysisProgress:
-    """Thread-safe multi-phase progress: vision + instruction + outcome per event."""
+    """Thread-safe multi-phase progress: vision + instruction per event."""
 
     def __init__(
         self,
@@ -449,64 +439,6 @@ async def _analyze_all_event_instructions(
     return results, cancelled
 
 
-async def _infer_all_expected_outcomes(
-    jobs: list[tuple[int, str, str, str, str]],
-    *,
-    log_info: Callable[[str], None],
-    should_cancel: Callable[[], bool] | None,
-    max_workers: int,
-    on_outcome_done: Callable[[], None] | None = None,
-) -> tuple[dict[int, str | None], bool]:
-    """Run expected-outcome LLM jobs in parallel. ``jobs`` are (pos, instruction, before, after, hint)."""
-    sem = asyncio.Semaphore(max_workers)
-    cancelled = False
-    outcomes: dict[int, str | None] = {}
-
-    async def _one(
-        pos: int,
-        instruction: str,
-        before_shot: str,
-        after_shot: str,
-        window_change_hint: str,
-    ) -> None:
-        nonlocal cancelled
-        if should_cancel is not None and should_cancel():
-            cancelled = True
-            return
-        async with sem:
-            if should_cancel is not None and should_cancel():
-                cancelled = True
-                return
-            try:
-                outcomes[pos] = await infer_expected_outcome(
-                    instruction=instruction,
-                    before_screenshot=before_shot,
-                    after_screenshot=after_shot,
-                    window_change_hint=window_change_hint,
-                    log_info=log_info,
-                )
-            except Exception as exc:
-                # Soft-fail isolation: one timeout must not abort sibling jobs.
-                log_info(
-                    f"expected-outcome LLM job failed pos={pos}: "
-                    f"{type(exc).__name__}: {exc}"
-                )
-                outcomes[pos] = None
-            if on_outcome_done is not None:
-                on_outcome_done()
-
-    if jobs:
-        await asyncio.gather(
-            *[
-                _one(pos, instruction, before_shot, after_shot, hint)
-                for pos, instruction, before_shot, after_shot, hint in jobs
-            ]
-        )
-    if cancelled:
-        log_info("analyze_recording_session cancelled during expected-outcome LLM phase")
-    return outcomes, cancelled
-
-
 def _write_event_analysis(
     analysis_path: Path,
     *,
@@ -515,6 +447,7 @@ def _write_event_analysis(
     instruction: str,
     vision: dict[str, Any],
     expected_outcome: str | None,
+    use_expected_outcome: bool,
     elapsed_since_previous: float | None,
     wait_instruction: str | None,
     text_resolution: dict[str, Any] | None,
@@ -534,6 +467,7 @@ def _write_event_analysis(
                 if expected_outcome is not None
                 else {}
             ),
+            "use_expected_outcome": use_expected_outcome,
             **(
                 {"elapsed_since_previous_seconds": elapsed_since_previous}
                 if elapsed_since_previous is not None
@@ -660,68 +594,6 @@ async def analyze_recording_session(
         if llm_cancelled:
             cancelled = True
 
-        # Build expected-outcome jobs for events that got an instruction.
-        outcome_jobs: list[tuple[int, str, str, str, str]] = []
-        deterministic_outcomes: dict[int, str | None] = {}
-        for event_pos, event in enumerate(events):
-            prepared = prepared_list[event_pos]
-            result = instruction_results[event_pos]
-            if prepared is None or result is _UNSET:
-                # Cancelled before vision/instruction: credit remaining units for this event.
-                if prepared is None:
-                    progress.bump(3)  # vision + instruction + outcome never ran
-                else:
-                    progress.bump(2)  # instruction + outcome never ran
-                continue
-            if result is None:
-                # Instruction failed (already bumped); count the outcome slot as done.
-                progress.bump(1)
-                continue
-            instruction = result["instruction"]
-            next_event = events[event_pos + 1] if event_pos + 1 < len(events) else None
-            before_shot = before_screenshot_for_outcome(event)
-            after_shot = after_screenshot_for_outcome(
-                event,
-                next_event,
-                final_after_screenshot=final_after_screenshot,
-            )
-            window_change = resolve_window_change(
-                event.window_change,
-                event.window_snapshot_debug,
-                event.cursor_xy,
-            )
-            expected_outcome = expected_outcome_for_window_change(window_change)
-            if expected_outcome is not None:
-                deterministic_outcomes[event_pos] = expected_outcome
-                progress.bump(1)
-            elif before_shot is not None and after_shot is not None:
-                outcome_jobs.append(
-                    (
-                        event_pos,
-                        instruction,
-                        before_shot,
-                        after_shot,
-                        format_window_change_hint(window_change),
-                    )
-                )
-            else:
-                deterministic_outcomes[event_pos] = None
-                progress.bump(1)
-
-        inferred_outcomes, outcome_cancelled = await _infer_all_expected_outcomes(
-            outcome_jobs,
-            log_info=log_info,
-            should_cancel=should_cancel,
-            max_workers=llm_workers,
-            on_outcome_done=progress.bump,
-        )
-        if outcome_cancelled:
-            cancelled = True
-            # Credit outcome slots that never started due to cancel.
-            for pos, *_rest in outcome_jobs:
-                if pos not in inferred_outcomes and pos not in deterministic_outcomes:
-                    progress.bump(1)
-
         # Ordered assemble: waits, report lists, per-event analysis JSON.
         previous_instruction_event: RecordedEvent | None = None
         for event_pos, event in enumerate(events):
@@ -775,13 +647,8 @@ async def analyze_recording_session(
                     instructions.append(wait_instruction)
                     expected_outcomes.append(None)
 
-            if event_pos in deterministic_outcomes:
-                expected_outcome = deterministic_outcomes[event_pos]
-            else:
-                expected_outcome = inferred_outcomes.get(event_pos)
-
             instructions.append(instruction)
-            expected_outcomes.append(expected_outcome)
+            expected_outcomes.append(None)
             previous_instruction_event = event
             _write_event_analysis(
                 analysis_path,
@@ -789,18 +656,13 @@ async def analyze_recording_session(
                 result=result,
                 instruction=instruction,
                 vision=vision,
-                expected_outcome=expected_outcome,
+                expected_outcome=None,
+                use_expected_outcome=False,
                 elapsed_since_previous=elapsed_since_previous,
                 wait_instruction=wait_instruction,
                 text_resolution=text_resolution,
             )
-            if expected_outcome:
-                log_info(
-                    f"cached event {event.index}: {instruction} "
-                    f"| expected_outcome={expected_outcome}"
-                )
-            else:
-                log_info(f"cached event {event.index}: {instruction}")
+            log_info(f"cached event {event.index}: {instruction}")
 
         if not cancelled:
             progress.complete()

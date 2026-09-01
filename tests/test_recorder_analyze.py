@@ -21,6 +21,7 @@ from src.recorder.analyze import (
     instruction_for_scroll,
     rebuild_pointer_instruction,
     use_char_target_enabled,
+    use_expected_outcome_enabled,
 )
 from src.recorder.models import RecordedEvent
 from src.recorder.orchestrator import (
@@ -1514,9 +1515,6 @@ async def test_analyze_recording_session_persists_coalesced_clicks(tmp_path: Pat
     ), patch(
         "src.recorder.orchestrator.analyze_event_to_cache",
         new=AsyncMock(side_effect=_fake_analyze),
-    ), patch(
-        "src.recorder.orchestrator.infer_expected_outcome",
-        new=AsyncMock(return_value=None),
     ):
         report = await analyze_recording_session(run_dir)
 
@@ -1961,6 +1959,15 @@ def test_instruction_for_click_char_target_duplicate() -> None:
     assert instruction_for_click(event, vision, use_char_target=True) == (
         "將滑鼠移到「Google」的第2個「o」字上"
     )
+
+
+def test_use_expected_outcome_enabled_defaults_false_without_text() -> None:
+    assert use_expected_outcome_enabled(None) is False
+    assert use_expected_outcome_enabled({}) is False
+    assert use_expected_outcome_enabled({"expected_outcome": "  "}) is False
+    assert use_expected_outcome_enabled({"use_expected_outcome": False, "expected_outcome": "done"}) is False
+    assert use_expected_outcome_enabled({"use_expected_outcome": True}) is True
+    assert use_expected_outcome_enabled({"expected_outcome": "done"}) is True
 
 
 def test_use_char_target_enabled_defaults_false_without_phrase() -> None:
@@ -3142,9 +3149,7 @@ async def test_infer_expected_outcome_soft_fails_on_timeout(tmp_path: Path) -> N
 async def test_analyze_recording_session_continues_when_one_outcome_times_out(
     tmp_path: Path,
 ) -> None:
-    """One hung expected-outcome call must not abort sibling events or the report."""
-    import httpx
-
+    """Analysis completes without an expected-outcome phase."""
     from src.common.run_state import reset_run_state_manager
 
     reset_run_state_manager()
@@ -3196,14 +3201,6 @@ async def test_analyze_recording_session_continues_when_one_outcome_times_out(
         encoding="utf-8",
     )
 
-    call_count = {"n": 0}
-
-    async def flaky_outcome(*, instruction: str, **_kwargs):
-        call_count["n"] += 1
-        if call_count["n"] == 1:
-            raise httpx.ReadTimeout("hung on first outcome")
-        return "第二步已完成"
-
     with patch(
         "src.recorder.orchestrator.build_vision_context",
         new=AsyncMock(return_value={"used_vision": False, "candidate_text": ""}),
@@ -3215,17 +3212,13 @@ async def test_analyze_recording_session_continues_when_one_outcome_times_out(
                 {"instruction": "按下 Tab 鍵"},
             ]
         ),
-    ), patch(
-        "src.recorder.orchestrator.infer_expected_outcome",
-        new=AsyncMock(side_effect=flaky_outcome),
     ):
         report = await analyze_recording_session(run_dir)
 
     assert report["cached"] == 2
     assert report["cancelled"] is False
     assert report["instructions"] == ["按下 Enter 鍵", "按下 Tab 鍵"]
-    # First outcome soft-failed to None; second succeeded.
-    assert report["expected_outcomes"] == [None, "第二步已完成"]
+    assert report["expected_outcomes"] == [None, None]
     assert (run_dir / "report.json").is_file()
     assert (run_dir / "analysis" / "event_001.json").is_file()
     assert (run_dir / "analysis" / "event_002.json").is_file()
@@ -3327,7 +3320,10 @@ def test_after_screenshot_for_text_input_falls_back_to_end_without_next(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_analyze_recording_session_writes_expected_outcome(tmp_path: Path) -> None:
+async def test_analyze_recording_session_skips_expected_outcome_by_default(
+    tmp_path: Path,
+) -> None:
+    """Expected outcomes are opt-in; analysis does not auto-infer them."""
     from src.common.run_state import reset_run_state_manager
 
     reset_run_state_manager()
@@ -3381,25 +3377,23 @@ async def test_analyze_recording_session_writes_expected_outcome(tmp_path: Path)
         "src.recorder.orchestrator.build_vision_context",
         new=AsyncMock(return_value=no_vision),
     ), patch(
-        "src.recorder.orchestrator.infer_expected_outcome",
+        "src.recorder.analyze.infer_expected_outcome",
         new=AsyncMock(return_value="對話框已開啟"),
     ) as outcome_mock:
         report = await analyze_recording_session(run_dir)
 
     assert report["instructions"] == ["按下 Enter 鍵", "按下 Tab 鍵"]
-    assert report["expected_outcomes"] == ["對話框已開啟", None]
+    assert report["expected_outcomes"] == [None, None]
     first_analysis = json.loads(
         (run_dir / "analysis" / "event_001.json").read_text(encoding="utf-8")
     )
-    assert first_analysis["expected_outcome"] == "對話框已開啟"
-    assert outcome_mock.await_count == 1
-    assert outcome_mock.await_args.kwargs["before_screenshot"] == str(before)
-    assert outcome_mock.await_args.kwargs["after_screenshot"] == str(after)
-    assert outcome_mock.await_args.kwargs["window_change_hint"] == "(none)"
+    assert first_analysis.get("expected_outcome") is None
+    assert first_analysis["use_expected_outcome"] is False
+    assert outcome_mock.await_count == 0
 
 
 @pytest.mark.asyncio
-async def test_analyze_recording_session_enter_uses_opened_window_outcome(
+async def test_analyze_recording_session_enter_skips_window_outcome_by_default(
     tmp_path: Path,
 ) -> None:
     from src.common.run_state import reset_run_state_manager
@@ -3460,17 +3454,18 @@ async def test_analyze_recording_session_enter_uses_opened_window_outcome(
         "src.recorder.orchestrator.build_vision_context",
         new=AsyncMock(return_value=no_vision),
     ), patch(
-        "src.recorder.orchestrator.infer_expected_outcome",
+        "src.recorder.analyze.infer_expected_outcome",
         new=AsyncMock(return_value="should-not-be-used"),
     ) as outcome_mock:
         report = await analyze_recording_session(run_dir)
 
     assert report["instructions"] == ["按下 Enter 鍵", "按下 Tab 鍵"]
-    assert report["expected_outcomes"] == ["「常用 - 檔案總管」視窗已開啟", None]
+    assert report["expected_outcomes"] == [None, None]
     first_analysis = json.loads(
         (run_dir / "analysis" / "event_001.json").read_text(encoding="utf-8")
     )
-    assert first_analysis["expected_outcome"] == "「常用 - 檔案總管」視窗已開啟"
+    assert first_analysis.get("expected_outcome") is None
+    assert first_analysis["use_expected_outcome"] is False
     assert outcome_mock.await_count == 0
 
 
@@ -3519,15 +3514,13 @@ async def test_analyze_recording_session_uses_final_after_for_last_action(
         "src.recorder.orchestrator.build_vision_context",
         new=AsyncMock(return_value=no_vision),
     ), patch(
-        "src.recorder.orchestrator.infer_expected_outcome",
+        "src.recorder.analyze.infer_expected_outcome",
         new=AsyncMock(return_value="畫面已捲動"),
     ) as outcome_mock:
         report = await analyze_recording_session(run_dir)
 
-    assert report["expected_outcomes"] == ["畫面已捲動"]
-    assert outcome_mock.await_count == 1
-    assert outcome_mock.await_args.kwargs["before_screenshot"] == str(before)
-    assert outcome_mock.await_args.kwargs["after_screenshot"] == str(final_after)
+    assert report["expected_outcomes"] == [None]
+    assert outcome_mock.await_count == 0
 
 
 @pytest.mark.asyncio
@@ -3606,14 +3599,14 @@ async def test_analyze_recording_session_drops_multiple_trailing_agent_restores(
         "src.recorder.orchestrator.build_vision_context",
         new=AsyncMock(return_value=no_vision),
     ), patch(
-        "src.recorder.orchestrator.infer_expected_outcome",
+        "src.recorder.analyze.infer_expected_outcome",
         new=AsyncMock(return_value="動作完成"),
     ) as outcome_mock:
         report = await analyze_recording_session(run_dir)
 
     assert report["recorded"] == 1
     assert report["instructions"] == ["按下 Enter 鍵"]
-    assert report["expected_outcomes"] == ["動作完成"]
+    assert report["expected_outcomes"] == [None]
     assert not (run_dir / "events" / "event_002.json").exists()
     assert not (run_dir / "events" / "event_003.json").exists()
     final_after = run_dir / "screenshots" / "final_after.jpeg"
@@ -3621,4 +3614,4 @@ async def test_analyze_recording_session_drops_multiple_trailing_agent_restores(
     assert final_after.read_bytes() == b"pre-restore-ui"
     session = json.loads((run_dir / "session.json").read_text(encoding="utf-8"))
     assert session["final_after_screenshot"] == "screenshots/final_after.jpeg"
-    assert outcome_mock.await_args.kwargs["after_screenshot"] == str(final_after)
+    assert outcome_mock.await_count == 0

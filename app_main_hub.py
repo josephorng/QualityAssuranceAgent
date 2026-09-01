@@ -315,9 +315,9 @@ class MainHub(ctk.CTk):
 
         restored_queue: list[Path] = []
         for raw_path in hub.get("queue_script_paths", []):
-            resolved = resolve_runnable_script_path(Path(raw_path))
-            if is_runnable_script_path(resolved):
-                restored_queue.append(resolved)
+            if not str(raw_path).strip():
+                continue
+            restored_queue.append(resolve_runnable_script_path(Path(raw_path)))
         self._queue_paths = restored_queue
         self._refresh_queue_list()
 
@@ -1363,6 +1363,14 @@ class MainHub(ctk.CTk):
         b_add_rec.pack(side="left", padx=(0, 8))
         b_clear = ctk.CTkButton(row, text="清空", width=80, command=self._queue_clear)
         b_clear.pack(side="left")
+        self._queue_warning_label = ctk.CTkLabel(
+            parent,
+            text="",
+            font=ctk.CTkFont(size=12),
+            text_color=("#b91c1c", "#f87171"),
+            wraplength=820,
+            justify="left",
+        )
         self._queue_list_frame = ctk.CTkScrollableFrame(parent)
         self._queue_list_frame.pack(fill="both", expand=True, padx=8, pady=(8, 8))
         self._queue_controls.extend([b_add, b_add_rec, b_clear])
@@ -1383,6 +1391,24 @@ class MainHub(ctk.CTk):
             except Exception:
                 pass
 
+    def _update_queue_missing_warning(self) -> None:
+        label = getattr(self, "_queue_warning_label", None)
+        list_frame = getattr(self, "_queue_list_frame", None)
+        if label is None or list_frame is None:
+            return
+        missing = [p for p in self._queue_paths if not is_runnable_script_path(p)]
+        if missing:
+            names = "、".join(script_display_name(p) for p in missing)
+            label.configure(
+                text=f"警告：以下項目找不到檔案或資料夾（執行時將略過）：{names}"
+            )
+            if not label.winfo_ismapped():
+                label.pack(fill="x", padx=8, pady=(0, 4), before=list_frame)
+        else:
+            label.configure(text="")
+            if label.winfo_ismapped():
+                label.pack_forget()
+
     def _refresh_queue_list(self) -> None:
         frame = getattr(self, "_queue_list_frame", None)
         if frame is None:
@@ -1390,6 +1416,7 @@ class MainHub(ctk.CTk):
         self._queue_item_controls = []
         for w in frame.winfo_children():
             w.destroy()
+        self._update_queue_missing_warning()
         if not self._queue_paths:
             ctk.CTkLabel(
                 frame,
@@ -1400,13 +1427,18 @@ class MainHub(ctk.CTk):
             return
         busy = self._queue_controls_busy()
         item_state = "disabled" if busy else "normal"
+        missing_color = ("#b91c1c", "#f87171")
         for i, p in enumerate(self._queue_paths):
             selected = i == self._queue_selected
             fg = ("gray75", "gray28") if selected else "transparent"
+            missing = not is_runnable_script_path(p)
             row = ctk.CTkFrame(frame, fg_color="transparent")
             row.pack(fill="x", padx=4, pady=2)
             status = self._queue_status_by_index.get(i)
-            icon, icon_color = self._queue_status_icon(status)
+            if status is None and missing:
+                icon, icon_color = "\u26a0", missing_color
+            else:
+                icon, icon_color = self._queue_status_icon(status)
             ctk.CTkLabel(
                 row,
                 text=icon,
@@ -1445,15 +1477,18 @@ class MainHub(ctk.CTk):
             )
             b_remove.pack(side="left", padx=(0, 6))
             self._queue_item_controls.extend([b_up, b_down, b_remove])
+            item_label = script_display_name(p)
+            if missing:
+                item_label += "（找不到）"
             btn = ctk.CTkButton(
                 row,
-                text=f"{i + 1}. {script_display_name(p)}",
+                text=f"{i + 1}. {item_label}",
                 anchor="w",
                 fg_color=fg,
                 # Neutral hover (not theme blue) so dark text stays readable in light mode.
                 hover_color=("gray65", "gray35"),
                 hover=not selected,
-                text_color=("gray10", "gray90"),
+                text_color=missing_color if missing else ("gray10", "gray90"),
                 command=lambda idx=i: self._queue_select(idx),
             )
             btn.pack(side="left", fill="x", expand=True)

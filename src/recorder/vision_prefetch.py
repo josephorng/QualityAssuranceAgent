@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import queue
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,10 @@ class VisionPrefetchWorker:
         self._queue: queue.Queue[Any] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._in_flight = False
+        self._drain_progress: Callable[[int, int], None] | None = None
+        self._drain_total = 0
+        self._drain_done = 0
 
     def start(self, run_dir: Path) -> None:
         """Start (or restart) the prefetch worker for ``run_dir``."""
@@ -46,20 +51,38 @@ class VisionPrefetchWorker:
                 return
             self._queue.put(event)
 
-    def drain_and_stop(self, timeout: float = 120.0) -> None:
+    def drain_and_stop(
+        self,
+        timeout: float = 120.0,
+        *,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> None:
         """Finish queued jobs (best-effort) and stop the worker thread."""
         with self._lock:
             thread = self._thread
             q = self._queue
             run_dir = self._run_dir
+            in_flight = self._in_flight
         if thread is None:
+            if on_progress is not None:
+                on_progress(0, 0)
             return
+        pending = q.qsize() + (1 if in_flight else 0)
+        with self._lock:
+            self._drain_progress = on_progress
+            self._drain_total = pending
+            self._drain_done = 0
+        if on_progress is not None:
+            on_progress(0, pending)
         q.put(_SENTINEL)
         thread.join(timeout=timeout)
         with self._lock:
             if self._thread is thread:
                 self._thread = None
                 self._run_dir = None
+            self._drain_progress = None
+            self._drain_total = 0
+            self._drain_done = 0
         if run_dir is not None and thread.is_alive():
             self._log(run_dir, "vision prefetch drain timed out; abandoning worker")
 
@@ -75,7 +98,22 @@ class VisionPrefetchWorker:
                     run_dir = self._run_dir
                 if run_dir is None:
                     continue
-                self._run_one(item, run_dir)
+                with self._lock:
+                    self._in_flight = True
+                try:
+                    self._run_one(item, run_dir)
+                finally:
+                    with self._lock:
+                        self._in_flight = False
+                        progress = self._drain_progress
+                        if progress is not None and self._drain_total > 0:
+                            self._drain_done += 1
+                            done = self._drain_done
+                            total = self._drain_total
+                        else:
+                            progress = None
+                    if progress is not None:
+                        progress(done, total)
             finally:
                 self._queue.task_done()
 

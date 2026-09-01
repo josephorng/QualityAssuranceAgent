@@ -254,3 +254,42 @@ def test_vision_prefetch_worker_writes_yolo_ocr(tmp_path: Path) -> None:
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert payload["source_fingerprint"] == vision_source_fingerprint(event)
     assert payload["candidates"]
+
+
+def test_vision_prefetch_drain_reports_progress(tmp_path: Path) -> None:
+    (tmp_path / "yolo_ocr").mkdir()
+    events = [_click_event(tmp_path, index=i) for i in range(1, 4)]
+    worker = VisionPrefetchWorker()
+    progress: list[tuple[int, int]] = []
+
+    def on_progress(current: int, total: int) -> None:
+        progress.append((current, total))
+
+    with patch(
+        "src.recorder.vision_context.imread_bgr",
+        return_value=np.zeros((100, 100, 3), dtype=np.uint8),
+    ), patch(
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
+        return_value=[
+            _detection_from_bbox((8, 8, 10, 10), YOLO_CLASS_TEXT, text="預取"),
+        ],
+    ):
+        worker.start(tmp_path)
+        for event in events:
+            worker.enqueue(event)
+        worker.drain_and_stop(timeout=30.0, on_progress=on_progress)
+
+    assert progress[0] == (0, 3)
+    assert progress[-1] == (3, 3)
+
+
+def test_vision_prefetch_drain_empty_queue_reports_zero_total(tmp_path: Path) -> None:
+    worker = VisionPrefetchWorker()
+    progress: list[tuple[int, int]] = []
+
+    def on_progress(current: int, total: int) -> None:
+        progress.append((current, total))
+
+    worker.start(tmp_path)
+    worker.drain_and_stop(timeout=5.0, on_progress=on_progress)
+    assert progress == [(0, 0)]

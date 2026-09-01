@@ -1954,6 +1954,23 @@ class MainHub(ctk.CTk):
             text_color=("gray20", "gray65"),
         )
 
+    def _begin_vision_prefetch_progress(self, total: int) -> None:
+        if total <= 0:
+            return
+        self._show_analysis_progress()
+        self._update_vision_prefetch_progress(0, total)
+
+    def _update_vision_prefetch_progress(self, current: int, total: int) -> None:
+        if total <= 0:
+            return
+        if self._analysis_progress is not None:
+            self._analysis_progress.set(current / total)
+        pct = int(round(100.0 * current / total))
+        self._status.configure(
+            text=f"正在處理視覺資料 ({pct}%)…",
+            text_color=("gray20", "gray65"),
+        )
+
     def _request_cancel_analysis(self) -> None:
         if not self._is_analysis_running():
             return
@@ -2299,7 +2316,24 @@ class MainHub(ctk.CTk):
             try:
                 run_dir = self._recording_session.finalize_stop()
                 event_count = self._recording_session.event_count()
-                self._vision_prefetch.drain_and_stop()
+
+                def on_prefetch_progress(current: int, total: int) -> None:
+                    if total <= 0:
+                        return
+                    if current == 0:
+                        self.after(
+                            0,
+                            lambda t=total: self._begin_vision_prefetch_progress(t),
+                        )
+                    else:
+                        self.after(
+                            0,
+                            lambda c=current, t=total: self._update_vision_prefetch_progress(
+                                c, t
+                            ),
+                        )
+
+                self._vision_prefetch.drain_and_stop(on_progress=on_prefetch_progress)
                 self.after(
                     0,
                     lambda: self._on_recording_finalize_done(run_dir, event_count, analyze),

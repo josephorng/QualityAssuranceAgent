@@ -186,7 +186,7 @@ async def move_mouse(
     (e.g. ["「Edge」圖示", "「Copilot」圖示"]). Prefer this over embedding
     （附近有…） comments inside instruction.
     '''
-    duration: float = 0.2
+    duration: float = 0.0
     result = await _move_mouse(
         instruction=instruction,
         nearby_objects=nearby_objects,
@@ -210,7 +210,7 @@ async def move_mouse_visual(
     chosen target has label-similar peers, runs similar_function_describe to
     re-rank among those peers before moving.
     """
-    duration: float = 0.2
+    duration: float = 0.0
     return await _move_mouse_visual(
         instruction=instruction,
         duration=duration,

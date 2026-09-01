@@ -21,6 +21,15 @@ if TYPE_CHECKING:
     from src.eye.module import EyeModule
 
 _AFTER_ACTION_SETTLE_S = 1.0
+_AFTER_MOVE_SETTLE_S = 0.15
+_MOVE_ACTIONS = frozenset({"move_mouse", "move_mouse_visual"})
+
+
+def _after_action_settle_s(action: str) -> float:
+    """Shorter post-move settle reduces hover tooltip dwell before screenshots."""
+    if action in _MOVE_ACTIONS:
+        return _AFTER_MOVE_SETTLE_S
+    return _AFTER_ACTION_SETTLE_S
 
 
 def _parse_mcp_tool_result(tool_output: Any) -> dict[str, Any] | None:
@@ -162,11 +171,12 @@ class HandModule:
         if screenshot_before_path is None:
             screenshot_before_path = await self._capture_report_screenshot("before-action")
 
+        settle_delay = _after_action_settle_s(action)
         try:
             tool_output = await mcp_server.call_tool(action, args)
             if screenshot_after_path is None:
                 screenshot_after_path = await self._capture_report_screenshot(
-                    "after-action", settle_delay=_AFTER_ACTION_SETTLE_S
+                    "after-action", settle_delay=settle_delay
                 )
             return ExecutionResult(
                 ok=True,
@@ -188,7 +198,8 @@ class HandModule:
                         tool_output = await mcp_server.call_tool(remapped_action, remapped_args)
                         if screenshot_after_path is None:
                             screenshot_after_path = await self._capture_report_screenshot(
-                                "after-action", settle_delay=_AFTER_ACTION_SETTLE_S
+                                "after-action",
+                                settle_delay=_after_action_settle_s(remapped_action),
                             )
                         return ExecutionResult(
                             ok=True,
@@ -206,7 +217,7 @@ class HandModule:
                         )
             if screenshot_after_path is None:
                 screenshot_after_path = await self._capture_report_screenshot(
-                    "after-action", settle_delay=_AFTER_ACTION_SETTLE_S
+                    "after-action", settle_delay=settle_delay
                 )
             return ExecutionResult(
                 ok=False,

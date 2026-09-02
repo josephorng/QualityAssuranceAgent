@@ -1952,13 +1952,15 @@ class MainHub(ctk.CTk):
         self._run_btn.configure(state="disabled")
         self._settings_btn.configure(state="disabled")
         for w in self._script_controls:
+            if w is self._record_btn:
+                continue
             w.configure(state="disabled")
         for w in self._smart_controls:
             w.configure(state="disabled")
         self._set_queue_control_widgets_state("disabled")
         self._use_tool_cache_checkbox.configure(state="disabled")
         if self._record_btn is not None:
-            self._record_btn.configure(text="正在完成錄製…", state="disabled")
+            self._record_btn.configure(text="停止分析", state="normal", command=self._on_record_button)
         self._hide_analysis_progress()
 
     def _set_hub_controls_analyzing(self) -> None:
@@ -2009,7 +2011,7 @@ class MainHub(ctk.CTk):
         )
 
     def _request_cancel_analysis(self) -> None:
-        if not self._is_analysis_running():
+        if not self._is_analysis_running() and not self._is_recording_finalizing():
             return
         self._analysis_cancel_event.set()
         if self._record_btn is not None:
@@ -2271,7 +2273,7 @@ class MainHub(ctk.CTk):
         self._start_recording_analysis(run_dir, event_count)
 
     def _on_record_button(self) -> None:
-        if self._is_analysis_running():
+        if self._is_analysis_running() or self._is_recording_finalizing():
             self._request_cancel_analysis()
             return
         self._toggle_recording()
@@ -2340,6 +2342,7 @@ class MainHub(ctk.CTk):
     def _stop_recording(self, *, analyze: bool) -> None:
         if not self._recording_session.is_active() or self._is_recording_finalizing():
             return
+        self._analysis_cancel_event.clear()
         self._recording_session.begin_stop()
         self._set_hub_controls_finalizing()
         self._status.configure(text="正在完成錄製…", text_color=("gray20", "gray65"))
@@ -2406,6 +2409,13 @@ class MainHub(ctk.CTk):
         if run_dir is None:
             self._set_hub_controls_idle()
             self._status.configure(text="錄製已停止。")
+            return
+        if analyze and self._analysis_cancel_event.is_set():
+            self._set_hub_controls_idle()
+            self._status.configure(text="分析已停止。")
+            show_ctk_message(self, "錄製分析已停止", "分析已停止。", kind="warning")
+            if self._is_recording_script_open() and run_dir is not None:
+                self._load_script_into_editor(run_dir)
             return
         if analyze and event_count > 0:
             total_events = self._count_recording_events(run_dir)

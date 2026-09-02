@@ -651,10 +651,9 @@ def merge_yolo_inputs_with_line_rectangles(
     img_h: int | None = None,
     horizontal_scrollbar_boxes: list[tuple[int, int, int, int]] | None = None,
 ) -> list[tuple[int, int, int, int]]:
-    """Add Hough input-box rectangles and refine YOLO inputs on high IoU.
+    """Refine YOLO input boxes using Hough-detected line rectangles.
 
-    - Line rectangles with no matching YOLO input (IoU ≤ threshold) are kept
-      as new input boxes.
+    - Line rectangles with no matching YOLO input (IoU ≤ threshold) are dropped.
     - When IoU with a YOLO input exceeds ``iou_threshold``, the YOLO box is
       replaced by the line rectangle (each YOLO / rectangle used at most once).
     - Unmatched YOLO inputs are kept as-is.
@@ -684,7 +683,7 @@ def merge_yolo_inputs_with_line_rectangles(
     if not rect_boxes:
         merged_inputs = list(yolo_input_boxes)
     elif not yolo_input_boxes:
-        merged_inputs = rect_boxes
+        merged_inputs = []
     else:
         used_yolo: set[int] = set()
         merged_inputs = []
@@ -702,8 +701,6 @@ def merge_yolo_inputs_with_line_rectangles(
             if best_i is not None and best_iou > iou_threshold:
                 merged_inputs.append(rect)
                 used_yolo.add(best_i)
-            else:
-                merged_inputs.append(rect)
 
         for i, yolo in enumerate(yolo_input_boxes):
             if i not in used_yolo:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -293,3 +294,48 @@ def test_vision_prefetch_drain_empty_queue_reports_zero_total(tmp_path: Path) ->
     worker.start(tmp_path)
     worker.drain_and_stop(timeout=5.0, on_progress=on_progress)
     assert progress == [(0, 0)]
+
+
+def test_vision_prefetch_runs_events_in_parallel(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+    import time
+
+    (tmp_path / "yolo_ocr").mkdir()
+    events = [_click_event(tmp_path, index=i) for i in range(1, 5)]
+    worker = VisionPrefetchWorker(max_workers=4)
+    monkeypatch.setenv("RECORDING_VISION_WORKERS", "4")
+
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    async def slow_prepare(event, **_kwargs):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        await asyncio.sleep(0.05)
+        with lock:
+            active -= 1
+        from src.recorder.orchestrator import _PreparedEvent
+
+        return _PreparedEvent(
+            event=event,
+            event_for_llm=event,
+            vision={"used_vision": False, "candidate_text": "", "local_cursor": None},
+            text_resolution=None,
+        )
+
+    started = time.perf_counter()
+    with patch(
+        "src.recorder.vision_prefetch.prepare_event_vision",
+        new=slow_prepare,
+    ):
+        worker.start(tmp_path)
+        for event in events:
+            worker.enqueue(event)
+        worker.drain_and_stop(timeout=30.0)
+    elapsed = time.perf_counter() - started
+
+    assert max_active >= 2
+    assert elapsed < 0.20

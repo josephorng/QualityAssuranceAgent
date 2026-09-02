@@ -648,6 +648,108 @@ def test_collect_nearby_hints_skips_container_when_it_is_primary() -> None:
     assert all(h.label != "輸入欄" for h in hints)
 
 
+def test_collect_nearby_hints_prefers_disambiguating_landmark_between_scrollbars() -> None:
+    from src.common.nearby_side import NearbyHint, Side
+    from src.recorder.vision_context import collect_nearby_hints
+
+    vision = {
+        "used_vision": True,
+        "local_cursor": [1893, 554],
+        "candidates": [
+            {
+                "bbox": [1879, 274, 28, 560],
+                "center": [1893, 554],
+                "class_name": "scrollbar",
+                "text": None,
+            },
+            {
+                "bbox": [1758, 849, 145, 17],
+                "center": [1831, 858],
+                "class_name": "text",
+                "text": "此為非商業對話",
+            },
+            {
+                "bbox": [399, 51, 21, 810],
+                "center": [410, 456],
+                "class_name": "scrollbar",
+                "text": None,
+            },
+            {
+                "bbox": [181, 50, 23, 825],
+                "center": [193, 463],
+                "class_name": "scrollbar",
+                "text": None,
+            },
+        ],
+    }
+    hints = collect_nearby_hints(vision, instruction="在滾動條附近向下捲動")
+    assert hints[0] == NearbyHint("「此為非商業對話」文字", Side.UPPER_RIGHT)
+
+
+def test_collect_nearby_hints_prefers_disambiguating_landmark_between_similar_text() -> None:
+    from src.common.nearby_side import NearbyHint, Side
+    from src.recorder.vision_context import collect_nearby_hints
+
+    vision = {
+        "used_vision": True,
+        "local_cursor": [210, 110],
+        "candidates": [
+            {
+                "bbox": [200, 100, 20, 20],
+                "center": [210, 110],
+                "class_name": "text",
+                "text": "A",
+            },
+            {
+                "bbox": [100, 100, 20, 20],
+                "center": [110, 110],
+                "class_name": "text",
+                "text": "a",
+            },
+            {
+                "bbox": [150, 100, 20, 20],
+                "center": [160, 110],
+                "class_name": "text",
+                "text": "B",
+            },
+        ],
+    }
+    hints = collect_nearby_hints(vision, instruction="點擊「A」文字")
+    assert hints[0] == NearbyHint("「B」文字", Side.RIGHT)
+
+
+def test_list_nearby_landmark_options_boosts_disambiguating_landmark() -> None:
+    from src.recorder.vision_context import list_nearby_landmark_options
+
+    vision = {
+        "used_vision": True,
+        "local_cursor": [210, 110],
+        "candidates": [
+            {
+                "bbox": [200, 100, 20, 20],
+                "center": [210, 110],
+                "class_name": "text",
+                "text": "A",
+            },
+            {
+                "bbox": [100, 100, 20, 20],
+                "center": [110, 110],
+                "class_name": "text",
+                "text": "a",
+            },
+            {
+                "bbox": [150, 100, 20, 20],
+                "center": [160, 110],
+                "class_name": "text",
+                "text": "B",
+            },
+        ],
+    }
+    options = list_nearby_landmark_options(vision, instruction="點擊「A」文字")
+    assert options[0]["label"] == "「B」文字"
+    assert options[0]["side"] == "right"
+
+
 def test_append_drag_nearby_context_comments() -> None:
     vision = {
         "used_vision": True,

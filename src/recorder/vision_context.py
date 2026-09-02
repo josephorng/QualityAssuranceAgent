@@ -32,7 +32,11 @@ from cua_mcp.scrollbar_arrows import (
     scrollbar_axis_percent,
     scrollbar_orientation,
 )
-from cua_mcp.select_mouse_target import _detect_mouse_targets_from_bgr
+from cua_mcp.select_mouse_target import (
+    _MOUSE_FILTER_SIMILARITY_THRESHOLD,
+    _detect_mouse_targets_from_bgr,
+    _label_similarity,
+)
 from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text
 from cua_mcp.yolo_onnx import (
     YOLO_CLASS_ELEMENT,
@@ -45,6 +49,7 @@ from src.common.nearby_side import (
     LandmarkCell,
     NearbyHint,
     Side,
+    anchor_satisfies_side,
     format_nearby_context_comment,
     landmark_cell_from_anchor_bbox,
     side_from_anchor_bbox,
@@ -71,6 +76,8 @@ _DRAG_OFFSET_THRESHOLD_PX = 5
 # OCR boxes hug glyphs; pad so a near-miss click still counts as on-target.
 _BBOX_HIT_TOLERANCE_PX = 4
 _CONTAINER_LANDMARK_CLASSES = frozenset({"input", "scrollbar"})
+_SIMILAR_CLASS_LABELS = frozenset({"input", "scrollbar"})
+_CLASS_LABEL_BY_NAME = {"input": "輸入欄", "scrollbar": "滾動條"}
 # All eight directed sides used for recording HTML landmark side groups.
 _DIRECTIONAL_LANDMARK_CELLS = frozenset(
     {
@@ -1153,6 +1160,183 @@ def _neighbor_side_for_candidate(
     return None
 
 
+def _candidate_match_labels(candidate: dict[str, Any]) -> set[str]:
+    """Labels used to find confusable peers (OCR, icons, class names for input/scrollbar)."""
+    labels: set[str] = set()
+    visible = _visible_text(candidate.get("text"))
+    if visible:
+        labels.add(visible)
+    for icon in candidate.get("icons") or []:
+        if not isinstance(icon, dict):
+            continue
+        label = str(icon.get("chinese_id") or icon.get("id") or "").strip()
+        if label:
+            labels.add(label)
+    class_name = str(candidate.get("class_name") or "").strip()
+    if class_name in _SIMILAR_CLASS_LABELS:
+        class_label = _CLASS_LABEL_BY_NAME.get(class_name, "").strip()
+        if class_label:
+            labels.add(class_label)
+    return labels
+
+
+def _candidates_label_similar(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    *,
+    threshold: float = _MOUSE_FILTER_SIMILARITY_THRESHOLD,
+) -> bool:
+    """True when any label pair between two candidates scores at least ``threshold``."""
+    labels_left = _candidate_match_labels(left)
+    labels_right = _candidate_match_labels(right)
+    if not labels_left or not labels_right:
+        return False
+    for a in labels_left:
+        for b in labels_right:
+            if _label_similarity(a, b) >= threshold:
+                return True
+    return False
+
+
+def _find_confusable_peers(
+    candidates: list[Any],
+    *,
+    threshold: float = _MOUSE_FILTER_SIMILARITY_THRESHOLD,
+) -> list[dict[str, Any]]:
+    """Return neighbors label-similar to ``candidates[0]`` (excluding the primary)."""
+    if not candidates or not isinstance(candidates[0], dict):
+        return []
+    primary = candidates[0]
+    peers: list[dict[str, Any]] = []
+    for candidate in candidates[1:]:
+        if not isinstance(candidate, dict):
+            continue
+        if _candidates_label_similar(primary, candidate, threshold=threshold):
+            peers.append(candidate)
+    return peers
+
+
+def _landmark_separates_primary_from_peers(
+    landmark: dict[str, Any],
+    *,
+    primary_bbox: tuple[int, int, int, int],
+    confusables: list[dict[str, Any]],
+) -> Side | None:
+    """Return the script side for primary when landmark uniquely separates all peers."""
+    center = _candidate_center(landmark)
+    if center is None:
+        return None
+    primary_side = side_from_anchor_bbox(primary_bbox, center[0], center[1])
+    if primary_side is None:
+        return None
+
+    lm_bbox = _as_bbox_xywh(landmark.get("bbox"))
+    for peer in confusables:
+        peer_bbox = _as_bbox_xywh(peer.get("bbox"))
+        if peer_bbox is None:
+            continue
+        if anchor_satisfies_side(
+            peer_bbox,
+            center[0],
+            center[1],
+            primary_side,
+            landmark_bbox=lm_bbox,
+        ):
+            return None
+    return primary_side
+
+
+def _betweenness_score(
+    landmark_center: tuple[int, int],
+    primary_center: tuple[int, int],
+    peer_center: tuple[int, int],
+) -> float:
+    """Higher when landmark lies between primary and peer on the separating axis."""
+    lx, ly = landmark_center
+    px, py = primary_center
+    cx, cy = peer_center
+    dx, dy = px - cx, py - cy
+    if abs(dx) >= abs(dy):
+        lo, hi = sorted((px, cx))
+        if lo < lx < hi:
+            mid = (lo + hi) / 2
+            return 1.0 - abs(lx - mid) / max(hi - lo, 1)
+    else:
+        lo, hi = sorted((py, cy))
+        if lo < ly < hi:
+            mid = (lo + hi) / 2
+            return 1.0 - abs(ly - mid) / max(hi - lo, 1)
+    return 0.0
+
+
+def _score_disambiguating_landmarks(
+    candidates: list[Any],
+    *,
+    instruction: str,
+) -> list[tuple[float, int, int, NearbyHint]]:
+    """Score neighbor landmarks that separate the primary from label-similar peers."""
+    if len(candidates) < 2 or not isinstance(candidates[0], dict):
+        return []
+
+    confusables = _find_confusable_peers(candidates)
+    if not confusables:
+        return []
+
+    primary = candidates[0]
+    primary_bbox = _as_bbox_xywh(primary.get("bbox"))
+    primary_center = _candidate_center(primary)
+    if primary_bbox is None or primary_center is None:
+        return []
+
+    confusable_ids = {id(peer) for peer in confusables}
+    scored: list[tuple[float, int, int, NearbyHint]] = []
+
+    for order, candidate in enumerate(candidates[1:]):
+        if not isinstance(candidate, dict) or id(candidate) in confusable_ids:
+            continue
+        label = _candidate_label_for_hint(candidate)
+        if not label or _label_already_in_instruction(label, instruction):
+            continue
+
+        side = _landmark_separates_primary_from_peers(
+            candidate,
+            primary_bbox=primary_bbox,
+            confusables=confusables,
+        )
+        if side is None:
+            continue
+
+        center = _candidate_center(candidate)
+        if center is None:
+            continue
+
+        between = 0.0
+        for peer in confusables:
+            peer_center = _candidate_center(peer)
+            if peer_center is None:
+                continue
+            between = max(between, _betweenness_score(center, primary_center, peer_center))
+
+        tier = _nearby_hint_tier(candidate, label)
+        scored.append((between, tier, order, NearbyHint(label=label, side=side)))
+
+    scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+    return scored
+
+
+def _pick_disambiguating_hints(
+    candidates: list[Any],
+    *,
+    instruction: str,
+    max_count: int = _MIN_NEARBY_TEXT_LANDMARKS,
+) -> list[NearbyHint]:
+    """Pick landmarks whose directed side separates the primary from similar peers."""
+    if max_count <= 0:
+        return []
+    scored = _score_disambiguating_landmarks(candidates, instruction=instruction)
+    return [hint for _, _, _, hint in scored[:max_count]]
+
+
 def _collect_containing_container_hints(
     candidates: list[Any],
     *,
@@ -1214,10 +1398,17 @@ def _prioritized_nearby_parts(
         instruction=instruction,
         click_xy=click_xy,
     )
+    disambiguating = _pick_disambiguating_hints(
+        candidates,
+        instruction=instruction,
+        max_count=_MIN_NEARBY_TEXT_LANDMARKS,
+    )
     forced_labels = {hint.label for hint in forced}
+    disambiguating_labels = {hint.label for hint in disambiguating}
+    reserved_labels = forced_labels | disambiguating_labels
 
     eligible: list[tuple[int, int, int, dict[str, Any], str]] = []
-    seen: set[str] = set(forced_labels)
+    seen: set[str] = set(reserved_labels)
     for order, candidate in enumerate(candidates[1:]):
         if not isinstance(candidate, dict):
             continue
@@ -1246,7 +1437,7 @@ def _prioritized_nearby_parts(
             click_xy=click_xy,
         )
         ranked.append(NearbyHint(label=label, side=side))
-    return forced, ranked
+    return [*forced, *disambiguating], ranked
 
 
 def list_prioritized_nearby_hints(
@@ -1378,8 +1569,17 @@ def list_nearby_landmark_options(
 
     base_instruction = strip_nearby_context_comments(instruction) if instruction else ""
 
-    # (spatial_rank, distance_sq, order, option) — rank within each side by region then distance.
-    pending: list[tuple[int, float, int, dict[str, Any]]] = []
+    disambig_by_label = {
+        hint.label: hint.side
+        for hint in _pick_disambiguating_hints(
+            candidates,
+            instruction=base_instruction,
+            max_count=len(candidates),
+        )
+    }
+
+    # (disambig_boost, spatial_rank, distance_sq, order, option)
+    pending: list[tuple[int, int, float, int, dict[str, Any]]] = []
     seen: set[str] = set()
     for order, candidate in enumerate(candidates[1:]):
         if not isinstance(candidate, dict):
@@ -1390,11 +1590,15 @@ def list_nearby_landmark_options(
         if base_instruction and _label_already_in_instruction(label, base_instruction):
             continue
         seen.add(label)
-        side = _neighbor_side_for_candidate(
-            candidate,
-            primary_bbox=primary_bbox,
-            click_xy=click_xy,
-        )
+        disambig_side = disambig_by_label.get(label)
+        if disambig_side is not None:
+            side = disambig_side
+        else:
+            side = _neighbor_side_for_candidate(
+                candidate,
+                primary_bbox=primary_bbox,
+                click_xy=click_xy,
+            )
         if side is not None:
             display = f"{label}（{side_to_zh(side)}）"
         else:
@@ -1405,8 +1609,10 @@ def list_nearby_landmark_options(
         else:
             dist_sq = float(order)
         spatial_rank = int(candidate.get("spatial_region_rank", 0))
+        disambig_boost = 0 if label in disambig_by_label else 1
         pending.append(
             (
+                disambig_boost,
                 spatial_rank,
                 dist_sq,
                 order,
@@ -1418,21 +1624,21 @@ def list_nearby_landmark_options(
             )
         )
 
-    by_side: dict[str | None, list[tuple[int, float, int, dict[str, Any]]]] = {}
+    by_side: dict[str | None, list[tuple[int, int, float, int, dict[str, Any]]]] = {}
     for item in pending:
-        side_key = item[3].get("side")
+        side_key = item[4].get("side")
         if side_key is None or side_key == "":
             bucket: str | None = None
         else:
             bucket = str(side_key)
         by_side.setdefault(bucket, []).append(item)
 
-    kept: list[tuple[int, float, int, dict[str, Any]]] = []
+    kept: list[tuple[int, int, float, int, dict[str, Any]]] = []
     for items in by_side.values():
-        items.sort(key=lambda row: (row[0], row[1], row[2]))
+        items.sort(key=lambda row: (row[0], row[1], row[2], row[3]))
         kept.extend(items[:_MAX_NEARBY_LANDMARK_OPTIONS_PER_SIDE])
-    kept.sort(key=lambda row: (row[0], row[1], row[2]))
-    return [option for _, _, _, option in kept]
+    kept.sort(key=lambda row: (row[0], row[1], row[2], row[3]))
+    return [option for _, _, _, _, option in kept]
 
 
 def load_yolo_ocr_payload(

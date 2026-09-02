@@ -30,6 +30,7 @@ from cua_mcp.read_screen_text.ocr_image import (
     ocr_box_with_spans,
     ocr_mode_for_yolo_class,
 )
+from cua_mcp.caption_buttons import relabel_caption_button_detections
 from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls, scrollbar_orientation
 from cua_mcp.select_ui_element import (
     UiDetection,
@@ -322,6 +323,7 @@ def _detect_mouse_targets_from_bgr(
     yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
     original_scrollbar_bboxes_out: list[tuple[int, int, int, int]] | None = None,
     original_input_bboxes_out: list[tuple[int, int, int, int]] | None = None,
+    coord_offset: tuple[int, int] = (0, 0),
 ) -> list[UiDetection]:
     """Detect mouse-target UI elements on ``bgr`` via YOLO + OCR.
 
@@ -459,6 +461,11 @@ def _detect_mouse_targets_from_bgr(
         ]
     candidates = fit_scrollbar_bboxes_to_arrow_controls(
         candidates, log_info=_log_info
+    )
+    candidates = relabel_caption_button_detections(
+        candidates,
+        coord_offset=coord_offset,
+        log_info=_log_info,
     )
     if original_scrollbar_bboxes_out is not None:
         for i, old_bbox in pre_fit_scrollbars:
@@ -933,11 +940,12 @@ def _detections_for_captured_monitor(
     yolo_conf_threshold: float,
 ) -> list[UiDetection]:
     """YOLO+OCR on one monitor image, then map boxes into virtual-desktop coords."""
+    left, top = active_monitor_offset(monitor_index)
     local_candidates = _detect_mouse_targets_from_bgr(
         bgr,
         yolo_conf_threshold=yolo_conf_threshold,
+        coord_offset=(left, top),
     )
-    left, top = active_monitor_offset(monitor_index)
     return [_offset_detection(d, left, top) for d in local_candidates]
 
 

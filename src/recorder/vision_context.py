@@ -2229,9 +2229,10 @@ def build_vision_context_at_point(
         return empty
 
     assert bgr is not None
+    offset = event.monitor_offset if event.monitor_offset is not None else (0, 0)
     yolo_error: str | None = None
     try:
-        all_detections = _detect_mouse_targets_from_bgr(bgr)
+        all_detections = _detect_mouse_targets_from_bgr(bgr, coord_offset=offset)
     except RuntimeError as exc:
         all_detections = []
         yolo_error = str(exc)

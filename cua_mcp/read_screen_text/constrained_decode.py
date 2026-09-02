@@ -21,6 +21,7 @@ class CharSpan:
     x_start: float
     x_end: float
 
+
 PUA_MIN = 0xE000
 PUA_MAX = 0xF8FF
 

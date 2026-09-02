@@ -1403,7 +1403,9 @@ class MainHub(ctk.CTk):
                 text=f"警告：以下項目找不到檔案或資料夾（執行時將略過）：{names}"
             )
             if not label.winfo_ismapped():
-                label.pack(fill="x", padx=8, pady=(0, 4), before=list_frame)
+                # CTkScrollableFrame.pack() targets _parent_frame; before= must match that sibling.
+                list_container = getattr(list_frame, "_parent_frame", list_frame)
+                label.pack(fill="x", padx=8, pady=(0, 4), before=list_container)
         else:
             label.configure(text="")
             if label.winfo_ismapped():

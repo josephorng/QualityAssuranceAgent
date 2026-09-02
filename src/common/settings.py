@@ -204,6 +204,8 @@ class Settings(BaseSettings):
     triton_timeout_seconds: float = 20.0
     smart_max_cycles: int = 50
     smart_max_recovery_attempts: int = 3
+    # Scripted playback: stop the run after N attempts on the same script line (0 = unlimited).
+    script_max_step_attempts: int = 0
 
 
 def canonicalize_llm_backend(backend: str) -> str:

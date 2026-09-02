@@ -158,6 +158,21 @@ class BrainModule:
                 continue
         return max_tc + 1
 
+    def _script_step_attempt_number(self, script_step_index: int) -> int:
+        """1-based attempt number for ``script_step_index`` (counts existing ``steps/*_<index>.json``)."""
+        steps_dir = self.manager.require_paths().root / "steps"
+        if not steps_dir.is_dir():
+            return 1
+        suffix = f"_{script_step_index}.json"
+        count = sum(1 for path in steps_dir.iterdir() if path.name.endswith(suffix))
+        return count + 1
+
+    def _script_step_retry_limit_reached(self, script_step_index: int) -> bool:
+        max_attempts = int(self.settings.script_max_step_attempts)
+        if max_attempts <= 0:
+            return False
+        return self._script_step_attempt_number(script_step_index) >= max_attempts
+
     def _save_step_messages(self, messages: list[dict[str, Any]]) -> None:
         """Save or update the decide-loop transcript under `steps/<n>.json`."""        
         steps_dir = self.manager.require_paths().root / "steps"
@@ -1199,6 +1214,48 @@ class BrainModule:
 
             step_goal = self._current_goal()
             step_expected_outcome = self._current_expected_outcome() or None
+            attempt_number = self._script_step_attempt_number(script_step_index)
+            max_attempts = int(self.settings.script_max_step_attempts)
+            if (
+                max_attempts > 0
+                and not verify_result.accomplished
+                and verify_result.branch == "retry"
+                and attempt_number >= max_attempts
+            ):
+                reason = (
+                    f"Script step {script_step_index + 1} failed after "
+                    f"{attempt_number}/{max_attempts} attempt(s): {verify_result.reason}"
+                )
+                self.manager.log_info(
+                    f"Script step retry limit reached ({attempt_number}/{max_attempts}); stopping run"
+                )
+                self._update_step_metadata(
+                    transcript_counter,
+                    script_step_index,
+                    {
+                        "started_at_utc": started_iso,
+                        "finished_at_utc": finished_iso,
+                        "duration_seconds": duration_seconds,
+                        "status": "failed",
+                        "step_index": script_step_index,
+                        "goal": step_goal,
+                        "expected_outcome": step_expected_outcome,
+                        "attempt_number": attempt_number,
+                        "max_attempts": max_attempts,
+                        "verify": {
+                            "accomplished": verify_result.accomplished,
+                            "branch": verify_result.branch,
+                            "target_step": verify_result.target_step,
+                            "clearly_unmet": verify_result.clearly_unmet,
+                            "reason": verify_result.reason,
+                        },
+                    },
+                )
+                return BrainStepResult(
+                    reason=reason,
+                    step_finished=False,
+                    step_index=script_step_index,
+                )
             run_complete = self._apply_verify_branch(verify_result)
             if verify_result.accomplished:
                 status = "completed"

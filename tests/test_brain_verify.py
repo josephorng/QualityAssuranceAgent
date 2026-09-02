@@ -9,13 +9,17 @@ from src.common.models import ScriptStepVerifyResult
 from src.common.prompting import get_prompt
 
 
-def _brain_for_process_step() -> BrainModule:
+def _brain_for_process_step(*, max_step_attempts: int = 0) -> BrainModule:
     brain = BrainModule.__new__(BrainModule)
     brain.manager = MagicMock()
     brain.manager.log_info = MagicMock()
     brain.manager.log_error = MagicMock()
     brain.manager.set_step_log_context = MagicMock()
     brain.manager.clear_step_log_context = MagicMock()
+    brain.manager.require_paths = MagicMock(
+        return_value=MagicMock(root=MagicMock(is_dir=lambda: False))
+    )
+    brain.settings = MagicMock(script_max_step_attempts=max_step_attempts)
     brain.script_lines = [
         "click search",
         "click calculator",
@@ -339,6 +343,61 @@ async def test_process_step_verifies_when_expected_empty_and_actor_failed() -> N
     brain._verify_script_step.assert_awaited_once()
     metadata = brain._update_step_metadata.call_args.args[2]
     assert metadata["status"] == "failed"
+    assert metadata["verify"]["branch"] == "retry"
+
+
+@pytest.mark.asyncio
+async def test_process_step_stops_when_script_retry_limit_reached(tmp_path) -> None:
+    brain = _brain_for_process_step(max_step_attempts=3)
+    steps_dir = tmp_path / "steps"
+    steps_dir.mkdir()
+    (steps_dir / "0_1.json").write_text("{}", encoding="utf-8")
+    (steps_dir / "1_1.json").write_text("{}", encoding="utf-8")
+    brain.manager.require_paths.return_value.root = tmp_path
+    brain.loop = AsyncMock(return_value=False)
+    brain._verify_script_step = AsyncMock(
+        return_value=ScriptStepVerifyResult(
+            accomplished=False,
+            branch="retry",
+            target_step=None,
+            clearly_unmet=True,
+            reason="target not found",
+        )
+    )
+
+    result = await brain.process_step()
+
+    assert result.step_finished is False
+    assert brain._script_step_index == 1
+    assert "3/3 attempt(s)" in result.reason
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["attempt_number"] == 3
+    assert metadata["max_attempts"] == 3
+
+
+@pytest.mark.asyncio
+async def test_process_step_allows_retry_below_script_limit(tmp_path) -> None:
+    brain = _brain_for_process_step(max_step_attempts=3)
+    steps_dir = tmp_path / "steps"
+    steps_dir.mkdir()
+    (steps_dir / "0_1.json").write_text("{}", encoding="utf-8")
+    brain.manager.require_paths.return_value.root = tmp_path
+    brain.loop = AsyncMock(return_value=False)
+    brain._verify_script_step = AsyncMock(
+        return_value=ScriptStepVerifyResult(
+            accomplished=False,
+            branch="retry",
+            target_step=None,
+            clearly_unmet=True,
+            reason="target not found",
+        )
+    )
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 1
+    metadata = brain._update_step_metadata.call_args.args[2]
     assert metadata["verify"]["branch"] == "retry"
 
 

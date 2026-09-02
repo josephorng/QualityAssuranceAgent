@@ -55,7 +55,7 @@ python -m nuitka ^
     --include-package-data=opencc ^
     --include-package-data=customtkinter ^
     --enable-plugin=tk-inter ^
-    --windows-disable-console ^
+    --windows-console-mode=disable ^
     %ENTRYSCRIPT%
 set "BUILD_EXIT=!ERRORLEVEL!"
 

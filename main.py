@@ -71,7 +71,7 @@ def write_crash_log(
 
 
 def _ensure_stdio_streams() -> None:
-    """Windows GUI builds (--windows-disable-console) leave stdout/stderr as None.
+    """Windows GUI builds (--windows-console-mode=disable) leave stdout/stderr as None.
 
     CustomTkinter writes font warnings to sys.stderr; without a stream that raises
     AttributeError: 'NoneType' object has no attribute 'write'.

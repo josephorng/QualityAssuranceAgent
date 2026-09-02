@@ -863,7 +863,61 @@ def test_write_recording_html_uses_next_event_screenshot_as_after(tmp_path: Path
     assert 'src="screenshots/event_001.jpeg"' not in second_group
 
 
-def test_write_recording_html_adds_wait_button_from_elapsed(tmp_path: Path) -> None:
+def test_write_recording_html_uses_final_after_for_last_step(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000042"
+    run_root.mkdir(parents=True)
+    (run_root / "events").mkdir()
+    (run_root / "screenshots").mkdir()
+    shot1 = _make_jpeg(run_root / "screenshots" / "event_001.jpeg")
+    shot2 = _make_jpeg(run_root / "screenshots" / "event_002.jpeg")
+    final_after = _make_jpeg(run_root / "screenshots" / "final_after.jpeg")
+    for index, shot in ((1, shot1), (2, shot2)):
+        (run_root / "events" / f"event_{index:03d}.json").write_text(
+            json.dumps(
+                {
+                    "index": index,
+                    "timestamp_utc": f"2026-07-21T04:00:0{index}+00:00",
+                    "kind": "click",
+                    "cursor_xy": [10, 20],
+                    "screenshot_path": str(shot),
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    (run_root / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_root.name,
+                "started_at_utc": "2026-07-21T04:00:00+00:00",
+                "stopped_at_utc": "2026-07-21T04:01:00+00:00",
+                "event_count": 2,
+                "events": ["events/event_001.json", "events/event_002.json"],
+                "final_after_screenshot": "screenshots/final_after.jpeg",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "analysis").mkdir()
+    for index, instruction in ((1, "點擊「搜尋」"), (2, "點擊「確定」")):
+        (run_root / "analysis" / f"event_{index:03d}.json").write_text(
+            json.dumps({"event_index": index, "instruction": instruction}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+
+    second_group = html.split('data-event-index="2"', 1)[1].split("</details>", 1)[0]
+    first_group = html.split('data-event-index="1"', 1)[1].split("</details>", 1)[0]
+
+    assert second_group.index("screenshots/event_002.jpeg") < second_group.index(
+        "screenshots/final_after.jpeg"
+    )
+    assert 'src="screenshots/final_after.jpeg"' in second_group
+    assert "無螢幕截圖" not in second_group
+    assert 'src="screenshots/final_after.jpeg"' not in first_group
+    assert final_after.is_file()
     run_root = tmp_path / "recording_20260721_120000_000041"
     run_root.mkdir(parents=True)
     (run_root / "events").mkdir()

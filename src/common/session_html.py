@@ -4095,6 +4095,7 @@ def _render_recording_event_html(
     event: dict[str, Any],
     next_event: dict[str, Any] | None = None,
     display_index: int | None = None,
+    final_after_screenshot: str | None = None,
 ) -> str:
     raw_index = event.get("index")
     index = raw_index if isinstance(raw_index, int) else 0
@@ -4190,6 +4191,11 @@ def _render_recording_event_html(
     if after is None:
         after = _resolve_recording_screenshot(
             str(event.get("end_screenshot_path") or ""),
+            run_root,
+        )
+    if after is None and next_event is None:
+        after = _resolve_recording_screenshot(
+            str(final_after_screenshot or ""),
             run_root,
         )
     shots = _render_shot_html("動作前截圖", before, run_root) + _render_shot_html(
@@ -4699,12 +4705,19 @@ def write_recording_html_from_run(run_root: Path, *, update_index: bool = True) 
     run_root.mkdir(parents=True, exist_ok=True)
 
     events = _load_recording_events(run_root)
+    manifest = _load_session_manifest(run_root)
+    final_after_screenshot: str | None = None
+    if isinstance(manifest, dict):
+        raw_final_after = manifest.get("final_after_screenshot")
+        if isinstance(raw_final_after, str) and raw_final_after.strip():
+            final_after_screenshot = raw_final_after.strip()
     events_html = [
         _render_recording_event_html(
             run_root=run_root,
             event=event,
             next_event=events[index + 1] if index + 1 < len(events) else None,
             display_index=index + 1,
+            final_after_screenshot=final_after_screenshot,
         )
         for index, event in enumerate(events)
     ]

@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from cua_mcp import hand_tools
+from cua_mcp.instruction_offset import extract_track_percent
+from cua_mcp.scrollbar_arrows import point_from_scrollbar_percent
 from cua_mcp.select_mouse_target import find_mouse_point, resolve_mouse_point
 from cua_mcp.visual_mouse import resolve_visual_mouse_point
 from cua_mcp.storage import store_clipboard_text, store_image, store_text, _current_run_paths
@@ -170,6 +172,50 @@ def _drag_at_points(
     return hand_tools.drag(x1, y1, x2, y2, duration=duration, button=button)
 
 
+def _bbox_tuple_from_meta(meta: dict[str, Any]) -> tuple[int, int, int, int] | None:
+    bbox = meta.get("target_bbox")
+    if not isinstance(bbox, dict):
+        return None
+    try:
+        return (int(bbox["x"]), int(bbox["y"]), int(bbox["w"]), int(bbox["h"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _destination_track_percent_on_pinned_scrollbar(
+    start_instruction: str,
+    destination_instruction: str,
+    start_meta: dict[str, Any],
+) -> int | None:
+    if extract_track_percent(start_instruction) is None:
+        return None
+    dest_percent = extract_track_percent(destination_instruction)
+    if dest_percent is None:
+        return None
+    if start_meta.get("class_name") != "scrollbar":
+        return None
+    if _bbox_tuple_from_meta(start_meta) is None:
+        return None
+    return dest_percent
+
+
+def _pinned_scrollbar_destination_meta(
+    start_meta: dict[str, Any],
+    *,
+    destination_instruction: str,
+    destination_nearby_objects: list[str] | None,
+    track_percent: int,
+    x: int,
+    y: int,
+) -> dict[str, Any]:
+    end_meta = dict(start_meta)
+    end_meta["anchor_instruction"] = destination_instruction
+    end_meta["nearby_objects"] = list(destination_nearby_objects or [])
+    end_meta["track_percent"] = track_percent
+    end_meta["resolved_center"] = {"x": x, "y": y}
+    return end_meta
+
+
 async def _drag(
     start_instruction: str,
     destination_instruction: str,
@@ -181,17 +227,51 @@ async def _drag(
     if is_smart_mode():
         # Smart mode: one-pass multimodal selection (same path as move_mouse_visual).
         x1, y1, start_meta = await resolve_visual_mouse_point(start_instruction)
-        x2, y2, end_meta = await resolve_visual_mouse_point(destination_instruction)
+        dest_track_percent = _destination_track_percent_on_pinned_scrollbar(
+            start_instruction,
+            destination_instruction,
+            start_meta,
+        )
+        pinned_bbox = _bbox_tuple_from_meta(start_meta)
+        if dest_track_percent is not None and pinned_bbox is not None:
+            x2, y2 = point_from_scrollbar_percent(pinned_bbox, dest_track_percent)
+            end_meta = _pinned_scrollbar_destination_meta(
+                start_meta,
+                destination_instruction=destination_instruction,
+                destination_nearby_objects=destination_nearby_objects,
+                track_percent=dest_track_percent,
+                x=x2,
+                y=y2,
+            )
+        else:
+            x2, y2, end_meta = await resolve_visual_mouse_point(destination_instruction)
         default_kind = "visual_mouse_target"
     else:
         x1, y1, start_meta = await resolve_mouse_point(
             start_instruction,
             nearby_objects=start_nearby_objects,
         )
-        x2, y2, end_meta = await resolve_mouse_point(
+        dest_track_percent = _destination_track_percent_on_pinned_scrollbar(
+            start_instruction,
             destination_instruction,
-            nearby_objects=destination_nearby_objects,
+            start_meta,
         )
+        pinned_bbox = _bbox_tuple_from_meta(start_meta)
+        if dest_track_percent is not None and pinned_bbox is not None:
+            x2, y2 = point_from_scrollbar_percent(pinned_bbox, dest_track_percent)
+            end_meta = _pinned_scrollbar_destination_meta(
+                start_meta,
+                destination_instruction=destination_instruction,
+                destination_nearby_objects=destination_nearby_objects,
+                track_percent=dest_track_percent,
+                x=x2,
+                y=y2,
+            )
+        else:
+            x2, y2, end_meta = await resolve_mouse_point(
+                destination_instruction,
+                nearby_objects=destination_nearby_objects,
+            )
         default_kind = "mouse_target"
     result = _drag_at_points(x1, y1, x2, y2, duration=duration, button=button)
     merged: dict[str, Any] = dict(result)

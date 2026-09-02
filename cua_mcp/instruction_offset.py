@@ -294,3 +294,9 @@ async def parse_mouse_target_instruction(
             f"nearby={nearby!r}"
         )
         return anchor, dx, dy, nearby, char, char_occurrence, track_percent
+
+
+def extract_track_percent(instruction: str) -> int | None:
+    """Return 0–100 when ``instruction`` contains ``的N%處`` (e.g. 滾動條的60%處)."""
+    _, track_percent = _extract_track_percent_regex((instruction or "").strip())
+    return track_percent

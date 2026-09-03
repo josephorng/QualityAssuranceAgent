@@ -1005,6 +1005,25 @@ def _candidate_label_for_hint(candidate: dict[str, Any]) -> str | None:
     return anchor
 
 
+def _is_stable_disambiguation_label(label: str, candidate: dict[str, Any]) -> bool:
+    """True when ``label`` is stable enough to auto-pick for peer set-cover.
+
+    Drops ``未知`` anchors, PUA-containing phrases, and quoted OCR that starts
+    with underscore noise (e.g. 「_未分類黏署」).
+    """
+    if not label or label == "未知" or label.endswith("未知"):
+        return False
+    if str(candidate.get("class_name") or "").strip() == "unknown":
+        return False
+    if any(is_pua_char(ch) for ch in label):
+        return False
+    if label.startswith("「") and "」" in label:
+        inner = label[1 : label.index("」")]
+        if inner.startswith("_"):
+            return False
+    return True
+
+
 def _label_already_in_instruction(label: str, instruction: str) -> bool:
     """True when the label's quoted name or full phrase already appears in the instruction."""
     if label in instruction:
@@ -1160,18 +1179,24 @@ def _neighbor_side_for_candidate(
     return None
 
 
-def _candidate_match_labels(candidate: dict[str, Any]) -> set[str]:
-    """Labels used to find confusable peers (OCR, icons, class names for input/scrollbar)."""
+def _candidate_icon_ids(candidate: dict[str, Any]) -> set[str]:
+    """Return icon ``chinese_id`` / ``id`` labels on ``candidate``."""
     labels: set[str] = set()
-    visible = _visible_text(candidate.get("text"))
-    if visible:
-        labels.add(visible)
     for icon in candidate.get("icons") or []:
         if not isinstance(icon, dict):
             continue
         label = str(icon.get("chinese_id") or icon.get("id") or "").strip()
         if label:
             labels.add(label)
+    return labels
+
+
+def _candidate_non_icon_labels(candidate: dict[str, Any]) -> set[str]:
+    """OCR text and input/scrollbar class labels (excludes icon ids)."""
+    labels: set[str] = set()
+    visible = _visible_text(candidate.get("text"))
+    if visible:
+        labels.add(visible)
     class_name = str(candidate.get("class_name") or "").strip()
     if class_name in _SIMILAR_CLASS_LABELS:
         class_label = _CLASS_LABEL_BY_NAME.get(class_name, "").strip()
@@ -1180,21 +1205,52 @@ def _candidate_match_labels(candidate: dict[str, Any]) -> set[str]:
     return labels
 
 
+def _candidate_match_labels(candidate: dict[str, Any]) -> set[str]:
+    """Labels used to find confusable peers (OCR, icons, class names for input/scrollbar)."""
+    return _candidate_icon_ids(candidate) | _candidate_non_icon_labels(candidate)
+
+
+def _any_label_pair_similar(
+    left_labels: set[str],
+    right_labels: set[str],
+    *,
+    threshold: float,
+) -> bool:
+    """True when any cross-pair scores at least ``threshold``."""
+    if not left_labels or not right_labels:
+        return False
+    for a in left_labels:
+        for b in right_labels:
+            if _label_similarity(a, b) >= threshold:
+                return True
+    return False
+
+
 def _candidates_label_similar(
     left: dict[str, Any],
     right: dict[str, Any],
     *,
     threshold: float = _MOUSE_FILTER_SIMILARITY_THRESHOLD,
 ) -> bool:
-    """True when any label pair between two candidates scores at least ``threshold``."""
-    labels_left = _candidate_match_labels(left)
-    labels_right = _candidate_match_labels(right)
-    if not labels_left or not labels_right:
-        return False
-    for a in labels_left:
-        for b in labels_right:
-            if _label_similarity(a, b) >= threshold:
-                return True
+    """True when candidates share a confusable label.
+
+    Icon ids match only on exact ``chinese_id`` overlap (so ``向下V箭頭`` does not
+    match ``向左滾動箭頭``). OCR / class labels still use fuzzy similarity, including
+    icon-vs-text pairs (e.g. icon ``Edge`` vs text ``Edge``).
+    """
+    icons_left = _candidate_icon_ids(left)
+    icons_right = _candidate_icon_ids(right)
+    if icons_left & icons_right:
+        return True
+
+    texts_left = _candidate_non_icon_labels(left)
+    texts_right = _candidate_non_icon_labels(right)
+    if _any_label_pair_similar(texts_left, texts_right, threshold=threshold):
+        return True
+    if _any_label_pair_similar(icons_left, texts_right, threshold=threshold):
+        return True
+    if _any_label_pair_similar(texts_left, icons_right, threshold=threshold):
+        return True
     return False
 
 
@@ -1214,36 +1270,6 @@ def _find_confusable_peers(
         if _candidates_label_similar(primary, candidate, threshold=threshold):
             peers.append(candidate)
     return peers
-
-
-def _landmark_separates_primary_from_peers(
-    landmark: dict[str, Any],
-    *,
-    primary_bbox: tuple[int, int, int, int],
-    confusables: list[dict[str, Any]],
-) -> Side | None:
-    """Return the script side for primary when landmark uniquely separates all peers."""
-    center = _candidate_center(landmark)
-    if center is None:
-        return None
-    primary_side = side_from_anchor_bbox(primary_bbox, center[0], center[1])
-    if primary_side is None:
-        return None
-
-    lm_bbox = _as_bbox_xywh(landmark.get("bbox"))
-    for peer in confusables:
-        peer_bbox = _as_bbox_xywh(peer.get("bbox"))
-        if peer_bbox is None:
-            continue
-        if anchor_satisfies_side(
-            peer_bbox,
-            center[0],
-            center[1],
-            primary_side,
-            landmark_bbox=lm_bbox,
-        ):
-            return None
-    return primary_side
 
 
 def _betweenness_score(
@@ -1269,12 +1295,113 @@ def _betweenness_score(
     return 0.0
 
 
+def _dist_sq(a: tuple[int, int], b: tuple[int, int]) -> float:
+    """Squared Euclidean distance between two points."""
+    dx = a[0] - b[0]
+    dy = a[1] - b[1]
+    return float(dx * dx + dy * dy)
+
+
+def _landmark_relevant_to_peer(
+    landmark_center: tuple[int, int],
+    primary_center: tuple[int, int],
+    peer_center: tuple[int, int],
+) -> bool:
+    """True when ``landmark`` is local enough to count as separating ``peer``.
+
+    Far landmarks (e.g. sidebar text) can create spurious unique sides via the
+    9-section grid. Count an elimination only when the landmark lies between
+    primary and peer, or is near the primary relative to the peer distance.
+    """
+    if _betweenness_score(landmark_center, primary_center, peer_center) > 0.0:
+        return True
+    peer_dist_sq = _dist_sq(primary_center, peer_center)
+    # Allow field labels beside the control; pad so near-miss geometry still counts.
+    max_dist_sq = peer_dist_sq + 2.0 * (peer_dist_sq**0.5) * 80.0 + 80.0 * 80.0
+    return _dist_sq(landmark_center, primary_center) <= max_dist_sq
+
+
+def _peers_eliminated_by_landmark(
+    landmark: dict[str, Any],
+    *,
+    primary_bbox: tuple[int, int, int, int],
+    primary_center: tuple[int, int],
+    confusables: list[dict[str, Any]],
+) -> tuple[Side | None, set[int]]:
+    """Return ``(primary_side, eliminated_peer_ids)`` for a partial separator.
+
+    A peer is eliminated when it does **not** satisfy the same directed side as
+    the primary relative to ``landmark``, and the landmark is local to that
+    primary/peer pair. Returns ``(None, empty)`` when the landmark has no
+    directed side for the primary or eliminates nobody.
+    """
+    center = _candidate_center(landmark)
+    if center is None:
+        return None, set()
+    primary_side = side_from_anchor_bbox(primary_bbox, center[0], center[1])
+    if primary_side is None:
+        return None, set()
+
+    lm_bbox = _as_bbox_xywh(landmark.get("bbox"))
+    eliminated: set[int] = set()
+    for peer in confusables:
+        peer_bbox = _as_bbox_xywh(peer.get("bbox"))
+        peer_center = _candidate_center(peer)
+        if peer_bbox is None or peer_center is None:
+            continue
+        if anchor_satisfies_side(
+            peer_bbox,
+            center[0],
+            center[1],
+            primary_side,
+            landmark_bbox=lm_bbox,
+        ):
+            continue
+        if not _landmark_relevant_to_peer(center, primary_center, peer_center):
+            continue
+        eliminated.add(id(peer))
+    if not eliminated:
+        return None, set()
+    return primary_side, eliminated
+
+
+def _landmark_separates_primary_from_peers(
+    landmark: dict[str, Any],
+    *,
+    primary_bbox: tuple[int, int, int, int],
+    confusables: list[dict[str, Any]],
+    primary_center: tuple[int, int] | None = None,
+) -> Side | None:
+    """Return the script side for primary when landmark uniquely separates all peers."""
+    center = primary_center
+    if center is None:
+        # Derive from bbox when callers omit an explicit primary center.
+        x, y, w, h = primary_bbox
+        center = (x + w // 2, y + h // 2)
+    side, eliminated = _peers_eliminated_by_landmark(
+        landmark,
+        primary_bbox=primary_bbox,
+        primary_center=center,
+        confusables=confusables,
+    )
+    if side is None or len(eliminated) < len(confusables):
+        return None
+    return side
+
+
 def _score_disambiguating_landmarks(
     candidates: list[Any],
     *,
     instruction: str,
-) -> list[tuple[float, int, int, NearbyHint]]:
-    """Score neighbor landmarks that separate the primary from label-similar peers."""
+) -> list[tuple[set[int], float, int, int, int, tuple[int, int], NearbyHint]]:
+    """Score neighbor landmarks that eliminate at least one label-similar peer.
+
+    Each row is
+    ``(eliminated_peer_ids, betweenness, tier, order, label_freq, center, hint)``.
+    Landmarks need not separate every peer alone; callers greedy-cover the peer
+    set. Lower ``label_freq`` is preferred so unique labels (e.g. 「確定」) beat
+    repeated grid text (e.g. many 「未分類裝置」).
+    """
     if len(candidates) < 2 or not isinstance(candidates[0], dict):
         return []
 
@@ -1288,8 +1415,24 @@ def _score_disambiguating_landmarks(
     if primary_bbox is None or primary_center is None:
         return []
 
+    label_freq: dict[str, int] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        lab = _candidate_label_for_hint(candidate)
+        if lab:
+            label_freq[lab] = label_freq.get(lab, 0) + 1
+
     confusable_ids = {id(peer) for peer in confusables}
-    scored: list[tuple[float, int, int, NearbyHint]] = []
+    peer_centers: dict[int, tuple[int, int]] = {}
+    for peer in confusables:
+        center = _candidate_center(peer)
+        if center is not None:
+            peer_centers[id(peer)] = center
+
+    scored: list[
+        tuple[set[int], float, int, int, int, tuple[int, int], NearbyHint]
+    ] = []
 
     for order, candidate in enumerate(candidates[1:]):
         if not isinstance(candidate, dict) or id(candidate) in confusable_ids:
@@ -1297,13 +1440,16 @@ def _score_disambiguating_landmarks(
         label = _candidate_label_for_hint(candidate)
         if not label or _label_already_in_instruction(label, instruction):
             continue
+        if not _is_stable_disambiguation_label(label, candidate):
+            continue
 
-        side = _landmark_separates_primary_from_peers(
+        side, eliminated = _peers_eliminated_by_landmark(
             candidate,
             primary_bbox=primary_bbox,
+            primary_center=primary_center,
             confusables=confusables,
         )
-        if side is None:
+        if side is None or not eliminated:
             continue
 
         center = _candidate_center(candidate)
@@ -1311,16 +1457,29 @@ def _score_disambiguating_landmarks(
             continue
 
         between = 0.0
-        for peer in confusables:
-            peer_center = _candidate_center(peer)
+        for peer_id in eliminated:
+            peer_center = peer_centers.get(peer_id)
             if peer_center is None:
                 continue
-            between = max(between, _betweenness_score(center, primary_center, peer_center))
+            between = max(
+                between, _betweenness_score(center, primary_center, peer_center)
+            )
 
         tier = _nearby_hint_tier(candidate, label)
-        scored.append((between, tier, order, NearbyHint(label=label, side=side)))
+        scored.append(
+            (
+                eliminated,
+                between,
+                tier,
+                order,
+                label_freq.get(label, 1),
+                center,
+                NearbyHint(label=label, side=side),
+            )
+        )
 
-    scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+    # More peers covered, rarer label, better tier, closer order, higher between.
+    scored.sort(key=lambda item: (-len(item[0]), item[4], item[2], item[3], -item[1]))
     return scored
 
 
@@ -1329,12 +1488,106 @@ def _pick_disambiguating_hints(
     *,
     instruction: str,
     max_count: int = _MIN_NEARBY_TEXT_LANDMARKS,
+    reserved_labels: set[str] | None = None,
 ) -> list[NearbyHint]:
-    """Pick landmarks whose directed side separates the primary from similar peers."""
+    """Greedy set-cover landmarks that together separate primary from similar peers.
+
+    Each pick must eliminate at least one still-confused peer. Stops when every
+    peer is covered or ``max_count`` is reached. Prefers landmarks that clear more
+    remaining peers, then closer to those peers, closer to the primary, rarer
+    labels, multi-char text, and betweenness. ``reserved_labels`` (e.g. forced
+    containing ``輸入欄``) are skipped so a duplicate bare class label cannot
+    consume a cover slot.
+    """
     if max_count <= 0:
         return []
     scored = _score_disambiguating_landmarks(candidates, instruction=instruction)
-    return [hint for _, _, _, hint in scored[:max_count]]
+    if not scored:
+        return []
+
+    confusables = _find_confusable_peers(candidates)
+    primary_center = None
+    if candidates and isinstance(candidates[0], dict):
+        primary_center = _candidate_center(candidates[0])
+    peer_centers: dict[int, tuple[int, int]] = {}
+    for peer in confusables:
+        center = _candidate_center(peer)
+        if center is not None:
+            peer_centers[id(peer)] = center
+
+    remaining: set[int] = set()
+    for eliminated, *_rest in scored:
+        remaining |= eliminated
+    if not remaining:
+        return []
+
+    picked: list[NearbyHint] = []
+    used_labels: set[str] = set(reserved_labels or ())
+    while remaining and len(picked) < max_count:
+        best: (
+            tuple[int, float, int, int, float, float, NearbyHint, set[int]] | None
+        ) = None
+        for eliminated, between, tier, _order, freq, center, hint in scored:
+            if hint.label in used_labels:
+                continue
+            newly = eliminated & remaining
+            if not newly:
+                continue
+            dist_vals = [
+                _dist_sq(center, peer_centers[pid])
+                for pid in newly
+                if pid in peer_centers
+            ]
+            min_peer_dist = (
+                min(dist_vals) ** 0.5 if dist_vals else float("inf")
+            )
+            primary_dist = (
+                _dist_sq(center, primary_center) ** 0.5
+                if primary_center is not None
+                else min_peer_dist
+            )
+            row_delta = (
+                float(abs(center[1] - primary_center[1]))
+                if primary_center is not None
+                else 0.0
+            )
+            # Penalize off-row landmarks lightly so same-row field labels win the
+            # first pick, while unique OK/Cancel buttons still beat distant grid
+            # text on later picks.
+            locality = min_peer_dist + 2.0 * row_delta
+            key = (
+                len(newly),
+                -locality,
+                -freq,
+                -tier,
+                -primary_dist,
+                between,
+            )
+            if best is None or key > (
+                best[0],
+                -best[1],
+                -best[2],
+                -best[3],
+                -best[4],
+                best[5],
+            ):
+                best = (
+                    len(newly),
+                    locality,
+                    freq,
+                    tier,
+                    primary_dist,
+                    between,
+                    hint,
+                    newly,
+                )
+        if best is None:
+            break
+        _n, _loc, _freq, _tier, _pd, _between, hint, newly = best
+        picked.append(hint)
+        used_labels.add(hint.label)
+        remaining -= newly
+    return picked
 
 
 def _collect_containing_container_hints(
@@ -1402,6 +1655,7 @@ def _prioritized_nearby_parts(
         candidates,
         instruction=instruction,
         max_count=_MIN_NEARBY_TEXT_LANDMARKS,
+        reserved_labels={hint.label for hint in forced},
     )
     forced_labels = {hint.label for hint in forced}
     disambiguating_labels = {hint.label for hint in disambiguating}
@@ -1569,12 +1823,21 @@ def list_nearby_landmark_options(
 
     base_instruction = strip_nearby_context_comments(instruction) if instruction else ""
 
+    # Boost any landmark that eliminates ≥1 confusable peer (not only the
+    # greedy cover set used in auto-picked nearby comments).
     disambig_by_label = {
         hint.label: hint.side
-        for hint in _pick_disambiguating_hints(
+        for (
+            _elim,
+            _between,
+            _tier,
+            _order,
+            _freq,
+            _center,
+            hint,
+        ) in _score_disambiguating_landmarks(
             candidates,
             instruction=base_instruction,
-            max_count=len(candidates),
         )
     }
 

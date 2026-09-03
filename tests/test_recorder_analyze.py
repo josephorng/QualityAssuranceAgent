@@ -718,6 +718,145 @@ def test_collect_nearby_hints_prefers_disambiguating_landmark_between_similar_te
     assert hints[0] == NearbyHint("「B」文字", Side.RIGHT)
 
 
+def test_candidates_label_similar_icons_require_exact_chinese_id() -> None:
+    from src.recorder.vision_context import _candidates_label_similar
+
+    v_arrow = {
+        "class_name": "element",
+        "text": "",
+        "icons": [{"chinese_id": "向下V箭頭"}],
+    }
+    other_v = {
+        "class_name": "element",
+        "text": "",
+        "icons": [{"chinese_id": "向下V箭頭"}],
+    }
+    scroll_left = {
+        "class_name": "element",
+        "text": "",
+        "icons": [{"chinese_id": "向左滾動箭頭"}],
+    }
+    assert _candidates_label_similar(v_arrow, other_v) is True
+    assert _candidates_label_similar(v_arrow, scroll_left) is False
+
+
+def test_find_confusable_peers_ignores_fuzzy_icon_cousins() -> None:
+    from src.recorder.vision_context import _find_confusable_peers
+
+    candidates = [
+        {
+            "bbox": [813, 391, 11, 10],
+            "center": [818, 396],
+            "class_name": "element",
+            "icons": [{"chinese_id": "向下V箭頭"}],
+        },
+        {
+            "bbox": [400, 858, 6, 8],
+            "center": [403, 862],
+            "class_name": "element",
+            "icons": [{"chinese_id": "向左滾動箭頭"}],
+        },
+        {
+            "bbox": [811, 424, 14, 13],
+            "center": [818, 430],
+            "class_name": "element",
+            "icons": [{"chinese_id": "向下V箭頭"}],
+        },
+    ]
+    peers = _find_confusable_peers(candidates)
+    assert len(peers) == 1
+    assert peers[0]["center"] == [818, 430]
+
+
+def test_collect_nearby_hints_set_cover_disambiguates_2x2_v_arrows() -> None:
+    """Row+column landmarks together uniquely ID one of four identical V-arrows."""
+    from src.common.nearby_side import NearbyHint, Side
+    from src.recorder.vision_context import collect_nearby_hints
+
+    def _v_arrow(cx: int, cy: int, *, w: int = 11, h: int = 10) -> dict:
+        return {
+            "bbox": [cx - w // 2, cy - h // 2, w, h],
+            "center": [cx, cy],
+            "class_name": "element",
+            "text": "",
+            "icons": [{"chinese_id": "向下V箭頭"}],
+            "spatial_region_rank": 0,
+        }
+
+    vision = {
+        "used_vision": True,
+        "local_cursor": [820, 397],
+        "candidates": [
+            _v_arrow(818, 396),
+            {
+                "bbox": [731, 384, 98, 22],
+                "center": [780, 395],
+                "class_name": "input",
+                "text": None,
+                "spatial_region_rank": 0,
+            },
+            _v_arrow(818, 430, w=14, h=13),
+            {
+                "bbox": [849, 387, 320, 19],
+                "center": [1009, 396],
+                "class_name": "input",
+                "text": None,
+                "spatial_region_rank": 0,
+            },
+            {
+                "bbox": [736, 390, 47, 13],
+                "center": [759, 396],
+                "class_name": "text",
+                "text": "資產名稱",
+                "spatial_region_rank": 0,
+            },
+            {
+                "bbox": [736, 426, 36, 12],
+                "center": [754, 432],
+                "class_name": "text",
+                "text": "IP位址",
+                "spatial_region_rank": 0,
+            },
+            _v_arrow(1160, 396, w=15, h=16),
+            _v_arrow(1160, 433, w=9, h=6),
+            {
+                "bbox": [1054, 505, 25, 12],
+                "center": [1066, 511],
+                "class_name": "text",
+                "text": "確定",
+                "spatial_region_rank": 0,
+            },
+            {
+                "bbox": [400, 858, 6, 8],
+                "center": [403, 862],
+                "class_name": "element",
+                "icons": [{"chinese_id": "向左滾動箭頭"}],
+                "spatial_region_rank": 0,
+            },
+        ],
+    }
+    hints = collect_nearby_hints(
+        vision, instruction="將滑鼠移到「向下V箭頭」圖示"
+    )
+    assert NearbyHint("輸入欄", Side.INSIDE) in hints
+
+    from src.recorder.vision_context import _pick_disambiguating_hints
+
+    picked = _pick_disambiguating_hints(
+        vision["candidates"],
+        instruction="將滑鼠移到「向下V箭頭」圖示",
+        reserved_labels={"輸入欄"},
+    )
+    assert len(picked) >= 2
+    labels = {hint.label for hint in picked}
+    # Row cue (field label) + column cue (OK button).
+    assert "「資產名稱」文字" in labels
+    assert "「確定」文字" in labels
+    by_label = {hint.label: hint.side for hint in picked}
+    assert by_label["「資產名稱」文字"] == Side.RIGHT
+    assert by_label["「確定」文字"] == Side.UPPER_LEFT
+
+
 def test_list_nearby_landmark_options_boosts_disambiguating_landmark() -> None:
     from src.recorder.vision_context import list_nearby_landmark_options
 

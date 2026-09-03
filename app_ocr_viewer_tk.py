@@ -655,7 +655,7 @@ def load_yolo_lines(image_path: Path, *, yolo_conf_threshold: float) -> tuple[li
                 chinese_ids=icon_labels,
             )
         )
-    # Pre-fit YOLO scrollbar boxes (when arrow-fit changed them) for debug.
+    # Pre-fit YOLO scrollbar boxes (all of them) for "Original scrollbar" debug.
     for bbox in original_scrollbars:
         lines.append(
             OcrLine(

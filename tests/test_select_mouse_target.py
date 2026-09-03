@@ -860,6 +860,224 @@ def test_fit_vertical_scrollbar_picks_closest_to_center_on_each_side() -> None:
     assert fitted.bbox[1] + fitted.bbox[3] == 612
 
 
+def test_create_vertical_scrollbar_from_v_arrow_pair() -> None:
+    from cua_mcp.scrollbar_arrows import create_scrollbars_from_arrow_pairs
+
+    up = _detection_from_bbox(
+        (1683, 100, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上V箭頭"}],
+    )
+    down = _detection_from_bbox(
+        (1684, 400, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下V箭頭"}],
+    )
+    out = create_scrollbars_from_arrow_pairs([up, down])
+    scrollbars = [d for d in out if d.class_name == "scrollbar"]
+    assert len(scrollbars) == 1
+    assert scrollbars[0].bbox == (1683, 100, 13, 312)
+    by_bbox = {d.bbox: d for d in out if d.class_name != "scrollbar"}
+    assert by_bbox[up.bbox].icons[0]["chinese_id"] == "向上滾動箭頭"
+    assert by_bbox[down.bbox].icons[0]["chinese_id"] == "向下滾動箭頭"
+
+
+def test_create_horizontal_scrollbar_from_triangle_pair() -> None:
+    from cua_mcp.scrollbar_arrows import create_scrollbars_from_arrow_pairs
+
+    left = _detection_from_bbox(
+        (200, 502, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向左三角"}],
+    )
+    right = _detection_from_bbox(
+        (500, 504, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向右三角"}],
+    )
+    out = create_scrollbars_from_arrow_pairs([left, right])
+    scrollbars = [d for d in out if d.class_name == "scrollbar"]
+    assert len(scrollbars) == 1
+    assert scrollbars[0].bbox == (200, 502, 312, 14)
+    by_bbox = {d.bbox: d for d in out if d.class_name != "scrollbar"}
+    assert by_bbox[left.bbox].icons[0]["chinese_id"] == "向左滾動箭頭"
+    assert by_bbox[right.bbox].icons[0]["chinese_id"] == "向右滾動箭頭"
+
+
+def test_create_scrollbar_skips_when_yolo_scrollbar_overlaps() -> None:
+    from cua_mcp.scrollbar_arrows import create_scrollbars_from_arrow_pairs
+
+    scrollbar = _detection_from_bbox((1680, 100, 20, 320), YOLO_CLASS_SCROLLBAR)
+    up = _detection_from_bbox(
+        (1683, 100, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上V箭頭"}],
+    )
+    down = _detection_from_bbox(
+        (1684, 400, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下V箭頭"}],
+    )
+    out = create_scrollbars_from_arrow_pairs([scrollbar, up, down])
+    assert sum(1 for d in out if d.class_name == "scrollbar") == 1
+    assert out[0].bbox == scrollbar.bbox
+    assert (out[1].icons or [{}])[0].get("chinese_id") == "向上V箭頭"
+    assert (out[2].icons or [{}])[0].get("chinese_id") == "向下V箭頭"
+
+
+def test_create_scrollbar_skips_when_union_overlaps_text() -> None:
+    from cua_mcp.scrollbar_arrows import create_scrollbars_from_arrow_pairs
+
+    up = _detection_from_bbox(
+        (100, 50, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上三角"}],
+    )
+    down = _detection_from_bbox(
+        (100, 300, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下三角"}],
+    )
+    text = _detection_from_bbox(
+        (98, 150, 40, 20),
+        YOLO_CLASS_TEXT,
+        text="內容",
+    )
+    out = create_scrollbars_from_arrow_pairs([up, down, text])
+    assert not any(d.class_name == "scrollbar" for d in out)
+
+
+def test_create_scrollbar_skips_misaligned_pair() -> None:
+    from cua_mcp.scrollbar_arrows import create_scrollbars_from_arrow_pairs
+
+    up = _detection_from_bbox(
+        (100, 50, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上V箭頭"}],
+    )
+    # Far to the right — not the same column.
+    down = _detection_from_bbox(
+        (300, 400, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下V箭頭"}],
+    )
+    out = create_scrollbars_from_arrow_pairs([up, down])
+    assert not any(d.class_name == "scrollbar" for d in out)
+
+
+def test_create_scrollbar_skips_cross_family_pair() -> None:
+    from cua_mcp.scrollbar_arrows import create_scrollbars_from_arrow_pairs
+
+    up = _detection_from_bbox(
+        (100, 50, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上V箭頭"}],
+    )
+    down = _detection_from_bbox(
+        (100, 400, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下三角"}],
+    )
+    out = create_scrollbars_from_arrow_pairs([up, down])
+    assert not any(d.class_name == "scrollbar" for d in out)
+
+
+def test_create_scrollbar_does_not_steal_fitted_yolo_arrows() -> None:
+    from cua_mcp.scrollbar_arrows import (
+        create_scrollbars_from_arrow_pairs,
+        fit_scrollbar_bboxes_to_arrow_controls,
+    )
+
+    scrollbar = _detection_from_bbox((1680, 440, 20, 100), YOLO_CLASS_SCROLLBAR)
+    up = _detection_from_bbox(
+        (1683, 418, 12, 13),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上V箭頭"}],
+    )
+    down = _detection_from_bbox(
+        (1684, 555, 11, 10),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下V箭頭"}],
+    )
+    fitted = fit_scrollbar_bboxes_to_arrow_controls([scrollbar, up, down])
+    out = create_scrollbars_from_arrow_pairs(fitted)
+    assert sum(1 for d in out if d.class_name == "scrollbar") == 1
+    fitted_sb = next(d for d in out if d.class_name == "scrollbar")
+    assert fitted_sb.bbox[1] == 418
+    assert fitted_sb.bbox[1] + fitted_sb.bbox[3] == 565
+
+
+def test_drop_scrollbars_without_arrow_ends_removes_bare_yolo_bar() -> None:
+    from cua_mcp.scrollbar_arrows import drop_scrollbars_without_arrow_ends
+
+    bare = _detection_from_bbox((603, 852, 476, 20), YOLO_CLASS_SCROLLBAR)
+    text = _detection_from_bbox((618, 855, 60, 12), YOLO_CLASS_TEXT, text="M1TTKT47A")
+    out = drop_scrollbars_without_arrow_ends([bare, text])
+    assert not any(d.class_name == "scrollbar" for d in out)
+    assert out[0].text == "M1TTKT47A"
+
+
+def test_drop_scrollbars_without_arrow_ends_keeps_v_arrow_pair() -> None:
+    from cua_mcp.scrollbar_arrows import drop_scrollbars_without_arrow_ends
+
+    scrollbar = _detection_from_bbox((1680, 418, 20, 147), YOLO_CLASS_SCROLLBAR)
+    up = _detection_from_bbox(
+        (1683, 418, 12, 13),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上滾動箭頭"}],
+    )
+    down = _detection_from_bbox(
+        (1684, 555, 11, 10),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下滾動箭頭"}],
+    )
+    out = drop_scrollbars_without_arrow_ends([scrollbar, up, down])
+    assert sum(1 for d in out if d.class_name == "scrollbar") == 1
+
+
+def test_drop_scrollbars_without_arrow_ends_rejects_unknown_only_ends() -> None:
+    from cua_mcp.scrollbar_arrows import drop_scrollbars_without_arrow_ends
+    from cua_mcp.yolo_onnx import PICKER_CLASS_UNKNOWN
+
+    scrollbar = _detection_from_bbox((1680, 440, 20, 100), YOLO_CLASS_SCROLLBAR)
+    unknown_up = _detection_from_bbox(
+        (1683, 418, 12, 13),
+        PICKER_CLASS_UNKNOWN,
+        icons=[{"chinese_id": "未知圖示"}],
+    )
+    unknown_down = _detection_from_bbox(
+        (1684, 555, 11, 10),
+        PICKER_CLASS_UNKNOWN,
+        icons=[{"chinese_id": "未知圖示"}],
+    )
+    out = drop_scrollbars_without_arrow_ends(
+        [scrollbar, unknown_up, unknown_down]
+    )
+    assert not any(d.class_name == "scrollbar" for d in out)
+
+
+def test_merge_overlapping_scrollbars_unions_high_iou_pair() -> None:
+    from cua_mcp.scrollbar_arrows import merge_overlapping_scrollbars
+
+    a = _detection_from_bbox((100, 50, 20, 200), YOLO_CLASS_SCROLLBAR)
+    b = _detection_from_bbox((102, 80, 18, 200), YOLO_CLASS_SCROLLBAR)
+    text = _detection_from_bbox((0, 0, 40, 20), YOLO_CLASS_TEXT, text="x")
+    out = merge_overlapping_scrollbars([text, a, b])
+    scrollbars = [d for d in out if d.class_name == "scrollbar"]
+    assert len(scrollbars) == 1
+    assert scrollbars[0].bbox == (100, 50, 20, 230)
+    assert out[0].text == "x"
+
+
+def test_merge_overlapping_scrollbars_skips_low_iou() -> None:
+    from cua_mcp.scrollbar_arrows import merge_overlapping_scrollbars
+
+    a = _detection_from_bbox((100, 0, 20, 100), YOLO_CLASS_SCROLLBAR)
+    b = _detection_from_bbox((100, 200, 20, 100), YOLO_CLASS_SCROLLBAR)
+    out = merge_overlapping_scrollbars([a, b])
+    assert sum(1 for d in out if d.class_name == "scrollbar") == 2
+
+
 def test_iou_xywh_near_identical_boxes() -> None:
     from cua_mcp.geometry import iou_xywh
 

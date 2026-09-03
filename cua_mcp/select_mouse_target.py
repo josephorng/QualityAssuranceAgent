@@ -31,7 +31,13 @@ from cua_mcp.read_screen_text.ocr_image import (
     ocr_mode_for_yolo_class,
 )
 from cua_mcp.caption_buttons import relabel_caption_button_detections
-from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls, scrollbar_orientation
+from cua_mcp.scrollbar_arrows import (
+    create_scrollbars_from_arrow_pairs,
+    drop_scrollbars_without_arrow_ends,
+    fit_scrollbar_bboxes_to_arrow_controls,
+    merge_overlapping_scrollbars,
+    scrollbar_orientation,
+)
 from cua_mcp.select_ui_element import (
     UiDetection,
     _ANCHOR_SUFFIX_BY_CLASS,
@@ -462,15 +468,25 @@ def _detect_mouse_targets_from_bgr(
     candidates = fit_scrollbar_bboxes_to_arrow_controls(
         candidates, log_info=_log_info
     )
+    candidates = create_scrollbars_from_arrow_pairs(
+        candidates, log_info=_log_info
+    )
+    candidates = drop_scrollbars_without_arrow_ends(
+        candidates, log_info=_log_info
+    )
+    candidates = merge_overlapping_scrollbars(
+        candidates, log_info=_log_info
+    )
     candidates = relabel_caption_button_detections(
         candidates,
         coord_offset=coord_offset,
         log_info=_log_info,
     )
+    # All pre-fit YOLO scrollbar boxes (for viewer "Original scrollbar" debug).
     if original_scrollbar_bboxes_out is not None:
-        for i, old_bbox in pre_fit_scrollbars:
-            if i < len(candidates) and candidates[i].bbox != old_bbox:
-                original_scrollbar_bboxes_out.append(old_bbox)
+        original_scrollbar_bboxes_out.extend(
+            old_bbox for _i, old_bbox in pre_fit_scrollbars
+        )
     _log_info(
         "move_mouse vision profile "
         f"yolo_s={yolo_elapsed:.3f} line_s={line_elapsed:.3f} "

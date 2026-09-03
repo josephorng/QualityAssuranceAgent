@@ -6,6 +6,7 @@ from collections.abc import Callable
 from functools import lru_cache
 from typing import Any
 
+from cua_mcp.geometry import boxes_overlap, iou_xywh, merge_two_boxes
 from cua_mcp.icon_map import (
     is_pua_char,
     is_unknown_icon_record,
@@ -14,10 +15,12 @@ from cua_mcp.icon_map import (
 )
 from cua_mcp.select_ui_element import UiDetection
 from cua_mcp.yolo_onnx import (
+    DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD,
     PICKER_CLASS_UNKNOWN,
     YOLO_CLASS_ELEMENT,
     YOLO_CLASS_NAMES,
     YOLO_CLASS_SCROLLBAR,
+    YOLO_CLASS_TEXT,
 )
 
 # Scrollbar arrow button icons (OCR / icon_map chinese_id). After YOLO+OCR, each
@@ -48,6 +51,34 @@ _SCROLL_ARROW_HORIZONTAL_IDS: frozenset[str] = (
 )
 _SCROLL_ARROW_ALL_IDS: frozenset[str] = (
     _SCROLL_ARROW_VERTICAL_IDS | _SCROLL_ARROW_HORIZONTAL_IDS
+)
+# Same-family pairs used to *create* scrollbars when YOLO missed the track.
+# Unified ``*滾動箭頭`` labels are intentionally excluded (those come from fit).
+_PAIR_FAMILY_V_ARROW_VERTICAL: tuple[str, str, bool] = (
+    "向上V箭頭",
+    "向下V箭頭",
+    True,
+)
+_PAIR_FAMILY_TRIANGLE_VERTICAL: tuple[str, str, bool] = (
+    "向上三角",
+    "向下三角",
+    True,
+)
+_PAIR_FAMILY_V_ARROW_HORIZONTAL: tuple[str, str, bool] = (
+    "向左V箭頭",
+    "向右V箭頭",
+    False,
+)
+_PAIR_FAMILY_TRIANGLE_HORIZONTAL: tuple[str, str, bool] = (
+    "向左三角",
+    "向右三角",
+    False,
+)
+_SCROLLBAR_PAIR_FAMILIES: tuple[tuple[str, str, bool], ...] = (
+    _PAIR_FAMILY_V_ARROW_VERTICAL,
+    _PAIR_FAMILY_TRIANGLE_VERTICAL,
+    _PAIR_FAMILY_V_ARROW_HORIZONTAL,
+    _PAIR_FAMILY_TRIANGLE_HORIZONTAL,
 )
 _UNKNOWN_ICON_CHINESE_ID: str = str(
     unknown_icon_record().get("chinese_id", "未知圖示")
@@ -176,14 +207,15 @@ def _pick_scrollbar_end_arrow(
     any_ids: frozenset[str],
     scrollbar_bbox: tuple[int, int, int, int],
     vertical: bool,
+    allow_unknown: bool = True,
 ) -> UiDetection | None:
     """Pick a track-aligned end arrow on the correct side of the scrollbar center.
 
-    Priority: ``preferred_ids`` (expected direction), then unknown icons, then
-    ``any_ids``. Within a priority tier, choose the arrow closest to the
-    original scrollbar center. ``end`` must be ``top`` / ``bottom`` / ``left`` /
-    ``right`` and restricts candidates to that side of the center (e.g. top
-    requires ``cy < center_y``).
+    Priority: ``preferred_ids`` (expected direction), then unknown icons (when
+    ``allow_unknown``), then ``any_ids``. Within a priority tier, choose the
+    arrow closest to the original scrollbar center. ``end`` must be ``top`` /
+    ``bottom`` / ``left`` / ``right`` and restricts candidates to that side of
+    the center (e.g. top requires ``cy < center_y``).
     """
     center_xy = _scrollbar_center(scrollbar_bbox)
     ccx, ccy = center_xy
@@ -212,11 +244,11 @@ def _pick_scrollbar_end_arrow(
             out.append(arrow)
         return out
 
-    pool = (
-        _candidates(ids=preferred_ids)
-        or _candidates(unknown_only=True)
-        or _candidates(ids=any_ids)
-    )
+    pool = _candidates(ids=preferred_ids)
+    if not pool and allow_unknown:
+        pool = _candidates(unknown_only=True)
+    if not pool:
+        pool = _candidates(ids=any_ids)
     if not pool:
         return None
     return min(pool, key=lambda a: (a.cx - ccx) ** 2 + (a.cy - ccy) ** 2)
@@ -407,6 +439,327 @@ def fit_scrollbar_bboxes_to_arrow_controls(
             f"unified_labels={unified} scrollbars={len(scrollbars)}"
         )
     return out
+
+
+def _pair_cross_axis_aligned(
+    a: UiDetection,
+    b: UiDetection,
+    *,
+    vertical: bool,
+) -> bool:
+    """True when ``a`` and ``b`` share the same column (vertical) or row (horizontal).
+
+    Tolerance is half the larger arrow's cross-axis size:
+    ``abs(cx_a - cx_b) <= max(w_a, w_b) // 2`` (vertical) or the height analogue.
+    """
+    if vertical:
+        tol = max(a.bbox[2], b.bbox[2]) // 2
+        return abs(a.cx - b.cx) <= tol
+    tol = max(a.bbox[3], b.bbox[3]) // 2
+    return abs(a.cy - b.cy) <= tol
+
+
+def _pair_ordered_along_axis(
+    start: UiDetection,
+    end: UiDetection,
+    *,
+    vertical: bool,
+) -> bool:
+    """True when ``start`` sits above (vertical) or left of (horizontal) ``end``."""
+    if vertical:
+        return start.cy < end.cy
+    return start.cx < end.cx
+
+
+def _pair_main_axis_distance(
+    start: UiDetection,
+    end: UiDetection,
+    *,
+    vertical: bool,
+) -> int:
+    """Absolute center distance along the scrollbar main axis."""
+    if vertical:
+        return abs(end.cy - start.cy)
+    return abs(end.cx - start.cx)
+
+
+def _is_text_detection(det: UiDetection) -> bool:
+    """True for YOLO/OCR text class detections."""
+    return det.class_id == YOLO_CLASS_TEXT or det.class_name == "text"
+
+
+def _is_scrollbar_detection(det: UiDetection) -> bool:
+    """True for scrollbar class detections."""
+    return det.class_id == YOLO_CLASS_SCROLLBAR or det.class_name == "scrollbar"
+
+
+def _detection_has_icon_id(det: UiDetection, chinese_id: str) -> bool:
+    """True when ``det.icons`` includes ``chinese_id``."""
+    return chinese_id in _detection_icon_chinese_ids(det)
+
+
+def _proposed_pair_bbox_valid(
+    proposed: tuple[int, int, int, int],
+    detections: list[UiDetection],
+) -> bool:
+    """Reject proposed bars that overlap text or an existing scrollbar."""
+    for det in detections:
+        if _is_scrollbar_detection(det) and boxes_overlap(proposed, det.bbox):
+            return False
+        if _is_text_detection(det) and boxes_overlap(proposed, det.bbox):
+            return False
+    return True
+
+
+def create_scrollbars_from_arrow_pairs(
+    detections: list[UiDetection],
+    *,
+    log_info: Callable[[str], None] | None = None,
+) -> list[UiDetection]:
+    """
+    Create scrollbar detections from same-family opposing arrow/triangle pairs.
+
+    Pairs ``向上/下V箭頭``, ``向上/下三角``, ``向左/右V箭頭``, and ``向左/右三角``
+    when both ends share a column (vertical) or row (horizontal). The scrollbar
+    bbox is the union of the two arrow boxes. Skips pairs whose union overlaps
+    any text or any existing scrollbar (YOLO miss-fill only). Each detection is
+    used in at most one created pair. Matched ends are unified to
+    ``*滾動箭頭`` labels. Unified ``*滾動箭頭`` icons are not pair seeds.
+    """
+    if not detections:
+        return detections
+
+    out = list(detections)
+    used: set[int] = set()
+    created = 0
+    unified = 0
+
+    for start_id, end_id, vertical in _SCROLLBAR_PAIR_FAMILIES:
+        start_indices = [
+            i
+            for i, det in enumerate(out)
+            if i not in used and _detection_has_icon_id(det, start_id)
+        ]
+        end_indices = [
+            i
+            for i, det in enumerate(out)
+            if i not in used and _detection_has_icon_id(det, end_id)
+        ]
+        if not start_indices or not end_indices:
+            continue
+
+        candidates: list[tuple[int, int, int]] = []
+        for si in start_indices:
+            for ei in end_indices:
+                start, end = out[si], out[ei]
+                if not _pair_cross_axis_aligned(start, end, vertical=vertical):
+                    continue
+                if not _pair_ordered_along_axis(start, end, vertical=vertical):
+                    continue
+                dist = _pair_main_axis_distance(start, end, vertical=vertical)
+                candidates.append((dist, si, ei))
+        candidates.sort(key=lambda t: t[0])
+
+        for _dist, si, ei in candidates:
+            if si in used or ei in used:
+                continue
+            start, end = out[si], out[ei]
+            proposed = merge_two_boxes(start.bbox, end.bbox)
+            if not _proposed_pair_bbox_valid(proposed, out):
+                continue
+
+            out.append(
+                _rebuild_detection(
+                    proposed,
+                    class_id=YOLO_CLASS_SCROLLBAR,
+                    text=None,
+                    icons=None,
+                )
+            )
+            created += 1
+            used.add(si)
+            used.add(ei)
+
+            if vertical:
+                start_label, end_label = _SCROLL_ARROW_UP_ID, _SCROLL_ARROW_DOWN_ID
+            else:
+                start_label, end_label = _SCROLL_ARROW_LEFT_ID, _SCROLL_ARROW_RIGHT_ID
+            if _unify_end_arrow_label(out, start, start_label):
+                unified += 1
+            if _unify_end_arrow_label(out, end, end_label):
+                unified += 1
+
+    if (created or unified) and log_info is not None:
+        log_info(
+            f"create_scrollbars_from_arrow_pairs: created={created} "
+            f"unified_labels={unified}"
+        )
+    return out
+
+
+def _scrollbar_has_v_or_triangle_ends(
+    scrollbar: UiDetection,
+    detections: list[UiDetection],
+) -> bool:
+    """True when ``scrollbar`` has opposing V箭頭/三角/滾動箭頭 ends (not unknown)."""
+    vertical = _is_vertical_scrollbar_bbox(scrollbar.bbox)
+    arrow_ids = (
+        _SCROLL_ARROW_VERTICAL_IDS if vertical else _SCROLL_ARROW_HORIZONTAL_IDS
+    )
+    arrows = [
+        det
+        for det in detections
+        if det is not scrollbar
+        and bool(_detection_icon_chinese_ids(det) & arrow_ids)
+    ]
+    if vertical:
+        top = _pick_scrollbar_end_arrow(
+            arrows,
+            end="top",
+            preferred_ids=_SCROLL_ARROW_UP_IDS,
+            any_ids=_SCROLL_ARROW_VERTICAL_IDS,
+            scrollbar_bbox=scrollbar.bbox,
+            vertical=True,
+            allow_unknown=False,
+        )
+        bottom = _pick_scrollbar_end_arrow(
+            arrows,
+            end="bottom",
+            preferred_ids=_SCROLL_ARROW_DOWN_IDS,
+            any_ids=_SCROLL_ARROW_VERTICAL_IDS,
+            scrollbar_bbox=scrollbar.bbox,
+            vertical=True,
+            allow_unknown=False,
+        )
+        return top is not None and bottom is not None and top is not bottom
+    left = _pick_scrollbar_end_arrow(
+        arrows,
+        end="left",
+        preferred_ids=_SCROLL_ARROW_LEFT_IDS,
+        any_ids=_SCROLL_ARROW_HORIZONTAL_IDS,
+        scrollbar_bbox=scrollbar.bbox,
+        vertical=False,
+        allow_unknown=False,
+    )
+    right = _pick_scrollbar_end_arrow(
+        arrows,
+        end="right",
+        preferred_ids=_SCROLL_ARROW_RIGHT_IDS,
+        any_ids=_SCROLL_ARROW_HORIZONTAL_IDS,
+        scrollbar_bbox=scrollbar.bbox,
+        vertical=False,
+        allow_unknown=False,
+    )
+    return left is not None and right is not None and left is not right
+
+
+def drop_scrollbars_without_arrow_ends(
+    detections: list[UiDetection],
+    *,
+    log_info: Callable[[str], None] | None = None,
+) -> list[UiDetection]:
+    """
+    Remove scrollbar detections that lack V箭頭 / 三角 / ``*滾動箭頭`` end caps.
+
+    Unknown-only ends do not count. Non-scrollbar detections are kept unchanged.
+    """
+    if not detections:
+        return detections
+
+    kept: list[UiDetection] = []
+    dropped = 0
+    for det in detections:
+        if not _is_scrollbar_detection(det):
+            kept.append(det)
+            continue
+        if _scrollbar_has_v_or_triangle_ends(det, detections):
+            kept.append(det)
+        else:
+            dropped += 1
+
+    if dropped and log_info is not None:
+        log_info(
+            f"drop_scrollbars_without_arrow_ends: dropped={dropped} "
+            f"kept_scrollbars={sum(1 for d in kept if _is_scrollbar_detection(d))}"
+        )
+    return kept
+
+
+def merge_overlapping_scrollbars(
+    detections: list[UiDetection],
+    *,
+    min_iou: float = DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD,
+    log_info: Callable[[str], None] | None = None,
+) -> list[UiDetection]:
+    """
+    Merge scrollbar detections whose pairwise IoU is strictly greater than ``min_iou``.
+
+    Same default threshold as YOLO same-class merge (0.2). Groups are transitive;
+    each group becomes the axis-aligned union bbox. Non-scrollbar detections are
+    unchanged.
+    """
+    if not detections:
+        return detections
+
+    sb_idxs = [
+        i for i, det in enumerate(detections) if _is_scrollbar_detection(det)
+    ]
+    if len(sb_idxs) < 2:
+        return detections
+
+    parent = {i: i for i in sb_idxs}
+
+    def _find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def _union(a: int, b: int) -> None:
+        ra, rb = _find(a), _find(b)
+        if ra == rb:
+            return
+        # Keep the lower index as root so the merged bar stays near first sighting.
+        if ra < rb:
+            parent[rb] = ra
+        else:
+            parent[ra] = rb
+
+    for a_pos, ia in enumerate(sb_idxs):
+        for ib in sb_idxs[a_pos + 1 :]:
+            if iou_xywh(detections[ia].bbox, detections[ib].bbox) > min_iou:
+                _union(ia, ib)
+
+    groups: dict[int, list[int]] = {}
+    for i in sb_idxs:
+        groups.setdefault(_find(i), []).append(i)
+
+    out: list[UiDetection | None] = list(detections)
+    merged_groups = 0
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        merged_groups += 1
+        union_box = detections[members[0]].bbox
+        for m in members[1:]:
+            union_box = merge_two_boxes(union_box, detections[m].bbox)
+        keep = min(members)
+        out[keep] = _rebuild_detection(
+            union_box,
+            class_id=YOLO_CLASS_SCROLLBAR,
+            text=None,
+            icons=None,
+        )
+        for m in members:
+            if m != keep:
+                out[m] = None
+
+    if merged_groups and log_info is not None:
+        log_info(
+            f"merge_overlapping_scrollbars: merged_groups={merged_groups} "
+            f"min_iou={min_iou}"
+        )
+    return [det for det in out if det is not None]
 
 
 def _icon_chinese_ids_from_candidate(candidate: Any) -> set[str]:

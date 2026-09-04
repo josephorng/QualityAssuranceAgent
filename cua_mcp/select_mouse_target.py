@@ -949,6 +949,136 @@ def _filter_mouse_candidates(
     )
 
 
+# Blank/unknown peers admitted as icon candidates must be size-compatible with the
+# labeled icon seed(s). Ratio is max(seed/cand, cand/seed) on either side.
+_ICON_PEER_MAX_SIDE_RATIO = 2.5
+# When no labeled icon seed size is available, keep only small glyph-like boxes.
+_ICON_PEER_FALLBACK_MAX_SIDE_PX = 64
+
+
+def _instruction_targets_icon(anchor: str, labeled_anchors: list[UiDetection]) -> bool:
+    """True when the mouse target is an icon (instruction or labeled seeds)."""
+    if "圖示" in (anchor or ""):
+        return True
+    return any(_has_actual_icon_labels(det) for det in labeled_anchors)
+
+
+def _is_blank_unknown_icon_candidate(det: UiDetection) -> bool:
+    """True for OCR-failed icon boxes: ``unknown`` with no usable text/icon ids."""
+    if not _is_unknown_detection(det):
+        return False
+    if _has_actual_visible_text(det):
+        return False
+    if _has_actual_icon_labels(det):
+        return False
+    return True
+
+
+def _icon_peer_size_compatible(
+    candidate: UiDetection,
+    seeds: list[UiDetection],
+) -> bool:
+    """True when ``candidate`` is roughly the same size as a labeled icon seed."""
+    _, _, cw, ch = candidate.bbox
+    if cw < 1 or ch < 1:
+        return False
+    icon_seeds = [s for s in seeds if _has_actual_icon_labels(s)]
+    if not icon_seeds:
+        return max(cw, ch) <= _ICON_PEER_FALLBACK_MAX_SIDE_PX
+    for seed in icon_seeds:
+        _, _, sw, sh = seed.bbox
+        if sw < 1 or sh < 1:
+            continue
+        ratio = max(cw / sw, sw / cw, ch / sh, sh / ch)
+        if ratio <= _ICON_PEER_MAX_SIDE_RATIO:
+            return True
+    return False
+
+
+def _unknown_covers_directed_hints(
+    candidate: UiDetection,
+    nearby_matches: list[UiDetection],
+    hints: list[NearbyHint],
+    *,
+    threshold: float = _MOUSE_FILTER_SIMILARITY_THRESHOLD,
+) -> bool:
+    """True when ``candidate`` satisfies every directed nearby side hint."""
+    directed = [hint for hint in hints if hint.side is not None]
+    if not directed or not nearby_matches:
+        return False
+    return all(
+        _hint_covered_by_neighbors(
+            candidate,
+            nearby_matches,
+            hint,
+            threshold=threshold,
+            require_side=True,
+        )
+        for hint in directed
+    )
+
+
+def _admit_unknown_icon_peers(
+    detections: list[UiDetection],
+    labeled_anchors: list[UiDetection],
+    nearby_matches: list[UiDetection],
+    nearby_labels: list[str] | list[NearbyHint] | None,
+    *,
+    anchor: str,
+) -> list[UiDetection]:
+    """
+    Admit blank ``unknown`` detections that pass directed icon landmarks.
+
+    When the target is an icon and OCR missed a peer glyph (class ``unknown``),
+    similarity expansion cannot find it. If directed nearby hints are present,
+    re-admit size-compatible unknowns that satisfy those sides so nearby
+    prefilter / LLM pick can choose the correct peer.
+    """
+    hints = normalize_nearby_hints(nearby_labels)
+    directed = [hint for hint in hints if hint.side is not None]
+    if (
+        not labeled_anchors
+        or not detections
+        or not directed
+        or not nearby_matches
+        or not _instruction_targets_icon(anchor, labeled_anchors)
+    ):
+        return []
+
+    labeled_ids = {id(det) for det in labeled_anchors}
+    admitted: list[UiDetection] = []
+    for det in detections:
+        if id(det) in labeled_ids:
+            continue
+        if not _is_blank_unknown_icon_candidate(det):
+            continue
+        if not _icon_peer_size_compatible(det, labeled_anchors):
+            continue
+        if not _unknown_covers_directed_hints(det, nearby_matches, hints):
+            continue
+        admitted.append(det)
+    return admitted
+
+
+def _merge_anchor_detections(
+    labeled: list[UiDetection],
+    admitted: list[UiDetection],
+) -> list[UiDetection]:
+    """Append admitted peers not already present (by object identity / bbox)."""
+    if not admitted:
+        return list(labeled)
+    seen_ids = {id(det) for det in labeled}
+    seen_bboxes = {det.bbox for det in labeled}
+    merged = list(labeled)
+    for det in admitted:
+        if id(det) in seen_ids or det.bbox in seen_bboxes:
+            continue
+        merged.append(det)
+        seen_ids.add(id(det))
+        seen_bboxes.add(det.bbox)
+    return merged
+
+
 def _detections_for_captured_monitor(
     monitor_index: int,
     bgr: np.ndarray,
@@ -1358,14 +1488,32 @@ async def find_mouse_point(
         nearby_matches = []
     else:
         before_nearby = len(anchor_matches)
+        admitted_unknowns = _admit_unknown_icon_peers(
+            detections,
+            anchor_matches,
+            nearby_matches,
+            nearby_hints,
+            anchor=anchor,
+        )
+        if admitted_unknowns:
+            centers = ", ".join(f"({d.cx},{d.cy})" for d in admitted_unknowns)
+            _log_info(
+                "move_mouse: admitted blank unknown icon peers "
+                f"count={len(admitted_unknowns)} centers=[{centers}] "
+                f"labeled_anchors={before_nearby}"
+            )
+            anchor_matches = _merge_anchor_detections(
+                anchor_matches, admitted_unknowns
+            )
+        after_admit = len(anchor_matches)
         anchor_matches = _prefilter_anchors_by_nearby(
             anchor_matches, nearby_matches, nearby_hints
         )
-        if len(anchor_matches) != before_nearby:
+        if len(anchor_matches) != before_nearby or admitted_unknowns:
             _log_info(
                 "move_mouse nearby prefilter "
-                f"anchors {before_nearby} -> {len(anchor_matches)} "
-                f"nearby_labels={nearby_phrases!r}"
+                f"anchors {before_nearby} -> {after_admit} admitted -> "
+                f"{len(anchor_matches)} nearby_labels={nearby_phrases!r}"
             )
 
         if len(anchor_matches) == 1:

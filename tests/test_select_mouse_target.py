@@ -1466,6 +1466,144 @@ def test_prefilter_anchors_by_nearby_keeps_full_coverage() -> None:
     assert kept == [correct]
 
 
+def test_admit_unknown_icon_peers_step8_style_picks_end_chevron() -> None:
+    """OCR-missed End chevron is admitted; nearby sides drop the Start seed."""
+    from cua_mcp.select_mouse_target import (
+        _admit_unknown_icon_peers,
+        _merge_anchor_detections,
+        _prefilter_anchors_by_nearby,
+    )
+
+    # Geometry from 政策制定 step 8 / event_014.
+    start_arrow = _detection_from_bbox(
+        (892, 430, 13, 16),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下V箭頭"}],
+    )
+    end_arrow_unknown = _detection_from_bbox(
+        (1048, 430, 14, 15),
+        PICKER_CLASS_UNKNOWN,
+    )
+    large_unknown = _detection_from_bbox(
+        (300, 400, 80, 80),
+        PICKER_CLASS_UNKNOWN,
+    )
+    text_unknown = _detection_from_bbox(
+        (1050, 500, 14, 14),
+        PICKER_CLASS_UNKNOWN,
+        text="搜",
+    )
+    landmark_start_time = _detection_from_bbox(
+        (812, 431, 28, 11), YOLO_CLASS_TEXT, text="07:00"
+    )
+    landmark_end_label = _detection_from_bbox(
+        (926, 431, 30, 14), YOLO_CLASS_TEXT, text="終止"
+    )
+    landmark_error = _detection_from_bbox(
+        (770, 463, 199, 16),
+        YOLO_CLASS_TEXT,
+        text="求起始時間必須小於終止時間!",
+    )
+    detections = [
+        start_arrow,
+        end_arrow_unknown,
+        large_unknown,
+        text_unknown,
+        landmark_start_time,
+        landmark_end_label,
+        landmark_error,
+    ]
+    nearby_matches = [landmark_start_time, landmark_end_label, landmark_error]
+    nearby_phrases = [
+        "在「終止」文字的右邊",
+        "在「07:00」文字的右邊",
+        "在「求起始時間必須小於終止時間!」文字的右上方",
+    ]
+
+    admitted = _admit_unknown_icon_peers(
+        detections,
+        [start_arrow],
+        nearby_matches,
+        nearby_phrases,
+        anchor="「向下V箭頭」圖示",
+    )
+    assert admitted == [end_arrow_unknown]
+
+    merged = _merge_anchor_detections([start_arrow], admitted)
+    kept = _prefilter_anchors_by_nearby(merged, nearby_matches, nearby_phrases)
+    assert kept == [end_arrow_unknown]
+
+
+def test_admit_unknown_icon_peers_requires_icon_target_and_directed_sides() -> None:
+    from cua_mcp.select_mouse_target import _admit_unknown_icon_peers
+
+    labeled = _detection_from_bbox(
+        (100, 100, 16, 16),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下V箭頭"}],
+    )
+    unknown = _detection_from_bbox((200, 100, 16, 16), PICKER_CLASS_UNKNOWN)
+    landmark = _detection_from_bbox((150, 100, 30, 14), YOLO_CLASS_TEXT, text="終止")
+    detections = [labeled, unknown, landmark]
+
+    # No directed side → no admit.
+    assert (
+        _admit_unknown_icon_peers(
+            detections,
+            [labeled],
+            [landmark],
+            ["「終止」文字"],
+            anchor="「向下V箭頭」圖示",
+        )
+        == []
+    )
+    # Text target (no 圖示 / no icon labels on seed) → no admit.
+    text_seed = _detection_from_bbox((100, 100, 30, 14), YOLO_CLASS_TEXT, text="終止")
+    assert (
+        _admit_unknown_icon_peers(
+            [text_seed, unknown, landmark],
+            [text_seed],
+            [landmark],
+            ["在「終止」文字的右邊"],
+            anchor="「終止」文字",
+        )
+        == []
+    )
+    # Wrong side for the unknown → no admit.
+    assert (
+        _admit_unknown_icon_peers(
+            detections,
+            [labeled],
+            [landmark],
+            ["在「終止」文字的左邊"],
+            anchor="「向下V箭頭」圖示",
+        )
+        == []
+    )
+
+
+def test_admit_unknown_icon_peers_skips_size_incompatible() -> None:
+    from cua_mcp.select_mouse_target import _admit_unknown_icon_peers
+
+    labeled = _detection_from_bbox(
+        (100, 100, 16, 16),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下V箭頭"}],
+    )
+    huge_unknown = _detection_from_bbox((200, 100, 60, 60), PICKER_CLASS_UNKNOWN)
+    landmark = _detection_from_bbox((150, 100, 30, 14), YOLO_CLASS_TEXT, text="終止")
+    assert (
+        _admit_unknown_icon_peers(
+            [labeled, huge_unknown, landmark],
+            [labeled],
+            [landmark],
+            ["在「終止」文字的右邊"],
+            anchor="「向下V箭頭」圖示",
+        )
+        == []
+    )
+
+
 def test_prefilter_anchors_by_nearby_falls_back_when_unmatched() -> None:
     anchors = [
         _detection_from_bbox((0, 0, 20, 20), YOLO_CLASS_TEXT, text="文件"),

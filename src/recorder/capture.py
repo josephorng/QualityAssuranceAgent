@@ -753,7 +753,17 @@ class RecordingSession:
             pending.cancel()
         if left_press_dragging and pending_coords is not None and last_move_xy is not None:
             sx, sy, button = pending_coords
-            self._flush_pending_drag(sx, sy, last_move_xy[0], last_move_xy[1], button)
+            ex, ey = last_move_xy
+            if abs(sx - ex) > _DRAG_THRESHOLD_PX or abs(sy - ey) > _DRAG_THRESHOLD_PX:
+                self._flush_pending_drag(sx, sy, ex, ey, button)
+            else:
+                hold_duration = (
+                    time.monotonic() - pending_down_at if pending_down_at is not None else 0.0
+                )
+                if hold_duration >= _HOLD_THRESHOLD_S:
+                    self._flush_pending_hold(sx, sy, button, hold_duration)
+                else:
+                    self._flush_pending_click(sx, sy, button)
         elif pending_coords is not None:
             x, y, button = pending_coords
             hold_duration = (
@@ -1817,8 +1827,16 @@ class RecordingSession:
             return
         sx, sy, button = pending_coords
         if dragging:
-            self._flush_pending_drag(sx, sy, ix, iy, button)
-            return
+            # Interim movement may arm drag, but a release near the press point
+            # is a click (or hold), not a drag.
+            if (
+                abs(sx - ix) > _DRAG_THRESHOLD_PX
+                or abs(sy - iy) > _DRAG_THRESHOLD_PX
+            ):
+                self._flush_pending_drag(sx, sy, ix, iy, button)
+                return
+            with self._lock:
+                self._left_press_dragging = False
         hold_duration = time.monotonic() - down_at if down_at is not None else 0.0
         if hold_duration >= _HOLD_THRESHOLD_S:
             self._flush_pending_hold(sx, sy, button, hold_duration)

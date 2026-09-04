@@ -6,6 +6,8 @@ from src.recorder.models import RecordedEvent
 
 _MULTI_CLICK_MAX_GAP_S = 1.0
 _MULTI_CLICK_MAX_DIST_PX = 8
+# Match capture._DRAG_THRESHOLD_PX: start/end within this → treat drag as click.
+_NEGLIGIBLE_DRAG_DIST_PX = 8
 _COALESCABLE_CLICK_KINDS = frozenset({"click", "double_click", "triple_click"})
 
 
@@ -139,6 +141,55 @@ def _merge_click_group(group: list[RecordedEvent]) -> RecordedEvent:
         target_window_title=first.target_window_title,
         window_snapshot_debug=first.window_snapshot_debug,
     )
+
+
+def _drag_start_end_too_close(event: RecordedEvent) -> bool:
+    """True when a drag's release is within the negligible-distance threshold of press."""
+    if event.kind != "drag":
+        return False
+    if event.cursor_xy is None or event.end_xy is None:
+        return False
+    sx, sy = event.cursor_xy
+    ex, ey = event.end_xy
+    return (
+        abs(sx - ex) <= _NEGLIGIBLE_DRAG_DIST_PX
+        and abs(sy - ey) <= _NEGLIGIBLE_DRAG_DIST_PX
+    )
+
+
+def _drag_as_click(event: RecordedEvent) -> RecordedEvent:
+    """Convert a negligible drag into a left click at the press point."""
+    return RecordedEvent(
+        index=event.index,
+        timestamp_utc=event.timestamp_utc,
+        kind="click",
+        cursor_xy=event.cursor_xy,
+        button=event.button or "left",
+        modifiers=list(event.modifiers) if event.modifiers else None,
+        screenshot_path=event.screenshot_path,
+        monitor_index=event.monitor_index,
+        monitor_offset=event.monitor_offset,
+        anchor_click_xy=event.anchor_click_xy,
+        window_change=event.window_change,
+        target_window_title=event.target_window_title,
+        window_snapshot_debug=event.window_snapshot_debug,
+    )
+
+
+def reclassify_negligible_drags_as_clicks(
+    events: list[RecordedEvent],
+) -> list[RecordedEvent]:
+    """Turn drag events whose start and end are too close into clicks.
+
+    Capture may mark a press as a drag after interim movement, then release near
+    the press point. During analyze those should be treated as clicks.
+    """
+    if not events:
+        return []
+    return [
+        _drag_as_click(event) if _drag_start_end_too_close(event) else event
+        for event in events
+    ]
 
 
 def coalesce_consecutive_same_location_clicks(

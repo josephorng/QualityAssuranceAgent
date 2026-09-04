@@ -124,6 +124,32 @@ def test_small_move_still_records_click(tmp_path) -> None:
     assert raw["cursor_xy"] == [400, 400]
 
 
+def test_drag_returning_near_start_records_click(tmp_path) -> None:
+    """Interim movement arms drag, but release near press → click."""
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.mouse import Button
+
+            session._on_mouse_click(2698, 278, Button.left, True)
+            session._on_mouse_move(2720, 300)  # beyond threshold → arms drag
+            session._on_mouse_click(2697, 278, Button.left, False)  # release ~1px away
+            time.sleep(_DOUBLE_CLICK_INTERVAL_S + 0.05)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "click"
+    assert raw["cursor_xy"] == [2698, 278]
+    assert raw.get("end_xy") is None
+
+
 def test_keyboard_events_not_filtered_by_ignore_rect(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
     hub_rect = (0, 0, 2000, 1200)

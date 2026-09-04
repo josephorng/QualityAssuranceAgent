@@ -3,6 +3,7 @@ from __future__ import annotations
 from src.recorder.coalesce import (
     coalesce_consecutive_same_location_clicks,
     coalesce_consecutive_text_inputs,
+    reclassify_negligible_drags_as_clicks,
 )
 from src.recorder.models import RecordedEvent
 
@@ -34,6 +35,28 @@ def _click_event(
         button=button,
         modifiers=modifiers,
         screenshot_path=screenshot_path,
+    )
+
+
+def _drag_event(
+    index: int,
+    *,
+    cursor_xy: tuple[int, int],
+    end_xy: tuple[int, int],
+    timestamp_utc: str = "2026-08-12T00:00:00+00:00",
+    screenshot_path: str = "drag.jpeg",
+) -> RecordedEvent:
+    return RecordedEvent(
+        index=index,
+        timestamp_utc=timestamp_utc,
+        kind="drag",
+        cursor_xy=cursor_xy,
+        end_xy=end_xy,
+        button="left",
+        screenshot_path=screenshot_path,
+        end_screenshot_path="drag_end.jpeg",
+        end_monitor_index=1,
+        end_monitor_offset=(0, 0),
     )
 
 
@@ -207,3 +230,61 @@ def test_coalesce_same_location_clicks_ignores_right_click() -> None:
     ]
     merged = coalesce_consecutive_same_location_clicks(events)
     assert len(merged) == 2
+
+
+def test_reclassify_negligible_drag_as_click() -> None:
+    # event_007-like: 1px release offset after interim drag arming
+    events = [
+        _drag_event(7, cursor_xy=(2698, 278), end_xy=(2697, 278)),
+    ]
+    result = reclassify_negligible_drags_as_clicks(events)
+    assert len(result) == 1
+    assert result[0].kind == "click"
+    assert result[0].cursor_xy == (2698, 278)
+    assert result[0].end_xy is None
+    assert result[0].end_screenshot_path == ""
+    assert result[0].screenshot_path == "drag.jpeg"
+
+
+def test_reclassify_keeps_real_drag() -> None:
+    events = [
+        _drag_event(1, cursor_xy=(100, 100), end_xy=(200, 200)),
+    ]
+    result = reclassify_negligible_drags_as_clicks(events)
+    assert result[0].kind == "drag"
+    assert result[0].end_xy == (200, 200)
+
+
+def test_reclassify_boundary_at_threshold_becomes_click() -> None:
+    events = [
+        _drag_event(1, cursor_xy=(100, 100), end_xy=(108, 100)),
+    ]
+    result = reclassify_negligible_drags_as_clicks(events)
+    assert result[0].kind == "click"
+
+
+def test_reclassify_just_beyond_threshold_stays_drag() -> None:
+    events = [
+        _drag_event(1, cursor_xy=(100, 100), end_xy=(109, 100)),
+    ]
+    result = reclassify_negligible_drags_as_clicks(events)
+    assert result[0].kind == "drag"
+
+
+def test_reclassify_then_coalesce_with_adjacent_click() -> None:
+    events = [
+        _drag_event(
+            1,
+            cursor_xy=(100, 200),
+            end_xy=(101, 200),
+            timestamp_utc="2026-08-12T00:00:00+00:00",
+            screenshot_path="a.jpeg",
+        ),
+        _click_event(2, timestamp_utc="2026-08-12T00:00:00.300000+00:00"),
+    ]
+    result = coalesce_consecutive_same_location_clicks(
+        reclassify_negligible_drags_as_clicks(events)
+    )
+    assert len(result) == 1
+    assert result[0].kind == "double_click"
+    assert result[0].screenshot_path == "a.jpeg"

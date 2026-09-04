@@ -19,6 +19,7 @@ from src.recorder.models import RecordedEvent, final_after_screenshot_path
 from src.recorder.coalesce import (
     coalesce_consecutive_same_location_clicks,
     coalesce_consecutive_text_inputs,
+    reclassify_negligible_drags_as_clicks,
 )
 from src.recorder.text_resolve import event_with_resolved_text, resolve_text_input_text
 from src.recorder.vision_context import (
@@ -535,7 +536,9 @@ async def analyze_recording_session(
             f"llm_workers={llm_workers}"
         )
         events = coalesce_consecutive_same_location_clicks(
-            coalesce_consecutive_text_inputs(_load_events(run_dir))
+            coalesce_consecutive_text_inputs(
+                reclassify_negligible_drags_as_clicks(_load_events(run_dir))
+            )
         )
         events = _drop_trailing_agent_restore(
             events,

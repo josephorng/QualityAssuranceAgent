@@ -29,6 +29,7 @@ from app_ocr_viewer_tk import (
     _is_pua_icon_identity_text,
     _parse_conf_0_to_1,
     _unknown_icon_label,
+    _smallest_box_hit_index,
     _undo_export_files,
     load_yolo_lines,
     YOLO_UNDONE_IMAGES,
@@ -870,6 +871,7 @@ class OcrVerifyPanel(_CanvasZoomMixin):
         self.canvas.bind("<ButtonPress-1>", self._on_lmb_press)
         self.canvas.bind("<B1-Motion>", self._on_lmb_motion)
         self.canvas.bind("<ButtonRelease-1>", self._on_lmb_release)
+        self.canvas.bind("<Double-Button-1>", self._on_canvas_double_click)
         self.canvas.bind("<ButtonPress-2>", self._on_mmb_press)
         self.canvas.bind("<B2-Motion>", self._on_mmb_drag)
         self.canvas.bind("<MouseWheel>", self._on_canvas_mousewheel)
@@ -1281,10 +1283,8 @@ class OcrVerifyPanel(_CanvasZoomMixin):
         if idx < 0 or idx >= len(self.text_lines):
             return
         navigation_indices = list(self._visible_line_indices)
-        if not navigation_indices:
+        if not navigation_indices or idx not in navigation_indices:
             navigation_indices = list(range(len(self.text_lines)))
-        if idx not in navigation_indices:
-            return
 
         dialog = tk.Toplevel(self.root)
         dialog.transient(self.root)
@@ -1472,6 +1472,22 @@ class OcrVerifyPanel(_CanvasZoomMixin):
         _render_details(idx)
         gemma_entry.focus_set()
         gemma_entry.selection_range(0, tk.END)
+
+    def _line_hit_index_at_canvas(self, event: tk.Event[tk.Canvas]) -> int | None:
+        if self.current_image is None or not self.text_lines:
+            return None
+        canvas_x = self.canvas.canvasx(int(event.x))
+        canvas_y = self.canvas.canvasy(int(event.y))
+        img_x = int(canvas_x / max(self._render_scale, 1e-6))
+        img_y = int(canvas_y / max(self._render_scale, 1e-6))
+        return _smallest_box_hit_index(self.text_lines, img_x, img_y)
+
+    def _on_canvas_double_click(self, event: tk.Event[tk.Canvas]) -> None:
+        idx = self._line_hit_index_at_canvas(event)
+        if idx is None:
+            return
+        self._sync_result_list_selection(idx)
+        self._open_detection_detail_dialog(idx)
 
     def _on_result_double_click(self, event: tk.Event[tk.Misc]) -> None:
         idx = self._result_index_at_event(event)

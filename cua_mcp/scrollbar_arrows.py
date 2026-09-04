@@ -83,6 +83,7 @@ _SCROLLBAR_PAIR_FAMILIES: tuple[tuple[str, str, bool], ...] = (
 _UNKNOWN_ICON_CHINESE_ID: str = str(
     unknown_icon_record().get("chinese_id", "未知圖示")
 ).strip()
+# OCR often misreads end-arrow glyphs as tiny text overlapping the arrow box.
 
 
 def _detection_icon_chinese_ids(det: UiDetection) -> set[str]:
@@ -340,7 +341,8 @@ def fit_scrollbar_bboxes_to_arrow_controls(
     the scrollbar extends to them. When either end lacks a matching
     track-aligned arrow, that scrollbar is left unchanged. When the fitted
     bbox would overlap text or another scrollbar, the fit is skipped (bbox
-    and end-arrow labels unchanged), matching create-pair rejection.
+    and end-arrow labels unchanged), matching create-pair rejection. Text
+    that overlaps any directional end arrow is ignored for that overlap check.
     """
     if not detections:
         return detections
@@ -502,6 +504,24 @@ def _is_scrollbar_detection(det: UiDetection) -> bool:
     return det.class_id == YOLO_CLASS_SCROLLBAR or det.class_name == "scrollbar"
 
 
+def _is_scrollbar_end_arrow_detection(det: UiDetection) -> bool:
+    """True when ``det`` is a directional scrollbar end arrow (V/三角/滾動箭頭)."""
+    return bool(_detection_icon_chinese_ids(det) & _SCROLL_ARROW_ALL_IDS)
+
+
+def _text_overlaps_scrollbar_arrow(
+    text: UiDetection,
+    detections: list[UiDetection],
+) -> bool:
+    """True when ``text`` overlaps any directional scrollbar end arrow."""
+    for det in detections:
+        if _is_scrollbar_end_arrow_detection(det) and boxes_overlap(
+            text.bbox, det.bbox
+        ):
+            return True
+    return False
+
+
 def _detection_has_icon_id(det: UiDetection, chinese_id: str) -> bool:
     """True when ``det.icons`` includes ``chinese_id``."""
     return chinese_id in _detection_icon_chinese_ids(det)
@@ -516,7 +536,8 @@ def _proposed_pair_bbox_valid(
     """Reject proposed bars that overlap text or an existing scrollbar.
 
     ``ignore`` skips one detection (the scrollbar being fitted) so self-overlap
-    does not fail the check.
+    does not fail the check. Text boxes that overlap a directional end arrow
+    (OCR misreads of the arrow glyph) are ignored regardless of overlap size.
     """
     for det in detections:
         if ignore is not None and det is ignore:
@@ -524,9 +545,10 @@ def _proposed_pair_bbox_valid(
         if _is_scrollbar_detection(det) and boxes_overlap(proposed, det.bbox):
             return False
         if _is_text_detection(det) and boxes_overlap(proposed, det.bbox):
+            if _text_overlaps_scrollbar_arrow(det, detections):
+                continue
             return False
     return True
-
 
 def create_scrollbars_from_arrow_pairs(
     detections: list[UiDetection],
@@ -539,7 +561,8 @@ def create_scrollbars_from_arrow_pairs(
     Pairs ``向上/下V箭頭``, ``向上/下三角``, ``向左/右V箭頭``, and ``向左/右三角``
     when both ends share a column (vertical) or row (horizontal). The scrollbar
     bbox is the union of the two arrow boxes. Skips pairs whose union overlaps
-    any text or any existing scrollbar (YOLO miss-fill only). Each detection is
+    any text or any existing scrollbar (YOLO miss-fill only), except text that
+    overlaps a directional end arrow (OCR-on-glyph noise). Each detection is
     used in at most one created pair. Matched ends are unified to
     ``*滾動箭頭`` labels. Unified ``*滾動箭頭`` icons are not pair seeds.
     """

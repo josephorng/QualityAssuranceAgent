@@ -63,8 +63,11 @@ def merge_overlapping_boxes(
     return merged
 
 
-def iou_xywh(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
-    """Intersection-over-union for ``(x, y, w, h)`` boxes; 0 when either has no area."""
+def intersection_area_xywh(
+    a: tuple[int, int, int, int],
+    b: tuple[int, int, int, int],
+) -> float:
+    """Intersection area for ``(x, y, w, h)`` boxes; 0 when either has no area."""
     ax, ay, aw, ah = a
     bx, by, bw, bh = b
     if aw <= 0 or ah <= 0 or bw <= 0 or bh <= 0:
@@ -76,7 +79,18 @@ def iou_xywh(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> floa
     iw, ih = ix2 - ix1, iy2 - iy1
     if iw <= 0 or ih <= 0:
         return 0.0
-    inter = float(iw * ih)
+    return float(iw * ih)
+
+
+def iou_xywh(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+    """Intersection-over-union for ``(x, y, w, h)`` boxes; 0 when either has no area."""
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    if aw <= 0 or ah <= 0 or bw <= 0 or bh <= 0:
+        return 0.0
+    inter = intersection_area_xywh(a, b)
+    if inter <= 0.0:
+        return 0.0
     union = float(aw * ah + bw * bh) - inter
     if union <= 0.0:
         return 0.0

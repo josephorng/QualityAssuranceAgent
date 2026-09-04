@@ -1009,6 +1009,82 @@ def test_create_scrollbar_skips_when_union_overlaps_text() -> None:
     assert not any(d.class_name == "scrollbar" for d in out)
 
 
+def test_create_scrollbar_ignores_text_overlapping_end_arrow() -> None:
+    from cua_mcp.scrollbar_arrows import create_scrollbars_from_arrow_pairs
+
+    up = _detection_from_bbox(
+        (904, 450, 14, 16),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上V箭頭"}],
+    )
+    down = _detection_from_bbox(
+        (904, 574, 12, 10),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下V箭頭"}],
+    )
+    # OCR misread on the up-arrow glyph — any overlap is ignored.
+    ghost = _detection_from_bbox(
+        (903, 454, 12, 9),
+        YOLO_CLASS_TEXT,
+        text="機",
+    )
+    out = create_scrollbars_from_arrow_pairs([up, down, ghost])
+    scrollbars = [d for d in out if d.class_name == "scrollbar"]
+    assert len(scrollbars) == 1
+    assert scrollbars[0].bbox == (904, 450, 14, 134)
+    by_bbox = {d.bbox: d for d in out}
+    assert by_bbox[up.bbox].icons[0]["chinese_id"] == "向上滾動箭頭"
+    assert by_bbox[down.bbox].icons[0]["chinese_id"] == "向下滾動箭頭"
+
+
+def test_create_scrollbar_ignores_partial_text_overlap_on_end_arrow() -> None:
+    from cua_mcp.scrollbar_arrows import create_scrollbars_from_arrow_pairs
+
+    up = _detection_from_bbox(
+        (100, 50, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上V箭頭"}],
+    )
+    down = _detection_from_bbox(
+        (100, 300, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下V箭頭"}],
+    )
+    # Only partial overlap with the up arrow — still ignored.
+    text = _detection_from_bbox(
+        (106, 50, 12, 12),
+        YOLO_CLASS_TEXT,
+        text="半",
+    )
+    out = create_scrollbars_from_arrow_pairs([up, down, text])
+    assert sum(1 for d in out if d.class_name == "scrollbar") == 1
+
+
+def test_fit_scrollbar_ignores_text_overlapping_end_arrow() -> None:
+    from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
+
+    scrollbar = _detection_from_bbox((904, 480, 14, 80), YOLO_CLASS_SCROLLBAR)
+    up = _detection_from_bbox(
+        (904, 450, 14, 16),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上V箭頭"}],
+    )
+    down = _detection_from_bbox(
+        (904, 574, 12, 10),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下V箭頭"}],
+    )
+    ghost = _detection_from_bbox(
+        (903, 454, 12, 9),
+        YOLO_CLASS_TEXT,
+        text="機",
+    )
+    out = fit_scrollbar_bboxes_to_arrow_controls([scrollbar, up, down, ghost])
+    fitted = next(d for d in out if d.class_name == "scrollbar")
+    assert fitted.bbox[1] == 450
+    assert fitted.bbox[1] + fitted.bbox[3] == 584
+
+
 def test_create_scrollbar_skips_misaligned_pair() -> None:
     from cua_mcp.scrollbar_arrows import create_scrollbars_from_arrow_pairs
 

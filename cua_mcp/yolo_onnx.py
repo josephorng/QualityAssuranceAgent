@@ -14,6 +14,10 @@ overlapping 2×2 quadtree, re-infers each tile, and merges results.
 Classes: ``text`` (:data:`YOLO_CLASS_TEXT`), ``element`` (:data:`YOLO_CLASS_ELEMENT`),
 ``input`` (:data:`YOLO_CLASS_INPUT`), and ``scrollbar`` (:data:`YOLO_CLASS_SCROLLBAR`).
 
+After decode/merge, tiny ``text`` boxes (both sides under
+:data:`DEFAULT_SMALL_TEXT_AS_ELEMENT_MAX_SIDE`) are also emitted as ``element`` at the
+same bbox so icon OCR can run alongside text OCR.
+
 Tune defaults via ``DEFAULT_CONF_*``, or pass keyword args per call.
 """
 
@@ -51,9 +55,15 @@ DEFAULT_CROSS_TILE_NMS_IOU: float = 0.5
 #
 # After same-class merge, each ``input`` box is expanded to the axis-aligned union of
 # itself and every overlapping ``text`` box (text detections are left unchanged).
+#
+# Finally, each ``text`` box whose width and height are both strictly under
+# :data:`DEFAULT_SMALL_TEXT_AS_ELEMENT_MAX_SIDE` is also emitted as an ``element`` at the
+# same bbox (original text kept), so tiny icon-like glyphs get dual-stream OCR.
 DEFAULT_MERGE_TOUCHING_SAME_CLASS: bool = False
 # Pairs of same-class boxes are linked (and merged transitively) when ``IoU >`` this value.
 DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD: float = 0.2
+# Duplicate ``text`` → ``element`` when both sides are strictly smaller than this (pixels).
+DEFAULT_SMALL_TEXT_AS_ELEMENT_MAX_SIDE: int = 15
 
 # ``best.onnx`` classes (Ultralytics metadata: Text=0, Element=1, Input=2, Scrollbar=3)
 YOLO_CLASS_TEXT: int = 0
@@ -248,6 +258,9 @@ def run_yolo_onnx_end2end(
     pairwise IoU exceeds ``merge_same_class_iou_threshold``. ``input`` and ``scrollbar`` are
     always merged at that threshold (see :data:`DEFAULT_MERGE_TOUCHING_CLASS_IDS`). Each
     ``input`` box is then expanded to include every overlapping ``text`` box.
+
+    Tiny ``text`` boxes (both sides under :data:`DEFAULT_SMALL_TEXT_AS_ELEMENT_MAX_SIDE`)
+    are also duplicated as ``element`` at the same bbox when ``element`` is in ``class_ids``.
     """
     return _run_yolo_onnx_end2end_recursive(
         bgr,
@@ -278,7 +291,7 @@ def _run_yolo_onnx_end2end_recursive(
     hit_cap = valid >= max_det
 
     if not hit_cap or not _quadtree_can_split(h0, w0, depth):
-        return decode_yolov26_end2end(
+        xyxy, scores, cls_arr = decode_yolov26_end2end(
             raw,
             h0,
             w0,
@@ -286,6 +299,9 @@ def _run_yolo_onnx_end2end_recursive(
             class_ids=class_ids,
             merge_touching_same_class=merge_touching_same_class,
             merge_same_class_iou_threshold=merge_same_class_iou_threshold,
+        )
+        return copy_small_text_as_element_xyxy(
+            xyxy, scores, cls_arr, class_ids=class_ids
         )
 
     # Cap hit: discard truncated full-image decode; results come only from tiles.
@@ -350,7 +366,9 @@ def _run_yolo_onnx_end2end_recursive(
         xyxy_f, scores, cls_arr
     )
     xyxy = np.round(xyxy_f).astype(np.int32)
-    return xyxy, scores, cls_arr
+    return copy_small_text_as_element_xyxy(
+        xyxy, scores, cls_arr, class_ids=class_ids
+    )
 
 
 def bgr_to_nchw_normalized(
@@ -652,6 +670,77 @@ def expand_input_boxes_with_overlapping_text_xyxy(
             xyxy[i] = np.array([x1, y1, x2, y2], dtype=np.float32)
 
     return xyxy, scores, cls_ids
+
+
+def copy_small_text_as_element_xyxy(
+    xyxy: np.ndarray,
+    scores: np.ndarray,
+    cls_ids: np.ndarray,
+    *,
+    max_side: int = DEFAULT_SMALL_TEXT_AS_ELEMENT_MAX_SIDE,
+    class_ids: set[int] | frozenset[int] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Duplicate small ``text`` detections as ``element`` at the same bbox.
+
+    A text box is copied when both width and height are strictly less than
+    ``max_side``. The original text row is kept. Skips when ``class_ids`` is set
+    and does not include :data:`YOLO_CLASS_ELEMENT`, or when an ``element`` with
+    the identical bbox already exists (so re-applying is idempotent).
+    """
+    if len(xyxy) == 0:
+        return xyxy, scores, cls_ids
+    if class_ids is not None and YOLO_CLASS_ELEMENT not in class_ids:
+        return xyxy, scores, cls_ids
+
+    xyxy = np.asarray(xyxy)
+    scores = np.asarray(scores, dtype=np.float32).reshape(-1)
+    cls_ids = np.asarray(cls_ids, dtype=np.int64).reshape(-1)
+    if len(xyxy) != len(scores) or len(xyxy) != len(cls_ids):
+        raise ValueError("xyxy, scores, and cls_ids must have the same length")
+
+    existing_element_boxes = {
+        (int(row[0]), int(row[1]), int(row[2]), int(row[3]))
+        for row, cls_id in zip(xyxy, cls_ids, strict=True)
+        if int(cls_id) == YOLO_CLASS_ELEMENT
+    }
+
+    extra_xy: list[np.ndarray] = []
+    extra_sc: list[float] = []
+    for row, score, cls_id in zip(xyxy, scores, cls_ids, strict=True):
+        if int(cls_id) != YOLO_CLASS_TEXT:
+            continue
+        x1, y1, x2, y2 = (float(row[k]) for k in range(4))
+        width = x2 - x1
+        height = y2 - y1
+        if width >= max_side or height >= max_side:
+            continue
+        key = (int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2)))
+        if key in existing_element_boxes:
+            continue
+        existing_element_boxes.add(key)
+        extra_xy.append(np.asarray(row))
+        extra_sc.append(float(score))
+
+    if not extra_xy:
+        return xyxy, scores, cls_ids
+
+    out_xy = np.concatenate([xyxy, np.stack(extra_xy, axis=0)], axis=0)
+    if np.issubdtype(xyxy.dtype, np.integer):
+        out_xy = np.round(out_xy).astype(xyxy.dtype)
+    else:
+        out_xy = out_xy.astype(np.float32)
+    out_sc = np.concatenate(
+        [scores, np.asarray(extra_sc, dtype=np.float32)], axis=0
+    )
+    out_cls = np.concatenate(
+        [
+            cls_ids,
+            np.full(len(extra_xy), YOLO_CLASS_ELEMENT, dtype=np.int64),
+        ],
+        axis=0,
+    )
+    return out_xy, out_sc, out_cls
 
 
 def decode_yolov26_end2end(

@@ -1412,6 +1412,55 @@ def test_write_recording_html_shows_yolo_retry_when_failed(tmp_path: Path) -> No
     assert "/events/" in html and "/yolo_ocr" in html
 
 
+def test_write_recording_html_shows_pick_target_when_cursor_missing(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000050"
+    _write_recording_fixture(run_root)
+    event_path = run_root / "events" / "event_001.json"
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    event["cursor_xy"] = None
+    event_path.write_text(json.dumps(event, ensure_ascii=False), encoding="utf-8")
+    (run_root / "yolo_ocr").mkdir(exist_ok=True)
+    (run_root / "yolo_ocr" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "cursor_xy": None,
+                "local_cursor": None,
+                "candidates": [
+                    {
+                        "bbox": [10, 10, 20, 20],
+                        "center": [20, 20],
+                        "class_name": "text",
+                        "text": "搜尋",
+                    },
+                    {
+                        "bbox": [40, 40, 30, 14],
+                        "center": [55, 47],
+                        "class_name": "text",
+                        "text": "確定",
+                    },
+                ],
+                "detection_count": 2,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+    assert 'class="pick-target"' in html
+    assert "選取點擊目標" in html
+    assert 'class="apply-pick-target"' in html
+    assert 'class="pick-target-filter"' in html
+    assert "/pick_target" in html
+    assert "「搜尋」文字" in html or "搜尋" in html
+    assert "「確定」文字" in html or "確定" in html
+    assert "請選取點擊目標" in html
+    assert 'class="landmarks"' not in html
+
+
 def test_write_recording_html_escapes_markup(tmp_path: Path) -> None:
     run_root = tmp_path / "recording_20260721_120000_000002"
     _write_recording_fixture(run_root, with_analysis=False)

@@ -68,6 +68,8 @@ _MIN_NEARBY_TEXT_CANDIDATES = 8
 _MIN_NEARBY_ICON_CANDIDATES = 5
 # Recording HTML「點擊目標」radio list: closest labeled candidates only.
 _MAX_PRIMARY_TARGET_OPTIONS = 10
+# Manual steps with no click point need a wider gallery than proximity-ranked picks.
+_MAX_PICK_TARGET_OPTIONS = 80
 # Recording HTML「附近地標」: max options per directed side (closest to click).
 _MAX_NEARBY_LANDMARK_OPTIONS_PER_SIDE = 10
 # Prefer at least this many multi-char text neighbors in each directional cell.
@@ -1988,28 +1990,41 @@ def drag_end_vision(run_root: Path, event_index: int) -> dict[str, Any]:
 
 def list_primary_target_options(
     vision: dict[str, Any],
+    *,
+    max_options: int | None = _MAX_PRIMARY_TARGET_OPTIONS,
+    mark_current: bool = True,
 ) -> list[dict[str, Any]]:
     """Return selectable primary click/drag targets from ranked candidates.
 
     Each option is ``{"index", "label", "display"}``. Index 0 is the current
-    primary. Candidates without a meaningful hub-style label are omitted.
-    Only the ``_MAX_PRIMARY_TARGET_OPTIONS`` candidates nearest the click
-    (``candidates`` order) are considered.
+    primary when ``mark_current`` is True. Candidates without a meaningful
+    hub-style label are omitted. When ``max_options`` is set, only that many
+    leading candidates (``candidates`` order) are considered.
     """
     candidates = vision.get("candidates") or []
     if not isinstance(candidates, list) or not candidates:
         return []
 
+    limited = candidates if max_options is None else candidates[:max_options]
     options: list[dict[str, Any]] = []
-    for index, candidate in enumerate(candidates[:_MAX_PRIMARY_TARGET_OPTIONS]):
+    for index, candidate in enumerate(limited):
         if not isinstance(candidate, dict):
             continue
         label = _candidate_label_for_hint(candidate)
         if not label:
             continue
-        display = f"{label}（目前）" if index == 0 else label
+        display = f"{label}（目前）" if mark_current and index == 0 else label
         options.append({"index": index, "label": label, "display": display})
     return options
+
+
+def list_pick_target_options(vision: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return labeled detections for choosing a click point when ``cursor_xy`` is unset."""
+    return list_primary_target_options(
+        vision,
+        max_options=_MAX_PICK_TARGET_OPTIONS,
+        mark_current=False,
+    )
 
 
 def load_recording_primary_target_options(
@@ -2032,6 +2047,33 @@ def load_recording_primary_target_options(
         drag_end_vision(run_root, event_index)
     )
     return {"start": start_options, "end": end_options}
+
+
+def load_recording_pick_target_options(
+    run_root: Path,
+    event_index: int,
+) -> list[dict[str, Any]]:
+    """Load pick-target options for a pointer event that still has no ``cursor_xy``."""
+    return list_pick_target_options(
+        vision_from_yolo_ocr(run_root, event_index, suffix="")
+    )
+
+
+def local_to_global_xy(
+    event: RecordedEvent,
+    local_xy: tuple[int, int],
+) -> tuple[int, int]:
+    """Map screenshot-local coords to global desktop coords via ``monitor_offset``."""
+    lx, ly = local_xy
+    if event.monitor_offset is not None:
+        ox, oy = event.monitor_offset
+        return lx + ox, ly + oy
+    return lx, ly
+
+
+def candidate_bbox_key(candidate: dict[str, Any]) -> tuple[int, int, int, int] | None:
+    """Return a comparable ``(x, y, w, h)`` key for matching re-detected boxes."""
+    return _candidate_bbox_tuple(candidate)
 
 
 def _dict_to_detection(candidate: dict[str, Any]) -> UiDetection | None:
@@ -2432,6 +2474,107 @@ def extract_nearest_text(
             return text
 
     return None
+
+
+def build_vision_context_full_image(
+    event: RecordedEvent,
+    *,
+    run_dir: Path,
+    persist_debug: bool = True,
+    image_path: str | None = None,
+    debug_name: str | None = None,
+    source_fingerprint: str | None = None,
+) -> dict[str, Any]:
+    """Run YOLO+OCR on the full screenshot without a click point.
+
+    Persists every detection (reading order) so the user can pick a click target.
+    ``cursor_xy`` / ``local_cursor`` stay null until a target is chosen.
+    """
+    empty: dict[str, Any] = {
+        "used_vision": False,
+        "candidate_text": "",
+        "local_cursor": None,
+        "candidates": [],
+        "detection_count": 0,
+    }
+    fingerprint = source_fingerprint or vision_source_fingerprint(event)
+
+    resolved = resolve_event_screenshot_path(
+        event,
+        run_dir,
+        image_path=image_path,
+        debug_name=debug_name,
+    )
+    resolved_image_path = str(resolved) if resolved is not None else (image_path or event.screenshot_path or "")
+    load_error: str | None = None
+    bgr = None
+    if resolved is None:
+        load_error = "找不到截圖檔"
+    else:
+        bgr = imread_bgr(resolved)
+        if bgr is None:
+            load_error = "無法讀取截圖"
+
+    if load_error is not None:
+        empty["yolo_error"] = load_error
+        if persist_debug:
+            write_json(
+                run_dir / "yolo_ocr" / f"event_{event.index:03d}{debug_name or ''}.json",
+                {
+                    "event_index": event.index,
+                    "image_path": resolved_image_path,
+                    "cursor_xy": None,
+                    "local_cursor": None,
+                    "candidate_text": "",
+                    "candidates": [],
+                    "detection_count": 0,
+                    "yolo_error": load_error,
+                    "source_fingerprint": fingerprint,
+                },
+            )
+        return empty
+
+    assert bgr is not None
+    offset = event.monitor_offset if event.monitor_offset is not None else (0, 0)
+    yolo_error: str | None = None
+    try:
+        all_detections = _detect_mouse_targets_from_bgr(bgr, coord_offset=offset)
+    except RuntimeError as exc:
+        all_detections = []
+        yolo_error = str(exc)
+
+    candidate_dicts = [_detection_to_dict(det) for det in all_detections]
+    candidate_text = _format_ui_candidates_text(all_detections) if all_detections else ""
+    payload: dict[str, Any] = {
+        "event_index": event.index,
+        "image_path": resolved_image_path,
+        "cursor_xy": None,
+        "local_cursor": None,
+        "candidate_text": candidate_text,
+        "candidates": candidate_dicts,
+        "detection_count": len(all_detections),
+        "source_fingerprint": fingerprint,
+    }
+    if yolo_error:
+        payload["yolo_error"] = yolo_error
+
+    if persist_debug:
+        suffix = debug_name or ""
+        debug_path = run_dir / "yolo_ocr" / f"event_{event.index:03d}{suffix}.json"
+        write_json(debug_path, payload)
+
+    result: dict[str, Any] = {
+        "used_vision": bool(candidate_dicts),
+        "candidate_text": candidate_text,
+        "local_cursor": None,
+        "candidates": candidate_dicts,
+        "detection_count": len(all_detections),
+        "bgr": bgr,
+        "all_detections": all_detections,
+        "yolo_error": yolo_error,
+        "field_context": "(none)",
+    }
+    return result
 
 
 def build_vision_context_at_point(
@@ -2883,7 +3026,15 @@ def run_pointer_event_yolo_ocr(
 
     local = _local_cursor(event)
     if local is None:
-        return empty
+        result = build_vision_context_full_image(
+            event,
+            run_dir=run_dir,
+            persist_debug=persist_debug,
+            source_fingerprint=fingerprint,
+        )
+        result.pop("bgr", None)
+        result.pop("all_detections", None)
+        return result
 
     result = build_vision_context_at_point(
         event,

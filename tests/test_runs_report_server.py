@@ -19,6 +19,7 @@ from src.common.runs_report_server import (
     delete_recording_events,
     delete_run_report_folder,
     ensure_runs_report_server,
+    pick_recording_event_target,
     rename_recording_folder,
     rerun_recording_event_yolo_ocr,
     resolve_deletable_run_folder,
@@ -1631,3 +1632,223 @@ def test_resolve_deletable_run_folder_accepts_unicode(tmp_path: Path) -> None:
     _make_recording_landmark_run(runs_root, "錄製 測試")
     target = resolve_deletable_run_folder(runs_root, "錄製 測試")
     assert target.name == "錄製 測試"
+
+
+def test_add_recording_event_click_copies_monitor_offset(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_two_event_run(runs_root, "recording_add_click_offset")
+    event_path = run_root / "events" / "event_002.json"
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    event["monitor_index"] = 1
+    event["monitor_offset"] = [1920, 0]
+    event_path.write_text(json.dumps(event, ensure_ascii=False), encoding="utf-8")
+
+    result = add_recording_event(
+        runs_root,
+        "recording_add_click_offset",
+        kind="click",
+        instruction="點擊「下一步」",
+        after_event_index=2,
+    )
+    assert result["event_index"] == 3
+    added = json.loads((run_root / "events" / "event_003.json").read_text(encoding="utf-8"))
+    assert added["kind"] == "click"
+    assert added["cursor_xy"] is None
+    assert added["monitor_index"] == 1
+    assert added["monitor_offset"] == [1920, 0]
+
+
+def test_rerun_recording_event_yolo_ocr_null_cursor_needs_pick(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_landmark_run(runs_root, "recording_yolo_null_cursor")
+    event_path = run_root / "events" / "event_001.json"
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    event["cursor_xy"] = None
+    event["monitor_offset"] = [100, 200]
+    event_path.write_text(json.dumps(event, ensure_ascii=False), encoding="utf-8")
+    original_instruction = json.loads(
+        (run_root / "analysis" / "event_001.json").read_text(encoding="utf-8")
+    )["instruction"]
+
+    def fake_yolo(event_obj, *, run_dir, persist_debug=True):
+        payload = {
+            "event_index": event_obj.index,
+            "cursor_xy": None,
+            "local_cursor": None,
+            "candidates": [
+                {
+                    "bbox": [10, 10, 20, 20],
+                    "center": [20, 20],
+                    "class_name": "text",
+                    "text": "搜尋",
+                },
+                {
+                    "bbox": [40, 40, 30, 14],
+                    "center": [55, 47],
+                    "class_name": "text",
+                    "text": "確定",
+                },
+            ],
+            "candidate_text": "搜尋 / 確定",
+            "detection_count": 2,
+        }
+        (run_dir / "yolo_ocr").mkdir(exist_ok=True)
+        (run_dir / "yolo_ocr" / "event_001.json").write_text(
+            json.dumps(payload, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return {
+            "used_vision": True,
+            "candidates": payload["candidates"],
+            "detection_count": 2,
+            "candidate_text": "搜尋 / 確定",
+        }
+
+    monkeypatch.setattr(
+        "src.common.runs_report_server.run_pointer_event_yolo_ocr",
+        fake_yolo,
+    )
+
+    result = rerun_recording_event_yolo_ocr(
+        runs_root, "recording_yolo_null_cursor", 1
+    )
+    assert result["needs_pick_target"] is True
+    assert result["candidate_count"] == 2
+    assert result["instruction"] == original_instruction
+    analysis = json.loads(
+        (run_root / "analysis" / "event_001.json").read_text(encoding="utf-8")
+    )
+    assert analysis["instruction"] == original_instruction
+
+
+def test_pick_recording_event_target_sets_cursor_and_rebuilds(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_landmark_run(runs_root, "recording_pick_target")
+    event_path = run_root / "events" / "event_001.json"
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    event["cursor_xy"] = None
+    event["monitor_offset"] = [1000, 100]
+    event_path.write_text(json.dumps(event, ensure_ascii=False), encoding="utf-8")
+    (run_root / "yolo_ocr" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "cursor_xy": None,
+                "local_cursor": None,
+                "candidates": [
+                    {
+                        "bbox": [10, 10, 20, 20],
+                        "center": [20, 20],
+                        "class_name": "text",
+                        "text": "搜尋",
+                    },
+                    {
+                        "bbox": [80, 90, 40, 16],
+                        "center": [100, 98],
+                        "class_name": "text",
+                        "text": "確定",
+                    },
+                ],
+                "detection_count": 2,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_yolo(event_obj, *, run_dir, persist_debug=True):
+        assert event_obj.cursor_xy == (1100, 198)
+        payload = {
+            "event_index": event_obj.index,
+            "cursor_xy": list(event_obj.cursor_xy),
+            "local_cursor": [100, 98],
+            "candidates": [
+                {
+                    "bbox": [80, 90, 40, 16],
+                    "center": [100, 98],
+                    "class_name": "text",
+                    "text": "確定",
+                },
+                {
+                    "bbox": [10, 10, 20, 20],
+                    "center": [20, 20],
+                    "class_name": "text",
+                    "text": "搜尋",
+                },
+            ],
+            "candidate_text": "[index 0] text=確定\n[index 1] text=搜尋",
+            "detection_count": 2,
+        }
+        (run_dir / "yolo_ocr" / "event_001.json").write_text(
+            json.dumps(payload, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return {
+            "used_vision": True,
+            "candidates": payload["candidates"],
+            "detection_count": 2,
+            "candidate_text": payload["candidate_text"],
+            "local_cursor": (100, 98),
+        }
+
+    monkeypatch.setattr(
+        "src.common.runs_report_server.run_pointer_event_yolo_ocr",
+        fake_yolo,
+    )
+
+    result = pick_recording_event_target(
+        runs_root,
+        "recording_pick_target",
+        1,
+        primary_index=1,
+    )
+    assert result["cursor_xy"] == [1100, 198]
+    assert "確定" in result["instruction"]
+
+    saved = json.loads(event_path.read_text(encoding="utf-8"))
+    assert saved["cursor_xy"] == [1100, 198]
+    analysis = json.loads(
+        (run_root / "analysis" / "event_001.json").read_text(encoding="utf-8")
+    )
+    assert analysis["instruction"] == result["instruction"]
+    html = (run_root / "recording_steps.html").read_text(encoding="utf-8")
+    assert "確定" in html
+    assert 'class="pick-target"' not in html
+
+
+def test_runs_report_server_pick_target_endpoint(tmp_path: Path, monkeypatch) -> None:
+    runs_root = tmp_path / "runs"
+    _make_recording_landmark_run(runs_root, "recording_http_pick")
+
+    monkeypatch.setattr(
+        "src.common.runs_report_server.pick_recording_event_target",
+        lambda *args, **kwargs: {
+            "instruction": "將滑鼠移到「確定」文字，並點擊滑鼠一下。",
+            "cursor_xy": [50, 60],
+            "primary_index": 0,
+            "candidate_count": 2,
+        },
+    )
+
+    server = RunsReportServer(runs_root)
+    try:
+        base = server.start()
+        body = json.dumps({"primary_index": 1}, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            f"{base}/api/runs/recording_http_pick/events/1/pick_target",
+            method="POST",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            assert response.status == 200
+        assert payload["ok"] is True
+        assert payload["cursor_xy"] == [50, 60]
+        assert "確定" in payload["instruction"]
+    finally:
+        server.stop()

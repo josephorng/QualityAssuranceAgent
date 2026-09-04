@@ -296,6 +296,43 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
   margin-left: .6rem; font-size: .8rem; font-weight: 600; color: #57606a;
 }
 .vision-retry-status.error { color: #cf222e; }
+.pick-target {
+  margin: 0 1.5rem 1rem; padding: .75rem .9rem;
+  border: 1px solid #0969da; border-radius: 8px; background: #ddf4ff;
+}
+.pick-target-title { font-weight: 600; margin: 0 0 .35rem; }
+.pick-target-note { margin: 0 0 .6rem; color: #57606a; font-size: .85rem; }
+.pick-target-filter {
+  display: block; width: 100%; max-width: 28rem; box-sizing: border-box;
+  margin: 0 0 .6rem; padding: .35rem .55rem;
+  border: 1px solid #d0d7de; border-radius: 6px; font: inherit;
+}
+.pick-target-list {
+  list-style: none; margin: 0 0 .65rem; padding: 0;
+  max-height: 16rem; overflow: auto;
+  border: 1px solid #d0d7de; border-radius: 6px; background: #fff;
+}
+.pick-target-list li { margin: 0; padding: 0; border-bottom: 1px solid #eaeef2; }
+.pick-target-list li:last-child { border-bottom: 0; }
+.pick-target-list label {
+  display: flex; gap: .5rem; align-items: flex-start;
+  padding: .4rem .55rem; cursor: pointer; font-size: .85rem;
+}
+.pick-target-list label:hover { background: #f6f8fa; }
+.pick-target-list input { margin-top: .2rem; flex: 0 0 auto; }
+.pick-target-list li[hidden] { display: none; }
+.apply-pick-target {
+  appearance: none; border: 1px solid #0969da; background: #fff;
+  cursor: pointer; border-radius: 6px; padding: .3rem .7rem;
+  font-size: .8rem; line-height: 1.2; font-family: inherit;
+  font-weight: 600; color: #0969da;
+}
+.apply-pick-target:hover:not(:disabled) { background: #b6e3ff; }
+.apply-pick-target:disabled { opacity: .45; cursor: not-allowed; }
+.pick-target-status {
+  margin-left: .6rem; font-size: .8rem; font-weight: 600; color: #57606a;
+}
+.pick-target-status.error { color: #cf222e; }
 .typed-text {
   margin: 0 1.5rem 1rem; padding: .75rem 1rem;
   border: 1px solid #d0d7de; border-radius: 8px; background: #f6f8fa;
@@ -1093,6 +1130,97 @@ _RECORDING_SCRIPT = """
           setStatus("無法連線主程式，請確認主程式正在執行。", true);
         });
     });
+  });
+
+  Array.prototype.slice.call(document.querySelectorAll(".pick-target")).forEach(function (panel) {
+    var filter = panel.querySelector(".pick-target-filter");
+    var list = panel.querySelector(".pick-target-list");
+    var applyBtn = panel.querySelector("button.apply-pick-target");
+    var status = panel.querySelector(".pick-target-status");
+    function setPickStatus(text, isError) {
+      if (!status) return;
+      status.textContent = text || "";
+      if (isError) status.classList.add("error");
+      else status.classList.remove("error");
+    }
+    function selectedPickIndex() {
+      var checked = panel.querySelector('input[type="radio"][name^="pick-target-"]:checked');
+      if (!checked) return null;
+      var raw = checked.getAttribute("data-primary-index");
+      var index = parseInt(raw || "", 10);
+      return Number.isFinite(index) ? index : null;
+    }
+    function syncPickApply() {
+      if (!applyBtn || panel.getAttribute("data-applying") === "1") return;
+      applyBtn.disabled = selectedPickIndex() == null;
+    }
+    if (filter && list) {
+      filter.addEventListener("input", function () {
+        var q = (filter.value || "").trim().toLowerCase();
+        Array.prototype.slice.call(list.querySelectorAll("li")).forEach(function (li) {
+          var label = (li.getAttribute("data-filter") || "").toLowerCase();
+          li.hidden = Boolean(q) && label.indexOf(q) === -1;
+        });
+      });
+    }
+    panel.addEventListener("change", function (event) {
+      var target = event.target;
+      if (!target || !target.matches('input[type="radio"][name^="pick-target-"]')) return;
+      syncPickApply();
+      setPickStatus("", false);
+    });
+    syncPickApply();
+    if (applyBtn) {
+      applyBtn.addEventListener("click", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        var group = panel.closest(".instruction-group");
+        if (!group) return;
+        if (window.location.protocol === "file:") {
+          setPickStatus("請透過主程式開啟報告以設定點擊目標。", true);
+          return;
+        }
+        var runId = group.getAttribute("data-run-id") || "";
+        var eventIndex = group.getAttribute("data-event-index") || "";
+        var primaryIndex = selectedPickIndex();
+        if (!runId || !eventIndex) {
+          setPickStatus("缺少事件資訊。", true);
+          return;
+        }
+        if (primaryIndex == null) {
+          setPickStatus("請先選取一個目標。", true);
+          return;
+        }
+        panel.setAttribute("data-applying", "1");
+        applyBtn.disabled = true;
+        setPickStatus("設定中…可能需要數十秒。", false);
+        fetch("/api/runs/" + encodeURIComponent(runId) + "/events/" + encodeURIComponent(eventIndex) + "/pick_target", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ primary_index: primaryIndex })
+        })
+          .then(function (response) {
+            return response.json().then(function (payload) {
+              return { ok: response.ok, payload: payload };
+            });
+          })
+          .then(function (result) {
+            panel.removeAttribute("data-applying");
+            if (!result.ok || !result.payload || !result.payload.ok) {
+              syncPickApply();
+              var err = (result.payload && result.payload.error) || "設定失敗";
+              setPickStatus(err, true);
+              return;
+            }
+            window.location.reload();
+          })
+          .catch(function () {
+            panel.removeAttribute("data-applying");
+            syncPickApply();
+            setPickStatus("無法連線主程式，請確認主程式正在執行。", true);
+          });
+      });
+    }
   });
 
   function setTypedTextStatus(panel, text, isError) {
@@ -3719,11 +3847,32 @@ def _recording_yolo_ocr_failed(run_root: Path, event_index: int, kind: str) -> b
     return True
 
 
+def _recording_needs_pick_target(
+    run_root: Path,
+    event: dict[str, Any],
+    event_index: int,
+    kind: str,
+) -> bool:
+    from src.recorder.models import POINTER_EVENT_KINDS
+    from src.recorder.vision_context import load_yolo_ocr_payload
+
+    if kind not in POINTER_EVENT_KINDS or kind == "drag":
+        return False
+    cursor = event.get("cursor_xy")
+    if isinstance(cursor, (list, tuple)) and len(cursor) == 2:
+        return False
+    return _yolo_ocr_payload_has_candidates(
+        load_yolo_ocr_payload(run_root, event_index, suffix="")
+    )
+
+
 def _render_yolo_retry_panel_html(
     *,
     run_root: Path,
     event_index: int,
     kind: str,
+    needs_pick_target: bool = False,
+    missing_cursor: bool = False,
 ) -> str:
     from src.recorder.models import POINTER_EVENT_KINDS
     from src.recorder.vision_context import load_yolo_ocr_payload
@@ -3737,8 +3886,15 @@ def _render_yolo_retry_panel_html(
         raw_error = payload.get("yolo_error")
         if isinstance(raw_error, str) and raw_error.strip():
             error_text = raw_error.strip()
-    if failed:
-        note = "分析時 YOLO/OCR 沒有偵測到目標（常為 Triton 逾時）。可重新偵測後重建指令。"
+    if needs_pick_target:
+        note = "已偵測到畫面目標。請在下方選取要點擊的項目；也可重新偵測。"
+        title = "請選取點擊目標"
+        failed_class = ""
+    elif failed:
+        if missing_cursor:
+            note = "此步驟尚無點擊位置。請先重新偵測 YOLO/OCR，再從偵測結果選取目標。"
+        else:
+            note = "分析時 YOLO/OCR 沒有偵測到目標（常為 Triton 逾時）。可重新偵測後重建指令。"
         if error_text:
             note = f"分析時 YOLO/OCR 失敗：{error_text}"
         title = "YOLO/OCR 未偵測到目標"
@@ -3754,6 +3910,54 @@ def _render_yolo_retry_panel_html(
         f'<button type="button" class="rerun-yolo-ocr" title="重新偵測 YOLO/OCR">'
         f"重新偵測 YOLO/OCR</button>"
         f'<span class="vision-retry-status" aria-live="polite"></span>'
+        f"</div>"
+    )
+
+
+def _render_pick_target_panel_html(
+    *,
+    run_root: Path,
+    event_index: int,
+) -> str:
+    from src.recorder.vision_context import load_recording_pick_target_options
+
+    options = load_recording_pick_target_options(run_root, event_index)
+    if not options:
+        return ""
+    name = f"pick-target-{event_index}"
+    items: list[str] = []
+    for option in options:
+        try:
+            index = int(option.get("index"))
+        except (TypeError, ValueError):
+            continue
+        label = str(option.get("label") or "")
+        if not label:
+            continue
+        display = str(option.get("display") or label)
+        items.append(
+            f'<li data-filter="{escape(label, quote=True)}">'
+            f'<label><input type="radio" name="{escape(name, quote=True)}" '
+            f'data-primary-index="{index}" '
+            f'data-label="{escape(label, quote=True)}">'
+            f"<span>{escape(display)}</span></label>"
+            f"</li>"
+        )
+    if not items:
+        return ""
+    return (
+        f'<div class="pick-target">'
+        f'<div class="pick-target-title">選取點擊目標</div>'
+        f'<p class="pick-target-note">'
+        f"從偵測結果選擇此步驟要點的目標；會以該目標中心設為點擊位置並重建指令。"
+        f"</p>"
+        f'<input type="search" class="pick-target-filter" '
+        f'placeholder="篩選目標…" autocomplete="off" spellcheck="false">'
+        f'<ul class="pick-target-list">{"".join(items)}</ul>'
+        f'<button type="button" class="apply-pick-target" disabled '
+        f'title="將選取目標設為點擊位置">'
+        f"設為點擊目標</button>"
+        f'<span class="pick-target-status" aria-live="polite"></span>'
         f"</div>"
     )
 
@@ -4202,16 +4406,39 @@ def _render_recording_event_html(
         "動作後截圖", after, run_root
     )
 
-    landmarks_html = _render_landmarks_panel_html(
-        run_root=run_root,
-        event_index=index,
-        kind=kind,
-        instruction=instruction,
-    )
+    landmarks_html = ""
+    pick_target_html = ""
+    needs_pick = _recording_needs_pick_target(run_root, event, index, kind)
+    missing_cursor = False
+    if kind in {
+        "click",
+        "double_click",
+        "triple_click",
+        "right_click",
+        "middle_click",
+        "scroll",
+        "hold",
+    }:
+        cursor = event.get("cursor_xy")
+        missing_cursor = not (isinstance(cursor, (list, tuple)) and len(cursor) == 2)
+    if needs_pick:
+        pick_target_html = _render_pick_target_panel_html(
+            run_root=run_root,
+            event_index=index,
+        )
+    else:
+        landmarks_html = _render_landmarks_panel_html(
+            run_root=run_root,
+            event_index=index,
+            kind=kind,
+            instruction=instruction,
+        )
     yolo_retry_html = _render_yolo_retry_panel_html(
         run_root=run_root,
         event_index=index,
         kind=kind,
+        needs_pick_target=needs_pick,
+        missing_cursor=missing_cursor,
     )
     typed_text_html = _render_typed_text_panel_html(
         event=event,
@@ -4295,6 +4522,7 @@ def _render_recording_event_html(
         f"{char_target_html}"
         f"{typed_text_html}"
         f"{yolo_retry_html}"
+        f"{pick_target_html}"
         f"{landmarks_html}"
         f'<div class="shots" style="padding: 0 1.5rem 1rem;">{shots}</div>'
         f'<div class="collapse-row">'

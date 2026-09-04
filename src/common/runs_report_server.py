@@ -14,6 +14,7 @@ Recording event inserts POST to ``/api/runs/<id>/events/add``.
 Recording instruction edits POST to ``/api/runs/<id>/events/<n>/instruction``.
 Recording character-target edits POST to ``/api/runs/<id>/events/<n>/char_target``.
 Recording YOLO/OCR retry POST to ``/api/runs/<id>/events/<n>/yolo_ocr``.
+Recording click-target pick POST to ``/api/runs/<id>/events/<n>/pick_target``.
 Recording folder rename POST to ``/api/runs/<id>/rename``.
 """
 
@@ -63,9 +64,11 @@ from src.recorder.models import (
     utc_now_iso,
 )
 from src.recorder.vision_context import (
+    candidate_bbox_key,
     drag_end_vision,
     drag_end_yolo_suffix,
     format_drag_candidate_anchor,
+    local_to_global_xy,
     primary_candidate_char_target,
     reorder_yolo_ocr_primary,
     run_pointer_event_yolo_ocr,
@@ -101,6 +104,9 @@ _EVENT_CHAR_TARGET_PATH_RE = re.compile(
 )
 _EVENT_YOLO_OCR_PATH_RE = re.compile(
     r"^/api/runs/([^/]+)/events/(\d+)/yolo_ocr/?$"
+)
+_EVENT_PICK_TARGET_PATH_RE = re.compile(
+    r"^/api/runs/([^/]+)/events/(\d+)/pick_target/?$"
 )
 _EVENT_ADD_PATH_RE = re.compile(r"^/api/runs/([^/]+)/events/add/?$")
 _TYPED_TEXT_MAX_LEN = 8192
@@ -746,6 +752,46 @@ def _copy_previous_screenshot(
         return str(dest)
 
 
+def _monitor_index_from_event(source_event: dict[str, Any] | None) -> int | None:
+    if not isinstance(source_event, dict):
+        return None
+    raw = source_event.get("monitor_index")
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None
+    return raw
+
+
+def _monitor_offset_from_event(
+    source_event: dict[str, Any] | None,
+) -> tuple[int, int] | None:
+    if not isinstance(source_event, dict):
+        return None
+    raw = source_event.get("monitor_offset")
+    if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+        return None
+    try:
+        return int(raw[0]), int(raw[1])
+    except (TypeError, ValueError):
+        return None
+
+
+def _candidate_center_xy(candidate: dict[str, Any]) -> tuple[int, int] | None:
+    center = candidate.get("center")
+    if isinstance(center, (list, tuple)) and len(center) == 2:
+        try:
+            return int(center[0]), int(center[1])
+        except (TypeError, ValueError):
+            return None
+    bbox = candidate.get("bbox")
+    if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+        try:
+            x, y, w, h = (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
+        except (TypeError, ValueError):
+            return None
+        return x + w // 2, y + h // 2
+    return None
+
+
 def _clear_analysis_wait_instruction(run_dir: Path, event_index: int) -> None:
     """Drop a virtual ``wait_instruction`` so a real wait event is not duplicated."""
     if event_index < 1:
@@ -944,6 +990,8 @@ def add_recording_event(
         duration_seconds=parsed_duration,
         click_count=click_count,
         screenshot_path=screenshot_rel,
+        monitor_index=_monitor_index_from_event(previous_event) if kind in POINTER_EVENT_KINDS else None,
+        monitor_offset=_monitor_offset_from_event(previous_event) if kind in POINTER_EVENT_KINDS else None,
     )
     event_payload = event.to_dict()
     if kind == "condition":
@@ -1450,9 +1498,13 @@ def rerun_recording_event_yolo_ocr(
 ) -> dict[str, Any]:
     """Re-run YOLO/OCR for one pointer event, rebuild the instruction, and persist.
 
-    Returns ``instruction``, ``detection_count``, and ``candidate_count``.
-    Raises ``ValueError`` for invalid input and ``RuntimeError`` when inference
-    fails or yields no usable targets.
+    When the event has no ``cursor_xy``, runs a full-image detect and returns
+    ``needs_pick_target=True`` without overwriting the instruction so the user
+    can choose a click target next.
+
+    Returns ``instruction``, ``detection_count``, ``candidate_count``, and
+    optionally ``needs_pick_target``. Raises ``ValueError`` for invalid input
+    and ``RuntimeError`` when inference fails or yields no usable targets.
     """
     run_dir = resolve_deletable_run_folder(runs_root, run_id)
     if not isinstance(event_index, int) or event_index < 1:
@@ -1484,6 +1536,18 @@ def rerun_recording_event_yolo_ocr(
     )
     if not start_candidates and (event.kind != "drag" or not end_candidates):
         raise RuntimeError("YOLO/OCR 沒有偵測到目標。請確認 Triton 可用後再試。")
+
+    # Manual/added pointer steps have a screenshot but no click point yet.
+    if event.cursor_xy is None:
+        write_recording_html_from_run(run_dir, update_index=False)
+        existing = analysis.get("instruction")
+        instruction = existing if isinstance(existing, str) else ""
+        return {
+            "instruction": instruction,
+            "detection_count": int(vision.get("detection_count") or len(start_candidates)),
+            "candidate_count": len(start_candidates),
+            "needs_pick_target": True,
+        }
 
     rebuilt = rebuild_pointer_instruction(
         event,
@@ -1519,6 +1583,117 @@ def rerun_recording_event_yolo_ocr(
         "instruction": rebuilt,
         "detection_count": int(vision.get("detection_count") or len(start_candidates)),
         "candidate_count": len(start_candidates),
+        "needs_pick_target": False,
+    }
+
+
+def pick_recording_event_target(
+    runs_root: Path,
+    run_id: str,
+    event_index: int,
+    *,
+    primary_index: Any,
+) -> dict[str, Any]:
+    """Set ``cursor_xy`` from a chosen detection, re-rank YOLO near it, rebuild instruction.
+
+    Used after a null-cursor full-image detect. ``primary_index`` indexes the
+    persisted ``yolo_ocr`` candidates list (before re-ranking).
+    """
+    run_dir = resolve_deletable_run_folder(runs_root, run_id)
+    if not isinstance(event_index, int) or event_index < 1:
+        raise ValueError("invalid event index")
+    chosen_index = _optional_int_index(primary_index, field_name="primary_index")
+    if chosen_index is None:
+        raise ValueError("primary_index is required")
+
+    event_path = event_json_path(run_dir, event_index)
+    event_payload = read_json(event_path, None)
+    if not isinstance(event_payload, dict):
+        raise ValueError("event not found")
+    event = RecordedEvent.from_dict(event_payload)
+    if event.kind not in POINTER_EVENT_KINDS:
+        raise ValueError("event does not support pick target")
+    if event.kind == "drag":
+        raise ValueError("drag pick target is not supported")
+
+    vision_before = vision_from_yolo_ocr(run_dir, event_index, suffix="")
+    candidates = vision_before.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        raise ValueError("yolo_ocr not found")
+    if chosen_index >= len(candidates):
+        raise ValueError("primary index out of range")
+    chosen = candidates[chosen_index]
+    if not isinstance(chosen, dict):
+        raise ValueError("invalid candidate")
+    local_center = _candidate_center_xy(chosen)
+    if local_center is None:
+        raise ValueError("candidate has no center")
+    chosen_bbox = candidate_bbox_key(chosen)
+
+    event.cursor_xy = local_to_global_xy(event, local_center)
+    write_json(event_path, event.to_dict())
+
+    vision = run_pointer_event_yolo_ocr(event, run_dir=run_dir, persist_debug=True)
+    yolo_error = vision.get("yolo_error")
+    if yolo_error:
+        raise RuntimeError(str(yolo_error))
+    new_candidates = vision.get("candidates") if isinstance(vision.get("candidates"), list) else []
+    if not new_candidates:
+        raise RuntimeError("YOLO/OCR 沒有偵測到目標。請確認 Triton 可用後再試。")
+
+    match_index = 0
+    if chosen_bbox is not None:
+        for index, candidate in enumerate(new_candidates):
+            if not isinstance(candidate, dict):
+                continue
+            if candidate_bbox_key(candidate) == chosen_bbox:
+                match_index = index
+                break
+    if match_index != 0:
+        reorder_yolo_ocr_primary(run_dir, event_index, match_index, suffix="")
+        vision = vision_from_yolo_ocr(run_dir, event_index, suffix="")
+
+    analysis_path = run_dir / "analysis" / f"event_{event_index:03d}.json"
+    analysis = read_json(analysis_path, None)
+    if not isinstance(analysis, dict):
+        analysis = {"event_index": event_index}
+    use_char_target = use_char_target_enabled(analysis)
+
+    rebuilt = rebuild_pointer_instruction(
+        event,
+        vision,
+        {},
+        include_nearby=True,
+        use_char_target=use_char_target,
+    )
+    if not rebuilt:
+        raise RuntimeError("已設定點擊點，但無法自動重建指令。")
+
+    analysis["instruction"] = rebuilt
+    analysis["vision"] = {
+        "used_vision": vision.get("used_vision"),
+        "candidate_text": vision.get("candidate_text"),
+    }
+    analysis.pop("landmarks", None)
+    if primary_candidate_char_target(vision) is not None:
+        analysis["use_char_target"] = use_char_target
+    else:
+        analysis.pop("use_char_target", None)
+    write_json(analysis_path, analysis)
+
+    report_path = run_dir / "report.json"
+    report = read_json(report_path, {})
+    if not isinstance(report, dict):
+        report = {}
+    _rebuild_report_instructions(run_dir, report)
+    write_json(report_path, report)
+    write_recording_html_from_run(run_dir, update_index=False)
+
+    return {
+        "instruction": rebuilt,
+        "cursor_xy": list(event.cursor_xy) if event.cursor_xy else None,
+        "primary_index": 0,
+        "candidate_count": len(new_candidates),
     }
 
 
@@ -1595,6 +1770,7 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
             event_instruction_match = _EVENT_INSTRUCTION_PATH_RE.fullmatch(path)
             event_char_target_match = _EVENT_CHAR_TARGET_PATH_RE.fullmatch(path)
             event_yolo_ocr_match = _EVENT_YOLO_OCR_PATH_RE.fullmatch(path)
+            event_pick_target_match = _EVENT_PICK_TARGET_PATH_RE.fullmatch(path)
             event_delete_match = _EVENT_DELETE_PATH_RE.fullmatch(path)
             events_bulk_delete_match = _EVENTS_BULK_DELETE_PATH_RE.fullmatch(path)
             event_add_match = _EVENT_ADD_PATH_RE.fullmatch(path)
@@ -1762,6 +1938,30 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
                 try:
                     event_index = int(event_index_raw)
                     result = rerun_recording_event_yolo_ocr(root, run_id, event_index)
+                except ValueError as exc:
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                    return
+                except RuntimeError as exc:
+                    self._send_json(500, {"ok": False, "error": str(exc)})
+                    return
+                except OSError as exc:
+                    self._send_json(500, {"ok": False, "error": str(exc)})
+                    return
+                self._send_json(200, {"ok": True, **result})
+                return
+
+            if event_pick_target_match is not None:
+                run_id = event_pick_target_match.group(1)
+                event_index_raw = event_pick_target_match.group(2)
+                try:
+                    event_index = int(event_index_raw)
+                    body = self._read_json_body()
+                    result = pick_recording_event_target(
+                        root,
+                        run_id,
+                        event_index,
+                        primary_index=body.get("primary_index"),
+                    )
                 except ValueError as exc:
                     self._send_json(400, {"ok": False, "error": str(exc)})
                     return

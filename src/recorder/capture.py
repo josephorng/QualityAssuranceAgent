@@ -43,6 +43,35 @@ _DRAG_THRESHOLD_PX = 8
 # Must exceed the double-click window so short presses still defer for double-click.
 _HOLD_THRESHOLD_S = 0.5
 _QUEUE_SENTINEL = object()
+_DRAIN_MARKER = object()
+
+
+@dataclass
+class _DeferredCaptureJob:
+    """Screenshot / UIA work deferred off the low-level input hook threads.
+
+    Windows silently removes ``WH_KEYBOARD_LL`` / ``WH_MOUSE_LL`` hooks when the
+    callback takes too long. Keep hook handlers cheap; run capture work here.
+    """
+
+    action: str  # begin_text_input | flush_text_input | keyboard_event
+    meta: dict[str, Any] | None = None
+    pending_pre_type: tuple[str, int, tuple[int, int]] | None = None
+    last_click_xy: tuple[int, int] | None = None
+    mouse_xy: tuple[int, int] | None = None
+    flush_chars: list[str] | None = None
+    flush_meta: dict[str, Any] | None = None
+    shared_end_index: int | None = None
+    shared_end_monitor: int | None = None
+    shared_end_offset: tuple[int, int] | None = None
+    kind: str | None = None
+    cursor_xy: tuple[int, int] | None = None
+    event_index: int | None = None
+    timestamp_utc: str | None = None
+    key: str | None = None
+    keys: list[str] | None = None
+    text: str | None = None
+    refresh_pre_type: bool = False
 _LISTENER_STARTUP_TIMEOUT_S = 2.0
 _SPECIAL_KEYS = frozenset(
     {
@@ -1005,39 +1034,35 @@ class RecordingSession:
         text: str | None = None,
         timestamp_utc: str | None = None,
     ) -> None:
+        """Reserve indices and enqueue screenshot work off the keyboard hook thread."""
         action_timestamp_utc = timestamp_utc or utc_now_iso()
         with self._lock:
-            run_dir = self._run_dir
-            if run_dir is None:
+            if self._run_dir is None:
                 return
             index = self._next_index
             self._next_index += 1
+            flush_chars = list(self._pending_text_chars)
+            flush_meta = self._pending_text_meta
+            self._pending_text_chars = []
+            self._pending_text_caret = 0
+            self._pending_text_meta = None
         shared_index = index if cursor_xy is not None else None
-        self._flush_pending_text_input(shared_end_index=shared_index)
-        shot_path = ""
-        mon_idx: int | None = None
-        mon_offset: tuple[int, int] | None = None
-        if cursor_xy is not None:
-            shot_path, mon_idx, mon_offset = self._capture_immediate_screenshot(
-                run_dir,
-                index,
-                cursor_xy,
-            )
-        self._queue_event(
-            _QueuedEvent(
+        self._enqueue(
+            _DeferredCaptureJob(
+                action="keyboard_event",
                 kind=kind,
                 cursor_xy=cursor_xy,
                 event_index=index,
                 timestamp_utc=action_timestamp_utc,
-                screenshot_path=shot_path,
-                monitor_index=mon_idx,
-                monitor_offset=mon_offset,
                 key=key,
                 keys=keys,
                 text=text,
+                flush_chars=flush_chars or None,
+                flush_meta=flush_meta,
+                shared_end_index=shared_index,
+                refresh_pre_type=True,
             )
         )
-        self._refresh_pending_pre_type(cursor_xy)
 
     def _capture_typing_ocr_end_shot(
         self,
@@ -1137,55 +1162,23 @@ class RecordingSession:
         shared_end_monitor: int | None = None,
         shared_end_offset: tuple[int, int] | None = None,
     ) -> None:
+        """Detach pending typed text and enqueue OCR/screenshot work off-hook."""
         with self._lock:
             chars = list(self._pending_text_chars)
             meta = self._pending_text_meta
-            run_dir = self._run_dir
             self._pending_text_chars = []
             self._pending_text_caret = 0
             self._pending_text_meta = None
-        if not chars or meta is None or run_dir is None:
+        if not chars or meta is None:
             return
-
-        shot_xy = meta.get("cursor_xy")
-        index = int(meta["index"])
-
-        # OCR / after-frame for typing must be on the typing focus monitor, not the
-        # next pointer event's monitor (which can be a different display).
-        end_shot_path = ""
-        end_mon_idx: int | None = None
-        end_mon_offset: tuple[int, int] | None = None
-        if shot_xy is not None:
-            ocr_shot = self._capture_typing_ocr_end_shot(
-                run_dir,
-                index,
-                int(shot_xy[0]),
-                int(shot_xy[1]),
-            )
-            if ocr_shot is not None:
-                end_shot_path, end_mon_idx, end_mon_offset = ocr_shot
-
-        # Optional shared next-action path is only a fallback when OCR end capture failed.
-        if not end_shot_path and shared_end_index is not None:
-            end_shot_path = str(screenshot_path_for_event(run_dir, shared_end_index))
-            end_mon_idx = shared_end_monitor
-            end_mon_offset = shared_end_offset
-
-        self._queue_event(
-            _QueuedEvent(
-                kind="text_input",
-                cursor_xy=meta.get("cursor_xy"),
-                event_index=index,
-                timestamp_utc=str(meta["timestamp_utc"]),
-                screenshot_path=str(meta.get("screenshot_path") or ""),
-                monitor_index=meta.get("monitor_index"),
-                monitor_offset=meta.get("monitor_offset"),
-                end_screenshot_path=end_shot_path,
-                end_monitor_index=end_mon_idx,
-                end_monitor_offset=end_mon_offset,
-                text="".join(chars),
-                anchor_click_xy=None,
-                focus_rect=meta.get("focus_rect"),
+        self._enqueue(
+            _DeferredCaptureJob(
+                action="flush_text_input",
+                flush_chars=chars,
+                flush_meta=meta,
+                shared_end_index=shared_end_index,
+                shared_end_monitor=shared_end_monitor,
+                shared_end_offset=shared_end_offset,
             )
         )
 
@@ -1195,7 +1188,7 @@ class RecordingSession:
         *,
         timestamp_utc: str | None = None,
     ) -> None:
-        """Reserve the text-input event and attach the before-typing screenshot.
+        """Reserve the text-input event; defer UIA + before-shot off the hook thread.
 
         Prefer a pre-captured empty-field frame (taken after the focusing click /
         key), falling back to a live grab only when none is available.
@@ -1207,8 +1200,7 @@ class RecordingSession:
         except Exception:
             pass
         with self._lock:
-            run_dir = self._run_dir
-            if run_dir is None:
+            if self._run_dir is None:
                 return
             last_click_xy = self._last_pointer_cursor_xy
             index = self._next_index
@@ -1217,47 +1209,28 @@ class RecordingSession:
             self._pending_text_caret = 0
             pending_pre_type = self._pending_pre_type_screenshot
             self._pending_pre_type_screenshot = None
-
-        typing_focus = resolve_typing_focus(
-            last_click_xy=last_click_xy,
-            mouse_xy=mouse_xy,
-        )
-        focus_xy = typing_focus.point
-        with self._lock:
-            if self._run_dir is None:
-                return
-            self._pending_text_meta = {
+            provisional_xy = mouse_xy or last_click_xy or cursor_xy
+            meta: dict[str, Any] = {
                 "index": index,
-                "cursor_xy": focus_xy,
+                "cursor_xy": provisional_xy,
                 "anchor_click_xy": None,
-                "focus_rect": typing_focus.rect,
+                "focus_rect": None,
                 "timestamp_utc": timestamp_utc or utc_now_iso(),
+                "screenshot_path": "",
+                "monitor_index": None,
+                "monitor_offset": None,
+                "capture_ready": threading.Event(),
             }
-
-        shot_path = ""
-        mon_idx: int | None = None
-        mon_offset: tuple[int, int] | None = None
-        if focus_xy is not None:
-            shot_path, mon_idx, mon_offset = _finalize_screenshot(
-                run_dir,
-                index,
-                focus_xy,
-                pending_pre_type,
+            self._pending_text_meta = meta
+        self._enqueue(
+            _DeferredCaptureJob(
+                action="begin_text_input",
+                meta=meta,
+                pending_pre_type=pending_pre_type,
+                last_click_xy=last_click_xy,
+                mouse_xy=mouse_xy,
             )
-        elif pending_pre_type is not None:
-            leftover = Path(pending_pre_type[0])
-            if leftover.is_file():
-                try:
-                    leftover.unlink()
-                except OSError:
-                    pass
-        with self._lock:
-            meta = self._pending_text_meta
-            if meta is None or int(meta.get("index", -1)) != index:
-                return
-            meta["screenshot_path"] = shot_path
-            meta["monitor_index"] = mon_idx
-            meta["monitor_offset"] = mon_offset
+        )
 
     def _append_text_input_char(
         self,
@@ -1667,8 +1640,218 @@ class RecordingSession:
             item = self._event_queue.get()
             if item is _QUEUE_SENTINEL:
                 return
-            if isinstance(item, _QueuedEvent):
+            if isinstance(item, tuple) and len(item) == 2 and item[0] is _DRAIN_MARKER:
+                done = item[1]
+                if isinstance(done, threading.Event):
+                    done.set()
+                continue
+            if isinstance(item, _DeferredCaptureJob):
+                self._process_deferred_capture_job(item)
+            elif isinstance(item, _QueuedEvent):
                 self._persist_queued_event(item)
+
+    def wait_for_deferred_work(self, timeout: float = 2.0) -> None:
+        """Block until previously enqueued capture jobs/events are processed.
+
+        Used by tests; production stop path drains via the worker sentinel.
+        """
+        done = threading.Event()
+        self._event_queue.put((_DRAIN_MARKER, done))
+        if not done.wait(timeout):
+            raise TimeoutError(f"deferred capture work did not finish within {timeout:.1f}s")
+
+    def _process_deferred_capture_job(self, job: _DeferredCaptureJob) -> None:
+        if job.action == "begin_text_input":
+            self._worker_begin_text_input(job)
+        elif job.action == "flush_text_input":
+            self._worker_flush_text_input(job)
+        elif job.action == "keyboard_event":
+            self._worker_keyboard_event(job)
+
+    def _discard_pending_pre_type_file(
+        self,
+        pending: tuple[str, int, tuple[int, int]] | None,
+    ) -> None:
+        if pending is None:
+            return
+        path = Path(pending[0])
+        if path.is_file():
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+    def _worker_begin_text_input(self, job: _DeferredCaptureJob) -> None:
+        meta = job.meta
+        if meta is None:
+            self._discard_pending_pre_type_file(job.pending_pre_type)
+            return
+        ready = meta.get("capture_ready")
+        try:
+            if meta.get("capture_closed"):
+                self._discard_pending_pre_type_file(job.pending_pre_type)
+                return
+
+            with self._lock:
+                run_dir = self._run_dir
+            if run_dir is None:
+                self._discard_pending_pre_type_file(job.pending_pre_type)
+                return
+
+            typing_focus = resolve_typing_focus(
+                last_click_xy=job.last_click_xy,
+                mouse_xy=job.mouse_xy,
+            )
+            focus_xy = typing_focus.point
+            index = int(meta["index"])
+            if meta.get("capture_closed"):
+                self._discard_pending_pre_type_file(job.pending_pre_type)
+                return
+
+            meta["cursor_xy"] = focus_xy
+            meta["focus_rect"] = typing_focus.rect
+
+            shot_path = ""
+            mon_idx: int | None = None
+            mon_offset: tuple[int, int] | None = None
+            if focus_xy is not None:
+                shot_path, mon_idx, mon_offset = _finalize_screenshot(
+                    run_dir,
+                    index,
+                    focus_xy,
+                    job.pending_pre_type,
+                )
+            else:
+                self._discard_pending_pre_type_file(job.pending_pre_type)
+
+            if meta.get("capture_closed"):
+                # Flushed while we captured; drop a late before-shot file if unused.
+                return
+
+            meta["screenshot_path"] = shot_path
+            meta["monitor_index"] = mon_idx
+            meta["monitor_offset"] = mon_offset
+        finally:
+            if isinstance(ready, threading.Event):
+                ready.set()
+
+    def _worker_flush_text_input(self, job: _DeferredCaptureJob) -> None:
+        chars = job.flush_chars
+        meta = job.flush_meta
+        if not chars or meta is None:
+            return
+
+        meta["capture_closed"] = True
+        with self._lock:
+            run_dir = self._run_dir
+        if run_dir is None:
+            return
+
+        index = int(meta["index"])
+        shot_xy = meta.get("cursor_xy")
+        if not meta.get("screenshot_path") and shot_xy is not None:
+            shot_path, mon_idx, mon_offset = _finalize_screenshot(
+                run_dir,
+                index,
+                (int(shot_xy[0]), int(shot_xy[1])),
+                None,
+            )
+            meta["screenshot_path"] = shot_path
+            meta["monitor_index"] = mon_idx
+            meta["monitor_offset"] = mon_offset
+
+        end_shot_path = ""
+        end_mon_idx: int | None = None
+        end_mon_offset: tuple[int, int] | None = None
+        # OCR / after-frame for typing must be on the typing focus monitor, not the
+        # next pointer event's monitor (which can be a different display).
+        if shot_xy is not None:
+            ocr_shot = self._capture_typing_ocr_end_shot(
+                run_dir,
+                index,
+                int(shot_xy[0]),
+                int(shot_xy[1]),
+            )
+            if ocr_shot is not None:
+                end_shot_path, end_mon_idx, end_mon_offset = ocr_shot
+
+        if not end_shot_path and job.shared_end_index is not None:
+            end_shot_path = str(screenshot_path_for_event(run_dir, job.shared_end_index))
+            end_mon_idx = job.shared_end_monitor
+            end_mon_offset = job.shared_end_offset
+
+        self._persist_queued_event(
+            _QueuedEvent(
+                kind="text_input",
+                cursor_xy=meta.get("cursor_xy"),
+                event_index=index,
+                timestamp_utc=str(meta["timestamp_utc"]),
+                screenshot_path=str(meta.get("screenshot_path") or ""),
+                monitor_index=meta.get("monitor_index"),
+                monitor_offset=meta.get("monitor_offset"),
+                end_screenshot_path=end_shot_path,
+                end_monitor_index=end_mon_idx,
+                end_monitor_offset=end_mon_offset,
+                text="".join(chars),
+                anchor_click_xy=None,
+                focus_rect=meta.get("focus_rect"),
+            )
+        )
+
+    def _typing_focus_xy_for_ocr(self, text_meta: dict[str, Any]) -> tuple[int, int] | None:
+        """Return focus coords for OCR, waiting for deferred begin-text work if needed."""
+        ready = text_meta.get("capture_ready")
+        if isinstance(ready, threading.Event) and not ready.is_set():
+            ready.wait(timeout=2.0)
+        focus_xy = text_meta.get("cursor_xy")
+        if isinstance(focus_xy, (tuple, list)) and len(focus_xy) == 2:
+            return int(focus_xy[0]), int(focus_xy[1])
+        return None
+
+    def _worker_keyboard_event(self, job: _DeferredCaptureJob) -> None:
+        if job.flush_chars and job.flush_meta is not None:
+            self._worker_flush_text_input(
+                _DeferredCaptureJob(
+                    action="flush_text_input",
+                    flush_chars=job.flush_chars,
+                    flush_meta=job.flush_meta,
+                    shared_end_index=job.shared_end_index,
+                    shared_end_monitor=job.shared_end_monitor,
+                    shared_end_offset=job.shared_end_offset,
+                )
+            )
+
+        with self._lock:
+            run_dir = self._run_dir
+        if run_dir is None or job.event_index is None or job.kind is None:
+            return
+
+        shot_path = ""
+        mon_idx: int | None = None
+        mon_offset: tuple[int, int] | None = None
+        if job.cursor_xy is not None:
+            shot_path, mon_idx, mon_offset = self._capture_immediate_screenshot(
+                run_dir,
+                job.event_index,
+                job.cursor_xy,
+            )
+
+        self._persist_queued_event(
+            _QueuedEvent(
+                kind=job.kind,
+                cursor_xy=job.cursor_xy,
+                event_index=job.event_index,
+                timestamp_utc=job.timestamp_utc or utc_now_iso(),
+                screenshot_path=shot_path,
+                monitor_index=mon_idx,
+                monitor_offset=mon_offset,
+                key=job.key,
+                keys=job.keys,
+                text=job.text,
+            )
+        )
+        if job.refresh_pre_type:
+            self._refresh_pending_pre_type(job.cursor_xy)
 
     def _resolve_window_change(
         self,
@@ -1805,13 +1988,13 @@ class RecordingSession:
             and has_pending_text
             and text_meta is not None
         ):
-            focus_xy = text_meta.get("cursor_xy")
-            if isinstance(focus_xy, (tuple, list)) and len(focus_xy) == 2:
+            focus_xy = self._typing_focus_xy_for_ocr(text_meta)
+            if focus_xy is not None:
                 self._capture_typing_ocr_end_shot(
                     run_dir,
                     int(text_meta["index"]),
-                    int(focus_xy[0]),
-                    int(focus_xy[1]),
+                    focus_xy[0],
+                    focus_xy[1],
                 )
         if run_dir is not None:
             self._capture_pending_left_press(run_dir, ix, iy)
@@ -1868,13 +2051,13 @@ class RecordingSession:
             and has_pending_text
             and text_meta is not None
         ):
-            focus_xy = text_meta.get("cursor_xy")
-            if isinstance(focus_xy, (tuple, list)) and len(focus_xy) == 2:
+            focus_xy = self._typing_focus_xy_for_ocr(text_meta)
+            if focus_xy is not None:
                 self._capture_typing_ocr_end_shot(
                     run_dir,
                     int(text_meta["index"]),
-                    int(focus_xy[0]),
-                    int(focus_xy[1]),
+                    focus_xy[0],
+                    focus_xy[1],
                 )
         if run_dir is not None:
             self._capture_pending_right_press(run_dir, ix, iy)

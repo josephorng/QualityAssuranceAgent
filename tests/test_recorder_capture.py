@@ -231,6 +231,7 @@ def test_typing_burst_coalesced_into_one_event(tmp_path) -> None:
 
             for ch in "chrome":
                 session._on_key_press(KeyCode.from_char(ch))
+            session.wait_for_deferred_work()
             assert before_dests == ["event_001.jpeg"]
             assert end_captures == []
             session.stop()
@@ -640,6 +641,54 @@ def test_functional_key_flushes_text_then_records_key(tmp_path) -> None:
     assert text_event["kind"] == "text_input"
     assert text_event["text"] == "go"
     assert enter_event["kind"] == "key_press"
+    assert enter_event["key"] == "enter"
+
+
+def test_keyboard_hook_defers_screenshot_and_uia_off_thread(tmp_path) -> None:
+    """Enter must not run mss/UIA on the hook callback thread (hook timeout risk)."""
+    import threading
+
+    session = RecordingSession(runs_root=tmp_path)
+    press_thread_id = threading.get_ident()
+    sync_hook_work = {"count": 0}
+
+    def _track_shot(*_args, **_kwargs):
+        if threading.get_ident() == press_thread_id:
+            sync_hook_work["count"] += 1
+        return _mock_screenshot(*_args, **_kwargs)
+
+    def _track_focus(**_kwargs):
+        if threading.get_ident() == press_thread_id:
+            sync_hook_work["count"] += 1
+        return TypingFocus(point=(100, 100), rect=None)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_track_shot,
+    ), patch(
+        "src.recorder.capture.resolve_typing_focus",
+        side_effect=_track_focus,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            for ch in "ab":
+                session._on_key_press(KeyCode.from_char(ch))
+            session._on_key_press(Key.enter)
+
+            assert sync_hook_work["count"] == 0
+            session.wait_for_deferred_work()
+        finally:
+            session.stop()
+
+    assert session.event_count() == 2
+    text_event = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    enter_event = json.loads((run_dir / "events" / "event_002.json").read_text(encoding="utf-8"))
+    assert text_event["text"] == "ab"
     assert enter_event["key"] == "enter"
 
 

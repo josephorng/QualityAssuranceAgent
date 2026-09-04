@@ -61,9 +61,11 @@ async def test_visual_mouse_selects_candidate_in_one_llm_call(
         "cua_mcp.visual_mouse.capture_screen_context",
         fake_capture_screen_context,
     )
-    monkeypatch.setattr("cua_mcp.visual_mouse.get_llm_client", lambda: _FakeClient())
     monkeypatch.setattr(
-        "cua_mcp.visual_mouse.load_settings",
+        "cua_mcp.gemma_roi_refine.get_llm_client", lambda: _FakeClient()
+    )
+    monkeypatch.setattr(
+        "cua_mcp.gemma_roi_refine.load_settings",
         lambda: SimpleNamespace(brain_lm="vision-model"),
     )
 
@@ -143,9 +145,11 @@ async def test_visual_mouse_runs_similar_function_describe_for_peers(
         "cua_mcp.visual_mouse.capture_screen_context",
         fake_capture_screen_context,
     )
-    monkeypatch.setattr("cua_mcp.visual_mouse.get_llm_client", lambda: _FakeClient())
     monkeypatch.setattr(
-        "cua_mcp.visual_mouse.load_settings",
+        "cua_mcp.gemma_roi_refine.get_llm_client", lambda: _FakeClient()
+    )
+    monkeypatch.setattr(
+        "cua_mcp.gemma_roi_refine.load_settings",
         lambda: SimpleNamespace(brain_lm="vision-model"),
     )
     monkeypatch.setattr(

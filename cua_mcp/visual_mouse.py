@@ -4,27 +4,17 @@ from __future__ import annotations
 
 from typing import Any
 
+from cua_mcp.gemma_roi_refine import (
+    metadata_from_detection,
+    pick_candidate_with_gemma,
+    resolve_target_via_gemma_roi,
+)
 from cua_mcp.screen_context import capture_screen_context
 from cua_mcp.select_mouse_target import (
     _detections_similar_to,
     _maybe_disambiguate_similar_selection,
 )
-from cua_mcp.select_ui_element import _parse_index_from_llm
-from src.common.llm_factory import get_llm_client
-from src.common.prompting import get_prompt
 from src.common.run_state import get_run_state_manager, ts_name
-from src.common.settings import load_settings
-
-
-_VISUAL_MOUSE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "index": {"type": "integer"},
-        "text": {"type": "string"},
-    },
-    "required": ["index", "text"],
-    "additionalProperties": False,
-}
 
 
 async def resolve_visual_mouse_point(
@@ -37,6 +27,9 @@ async def resolve_visual_mouse_point(
     nearby-landmark filtering. After the one-pass pick, when other detections are
     label-similar to the chosen target, ``similar_function_describe`` re-ranks those
     peers in reading order (describe functions + re-pick).
+
+    When YOLO/OCR returns no candidates, falls back to Gemma ROI → YOLO-on-crop →
+    index pick (``selection_method: gemma_roi_yolo``).
     """
     target = (instruction or "").strip()
     if not target:
@@ -44,30 +37,20 @@ async def resolve_visual_mouse_point(
 
     context = await capture_screen_context(include_geometry=True)
     if not context.candidates:
-        raise ValueError("No YOLO/OCR candidates found on selected monitor(s).")
+        grounded = await resolve_target_via_gemma_roi(
+            target,
+            image_paths=list(context.screenshot_paths),
+            monitor_indices=list(context.monitor_indices),
+        )
+        if grounded is None:
+            raise ValueError("No YOLO/OCR candidates found on selected monitor(s).")
+        return grounded
 
-    prompt = get_prompt("visual_mouse_selection").format(
-        instruction=target,
-        candidates_text=context.ocr_text,
+    selected_index, selected_text, chosen = await pick_candidate_with_gemma(
+        target,
+        list(context.candidates),
+        list(context.screenshot_paths),
     )
-    response = await get_llm_client().chat_messages(
-        load_settings().brain_lm,
-        messages=[
-            {
-                "role": "user",
-                "content": prompt,
-                "images": list(context.screenshot_paths),
-            }
-        ],
-        tools=[],
-        response_format=_VISUAL_MOUSE_SCHEMA,
-        think=True,
-    )
-    selected_index, selected_text = _parse_index_from_llm(
-        response.content,
-        len(context.candidates),
-    )
-    chosen = context.candidates[selected_index]
 
     disambiguation_meta: dict[str, Any] = {}
     # Re-rank only when label-similar peers exist (same path as former move_mouse).
@@ -89,23 +72,13 @@ async def resolve_visual_mouse_point(
             )
         )
 
-    x, y, w, h = chosen.bbox
-    metadata: dict[str, Any] = {
-        "selected_index": selected_index,
-        "selected_text": selected_text,
-        "selection_method": "visual_one_pass",
-        "screenshot_path": context.screenshot_paths[0]
-        if context.screenshot_paths
-        else "",
-        "screenshot_paths": list(context.screenshot_paths),
-        "target_kind": chosen.class_name,
-        "target_text": chosen.text or "",
-        "target_icons": list(chosen.icons or []),
-        "target_bbox": {"x": x, "y": y, "w": w, "h": h},
-        "image_center": {"x": chosen.cx, "y": chosen.cy},
-        "resolved_center": {"x": chosen.cx, "y": chosen.cy},
-        "anchor_instruction": target,
-    }
-    if disambiguation_meta:
-        metadata.update(disambiguation_meta)
+    metadata = metadata_from_detection(
+        chosen,
+        selected_index=selected_index,
+        selected_text=selected_text,
+        selection_method="visual_one_pass",
+        image_paths=list(context.screenshot_paths),
+        instruction=target,
+        extra=disambiguation_meta or None,
+    )
     return chosen.cx, chosen.cy, metadata

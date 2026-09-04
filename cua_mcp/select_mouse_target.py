@@ -1289,9 +1289,36 @@ async def find_mouse_point(
             + _format_ui_candidates_text(detections, include_geometry=True)
         )
 
+    selection_method: str | None = None
     if not detections:
-        _log_info("move_mouse: no YOLO candidates found on selected monitor(s)")
-        return None
+        # Stage B: Gemma ROI → YOLO/OCR on crop → index pick.
+        _log_info(
+            "move_mouse: no YOLO candidates; trying Gemma ROI + YOLO-on-crop fallback"
+        )
+        from cua_mcp.gemma_roi_refine import resolve_target_via_gemma_roi
+
+        grounded = await resolve_target_via_gemma_roi(
+            instruction_text,
+            image_paths=image_paths,
+            monitor_indices=monitor_indices,
+            captured=captured,
+            yolo_conf_threshold=yolo_conf_threshold,
+        )
+        if grounded is None:
+            _log_info("move_mouse: Gemma ROI fallback found nothing")
+            return None
+        gx, gy, roi_meta = grounded
+        gx = int(gx) + offset_dx
+        gy = int(gy) + offset_dy
+        meta = dict(roi_meta)
+        meta["relative_offset"] = {"dx": offset_dx, "dy": offset_dy}
+        meta["resolved_center"] = {"x": gx, "y": gy}
+        meta["anchor_instruction"] = instruction_text
+        meta["nearby_objects"] = nearby_phrases
+        meta["char_target"] = char_target
+        meta["char_occurrence"] = char_occurrence
+        meta["track_percent"] = track_percent
+        return gx, gy, meta
 
     anchor_matches, nearby_matches = _filter_mouse_candidates(
         detections, anchor, nearby_labels
@@ -1302,40 +1329,65 @@ async def find_mouse_point(
         f"anchor={anchor!r} nearby_labels={nearby_phrases!r}"
     )
 
-    if not anchor_matches:
-        _log_info("move_mouse: no anchor candidates matched after LLM filtering")
-        return None
-
-    before_nearby = len(anchor_matches)
-    anchor_matches = _prefilter_anchors_by_nearby(
-        anchor_matches, nearby_matches, nearby_hints
-    )
-    if len(anchor_matches) != before_nearby:
-        _log_info(
-            "move_mouse nearby prefilter "
-            f"anchors {before_nearby} -> {len(anchor_matches)} "
-            f"nearby_labels={nearby_phrases!r}"
-        )
-
     selected_text: str | None = None
-    if len(anchor_matches) == 1:
-        idx = 0
-        chosen = anchor_matches[0]
-        _log_info("move_mouse: single anchor candidate after filter; skipping Ollama pick")
-    else:
-        pool_idx, selected_text = await _select_center_with_ollama(
-            anchor,
-            anchor_matches,
-            image_paths,
-            neighbor_candidates=nearby_matches,
-            nearby_labels=nearby_phrases,
-        )
-        idx = pool_idx
-        chosen = anchor_matches[pool_idx]
+    if not anchor_matches:
+        # Stage A: similarity miss but detections exist → Gemma pick among all.
         _log_info(
-            f"move_mouse: Ollama picked index={pool_idx} "
-            f"text={selected_text!r} center=[{chosen.cx},{chosen.cy}]"
+            "move_mouse: no similarity anchor matches; "
+            "trying visual one-pass fallback over all detections"
         )
+        from cua_mcp.gemma_roi_refine import pick_candidate_with_gemma
+
+        try:
+            idx, selected_text, chosen = await pick_candidate_with_gemma(
+                instruction_text,
+                detections,
+                image_paths,
+            )
+        except Exception as exc:
+            _log_info(
+                "move_mouse: visual one-pass fallback failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return None
+        selection_method = "visual_one_pass_fallback"
+        _log_info(
+            "move_mouse: visual one-pass fallback "
+            f"index={idx} text={selected_text!r} center=[{chosen.cx},{chosen.cy}]"
+        )
+        nearby_matches = []
+    else:
+        before_nearby = len(anchor_matches)
+        anchor_matches = _prefilter_anchors_by_nearby(
+            anchor_matches, nearby_matches, nearby_hints
+        )
+        if len(anchor_matches) != before_nearby:
+            _log_info(
+                "move_mouse nearby prefilter "
+                f"anchors {before_nearby} -> {len(anchor_matches)} "
+                f"nearby_labels={nearby_phrases!r}"
+            )
+
+        if len(anchor_matches) == 1:
+            idx = 0
+            chosen = anchor_matches[0]
+            _log_info(
+                "move_mouse: single anchor candidate after filter; skipping Ollama pick"
+            )
+        else:
+            pool_idx, selected_text = await _select_center_with_ollama(
+                anchor,
+                anchor_matches,
+                image_paths,
+                neighbor_candidates=nearby_matches,
+                nearby_labels=nearby_phrases,
+            )
+            idx = pool_idx
+            chosen = anchor_matches[pool_idx]
+            _log_info(
+                f"move_mouse: Ollama picked index={pool_idx} "
+                f"text={selected_text!r} center=[{chosen.cx},{chosen.cy}]"
+            )
 
     # similar_function_describe runs on move_mouse_visual only (see visual_mouse.py).
 
@@ -1422,6 +1474,8 @@ async def find_mouse_point(
         meta["selected_text"] = selected_text
     if char_center is not None:
         meta["resolved_char_center"] = char_center
+    if selection_method is not None:
+        meta["selection_method"] = selection_method
     return resolved_x, resolved_y, meta
 
 

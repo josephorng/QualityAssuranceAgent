@@ -186,6 +186,28 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "models": ["gemma4:e2b", "gemma3:4b"],
         }
     ],
+    "visual_target_roi": [
+        {
+            "image_usage": "use_image",
+            "prompt": (
+                "Locate the UI target in the screenshot(s) and return a loose bounding box "
+                "that fully covers it (include a little surrounding context).\n\n"
+                "TargetInstruction:\n{instruction}\n\n"
+                "ImageCount: {image_count}\n"
+                "RoundHint:\n{round_hint}\n"
+            ),
+            "instructions": [
+                "Coordinates use a normalized 0..1000 grid relative to the chosen image "
+                "(origin top-left; nx grows right; ny grows down).",
+                "image_index is 0-based into the attached screenshot list.",
+                "Prefer a box that is large enough to contain the whole target; a slightly "
+                "loose box is better than a tight miss.",
+                "If the target is not visible, set found=false (other fields may be 0).",
+                'Return strict JSON only: {{"found":true,"image_index":0,"nx1":0,"ny1":0,"nx2":1000,"ny2":1000}}.',
+            ],
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
     "coordinate_selection": [
         {
             "image_usage": "optional",

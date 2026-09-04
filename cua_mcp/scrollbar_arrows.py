@@ -338,7 +338,9 @@ def fit_scrollbar_bboxes_to_arrow_controls(
     then labeled ``向上滾動箭頭`` / ``向下滾動箭頭`` / ``向左滾動箭頭`` /
     ``向右滾動箭頭``. Matching arrows may be any distance along the track —
     the scrollbar extends to them. When either end lacks a matching
-    track-aligned arrow, that scrollbar is left unchanged.
+    track-aligned arrow, that scrollbar is left unchanged. When the fitted
+    bbox would overlap text or another scrollbar, the fit is skipped (bbox
+    and end-arrow labels unchanged), matching create-pair rejection.
     """
     if not detections:
         return detections
@@ -354,6 +356,7 @@ def fit_scrollbar_bboxes_to_arrow_controls(
     out = list(detections)
     adjusted = 0
     unified = 0
+    skipped_overlap = 0
     for idx in scrollbars:
         # Rebuild pools from ``out`` so prior end-arrow unifications apply.
         vertical_arrows = [
@@ -393,10 +396,8 @@ def fit_scrollbar_bboxes_to_arrow_controls(
             new_bbox = _fit_bbox_to_arrows_1d(
                 sb.bbox, top, bottom, vertical=True
             )
-            if _unify_end_arrow_label(out, top, _SCROLL_ARROW_UP_ID):
-                unified += 1
-            if _unify_end_arrow_label(out, bottom, _SCROLL_ARROW_DOWN_ID):
-                unified += 1
+            start_arrow, end_arrow = top, bottom
+            start_label, end_label = _SCROLL_ARROW_UP_ID, _SCROLL_ARROW_DOWN_ID
         else:
             left = _pick_scrollbar_end_arrow(
                 horizontal_arrows,
@@ -419,10 +420,17 @@ def fit_scrollbar_bboxes_to_arrow_controls(
             new_bbox = _fit_bbox_to_arrows_1d(
                 sb.bbox, left, right, vertical=False
             )
-            if _unify_end_arrow_label(out, left, _SCROLL_ARROW_LEFT_ID):
-                unified += 1
-            if _unify_end_arrow_label(out, right, _SCROLL_ARROW_RIGHT_ID):
-                unified += 1
+            start_arrow, end_arrow = left, right
+            start_label, end_label = _SCROLL_ARROW_LEFT_ID, _SCROLL_ARROW_RIGHT_ID
+
+        if not _proposed_pair_bbox_valid(new_bbox, out, ignore=sb):
+            skipped_overlap += 1
+            continue
+
+        if _unify_end_arrow_label(out, start_arrow, start_label):
+            unified += 1
+        if _unify_end_arrow_label(out, end_arrow, end_label):
+            unified += 1
 
         if new_bbox != sb.bbox:
             out[idx] = _rebuild_detection(
@@ -433,10 +441,11 @@ def fit_scrollbar_bboxes_to_arrow_controls(
             )
             adjusted += 1
 
-    if (adjusted or unified) and log_info is not None:
+    if (adjusted or unified or skipped_overlap) and log_info is not None:
         log_info(
             f"fit_scrollbar_bboxes_to_arrow_controls: adjusted={adjusted} "
-            f"unified_labels={unified} scrollbars={len(scrollbars)}"
+            f"unified_labels={unified} skipped_overlap={skipped_overlap} "
+            f"scrollbars={len(scrollbars)}"
         )
     return out
 
@@ -501,9 +510,17 @@ def _detection_has_icon_id(det: UiDetection, chinese_id: str) -> bool:
 def _proposed_pair_bbox_valid(
     proposed: tuple[int, int, int, int],
     detections: list[UiDetection],
+    *,
+    ignore: UiDetection | None = None,
 ) -> bool:
-    """Reject proposed bars that overlap text or an existing scrollbar."""
+    """Reject proposed bars that overlap text or an existing scrollbar.
+
+    ``ignore`` skips one detection (the scrollbar being fitted) so self-overlap
+    does not fail the check.
+    """
     for det in detections:
+        if ignore is not None and det is ignore:
+            continue
         if _is_scrollbar_detection(det) and boxes_overlap(proposed, det.bbox):
             return False
         if _is_text_detection(det) and boxes_overlap(proposed, det.bbox):

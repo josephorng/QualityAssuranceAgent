@@ -709,6 +709,68 @@ def test_fit_scrollbar_skips_when_end_arrows_missing() -> None:
     assert out[0].bbox == scrollbar.bbox
 
 
+def test_fit_scrollbar_skips_when_fitted_bbox_overlaps_text() -> None:
+    from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
+
+    # Short YOLO track; far arrows would stretch through a label (event_005-style).
+    scrollbar = _detection_from_bbox((177, 400, 29, 80), YOLO_CLASS_SCROLLBAR)
+    up = _detection_from_bbox(
+        (181, 46, 21, 23),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上V箭頭"}],
+    )
+    down = _detection_from_bbox(
+        (185, 864, 14, 13),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下V箭頭"}],
+    )
+    text = _detection_from_bbox(
+        (158, 420, 71, 11),
+        YOLO_CLASS_TEXT,
+        text="取消自動校時",
+    )
+    logs: list[str] = []
+    out = fit_scrollbar_bboxes_to_arrow_controls(
+        [scrollbar, up, down, text],
+        log_info=logs.append,
+    )
+    fitted = next(d for d in out if d.class_name == "scrollbar")
+    assert fitted.bbox == scrollbar.bbox
+    by_bbox = {d.bbox: d for d in out}
+    assert by_bbox[up.bbox].icons[0]["chinese_id"] == "向上V箭頭"
+    assert by_bbox[down.bbox].icons[0]["chinese_id"] == "向下V箭頭"
+    assert any("skipped_overlap=1" in line for line in logs)
+
+
+def test_fit_scrollbar_still_extends_when_text_does_not_overlap() -> None:
+    from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
+
+    scrollbar = _detection_from_bbox((1680, 440, 20, 100), YOLO_CLASS_SCROLLBAR)
+    up = _detection_from_bbox(
+        (1683, 418, 12, 13),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上V箭頭"}],
+    )
+    down = _detection_from_bbox(
+        (1684, 555, 11, 10),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下V箭頭"}],
+    )
+    # Label sits clear of the track column.
+    text = _detection_from_bbox(
+        (1500, 480, 80, 14),
+        YOLO_CLASS_TEXT,
+        text="側邊文字",
+    )
+    out = fit_scrollbar_bboxes_to_arrow_controls([scrollbar, up, down, text])
+    fitted = next(d for d in out if d.class_name == "scrollbar")
+    assert fitted.bbox[1] == 418
+    assert fitted.bbox[1] + fitted.bbox[3] == 565
+    by_bbox = {d.bbox: d for d in out}
+    assert by_bbox[up.bbox].icons[0]["chinese_id"] == "向上滾動箭頭"
+    assert by_bbox[down.bbox].icons[0]["chinese_id"] == "向下滾動箭頭"
+
+
 def test_fit_vertical_scrollbar_accepts_unknown_icon_as_end() -> None:
     from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
     from cua_mcp.yolo_onnx import PICKER_CLASS_UNKNOWN

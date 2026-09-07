@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import os
 import queue
+import shutil
 import tempfile
 import threading
+import time
 import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
@@ -2412,10 +2414,20 @@ class MainHub(ctk.CTk):
             return
         if analyze and self._analysis_cancel_event.is_set():
             self._set_hub_controls_idle()
-            self._status.configure(text="分析已停止。")
-            show_ctk_message(self, "錄製分析已停止", "分析已停止。", kind="warning")
-            if self._is_recording_script_open() and run_dir is not None:
-                self._load_script_into_editor(run_dir)
+            deleted = self._discard_recording_folder_after_cancel(run_dir)
+            if deleted:
+                self._status.configure(text="分析已停止，已刪除錄製資料夾。")
+                show_ctk_message(
+                    self,
+                    "錄製分析已停止",
+                    "分析已停止，已刪除錄製資料夾。",
+                    kind="warning",
+                )
+            else:
+                self._status.configure(text="分析已停止。")
+                show_ctk_message(self, "錄製分析已停止", "分析已停止。", kind="warning")
+                if self._is_recording_script_open() and run_dir is not None:
+                    self._load_script_into_editor(run_dir)
             return
         if analyze and event_count > 0:
             total_events = self._count_recording_events(run_dir)
@@ -2509,14 +2521,22 @@ class MainHub(ctk.CTk):
             lines = format_script_lines_with_outcomes(instruction_lines, outcomes)
         if cancelled:
             processed = int(report.get("processed", 0))
-            msg = (
-                f"分析已停止（已完成 {processed}/{recorded} 個事件）。\n"
-                f"已寫入快取 {cached} 筆，略過 {skipped} 筆。"
-            )
-            self._status.configure(text=f"分析已停止（{processed}/{recorded}）。")
+            deleted = self._discard_recording_folder_after_cancel(run_dir)
+            if deleted:
+                msg = (
+                    f"分析已停止（已完成 {processed}/{recorded} 個事件）。\n"
+                    "已刪除錄製資料夾。"
+                )
+                self._status.configure(text="分析已停止，已刪除錄製資料夾。")
+            else:
+                msg = (
+                    f"分析已停止（已完成 {processed}/{recorded} 個事件）。\n"
+                    f"已寫入快取 {cached} 筆，略過 {skipped} 筆。"
+                )
+                self._status.configure(text=f"分析已停止（{processed}/{recorded}）。")
+                if self._is_recording_script_open() and self._script_path is not None:
+                    self._load_script_into_editor(self._script_path)
             show_ctk_message(self, "錄製分析已停止", msg, kind="warning")
-            if self._is_recording_script_open() and self._script_path is not None:
-                self._load_script_into_editor(self._script_path)
             return
         msg = (
             f"錄製 {recorded} 個事件。\n"
@@ -2725,6 +2745,71 @@ class MainHub(ctk.CTk):
 
         if changed:
             self._persist_hub_ui_state()
+
+    def _clear_recording_folder_refs(self, folder: Path) -> None:
+        """Drop editor/queue references that pointed at a deleted recording folder."""
+        folder_key = _resolved_path_key(folder)
+        changed = False
+        if self._script_path is not None and _path_is_recording_folder(
+            self._script_path, folder_key
+        ):
+            self._script_path = None
+            self._runtime_commands_cache_path = None
+            self._script_text.configure(state="normal")
+            self._suppress_script_cache_sync = True
+            try:
+                self._script_text.delete("0.0", "end")
+                self._reset_textbox_undo(self._script_text)
+            finally:
+                self._suppress_script_cache_sync = False
+            self._clear_script_step_statuses()
+            self._refresh_script_line_numbers()
+            self._refresh_script_path_label()
+            self._mark_script_clean()
+            self._apply_script_editor_lock()
+            self._refresh_record_button_idle_label()
+            changed = True
+
+        kept = [
+            path
+            for path in self._queue_paths
+            if not _path_is_recording_folder(path, folder_key)
+        ]
+        if len(kept) != len(self._queue_paths):
+            self._queue_paths = kept
+            self._refresh_queue_list()
+            changed = True
+
+        if changed:
+            self._persist_hub_ui_state()
+
+    def _discard_recording_folder_after_cancel(self, run_dir: Path | None) -> bool:
+        """Delete the recording folder after the user cancelled analysis.
+
+        Returns True when the folder was removed.
+        """
+        if run_dir is None:
+            return False
+        folder = Path(run_dir)
+        if not folder.is_dir():
+            return False
+        last_error: OSError | None = None
+        for attempt in range(5):
+            try:
+                shutil.rmtree(folder)
+                self._clear_recording_folder_refs(folder)
+                return True
+            except OSError as exc:
+                last_error = exc
+                if attempt < 4:
+                    time.sleep(0.15 * (attempt + 1))
+        show_ctk_message(
+            self,
+            "錄製分析已停止",
+            f"分析已停止，但無法刪除錄製資料夾：{last_error}",
+            kind="error",
+        )
+        return False
 
     def _begin_worker_run(self, args: _WorkerArgs) -> None:
         reset_run_control()

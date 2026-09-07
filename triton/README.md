@@ -1,6 +1,6 @@
 # NVIDIA Triton — YOLO + CRNN OCR
 
-將 `cua_mcp/best.onnx` 以 **yolo_ui** 提供服務，將 `cua_mcp/read_screen_text/ocr_model_finetuned.onnx` 以 **crnn_ocr** 提供服務。
+將 YOLO nano（`train-nano`）以 **yolo_ui**、YOLO small（`train-small`）以 **yolo_ui_small** 提供服務，將 `cua_mcp/read_screen_text/ocr_model_finetuned.onnx` 以 **crnn_ocr** 提供服務。`yolo_ui` 與 `yolo_ui_small` 的輸入／輸出張量相同（`images` → `output0`）。
 
 前處理（letterbox、裁切縮放）與後處理（框解碼、CTC 解碼）仍由 Python 用戶端執行。
 
@@ -35,7 +35,14 @@ docker compose -f triton/docker-compose.yml up
 ```bash
 curl http://localhost:9000/v2/health/ready
 curl http://localhost:9000/v2/models/yolo_ui/ready
+curl http://localhost:9000/v2/models/yolo_ui_small/ready
 curl http://localhost:9000/v2/models/crnn_ocr/ready
+```
+
+切換 YOLO 模型（預設 `yolo_ui`）：
+
+```
+TRITON_YOLO_MODEL=yolo_ui_small
 ```
 
 ## GPU 驗證

@@ -1750,10 +1750,10 @@ class OcrViewerApp:
             row=6, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(6, 0)
         )
         ttk.Button(controls, text="Delete selected", command=self._delete_selected_detection).grid(
-            row=7, column=0, columnspan=4, sticky="ew", pady=(6, 0)
+            row=7, column=0, columnspan=2, sticky="ew", pady=(6, 0)
         )
         ttk.Button(controls, text="Reset Zoom", command=self._reset_zoom).grid(
-            row=8, column=0, columnspan=4, sticky="ew", pady=(6, 0)
+            row=7, column=2, columnspan=2, sticky="ew", pady=(6, 0)
         )
 
         canvas_wrap = ttk.Frame(self.parent, padding=8)
@@ -1830,6 +1830,51 @@ class OcrViewerApp:
         else:
             label = self._session_list_label.lower()
             self.status_var.set(f"No {label} found at {self.runs_root}")
+
+    def refresh_lists(self) -> None:
+        """Re-scan runs root and refresh run + image listboxes, keeping selection when possible."""
+        prev_run = self._selected_run()
+        prev_run_name = prev_run.name if prev_run is not None else None
+        prev_image = self._current_image_path()
+        prev_image_name = prev_image.name if prev_image is not None else None
+
+        self.run_dirs = _discover_runs(self.runs_root)
+        self.run_list.delete(0, tk.END)
+        for run in self.run_dirs:
+            self.run_list.insert(tk.END, run.name)
+        if not self.run_dirs:
+            self.current_run_images = []
+            self.image_list.delete(0, tk.END)
+            self.current_image = None
+            self._set_current_lines([])
+            self.segment_result = None
+            self.selected_region_id = None
+            self._spatial_rank_by_box = {}
+            self.item_list.delete(0, tk.END)
+            self.region_list.delete(0, tk.END)
+            self.canvas.delete("all")
+            label = self._session_list_label.lower()
+            self.status_var.set(f"No {label} found at {self.runs_root}")
+            return
+
+        run_idx = 0
+        if prev_run_name is not None:
+            for idx, run in enumerate(self.run_dirs):
+                if run.name == prev_run_name:
+                    run_idx = idx
+                    break
+        self.run_list.select_clear(0, tk.END)
+        self.run_list.select_set(run_idx)
+        self.run_list.see(run_idx)
+        self._on_run_select()
+
+        if prev_image_name is None:
+            return
+        for idx, img in enumerate(self.current_run_images):
+            if img.name == prev_image_name:
+                self._select_image_index(idx)
+                self._on_image_select()
+                break
 
     def _selected_run(self) -> Path | None:
         selected = self.run_list.curselection()
@@ -2789,10 +2834,10 @@ class TestImagesViewerApp:
             row=4, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(6, 0)
         )
         ttk.Button(controls, text="Delete selected", command=self._delete_selected_detection).grid(
-            row=5, column=0, columnspan=4, sticky="ew", pady=(6, 0)
+            row=5, column=0, columnspan=2, sticky="ew", pady=(6, 0)
         )
         ttk.Button(controls, text="Reset Zoom", command=self._reset_zoom).grid(
-            row=6, column=0, columnspan=4, sticky="ew", pady=(6, 0)
+            row=5, column=2, columnspan=2, sticky="ew", pady=(6, 0)
         )
 
         canvas_wrap = ttk.Frame(self.parent, padding=8)
@@ -2884,6 +2929,35 @@ class TestImagesViewerApp:
             self.region_list.delete(0, tk.END)
             self.canvas.delete("all")
             self.status_var.set(f"No images in {self.images_dir}")
+
+    def refresh_lists(self) -> None:
+        """Re-scan the folder and refresh the image listbox, keeping selection when possible."""
+        prev_image = self._current_image_path()
+        prev_image_name = prev_image.name if prev_image is not None else None
+        self.images_dir = Path(self.folder_var.get() or self.images_dir)
+        self.image_paths = _discover_folder_images(self.images_dir)
+        self.image_list.delete(0, tk.END)
+        for img in self.image_paths:
+            self.image_list.insert(tk.END, img.name)
+        if not self.image_paths:
+            self.current_image = None
+            self.current_lines = []
+            self.item_list.delete(0, tk.END)
+            self.region_list.delete(0, tk.END)
+            self.canvas.delete("all")
+            self.status_var.set(f"No images in {self.images_dir}")
+            return
+
+        image_idx = 0
+        if prev_image_name is not None:
+            for idx, img in enumerate(self.image_paths):
+                if img.name == prev_image_name:
+                    image_idx = idx
+                    break
+        self.image_list.select_clear(0, tk.END)
+        self.image_list.select_set(image_idx)
+        self.image_list.see(image_idx)
+        self._on_image_select()
 
     def _refresh_spatial_segmentation(self) -> None:
         state = _build_yolo_spatial_segment_state(self.current_image, self.current_lines)
@@ -3792,6 +3866,73 @@ class LineSegmentsViewerApp:
             self._clear_segment_state()
             self.canvas.delete("all")
             self.status_var.set(f"No images in {self.source_root}")
+
+    def refresh_lists(self) -> None:
+        """Re-scan sessions/folder and refresh listboxes, keeping selection when possible."""
+        prev_image = self._current_image_path()
+        prev_image_name = prev_image.name if prev_image is not None else None
+        if self.mode == "folder":
+            self.source_root = Path(self.folder_var.get() or self.source_root)
+            self.image_paths = _discover_folder_images(self.source_root)
+            self.image_list.delete(0, tk.END)
+            for img in self.image_paths:
+                self.image_list.insert(tk.END, img.name)
+            if not self.image_paths:
+                self.current_image = None
+                self._clear_segment_state()
+                self.canvas.delete("all")
+                self.status_var.set(f"No images in {self.source_root}")
+                return
+            image_idx = 0
+            if prev_image_name is not None:
+                for idx, img in enumerate(self.image_paths):
+                    if img.name == prev_image_name:
+                        image_idx = idx
+                        break
+            self.image_list.select_clear(0, tk.END)
+            self.image_list.select_set(image_idx)
+            self.image_list.see(image_idx)
+            self._on_image_select()
+            return
+
+        prev_session = None
+        selected = self.session_list.curselection()
+        if selected:
+            prev_session = self.session_dirs[selected[0]].name
+        self.session_dirs = _discover_runs(self.source_root)
+        self.session_list.delete(0, tk.END)
+        for session in self.session_dirs:
+            self.session_list.insert(tk.END, session.name)
+        if not self.session_dirs:
+            self.image_paths = []
+            self.image_list.delete(0, tk.END)
+            self.current_image = None
+            self._clear_segment_state()
+            self.canvas.delete("all")
+            label = self._session_list_label.lower()
+            self.status_var.set(f"No {label} found in {self.source_root}")
+            return
+
+        session_idx = 0
+        if prev_session is not None:
+            for idx, session in enumerate(self.session_dirs):
+                if session.name == prev_session:
+                    session_idx = idx
+                    break
+        self.session_list.select_clear(0, tk.END)
+        self.session_list.select_set(session_idx)
+        self.session_list.see(session_idx)
+        self._on_session_select()
+        if prev_image_name is None:
+            return
+        for idx, img in enumerate(self.image_paths):
+            if img.name == prev_image_name:
+                self.image_list.select_clear(0, tk.END)
+                self.image_list.select_set(idx)
+                self.image_list.see(idx)
+                self._on_image_select()
+                break
+
     def _selected_image_index(self) -> int | None:
         selected = self.image_list.curselection()
         if not selected:
@@ -4543,6 +4684,72 @@ class ColorSegmentViewerApp:
             self.canvas.delete("all")
             self.status_var.set(f"No images in {self.source_root}")
 
+    def refresh_lists(self) -> None:
+        """Re-scan sessions/folder and refresh listboxes, keeping selection when possible."""
+        prev_image = self._current_image_path()
+        prev_image_name = prev_image.name if prev_image is not None else None
+        if self.mode == "folder":
+            self.source_root = Path(self.folder_var.get() or self.source_root)
+            self.image_paths = _discover_folder_images(self.source_root)
+            self.image_list.delete(0, tk.END)
+            for img in self.image_paths:
+                self.image_list.insert(tk.END, img.name)
+            if not self.image_paths:
+                self.current_image = None
+                self._clear_segment_state()
+                self.canvas.delete("all")
+                self.status_var.set(f"No images in {self.source_root}")
+                return
+            image_idx = 0
+            if prev_image_name is not None:
+                for idx, img in enumerate(self.image_paths):
+                    if img.name == prev_image_name:
+                        image_idx = idx
+                        break
+            self.image_list.select_clear(0, tk.END)
+            self.image_list.select_set(image_idx)
+            self.image_list.see(image_idx)
+            self._on_image_select()
+            return
+
+        prev_session = None
+        selected = self.session_list.curselection()
+        if selected:
+            prev_session = self.session_dirs[selected[0]].name
+        self.session_dirs = _discover_runs(self.source_root)
+        self.session_list.delete(0, tk.END)
+        for session in self.session_dirs:
+            self.session_list.insert(tk.END, session.name)
+        if not self.session_dirs:
+            self.image_paths = []
+            self.image_list.delete(0, tk.END)
+            self.current_image = None
+            self._clear_segment_state()
+            self.canvas.delete("all")
+            label = self._session_list_label.lower()
+            self.status_var.set(f"No {label} found in {self.source_root}")
+            return
+
+        session_idx = 0
+        if prev_session is not None:
+            for idx, session in enumerate(self.session_dirs):
+                if session.name == prev_session:
+                    session_idx = idx
+                    break
+        self.session_list.select_clear(0, tk.END)
+        self.session_list.select_set(session_idx)
+        self.session_list.see(session_idx)
+        self._on_session_select()
+        if prev_image_name is None:
+            return
+        for idx, img in enumerate(self.image_paths):
+            if img.name == prev_image_name:
+                self.image_list.select_clear(0, tk.END)
+                self.image_list.select_set(idx)
+                self.image_list.see(idx)
+                self._on_image_select()
+                break
+
     def _selected_run(self) -> Path | None:
         if self.mode != "sessions":
             return None
@@ -5059,6 +5266,10 @@ class SourceTabShell:
         self._viewers = (self.yolo_viewer, self.lines_viewer, self.color_viewer)
         self.notebook.bind("<<NotebookTabChanged>>", self._on_subtab_changed)
 
+    def refresh_lists(self) -> None:
+        for viewer in self._viewers:
+            viewer.refresh_lists()
+
     def activate_hotkeys(self) -> None:
         self._hotkeys_active = True
         self._on_subtab_changed()
@@ -5101,9 +5312,18 @@ class CombinedImageViewerApp:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
 
-        notebook = ttk.Notebook(self.root)
+        shell = ttk.Frame(self.root)
+        shell.grid(row=0, column=0, sticky="nsew")
+        shell.columnconfigure(0, weight=1)
+        shell.rowconfigure(0, weight=1)
+
+        notebook = ttk.Notebook(shell)
         notebook.grid(row=0, column=0, sticky="nsew")
         self.notebook = notebook
+
+        ttk.Button(shell, text="Refresh", command=self._refresh_lists).place(
+            relx=1.0, x=-6, y=2, anchor="ne"
+        )
 
         runs_tab = ttk.Frame(notebook)
         recordings_tab = ttk.Frame(notebook)
@@ -5202,6 +5422,10 @@ class CombinedImageViewerApp:
         if initial_tab in self._tab_frames:
             notebook.select(self._tab_frames[initial_tab])
         self._on_tab_changed()
+
+    def _refresh_lists(self) -> None:
+        selected = self.notebook.index(self.notebook.select())
+        self._viewers[selected].refresh_lists()
 
     def _on_tab_changed(self, _event: object | None = None) -> None:
         selected = self.notebook.index(self.notebook.select())

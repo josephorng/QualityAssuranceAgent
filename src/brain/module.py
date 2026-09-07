@@ -49,7 +49,10 @@ SCRIPT_STEP_VERIFY_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "accomplished": {"type": "boolean"},
-        "branch": {"type": "string", "enum": ["advance", "retry", "skip", "goto"]},
+        "branch": {
+            "type": "string",
+            "enum": ["advance", "retry", "skip", "goto", "abort"],
+        },
         "target_step": {"type": ["integer", "null"]},
         "clearly_unmet": {"type": "boolean"},
         "reason": {"type": "string"},
@@ -544,7 +547,7 @@ class BrainModule:
         text = repair_json_object_text(content) or extract_json_object_string(content)
         accomplished_match = re.search(r'"accomplished"\s*:\s*(true|false)', text, re.IGNORECASE)
         branch_match = re.search(
-            r'"branch"\s*:\s*"(advance|retry|skip|goto)"',
+            r'"branch"\s*:\s*"(advance|retry|skip|goto|abort)"',
             text,
             re.IGNORECASE,
         )
@@ -664,11 +667,19 @@ class BrainModule:
         return False
 
     def _apply_verify_branch(self, result: ScriptStepVerifyResult) -> bool:
-        """Apply verification `branch` to `_script_step_index`. Returns whether all script lines are done."""
+        """Apply verification `branch` to `_script_step_index`. Returns whether all script lines are done.
+
+        ``abort`` leaves the index unchanged; callers must treat it as a hard stop
+        (``step_finished=False``) rather than continuing the script.
+        """
         n = len(self.script_lines)
         idx = self._script_step_index
 
-        if result.accomplished:
+        if result.branch == "abort":
+            self.manager.log_info(
+                f"Verify: branch=abort; holding step and stopping run. {result.reason}"
+            )
+        elif result.accomplished:
             if result.branch != "advance":
                 self.manager.log_info(
                     f"Verify: accomplished with branch={result.branch}; advancing to next line. {result.reason}"
@@ -705,10 +716,28 @@ class BrainModule:
 
         Flaky ``retry`` answers (uncertain / not clearly_unmet) become advance so a
         successful tool loop is not undone by a weak vision false negative. ``goto`` /
-        ``skip`` and clearly unmet retries are left unchanged.
+        ``skip`` and clearly unmet retries are left unchanged. ``abort`` after actor
+        success is coerced to advance unless clearly unmet (then left as abort).
         """
         if not actor_succeeded:
             return result
+        if result.branch == "abort":
+            if result.clearly_unmet:
+                return result
+            self.manager.log_info(
+                "Verify: actor succeeded; coercing abort to advance "
+                f"(clearly_unmet=false). {result.reason}"
+            )
+            return ScriptStepVerifyResult(
+                accomplished=True,
+                branch="advance",
+                target_step=None,
+                clearly_unmet=False,
+                reason=(
+                    "Actor succeeded; outcome not clearly unmet. "
+                    f"Original abort: {result.reason}"
+                ),
+            )
         if result.accomplished:
             if result.branch != "advance":
                 return result.model_copy(update={"branch": "advance", "target_step": None})
@@ -806,7 +835,7 @@ class BrainModule:
                 "content": (
                     "Your previous reply was not valid JSON. "
                     "Reply with ONLY one valid JSON object (no markdown) with keys: "
-                    "accomplished (bool), branch (advance|retry|skip|goto), "
+                    "accomplished (bool), branch (advance|retry|skip|goto|abort), "
                     "target_step (number|null), clearly_unmet (bool), reason (string). "
                     "Keep the same judgment; only fix the JSON syntax."
                 ),
@@ -1128,11 +1157,12 @@ class BrainModule:
 
         Happy path: empty expected outcome + actor success (all tools ok) auto-advances
         without a screenshot or verifier LLM. Recovery path: actor failure or a recorded
-        expected outcome still uses screenshot verification for `goto`/`retry`/`skip`.
-        After actor success, ambiguous verifier retries (`clearly_unmet=false`) are coerced
-        to advance to reduce flaky false negatives. If verification JSON is still
-        unparseable after local repair and one rewrite, actor success soft-fails to
-        advance instead of aborting the run.
+        expected outcome still uses screenshot verification for `goto`/`retry`/`skip`/
+        `abort`. After actor success, ambiguous verifier retries (`clearly_unmet=false`)
+        are coerced to advance to reduce flaky false negatives. If verification JSON is
+        still unparseable after local repair and one rewrite, actor success soft-fails to
+        advance instead of aborting the run. Verify `branch=abort` stops the scripted run
+        (`step_finished=False`).
         Sets `run_complete` when the script is exhausted.
         """
         # await self._validate_tool_functions_match_mcp()
@@ -1216,6 +1246,40 @@ class BrainModule:
             step_expected_outcome = self._current_expected_outcome() or None
             attempt_number = self._script_step_attempt_number(script_step_index)
             max_attempts = int(self.settings.script_max_step_attempts)
+            if verify_result.branch == "abort":
+                reason = (
+                    f"Script step {script_step_index + 1} aborted: {verify_result.reason}"
+                )
+                self.manager.log_info(
+                    f"Script step {script_step_index + 1} verify branch=abort; stopping run"
+                )
+                self._update_step_metadata(
+                    transcript_counter,
+                    script_step_index,
+                    {
+                        "started_at_utc": started_iso,
+                        "finished_at_utc": finished_iso,
+                        "duration_seconds": duration_seconds,
+                        "status": "failed",
+                        "step_index": script_step_index,
+                        "goal": step_goal,
+                        "expected_outcome": step_expected_outcome,
+                        "attempt_number": attempt_number,
+                        "max_attempts": max_attempts,
+                        "verify": {
+                            "accomplished": verify_result.accomplished,
+                            "branch": verify_result.branch,
+                            "target_step": verify_result.target_step,
+                            "clearly_unmet": verify_result.clearly_unmet,
+                            "reason": verify_result.reason,
+                        },
+                    },
+                )
+                return BrainStepResult(
+                    reason=reason,
+                    step_finished=False,
+                    step_index=script_step_index,
+                )
             if (
                 max_attempts > 0
                 and not verify_result.accomplished

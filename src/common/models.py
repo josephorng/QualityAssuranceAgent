@@ -64,7 +64,7 @@ class ScriptStepVerifyResult(BaseModel):
     """Vision LLM output for whether the current scripted step is satisfied, and how to branch."""
 
     accomplished: bool
-    branch: Literal["advance", "retry", "skip", "goto"]
+    branch: Literal["advance", "retry", "skip", "goto", "abort"]
     target_step: int | None = Field(
         default=None,
         description="1-based line number in the script when branch is goto",

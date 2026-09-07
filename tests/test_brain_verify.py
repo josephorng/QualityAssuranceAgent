@@ -66,6 +66,8 @@ def test_brain_verify_script_step_prompt_has_goto_policy() -> None:
     assert "clearly_unmet" in text
     assert "prefer accomplished true and branch advance" in text
     assert "Search/Start flyout" in text
+    assert "advance, retry, skip, goto, abort" in text
+    assert "Use abort to stop the whole scripted run" in text
 
 
 def test_coerce_verify_result_advances_ambiguous_retry_after_actor_success() -> None:
@@ -130,6 +132,48 @@ def test_coerce_verify_result_does_not_coerce_when_actor_failed() -> None:
     )
 
     assert coerced is original
+
+
+def test_coerce_verify_result_coerces_abort_after_actor_success() -> None:
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = MagicMock()
+    brain.manager.log_info = MagicMock()
+
+    coerced = brain._coerce_verify_result_for_actor_success(
+        ScriptStepVerifyResult(
+            accomplished=False,
+            branch="abort",
+            target_step=None,
+            clearly_unmet=False,
+            reason="model gave up after success",
+        ),
+        actor_succeeded=True,
+    )
+
+    assert coerced.accomplished is True
+    assert coerced.branch == "advance"
+    assert "Original abort" in coerced.reason
+
+
+def test_coerce_verify_result_keeps_clearly_unmet_abort_after_actor_success() -> None:
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = MagicMock()
+    brain.manager.log_info = MagicMock()
+
+    original = ScriptStepVerifyResult(
+        accomplished=False,
+        branch="abort",
+        target_step=None,
+        clearly_unmet=True,
+        reason="outcome clearly unmet",
+    )
+    coerced = brain._coerce_verify_result_for_actor_success(
+        original,
+        actor_succeeded=True,
+    )
+
+    assert coerced is original
+    assert coerced.branch == "abort"
 
 
 @pytest.mark.asyncio
@@ -236,6 +280,31 @@ async def test_process_step_verifies_after_actor_failure_and_applies_goto() -> N
 
 
 @pytest.mark.asyncio
+async def test_process_step_stops_run_when_verify_aborts() -> None:
+    brain = _brain_for_process_step()
+    brain.loop = AsyncMock(return_value=False)
+    brain._verify_script_step = AsyncMock(
+        return_value=ScriptStepVerifyResult(
+            accomplished=False,
+            branch="abort",
+            target_step=None,
+            clearly_unmet=True,
+            reason="click never succeeded; no recovery",
+        )
+    )
+
+    result = await brain.process_step()
+
+    assert result.step_finished is False
+    assert result.run_complete is False
+    assert brain._script_step_index == 1
+    assert "aborted" in (result.reason or "").lower()
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "failed"
+    assert metadata["verify"]["branch"] == "abort"
+
+
+@pytest.mark.asyncio
 async def test_process_step_aborts_when_actor_fails_and_verify_unavailable() -> None:
     brain = _brain_for_process_step()
     brain.loop = AsyncMock(return_value=False)
@@ -300,6 +369,18 @@ def test_recover_verify_result_payload_scrapes_fields() -> None:
     assert payload["clearly_unmet"] is False
     result = ScriptStepVerifyResult.model_validate(payload)
     assert result.branch == "advance"
+
+
+def test_recover_verify_result_payload_scrapes_abort() -> None:
+    raw = (
+        '{"accomplished": false, "branch": "abort", "target_step": null, '
+        '"clearly_unmet": true, "reason": "unrecoverable"}'
+    )
+    payload = BrainModule._recover_verify_result_payload(raw)
+    assert payload is not None
+    assert payload["branch"] == "abort"
+    result = ScriptStepVerifyResult.model_validate(payload)
+    assert result.branch == "abort"
 
 
 @pytest.mark.asyncio

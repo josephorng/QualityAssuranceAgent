@@ -9,6 +9,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 import re
 import time
+import unicodedata
 from typing import Any
 
 import cv2
@@ -567,15 +568,59 @@ _SIMILARITY_WRAP_PAIRS: tuple[tuple[str, str], ...] = (
     ('"', '"'),
 )
 
+# Whitespace variants stripped at edges before unwrap; pipe added after unwrap.
+_SIMILARITY_WHITESPACE = " \t\n\r\f\v\u00a0\u3000"
+_SIMILARITY_EDGE_CHARS = _SIMILARITY_WHITESPACE + "|"
+_SIMILARITY_SPACE_FOLD = str.maketrans({"\u00a0": " ", "\u3000": " "})
+_SIMILARITY_DASH_FOLD = str.maketrans(
+    {
+        "\u2013": "-",  # en dash
+        "\u2014": "-",  # em dash
+        "\uff0d": "-",  # fullwidth hyphen-minus
+        "\u2500": "-",  # box drawings light horizontal
+    }
+)
+_SIMILARITY_CJK_PUNCT_FOLD = str.maketrans({"。": ".", "、": ","})
+_SIMILARITY_LOOKALIKE_FOLD = str.maketrans({"I": "l", "1": "l", "O": "0"})
+
+
+def _strip_similarity_edges(text: str, chars: str = _SIMILARITY_EDGE_CHARS) -> str:
+    """Strip leading/trailing ``chars`` until stable."""
+    while True:
+        stripped = text.strip(chars)
+        if stripped == text:
+            return stripped
+        text = stripped
+
+
+def _canonicalize_similarity_text(text: str) -> str:
+    """OCR/typography folds applied after hub-wrapper unwrap."""
+    text = _strip_similarity_edges(text)
+    if not text:
+        return ""
+    # Pre-NFKC: fold leaders that NFKC would otherwise turn into ``..`` / leave odd.
+    text = text.replace("⋯", "…").replace("‥", "…")
+    text = unicodedata.normalize("NFKC", text)
+    # Post-NFKC: HORIZONTAL ELLIPSIS compatibility-decomposes to ASCII ``...``.
+    text = text.replace("...", "…")
+    text = text.translate(_SIMILARITY_SPACE_FOLD)
+    text = _strip_similarity_edges(text)
+    text = text.translate(_SIMILARITY_DASH_FOLD)
+    text = text.translate(_SIMILARITY_CJK_PUNCT_FOLD)
+    return text.translate(_SIMILARITY_LOOKALIKE_FOLD)
+
 
 def _normalize_similarity_label(label: str) -> str:
-    """Strip hub wrappers so ``「擷取」文字`` compares as ``擷取`` against raw OCR.
+    """Normalize a label for similarity matching against OCR / hub queries.
 
-    Prefer the content of the leftmost wrapper pair among ``""`` / ``「」`` /
-    ``『』`` / ``【】`` / ``〔〕`` / ``[]`` when present; otherwise keep the trimmed
-    label. Class-only anchors such as ``輸入欄`` / ``滾動條`` are unchanged.
+    Unwrap hub wrappers so ``「擷取」文字`` compares as ``擷取`` against raw OCR
+    (leftmost pair among ``""`` / ``「」`` / ``『』`` / ``【】`` / ``〔〕`` / ``[]``).
+    Then canonicalize: strip edge whitespace/``|``, fold ellipsis leaders, NFKC
+    (then re-fold ASCII ``...``), space/dash/CJK punct folds, and lookalikes
+    ``I``/``1``→``l``, ``O``→``0``. Class-only anchors such as ``輸入欄`` /
+    ``滾動條`` are unchanged aside from those folds.
     """
-    text = (label or "").strip()
+    text = _strip_similarity_edges(label or "", _SIMILARITY_WHITESPACE)
     if not text:
         return ""
 
@@ -592,10 +637,12 @@ def _normalize_similarity_label(label: str) -> str:
             best_start, best_end = start, end
 
     if best_start is not None and best_end is not None:
-        inner = text[best_start + 1 : best_end].strip()
+        inner = _strip_similarity_edges(
+            text[best_start + 1 : best_end], _SIMILARITY_WHITESPACE
+        )
         if inner:
-            return inner
-    return text
+            text = inner
+    return _canonicalize_similarity_text(text)
 
 
 def _label_similarity(a: str, b: str) -> float:

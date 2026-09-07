@@ -1271,6 +1271,32 @@ def test_normalize_similarity_label_strips_hub_wrappers() -> None:
     assert _normalize_similarity_label('""文字') == '""文字'
 
 
+def test_normalize_similarity_label_ocr_canonicalization() -> None:
+    from cua_mcp.select_mouse_target import _normalize_similarity_label
+
+    assert _normalize_similarity_label("Foo|") == "Foo"
+    assert _normalize_similarity_label("|Foo|") == "Foo"
+    assert _normalize_similarity_label(" |Foo| ") == "Foo"
+    assert _normalize_similarity_label("a|b") == "a|b"
+    assert _normalize_similarity_label("「More...」文字") == "More…"
+    assert _normalize_similarity_label("More...") == "More…"
+    assert _normalize_similarity_label("Save⋯") == "Save…"
+    assert _normalize_similarity_label("Save‥") == "Save…"
+    assert _normalize_similarity_label("【Ｅｄｇｅ】圖示") == "Edge"
+    assert _normalize_similarity_label("A–B") == "A-B"
+    assert _normalize_similarity_label("A—B") == "A-B"
+    assert _normalize_similarity_label("A－B") == "A-B"
+    assert _normalize_similarity_label("A─B") == "A-B"
+    assert _normalize_similarity_label("完成。") == "完成."
+    assert _normalize_similarity_label("甲、乙") == "甲,乙"
+    assert _normalize_similarity_label("IDE") == "lDE"
+    assert _normalize_similarity_label("file1") == "filel"
+    assert _normalize_similarity_label("O0") == "00"
+    assert _normalize_similarity_label("\u00a0Edge\u00a0") == "Edge"
+    assert _normalize_similarity_label("　Edge　") == "Edge"
+    assert _normalize_similarity_label("hello\u00a0world") == "hello world"
+
+
 def test_label_similarity_hub_query_matches_ocr_near_miss() -> None:
     from cua_mcp.select_mouse_target import _label_similarity
 
@@ -1282,6 +1308,25 @@ def test_label_similarity_hub_query_matches_ocr_near_miss() -> None:
     assert _label_similarity("[擷取]文字", "擷取") == 1.0
     assert _label_similarity("「擷取」文字", "文字文件") == 0.0
     assert _label_similarity("「Edge」圖示", "Edge") == 1.0
+
+
+def test_label_similarity_ocr_canonicalization_folds() -> None:
+    from cua_mcp.select_mouse_target import _label_similarity
+
+    assert _label_similarity("Foo|", "Foo") == 1.0
+    assert _label_similarity("Save...", "Save…") == 1.0
+    assert _label_similarity("Save⋯", "Save…") == 1.0
+    assert _label_similarity("Save‥", "Save…") == 1.0
+    assert _label_similarity("IDE", "lDE") == 1.0
+    assert _label_similarity("file1", "filel") == 1.0
+    assert _label_similarity("O0", "00") == 1.0
+    assert _label_similarity("A–B", "A-B") == 1.0
+    assert _label_similarity("A—B", "A-B") == 1.0
+    assert _label_similarity("A－B", "A-B") == 1.0
+    assert _label_similarity("完成。", "完成.") == 1.0
+    assert _label_similarity("【Ｅｄｇｅ】圖示", "Edge") == 1.0
+    assert _label_similarity("hello\u00a0world", "hello world") == 1.0
+    assert _label_similarity("「More...」文字", "More…") == 1.0
 
 
 def test_prefilter_keeps_ocr_near_miss_over_shared_suffix() -> None:

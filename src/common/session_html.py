@@ -2937,6 +2937,7 @@ def _verify_badge_class(
             "goto",
             "skip",
             "abort",
+            "smart",
             "stop",
             "replan",
             "backtrack",

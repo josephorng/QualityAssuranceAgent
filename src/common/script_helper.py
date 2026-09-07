@@ -6,7 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from src.recorder.analyze import use_expected_outcome_enabled
+from src.recorder.analyze import after_screenshot_for_outcome, use_expected_outcome_enabled
+from src.recorder.models import RecordedEvent
 
 _EXPECTED_OUTCOME_PREFIX = "# expected_outcome:"
 _LEGACY_RECORDING_SCRIPT_FILENAME = "script.txt"
@@ -121,6 +122,34 @@ def _recording_event_json_paths(run_dir: Path) -> list[Path]:
     return []
 
 
+def _resolve_recording_media_path(run_dir: Path, raw: str | None) -> str | None:
+    """Return an existing media path, resolving relative paths against ``run_dir``."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    path = Path(raw.strip())
+    if path.is_file():
+        return str(path.resolve())
+    candidate = (Path(run_dir) / path).resolve()
+    return str(candidate) if candidate.is_file() else None
+
+
+def _recorded_event_with_resolved_shots(
+    run_dir: Path, raw: dict[str, Any]
+) -> RecordedEvent | None:
+    """Build a ``RecordedEvent`` with screenshot paths resolved under ``run_dir``."""
+    try:
+        event = RecordedEvent.from_dict(raw)
+    except (KeyError, TypeError, ValueError):
+        return None
+    shot = _resolve_recording_media_path(run_dir, event.screenshot_path)
+    end_shot = _resolve_recording_media_path(run_dir, event.end_screenshot_path)
+    if shot is not None:
+        event.screenshot_path = shot
+    if end_shot is not None:
+        event.end_screenshot_path = end_shot
+    return event
+
+
 def collect_recording_instructions(run_dir: Path) -> tuple[list[str], list[str | None]]:
     """Collect hub-script lines from recording analysis files (includes wait lines)."""
     analysis_dir = Path(run_dir) / "analysis"
@@ -152,6 +181,58 @@ def collect_recording_instructions(run_dir: Path) -> tuple[list[str], list[str |
             else:
                 expected_outcomes.append(None)
     return instructions, expected_outcomes
+
+
+def collect_recording_baseline_after_paths(run_dir: Path) -> list[str | None]:
+    """Collect recording after-screenshot paths aligned with ``collect_recording_instructions``.
+
+    Wait lines get ``None``. Action lines use ``after_screenshot_for_outcome``
+    (next event before → typing/drag end → session ``final_after``).
+    """
+    run_dir = Path(run_dir)
+    analysis_dir = run_dir / "analysis"
+    session = _load_json_dict(run_dir / "session.json") or {}
+    final_after = _resolve_recording_media_path(
+        run_dir, session.get("final_after_screenshot") if isinstance(session, dict) else None
+    )
+    if final_after is None:
+        final_after = _resolve_recording_media_path(
+            run_dir, str(run_dir / "screenshots" / "final_after.jpeg")
+        )
+
+    event_paths = _recording_event_json_paths(run_dir)
+    loaded: list[tuple[RecordedEvent, dict[str, Any]]] = []
+    for event_path in event_paths:
+        raw = _load_json_dict(event_path)
+        if raw is None:
+            continue
+        raw_index = raw.get("index")
+        if not isinstance(raw_index, int):
+            continue
+        analysis = _load_json_dict(analysis_dir / f"event_{raw_index:03d}.json")
+        if analysis is None:
+            continue
+        event = _recorded_event_with_resolved_shots(run_dir, raw)
+        if event is None:
+            continue
+        loaded.append((event, analysis))
+
+    baselines: list[str | None] = []
+    for index, (event, analysis) in enumerate(loaded):
+        wait = analysis.get("wait_instruction")
+        if isinstance(wait, str) and wait.strip():
+            baselines.append(None)
+        instruction = analysis.get("instruction")
+        if isinstance(instruction, str) and instruction.strip():
+            next_event = loaded[index + 1][0] if index + 1 < len(loaded) else None
+            baselines.append(
+                after_screenshot_for_outcome(
+                    event,
+                    next_event,
+                    final_after_screenshot=final_after,
+                )
+            )
+    return baselines
 
 
 def collect_recording_script_text(run_dir: Path) -> str:

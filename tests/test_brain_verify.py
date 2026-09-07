@@ -19,7 +19,11 @@ def _brain_for_process_step(*, max_step_attempts: int = 0) -> BrainModule:
     brain.manager.require_paths = MagicMock(
         return_value=MagicMock(root=MagicMock(is_dir=lambda: False))
     )
-    brain.settings = MagicMock(script_max_step_attempts=max_step_attempts)
+    brain.settings = MagicMock(
+        script_max_step_attempts=max_step_attempts,
+        script_smart_recovery_max_cycles=3,
+        script_smart_recovery_max_per_step=2,
+    )
     brain.script_lines = [
         "click search",
         "click calculator",
@@ -30,6 +34,7 @@ def _brain_for_process_step(*, max_step_attempts: int = 0) -> BrainModule:
         "calculator window open",
         "5 entered",
     ]
+    brain.script_baseline_after_paths = [None, None, None]
     brain._script_step_index = 1
     brain._step_transcript_counter = 3
     brain._update_step_metadata = MagicMock()
@@ -68,6 +73,23 @@ def test_brain_verify_script_step_prompt_has_goto_policy() -> None:
     assert "Search/Start flyout" in text
     assert "advance, retry, skip, goto, abort" in text
     assert "Use abort to stop the whole scripted run" in text
+    assert "{baseline_attached}" in text
+    assert "RecordedAfterBaselineAttached" in text
+    assert "recorded success after-frame" in text
+    assert "advance, retry, skip, goto, abort, smart" in text
+    assert "Use smart when live UI shows an unexpected blocker" in text
+
+
+def test_should_skip_vision_verify_requires_no_baseline() -> None:
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = [None, None, None]
+    brain.script_baseline_after_paths = [None, None, None]
+    brain._script_step_index = 0
+    assert brain._should_skip_vision_verify(True) is True
+    assert brain._should_skip_vision_verify(False) is False
+
+    brain._current_baseline_after_path = MagicMock(return_value="C:/x.jpeg")
+    assert brain._should_skip_vision_verify(True) is False
 
 
 def test_coerce_verify_result_advances_ambiguous_retry_after_actor_success() -> None:
@@ -153,6 +175,27 @@ def test_coerce_verify_result_coerces_abort_after_actor_success() -> None:
     assert coerced.accomplished is True
     assert coerced.branch == "advance"
     assert "Original abort" in coerced.reason
+
+
+def test_coerce_verify_result_coerces_smart_after_actor_success() -> None:
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = MagicMock()
+    brain.manager.log_info = MagicMock()
+
+    coerced = brain._coerce_verify_result_for_actor_success(
+        ScriptStepVerifyResult(
+            accomplished=False,
+            branch="smart",
+            target_step=None,
+            clearly_unmet=False,
+            reason="ambiguous smart",
+        ),
+        actor_succeeded=True,
+    )
+
+    assert coerced.accomplished is True
+    assert coerced.branch == "advance"
+    assert "Original smart" in coerced.reason
 
 
 def test_coerce_verify_result_keeps_clearly_unmet_abort_after_actor_success() -> None:
@@ -305,6 +348,123 @@ async def test_process_step_stops_run_when_verify_aborts() -> None:
 
 
 @pytest.mark.asyncio
+async def test_process_step_smart_recovery_success_holds_step(monkeypatch) -> None:
+    from src.runtime.script_smart_recovery import ScriptSmartRecoveryResult
+
+    brain = _brain_for_process_step()
+    brain.loop = AsyncMock(return_value=False)
+    brain._verify_script_step = AsyncMock(
+        return_value=ScriptStepVerifyResult(
+            accomplished=False,
+            branch="smart",
+            target_step=None,
+            clearly_unmet=True,
+            reason="unexpected system popup",
+        )
+    )
+    brain._script_step_smart_recovery_count = MagicMock(return_value=0)
+
+    async def _fake_recovery(**kwargs):
+        return ScriptSmartRecoveryResult(
+            ok=True,
+            reason="dismissed popup",
+            events=[{"phase": "act", "summary": "clicked OK"}],
+        )
+
+    monkeypatch.setattr(
+        "src.runtime.script_smart_recovery.run_script_smart_recovery",
+        _fake_recovery,
+    )
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert result.run_complete is False
+    assert brain._script_step_index == 1
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "smart_recovered"
+    assert metadata["verify"]["branch"] == "smart"
+    assert metadata["smart_recovery"]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_process_step_smart_recovery_failure_stops_run(monkeypatch) -> None:
+    from src.runtime.script_smart_recovery import ScriptSmartRecoveryResult
+
+    brain = _brain_for_process_step()
+    brain.loop = AsyncMock(return_value=False)
+    brain._verify_script_step = AsyncMock(
+        return_value=ScriptStepVerifyResult(
+            accomplished=False,
+            branch="smart",
+            target_step=None,
+            clearly_unmet=True,
+            reason="unexpected system popup",
+        )
+    )
+    brain._script_step_smart_recovery_count = MagicMock(return_value=0)
+
+    async def _fake_recovery(**kwargs):
+        return ScriptSmartRecoveryResult(ok=False, reason="could not dismiss", events=[])
+
+    monkeypatch.setattr(
+        "src.runtime.script_smart_recovery.run_script_smart_recovery",
+        _fake_recovery,
+    )
+
+    result = await brain.process_step()
+
+    assert result.step_finished is False
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "failed"
+    assert metadata["smart_recovery"]["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_process_step_smart_recovery_cap_aborts_without_runner(monkeypatch) -> None:
+    brain = _brain_for_process_step()
+    brain.loop = AsyncMock(return_value=False)
+    brain._verify_script_step = AsyncMock(
+        return_value=ScriptStepVerifyResult(
+            accomplished=False,
+            branch="smart",
+            target_step=None,
+            clearly_unmet=True,
+            reason="popup again",
+        )
+    )
+    brain._script_step_smart_recovery_count = MagicMock(return_value=2)
+    called = {"n": 0}
+
+    async def _fake_recovery(**kwargs):
+        called["n"] += 1
+        raise AssertionError("recovery should not run when cap reached")
+
+    monkeypatch.setattr(
+        "src.runtime.script_smart_recovery.run_script_smart_recovery",
+        _fake_recovery,
+    )
+
+    result = await brain.process_step()
+
+    assert result.step_finished is False
+    assert called["n"] == 0
+    assert "cap reached" in (result.reason or "").lower()
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "failed"
+    assert metadata["verify"]["branch"] == "smart"
+
+
+def test_build_recovery_goal_mentions_script_step() -> None:
+    from src.runtime.script_smart_recovery import build_recovery_goal
+
+    text = build_recovery_goal(script_goal="click search", verify_reason="UAC dialog")
+    assert "click search" in text
+    assert "UAC dialog" in text
+    assert "Do not advance the recorded script" in text
+
+
+@pytest.mark.asyncio
 async def test_process_step_aborts_when_actor_fails_and_verify_unavailable() -> None:
     brain = _brain_for_process_step()
     brain.loop = AsyncMock(return_value=False)
@@ -387,6 +547,7 @@ def test_recover_verify_result_payload_scrapes_abort() -> None:
 async def test_process_step_skips_vision_verify_when_expected_empty_and_actor_ok() -> None:
     brain = _brain_for_process_step()
     brain.script_expected_outcomes = [None, None, None]
+    brain.script_baseline_after_paths = [None, None, None]
     brain.loop = AsyncMock(return_value=True)
     brain._verify_script_step = AsyncMock()
 
@@ -401,6 +562,76 @@ async def test_process_step_skips_vision_verify_when_expected_empty_and_actor_ok
     assert metadata["expected_outcome"] is None
     assert metadata["verify"]["branch"] == "advance"
     assert metadata["verify"]["accomplished"] is True
+
+
+@pytest.mark.asyncio
+async def test_process_step_verifies_when_baseline_present_even_if_outcome_empty() -> None:
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = [None, None, None]
+    brain.script_baseline_after_paths = [None, "C:/fake/baseline.jpeg", None]
+    brain._current_baseline_after_path = MagicMock(return_value="C:/fake/baseline.jpeg")
+    brain.loop = AsyncMock(return_value=True)
+    brain._verify_script_step = AsyncMock(
+        return_value=ScriptStepVerifyResult(
+            accomplished=True,
+            branch="advance",
+            target_step=None,
+            reason="live matches recorded after",
+        )
+    )
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    brain._verify_script_step.assert_awaited_once()
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "completed"
+    assert metadata["verify"]["baseline_after_path"] == "C:/fake/baseline.jpeg"
+
+
+@pytest.mark.asyncio
+async def test_verify_script_step_attaches_live_and_baseline(tmp_path) -> None:
+    live = tmp_path / "live.png"
+    baseline = tmp_path / "after.jpeg"
+    live.write_bytes(b"live")
+    baseline.write_bytes(b"after")
+
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = MagicMock()
+    brain.manager.log_info = MagicMock()
+    brain.manager.log_error = MagicMock()
+    brain.settings = MagicMock(brain_lm="test-model")
+    brain.script_lines = ["click search"]
+    brain.script_expected_outcomes = [None]
+    brain.script_baseline_after_paths = [str(baseline)]
+    brain._script_step_index = 0
+    brain._eye = MagicMock()
+    brain._eye.capture_separated_images = AsyncMock(return_value=[str(live)])
+    brain._append_step_messages = MagicMock()
+    captured: dict[str, object] = {}
+
+    async def _chat(model, *, messages, tools, response_format=None):
+        captured["messages"] = messages
+        return MagicMock(
+            content=(
+                '{"accomplished": true, "branch": "advance", "target_step": null, '
+                '"clearly_unmet": false, "reason": "match"}'
+            ),
+            model_dump=lambda: {"role": "assistant", "content": "ok"},
+        )
+
+    brain.ollama = MagicMock()
+    brain.ollama.chat_messages = _chat
+
+    result = await brain._verify_script_step(0, 0, actor_succeeded=True)
+
+    assert result is not None
+    assert result.branch == "advance"
+    user_msg = captured["messages"][0]
+    assert user_msg["images"] == [str(live), str(baseline)]
+    assert "Recorded success after-frame" in user_msg["content"]
+    assert "RecordedAfterBaselineAttached" in user_msg["content"]
+    assert "true" in user_msg["content"]
 
 
 @pytest.mark.asyncio

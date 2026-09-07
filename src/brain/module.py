@@ -5,6 +5,7 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
@@ -35,6 +36,7 @@ from src.common.nearby_side import enrich_tool_arguments_from_goal
 from src.common.prompting import get_prompt
 from src.common.run_state import get_run_state_manager
 from src.common.runtime_context import (
+    SCRIPT_BASELINE_AFTER_ENV,
     SCRIPT_LINES_ENV,
     SCRIPT_OUTCOMES_ENV,
     get_runtime_env,
@@ -51,7 +53,7 @@ SCRIPT_STEP_VERIFY_JSON_SCHEMA: dict[str, Any] = {
         "accomplished": {"type": "boolean"},
         "branch": {
             "type": "string",
-            "enum": ["advance", "retry", "skip", "goto", "abort"],
+            "enum": ["advance", "retry", "skip", "goto", "abort", "smart"],
         },
         "target_step": {"type": ["integer", "null"]},
         "clearly_unmet": {"type": "boolean"},
@@ -133,6 +135,11 @@ class BrainModule:
             if is_runtime_command_mode() or is_smart_mode()
             else self._script_seed_outcomes(len(self.script_lines))
         )
+        self.script_baseline_after_paths = (
+            []
+            if is_runtime_command_mode() or is_smart_mode()
+            else self._script_seed_baseline_after_paths(len(self.script_lines))
+        )
         self._script_step_index = 0
         self._hand = hand
         self._eye = eye
@@ -169,6 +176,30 @@ class BrainModule:
         suffix = f"_{script_step_index}.json"
         count = sum(1 for path in steps_dir.iterdir() if path.name.endswith(suffix))
         return count + 1
+
+    def _script_step_smart_recovery_count(self, script_step_index: int) -> int:
+        """Count prior transcripts for this line whose verify branch was ``smart``."""
+        steps_dir = self.manager.require_paths().root / "steps"
+        if not steps_dir.is_dir():
+            return 0
+        suffix = f"_{script_step_index}.json"
+        count = 0
+        for path in steps_dir.iterdir():
+            if not path.name.endswith(suffix):
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            timing = payload.get("step_timing")
+            if not isinstance(timing, dict):
+                continue
+            verify = timing.get("verify")
+            if isinstance(verify, dict) and verify.get("branch") == "smart":
+                count += 1
+        return count
 
     def _script_step_retry_limit_reached(self, script_step_index: int) -> bool:
         max_attempts = int(self.settings.script_max_step_attempts)
@@ -323,6 +354,25 @@ class BrainModule:
                 outcomes[index] = item.strip()
         return outcomes
 
+    def _script_seed_baseline_after_paths(self, step_count: int) -> list[str | None]:
+        """Load optional recording after-screenshot paths aligned with script steps."""
+        raw = os.environ.get(SCRIPT_BASELINE_AFTER_ENV, "")
+        baselines: list[str | None] = [None] * step_count
+        if not raw:
+            return baselines
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return baselines
+        if not isinstance(parsed, list):
+            return baselines
+        for index in range(min(step_count, len(parsed))):
+            item = parsed[index]
+            if isinstance(item, str) and item.strip():
+                path = Path(item.strip())
+                baselines[index] = str(path) if path.is_file() else None
+        return baselines
+
     def _current_expected_outcome(self) -> str:
         if not self.script_expected_outcomes:
             return ""
@@ -330,6 +380,17 @@ class BrainModule:
             return ""
         value = self.script_expected_outcomes[self._script_step_index]
         return value.strip() if isinstance(value, str) else ""
+
+    def _current_baseline_after_path(self) -> str | None:
+        if not self.script_baseline_after_paths:
+            return None
+        if self._script_step_index >= len(self.script_baseline_after_paths):
+            return None
+        value = self.script_baseline_after_paths[self._script_step_index]
+        if not isinstance(value, str) or not value.strip():
+            return None
+        path = Path(value.strip())
+        return str(path) if path.is_file() else None
 
     def _format_numbered_script(self) -> str:
         """Numbered script lines with each step's recorded expected outcome."""
@@ -352,6 +413,7 @@ class BrainModule:
             raise ValueError("runtime step command must be non-empty")
         self.script_lines = [cleaned]
         self.script_expected_outcomes = [None]
+        self.script_baseline_after_paths = [None]
         self._script_step_index = 0
 
     async def execute_instruction(self, instruction: str) -> bool:
@@ -367,11 +429,13 @@ class BrainModule:
 
         saved_lines = list(self.script_lines)
         saved_outcomes = list(self.script_expected_outcomes)
+        saved_baselines = list(self.script_baseline_after_paths)
         saved_index = self._script_step_index
         transcript_counter = self._step_transcript_counter
         script_step_index = 0
         self.script_lines = [cleaned]
         self.script_expected_outcomes = [None]
+        self.script_baseline_after_paths = [None]
         self._script_step_index = 0
         self.manager.set_step_log_context(transcript_counter, script_step_index)
         started_iso = datetime.now(timezone.utc).isoformat()
@@ -397,6 +461,7 @@ class BrainModule:
         finally:
             self.script_lines = saved_lines
             self.script_expected_outcomes = saved_outcomes
+            self.script_baseline_after_paths = saved_baselines
             self._script_step_index = saved_index
             self.manager.clear_step_log_context()
 
@@ -547,7 +612,7 @@ class BrainModule:
         text = repair_json_object_text(content) or extract_json_object_string(content)
         accomplished_match = re.search(r'"accomplished"\s*:\s*(true|false)', text, re.IGNORECASE)
         branch_match = re.search(
-            r'"branch"\s*:\s*"(advance|retry|skip|goto|abort)"',
+            r'"branch"\s*:\s*"(advance|retry|skip|goto|abort|smart)"',
             text,
             re.IGNORECASE,
         )
@@ -679,6 +744,11 @@ class BrainModule:
             self.manager.log_info(
                 f"Verify: branch=abort; holding step and stopping run. {result.reason}"
             )
+        elif result.branch == "smart":
+            # Primary handling is in process_step (nested recovery); hold index like retry.
+            self.manager.log_info(
+                f"Verify: branch=smart; holding step for nested recovery. {result.reason}"
+            )
         elif result.accomplished:
             if result.branch != "advance":
                 self.manager.log_info(
@@ -716,16 +786,16 @@ class BrainModule:
 
         Flaky ``retry`` answers (uncertain / not clearly_unmet) become advance so a
         successful tool loop is not undone by a weak vision false negative. ``goto`` /
-        ``skip`` and clearly unmet retries are left unchanged. ``abort`` after actor
-        success is coerced to advance unless clearly unmet (then left as abort).
+        ``skip`` and clearly unmet retries are left unchanged. ``abort`` / ``smart`` after
+        actor success are coerced to advance unless clearly unmet (then left unchanged).
         """
         if not actor_succeeded:
             return result
-        if result.branch == "abort":
+        if result.branch in ("abort", "smart"):
             if result.clearly_unmet:
                 return result
             self.manager.log_info(
-                "Verify: actor succeeded; coercing abort to advance "
+                f"Verify: actor succeeded; coercing {result.branch} to advance "
                 f"(clearly_unmet=false). {result.reason}"
             )
             return ScriptStepVerifyResult(
@@ -735,7 +805,7 @@ class BrainModule:
                 clearly_unmet=False,
                 reason=(
                     "Actor succeeded; outcome not clearly unmet. "
-                    f"Original abort: {result.reason}"
+                    f"Original {result.branch}: {result.reason}"
                 ),
             )
         if result.accomplished:
@@ -770,23 +840,41 @@ class BrainModule:
         if self._eye is None:
             raise RuntimeError("BrainModule requires eye=EyeModule(...) for step verification")
 
+        baseline_path = self._current_baseline_after_path()
         prompt = get_prompt("brain_verify_script_step").format(
             expected_outcome=self._current_expected_outcome() or "(none)",
             actor_succeeded="true" if actor_succeeded else "false",
+            baseline_attached="true" if baseline_path else "false",
         )
         numbered = self._format_numbered_script()
         current_1based = min(self._script_step_index + 1, len(self.script_lines))
         goal = self._current_goal()
+        if baseline_path:
+            image_guide = (
+                "Two images are attached in order:\n"
+                "1) Live current UI (after the actor finished this step).\n"
+                "2) Recorded success after-frame for this step from the original recording.\n"
+                "Compare live vs recorded success state.\n"
+            )
+        else:
+            image_guide = (
+                "All the monitor screenshot(s) are captured and will be provided to you.\n"
+            )
         body = (
             f"{prompt}\n\n"
             f"NumberedScript:\n{numbered}\n\n"
             f"CurrentStepNumber (1-based): {current_1based}\n"
             f"CurrentStepGoal:\n{goal}\n\n"
-            f"All the monitor screenshot(s) are captured and will be provided to you.\n"
+            f"{image_guide}"
             "Respond with JSON only."
         )
 
-        verification_image_paths = await self._eye.capture_separated_images()
+        verification_image_paths = list(await self._eye.capture_separated_images())
+        if baseline_path:
+            verification_image_paths = [
+                *verification_image_paths[:1],
+                baseline_path,
+            ]
 
         messages: list[dict[str, Any]] = [
             stamp_message(
@@ -835,7 +923,7 @@ class BrainModule:
                 "content": (
                     "Your previous reply was not valid JSON. "
                     "Reply with ONLY one valid JSON object (no markdown) with keys: "
-                    "accomplished (bool), branch (advance|retry|skip|goto|abort), "
+                    "accomplished (bool), branch (advance|retry|skip|goto|abort|smart), "
                     "target_step (number|null), clearly_unmet (bool), reason (string). "
                     "Keep the same judgment; only fix the JSON syntax."
                 ),
@@ -1140,8 +1228,13 @@ class BrainModule:
 
         `step_succeeded` already means the model marked completed and every tool
         that failed was later retried successfully (no unresolved `ok=false`).
+        A recording after-baseline counts as a visual criterion, so verify still runs.
         """
-        return bool(step_succeeded) and not self._current_expected_outcome()
+        return (
+            bool(step_succeeded)
+            and not self._current_expected_outcome()
+            and self._current_baseline_after_path() is None
+        )
 
     @staticmethod
     def _auto_advance_verify_result() -> ScriptStepVerifyResult:
@@ -1152,13 +1245,32 @@ class BrainModule:
             reason="Actor completed the step with all tools ok; no recorded expected outcome.",
         )
 
+    def _verify_result_metadata(
+        self,
+        verify_result: ScriptStepVerifyResult,
+        *,
+        baseline_after_path: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "accomplished": verify_result.accomplished,
+            "branch": verify_result.branch,
+            "target_step": verify_result.target_step,
+            "clearly_unmet": verify_result.clearly_unmet,
+            "reason": verify_result.reason,
+            "baseline_after_path": baseline_after_path,
+        }
+
     async def process_step(self) -> BrainStepResult:
         """Run one script step: tool loop, then verification and index branching.
 
-        Happy path: empty expected outcome + actor success (all tools ok) auto-advances
-        without a screenshot or verifier LLM. Recovery path: actor failure or a recorded
-        expected outcome still uses screenshot verification for `goto`/`retry`/`skip`/
-        `abort`. After actor success, ambiguous verifier retries (`clearly_unmet=false`)
+        Happy path: empty expected outcome, no recording after-baseline, and actor
+        success (all tools ok) auto-advances without a screenshot or verifier LLM.
+        Recovery path: actor failure, a recorded expected outcome, or a recording
+        after-baseline still uses screenshot verification for `goto`/`retry`/`skip`/
+        `abort`/`smart`. When a baseline is attached, verify compares live vs recorded
+        success. Branch `smart` runs a bounded nested Plan→Act→Verify recovery, then
+        retries the same script line on success (or stops the run on failure).
+        After actor success, ambiguous verifier retries (`clearly_unmet=false`)
         are coerced to advance to reduce flaky false negatives. If verification JSON is
         still unparseable after local repair and one rewrite, actor success soft-fails to
         advance instead of aborting the run. Verify `branch=abort` stops the scripted run
@@ -1185,7 +1297,7 @@ class BrainModule:
             if self._should_skip_vision_verify(step_succeeded):
                 self.manager.log_info(
                     f"Script step {script_step_index + 1} skipping vision verification "
-                    "(empty expected outcome; actor tools succeeded)"
+                    "(empty expected outcome; no recording baseline; actor tools succeeded)"
                 )
                 verify_result = self._auto_advance_verify_result()
             else:
@@ -1222,6 +1334,7 @@ class BrainModule:
             finished_iso = datetime.now(timezone.utc).isoformat()
             duration_seconds = round(perf_counter() - started_at, 3)
             self._step_transcript_counter += 1
+            step_baseline_after = self._current_baseline_after_path()
             if verify_result is None:
                 self._update_step_metadata(
                     transcript_counter,
@@ -1246,6 +1359,119 @@ class BrainModule:
             step_expected_outcome = self._current_expected_outcome() or None
             attempt_number = self._script_step_attempt_number(script_step_index)
             max_attempts = int(self.settings.script_max_step_attempts)
+            verify_meta = self._verify_result_metadata(
+                verify_result,
+                baseline_after_path=step_baseline_after,
+            )
+            if verify_result.branch == "smart":
+                prior_smart = self._script_step_smart_recovery_count(script_step_index)
+                max_smart = max(0, int(self.settings.script_smart_recovery_max_per_step))
+                if max_smart > 0 and prior_smart >= max_smart:
+                    reason = (
+                        f"Script step {script_step_index + 1} smart recovery cap reached "
+                        f"({prior_smart}/{max_smart}): {verify_result.reason}"
+                    )
+                    self.manager.log_info(reason)
+                    self._update_step_metadata(
+                        transcript_counter,
+                        script_step_index,
+                        {
+                            "started_at_utc": started_iso,
+                            "finished_at_utc": finished_iso,
+                            "duration_seconds": duration_seconds,
+                            "status": "failed",
+                            "step_index": script_step_index,
+                            "goal": step_goal,
+                            "expected_outcome": step_expected_outcome,
+                            "attempt_number": attempt_number,
+                            "max_attempts": max_attempts,
+                            "verify": verify_meta,
+                            "smart_recovery": {
+                                "ok": False,
+                                "reason": reason,
+                                "prior_count": prior_smart,
+                                "max_per_step": max_smart,
+                                "events": [],
+                            },
+                        },
+                    )
+                    return BrainStepResult(
+                        reason=reason,
+                        step_finished=False,
+                        step_index=script_step_index,
+                    )
+                from src.runtime.script_smart_recovery import run_script_smart_recovery
+
+                recovery = await run_script_smart_recovery(
+                    brain=self,
+                    script_goal=step_goal,
+                    verify_reason=verify_result.reason,
+                    max_cycles=int(self.settings.script_smart_recovery_max_cycles),
+                )
+                finished_iso = datetime.now(timezone.utc).isoformat()
+                duration_seconds = round(perf_counter() - started_at, 3)
+                smart_meta = {
+                    "ok": recovery.ok,
+                    "reason": recovery.reason,
+                    "prior_count": prior_smart,
+                    "max_per_step": max_smart,
+                    "events": recovery.events,
+                }
+                if recovery.ok:
+                    self.manager.log_info(
+                        f"Script step {script_step_index + 1} smart recovery ok; "
+                        "holding step for retry"
+                    )
+                    self._update_step_metadata(
+                        transcript_counter,
+                        script_step_index,
+                        {
+                            "started_at_utc": started_iso,
+                            "finished_at_utc": finished_iso,
+                            "duration_seconds": duration_seconds,
+                            "status": "smart_recovered",
+                            "step_index": script_step_index,
+                            "goal": step_goal,
+                            "expected_outcome": step_expected_outcome,
+                            "attempt_number": attempt_number,
+                            "max_attempts": max_attempts,
+                            "verify": verify_meta,
+                            "smart_recovery": smart_meta,
+                        },
+                    )
+                    return BrainStepResult(
+                        reason=f"Smart recovery: {recovery.reason}",
+                        step_finished=True,
+                        run_complete=False,
+                        step_index=script_step_index,
+                    )
+                reason = (
+                    f"Script step {script_step_index + 1} smart recovery failed: "
+                    f"{recovery.reason}"
+                )
+                self.manager.log_info(reason)
+                self._update_step_metadata(
+                    transcript_counter,
+                    script_step_index,
+                    {
+                        "started_at_utc": started_iso,
+                        "finished_at_utc": finished_iso,
+                        "duration_seconds": duration_seconds,
+                        "status": "failed",
+                        "step_index": script_step_index,
+                        "goal": step_goal,
+                        "expected_outcome": step_expected_outcome,
+                        "attempt_number": attempt_number,
+                        "max_attempts": max_attempts,
+                        "verify": verify_meta,
+                        "smart_recovery": smart_meta,
+                    },
+                )
+                return BrainStepResult(
+                    reason=reason,
+                    step_finished=False,
+                    step_index=script_step_index,
+                )
             if verify_result.branch == "abort":
                 reason = (
                     f"Script step {script_step_index + 1} aborted: {verify_result.reason}"
@@ -1266,13 +1492,7 @@ class BrainModule:
                         "expected_outcome": step_expected_outcome,
                         "attempt_number": attempt_number,
                         "max_attempts": max_attempts,
-                        "verify": {
-                            "accomplished": verify_result.accomplished,
-                            "branch": verify_result.branch,
-                            "target_step": verify_result.target_step,
-                            "clearly_unmet": verify_result.clearly_unmet,
-                            "reason": verify_result.reason,
-                        },
+                        "verify": verify_meta,
                     },
                 )
                 return BrainStepResult(
@@ -1306,13 +1526,7 @@ class BrainModule:
                         "expected_outcome": step_expected_outcome,
                         "attempt_number": attempt_number,
                         "max_attempts": max_attempts,
-                        "verify": {
-                            "accomplished": verify_result.accomplished,
-                            "branch": verify_result.branch,
-                            "target_step": verify_result.target_step,
-                            "clearly_unmet": verify_result.clearly_unmet,
-                            "reason": verify_result.reason,
-                        },
+                        "verify": verify_meta,
                     },
                 )
                 return BrainStepResult(
@@ -1338,13 +1552,7 @@ class BrainModule:
                     "step_index": script_step_index,
                     "goal": step_goal,
                     "expected_outcome": step_expected_outcome,
-                    "verify": {
-                        "accomplished": verify_result.accomplished,
-                        "branch": verify_result.branch,
-                        "target_step": verify_result.target_step,
-                        "clearly_unmet": verify_result.clearly_unmet,
-                        "reason": verify_result.reason,
-                    },
+                    "verify": verify_meta,
                 },
             )
             return BrainStepResult(

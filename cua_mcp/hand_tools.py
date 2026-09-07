@@ -27,6 +27,18 @@ def _normalize_hotkey_token(key: str) -> str:
     return cleaned.lower()
 
 
+def _normalize_button(button: str | int) -> str | int:
+    """Normalize odd wrappers that can appear in model output for mouse buttons."""
+    if isinstance(button, int):
+        return button
+    cleaned = str(button).strip()
+    cleaned = cleaned.replace('<|"|>', "")
+    cleaned = cleaned.strip("\"'").strip()
+    if cleaned.isdigit():
+        return int(cleaned)
+    return cleaned.lower()
+
+
 KEY_ALIASES = {
     "control": "ctrl",
     "command": "win",
@@ -81,6 +93,7 @@ def click(
     Optional ``modifiers`` (e.g. ``["ctrl"]``, ``["shift"]``) are held via
     keyDown for the duration of the click, then released in reverse order.
     """
+    button = _normalize_button(button)
     held = [_canonicalize_key(m) for m in (modifiers or []) if str(m).strip()]
     for key in held:
         pyautogui.keyDown(key)
@@ -221,6 +234,7 @@ def drag(
     button: str = "left",
 ) -> dict[str, Any]:
     """Drag from (x1,y1) to (x2,y2)."""
+    button = _normalize_button(button)
     pyautogui.moveTo(x1, y1)
     pyautogui.dragTo(x2, y2, duration=duration, button=button)
     return {
@@ -251,6 +265,7 @@ def cursor_position() -> dict[str, Any]:
 
 
 def mouse_down(x: int | None = None, y: int | None = None, button: str = "left") -> dict[str, Any]:
+    button = _normalize_button(button)
     if x is not None and y is not None:
         pyautogui.moveTo(x, y)
     pyautogui.mouseDown(button=button)
@@ -263,6 +278,7 @@ def mouse_down(x: int | None = None, y: int | None = None, button: str = "left")
 
 
 def mouse_up(x: int | None = None, y: int | None = None, button: str = "left") -> dict[str, Any]:
+    button = _normalize_button(button)
     if x is not None and y is not None:
         pyautogui.moveTo(x, y)
     pyautogui.mouseUp(button=button)
@@ -314,6 +330,7 @@ def hold_mouse(
     button: str = "left",
     modifiers: list[str] | None = None,
 ) -> dict[str, Any]:
+    button = _normalize_button(button)
     held = [_canonicalize_key(m) for m in (modifiers or []) if str(m).strip()]
     for key in held:
         pyautogui.keyDown(key)

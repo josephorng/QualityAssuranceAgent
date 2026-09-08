@@ -39,6 +39,11 @@ def _normalize_button(button: str | int) -> str | int:
     return cleaned.lower()
 
 
+def _normalize_typed_text(text: str) -> str:
+    """Strip model quote wrappers from typed text without removing intentional quotes."""
+    return str(text).replace('<|"|>', "")
+
+
 KEY_ALIASES = {
     "control": "ctrl",
     "command": "win",
@@ -134,6 +139,7 @@ def type_text(
     Does not move or click the mouse. Best-effort restores prior clipboard text
     after pasting (non-text clipboard contents cannot be restored via pyperclip).
     """
+    text = _normalize_typed_text(text)
     previous = _safe_clipboard_text()
     try:
         pyperclip.copy(text)

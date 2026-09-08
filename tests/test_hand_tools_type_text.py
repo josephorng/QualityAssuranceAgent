@@ -5,6 +5,48 @@ import pytest
 from cua_mcp import hand_tools
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("NBA live", "NBA live"),
+        ('<|"|>NBA live<|"|>', "NBA live"),
+        ('<|"|>"quoted"<|"|>', '"quoted"'),
+        ("  keep spaces  ", "  keep spaces  "),
+    ],
+)
+def test_normalize_typed_text(raw: str, expected: str) -> None:
+    assert hand_tools._normalize_typed_text(raw) == expected
+
+
+def test_type_text_strips_model_quote_wrappers(monkeypatch: pytest.MonkeyPatch) -> None:
+    clipboard = {"value": ""}
+
+    def fake_paste() -> str:
+        return clipboard["value"]
+
+    def fake_copy(text: str) -> None:
+        clipboard["value"] = text
+
+    pasted: list[str] = []
+
+    def fake_hotkey(*keys: str) -> None:
+        if keys == ("ctrl", "v"):
+            pasted.append(clipboard["value"])
+
+    monkeypatch.setattr(
+        hand_tools,
+        "pyperclip",
+        type("P", (), {"paste": staticmethod(fake_paste), "copy": staticmethod(fake_copy)})(),
+    )
+    monkeypatch.setattr(hand_tools.pyautogui, "hotkey", fake_hotkey)
+    monkeypatch.setattr(hand_tools, "sleep", lambda _s: None)
+
+    result = hand_tools.type_text('<|"|>NBA live<|"|>')
+
+    assert pasted == ["NBA live"]
+    assert result["text"] == "NBA live"
+
+
 def test_type_text_restores_previous_clipboard(monkeypatch: pytest.MonkeyPatch) -> None:
     clipboard = {"value": "previously copied"}
 

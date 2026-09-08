@@ -82,40 +82,93 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "models": ["gemma4:e2b", "gemma3:4b"],
         }
     ],
+    "brain_verify_baseline_match": [
+        {
+            "image_usage": "use_image",
+            "prompt": (
+                "Compare two screenshots only. Decide whether they show the same success UI state "
+                "for a scripted automation step.\n\n"
+                "Image 1 = live UI after the actor finished the step.\n"
+                "Image 2 = recorded success after-frame for this step.\n"
+            ),
+            "instructions": [
+                "Judge from the images alone. Do not invent windows, dialogs, or text that are not visible.",
+                "Match on key windows, panels, dialogs, overlays, and primary labels/text.",
+                "Ignore benign drift: clock, cursor, caret blink, minor window offset, theme noise, selection highlight flicker.",
+                "Absence of a dialog/overlay in both images is a match when that absence is the success state "
+                "(for example after Cancel/關閉/close dismissed a dialog).",
+                "Do not require the step's click/move target to still be visible if image 2 also lacks it.",
+                "If unsure whether the key UI state matches, set match to false.",
+                'Return strict JSON only (no markdown): {"match":bool,"reason":"<short explanation>"}.',
+            ],
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
     "brain_verify_script_step": [
         {
             "image_usage": "use_image",
             "prompt": (
-                "You are verifying whether the current scripted task step is satisfied in the screenshot. "
+                "You are deciding recovery for a scripted task step from the screenshot. "
                 "You will see the full numbered script and which step is current.\n\n"
                 "ExpectedOutcome (recorded success criterion; may be empty):\n{expected_outcome}\n\n"
                 "ActorSucceeded (actor finished this step with tools ok): {actor_succeeded}\n"
-                "RecordedAfterBaselineAttached (live vs recording after-frame provided): {baseline_attached}\n"
+                "RecordedAfterBaselineAttached: {baseline_attached}\n"
+                "BaselinePrecheck (prior live-vs-recorded match round; '(none)' if skipped):\n{baseline_precheck}\n"
             ),
             "instructions": [
                 "Scan every monitor in the screenshot(s). Overlays, menus, and dialogs may appear on only one display.",
-                "When RecordedAfterBaselineAttached is true: image 1 is the live current UI; image 2 is the recorded success after-frame for this step. Treat matching the recorded success state as the primary visual criterion (same key windows, panels, dialogs, and text). Ignore benign drift (clock, cursor, caret blink, minor window offset, theme noise). Do not mark accomplished true from cursor position alone when live clearly differs from the recorded after-frame.",
-                "When ExpectedOutcome is provided and not '(none)', treat it as an additional success criterion alongside any baseline comparison; the step instruction describes the action that was attempted.",
-                "Mark accomplished true when the screenshot shows positive evidence that ExpectedOutcome holds (or, if ExpectedOutcome is '(none)' and no baseline is attached, that the step goal's visible effect holds).",
-                "When a baseline is attached and live clearly differs from the recorded after-frame, set accomplished false and clearly_unmet true; do not advance.",
-                "For outcomes like search/Start interface open (搜尋介面已開啟): treat as met when the Search/Start flyout, results panel, or equivalent overlay is visible — not merely when the taskbar search box or magnifying-glass glyph is present.",
-                "Do not require extra focus, hover, or 'fully opened' conditions beyond what ExpectedOutcome states. If the described UI result is already visible, accomplished is true.",
-                "Prefer visible positive evidence over inferring that a click or move did not happen — except when a recorded after-baseline is attached and live does not match that success state.",
-                "NumberedScript lists every line with its recorded expected outcome after '| expected:'. Use those prior outcomes to decide recovery.",
-                'Return strict JSON only (no markdown), single object with keys: accomplished (bool), branch (string), target_step (number or null), clearly_unmet (bool), reason (string).',
+                "When BaselinePrecheck reports a mismatch: do not re-litigate whether live matches the recorded "
+                "after-frame. Assume they differ; choose recovery (retry/goto/skip/abort/smart) or mark "
+                "accomplished only if ExpectedOutcome is clearly already met despite the mismatch.",
+                "When RecordedAfterBaselineAttached is true and images are attached: image 1 is live UI; "
+                "image 2 is the recorded after-frame (context for how far UI drifted). "
+                "Ignore benign drift (clock, cursor, caret blink, minor window offset, theme noise).",
+                "When ExpectedOutcome is provided and not '(none)', treat it as the success criterion. "
+                "The step instruction describes the action that was attempted, not a requirement that the "
+                "click/move target still be visible afterward.",
+                "Mark accomplished true when the screenshot shows positive evidence that ExpectedOutcome holds "
+                "(or, if ExpectedOutcome is '(none)' and BaselinePrecheck is '(none)', that the step goal's "
+                "visible effect holds).",
+                "For dismiss/cancel/close steps: absence of the dismissed dialog/window can be success when "
+                "ExpectedOutcome or the recorded after-frame indicates that.",
+                "For outcomes like search/Start interface open (搜尋介面已開啟): treat as met when the "
+                "Search/Start flyout, results panel, or equivalent overlay is visible — not merely when the "
+                "taskbar search box or magnifying-glass glyph is present.",
+                "Do not require extra focus, hover, or 'fully opened' conditions beyond what ExpectedOutcome states. "
+                "If the described UI result is already visible, accomplished is true.",
+                "Prefer visible positive evidence over inferring that a click or move did not happen.",
+                "NumberedScript lists every line with its recorded expected outcome after '| expected:'. "
+                "Use those prior outcomes to decide recovery.",
+                'Return strict JSON only (no markdown), single object with keys: accomplished (bool), '
+                "branch (string), target_step (number or null), clearly_unmet (bool), reason (string).",
                 "branch must be one of: advance, retry, skip, goto, abort, smart.",
                 "Use branch advance only when accomplished is true (move to next script line).",
-                "Set clearly_unmet true only when ExpectedOutcome (or the step goal / recorded after-baseline, if no outcome) is visibly contradicted by the screenshot. If uncertain or evidence is weak, set clearly_unmet false.",
-                "When ActorSucceeded is true: prefer accomplished true and branch advance unless the outcome (or baseline match) is clearly unmet. Do not choose retry on doubt, ambiguity, or missing secondary cues. Use retry only when clearly_unmet is true and the step target is still available.",
-                "When ActorSucceeded is false: use retry/goto/skip/abort/smart for recovery or stop as needed; still set clearly_unmet honestly from the screenshot (and baseline when attached).",
-                "When accomplished is false: retry only if clearly_unmet is true and this step's target is still on screen (or prior lines' expected outcomes still hold) but this step's outcome is not met.",
-                "Use goto when a prior step's expected outcome is no longer true and this step cannot succeed from the current UI. Jump to the latest such prior line (target_step = that 1-based number).",
-                "If the current step names an on-screen target that is not visible, do not retry. If an earlier line's expected outcome would bring that target back, goto that line.",
-                "Use skip to abandon this line and move to the next when the line is irrelevant or impossible even after restoring prior UI.",
-                "Use abort to stop the whole scripted run when the step cannot be recovered (no viable retry/goto/skip/smart) — for example ActorSucceeded is false, ExpectedOutcome is '(none)', and the goal was not achieved.",
-                "Use smart when live UI shows an unexpected blocker (system popup, dialog, or off-script overlay) that is not part of the current step goal or recorded baseline, and clearing it is required before the scripted step can succeed. Do not use smart for ordinary missing targets (prefer goto) or repeating the same scripted action (prefer retry).",
-                "For goto, target_step must be the line number shown before each script line (1 to N). Set target_step to null for other branches.",
-                "Do not invent UI elements; base conclusions on the image(s), ExpectedOutcome, ActorSucceeded, baseline match when attached, and script text only.",
+                "Set clearly_unmet true only when ExpectedOutcome (or the step goal, if no outcome) is visibly "
+                "contradicted by the screenshot. If uncertain or evidence is weak, set clearly_unmet false.",
+                "When ActorSucceeded is true: prefer accomplished true and branch advance unless the outcome "
+                "is clearly unmet. Do not choose retry on doubt, ambiguity, or missing secondary cues. "
+                "Use retry only when clearly_unmet is true and the step target is still available.",
+                "When ActorSucceeded is false: use retry/goto/skip/abort/smart for recovery or stop as needed; "
+                "still set clearly_unmet honestly from the screenshot.",
+                "When accomplished is false: retry only if clearly_unmet is true and this step's target is "
+                "still on screen (or prior lines' expected outcomes still hold) but this step's outcome is not met.",
+                "Use goto when a prior step's expected outcome is no longer true and this step cannot succeed "
+                "from the current UI. Jump to the latest such prior line (target_step = that 1-based number).",
+                "If the current step names an on-screen target that is not visible, do not retry. If an earlier "
+                "line's expected outcome would bring that target back, goto that line.",
+                "Use skip to abandon this line and move to the next when the line is irrelevant or impossible "
+                "even after restoring prior UI.",
+                "Use abort to stop the whole scripted run when the step cannot be recovered "
+                "(no viable retry/goto/skip/smart) — for example ActorSucceeded is false, "
+                "ExpectedOutcome is '(none)', and the goal was not achieved.",
+                "Use smart when live UI shows an unexpected blocker (system popup, dialog, or off-script overlay) "
+                "that is not part of the current step goal or recorded baseline, and clearing it is required "
+                "before the scripted step can succeed. Do not use smart for ordinary missing targets (prefer goto) "
+                "or repeating the same scripted action (prefer retry).",
+                "For goto, target_step must be the line number shown before each script line (1 to N). "
+                "Set target_step to null for other branches.",
+                "Do not invent UI elements; base conclusions on the image(s), ExpectedOutcome, ActorSucceeded, "
+                "BaselinePrecheck, and script text only.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
         }

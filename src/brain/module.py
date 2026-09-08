@@ -63,6 +63,23 @@ SCRIPT_STEP_VERIFY_JSON_SCHEMA: dict[str, Any] = {
     "required": ["accomplished", "branch", "clearly_unmet", "reason"],
 }
 
+BASELINE_MATCH_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "match": {"type": "boolean"},
+        "reason": {"type": "string"},
+    },
+    "required": ["match", "reason"],
+}
+
+
+@dataclass(frozen=True)
+class BaselineMatchDecision:
+    """Round-1 live vs recorded after-frame comparison."""
+
+    match: bool
+    reason: str = ""
+
 ROLE_USER = "user"
 ROLE_TOOL = "tool"
 ROLE_SYSTEM = "system"
@@ -648,6 +665,26 @@ class BrainModule:
             "reason": reason,
         }
 
+    @staticmethod
+    def _recover_baseline_match_payload(content: str) -> dict[str, Any] | None:
+        """Best-effort extract of baseline match fields when model JSON is malformed."""
+        text = repair_json_object_text(content) or extract_json_object_string(content)
+        match_match = re.search(r'"match"\s*:\s*(true|false)', text, re.IGNORECASE)
+        if not match_match:
+            return None
+        reason = ""
+        reason_match = re.search(r'"reason"\s*:\s*"(.*)"\s*[,}\]]\s*$', text, re.DOTALL)
+        if reason_match:
+            reason = reason_match.group(1)
+        else:
+            reason_match = re.search(r'"reason"\s*:\s*"(.*)', text, re.DOTALL)
+            if reason_match:
+                reason = reason_match.group(1).rstrip().rstrip('"}]')
+        return {
+            "match": match_match.group(1).lower() == "true",
+            "reason": reason,
+        }
+
     def _parse_verify_result_from_content(self, content: str) -> ScriptStepVerifyResult | None:
         """Parse verify JSON, falling back to schema scrape on malformed output."""
         try:
@@ -665,6 +702,31 @@ class BrainModule:
                 except (ValidationError, TypeError, ValueError):
                     pass
             self.manager.log_error(f"Verify step JSON parse/validation failed: {e}")
+            return None
+
+    def _parse_baseline_match_from_content(self, content: str) -> BaselineMatchDecision | None:
+        """Parse baseline-match JSON, falling back to schema scrape on malformed output."""
+        try:
+            payload = self._parse_json_object_from_model_content(content)
+            if not isinstance(payload, dict) or "match" not in payload:
+                raise ValueError("baseline match reply missing match")
+            match_value = payload.get("match")
+            if not isinstance(match_value, bool):
+                raise ValueError("baseline match must be bool")
+            reason_value = payload.get("reason", "")
+            reason = reason_value.strip() if isinstance(reason_value, str) else ""
+            return BaselineMatchDecision(match=match_value, reason=reason)
+        except (json.JSONDecodeError, ValueError, ValidationError, TypeError) as e:
+            recovered = self._recover_baseline_match_payload(content)
+            if recovered is not None:
+                self.manager.log_info(
+                    "Baseline match JSON was malformed; recovered fields via fallback parser"
+                )
+                return BaselineMatchDecision(
+                    match=bool(recovered["match"]),
+                    reason=str(recovered.get("reason") or ""),
+                )
+            self.manager.log_error(f"Baseline match JSON parse/validation failed: {e}")
             return None
 
     @staticmethod
@@ -844,25 +906,169 @@ class BrainModule:
         *,
         actor_succeeded: bool,
     ) -> ScriptStepVerifyResult | None:
-        """Capture a fresh screenshot and ask the LLM (no tools) for `ScriptStepVerifyResult` JSON, or None on failure."""
+        """Capture a fresh screenshot and verify via a two-round LLM flow when a baseline exists.
+
+        Round 1 (baseline attached): compare live vs recorded after-frame only. On match,
+        advance immediately. On mismatch/parse failure, round 2 decides recovery.
+        Without a baseline: single recovery/outcome verify call (existing path).
+        """
         if self._eye is None:
             raise RuntimeError("BrainModule requires eye=EyeModule(...) for step verification")
 
         baseline_path = self._current_baseline_after_path()
+        live_image_paths = list(await self._eye.capture_separated_images())
+        verification_image_paths = list(live_image_paths)
+        if baseline_path:
+            verification_image_paths = [
+                *live_image_paths[:1],
+                baseline_path,
+            ]
+
+        transcript_messages: list[dict[str, Any]] = []
+        baseline_precheck = "(none)"
+
+        if baseline_path:
+            match_decision, match_messages = await self._verify_baseline_match_round(
+                verification_image_paths
+            )
+            transcript_messages.extend(match_messages)
+            if match_decision is not None and match_decision.match:
+                self._append_step_messages(
+                    transcript_messages,
+                    transcript_counter,
+                    script_step_index,
+                    attribute_name="verification",
+                )
+                reason = match_decision.reason.strip() or "Live UI matches recorded after-frame."
+                self.manager.log_info(f"Verify baseline match: true; advancing. {reason}")
+                return ScriptStepVerifyResult(
+                    accomplished=True,
+                    branch="advance",
+                    target_step=None,
+                    clearly_unmet=False,
+                    reason=reason,
+                )
+            if match_decision is None:
+                baseline_precheck = (
+                    "mismatch: baseline match round returned no parseable result; "
+                    "treat as not matching and decide recovery"
+                )
+                self.manager.log_info(
+                    "Verify baseline match unparseable; proceeding to recovery round"
+                )
+            else:
+                mismatch_reason = (
+                    match_decision.reason.strip() or "Live UI differs from recorded after-frame."
+                )
+                baseline_precheck = f"mismatch: {mismatch_reason}"
+                self.manager.log_info(
+                    f"Verify baseline match: false; proceeding to recovery. {mismatch_reason}"
+                )
+
+        recovery_result, recovery_messages = await self._verify_script_recovery_round(
+            verification_image_paths,
+            actor_succeeded=actor_succeeded,
+            baseline_attached=bool(baseline_path),
+            baseline_precheck=baseline_precheck,
+        )
+        transcript_messages.extend(recovery_messages)
+        self._append_step_messages(
+            transcript_messages,
+            transcript_counter,
+            script_step_index,
+            attribute_name="verification",
+        )
+        return recovery_result
+
+    async def _verify_baseline_match_round(
+        self,
+        image_paths: list[str],
+    ) -> tuple[BaselineMatchDecision | None, list[dict[str, Any]]]:
+        """Round 1: ask whether live matches the recorded after-frame."""
+        body = (
+            f"{get_prompt('brain_verify_baseline_match')}\n\n"
+            "Two images are attached in order:\n"
+            "1) Live current UI (after the actor finished this step).\n"
+            "2) Recorded success after-frame for this step from the original recording.\n"
+            "Respond with JSON only."
+        )
+        messages: list[dict[str, Any]] = [
+            stamp_message(
+                {
+                    "role": ROLE_USER,
+                    "content": body,
+                    "images": image_paths,
+                }
+            )
+        ]
+        response_message = await self.ollama.chat_messages(
+            self.settings.brain_lm,
+            messages=messages,
+            tools=[],
+            response_format=BASELINE_MATCH_JSON_SCHEMA,
+        )
+        if response_message:
+            messages.append(stamp_message(response_message.model_dump()))
+        if not response_message or not response_message.content:
+            self.manager.log_error("Ollama baseline match returned empty content")
+            return None, messages
+
+        parsed = self._parse_baseline_match_from_content(response_message.content)
+        if parsed is not None:
+            return parsed, messages
+
+        self.manager.log_info(
+            "Baseline match JSON unparseable after local repair; requesting one rewrite"
+        )
+        repair_user = stamp_message(
+            {
+                "role": ROLE_USER,
+                "content": (
+                    "Your previous reply was not valid JSON. "
+                    "Reply with ONLY one valid JSON object (no markdown) with keys: "
+                    "match (bool), reason (string). "
+                    "Keep the same judgment; only fix the JSON syntax."
+                ),
+            }
+        )
+        messages.append(repair_user)
+        repair_message = await self.ollama.chat_messages(
+            self.settings.brain_lm,
+            messages=messages,
+            tools=[],
+            response_format=BASELINE_MATCH_JSON_SCHEMA,
+        )
+        if repair_message:
+            messages.append(stamp_message(repair_message.model_dump()))
+        if not repair_message or not repair_message.content:
+            self.manager.log_error("Baseline match JSON repair rewrite returned empty content")
+            return None, messages
+        return self._parse_baseline_match_from_content(repair_message.content), messages
+
+    async def _verify_script_recovery_round(
+        self,
+        image_paths: list[str],
+        *,
+        actor_succeeded: bool,
+        baseline_attached: bool,
+        baseline_precheck: str,
+    ) -> tuple[ScriptStepVerifyResult | None, list[dict[str, Any]]]:
+        """Round 2 (or sole round without baseline): outcome / recovery decision."""
         prompt = get_prompt("brain_verify_script_step").format(
             expected_outcome=self._current_expected_outcome() or "(none)",
             actor_succeeded="true" if actor_succeeded else "false",
-            baseline_attached="true" if baseline_path else "false",
+            baseline_attached="true" if baseline_attached else "false",
+            baseline_precheck=baseline_precheck,
         )
         numbered = self._format_numbered_script()
         current_1based = min(self._script_step_index + 1, len(self.script_lines))
         goal = self._current_goal()
-        if baseline_path:
+        if baseline_attached:
             image_guide = (
                 "Two images are attached in order:\n"
                 "1) Live current UI (after the actor finished this step).\n"
                 "2) Recorded success after-frame for this step from the original recording.\n"
-                "Compare live vs recorded success state.\n"
+                "Use them as context for recovery; BaselinePrecheck already compared them.\n"
             )
         else:
             image_guide = (
@@ -876,20 +1082,12 @@ class BrainModule:
             f"{image_guide}"
             "Respond with JSON only."
         )
-
-        verification_image_paths = list(await self._eye.capture_separated_images())
-        if baseline_path:
-            verification_image_paths = [
-                *verification_image_paths[:1],
-                baseline_path,
-            ]
-
         messages: list[dict[str, Any]] = [
             stamp_message(
                 {
                     "role": ROLE_USER,
                     "content": body,
-                    "images": verification_image_paths,
+                    "images": image_paths,
                 }
             )
         ]
@@ -902,26 +1100,13 @@ class BrainModule:
         if response_message:
             messages.append(stamp_message(response_message.model_dump()))
         if not response_message or not response_message.content:
-            self._append_step_messages(
-                messages,
-                transcript_counter,
-                script_step_index,
-                attribute_name="verification",
-            )
             self.manager.log_error("Ollama verify step returned empty content")
-            return None
+            return None, messages
 
         parsed = self._parse_verify_result_from_content(response_message.content)
         if parsed is not None:
-            self._append_step_messages(
-                messages,
-                transcript_counter,
-                script_step_index,
-                attribute_name="verification",
-            )
-            return parsed
+            return parsed, messages
 
-        # One LLM rewrite when local repair / schema scrape still fail.
         self.manager.log_info(
             "Verify JSON unparseable after local repair; requesting one rewrite"
         )
@@ -946,16 +1131,10 @@ class BrainModule:
         )
         if repair_message:
             messages.append(stamp_message(repair_message.model_dump()))
-        self._append_step_messages(
-            messages,
-            transcript_counter,
-            script_step_index,
-            attribute_name="verification",
-        )
         if not repair_message or not repair_message.content:
             self.manager.log_error("Verify JSON repair rewrite returned empty content")
-            return None
-        return self._parse_verify_result_from_content(repair_message.content)
+            return None, messages
+        return self._parse_verify_result_from_content(repair_message.content), messages
 
     async def _try_replay_cached_tools(
         self,
@@ -1277,10 +1456,11 @@ class BrainModule:
         success (all tools ok) auto-advances without a screenshot or verifier LLM.
         Recovery path: actor failure, a recorded expected outcome, or a recording
         after-baseline still uses screenshot verification for `goto`/`retry`/`skip`/
-        `abort`/`smart`. When a baseline is attached, verify compares live vs recorded
-        success. Branch `smart` runs a bounded nested Plan→Act→Verify recovery, then
-        retries the same script line on success (or stops the run on failure).
-        After actor success, ambiguous verifier retries (`clearly_unmet=false`)
+        `abort`/`smart`. When a baseline is attached, verify first compares live vs
+        recorded after-frame only and advances on match; on mismatch a second recovery
+        round chooses the branch. Branch `smart` runs a bounded nested Plan→Act→Verify
+        recovery, then retries the same script line on success (or stops the run on
+        failure). After actor success, ambiguous verifier retries (`clearly_unmet=false`)
         are coerced to advance to reduce flaky false negatives. If verification JSON is
         still unparseable after local repair and one rewrite, actor success soft-fails to
         advance instead of aborting the run. Verify `branch=abort` stops the scripted run

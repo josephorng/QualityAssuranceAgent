@@ -123,14 +123,33 @@ def _recording_event_json_paths(run_dir: Path) -> list[Path]:
 
 
 def _resolve_recording_media_path(run_dir: Path, raw: str | None) -> str | None:
-    """Return an existing media path, resolving relative paths against ``run_dir``."""
+    """Return an existing media path under ``run_dir``.
+
+    Handles relative paths, absolute paths that still exist, and relocated /
+    renamed recordings whose JSON still points at a pre-rename absolute path
+    (same basename under ``run_dir/screenshots/``).
+    """
     if not isinstance(raw, str) or not raw.strip():
         return None
     path = Path(raw.strip())
+    run_dir = Path(run_dir)
+    candidates: list[Path] = []
     if path.is_file():
-        return str(path.resolve())
-    candidate = (Path(run_dir) / path).resolve()
-    return str(candidate) if candidate.is_file() else None
+        candidates.append(path)
+    if not path.is_absolute():
+        candidates.append(run_dir / path)
+    # Renamed/copied recording folders leave absolute paths to the old dir.
+    if path.name:
+        candidates.append(run_dir / "screenshots" / path.name)
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.is_file():
+            return str(candidate.resolve())
+    return None
 
 
 def _recorded_event_with_resolved_shots(
@@ -143,10 +162,9 @@ def _recorded_event_with_resolved_shots(
         return None
     shot = _resolve_recording_media_path(run_dir, event.screenshot_path)
     end_shot = _resolve_recording_media_path(run_dir, event.end_screenshot_path)
-    if shot is not None:
-        event.screenshot_path = shot
-    if end_shot is not None:
-        event.end_screenshot_path = end_shot
+    # Always rewrite (or clear) so callers never keep a stale absolute path.
+    event.screenshot_path = shot or ""
+    event.end_screenshot_path = end_shot or ""
     return event
 
 

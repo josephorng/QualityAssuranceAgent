@@ -93,6 +93,29 @@ def test_collect_recording_baseline_after_paths_aligns_with_wait_lines(tmp_path:
     assert baselines[2].endswith("final_after.jpeg")
 
 
+def test_collect_recording_baseline_after_paths_survives_renamed_folder(tmp_path: Path) -> None:
+    """Absolute screenshot paths from a pre-rename folder still resolve by basename."""
+    run_dir = _write_recording(tmp_path)
+    old_root = tmp_path / "recording_old_id"
+    for event_path in (run_dir / "events").glob("event_*.json"):
+        payload = json.loads(event_path.read_text(encoding="utf-8"))
+        name = Path(payload["screenshot_path"]).name
+        payload["screenshot_path"] = str(old_root / "screenshots" / name)
+        event_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    session_path = run_dir / "session.json"
+    session = json.loads(session_path.read_text(encoding="utf-8"))
+    session["final_after_screenshot"] = str(old_root / "screenshots" / "final_after.jpeg")
+    session_path.write_text(json.dumps(session, ensure_ascii=False), encoding="utf-8")
+
+    assert not old_root.exists()
+    baselines = collect_recording_baseline_after_paths(run_dir)
+    assert baselines[0] is None
+    assert baselines[1] is not None and baselines[1].endswith("event_001.jpeg")
+    assert Path(baselines[1]).is_file()
+    assert baselines[2] is not None and baselines[2].endswith("final_after.jpeg")
+    assert Path(baselines[2]).is_file()
+
+
 def test_prepare_run_session_seeds_baseline_after_env(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv(RUNTIME_COMMAND_MODE_ENV, raising=False)
     monkeypatch.delenv(SMART_MODE_ENV, raising=False)

@@ -211,3 +211,4 @@ recordings/
 
 # Triton model copies (sync via triton/scripts/sync_models.py)
 triton/model_repository/**/model.onnx
+triton/model_repository/**/model_copy_metadata.json

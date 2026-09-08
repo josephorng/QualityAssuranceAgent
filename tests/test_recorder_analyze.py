@@ -768,6 +768,63 @@ def test_find_confusable_peers_ignores_fuzzy_icon_cousins() -> None:
     assert peers[0]["center"] == [818, 430]
 
 
+def test_pick_disambiguating_hints_skips_repeated_labels() -> None:
+    """Repeated icons (e.g. many checked boxes) must not be auto-disambiguators."""
+    from src.common.nearby_side import Side
+    from src.recorder.vision_context import _pick_disambiguating_hints
+
+    def _empty(cx: int, cy: int) -> dict:
+        return {
+            "bbox": [cx - 6, cy - 6, 12, 12],
+            "center": [cx, cy],
+            "class_name": "element",
+            "text": "",
+            "icons": [{"chinese_id": "方框、矩形框線"}],
+        }
+
+    def _checked(cx: int, cy: int) -> dict:
+        return {
+            "bbox": [cx - 6, cy - 6, 12, 12],
+            "center": [cx, cy],
+            "class_name": "element",
+            "text": "",
+            "icons": [{"chinese_id": "已勾選方框"}],
+        }
+
+    # Nearby repeated checked boxes would clear peers vs one fixed instance,
+    # but must be skipped; unique same-row 「4.3」is the valid disambiguator.
+    candidates = [
+        _empty(900, 168),  # primary
+        _checked(900, 145),
+        _checked(900, 191),
+        _checked(820, 168),
+        _checked(820, 191),
+        _empty(900, 400),  # far same-column peer
+        _empty(900, 500),
+        _empty(600, 168),  # far same-row peer
+        {
+            "bbox": [780, 163, 16, 10],
+            "center": [788, 168],
+            "class_name": "text",
+            "text": "4.3",
+        },
+        {
+            "bbox": [560, 94, 24, 11],
+            "center": [575, 99],
+            "class_name": "text",
+            "text": "版本",
+        },
+    ]
+    picked = _pick_disambiguating_hints(
+        candidates,
+        instruction="點擊「方框、矩形框線」圖示",
+    )
+    labels = [hint.label for hint in picked]
+    assert "「已勾選方框」圖示" not in labels
+    assert "「4.3」文字" in labels
+    assert picked[0].side == Side.RIGHT
+
+
 def test_collect_nearby_hints_set_cover_disambiguates_2x2_v_arrows() -> None:
     """Row+column landmarks together uniquely ID one of four identical V-arrows."""
     from src.common.nearby_side import NearbyHint, Side

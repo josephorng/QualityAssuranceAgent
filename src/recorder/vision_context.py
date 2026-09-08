@@ -1401,8 +1401,10 @@ def _score_disambiguating_landmarks(
     Each row is
     ``(eliminated_peer_ids, betweenness, tier, order, label_freq, center, hint)``.
     Landmarks need not separate every peer alone; callers greedy-cover the peer
-    set. Lower ``label_freq`` is preferred so unique labels (e.g. 「確定」) beat
-    repeated grid text (e.g. many 「未分類裝置」).
+    set. Only **unique** on-screen labels (``label_freq == 1``) are scored:
+    repeated icons/text (e.g. many 「已勾選方框」) look strong against one fixed
+    instance at record time but fail at playback, where the side must hold
+    against *any* matching landmark.
     """
     if len(candidates) < 2 or not isinstance(candidates[0], dict):
         return []
@@ -1444,6 +1446,9 @@ def _score_disambiguating_landmarks(
             continue
         if not _is_stable_disambiguation_label(label, candidate):
             continue
+        # Skip labels that appear more than once on the screenshot.
+        if label_freq.get(label, 1) > 1:
+            continue
 
         side, eliminated = _peers_eliminated_by_landmark(
             candidate,
@@ -1480,8 +1485,9 @@ def _score_disambiguating_landmarks(
             )
         )
 
-    # More peers covered, rarer label, better tier, closer order, higher between.
-    scored.sort(key=lambda item: (-len(item[0]), item[4], item[2], item[3], -item[1]))
+    # More peers covered, better tier, closer order, higher between.
+    # (freq is always 1 here; kept in the tuple for callers/tests.)
+    scored.sort(key=lambda item: (-len(item[0]), item[2], item[3], -item[1]))
     return scored
 
 
@@ -1495,9 +1501,10 @@ def _pick_disambiguating_hints(
     """Greedy set-cover landmarks that together separate primary from similar peers.
 
     Each pick must eliminate at least one still-confused peer. Stops when every
-    peer is covered or ``max_count`` is reached. Prefers landmarks that clear more
-    remaining peers, then closer to those peers, closer to the primary, rarer
-    labels, multi-char text, and betweenness. ``reserved_labels`` (e.g. forced
+    peer is covered or ``max_count`` is reached. Only unique on-screen labels are
+    considered (see ``_score_disambiguating_landmarks``). Prefers landmarks that
+    clear more remaining peers, then closer to those peers, closer to the
+    primary, multi-char text, and betweenness. ``reserved_labels`` (e.g. forced
     containing ``輸入欄``) are skipped so a duplicate bare class label cannot
     consume a cover slot.
     """
@@ -1527,9 +1534,9 @@ def _pick_disambiguating_hints(
     used_labels: set[str] = set(reserved_labels or ())
     while remaining and len(picked) < max_count:
         best: (
-            tuple[int, float, int, int, float, float, NearbyHint, set[int]] | None
+            tuple[int, float, int, float, float, NearbyHint, set[int]] | None
         ) = None
-        for eliminated, between, tier, _order, freq, center, hint in scored:
+        for eliminated, between, tier, _order, _freq, center, hint in scored:
             if hint.label in used_labels:
                 continue
             newly = eliminated & remaining
@@ -1560,7 +1567,6 @@ def _pick_disambiguating_hints(
             key = (
                 len(newly),
                 -locality,
-                -freq,
                 -tier,
                 -primary_dist,
                 between,
@@ -1570,13 +1576,11 @@ def _pick_disambiguating_hints(
                 -best[1],
                 -best[2],
                 -best[3],
-                -best[4],
-                best[5],
+                best[4],
             ):
                 best = (
                     len(newly),
                     locality,
-                    freq,
                     tier,
                     primary_dist,
                     between,
@@ -1585,7 +1589,7 @@ def _pick_disambiguating_hints(
                 )
         if best is None:
             break
-        _n, _loc, _freq, _tier, _pd, _between, hint, newly = best
+        _n, _loc, _tier, _pd, _between, hint, newly = best
         picked.append(hint)
         used_labels.add(hint.label)
         remaining -= newly

@@ -3026,7 +3026,6 @@ def _render_instruction_group_html(
     )
     step_label = escape(f"{step_number}.")
     has_expected = isinstance(expected_outcome, str) and bool(expected_outcome.strip())
-    show_empty_expected = (not has_expected) and isinstance(verify_dict, dict)
 
     if isinstance(verify_dict, dict) and verify_dict.get("branch"):
         primary_badge = escape(str(verify_dict.get("branch")))
@@ -3048,12 +3047,6 @@ def _render_instruction_group_html(
             f'<span class="instruction-expected">'
             f"預期結果：{escape(expected_outcome.strip())}"
             f"</span>"
-        )
-    elif show_empty_expected:
-        expected_summary = (
-            '<span class="instruction-expected instruction-expected-empty">'
-            "預期結果：（無）"
-            "</span>"
         )
     else:
         expected_summary = ""

@@ -58,6 +58,56 @@ def test_side_inversion_table() -> None:
     assert side_from_anchor_bbox(_ANCHOR, 25, 35) is None
 
 
+def test_two_way_alignment_wide_landmark_counts_as_cardinal() -> None:
+    """Anchor center inside landmark x-span → ABOVE/BELOW, not diagonal.
+
+    Mirrors a wide column header (「異動信件」) whose center sits slightly
+    beside a narrow checkbox that still lies under the header text.
+    """
+    # Narrow checkbox; center x=906.
+    anchor = (900, 162, 12, 12)
+    # Wide header above; center x=917 is right of the box, but box center
+    # (906) falls inside the header's x-range [894, 941].
+    landmark = (894, 94, 47, 12)
+    landmark_cx, landmark_cy = 917, 100
+
+    assert (
+        landmark_cell_from_anchor_bbox(anchor, landmark_cx, landmark_cy)
+        == LandmarkCell.UPPER_RIGHT
+    )
+    assert (
+        landmark_cell_from_anchor_bbox(
+            anchor, landmark_cx, landmark_cy, landmark_bbox=landmark
+        )
+        == LandmarkCell.ABOVE
+    )
+    assert (
+        side_from_anchor_bbox(
+            anchor, landmark_cx, landmark_cy, landmark_bbox=landmark
+        )
+        == Side.BELOW
+    )
+    assert anchor_satisfies_side(
+        anchor, landmark_cx, landmark_cy, Side.BELOW, landmark_bbox=landmark
+    )
+    assert not anchor_satisfies_side(
+        anchor, landmark_cx, landmark_cy, Side.LOWER_LEFT, landmark_bbox=landmark
+    )
+
+
+def test_two_way_alignment_does_not_force_when_anchor_misses_span() -> None:
+    """Without overlap on the axis, diagonals stay diagonals."""
+    anchor = (900, 162, 12, 12)
+    # Header fully to the right of the checkbox center.
+    landmark = (920, 94, 40, 12)
+    assert (
+        landmark_cell_from_anchor_bbox(
+            anchor, 940, 100, landmark_bbox=landmark
+        )
+        == LandmarkCell.UPPER_RIGHT
+    )
+
+
 def test_anchor_satisfies_side_round_trip() -> None:
     assert anchor_satisfies_side(_ANCHOR, 45, 35, Side.LEFT)
     assert not anchor_satisfies_side(_ANCHOR, 5, 35, Side.LEFT)

@@ -539,7 +539,12 @@ def _detection_directional_cell(
 
     Center-band neighbors return ``None`` (they stay undirected / 「其他」).
     """
-    cell = landmark_cell_from_anchor_bbox(primary_bbox, det.cx, det.cy)
+    cell = landmark_cell_from_anchor_bbox(
+        primary_bbox,
+        det.cx,
+        det.cy,
+        landmark_bbox=det.bbox,
+    )
     return cell if cell in _DIRECTIONAL_LANDMARK_CELLS else None
 
 
@@ -1061,7 +1066,12 @@ def _tier0_cell_rank(
     center = _candidate_center(candidate)
     if center is None:
         return _TIER0_NON_CARDINAL_RANK
-    cell = landmark_cell_from_anchor_bbox(primary_bbox, center[0], center[1])
+    cell = landmark_cell_from_anchor_bbox(
+        primary_bbox,
+        center[0],
+        center[1],
+        landmark_bbox=_as_bbox_xywh(candidate.get("bbox")),
+    )
     return _TIER0_CELL_RANK.get(cell, _TIER0_NON_CARDINAL_RANK)
 
 
@@ -1177,7 +1187,12 @@ def _neighbor_side_for_candidate(
     if primary_bbox is not None:
         center = _candidate_center(candidate)
         if center is not None:
-            return side_from_anchor_bbox(primary_bbox, center[0], center[1])
+            return side_from_anchor_bbox(
+                primary_bbox,
+                center[0],
+                center[1],
+                landmark_bbox=cand_bbox,
+            )
     return None
 
 
@@ -1340,11 +1355,17 @@ def _peers_eliminated_by_landmark(
     center = _candidate_center(landmark)
     if center is None:
         return None, set()
-    primary_side = side_from_anchor_bbox(primary_bbox, center[0], center[1])
+
+    lm_bbox = _as_bbox_xywh(landmark.get("bbox"))
+    primary_side = side_from_anchor_bbox(
+        primary_bbox,
+        center[0],
+        center[1],
+        landmark_bbox=lm_bbox,
+    )
     if primary_side is None:
         return None, set()
 
-    lm_bbox = _as_bbox_xywh(landmark.get("bbox"))
     eliminated: set[int] = set()
     for peer in confusables:
         peer_bbox = _as_bbox_xywh(peer.get("bbox"))

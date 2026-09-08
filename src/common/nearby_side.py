@@ -99,29 +99,44 @@ def _bbox_xywh_to_edges(bbox: tuple[int, int, int, int]) -> tuple[int, int, int,
     return x, y, x + w, y + h
 
 
+def _axis_band_offset(point: int, lo: int, hi: int) -> int:
+    """Return -1 / 0 / 1 for ``point`` vs inclusive ``[lo, hi]`` band."""
+    if point < lo:
+        return -1
+    if point > hi:
+        return 1
+    return 0
+
+
 def landmark_cell_from_anchor_bbox(
     anchor_bbox: tuple[int, int, int, int],
     landmark_cx: int,
     landmark_cy: int,
+    *,
+    landmark_bbox: tuple[int, int, int, int] | None = None,
 ) -> LandmarkCell:
     """Return which of the nine cells contains ``(landmark_cx, landmark_cy)``.
 
     ``anchor_bbox`` is ``(x, y, w, h)``. Points on an edge belong to the center
     band for that axis (``x1 <= x <= x2``, ``y1 <= y <= y2``).
+
+    When ``landmark_bbox`` is provided, also treat an axis as center-aligned if
+    the anchor center falls within the landmark's range on that axis (two-way
+    overlap). Example: a wide column header whose center sits slightly beside a
+    narrow checkbox still counts as ABOVE/BELOW when the checkbox center lies
+    inside the header's x-span.
     """
     x1, y1, x2, y2 = _bbox_xywh_to_edges(anchor_bbox)
-    if landmark_cx < x1:
-        col = -1
-    elif landmark_cx > x2:
-        col = 1
-    else:
-        col = 0
-    if landmark_cy < y1:
-        row = -1
-    elif landmark_cy > y2:
-        row = 1
-    else:
-        row = 0
+    col = _axis_band_offset(landmark_cx, x1, x2)
+    row = _axis_band_offset(landmark_cy, y1, y2)
+
+    if landmark_bbox is not None:
+        lx1, ly1, lx2, ly2 = _bbox_xywh_to_edges(landmark_bbox)
+        acx, acy = anchor_center_xy(anchor_bbox)
+        if col != 0 and lx1 <= acx <= lx2:
+            col = 0
+        if row != 0 and ly1 <= acy <= ly2:
+            row = 0
 
     return {
         (-1, -1): LandmarkCell.UPPER_LEFT,
@@ -140,9 +155,16 @@ def side_from_anchor_bbox(
     anchor_bbox: tuple[int, int, int, int],
     landmark_cx: int,
     landmark_cy: int,
+    *,
+    landmark_bbox: tuple[int, int, int, int] | None = None,
 ) -> Side | None:
     """Script side for an anchor bbox given a landmark center, or None if CENTER."""
-    cell = landmark_cell_from_anchor_bbox(anchor_bbox, landmark_cx, landmark_cy)
+    cell = landmark_cell_from_anchor_bbox(
+        anchor_bbox,
+        landmark_cx,
+        landmark_cy,
+        landmark_bbox=landmark_bbox,
+    )
     return _CELL_TO_SCRIPT_SIDE[cell]
 
 
@@ -172,15 +194,24 @@ def anchor_satisfies_side(
 ) -> bool:
     """True when geometry satisfies ``side`` for this anchor/landmark pair.
 
-    Directional sides use the 9-grid + inversion. ``Side.INSIDE`` requires the
-    anchor center to fall inside ``landmark_bbox``.
+    Directional sides use the 9-grid + inversion (with optional two-way
+    landmark-bbox alignment). ``Side.INSIDE`` requires the anchor center to
+    fall inside ``landmark_bbox``.
     """
     if side == Side.INSIDE:
         if landmark_bbox is None:
             return False
         ax, ay = anchor_center_xy(anchor_bbox)
         return _point_inside_bbox_xywh(ax, ay, landmark_bbox)
-    return side_from_anchor_bbox(anchor_bbox, landmark_cx, landmark_cy) == side
+    return (
+        side_from_anchor_bbox(
+            anchor_bbox,
+            landmark_cx,
+            landmark_cy,
+            landmark_bbox=landmark_bbox,
+        )
+        == side
+    )
 
 
 def side_to_zh(side: Side) -> str:

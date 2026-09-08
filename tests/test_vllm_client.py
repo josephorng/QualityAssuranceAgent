@@ -1,4 +1,5 @@
 from src.common.vllm_client import (
+    _coerce_arguments_to_dict,
     _keep_latest_message_images,
     _parse_call_syntax_arguments,
     _parse_call_syntax_tool_calls,
@@ -87,6 +88,38 @@ def test_parse_call_syntax_tool_calls_nearby_objects() -> None:
         "instruction": "「資料夾」圖示",
         "nearby_objects": ["「Edge」圖示", "「Copilot」圖示"],
     }
+
+
+def test_parse_call_syntax_strips_llm_quote_wrappers() -> None:
+    calls = _parse_call_syntax_tool_calls(
+        'call:move_mouse{instruction:<|"|>輸入欄<|"|>,'
+        'nearby_objects:[<|"|>在「帳號」文字的右邊<|"|>,'
+        '<|"|>在「確定」文字的上面<|"|>]}'
+    )
+    assert len(calls) == 1
+    assert calls[0].function.arguments == {
+        "instruction": "輸入欄",
+        "nearby_objects": ["在「帳號」文字的右邊", "在「確定」文字的上面"],
+    }
+
+
+def test_coerce_arguments_to_dict_strips_llm_quote_wrappers() -> None:
+    assert _coerce_arguments_to_dict(
+        {
+            "button": '<|"|>left<|"|>',
+            "nearby_objects": ['<|"|>在「帳號」文字的右邊<|"|>'],
+        }
+    ) == {
+        "button": "left",
+        "nearby_objects": ["在「帳號」文字的右邊"],
+    }
+    assert _coerce_arguments_to_dict(
+        '{"instruction": "<|\\"|>輸入欄<|\\"|>"}'
+    ) == {"instruction": "輸入欄"}
+    # Literal wrappers without JSON escaping also appear in call-syntax / dict args.
+    assert _coerce_arguments_to_dict(
+        {"instruction": '<|"|>輸入欄<|"|>'}
+    ) == {"instruction": "輸入欄"}
 
 
 def test_translate_openai_message_parses_call_syntax() -> None:

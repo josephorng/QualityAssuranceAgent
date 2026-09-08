@@ -32,6 +32,7 @@ from src.common.instruction_tool_cache import (
     upsert_tool_calls,
 )
 from src.common.llm_factory import get_llm_client
+from src.common.llm_text import strip_llm_quote_wrappers
 from src.common.nearby_side import enrich_tool_arguments_from_goal
 from src.common.prompting import get_prompt
 from src.common.run_state import get_run_state_manager
@@ -493,6 +494,13 @@ class BrainModule:
         if not image_paths:
             return None
         return image_paths[0]
+
+    @staticmethod
+    def _normalize_tool_arguments(arguments: dict[str, Any] | None) -> dict[str, Any]:
+        """Copy tool args and strip model quote-wrapper tokens like ``<|"|>``."""
+        raw = dict(arguments) if isinstance(arguments, dict) else {}
+        cleaned = strip_llm_quote_wrappers(raw)
+        return cleaned if isinstance(cleaned, dict) else raw
 
     def _enrich_tool_arguments(
         self, tool_name: str, arguments: dict[str, Any], goal: str
@@ -984,7 +992,7 @@ class BrainModule:
         ]
 
         for call in cached_calls:
-            arguments = dict(call["arguments"])
+            arguments = self._normalize_tool_arguments(call.get("arguments"))
             try:
                 normalized_name = await self._normalize_tool_name(call["name"], arguments)
             except Exception as e:
@@ -1159,7 +1167,9 @@ class BrainModule:
 
                 abort_step = False
                 for tool_call in real_tool_calls:
-                    arguments = dict(tool_call.function.arguments)
+                    arguments = self._normalize_tool_arguments(
+                        tool_call.function.arguments
+                    )
                     try:
                         normalized_name = await self._normalize_tool_name(
                             tool_call.function.name, arguments

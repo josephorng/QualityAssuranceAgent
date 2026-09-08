@@ -13,6 +13,7 @@ import pyautogui
 import pygetwindow as gw
 from src.common.io_utils import imread_bgr
 from src.common.llm_factory import get_llm_client
+from src.common.llm_text import strip_llm_quote_wrappers
 from src.common.prompting import get_prompt
 from src.common.settings import load_settings
 from src.eye.capture import capture_active_monitor_to_file
@@ -20,8 +21,7 @@ from src.eye.capture import capture_active_monitor_to_file
 
 def _normalize_hotkey_token(key: str) -> str:
     """Normalize odd wrappers that can appear in model output."""
-    cleaned = key.strip()
-    cleaned = cleaned.replace('<|"|>', "")
+    cleaned = strip_llm_quote_wrappers(key).strip()
     cleaned = cleaned.strip("\"'").strip()
     # pyautogui key tokens are lowercase (e.g. "f6", "enter", "pagedown")
     return cleaned.lower()
@@ -31,8 +31,7 @@ def _normalize_button(button: str | int) -> str | int:
     """Normalize odd wrappers that can appear in model output for mouse buttons."""
     if isinstance(button, int):
         return button
-    cleaned = str(button).strip()
-    cleaned = cleaned.replace('<|"|>', "")
+    cleaned = strip_llm_quote_wrappers(str(button)).strip()
     cleaned = cleaned.strip("\"'").strip()
     if cleaned.isdigit():
         return int(cleaned)
@@ -41,7 +40,7 @@ def _normalize_button(button: str | int) -> str | int:
 
 def _normalize_typed_text(text: str) -> str:
     """Strip model quote wrappers from typed text without removing intentional quotes."""
-    return str(text).replace('<|"|>', "")
+    return strip_llm_quote_wrappers(str(text))
 
 
 KEY_ALIASES = {

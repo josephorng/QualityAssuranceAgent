@@ -13,6 +13,7 @@ from ollama import Message
 from ollama._utils import convert_function_to_tool
 
 from src.common.llm_client import LLMClient, ResponseFormatParam, ThinkParam
+from src.common.llm_text import strip_llm_quote_wrappers
 from src.common.run_state import get_run_state_manager
 
 # Ollama exposes an OpenAI-compatible API at /v1/chat/completions on port 11434.
@@ -86,8 +87,8 @@ def _parse_call_syntax_value(value: str) -> Any:
     """Coerce a raw call-syntax value; lists become real lists for Pydantic tools."""
     parsed_list = _parse_call_syntax_list(value)
     if parsed_list is not None:
-        return parsed_list
-    return value
+        return strip_llm_quote_wrappers(parsed_list)
+    return strip_llm_quote_wrappers(value)
 
 
 def _parse_call_syntax_arguments(args_str: str) -> dict[str, Any]:
@@ -123,17 +124,20 @@ def _parse_call_syntax_tool_calls(content: str) -> list[Message.ToolCall]:
 
 def _coerce_arguments_to_dict(arguments: Any) -> dict[str, Any]:
     if isinstance(arguments, dict):
-        return arguments
+        cleaned = strip_llm_quote_wrappers(arguments)
+        return cleaned if isinstance(cleaned, dict) else {}
     if isinstance(arguments, str):
         if not arguments.strip():
             return {}
         try:
             parsed = json.loads(arguments)
         except json.JSONDecodeError:
-            return {"_raw": arguments}
-        return parsed if isinstance(parsed, dict) else {"_raw": parsed}
+            return {"_raw": strip_llm_quote_wrappers(arguments)}
+        if isinstance(parsed, dict):
+            cleaned = strip_llm_quote_wrappers(parsed)
+            return cleaned if isinstance(cleaned, dict) else {}
+        return {"_raw": strip_llm_quote_wrappers(parsed)}
     return {}
-
 
 def _encode_image_data_url(path: str | Path) -> str:
     """Read an image file and return a ``data:<mime>;base64,...`` URL."""

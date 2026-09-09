@@ -448,6 +448,16 @@ def test_expand_bbox_avoiding_text_clamps_side_near_text() -> None:
     assert not boxes_overlap(out, text)
 
 
+def test_expand_bbox_side_margins_left_right() -> None:
+    from cua_mcp.select_mouse_target import _expand_bbox_avoiding_text
+
+    icon = (100, 100, 10, 10)
+    out = _expand_bbox_avoiding_text(
+        icon, [], img_w=200, img_h=200, side_margins=(4, 0, 4, 0)
+    )
+    assert out == (96, 100, 18, 10)
+
+
 def test_expand_bbox_avoiding_text_keeps_original_when_text_already_overlaps() -> None:
     from cua_mcp.select_mouse_target import _expand_bbox_avoiding_text
 
@@ -479,12 +489,25 @@ def test_is_empty_unknown_detection_requires_blank_ocr() -> None:
     assert _is_empty_unknown_detection(element) is False
 
 
+def test_single_known_icon_pua_rejects_multi_and_unknown() -> None:
+    from cua_mcp.select_mouse_target import _single_known_icon_pua
+
+    assert _single_known_icon_pua("\ue002") == "\ue002"
+    assert _single_known_icon_pua("") is None
+    assert _single_known_icon_pua("搜") is None
+    assert _single_known_icon_pua("\ue01a") is None  # unknown_icon
+    assert _single_known_icon_pua("\ue002\ue075") is None
+
+
 def test_retry_empty_unknown_icon_ocr_upgrades_known_pua(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import numpy as np
 
-    from cua_mcp.select_mouse_target import _retry_empty_unknown_icon_ocr
+    from cua_mcp.select_mouse_target import (
+        _UNKNOWN_ICON_RETRY_SIDE_MARGINS,
+        _retry_empty_unknown_icon_ocr,
+    )
 
     unknown = _detection_from_bbox((100, 100, 12, 12), PICKER_CLASS_UNKNOWN)
     # Close enough that +2 right expand would overlap without clamp.
@@ -503,18 +526,14 @@ def test_retry_empty_unknown_icon_ocr_upgrades_known_pua(
         "cua_mcp.select_mouse_target._ocr_boxes_on_bgr",
         fake_ocr,
     )
-    monkeypatch.setattr(
-        "cua_mcp.select_mouse_target._split_multi_icon_element_detection",
-        lambda *_args, **_kwargs: None,
-    )
 
     bgr = np.zeros((200, 200, 3), dtype=np.uint8)
     out = _retry_empty_unknown_icon_ocr(bgr, [unknown, text])
 
     assert captured["mode"] == "icon"
     assert captured["margin"] == 0
-    assert len(captured["boxes"]) == 1
-    # Right side clamped before text at x=113; left/top/bottom +2.
+    assert len(captured["boxes"]) == len(_UNKNOWN_ICON_RETRY_SIDE_MARGINS)
+    # First variant: +2 all; right side clamped before text at x=113.
     assert captured["boxes"][0] == (98, 98, 15, 16)
     assert len(out) == 2
     assert out[0].class_id == YOLO_CLASS_ELEMENT
@@ -522,6 +541,60 @@ def test_retry_empty_unknown_icon_ocr_upgrades_known_pua(
     assert out[0].bbox == (100, 100, 12, 12)  # stored bbox unchanged
     assert out[0].icons
     assert out[1].class_id == YOLO_CLASS_TEXT
+
+
+def test_retry_empty_unknown_uses_later_variant_when_first_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+
+    from cua_mcp.select_mouse_target import (
+        _UNKNOWN_ICON_RETRY_SIDE_MARGINS,
+        _retry_empty_unknown_icon_ocr,
+    )
+
+    unknown = _detection_from_bbox((100, 100, 12, 12), PICKER_CLASS_UNKNOWN)
+    # Variant 0 (+2 all) empty; variant 1 (+4 L+R) yields known PUA.
+    responses = [[], ["\ue075"], [], [], []]
+
+    def fake_ocr(_bgr, boxes, *, mode="text", margin=2, **_kwargs):
+        assert len(boxes) == len(_UNKNOWN_ICON_RETRY_SIDE_MARGINS)
+        return responses
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._ocr_boxes_on_bgr",
+        fake_ocr,
+    )
+
+    bgr = np.zeros((200, 200, 3), dtype=np.uint8)
+    out = _retry_empty_unknown_icon_ocr(bgr, [unknown])
+
+    assert len(out) == 1
+    assert out[0].class_id == YOLO_CLASS_ELEMENT
+    assert out[0].text == "\ue075"
+    assert out[0].bbox == (100, 100, 12, 12)
+
+
+def test_retry_empty_unknown_rejects_multi_pua_variants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+
+    from cua_mcp.select_mouse_target import _retry_empty_unknown_icon_ocr
+
+    unknown = _detection_from_bbox((10, 10, 12, 12), PICKER_CLASS_UNKNOWN)
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._ocr_boxes_on_bgr",
+        lambda *_a, **_k: [["\ue002\ue075"] for _ in range(5)],
+    )
+
+    bgr = np.zeros((80, 80, 3), dtype=np.uint8)
+    out = _retry_empty_unknown_icon_ocr(bgr, [unknown])
+
+    assert len(out) == 1
+    assert out[0].class_id == PICKER_CLASS_UNKNOWN
+    assert out[0].text is None
 
 
 def test_retry_empty_unknown_skips_unknown_with_text(
@@ -564,11 +637,7 @@ def test_retry_empty_unknown_leaves_plain_text_as_unknown(
 
     monkeypatch.setattr(
         "cua_mcp.select_mouse_target._ocr_boxes_on_bgr",
-        lambda *_a, **_k: [["搜"]],
-    )
-    monkeypatch.setattr(
-        "cua_mcp.select_mouse_target._split_multi_icon_element_detection",
-        lambda *_a, **_k: None,
+        lambda *_a, **_k: [["搜"] for _ in range(5)],
     )
 
     bgr = np.zeros((80, 80, 3), dtype=np.uint8)

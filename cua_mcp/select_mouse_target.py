@@ -326,6 +326,15 @@ def _split_multi_icon_element_detection(
 
 # Second-pass OCR for empty-OCR ``unknown`` icons: modest expand, stop before text.
 _UNKNOWN_ICON_RETRY_EXTRA_MARGIN = 2
+# Per-side pads ``(left, top, right, bottom)`` tried in order until one yields a
+# single known-icon PUA. First: uniform +2; then +4 on exactly two sides.
+_UNKNOWN_ICON_RETRY_SIDE_MARGINS: tuple[tuple[int, int, int, int], ...] = (
+    (2, 2, 2, 2),  # +2 all sides
+    (4, 0, 4, 0),  # +4 left+right
+    (0, 4, 0, 4),  # +4 top+bottom
+    (4, 4, 0, 0),  # +4 left+top
+    (0, 0, 4, 4),  # +4 right+bottom
+)
 
 
 def _is_empty_unknown_detection(det: UiDetection) -> bool:
@@ -346,8 +355,12 @@ def _expand_bbox_avoiding_text(
     img_h: int,
     *,
     extra_margin: int = _UNKNOWN_ICON_RETRY_EXTRA_MARGIN,
+    side_margins: tuple[int, int, int, int] | None = None,
 ) -> tuple[int, int, int, int]:
-    """Expand ``bbox`` by ``extra_margin``, shrinking sides that would overlap text.
+    """Expand ``bbox`` by side pads, shrinking sides that would overlap text.
+
+    ``side_margins`` is ``(left, top, right, bottom)``. When omitted, each side
+    uses ``extra_margin`` (legacy uniform expand).
 
     Never shrinks below the original ``bbox``. Result is clipped to the image.
     Only the expanded portion of each side is retracted when that side's pad
@@ -355,10 +368,14 @@ def _expand_bbox_avoiding_text(
     """
     ox, oy, ow, oh = bbox
     ox2, oy2 = ox + ow, oy + oh
-    x1 = ox - int(extra_margin)
-    y1 = oy - int(extra_margin)
-    x2 = ox2 + int(extra_margin)
-    y2 = oy2 + int(extra_margin)
+    if side_margins is None:
+        left = top = right = bottom = int(extra_margin)
+    else:
+        left, top, right, bottom = (int(v) for v in side_margins)
+    x1 = ox - left
+    y1 = oy - top
+    x2 = ox2 + right
+    y2 = oy2 + bottom
     x1, y1, ew, eh = clip_box(x1, y1, x2 - x1, y2 - y1, img_w, img_h)
     x2, y2 = x1 + ew, y1 + eh
 
@@ -383,17 +400,35 @@ def _expand_bbox_avoiding_text(
     return clip_box(x1, y1, x2 - x1, y2 - y1, img_w, img_h)
 
 
+def _single_known_icon_pua(text_value: str) -> str | None:
+    """Return the sole known-icon PUA in ``text_value``, else ``None``.
+
+    Rejects empty, plain text, multi-PUA, unmapped PUA, and ``unknown_icon``.
+    """
+    text = (text_value or "").strip()
+    if not text or not _text_is_pua_only(text) or _pua_char_count(text) != 1:
+        return None
+    if _resolve_ocr_class_id(YOLO_CLASS_ELEMENT, text) == PICKER_CLASS_UNKNOWN:
+        return None
+    if not _known_icons_for_text(text):
+        return None
+    return text
+
+
 def _retry_empty_unknown_icon_ocr(
     bgr: np.ndarray,
     candidates: list[UiDetection],
 ) -> list[UiDetection]:
     """
-    Re-OCR empty ``unknown`` detections with a modestly expanded crop.
+    Re-OCR empty ``unknown`` detections with several modestly expanded crops.
 
-    Uses icon decode and ``margin=0`` on an already-clamped crop so the default
-    OCR pad cannot bleed into neighboring text. Stored detection bboxes stay
-    as the original YOLO boxes. Only upgrades when OCR yields a non-unknown
-    class (known-icon PUA); otherwise leaves the empty unknown unchanged.
+    Tries :data:`_UNKNOWN_ICON_RETRY_SIDE_MARGINS` in order (uniform +2, then
+    four +4-on-two-sides variants). Uses icon decode and ``margin=0`` on
+    already-clamped crops so the default OCR pad cannot bleed into neighboring
+    text. Stored detection bboxes stay as the original YOLO boxes.
+
+    Upgrades only when a variant yields exactly one known-icon PUA; otherwise
+    leaves the empty unknown unchanged.
     """
     retry_indices = [
         i for i, det in enumerate(candidates) if _is_empty_unknown_detection(det)
@@ -410,39 +445,46 @@ def _retry_empty_unknown_icon_ocr(
             and _has_actual_visible_text(det)
         )
     ]
-    crop_boxes = [
-        _expand_bbox_avoiding_text(
-            candidates[i].bbox,
-            text_boxes,
-            img_w,
-            img_h,
-            extra_margin=_UNKNOWN_ICON_RETRY_EXTRA_MARGIN,
-        )
-        for i in retry_indices
-    ]
+    crop_boxes: list[tuple[int, int, int, int]] = []
+    crop_owners: list[int] = []
+    for idx in retry_indices:
+        for side_margins in _UNKNOWN_ICON_RETRY_SIDE_MARGINS:
+            crop_boxes.append(
+                _expand_bbox_avoiding_text(
+                    candidates[idx].bbox,
+                    text_boxes,
+                    img_w,
+                    img_h,
+                    side_margins=side_margins,
+                )
+            )
+            crop_owners.append(idx)
+
     mode = ocr_mode_for_yolo_class(YOLO_CLASS_ELEMENT)
     ocr_preds = _ocr_boxes_on_bgr(bgr, crop_boxes, mode=mode, margin=0)
 
+    preds_by_idx: dict[int, list[str]] = {idx: [] for idx in retry_indices}
+    for owner, preds in zip(crop_owners, ocr_preds, strict=True):
+        preds_by_idx[owner].append("".join(preds).strip())
+
     replacements: dict[int, list[UiDetection]] = {}
-    for idx, preds in zip(retry_indices, ocr_preds, strict=True):
-        text_value = "".join(preds).strip()
-        if not text_value:
+    for idx in retry_indices:
+        chosen: str | None = None
+        for text_value in preds_by_idx[idx]:
+            chosen = _single_known_icon_pua(text_value)
+            if chosen is not None:
+                break
+        if chosen is None:
             continue
-        orig = candidates[idx]
-        split = _split_multi_icon_element_detection(bgr, orig.bbox, text_value)
-        if split is not None:
-            replacements[idx] = split
-            continue
-        resolved_cls = _resolve_ocr_class_id(YOLO_CLASS_ELEMENT, text_value)
-        if resolved_cls == PICKER_CLASS_UNKNOWN:
-            continue
+        resolved_cls = _resolve_ocr_class_id(YOLO_CLASS_ELEMENT, chosen)
         replacements[idx] = [
-            _detection_from_bbox(orig.bbox, resolved_cls, text=text_value)
+            _detection_from_bbox(candidates[idx].bbox, resolved_cls, text=chosen)
         ]
 
     _log_info(
         "move_mouse: unknown icon OCR retry "
-        f"count={len(retry_indices)} upgraded={len(replacements)}"
+        f"count={len(retry_indices)} variants={len(_UNKNOWN_ICON_RETRY_SIDE_MARGINS)} "
+        f"upgraded={len(replacements)}"
     )
     if not replacements:
         return candidates

@@ -16,6 +16,7 @@ from cua_mcp.icon_map import (
 from cua_mcp.select_ui_element import UiDetection
 from cua_mcp.yolo_onnx import (
     DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD,
+    DEFAULT_SMALL_TEXT_AS_ELEMENT_MAX_SIDE,
     PICKER_CLASS_UNKNOWN,
     YOLO_CLASS_ELEMENT,
     YOLO_CLASS_INPUT,
@@ -344,8 +345,10 @@ def fit_scrollbar_bboxes_to_arrow_controls(
     bbox's **open track** (between the end caps) would overlap text or an
     input with meaningful cross-axis penetration, the fit is skipped (bbox and
     end-arrow labels unchanged). Thin parallel grazes (footer text hugging the
-    track) and overlap confined to an end-arrow box are allowed. Overlap with
-    another scrollbar is allowed (e.g. V+H corner meetings).
+    track), tiny text boxes (both sides under
+    :data:`~cua_mcp.yolo_onnx.DEFAULT_SMALL_TEXT_AS_ELEMENT_MAX_SIDE`), and
+    overlap confined to an end-arrow box are allowed. Overlap with another
+    scrollbar is allowed (e.g. V+H corner meetings).
     """
     if not detections:
         return detections
@@ -613,6 +616,16 @@ def _fit_text_input_overlap_blocks(
     return depth > threshold
 
 
+def _is_tiny_text_bbox(
+    bbox: tuple[int, int, int, int],
+    *,
+    max_side: int = DEFAULT_SMALL_TEXT_AS_ELEMENT_MAX_SIDE,
+) -> bool:
+    """True when both width and height are strictly under ``max_side``."""
+    _x, _y, w, h = bbox
+    return w < max_side and h < max_side
+
+
 def _detection_has_icon_id(det: UiDetection, chinese_id: str) -> bool:
     """True when ``det.icons`` includes ``chinese_id``."""
     return chinese_id in _detection_icon_chinese_ids(det)
@@ -630,24 +643,27 @@ def _proposed_pair_bbox_valid(
 
     ``ignore`` skips one detection (the scrollbar being fitted) so self-overlap
     does not fail the check. ``reject_scrollbar_overlap`` is True for
-    create-from-pairs (avoid duplicating a YOLO track) and False for fit
-    (allow V+H corner meetings).
+    create-from-pairs (avoid duplicating a same-orientation YOLO track; V+H
+    corner clips are allowed) and False for fit (allow all scrollbar overlaps).
 
     When ``end_arrows`` is set (fit path), text/input are rejected only if they
     overlap the **open track between** those caps with meaningful **cross-axis**
-    penetration (parallel grazes of a few pixels are ignored). Overlap on an
-    end arrow or outside the caps is allowed. When ``end_arrows`` is omitted
+    penetration (parallel grazes of a few pixels are ignored). Tiny ``text``
+    boxes (both sides under :data:`~cua_mcp.yolo_onnx.DEFAULT_SMALL_TEXT_AS_ELEMENT_MAX_SIDE`)
+    are ignored as icon-sized YOLO/OCR noise on the track. Overlap on an end
+    arrow or outside the caps is allowed. When ``end_arrows`` is omitted
     (create path), any text/input overlap with ``proposed`` rejects, except
     text that overlaps a directional end arrow (OCR-on-glyph noise).
     """
     interior: tuple[int, int, int, int] | None = None
+    proposed_vertical = _is_vertical_scrollbar_bbox(proposed)
     if end_arrows is not None:
         a, b = end_arrows
         interior = _track_interior_between_end_arrows(
             proposed,
             a,
             b,
-            vertical=_is_vertical_scrollbar_bbox(proposed),
+            vertical=proposed_vertical,
         )
 
     for det in detections:
@@ -657,10 +673,13 @@ def _proposed_pair_bbox_valid(
             reject_scrollbar_overlap
             and _is_scrollbar_detection(det)
             and boxes_overlap(proposed, det.bbox)
+            and _is_vertical_scrollbar_bbox(det.bbox) == proposed_vertical
         ):
             return False
         if _is_input_detection(det) or _is_text_detection(det):
             if end_arrows is not None:
+                if _is_text_detection(det) and _is_tiny_text_bbox(det.bbox):
+                    continue
                 if interior is not None and _fit_text_input_overlap_blocks(
                     interior, det.bbox
                 ):
@@ -686,10 +705,11 @@ def create_scrollbars_from_arrow_pairs(
     Pairs ``向上/下V箭頭``, ``向上/下三角``, ``向左/右V箭頭``, and ``向左/右三角``
     when both ends share a column (vertical) or row (horizontal). The scrollbar
     bbox is the union of the two arrow boxes. Skips pairs whose union overlaps
-    any text, input, or existing scrollbar (YOLO miss-fill only), except text
-    that overlaps a directional end arrow (OCR-on-glyph noise). Each detection
-    is used in at most one created pair. Matched ends are unified to
-    ``*滾動箭頭`` labels. Unified ``*滾動箭頭`` icons are not pair seeds.
+    any text, input, or an existing **same-orientation** scrollbar (YOLO
+    miss-fill only; V+H corner clips are allowed), except text that overlaps a
+    directional end arrow (OCR-on-glyph noise). Each detection is used in at
+    most one created pair. Matched ends are unified to ``*滾動箭頭`` labels.
+    Unified ``*滾動箭頭`` icons are not pair seeds.
     """
     if not detections:
         return detections

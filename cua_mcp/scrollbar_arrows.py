@@ -347,8 +347,10 @@ def fit_scrollbar_bboxes_to_arrow_controls(
     end-arrow labels unchanged). Thin parallel grazes (footer text hugging the
     track), tiny text boxes (both sides under
     :data:`~cua_mcp.yolo_onnx.DEFAULT_SMALL_TEXT_AS_ELEMENT_MAX_SIDE`), and
-    overlap confined to an end-arrow box are allowed. Overlap with another
-    scrollbar is allowed (e.g. V+H corner meetings).
+    overlap confined to an end-arrow box are allowed. After a successful fit,
+    the bbox grows by :data:`_FIT_SCROLLBAR_MAIN_EXPAND_PX` past each end cap
+    (top/bottom or left/right). Overlap with another scrollbar is allowed
+    (e.g. V+H corner meetings).
     """
     if not detections:
         return detections
@@ -446,6 +448,9 @@ def fit_scrollbar_bboxes_to_arrow_controls(
         if _unify_end_arrow_label(out, end_arrow, end_label):
             unified += 1
 
+        new_bbox = _expand_scrollbar_bbox_main_axis(
+            new_bbox, vertical=vertical
+        )
         if new_bbox != sb.bbox:
             out[idx] = _rebuild_detection(
                 new_bbox,
@@ -504,6 +509,45 @@ def _pair_main_axis_distance(
     if vertical:
         return abs(end.cy - start.cy)
     return abs(end.cx - start.cx)
+
+
+# Created bars grow this many pixels on each side of the cross axis so thin
+# arrow unions better match typical track thickness.
+_CREATE_SCROLLBAR_CROSS_EXPAND_PX = 2
+
+# Fitted / created bars grow this many pixels past each end cap along the
+# main axis (top/bottom or left/right).
+_FIT_SCROLLBAR_MAIN_EXPAND_PX = 4
+
+
+def _expand_scrollbar_bbox_cross_axis(
+    bbox: tuple[int, int, int, int],
+    *,
+    vertical: bool,
+    expand_px: int = _CREATE_SCROLLBAR_CROSS_EXPAND_PX,
+) -> tuple[int, int, int, int]:
+    """Widen ``bbox`` on the cross axis by ``expand_px`` on each side."""
+    x, y, w, h = bbox
+    if expand_px <= 0:
+        return bbox
+    if vertical:
+        return x - expand_px, y, w + 2 * expand_px, h
+    return x, y - expand_px, w, h + 2 * expand_px
+
+
+def _expand_scrollbar_bbox_main_axis(
+    bbox: tuple[int, int, int, int],
+    *,
+    vertical: bool,
+    expand_px: int = _FIT_SCROLLBAR_MAIN_EXPAND_PX,
+) -> tuple[int, int, int, int]:
+    """Lengthen ``bbox`` on the main axis by ``expand_px`` past each end."""
+    x, y, w, h = bbox
+    if expand_px <= 0:
+        return bbox
+    if vertical:
+        return x, y - expand_px, w, h + 2 * expand_px
+    return x - expand_px, y, w + 2 * expand_px, h
 
 
 def _is_text_detection(det: UiDetection) -> bool:
@@ -704,12 +748,15 @@ def create_scrollbars_from_arrow_pairs(
 
     Pairs ``向上/下V箭頭``, ``向上/下三角``, ``向左/右V箭頭``, and ``向左/右三角``
     when both ends share a column (vertical) or row (horizontal). The scrollbar
-    bbox is the union of the two arrow boxes. Skips pairs whose union overlaps
-    any text, input, or an existing **same-orientation** scrollbar (YOLO
-    miss-fill only; V+H corner clips are allowed), except text that overlaps a
-    directional end arrow (OCR-on-glyph noise). Each detection is used in at
-    most one created pair. Matched ends are unified to ``*滾動箭頭`` labels.
-    Unified ``*滾動箭頭`` icons are not pair seeds.
+    bbox is the union of the two arrow boxes, then widened by
+    :data:`_CREATE_SCROLLBAR_CROSS_EXPAND_PX` on each side of the cross axis
+    and lengthened by :data:`_FIT_SCROLLBAR_MAIN_EXPAND_PX` past each end.
+    Skips pairs whose (expanded) union overlaps any text, input, or an existing
+    **same-orientation** scrollbar (YOLO miss-fill only; V+H corner clips are
+    allowed), except text that overlaps a directional end arrow (OCR-on-glyph
+    noise). Each detection is used in at most one created pair. Matched ends
+    are unified to ``*滾動箭頭`` labels. Unified ``*滾動箭頭`` icons are not
+    pair seeds.
     """
     if not detections:
         return detections
@@ -749,7 +796,13 @@ def create_scrollbars_from_arrow_pairs(
             if si in used or ei in used:
                 continue
             start, end = out[si], out[ei]
-            proposed = merge_two_boxes(start.bbox, end.bbox)
+            proposed = _expand_scrollbar_bbox_main_axis(
+                _expand_scrollbar_bbox_cross_axis(
+                    merge_two_boxes(start.bbox, end.bbox),
+                    vertical=vertical,
+                ),
+                vertical=vertical,
+            )
             if not _proposed_pair_bbox_valid(
                 proposed, out, reject_scrollbar_overlap=True
             ):

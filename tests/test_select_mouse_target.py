@@ -891,8 +891,8 @@ def test_fit_vertical_scrollbar_extends_to_up_down_v_arrows() -> None:
     fitted = next(d for d in out if d.class_name == "scrollbar")
     assert fitted.bbox[0] == 1680
     assert fitted.bbox[2] == 20
-    assert fitted.bbox[1] == 418
-    assert fitted.bbox[1] + fitted.bbox[3] == 565
+    assert fitted.bbox[1] == 414
+    assert fitted.bbox[1] + fitted.bbox[3] == 569
     assert fitted.cy == 418 + (565 - 418) // 2
 
 
@@ -912,7 +912,7 @@ def test_fit_vertical_scrollbar_shrinks_to_triangle_ends() -> None:
     )
     out = fit_scrollbar_bboxes_to_arrow_controls([scrollbar, up, down])
     fitted = next(d for d in out if d.class_name == "scrollbar")
-    assert fitted.bbox == (100, 100, 16, 212)
+    assert fitted.bbox == (100, 96, 16, 220)
 
 
 def test_fit_horizontal_scrollbar_extends_to_left_right_arrows() -> None:
@@ -933,8 +933,8 @@ def test_fit_horizontal_scrollbar_extends_to_left_right_arrows() -> None:
     fitted = next(d for d in out if d.class_name == "scrollbar")
     assert fitted.bbox[1] == 500
     assert fitted.bbox[3] == 16
-    assert fitted.bbox[0] == 200
-    assert fitted.bbox[0] + fitted.bbox[2] == 342
+    assert fitted.bbox[0] == 196
+    assert fitted.bbox[0] + fitted.bbox[2] == 346
     by_bbox = {d.bbox: d for d in out}
     assert by_bbox[left.bbox].icons[0]["chinese_id"] == "向左滾動箭頭"
     assert by_bbox[right.bbox].icons[0]["chinese_id"] == "向右滾動箭頭"
@@ -1029,7 +1029,7 @@ def test_fit_scrollbar_allows_input_overlap_on_end_arrow() -> None:
     field = _detection_from_bbox((71, 871, 263, 43), YOLO_CLASS_INPUT)
     out = fit_scrollbar_bboxes_to_arrow_controls([scrollbar, up, down, field])
     fitted = next(d for d in out if d.class_name == "scrollbar")
-    assert fitted.bbox == (183, 50, 20, 823)
+    assert fitted.bbox == (183, 46, 20, 831)
     by_bbox = {d.bbox: d for d in out}
     assert by_bbox[up.bbox].icons[0]["chinese_id"] == "向上滾動箭頭"
     assert by_bbox[down.bbox].icons[0]["chinese_id"] == "向下滾動箭頭"
@@ -1085,7 +1085,7 @@ def test_fit_horizontal_scrollbar_allows_parallel_text_graze() -> None:
         [scrollbar, left, right, text]
     )
     fitted = next(d for d in out if d.class_name == "scrollbar")
-    assert fitted.bbox == (409, 398, 1322, 24)
+    assert fitted.bbox == (405, 398, 1330, 24)
     by_bbox = {d.bbox: d for d in out}
     assert by_bbox[left.bbox].icons[0]["chinese_id"] == "向左滾動箭頭"
     assert by_bbox[right.bbox].icons[0]["chinese_id"] == "向右滾動箭頭"
@@ -1150,7 +1150,7 @@ def test_fit_horizontal_scrollbar_allows_tiny_text_on_track() -> None:
         [scrollbar, left, right, tiny]
     )
     fitted = next(d for d in out if d.class_name == "scrollbar")
-    assert fitted.bbox == (412, 403, 1319, 20)
+    assert fitted.bbox == (408, 403, 1327, 20)
     by_bbox = {d.bbox: d for d in out}
     assert by_bbox[left.bbox].icons[0]["chinese_id"] == "向左滾動箭頭"
     assert by_bbox[right.bbox].icons[0]["chinese_id"] == "向右滾動箭頭"
@@ -1176,7 +1176,7 @@ def test_fit_scrollbar_allows_overlap_with_other_scrollbar() -> None:
         [vertical, horizontal, up, down]
     )
     fitted = next(d for d in out if d.bbox[0] == 181)
-    assert fitted.bbox == (181, 49, 26, 827)
+    assert fitted.bbox == (181, 45, 26, 835)
     assert next(d for d in out if d.bbox == horizontal.bbox).bbox == horizontal.bbox
     by_bbox = {d.bbox: d for d in out}
     assert by_bbox[up.bbox].icons[0]["chinese_id"] == "向上滾動箭頭"
@@ -1205,8 +1205,8 @@ def test_fit_scrollbar_still_extends_when_text_does_not_overlap() -> None:
     )
     out = fit_scrollbar_bboxes_to_arrow_controls([scrollbar, up, down, text])
     fitted = next(d for d in out if d.class_name == "scrollbar")
-    assert fitted.bbox[1] == 418
-    assert fitted.bbox[1] + fitted.bbox[3] == 565
+    assert fitted.bbox[1] == 414
+    assert fitted.bbox[1] + fitted.bbox[3] == 569
     by_bbox = {d.bbox: d for d in out}
     assert by_bbox[up.bbox].icons[0]["chinese_id"] == "向上滾動箭頭"
     assert by_bbox[down.bbox].icons[0]["chinese_id"] == "向下滾動箭頭"
@@ -1230,8 +1230,8 @@ def test_fit_vertical_scrollbar_accepts_unknown_icon_as_end() -> None:
     )
     out = fit_scrollbar_bboxes_to_arrow_controls([scrollbar, up, unknown_down])
     fitted = next(d for d in out if d.class_name == "scrollbar")
-    assert fitted.bbox[1] == 418
-    assert fitted.bbox[1] + fitted.bbox[3] == 565
+    assert fitted.bbox[1] == 414
+    assert fitted.bbox[1] + fitted.bbox[3] == 569
     relabeled = next(
         d
         for d in out
@@ -1287,8 +1287,8 @@ def test_fit_vertical_scrollbar_extends_far_without_gap_limit() -> None:
     )
     out = fit_scrollbar_bboxes_to_arrow_controls([scrollbar, up, down])
     fitted = next(d for d in out if d.class_name == "scrollbar")
-    assert fitted.bbox[1] == 300
-    assert fitted.bbox[1] + fitted.bbox[3] == 710
+    assert fitted.bbox[1] == 296
+    assert fitted.bbox[1] + fitted.bbox[3] == 714
 
 
 def test_fit_vertical_scrollbar_prefers_unknown_over_wrong_direction() -> None:
@@ -1317,8 +1317,8 @@ def test_fit_vertical_scrollbar_prefers_unknown_over_wrong_direction() -> None:
         [scrollbar, up, wrong_near_bottom, unknown_down]
     )
     fitted = next(d for d in out if d.class_name == "scrollbar")
-    assert fitted.bbox[1] == 418
-    assert fitted.bbox[1] + fitted.bbox[3] == 565
+    assert fitted.bbox[1] == 414
+    assert fitted.bbox[1] + fitted.bbox[3] == 569
     relabeled = next(d for d in out if d.bbox == unknown_down.bbox)
     assert (relabeled.icons or [])[0]["chinese_id"] == "向下滾動箭頭"
 
@@ -1359,8 +1359,8 @@ def test_fit_vertical_scrollbar_picks_closest_to_center_on_each_side() -> None:
         [scrollbar, far_up, near_up, near_down, far_down, up_on_bottom_side]
     )
     fitted = next(d for d in out if d.class_name == "scrollbar")
-    assert fitted.bbox[1] == 480
-    assert fitted.bbox[1] + fitted.bbox[3] == 612
+    assert fitted.bbox[1] == 476
+    assert fitted.bbox[1] + fitted.bbox[3] == 616
 
 
 def test_create_vertical_scrollbar_from_v_arrow_pair() -> None:
@@ -1379,7 +1379,7 @@ def test_create_vertical_scrollbar_from_v_arrow_pair() -> None:
     out = create_scrollbars_from_arrow_pairs([up, down])
     scrollbars = [d for d in out if d.class_name == "scrollbar"]
     assert len(scrollbars) == 1
-    assert scrollbars[0].bbox == (1683, 100, 13, 312)
+    assert scrollbars[0].bbox == (1681, 96, 17, 320)
     by_bbox = {d.bbox: d for d in out if d.class_name != "scrollbar"}
     assert by_bbox[up.bbox].icons[0]["chinese_id"] == "向上滾動箭頭"
     assert by_bbox[down.bbox].icons[0]["chinese_id"] == "向下滾動箭頭"
@@ -1401,7 +1401,7 @@ def test_create_horizontal_scrollbar_from_triangle_pair() -> None:
     out = create_scrollbars_from_arrow_pairs([left, right])
     scrollbars = [d for d in out if d.class_name == "scrollbar"]
     assert len(scrollbars) == 1
-    assert scrollbars[0].bbox == (200, 502, 312, 14)
+    assert scrollbars[0].bbox == (196, 500, 320, 18)
     by_bbox = {d.bbox: d for d in out if d.class_name != "scrollbar"}
     assert by_bbox[left.bbox].icons[0]["chinese_id"] == "向左滾動箭頭"
     assert by_bbox[right.bbox].icons[0]["chinese_id"] == "向右滾動箭頭"
@@ -1447,7 +1447,7 @@ def test_create_scrollbar_allows_overlap_with_perpendicular_scrollbar() -> None:
     scrollbars = [d for d in out if d.class_name == "scrollbar"]
     assert len(scrollbars) == 2
     assert horizontal.bbox in {d.bbox for d in scrollbars}
-    assert (1723, 490, 18, 366) in {d.bbox for d in scrollbars}
+    assert (1721, 486, 22, 374) in {d.bbox for d in scrollbars}
     by_bbox = {d.bbox: d for d in out if d.class_name != "scrollbar"}
     assert by_bbox[up.bbox].icons[0]["chinese_id"] == "向上滾動箭頭"
     assert by_bbox[down.bbox].icons[0]["chinese_id"] == "向下滾動箭頭"
@@ -1515,7 +1515,7 @@ def test_create_scrollbar_ignores_text_overlapping_end_arrow() -> None:
     out = create_scrollbars_from_arrow_pairs([up, down, ghost])
     scrollbars = [d for d in out if d.class_name == "scrollbar"]
     assert len(scrollbars) == 1
-    assert scrollbars[0].bbox == (904, 450, 14, 134)
+    assert scrollbars[0].bbox == (902, 446, 18, 142)
     by_bbox = {d.bbox: d for d in out}
     assert by_bbox[up.bbox].icons[0]["chinese_id"] == "向上滾動箭頭"
     assert by_bbox[down.bbox].icons[0]["chinese_id"] == "向下滾動箭頭"
@@ -1565,8 +1565,8 @@ def test_fit_scrollbar_ignores_text_overlapping_end_arrow() -> None:
     )
     out = fit_scrollbar_bboxes_to_arrow_controls([scrollbar, up, down, ghost])
     fitted = next(d for d in out if d.class_name == "scrollbar")
-    assert fitted.bbox[1] == 450
-    assert fitted.bbox[1] + fitted.bbox[3] == 584
+    assert fitted.bbox[1] == 446
+    assert fitted.bbox[1] + fitted.bbox[3] == 588
 
 
 def test_create_scrollbar_skips_misaligned_pair() -> None:
@@ -1625,8 +1625,8 @@ def test_create_scrollbar_does_not_steal_fitted_yolo_arrows() -> None:
     out = create_scrollbars_from_arrow_pairs(fitted)
     assert sum(1 for d in out if d.class_name == "scrollbar") == 1
     fitted_sb = next(d for d in out if d.class_name == "scrollbar")
-    assert fitted_sb.bbox[1] == 418
-    assert fitted_sb.bbox[1] + fitted_sb.bbox[3] == 565
+    assert fitted_sb.bbox[1] == 414
+    assert fitted_sb.bbox[1] + fitted_sb.bbox[3] == 569
 
 
 def test_drop_scrollbars_without_arrow_ends_removes_bare_yolo_bar() -> None:

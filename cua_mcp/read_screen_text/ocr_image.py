@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence, TypeVar
 
 import cv2
 import numpy as np
@@ -22,6 +22,11 @@ from .inference_onnx import TextPredictor
 from src.common.run_state import get_run_state_manager
 
 _DEFAULT_CRNN_BATCH_SIZE = 64
+# Within one zero-padded CRNN chunk, reject adding a wider row when
+# ``max_width / min_width`` would exceed this (width-sorted packing).
+DEFAULT_OCR_BATCH_MAX_WIDTH_RATIO = 1.5
+
+_T = TypeVar("_T")
 
 _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 _CRNN_PREDICTOR: TextPredictor | None = None
@@ -233,6 +238,7 @@ def _ocr_crops_batched(
     *,
     batch_size: int = _DEFAULT_CRNN_BATCH_SIZE,
     mode: DecodeMode | Sequence[DecodeMode] = "text",
+    max_width_ratio: float = DEFAULT_OCR_BATCH_MAX_WIDTH_RATIO,
 ) -> list[list[str]]:
     """Run CRNN OCR on crops in width-sorted, zero-padded batches."""
     detailed = _ocr_crops_batched_detailed(
@@ -241,11 +247,53 @@ def _ocr_crops_batched(
         line_height,
         batch_size=batch_size,
         mode=mode,
+        max_width_ratio=max_width_ratio,
     )
     results: list[list[str]] = [[] for _ in crops]
     for index, text, _spans in detailed:
         results[index] = [text] if text else []
     return results
+
+
+def _partition_width_sorted_batches(
+    items: Sequence[_T],
+    *,
+    width_of: Callable[[_T], int],
+    batch_size: int,
+    max_width_ratio: float = DEFAULT_OCR_BATCH_MAX_WIDTH_RATIO,
+) -> list[list[_T]]:
+    """
+    Pack width-sorted ``items`` into chunks with bounded zero-pad.
+
+    Items must already be sorted by non-decreasing width. A new chunk starts
+    when ``batch_size`` would be exceeded or when adding the next item would
+    make ``max_width / min_width`` in the chunk reach or exceed ``max_width_ratio``.
+    """
+    if batch_size < 1:
+        batch_size = _DEFAULT_CRNN_BATCH_SIZE
+    ratio_limit = float(max_width_ratio)
+    if ratio_limit < 1.0:
+        ratio_limit = 1.0
+
+    chunks: list[list[_T]] = []
+    current: list[_T] = []
+    chunk_min_w = 0
+    for item in items:
+        width = int(width_of(item))
+        if not current:
+            current = [item]
+            chunk_min_w = max(width, 1)
+            continue
+        # Width-sorted: the candidate is the new max in this chunk.
+        if len(current) >= batch_size or (width / chunk_min_w) >= ratio_limit:
+            chunks.append(current)
+            current = [item]
+            chunk_min_w = max(width, 1)
+        else:
+            current.append(item)
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def _ocr_crops_batched_detailed(
@@ -255,8 +303,14 @@ def _ocr_crops_batched_detailed(
     *,
     batch_size: int = _DEFAULT_CRNN_BATCH_SIZE,
     mode: DecodeMode | Sequence[DecodeMode] = "text",
+    max_width_ratio: float = DEFAULT_OCR_BATCH_MAX_WIDTH_RATIO,
 ) -> list[tuple[int, str, list[CharSpan]]]:
-    """Run CRNN OCR; return ``(orig_index, text, char_spans)`` per valid crop."""
+    """Run CRNN OCR; return ``(orig_index, text, char_spans)`` per valid crop.
+
+    Crops are sorted by resized width and packed into chunks that respect both
+    ``batch_size`` and ``max_width_ratio`` so narrow rows are not zero-padded
+    to much wider peers in the same tensor.
+    """
     if batch_size < 1:
         batch_size = _DEFAULT_CRNN_BATCH_SIZE
 
@@ -271,13 +325,18 @@ def _ocr_crops_batched_detailed(
             valid.append((index, line_image, crop_modes[index]))
 
     valid.sort(key=lambda item: item[1].shape[1])
+    chunks = _partition_width_sorted_batches(
+        valid,
+        width_of=lambda item: item[1].shape[1],
+        batch_size=batch_size,
+        max_width_ratio=max_width_ratio,
+    )
 
     batch_count = 0
     infer_total_s = 0.0
     started = time.perf_counter()
 
-    for start in range(0, len(valid), batch_size):
-        chunk = valid[start : start + batch_size]
+    for chunk in chunks:
         if not chunk:
             continue
 

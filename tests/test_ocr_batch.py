@@ -106,11 +106,17 @@ def test_ocr_crops_batched_padding() -> None:
     assert batch_preds == serial_preds
 
 
-@pytest.mark.parametrize(
-    "image_path",
-    _sample_images(),
-    ids=lambda p: Path(p).name,
-)
+_SAMPLE_IMAGES = _sample_images()
+_SAMPLE_IMAGE_PARAMS = _SAMPLE_IMAGES or [
+    pytest.param(
+        None,
+        marks=pytest.mark.skip(reason="No OCR sample images found"),
+        id="no-sample-images",
+    )
+]
+
+
+@pytest.mark.parametrize("image_path", _SAMPLE_IMAGE_PARAMS)
 def test_batch_matches_serial_on_sample_images(image_path: Path) -> None:
     serial_regions = ocr_regions_from_image_path(str(image_path), batch_size=1)
     batch_regions = ocr_regions_from_image_path(str(image_path), batch_size=64)
@@ -121,11 +127,7 @@ def test_batch_matches_serial_on_sample_images(image_path: Path) -> None:
         assert batch_region[1] == serial_region[1]
 
 
-@pytest.mark.parametrize(
-    "image_path",
-    _sample_images(),
-    ids=lambda p: Path(p).name,
-)
+@pytest.mark.parametrize("image_path", _SAMPLE_IMAGE_PARAMS)
 def test_batch_ocr_text_near_serial_on_fixed_crops(image_path: Path) -> None:
     bgr = cv2.imread(str(image_path))
     assert bgr is not None
@@ -177,3 +179,64 @@ def test_ocr_mode_for_yolo_class() -> None:
 
 def test_default_batch_size_constant() -> None:
     assert ocr_image._DEFAULT_CRNN_BATCH_SIZE == 64
+
+
+def test_partition_width_sorted_batches_splits_on_ratio() -> None:
+    from cua_mcp.read_screen_text.ocr_image import _partition_width_sorted_batches
+
+    # Widths already sorted: 10,12 stay together under 1.5; 15 reaches 1.5x of 10.
+    items = [("a", 10), ("b", 12), ("c", 15), ("d", 16)]
+    chunks = _partition_width_sorted_batches(
+        items,
+        width_of=lambda item: item[1],
+        batch_size=64,
+        max_width_ratio=1.5,
+    )
+    assert [[w for _, w in chunk] for chunk in chunks] == [[10, 12], [15, 16]]
+
+
+def test_partition_width_sorted_batches_respects_batch_size() -> None:
+    from cua_mcp.read_screen_text.ocr_image import _partition_width_sorted_batches
+
+    items = list(range(5))  # equal widths via width_of=1
+    chunks = _partition_width_sorted_batches(
+        items,
+        width_of=lambda _item: 8,
+        batch_size=2,
+        max_width_ratio=1.5,
+    )
+    assert chunks == [[0, 1], [2, 3], [4]]
+
+
+def test_ocr_crops_batched_width_bucketing_limits_pad(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cua_mcp.read_screen_text.ocr_image import _ocr_crops_batched_detailed
+
+    captured_widths: list[int] = []
+
+    class _FakePredictor:
+        def predict_images(self, batch, widths=None, mode="text"):
+            captured_widths.append(int(batch.shape[2]))
+            n = batch.shape[0]
+            return [""] * n, [[] for _ in range(n)]
+
+    # Same height so resized width tracks source width; 10 vs 100 exceeds 1.5x.
+    crops = [
+        np.full((16, 10, 3), 128, dtype=np.uint8),
+        np.full((16, 12, 3), 128, dtype=np.uint8),
+        np.full((16, 100, 3), 128, dtype=np.uint8),
+    ]
+    _ocr_crops_batched_detailed(
+        crops,
+        _FakePredictor(),
+        32,
+        batch_size=64,
+        max_width_ratio=1.5,
+    )
+    assert len(captured_widths) == 2
+    assert captured_widths[0] < captured_widths[1]
+    # First chunk must not pad out to the wide crop's resized width.
+    wide = _prepare_crop_line_image(crops[2], 32)
+    assert wide is not None
+    assert captured_widths[0] < wide.shape[1]

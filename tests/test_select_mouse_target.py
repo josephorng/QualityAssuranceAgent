@@ -436,6 +436,181 @@ def test_resolve_ocr_class_id_unknown_pua_only_becomes_unknown() -> None:
     assert _resolve_ocr_class_id(YOLO_CLASS_TEXT, "\ue01a") == PICKER_CLASS_UNKNOWN
 
 
+def test_expand_bbox_avoiding_text_clamps_side_near_text() -> None:
+    from cua_mcp.geometry import boxes_overlap
+    from cua_mcp.select_mouse_target import _expand_bbox_avoiding_text
+
+    # Icon left of text with a 1px gap; +2 expand would overlap without clamp.
+    icon = (100, 100, 10, 10)  # 100..110
+    text = (111, 100, 40, 10)  # 111..151
+    out = _expand_bbox_avoiding_text(icon, [text], img_w=200, img_h=200, extra_margin=2)
+    assert out == (98, 98, 13, 14)
+    assert not boxes_overlap(out, text)
+
+
+def test_expand_bbox_avoiding_text_keeps_original_when_text_already_overlaps() -> None:
+    from cua_mcp.select_mouse_target import _expand_bbox_avoiding_text
+
+    icon = (100, 100, 13, 12)  # 100..113
+    text = (110, 100, 50, 12)  # overlaps original
+    out = _expand_bbox_avoiding_text(icon, [text], img_w=200, img_h=200, extra_margin=2)
+    x, y, w, h = out
+    assert x == 98
+    assert y == 98
+    assert x + w >= 113  # never shrinks below original right edge
+    assert h >= 12
+
+
+def test_is_empty_unknown_detection_requires_blank_ocr() -> None:
+    from cua_mcp.select_mouse_target import _is_empty_unknown_detection
+
+    blank = _detection_from_bbox((0, 0, 10, 10), PICKER_CLASS_UNKNOWN)
+    with_text = _detection_from_bbox((0, 0, 10, 10), PICKER_CLASS_UNKNOWN, text="搜")
+    with_icons = _detection_from_bbox(
+        (0, 0, 10, 10),
+        PICKER_CLASS_UNKNOWN,
+        icons=[{"chinese_id": "星號、我的最愛"}],
+    )
+    element = _detection_from_bbox((0, 0, 10, 10), YOLO_CLASS_ELEMENT)
+
+    assert _is_empty_unknown_detection(blank) is True
+    assert _is_empty_unknown_detection(with_text) is False
+    assert _is_empty_unknown_detection(with_icons) is False
+    assert _is_empty_unknown_detection(element) is False
+
+
+def test_retry_empty_unknown_icon_ocr_upgrades_known_pua(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+
+    from cua_mcp.select_mouse_target import _retry_empty_unknown_icon_ocr
+
+    unknown = _detection_from_bbox((100, 100, 12, 12), PICKER_CLASS_UNKNOWN)
+    # Close enough that +2 right expand would overlap without clamp.
+    text = _detection_from_bbox(
+        (113, 100, 40, 12), YOLO_CLASS_TEXT, text="類別名稱"
+    )
+    captured: dict[str, object] = {}
+
+    def fake_ocr(bgr, boxes, *, mode="text", margin=2, **_kwargs):
+        captured["boxes"] = list(boxes)
+        captured["mode"] = mode
+        captured["margin"] = margin
+        return [["\ue002"] for _ in boxes]
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._ocr_boxes_on_bgr",
+        fake_ocr,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._split_multi_icon_element_detection",
+        lambda *_args, **_kwargs: None,
+    )
+
+    bgr = np.zeros((200, 200, 3), dtype=np.uint8)
+    out = _retry_empty_unknown_icon_ocr(bgr, [unknown, text])
+
+    assert captured["mode"] == "icon"
+    assert captured["margin"] == 0
+    assert len(captured["boxes"]) == 1
+    # Right side clamped before text at x=113; left/top/bottom +2.
+    assert captured["boxes"][0] == (98, 98, 15, 16)
+    assert len(out) == 2
+    assert out[0].class_id == YOLO_CLASS_ELEMENT
+    assert out[0].text == "\ue002"
+    assert out[0].bbox == (100, 100, 12, 12)  # stored bbox unchanged
+    assert out[0].icons
+    assert out[1].class_id == YOLO_CLASS_TEXT
+
+
+def test_retry_empty_unknown_skips_unknown_with_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+
+    from cua_mcp.select_mouse_target import _retry_empty_unknown_icon_ocr
+
+    called = {"n": 0}
+
+    def fake_ocr(*_args, **_kwargs):
+        called["n"] += 1
+        return []
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._ocr_boxes_on_bgr",
+        fake_ocr,
+    )
+
+    unknown_with_text = _detection_from_bbox(
+        (0, 0, 10, 10), PICKER_CLASS_UNKNOWN, text="搜"
+    )
+    bgr = np.zeros((50, 50, 3), dtype=np.uint8)
+    out = _retry_empty_unknown_icon_ocr(bgr, [unknown_with_text])
+
+    assert called["n"] == 0
+    assert out[0].text == "搜"
+    assert out[0].class_id == PICKER_CLASS_UNKNOWN
+
+
+def test_retry_empty_unknown_leaves_plain_text_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+
+    from cua_mcp.select_mouse_target import _retry_empty_unknown_icon_ocr
+
+    unknown = _detection_from_bbox((10, 10, 12, 12), PICKER_CLASS_UNKNOWN)
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._ocr_boxes_on_bgr",
+        lambda *_a, **_k: [["搜"]],
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._split_multi_icon_element_detection",
+        lambda *_a, **_k: None,
+    )
+
+    bgr = np.zeros((80, 80, 3), dtype=np.uint8)
+    out = _retry_empty_unknown_icon_ocr(bgr, [unknown])
+
+    assert len(out) == 1
+    assert out[0].class_id == PICKER_CLASS_UNKNOWN
+    assert out[0].text is None
+
+
+def test_ocr_boxes_on_bgr_respects_custom_margin(monkeypatch: pytest.MonkeyPatch) -> None:
+    import numpy as np
+
+    from cua_mcp.read_screen_text.ocr_image import _ocr_boxes_on_bgr
+
+    bgr = np.zeros((40, 40, 3), dtype=np.uint8)
+    captured: dict[str, object] = {}
+
+    class _FakePredictor:
+        def predict_images(self, *_args, **_kwargs):
+            return []
+
+    def fake_batched(crops, *_args, **_kwargs):
+        captured["crop_shapes"] = [c.shape[:2] for c in crops]
+        return [[] for _ in crops]
+
+    monkeypatch.setattr(
+        "cua_mcp.read_screen_text.ocr_image._get_ocr_predictor",
+        lambda *_a, **_k: _FakePredictor(),
+    )
+    monkeypatch.setattr(
+        "cua_mcp.read_screen_text.ocr_image._ocr_crops_batched",
+        fake_batched,
+    )
+
+    _ocr_boxes_on_bgr(bgr, [(10, 10, 8, 8)], margin=0)
+    assert captured["crop_shapes"] == [(8, 8)]
+
+    _ocr_boxes_on_bgr(bgr, [(10, 10, 8, 8)], margin=2)
+    assert captured["crop_shapes"] == [(12, 12)]
+
+
 def test_split_multi_icon_element_two_pua_spans(monkeypatch: pytest.MonkeyPatch) -> None:
     import numpy as np
     from cua_mcp.read_screen_text.constrained_decode import CharSpan

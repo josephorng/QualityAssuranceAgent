@@ -16,7 +16,7 @@ import cv2
 import numpy as np
 
 from cua_mcp.char_target import resolve_char_screen_point, screen_bbox_from_span
-from cua_mcp.geometry import clip_box, iou_xywh, merge_overlapping_boxes
+from cua_mcp.geometry import boxes_overlap, clip_box, iou_xywh, merge_overlapping_boxes
 from cua_mcp.input_box_rectangles import merge_yolo_inputs_with_line_rectangles
 from cua_mcp.instruction_offset import parse_mouse_target_instruction
 from cua_mcp.scrollbar_arrows import point_from_scrollbar_percent
@@ -324,6 +324,138 @@ def _split_multi_icon_element_detection(
     return split if split else None
 
 
+# Second-pass OCR for empty-OCR ``unknown`` icons: modest expand, stop before text.
+_UNKNOWN_ICON_RETRY_EXTRA_MARGIN = 2
+
+
+def _is_empty_unknown_detection(det: UiDetection) -> bool:
+    """True for ``unknown`` detections with no OCR text and no icon metadata."""
+    if not _is_unknown_detection(det):
+        return False
+    if (det.text or "").strip():
+        return False
+    if det.icons:
+        return False
+    return True
+
+
+def _expand_bbox_avoiding_text(
+    bbox: tuple[int, int, int, int],
+    text_boxes: list[tuple[int, int, int, int]],
+    img_w: int,
+    img_h: int,
+    *,
+    extra_margin: int = _UNKNOWN_ICON_RETRY_EXTRA_MARGIN,
+) -> tuple[int, int, int, int]:
+    """Expand ``bbox`` by ``extra_margin``, shrinking sides that would overlap text.
+
+    Never shrinks below the original ``bbox``. Result is clipped to the image.
+    Only the expanded portion of each side is retracted when that side's pad
+    would intersect a text box (same-row text trims left/right only).
+    """
+    ox, oy, ow, oh = bbox
+    ox2, oy2 = ox + ow, oy + oh
+    x1 = ox - int(extra_margin)
+    y1 = oy - int(extra_margin)
+    x2 = ox2 + int(extra_margin)
+    y2 = oy2 + int(extra_margin)
+    x1, y1, ew, eh = clip_box(x1, y1, x2 - x1, y2 - y1, img_w, img_h)
+    x2, y2 = x1 + ew, y1 + eh
+
+    for tx, ty, tw, th in text_boxes:
+        if not boxes_overlap((x1, y1, x2 - x1, y2 - y1), (tx, ty, tw, th)):
+            continue
+        tx2, ty2 = tx + tw, ty + th
+        # Retract only the expanded pad on each side when that pad hits text.
+        if x2 > ox2 and tx < x2 and tx2 > ox2 and ty < y2 and ty2 > y1:
+            x2 = min(x2, max(ox2, tx))
+        if x1 < ox and tx2 > x1 and tx < ox and ty < y2 and ty2 > y1:
+            x1 = max(x1, min(ox, tx2))
+        if y2 > oy2 and ty < y2 and ty2 > oy2 and tx < x2 and tx2 > x1:
+            y2 = min(y2, max(oy2, ty))
+        if y1 < oy and ty2 > y1 and ty < oy and tx < x2 and tx2 > x1:
+            y1 = max(y1, min(oy, ty2))
+
+    x1 = min(x1, ox)
+    y1 = min(y1, oy)
+    x2 = max(x2, ox2)
+    y2 = max(y2, oy2)
+    return clip_box(x1, y1, x2 - x1, y2 - y1, img_w, img_h)
+
+
+def _retry_empty_unknown_icon_ocr(
+    bgr: np.ndarray,
+    candidates: list[UiDetection],
+) -> list[UiDetection]:
+    """
+    Re-OCR empty ``unknown`` detections with a modestly expanded crop.
+
+    Uses icon decode and ``margin=0`` on an already-clamped crop so the default
+    OCR pad cannot bleed into neighboring text. Stored detection bboxes stay
+    as the original YOLO boxes. Only upgrades when OCR yields a non-unknown
+    class (known-icon PUA); otherwise leaves the empty unknown unchanged.
+    """
+    retry_indices = [
+        i for i, det in enumerate(candidates) if _is_empty_unknown_detection(det)
+    ]
+    if not retry_indices:
+        return candidates
+
+    img_h, img_w = bgr.shape[:2]
+    text_boxes = [
+        det.bbox
+        for det in candidates
+        if (
+            (det.class_id == YOLO_CLASS_TEXT or det.class_name == "text")
+            and _has_actual_visible_text(det)
+        )
+    ]
+    crop_boxes = [
+        _expand_bbox_avoiding_text(
+            candidates[i].bbox,
+            text_boxes,
+            img_w,
+            img_h,
+            extra_margin=_UNKNOWN_ICON_RETRY_EXTRA_MARGIN,
+        )
+        for i in retry_indices
+    ]
+    mode = ocr_mode_for_yolo_class(YOLO_CLASS_ELEMENT)
+    ocr_preds = _ocr_boxes_on_bgr(bgr, crop_boxes, mode=mode, margin=0)
+
+    replacements: dict[int, list[UiDetection]] = {}
+    for idx, preds in zip(retry_indices, ocr_preds, strict=True):
+        text_value = "".join(preds).strip()
+        if not text_value:
+            continue
+        orig = candidates[idx]
+        split = _split_multi_icon_element_detection(bgr, orig.bbox, text_value)
+        if split is not None:
+            replacements[idx] = split
+            continue
+        resolved_cls = _resolve_ocr_class_id(YOLO_CLASS_ELEMENT, text_value)
+        if resolved_cls == PICKER_CLASS_UNKNOWN:
+            continue
+        replacements[idx] = [
+            _detection_from_bbox(orig.bbox, resolved_cls, text=text_value)
+        ]
+
+    _log_info(
+        "move_mouse: unknown icon OCR retry "
+        f"count={len(retry_indices)} upgraded={len(replacements)}"
+    )
+    if not replacements:
+        return candidates
+
+    result: list[UiDetection] = []
+    for i, det in enumerate(candidates):
+        if i in replacements:
+            result.extend(replacements[i])
+        else:
+            result.append(det)
+    return result
+
+
 def _detect_mouse_targets_from_bgr(
     bgr: np.ndarray,
     *,
@@ -457,6 +589,8 @@ def _detect_mouse_targets_from_bgr(
         candidates.append(
             _detection_from_bbox(bbox, resolved_cls, text=text_value or None)
         )
+
+    candidates = _retry_empty_unknown_icon_ocr(bgr, candidates)
 
     candidates = _sort_detections_reading_order(candidates)
     pre_fit_scrollbars: list[tuple[int, tuple[int, int, int, int]]] = []

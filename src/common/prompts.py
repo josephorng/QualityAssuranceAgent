@@ -93,13 +93,25 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             ),
             "instructions": [
                 "Judge from the images alone. Do not invent windows, dialogs, or text that are not visible.",
-                "Match on key windows, panels, dialogs, overlays, and primary labels/text.",
-                "Ignore benign drift: clock, cursor, caret blink, minor window offset, theme noise, selection highlight flicker.",
+                "Match on key windows, panels, dialogs, overlays, and primary labels/text "
+                "(same dialog/window title and same primary controls).",
+                "If the same key dialog or main window is visible in both images "
+                "(same title / same primary controls), set match true — that is enough.",
+                "Ignore benign drift completely: clock, mouse cursor position, caret blink, text-field focus, "
+                "selection highlight, IME/composition state, hover highlights, minor window offset, theme noise.",
+                "Focus or caret present in one image and absent in the other is NOT a mismatch when the "
+                "same dialog/window is open in both.",
                 "Absence of a dialog/overlay in both images is a match when that absence is the success state "
                 "(for example after Cancel/關閉/close dismissed a dialog).",
                 "Do not require the step's click/move target to still be visible if image 2 also lacks it.",
-                "If unsure whether the key UI state matches, set match to false.",
-                'Return strict JSON only (no markdown): {"match":bool,"reason":"<short explanation>"}.',
+                "Set confidence high only for a clear structural difference "
+                "(different key window/dialog/page, or clearly different primary content). "
+                "For focus/caret/cursor/clock-only differences, or any doubt, set match true "
+                "(preferred) or match false with confidence low — never confidence high.",
+                "If unsure whether the key UI state matches, set match false and confidence low "
+                "(do not send low-confidence mismatches as high).",
+                'Return strict JSON only (no markdown): '
+                '{"match":bool,"confidence":"high"|"low","reason":"<short explanation>"}.',
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
         }

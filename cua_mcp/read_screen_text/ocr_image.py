@@ -161,12 +161,16 @@ def _ocr_boxes_on_bgr(
     ocr_model_path: Optional[str] = None,
     batch_size: int = _DEFAULT_CRNN_BATCH_SIZE,
     mode: DecodeMode | Sequence[DecodeMode] = "text",
+    margin: int = OCR_BOX_MARGIN,
 ) -> list[list[str]]:
     """
     Run CRNN OCR on each ``(x, y, w, h)`` crop in ``boxes``.
 
     ``mode`` selects the dual top-1 stream (``text_ids`` vs ``icon_ids``). Pass a
     single mode for all boxes, or one mode per box.
+
+    ``margin`` expands each box before cropping (same as :func:`ocr_box_with_spans`).
+    Pass ``0`` when the caller already expanded/clamped the crop.
 
     Returns one prediction list per box (same order as ``boxes``). Empty boxes yield ``[]``.
     """
@@ -180,7 +184,9 @@ def _ocr_boxes_on_bgr(
         _log_info(f"OCR ONNX OCR model missing: {exc}")
         return [[] for _ in boxes]
 
-    expanded = [_expand_box(x, y, w, h, img_w, img_h) for x, y, w, h in boxes]
+    expanded = [
+        _expand_box(x, y, w, h, img_w, img_h, margin=margin) for x, y, w, h in boxes
+    ]
     crops: list[np.ndarray] = []
     for x, y, w, h in expanded:
         crop = bgr[y : y + h, x : x + w]

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from cua_mcp.tools import (
     TOOL_FUNCTIONS,
@@ -67,9 +67,10 @@ BASELINE_MATCH_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "match": {"type": "boolean"},
+        "confidence": {"type": "string", "enum": ["high", "low"]},
         "reason": {"type": "string"},
     },
-    "required": ["match", "reason"],
+    "required": ["match", "confidence", "reason"],
 }
 
 
@@ -78,7 +79,12 @@ class BaselineMatchDecision:
     """Round-1 live vs recorded after-frame comparison."""
 
     match: bool
+    confidence: Literal["high", "low"] = "low"
     reason: str = ""
+
+    def treats_as_match(self) -> bool:
+        """Advance without recovery unless mismatch is high-confidence."""
+        return self.match or self.confidence != "high"
 
 ROLE_USER = "user"
 ROLE_TOOL = "tool"
@@ -672,6 +678,11 @@ class BrainModule:
         match_match = re.search(r'"match"\s*:\s*(true|false)', text, re.IGNORECASE)
         if not match_match:
             return None
+        confidence_match = re.search(
+            r'"confidence"\s*:\s*"(high|low)"',
+            text,
+            re.IGNORECASE,
+        )
         reason = ""
         reason_match = re.search(r'"reason"\s*:\s*"(.*)"\s*[,}\]]\s*$', text, re.DOTALL)
         if reason_match:
@@ -680,8 +691,13 @@ class BrainModule:
             reason_match = re.search(r'"reason"\s*:\s*"(.*)', text, re.DOTALL)
             if reason_match:
                 reason = reason_match.group(1).rstrip().rstrip('"}]')
+        # Missing confidence on mismatch defaults to low so caret/focus nits do not force recovery.
+        confidence = (
+            confidence_match.group(1).lower() if confidence_match else "low"
+        )
         return {
             "match": match_match.group(1).lower() == "true",
+            "confidence": confidence,
             "reason": reason,
         }
 
@@ -713,17 +729,32 @@ class BrainModule:
             match_value = payload.get("match")
             if not isinstance(match_value, bool):
                 raise ValueError("baseline match must be bool")
+            confidence_raw = payload.get("confidence", "low")
+            if isinstance(confidence_raw, str):
+                confidence_norm = confidence_raw.strip().lower()
+            else:
+                confidence_norm = "low"
+            if confidence_norm not in ("high", "low"):
+                confidence_norm = "low"
             reason_value = payload.get("reason", "")
             reason = reason_value.strip() if isinstance(reason_value, str) else ""
-            return BaselineMatchDecision(match=match_value, reason=reason)
+            return BaselineMatchDecision(
+                match=match_value,
+                confidence=confidence_norm,  # type: ignore[arg-type]
+                reason=reason,
+            )
         except (json.JSONDecodeError, ValueError, ValidationError, TypeError) as e:
             recovered = self._recover_baseline_match_payload(content)
             if recovered is not None:
                 self.manager.log_info(
                     "Baseline match JSON was malformed; recovered fields via fallback parser"
                 )
+                confidence = str(recovered.get("confidence") or "low").lower()
+                if confidence not in ("high", "low"):
+                    confidence = "low"
                 return BaselineMatchDecision(
                     match=bool(recovered["match"]),
+                    confidence=confidence,  # type: ignore[arg-type]
                     reason=str(recovered.get("reason") or ""),
                 )
             self.manager.log_error(f"Baseline match JSON parse/validation failed: {e}")
@@ -908,9 +939,9 @@ class BrainModule:
     ) -> ScriptStepVerifyResult | None:
         """Capture a fresh screenshot and verify via a two-round LLM flow when a baseline exists.
 
-        Round 1 (baseline attached): compare live vs recorded after-frame only. On match,
-        advance immediately. On mismatch/parse failure, round 2 decides recovery.
-        Without a baseline: single recovery/outcome verify call (existing path).
+        Round 1 (baseline attached): compare live vs recorded after-frame only. Advance on
+        match, or on mismatch with confidence low. Only high-confidence mismatches continue
+        to recovery. Without a baseline: single recovery/outcome verify call (existing path).
         """
         if self._eye is None:
             raise RuntimeError("BrainModule requires eye=EyeModule(...) for step verification")
@@ -932,15 +963,28 @@ class BrainModule:
                 verification_image_paths
             )
             transcript_messages.extend(match_messages)
-            if match_decision is not None and match_decision.match:
+            if match_decision is not None and match_decision.treats_as_match():
                 self._append_step_messages(
                     transcript_messages,
                     transcript_counter,
                     script_step_index,
                     attribute_name="verification",
                 )
-                reason = match_decision.reason.strip() or "Live UI matches recorded after-frame."
-                self.manager.log_info(f"Verify baseline match: true; advancing. {reason}")
+                if match_decision.match:
+                    reason = (
+                        match_decision.reason.strip()
+                        or "Live UI matches recorded after-frame."
+                    )
+                    self.manager.log_info(f"Verify baseline match: true; advancing. {reason}")
+                else:
+                    reason = (
+                        match_decision.reason.strip()
+                        or "Baseline mismatch not high-confidence; treating as match."
+                    )
+                    self.manager.log_info(
+                        "Verify baseline match: false with confidence="
+                        f"{match_decision.confidence}; advancing without recovery. {reason}"
+                    )
                 return ScriptStepVerifyResult(
                     accomplished=True,
                     branch="advance",
@@ -960,9 +1004,12 @@ class BrainModule:
                 mismatch_reason = (
                     match_decision.reason.strip() or "Live UI differs from recorded after-frame."
                 )
-                baseline_precheck = f"mismatch: {mismatch_reason}"
+                baseline_precheck = (
+                    f"mismatch (confidence={match_decision.confidence}): {mismatch_reason}"
+                )
                 self.manager.log_info(
-                    f"Verify baseline match: false; proceeding to recovery. {mismatch_reason}"
+                    "Verify baseline match: false confidence="
+                    f"{match_decision.confidence}; proceeding to recovery. {mismatch_reason}"
                 )
 
         recovery_result, recovery_messages = await self._verify_script_recovery_round(
@@ -1026,7 +1073,7 @@ class BrainModule:
                 "content": (
                     "Your previous reply was not valid JSON. "
                     "Reply with ONLY one valid JSON object (no markdown) with keys: "
-                    "match (bool), reason (string). "
+                    'match (bool), confidence ("high"|"low"), reason (string). '
                     "Keep the same judgment; only fix the JSON syntax."
                 ),
             }
@@ -1457,14 +1504,14 @@ class BrainModule:
         Recovery path: actor failure, a recorded expected outcome, or a recording
         after-baseline still uses screenshot verification for `goto`/`retry`/`skip`/
         `abort`/`smart`. When a baseline is attached, verify first compares live vs
-        recorded after-frame only and advances on match; on mismatch a second recovery
-        round chooses the branch. Branch `smart` runs a bounded nested Plan→Act→Verify
-        recovery, then retries the same script line on success (or stops the run on
-        failure). After actor success, ambiguous verifier retries (`clearly_unmet=false`)
-        are coerced to advance to reduce flaky false negatives. If verification JSON is
-        still unparseable after local repair and one rewrite, actor success soft-fails to
-        advance instead of aborting the run. Verify `branch=abort` stops the scripted run
-        (`step_finished=False`).
+        recorded after-frame only and advances on match (or low-confidence mismatch);
+        only high-confidence mismatches run a second recovery round. Branch `smart` runs
+        a bounded nested Plan→Act→Verify recovery, then retries the same script line on
+        success (or stops the run on failure). After actor success, ambiguous verifier
+        retries (`clearly_unmet=false`) are coerced to advance to reduce flaky false
+        negatives. If verification JSON is still unparseable after local repair and one
+        rewrite, actor success soft-fails to advance instead of aborting the run. Verify
+        `branch=abort` stops the scripted run (`step_finished=False`).
         Sets `run_complete` when the script is exhausted.
         """
         # await self._validate_tool_functions_match_mcp()

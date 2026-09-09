@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.brain.module import BrainModule
+from src.brain.module import BaselineMatchDecision, BrainModule
 from src.common.models import ScriptStepVerifyResult
 from src.common.prompting import get_prompt
 
@@ -65,10 +65,36 @@ def test_brain_verify_baseline_match_prompt_is_image_only() -> None:
 
     assert "Compare two screenshots only" in text
     assert '"match"' in text
+    assert "confidence" in text
     assert "NumberedScript" not in text
     assert "CurrentStepGoal" not in text
-    assert "benign drift" in text
+    assert "benign drift" in text or "Ignore benign drift" in text
+    assert "text-field focus" in text or "caret" in text
     assert "Cancel" in text or "關閉" in text
+    assert "confidence high only" in text or "Set confidence high only" in text
+
+
+def test_baseline_match_decision_treats_low_confidence_mismatch_as_match() -> None:
+    assert BaselineMatchDecision(match=True, confidence="high").treats_as_match() is True
+    assert BaselineMatchDecision(match=True, confidence="low").treats_as_match() is True
+    assert BaselineMatchDecision(match=False, confidence="low").treats_as_match() is True
+    assert BaselineMatchDecision(match=False, confidence="high").treats_as_match() is False
+
+
+def test_parse_baseline_match_defaults_missing_confidence_to_low() -> None:
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = MagicMock()
+    brain.manager.log_info = MagicMock()
+    brain.manager.log_error = MagicMock()
+
+    parsed = brain._parse_baseline_match_from_content(
+        '{"match": false, "reason": "caret differs"}'
+    )
+
+    assert parsed is not None
+    assert parsed.match is False
+    assert parsed.confidence == "low"
+    assert parsed.treats_as_match() is True
 
 
 def test_brain_verify_script_step_prompt_has_goto_policy() -> None:
@@ -627,7 +653,10 @@ async def test_verify_script_step_baseline_match_advances_without_recovery(tmp_p
     async def _chat(model, *, messages, tools, response_format=None):
         calls.append({"messages": messages, "response_format": response_format})
         return MagicMock(
-            content='{"match": true, "reason": "same main window and panels"}',
+            content=(
+                '{"match": true, "confidence": "high", '
+                '"reason": "same main window and panels"}'
+            ),
             model_dump=lambda: {"role": "assistant", "content": "ok"},
         )
 
@@ -646,6 +675,49 @@ async def test_verify_script_step_baseline_match_advances_without_recovery(tmp_p
     assert "Compare two screenshots only" in user_msg["content"]
     assert "NumberedScript" not in user_msg["content"]
     brain._append_step_messages.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_verify_script_step_low_confidence_mismatch_advances(tmp_path) -> None:
+    live = tmp_path / "live.png"
+    baseline = tmp_path / "after.jpeg"
+    live.write_bytes(b"live")
+    baseline.write_bytes(b"after")
+
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = MagicMock()
+    brain.manager.log_info = MagicMock()
+    brain.manager.log_error = MagicMock()
+    brain.settings = MagicMock(brain_lm="test-model")
+    brain.script_lines = ["press enter"]
+    brain.script_expected_outcomes = [None]
+    brain.script_baseline_after_paths = [str(baseline)]
+    brain._script_step_index = 0
+    brain._eye = MagicMock()
+    brain._eye.capture_separated_images = AsyncMock(return_value=[str(live)])
+    brain._append_step_messages = MagicMock()
+    calls: list[dict[str, object]] = []
+
+    async def _chat(model, *, messages, tools, response_format=None):
+        calls.append({"messages": messages})
+        return MagicMock(
+            content=(
+                '{"match": false, "confidence": "low", '
+                '"reason": "username field caret/focus differs"}'
+            ),
+            model_dump=lambda: {"role": "assistant", "content": "ok"},
+        )
+
+    brain.ollama = MagicMock()
+    brain.ollama.chat_messages = _chat
+
+    result = await brain._verify_script_step(0, 0, actor_succeeded=True)
+
+    assert result is not None
+    assert result.branch == "advance"
+    assert result.accomplished is True
+    assert len(calls) == 1
+    assert "caret/focus" in result.reason
 
 
 @pytest.mark.asyncio
@@ -673,7 +745,10 @@ async def test_verify_script_step_baseline_mismatch_runs_recovery(tmp_path) -> N
         calls.append({"messages": messages, "response_format": response_format, "tools": tools})
         if len(calls) == 1:
             return MagicMock(
-                content='{"match": false, "reason": "dialog missing in live"}',
+                content=(
+                    '{"match": false, "confidence": "high", '
+                    '"reason": "dialog missing in live"}'
+                ),
                 model_dump=lambda: {"role": "assistant", "content": "match-round"},
             )
         return MagicMock(
@@ -699,7 +774,8 @@ async def test_verify_script_step_baseline_mismatch_runs_recovery(tmp_path) -> N
     assert recovery_msg["images"] == [str(live), str(baseline)]
     assert "NumberedScript" in recovery_msg["content"]
     assert "BaselinePrecheck" in recovery_msg["content"]
-    assert "mismatch: dialog missing in live" in recovery_msg["content"]
+    assert "dialog missing in live" in recovery_msg["content"]
+    assert "confidence=high" in recovery_msg["content"]
     assert "do not re-litigate" in recovery_msg["content"]
 
 

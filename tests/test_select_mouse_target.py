@@ -956,7 +956,7 @@ def test_fit_scrollbar_skips_when_end_arrows_missing() -> None:
 def test_fit_scrollbar_skips_when_fitted_bbox_overlaps_text() -> None:
     from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
 
-    # Short YOLO track; far arrows would stretch through a label (event_005-style).
+    # Short YOLO track; far arrows would stretch through a mid-track label.
     scrollbar = _detection_from_bbox((177, 400, 29, 80), YOLO_CLASS_SCROLLBAR)
     up = _detection_from_bbox(
         (181, 46, 21, 23),
@@ -1004,6 +1004,116 @@ def test_fit_scrollbar_skips_when_fitted_bbox_overlaps_input() -> None:
     logs: list[str] = []
     out = fit_scrollbar_bboxes_to_arrow_controls(
         [scrollbar, up, down, field],
+        log_info=logs.append,
+    )
+    fitted = next(d for d in out if d.class_name == "scrollbar")
+    assert fitted.bbox == scrollbar.bbox
+    assert any("skipped_overlap=1" in line for line in logs)
+
+
+def test_fit_scrollbar_allows_input_overlap_on_end_arrow() -> None:
+    from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
+
+    # event_005-style: input clips only the down-triangle band, not the open track.
+    scrollbar = _detection_from_bbox((183, 45, 20, 473), YOLO_CLASS_SCROLLBAR)
+    up = _detection_from_bbox(
+        (186, 50, 12, 10),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上三角"}],
+    )
+    down = _detection_from_bbox(
+        (186, 862, 13, 11),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下三角"}],
+    )
+    field = _detection_from_bbox((71, 871, 263, 43), YOLO_CLASS_INPUT)
+    out = fit_scrollbar_bboxes_to_arrow_controls([scrollbar, up, down, field])
+    fitted = next(d for d in out if d.class_name == "scrollbar")
+    assert fitted.bbox == (183, 50, 20, 823)
+    by_bbox = {d.bbox: d for d in out}
+    assert by_bbox[up.bbox].icons[0]["chinese_id"] == "向上滾動箭頭"
+    assert by_bbox[down.bbox].icons[0]["chinese_id"] == "向下滾動箭頭"
+
+
+def test_fit_scrollbar_skips_when_input_straddles_arrow_and_interior() -> None:
+    from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
+
+    scrollbar = _detection_from_bbox((183, 400, 20, 80), YOLO_CLASS_SCROLLBAR)
+    up = _detection_from_bbox(
+        (186, 50, 12, 10),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上三角"}],
+    )
+    down = _detection_from_bbox(
+        (186, 862, 13, 11),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下三角"}],
+    )
+    # Overlaps down arrow and extends into the open track above it.
+    field = _detection_from_bbox((160, 850, 80, 30), YOLO_CLASS_INPUT)
+    logs: list[str] = []
+    out = fit_scrollbar_bboxes_to_arrow_controls(
+        [scrollbar, up, down, field],
+        log_info=logs.append,
+    )
+    fitted = next(d for d in out if d.class_name == "scrollbar")
+    assert fitted.bbox == scrollbar.bbox
+    assert any("skipped_overlap=1" in line for line in logs)
+
+
+def test_fit_horizontal_scrollbar_allows_parallel_text_graze() -> None:
+    from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
+
+    # event_001-style: footer text sits just above the bar; 1px vertical graze.
+    scrollbar = _detection_from_bbox((410, 398, 669, 24), YOLO_CLASS_SCROLLBAR)
+    left = _detection_from_bbox(
+        (409, 406, 11, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向左三角"}],
+    )
+    right = _detection_from_bbox(
+        (1724, 408, 7, 9),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向右三角"}],
+    )
+    text = _detection_from_bbox(
+        (520, 385, 285, 14),
+        YOLO_CLASS_TEXT,
+        text="離線14 通訊異常 0未驗證1_未知0 Lite 7",
+    )
+    out = fit_scrollbar_bboxes_to_arrow_controls(
+        [scrollbar, left, right, text]
+    )
+    fitted = next(d for d in out if d.class_name == "scrollbar")
+    assert fitted.bbox == (409, 398, 1322, 24)
+    by_bbox = {d.bbox: d for d in out}
+    assert by_bbox[left.bbox].icons[0]["chinese_id"] == "向左滾動箭頭"
+    assert by_bbox[right.bbox].icons[0]["chinese_id"] == "向右滾動箭頭"
+
+
+def test_fit_horizontal_scrollbar_skips_when_text_cuts_into_track() -> None:
+    from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
+
+    scrollbar = _detection_from_bbox((410, 398, 669, 24), YOLO_CLASS_SCROLLBAR)
+    left = _detection_from_bbox(
+        (409, 406, 11, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向左三角"}],
+    )
+    right = _detection_from_bbox(
+        (1724, 408, 7, 9),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向右三角"}],
+    )
+    # Deep vertical penetration into the open track (not a 1px graze).
+    text = _detection_from_bbox(
+        (520, 390, 200, 20),
+        YOLO_CLASS_TEXT,
+        text="status through track",
+    )
+    logs: list[str] = []
+    out = fit_scrollbar_bboxes_to_arrow_controls(
+        [scrollbar, left, right, text],
         log_info=logs.append,
     )
     fitted = next(d for d in out if d.class_name == "scrollbar")

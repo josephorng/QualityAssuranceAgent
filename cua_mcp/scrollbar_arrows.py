@@ -341,10 +341,11 @@ def fit_scrollbar_bboxes_to_arrow_controls(
     ``向右滾動箭頭``. Matching arrows may be any distance along the track —
     the scrollbar extends to them. When either end lacks a matching
     track-aligned arrow, that scrollbar is left unchanged. When the fitted
-    bbox would overlap text or an input, the fit is skipped (bbox and
-    end-arrow labels unchanged). Overlap with another scrollbar is allowed
-    (e.g. V+H corner meetings). Text that overlaps any directional end arrow
-    is ignored for that overlap check.
+    bbox's **open track** (between the end caps) would overlap text or an
+    input with meaningful cross-axis penetration, the fit is skipped (bbox and
+    end-arrow labels unchanged). Thin parallel grazes (footer text hugging the
+    track) and overlap confined to an end-arrow box are allowed. Overlap with
+    another scrollbar is allowed (e.g. V+H corner meetings).
     """
     if not detections:
         return detections
@@ -432,6 +433,7 @@ def fit_scrollbar_bboxes_to_arrow_controls(
             out,
             ignore=sb,
             reject_scrollbar_overlap=False,
+            end_arrows=(start_arrow, end_arrow),
         ):
             skipped_overlap += 1
             continue
@@ -534,6 +536,83 @@ def _text_overlaps_scrollbar_arrow(
     return False
 
 
+def _track_interior_between_end_arrows(
+    proposed: tuple[int, int, int, int],
+    arrow_a: UiDetection,
+    arrow_b: UiDetection,
+    *,
+    vertical: bool,
+) -> tuple[int, int, int, int] | None:
+    """Return the open-track bbox between two end caps, or ``None`` if empty.
+
+    Uses ``proposed``'s cross-axis span. Along the main axis, the interior is
+    the gap strictly between the two arrow boxes (exclusive of both caps).
+    """
+    sx, sy, sw, sh = proposed
+    ax, ay, aw, ah = arrow_a.bbox
+    bx, by, bw, bh = arrow_b.bbox
+    if vertical:
+        a0, a1 = ay, ay + ah
+        b0, b1 = by, by + bh
+        if a1 <= b0:
+            y0, y1 = a1, b0
+        elif b1 <= a0:
+            y0, y1 = b1, a0
+        else:
+            return None
+        if y1 <= y0:
+            return None
+        return sx, y0, sw, y1 - y0
+    a0, a1 = ax, ax + aw
+    b0, b1 = bx, bx + bw
+    if a1 <= b0:
+        x0, x1 = a1, b0
+    elif b1 <= a0:
+        x0, x1 = b1, a0
+    else:
+        return None
+    if x1 <= x0:
+        return None
+    return x0, sy, x1 - x0, sh
+
+
+# Fit rejects text/input only when cross-axis penetration into the open track
+# exceeds this floor and fraction of track thickness (ignores parallel grazes).
+_FIT_OVERLAP_CROSS_MIN_PX = 2
+_FIT_OVERLAP_CROSS_FRAC = 0.25
+
+
+def _overlap_cross_axis_depth(
+    track: tuple[int, int, int, int],
+    other: tuple[int, int, int, int],
+    *,
+    vertical: bool,
+) -> int:
+    """Overlap extent along the track's thin (cross) axis; 0 if no overlap."""
+    tx, ty, tw, th = track
+    ox, oy, ow, oh = other
+    if vertical:
+        return max(0, min(tx + tw, ox + ow) - max(tx, ox))
+    return max(0, min(ty + th, oy + oh) - max(ty, oy))
+
+
+def _fit_text_input_overlap_blocks(
+    track: tuple[int, int, int, int],
+    other: tuple[int, int, int, int],
+) -> bool:
+    """True when text/input meaningfully cuts into ``track`` (not a parallel graze)."""
+    if not boxes_overlap(track, other):
+        return False
+    vertical = _is_vertical_scrollbar_bbox(track)
+    depth = _overlap_cross_axis_depth(track, other, vertical=vertical)
+    track_cross = track[2] if vertical else track[3]
+    threshold = max(
+        _FIT_OVERLAP_CROSS_MIN_PX,
+        int(track_cross * _FIT_OVERLAP_CROSS_FRAC),
+    )
+    return depth > threshold
+
+
 def _detection_has_icon_id(det: UiDetection, chinese_id: str) -> bool:
     """True when ``det.icons`` includes ``chinese_id``."""
     return chinese_id in _detection_icon_chinese_ids(det)
@@ -545,16 +624,32 @@ def _proposed_pair_bbox_valid(
     *,
     ignore: UiDetection | None = None,
     reject_scrollbar_overlap: bool = True,
+    end_arrows: tuple[UiDetection, UiDetection] | None = None,
 ) -> bool:
     """Reject proposed bars that overlap text, input, or (optionally) a scrollbar.
 
     ``ignore`` skips one detection (the scrollbar being fitted) so self-overlap
     does not fail the check. ``reject_scrollbar_overlap`` is True for
     create-from-pairs (avoid duplicating a YOLO track) and False for fit
-    (allow V+H corner meetings). Text boxes that overlap a directional end
-    arrow (OCR misreads of the arrow glyph) are ignored regardless of
-    overlap size.
+    (allow V+H corner meetings).
+
+    When ``end_arrows`` is set (fit path), text/input are rejected only if they
+    overlap the **open track between** those caps with meaningful **cross-axis**
+    penetration (parallel grazes of a few pixels are ignored). Overlap on an
+    end arrow or outside the caps is allowed. When ``end_arrows`` is omitted
+    (create path), any text/input overlap with ``proposed`` rejects, except
+    text that overlaps a directional end arrow (OCR-on-glyph noise).
     """
+    interior: tuple[int, int, int, int] | None = None
+    if end_arrows is not None:
+        a, b = end_arrows
+        interior = _track_interior_between_end_arrows(
+            proposed,
+            a,
+            b,
+            vertical=_is_vertical_scrollbar_bbox(proposed),
+        )
+
     for det in detections:
         if ignore is not None and det is ignore:
             continue
@@ -564,12 +659,19 @@ def _proposed_pair_bbox_valid(
             and boxes_overlap(proposed, det.bbox)
         ):
             return False
-        if _is_input_detection(det) and boxes_overlap(proposed, det.bbox):
-            return False
-        if _is_text_detection(det) and boxes_overlap(proposed, det.bbox):
-            if _text_overlaps_scrollbar_arrow(det, detections):
+        if _is_input_detection(det) or _is_text_detection(det):
+            if end_arrows is not None:
+                if interior is not None and _fit_text_input_overlap_blocks(
+                    interior, det.bbox
+                ):
+                    return False
                 continue
-            return False
+            if _is_input_detection(det) and boxes_overlap(proposed, det.bbox):
+                return False
+            if _is_text_detection(det) and boxes_overlap(proposed, det.bbox):
+                if _text_overlaps_scrollbar_arrow(det, detections):
+                    continue
+                return False
     return True
 
 

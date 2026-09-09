@@ -36,6 +36,7 @@ from cua_mcp.select_mouse_target import (
     _detection_from_bbox,
 )
 from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text
+from cua_mcp.vision_backend import triton_yolo_model_name
 from cua_mcp.yolo_onnx import (
     DEFAULT_CONF_YOLOV26_END2END,
     MOUSE_TARGET_CLASS_IDS,
@@ -49,6 +50,25 @@ from cua_mcp.yolo_onnx import (
 )
 from src.common.io_utils import imread_bgr, read_json, write_json
 from src.common.settings import ROOT_DIR, resolve_recordings_dir, resolve_runs_dir
+
+YOLO_TRITON_MODEL_UI = "yolo_ui"
+YOLO_TRITON_MODEL_UI_SMALL = "yolo_ui_small"
+YOLO_TRITON_MODELS = (YOLO_TRITON_MODEL_UI, YOLO_TRITON_MODEL_UI_SMALL)
+
+
+def _normalize_yolo_triton_model(model_name: str | None) -> str:
+    name = (model_name or "").strip() or YOLO_TRITON_MODEL_UI
+    if name not in YOLO_TRITON_MODELS:
+        return YOLO_TRITON_MODEL_UI
+    return name
+
+
+def _apply_yolo_triton_model(model_name: str | None) -> str:
+    """Select Triton YOLO model for subsequent ``infer_yolo`` calls."""
+    name = _normalize_yolo_triton_model(model_name)
+    os.environ["TRITON_YOLO_MODEL"] = name
+    return name
+
 
 YOLO_UNDONE_IMAGES = Path(
     r"C:\Users\Joseph Hung\Documents\Repos\Git\YOLO\real_screenshot\undone\images"
@@ -681,7 +701,7 @@ def load_yolo_lines(image_path: Path, *, yolo_conf_threshold: float) -> tuple[li
     return lines, f"Loaded {len(lines)} YOLO detections"
 
 
-YoloLinesCache = dict[tuple[str, float], tuple[list[OcrLine], str]]
+YoloLinesCache = dict[tuple[str, float, str], tuple[list[OcrLine], str]]
 
 
 def resolve_image_lines(
@@ -692,6 +712,7 @@ def resolve_image_lines(
     yolo_cache: YoloLinesCache | None = None,
     force_yolo: bool = False,
     run_dir: Path | None = None,
+    yolo_model: str | None = None,
 ) -> tuple[list[OcrLine], str]:
     """Load detections from sidecar JSON, else cache or optional live YOLO."""
     if not force_yolo:
@@ -699,7 +720,8 @@ def resolve_image_lines(
         if json_path.is_file():
             return load_ocr_lines(json_path)
 
-    cache_key = (str(image_path.resolve()), yolo_conf_threshold)
+    model_name = _apply_yolo_triton_model(yolo_model or triton_yolo_model_name())
+    cache_key = (str(image_path.resolve()), yolo_conf_threshold, model_name)
     if not force_yolo and yolo_cache is not None and cache_key in yolo_cache:
         return yolo_cache[cache_key]
 
@@ -707,6 +729,7 @@ def resolve_image_lines(
         return [], "No OCR JSON — click Reload YOLO detections"
 
     lines, status = load_yolo_lines(image_path, yolo_conf_threshold=yolo_conf_threshold)
+    status = f"{status} [{model_name}]"
     if yolo_cache is not None:
         yolo_cache[cache_key] = (lines, status)
     return lines, status
@@ -1476,6 +1499,9 @@ class OcrViewerApp:
         self.status_var = tk.StringVar(value="Ready")
         _dcf = DEFAULT_CONF_YOLOV26_END2END
         self.yolo_conf_var = tk.StringVar(value=f"{_dcf:g}")
+        self.yolo_model_var = tk.StringVar(
+            value=_normalize_yolo_triton_model(triton_yolo_model_name())
+        )
         self.box_edit_mode = tk.StringVar(value="expand")
 
         self._view_zoom = 1.0
@@ -1491,6 +1517,7 @@ class OcrViewerApp:
         self.selected_region_id: int | None = None
         self._spatial_rank_by_box: dict[tuple[int, int, int, int], int] = {}
 
+        _apply_yolo_triton_model(self.yolo_model_var.get())
         self._build_ui()
         self._populate_runs()
         if bind_global_hotkeys:
@@ -1745,15 +1772,30 @@ class OcrViewerApp:
             text="Copy all run images to undone/images",
             command=self._copy_all_run_images_to_undone,
         ).grid(row=5, column=0, columnspan=4, sticky="ew", pady=(6, 0))
-        ttk.Label(controls, text="YOLO confidence").grid(row=6, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(controls, text="YOLO model").grid(row=6, column=0, sticky="w", pady=(6, 0))
+        ttk.Radiobutton(
+            controls,
+            text="yolo_ui",
+            variable=self.yolo_model_var,
+            value=YOLO_TRITON_MODEL_UI,
+            command=self._on_yolo_model_change,
+        ).grid(row=6, column=1, sticky="w", pady=(6, 0))
+        ttk.Radiobutton(
+            controls,
+            text="yolo_ui_small",
+            variable=self.yolo_model_var,
+            value=YOLO_TRITON_MODEL_UI_SMALL,
+            command=self._on_yolo_model_change,
+        ).grid(row=6, column=2, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Label(controls, text="YOLO confidence").grid(row=7, column=0, sticky="w", pady=(6, 0))
         ttk.Entry(controls, textvariable=self.yolo_conf_var, width=10).grid(
-            row=6, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(6, 0)
+            row=7, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(6, 0)
         )
         ttk.Button(controls, text="Delete selected", command=self._delete_selected_detection).grid(
-            row=7, column=0, columnspan=2, sticky="ew", pady=(6, 0)
+            row=8, column=0, columnspan=2, sticky="ew", pady=(6, 0)
         )
         ttk.Button(controls, text="Reset Zoom", command=self._reset_zoom).grid(
-            row=7, column=2, columnspan=2, sticky="ew", pady=(6, 0)
+            row=8, column=2, columnspan=2, sticky="ew", pady=(6, 0)
         )
 
         canvas_wrap = ttk.Frame(self.parent, padding=8)
@@ -1940,6 +1982,7 @@ class OcrViewerApp:
                 allow_yolo=False,
                 yolo_cache=self._yolo_lines_cache,
                 run_dir=run,
+                yolo_model=self.yolo_model_var.get(),
             )
             self._set_current_lines(lines)
         self.selected_line_idx = None
@@ -2559,6 +2602,12 @@ class OcrViewerApp:
             return
         self._select_image_index(min(len(self.current_run_images) - 1, idx + 1))
 
+    def _on_yolo_model_change(self) -> None:
+        model_name = _apply_yolo_triton_model(self.yolo_model_var.get())
+        self.status_var.set(
+            f"YOLO model: {model_name} — click Reload YOLO detections to re-run"
+        )
+
     def _run_select_text_current_image(self) -> None:
         src = self._current_image_path()
         if src is None or not src.is_file():
@@ -2568,7 +2617,10 @@ class OcrViewerApp:
         if conf is None:
             self.status_var.set(f"Invalid confidence: {err}")
             return
-        self.status_var.set(f"Running YOLO detections (conf={conf:g})...")
+        model_name = _apply_yolo_triton_model(self.yolo_model_var.get())
+        self.status_var.set(
+            f"Running YOLO detections ({model_name}, conf={conf:g})..."
+        )
         self.root.update_idletasks()
         t0 = time.perf_counter()
         try:
@@ -2579,6 +2631,7 @@ class OcrViewerApp:
                 yolo_cache=self._yolo_lines_cache,
                 force_yolo=True,
                 run_dir=self._selected_run(),
+                yolo_model=model_name,
             )
         except Exception as exc:
             self.status_var.set(f"YOLO detections failed: {type(exc).__name__}: {exc}")
@@ -2686,6 +2739,9 @@ class TestImagesViewerApp:
         self.status_var = tk.StringVar(value="Ready")
         self.folder_var = tk.StringVar(value=str(images_dir))
         self.yolo_conf_var = tk.StringVar(value=f"{DEFAULT_CONF_YOLOV26_END2END:g}")
+        self.yolo_model_var = tk.StringVar(
+            value=_normalize_yolo_triton_model(triton_yolo_model_name())
+        )
         self.box_edit_mode = tk.StringVar(value="expand")
 
         self._view_zoom = 1.0
@@ -2700,6 +2756,7 @@ class TestImagesViewerApp:
         self.selected_region_id: int | None = None
         self._spatial_rank_by_box: dict[tuple[int, int, int, int], int] = {}
 
+        _apply_yolo_triton_model(self.yolo_model_var.get())
         self._build_ui()
         self._reload_image_list()
         if bind_global_hotkeys:
@@ -2829,15 +2886,30 @@ class TestImagesViewerApp:
             text="YOLO text regions (select_text)",
             command=self._run_select_text_regions,
         ).grid(row=3, column=0, columnspan=4, sticky="ew", pady=(6, 0))
-        ttk.Label(controls, text="YOLO confidence").grid(row=4, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(controls, text="YOLO model").grid(row=4, column=0, sticky="w", pady=(6, 0))
+        ttk.Radiobutton(
+            controls,
+            text="yolo_ui",
+            variable=self.yolo_model_var,
+            value=YOLO_TRITON_MODEL_UI,
+            command=self._on_yolo_model_change,
+        ).grid(row=4, column=1, sticky="w", pady=(6, 0))
+        ttk.Radiobutton(
+            controls,
+            text="yolo_ui_small",
+            variable=self.yolo_model_var,
+            value=YOLO_TRITON_MODEL_UI_SMALL,
+            command=self._on_yolo_model_change,
+        ).grid(row=4, column=2, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Label(controls, text="YOLO confidence").grid(row=5, column=0, sticky="w", pady=(6, 0))
         ttk.Entry(controls, textvariable=self.yolo_conf_var, width=10).grid(
-            row=4, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(6, 0)
+            row=5, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(6, 0)
         )
         ttk.Button(controls, text="Delete selected", command=self._delete_selected_detection).grid(
-            row=5, column=0, columnspan=2, sticky="ew", pady=(6, 0)
+            row=6, column=0, columnspan=2, sticky="ew", pady=(6, 0)
         )
         ttk.Button(controls, text="Reset Zoom", command=self._reset_zoom).grid(
-            row=5, column=2, columnspan=2, sticky="ew", pady=(6, 0)
+            row=6, column=2, columnspan=2, sticky="ew", pady=(6, 0)
         )
 
         canvas_wrap = ttk.Frame(self.parent, padding=8)
@@ -3237,6 +3309,12 @@ class TestImagesViewerApp:
         self._refresh_image()
         self.status_var.set(f"{status}{self._spatial_segment_status_suffix()}")
 
+    def _on_yolo_model_change(self) -> None:
+        model_name = _apply_yolo_triton_model(self.yolo_model_var.get())
+        self.status_var.set(
+            f"YOLO model: {model_name} — re-run YOLO text regions to apply"
+        )
+
     def _run_select_text_regions(self) -> None:
         src = self._current_image_path()
         if src is None or not src.is_file():
@@ -3246,7 +3324,10 @@ class TestImagesViewerApp:
         if conf is None:
             self.status_var.set(f"Invalid confidence: {err}")
             return
-        self.status_var.set(f"Running YOLO text regions (select_text, conf={conf:g})…")
+        model_name = _apply_yolo_triton_model(self.yolo_model_var.get())
+        self.status_var.set(
+            f"Running YOLO text regions (select_text, {model_name}, conf={conf:g})…"
+        )
         self.root.update_idletasks()
         t0 = time.perf_counter()
         try:
@@ -3269,7 +3350,8 @@ class TestImagesViewerApp:
             save_note = f", save failed: {exc}"
         self._set_lines(
             lines,
-            f"YOLO text regions: {len(lines)} regions in {elapsed_ms:.0f} ms{save_note}",
+            f"YOLO text regions [{model_name}]: {len(lines)} regions "
+            f"in {elapsed_ms:.0f} ms{save_note}",
         )
 
     def _refresh_image(self) -> None:

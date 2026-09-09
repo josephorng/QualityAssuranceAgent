@@ -18,6 +18,7 @@ from cua_mcp.yolo_onnx import (
     DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD,
     PICKER_CLASS_UNKNOWN,
     YOLO_CLASS_ELEMENT,
+    YOLO_CLASS_INPUT,
     YOLO_CLASS_NAMES,
     YOLO_CLASS_SCROLLBAR,
     YOLO_CLASS_TEXT,
@@ -340,9 +341,10 @@ def fit_scrollbar_bboxes_to_arrow_controls(
     ``向右滾動箭頭``. Matching arrows may be any distance along the track —
     the scrollbar extends to them. When either end lacks a matching
     track-aligned arrow, that scrollbar is left unchanged. When the fitted
-    bbox would overlap text or another scrollbar, the fit is skipped (bbox
-    and end-arrow labels unchanged), matching create-pair rejection. Text
-    that overlaps any directional end arrow is ignored for that overlap check.
+    bbox would overlap text or an input, the fit is skipped (bbox and
+    end-arrow labels unchanged). Overlap with another scrollbar is allowed
+    (e.g. V+H corner meetings). Text that overlaps any directional end arrow
+    is ignored for that overlap check.
     """
     if not detections:
         return detections
@@ -425,7 +427,12 @@ def fit_scrollbar_bboxes_to_arrow_controls(
             start_arrow, end_arrow = left, right
             start_label, end_label = _SCROLL_ARROW_LEFT_ID, _SCROLL_ARROW_RIGHT_ID
 
-        if not _proposed_pair_bbox_valid(new_bbox, out, ignore=sb):
+        if not _proposed_pair_bbox_valid(
+            new_bbox,
+            out,
+            ignore=sb,
+            reject_scrollbar_overlap=False,
+        ):
             skipped_overlap += 1
             continue
 
@@ -499,6 +506,11 @@ def _is_text_detection(det: UiDetection) -> bool:
     return det.class_id == YOLO_CLASS_TEXT or det.class_name == "text"
 
 
+def _is_input_detection(det: UiDetection) -> bool:
+    """True for YOLO input / text-field class detections."""
+    return det.class_id == YOLO_CLASS_INPUT or det.class_name == "input"
+
+
 def _is_scrollbar_detection(det: UiDetection) -> bool:
     """True for scrollbar class detections."""
     return det.class_id == YOLO_CLASS_SCROLLBAR or det.class_name == "scrollbar"
@@ -532,23 +544,34 @@ def _proposed_pair_bbox_valid(
     detections: list[UiDetection],
     *,
     ignore: UiDetection | None = None,
+    reject_scrollbar_overlap: bool = True,
 ) -> bool:
-    """Reject proposed bars that overlap text or an existing scrollbar.
+    """Reject proposed bars that overlap text, input, or (optionally) a scrollbar.
 
     ``ignore`` skips one detection (the scrollbar being fitted) so self-overlap
-    does not fail the check. Text boxes that overlap a directional end arrow
-    (OCR misreads of the arrow glyph) are ignored regardless of overlap size.
+    does not fail the check. ``reject_scrollbar_overlap`` is True for
+    create-from-pairs (avoid duplicating a YOLO track) and False for fit
+    (allow V+H corner meetings). Text boxes that overlap a directional end
+    arrow (OCR misreads of the arrow glyph) are ignored regardless of
+    overlap size.
     """
     for det in detections:
         if ignore is not None and det is ignore:
             continue
-        if _is_scrollbar_detection(det) and boxes_overlap(proposed, det.bbox):
+        if (
+            reject_scrollbar_overlap
+            and _is_scrollbar_detection(det)
+            and boxes_overlap(proposed, det.bbox)
+        ):
+            return False
+        if _is_input_detection(det) and boxes_overlap(proposed, det.bbox):
             return False
         if _is_text_detection(det) and boxes_overlap(proposed, det.bbox):
             if _text_overlaps_scrollbar_arrow(det, detections):
                 continue
             return False
     return True
+
 
 def create_scrollbars_from_arrow_pairs(
     detections: list[UiDetection],
@@ -561,9 +584,9 @@ def create_scrollbars_from_arrow_pairs(
     Pairs ``向上/下V箭頭``, ``向上/下三角``, ``向左/右V箭頭``, and ``向左/右三角``
     when both ends share a column (vertical) or row (horizontal). The scrollbar
     bbox is the union of the two arrow boxes. Skips pairs whose union overlaps
-    any text or any existing scrollbar (YOLO miss-fill only), except text that
-    overlaps a directional end arrow (OCR-on-glyph noise). Each detection is
-    used in at most one created pair. Matched ends are unified to
+    any text, input, or existing scrollbar (YOLO miss-fill only), except text
+    that overlaps a directional end arrow (OCR-on-glyph noise). Each detection
+    is used in at most one created pair. Matched ends are unified to
     ``*滾動箭頭`` labels. Unified ``*滾動箭頭`` icons are not pair seeds.
     """
     if not detections:
@@ -605,7 +628,9 @@ def create_scrollbars_from_arrow_pairs(
                 continue
             start, end = out[si], out[ei]
             proposed = merge_two_boxes(start.bbox, end.bbox)
-            if not _proposed_pair_bbox_valid(proposed, out):
+            if not _proposed_pair_bbox_valid(
+                proposed, out, reject_scrollbar_overlap=True
+            ):
                 continue
 
             out.append(

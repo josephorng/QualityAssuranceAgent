@@ -917,6 +917,58 @@ def test_fit_scrollbar_skips_when_fitted_bbox_overlaps_text() -> None:
     assert any("skipped_overlap=1" in line for line in logs)
 
 
+def test_fit_scrollbar_skips_when_fitted_bbox_overlaps_input() -> None:
+    from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
+
+    scrollbar = _detection_from_bbox((177, 400, 29, 80), YOLO_CLASS_SCROLLBAR)
+    up = _detection_from_bbox(
+        (181, 46, 21, 23),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上三角"}],
+    )
+    down = _detection_from_bbox(
+        (185, 864, 14, 13),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下三角"}],
+    )
+    field = _detection_from_bbox((160, 500, 80, 24), YOLO_CLASS_INPUT)
+    logs: list[str] = []
+    out = fit_scrollbar_bboxes_to_arrow_controls(
+        [scrollbar, up, down, field],
+        log_info=logs.append,
+    )
+    fitted = next(d for d in out if d.class_name == "scrollbar")
+    assert fitted.bbox == scrollbar.bbox
+    assert any("skipped_overlap=1" in line for line in logs)
+
+
+def test_fit_scrollbar_allows_overlap_with_other_scrollbar() -> None:
+    from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
+
+    # event_003-style: vertical fit clips a horizontal bar at the corner.
+    vertical = _detection_from_bbox((181, 132, 26, 738), YOLO_CLASS_SCROLLBAR)
+    horizontal = _detection_from_bbox((205, 853, 1527, 22), YOLO_CLASS_SCROLLBAR)
+    up = _detection_from_bbox(
+        (185, 49, 15, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上三角"}],
+    )
+    down = _detection_from_bbox(
+        (185, 863, 14, 13),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下三角"}],
+    )
+    out = fit_scrollbar_bboxes_to_arrow_controls(
+        [vertical, horizontal, up, down]
+    )
+    fitted = next(d for d in out if d.bbox[0] == 181)
+    assert fitted.bbox == (181, 49, 26, 827)
+    assert next(d for d in out if d.bbox == horizontal.bbox).bbox == horizontal.bbox
+    by_bbox = {d.bbox: d for d in out}
+    assert by_bbox[up.bbox].icons[0]["chinese_id"] == "向上滾動箭頭"
+    assert by_bbox[down.bbox].icons[0]["chinese_id"] == "向下滾動箭頭"
+
+
 def test_fit_scrollbar_still_extends_when_text_does_not_overlap() -> None:
     from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
 
@@ -1181,6 +1233,24 @@ def test_create_scrollbar_skips_when_union_overlaps_text() -> None:
         text="內容",
     )
     out = create_scrollbars_from_arrow_pairs([up, down, text])
+    assert not any(d.class_name == "scrollbar" for d in out)
+
+
+def test_create_scrollbar_skips_when_union_overlaps_input() -> None:
+    from cua_mcp.scrollbar_arrows import create_scrollbars_from_arrow_pairs
+
+    up = _detection_from_bbox(
+        (100, 50, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向上三角"}],
+    )
+    down = _detection_from_bbox(
+        (100, 300, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "向下三角"}],
+    )
+    field = _detection_from_bbox((98, 150, 40, 20), YOLO_CLASS_INPUT)
+    out = create_scrollbars_from_arrow_pairs([up, down, field])
     assert not any(d.class_name == "scrollbar" for d in out)
 
 

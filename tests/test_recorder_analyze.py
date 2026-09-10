@@ -1621,7 +1621,7 @@ async def test_analyze_recording_session_writes_settle_after_not_wait_instructio
             {
                 "run_id": run_dir.name,
                 "started_at_utc": events[0].timestamp_utc,
-                "stopped_at_utc": events[-1].timestamp_utc,
+                "stopped_at_utc": "2026-07-30T03:00:28.250+00:00",
                 "event_count": len(events),
                 "events": event_paths,
             }
@@ -1658,7 +1658,7 @@ async def test_analyze_recording_session_writes_settle_after_not_wait_instructio
     assert second_analysis["elapsed_since_previous_seconds"] == 10.0
     assert second_analysis["settle_after_seconds"] == 10.25
     assert third_analysis["elapsed_since_previous_seconds"] == 10.25
-    assert "settle_after_seconds" not in third_analysis
+    assert third_analysis["settle_after_seconds"] == 8.0
 
 
 @pytest.mark.asyncio
@@ -1717,7 +1717,11 @@ async def test_analyze_recording_session_omits_settle_under_one_second(
     first_analysis = json.loads(
         (run_dir / "analysis" / "event_001.json").read_text(encoding="utf-8")
     )
+    second_analysis = json.loads(
+        (run_dir / "analysis" / "event_002.json").read_text(encoding="utf-8")
+    )
     assert "settle_after_seconds" not in first_analysis
+    assert "settle_after_seconds" not in second_analysis
     assert "wait_instruction" not in first_analysis
 
 

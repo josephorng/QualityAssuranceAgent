@@ -254,11 +254,18 @@ def collect_recording_baseline_after_paths(run_dir: Path) -> list[str | None]:
 def collect_recording_settle_after_seconds(run_dir: Path) -> list[float | None]:
     """Collect post-action settle seconds aligned with ``collect_recording_instructions``.
 
-    Derived from event timestamps (this → next instruction event). Gaps under 1s,
-    last events, and ``kind=wait`` events yield ``None``.
+    Derived from event timestamps (this → next instruction event). The last action
+    uses ``session.stopped_at_utc`` when present. Gaps under 1s and ``kind=wait``
+    events yield ``None``.
     """
     run_dir = Path(run_dir)
     analysis_dir = run_dir / "analysis"
+    session = _load_json_dict(run_dir / "session.json") or {}
+    stopped_at_utc = (
+        session.get("stopped_at_utc") if isinstance(session, dict) else None
+    )
+    if not isinstance(stopped_at_utc, str):
+        stopped_at_utc = None
     loaded: list[RecordedEvent] = []
     for event_path in _recording_event_json_paths(run_dir):
         raw = _load_json_dict(event_path)
@@ -280,12 +287,14 @@ def collect_recording_settle_after_seconds(run_dir: Path) -> list[float | None]:
 
     settles: list[float | None] = []
     for index, event in enumerate(loaded):
-        if event.kind == "wait" or index + 1 >= len(loaded):
+        if event.kind == "wait":
             settles.append(None)
             continue
-        settle = _elapsed_seconds_between(
-            event.timestamp_utc, loaded[index + 1].timestamp_utc
-        )
+        if index + 1 < len(loaded):
+            end_ts = loaded[index + 1].timestamp_utc
+        else:
+            end_ts = stopped_at_utc
+        settle = _elapsed_seconds_between(event.timestamp_utc, end_ts)
         if settle is not None and settle >= 1.0:
             settles.append(settle)
         else:
@@ -294,12 +303,16 @@ def collect_recording_settle_after_seconds(run_dir: Path) -> list[float | None]:
 
 
 def _elapsed_seconds_between(
-    previous_timestamp_utc: str, current_timestamp_utc: str
+    previous_timestamp_utc: str, current_timestamp_utc: str | None
 ) -> float | None:
     """Return non-negative elapsed seconds between two timezone-aware ISO timestamps."""
+    if not isinstance(current_timestamp_utc, str) or not current_timestamp_utc.strip():
+        return None
     try:
         previous = datetime.fromisoformat(previous_timestamp_utc.replace("Z", "+00:00"))
-        current = datetime.fromisoformat(current_timestamp_utc.replace("Z", "+00:00"))
+        current = datetime.fromisoformat(
+            current_timestamp_utc.strip().replace("Z", "+00:00")
+        )
     except (TypeError, ValueError):
         return None
     if previous.tzinfo is None or current.tzinfo is None:

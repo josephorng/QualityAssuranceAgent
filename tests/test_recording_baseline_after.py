@@ -73,6 +73,7 @@ def _write_recording(tmp_path: Path) -> Path:
             {
                 "run_id": "rec_demo",
                 "started_at_utc": "2026-09-07T00:00:00+00:00",
+                "stopped_at_utc": "2026-09-07T00:00:17+00:00",
                 "events": events,
                 "final_after_screenshot": str(final_after),
             },
@@ -96,7 +97,7 @@ def test_collect_recording_baseline_after_paths_ignores_virtual_wait(tmp_path: P
     assert baselines[0].endswith("event_001.jpeg")
     assert baselines[1] is not None
     assert baselines[1].endswith("final_after.jpeg")
-    assert settles == [9.0, None]
+    assert settles == [9.0, 8.0]
 
 
 def test_collect_recording_baseline_after_paths_survives_renamed_folder(tmp_path: Path) -> None:
@@ -148,7 +149,7 @@ def test_prepare_run_session_seeds_baseline_and_settle_env(tmp_path: Path, monke
     assert len(baselines) == len(instructions)
     assert isinstance(baselines[0], str) and baselines[0].endswith("event_001.jpeg")
     assert isinstance(baselines[1], str) and baselines[1].endswith("final_after.jpeg")
-    assert settles == [9.0, None]
+    assert settles == [9.0, 8.0]
 
 
 def test_prepare_run_session_drops_baselines_when_script_edited(tmp_path: Path, monkeypatch) -> None:

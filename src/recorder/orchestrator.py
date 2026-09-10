@@ -497,6 +497,18 @@ def _write_event_analysis(
     )
 
 
+def _settle_after_if_long_enough(
+    start_timestamp_utc: str, end_timestamp_utc: str | None
+) -> float | None:
+    """Return elapsed seconds when present and at least ``_SETTLE_AFTER_MIN_SECONDS``."""
+    if not isinstance(end_timestamp_utc, str) or not end_timestamp_utc.strip():
+        return None
+    settle = _elapsed_seconds(start_timestamp_utc, end_timestamp_utc.strip())
+    if settle is not None and settle >= _SETTLE_AFTER_MIN_SECONDS:
+        return settle
+    return None
+
+
 def _next_instruction_event_settle(
     *,
     events: list[RecordedEvent],
@@ -504,8 +516,9 @@ def _next_instruction_event_settle(
     event: RecordedEvent,
     prepared_list: list[Any],
     instruction_results: list[Any],
+    stopped_at_utc: str | None = None,
 ) -> float | None:
-    """Forward gap to the next event that will emit an instruction, if >= min settle."""
+    """Forward gap to the next instruction event, or to session stop for the last action."""
     if event.kind == "wait":
         return None
     for next_pos in range(event_pos + 1, len(events)):
@@ -514,11 +527,10 @@ def _next_instruction_event_settle(
         next_result = instruction_results[next_pos]
         if next_result is _UNSET or next_result is None:
             continue
-        settle = _elapsed_seconds(event.timestamp_utc, events[next_pos].timestamp_utc)
-        if settle is not None and settle >= _SETTLE_AFTER_MIN_SECONDS:
-            return settle
-        return None
-    return None
+        return _settle_after_if_long_enough(
+            event.timestamp_utc, events[next_pos].timestamp_utc
+        )
+    return _settle_after_if_long_enough(event.timestamp_utc, stopped_at_utc)
 
 
 async def analyze_recording_session(
@@ -661,12 +673,20 @@ async def analyze_recording_session(
                     event.timestamp_utc,
                 )
 
+            stopped_at_utc = (
+                manifest_raw.get("stopped_at_utc")
+                if isinstance(manifest_raw, dict)
+                else None
+            )
             settle_after_seconds = _next_instruction_event_settle(
                 events=events,
                 event_pos=event_pos,
                 event=event,
                 prepared_list=prepared_list,
                 instruction_results=instruction_results,
+                stopped_at_utc=(
+                    stopped_at_utc if isinstance(stopped_at_utc, str) else None
+                ),
             )
 
             instructions.append(instruction)

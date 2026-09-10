@@ -28,7 +28,6 @@ from src.recorder.orchestrator import (
     _elapsed_seconds,
     _llm_max_workers,
     _vision_max_workers,
-    _wait_instruction,
     analyze_recording_session,
 )
 from src.recorder.vision_context import (
@@ -1355,12 +1354,6 @@ def test_elapsed_seconds_requires_valid_ordered_timezone_aware_timestamps() -> N
     )
 
 
-def test_wait_instruction_ceilings_to_integer_seconds() -> None:
-    assert _wait_instruction(4.0) == "等待 4 秒"
-    assert _wait_instruction(3.0001) == "等待 4 秒"
-    assert _wait_instruction(3.1254) == "等待 4 秒"
-
-
 def test_vision_max_workers_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RECORDING_VISION_WORKERS", raising=False)
     assert _vision_max_workers() == 3
@@ -1584,13 +1577,13 @@ async def test_analyze_recording_session_reports_multi_phase_progress(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_analyze_recording_session_inserts_wait_only_over_threshold_seconds(
+async def test_analyze_recording_session_writes_settle_after_not_wait_instruction(
     tmp_path: Path,
 ) -> None:
     from src.common.run_state import reset_run_state_manager
 
     reset_run_state_manager()
-    run_dir = tmp_path / "screen_record_wait_test"
+    run_dir = tmp_path / "screen_record_settle_test"
     (run_dir / "events").mkdir(parents=True)
     events = [
         RecordedEvent(
@@ -1646,23 +1639,88 @@ async def test_analyze_recording_session_inserts_wait_only_over_threshold_second
     assert report["instructions"] == [
         "按下 Enter 鍵",
         "按下 Tab 鍵",
-        "等待 11 秒",
         "按下 Esc 鍵",
     ]
-    assert report["expected_outcomes"] == [None, None, None, None]
+    assert report["expected_outcomes"] == [None, None, None]
+    first_analysis = json.loads(
+        (run_dir / "analysis" / "event_001.json").read_text(encoding="utf-8")
+    )
     second_analysis = json.loads(
         (run_dir / "analysis" / "event_002.json").read_text(encoding="utf-8")
     )
     third_analysis = json.loads(
         (run_dir / "analysis" / "event_003.json").read_text(encoding="utf-8")
     )
-    assert second_analysis["elapsed_since_previous_seconds"] == 10.0
+    assert "wait_instruction" not in first_analysis
     assert "wait_instruction" not in second_analysis
+    assert "wait_instruction" not in third_analysis
+    assert first_analysis["settle_after_seconds"] == 10.0
+    assert second_analysis["elapsed_since_previous_seconds"] == 10.0
+    assert second_analysis["settle_after_seconds"] == 10.25
     assert third_analysis["elapsed_since_previous_seconds"] == 10.25
-    assert third_analysis["wait_instruction"] == "等待 11 秒"
+    assert "settle_after_seconds" not in third_analysis
 
 
 @pytest.mark.asyncio
+async def test_analyze_recording_session_omits_settle_under_one_second(
+    tmp_path: Path,
+) -> None:
+    from src.common.run_state import reset_run_state_manager
+
+    reset_run_state_manager()
+    run_dir = tmp_path / "screen_record_settle_short"
+    (run_dir / "events").mkdir(parents=True)
+    events = [
+        RecordedEvent(
+            index=1,
+            timestamp_utc="2026-07-30T03:00:00+00:00",
+            kind="key_press",
+            key="enter",
+            screenshot_path="",
+        ),
+        RecordedEvent(
+            index=2,
+            timestamp_utc="2026-07-30T03:00:00.500+00:00",
+            kind="key_press",
+            key="tab",
+            screenshot_path="",
+        ),
+    ]
+    event_paths: list[str] = []
+    for event in events:
+        relative_path = f"events/event_{event.index:03d}.json"
+        event_paths.append(relative_path)
+        (run_dir / relative_path).write_text(
+            json.dumps(event.to_dict(), ensure_ascii=False),
+            encoding="utf-8",
+        )
+    (run_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "started_at_utc": events[0].timestamp_utc,
+                "stopped_at_utc": events[-1].timestamp_utc,
+                "event_count": len(events),
+                "events": event_paths,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    no_vision = {"used_vision": False, "candidate_text": "", "local_cursor": None}
+    with patch(
+        "src.recorder.orchestrator.build_vision_context",
+        new=AsyncMock(return_value=no_vision),
+    ):
+        await analyze_recording_session(run_dir)
+
+    first_analysis = json.loads(
+        (run_dir / "analysis" / "event_001.json").read_text(encoding="utf-8")
+    )
+    assert "settle_after_seconds" not in first_analysis
+    assert "wait_instruction" not in first_analysis
+
+
 async def test_analyze_recording_session_drops_trailing_agent_restore(
     tmp_path: Path,
 ) -> None:

@@ -342,7 +342,7 @@ def test_apply_recording_event_landmarks_persists_and_rebuilds(tmp_path: Path) -
     report = json.loads(
         (runs_root / "recording_landmark_edit" / "report.json").read_text(encoding="utf-8")
     )
-    assert report["instructions"] == ["等待 2 秒", expected]
+    assert report["instructions"] == [expected]
     html = (runs_root / "recording_landmark_edit" / "recording_steps.html").read_text(
         encoding="utf-8"
     )
@@ -1039,7 +1039,7 @@ def test_apply_recording_event_text_persists_and_rebuilds(tmp_path: Path) -> Non
     report = json.loads(
         (runs_root / "recording_text_edit" / "report.json").read_text(encoding="utf-8")
     )
-    assert report["instructions"] == ["等待 2 秒", "輸入「正確文字」"]
+    assert report["instructions"] == ["輸入「正確文字」"]
     html = (runs_root / "recording_text_edit" / "recording_steps.html").read_text(
         encoding="utf-8"
     )
@@ -1603,7 +1603,7 @@ def test_apply_instruction_updates_collected_script_text(tmp_path: Path) -> None
     )
     assert result["instruction"] == "點擊「新目標」"
     script = collect_recording_script_text(run_root)
-    assert "等待 2 秒" in script
+    assert "等待 2 秒" not in script
     assert "點擊「新目標」" in script
     assert "# expected_outcome: 搜尋結果已顯示" in script
     assert not (run_root / "script.txt").exists()

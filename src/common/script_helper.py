@@ -169,7 +169,11 @@ def _recorded_event_with_resolved_shots(
 
 
 def collect_recording_instructions(run_dir: Path) -> tuple[list[str], list[str | None]]:
-    """Collect hub-script lines from recording analysis files (includes wait lines)."""
+    """Collect hub-script lines from recording analysis files.
+
+    Virtual ``wait_instruction`` fields are ignored; manual ``kind=wait`` events
+    still appear via their own analysis ``instruction``.
+    """
     analysis_dir = Path(run_dir) / "analysis"
     instructions: list[str] = []
     expected_outcomes: list[str | None] = []
@@ -183,10 +187,6 @@ def collect_recording_instructions(run_dir: Path) -> tuple[list[str], list[str |
         analysis = _load_json_dict(analysis_dir / f"event_{raw_index:03d}.json")
         if analysis is None:
             continue
-        wait = analysis.get("wait_instruction")
-        if isinstance(wait, str) and wait.strip():
-            instructions.append(wait.strip())
-            expected_outcomes.append(None)
         instruction = analysis.get("instruction")
         if isinstance(instruction, str) and instruction.strip():
             instructions.append(instruction.strip())
@@ -204,7 +204,7 @@ def collect_recording_instructions(run_dir: Path) -> tuple[list[str], list[str |
 def collect_recording_baseline_after_paths(run_dir: Path) -> list[str | None]:
     """Collect recording after-screenshot paths aligned with ``collect_recording_instructions``.
 
-    Wait lines get ``None``. Action lines use ``after_screenshot_for_outcome``
+    Action lines use ``after_screenshot_for_outcome``
     (next event before → typing/drag end → session ``final_after``).
     """
     run_dir = Path(run_dir)
@@ -233,24 +233,79 @@ def collect_recording_baseline_after_paths(run_dir: Path) -> list[str | None]:
         event = _recorded_event_with_resolved_shots(run_dir, raw)
         if event is None:
             continue
+        instruction = analysis.get("instruction")
+        if not (isinstance(instruction, str) and instruction.strip()):
+            continue
         loaded.append((event, analysis))
 
     baselines: list[str | None] = []
-    for index, (event, analysis) in enumerate(loaded):
-        wait = analysis.get("wait_instruction")
-        if isinstance(wait, str) and wait.strip():
-            baselines.append(None)
-        instruction = analysis.get("instruction")
-        if isinstance(instruction, str) and instruction.strip():
-            next_event = loaded[index + 1][0] if index + 1 < len(loaded) else None
-            baselines.append(
-                after_screenshot_for_outcome(
-                    event,
-                    next_event,
-                    final_after_screenshot=final_after,
-                )
+    for index, (event, _analysis) in enumerate(loaded):
+        next_event = loaded[index + 1][0] if index + 1 < len(loaded) else None
+        baselines.append(
+            after_screenshot_for_outcome(
+                event,
+                next_event,
+                final_after_screenshot=final_after,
             )
+        )
     return baselines
+
+
+def collect_recording_settle_after_seconds(run_dir: Path) -> list[float | None]:
+    """Collect post-action settle seconds aligned with ``collect_recording_instructions``.
+
+    Derived from event timestamps (this → next instruction event). Gaps under 1s,
+    last events, and ``kind=wait`` events yield ``None``.
+    """
+    run_dir = Path(run_dir)
+    analysis_dir = run_dir / "analysis"
+    loaded: list[RecordedEvent] = []
+    for event_path in _recording_event_json_paths(run_dir):
+        raw = _load_json_dict(event_path)
+        if raw is None:
+            continue
+        raw_index = raw.get("index")
+        if not isinstance(raw_index, int):
+            continue
+        analysis = _load_json_dict(analysis_dir / f"event_{raw_index:03d}.json")
+        if analysis is None:
+            continue
+        instruction = analysis.get("instruction")
+        if not (isinstance(instruction, str) and instruction.strip()):
+            continue
+        event = _recorded_event_with_resolved_shots(run_dir, raw)
+        if event is None:
+            continue
+        loaded.append(event)
+
+    settles: list[float | None] = []
+    for index, event in enumerate(loaded):
+        if event.kind == "wait" or index + 1 >= len(loaded):
+            settles.append(None)
+            continue
+        settle = _elapsed_seconds_between(
+            event.timestamp_utc, loaded[index + 1].timestamp_utc
+        )
+        if settle is not None and settle >= 1.0:
+            settles.append(settle)
+        else:
+            settles.append(None)
+    return settles
+
+
+def _elapsed_seconds_between(
+    previous_timestamp_utc: str, current_timestamp_utc: str
+) -> float | None:
+    """Return non-negative elapsed seconds between two timezone-aware ISO timestamps."""
+    try:
+        previous = datetime.fromisoformat(previous_timestamp_utc.replace("Z", "+00:00"))
+        current = datetime.fromisoformat(current_timestamp_utc.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if previous.tzinfo is None or current.tzinfo is None:
+        return None
+    elapsed = (current - previous).total_seconds()
+    return elapsed if elapsed >= 0 else None
 
 
 def collect_recording_script_text(run_dir: Path) -> str:

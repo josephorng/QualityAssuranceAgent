@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -40,6 +41,7 @@ from src.common.runtime_context import (
     SCRIPT_BASELINE_AFTER_ENV,
     SCRIPT_LINES_ENV,
     SCRIPT_OUTCOMES_ENV,
+    SCRIPT_SETTLE_AFTER_ENV,
     get_runtime_env,
     is_runtime_command_mode,
     is_smart_mode,
@@ -163,6 +165,11 @@ class BrainModule:
             []
             if is_runtime_command_mode() or is_smart_mode()
             else self._script_seed_baseline_after_paths(len(self.script_lines))
+        )
+        self.script_settle_after_seconds = (
+            []
+            if is_runtime_command_mode() or is_smart_mode()
+            else self._script_seed_settle_after_seconds(len(self.script_lines))
         )
         self._script_step_index = 0
         self._hand = hand
@@ -397,6 +404,28 @@ class BrainModule:
                 baselines[index] = str(path) if path.is_file() else None
         return baselines
 
+    def _script_seed_settle_after_seconds(self, step_count: int) -> list[float | None]:
+        """Load optional post-action settle delays aligned with script steps."""
+        raw = os.environ.get(SCRIPT_SETTLE_AFTER_ENV, "")
+        settles: list[float | None] = [None] * step_count
+        if not raw:
+            return settles
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return settles
+        if not isinstance(parsed, list):
+            return settles
+        for index in range(min(step_count, len(parsed))):
+            item = parsed[index]
+            if isinstance(item, bool) or item is None:
+                continue
+            if isinstance(item, (int, float)):
+                value = float(item)
+                if value > 0:
+                    settles[index] = value
+        return settles
+
     def _current_expected_outcome(self) -> str:
         if not self.script_expected_outcomes:
             return ""
@@ -415,6 +444,18 @@ class BrainModule:
             return None
         path = Path(value.strip())
         return str(path) if path.is_file() else None
+
+    def _current_settle_after_seconds(self) -> float | None:
+        if not self.script_settle_after_seconds:
+            return None
+        if self._script_step_index >= len(self.script_settle_after_seconds):
+            return None
+        value = self.script_settle_after_seconds[self._script_step_index]
+        if isinstance(value, bool) or value is None:
+            return None
+        if isinstance(value, (int, float)) and float(value) > 0:
+            return float(value)
+        return None
 
     def _format_numbered_script(self) -> str:
         """Numbered script lines with each step's recorded expected outcome."""
@@ -438,6 +479,7 @@ class BrainModule:
         self.script_lines = [cleaned]
         self.script_expected_outcomes = [None]
         self.script_baseline_after_paths = [None]
+        self.script_settle_after_seconds = [None]
         self._script_step_index = 0
 
     async def execute_instruction(self, instruction: str) -> bool:
@@ -454,12 +496,14 @@ class BrainModule:
         saved_lines = list(self.script_lines)
         saved_outcomes = list(self.script_expected_outcomes)
         saved_baselines = list(self.script_baseline_after_paths)
+        saved_settles = list(self.script_settle_after_seconds)
         saved_index = self._script_step_index
         transcript_counter = self._step_transcript_counter
         script_step_index = 0
         self.script_lines = [cleaned]
         self.script_expected_outcomes = [None]
         self.script_baseline_after_paths = [None]
+        self.script_settle_after_seconds = [None]
         self._script_step_index = 0
         self.manager.set_step_log_context(transcript_counter, script_step_index)
         started_iso = datetime.now(timezone.utc).isoformat()
@@ -486,6 +530,7 @@ class BrainModule:
             self.script_lines = saved_lines
             self.script_expected_outcomes = saved_outcomes
             self.script_baseline_after_paths = saved_baselines
+            self.script_settle_after_seconds = saved_settles
             self._script_step_index = saved_index
             self.manager.clear_step_log_context()
 
@@ -1531,6 +1576,15 @@ class BrainModule:
             started_at = perf_counter()
 
             step_succeeded = await self.loop()
+            settle_after = None
+            if step_succeeded:
+                settle_after = self._current_settle_after_seconds()
+                if settle_after is not None and settle_after > 0:
+                    self.manager.log_info(
+                        f"Script step {script_step_index + 1} settling "
+                        f"{settle_after:.3f}s before verify"
+                    )
+                    await asyncio.sleep(settle_after)
             if self._should_skip_vision_verify(step_succeeded):
                 self.manager.log_info(
                     f"Script step {script_step_index + 1} skipping vision verification "
@@ -1583,6 +1637,7 @@ class BrainModule:
                         "status": "failed",
                         "step_index": script_step_index,
                         "goal": self._current_goal(),
+                        "settle_after_seconds": settle_after,
                         "verify": None,
                     },
                 )
@@ -1789,6 +1844,7 @@ class BrainModule:
                     "step_index": script_step_index,
                     "goal": step_goal,
                     "expected_outcome": step_expected_outcome,
+                    "settle_after_seconds": settle_after,
                     "verify": verify_meta,
                 },
             )

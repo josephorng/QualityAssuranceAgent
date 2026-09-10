@@ -11,12 +11,14 @@ from src.common.runtime_context import (
     SCRIPT_LINES_ENV,
     SCRIPT_OUTCOMES_ENV,
     SCRIPT_PATH_ENV,
+    SCRIPT_SETTLE_AFTER_ENV,
     SMART_GOAL_ENV,
     SMART_MODE_ENV,
 )
 from src.common.script_helper import (
     collect_recording_baseline_after_paths,
     collect_recording_instructions,
+    collect_recording_settle_after_seconds,
 )
 
 
@@ -34,14 +36,18 @@ def _write_recording(tmp_path: Path) -> Path:
     final_after.write_bytes(b"final")
 
     events = []
-    for index, shot in ((0, shot0), (1, shot1)):
+    timestamps = (
+        "2026-09-07T00:00:00+00:00",
+        "2026-09-07T00:00:09+00:00",
+    )
+    for index, (shot, ts) in enumerate(zip((shot0, shot1), timestamps)):
         rel = f"events/event_{index:03d}.json"
         events.append(rel)
         (run_dir / rel).write_text(
             json.dumps(
                 {
                     "index": index,
-                    "timestamp_utc": "2026-09-07T00:00:00+00:00",
+                    "timestamp_utc": ts,
                     "kind": "click",
                     "screenshot_path": str(shot),
                 },
@@ -55,6 +61,7 @@ def _write_recording(tmp_path: Path) -> Path:
             "use_expected_outcome": False,
         }
         if index == 0:
+            # Leftover virtual wait must be ignored by collectors.
             analysis["wait_instruction"] = "等待 1 秒"
         (run_dir / "analysis" / f"event_{index:03d}.json").write_text(
             json.dumps(analysis, ensure_ascii=False),
@@ -76,21 +83,20 @@ def _write_recording(tmp_path: Path) -> Path:
     return run_dir
 
 
-def test_collect_recording_baseline_after_paths_aligns_with_wait_lines(tmp_path: Path) -> None:
+def test_collect_recording_baseline_after_paths_ignores_virtual_wait(tmp_path: Path) -> None:
     run_dir = _write_recording(tmp_path)
     instructions, outcomes = collect_recording_instructions(run_dir)
     baselines = collect_recording_baseline_after_paths(run_dir)
+    settles = collect_recording_settle_after_seconds(run_dir)
 
-    assert instructions == ["等待 1 秒", "click step 0", "click step 1"]
-    assert outcomes == [None, None, None]
+    assert instructions == ["click step 0", "click step 1"]
+    assert outcomes == [None, None]
     assert len(baselines) == len(instructions)
-    assert baselines[0] is None  # wait line
-    # step 0 after = next event before shot
+    assert baselines[0] is not None
+    assert baselines[0].endswith("event_001.jpeg")
     assert baselines[1] is not None
-    assert baselines[1].endswith("event_001.jpeg")
-    # last step after = final_after
-    assert baselines[2] is not None
-    assert baselines[2].endswith("final_after.jpeg")
+    assert baselines[1].endswith("final_after.jpeg")
+    assert settles == [9.0, None]
 
 
 def test_collect_recording_baseline_after_paths_survives_renamed_folder(tmp_path: Path) -> None:
@@ -109,14 +115,13 @@ def test_collect_recording_baseline_after_paths_survives_renamed_folder(tmp_path
 
     assert not old_root.exists()
     baselines = collect_recording_baseline_after_paths(run_dir)
-    assert baselines[0] is None
-    assert baselines[1] is not None and baselines[1].endswith("event_001.jpeg")
+    assert baselines[0] is not None and baselines[0].endswith("event_001.jpeg")
+    assert Path(baselines[0]).is_file()
+    assert baselines[1] is not None and baselines[1].endswith("final_after.jpeg")
     assert Path(baselines[1]).is_file()
-    assert baselines[2] is not None and baselines[2].endswith("final_after.jpeg")
-    assert Path(baselines[2]).is_file()
 
 
-def test_prepare_run_session_seeds_baseline_after_env(tmp_path: Path, monkeypatch) -> None:
+def test_prepare_run_session_seeds_baseline_and_settle_env(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv(RUNTIME_COMMAND_MODE_ENV, raising=False)
     monkeypatch.delenv(SMART_MODE_ENV, raising=False)
     monkeypatch.delenv(SMART_GOAL_ENV, raising=False)
@@ -124,6 +129,7 @@ def test_prepare_run_session_seeds_baseline_after_env(tmp_path: Path, monkeypatc
     monkeypatch.delenv(SCRIPT_LINES_ENV, raising=False)
     monkeypatch.delenv(SCRIPT_OUTCOMES_ENV, raising=False)
     monkeypatch.delenv(SCRIPT_BASELINE_AFTER_ENV, raising=False)
+    monkeypatch.delenv(SCRIPT_SETTLE_AFTER_ENV, raising=False)
 
     run_dir = _write_recording(tmp_path)
     instructions, _ = collect_recording_instructions(run_dir)
@@ -137,16 +143,17 @@ def test_prepare_run_session_seeds_baseline_after_env(tmp_path: Path, monkeypatc
         clear_runs_root=False,
     )
 
-    raw = os.environ[SCRIPT_BASELINE_AFTER_ENV]
-    baselines = json.loads(raw)
+    baselines = json.loads(os.environ[SCRIPT_BASELINE_AFTER_ENV])
+    settles = json.loads(os.environ[SCRIPT_SETTLE_AFTER_ENV])
     assert len(baselines) == len(instructions)
-    assert baselines[0] is None
-    assert isinstance(baselines[1], str) and baselines[1].endswith("event_001.jpeg")
-    assert isinstance(baselines[2], str) and baselines[2].endswith("final_after.jpeg")
+    assert isinstance(baselines[0], str) and baselines[0].endswith("event_001.jpeg")
+    assert isinstance(baselines[1], str) and baselines[1].endswith("final_after.jpeg")
+    assert settles == [9.0, None]
 
 
 def test_prepare_run_session_drops_baselines_when_script_edited(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv(SCRIPT_BASELINE_AFTER_ENV, raising=False)
+    monkeypatch.delenv(SCRIPT_SETTLE_AFTER_ENV, raising=False)
     run_dir = _write_recording(tmp_path)
     # Edited hub script: fewer lines than collected baselines
     prepare_run_session(
@@ -159,4 +166,6 @@ def test_prepare_run_session_drops_baselines_when_script_edited(tmp_path: Path, 
         clear_runs_root=False,
     )
     baselines = json.loads(os.environ[SCRIPT_BASELINE_AFTER_ENV])
+    settles = json.loads(os.environ[SCRIPT_SETTLE_AFTER_ENV])
     assert baselines == [None]
+    assert settles == [None]

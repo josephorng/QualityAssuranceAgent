@@ -35,6 +35,7 @@ def _brain_for_process_step(*, max_step_attempts: int = 0) -> BrainModule:
         "5 entered",
     ]
     brain.script_baseline_after_paths = [None, None, None]
+    brain.script_settle_after_seconds = [None, None, None]
     brain._script_step_index = 1
     brain._step_transcript_counter = 3
     brain._update_step_metadata = MagicMock()
@@ -627,6 +628,52 @@ async def test_process_step_verifies_when_baseline_present_even_if_outcome_empty
     metadata = brain._update_step_metadata.call_args.args[2]
     assert metadata["status"] == "completed"
     assert metadata["verify"]["baseline_after_path"] == "C:/fake/baseline.jpeg"
+
+
+@pytest.mark.asyncio
+async def test_process_step_settles_before_verify_when_settle_seeded(monkeypatch) -> None:
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = [None, None, None]
+    brain.script_baseline_after_paths = [None, "C:/fake/baseline.jpeg", None]
+    brain.script_settle_after_seconds = [None, 2.5, None]
+    brain._current_baseline_after_path = MagicMock(return_value="C:/fake/baseline.jpeg")
+    brain.loop = AsyncMock(return_value=True)
+    brain._verify_script_step = AsyncMock(
+        return_value=ScriptStepVerifyResult(
+            accomplished=True,
+            branch="advance",
+            target_step=None,
+            reason="live matches recorded after",
+        )
+    )
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    sleep_mock.assert_awaited_once_with(2.5)
+    brain._verify_script_step.assert_awaited_once()
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["settle_after_seconds"] == 2.5
+
+
+@pytest.mark.asyncio
+async def test_process_step_skips_settle_when_settle_none(monkeypatch) -> None:
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = [None, None, None]
+    brain.script_baseline_after_paths = [None, None, None]
+    brain.script_settle_after_seconds = [None, None, None]
+    brain.loop = AsyncMock(return_value=True)
+    brain._verify_script_step = AsyncMock()
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    sleep_mock.assert_not_awaited()
+    brain._verify_script_step.assert_not_awaited()
 
 
 @pytest.mark.asyncio

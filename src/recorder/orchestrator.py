@@ -6,7 +6,6 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from math import ceil
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +30,7 @@ from src.recorder.vision_context import (
 from src.recorder.window_snapshot import is_agent_app_restore, resolve_window_change
 
 
-_WAIT_THRESHOLD_SECONDS = 10.0
+_SETTLE_AFTER_MIN_SECONDS = 1.0
 _FINAL_AFTER_RELATIVE = "screenshots/final_after.jpeg"
 # Cap concurrent Triton YOLO+OCR jobs so the GPU is not flooded.
 _DEFAULT_VISION_WORKERS = 4
@@ -111,10 +110,6 @@ def _elapsed_seconds(previous_timestamp_utc: str, current_timestamp_utc: str) ->
         return None
     elapsed = (current - previous).total_seconds()
     return elapsed if elapsed >= 0 else None
-
-
-def _wait_instruction(elapsed_seconds: float) -> str:
-    return f"等待 {ceil(elapsed_seconds)} 秒"
 
 
 def _is_trailing_agent_restore(event: RecordedEvent) -> bool:
@@ -450,7 +445,7 @@ def _write_event_analysis(
     expected_outcome: str | None,
     use_expected_outcome: bool,
     elapsed_since_previous: float | None,
-    wait_instruction: str | None,
+    settle_after_seconds: float | None,
     text_resolution: dict[str, Any] | None,
 ) -> None:
     write_json(
@@ -475,8 +470,8 @@ def _write_event_analysis(
                 else {}
             ),
             **(
-                {"wait_instruction": wait_instruction}
-                if wait_instruction is not None
+                {"settle_after_seconds": settle_after_seconds}
+                if settle_after_seconds is not None
                 else {}
             ),
             "vision": {
@@ -500,6 +495,30 @@ def _write_event_analysis(
             ),
         },
     )
+
+
+def _next_instruction_event_settle(
+    *,
+    events: list[RecordedEvent],
+    event_pos: int,
+    event: RecordedEvent,
+    prepared_list: list[Any],
+    instruction_results: list[Any],
+) -> float | None:
+    """Forward gap to the next event that will emit an instruction, if >= min settle."""
+    if event.kind == "wait":
+        return None
+    for next_pos in range(event_pos + 1, len(events)):
+        if prepared_list[next_pos] is None:
+            continue
+        next_result = instruction_results[next_pos]
+        if next_result is _UNSET or next_result is None:
+            continue
+        settle = _elapsed_seconds(event.timestamp_utc, events[next_pos].timestamp_utc)
+        if settle is not None and settle >= _SETTLE_AFTER_MIN_SECONDS:
+            return settle
+        return None
+    return None
 
 
 async def analyze_recording_session(
@@ -597,7 +616,7 @@ async def analyze_recording_session(
         if llm_cancelled:
             cancelled = True
 
-        # Ordered assemble: waits, report lists, per-event analysis JSON.
+        # Ordered assemble: report lists, per-event analysis JSON.
         previous_instruction_event: RecordedEvent | None = None
         for event_pos, event in enumerate(events):
             if should_cancel is not None and should_cancel():
@@ -636,19 +655,19 @@ async def analyze_recording_session(
             cached += 1
             processed += 1
             elapsed_since_previous: float | None = None
-            wait_instruction: str | None = None
             if previous_instruction_event is not None:
                 elapsed_since_previous = _elapsed_seconds(
                     previous_instruction_event.timestamp_utc,
                     event.timestamp_utc,
                 )
-                if (
-                    elapsed_since_previous is not None
-                    and elapsed_since_previous > _WAIT_THRESHOLD_SECONDS
-                ):
-                    wait_instruction = _wait_instruction(elapsed_since_previous)
-                    instructions.append(wait_instruction)
-                    expected_outcomes.append(None)
+
+            settle_after_seconds = _next_instruction_event_settle(
+                events=events,
+                event_pos=event_pos,
+                event=event,
+                prepared_list=prepared_list,
+                instruction_results=instruction_results,
+            )
 
             instructions.append(instruction)
             expected_outcomes.append(None)
@@ -662,7 +681,7 @@ async def analyze_recording_session(
                 expected_outcome=None,
                 use_expected_outcome=False,
                 elapsed_since_previous=elapsed_since_previous,
-                wait_instruction=wait_instruction,
+                settle_after_seconds=settle_after_seconds,
                 text_resolution=text_resolution,
             )
             log_info(f"cached event {event.index}: {instruction}")

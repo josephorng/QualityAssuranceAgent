@@ -78,7 +78,7 @@ def test_recording_script_helpers(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     text = script_helper.collect_recording_script_text(run_dir)
-    assert text == "等待 2 秒\n點擊「確定」\n# expected_outcome: 對話框已關閉\n"
+    assert text == "點擊「確定」\n# expected_outcome: 對話框已關閉\n"
     assert script_helper.is_recording_dir(run_dir)
     assert script_helper.is_recording_script_path(run_dir)
     assert script_helper.resolve_runnable_script_path(run_dir) == run_dir

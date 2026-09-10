@@ -49,7 +49,12 @@ from cua_mcp.yolo_onnx import (
     run_yolo_onnx_end2end,
 )
 from src.common.io_utils import imread_bgr, read_json, write_json
-from src.common.settings import ROOT_DIR, resolve_recordings_dir, resolve_runs_dir
+from src.common.settings import (
+    ROOT_DIR,
+    apply_vision_env_from_settings,
+    resolve_recordings_dir,
+    resolve_runs_dir,
+)
 
 YOLO_TRITON_MODEL_UI = "yolo_ui"
 YOLO_TRITON_MODEL_UI_SMALL = "yolo_ui_small"
@@ -2693,6 +2698,8 @@ def run_app(
     images_dir: Path | None = None,
     initial_tab: str = "runs",
 ) -> None:
+    # Same as main.py: use agent settings Triton host (not vision_backend local default).
+    apply_vision_env_from_settings()
     root = tk.Tk()
     CombinedImageViewerApp(
         root,

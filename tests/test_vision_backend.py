@@ -84,7 +84,7 @@ def test_infer_yolo_calls_triton_client(monkeypatch: pytest.MonkeyPatch) -> None
     assert out.shape == expected.shape
     mock_client.infer.assert_called_once()
     call_kwargs = mock_client.infer.call_args.kwargs
-    assert call_kwargs["model_name"] == "yolo_ui"
+    assert call_kwargs["model_name"] == "yolo_ui_small"
     assert call_kwargs["timeout"] == 20
     client_kwargs = client_cls.call_args.kwargs
     assert client_kwargs["connection_timeout"] == 20.0

@@ -70,7 +70,7 @@ def triton_client_use_ssl() -> bool:
 
 
 def triton_yolo_model_name() -> str:
-    return os.environ.get("TRITON_YOLO_MODEL", "yolo_ui").strip() or "yolo_ui"
+    return os.environ.get("TRITON_YOLO_MODEL", "yolo_ui_small").strip() or "yolo_ui_small"
 
 
 def triton_crnn_model_name() -> str:

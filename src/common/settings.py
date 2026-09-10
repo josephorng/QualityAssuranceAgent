@@ -454,3 +454,4 @@ def apply_vision_env_from_settings() -> None:
     os.environ["TRITON_HTTP_URL"] = normalize_triton_http_url(settings.triton_http_url)
     os.environ["VISION_BACKEND"] = "triton"
     os.environ["TRITON_TIMEOUT_SECONDS"] = str(settings.triton_timeout_seconds)
+    os.environ["TRITON_YOLO_MODEL"] = "yolo_ui_small"

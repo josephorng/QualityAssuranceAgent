@@ -43,7 +43,12 @@ from cua_mcp.selection_engine import request_json_with_retry
 from cua_mcp.vision_backend import triton_yolo_model_name
 from cua_mcp.yolo_onnx import DEFAULT_CONF_YOLOV26_END2END, YOLO_CLASS_ELEMENT, YOLO_CLASS_TEXT
 from src.common.io_utils import imread_bgr
-from src.common.settings import load_settings, resolve_recordings_dir, resolve_runs_dir
+from src.common.settings import (
+    apply_vision_env_from_settings,
+    load_settings,
+    resolve_recordings_dir,
+    resolve_runs_dir,
+)
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
 UI_FONT_SIZE = 12
@@ -2309,6 +2314,8 @@ def run_app(
     images_dir: Path | None = None,
     initial_tab: str = "runs",
 ) -> None:
+    # Same as main.py: use agent settings Triton host (not vision_backend local default).
+    apply_vision_env_from_settings()
     _ensure_run_state_for_tooling()
     root = tk.Tk()
     OcrVerifyApp(

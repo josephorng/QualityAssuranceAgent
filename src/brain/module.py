@@ -88,6 +88,13 @@ class BaselineMatchDecision:
         """Advance without recovery unless mismatch is high-confidence."""
         return self.match or self.confidence != "high"
 
+
+# After actor success with a settle gap and baseline: verify at these multiples of the gap.
+# Gaps under ``_SETTLE_POLL_MULTI_MIN_SECONDS`` only poll once at 1.0x.
+_SETTLE_BASELINE_POLL_MULTIPLIERS: tuple[float, ...] = (1.0, 1.5, 2.0)
+_SETTLE_POLL_MULTI_MIN_SECONDS = 2.0
+
+
 ROLE_USER = "user"
 ROLE_TOOL = "tool"
 ROLE_SYSTEM = "system"
@@ -981,62 +988,106 @@ class BrainModule:
         script_step_index: int,
         *,
         actor_succeeded: bool,
+        settle_after: float | None = None,
     ) -> ScriptStepVerifyResult | None:
         """Capture a fresh screenshot and verify via a two-round LLM flow when a baseline exists.
 
         Round 1 (baseline attached): compare live vs recorded after-frame only. Advance on
         match, or on mismatch with confidence low. Only high-confidence mismatches continue
         to recovery. Without a baseline: single recovery/outcome verify call (existing path).
+
+        When ``settle_after`` is set with a baseline and actor success, poll baseline match
+        at 1.0x / 1.5x / 2.0x of that gap (1.0x only when the gap is under 2s). Recovery
+        runs only after the final poll still mismatches.
         """
         if self._eye is None:
             raise RuntimeError("BrainModule requires eye=EyeModule(...) for step verification")
 
         baseline_path = self._current_baseline_after_path()
-        live_image_paths = list(await self._eye.capture_separated_images())
-        verification_image_paths = list(live_image_paths)
-        if baseline_path:
-            verification_image_paths = [
-                *live_image_paths[:1],
-                baseline_path,
-            ]
-
         transcript_messages: list[dict[str, Any]] = []
         baseline_precheck = "(none)"
+        verification_image_paths: list[str] = []
+
+        poll_settle = (
+            bool(baseline_path)
+            and actor_succeeded
+            and settle_after is not None
+            and settle_after > 0
+        )
 
         if baseline_path:
-            match_decision, match_messages = await self._verify_baseline_match_round(
-                verification_image_paths
-            )
-            transcript_messages.extend(match_messages)
-            if match_decision is not None and match_decision.treats_as_match():
-                self._append_step_messages(
-                    transcript_messages,
-                    transcript_counter,
-                    script_step_index,
-                    attribute_name="verification",
+            match_decision: BaselineMatchDecision | None = None
+            if poll_settle:
+                assert settle_after is not None
+                multipliers = (
+                    _SETTLE_BASELINE_POLL_MULTIPLIERS
+                    if settle_after >= _SETTLE_POLL_MULTI_MIN_SECONDS
+                    else (1.0,)
                 )
-                if match_decision.match:
-                    reason = (
-                        match_decision.reason.strip()
-                        or "Live UI matches recorded after-frame."
+                elapsed = 0.0
+                for attempt_index, mult in enumerate(multipliers):
+                    target = settle_after * mult
+                    delay = max(0.0, target - elapsed)
+                    if delay > 0:
+                        self.manager.log_info(
+                            f"Script step {script_step_index + 1} settling "
+                            f"{delay:.3f}s to {mult:.1f}x gap ({target:.3f}s) "
+                            f"before baseline verify "
+                            f"({attempt_index + 1}/{len(multipliers)})"
+                        )
+                        await asyncio.sleep(delay)
+                        elapsed = target
+                    live_image_paths = list(await self._eye.capture_separated_images())
+                    verification_image_paths = [
+                        *live_image_paths[:1],
+                        baseline_path,
+                    ]
+                    match_decision, match_messages = await self._verify_baseline_match_round(
+                        verification_image_paths
                     )
-                    self.manager.log_info(f"Verify baseline match: true; advancing. {reason}")
-                else:
-                    reason = (
-                        match_decision.reason.strip()
-                        or "Baseline mismatch not high-confidence; treating as match."
-                    )
-                    self.manager.log_info(
-                        "Verify baseline match: false with confidence="
-                        f"{match_decision.confidence}; advancing without recovery. {reason}"
-                    )
-                return ScriptStepVerifyResult(
-                    accomplished=True,
-                    branch="advance",
-                    target_step=None,
-                    clearly_unmet=False,
-                    reason=reason,
+                    transcript_messages.extend(match_messages)
+                    if match_decision is not None and match_decision.treats_as_match():
+                        return self._baseline_match_advance_result(
+                            match_decision,
+                            transcript_messages,
+                            transcript_counter,
+                            script_step_index,
+                        )
+                    is_last = attempt_index + 1 >= len(multipliers)
+                    if not is_last:
+                        if match_decision is None:
+                            self.manager.log_info(
+                                f"Verify baseline match unparseable at {mult:.1f}x; "
+                                "waiting for next settle poll"
+                            )
+                        else:
+                            mismatch_reason = (
+                                match_decision.reason.strip()
+                                or "Live UI differs from recorded after-frame."
+                            )
+                            self.manager.log_info(
+                                "Verify baseline match: false confidence="
+                                f"{match_decision.confidence} at {mult:.1f}x; "
+                                f"waiting for next settle poll. {mismatch_reason}"
+                            )
+            else:
+                live_image_paths = list(await self._eye.capture_separated_images())
+                verification_image_paths = [
+                    *live_image_paths[:1],
+                    baseline_path,
+                ]
+                match_decision, match_messages = await self._verify_baseline_match_round(
+                    verification_image_paths
                 )
+                transcript_messages.extend(match_messages)
+                if match_decision is not None and match_decision.treats_as_match():
+                    return self._baseline_match_advance_result(
+                        match_decision,
+                        transcript_messages,
+                        transcript_counter,
+                        script_step_index,
+                    )
+
             if match_decision is None:
                 baseline_precheck = (
                     "mismatch: baseline match round returned no parseable result; "
@@ -1056,6 +1107,15 @@ class BrainModule:
                     "Verify baseline match: false confidence="
                     f"{match_decision.confidence}; proceeding to recovery. {mismatch_reason}"
                 )
+            if not verification_image_paths:
+                live_image_paths = list(await self._eye.capture_separated_images())
+                verification_image_paths = [
+                    *live_image_paths[:1],
+                    baseline_path,
+                ]
+        else:
+            live_image_paths = list(await self._eye.capture_separated_images())
+            verification_image_paths = list(live_image_paths)
 
         recovery_result, recovery_messages = await self._verify_script_recovery_round(
             verification_image_paths,
@@ -1071,6 +1131,43 @@ class BrainModule:
             attribute_name="verification",
         )
         return recovery_result
+
+    def _baseline_match_advance_result(
+        self,
+        match_decision: BaselineMatchDecision,
+        transcript_messages: list[dict[str, Any]],
+        transcript_counter: int,
+        script_step_index: int,
+    ) -> ScriptStepVerifyResult:
+        """Persist baseline-match transcript and return an advance verify result."""
+        self._append_step_messages(
+            transcript_messages,
+            transcript_counter,
+            script_step_index,
+            attribute_name="verification",
+        )
+        if match_decision.match:
+            reason = (
+                match_decision.reason.strip()
+                or "Live UI matches recorded after-frame."
+            )
+            self.manager.log_info(f"Verify baseline match: true; advancing. {reason}")
+        else:
+            reason = (
+                match_decision.reason.strip()
+                or "Baseline mismatch not high-confidence; treating as match."
+            )
+            self.manager.log_info(
+                "Verify baseline match: false with confidence="
+                f"{match_decision.confidence}; advancing without recovery. {reason}"
+            )
+        return ScriptStepVerifyResult(
+            accomplished=True,
+            branch="advance",
+            target_step=None,
+            clearly_unmet=False,
+            reason=reason,
+        )
 
     async def _verify_baseline_match_round(
         self,
@@ -1579,12 +1676,25 @@ class BrainModule:
             settle_after = None
             if step_succeeded:
                 settle_after = self._current_settle_after_seconds()
-                if settle_after is not None and settle_after > 0:
-                    self.manager.log_info(
-                        f"Script step {script_step_index + 1} settling "
-                        f"{settle_after:.3f}s before verify"
-                    )
-                    await asyncio.sleep(settle_after)
+            # With a baseline, settle sleeps happen inside verify polls (1.0x/1.5x/2.0x).
+            # Without a baseline, sleep the full gap here before skip/outcome verify.
+            poll_settle = (
+                step_succeeded
+                and settle_after is not None
+                and settle_after > 0
+                and self._current_baseline_after_path() is not None
+            )
+            if (
+                step_succeeded
+                and settle_after is not None
+                and settle_after > 0
+                and not poll_settle
+            ):
+                self.manager.log_info(
+                    f"Script step {script_step_index + 1} settling "
+                    f"{settle_after:.3f}s before verify"
+                )
+                await asyncio.sleep(settle_after)
             if self._should_skip_vision_verify(step_succeeded):
                 self.manager.log_info(
                     f"Script step {script_step_index + 1} skipping vision verification "
@@ -1601,6 +1711,7 @@ class BrainModule:
                     transcript_counter,
                     script_step_index,
                     actor_succeeded=step_succeeded,
+                    settle_after=settle_after if poll_settle else None,
                 )
                 if verify_result is None and step_succeeded:
                     self.manager.log_info(

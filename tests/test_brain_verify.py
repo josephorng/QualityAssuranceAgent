@@ -631,7 +631,7 @@ async def test_process_step_verifies_when_baseline_present_even_if_outcome_empty
 
 
 @pytest.mark.asyncio
-async def test_process_step_settles_before_verify_when_settle_seeded(monkeypatch) -> None:
+async def test_process_step_passes_settle_to_verify_when_baseline_present(monkeypatch) -> None:
     brain = _brain_for_process_step()
     brain.script_expected_outcomes = [None, None, None]
     brain.script_baseline_after_paths = [None, "C:/fake/baseline.jpeg", None]
@@ -652,10 +652,37 @@ async def test_process_step_settles_before_verify_when_settle_seeded(monkeypatch
     result = await brain.process_step()
 
     assert result.step_finished is True
-    sleep_mock.assert_awaited_once_with(2.5)
+    sleep_mock.assert_not_awaited()
     brain._verify_script_step.assert_awaited_once()
+    assert brain._verify_script_step.await_args.kwargs["settle_after"] == 2.5
     metadata = brain._update_step_metadata.call_args.args[2]
     assert metadata["settle_after_seconds"] == 2.5
+
+
+@pytest.mark.asyncio
+async def test_process_step_sleeps_settle_when_no_baseline(monkeypatch) -> None:
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = ["panel open", "calc open", "5 entered"]
+    brain.script_baseline_after_paths = [None, None, None]
+    brain.script_settle_after_seconds = [None, 3.0, None]
+    brain._current_baseline_after_path = MagicMock(return_value=None)
+    brain.loop = AsyncMock(return_value=True)
+    brain._verify_script_step = AsyncMock(
+        return_value=ScriptStepVerifyResult(
+            accomplished=True,
+            branch="advance",
+            target_step=None,
+            reason="ok",
+        )
+    )
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    sleep_mock.assert_awaited_once_with(3.0)
+    assert brain._verify_script_step.await_args.kwargs["settle_after"] is None
 
 
 @pytest.mark.asyncio
@@ -674,6 +701,165 @@ async def test_process_step_skips_settle_when_settle_none(monkeypatch) -> None:
     assert result.step_finished is True
     sleep_mock.assert_not_awaited()
     brain._verify_script_step.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_verify_script_step_settle_poll_retries_then_recovers(tmp_path, monkeypatch) -> None:
+    live = tmp_path / "live.png"
+    baseline = tmp_path / "after.jpeg"
+    live.write_bytes(b"live")
+    baseline.write_bytes(b"after")
+
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = MagicMock()
+    brain.manager.log_info = MagicMock()
+    brain.manager.log_error = MagicMock()
+    brain.settings = MagicMock(brain_lm="test-model")
+    brain.script_lines = ["press enter"]
+    brain.script_expected_outcomes = [None]
+    brain.script_baseline_after_paths = [str(baseline)]
+    brain._script_step_index = 0
+    brain._eye = MagicMock()
+    brain._eye.capture_separated_images = AsyncMock(return_value=[str(live)])
+    brain._append_step_messages = MagicMock()
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+
+    match_calls = {"n": 0}
+
+    async def _match(_paths):
+        match_calls["n"] += 1
+        return (
+            BaselineMatchDecision(
+                match=False,
+                confidence="high",
+                reason=f"still loading {match_calls['n']}",
+            ),
+            [{"role": "assistant", "content": "mismatch"}],
+        )
+
+    brain._verify_baseline_match_round = _match
+    brain._verify_script_recovery_round = AsyncMock(
+        return_value=(
+            ScriptStepVerifyResult(
+                accomplished=False,
+                branch="smart",
+                target_step=None,
+                clearly_unmet=True,
+                reason="recover",
+            ),
+            [{"role": "assistant", "content": "recover"}],
+        )
+    )
+
+    result = await brain._verify_script_step(
+        0, 0, actor_succeeded=True, settle_after=4.0
+    )
+
+    assert result is not None
+    assert result.branch == "smart"
+    assert match_calls["n"] == 3
+    assert [call.args[0] for call in sleep_mock.await_args_list] == [4.0, 2.0, 2.0]
+    brain._verify_script_recovery_round.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_verify_script_step_settle_poll_advances_on_second_match(
+    tmp_path, monkeypatch
+) -> None:
+    live = tmp_path / "live.png"
+    baseline = tmp_path / "after.jpeg"
+    live.write_bytes(b"live")
+    baseline.write_bytes(b"after")
+
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = MagicMock()
+    brain.manager.log_info = MagicMock()
+    brain.manager.log_error = MagicMock()
+    brain.settings = MagicMock(brain_lm="test-model")
+    brain.script_lines = ["press enter"]
+    brain.script_expected_outcomes = [None]
+    brain.script_baseline_after_paths = [str(baseline)]
+    brain._script_step_index = 0
+    brain._eye = MagicMock()
+    brain._eye.capture_separated_images = AsyncMock(return_value=[str(live)])
+    brain._append_step_messages = MagicMock()
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+
+    decisions = [
+        BaselineMatchDecision(match=False, confidence="high", reason="loading"),
+        BaselineMatchDecision(match=True, confidence="high", reason="ready"),
+    ]
+
+    async def _match(_paths):
+        return decisions.pop(0), [{"role": "assistant", "content": "x"}]
+
+    brain._verify_baseline_match_round = _match
+    brain._verify_script_recovery_round = AsyncMock()
+
+    result = await brain._verify_script_step(
+        0, 0, actor_succeeded=True, settle_after=4.0
+    )
+
+    assert result is not None
+    assert result.accomplished is True
+    assert result.branch == "advance"
+    assert result.reason == "ready"
+    assert [call.args[0] for call in sleep_mock.await_args_list] == [4.0, 2.0]
+    brain._verify_script_recovery_round.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_verify_script_step_short_settle_polls_once(tmp_path, monkeypatch) -> None:
+    live = tmp_path / "live.png"
+    baseline = tmp_path / "after.jpeg"
+    live.write_bytes(b"live")
+    baseline.write_bytes(b"after")
+
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = MagicMock()
+    brain.manager.log_info = MagicMock()
+    brain.manager.log_error = MagicMock()
+    brain.settings = MagicMock(brain_lm="test-model")
+    brain.script_lines = ["press enter"]
+    brain.script_expected_outcomes = [None]
+    brain.script_baseline_after_paths = [str(baseline)]
+    brain._script_step_index = 0
+    brain._eye = MagicMock()
+    brain._eye.capture_separated_images = AsyncMock(return_value=[str(live)])
+    brain._append_step_messages = MagicMock()
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+
+    async def _match(_paths):
+        return (
+            BaselineMatchDecision(match=False, confidence="high", reason="nope"),
+            [{"role": "assistant", "content": "x"}],
+        )
+
+    brain._verify_baseline_match_round = _match
+    brain._verify_script_recovery_round = AsyncMock(
+        return_value=(
+            ScriptStepVerifyResult(
+                accomplished=False,
+                branch="retry",
+                target_step=None,
+                clearly_unmet=True,
+                reason="retry",
+            ),
+            [],
+        )
+    )
+
+    result = await brain._verify_script_step(
+        0, 0, actor_succeeded=True, settle_after=1.5
+    )
+
+    assert result is not None
+    assert result.branch == "retry"
+    sleep_mock.assert_awaited_once_with(1.5)
+    brain._verify_script_recovery_round.assert_awaited_once()
 
 
 @pytest.mark.asyncio

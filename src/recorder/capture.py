@@ -42,8 +42,28 @@ _DOUBLE_CLICK_MAX_DIST_PX = 8
 _DRAG_THRESHOLD_PX = 8
 # Must exceed the double-click window so short presses still defer for double-click.
 _HOLD_THRESHOLD_S = 0.5
+# Pre-type frames are only reused when typing focus is still near the capture point.
+# Enter→app launch→type into a new dialog moves focus far away; reuse would keep a
+# stale Search/desktop frame as the text_input before-shot.
+_PRE_TYPE_FOCUS_MAX_DIST_PX = 48
+# After typing pauses, capture a settled frame for the next key_press before-shot.
+# LL hooks cannot screenshot before Tab/Enter is delivered; reuse this frame instead.
+_PRE_KEY_SETTLE_S = 0.3
 _QUEUE_SENTINEL = object()
 _DRAIN_MARKER = object()
+
+
+@dataclass(frozen=True)
+class _PendingPreTypeShot:
+    """Settled UI frame captured before the next text_input or key_press."""
+
+    path: str
+    monitor_index: int
+    monitor_offset: tuple[int, int]
+    focus_xy: tuple[int, int]
+
+    def as_finalize_tuple(self) -> tuple[str, int, tuple[int, int]]:
+        return self.path, self.monitor_index, self.monitor_offset
 
 
 @dataclass
@@ -54,9 +74,10 @@ class _DeferredCaptureJob:
     callback takes too long. Keep hook handlers cheap; run capture work here.
     """
 
-    action: str  # begin_text_input | flush_text_input | keyboard_event
+    action: str  # begin_text_input | flush_text_input | keyboard_event | settle_pre_key
     meta: dict[str, Any] | None = None
-    pending_pre_type: tuple[str, int, tuple[int, int]] | None = None
+    pending_pre_type: _PendingPreTypeShot | None = None
+    pending_pre_key: _PendingPreTypeShot | None = None
     last_click_xy: tuple[int, int] | None = None
     mouse_xy: tuple[int, int] | None = None
     flush_chars: list[str] | None = None
@@ -72,6 +93,22 @@ class _DeferredCaptureJob:
     keys: list[str] | None = None
     text: str | None = None
     refresh_pre_type: bool = False
+
+
+def _pre_type_focus_still_valid(
+    pending_focus: tuple[int, int] | None,
+    current_focus: tuple[int, int] | None,
+    *,
+    max_dist_px: float = _PRE_TYPE_FOCUS_MAX_DIST_PX,
+) -> bool:
+    """Return True when the pre-type frame still matches the live typing focus."""
+    if pending_focus is None or current_focus is None:
+        return False
+    dx = int(pending_focus[0]) - int(current_focus[0])
+    dy = int(pending_focus[1]) - int(current_focus[1])
+    return (dx * dx + dy * dy) <= int(max_dist_px * max_dist_px)
+
+
 _LISTENER_STARTUP_TIMEOUT_S = 2.0
 _SPECIAL_KEYS = frozenset(
     {
@@ -177,6 +214,10 @@ def _pending_right_capture_path(run_dir: Path) -> Path:
 
 def _pending_pre_type_capture_path(run_dir: Path) -> Path:
     return run_dir / "screenshots" / "_pending_pre_type.jpeg"
+
+
+def _pending_pre_key_capture_path(run_dir: Path) -> Path:
+    return run_dir / "screenshots" / "_pending_pre_key.jpeg"
 
 
 def _pending_drag_end_capture_path(run_dir: Path, monitor_index: int) -> Path:
@@ -612,7 +653,10 @@ class RecordingSession:
         self._pending_text_meta: dict[str, Any] | None = None
         # Empty-field frame captured after focus settles (click/Tab/etc.), consumed
         # as the text_input before-shot so we do not race the first typed glyph.
-        self._pending_pre_type_screenshot: tuple[str, int, tuple[int, int]] | None = None
+        self._pending_pre_type_screenshot: _PendingPreTypeShot | None = None
+        # Settled frame for the next key_press before-shot (cannot capture on LL hook).
+        self._pending_pre_key_screenshot: _PendingPreTypeShot | None = None
+        self._pending_pre_key_timer: threading.Timer | None = None
         self._last_pointer_cursor_xy: tuple[int, int] | None = None
         self._event_queue: queue.Queue[object] = queue.Queue()
         self._worker_thread: threading.Thread | None = None
@@ -709,6 +753,8 @@ class RecordingSession:
             self._pending_text_chars = []
             self._pending_text_meta = None
             self._pending_pre_type_screenshot = None
+            self._pending_pre_key_screenshot = None
+            self._cancel_pre_key_settle_timer_locked()
             self._last_pointer_cursor_xy = None
             pending = self._pending_click_timer
             self._pending_click_timer = None
@@ -823,12 +869,22 @@ class RecordingSession:
             self._pending_windows_before = None
             leftover_pre_type = self._pending_pre_type_screenshot
             self._pending_pre_type_screenshot = None
+            leftover_pre_key = self._pending_pre_key_screenshot
+            self._pending_pre_key_screenshot = None
+            self._cancel_pre_key_settle_timer_locked()
         _discard_pending_drag_end_capture_files(leftover_drag_end)
         if leftover_pre_type is not None:
-            pending_pre = Path(leftover_pre_type[0])
+            pending_pre = Path(leftover_pre_type.path)
             if pending_pre.is_file():
                 try:
                     pending_pre.unlink()
+                except OSError:
+                    pass
+        if leftover_pre_key is not None:
+            pending_key = Path(leftover_pre_key.path)
+            if pending_key.is_file():
+                try:
+                    pending_key.unlink()
                 except OSError:
                     pass
 
@@ -1046,6 +1102,9 @@ class RecordingSession:
             self._pending_text_chars = []
             self._pending_text_caret = 0
             self._pending_text_meta = None
+            self._cancel_pre_key_settle_timer_locked()
+            pending_pre_key = self._pending_pre_key_screenshot
+            self._pending_pre_key_screenshot = None
         shared_index = index if cursor_xy is not None else None
         self._enqueue(
             _DeferredCaptureJob(
@@ -1060,6 +1119,7 @@ class RecordingSession:
                 flush_chars=flush_chars or None,
                 flush_meta=flush_meta,
                 shared_end_index=shared_index,
+                pending_pre_key=pending_pre_key,
                 refresh_pre_type=True,
             )
         )
@@ -1094,12 +1154,168 @@ class RecordingSession:
         self._pending_pre_type_screenshot = None
         if pending is None:
             return
-        path = Path(pending[0])
+        path = Path(pending.path)
         if path.is_file():
             try:
                 path.unlink()
             except OSError:
                 pass
+
+    def _discard_pending_pre_key_locked(self) -> None:
+        pending = self._pending_pre_key_screenshot
+        self._pending_pre_key_screenshot = None
+        if pending is None:
+            return
+        path = Path(pending.path)
+        if path.is_file():
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+    def _cancel_pre_key_settle_timer_locked(self) -> None:
+        pending = self._pending_pre_key_timer
+        self._pending_pre_key_timer = None
+        if pending is not None:
+            pending.cancel()
+
+    def _schedule_pre_key_settle(self) -> None:
+        """After typing pauses, capture a before-shot for the next Tab/Enter/etc."""
+        with self._lock:
+            if (
+                self._run_dir is None
+                or not self._accepting_input
+                or self._finalizing
+                or self._pending_text_meta is None
+            ):
+                return
+            self._cancel_pre_key_settle_timer_locked()
+            timer = threading.Timer(_PRE_KEY_SETTLE_S, self._on_pre_key_settle_timer)
+            timer.daemon = True
+            self._pending_pre_key_timer = timer
+            timer.start()
+
+    def _on_pre_key_settle_timer(self) -> None:
+        with self._lock:
+            self._pending_pre_key_timer = None
+            if (
+                self._run_dir is None
+                or not self._accepting_input
+                or self._finalizing
+                or self._pending_text_meta is None
+            ):
+                return
+        self._enqueue(_DeferredCaptureJob(action="settle_pre_key"))
+
+    def _mirror_shot_to_pre_key(
+        self,
+        shot: _PendingPreTypeShot,
+        run_dir: Path,
+    ) -> None:
+        """Copy a settled frame into the pre-key slot for the next key_press."""
+        with self._lock:
+            self._discard_pending_pre_key_locked()
+            if (
+                self._run_dir is None
+                or not self._accepting_input
+                or self._finalizing
+            ):
+                return
+        dest = _pending_pre_key_capture_path(run_dir)
+        src = Path(shot.path)
+        try:
+            if src.resolve() != dest.resolve():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(src.read_bytes())
+            elif not dest.is_file():
+                return
+        except OSError:
+            return
+        with self._lock:
+            if (
+                self._run_dir is None
+                or not self._accepting_input
+                or self._finalizing
+            ):
+                if dest.is_file():
+                    try:
+                        dest.unlink()
+                    except OSError:
+                        pass
+                return
+            self._pending_pre_key_screenshot = _PendingPreTypeShot(
+                path=str(dest),
+                monitor_index=shot.monitor_index,
+                monitor_offset=shot.monitor_offset,
+                focus_xy=shot.focus_xy,
+            )
+
+    def _refresh_pending_pre_key(self) -> None:
+        """Capture the current typing UI as the next key_press before-shot."""
+        with self._lock:
+            run_dir = self._run_dir
+            if (
+                run_dir is None
+                or not self._accepting_input
+                or self._finalizing
+                or self._pending_text_meta is None
+            ):
+                return
+            last_click_xy = self._last_pointer_cursor_xy
+            text_meta = self._pending_text_meta
+            self._discard_pending_pre_key_locked()
+
+        mouse_xy = None
+        try:
+            pos = pyautogui.position()
+            mouse_xy = (int(pos.x), int(pos.y))
+        except Exception:
+            pass
+
+        focus_xy = None
+        if isinstance(text_meta, dict):
+            raw_focus = text_meta.get("cursor_xy")
+            if isinstance(raw_focus, (tuple, list)) and len(raw_focus) == 2:
+                focus_xy = (int(raw_focus[0]), int(raw_focus[1]))
+        if focus_xy is None:
+            typing_focus = resolve_typing_focus(
+                last_click_xy=last_click_xy,
+                mouse_xy=mouse_xy,
+            )
+            focus_xy = typing_focus.point
+        if focus_xy is None:
+            return
+
+        pending_dest = _pending_pre_key_capture_path(run_dir)
+        try:
+            path, mon_idx, mon_offset = _capture_screenshot_at_point(
+                focus_xy[0],
+                focus_xy[1],
+                pending_dest,
+            )
+        except Exception:
+            return
+
+        with self._lock:
+            if (
+                self._run_dir is None
+                or not self._accepting_input
+                or self._finalizing
+                or self._pending_text_meta is None
+            ):
+                stale = Path(path)
+                if stale.is_file():
+                    try:
+                        stale.unlink()
+                    except OSError:
+                        pass
+                return
+            self._pending_pre_key_screenshot = _PendingPreTypeShot(
+                path=path,
+                monitor_index=mon_idx,
+                monitor_offset=mon_offset,
+                focus_xy=(int(focus_xy[0]), int(focus_xy[1])),
+            )
 
     def _refresh_pending_pre_type(
         self,
@@ -1135,10 +1351,20 @@ class RecordingSession:
 
         pending_dest = _pending_pre_type_capture_path(run_dir)
         try:
-            info = _capture_screenshot_at_point(focus_xy[0], focus_xy[1], pending_dest)
+            path, mon_idx, mon_offset = _capture_screenshot_at_point(
+                focus_xy[0],
+                focus_xy[1],
+                pending_dest,
+            )
         except Exception:
             return
 
+        shot = _PendingPreTypeShot(
+            path=path,
+            monitor_index=mon_idx,
+            monitor_offset=mon_offset,
+            focus_xy=(int(focus_xy[0]), int(focus_xy[1])),
+        )
         with self._lock:
             if (
                 self._run_dir is None
@@ -1146,14 +1372,16 @@ class RecordingSession:
                 or self._finalizing
                 or self._pending_text_meta is not None
             ):
-                path = Path(info[0])
-                if path.is_file():
+                stale = Path(path)
+                if stale.is_file():
                     try:
-                        path.unlink()
+                        stale.unlink()
                     except OSError:
                         pass
                 return
-            self._pending_pre_type_screenshot = info
+            self._pending_pre_type_screenshot = shot
+        # Same settled UI is the best before-shot for a following Tab/Enter.
+        self._mirror_shot_to_pre_key(shot, run_dir)
 
     def _flush_pending_text_input(
         self,
@@ -1169,6 +1397,7 @@ class RecordingSession:
             self._pending_text_chars = []
             self._pending_text_caret = 0
             self._pending_text_meta = None
+            self._cancel_pre_key_settle_timer_locked()
         if not chars or meta is None:
             return
         self._enqueue(
@@ -1251,6 +1480,7 @@ class RecordingSession:
             caret = max(0, min(self._pending_text_caret, len(self._pending_text_chars)))
             self._pending_text_chars[caret:caret] = [char]
             self._pending_text_caret = caret + 1
+        self._schedule_pre_key_settle()
 
     def _append_text_input_text(
         self,
@@ -1273,6 +1503,7 @@ class RecordingSession:
             caret = max(0, min(self._pending_text_caret, len(self._pending_text_chars)))
             self._pending_text_chars[caret:caret] = list(text)
             self._pending_text_caret = caret + len(text)
+        self._schedule_pre_key_settle()
 
     def _edit_pending_text_input(self, key: keyboard.Key | keyboard.KeyCode) -> bool:
         """Apply in-burst Backspace/Delete/Left/Right/Home/End. Returns True if handled."""
@@ -1307,7 +1538,10 @@ class RecordingSession:
                 self._pending_text_caret = 0
             else:  # end
                 self._pending_text_caret = len(self._pending_text_chars)
-            return True
+            edited = True
+        if edited:
+            self._schedule_pre_key_settle()
+        return edited
 
     def _cancel_pending_click_timer(self) -> None:
         with self._lock:
@@ -1667,14 +1901,16 @@ class RecordingSession:
             self._worker_flush_text_input(job)
         elif job.action == "keyboard_event":
             self._worker_keyboard_event(job)
+        elif job.action == "settle_pre_key":
+            self._refresh_pending_pre_key()
 
     def _discard_pending_pre_type_file(
         self,
-        pending: tuple[str, int, tuple[int, int]] | None,
+        pending: _PendingPreTypeShot | None,
     ) -> None:
         if pending is None:
             return
-        path = Path(pending[0])
+        path = Path(pending.path)
         if path.is_file():
             try:
                 path.unlink()
@@ -1711,6 +1947,16 @@ class RecordingSession:
             meta["cursor_xy"] = focus_xy
             meta["focus_rect"] = typing_focus.rect
 
+            pending_pre_type = job.pending_pre_type
+            if pending_pre_type is not None and not _pre_type_focus_still_valid(
+                pending_pre_type.focus_xy,
+                focus_xy,
+            ):
+                # Focus moved (e.g. Enter launched an app; login field auto-focused).
+                # Reusing the old frame would show the previous UI as the before-shot.
+                self._discard_pending_pre_type_file(pending_pre_type)
+                pending_pre_type = None
+
             shot_path = ""
             mon_idx: int | None = None
             mon_offset: tuple[int, int] | None = None
@@ -1719,10 +1965,14 @@ class RecordingSession:
                     run_dir,
                     index,
                     focus_xy,
-                    job.pending_pre_type,
+                    (
+                        pending_pre_type.as_finalize_tuple()
+                        if pending_pre_type is not None
+                        else None
+                    ),
                 )
             else:
-                self._discard_pending_pre_type_file(job.pending_pre_type)
+                self._discard_pending_pre_type_file(pending_pre_type)
 
             if meta.get("capture_closed"):
                 # Flushed while we captured; drop a late before-shot file if unused.
@@ -1763,9 +2013,26 @@ class RecordingSession:
         end_shot_path = ""
         end_mon_idx: int | None = None
         end_mon_offset: tuple[int, int] | None = None
+        # Prefer a pre-key settle frame (captured before Tab/Enter) over a live
+        # grab that may already show the key's focus change.
+        preferred_end = job.pending_pre_key
+        if preferred_end is not None:
+            dest = screenshot_path_for_event_end(run_dir, index)
+            src = Path(preferred_end.path)
+            if src.is_file():
+                try:
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    if src.resolve() != dest.resolve():
+                        dest.write_bytes(src.read_bytes())
+                    end_shot_path = str(dest)
+                    end_mon_idx = preferred_end.monitor_index
+                    end_mon_offset = preferred_end.monitor_offset
+                except OSError:
+                    end_shot_path = ""
+
         # OCR / after-frame for typing must be on the typing focus monitor, not the
         # next pointer event's monitor (which can be a different display).
-        if shot_xy is not None:
+        if not end_shot_path and shot_xy is not None:
             ocr_shot = self._capture_typing_ocr_end_shot(
                 run_dir,
                 index,
@@ -1809,6 +2076,7 @@ class RecordingSession:
         return None
 
     def _worker_keyboard_event(self, job: _DeferredCaptureJob) -> None:
+        pending_pre_key = job.pending_pre_key
         if job.flush_chars and job.flush_meta is not None:
             self._worker_flush_text_input(
                 _DeferredCaptureJob(
@@ -1818,23 +2086,35 @@ class RecordingSession:
                     shared_end_index=job.shared_end_index,
                     shared_end_monitor=job.shared_end_monitor,
                     shared_end_offset=job.shared_end_offset,
+                    pending_pre_key=pending_pre_key,
                 )
             )
 
         with self._lock:
             run_dir = self._run_dir
         if run_dir is None or job.event_index is None or job.kind is None:
+            if pending_pre_key is not None:
+                self._discard_pending_pre_type_file(pending_pre_key)
             return
 
         shot_path = ""
         mon_idx: int | None = None
         mon_offset: tuple[int, int] | None = None
         if job.cursor_xy is not None:
-            shot_path, mon_idx, mon_offset = self._capture_immediate_screenshot(
+            shot_path, mon_idx, mon_offset = _finalize_screenshot(
                 run_dir,
                 job.event_index,
                 job.cursor_xy,
+                (
+                    pending_pre_key.as_finalize_tuple()
+                    if pending_pre_key is not None
+                    else None
+                ),
             )
+            pending_pre_key = None
+        elif pending_pre_key is not None:
+            self._discard_pending_pre_type_file(pending_pre_key)
+            pending_pre_key = None
 
         self._persist_queued_event(
             _QueuedEvent(

@@ -1073,6 +1073,115 @@ def test_text_input_falls_back_to_live_before_without_pre_type(tmp_path) -> None
     assert Path(raw["screenshot_path"]).read_bytes() == b"live"
 
 
+def test_text_input_discards_pre_type_when_focus_moves(tmp_path) -> None:
+    """Enter can leave a pre-type frame on the old UI; typing into a new field must live-capture."""
+    session = RecordingSession(runs_root=tmp_path)
+    focus_points = iter(
+        [
+            # Pre-type after click (search bar).
+            TypingFocus(point=(160, 900), rect=(50, 880, 300, 920)),
+            # Typing first burst still on search.
+            TypingFocus(point=(160, 900), rect=(50, 880, 300, 920)),
+            # Pre-type immediately after Enter (search still visible).
+            TypingFocus(point=(160, 900), rect=(50, 880, 300, 920)),
+            # Later typing into login account field (focus moved).
+            TypingFocus(point=(917, 410), rect=(890, 400, 1040, 430)),
+        ]
+    )
+
+    def _track(x: int, y: int, dest):
+        name = Path(dest).name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(name.encode("utf-8"))
+        return str(dest), 1, (0, 0)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_track,
+    ), patch(
+        "src.recorder.capture.resolve_typing_focus",
+        side_effect=lambda **_kwargs: next(focus_points),
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            _left_click(session, 160, 900)
+            session._on_key_press(KeyCode.from_char("a"))
+            session._on_key_press(Key.enter)
+            session._on_key_press(KeyCode.from_char("j"))
+            session.stop()
+        finally:
+            if session.is_active():
+                session.stop()
+
+    # event_001 click, event_002 type "a", event_003 Enter, event_004 type "j"
+    text_raw = json.loads((run_dir / "events" / "event_004.json").read_text(encoding="utf-8"))
+    assert text_raw["kind"] == "text_input"
+    assert text_raw["text"] == "j"
+    before = Path(text_raw["screenshot_path"])
+    assert before.name == "event_004.jpeg"
+    # Must be a fresh live grab, not the stale post-Enter pre-type frame.
+    assert before.read_bytes() == b"event_004.jpeg"
+    assert not (run_dir / "screenshots" / "_pending_pre_type.jpeg").exists()
+
+
+def test_key_press_reuses_settled_pre_key_before_shot(tmp_path) -> None:
+    """Tab before-shot must be the settled pre-Tab frame, not a live post-Tab grab."""
+    from src.recorder.capture import _PRE_KEY_SETTLE_S
+
+    session = RecordingSession(runs_root=tmp_path)
+
+    def _track(x: int, y: int, dest):
+        name = Path(dest).name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(name.encode("utf-8"))
+        return str(dest), 1, (0, 0)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_track,
+    ), patch(
+        "src.recorder.capture.resolve_typing_focus",
+        return_value=TypingFocus(point=(903, 410), rect=(890, 400, 920, 430)),
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            _left_click(session, 903, 410)
+            session._on_key_press(KeyCode.from_char("j"))
+            # Wait for debounced pre-key settle after typing.
+            time.sleep(_PRE_KEY_SETTLE_S + 0.15)
+            # Drain settle job before Tab.
+            session.wait_for_deferred_work(timeout=2.0)
+            session._on_key_press(Key.tab)
+            session.stop()
+        finally:
+            if session.is_active():
+                session.stop()
+
+    tab_raw = json.loads((run_dir / "events" / "event_003.json").read_text(encoding="utf-8"))
+    assert tab_raw["kind"] == "key_press"
+    assert tab_raw["key"] == "tab"
+    before = Path(tab_raw["screenshot_path"])
+    assert before.name == "event_003.jpeg"
+    assert before.read_bytes() == b"_pending_pre_key.jpeg"
+
+    text_raw = json.loads((run_dir / "events" / "event_002.json").read_text(encoding="utf-8"))
+    assert text_raw["kind"] == "text_input"
+    end = Path(text_raw["end_screenshot_path"])
+    assert end.name == "event_002_end.jpeg"
+    # Typing after-frame should also prefer the pre-Tab settle (not post-Tab live).
+    assert end.read_bytes() == b"_pending_pre_key.jpeg"
+
+
 def test_text_input_uses_focus_point_not_anchor_click(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
 

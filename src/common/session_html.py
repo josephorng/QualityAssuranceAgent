@@ -551,6 +551,7 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
   margin: 0 0 .5rem; font-size: .9rem; font-weight: 700; color: #57606a;
 }
 .session-verify .meta { margin: 0; }
+.session-verify .shots { margin-top: .75rem; }
 .executed-tools { border-top: 1px solid #d0d7de; }
 .executed-tools h3 { font-size: 1rem; margin: 0; padding: 1rem 1.5rem 0; }
 .meta { margin: 0 0 1rem; }
@@ -2639,11 +2640,80 @@ def _resolve_run_screenshot(raw: str | None, run_root: Path) -> Path | None:
         return None
     candidate = Path(raw)
     if candidate.is_absolute():
-        return candidate if candidate.is_file() else None
+        if candidate.is_file():
+            return candidate
+        # Relocated run folders leave absolute paths to another machine/cwd.
+        if candidate.name:
+            remapped = run_root / "eye" / candidate.name
+            if remapped.is_file():
+                return remapped
+        return None
     repo_root = run_root.parent.parent
     for resolved in (repo_root / candidate, run_root / "eye" / candidate.name):
         if resolved.is_file():
             return resolved
+    return None
+
+
+def _recording_roots_for_remap(run_root: Path) -> list[Path]:
+    """Candidate ``recordings`` roots when remapping absolute paths from other machines."""
+    roots: list[Path] = []
+    parent = run_root.parent
+    # Typical layout: <repo>/runs/<run_id> → <repo>/recordings
+    roots.append(parent.parent / "recordings")
+    # When runs and recordings are siblings under the same parent already named runs.
+    if parent.name.lower() != "recordings":
+        roots.append(parent / "recordings")
+    try:
+        from src.common.settings import resolve_recordings_dir
+
+        roots.append(resolve_recordings_dir())
+    except Exception:
+        pass
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for root in roots:
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(root)
+    return unique
+
+
+def _resolve_baseline_screenshot(raw: str | None, run_root: Path) -> Path | None:
+    """Resolve a recording after-baseline path for session HTML.
+
+    Handles absolute paths that still exist, paths under the run's ``eye/`` folder,
+    and relocated machine paths that still contain ``recordings/<id>/screenshots/...``.
+    """
+    if not raw or not str(raw).strip():
+        return None
+    text = str(raw).strip()
+    found = _resolve_run_screenshot(text, run_root)
+    if found is not None:
+        return found
+    candidate = Path(text)
+    if candidate.is_file():
+        return candidate
+    parts = candidate.parts
+    for index, part in enumerate(parts):
+        if part.lower() != "recordings" or index + 1 >= len(parts):
+            continue
+        relative = Path(*parts[index + 1 :])
+        for recordings_root in _recording_roots_for_remap(run_root):
+            mapped = recordings_root / relative
+            if mapped.is_file():
+                return mapped
+        break
+    if candidate.name:
+        for recordings_root in _recording_roots_for_remap(run_root):
+            if not recordings_root.is_dir():
+                continue
+            # Last resort: basename under any recording's screenshots folder.
+            for shot in recordings_root.glob(f"*/screenshots/{candidate.name}"):
+                if shot.is_file():
+                    return shot
     return None
 
 
@@ -2652,11 +2722,17 @@ def _relative_img_src(screenshot: Path | None, run_root: Path) -> str | None:
     if screenshot is None:
         return None
     resolved = screenshot.resolve()
+    run_resolved = run_root.resolve()
     try:
-        rel = resolved.relative_to(run_root.resolve())
+        rel = resolved.relative_to(run_resolved)
         return str(rel).replace("\\", "/")
     except ValueError:
-        # Screenshot lives outside the run folder; fall back to an absolute file URI.
+        pass
+    # Prefer a relative path for siblings (e.g. ``../recordings/...``) so HTTP report
+    # serving from the common parent works; fall back to file:// across drives.
+    try:
+        return Path(os.path.relpath(resolved, run_resolved)).as_posix()
+    except ValueError:
         return resolved.as_uri()
 
 
@@ -2774,7 +2850,44 @@ def _step_verify_meta_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         status = timing.get("status")
     if isinstance(status, str) and status.strip():
         meta["status"] = status.strip()
+
+    # Last baseline-match user turn attaches [live, recorded-baseline] images.
+    verification = payload.get("verification")
+    if isinstance(verification, list):
+        for message in reversed(verification):
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            images = message.get("images")
+            if not isinstance(images, list) or len(images) < 2:
+                continue
+            live = images[0]
+            baseline = images[1]
+            if isinstance(live, str) and live.strip():
+                meta["verify_live_path"] = live.strip()
+            if isinstance(baseline, str) and baseline.strip():
+                meta["verify_baseline_path"] = baseline.strip()
+            break
     return meta
+
+
+def _baseline_path_from_group(group: dict[str, Any]) -> str | None:
+    """Prefer verify.baseline_after_path, then verification-message baseline image."""
+    verify = group.get("verify")
+    if isinstance(verify, dict):
+        raw = verify.get("baseline_after_path")
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    raw = group.get("verify_baseline_path")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return None
+
+
+def _verify_live_path_from_group(group: dict[str, Any]) -> str | None:
+    raw = group.get("verify_live_path")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return None
 
 
 def _load_step_verify_meta(run_root: Path) -> dict[tuple[int, int], dict[str, Any]]:
@@ -2954,13 +3067,19 @@ def _verify_badge_class(
 
 def _render_verify_panel_html(
     *,
+    run_root: Path,
     verify: Any = None,
     status: Any = None,
+    verify_live_path: str | None = None,
+    baseline_after_path: str | None = None,
 ) -> str:
     """Render verifier decision for a scripted instruction group."""
     has_verify = isinstance(verify, dict)
     has_status = isinstance(status, str) and bool(status.strip())
-    if not has_verify and not has_status:
+    live_shot = _resolve_run_screenshot(verify_live_path, run_root)
+    baseline_shot = _resolve_baseline_screenshot(baseline_after_path, run_root)
+    has_shots = live_shot is not None or baseline_shot is not None
+    if not has_verify and not has_status and not has_shots:
         return ""
 
     rows: list[str] = []
@@ -2996,10 +3115,23 @@ def _render_verify_panel_html(
         if isinstance(updated_state, str) and updated_state.strip():
             rows.append(f"<dt>Updated state</dt><dd>{escape(updated_state.strip())}</dd>")
 
+    meta_html = f'<div class="meta"><dl>{"".join(rows)}</dl></div>' if rows else ""
+    shots_html = ""
+    if has_shots:
+        shot_parts: list[str] = []
+        if live_shot is not None or verify_live_path:
+            shot_parts.append(_render_shot_html("驗證時截圖（即時）", live_shot, run_root))
+        if baseline_shot is not None or baseline_after_path:
+            shot_parts.append(
+                _render_shot_html("錄製基準截圖（after）", baseline_shot, run_root)
+            )
+        shots_html = f'<div class="shots">{"".join(shot_parts)}</div>'
+
     return (
         f'<div class="session-verify">'
         f'<div class="session-verify-title">驗證結果</div>'
-        f'<div class="meta"><dl>{"".join(rows)}</dl></div>'
+        f"{meta_html}"
+        f"{shots_html}"
         f"</div>"
     )
 
@@ -3013,6 +3145,8 @@ def _render_instruction_group_html(
     expected_outcome: Any = None,
     verify: Any = None,
     status: Any = None,
+    verify_live_path: str | None = None,
+    baseline_after_path: str | None = None,
 ) -> str:
     operation_count = len(operations)
     count_label = escape(f"{operation_count} 個動作")
@@ -3060,9 +3194,17 @@ def _render_instruction_group_html(
     else:
         body = '<p class="args-empty" style="padding: 1rem 1.5rem;">（無手部動作）</p>'
 
+    if baseline_after_path is None and isinstance(verify_dict, dict):
+        raw_baseline = verify_dict.get("baseline_after_path")
+        if isinstance(raw_baseline, str) and raw_baseline.strip():
+            baseline_after_path = raw_baseline.strip()
+
     verify_panel = _render_verify_panel_html(
+        run_root=run_root,
         verify=verify,
         status=status,
+        verify_live_path=verify_live_path,
+        baseline_after_path=baseline_after_path,
     )
 
     return (
@@ -4889,6 +5031,8 @@ def write_session_html_from_run(run_root: Path) -> Path:
             expected_outcome=group.get("expected_outcome"),
             verify=group.get("verify"),
             status=group.get("status"),
+            verify_live_path=_verify_live_path_from_group(group),
+            baseline_after_path=_baseline_path_from_group(group),
         )
         for index, group in enumerate(remaining_groups, start=smart_actor_count + 1)
     ]

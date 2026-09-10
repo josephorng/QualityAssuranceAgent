@@ -328,6 +328,86 @@ def test_write_session_html_includes_verification_result(tmp_path: Path) -> None
     assert "<dt>Expected</dt>" not in html
 
 
+def test_write_session_html_shows_baseline_and_live_verify_shots(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    recordings_root = tmp_path / "recordings"
+    run_root = runs_root / "task_baseline_html"
+    recording = recordings_root / "demo_rec"
+    live = _make_png(run_root / "eye" / "live_verify.png")
+    baseline = _make_jpeg(recording / "screenshots" / "event_003.jpeg")
+    foreign_live = Path(
+        r"C:\OtherMachine\ComputerUseAgent\runs\task_baseline_html\eye\live_verify.png"
+    )
+    foreign_baseline = Path(
+        r"C:\OtherMachine\ComputerUseAgent\recordings\demo_rec\screenshots\event_003.jpeg"
+    )
+
+    _write_step(
+        run_root,
+        transcript_counter=0,
+        script_step_index=0,
+        goal="輸入「winmaster7 console」",
+        started_at="2026-06-11T06:00:00+00:00",
+        finished_at="2026-06-11T06:00:10+00:00",
+    )
+    step_path = run_root / "steps" / "0_0.json"
+    payload = json.loads(step_path.read_text(encoding="utf-8"))
+    payload["verification"] = [
+        {
+            "role": "user",
+            "content": "Compare two screenshots only.",
+            "images": [str(foreign_live), str(foreign_baseline)],
+        },
+        {
+            "role": "assistant",
+            "content": '{"match":false,"confidence":"high","reason":"mismatch"}',
+        },
+    ]
+    payload["step_timing"].update(
+        {
+            "status": "completed",
+            "verify": {
+                "accomplished": True,
+                "branch": "advance",
+                "target_step": None,
+                "clearly_unmet": False,
+                "reason": "advanced after baseline mismatch recovery",
+                "baseline_after_path": str(foreign_baseline),
+            },
+        }
+    )
+    step_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    _write_hand_csv(
+        run_root,
+        [
+            {
+                "timestamp": "2026-06-11T06:00:05+00:00",
+                "action": "type_text",
+                "args": {"text": "winmaster7 console"},
+                "ok": True,
+                "screenshot_name": "",
+                "screenshot_before_path": "",
+                "screenshot_after_path": "",
+                "message": "executed",
+            }
+        ],
+    )
+
+    html = write_session_html_from_run(run_root).read_text(encoding="utf-8")
+
+    assert "錄製基準截圖（after）" in html
+    assert "驗證時截圖（即時）" in html
+    assert 'src="eye/live_verify.png"' in html
+    assert 'src="../../recordings/demo_rec/screenshots/event_003.jpeg"' in html
+    assert baseline.exists()
+    assert "OtherMachine" not in html
+    verify_panel = html.split('session-verify-title">驗證結果', 1)[1].split(
+        '<ul class="hand-ops"', 1
+    )[0]
+    assert "file://" not in verify_panel
+    assert "event_003.jpeg" in verify_panel
+
+
 def test_write_session_html_merges_smart_cycle_with_executed_tools(tmp_path: Path) -> None:
     run_root = tmp_path / "smart_20260730_090228_245442"
     timestamp = "2026-07-30T09:02:46+00:00"

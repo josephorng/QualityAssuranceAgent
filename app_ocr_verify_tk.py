@@ -20,6 +20,9 @@ from app_ocr_viewer_tk import (
     OCR_EXPORT_DEFAULT_DIR,
     OCR_EXPORT_ICONS_DIR,
     OcrLine,
+    YOLO_TRITON_MODEL_UI,
+    YOLO_TRITON_MODEL_UI_SMALL,
+    _apply_yolo_triton_model,
     _configure_ui_fonts,
     _discover_folder_images,
     _discover_run_images,
@@ -27,6 +30,7 @@ from app_ocr_viewer_tk import (
     _display_label_for_line,
     _icon_labels_for_text,
     _is_pua_icon_identity_text,
+    _normalize_yolo_triton_model,
     _parse_conf_0_to_1,
     _unknown_icon_label,
     _smallest_box_hit_index,
@@ -36,6 +40,7 @@ from app_ocr_viewer_tk import (
 )
 from cua_mcp.read_screen_text.ocr_image import _expand_box
 from cua_mcp.selection_engine import request_json_with_retry
+from cua_mcp.vision_backend import triton_yolo_model_name
 from cua_mcp.yolo_onnx import DEFAULT_CONF_YOLOV26_END2END, YOLO_CLASS_ELEMENT, YOLO_CLASS_TEXT
 from src.common.io_utils import imread_bgr
 from src.common.settings import load_settings, resolve_recordings_dir, resolve_runs_dir
@@ -228,14 +233,55 @@ def build_verify_sheet_image(
 
 def build_sheet_read_prompt(*, start_index: int, count: int) -> str:
     end_index = start_index + count - 1
+    example_index = start_index
     return (
         "The attached image is an OCR verification sheet.\n"
         "Each row shows an index number on the left and a cropped text region from a UI screenshot.\n"
         f"Read the visible text in every crop labeled {start_index} through {end_index}.\n"
         "Return JSON only: "
-        '{"readings":[{"index":0,"text":"visible text"}],"summary":"brief note"}.\n'
+        f'{{"readings":[{{"index":{example_index},"text":"visible text"}}],'
+        '"summary":"brief note"}.\n'
         "Include one readings entry per index shown in the image.\n"
+        "Use the exact index numbers printed on the sheet (do not renumber from 0).\n"
     )
+
+
+def _remap_readings_to_sheet_indices(
+    readings: dict[int, str],
+    *,
+    start_index: int,
+    count: int,
+) -> dict[int, str]:
+    """Map Gemma reading keys onto the sheet's printed indices.
+
+    Later batches print global labels (50, 51, …), but models often still return
+    local 0..n-1 keys because the schema example historically showed index 0.
+    Prefer exact matches; fall back to a uniform local or 1-based offset.
+    """
+    if count <= 0:
+        return readings
+    expected = set(range(start_index, start_index + count))
+    keys = set(readings)
+    if keys & expected:
+        return {idx: readings[idx] for idx in expected if idx in readings}
+
+    local_zero = set(range(count))
+    if keys & local_zero and not (keys & expected):
+        return {
+            start_index + local_idx: text
+            for local_idx, text in readings.items()
+            if 0 <= local_idx < count
+        }
+
+    local_one = set(range(1, count + 1))
+    if keys & local_one and not (keys & expected):
+        return {
+            start_index + (local_idx - 1): text
+            for local_idx, text in readings.items()
+            if 1 <= local_idx <= count
+        }
+
+    return readings
 
 
 def parse_sheet_read_response(content: str | None) -> tuple[dict[int, str], str]:
@@ -266,6 +312,9 @@ def compare_readings_to_ocr(
     *,
     start_index: int = 0,
 ) -> list[TextVerifyResult]:
+    readings = _remap_readings_to_sheet_indices(
+        readings, start_index=start_index, count=len(lines)
+    )
     results: list[TextVerifyResult] = []
     for local_idx, line in enumerate(lines):
         global_idx = start_index + local_idx
@@ -333,7 +382,9 @@ async def _read_verify_sheet_with_gemma(
         response_schema=OCR_READ_SHEET_RESPONSE_SCHEMA,
         parse_reply=_parse,
         retry_instruction=(
-            'Return strict JSON only: {"readings":[{"index":0,"text":"..."}],'
+            "Return strict JSON only with one readings entry per sheet index "
+            f"{start_index}..{start_index + max(0, len(lines) - 1)}: "
+            f'{{"readings":[{{"index":{start_index},"text":"..."}}],'
             '"summary":"..."}.'
         ),
         log_info=log_info,
@@ -366,7 +417,9 @@ async def verify_text_ocr_with_gemma(
             on_progress(batch_num, total_batches)
         batch_lines = lines[start : start + batch_size]
         sheet_t0 = time.perf_counter()
-        sheet = build_verify_sheet_image(source_image, batch_lines, start_index=start)
+        # Always number each sheet 0..n-1 so Gemma does not have to track global
+        # offsets across batches (yolo_ui_small often yields >1 batch).
+        sheet = build_verify_sheet_image(source_image, batch_lines, start_index=0)
         sheet_path = sheet_dir / f"verify_sheet_{stamp}_{batch_num:02d}.png"
         sheet.save(sheet_path)
         sheet_elapsed_s += time.perf_counter() - sheet_t0
@@ -374,16 +427,22 @@ async def verify_text_ocr_with_gemma(
         outcome = await _read_verify_sheet_with_gemma(
             sheet_path,
             batch_lines,
-            start_index=start,
+            start_index=0,
             log_info=log_info,
         )
         gemma_elapsed_s += time.perf_counter() - gemma_t0
         if outcome.summary:
             summaries.append(outcome.summary)
         for item in outcome.results:
-            if 0 <= item.index < len(merged_results):
-                merged_results[item.index] = item
-
+            global_idx = start + item.index
+            if 0 <= global_idx < len(merged_results):
+                merged_results[global_idx] = TextVerifyResult(
+                    index=global_idx,
+                    recognized_text=item.recognized_text,
+                    correct=item.correct,
+                    expected_text=item.expected_text,
+                    notes=item.notes,
+                )
     final_results: list[TextVerifyResult] = []
     for idx, line in enumerate(lines):
         item = merged_results[idx]
@@ -698,12 +757,16 @@ class OcrVerifyPanel(_CanvasZoomMixin):
 
         self.status_var = tk.StringVar(value="Ready")
         self.folder_var = tk.StringVar(value=str(source_root))
+        self.yolo_model_var = tk.StringVar(
+            value=_normalize_yolo_triton_model(triton_yolo_model_name())
+        )
         self.yolo_conf_var = tk.StringVar(value=f"{DEFAULT_CONF_YOLOV26_END2END:g}")
         self.summary_var = tk.StringVar(value="")
         self.filter_mismatch_var = tk.BooleanVar(value=True)
         self.detections_label_var = tk.StringVar(value="Text detections")
 
         self._ui_font = _configure_ui_fonts(self.root, UI_FONT_SIZE)
+        _apply_yolo_triton_model(self.yolo_model_var.get())
         self._build_ui()
         if self.mode == "folder":
             self._reload_folder_images()
@@ -823,30 +886,45 @@ class OcrVerifyPanel(_CanvasZoomMixin):
         controls.columnconfigure(0, weight=1)
         controls.columnconfigure(1, weight=1)
         controls.columnconfigure(2, weight=1)
-        ttk.Label(controls, text="YOLO confidence").grid(row=0, column=0, sticky="w")
+        ttk.Label(controls, text="YOLO model").grid(row=0, column=0, sticky="w")
+        ttk.Radiobutton(
+            controls,
+            text="yolo_ui",
+            variable=self.yolo_model_var,
+            value=YOLO_TRITON_MODEL_UI,
+            command=self._on_yolo_model_change,
+        ).grid(row=0, column=1, sticky="w")
+        ttk.Radiobutton(
+            controls,
+            text="yolo_ui_small",
+            variable=self.yolo_model_var,
+            value=YOLO_TRITON_MODEL_UI_SMALL,
+            command=self._on_yolo_model_change,
+        ).grid(row=0, column=2, sticky="w")
+        ttk.Label(controls, text="YOLO confidence").grid(row=1, column=0, sticky="w", pady=(6, 0))
         ttk.Entry(controls, textvariable=self.yolo_conf_var, width=10).grid(
-            row=0, column=1, columnspan=2, sticky="ew", padx=(4, 0)
+            row=1, column=1, columnspan=2, sticky="ew", padx=(4, 0), pady=(6, 0)
         )
         ttk.Button(controls, text="Detect text (YOLO OCR)", command=self._run_detect).grid(
-            row=1, column=0, sticky="ew", pady=(6, 0), padx=(0, 2)
-        )
-        ttk.Button(controls, text="Verify (Gemma 4)", command=self._run_verify).grid(
-            row=1, column=1, sticky="ew", pady=(6, 0), padx=2
-        )
-        ttk.Button(controls, text="Detect + Verify", command=self._run_detect_and_verify).grid(
-            row=1, column=2, sticky="ew", pady=(6, 0), padx=(2, 0)
-        )
-        ttk.Button(controls, text="Select non-matching", command=self._select_non_matching).grid(
             row=2, column=0, sticky="ew", pady=(6, 0), padx=(0, 2)
         )
-        ttk.Button(controls, text="Select all", command=self._select_all_results).grid(
+        ttk.Button(controls, text="Verify (Gemma 4)", command=self._run_verify).grid(
             row=2, column=1, sticky="ew", pady=(6, 0), padx=2
         )
-        ttk.Button(controls, text="Export to cua_data", command=self._export_selected_to_cua_data).grid(
+        ttk.Button(controls, text="Detect + Verify", command=self._run_detect_and_verify).grid(
             row=2, column=2, sticky="ew", pady=(6, 0), padx=(2, 0)
         )
+        ttk.Button(controls, text="Select non-matching", command=self._select_non_matching).grid(
+            row=3, column=0, sticky="ew", pady=(6, 0), padx=(0, 2)
+        )
+        ttk.Button(controls, text="Select all", command=self._select_all_results).grid(
+            row=3, column=1, sticky="ew", pady=(6, 0), padx=2
+        )
+        ttk.Button(controls, text="Export to cua_data", command=self._export_selected_to_cua_data).grid(
+            row=3, column=2, sticky="ew", pady=(6, 0), padx=(2, 0)
+        )
         ttk.Button(controls, text="Copy to undone/images", command=self._copy_current_image_to_undone).grid(
-            row=3, column=0, columnspan=3, sticky="ew", pady=(6, 0)
+            row=4, column=0, columnspan=3, sticky="ew", pady=(6, 0)
         )
         row += 1
 
@@ -1035,6 +1113,10 @@ class OcrVerifyPanel(_CanvasZoomMixin):
         self._set_busy(True, status)
         threading.Thread(target=runner, daemon=True).start()
 
+    def _on_yolo_model_change(self) -> None:
+        model_name = _apply_yolo_triton_model(self.yolo_model_var.get())
+        self.status_var.set(f"YOLO model: {model_name} — re-run Detect to apply")
+
     def _run_detect(self) -> None:
         path = self._current_image_path()
         if path is None:
@@ -1044,13 +1126,15 @@ class OcrVerifyPanel(_CanvasZoomMixin):
         if conf is None:
             self.status_var.set(f"Invalid confidence: {err}")
             return
+        model_name = _apply_yolo_triton_model(self.yolo_model_var.get())
 
         def work() -> tuple[list[OcrLine], str, float]:
             t0 = time.perf_counter()
+            _apply_yolo_triton_model(model_name)
             lines, status = load_yolo_lines(path, yolo_conf_threshold=conf)
             text_lines = text_lines_from_yolo(lines)
             elapsed = time.perf_counter() - t0
-            return text_lines, status, elapsed
+            return text_lines, f"{status} [{model_name}]", elapsed
 
         def on_done(result: Any, error: BaseException | None) -> None:
             self._set_busy(False)
@@ -1074,7 +1158,9 @@ class OcrVerifyPanel(_CanvasZoomMixin):
                 f"model={load_settings().brain_lm}"
             )
 
-        self._run_in_thread(work, on_done, status=f"Running YOLO OCR (conf={conf:g})...")
+        self._run_in_thread(
+            work, on_done, status=f"Running YOLO OCR ({model_name}, conf={conf:g})..."
+        )
 
     def _run_verify(self) -> None:
         path = self._current_image_path()
@@ -1149,6 +1235,7 @@ class OcrVerifyPanel(_CanvasZoomMixin):
         if conf is None:
             self.status_var.set(f"Invalid confidence: {err}")
             return
+        model_name = _apply_yolo_triton_model(self.yolo_model_var.get())
 
         def _on_progress(batch_num: int, batch_total: int) -> None:
             self.root.after(
@@ -1160,6 +1247,7 @@ class OcrVerifyPanel(_CanvasZoomMixin):
 
         def work() -> tuple[list[OcrLine], OcrVerifyOutcome, float, float]:
             ocr_t0 = time.perf_counter()
+            _apply_yolo_triton_model(model_name)
             lines, _status = load_yolo_lines(path, yolo_conf_threshold=conf)
             text_lines = text_lines_from_yolo(lines)
             ocr_elapsed = time.perf_counter() - ocr_t0
@@ -1196,12 +1284,15 @@ class OcrVerifyPanel(_CanvasZoomMixin):
             self._populate_result_list()
             self._refresh_image()
             self.status_var.set(
-                f"Detected {total} text boxes, {correct} correct | {timing} | "
+                f"Detected {total} text boxes [{model_name}], {correct} correct | {timing} | "
                 f"model={load_settings().brain_lm}"
             )
 
-        self._run_in_thread(work, on_done, status="Running YOLO OCR + Gemma crop-sheet verify...")
-
+        self._run_in_thread(
+            work,
+            on_done,
+            status=f"Running YOLO OCR ({model_name}) + Gemma crop-sheet verify...",
+        )
     def _format_result_row(self, idx: int) -> str:
         line = self.text_lines[idx]
         text = line.text.strip() or "<empty>"
@@ -1634,11 +1725,15 @@ class UnknownElementsPanel(_CanvasZoomMixin):
 
         self.status_var = tk.StringVar(value="Ready")
         self.folder_var = tk.StringVar(value=str(source_root))
+        self.yolo_model_var = tk.StringVar(
+            value=_normalize_yolo_triton_model(triton_yolo_model_name())
+        )
         self.yolo_conf_var = tk.StringVar(value=f"{DEFAULT_CONF_YOLOV26_END2END:g}")
         self.summary_var = tk.StringVar(value="")
         self.elements_label_var = tk.StringVar(value="Unknown elements")
 
         self._ui_font = _configure_ui_fonts(self.root, UI_FONT_SIZE)
+        _apply_yolo_triton_model(self.yolo_model_var.get())
         self._build_ui()
         if self.mode == "folder":
             self._reload_folder_images()
@@ -1744,21 +1839,36 @@ class UnknownElementsPanel(_CanvasZoomMixin):
         controls.columnconfigure(0, weight=1)
         controls.columnconfigure(1, weight=1)
         controls.columnconfigure(2, weight=1)
-        ttk.Label(controls, text="YOLO confidence").grid(row=0, column=0, sticky="w")
+        ttk.Label(controls, text="YOLO model").grid(row=0, column=0, sticky="w")
+        ttk.Radiobutton(
+            controls,
+            text="yolo_ui",
+            variable=self.yolo_model_var,
+            value=YOLO_TRITON_MODEL_UI,
+            command=self._on_yolo_model_change,
+        ).grid(row=0, column=1, sticky="w")
+        ttk.Radiobutton(
+            controls,
+            text="yolo_ui_small",
+            variable=self.yolo_model_var,
+            value=YOLO_TRITON_MODEL_UI_SMALL,
+            command=self._on_yolo_model_change,
+        ).grid(row=0, column=2, sticky="w")
+        ttk.Label(controls, text="YOLO confidence").grid(row=1, column=0, sticky="w", pady=(6, 0))
         ttk.Entry(controls, textvariable=self.yolo_conf_var, width=10).grid(
-            row=0, column=1, columnspan=2, sticky="ew", padx=(4, 0)
+            row=1, column=1, columnspan=2, sticky="ew", padx=(4, 0), pady=(6, 0)
         )
         ttk.Button(controls, text="Detect unknown elements", command=self._run_detect).grid(
-            row=1, column=0, columnspan=3, sticky="ew", pady=(6, 0)
+            row=2, column=0, columnspan=3, sticky="ew", pady=(6, 0)
         )
         ttk.Button(controls, text="Select all", command=self._select_all_results).grid(
-            row=2, column=0, sticky="ew", pady=(6, 0), padx=(0, 2)
+            row=3, column=0, sticky="ew", pady=(6, 0), padx=(0, 2)
         )
         ttk.Button(controls, text="Export to elements", command=self._export_selected).grid(
-            row=2, column=1, columnspan=2, sticky="ew", pady=(6, 0), padx=(2, 0)
+            row=3, column=1, columnspan=2, sticky="ew", pady=(6, 0), padx=(2, 0)
         )
         ttk.Button(controls, text="Copy to undone/images", command=self._copy_current_image_to_undone).grid(
-            row=3, column=0, columnspan=3, sticky="ew", pady=(6, 0)
+            row=4, column=0, columnspan=3, sticky="ew", pady=(6, 0)
         )
         row += 1
 
@@ -1938,6 +2048,10 @@ class UnknownElementsPanel(_CanvasZoomMixin):
         self._set_busy(True, status)
         threading.Thread(target=runner, daemon=True).start()
 
+    def _on_yolo_model_change(self) -> None:
+        model_name = _apply_yolo_triton_model(self.yolo_model_var.get())
+        self.status_var.set(f"YOLO model: {model_name} — re-run Detect to apply")
+
     def _run_detect(self) -> None:
         path = self._current_image_path()
         if path is None:
@@ -1947,13 +2061,15 @@ class UnknownElementsPanel(_CanvasZoomMixin):
         if conf is None:
             self.status_var.set(f"Invalid confidence: {err}")
             return
+        model_name = _apply_yolo_triton_model(self.yolo_model_var.get())
 
         def work() -> tuple[list[OcrLine], str, float]:
             t0 = time.perf_counter()
+            _apply_yolo_triton_model(model_name)
             lines, status = load_yolo_lines(path, yolo_conf_threshold=conf)
             element_lines = unknown_element_lines_from_yolo(lines)
             elapsed = time.perf_counter() - t0
-            return element_lines, status, elapsed
+            return element_lines, f"{status} [{model_name}]", elapsed
 
         def on_done(result: Any, error: BaseException | None) -> None:
             self._set_busy(False)
@@ -1971,7 +2087,9 @@ class UnknownElementsPanel(_CanvasZoomMixin):
                 f"{status} | {len(element_lines)} unknown element(s) | OCR {elapsed:.1f}s"
             )
 
-        self._run_in_thread(work, on_done, status=f"Running YOLO detect (conf={conf:g})...")
+        self._run_in_thread(
+            work, on_done, status=f"Running YOLO detect ({model_name}, conf={conf:g})..."
+        )
 
     def _format_result_row(self, idx: int) -> str:
         line = self.element_lines[idx]

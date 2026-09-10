@@ -66,6 +66,28 @@ def test_compare_readings_to_ocr_marks_mismatches() -> None:
     assert results[1].expected_text == "World"
 
 
+def test_compare_readings_remaps_local_indices_for_offset_batch() -> None:
+    """Gemma often returns 0..n-1 even when the sheet was labeled 50+."""
+    from app_ocr_verify_tk import _remap_readings_to_sheet_indices
+
+    remapped = _remap_readings_to_sheet_indices(
+        {0: "foo", 1: "bar"}, start_index=50, count=2
+    )
+    assert remapped == {50: "foo", 51: "bar"}
+    results = compare_readings_to_ocr(
+        [
+            OcrLine(box=(0, 0, 1, 1), text="foo"),
+            OcrLine(box=(1, 1, 1, 1), text="baz"),
+        ],
+        {0: "foo", 1: "bar"},
+        start_index=50,
+    )
+    assert results[0].correct is True
+    assert results[0].index == 50
+    assert results[1].correct is False
+    assert results[1].expected_text == "bar"
+
+
 def test_parse_sheet_read_response() -> None:
     payload = {
         "readings": [{"index": 2, "text": "foo"}],

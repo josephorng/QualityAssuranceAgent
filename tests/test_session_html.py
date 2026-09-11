@@ -1678,6 +1678,28 @@ def test_typed_text_candidates_default_to_recorded_when_available() -> None:
     assert active_source == "recorded"
 
 
+def test_typed_text_candidates_respect_llm_resolved_ocr() -> None:
+    event = {"kind": "text_input", "text": "winwinmaster7"}
+    analysis = {
+        "text_resolution": {
+            "recorded_text": "winwinmaster7",
+            "ocr_text": "winmaster7",
+            "ocr_options": ["winmaster7"],
+            "resolved_text": "winmaster7",
+            "source": "llm",
+        }
+    }
+    recorded, ocr_options, active, active_source = _typed_text_candidates(
+        event,
+        analysis,
+        "輸入「winmaster7」",
+    )
+    assert recorded == "winwinmaster7"
+    assert ocr_options == ["winmaster7"]
+    assert active == "winmaster7"
+    assert active_source == "ocr"
+
+
 def test_write_runs_index_lists_recordings_in_recordings_tab(tmp_path: Path) -> None:
     task = tmp_path / "task_20260721_100000_000001"
     task.mkdir()

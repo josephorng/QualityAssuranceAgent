@@ -269,7 +269,10 @@ async def resolve_text_input_text(
     run_dir: Path,
     log_info: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """Resolve typing text, preferring recorded keystrokes; OCR kept as alternate."""
+    """Resolve typing text, preferring recorded keystrokes; OCR kept as alternate.
+
+    Analyze later may refine disagreements via ``text_choose`` (text-only LLM).
+    """
     recorded_text = event.text or ""
     anchor = event.cursor_xy or event.anchor_click_xy
     if anchor is None:

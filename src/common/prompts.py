@@ -364,6 +364,38 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "models": ["gemma4:e2b", "gemma3:4b"],
         }
     ],
+    "recording_text_input_choose": [
+        {
+            "image_usage": "none",
+            "prompt": (
+                "You choose the correct typed text for one recorded desktop typing action.\n"
+                "No screenshot is provided — decide only from the candidate strings.\n\n"
+                "Recorded keystrokes (may be wrong for IME composition):\n"
+                "{recorded_text}\n\n"
+                "Candidates (choose exactly one by index):\n"
+                "{candidates_block}\n"
+            ),
+            "instructions": [
+                "Pick the candidate that best represents what the user intended to type.",
+                "Prefer recorded keystrokes for passwords and when OCR looks masked (*** / •••).",
+                "Prefer OCR when recorded looks like IME Latin key codes / garbage while OCR is readable CJK or words.",
+                "Prefer OCR when recorded has obvious doubled/extra characters and OCR matches the cleaner form.",
+                "Never invent text; chosen_index must refer to a listed candidate.",
+                'Return strict JSON only: {{"chosen_index": <int>, "reason": "<short string>"}}',
+            ],
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
+    "recording_text_input_choose_retry": [
+        {
+            "image_usage": "none",
+            "prompt": (
+                'Reply with ONLY: {{"chosen_index": <int>, "reason": "<short string>"}}. '
+                "No text before or after the JSON."
+            ),
+            "models": ["gemma4:e2b", "gemma3:4b"],
+        }
+    ],
     "recording_expected_outcome": [
         {
             "image_usage": "use_image",

@@ -1335,6 +1335,79 @@ async def test_analyze_recording_session_writes_instructions(tmp_path: Path) -> 
     assert not (run_dir / "script.txt").exists()
 
 
+@pytest.mark.asyncio
+async def test_analyze_recording_session_llm_chooses_ocr_on_disagreement(
+    tmp_path: Path,
+) -> None:
+    from src.common.run_state import reset_run_state_manager
+
+    reset_run_state_manager()
+    run_dir = tmp_path / "screen_record_text_choice"
+    (run_dir / "events").mkdir(parents=True)
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="text_input",
+        text="winwinmaster7",
+        screenshot_path="",
+        cursor_xy=(10, 10),
+    )
+    (run_dir / "events" / "event_001.json").write_text(
+        json.dumps(event.to_dict(), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (run_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": "screen_record_text_choice",
+                "started_at_utc": "t",
+                "stopped_at_utc": "t",
+                "event_count": 1,
+                "events": ["events/event_001.json"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(return_value={"instruction": "should not be used"}),
+    ), patch(
+        "src.recorder.orchestrator.resolve_text_input_text",
+        new=AsyncMock(
+            return_value={
+                "text": "winwinmaster7",
+                "recorded_text": "winwinmaster7",
+                "ocr_text": "winmaster7",
+                "ocr_options": ["winmaster7"],
+                "source": "recorded",
+                "meaningful": None,
+                "reason": "prefer recorded text; after-screenshot OCR available as alternate",
+                "vision": {
+                    "used_vision": True,
+                    "candidate_text": "",
+                    "local_cursor": (10, 10),
+                    "candidates": [],
+                    "detection_count": 0,
+                },
+            }
+        ),
+    ), patch(
+        "src.recorder.text_choose.request_json_with_retry",
+        new=AsyncMock(return_value={"chosen_index": 1, "reason": "doubled chars"}),
+    ) as choose_mock:
+        report = await analyze_recording_session(run_dir)
+
+    assert report["cached"] == 1
+    assert report["instructions"] == ["輸入「winmaster7」"]
+    choose_mock.assert_awaited_once()
+    analysis = json.loads((run_dir / "analysis" / "event_001.json").read_text(encoding="utf-8"))
+    assert analysis["text_resolution"]["resolved_text"] == "winmaster7"
+    assert analysis["text_resolution"]["source"] == "llm"
+    assert analysis["text_resolution"]["recorded_text"] == "winwinmaster7"
+    assert analysis["text_resolution"]["ocr_text"] == "winmaster7"
+
+
 def test_elapsed_seconds_requires_valid_ordered_timezone_aware_timestamps() -> None:
     assert (
         _elapsed_seconds(

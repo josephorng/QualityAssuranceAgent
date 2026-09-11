@@ -20,6 +20,11 @@ from src.recorder.coalesce import (
     coalesce_consecutive_text_inputs,
     reclassify_negligible_drags_as_clicks,
 )
+from src.recorder.text_choose import (
+    apply_text_choice_hard_rules,
+    choose_text_input_with_llm,
+    needs_llm_text_choice,
+)
 from src.recorder.text_resolve import event_with_resolved_text, resolve_text_input_text
 from src.recorder.vision_context import (
     build_vision_context,
@@ -377,6 +382,84 @@ async def _prepare_all_event_visions(
     return results, cancelled
 
 
+async def _refine_all_text_resolutions(
+    prepared_list: list[_PreparedEvent | None],
+    *,
+    run_dir: Path,
+    log_info: Callable[[str], None],
+    should_cancel: Callable[[], bool] | None,
+    max_workers: int,
+) -> bool:
+    """Batch text-only LLM choice for typing events where recorded ≠ OCR.
+
+    Runs after vision prep (and coalesce) so candidates are final. Soft-fails per
+    event: on cancel/LLM errors the prefer-recorded resolution is kept.
+    Returns True when cancelled.
+    """
+    sem = asyncio.Semaphore(max_workers)
+    cancelled = False
+
+    def _apply_refined(prepared: _PreparedEvent, refined: dict[str, Any]) -> None:
+        previous = prepared.text_resolution or {}
+        if (
+            refined.get("resolved_text") == previous.get("resolved_text")
+            and refined.get("source") == previous.get("source")
+            and refined.get("reason") == previous.get("reason")
+        ):
+            return
+        prepared.text_resolution = refined
+        prepared.event_for_llm = event_with_resolved_text(
+            prepared.event,
+            {"text": refined.get("resolved_text") or ""},
+        )
+        save_text_resolution_cache(run_dir, prepared.event, refined)
+
+    async def _one(prepared: _PreparedEvent) -> None:
+        nonlocal cancelled
+        if should_cancel is not None and should_cancel():
+            cancelled = True
+            return
+        text_resolution = prepared.text_resolution
+        if prepared.event.kind != "text_input" or text_resolution is None:
+            return
+
+        if not needs_llm_text_choice(text_resolution):
+            _apply_refined(prepared, apply_text_choice_hard_rules(text_resolution))
+            return
+
+        async with sem:
+            if should_cancel is not None and should_cancel():
+                cancelled = True
+                return
+            event = prepared.event
+            log_info(
+                f"text choice LLM event={event.index} "
+                f"recorded={text_resolution.get('recorded_text')!r} "
+                f"ocr={text_resolution.get('ocr_text')!r}"
+            )
+            refined = await choose_text_input_with_llm(
+                text_resolution,
+                log_info=log_info,
+            )
+            _apply_refined(prepared, refined)
+            log_info(
+                f"text choice done event={event.index} "
+                f"source={refined.get('source')} "
+                f"resolved={refined.get('resolved_text')!r}"
+            )
+
+    tasks = [
+        _one(prepared)
+        for prepared in prepared_list
+        if prepared is not None and prepared.event.kind == "text_input"
+    ]
+    if tasks:
+        await asyncio.gather(*tasks)
+    if cancelled:
+        log_info("analyze_recording_session cancelled during text choice phase")
+    return cancelled
+
+
 async def _analyze_all_event_instructions(
     prepared_list: list[_PreparedEvent | None],
     *,
@@ -615,6 +698,16 @@ async def analyze_recording_session(
             on_vision_done=progress.bump,
         )
         if vision_cancelled:
+            cancelled = True
+
+        text_choice_cancelled = await _refine_all_text_resolutions(
+            prepared_list,
+            run_dir=run_dir,
+            log_info=log_info,
+            should_cancel=should_cancel,
+            max_workers=llm_workers,
+        )
+        if text_choice_cancelled:
             cancelled = True
 
         instruction_results, llm_cancelled = await _analyze_all_event_instructions(

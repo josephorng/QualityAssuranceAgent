@@ -4145,6 +4145,14 @@ def _typed_text_candidates(
                 active_source = "recorded"
             else:
                 active_source = "custom"
+        elif source in {"ocr", "llm"} and resolved:
+            active = resolved
+            if resolved == recorded:
+                active_source = "recorded"
+            elif resolved in ocr_options:
+                active_source = "ocr"
+            else:
+                active_source = "custom"
         elif recorded:
             active = recorded
             active_source = "recorded"

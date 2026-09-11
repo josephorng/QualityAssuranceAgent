@@ -120,6 +120,31 @@ def test_partition_recording_dirs_keeps_valid_and_skips_duplicates(tmp_path: Pat
     assert invalid == [other]
 
 
+def test_recording_path_helpers_tolerate_permission_errors(monkeypatch, tmp_path: Path) -> None:
+    blocked = Path(r"C:\Users\OtherUser\Documents\ComputerUseAgent\recordings\打開神網")
+
+    def raise_access_denied(self: Path) -> bool:
+        raise PermissionError(5, "Access is denied", str(self))
+
+    monkeypatch.setattr(Path, "is_dir", raise_access_denied)
+    monkeypatch.setattr(Path, "is_file", raise_access_denied)
+    monkeypatch.setattr(Path, "resolve", raise_access_denied)
+
+    assert not script_helper.is_recording_dir(blocked)
+    assert script_helper.recording_run_dir(blocked) is None
+    assert not script_helper.is_recording_script_path(blocked)
+    assert not script_helper.is_runnable_script_path(blocked)
+    assert script_helper.resolve_runnable_script_path(blocked) == blocked
+    assert script_helper.script_display_name(blocked) == blocked.name
+
+    added, invalid = script_helper.partition_recording_dirs(
+        [blocked],
+        existing=[blocked],
+    )
+    assert added == []
+    assert invalid == [blocked]
+
+
 def test_resolve_task_and_script_from_cli_task(monkeypatch, tmp_path: Path) -> None:
     task, script_path, lines = script_helper.resolve_task_and_script("typed task", tmp_path)
     assert task == "typed task"

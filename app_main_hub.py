@@ -301,17 +301,24 @@ class MainHub(ctk.CTk):
         last_smart = hub.get("last_smart_goal_path")
         if isinstance(last_smart, str) and last_smart.strip():
             sp = Path(last_smart)
-            if sp.is_file():
+            try:
+                smart_readable = sp.is_file()
+            except OSError:
+                smart_readable = False
+            if smart_readable:
                 self._smart_goal_path = sp
                 self._suppress_smart_cache_sync = True
                 try:
                     self._smart_text.delete("0.0", "end")
                     self._smart_text.insert("0.0", sp.read_text(encoding="utf-8"))
                     self._reset_textbox_undo(self._smart_text)
+                except OSError:
+                    self._smart_goal_path = None
                 finally:
                     self._suppress_smart_cache_sync = False
-                self._refresh_smart_path_label()
-                self._mark_smart_clean()
+                if self._smart_goal_path is not None:
+                    self._refresh_smart_path_label()
+                    self._mark_smart_clean()
         if self._smart_goal_path is None:
             self._try_load_smart_goal_cache()
 
@@ -319,7 +326,9 @@ class MainHub(ctk.CTk):
         for raw_path in hub.get("queue_script_paths", []):
             if not str(raw_path).strip():
                 continue
-            restored_queue.append(resolve_runnable_script_path(Path(raw_path)))
+            p = resolve_runnable_script_path(Path(raw_path))
+            if is_runnable_script_path(p):
+                restored_queue.append(p)
         self._queue_paths = restored_queue
         self._refresh_queue_list()
 

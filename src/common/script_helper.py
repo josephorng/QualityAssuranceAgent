@@ -13,10 +13,34 @@ _EXPECTED_OUTCOME_PREFIX = "# expected_outcome:"
 _LEGACY_RECORDING_SCRIPT_FILENAME = "script.txt"
 
 
+def _safe_is_dir(path: Path) -> bool:
+    """Like ``Path.is_dir`` but treat permission / IO failures as missing."""
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
+def _safe_is_file(path: Path) -> bool:
+    """Like ``Path.is_file`` but treat permission / IO failures as missing."""
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def _safe_resolve_key(path: Path) -> str | None:
+    """Return a resolved path key, or ``None`` when the path is inaccessible."""
+    try:
+        return str(Path(path).resolve())
+    except OSError:
+        return None
+
+
 def is_recording_dir(path: Path) -> bool:
     """True when ``path`` is a recording folder (has ``session.json``)."""
     candidate = Path(path)
-    return candidate.is_dir() and (candidate / "session.json").is_file()
+    return _safe_is_dir(candidate) and _safe_is_file(candidate / "session.json")
 
 
 def partition_recording_dirs(
@@ -28,7 +52,11 @@ def partition_recording_dirs(
 
     Duplicates (including folders already in ``existing``) are omitted from both lists.
     """
-    seen = {str(Path(path).resolve()) for path in existing}
+    seen: set[str] = set()
+    for path in existing:
+        key = _safe_resolve_key(path)
+        if key is not None:
+            seen.add(key)
     added: list[Path] = []
     invalid: list[Path] = []
     for raw in picked:
@@ -36,7 +64,10 @@ def partition_recording_dirs(
         if not is_recording_dir(folder):
             invalid.append(folder)
             continue
-        key = str(folder.resolve())
+        key = _safe_resolve_key(folder)
+        if key is None:
+            invalid.append(folder)
+            continue
         if key in seen:
             continue
         seen.add(key)
@@ -50,7 +81,7 @@ def recording_run_dir(path: Path) -> Path | None:
     if is_recording_dir(candidate):
         return candidate
     if (
-        candidate.is_file()
+        _safe_is_file(candidate)
         and candidate.name == _LEGACY_RECORDING_SCRIPT_FILENAME
         and is_recording_dir(candidate.parent)
     ):
@@ -66,7 +97,7 @@ def is_recording_script_path(path: Path) -> bool:
 def is_runnable_script_path(path: Path) -> bool:
     """True when ``path`` is an existing script file or recording folder."""
     resolved = resolve_runnable_script_path(path)
-    return resolved.is_file() or is_recording_dir(resolved)
+    return _safe_is_file(resolved) or is_recording_dir(resolved)
 
 
 def resolve_runnable_script_path(path: Path) -> Path:

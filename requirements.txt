@@ -7,9 +7,9 @@ pydantic
 pydantic-settings
 mcp
 python-dotenv
+ollama
 Pillow
 numpy
-ultralytics>=8.3.0
 opencv-contrib-python>=4.6.0
 mss
 pyautogui

@@ -130,13 +130,6 @@ def main() -> None:
         if sz:
             pkg_bytes[top] = sz
 
-    # Likely pulled by nuitka include flags even if not imported
-    for extra in ("opencc",):
-        if extra not in pkg_bytes:
-            sz, _ = package_size(extra)
-            if sz:
-                pkg_bytes[extra] = sz
-
     total_pkgs = sum(pkg_bytes.values())
     print("=== Static import estimate (main.py closure) ===")
     print(f"Project modules traced: {len(project_modules)}")
@@ -155,7 +148,7 @@ def main() -> None:
     print(f"Estimated standalone folder (--standalone, no onefile): {rough * 1.05 / (1024**2):.0f}–{rough * 1.2 / (1024**2):.0f} MB")
     print()
     not_in_closure = []
-    for maybe in ("torch", "ultralytics", "skimage", "scipy", "pytest"):
+    for maybe in ("torch", "skimage", "scipy", "pytest"):
         if maybe not in pkg_bytes:
             not_in_closure.append(maybe)
     if not_in_closure:

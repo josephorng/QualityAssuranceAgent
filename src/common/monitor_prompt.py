@@ -89,56 +89,6 @@ def _primary_monitor_index(physical: list[dict[str, Any]]) -> int | None:
     return None
 
 
-# def prompt_eye_monitor_index() -> int:
-#     """
-#     Ask the user which mss monitor index to capture.
-
-#     Returns mss index: 0 = all screens (virtual desktop), 1+ = a single monitor.
-#     If stdin is not a TTY, returns int(os.environ['EYE_MONITOR_INDEX']) if set,
-#     otherwise 1.
-#     """
-#     if not sys.stdin.isatty():
-#         preset = os.environ.get("EYE_MONITOR_INDEX")
-#         if preset is not None and preset.strip() != "":
-#             try:
-#                 return int(preset)
-#             except ValueError:
-#                 print(
-#                     f"[master] Invalid EYE_MONITOR_INDEX={preset!r}; "
-#                     "falling back to monitor index 1."
-#                 )
-#         print(
-#             "[master] stdin is not interactive; using monitor index 1 "
-#             "(set EYE_MONITOR_INDEX to override)."
-#         )
-#         return 1
-
-#     rows = list_eye_monitor_choices()
-#     physical = _physical_monitors()
-#     print()
-#     print("Which screen should Eye capture? (coordinates from screenshots use this region.)")
-#     print()
-#     for row in rows:
-#         print(f"  [{row.index}]  {row.title}  —  {row.detail}")
-#     print()
-
-#     if not physical:
-#         print("  No separate physical monitors detected; using [0] all screens.")
-#         return 0
-
-#     valid = {0} | {m["index"] for m in physical}
-#     while True:
-#         raw = input("Enter monitor index (0 = all screens, or a number from the list above): ").strip()
-#         try:
-#             choice = int(raw)
-#         except ValueError:
-#             print("Please enter an integer.")
-#             continue
-#         if choice in valid:
-#             return choice
-#         print(f"Invalid choice {choice!r}. Valid: {sorted(valid)}")
-
-
 def read_eye_monitor_index_from_env(default: int = 1) -> int:
     """Parse EYE_MONITOR_INDEX for child processes (e.g. Eye server)."""
     raw = os.environ.get("EYE_MONITOR_INDEX")

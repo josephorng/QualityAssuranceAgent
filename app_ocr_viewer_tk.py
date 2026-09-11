@@ -90,8 +90,6 @@ UI_EXPORT_DEFAULT_DIR = Path(
 OCR_VALIDATE_DIR = Path(
     r"C:\Users\Joseph Hung\Documents\Repos\Git\OCR\data\validate\cua_data"
 )
-# Same weights as ONNX export used by OCR (`cua_mcp/yolo_onnx.DEFAULT_YOLO_ONNX_PATH`).
-DEFAULT_ULTRALYTICS_PT_PATH = ROOT_DIR / "cua_mcp" / "best.pt"
 DEFAULT_TEST_IMAGES_DIR = ROOT_DIR / "test_images"
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
 
@@ -1493,7 +1491,6 @@ class OcrViewerApp:
         self.current_image: Image.Image | None = None
         self.current_lines: list[OcrLine] = []
         self.selected_line_idx: int | None = None
-        self._ultralytics_model_holder: list[Any] = []
 
         self.show_boxes = tk.BooleanVar(value=True)
         self.show_original_scrollbar = tk.BooleanVar(value=False)
@@ -2737,7 +2734,6 @@ class TestImagesViewerApp:
         self.current_image: Image.Image | None = None
         self.current_lines: list[OcrLine] = []
         self.selected_line_idx: int | None = None
-        self._ultralytics_model_holder: list[Any] = []
 
         self.show_boxes = tk.BooleanVar(value=True)
         self.show_labels = tk.BooleanVar(value=True)

@@ -3,7 +3,7 @@ setlocal
 
 cd /d "%~dp0"
 
-python -m pytest tests/test_windows_chrome_enter_live.py -v
+python -m pytest test_live/test_windows_chrome_enter_live.py -v
 set "EXIT_CODE=%ERRORLEVEL%"
 
 echo.

@@ -5,17 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from cua_mcp import active_monitor_capture
 from cua_mcp import hand_tools
 from src.common.run_state import RunStateManager
 from src.common.runtime_context import set_runtime_env
 from src.eye import capture
 from src.eye.module import EyeModule
-
-
-def test_active_monitor_capture_module_reuses_eye_functions() -> None:
-    assert active_monitor_capture.active_monitor_index is capture.active_monitor_index
-    assert active_monitor_capture.active_monitor_offset is capture.active_monitor_offset
 
 
 def test_hand_tools_screenshot_uses_eye_capture(monkeypatch, tmp_path: Path) -> None:

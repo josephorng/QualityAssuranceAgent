@@ -278,48 +278,6 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "models": ["gemma4:e2b", "gemma3:4b"],
         }
     ],
-    "coordinate_selection": [
-        {
-            "image_usage": "optional",
-            "prompt": (
-                "Choose ONE line from CoordinatesText that best matches Target.\n"
-                "CoordinatesText lines look like: [center_x,center_y] <OCR text for that region>.\n\n"
-                "Target:\n{target}\n\n"
-                "Instruction:\n{instruction}\n\n"
-                "CoordinatesText:\n{coordinate_text}\n"
-            ),
-            "instructions": [
-                "OCR text might have typos and errors, so you need to be careful to match the text correctly.",
-                "Reply with the OCR text only (the part after the bracket), copied verbatim from CoordinatesText when possible so it can be matched even if it contains typos and errors.",
-                "Output NOTHING except valid JSON matching the server's schema.",
-                "Do not summarize, classify, bullet-list, markdown, translate, explain, add keys, or add prose.",
-                "Return strict JSON only.",
-            ],
-            "models": ["gemma4:e2b", "gemma3:4b"],
-        }
-    ],
-    "coordinate_disambiguation": [
-        {
-            "image_usage": "optional",
-            "prompt": (
-                "The matched OCR text appears at multiple locations in the image.\n"
-                "Choose one center point (x, y) that best matches the Instruction.\n"
-                "(x, y) must be one of the candidate centers listed below — "
-                "same coordinate space as CoordinatesText (image pixels).\n"
-                '"text" must be the OCR line for the same choice: copy from after [cx,cy] '
-                "for the center you pick (verbatim when possible; OCR may have typos).\n\n"
-                "Instruction:\n{instruction}\n\n"
-                "Text matched in the first step:\n{chosen_text}\n\n"
-                "Candidate centers (pick exactly one):\n{options_lines}\n"
-            ),
-            "instructions": [
-                "OCR text might have typos and errors, so you need to be careful to match the text correctly.",
-                "Output NOTHING except valid JSON matching the server's schema.",
-                "Do not summarize, explain, or add prose.",
-            ],
-            "models": ["gemma4:e2b", "gemma3:4b"],
-        }
-    ],
     "ui_element_selection": [
         {
             "image_usage": "optional",
@@ -348,63 +306,6 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Never pick a Nearby landmark itself — only Candidates indices are valid.",
                 "Never invent an index; only use an index shown in the Candidates list.",
                 "index and text must describe the same Candidates row.",
-            ],
-            "models": ["gemma4:e2b", "gemma3:4b"],
-        }
-    ],
-    "ui_text_filter": [
-        {
-            "image_usage": "no_image",
-            "prompt": (
-                "Select ONLY text candidates that match the user instruction.\n\n"
-                "Instruction:\n{instruction}\n\n"
-                "Candidates:\n{candidates_text}\n"
-            ),
-            "instructions": [
-                'Return JSON only: {{"keep_indices": [<int>, ...]}}.',
-                "Use indices from the Candidates list. Keep an empty list when none match.",
-            ],
-            "models": ["gemma4:e2b", "gemma3:4b"],
-        }
-    ],
-    "mouse_target_filter": [
-        {
-            "image_usage": "no_image",
-            "prompt": (
-                "Split candidates into two lists: those matching the Anchor, and those matching any Nearby label.\n"
-                "Each row has class=文字(Text)|元素(Element)|未知(Unknown)|輸入欄(Input)|滾動條(Scrollbar). "
-                "文字/未知 may include OCR text; 元素 uses icon labels only (no OCR text).\n\n"
-                "Anchor:\n{anchor}\n\n"
-                "Nearby:\n{nearby_text}\n\n"
-                "Candidates:\n{candidates_text}\n"
-            ),
-            "instructions": [
-                'Return JSON only: {{"anchor_indices": [<int>, ...], "nearby_indices": [<int>, ...]}}.',
-                "Use [index N] values from the Candidates list. Use empty lists when none match.",
-                "anchor_indices: every candidate whose OCR text, icons, or class matches the Anchor.",
-                "nearby_indices: every candidate that matches any Nearby label "
-                "(文字/圖示/元素/輸入欄/滾動條), for spatial disambiguation later.",
-                "Do not put the same index in both lists; if a candidate matches both, put it only in "
-                "anchor_indices.",
-                "Nearby may be empty; when it is, nearby_indices must be [].",
-                "Prefer recall: include all plausible matches for each list, not only the single best one.",
-            ],
-            "models": ["gemma4:e2b", "gemma3:4b"],
-        }
-    ],
-    "ui_instruction_icon_location_extract": [
-        {
-            "image_usage": "no_image",
-            "prompt": (
-                "Analyze the UI automation instruction below for downstream models in one response.\n\n"
-                "User instruction:\n{instruction}\n"
-            ),
-            "instructions": [
-                'Return JSON only: {{"need_text_anchor": <true|false>, "location_description": "<string>"}}.',
-                "need_text_anchor: set true when the instruction refers to visible words, labels, or on-screen text content (for example: click 'Sign in', the row named X, select by caption). Set false when the target is mostly non-text visual (icon, toggle, avatar, gear, unlabeled button, panel) with no substantive text anchor.",
-                "location_description: a detailed spatial description for disambiguating multiple on-screen candidates: regions (top/bottom/left/right/center, corners), relative layout (above/below/next to/beside), ordinal (first/last row), distance from window edges, header/footer/toolbar/sidebar when implied. Expand vague hints into explicit positional language. If there is no positional clue, use an empty string.",
-                "Do not invent UI that is not implied by the instruction.",
-                "Do not output markdown or prose outside the JSON object.",
             ],
             "models": ["gemma4:e2b", "gemma3:4b"],
         }
@@ -500,34 +401,6 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
             "models": ["gemma4:e2b", "gemma3:4b"],
         }
     ],
-    "recording_text_meaningful_check": [
-        {
-            "image_usage": "required",
-            "prompt": (
-                "You judge whether recorded keyboard text matches what the user intended to type.\n\n"
-                "Recorded text from low-level key capture:\n{recorded_text}\n\n"
-                "The attached screenshot shows the UI after typing finished.\n"
-                "Return JSON only: {{\"meaningful\": <bool>, \"reason\": \"<short explanation>\"}}\n"
-            ),
-            "instructions": [
-                "Judge only whether recorded text matches the visible typed content in the focused field. Do not speculate that alphanumeric strings are passwords, identifiers, or leetspeak.",
-                "meaningful=true only when recorded text clearly matches (or is a close substring of) the text shown in the focused field: English words, Chinese characters, numbers, emails, URLs, or other intentional input visible on screen.",
-                "meaningful=false for IME composition keys only (pinyin like nihao, Zhuyin like vul3nj04q06, without matching Chinese in the field), vk_* virtual-key tokens, or any recorded text that does not match visible field content.",
-                "When the screenshot shows Chinese (or other composed text) in the focused field but recorded text is only Latin IME keys, meaningful=false.",
-            ],
-            "models": ["gemma4:e2b", "gemma3:4b"],
-        }
-    ],
-    "recording_text_meaningful_check_retry": [
-        {
-            "image_usage": "required",
-            "prompt": (
-                'Reply with ONLY: {{"meaningful": <bool>, "reason": "<short explanation>"}}. '
-                "No text before or after the JSON."
-            ),
-            "models": ["gemma4:e2b", "gemma3:4b"],
-        }
-    ],
     "hand_remap_tool": [
         {
             "image_usage": "no_image",
@@ -558,74 +431,6 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 'Return JSON only in this exact shape: {{"indices": [<int>, ...]}}\n'
                 "Use 0-based indices from the list.\n\n"
                 "Windows:\n{windows_list}\n"
-            ),
-            "models": ["gemma4:e2b", "gemma3:4b"],
-        }
-    ],
-    # "ui_element_selection_thinking_refine": [
-    #     {
-    #         "image_usage": "no_image",
-    #         "prompt": (
-    #             "Prior reasoning: {thinking}\n\n"
-    #             "Using your prior reasoning in context and the Candidates list below, output your "
-    #             'final choice as JSON only: a single object with key "index" (integer 0..{max_index}). '
-    #             "No markdown, no explanation.\n\n"
-    #         ),
-    #         "models": ["gemma4:e2b", "gemma3:4b"],
-    #     }
-    # ],
-    "coordinate_selection_retry": [
-        {
-            "image_usage": "optional",
-            "prompt": (
-                'Reply with ONLY: {{"text": "<string>"}} where "text" is the OCR line text from '
-                "CoordinatesText (after [cx,cy] ), as verbatim as possible. "
-                "No text before or after the JSON."
-            ),
-            "models": ["gemma4:e2b", "gemma3:4b"],
-        }
-    ],
-    "coordinate_disambiguation_retry": [
-        {
-            "image_usage": "optional",
-            "prompt": (
-                'Reply with ONLY: {{"x": <integer>, "y": <integer>, "text": "<string>"}} where x,y '
-                "equals one candidate [cx,cy] above and \"text\" is that line's OCR text. "
-                "No text before or after the JSON."
-            ),
-            "models": ["gemma4:e2b", "gemma3:4b"],
-        }
-    ],
-    "ui_instruction_icon_location_extract_retry": [
-        {
-            "image_usage": "no_image",
-            "prompt": (
-                'Reply with ONLY: {{"need_text_anchor": true|false, "location_description": "..."}}. '
-                "need_text_anchor: true for visible words/labels/on-screen text; false for mostly "
-                "non-text targets (icon, toggle, gear, unlabeled control). location_description: "
-                "detailed positional language for picking among candidates, or empty when there is "
-                "no spatial clue. No text before or after the JSON."
-            ),
-            "models": ["gemma4:e2b", "gemma3:4b"],
-        }
-    ],
-    "ui_text_filter_retry": [
-        {
-            "image_usage": "no_image",
-            "prompt": (
-                'Reply with ONLY: {{"keep_indices": [<integer>, ...]}}. '
-                "No text before or after the JSON."
-            ),
-            "models": ["gemma4:e2b", "gemma3:4b"],
-        }
-    ],
-    "mouse_target_filter_retry": [
-        {
-            "image_usage": "no_image",
-            "prompt": (
-                'Reply with ONLY: {{"anchor_indices": [<integer>, ...], '
-                '"nearby_indices": [<integer>, ...]}}. '
-                "No text before or after the JSON."
             ),
             "models": ["gemma4:e2b", "gemma3:4b"],
         }

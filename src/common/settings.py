@@ -361,16 +361,6 @@ def probe_vision_backend(
     return False, f"無法連線至 Triton\n主機：{triton_url}"
 
 
-def select_reachable_ollama_host(
-    *,
-    local_host: str = "",
-    remote_host: str = "",
-) -> str | None:
-    """Deprecated: Ollama backends were removed. Always returns None."""
-    _ = (local_host, remote_host)
-    return None
-
-
 def apply_startup_triton_probe() -> tuple[bool, str]:
     """Probe Triton readiness at startup. Returns ``(ok, message)`` without raising."""
     settings = load_settings()

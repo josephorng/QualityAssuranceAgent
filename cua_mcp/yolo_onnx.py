@@ -437,49 +437,6 @@ def nms_indices_xyxy(
     return [int(i) for i in flat]
 
 
-# def decode_yolov26_raw_output(
-#     pred: np.ndarray,
-#     orig_h: int,
-#     orig_w: int,
-#     *,
-#     conf_threshold: float = DEFAULT_CONF_YOLOV26_RAW,
-#     iou_threshold: float = DEFAULT_IOU_YOLOV26_RAW,
-#     input_size: int = YOLO_ONNX_INPUT_SIZE,
-# ) -> tuple[np.ndarray, np.ndarray]:
-#     """
-#     YOLOv26 **raw** ONNX head: ``(1, 4+nc, num_anchors)``.
-
-#     Each anchor is ``cx, cy, w, h`` (+ class scores) in ``input_size`` pixel space.
-#     Returns ``(xyxy, scores)`` in original image pixels after score filter and NMS.
-#     """
-#     if pred.ndim != 3 or pred.shape[1] < 5:
-#         raise RuntimeError(f"unexpected YOLOv26 raw ONNX output shape: {pred.shape}")
-#     pred_t = pred[0].T
-#     boxes = pred_t[:, :4].astype(np.float32)
-#     scores = (
-#         pred_t[:, 4:].max(axis=1).astype(np.float32)
-#         if pred_t.shape[1] > 5
-#         else pred_t[:, 4].astype(np.float32)
-#     )
-#     mask = scores >= conf_threshold
-#     boxes = boxes[mask]
-#     scores = scores[mask]
-#     if len(boxes) == 0:
-#         return np.zeros((0, 4), dtype=np.float32), np.zeros((0,), dtype=np.float32)
-#     cx, cy, bw, bh = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
-#     sx = orig_w / float(input_size)
-#     sy = orig_h / float(input_size)
-#     x1 = (cx - bw / 2.0) * sx
-#     y1 = (cy - bh / 2.0) * sy
-#     x2 = (cx + bw / 2.0) * sx
-#     y2 = (cy + bh / 2.0) * sy
-#     xyxy = np.stack([x1, y1, x2, y2], axis=1)
-#     keep = nms_indices_xyxy(xyxy, scores, iou_threshold)
-#     if not keep:
-#         return np.zeros((0, 4), dtype=np.float32), np.zeros((0,), dtype=np.float32)
-#     idx = np.asarray(keep, dtype=np.int64)
-#     return xyxy[idx], scores[idx]
-
 def scale_xyxy_letterboxed_to_original(
     xyxy: np.ndarray,
     orig_h: int,

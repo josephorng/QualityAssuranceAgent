@@ -19,6 +19,7 @@ from src.recorder.vision_context import (
     build_vision_context,
     build_vision_context_at_point,
     candidate_offset_for_instruction,
+    ensure_click_primary_candidate,
     format_drag_candidate_anchor,
     format_drag_destination_offset_hints,
     format_drag_relative_offset_phrase,
@@ -26,8 +27,10 @@ from src.recorder.vision_context import (
     format_input_context_hint,
     format_scrollbar_context_hint,
     primary_candidate_offset,
+    promote_click_primary_candidates,
     resolve_event_screenshot_path,
     scrollbar_track_percent_phrase,
+    select_click_primary_candidate,
     list_nearby_landmark_options,
 )
 
@@ -151,6 +154,90 @@ def test_nearest_candidates_sorted_by_distance() -> None:
     nearest = _nearest_candidates(detections, 10, 10)
     assert nearest[0].text == "Near"
     assert nearest[1].text == "Far"
+
+
+def test_select_click_primary_prefers_containing_input_over_nearby_text() -> None:
+    candidates = [
+        {
+            "bbox": [170, 34, 1243, 43],
+            "center": [792, 56],
+            "class_name": "input",
+            "text": None,
+        },
+        {
+            "bbox": [200, 100, 40, 14],
+            "center": [220, 107],
+            "class_name": "text",
+            "text": "標籤",
+        },
+    ]
+    primary = select_click_primary_candidate(candidates, 408, 56)
+    assert primary is not None
+    assert primary["class_name"] == "input"
+
+
+def test_select_click_primary_gap_click_prefers_side_text_landmark() -> None:
+    """Gap between wide input rows: pick landmark text, not the nearer wide input."""
+    candidates = [
+        {
+            "bbox": [215, 277, 1353, 18],
+            "center": [891, 286],
+            "class_name": "input",
+            "text": None,
+        },
+        {
+            "bbox": [215, 345, 1353, 20],
+            "center": [891, 355],
+            "class_name": "input",
+            "text": None,
+        },
+        {
+            "bbox": [219, 280, 44, 11],
+            "center": [241, 285],
+            "class_name": "text",
+            "text": "LANNIE",
+        },
+        {
+            "bbox": [130, 310, 57, 14],
+            "center": [158, 317],
+            "class_name": "text",
+            "text": "識別名稱2",
+        },
+        {
+            "bbox": [217, 314, 7, 14],
+            "center": [220, 321],
+            "class_name": "text",
+            "text": "!",
+        },
+    ]
+    primary = select_click_primary_candidate(candidates, 284, 314)
+    assert primary is not None
+    assert primary.get("text") == "識別名稱2"
+    promoted = promote_click_primary_candidates(candidates, 284, 314)
+    assert promoted[0].get("text") == "識別名稱2"
+    assert promoted[1]["class_name"] == "input"
+
+
+def test_ensure_click_primary_candidate_reorders_vision() -> None:
+    vision = {
+        "local_cursor": (284, 314),
+        "candidates": [
+            {
+                "bbox": [215, 277, 1353, 18],
+                "center": [891, 286],
+                "class_name": "input",
+                "text": None,
+            },
+            {
+                "bbox": [130, 310, 57, 14],
+                "center": [158, 317],
+                "class_name": "text",
+                "text": "識別名稱2",
+            },
+        ],
+    }
+    ensure_click_primary_candidate(vision)
+    assert vision["candidates"][0].get("text") == "識別名稱2"
 
 
 def test_nearest_candidates_spatial_neighbor_reorder() -> None:

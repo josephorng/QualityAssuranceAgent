@@ -15,6 +15,7 @@ from src.recorder.vision_context import (
     build_vision_context,
     candidate_anchor_name,
     candidate_offset_for_instruction,
+    ensure_click_primary_candidate,
     format_drag_candidate_anchor,
     format_drag_destination_offset_hints,
     format_field_context_hint,
@@ -371,6 +372,8 @@ def instruction_for_click(
     if event.kind not in _CLICK_POINTER_KINDS:
         return None
 
+    ensure_click_primary_candidate(vision)
+
     if use_char_target:
         char_target = primary_candidate_char_target(vision)
         if char_target is not None:
@@ -631,6 +634,7 @@ def rebuild_pointer_instruction(
         return base
 
     if event.kind in _CLICK_POINTER_KINDS:
+        ensure_click_primary_candidate(vision)
         base = instruction_for_click(event, vision, use_char_target=use_char_target)
         if base is None:
             return None
@@ -646,6 +650,7 @@ def rebuild_pointer_instruction(
         return base + suffix if suffix else base
 
     if event.kind == "scroll":
+        ensure_click_primary_candidate(vision)
         base = instruction_for_scroll(event, vision)
         if base is None:
             return None

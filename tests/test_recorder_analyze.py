@@ -2397,6 +2397,50 @@ def test_instruction_for_click_input_field_with_visible_text() -> None:
     assert instruction_for_click(event, vision) == "將滑鼠移到「搜尋」文字所在的輸入欄"
 
 
+def test_instruction_for_click_gap_between_input_rows_uses_side_landmark() -> None:
+    """Click in the gap under a wide input: anchor on row label, not input center."""
+    event = RecordedEvent(
+        index=8,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(284, 314),
+        button="left",
+        screenshot_path="",
+    )
+    vision = {
+        "local_cursor": (284, 314),
+        "candidates": [
+            {
+                "bbox": [215, 277, 1353, 18],
+                "center": [891, 286],
+                "class_name": "input",
+                "text": None,
+            },
+            {
+                "bbox": [215, 345, 1353, 20],
+                "center": [891, 355],
+                "class_name": "input",
+                "text": None,
+            },
+            {
+                "bbox": [219, 280, 44, 11],
+                "center": [241, 285],
+                "class_name": "text",
+                "text": "LANNIE",
+            },
+            {
+                "bbox": [130, 310, 57, 14],
+                "center": [158, 317],
+                "class_name": "text",
+                "text": "識別名稱2",
+            },
+        ],
+    }
+    assert instruction_for_click(event, vision) == (
+        "將滑鼠移到「識別名稱2」文字右方126個像素的位置"
+    )
+
+
 def test_instruction_for_click_empty_input_field() -> None:
     event = RecordedEvent(
         index=3,

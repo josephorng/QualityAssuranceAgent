@@ -742,6 +742,186 @@ def _destination_target_at_point(
     return min(hits, key=lambda det: (_hit_content_priority(det), _bbox_area(det.bbox)))
 
 
+def _candidate_containing_click(
+    candidates: list[dict[str, Any]],
+    local_x: int,
+    local_y: int,
+) -> dict[str, Any] | None:
+    """Return the best candidate whose padded bbox contains the click, if any.
+
+    Prefers multi-char text, then icons, then single-char text, then others;
+    smallest area breaks ties. Includes inputs/scrollbars so an on-field click
+    keeps that container as the primary anchor.
+    """
+    hits = [
+        candidate
+        for candidate in candidates
+        if isinstance(candidate, dict)
+        and _drop_point_inside_candidate(local_x, local_y, candidate)
+    ]
+    if not hits:
+        return None
+
+    def _hit_key(candidate: dict[str, Any]) -> tuple[int, int]:
+        class_name = str(candidate.get("class_name") or "").strip()
+        visible = _visible_text(candidate.get("text"))
+        if class_name == "text" and len(visible) > 1:
+            priority = 0
+        elif candidate.get("icons"):
+            priority = 1
+        elif class_name == "text" and len(visible) == 1:
+            priority = 2
+        else:
+            priority = 3
+        bbox = _as_bbox_xywh(candidate.get("bbox"))
+        area = _bbox_area(bbox) if bbox is not None else 0
+        return priority, area
+
+    return min(hits, key=_hit_key)
+
+
+def _click_landmark_primary_rank_key(
+    candidate: dict[str, Any],
+    *,
+    local_x: int,
+    local_y: int,
+    click_bbox: tuple[int, int, int, int],
+) -> tuple[int, int, float, int] | None:
+    """Sort key for landmark-style primary pick around the click point.
+
+    Matches nearby-landmark preference: multi-char text first, then other
+    labels, then icons; within Tier 0, prefer left/right/top/bottom cells
+    relative to the click; then closer edge distance and smaller area.
+    Returns ``None`` when the candidate has no meaningful hub label.
+    """
+    label = _candidate_label_for_hint(candidate)
+    if not label:
+        return None
+    bbox = _as_bbox_xywh(candidate.get("bbox"))
+    if bbox is None:
+        return None
+    tier = _nearby_hint_tier(candidate, label)
+    cell_rank = (
+        _tier0_cell_rank(candidate, primary_bbox=click_bbox) if tier == 0 else 0
+    )
+    dist_sq = _point_to_bbox_distance_sq(local_x, local_y, bbox)
+    return tier, cell_rank, dist_sq, _bbox_area(bbox)
+
+
+def select_click_primary_candidate(
+    candidates: list[dict[str, Any]],
+    local_x: int,
+    local_y: int,
+) -> dict[str, Any] | None:
+    """Choose the click instruction primary using the click point as reference.
+
+    1. If the click lies inside any candidate (with OCR hit padding), keep that
+       containing target (content-priority + smallest area).
+    2. Otherwise pick a single nearby-style landmark around the click point
+       (multi-char text preferred, sides relative to the click).
+    """
+    if not candidates:
+        return None
+    containing = _candidate_containing_click(candidates, local_x, local_y)
+    if containing is not None:
+        return containing
+
+    click_bbox = (local_x, local_y, 1, 1)
+    best: dict[str, Any] | None = None
+    best_key: tuple[int, int, float, int] | None = None
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        key = _click_landmark_primary_rank_key(
+            candidate,
+            local_x=local_x,
+            local_y=local_y,
+            click_bbox=click_bbox,
+        )
+        if key is None:
+            continue
+        if best_key is None or key < best_key:
+            best = candidate
+            best_key = key
+    return best
+
+
+def promote_click_primary_candidates(
+    candidates: list[dict[str, Any]],
+    local_x: int,
+    local_y: int,
+) -> list[dict[str, Any]]:
+    """Return candidates with the click-anchor primary moved to index 0.
+
+    Preserves relative order of the remaining entries. When no better primary
+    is found, returns ``candidates`` unchanged (same object if already correct).
+    """
+    if not candidates:
+        return candidates
+    primary = select_click_primary_candidate(candidates, local_x, local_y)
+    if primary is None:
+        return candidates
+    try:
+        index = next(i for i, c in enumerate(candidates) if c is primary)
+    except StopIteration:
+        # Equality fallback when callers pass copies.
+        primary_bbox = primary.get("bbox")
+        index = next(
+            (
+                i
+                for i, c in enumerate(candidates)
+                if isinstance(c, dict) and c.get("bbox") == primary_bbox
+            ),
+            0,
+        )
+    if index == 0:
+        return candidates
+    return [candidates[index], *candidates[:index], *candidates[index + 1 :]]
+
+
+def ensure_click_primary_candidate(vision: dict[str, Any]) -> dict[str, Any]:
+    """Reorder ``vision["candidates"]`` so the click-landmark primary is first.
+
+    Mutates ``vision`` in place when a local cursor and candidates are present.
+    """
+    local = vision.get("local_cursor")
+    candidates = vision.get("candidates")
+    if not isinstance(local, (list, tuple)) or len(local) != 2:
+        return vision
+    if not isinstance(candidates, list) or not candidates:
+        return vision
+    promoted = promote_click_primary_candidates(
+        candidates,
+        int(local[0]),
+        int(local[1]),
+    )
+    if promoted is not candidates:
+        vision["candidates"] = promoted
+    return vision
+
+
+def _promote_click_primary_detections(
+    detections: list[UiDetection],
+    local_x: int,
+    local_y: int,
+) -> list[UiDetection]:
+    """Reorder YOLO detections with the click-landmark primary first."""
+    if not detections:
+        return detections
+    as_dicts = [_detection_to_dict(det) for det in detections]
+    promoted = promote_click_primary_candidates(as_dicts, local_x, local_y)
+    if not promoted or promoted[0] is as_dicts[0]:
+        return detections
+    primary_bbox = tuple(int(v) for v in promoted[0]["bbox"])
+    index = next(
+        (i for i, det in enumerate(detections) if tuple(det.bbox) == primary_bbox),
+        0,
+    )
+    if index == 0:
+        return detections
+    return [detections[index], *detections[:index], *detections[index + 1 :]]
+
+
 def _nearest_candidate_by_class(
     candidates: list[dict[str, Any]],
     class_name: str,
@@ -2688,6 +2868,9 @@ def build_vision_context_at_point(
             local_y,
             segment_result=segment_result,
         )
+        # Click point is the geometric reference; promote a containing target or
+        # a nearby-style landmark to candidates[0] for instruction naming.
+        nearest = _promote_click_primary_detections(nearest, local_x, local_y)
         candidate_text = _format_ui_candidates_text(nearest)
 
     spatial_ranks: dict[tuple[int, int, int, int], int] = {}

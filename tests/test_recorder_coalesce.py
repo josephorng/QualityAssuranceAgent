@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from src.recorder.coalesce import (
+    coalesce_chinese_ime_candidate_keys,
     coalesce_consecutive_same_location_clicks,
     coalesce_consecutive_text_inputs,
     reclassify_negligible_drags_as_clicks,
+    retarget_ime_candidate_end_screenshots,
+    text_contains_cjk,
 )
 from src.recorder.models import RecordedEvent
 
@@ -14,6 +17,27 @@ def _text_event(index: int, text: str) -> RecordedEvent:
         timestamp_utc="t",
         kind="text_input",
         text=text,
+    )
+
+
+def _key_press_event(
+    index: int,
+    key: str,
+    *,
+    screenshot_path: str = "",
+    end_screenshot_path: str = "",
+    monitor_index: int | None = None,
+    modifiers: list[str] | None = None,
+) -> RecordedEvent:
+    return RecordedEvent(
+        index=index,
+        timestamp_utc="t",
+        kind="key_press",
+        key=key,
+        screenshot_path=screenshot_path,
+        end_screenshot_path=end_screenshot_path,
+        monitor_index=monitor_index,
+        modifiers=modifiers,
     )
 
 
@@ -129,6 +153,88 @@ def test_coalesce_consecutive_text_inputs_keeps_first_before_and_last_after() ->
     assert merged[0].end_screenshot_path == "last_end.jpeg"
     assert merged[0].end_monitor_index == 2
     assert merged[0].end_monitor_offset == (100, 0)
+
+
+def test_text_contains_cjk() -> None:
+    assert text_contains_cjk("比特幣的價值")
+    assert text_contains_cjk("hello世界")
+    assert not text_contains_cjk("1u3wk41u42k7ru8456")
+    assert not text_contains_cjk("hello")
+    assert not text_contains_cjk("")
+    assert not text_contains_cjk(None)
+
+
+def test_retarget_ime_candidate_end_screenshots_points_at_last_key() -> None:
+    events = [
+        RecordedEvent(
+            index=7,
+            timestamp_utc="t",
+            kind="text_input",
+            text="1u3wk41u42k7ru8456",
+            screenshot_path="before.jpeg",
+            end_screenshot_path="mid.jpeg",
+        ),
+        _key_press_event(8, "down", screenshot_path="down.jpeg"),
+        _key_press_event(9, "enter", screenshot_path="enter.jpeg", monitor_index=2),
+        RecordedEvent(index=10, timestamp_utc="t", kind="click", button="left"),
+    ]
+    out = retarget_ime_candidate_end_screenshots(events)
+    assert len(out) == 4
+    assert out[0].end_screenshot_path == "enter.jpeg"
+    assert out[0].end_monitor_index == 2
+    assert out[1].key == "down"
+    assert out[2].key == "enter"
+
+
+def test_coalesce_chinese_ime_candidate_keys_merges_when_chinese() -> None:
+    events = [
+        RecordedEvent(
+            index=7,
+            timestamp_utc="t",
+            kind="text_input",
+            text="1u3wk41u42k7ru8456",
+            screenshot_path="text_before.jpeg",
+            end_screenshot_path="text_mid.jpeg",
+        ),
+        _key_press_event(8, "down", screenshot_path="down1.jpeg"),
+        _key_press_event(9, "right", screenshot_path="right.jpeg"),
+        _key_press_event(10, "enter", screenshot_path="enter_last.jpeg", monitor_index=2),
+        RecordedEvent(index=11, timestamp_utc="t", kind="click", button="left"),
+    ]
+    merged = coalesce_chinese_ime_candidate_keys(events, {7})
+    assert len(merged) == 2
+    assert merged[0].kind == "text_input"
+    assert merged[0].end_screenshot_path == "enter_last.jpeg"
+    assert merged[0].end_monitor_index == 2
+    assert merged[1].kind == "click"
+
+
+def test_coalesce_chinese_ime_keeps_keys_when_not_chinese() -> None:
+    events = [
+        _text_event(1, "hello"),
+        _key_press_event(2, "down", screenshot_path="down.jpeg"),
+        _key_press_event(3, "enter", screenshot_path="enter.jpeg"),
+    ]
+    merged = coalesce_chinese_ime_candidate_keys(events, set())
+    assert len(merged) == 3
+    assert merged[1].key == "down"
+    assert merged[2].key == "enter"
+
+
+def test_coalesce_chinese_ime_keeps_lone_enter_even_when_chinese() -> None:
+    events = [
+        RecordedEvent(
+            index=1,
+            timestamp_utc="t",
+            kind="text_input",
+            text="搜尋",
+            end_screenshot_path="typed.jpeg",
+        ),
+        _key_press_event(2, "enter", screenshot_path="enter.jpeg"),
+    ]
+    merged = coalesce_chinese_ime_candidate_keys(events, {1})
+    assert len(merged) == 2
+    assert merged[1].key == "enter"
 
 
 def test_coalesce_same_location_clicks_three_singles_to_triple() -> None:

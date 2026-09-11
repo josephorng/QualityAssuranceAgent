@@ -9,6 +9,22 @@ _MULTI_CLICK_MAX_DIST_PX = 8
 # Match capture._DRAG_THRESHOLD_PX: start/end within this → treat drag as click.
 _NEGLIGIBLE_DRAG_DIST_PX = 8
 _COALESCABLE_CLICK_KINDS = frozenset({"click", "double_click", "triple_click"})
+_IME_CANDIDATE_KEYS = frozenset({"up", "down", "left", "right", "enter"})
+
+
+def text_contains_cjk(text: str | None) -> bool:
+    """True when ``text`` includes CJK ideographs (common Chinese/Japanese/Korean Han)."""
+    if not text:
+        return False
+    for ch in text:
+        code = ord(ch)
+        if (
+            0x4E00 <= code <= 0x9FFF  # CJK Unified Ideographs
+            or 0x3400 <= code <= 0x4DBF  # Extension A
+            or 0xF900 <= code <= 0xFAFF  # Compatibility Ideographs
+        ):
+            return True
+    return False
 
 
 def coalesce_consecutive_text_inputs(events: list[RecordedEvent]) -> list[RecordedEvent]:
@@ -57,6 +73,154 @@ def coalesce_consecutive_text_inputs(events: list[RecordedEvent]) -> list[Record
             )
             continue
         merged.append(event)
+    return merged
+
+
+def _ime_candidate_run_end(events: list[RecordedEvent], text_pos: int) -> int:
+    """Return exclusive end index of an IME candidate key run after ``text_pos``."""
+    j = text_pos + 1
+    while j < len(events):
+        nxt = events[j]
+        if nxt.kind != "key_press":
+            break
+        key = str(nxt.key or "").strip().lower()
+        if key not in _IME_CANDIDATE_KEYS or nxt.modifiers:
+            break
+        j += 1
+    return j
+
+
+def _run_has_vertical_nav(events: list[RecordedEvent], start: int, end: int) -> bool:
+    return any(
+        str(item.key or "").strip().lower() in ("up", "down") for item in events[start:end]
+    )
+
+
+def _end_shot_fields_from_event(
+    event: RecordedEvent,
+) -> tuple[str, int | None, tuple[int, int] | None]:
+    if event.end_screenshot_path:
+        return (
+            event.end_screenshot_path,
+            event.end_monitor_index,
+            event.end_monitor_offset,
+        )
+    if event.screenshot_path:
+        return event.screenshot_path, event.monitor_index, event.monitor_offset
+    return "", None, None
+
+
+def retarget_ime_candidate_end_screenshots(
+    events: list[RecordedEvent],
+) -> list[RecordedEvent]:
+    """Point ``text_input`` end shots at the last following IME-nav key frame.
+
+    Does not drop keys. Used before OCR so Chinese commit is visible in the
+    typing end frame when a vertical candidate-nav run follows typing.
+    """
+    if not events:
+        return []
+
+    out: list[RecordedEvent] = []
+    i = 0
+    while i < len(events):
+        event = events[i]
+        if event.kind != "text_input":
+            out.append(event)
+            i += 1
+            continue
+        run_end = _ime_candidate_run_end(events, i)
+        if run_end > i + 1 and _run_has_vertical_nav(events, i + 1, run_end):
+            end_path, end_mon_idx, end_mon_off = _end_shot_fields_from_event(
+                events[run_end - 1]
+            )
+            if end_path:
+                out.append(
+                    RecordedEvent(
+                        index=event.index,
+                        timestamp_utc=event.timestamp_utc,
+                        kind="text_input",
+                        cursor_xy=event.cursor_xy,
+                        text=event.text,
+                        screenshot_path=event.screenshot_path,
+                        monitor_index=event.monitor_index,
+                        monitor_offset=event.monitor_offset,
+                        end_screenshot_path=end_path,
+                        end_monitor_index=end_mon_idx,
+                        end_monitor_offset=end_mon_off,
+                        anchor_click_xy=event.anchor_click_xy,
+                        focus_rect=event.focus_rect,
+                        window_change=event.window_change,
+                        target_window_title=event.target_window_title,
+                        window_snapshot_debug=event.window_snapshot_debug,
+                    )
+                )
+            else:
+                out.append(event)
+            out.extend(events[i + 1 : run_end])
+            i = run_end
+            continue
+        out.append(event)
+        i += 1
+    return out
+
+
+def coalesce_chinese_ime_candidate_keys(
+    events: list[RecordedEvent],
+    chinese_event_indexes: set[int],
+) -> list[RecordedEvent]:
+    """Drop IME candidate nav keys after Chinese ``text_input`` events.
+
+    Merges a following Up/Down/Left/Right/Enter run into the typing step only when
+    that step's index is in ``chinese_event_indexes`` and the run includes ≥1
+    Up/Down (so English type+Enter submit stays intact).
+    """
+    if not events:
+        return []
+
+    merged: list[RecordedEvent] = []
+    i = 0
+    while i < len(events):
+        event = events[i]
+        if event.kind != "text_input" or event.index not in chinese_event_indexes:
+            merged.append(event)
+            i += 1
+            continue
+
+        run_end = _ime_candidate_run_end(events, i)
+        run = events[i + 1 : run_end]
+        if run and _run_has_vertical_nav(events, i + 1, run_end):
+            end_path, end_mon_idx, end_mon_off = _end_shot_fields_from_event(run[-1])
+            if not end_path:
+                end_path = event.end_screenshot_path
+                end_mon_idx = event.end_monitor_index
+                end_mon_off = event.end_monitor_offset
+            merged.append(
+                RecordedEvent(
+                    index=event.index,
+                    timestamp_utc=event.timestamp_utc,
+                    kind="text_input",
+                    cursor_xy=event.cursor_xy,
+                    text=event.text,
+                    screenshot_path=event.screenshot_path,
+                    monitor_index=event.monitor_index,
+                    monitor_offset=event.monitor_offset,
+                    end_screenshot_path=end_path,
+                    end_monitor_index=end_mon_idx,
+                    end_monitor_offset=end_mon_off,
+                    anchor_click_xy=event.anchor_click_xy,
+                    focus_rect=event.focus_rect,
+                    window_change=event.window_change,
+                    target_window_title=event.target_window_title,
+                    window_snapshot_debug=event.window_snapshot_debug,
+                )
+            )
+            i = run_end
+            continue
+
+        merged.append(event)
+        i += 1
+
     return merged
 
 

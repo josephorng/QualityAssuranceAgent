@@ -16,9 +16,12 @@ from src.common.settings import load_settings
 from src.recorder.analyze import analyze_event_to_cache
 from src.recorder.models import RecordedEvent, final_after_screenshot_path
 from src.recorder.coalesce import (
+    coalesce_chinese_ime_candidate_keys,
     coalesce_consecutive_same_location_clicks,
     coalesce_consecutive_text_inputs,
     reclassify_negligible_drags_as_clicks,
+    retarget_ime_candidate_end_screenshots,
+    text_contains_cjk,
 )
 from src.recorder.text_choose import (
     apply_text_choice_hard_rules,
@@ -340,6 +343,95 @@ async def prepare_event_vision(
     )
 
 
+def _prepared_typing_is_chinese(prepared: _PreparedEvent) -> bool:
+    """True when OCR/resolved typing text contains CJK (Chinese IME commit)."""
+    texts: list[str | None] = []
+    tr = prepared.text_resolution
+    if isinstance(tr, dict):
+        texts.append(tr.get("resolved_text") if isinstance(tr.get("resolved_text"), str) else None)
+        texts.append(tr.get("ocr_text") if isinstance(tr.get("ocr_text"), str) else None)
+        options = tr.get("ocr_options")
+        if isinstance(options, list):
+            for opt in options:
+                if isinstance(opt, str):
+                    texts.append(opt)
+    texts.append(prepared.event_for_llm.text)
+    texts.append(prepared.event.text)
+    return any(text_contains_cjk(text) for text in texts)
+
+
+def _fold_chinese_ime_after_text_resolve(
+    events: list[RecordedEvent],
+    prepared_list: list[_PreparedEvent | None],
+    *,
+    log_info: Callable[[str], None],
+) -> tuple[list[RecordedEvent], list[_PreparedEvent | None]]:
+    """Drop IME nav key events after Chinese typing; keep prepared rows aligned."""
+    chinese_indexes = {
+        prepared.event.index
+        for prepared in prepared_list
+        if prepared is not None
+        and prepared.event.kind == "text_input"
+        and _prepared_typing_is_chinese(prepared)
+    }
+    if not chinese_indexes:
+        return events, prepared_list
+
+    folded = coalesce_chinese_ime_candidate_keys(events, chinese_indexes)
+    if len(folded) == len(events):
+        return events, prepared_list
+
+    by_index = {
+        prepared.event.index: prepared
+        for prepared in prepared_list
+        if prepared is not None
+    }
+    new_prepared: list[_PreparedEvent | None] = []
+    for event in folded:
+        prepared = by_index.get(event.index)
+        if prepared is None:
+            new_prepared.append(None)
+            continue
+        # Keep resolved text/vision; refresh event refs to coalesced end-shot fields.
+        prepared.event = event
+        prepared.event_for_llm = event_with_resolved_text(
+            event,
+            {"text": (prepared.event_for_llm.text if prepared.event_for_llm.text is not None else event.text) or ""},
+        )
+        new_prepared.append(prepared)
+
+    dropped = len(events) - len(folded)
+    log_info(
+        f"folded Chinese IME candidate keys dropped={dropped} "
+        f"chinese_text_events={sorted(chinese_indexes)}"
+    )
+    return folded, new_prepared
+
+
+def _persist_coalesced_events(
+    run_dir: Path,
+    events: list[RecordedEvent],
+    *,
+    log_info: Callable[[str], None],
+) -> None:
+    try:
+        from src.common.runs_report_server import sync_recording_events
+
+        sync_result = sync_recording_events(run_dir, events)
+        purged = sync_result.get("purged") or []
+        if purged:
+            log_info(
+                "persisted coalesced events "
+                f"kept={sync_result.get('kept')} purged={purged}"
+            )
+        else:
+            log_info(
+                f"persisted coalesced events kept={sync_result.get('kept')} purged=[]"
+            )
+    except Exception as exc:
+        log_info(f"persist coalesced events failed: {exc}")
+
+
 # Backward-compatible private alias.
 _prepare_event_vision = prepare_event_vision
 
@@ -650,8 +742,10 @@ async def analyze_recording_session(
             f"llm_workers={llm_workers}"
         )
         events = coalesce_consecutive_same_location_clicks(
-            coalesce_consecutive_text_inputs(
-                reclassify_negligible_drags_as_clicks(_load_events(run_dir))
+            retarget_ime_candidate_end_screenshots(
+                coalesce_consecutive_text_inputs(
+                    reclassify_negligible_drags_as_clicks(_load_events(run_dir))
+                )
             )
         )
         events = _drop_trailing_agent_restore(
@@ -659,22 +753,7 @@ async def analyze_recording_session(
             run_dir=run_dir,
             log_info=log_info,
         )
-        try:
-            from src.common.runs_report_server import sync_recording_events
-
-            sync_result = sync_recording_events(run_dir, events)
-            purged = sync_result.get("purged") or []
-            if purged:
-                log_info(
-                    "persisted coalesced events "
-                    f"kept={sync_result.get('kept')} purged={purged}"
-                )
-            else:
-                log_info(
-                    f"persisted coalesced events kept={sync_result.get('kept')} purged=[]"
-                )
-        except Exception as exc:
-            log_info(f"persist coalesced events failed: {exc}")
+        _persist_coalesced_events(run_dir, events, log_info=log_info)
         final_after_screenshot = _resolve_final_after_screenshot(run_dir)
         if final_after_screenshot is not None:
             log_info(f"final after screenshot ready path={final_after_screenshot}")
@@ -709,6 +788,13 @@ async def analyze_recording_session(
         )
         if text_choice_cancelled:
             cancelled = True
+
+        events, prepared_list = _fold_chinese_ime_after_text_resolve(
+            events,
+            prepared_list,
+            log_info=log_info,
+        )
+        _persist_coalesced_events(run_dir, events, log_info=log_info)
 
         instruction_results, llm_cancelled = await _analyze_all_event_instructions(
             prepared_list,

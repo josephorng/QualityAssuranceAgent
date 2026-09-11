@@ -5,6 +5,8 @@ services:
     command:
       - tritonserver
       - --model-repository=/models
+      - --model-control-mode=poll
+      - --repository-poll-secs=5
       - --strict-model-config=false
       - --log-verbose=0
       - --http-port=9000

@@ -363,16 +363,21 @@ def instruction_for_click(
     vision: dict[str, Any],
     *,
     use_char_target: bool = False,
+    promote_primary: bool = True,
 ) -> str | None:
     """Build a hub-script click line from the nearest OCR/YOLO candidate.
 
     Character-level phrases (``「搜尋」的「搜」字上``) are opt-in via
     ``use_char_target``. The default is the parent OCR/YOLO label.
+
+    When ``promote_primary`` is False, keep ``candidates[0]`` as-is (used after
+    the user explicitly picks a click target in recording_steps.html).
     """
     if event.kind not in _CLICK_POINTER_KINDS:
         return None
 
-    ensure_click_primary_candidate(vision)
+    if promote_primary:
+        ensure_click_primary_candidate(vision)
 
     if use_char_target:
         char_target = primary_candidate_char_target(vision)
@@ -616,12 +621,16 @@ def rebuild_pointer_instruction(
     *,
     include_nearby: bool = True,
     use_char_target: bool = False,
+    promote_primary: bool = True,
 ) -> str | None:
     """Rebuild a hub-script pointer instruction from ranked vision candidates.
 
     When ``include_nearby`` is False, omits nearby-context parentheticals so
     callers can apply user-selected landmarks afterward. Click/hold kinds still
     receive their action suffix (e.g. 「，並點擊滑鼠一下。」).
+
+    When ``promote_primary`` is False, do not re-rank ``candidates[0]`` via
+    ``ensure_click_primary_candidate`` (honors an explicit user target pick).
     """
     dest = destination if isinstance(destination, dict) else {}
 
@@ -634,8 +643,12 @@ def rebuild_pointer_instruction(
         return base
 
     if event.kind in _CLICK_POINTER_KINDS:
-        ensure_click_primary_candidate(vision)
-        base = instruction_for_click(event, vision, use_char_target=use_char_target)
+        base = instruction_for_click(
+            event,
+            vision,
+            use_char_target=use_char_target,
+            promote_primary=promote_primary,
+        )
         if base is None:
             return None
         if include_nearby:
@@ -650,7 +663,8 @@ def rebuild_pointer_instruction(
         return base + suffix if suffix else base
 
     if event.kind == "scroll":
-        ensure_click_primary_candidate(vision)
+        if promote_primary:
+            ensure_click_primary_candidate(vision)
         base = instruction_for_scroll(event, vision)
         if base is None:
             return None

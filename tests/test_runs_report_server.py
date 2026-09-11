@@ -391,6 +391,162 @@ def test_apply_recording_event_primary_target_reorders_and_rebuilds(tmp_path: Pa
     assert "「45 個項目」文字" not in selected_labels
 
 
+def test_apply_primary_honors_single_char_over_overlapping_icon(tmp_path: Path) -> None:
+    """User-selected single-char text must win even when an icon shares the click."""
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_landmark_run(runs_root, "recording_yes_vs_avatar")
+    click_xy = [985, 532]
+    (run_root / "events" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "index": 1,
+                "timestamp_utc": "2026-07-21T04:00:00+00:00",
+                "kind": "click",
+                "cursor_xy": click_xy,
+                "screenshot_path": "",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    avatar_instruction = (
+        "將滑鼠移到「頭像、使用者頭像」圖示，並點擊滑鼠一下。"
+    )
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": avatar_instruction,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "yolo_ocr" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "local_cursor": click_xy,
+                "candidates": [
+                    {
+                        "bbox": [978, 525, 13, 13],
+                        "center": click_xy,
+                        "class_name": "element",
+                        "text": "\ue02d",
+                        "icons": [
+                            {
+                                "pua": "\ue02d",
+                                "chinese_id": "頭像、使用者頭像",
+                            }
+                        ],
+                    },
+                    {
+                        "bbox": [978, 525, 13, 13],
+                        "center": click_xy,
+                        "class_name": "text",
+                        "text": "是",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = apply_recording_event_landmarks(
+        runs_root,
+        "recording_yes_vs_avatar",
+        1,
+        selected=[],
+        primary_index=1,
+    )
+
+    assert result["rebuilt"] is True
+    assert result["instruction"].startswith("將滑鼠移到「是」文字")
+    assert "頭像" not in result["instruction"]
+
+    yolo = json.loads(
+        (run_root / "yolo_ocr" / "event_001.json").read_text(encoding="utf-8")
+    )
+    assert yolo["candidates"][0]["text"] == "是"
+    analysis = json.loads(
+        (run_root / "analysis" / "event_001.json").read_text(encoding="utf-8")
+    )
+    assert analysis["instruction"] == result["instruction"]
+
+
+def test_apply_primary_index_zero_rebuilds_desynced_instruction(tmp_path: Path) -> None:
+    """Applying the already-first candidate still rebuilds a stale instruction."""
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_landmark_run(runs_root, "recording_primary_desync")
+    click_xy = [985, 532]
+    (run_root / "events" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "index": 1,
+                "timestamp_utc": "2026-07-21T04:00:00+00:00",
+                "kind": "click",
+                "cursor_xy": click_xy,
+                "screenshot_path": "",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": "將滑鼠移到「頭像、使用者頭像」圖示，並點擊滑鼠一下。",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "yolo_ocr" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "local_cursor": click_xy,
+                "candidates": [
+                    {
+                        "bbox": [978, 525, 13, 13],
+                        "center": click_xy,
+                        "class_name": "text",
+                        "text": "是",
+                    },
+                    {
+                        "bbox": [978, 525, 13, 13],
+                        "center": click_xy,
+                        "class_name": "element",
+                        "text": "\ue02d",
+                        "icons": [
+                            {
+                                "pua": "\ue02d",
+                                "chinese_id": "頭像、使用者頭像",
+                            }
+                        ],
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = apply_recording_event_landmarks(
+        runs_root,
+        "recording_primary_desync",
+        1,
+        selected=[],
+        primary_index=0,
+    )
+
+    assert result["rebuilt"] is True
+    assert result["instruction"].startswith("將滑鼠移到「是」文字")
+    assert "頭像" not in result["instruction"]
+
+
 def _add_clicked_char(run_root: Path, *, char: str = "搜", index: int = 0) -> None:
     yolo_path = run_root / "yolo_ocr" / "event_001.json"
     payload = json.loads(yolo_path.read_text(encoding="utf-8"))

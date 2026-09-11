@@ -1069,9 +1069,11 @@ def apply_recording_event_landmarks(
 ) -> dict[str, Any]:
     """Reformat one event instruction from selected landmarks/targets and persist.
 
-    When ``primary_index`` / ``primary_end_index`` move a non-zero candidate to
-    index 0, reorders the matching ``yolo_ocr`` file and rebuilds the base
-    instruction from vision helpers before applying landmark checkboxes.
+    When ``primary_index`` / ``primary_end_index`` is provided, rebuilds the base
+    instruction from the chosen YOLO/OCR candidate (reordering when the index is
+    non-zero) and does not re-rank via ``ensure_click_primary_candidate``, so an
+    explicit user pick is honored even when auto-ranking would prefer another
+    overlapping detection. Nearby landmark checkboxes are then applied.
 
     Returns ``{"instruction": ..., "rebuilt": bool}``. Raises ``ValueError`` for
     invalid input.
@@ -1108,18 +1110,24 @@ def apply_recording_event_landmarks(
         else None
     )
 
+    # Any explicit primary radio selection rebuilds from that candidate. Index 0
+    # still rebuilds so a desynced instruction can catch up to the persisted
+    # YOLO order. Skip ensure_click_primary_candidate so auto-ranking cannot
+    # override the user's pick (e.g. icon beating single-char 「是」).
     rebuilt = False
-    if start_primary is not None and start_primary != 0:
-        reorder_yolo_ocr_primary(run_dir, event_index, start_primary, suffix="")
+    if start_primary is not None:
+        if start_primary != 0:
+            reorder_yolo_ocr_primary(run_dir, event_index, start_primary, suffix="")
         rebuilt = True
 
-    if kind == "drag" and end_primary is not None and end_primary != 0:
-        reorder_yolo_ocr_primary(
-            run_dir,
-            event_index,
-            end_primary,
-            suffix=drag_end_yolo_suffix(run_dir, event_index),
-        )
+    if kind == "drag" and end_primary is not None:
+        if end_primary != 0:
+            reorder_yolo_ocr_primary(
+                run_dir,
+                event_index,
+                end_primary,
+                suffix=drag_end_yolo_suffix(run_dir, event_index),
+            )
         rebuilt = True
 
     start_hints = _hints_from_selected_payload(selected)
@@ -1139,6 +1147,7 @@ def apply_recording_event_landmarks(
             destination,
             include_nearby=False,
             use_char_target=use_char_target_enabled(analysis),
+            promote_primary=False,
         )
         if not rebuilt_instruction:
             raise ValueError("unable to rebuild instruction for selected target")
@@ -1462,6 +1471,7 @@ def apply_recording_event_char_target(
         None,
         include_nearby=False,
         use_char_target=use_char_target,
+        promote_primary=False,
     )
     if not rebuilt:
         raise ValueError("unable to rebuild instruction for character target")

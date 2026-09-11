@@ -34,7 +34,7 @@ _SETTLE_AFTER_MIN_SECONDS = 1.0
 _FINAL_AFTER_RELATIVE = "screenshots/final_after.jpeg"
 # Cap concurrent Triton YOLO+OCR jobs so the GPU is not flooded.
 _DEFAULT_VISION_WORKERS = 4
-# Cap concurrent LLM calls so local Ollama/vLLM is not flooded.
+# Cap concurrent LLM calls so local/remote vLLM is not flooded.
 _DEFAULT_LLM_WORKERS = 4
 _UNSET: Any = object()
 # Each event contributes vision + instruction work units.

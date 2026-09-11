@@ -69,8 +69,8 @@ from src.common.script_helper import (
 from src.common.smart_mode import normalize_smart_goal, resolve_hub_run_mode
 from src.common.settings import (
     ROOT_DIR,
-    apply_startup_ollama_host_probe,
     apply_startup_triton_probe,
+    apply_startup_vllm_host_probe,
     load_settings,
     reports_serve_root,
 )
@@ -331,7 +331,7 @@ class MainHub(ctk.CTk):
                 pass
         self._sync_tool_cache_checkbox_for_mode()
 
-        self._status.configure(text="正在檢查 Ollama 與 Triton…")
+        self._status.configure(text="正在檢查 vLLM 與 Triton…")
         self._start_startup_probes()
 
         if self._recording_hotkey_enabled:
@@ -342,10 +342,10 @@ class MainHub(ctk.CTk):
         results: queue.SimpleQueue[tuple[bool, str, bool, str]] = queue.SimpleQueue()
 
         def work() -> None:
-            ollama_ok, ollama_message = apply_startup_ollama_host_probe()
+            vllm_ok, vllm_message = apply_startup_vllm_host_probe()
             triton_ok, triton_message = apply_startup_triton_probe()
             results.put(
-                (ollama_ok, ollama_message, triton_ok, triton_message)
+                (vllm_ok, vllm_message, triton_ok, triton_message)
             )
 
         def poll_results() -> None:
@@ -361,45 +361,18 @@ class MainHub(ctk.CTk):
 
     def _on_startup_probes_done(
         self,
-        ollama_ok: bool,
-        ollama_message: str,
+        vllm_ok: bool,
+        vllm_message: str,
         triton_ok: bool,
         triton_message: str,
     ) -> None:
-        message = f"{ollama_message} | {triton_message}"
-        if not ollama_ok:
+        message = f"{vllm_message} | {triton_message}"
+        if not vllm_ok:
             self._status.configure(text=message, text_color=("#b91c1c", "#f87171"))
         elif not triton_ok:
             self._status.configure(text=message, text_color=("#b45309", "#fbbf24"))
         else:
             self._status.configure(text=message, text_color=("gray20", "gray65"))
-
-    def _start_ollama_host_probe(self) -> None:
-        results: queue.SimpleQueue[tuple[bool, str]] = queue.SimpleQueue()
-
-        def work() -> None:
-            ok, message = apply_startup_ollama_host_probe()
-            results.put((ok, message))
-
-        def poll_results() -> None:
-            try:
-                result = results.get_nowait()
-            except queue.Empty:
-                self.after(50, poll_results)
-                return
-            self._on_ollama_host_probe_done(*result)
-
-        threading.Thread(target=work, daemon=True).start()
-        self.after(50, poll_results)
-
-    def _on_ollama_host_probe_done(self, ok: bool, message: str) -> None:
-        if ok:
-            self._status.configure(text=message, text_color=("gray20", "gray65"))
-        else:
-            self._status.configure(
-                text=message,
-                text_color=("#b91c1c", "#f87171"),
-            )
 
     def _refresh_script_path_label(self) -> None:
         if self._script_path is not None:

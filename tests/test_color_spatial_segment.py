@@ -21,6 +21,7 @@ from cua_mcp.color_spatial_segment import (
     load_color_segment_params,
     region_id_for_box,
     reorder_detections_for_landmark,
+    save_color_segment_params,
     segment_image_by_color,
     spatial_region_rank_for_detections,
 )
@@ -138,6 +139,42 @@ def test_load_color_segment_params_defaults_when_missing(tmp_path) -> None:
     params = load_color_segment_params(tmp_path / "missing.json")
     assert isinstance(params, ColorSegmentParams)
     assert params.num_colors == 120
+
+
+def test_save_and_load_color_segment_params_round_trip(tmp_path) -> None:
+    path = tmp_path / "color_segment_params.json"
+    original = ColorSegmentParams(
+        num_colors=80,
+        slic_compactness=12.5,
+        min_area_frac=0.02,
+        blur_ksize=7,
+        mask_text_icons=False,
+        require_yolo_objects=False,
+        merge_superpixels=False,
+        merge_similar=True,
+        merge_color_dist=15.0,
+        split_large_regions=False,
+        split_max_area_frac=0.1,
+        edge_canny_low=20,
+        edge_canny_high=120,
+        edge_dilate=3,
+    )
+    save_color_segment_params(original, path)
+    loaded = load_color_segment_params(path)
+    assert loaded.num_colors == original.num_colors
+    assert loaded.slic_compactness == original.slic_compactness
+    assert loaded.min_area_frac == original.min_area_frac
+    assert loaded.blur_ksize == original.blur_ksize
+    assert loaded.mask_text_icons is False
+    assert loaded.require_yolo_objects is False
+    assert loaded.merge_superpixels is False
+    assert loaded.merge_similar is True
+    assert loaded.merge_color_dist == original.merge_color_dist
+    assert loaded.split_large_regions is False
+    assert loaded.split_max_area_frac == original.split_max_area_frac
+    assert loaded.edge_canny_low == original.edge_canny_low
+    assert loaded.edge_canny_high == original.edge_canny_high
+    assert loaded.edge_dilate == original.edge_dilate
 
 
 def _nested_bac_regions() -> list[ColorRegion]:

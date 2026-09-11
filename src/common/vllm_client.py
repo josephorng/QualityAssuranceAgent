@@ -361,11 +361,10 @@ def _translate_response_format(response_format: ResponseFormatParam) -> dict[str
 
 class VLLMClient(LLMClient):
     """
-    LLM client for OpenAI-compatible chat completion APIs.
+    LLM client for OpenAI-compatible chat completion APIs (vLLM Gemma 4).
 
-    Configured for **Ollama** at ``OLLAMA_OPENAI_COMPAT_URL`` (OpenAI-compatible
-    routes). Use model name ``gemma4:26b`` in callers (e.g. ``brain_lm`` in
-    ``runs/agent_settings.json``).
+    Use the model id from settings (e.g. ``google/gemma-4-26B-A4B-it`` in
+    ``runs/agent_settings.json`` / ``brain_lm``).
 
     The wire format is translated to/from ``ollama.Message`` so the rest of the
     codebase can keep using the existing message shape and tool descriptors.

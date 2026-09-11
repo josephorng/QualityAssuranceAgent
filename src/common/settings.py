@@ -371,8 +371,8 @@ def apply_startup_triton_probe() -> tuple[bool, str]:
     return False, f"警告：無法連線 Triton（{triton_url}）"
 
 
-def apply_startup_ollama_host_probe() -> tuple[bool, str]:
-    """Report the configured vLLM Gemma 4 host at startup (no Ollama probing)."""
+def apply_startup_vllm_host_probe() -> tuple[bool, str]:
+    """Report the configured vLLM Gemma 4 host at startup."""
     data = load_agent_settings_dict()
     host = str(data.get("ollama_host") or BACKEND_PRESETS["vllm_server"]["ollama_host"])
     return True, f"vLLM 主機：{host}"

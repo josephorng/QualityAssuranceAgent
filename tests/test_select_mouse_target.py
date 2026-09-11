@@ -2412,7 +2412,7 @@ async def test_resolve_mouse_point_nearby_prefilter_skips_ollama(
         fake_filter,
     )
     monkeypatch.setattr(
-        "cua_mcp.select_mouse_target._select_center_with_ollama",
+        "cua_mcp.select_mouse_target._select_center_with_llm",
         fail_ollama,
     )
     monkeypatch.setattr(
@@ -2501,7 +2501,7 @@ async def test_resolve_mouse_point_does_not_run_function_describe(
         fake_filter,
     )
     monkeypatch.setattr(
-        "cua_mcp.select_mouse_target._select_center_with_ollama",
+        "cua_mcp.select_mouse_target._select_center_with_llm",
         fake_ollama,
     )
     monkeypatch.setattr(

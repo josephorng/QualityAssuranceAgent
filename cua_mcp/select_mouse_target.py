@@ -46,7 +46,7 @@ from cua_mcp.select_ui_element import (
     _describe_ui_candidate_functions,
     _format_ui_candidates_text,
     _select_center_with_functions,
-    _select_center_with_ollama,
+    _select_center_with_llm,
     _sort_detections_reading_order,
 )
 from src.common.io_utils import imread_bgr, imwrite_bgr
@@ -1743,10 +1743,10 @@ async def find_mouse_point(
             idx = 0
             chosen = anchor_matches[0]
             _log_info(
-                "move_mouse: single anchor candidate after filter; skipping Ollama pick"
+                "move_mouse: single anchor candidate after filter; skipping LLM pick"
             )
         else:
-            pool_idx, selected_text = await _select_center_with_ollama(
+            pool_idx, selected_text = await _select_center_with_llm(
                 anchor,
                 anchor_matches,
                 image_paths,
@@ -1756,7 +1756,7 @@ async def find_mouse_point(
             idx = pool_idx
             chosen = anchor_matches[pool_idx]
             _log_info(
-                f"move_mouse: Ollama picked index={pool_idx} "
+                f"move_mouse: LLM picked index={pool_idx} "
                 f"text={selected_text!r} center=[{chosen.cx},{chosen.cy}]"
             )
 

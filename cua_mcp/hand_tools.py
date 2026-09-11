@@ -370,7 +370,7 @@ def _parse_json_object_from_llm(content: str) -> dict[str, Any]:
     return json.loads(text)
 
 
-async def _ollama_pick_window_indices(
+async def _llm_pick_window_indices(
     user_query: str,
     candidates: list[tuple[Any, str]],
     instruction: str,
@@ -420,7 +420,7 @@ async def _select_target_windows(
     Return windows to act on and how they were chosen.
 
     Single substring match -> no LLM. Zero or multiple substring matches ->
-    Ollama returns one or more indices into the relevant candidate list.
+    LLM returns one or more indices into the relevant candidate list.
     """
     needle = (window_title_contains or "").strip()
     if not needle:
@@ -440,14 +440,14 @@ async def _select_target_windows(
         candidates = _list_windows_with_titles()
         if not candidates:
             raise ValueError("no windows with non-empty titles found")
-        idxs = await _ollama_pick_window_indices(
+        idxs = await _llm_pick_window_indices(
             needle,
             candidates,
             instruction=instruction,
             action=action,
         )
         return [candidates[i] for i in idxs], "ollama_no_substring_match"
-    idxs = await _ollama_pick_window_indices(
+    idxs = await _llm_pick_window_indices(
         needle,
         substring_matches,
         instruction=instruction,
@@ -464,9 +464,9 @@ async def maximize_windows(
     Bring one or more top-level windows to the foreground and maximize them.
 
     First tries case-insensitive substring match on window titles. If exactly one
-    window matches, it is used. If none or several match, asks Ollama (brain_lm)
+    window matches, it is used. If none or several match, asks the LLM (brain_lm)
     to pick one or more indices from the relevant candidate list. For those
-    Ollama calls, ``instruction`` (if non-empty) is included in the prompt as extra
+    LLM calls, ``instruction`` (if non-empty) is included in the prompt as extra
     disambiguation context.
     """
     needle = (window_title_contains or "").strip()
@@ -525,7 +525,7 @@ async def close_windows(
     Close one or more top-level windows whose titles best match the query.
 
     First tries case-insensitive substring match on window titles. If exactly one
-    window matches, it is used. If none or several match, asks Ollama (brain_lm)
+    window matches, it is used. If none or several match, asks the LLM (brain_lm)
     to pick one or more indices from the relevant candidate list.
     """
     needle = (window_title_contains or "").strip()

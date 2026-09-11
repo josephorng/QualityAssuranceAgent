@@ -136,7 +136,7 @@ class HandModule:
                 response_format="json",
             )
         except Exception as exc:
-            self.manager.log_error(f"Ollama remap call failed: {exc}")
+            self.manager.log_error(f"LLM remap call failed: {exc}")
             return None
 
         if not reply or not reply.content:
@@ -144,7 +144,7 @@ class HandModule:
         try:
             payload = json.loads(reply.content)
         except json.JSONDecodeError:
-            self.manager.log_error(f"Ollama remap returned non-JSON content: {reply.content}")
+            self.manager.log_error(f"LLM remap returned non-JSON content: {reply.content}")
             return None
         if not isinstance(payload, dict):
             return None
@@ -155,7 +155,7 @@ class HandModule:
             return None
         candidate_action = candidate_action.strip()
         if candidate_action not in tool_names:
-            self.manager.log_error(f"Ollama remap suggested invalid tool: {candidate_action}")
+            self.manager.log_error(f"LLM remap suggested invalid tool: {candidate_action}")
             return None
         if not isinstance(candidate_args, dict):
             candidate_args = args

@@ -19,8 +19,10 @@ from cua_mcp.color_spatial_segment import (
     ColorSegmentParams,
     ColorSegmentResult,
     SegmentDetection,
+    load_color_segment_params,
     prepare_segmentation_image,
     region_id_for_box,
+    save_color_segment_params,
     segment_image_by_color,
     spatial_region_rank_for_detections,
 )
@@ -299,7 +301,7 @@ def _build_yolo_spatial_segment_state(
     if image is None:
         return YoloSpatialSegmentState(None, {})
     try:
-        params = _load_color_segment_params()
+        params = load_color_segment_params()
         seg_lines = _lines_for_spatial_segmentation(lines)
         seg_dets = [_ocr_line_to_segment_detection(line) for line in seg_lines]
         result = segment_image_by_color(image, params=params, detections=seg_dets)
@@ -1136,80 +1138,6 @@ _COLOR_PARAM_TOOLTIPS: dict[str, str] = {
         "Non-adjacent same-color areas are never merged."
     ),
 }
-
-_COLOR_SEGMENT_PARAMS_PATH = ROOT_DIR / "color_segment_params.json"
-
-
-def _color_segment_params_path() -> Path:
-    return _COLOR_SEGMENT_PARAMS_PATH
-
-
-def _clamp_color_segment_param(key: str, value: float) -> float:
-    for slider_key, _label, lo, hi, _default, _decimals, _step in _COLOR_PARAM_SLIDERS:
-        if slider_key != key:
-            continue
-        return max(lo, min(hi, float(value)))
-    return float(value)
-
-
-def _load_color_segment_params() -> ColorSegmentParams:
-    defaults = ColorSegmentParams()
-    raw = read_json(_color_segment_params_path(), default={})
-    if not isinstance(raw, dict):
-        return defaults
-
-    def _num(key: str, fallback: float) -> float:
-        value = raw.get(key, fallback)
-        try:
-            return _clamp_color_segment_param(key, float(value))
-        except (TypeError, ValueError):
-            return fallback
-
-    blur = int(round(_num("blur_ksize", defaults.blur_ksize)))
-    if blur % 2 == 0:
-        blur = max(1, blur - 1)
-    min_area_pct = _num("min_area_frac", defaults.min_area_frac * 100.0)
-    split_pct = _num("split_max_area_frac", defaults.split_max_area_frac * 100.0)
-    return ColorSegmentParams(
-        num_colors=max(0, int(round(_num("num_colors", defaults.num_colors)))),
-        slic_compactness=float(_num("slic_compactness", defaults.slic_compactness)),
-        min_area_frac=max(0.0001, min_area_pct / 100.0),
-        blur_ksize=blur,
-        mask_text_icons=bool(raw.get("mask_text_icons", defaults.mask_text_icons)),
-        require_yolo_objects=bool(
-            raw.get("require_yolo_objects", defaults.require_yolo_objects)
-        ),
-        merge_superpixels=bool(raw.get("merge_superpixels", defaults.merge_superpixels)),
-        merge_similar=bool(raw.get("merge_similar", defaults.merge_similar)),
-        merge_color_dist=float(_num("merge_color_dist", defaults.merge_color_dist)),
-        split_large_regions=bool(raw.get("split_large_regions", defaults.split_large_regions)),
-        split_max_area_frac=max(0.01, split_pct / 100.0),
-        edge_canny_low=int(round(_num("edge_canny_low", defaults.edge_canny_low))),
-        edge_canny_high=int(round(_num("edge_canny_high", defaults.edge_canny_high))),
-        edge_dilate=max(0, int(round(_num("edge_dilate", defaults.edge_dilate)))),
-    )
-
-
-def _save_color_segment_params(params: ColorSegmentParams) -> None:
-    write_json(
-        _color_segment_params_path(),
-        {
-            "num_colors": int(params.num_colors),
-            "slic_compactness": float(params.slic_compactness),
-            "min_area_frac": round(params.min_area_frac * 100.0, 3),
-            "blur_ksize": int(params.blur_ksize),
-            "mask_text_icons": bool(params.mask_text_icons),
-            "require_yolo_objects": bool(params.require_yolo_objects),
-            "merge_superpixels": bool(params.merge_superpixels),
-            "merge_similar": bool(params.merge_similar),
-            "merge_color_dist": float(params.merge_color_dist),
-            "split_large_regions": bool(params.split_large_regions),
-            "split_max_area_frac": round(params.split_max_area_frac * 100.0, 2),
-            "edge_canny_low": int(params.edge_canny_low),
-            "edge_canny_high": int(params.edge_canny_high),
-            "edge_dilate": int(params.edge_dilate),
-        },
-    )
 
 
 _REGION_OUTLINE_COLORS: tuple[str, ...] = (
@@ -4443,7 +4371,7 @@ class ColorSegmentViewerApp:
         self._detect_after_id: str | None = None
         self._mask_preview: Image.Image | None = None
         self._mask_preview_boxes: list[tuple[int, int, int, int]] = []
-        saved = _load_color_segment_params()
+        saved = load_color_segment_params()
         self.mask_text_icons.set(saved.mask_text_icons)
         self.require_yolo_objects.set(saved.require_yolo_objects)
         self.merge_superpixels.set(saved.merge_superpixels)
@@ -4979,7 +4907,7 @@ class ColorSegmentViewerApp:
     def _schedule_detect(self) -> None:
         self._cancel_pending_detect()
         try:
-            _save_color_segment_params(self._read_params())
+            save_color_segment_params(self._read_params())
         except OSError:
             pass
         self.status_var.set("Parameters changed — segmenting in 2s...")
@@ -5034,7 +4962,7 @@ class ColorSegmentViewerApp:
     def _run_segmentation(self) -> None:
         params = self._read_params()
         try:
-            _save_color_segment_params(params)
+            save_color_segment_params(params)
         except OSError:
             pass
         if self.current_image is None:

@@ -22,7 +22,7 @@ from cua_mcp.yolo_onnx import (
     YOLO_CLASS_SCROLLBAR,
     YOLO_CLASS_TEXT,
 )
-from src.common.io_utils import imread_bgr, read_json
+from src.common.io_utils import imread_bgr, read_json, write_json
 from src.common.settings import ROOT_DIR
 
 T = TypeVar("T")
@@ -147,6 +147,33 @@ def load_color_segment_params(
         edge_canny_low=int(round(_num("edge_canny_low", defaults.edge_canny_low))),
         edge_canny_high=int(round(_num("edge_canny_high", defaults.edge_canny_high))),
         edge_dilate=max(0, int(round(_num("edge_dilate", defaults.edge_dilate)))),
+    )
+
+
+def save_color_segment_params(
+    params: ColorSegmentParams,
+    path: Path | None = None,
+) -> None:
+    """Persist segmentation params as JSON (percent fields for area fractions)."""
+    params_path = path or _DEFAULT_COLOR_SEGMENT_PARAMS_PATH
+    write_json(
+        params_path,
+        {
+            "num_colors": int(params.num_colors),
+            "slic_compactness": float(params.slic_compactness),
+            "min_area_frac": round(params.min_area_frac * 100.0, 3),
+            "blur_ksize": int(params.blur_ksize),
+            "mask_text_icons": bool(params.mask_text_icons),
+            "require_yolo_objects": bool(params.require_yolo_objects),
+            "merge_superpixels": bool(params.merge_superpixels),
+            "merge_similar": bool(params.merge_similar),
+            "merge_color_dist": float(params.merge_color_dist),
+            "split_large_regions": bool(params.split_large_regions),
+            "split_max_area_frac": round(params.split_max_area_frac * 100.0, 2),
+            "edge_canny_low": int(params.edge_canny_low),
+            "edge_canny_high": int(params.edge_canny_high),
+            "edge_dilate": int(params.edge_dilate),
+        },
     )
 
 

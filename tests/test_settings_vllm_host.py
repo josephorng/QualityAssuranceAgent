@@ -1,8 +1,8 @@
 from pathlib import Path
 
 from src.common.settings import (
-    apply_startup_ollama_host_probe,
     apply_startup_triton_probe,
+    apply_startup_vllm_host_probe,
     canonicalize_llm_backend,
     normalize_agent_settings_dict,
     probe_llm_backend,
@@ -49,7 +49,7 @@ def test_startup_probe_reports_vllm_host(
         lambda data: saved.append(data),
     )
 
-    ok, message = apply_startup_ollama_host_probe()
+    ok, message = apply_startup_vllm_host_probe()
 
     assert saved == []
     assert ok is True

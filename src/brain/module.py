@@ -1199,7 +1199,7 @@ class BrainModule:
         if response_message:
             messages.append(stamp_message(response_message.model_dump()))
         if not response_message or not response_message.content:
-            self.manager.log_error("Ollama baseline match returned empty content")
+            self.manager.log_error("LLM baseline match returned empty content")
             return None, messages
 
         parsed = self._parse_baseline_match_from_content(response_message.content)
@@ -1289,7 +1289,7 @@ class BrainModule:
         if response_message:
             messages.append(stamp_message(response_message.model_dump()))
         if not response_message or not response_message.content:
-            self.manager.log_error("Ollama verify step returned empty content")
+            self.manager.log_error("LLM verify step returned empty content")
             return None, messages
 
         parsed = self._parse_verify_result_from_content(response_message.content)
@@ -1463,7 +1463,7 @@ class BrainModule:
                     tools=tool_functions,
                 )
                 if not response_message:
-                    self.manager.log_error("Ollama returned empty response")
+                    self.manager.log_error("LLM returned empty response")
                     break
                 response_message_dict = stamp_message(self.sanitize_message(response_message))
                 messages.append(response_message_dict)

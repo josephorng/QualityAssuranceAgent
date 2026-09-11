@@ -111,7 +111,7 @@ def _parse_index_from_llm(raw: str, num_candidates: int) -> tuple[int, str]:
     out = parse_json_object(
         raw,
         empty_error=(
-            'Ollama UI picker returned empty content; '
+            'LLM UI picker returned empty content; '
             'expected {"index": <int>, "text": "<string>"}'
         ),
         decode_error_prefix="invalid JSON",
@@ -140,7 +140,7 @@ def _parse_function_descriptions_from_llm(
     out = parse_json_object(
         raw,
         empty_error=(
-            "Ollama UI function describer returned empty content; expected "
+            "LLM UI function describer returned empty content; expected "
             '{"items": [{"index": <int>, "function": "<string>"}, ...]}'
         ),
         decode_error_prefix="invalid JSON",
@@ -192,7 +192,7 @@ def _parse_keep_indices_from_llm(raw: str, max_len: int) -> list[int]:
     """Parse text-filter LLM reply; return deduplicated 0-based indices in ``[0, max_len)``."""
     out = parse_json_object(
         raw,
-        empty_error='Ollama text filter returned empty content; expected {"keep_indices": [int, ...]}',
+        empty_error='LLM text filter returned empty content; expected {"keep_indices": [int, ...]}',
         decode_error_prefix="invalid JSON",
     )
     preview = (raw or "")[:240]
@@ -227,7 +227,7 @@ def _parse_anchor_nearby_indices_from_llm(
     out = parse_json_object(
         raw,
         empty_error=(
-            "Ollama mouse filter returned empty content; expected "
+            "LLM mouse filter returned empty content; expected "
             '{"anchor_indices": [int, ...], "nearby_indices": [int, ...]}'
         ),
         decode_error_prefix="invalid JSON",
@@ -602,7 +602,7 @@ async def _select_center_with_functions(
     )
 
 
-async def _select_center_with_ollama(
+async def _select_center_with_llm(
     anchor_instruction: str,
     anchor_candidates: list[UiDetection],
     image_paths: list[str],
@@ -611,7 +611,7 @@ async def _select_center_with_ollama(
     nearby_labels: list[str] | None = None,
 ) -> tuple[int, str]:
     """
-    Ask Ollama for the best candidate index (0-based into ``detections``).
+    Ask the LLM for the best candidate index (0-based into ``detections``).
 
     Returns ``(index, text)`` where ``text`` is the LLM-echoed candidate row context.
 
@@ -664,5 +664,5 @@ async def _select_center_with_ollama(
         response_schema=_INDEX_JSON_SCHEMA,
         parse_reply=lambda raw: _parse_index_from_llm(raw, n),
         retry_instruction=get_prompt("ui_element_selection_retry"),
-        log_info=lambda m: _run_manager().log_info(f"_select_center_with_ollama: {m}"),
+        log_info=lambda m: _run_manager().log_info(f"_select_center_with_llm: {m}"),
     )

@@ -176,6 +176,15 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 .instruction-group > summary .select-step {
   flex: 0 0 auto; margin: 0; cursor: pointer;
 }
+.instruction-group > summary .verify-step {
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: .3rem;
+  margin: 0; font-size: .75rem; font-weight: 600; color: #57606a;
+  cursor: pointer; user-select: none; white-space: nowrap;
+}
+.instruction-group > summary .verify-step input {
+  margin: 0; cursor: pointer;
+}
+.instruction-group > summary .verify-step:hover { color: #1f2328; }
 .copy-all-instructions {
   appearance: none; border: 1px solid #d0d7de; background: #f6f8fa;
   cursor: pointer; border-radius: 6px; padding: .35rem .75rem;
@@ -1410,12 +1419,81 @@ _RECORDING_SCRIPT = """
     });
   });
 
+  Array.prototype.slice.call(document.querySelectorAll("input.use-expected-outcome")).forEach(function (checkbox) {
+    checkbox.addEventListener("click", function (event) {
+      event.stopPropagation();
+    });
+    checkbox.addEventListener("change", function (event) {
+      event.stopPropagation();
+      var group = checkbox.closest(".instruction-group");
+      if (!group) return;
+      var panel = group.querySelector(".expected-outcome");
+      var btn = panel ? panel.querySelector("button.apply-expected-outcome") : null;
+      if (btn) {
+        applyExpectedOutcome(btn);
+        return;
+      }
+      applyVerificationToggle(group, checkbox);
+    });
+  });
+
+  function applyVerificationToggle(group, checkbox) {
+      if (window.location.protocol === "file:") {
+        checkbox.checked = !checkbox.checked;
+        return;
+      }
+      var runId = group.getAttribute("data-run-id") || "";
+      var eventIndex = group.getAttribute("data-event-index") || "";
+      if (!runId || !eventIndex) {
+        checkbox.checked = !checkbox.checked;
+        return;
+      }
+      var copyBtn = group.querySelector("button.copy-instruction");
+      var text = (copyBtn && copyBtn.getAttribute("data-expected-outcome")) || "";
+      var enabled = !!checkbox.checked;
+      checkbox.disabled = true;
+      fetch("/api/runs/" + encodeURIComponent(runId) + "/events/" + encodeURIComponent(eventIndex) + "/expected_outcome", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expected_outcome: text, use_expected_outcome: enabled })
+      })
+        .then(function (response) {
+          return response.json().then(function (payload) {
+            return { ok: response.ok, payload: payload };
+          });
+        })
+        .then(function (result) {
+          checkbox.disabled = false;
+          if (!result.ok || !result.payload || !result.payload.ok) {
+            checkbox.checked = !enabled;
+            return;
+          }
+          var saved = result.payload.expected_outcome;
+          if (saved == null) saved = "";
+          var savedEnabled = !!result.payload.use_expected_outcome;
+          checkbox.checked = savedEnabled;
+          if (copyBtn) {
+            if (savedEnabled && saved) {
+              copyBtn.setAttribute("data-expected-outcome", saved);
+              copyBtn.setAttribute("data-use-expected-outcome", "1");
+            } else {
+              if (!saved) copyBtn.removeAttribute("data-expected-outcome");
+              copyBtn.setAttribute("data-use-expected-outcome", savedEnabled ? "1" : "0");
+            }
+          }
+        })
+        .catch(function () {
+          checkbox.disabled = false;
+          checkbox.checked = !enabled;
+        });
+  }
+
   function applyExpectedOutcome(btn) {
       var panel = btn.closest(".expected-outcome");
       var group = btn.closest(".instruction-group");
       if (!panel || !group) return;
       var input = panel.querySelector(".expected-outcome-input");
-      var checkbox = panel.querySelector("input.use-expected-outcome");
+      var checkbox = group.querySelector("input.use-expected-outcome");
       if (!input) return;
       if (window.location.protocol === "file:") {
         setExpectedOutcomeStatus(panel, "請透過主程式開啟報告以修改預期結果。", true);
@@ -1430,6 +1508,7 @@ _RECORDING_SCRIPT = """
       var text = input.value || "";
       var enabled = checkbox ? !!checkbox.checked : false;
       btn.disabled = true;
+      if (checkbox) checkbox.disabled = true;
       setExpectedOutcomeStatus(panel, "套用中…", false);
       fetch("/api/runs/" + encodeURIComponent(runId) + "/events/" + encodeURIComponent(eventIndex) + "/expected_outcome", {
         method: "POST",
@@ -1443,6 +1522,7 @@ _RECORDING_SCRIPT = """
         })
         .then(function (result) {
           btn.disabled = false;
+          if (checkbox) checkbox.disabled = false;
           if (!result.ok || !result.payload || !result.payload.ok) {
             var err = (result.payload && result.payload.error) || "套用失敗";
             setExpectedOutcomeStatus(panel, err, true);
@@ -1459,8 +1539,8 @@ _RECORDING_SCRIPT = """
               copyBtn.setAttribute("data-expected-outcome", saved);
               copyBtn.setAttribute("data-use-expected-outcome", "1");
             } else {
-              copyBtn.removeAttribute("data-expected-outcome");
-              copyBtn.setAttribute("data-use-expected-outcome", "0");
+              if (!saved) copyBtn.removeAttribute("data-expected-outcome");
+              copyBtn.setAttribute("data-use-expected-outcome", enabled ? "1" : "0");
             }
           }
           var summaryText = group.querySelector(".instruction-summary-text");
@@ -1486,6 +1566,7 @@ _RECORDING_SCRIPT = """
         })
         .catch(function () {
           btn.disabled = false;
+          if (checkbox) checkbox.disabled = false;
           setExpectedOutcomeStatus(panel, "無法連線主程式，請確認主程式正在執行。", true);
         });
   }
@@ -4322,16 +4403,10 @@ def _render_expected_outcome_panel_html(
 ) -> str:
     if not show:
         return ""
-    checked_attr = " checked" if use_expected_outcome else ""
+    _ = use_expected_outcome  # toggled from the step summary checkbox
     return (
         f'<div class="expected-outcome">'
         f'<div class="expected-outcome-title">預期結果</div>'
-        f'<div class="expected-outcome-row">'
-        f'<label>'
-        f'<input type="checkbox" class="use-expected-outcome"{checked_attr}>'
-        f"啟用預期結果驗證"
-        f"</label>"
-        f"</div>"
         f'<div class="expected-outcome-row">'
         f'<textarea class="expected-outcome-input" rows="2" '
         f'spellcheck="false" aria-label="預期結果">'
@@ -4612,7 +4687,7 @@ def _render_recording_event_html(
     )
     use_outcome_attr = (
         ' data-use-expected-outcome="1"'
-        if use_expected_outcome and expected_outcome
+        if use_expected_outcome
         else ' data-use-expected-outcome="0"'
     )
     if use_expected_outcome and expected_outcome:
@@ -4647,6 +4722,12 @@ def _render_recording_event_html(
         f"<summary>"
         f'<input type="checkbox" class="select-step" '
         f'aria-label="選取步驟 {step_label}" title="選取步驟">'
+        f'<label class="verify-step" title="啟用此步驟的驗證" '
+        f'onclick="event.stopPropagation()">'
+        f'<input type="checkbox" class="use-expected-outcome"'
+        f'{" checked" if use_expected_outcome else ""}>'
+        f"驗證"
+        f"</label>"
         f'<span class="instruction-number">{step_label}</span>'
         f'<span class="instruction-summary-text">'
         f'<span class="instruction-title">{escape(title)}</span>'

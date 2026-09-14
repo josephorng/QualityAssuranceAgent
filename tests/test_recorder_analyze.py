@@ -3864,8 +3864,12 @@ async def test_analyze_recording_session_skips_expected_outcome_by_default(
     first_analysis = json.loads(
         (run_dir / "analysis" / "event_001.json").read_text(encoding="utf-8")
     )
+    last_analysis = json.loads(
+        (run_dir / "analysis" / "event_002.json").read_text(encoding="utf-8")
+    )
     assert first_analysis.get("expected_outcome") is None
     assert first_analysis["use_expected_outcome"] is False
+    assert last_analysis["use_expected_outcome"] is True
     assert outcome_mock.await_count == 0
 
 
@@ -3941,8 +3945,12 @@ async def test_analyze_recording_session_enter_skips_window_outcome_by_default(
     first_analysis = json.loads(
         (run_dir / "analysis" / "event_001.json").read_text(encoding="utf-8")
     )
+    last_analysis = json.loads(
+        (run_dir / "analysis" / "event_002.json").read_text(encoding="utf-8")
+    )
     assert first_analysis.get("expected_outcome") is None
     assert first_analysis["use_expected_outcome"] is False
+    assert last_analysis["use_expected_outcome"] is True
     assert outcome_mock.await_count == 0
 
 

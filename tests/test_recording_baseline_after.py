@@ -58,7 +58,8 @@ def _write_recording(tmp_path: Path) -> Path:
         analysis = {
             "instruction": f"click step {index}",
             "expected_outcome": None,
-            "use_expected_outcome": False,
+            # Verification (and thus baseline) is opt-in per step.
+            "use_expected_outcome": True,
         }
         if index == 0:
             # Leftover virtual wait must be ignored by collectors.
@@ -98,6 +99,21 @@ def test_collect_recording_baseline_after_paths_ignores_virtual_wait(tmp_path: P
     assert baselines[1] is not None
     assert baselines[1].endswith("final_after.jpeg")
     assert settles == [9.0, 8.0]
+
+
+def test_collect_recording_baseline_after_paths_skips_disabled_verification(
+    tmp_path: Path,
+) -> None:
+    run_dir = _write_recording(tmp_path)
+    first = run_dir / "analysis" / "event_000.json"
+    payload = json.loads(first.read_text(encoding="utf-8"))
+    payload["use_expected_outcome"] = False
+    first.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    baselines = collect_recording_baseline_after_paths(run_dir)
+    assert baselines[0] is None
+    assert baselines[1] is not None
+    assert baselines[1].endswith("final_after.jpeg")
 
 
 def test_collect_recording_baseline_after_paths_survives_renamed_folder(tmp_path: Path) -> None:

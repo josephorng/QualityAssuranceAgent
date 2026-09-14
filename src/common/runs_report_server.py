@@ -1336,7 +1336,8 @@ def apply_recording_event_expected_outcome(
 
     Empty / whitespace-only values clear ``expected_outcome`` (stored as ``null``).
     When ``use_expected_outcome`` is omitted, saving non-empty text enables verification;
-    clearing text disables it.
+    clearing text disables it. An explicit boolean toggles verification independently
+    of whether outcome text is present (baseline verify still requires the flag on).
     Returns ``{"expected_outcome": str|None, "use_expected_outcome": bool}``.
     Raises ``ValueError`` for invalid input.
     """

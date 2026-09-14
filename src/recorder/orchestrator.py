@@ -809,6 +809,7 @@ async def analyze_recording_session(
 
         # Ordered assemble: report lists, per-event analysis JSON.
         previous_instruction_event: RecordedEvent | None = None
+        last_instruction_analysis_path: Path | None = None
         for event_pos, event in enumerate(events):
             if should_cancel is not None and should_cancel():
                 cancelled = True
@@ -883,7 +884,15 @@ async def analyze_recording_session(
                 settle_after_seconds=settle_after_seconds,
                 text_resolution=text_resolution,
             )
+            last_instruction_analysis_path = analysis_path
             log_info(f"cached event {event.index}: {instruction}")
+
+        # Default: only the last instruction step runs verification.
+        if not cancelled and last_instruction_analysis_path is not None:
+            last_analysis = read_json(last_instruction_analysis_path, None)
+            if isinstance(last_analysis, dict):
+                last_analysis["use_expected_outcome"] = True
+                write_json(last_instruction_analysis_path, last_analysis)
 
         if not cancelled:
             progress.complete()

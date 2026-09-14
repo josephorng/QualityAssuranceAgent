@@ -270,7 +270,11 @@ def collect_recording_baseline_after_paths(run_dir: Path) -> list[str | None]:
         loaded.append((event, analysis))
 
     baselines: list[str | None] = []
-    for index, (event, _analysis) in enumerate(loaded):
+    for index, (event, analysis) in enumerate(loaded):
+        if not use_expected_outcome_enabled(analysis):
+            # Opt-in verification: no baseline when the step's checkbox is off.
+            baselines.append(None)
+            continue
         next_event = loaded[index + 1][0] if index + 1 < len(loaded) else None
         baselines.append(
             after_screenshot_for_outcome(

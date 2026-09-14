@@ -1270,11 +1270,61 @@ def test_write_recording_html_copy_includes_expected_outcome(tmp_path: Path) -> 
     assert "預期結果" in html
     assert 'class="expected-outcome-input"' in html
     assert 'class="apply-expected-outcome"' in html
+    assert 'class="verify-step"' in html
+    assert 'class="use-expected-outcome"' in html
     assert "對話框顯示" in html
     assert "function instructionCopyText" in html
     assert "# expected_outcome: " in html
     assert "function applyExpectedOutcome" in html
+    assert "function applyVerificationToggle" in html
     assert "instruction-expected" in html
+
+
+def test_write_recording_html_verification_checkbox_defaults_from_analysis(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000031"
+    _write_recording_fixture(run_root)
+    (run_root / "events").mkdir(parents=True, exist_ok=True)
+    (run_root / "analysis").mkdir(parents=True, exist_ok=True)
+    for index, enabled in ((1, False), (2, True)):
+        (run_root / "events" / f"event_{index:03d}.json").write_text(
+            json.dumps(
+                {
+                    "index": index,
+                    "timestamp_utc": f"2026-07-21T12:00:0{index}+00:00",
+                    "kind": "click",
+                    "screenshot_path": f"screenshots/event_{index:03d}.jpeg",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        (run_root / "analysis" / f"event_{index:03d}.json").write_text(
+            json.dumps(
+                {
+                    "event_index": index,
+                    "instruction": f"步驟 {index}",
+                    "use_expected_outcome": enabled,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    session = json.loads((run_root / "session.json").read_text(encoding="utf-8"))
+    session["events"] = ["events/event_001.json", "events/event_002.json"]
+    session["event_count"] = 2
+    (run_root / "session.json").write_text(
+        json.dumps(session, ensure_ascii=False), encoding="utf-8"
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+    # First step unchecked, last step checked.
+    first = html.split('id="event-1"', 1)[1].split('id="event-2"', 1)[0]
+    second = html.split('id="event-2"', 1)[1]
+    assert 'class="use-expected-outcome"' in first
+    assert "checked" not in first.split("verify-step", 1)[1].split("</label>", 1)[0]
+    assert "checked" in second.split("verify-step", 1)[1].split("</label>", 1)[0]
 
 
 def test_write_recording_html_renders_landmark_multiselect(tmp_path: Path) -> None:

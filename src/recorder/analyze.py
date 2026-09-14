@@ -323,11 +323,12 @@ def _click_target_anchor(vision: dict[str, Any]) -> str | None:
 
 
 def use_expected_outcome_enabled(analysis: dict[str, Any] | None) -> bool:
-    """Whether a step's recorded expected outcome is used during script playback.
+    """Whether a step runs vision verification during script playback.
 
     An explicit ``use_expected_outcome`` field wins. Otherwise older recordings
     with non-empty ``expected_outcome`` text keep verification enabled.
-    New analysis defaults to False (opt-in via recording_steps.html).
+    New analysis defaults to False for all but the last instruction step
+    (opt-in via recording_steps.html).
     """
     if isinstance(analysis, dict) and "use_expected_outcome" in analysis:
         return bool(analysis.get("use_expected_outcome"))

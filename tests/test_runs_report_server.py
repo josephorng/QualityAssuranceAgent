@@ -1376,7 +1376,7 @@ def test_apply_recording_event_expected_outcome_persists_and_rebuilds(
     report = json.loads(
         (runs_root / "recording_outcome_edit" / "report.json").read_text(encoding="utf-8")
     )
-    assert report["expected_outcomes"] == [None, "對話框已開啟"]
+    assert report["expected_outcomes"] == ["對話框已開啟"]
     html = (runs_root / "recording_outcome_edit" / "recording_steps.html").read_text(
         encoding="utf-8"
     )
@@ -1408,7 +1408,7 @@ def test_apply_recording_event_expected_outcome_clears_when_empty(
     report = json.loads(
         (runs_root / "recording_outcome_clear" / "report.json").read_text(encoding="utf-8")
     )
-    assert report["expected_outcomes"] == [None, None]
+    assert report["expected_outcomes"] == [None]
 
 
 def test_runs_report_server_expected_outcome_endpoint(tmp_path: Path) -> None:

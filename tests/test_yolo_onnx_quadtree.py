@@ -95,12 +95,16 @@ def test_no_split_when_under_cap(monkeypatch: pytest.MonkeyPatch):
     xyxy, scores, cls_ids = run_yolo_onnx_end2end(
         bgr,
         class_ids={YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT},
+        overlap_refine=False,
     )
 
     assert len(calls) == 1
-    assert len(xyxy) == 10
-    assert len(scores) == 10
-    assert len(cls_ids) == 10
+    # 10 text + one small-text→element clone (identical bboxes share a single element).
+    assert sum(int(c) == YOLO_CLASS_TEXT for c in cls_ids) == 10
+    assert sum(int(c) == YOLO_CLASS_ELEMENT for c in cls_ids) == 1
+    assert len(xyxy) == 11
+    assert len(scores) == len(xyxy)
+    assert len(cls_ids) == len(xyxy)
     assert xyxy.dtype == np.int32
 
 
@@ -132,6 +136,7 @@ def test_split_once_when_full_image_hits_cap(monkeypatch: pytest.MonkeyPatch):
     xyxy, scores, cls_ids = run_yolo_onnx_end2end(
         bgr,
         class_ids={YOLO_CLASS_TEXT},
+        overlap_refine=False,
     )
 
     # 1 full + 4 tiles
@@ -171,6 +176,7 @@ def test_cross_tile_nms_collapses_duplicate_seam_boxes(
     xyxy, scores, cls_ids = run_yolo_onnx_end2end(
         bgr,
         class_ids={YOLO_CLASS_ELEMENT},
+        overlap_refine=False,
     )
 
     assert call_i["n"] == 5
@@ -215,6 +221,7 @@ def test_recurse_when_tile_also_hits_cap(monkeypatch: pytest.MonkeyPatch):
     xyxy, scores, _cls = run_yolo_onnx_end2end(
         bgr,
         class_ids={YOLO_CLASS_TEXT},
+        overlap_refine=False,
     )
 
     assert call_i["n"] == 9
@@ -238,6 +245,7 @@ def test_safety_stops_split_on_small_image(monkeypatch: pytest.MonkeyPatch):
     xyxy, scores, cls_ids = run_yolo_onnx_end2end(
         bgr,
         class_ids={YOLO_CLASS_TEXT},
+        overlap_refine=False,
     )
 
     assert call_i["n"] == 1
@@ -262,7 +270,7 @@ def test_safety_stops_at_max_depth(monkeypatch: pytest.MonkeyPatch):
     # Infers: 1 + 4 + 16 + 64 = 85
     side = 4096
     bgr = np.zeros((side, side, 3), dtype=np.uint8)
-    run_yolo_onnx_end2end(bgr, class_ids={YOLO_CLASS_TEXT})
+    run_yolo_onnx_end2end(bgr, class_ids={YOLO_CLASS_TEXT}, overlap_refine=False)
 
     expected = 1
     for d in range(DEFAULT_QUADTREE_MAX_DEPTH):
@@ -285,7 +293,7 @@ def test_cap_uses_raw_buffer_length(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(yolo_mod, "_run_yolo_raw_output", fake_infer)
 
     bgr = np.zeros((800, 800, 3), dtype=np.uint8)
-    run_yolo_onnx_end2end(bgr, class_ids={YOLO_CLASS_TEXT})
+    run_yolo_onnx_end2end(bgr, class_ids={YOLO_CLASS_TEXT}, overlap_refine=False)
     assert call_i["n"] == 5
 
 

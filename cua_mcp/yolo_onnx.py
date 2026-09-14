@@ -11,6 +11,10 @@ End-to-end output ``(1, N, 6+)`` — ``x1,y1,x2,y2,score,cls``; NMS is in the gr
 fills that buffer, :func:`run_yolo_onnx_end2end` recursively splits the image into an
 overlapping 2×2 quadtree, re-infers each tile, and merges results.
 
+After the full-frame / quadtree pass, overlapping or tall ``text`` clusters can be
+crop-refined via :func:`cua_mcp.yolo_divide_conquer.refine_overlapping_text_with_crops`
+(Stage 3; on by default). See ``OVERLAP_REFINE_LOGIC.md``.
+
 Classes: ``text`` (:data:`YOLO_CLASS_TEXT`), ``element`` (:data:`YOLO_CLASS_ELEMENT`),
 ``input`` (:data:`YOLO_CLASS_INPUT`), and ``scrollbar`` (:data:`YOLO_CLASS_SCROLLBAR`).
 
@@ -28,6 +32,11 @@ import time
 
 import cv2
 import numpy as np
+
+from cua_mcp.yolo_divide_conquer import (
+    OVERLAP_REFINE_DEFAULT,
+    refine_overlapping_text_with_crops,
+)
 
 YOLO_ONNX_INPUT_SIZE: int = 1280
 # Matches ``ultralytics.data.augment.LetterBox`` default ``padding_value``.
@@ -244,6 +253,7 @@ def run_yolo_onnx_end2end(
     conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
     merge_touching_same_class: bool = DEFAULT_MERGE_TOUCHING_SAME_CLASS,
     merge_same_class_iou_threshold: float = DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD,
+    overlap_refine: bool = OVERLAP_REFINE_DEFAULT,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Preprocess ``bgr``, run YOLOv26 end2end via Triton, and return
@@ -261,14 +271,58 @@ def run_yolo_onnx_end2end(
 
     Tiny ``text`` boxes (both sides under :data:`DEFAULT_SMALL_TEXT_AS_ELEMENT_MAX_SIDE`)
     are also duplicated as ``element`` at the same bbox when ``element`` is in ``class_ids``.
+
+    When ``overlap_refine`` is True and ``text`` is among ``class_ids``, hard text clusters
+    (overlap / crossing / tall multi-line) are crop-refined once on the full-image result
+    via :func:`~cua_mcp.yolo_divide_conquer.refine_overlapping_text_with_crops`. Crop
+    re-predict uses the same recursive detector with refine disabled to avoid recursion.
     """
-    return _run_yolo_onnx_end2end_recursive(
+    xyxy, scores, cls_arr = _run_yolo_onnx_end2end_recursive(
         bgr,
         depth=0,
         class_ids=class_ids,
         conf_threshold=conf_threshold,
         merge_touching_same_class=merge_touching_same_class,
         merge_same_class_iou_threshold=merge_same_class_iou_threshold,
+    )
+    if (
+        not overlap_refine
+        or YOLO_CLASS_TEXT not in class_ids
+        or len(xyxy) == 0
+        or bgr.size == 0
+    ):
+        return xyxy, scores, cls_arr
+
+    def _predict_crop(crop_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        # Leaf/quadtree only — never re-enter overlap refine on crop ROIs.
+        return _run_yolo_onnx_end2end_recursive(
+            crop_bgr,
+            depth=0,
+            class_ids=class_ids,
+            conf_threshold=conf_threshold,
+            merge_touching_same_class=merge_touching_same_class,
+            merge_same_class_iou_threshold=merge_same_class_iou_threshold,
+        )
+
+    xyxy_f, scores_f, cls_f, refine_crop_count = refine_overlapping_text_with_crops(
+        bgr,
+        xyxy.astype(np.float32, copy=False),
+        scores,
+        cls_arr,
+        predict_crop_fn=_predict_crop,
+        text_class_id=YOLO_CLASS_TEXT,
+        merge_iou=merge_same_class_iou_threshold,
+    )
+    if refine_crop_count <= 0:
+        return xyxy, scores, cls_arr
+
+    _log_yolo_profile(f"overlap-refine×{refine_crop_count}")
+    xyxy = np.round(xyxy_f).astype(np.int32)
+    scores = np.asarray(scores_f, dtype=np.float32).reshape(-1)
+    cls_arr = np.asarray(cls_f).reshape(-1).astype(np.int64, copy=False)
+    # Refine may add/replace text; re-apply small-text → element dual-stream.
+    return copy_small_text_as_element_xyxy(
+        xyxy, scores, cls_arr, class_ids=class_ids
     )
 
 

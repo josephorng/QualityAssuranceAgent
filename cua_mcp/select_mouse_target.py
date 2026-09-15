@@ -4,6 +4,7 @@ Unified mouse target selection: YOLO (text, element, input, scrollbar) + OCR + L
 
 from __future__ import annotations
 
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -1576,39 +1577,15 @@ async def _maybe_disambiguate_similar_selection(
     return new_chosen, pool_idx, new_text, extra
 
 
-async def find_mouse_point(
-    instruction: str,
-    *,
-    nearby_objects: list[str] | None = None,
+def _capture_and_detect_mouse_candidates(
     yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
-) -> tuple[int, int, dict[str, Any]] | None:
+) -> tuple[list[int], list[str], list[tuple[int, np.ndarray]], list[UiDetection]]:
     """
-    Capture selected monitor(s), build YOLO+OCR candidates, filter and pick via LLM.
+    Capture selected monitor(s) and build YOLO+OCR candidates.
 
-    ``nearby_objects`` are optional landmark labels for spatial disambiguation.
-    They are merged with any （附近有…） labels parsed from ``instruction``.
-
-    Returns ``(global_x, global_y, metadata)`` in virtual-desktop pixel space,
-    or ``None`` when no YOLO candidates / no anchor match (soft miss).
+    Sync helper so it can overlap with instruction parsing via ``asyncio.to_thread``.
+    Capture stays sequential — desktop grabbers are often not concurrent-safe.
     """
-    instruction_text = (instruction or "").strip()
-    if not instruction_text:
-        raise ValueError("instruction must be non-empty")
-
-    # Parse anchor/offset/nearby once; filter splits anchor vs nearby; pick uses anchor only.
-    (
-        anchor,
-        offset_dx,
-        offset_dy,
-        nearby_from_instruction,
-        char_target,
-        char_occurrence,
-        track_percent,
-    ) = await parse_mouse_target_instruction(instruction_text)
-    nearby_hints = merge_nearby_hints(nearby_objects, nearby_from_instruction)
-    nearby_labels = nearby_hints_to_labels(nearby_hints)
-    nearby_phrases = nearby_hints_to_phrases(nearby_hints)
-
     paths = _run_manager().require_paths()
     monitor_indices = selected_eye_monitor_indices()
     stamp = ts_name()
@@ -1616,7 +1593,6 @@ async def find_mouse_point(
     captured: list[tuple[int, np.ndarray]] = []
 
     _log_info(f"move_mouse resolve monitors={monitor_indices}")
-    # Capture sequentially — desktop grabbers are often not concurrent-safe.
     for monitor_index in monitor_indices:
         name = f"{stamp}_mon{monitor_index}.png"
         out = paths.yolo_ocr_dir / name
@@ -1641,6 +1617,51 @@ async def find_mouse_point(
             "move_mouse all_ocr_candidates:\n"
             + _format_ui_candidates_text(detections, include_geometry=True)
         )
+    return monitor_indices, image_paths, captured, detections
+
+
+async def find_mouse_point(
+    instruction: str,
+    *,
+    nearby_objects: list[str] | None = None,
+    yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
+) -> tuple[int, int, dict[str, Any]] | None:
+    """
+    Capture selected monitor(s), build YOLO+OCR candidates, filter and pick via LLM.
+
+    Instruction parsing overlaps with capture+YOLO+OCR; results merge before filtering.
+
+    ``nearby_objects`` are optional landmark labels for spatial disambiguation.
+    They are merged with any （附近有…） labels parsed from ``instruction``.
+
+    Returns ``(global_x, global_y, metadata)`` in virtual-desktop pixel space,
+    or ``None`` when no YOLO candidates / no anchor match (soft miss).
+    """
+    instruction_text = (instruction or "").strip()
+    if not instruction_text:
+        raise ValueError("instruction must be non-empty")
+
+    # Parse and vision are independent until filter; overlap LLM wait with capture/YOLO/OCR.
+    parsed, vision = await asyncio.gather(
+        parse_mouse_target_instruction(instruction_text),
+        asyncio.to_thread(
+            _capture_and_detect_mouse_candidates,
+            yolo_conf_threshold,
+        ),
+    )
+    (
+        anchor,
+        offset_dx,
+        offset_dy,
+        nearby_from_instruction,
+        char_target,
+        char_occurrence,
+        track_percent,
+    ) = parsed
+    nearby_hints = merge_nearby_hints(nearby_objects, nearby_from_instruction)
+    nearby_labels = nearby_hints_to_labels(nearby_hints)
+    nearby_phrases = nearby_hints_to_phrases(nearby_hints)
+    monitor_indices, image_paths, captured, detections = vision
 
     selection_method: str | None = None
     if not detections:
@@ -1858,6 +1879,8 @@ async def resolve_mouse_point(
 ) -> tuple[int, int, dict[str, Any]]:
     """
     Capture selected monitor(s), build YOLO+OCR candidates, filter and pick via LLM.
+
+    Instruction parsing overlaps with capture+YOLO+OCR (see ``find_mouse_point``).
 
     ``nearby_objects`` are optional landmark labels for spatial disambiguation.
     They are merged with any （附近有…） labels parsed from ``instruction``.

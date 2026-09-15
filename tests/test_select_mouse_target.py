@@ -134,6 +134,75 @@ async def test_resolve_mouse_point_merges_nearby_objects(monkeypatch: pytest.Mon
     assert meta["nearby_objects"] == captured_nearby["labels"]
     assert (gx, gy) == (10, 10)
 
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_overlaps_parse_with_capture_detect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parse and capture+detect must run concurrently, then merge before filter."""
+    import asyncio
+    import time
+
+    import numpy as np
+
+    from cua_mcp.select_mouse_target import find_mouse_point
+
+    branch_delay_s = 0.08
+
+    async def fake_parse(instruction: str):
+        await asyncio.sleep(branch_delay_s)
+        return "目標", 0, 0, [], None, 0, None
+
+    def fake_capture_detect(yolo_conf_threshold: float = 0.25):
+        time.sleep(branch_delay_s)
+        det = _detection_from_bbox(
+            (0, 0, 20, 20),
+            YOLO_CLASS_TEXT,
+            text="目標",
+        )
+        return [1], ["shot.png"], [(1, np.zeros((10, 10, 3), dtype=np.uint8))], [det]
+
+    def fake_filter(detections, anchor, nearby):
+        assert anchor == "目標"
+        assert detections and detections[0].text == "目標"
+        return [detections[0]], []
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.parse_mouse_target_instruction",
+        fake_parse,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._capture_and_detect_mouse_candidates",
+        fake_capture_detect,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._filter_mouse_candidates",
+        fake_filter,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._run_manager",
+        lambda: type(
+            "M",
+            (),
+            {
+                "require_paths": staticmethod(
+                    lambda: type("P", (), {"yolo_ocr_dir": Path(".")})()
+                ),
+                "log_info": staticmethod(lambda *_a, **_k: None),
+            },
+        )(),
+    )
+
+    t0 = time.perf_counter()
+    found = await find_mouse_point("移到目標")
+    elapsed = time.perf_counter() - t0
+
+    assert found is not None
+    assert found[0:2] == (10, 10)
+    # Sequential would be ~2 * branch_delay; overlap should finish near one delay.
+    assert elapsed < branch_delay_s * 1.6
+
+
 def test_detection_from_bbox_text() -> None:
     det = _detection_from_bbox((10, 20, 100, 30), YOLO_CLASS_TEXT, text="Submit")
     assert det.class_name == "text"

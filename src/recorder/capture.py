@@ -17,7 +17,7 @@ from pynput import keyboard, mouse
 from src.common.io_utils import append_text, read_json, write_json
 from src.common.run_state import unique_run_folder_name
 from src.common.settings import load_settings
-from src.eye.capture import resolve_monitor_index
+from src.eye.capture import capture_all_screens_to_file, resolve_monitor_index
 from src.recorder.focus_point import resolve_typing_focus
 from src.recorder.models import (
     RecordedEvent,
@@ -372,28 +372,15 @@ def capture_final_after_screenshot(
 ) -> str | None:
     """Capture settled UI after the last action (before the hub window is restored).
 
-    Uses the last event's end/cursor point to pick a monitor. Returns the saved
-    path, or ``None`` when capture fails.
+    Always grabs the full virtual desktop (all monitors) so playback verification
+    matches Eye's multi-monitor live frame. ``events`` is unused (kept for
+    call-site compatibility). Returns the saved path, or ``None`` when capture fails.
     """
+    _ = events
     dest = final_after_screenshot_path(run_dir)
-    anchor: tuple[int, int] | None = None
-    for event in reversed(events):
-        if event.end_xy is not None:
-            anchor = event.end_xy
-            break
-        if event.cursor_xy is not None:
-            anchor = event.cursor_xy
-            break
     try:
-        if anchor is None:
-            with mss.mss() as sct:
-                monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
-                anchor = (
-                    int(monitor["left"] + monitor["width"] // 2),
-                    int(monitor["top"] + monitor["height"] // 2),
-                )
-        path, _, _ = _capture_screenshot_at_point(anchor[0], anchor[1], dest)
-        return path
+        capture_all_screens_to_file(dest)
+        return str(dest)
     except Exception:
         return None
 

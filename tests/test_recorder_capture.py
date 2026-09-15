@@ -1656,3 +1656,41 @@ def test_continue_recording_appends_into_existing_folder(tmp_path) -> None:
         "events/event_002.json",
     ]
 
+
+def test_capture_final_after_screenshot_uses_all_screens(tmp_path: Path) -> None:
+    from src.recorder.capture import capture_final_after_screenshot
+    from src.recorder.models import RecordedEvent
+
+    run_dir = tmp_path / "rec"
+    (run_dir / "screenshots").mkdir(parents=True)
+    captured: list[Path] = []
+
+    def _fake_all_screens(dest: Path) -> None:
+        captured.append(Path(dest))
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        Path(dest).write_bytes(b"all-monitors")
+
+    with patch(
+        "src.recorder.capture.capture_all_screens_to_file",
+        side_effect=_fake_all_screens,
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=AssertionError("single-monitor capture must not be used"),
+    ):
+        path = capture_final_after_screenshot(
+            run_dir,
+            [
+                RecordedEvent(
+                    index=1,
+                    timestamp_utc="2026-01-01T00:00:00+00:00",
+                    kind="click",
+                    cursor_xy=(100, 200),
+                )
+            ],
+        )
+
+    assert path is not None
+    assert Path(path).name == "final_after.jpeg"
+    assert Path(path).read_bytes() == b"all-monitors"
+    assert captured == [run_dir / "screenshots" / "final_after.jpeg"]
+

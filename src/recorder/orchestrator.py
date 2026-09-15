@@ -135,14 +135,36 @@ def _write_final_after_from_source(
     *,
     log_info: Callable[[str], None] | None = None,
 ) -> bool:
-    """Copy ``source_screenshot`` to the session final-after path and update session.json."""
+    """Copy ``source_screenshot`` to the session final-after path and update session.json.
+
+    On multi-monitor setups, keep an existing ``final_after`` from
+    ``capture_final_after_screenshot`` (full virtual desktop) instead of replacing
+    it with a single-monitor restore-event shot.
+    """
     src = Path(source_screenshot)
     if not src.is_file():
         return False
     dest = final_after_screenshot_path(run_dir)
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.resolve() != src.resolve():
-        dest.write_bytes(src.read_bytes())
+        keep_existing = False
+        if dest.is_file():
+            try:
+                import mss
+
+                with mss.mss() as sct:
+                    # monitors[0] is the virtual desktop; >2 entries ⇒ 2+ physical.
+                    keep_existing = len(sct.monitors) > 2
+            except Exception:
+                keep_existing = False
+        if keep_existing:
+            if log_info is not None:
+                log_info(
+                    "keeping existing multi-monitor final after; "
+                    f"skip restore overwrite path={dest}"
+                )
+        else:
+            dest.write_bytes(src.read_bytes())
     session_path = run_dir / "session.json"
     session = read_json(session_path, {})
     if not isinstance(session, dict):

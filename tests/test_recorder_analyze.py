@@ -28,6 +28,7 @@ from src.recorder.orchestrator import (
     _elapsed_seconds,
     _llm_max_workers,
     _vision_max_workers,
+    _write_final_after_from_source,
     analyze_recording_session,
 )
 from src.recorder.vision_context import (
@@ -64,6 +65,59 @@ def test_collect_nearby_hint_labels_skips_primary_and_instruction_duplicates() -
         instruction="點擊「Chrome」圖示",
     )
     assert labels == ["「OneNote」文字", "「Docker」圖示"]
+
+
+def test_write_final_after_keeps_existing_on_multi_monitor(tmp_path: Path) -> None:
+    """Do not replace all-screens final_after with a single-monitor restore shot."""
+    run_dir = tmp_path / "rec"
+    shots = run_dir / "screenshots"
+    shots.mkdir(parents=True)
+    existing = shots / "final_after.jpeg"
+    existing.write_bytes(b"all-screens")
+    restore = shots / "event_restore.jpeg"
+    restore.write_bytes(b"single-monitor")
+    (run_dir / "session.json").write_text("{}", encoding="utf-8")
+
+    class _FakeSct:
+        monitors = [{}, {}, {}]  # virtual + 2 physical
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    with patch("mss.mss", return_value=_FakeSct()):
+        assert _write_final_after_from_source(run_dir, str(restore)) is True
+
+    assert existing.read_bytes() == b"all-screens"
+    session = json.loads((run_dir / "session.json").read_text(encoding="utf-8"))
+    assert session["final_after_screenshot"] == "screenshots/final_after.jpeg"
+
+
+def test_write_final_after_copies_when_single_monitor(tmp_path: Path) -> None:
+    run_dir = tmp_path / "rec"
+    shots = run_dir / "screenshots"
+    shots.mkdir(parents=True)
+    existing = shots / "final_after.jpeg"
+    existing.write_bytes(b"old")
+    restore = shots / "event_restore.jpeg"
+    restore.write_bytes(b"from-restore")
+    (run_dir / "session.json").write_text("{}", encoding="utf-8")
+
+    class _FakeSct:
+        monitors = [{}, {}]  # virtual + 1 physical
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    with patch("mss.mss", return_value=_FakeSct()):
+        assert _write_final_after_from_source(run_dir, str(restore)) is True
+
+    assert existing.read_bytes() == b"from-restore"
 
 
 def test_collect_nearby_hint_labels_prefers_text_over_icons() -> None:

@@ -499,6 +499,55 @@ def _retry_empty_unknown_icon_ocr(
     return result
 
 
+def _round_timing_s(value: float) -> float:
+    return round(max(0.0, float(value)), 3)
+
+
+def _add_vision_phase_timing(dst: dict[str, float], src: dict[str, float]) -> None:
+    """Accumulate YOLO/line/OCR phase seconds from one monitor into ``dst``."""
+    for key in ("yolo_s", "line_s", "ocr_s", "total_s"):
+        raw = src.get(key)
+        if isinstance(raw, (int, float)):
+            dst[key] = float(dst.get(key, 0.0)) + float(raw)
+
+
+def _build_move_mouse_timing(
+    *,
+    total_s: float,
+    capture_s: float,
+    vision: dict[str, float],
+    parse_s: float,
+    select_s: float,
+    select_phase: str = "select",
+) -> dict[str, Any]:
+    """Structured timing for move_mouse / check_object_exists tool results."""
+    yolo_s = _round_timing_s(float(vision.get("yolo_s", 0.0)))
+    line_s = _round_timing_s(float(vision.get("line_s", 0.0)))
+    ocr_s = _round_timing_s(float(vision.get("ocr_s", 0.0)))
+    capture_s = _round_timing_s(capture_s)
+    parse_s = _round_timing_s(parse_s)
+    select_s = _round_timing_s(select_s)
+    total_s = _round_timing_s(total_s)
+    phases: list[dict[str, Any]] = [
+        {"name": "capture", "seconds": capture_s},
+        {"name": "yolo", "seconds": yolo_s},
+        {"name": "line_refine", "seconds": line_s},
+        {"name": "ocr", "seconds": ocr_s},
+        {"name": "parse_instruction", "seconds": parse_s, "overlapped": True},
+        {"name": select_phase, "seconds": select_s},
+    ]
+    return {
+        "total_s": total_s,
+        "capture_s": capture_s,
+        "yolo_s": yolo_s,
+        "line_s": line_s,
+        "ocr_s": ocr_s,
+        "parse_s": parse_s,
+        "select_s": select_s,
+        "phases": phases,
+    }
+
+
 def _detect_mouse_targets_from_bgr(
     bgr: np.ndarray,
     *,
@@ -506,6 +555,7 @@ def _detect_mouse_targets_from_bgr(
     original_scrollbar_bboxes_out: list[tuple[int, int, int, int]] | None = None,
     original_input_bboxes_out: list[tuple[int, int, int, int]] | None = None,
     coord_offset: tuple[int, int] = (0, 0),
+    timing_out: dict[str, float] | None = None,
 ) -> list[UiDetection]:
     """Detect mouse-target UI elements on ``bgr`` via YOLO + OCR.
 
@@ -524,6 +574,9 @@ def _detect_mouse_targets_from_bgr(
 
     When ``original_input_bboxes_out`` is provided, appends each pre-merge
     YOLO ``input`` bbox that is absent from the post-merge input list.
+
+    When ``timing_out`` is provided, writes ``yolo_s`` / ``line_s`` / ``ocr_s`` /
+    ``total_s`` for this image (replacing prior values in that dict).
     """
     h, w = bgr.shape[:2]
     vision_started = time.perf_counter()
@@ -591,11 +644,22 @@ def _detect_mouse_targets_from_bgr(
     non_ocr.extend(other_non_ocr)
 
     if not text_boxes and not element_boxes and not non_ocr:
+        total_elapsed = time.perf_counter() - vision_started
         _log_info(
             f"move_mouse vision profile yolo_s={yolo_elapsed:.3f} "
             f"line_s={line_elapsed:.3f} ocr_s=0.000 "
-            f"total_s={time.perf_counter() - vision_started:.3f} detections=0"
+            f"total_s={total_elapsed:.3f} detections=0"
         )
+        if timing_out is not None:
+            timing_out.clear()
+            timing_out.update(
+                {
+                    "yolo_s": yolo_elapsed,
+                    "line_s": line_elapsed,
+                    "ocr_s": 0.0,
+                    "total_s": total_elapsed,
+                }
+            )
         return []
 
     ocr_boxes: list[tuple[int, int, int, int]] = []
@@ -665,15 +729,26 @@ def _detect_mouse_targets_from_bgr(
         original_scrollbar_bboxes_out.extend(
             old_bbox for _i, old_bbox in pre_fit_scrollbars
         )
+    total_elapsed = time.perf_counter() - vision_started
     _log_info(
         "move_mouse vision profile "
         f"yolo_s={yolo_elapsed:.3f} line_s={line_elapsed:.3f} "
         f"ocr_s={ocr_elapsed:.3f} "
-        f"total_s={time.perf_counter() - vision_started:.3f} "
+        f"total_s={total_elapsed:.3f} "
         f"yolo_boxes={0 if xyxy.size == 0 else len(xyxy)} "
         f"input_boxes={len(input_boxes)} ocr_boxes={len(ocr_boxes)} "
         f"candidates={len(candidates)}"
     )
+    if timing_out is not None:
+        timing_out.clear()
+        timing_out.update(
+            {
+                "yolo_s": yolo_elapsed,
+                "line_s": line_elapsed,
+                "ocr_s": ocr_elapsed,
+                "total_s": total_elapsed,
+            }
+        )
 
     return candidates
 
@@ -1308,6 +1383,7 @@ def _detections_for_captured_monitor(
     bgr: np.ndarray,
     *,
     yolo_conf_threshold: float,
+    timing_out: dict[str, float] | None = None,
 ) -> list[UiDetection]:
     """YOLO+OCR on one monitor image, then map boxes into virtual-desktop coords."""
     left, top = active_monitor_offset(monitor_index)
@@ -1315,6 +1391,7 @@ def _detections_for_captured_monitor(
         bgr,
         yolo_conf_threshold=yolo_conf_threshold,
         coord_offset=(left, top),
+        timing_out=timing_out,
     )
     return [_offset_detection(d, left, top) for d in local_candidates]
 
@@ -1372,14 +1449,23 @@ def _collect_monitor_detections(
     captured: list[tuple[int, np.ndarray]],
     *,
     yolo_conf_threshold: float,
+    timing_out: dict[str, float] | None = None,
 ) -> list[UiDetection]:
     """
     Run YOLO+OCR on captured monitors.
 
     Capture stays sequential (caller); inference runs in parallel when there is more
     than one monitor so Triton/ORT work can overlap.
+
+    When ``timing_out`` is set, accumulates per-monitor ``yolo_s`` / ``line_s`` /
+    ``ocr_s`` / ``total_s`` (sums across monitors).
     """
     if not captured:
+        if timing_out is not None:
+            timing_out.clear()
+            timing_out.update(
+                {"yolo_s": 0.0, "line_s": 0.0, "ocr_s": 0.0, "total_s": 0.0}
+            )
         return []
 
     if len(captured) == 1:
@@ -1388,21 +1474,41 @@ def _collect_monitor_detections(
             monitor_index,
             bgr,
             yolo_conf_threshold=yolo_conf_threshold,
+            timing_out=timing_out,
         )
 
     all_detections: list[UiDetection] = []
+    per_monitor_timings: list[dict[str, float]] = []
+
+    def _detect_one(
+        monitor_index: int, bgr: np.ndarray
+    ) -> tuple[list[UiDetection], dict[str, float]]:
+        local_timing: dict[str, float] = {}
+        dets = _detections_for_captured_monitor(
+            monitor_index,
+            bgr,
+            yolo_conf_threshold=yolo_conf_threshold,
+            timing_out=local_timing,
+        )
+        return dets, local_timing
+
     with ThreadPoolExecutor(max_workers=len(captured)) as pool:
         futures = [
-            pool.submit(
-                _detections_for_captured_monitor,
-                monitor_index,
-                bgr,
-                yolo_conf_threshold=yolo_conf_threshold,
-            )
+            pool.submit(_detect_one, monitor_index, bgr)
             for monitor_index, bgr in captured
         ]
         for future in futures:
-            all_detections.extend(future.result())
+            dets, local_timing = future.result()
+            all_detections.extend(dets)
+            per_monitor_timings.append(local_timing)
+
+    if timing_out is not None:
+        timing_out.clear()
+        timing_out.update(
+            {"yolo_s": 0.0, "line_s": 0.0, "ocr_s": 0.0, "total_s": 0.0}
+        )
+        for local_timing in per_monitor_timings:
+            _add_vision_phase_timing(timing_out, local_timing)
     return all_detections
 
 
@@ -1579,12 +1685,21 @@ async def _maybe_disambiguate_similar_selection(
 
 def _capture_and_detect_mouse_candidates(
     yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
-) -> tuple[list[int], list[str], list[tuple[int, np.ndarray]], list[UiDetection]]:
+) -> tuple[
+    list[int],
+    list[str],
+    list[tuple[int, np.ndarray]],
+    list[UiDetection],
+    dict[str, float],
+]:
     """
     Capture selected monitor(s) and build YOLO+OCR candidates.
 
     Sync helper so it can overlap with instruction parsing via ``asyncio.to_thread``.
     Capture stays sequential — desktop grabbers are often not concurrent-safe.
+
+    Returns ``(monitor_indices, image_paths, captured, detections, timing)`` where
+    ``timing`` includes ``capture_s`` plus summed vision phases.
     """
     paths = _run_manager().require_paths()
     monitor_indices = selected_eye_monitor_indices()
@@ -1593,6 +1708,7 @@ def _capture_and_detect_mouse_candidates(
     captured: list[tuple[int, np.ndarray]] = []
 
     _log_info(f"move_mouse resolve monitors={monitor_indices}")
+    capture_started = time.perf_counter()
     for monitor_index in monitor_indices:
         name = f"{stamp}_mon{monitor_index}.png"
         out = paths.yolo_ocr_dir / name
@@ -1605,10 +1721,13 @@ def _capture_and_detect_mouse_candidates(
             _log_info(f"move_mouse could not read captured image path={image_path}")
             continue
         captured.append((monitor_index, bgr))
+    capture_s = time.perf_counter() - capture_started
 
+    vision_timing: dict[str, float] = {}
     all_detections = _collect_monitor_detections(
         captured,
         yolo_conf_threshold=yolo_conf_threshold,
+        timing_out=vision_timing,
     )
     detections = _sort_detections_reading_order(all_detections)
     _log_info(f"move_mouse yolo_candidates={len(detections)}")
@@ -1617,7 +1736,14 @@ def _capture_and_detect_mouse_candidates(
             "move_mouse all_ocr_candidates:\n"
             + _format_ui_candidates_text(detections, include_geometry=True)
         )
-    return monitor_indices, image_paths, captured, detections
+    timing = {
+        "capture_s": capture_s,
+        "yolo_s": float(vision_timing.get("yolo_s", 0.0)),
+        "line_s": float(vision_timing.get("line_s", 0.0)),
+        "ocr_s": float(vision_timing.get("ocr_s", 0.0)),
+        "total_s": capture_s + float(vision_timing.get("total_s", 0.0)),
+    }
+    return monitor_indices, image_paths, captured, detections, timing
 
 
 async def find_mouse_point(
@@ -1636,18 +1762,33 @@ async def find_mouse_point(
 
     Returns ``(global_x, global_y, metadata)`` in virtual-desktop pixel space,
     or ``None`` when no YOLO candidates / no anchor match (soft miss).
+
+    Successful metadata includes ``timing`` with capture / YOLO / OCR / parse /
+    select phase seconds for session time profiles.
     """
     instruction_text = (instruction or "").strip()
     if not instruction_text:
         raise ValueError("instruction must be non-empty")
 
-    # Parse and vision are independent until filter; overlap LLM wait with capture/YOLO/OCR.
-    parsed, vision = await asyncio.gather(
-        parse_mouse_target_instruction(instruction_text),
-        asyncio.to_thread(
+    total_started = time.perf_counter()
+
+    async def _timed_parse():
+        started = time.perf_counter()
+        result = await parse_mouse_target_instruction(instruction_text)
+        return result, time.perf_counter() - started
+
+    async def _timed_vision():
+        started = time.perf_counter()
+        result = await asyncio.to_thread(
             _capture_and_detect_mouse_candidates,
             yolo_conf_threshold,
-        ),
+        )
+        return result, time.perf_counter() - started
+
+    # Parse and vision are independent until filter; overlap LLM wait with capture/YOLO/OCR.
+    (parsed, parse_s), (vision, _vision_wall_s) = await asyncio.gather(
+        _timed_parse(),
+        _timed_vision(),
     )
     (
         anchor,
@@ -1661,7 +1802,18 @@ async def find_mouse_point(
     nearby_hints = merge_nearby_hints(nearby_objects, nearby_from_instruction)
     nearby_labels = nearby_hints_to_labels(nearby_hints)
     nearby_phrases = nearby_hints_to_phrases(nearby_hints)
-    monitor_indices, image_paths, captured, detections = vision
+    monitor_indices, image_paths, captured, detections, vision_timing = vision
+    capture_s = float(vision_timing.get("capture_s", 0.0))
+
+    def _timing_meta(*, select_s: float, select_phase: str) -> dict[str, Any]:
+        return _build_move_mouse_timing(
+            total_s=time.perf_counter() - total_started,
+            capture_s=capture_s,
+            vision=vision_timing,
+            parse_s=parse_s,
+            select_s=select_s,
+            select_phase=select_phase,
+        )
 
     selection_method: str | None = None
     if not detections:
@@ -1671,6 +1823,7 @@ async def find_mouse_point(
         )
         from cua_mcp.gemma_roi_refine import resolve_target_via_gemma_roi
 
+        select_started = time.perf_counter()
         grounded = await resolve_target_via_gemma_roi(
             instruction_text,
             image_paths=image_paths,
@@ -1678,6 +1831,7 @@ async def find_mouse_point(
             captured=captured,
             yolo_conf_threshold=yolo_conf_threshold,
         )
+        select_s = time.perf_counter() - select_started
         if grounded is None:
             _log_info("move_mouse: Gemma ROI fallback found nothing")
             return None
@@ -1692,6 +1846,7 @@ async def find_mouse_point(
         meta["char_target"] = char_target
         meta["char_occurrence"] = char_occurrence
         meta["track_percent"] = track_percent
+        meta["timing"] = _timing_meta(select_s=select_s, select_phase="gemma_roi")
         return gx, gy, meta
 
     anchor_matches, nearby_matches = _filter_mouse_candidates(
@@ -1704,6 +1859,8 @@ async def find_mouse_point(
     )
 
     selected_text: str | None = None
+    select_phase = "select"
+    select_started = time.perf_counter()
     if not anchor_matches:
         # Stage A: similarity miss but detections exist → Gemma pick among all.
         _log_info(
@@ -1725,6 +1882,7 @@ async def find_mouse_point(
             )
             return None
         selection_method = "visual_one_pass_fallback"
+        select_phase = "visual_one_pass"
         _log_info(
             "move_mouse: visual one-pass fallback "
             f"index={idx} text={selected_text!r} center=[{chosen.cx},{chosen.cy}]"
@@ -1763,6 +1921,7 @@ async def find_mouse_point(
         if len(anchor_matches) == 1:
             idx = 0
             chosen = anchor_matches[0]
+            select_phase = "select_unique"
             _log_info(
                 "move_mouse: single anchor candidate after filter; skipping LLM pick"
             )
@@ -1776,10 +1935,12 @@ async def find_mouse_point(
             )
             idx = pool_idx
             chosen = anchor_matches[pool_idx]
+            select_phase = "llm_pick"
             _log_info(
                 f"move_mouse: LLM picked index={pool_idx} "
                 f"text={selected_text!r} center=[{chosen.cx},{chosen.cy}]"
             )
+    select_s = time.perf_counter() - select_started
 
     # similar_function_describe runs on move_mouse_visual only (see visual_mouse.py).
 
@@ -1861,6 +2022,7 @@ async def find_mouse_point(
             "w": chosen.bbox[2],
             "h": chosen.bbox[3],
         },
+        "timing": _timing_meta(select_s=select_s, select_phase=select_phase),
     }
     if selected_text is not None:
         meta["selected_text"] = selected_text

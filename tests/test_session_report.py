@@ -370,6 +370,89 @@ def test_time_profile_labels_tool_to_tool_gap_as_next_tool_execution(
     assert report["steps"][0]["timing_summary"]["tool_execution_seconds"] == 5.0
 
 
+def test_time_profile_includes_move_mouse_internal_timing_details(tmp_path: Path) -> None:
+    run_root = tmp_path / "task_move_mouse_timing"
+    run_root.mkdir()
+    steps_dir = run_root / "steps"
+    move_timing = {
+        "total_s": 4.5,
+        "capture_s": 0.2,
+        "yolo_s": 1.0,
+        "line_s": 0.1,
+        "ocr_s": 2.5,
+        "parse_s": 0.3,
+        "select_s": 0.4,
+        "hand_move_s": 0.01,
+        "phases": [
+            {"name": "capture", "seconds": 0.2},
+            {"name": "yolo", "seconds": 1.0},
+            {"name": "line_refine", "seconds": 0.1},
+            {"name": "ocr", "seconds": 2.5},
+            {"name": "parse_instruction", "seconds": 0.3, "overlapped": True},
+            {"name": "llm_pick", "seconds": 0.4},
+            {"name": "hand_move", "seconds": 0.01},
+        ],
+    }
+    _write_step(
+        steps_dir,
+        0,
+        0,
+        goal="Move to target",
+        messages=[
+            {
+                "role": "user",
+                "timestamp_utc": "2026-06-11T06:00:00+00:00",
+                "content": "Cache replay",
+                "images": ["shot1.png"],
+                "cache_replay": True,
+            },
+            {
+                "role": "assistant",
+                "timestamp_utc": "2026-06-11T06:00:00+00:00",
+                "cache_replay": True,
+                "tool_calls": [
+                    {"function": {"name": "move_mouse", "arguments": {"instruction": "t"}}},
+                    {"function": {"name": "click", "arguments": {"button": "left"}}},
+                ],
+            },
+            {
+                "role": "tool",
+                "timestamp_utc": "2026-06-11T06:00:05+00:00",
+                "content": json.dumps(
+                    {
+                        "action": "move_mouse",
+                        "ok": True,
+                        "args": {
+                            "instruction": "t",
+                            "timing": move_timing,
+                        },
+                    }
+                ),
+            },
+            {
+                "role": "tool",
+                "timestamp_utc": "2026-06-11T06:00:06+00:00",
+                "content": json.dumps({"action": "click", "ok": True}),
+            },
+        ],
+    )
+
+    report = build_session_report(run_root, session_end_reason="completed")
+    profile = report["steps"][0]["time_profile"]
+    move_entry = profile[1]
+    assert move_entry["kind"] == "tool_execution"
+    assert "move_mouse" in move_entry["actions"]
+    assert move_entry["tool_internal_seconds"] == 4.5
+    details = move_entry["details"]
+    assert details[0]["kind"] == "move_mouse_capture"
+    assert details[1]["kind"] == "move_mouse_yolo"
+    assert details[1]["duration_seconds"] == 1.0
+    assert details[3]["kind"] == "move_mouse_ocr"
+    assert details[3]["duration_seconds"] == 2.5
+    assert any(d["kind"] == "move_mouse_llm_pick" for d in details)
+    assert any(d["kind"] == "move_mouse_hand_move" for d in details)
+
+
 def test_write_session_report_creates_report_json(tmp_path: Path) -> None:
     run_root = tmp_path / "task_write"
     run_root.mkdir()

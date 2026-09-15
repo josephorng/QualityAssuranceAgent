@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from fnmatch import fnmatch
 from pathlib import Path
@@ -12,6 +13,21 @@ from cua_mcp.select_mouse_target import find_mouse_point, resolve_mouse_point
 from cua_mcp.visual_mouse import resolve_visual_mouse_point
 from cua_mcp.storage import store_clipboard_text, store_image, store_text, _current_run_paths
 from src.common.runtime_context import is_smart_mode
+
+
+def _append_hand_move_timing(meta: dict[str, Any], hand_move_s: float) -> None:
+    """Add cursor-move duration onto resolve ``timing`` when present."""
+    timing = meta.get("timing")
+    if not isinstance(timing, dict):
+        return
+    seconds = round(max(0.0, float(hand_move_s)), 3)
+    timing["hand_move_s"] = seconds
+    total = timing.get("total_s")
+    if isinstance(total, (int, float)):
+        timing["total_s"] = round(float(total) + seconds, 3)
+    phases = timing.get("phases")
+    if isinstance(phases, list):
+        phases.append({"name": "hand_move", "seconds": seconds})
 
 
 def _with_unified_target_metadata(
@@ -66,7 +82,9 @@ async def _move_mouse(
         instruction,
         nearby_objects=nearby_objects,
     )
+    move_started = time.perf_counter()
     result = hand_tools.move(x=gx, y=gy, duration=duration)
+    _append_hand_move_timing(meta, time.perf_counter() - move_started)
     merged: dict[str, Any] = dict(result)
     merged.update(meta)
     merged["instruction"] = instruction
@@ -87,7 +105,9 @@ async def _move_mouse_visual(
 ) -> dict[str, Any]:
     """Move to the candidate selected by one multimodal screenshot+OCR LLM pass."""
     gx, gy, meta = await resolve_visual_mouse_point(instruction)
+    move_started = time.perf_counter()
     result = hand_tools.move(x=gx, y=gy, duration=duration)
+    _append_hand_move_timing(meta, time.perf_counter() - move_started)
     merged: dict[str, Any] = dict(result)
     merged.update(meta)
     merged["instruction"] = instruction

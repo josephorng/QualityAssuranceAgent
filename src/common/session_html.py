@@ -661,6 +661,7 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
   font-variant-numeric: tabular-nums;
 }
 .time-profile-step .phase-table { margin: 0; border: none; border-radius: 0; box-shadow: none; }
+.time-profile-detail td { color: #656d76; font-size: 0.92em; }
 .time-profile .empty { color: #8c959f; font-style: italic; }
 @media (max-width: 720px) { .shots { grid-template-columns: 1fr; } }
 """.strip()
@@ -5473,6 +5474,31 @@ def _render_session_time_profile_html(run_root: Path, report: dict[str, Any]) ->
                     f'<td class="num">{escape(_format_seconds_precise(duration))}</td>'
                     "</tr>"
                 )
+                details = entry.get("details")
+                if isinstance(details, list):
+                    for detail in details:
+                        if not isinstance(detail, dict):
+                            continue
+                        detail_kind = (
+                            detail.get("kind")
+                            if isinstance(detail.get("kind"), str)
+                            else "—"
+                        )
+                        detail_label = (
+                            detail.get("label")
+                            if isinstance(detail.get("label"), str)
+                            else str(detail_kind)
+                        )
+                        detail_duration = detail.get("duration_seconds")
+                        phase_body.append(
+                            '<tr class="time-profile-detail">'
+                            f"<td>{escape(detail_kind)}</td>"
+                            f"<td>↳ {escape(detail_label)}</td>"
+                            f'<td class="num">'
+                            f"{escape(_format_seconds_precise(detail_duration))}"
+                            "</td>"
+                            "</tr>"
+                        )
             if phase_body:
                 phase_rows = (
                     '<table class="time-profile-table phase-table">'
@@ -5497,7 +5523,9 @@ def _render_session_time_profile_html(run_root: Path, report: dict[str, Any]) ->
     note = (
         '<p class="time-profile-note">'
         "執行 / 驗證 LLM、工具與截圖時間來自步驟訊息時間戳；"
-        "YOLO / OCR 來自本 run 的 <code>yolo_ocr/</code>（若有），為整次執行合計，未對應到單一指令。"
+        "move_mouse 工具列會展開 YOLO / OCR / 選取等內部階段（來自工具結果的 timing）；"
+        "YOLO / OCR（yolo_ocr）合計來自本 run 的 <code>yolo_ocr/</code> sidecar（若有），"
+        "為整次執行合計，未對應到單一指令。"
         "</p>"
     )
     per_step_section = (

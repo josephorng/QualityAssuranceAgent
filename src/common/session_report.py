@@ -110,6 +110,155 @@ def _tool_payload_from_message(content: Any) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+_MOVE_MOUSE_TIMING_ACTIONS = frozenset(
+    {"move_mouse", "move_mouse_visual", "check_object_exists"}
+)
+
+_MOVE_MOUSE_PHASE_LABELS = {
+    "capture": "Screenshot capture",
+    "yolo": "YOLO detect",
+    "line_refine": "Input line refine",
+    "ocr": "OCR",
+    "parse_instruction": "Parse instruction (overlapped)",
+    "select": "Target select",
+    "select_unique": "Unique target (skip LLM)",
+    "llm_pick": "LLM target pick",
+    "visual_one_pass": "Visual one-pass select",
+    "gemma_roi": "Gemma ROI fallback",
+    "hand_move": "Cursor move",
+}
+
+
+def _move_mouse_timing_from_tool_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Pull structured ``timing`` from a move_mouse-family tool result payload."""
+    action = payload.get("action")
+    args = payload.get("args")
+    timing: Any = None
+    if isinstance(args, dict) and isinstance(args.get("timing"), dict):
+        timing = args.get("timing")
+    elif isinstance(payload.get("timing"), dict):
+        timing = payload.get("timing")
+    if not isinstance(timing, dict):
+        return None
+    if isinstance(action, str) and action not in _MOVE_MOUSE_TIMING_ACTIONS:
+        # Still accept when timing is nested under args from a move-family tool merge.
+        if not (isinstance(args, dict) and "timing" in args):
+            return None
+    if isinstance(timing.get("phases"), list) or isinstance(
+        timing.get("total_s"), (int, float)
+    ):
+        return timing
+    return None
+
+
+def _details_from_move_mouse_timing(timing: dict[str, Any]) -> list[dict[str, Any]]:
+    """Convert move_mouse ``timing.phases`` into time_profile detail rows."""
+    phases = timing.get("phases")
+    details: list[dict[str, Any]] = []
+    if isinstance(phases, list):
+        for phase in phases:
+            if not isinstance(phase, dict):
+                continue
+            name = phase.get("name")
+            seconds = phase.get("seconds")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            if not isinstance(seconds, (int, float)):
+                continue
+            label = _MOVE_MOUSE_PHASE_LABELS.get(name, name)
+            if phase.get("overlapped") is True and "(overlapped)" not in label:
+                label = f"{label} (overlapped)"
+            details.append(
+                {
+                    "kind": f"move_mouse_{name}",
+                    "label": label,
+                    "duration_seconds": round(float(seconds), 3),
+                }
+            )
+    if details:
+        return details
+    for key, label in (
+        ("capture_s", "Screenshot capture"),
+        ("yolo_s", "YOLO detect"),
+        ("line_s", "Input line refine"),
+        ("ocr_s", "OCR"),
+        ("parse_s", "Parse instruction (overlapped)"),
+        ("select_s", "Target select"),
+        ("hand_move_s", "Cursor move"),
+    ):
+        raw = timing.get(key)
+        if isinstance(raw, (int, float)):
+            details.append(
+                {
+                    "kind": f"move_mouse_{key.removesuffix('_s')}",
+                    "label": label,
+                    "duration_seconds": round(float(raw), 3),
+                }
+            )
+    return details
+
+
+def _find_tool_payload_for_action(
+    messages: list[dict[str, Any]],
+    start_index: int,
+    action: str,
+) -> dict[str, Any] | None:
+    for message in messages[start_index + 1 :]:
+        if not isinstance(message, dict) or message.get("role") != _ROLE_TOOL:
+            continue
+        payload = _tool_payload_from_message(message.get("content"))
+        if payload.get("action") == action:
+            return payload
+    return None
+
+
+def _attach_move_mouse_timing_details(
+    entry: dict[str, Any],
+    *,
+    messages: list[dict[str, Any]],
+    message_index: int,
+    next_message: dict[str, Any] | None,
+) -> None:
+    """Attach nested move_mouse phase timings onto a tool_execution profile row."""
+    if entry.get("kind") != "tool_execution":
+        return
+    actions = entry.get("actions")
+    action_names = (
+        [str(a) for a in actions if isinstance(a, str)]
+        if isinstance(actions, list)
+        else []
+    )
+    target_action = next(
+        (name for name in action_names if name in _MOVE_MOUSE_TIMING_ACTIONS),
+        None,
+    )
+    if target_action is None:
+        raw_action = entry.get("action")
+        if isinstance(raw_action, str) and raw_action in _MOVE_MOUSE_TIMING_ACTIONS:
+            target_action = raw_action
+    if target_action is None:
+        return
+
+    payload: dict[str, Any] | None = None
+    if isinstance(next_message, dict) and next_message.get("role") == _ROLE_TOOL:
+        next_payload = _tool_payload_from_message(next_message.get("content"))
+        if next_payload.get("action") == target_action:
+            payload = next_payload
+    if payload is None:
+        payload = _find_tool_payload_for_action(messages, message_index, target_action)
+    if payload is None:
+        return
+    timing = _move_mouse_timing_from_tool_payload(payload)
+    if timing is None:
+        return
+    details = _details_from_move_mouse_timing(timing)
+    if details:
+        entry["details"] = details
+        total = timing.get("total_s")
+        if isinstance(total, (int, float)):
+            entry["tool_internal_seconds"] = round(float(total), 3)
+
+
 def _message_has_screenshots(message: dict[str, Any]) -> bool:
     images = message.get("images")
     return isinstance(images, list) and bool(images)
@@ -289,6 +438,12 @@ def _build_time_profile(
         }
         if duration is not None:
             entry["duration_seconds"] = duration
+        _attach_move_mouse_timing_details(
+            entry,
+            messages=messages,
+            message_index=index,
+            next_message=next_message,
+        )
 
         profile.append(entry)
 

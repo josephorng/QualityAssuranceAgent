@@ -2042,6 +2042,75 @@ def test_write_session_html_includes_time_profile_tab(tmp_path: Path) -> None:
     assert "OCR（yolo_ocr）" in html
     assert "verify_llm_inference" in html
     assert "id=\"tab-profile\"" in html
+    assert "move_mouse 工具列會展開" in html
+
+
+def test_write_session_html_renders_move_mouse_timing_details(tmp_path: Path) -> None:
+    run_root = tmp_path / "task_move_mouse_profile_details"
+    run_root.mkdir()
+    steps_dir = run_root / "steps"
+    steps_dir.mkdir()
+    (steps_dir / "0_0.json").write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "timestamp_utc": "2026-06-11T06:00:00+00:00",
+                        "content": "decide",
+                        "images": ["a.png"],
+                    },
+                    {
+                        "role": "assistant",
+                        "timestamp_utc": "2026-06-11T06:00:01+00:00",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "move_mouse",
+                                    "arguments": {"instruction": "目標"},
+                                }
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "timestamp_utc": "2026-06-11T06:00:05+00:00",
+                        "content": json.dumps(
+                            {
+                                "action": "move_mouse",
+                                "ok": True,
+                                "args": {
+                                    "timing": {
+                                        "total_s": 3.5,
+                                        "phases": [
+                                            {"name": "yolo", "seconds": 1.0},
+                                            {"name": "ocr", "seconds": 2.0},
+                                        ],
+                                    }
+                                },
+                            }
+                        ),
+                    },
+                ],
+                "step_timing": {
+                    "started_at_utc": "2026-06-11T06:00:00+00:00",
+                    "finished_at_utc": "2026-06-11T06:00:06+00:00",
+                    "duration_seconds": 6.0,
+                    "status": "completed",
+                    "step_index": 0,
+                    "goal": "移到目標",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_session_html_from_run(run_root).read_text(encoding="utf-8")
+    assert "move_mouse_yolo" in html
+    assert "move_mouse_ocr" in html
+    assert "YOLO detect" in html
+    assert "time-profile-detail" in html
 
 
 def test_write_recording_html_includes_time_profile_tab(tmp_path: Path) -> None:

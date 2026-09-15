@@ -160,7 +160,14 @@ async def test_find_mouse_point_overlaps_parse_with_capture_detect(
             YOLO_CLASS_TEXT,
             text="目標",
         )
-        return [1], ["shot.png"], [(1, np.zeros((10, 10, 3), dtype=np.uint8))], [det]
+        timing = {
+            "capture_s": 0.01,
+            "yolo_s": 0.02,
+            "line_s": 0.0,
+            "ocr_s": 0.03,
+            "total_s": 0.06,
+        }
+        return [1], ["shot.png"], [(1, np.zeros((10, 10, 3), dtype=np.uint8))], [det], timing
 
     def fake_filter(detections, anchor, nearby):
         assert anchor == "目標"
@@ -201,6 +208,14 @@ async def test_find_mouse_point_overlaps_parse_with_capture_detect(
     assert found[0:2] == (10, 10)
     # Sequential would be ~2 * branch_delay; overlap should finish near one delay.
     assert elapsed < branch_delay_s * 1.6
+    timing = found[2].get("timing")
+    assert isinstance(timing, dict)
+    assert timing["yolo_s"] == 0.02
+    assert timing["ocr_s"] == 0.03
+    assert timing["capture_s"] == 0.01
+    assert isinstance(timing.get("phases"), list)
+    assert any(p.get("name") == "yolo" for p in timing["phases"])
+    assert timing["total_s"] >= timing["capture_s"]
 
 
 def test_detection_from_bbox_text() -> None:
@@ -2766,7 +2781,7 @@ def test_collect_monitor_detections_preserves_order_and_offsets(
 
     calls: list[int] = []
 
-    def fake_build(bgr, *, yolo_conf_threshold: float = 0.05):
+    def fake_build(bgr, *, yolo_conf_threshold: float = 0.05, **_kwargs):
         monitor_tag = int(bgr[0, 0, 0])
         calls.append(monitor_tag)
         return [

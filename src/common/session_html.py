@@ -586,7 +586,120 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 .shot a { display: block; }
 .shot img { width: 100%; height: auto; border: 1px solid #d0d7de; border-radius: 6px; background: #fff; }
 .shot .missing { color: #8c959f; font-style: italic; }
+.tabs {
+  display: flex; flex-wrap: wrap; gap: .35rem; margin: 0 0 1.25rem;
+  border-bottom: 1px solid #d0d7de; padding-bottom: .35rem;
+}
+.tabs button {
+  appearance: none; border: 1px solid transparent; background: transparent;
+  cursor: pointer; border-radius: 6px 6px 0 0; padding: .45rem .9rem;
+  font-size: .95rem; font-family: inherit; color: #57606a; font-weight: 600;
+}
+.tabs button:hover { color: #1f2328; background: #eaeef2; }
+.tabs button.active {
+  color: #0969da; border-color: #d0d7de #d0d7de #f5f6f8; background: #fff;
+  margin-bottom: -1px; border-bottom-color: #fff;
+}
+.tab-panel[hidden] { display: none; }
+.time-profile { margin: 0 0 1.5rem; }
+.time-profile-note {
+  margin: 0 0 1rem; padding: .65rem .9rem; border-radius: 8px;
+  border: 1px solid #d0d7de; background: #f6f8fa; color: #57606a; font-size: .9rem;
+}
+.time-profile-summary {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: .75rem; margin: 0 0 1.25rem;
+}
+.time-profile-card {
+  background: #fff; border: 1px solid #d0d7de; border-radius: 10px;
+  padding: .85rem 1rem; box-shadow: 0 1px 2px rgba(0,0,0,.04);
+}
+.time-profile-card .label {
+  margin: 0 0 .25rem; color: #57606a; font-size: .8rem; font-weight: 600;
+}
+.time-profile-card .value {
+  margin: 0; font-size: 1.25rem; font-weight: 700; font-variant-numeric: tabular-nums;
+}
+.time-profile h2 {
+  font-size: 1.1rem; margin: 0 0 .65rem;
+}
+.time-profile-table {
+  width: 100%; border-collapse: collapse; background: #fff;
+  border: 1px solid #d0d7de; border-radius: 10px; overflow: hidden;
+  box-shadow: 0 1px 2px rgba(0,0,0,.04); margin: 0 0 1.25rem;
+}
+.time-profile-table th, .time-profile-table td {
+  text-align: left; vertical-align: top; padding: .65rem .9rem;
+  border-top: 1px solid #d0d7de; font-size: .9rem;
+}
+.time-profile-table thead th {
+  border-top: none; background: #f6f8fa; color: #57606a; font-size: .8rem;
+}
+.time-profile-table td.num, .time-profile-table th.num {
+  text-align: right; font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+.time-profile-bar {
+  display: block; height: .55rem; border-radius: 999px; background: #eaeef2;
+  overflow: hidden; min-width: 4.5rem;
+}
+.time-profile-bar > span {
+  display: block; height: 100%; background: #0969da; border-radius: 999px;
+}
+.time-profile-step {
+  background: #fff; border: 1px solid #d0d7de; border-radius: 10px;
+  margin: 0 0 .75rem; box-shadow: 0 1px 2px rgba(0,0,0,.04);
+}
+.time-profile-step > summary {
+  cursor: pointer; user-select: none; list-style: none;
+  padding: .75rem 1rem; font-weight: 600; display: flex;
+  align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap;
+}
+.time-profile-step > summary::-webkit-details-marker { display: none; }
+.time-profile-step .step-meta {
+  color: #57606a; font-weight: 500; font-size: .85rem;
+  font-variant-numeric: tabular-nums;
+}
+.time-profile-step .phase-table { margin: 0; border: none; border-radius: 0; box-shadow: none; }
+.time-profile .empty { color: #8c959f; font-style: italic; }
 @media (max-width: 720px) { .shots { grid-template-columns: 1fr; } }
+""".strip()
+
+_PAGE_TABS_SCRIPT = """
+(function () {
+  var buttons = Array.prototype.slice.call(document.querySelectorAll(".tabs button[data-tab]"));
+  var panels = Array.prototype.slice.call(document.querySelectorAll(".tab-panel[data-tab]"));
+  if (!buttons.length || !panels.length) return;
+  var allowed = { steps: true, profile: true };
+
+  function activate(tabId) {
+    var resolved = allowed[tabId] ? tabId : "steps";
+    buttons.forEach(function (btn) {
+      var active = btn.getAttribute("data-tab") === resolved;
+      btn.classList.toggle("active", active);
+      btn.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    panels.forEach(function (panel) {
+      var active = panel.getAttribute("data-tab") === resolved;
+      if (active) panel.removeAttribute("hidden");
+      else panel.setAttribute("hidden", "");
+    });
+    if (window.location.hash !== "#" + resolved) {
+      try { history.replaceState(null, "", "#" + resolved); } catch (e) {}
+    }
+  }
+
+  buttons.forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      activate(btn.getAttribute("data-tab") || "steps");
+    });
+  });
+
+  window.addEventListener("hashchange", function () {
+    activate((window.location.hash || "#steps").replace(/^#/, ""));
+  });
+  activate((window.location.hash || "#steps").replace(/^#/, ""));
+})();
 """.strip()
 
 _RECORDING_SCRIPT = """
@@ -5088,6 +5201,456 @@ def _render_smart_cycles_html(
     return "\n".join(blocks)
 
 
+def _format_seconds_precise(value: Any) -> str:
+    if not isinstance(value, (int, float)):
+        return "—"
+    seconds = max(0.0, float(value))
+    if seconds >= 60:
+        minutes = int(seconds // 60)
+        rem = seconds - minutes * 60
+        return f"{minutes}m {rem:.1f}s"
+    return f"{seconds:.2f}s"
+
+
+def _percent_of(part: float, total: float) -> float:
+    if total <= 0:
+        return 0.0
+    return round(100.0 * part / total, 1)
+
+
+def _render_percent_bar(pct: float) -> str:
+    width = max(0.0, min(100.0, float(pct)))
+    return (
+        f'<span class="time-profile-bar" title="{width:.1f}%">'
+        f'<span style="width:{width:.1f}%"></span></span>'
+    )
+
+
+def _load_yolo_ocr_timings(run_root: Path) -> dict[str, Any]:
+    """Sum YOLO/OCR elapsed ms from ``yolo_ocr/*.json`` when present."""
+    folder = run_root / "yolo_ocr"
+    if not folder.is_dir():
+        return {"file_count": 0, "yolo_seconds": 0.0, "ocr_seconds": 0.0, "has_data": False}
+
+    yolo_ms = 0.0
+    ocr_ms = 0.0
+    file_count = 0
+    has_data = False
+    for path in sorted(folder.glob("*.json")):
+        payload = _load_json_dict(path)
+        if payload is None:
+            continue
+        file_count += 1
+        yolo_raw = payload.get("yolo_elapsed_ms")
+        ocr_raw = payload.get("ocr_elapsed_ms")
+        if isinstance(yolo_raw, (int, float)):
+            yolo_ms += float(yolo_raw)
+            has_data = True
+        if isinstance(ocr_raw, (int, float)):
+            ocr_ms += float(ocr_raw)
+            has_data = True
+    return {
+        "file_count": file_count,
+        "yolo_seconds": round(yolo_ms / 1000.0, 3),
+        "ocr_seconds": round(ocr_ms / 1000.0, 3),
+        "has_data": has_data,
+    }
+
+
+def _render_page_tabs_nav(*, active: str = "steps") -> str:
+    steps_active = " active" if active == "steps" else ""
+    profile_active = " active" if active == "profile" else ""
+    steps_selected = "true" if active == "steps" else "false"
+    profile_selected = "true" if active == "profile" else "false"
+    return (
+        '<nav class="tabs" role="tablist" aria-label="報告內容">'
+        f'<button type="button" class="{steps_active.strip()}" data-tab="steps" role="tab" '
+        f'aria-selected="{steps_selected}" aria-controls="tab-steps">步驟</button>'
+        f'<button type="button" class="{profile_active.strip()}" data-tab="profile" role="tab" '
+        f'aria-selected="{profile_selected}" aria-controls="tab-profile">時間分析</button>'
+        "</nav>"
+    )
+
+
+def _render_summary_cards(cards: list[tuple[str, str]]) -> str:
+    if not cards:
+        return ""
+    items = "".join(
+        f'<div class="time-profile-card">'
+        f'<p class="label">{escape(label)}</p>'
+        f'<p class="value">{escape(value)}</p>'
+        f"</div>"
+        for label, value in cards
+    )
+    return f'<div class="time-profile-summary">{items}</div>'
+
+
+def _render_category_breakdown_table(
+    rows: list[tuple[str, float]],
+    *,
+    total_seconds: float | None,
+) -> str:
+    if not rows:
+        return ""
+    base = float(total_seconds) if isinstance(total_seconds, (int, float)) and total_seconds > 0 else 0.0
+    if base <= 0:
+        base = sum(max(0.0, seconds) for _, seconds in rows)
+    body_rows: list[str] = []
+    for label, seconds in rows:
+        pct = _percent_of(seconds, base) if base > 0 else 0.0
+        body_rows.append(
+            "<tr>"
+            f"<td>{escape(label)}</td>"
+            f'<td class="num">{escape(_format_seconds_precise(seconds))}</td>'
+            f'<td class="num">{pct:.1f}%</td>'
+            f"<td>{_render_percent_bar(pct)}</td>"
+            "</tr>"
+        )
+    return (
+        "<h2>類別總覽</h2>\n"
+        '<table class="time-profile-table">'
+        "<thead><tr>"
+        '<th>類別</th><th class="num">時間</th><th class="num">占比</th><th>分布</th>'
+        "</tr></thead>"
+        f"<tbody>{''.join(body_rows)}</tbody>"
+        "</table>"
+    )
+
+
+def _render_session_time_profile_html(run_root: Path, report: dict[str, Any]) -> str:
+    steps_raw = report.get("steps")
+    steps = [step for step in steps_raw if isinstance(step, dict)] if isinstance(steps_raw, list) else []
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    vision = _load_yolo_ocr_timings(run_root)
+
+    has_step_timing = any(
+        isinstance(step.get("timing_summary"), dict)
+        or (
+            isinstance(step.get("timing"), dict)
+            and isinstance(step["timing"].get("duration_seconds"), (int, float))
+        )
+        for step in steps
+    )
+    if not has_step_timing and not vision["has_data"]:
+        return (
+            '<div class="time-profile">'
+            '<p class="empty">尚無時間資料。</p>'
+            "</div>"
+        )
+
+    total_seconds = summary.get("total_duration_seconds")
+    if not isinstance(total_seconds, (int, float)):
+        total_seconds = None
+    step_count = summary.get("step_count")
+    if not isinstance(step_count, int):
+        step_count = len(steps)
+    avg_seconds = summary.get("avg_step_seconds")
+    if not isinstance(avg_seconds, (int, float)) and isinstance(total_seconds, (int, float)) and step_count:
+        avg_seconds = round(float(total_seconds) / step_count, 3)
+    failed_steps = summary.get("failed_step_count")
+    if not isinstance(failed_steps, int):
+        failed_steps = 0
+
+    cards: list[tuple[str, str]] = [
+        ("總時間", _format_seconds_precise(total_seconds) if total_seconds is not None else "—"),
+        ("步驟數", str(step_count)),
+        ("平均每步", _format_seconds_precise(avg_seconds) if isinstance(avg_seconds, (int, float)) else "—"),
+    ]
+    if failed_steps:
+        cards.append(("失敗步驟", str(failed_steps)))
+    if vision["has_data"]:
+        cards.append(("YOLO 檔案數", str(vision["file_count"])))
+
+    category_keys = [
+        ("execution_llm_seconds", "執行 LLM"),
+        ("verify_llm_seconds", "驗證 LLM"),
+        ("tool_execution_seconds", "工具執行"),
+        ("screenshot_seconds", "截圖 / 準備"),
+        ("other_seconds", "其他 / 未分類"),
+    ]
+    category_rows: list[tuple[str, float]] = []
+    for key, label in category_keys:
+        value = summary.get(key)
+        if isinstance(value, (int, float)):
+            category_rows.append((label, float(value)))
+        else:
+            rolled = 0.0
+            found = False
+            for step in steps:
+                timing_summary = step.get("timing_summary")
+                if not isinstance(timing_summary, dict):
+                    continue
+                raw = timing_summary.get(key)
+                if isinstance(raw, (int, float)):
+                    rolled += float(raw)
+                    found = True
+            if found:
+                category_rows.append((label, round(rolled, 3)))
+
+    if vision["has_data"]:
+        category_rows.append(("YOLO（yolo_ocr）", float(vision["yolo_seconds"])))
+        category_rows.append(("OCR（yolo_ocr）", float(vision["ocr_seconds"])))
+
+    ranked: list[tuple[int, dict[str, Any], float]] = []
+    for index, step in enumerate(steps, start=1):
+        timing = step.get("timing") if isinstance(step.get("timing"), dict) else {}
+        timing_summary = (
+            step.get("timing_summary") if isinstance(step.get("timing_summary"), dict) else {}
+        )
+        duration = timing_summary.get("total_seconds")
+        if not isinstance(duration, (int, float)):
+            duration = timing.get("duration_seconds")
+        if isinstance(duration, (int, float)):
+            ranked.append((index, step, float(duration)))
+    ranked.sort(key=lambda item: item[2], reverse=True)
+
+    slowest_html = ""
+    if ranked:
+        top = ranked[: min(5, len(ranked))]
+        rows_html = []
+        for index, step, duration in top:
+            goal = step.get("goal") if isinstance(step.get("goal"), str) else ""
+            goal_text = goal.strip() or "—"
+            if len(goal_text) > 80:
+                goal_text = goal_text[:77] + "…"
+            rows_html.append(
+                "<tr>"
+                f'<td class="num">{index}</td>'
+                f"<td>{escape(goal_text)}</td>"
+                f'<td class="num">{escape(_format_seconds_precise(duration))}</td>'
+                "</tr>"
+            )
+        slowest_html = (
+            "<h2>最慢步驟</h2>\n"
+            '<table class="time-profile-table">'
+            '<thead><tr><th class="num">#</th><th>指令</th><th class="num">時間</th></tr></thead>'
+            f"<tbody>{''.join(rows_html)}</tbody>"
+            "</table>"
+        )
+
+    per_step_parts: list[str] = []
+    for index, step in enumerate(steps, start=1):
+        goal = step.get("goal") if isinstance(step.get("goal"), str) else ""
+        goal_text = goal.strip() or "—"
+        if len(goal_text) > 100:
+            goal_text = goal_text[:97] + "…"
+        timing = step.get("timing") if isinstance(step.get("timing"), dict) else {}
+        timing_summary = (
+            step.get("timing_summary") if isinstance(step.get("timing_summary"), dict) else {}
+        )
+        total = timing_summary.get("total_seconds")
+        if not isinstance(total, (int, float)):
+            total = timing.get("duration_seconds")
+        meta_bits = [_format_seconds_precise(total) if isinstance(total, (int, float)) else "—"]
+        for key, short in (
+            ("execution_llm_seconds", "執行LLM"),
+            ("verify_llm_seconds", "驗證LLM"),
+            ("tool_execution_seconds", "工具"),
+            ("screenshot_seconds", "截圖"),
+            ("other_seconds", "其他"),
+        ):
+            value = timing_summary.get(key)
+            if isinstance(value, (int, float)) and value > 0:
+                meta_bits.append(f"{short} {_format_seconds_precise(value)}")
+        profile = step.get("time_profile")
+        phase_rows = ""
+        if isinstance(profile, list) and profile:
+            phase_body = []
+            for entry in profile:
+                if not isinstance(entry, dict):
+                    continue
+                label = (
+                    entry.get("label")
+                    if isinstance(entry.get("label"), str)
+                    else str(entry.get("kind") or "—")
+                )
+                kind = entry.get("kind") if isinstance(entry.get("kind"), str) else "—"
+                duration = entry.get("duration_seconds")
+                phase_body.append(
+                    "<tr>"
+                    f"<td>{escape(kind)}</td>"
+                    f"<td>{escape(label)}</td>"
+                    f'<td class="num">{escape(_format_seconds_precise(duration))}</td>'
+                    "</tr>"
+                )
+            if phase_body:
+                phase_rows = (
+                    '<table class="time-profile-table phase-table">'
+                    '<thead><tr><th>階段</th><th>說明</th><th class="num">時間</th></tr></thead>'
+                    f"<tbody>{''.join(phase_body)}</tbody>"
+                    "</table>"
+                )
+        if not phase_rows:
+            phase_rows = (
+                '<p class="empty" style="padding:0 1rem 1rem;">此步驟沒有細部時間剖面。</p>'
+            )
+        per_step_parts.append(
+            f'<details class="time-profile-step">'
+            f"<summary>"
+            f"<span>步驟 {index} · {escape(goal_text)}</span>"
+            f'<span class="step-meta">{escape(" · ".join(meta_bits))}</span>'
+            f"</summary>"
+            f"{phase_rows}"
+            f"</details>"
+        )
+
+    note = (
+        '<p class="time-profile-note">'
+        "執行 / 驗證 LLM、工具與截圖時間來自步驟訊息時間戳；"
+        "YOLO / OCR 來自本 run 的 <code>yolo_ocr/</code>（若有），為整次執行合計，未對應到單一指令。"
+        "</p>"
+    )
+    per_step_section = (
+        ("<h2>逐步明細</h2>\n" + "\n".join(per_step_parts)) if per_step_parts else ""
+    )
+    return (
+        '<div class="time-profile">'
+        f"{note}"
+        f"{_render_summary_cards(cards)}"
+        f"{_render_category_breakdown_table(category_rows, total_seconds=total_seconds if isinstance(total_seconds, (int, float)) else None)}"
+        f"{slowest_html}"
+        f"{per_step_section}"
+        "</div>"
+    )
+
+
+def _recording_float_seconds(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value < 0:
+        return None
+    return float(value)
+
+
+def _render_recording_time_profile_html(
+    run_root: Path,
+    events: list[dict[str, Any]],
+    manifest: dict[str, Any] | None,
+) -> str:
+    if not events:
+        return (
+            '<div class="time-profile">'
+            '<p class="empty">尚無時間資料。</p>'
+            "</div>"
+        )
+
+    started = None
+    stopped = None
+    if isinstance(manifest, dict):
+        started = manifest.get("started_at_utc")
+        stopped = manifest.get("stopped_at_utc")
+    span_seconds: float | None = None
+    if isinstance(started, str) and isinstance(stopped, str):
+        try:
+            start_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
+            stop_dt = datetime.fromisoformat(stopped.replace("Z", "+00:00"))
+            span_seconds = max(0.0, (stop_dt - start_dt).total_seconds())
+        except ValueError:
+            span_seconds = None
+
+    rows: list[dict[str, Any]] = []
+    elapsed_sum = 0.0
+    elapsed_count = 0
+    settle_sum = 0.0
+    settle_count = 0
+    hold_sum = 0.0
+    hold_count = 0
+    for index, event in enumerate(events):
+        event_index = event.get("index")
+        if not isinstance(event_index, int):
+            event_index = index + 1
+        analysis = _load_recording_analysis(run_root, event_index)
+        instruction = ""
+        if isinstance(analysis, dict):
+            raw_instruction = analysis.get("instruction")
+            if isinstance(raw_instruction, str):
+                instruction = raw_instruction.strip()
+        elapsed = None
+        settle = None
+        if isinstance(analysis, dict):
+            elapsed = _recording_float_seconds(analysis.get("elapsed_since_previous_seconds"))
+            settle = _recording_float_seconds(analysis.get("settle_after_seconds"))
+        if elapsed is None and index > 0:
+            wait = _recording_elapsed_wait_seconds(events[index - 1], event, analysis)
+            if wait is not None:
+                elapsed = float(wait)
+        hold = _recording_float_seconds(event.get("duration_seconds"))
+        if elapsed is not None:
+            elapsed_sum += elapsed
+            elapsed_count += 1
+        if settle is not None:
+            settle_sum += settle
+            settle_count += 1
+        if hold is not None:
+            hold_sum += hold
+            hold_count += 1
+        rows.append(
+            {
+                "index": event_index,
+                "instruction": instruction or "—",
+                "elapsed": elapsed,
+                "settle": settle,
+                "hold": hold,
+            }
+        )
+
+    avg_gap = round(elapsed_sum / elapsed_count, 3) if elapsed_count else None
+    cards: list[tuple[str, str]] = [
+        ("錄製總長", _format_seconds_precise(span_seconds) if span_seconds is not None else "—"),
+        ("事件數", str(len(events))),
+        ("平均間隔", _format_seconds_precise(avg_gap) if avg_gap is not None else "—"),
+        ("間隔合計", _format_seconds_precise(elapsed_sum) if elapsed_count else "—"),
+        ("Settle 合計", _format_seconds_precise(settle_sum) if settle_count else "—"),
+    ]
+    if hold_count:
+        cards.append(("Hold/Wait 合計", _format_seconds_precise(hold_sum)))
+
+    category_rows: list[tuple[str, float]] = []
+    if elapsed_count:
+        category_rows.append(("事件間隔", round(elapsed_sum, 3)))
+    if settle_count:
+        category_rows.append(("Settle", round(settle_sum, 3)))
+    if hold_count:
+        category_rows.append(("Hold / Wait", round(hold_sum, 3)))
+
+    table_rows = []
+    for row in rows:
+        instruction = row["instruction"]
+        if len(instruction) > 80:
+            instruction = instruction[:77] + "…"
+        table_rows.append(
+            "<tr>"
+            f'<td class="num">{row["index"]}</td>'
+            f"<td>{escape(instruction)}</td>"
+            f'<td class="num">{escape(_format_seconds_precise(row["elapsed"]))}</td>'
+            f'<td class="num">{escape(_format_seconds_precise(row["settle"]))}</td>'
+            f'<td class="num">{escape(_format_seconds_precise(row["hold"]))}</td>'
+            "</tr>"
+        )
+
+    note = (
+        '<p class="time-profile-note">'
+        "錄製分析目前只保存事件間隔與 settle 時間，沒有執行 LLM、驗證 LLM、YOLO 或 OCR 的細部耗時。"
+        "若要優化回放路徑的視覺 / LLM 成本，請改看執行報告（session_steps）的時間分析。"
+        "</p>"
+    )
+    return (
+        '<div class="time-profile">'
+        f"{note}"
+        f"{_render_summary_cards(cards)}"
+        f"{_render_category_breakdown_table(category_rows, total_seconds=span_seconds)}"
+        "<h2>各事件時間</h2>\n"
+        '<table class="time-profile-table">'
+        "<thead><tr>"
+        '<th class="num">#</th><th>指令</th>'
+        '<th class="num">間隔</th><th class="num">Settle</th><th class="num">Hold/Wait</th>'
+        "</tr></thead>"
+        f"<tbody>{''.join(table_rows)}</tbody>"
+        "</table>"
+        "</div>"
+    )
+
+
 def write_session_html_from_run(run_root: Path) -> Path:
     """Build ``session_steps.html`` from ``hand.csv`` in a single pass (O(n)).
 
@@ -5131,8 +5694,23 @@ def write_session_html_from_run(run_root: Path) -> Path:
         instruction_groups=instruction_groups,
     )
 
+    steps_body = smart_html + "\n" + "\n".join(groups_html)
+    profile_body = _render_session_time_profile_html(
+        run_root,
+        report if isinstance(report, dict) else {},
+    )
+    tabs = _render_page_tabs_nav()
+    body = (
+        f"{tabs}\n"
+        f'<section class="tab-panel" data-tab="steps" id="tab-steps" role="tabpanel">\n'
+        f"{steps_body}\n"
+        f"</section>\n"
+        f'<section class="tab-panel" data-tab="profile" id="tab-profile" role="tabpanel" hidden>\n'
+        f"{profile_body}\n"
+        f"</section>"
+    )
+
     title = escape(_resolve_session_title(run_root))
-    body = smart_html + "\n" + "\n".join(groups_html)
     nav_href = "../index.html#smart" if _is_smart_run_dir(run_root) else "../index.html"
     html = (
         "<!DOCTYPE html>\n"
@@ -5146,6 +5724,7 @@ def write_session_html_from_run(run_root: Path) -> Path:
         f"<h1>{title}</h1>\n"
         '<p class="intro">依使用者指令分組的手部動作紀錄。點選指令可展開底下的動作列表。</p>\n'
         f"{body}\n"
+        f"<script>\n{_PAGE_TABS_SCRIPT}\n</script>\n"
         "</body>\n</html>\n"
     )
 
@@ -5178,9 +5757,38 @@ def write_recording_html_from_run(run_root: Path, *, update_index: bool = True) 
         for index, event in enumerate(events)
     ]
     title = escape(_resolve_recording_title(run_root))
-    body = "\n".join(events_html) if events_html else '<p class="empty">尚無錄製事件。</p>'
+    steps_inner = "\n".join(events_html) if events_html else '<p class="empty">尚無錄製事件。</p>'
     copy_all_disabled = "" if events_html else " disabled"
     run_id_attr = escape(run_root.name, quote=True)
+    toolbar = (
+        f'<div class="recording-toolbar" data-run-id="{run_id_attr}">'
+        f'<label class="select-all-steps-label">'
+        f'<input type="checkbox" class="select-all-steps" aria-label="全選步驟"'
+        f"{copy_all_disabled}>"
+        f"全選</label>"
+        f'<span class="bulk-step-count">已選 0 筆</span>'
+        f'<button type="button" class="bulk-delete-steps" disabled '
+        f'title="刪除選取的步驟" aria-label="刪除選取的步驟">刪除選取</button>'
+        f'<button type="button" class="copy-all-instructions"{copy_all_disabled} '
+        'title="複製全部指令" aria-label="複製全部指令">複製全部指令</button>'
+        '<button type="button" class="rename-recording" '
+        'title="重新命名" aria-label="重新命名">重新命名</button>'
+        '<button type="button" class="add-recording-step" '
+        'title="新增步驟" aria-label="新增步驟">新增步驟</button>'
+        "</div>"
+    )
+    tabs = _render_page_tabs_nav()
+    profile_body = _render_recording_time_profile_html(run_root, events, manifest)
+    body = (
+        f"{tabs}\n"
+        f'<section class="tab-panel" data-tab="steps" id="tab-steps" role="tabpanel">\n'
+        f"{toolbar}\n"
+        f"{steps_inner}\n"
+        f"</section>\n"
+        f'<section class="tab-panel" data-tab="profile" id="tab-profile" role="tabpanel" hidden>\n'
+        f"{profile_body}\n"
+        f"</section>"
+    )
     html = (
         "<!DOCTYPE html>\n"
         '<html lang="zh-Hant">\n<head>\n'
@@ -5192,24 +5800,9 @@ def write_recording_html_from_run(run_root: Path, *, update_index: bool = True) 
         '<p class="nav"><a href="../index.html#recordings">← 報告列表</a></p>\n'
         f"<h1>{title}</h1>\n"
         '<p class="intro">依錄製事件排列的操作紀錄。點選事件可展開細節與截圖。</p>\n'
-        f'<div class="recording-toolbar" data-run-id="{run_id_attr}">'
-        f'<label class="select-all-steps-label">'
-        f'<input type="checkbox" class="select-all-steps" aria-label="全選步驟"'
-        f'{copy_all_disabled}>'
-        f"全選</label>"
-        f'<span class="bulk-step-count">已選 0 筆</span>'
-        f'<button type="button" class="bulk-delete-steps" disabled '
-        f'title="刪除選取的步驟" aria-label="刪除選取的步驟">刪除選取</button>'
-        f'<button type="button" class="copy-all-instructions"{copy_all_disabled} '
-        'title="複製全部指令" aria-label="複製全部指令">複製全部指令</button>'
-        '<button type="button" class="rename-recording" '
-        'title="重新命名" aria-label="重新命名">重新命名</button>'
-        '<button type="button" class="add-recording-step" '
-        'title="新增步驟" aria-label="新增步驟">新增步驟</button>'
-        "</div>\n"
         f"{body}\n"
         f"{_recording_add_dialog_html()}\n"
-        f"<script>\n{_RECORDING_SCRIPT}\n</script>\n"
+        f"<script>\n{_PAGE_TABS_SCRIPT}\n{_RECORDING_SCRIPT}\n</script>\n"
         "</body>\n</html>\n"
     )
 

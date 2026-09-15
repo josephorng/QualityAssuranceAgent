@@ -1972,3 +1972,100 @@ def test_write_recording_html_follows_session_order_for_display_numbers(
     assert 'class="add-recording-step"' in html
     assert 'id="add-step-dialog"' in html
     assert "自訂指令" in html
+
+
+def test_write_session_html_includes_time_profile_tab(tmp_path: Path) -> None:
+    run_root = tmp_path / "task_profile_tab"
+    run_root.mkdir()
+    steps_dir = run_root / "steps"
+    steps_dir.mkdir()
+    (steps_dir / "0_0.json").write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "timestamp_utc": "2026-06-11T06:00:00+00:00",
+                        "content": "observe",
+                    },
+                    {
+                        "role": "assistant",
+                        "timestamp_utc": "2026-06-11T06:00:04+00:00",
+                        "content": "done",
+                    },
+                ],
+                "verification": [
+                    {
+                        "role": "user",
+                        "timestamp_utc": "2026-06-11T06:00:06+00:00",
+                        "content": "verify",
+                    },
+                    {
+                        "role": "assistant",
+                        "timestamp_utc": "2026-06-11T06:00:09+00:00",
+                        "content": "{}",
+                    },
+                ],
+                "step_timing": {
+                    "started_at_utc": "2026-06-11T06:00:00+00:00",
+                    "finished_at_utc": "2026-06-11T06:00:10+00:00",
+                    "duration_seconds": 10.0,
+                    "status": "completed",
+                    "step_index": 0,
+                    "goal": "開啟記事本",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    yolo_dir = run_root / "yolo_ocr"
+    yolo_dir.mkdir()
+    (yolo_dir / "shot.json").write_text(
+        json.dumps(
+            {
+                "yolo_elapsed_ms": 1500.0,
+                "ocr_elapsed_ms": 500.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_session_html_from_run(run_root).read_text(encoding="utf-8")
+    assert 'data-tab="steps"' in html
+    assert 'data-tab="profile"' in html
+    assert "時間分析" in html
+    assert "類別總覽" in html
+    assert "執行 LLM" in html
+    assert "驗證 LLM" in html
+    assert "YOLO（yolo_ocr）" in html
+    assert "OCR（yolo_ocr）" in html
+    assert "verify_llm_inference" in html
+    assert "id=\"tab-profile\"" in html
+
+
+def test_write_recording_html_includes_time_profile_tab(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_profile_tab"
+    _write_recording_fixture(run_root, with_analysis=True)
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": "點擊「搜尋」按鈕",
+                "elapsed_since_previous_seconds": 2.5,
+                "settle_after_seconds": 1.2,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+    assert 'data-tab="steps"' in html
+    assert 'data-tab="profile"' in html
+    assert "時間分析" in html
+    assert "各事件時間" in html
+    assert "Settle" in html
+    assert "沒有執行 LLM" in html
+    assert "recording-toolbar" in html
+    assert 'id="tab-steps"' in html

@@ -127,7 +127,11 @@ def _extract_assistant_tool_names(message: dict[str, Any]) -> list[str]:
     return names
 
 
-def _describe_time_profile_entry(message: dict[str, Any]) -> dict[str, Any]:
+def _describe_time_profile_entry(
+    message: dict[str, Any],
+    *,
+    for_verify: bool = False,
+) -> dict[str, Any]:
     """
     Map a stamped transcript message to a human-readable phase description.
 
@@ -137,9 +141,16 @@ def _describe_time_profile_entry(message: dict[str, Any]) -> dict[str, Any]:
     - assistant with tool_calls: LLM chose tools; duration is hand execution.
     - assistant without tool_calls: LLM declared step done; duration is wrap-up.
     - tool: tool result recorded; duration is post-action wait and next capture.
+
+    When ``for_verify`` is True, user-role intervals are labeled ``verify_llm_inference``.
     """
     role = message.get("role")
     if role == _ROLE_USER:
+        if for_verify:
+            return {
+                "kind": "verify_llm_inference",
+                "label": "Verify LLM response generation after baseline/live screenshots were sent",
+            }
         return {
             "kind": "llm_inference",
             "label": "LLM response generation after prompt and screenshots were sent",
@@ -152,6 +163,11 @@ def _describe_time_profile_entry(message: dict[str, Any]) -> dict[str, Any]:
                 "kind": "tool_execution",
                 "label": f"Hand tool execution: {joined}",
                 "actions": tool_names,
+            }
+        if for_verify:
+            return {
+                "kind": "step_completion",
+                "label": "Verify wrap-up after final verify LLM response",
             }
         return {
             "kind": "step_completion",
@@ -173,9 +189,21 @@ def _describe_time_profile_entry(message: dict[str, Any]) -> dict[str, Any]:
     return {"kind": role_label, "label": f"Unhandled message role: {role_label}"}
 
 
+def _first_message_timestamp(messages: list[dict[str, Any]]) -> datetime | None:
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        started = _parse_iso(message.get("timestamp_utc"))
+        if started is not None:
+            return started
+    return None
+
+
 def _build_time_profile(
     messages: list[dict[str, Any]],
     finished_at_utc: str | None,
+    *,
+    for_verify: bool = False,
 ) -> list[dict[str, Any]]:
     if not messages:
         return []
@@ -198,7 +226,7 @@ def _build_time_profile(
         duration = _duration_seconds(started, next_started)
         entry: dict[str, Any] = {
             "started_at_utc": started.isoformat(),
-            **_describe_time_profile_entry(message),
+            **_describe_time_profile_entry(message, for_verify=for_verify),
         }
         if duration is not None:
             entry["duration_seconds"] = duration
@@ -206,6 +234,66 @@ def _build_time_profile(
         profile.append(entry)
 
     return profile
+
+
+def _sum_profile_durations(profile: list[dict[str, Any]], kinds: set[str]) -> float:
+    total = 0.0
+    for entry in profile:
+        if entry.get("kind") not in kinds:
+            continue
+        duration = entry.get("duration_seconds")
+        if isinstance(duration, (int, float)):
+            total += float(duration)
+    return round(total, 3)
+
+
+_KNOWN_TIMING_KINDS = frozenset(
+    {
+        "llm_inference",
+        "verify_llm_inference",
+        "tool_execution",
+        "screenshot_capture",
+    }
+)
+
+
+def _build_timing_summary(
+    timing: dict[str, Any],
+    time_profile: list[dict[str, Any]],
+) -> dict[str, Any]:
+    execution_llm = _sum_profile_durations(time_profile, {"llm_inference"})
+    verify_llm = _sum_profile_durations(time_profile, {"verify_llm_inference"})
+    tool_execution = _sum_profile_durations(time_profile, {"tool_execution"})
+    screenshot = _sum_profile_durations(time_profile, {"screenshot_capture"})
+    accounted = execution_llm + verify_llm + tool_execution + screenshot
+    other_kinds = {
+        str(entry.get("kind"))
+        for entry in time_profile
+        if entry.get("kind") not in _KNOWN_TIMING_KINDS and entry.get("kind") is not None
+    }
+    other_from_profile = _sum_profile_durations(time_profile, other_kinds)
+
+    total_raw = timing.get("duration_seconds")
+    total: float | None = float(total_raw) if isinstance(total_raw, (int, float)) else None
+    if total is None:
+        profile_total = accounted + other_from_profile
+        total = round(profile_total, 3) if profile_total > 0 else None
+
+    other = other_from_profile
+    if total is not None:
+        # Prefer wall-clock remainder so unprofiled gaps (settle, etc.) surface as other.
+        other = round(max(0.0, total - accounted), 3)
+
+    summary: dict[str, Any] = {
+        "execution_llm_seconds": execution_llm,
+        "verify_llm_seconds": verify_llm,
+        "tool_execution_seconds": tool_execution,
+        "screenshot_seconds": screenshot,
+        "other_seconds": other,
+    }
+    if total is not None:
+        summary["total_seconds"] = round(total, 3)
+    return summary
 
 
 def _build_step_records(
@@ -218,6 +306,12 @@ def _build_step_records(
         step_timing = dict(step_timing_raw) if isinstance(step_timing_raw, dict) else {}
         messages_raw = payload.get("messages")
         messages = [msg for msg in messages_raw if isinstance(msg, dict)] if isinstance(messages_raw, list) else []
+        verification_raw = payload.get("verification")
+        verification = (
+            [msg for msg in verification_raw if isinstance(msg, dict)]
+            if isinstance(verification_raw, list)
+            else []
+        )
 
         timing = {
             key: step_timing[key]
@@ -225,12 +319,24 @@ def _build_step_records(
             if key in step_timing
         }
 
+        finished_at = step_timing.get("finished_at_utc")
+        verify_started = _first_message_timestamp(verification)
+        actor_end = verify_started.isoformat() if verify_started is not None else finished_at
+        actor_profile = _build_time_profile(messages, actor_end)
+        verify_profile = _build_time_profile(
+            verification,
+            finished_at if isinstance(finished_at, str) else None,
+            for_verify=True,
+        )
+        time_profile = actor_profile + verify_profile
+
         record: dict[str, Any] = {
             "transcript_counter": transcript_counter,
             "script_step_index": script_step_index,
             "goal": _resolve_goal(transcript_counter, script_step_index, step_timing, runtime_goals),
             "timing": timing,
-            "time_profile": _build_time_profile(messages, step_timing.get("finished_at_utc")),
+            "time_profile": time_profile,
+            "timing_summary": _build_timing_summary(timing, time_profile),
         }
         expected_outcome = step_timing.get("expected_outcome")
         if isinstance(expected_outcome, str) and expected_outcome.strip():
@@ -339,16 +445,30 @@ def _build_summary(
     failed_steps = 0
     total_duration = 0.0
     has_duration = False
+    category_totals = {
+        "execution_llm_seconds": 0.0,
+        "verify_llm_seconds": 0.0,
+        "tool_execution_seconds": 0.0,
+        "screenshot_seconds": 0.0,
+        "other_seconds": 0.0,
+    }
+    has_category = False
     for record in step_records:
         timing = record.get("timing")
-        if not isinstance(timing, dict):
-            continue
-        if timing.get("status") == "failed":
-            failed_steps += 1
-        duration = timing.get("duration_seconds")
-        if isinstance(duration, (int, float)):
-            total_duration += float(duration)
-            has_duration = True
+        if isinstance(timing, dict):
+            if timing.get("status") == "failed":
+                failed_steps += 1
+            duration = timing.get("duration_seconds")
+            if isinstance(duration, (int, float)):
+                total_duration += float(duration)
+                has_duration = True
+        timing_summary = record.get("timing_summary")
+        if isinstance(timing_summary, dict):
+            for key in category_totals:
+                value = timing_summary.get(key)
+                if isinstance(value, (int, float)):
+                    category_totals[key] += float(value)
+                    has_category = True
 
     failed_tools = sum(1 for item in tool_results if not item.get("ok", False))
     summary: dict[str, Any] = {
@@ -359,6 +479,11 @@ def _build_summary(
     }
     if has_duration:
         summary["total_duration_seconds"] = round(total_duration, 3)
+        if step_records:
+            summary["avg_step_seconds"] = round(total_duration / len(step_records), 3)
+    if has_category:
+        for key, value in category_totals.items():
+            summary[key] = round(value, 3)
     return summary
 
 

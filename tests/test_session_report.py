@@ -176,11 +176,92 @@ def test_build_session_report_aggregates_steps_tools_and_profile(tmp_path: Path)
     assert profile[2]["action"] == "click"
     assert profile[2]["ok"] is True
 
+    timing_summary = report["steps"][0]["timing_summary"]
+    assert timing_summary["execution_llm_seconds"] == 2.0
+    assert timing_summary["tool_execution_seconds"] == 3.0
+    assert timing_summary["total_seconds"] == 10.0
+    assert report["summary"]["avg_step_seconds"] == 10.0
+    assert report["summary"]["execution_llm_seconds"] == 2.0
+
     tool_results = report["tool_results"]
     assert [item["action"] for item in tool_results] == ["click", "type"]
     assert tool_results[0]["transcript_counter"] == 0
     assert tool_results[1]["transcript_counter"] == 1
     assert tool_results[1]["ok"] is False
+
+
+def test_build_session_report_splits_verify_llm_from_verification(tmp_path: Path) -> None:
+    run_root = tmp_path / "task_verify_profile"
+    run_root.mkdir()
+    steps_dir = run_root / "steps"
+    steps_dir.mkdir()
+    payload = {
+        "messages": [
+            {
+                "role": "user",
+                "timestamp_utc": "2026-06-11T06:00:00+00:00",
+                "content": "observe",
+            },
+            {
+                "role": "assistant",
+                "timestamp_utc": "2026-06-11T06:00:03+00:00",
+                "content": "done",
+            },
+        ],
+        "verification": [
+            {
+                "role": "user",
+                "timestamp_utc": "2026-06-11T06:00:05+00:00",
+                "content": "verify",
+            },
+            {
+                "role": "assistant",
+                "timestamp_utc": "2026-06-11T06:00:08+00:00",
+                "content": '{"accomplished": true}',
+            },
+        ],
+        "step_timing": {
+            "started_at_utc": "2026-06-11T06:00:00+00:00",
+            "finished_at_utc": "2026-06-11T06:00:10+00:00",
+            "duration_seconds": 10.0,
+            "status": "completed",
+            "step_index": 0,
+            "goal": "Open notepad",
+            "expected_outcome": "Notepad is open",
+            "verify": {
+                "accomplished": True,
+                "branch": "advance",
+                "target_step": None,
+                "clearly_unmet": False,
+                "reason": "ok",
+            },
+        },
+    }
+    (steps_dir / "0_0.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    report = build_session_report(run_root, session_end_reason="completed")
+    step = report["steps"][0]
+    profile = step["time_profile"]
+    kinds = [entry["kind"] for entry in profile]
+    assert "llm_inference" in kinds
+    assert "verify_llm_inference" in kinds
+
+    actor_llm = next(entry for entry in profile if entry["kind"] == "llm_inference")
+    assert actor_llm["duration_seconds"] == 3.0
+    # Actor wrap-up ends at verify start (06:00:03 -> 06:00:05)
+    actor_done = next(entry for entry in profile if entry["kind"] == "step_completion")
+    assert actor_done["duration_seconds"] == 2.0
+
+    verify_llm = next(entry for entry in profile if entry["kind"] == "verify_llm_inference")
+    assert verify_llm["duration_seconds"] == 3.0
+
+    summary = step["timing_summary"]
+    assert summary["execution_llm_seconds"] == 3.0
+    assert summary["verify_llm_seconds"] == 3.0
+    assert summary["total_seconds"] == 10.0
+    assert report["summary"]["verify_llm_seconds"] == 3.0
+    assert report["summary"]["execution_llm_seconds"] == 3.0
+    assert report["summary"]["avg_step_seconds"] == 10.0
 
 
 def test_write_session_report_creates_report_json(tmp_path: Path) -> None:

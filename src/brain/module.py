@@ -49,7 +49,6 @@ from src.common.runtime_context import (
     use_tool_cache_enabled,
 )
 from src.common.settings import load_settings
-from time import sleep
 
 SCRIPT_STEP_VERIFY_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -1387,7 +1386,6 @@ class BrainModule:
                     }
                 )
             )
-            sleep(1)
             if not result.ok:
                 self._append_failed_tool_call(
                     result.action,
@@ -1427,32 +1425,32 @@ class BrainModule:
         first_prompt += mode_tool_policy
         second_prompt += mode_tool_policy
 
-        if use_tool_cache_enabled():
-            cached_calls = None
-            recording_dir = None
-            script_path_raw = (os.environ.get(SCRIPT_PATH_ENV) or "").strip()
-            if script_path_raw:
-                from src.common.script_helper import recording_run_dir
-                from src.recorder.compile_tool_calls import (
-                    ensure_recording_tool_cache,
-                    recording_tool_cache_path,
-                )
+        # Recording runs always prefer compiled tool calls from the recording folder.
+        # The hub "use tool cache" flag only gates the global runs/instruction cache.
+        cached_calls = None
+        script_path_raw = (os.environ.get(SCRIPT_PATH_ENV) or "").strip()
+        if script_path_raw:
+            from src.common.script_helper import recording_run_dir
+            from src.recorder.compile_tool_calls import (
+                ensure_recording_tool_cache,
+                recording_tool_cache_path,
+            )
 
-                recording_dir = recording_run_dir(Path(script_path_raw))
-                if recording_dir is not None:
-                    ensure_recording_tool_cache(recording_dir)
-                    cached_calls = lookup_tool_calls(
-                        goal, path=recording_tool_cache_path(recording_dir)
-                    )
-            if not cached_calls:
-                cached_calls = lookup_tool_calls(goal)
-            if cached_calls:
-                self.manager.log_info(
-                    f"Instruction tool cache hit ({len(cached_calls)} tool call(s)); replaying"
+            recording_dir = recording_run_dir(Path(script_path_raw))
+            if recording_dir is not None:
+                ensure_recording_tool_cache(recording_dir)
+                cached_calls = lookup_tool_calls(
+                    goal, path=recording_tool_cache_path(recording_dir)
                 )
-                if await self._try_replay_cached_tools(goal, cached_calls):
-                    return True
-                self.manager.log_info("Cache replay failed; falling back to LLM decide loop")
+        if not cached_calls and use_tool_cache_enabled():
+            cached_calls = lookup_tool_calls(goal)
+        if cached_calls:
+            self.manager.log_info(
+                f"Instruction tool cache hit ({len(cached_calls)} tool call(s)); replaying"
+            )
+            if await self._try_replay_cached_tools(goal, cached_calls):
+                return True
+            self.manager.log_info("Cache replay failed; falling back to LLM decide loop")
 
         messages: list[dict[str, Any]] = []
         step_succeeded = False
@@ -1586,7 +1584,6 @@ class BrainModule:
                             }
                         )
                     )
-                    sleep(1)
                     if not result.ok:
                         self._append_failed_tool_call(
                             result.action,

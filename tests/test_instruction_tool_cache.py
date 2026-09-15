@@ -120,6 +120,103 @@ def test_upsert_overwrites_existing_entry(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_loop_uses_recording_cache_even_when_tool_cache_flag_off(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Recording folder cache is always on; CUA_USE_TOOL_CACHE only gates global cache."""
+    monkeypatch.setenv(USE_TOOL_CACHE_ENV, "0")
+    recording = tmp_path / "rec"
+    (recording / "analysis").mkdir(parents=True)
+    (recording / "events").mkdir(parents=True)
+    (recording / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": "rec",
+                "started_at_utc": "t",
+                "stopped_at_utc": "t",
+                "event_count": 1,
+                "events": ["events/event_001.json"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    instruction = "按下 Enter 鍵"
+    recording_calls = [
+        {"name": "press_key", "arguments": {"key": "enter", "instruction": instruction}}
+    ]
+    (recording / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": instruction,
+                "tool_calls": recording_calls,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (recording / "events" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "index": 1,
+                "timestamp_utc": "t",
+                "kind": "key_press",
+                "key": "enter",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    from src.recorder.compile_tool_calls import rebuild_recording_instruction_tool_cache
+
+    rebuild_recording_instruction_tool_cache(recording)
+    monkeypatch.setenv("CUA_SCRIPT_PATH", str(recording))
+
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = MagicMock()
+    brain.manager.log_info = MagicMock()
+    brain.manager.log_error = MagicMock()
+    brain._step_transcript_counter = 0
+    brain._script_step_index = 0
+    brain.run_id = "test_run"
+    brain._hand = MagicMock()
+    brain._eye = MagicMock()
+    brain._eye.capture_separated_images = AsyncMock(return_value=["shot.png"])
+    brain._normalize_tool_name = AsyncMock(return_value="press_key")
+    brain._hand.execute_tool_command = AsyncMock(
+        return_value=ExecutionResult(
+            ok=True,
+            action="press_key",
+            args={"key": "enter", "instruction": instruction},
+            message="executed",
+        )
+    )
+    brain.sanitize_execution_result = BrainModule.sanitize_execution_result.__get__(
+        brain, BrainModule
+    )
+    brain._append_failed_tool_call = MagicMock()
+    brain._save_step_messages = MagicMock()
+    brain._current_goal = MagicMock(return_value=instruction)
+    brain._enrich_tool_arguments = lambda name, args, _goal: args
+
+    def _lookup(instr: str, path=None):
+        if path is not None:
+            return recording_calls if instr == instruction else None
+        raise AssertionError("global instruction cache must not be consulted")
+
+    monkeypatch.setattr("src.brain.module.lookup_tool_calls", _lookup)
+    chat_messages = AsyncMock()
+    monkeypatch.setattr(
+        "src.brain.module.get_llm_client", lambda: MagicMock(chat_messages=chat_messages)
+    )
+
+    assert await brain.loop() is True
+    chat_messages.assert_not_called()
+    executed = brain._hand.execute_tool_command.await_args.args[0]
+    assert executed.action == "press_key"
+
+
+@pytest.mark.asyncio
 async def test_loop_prefers_recording_cache_over_global(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -204,8 +301,6 @@ async def test_loop_prefers_recording_cache_over_global(
     brain._current_goal = MagicMock(return_value=instruction)
     brain._enrich_tool_arguments = lambda name, args, _goal: args
 
-    monkeypatch.setattr("src.brain.module.sleep", lambda _seconds: None)
-
     def _lookup(instr: str, path=None):
         if path is not None:
             return recording_calls if instr == instruction else None
@@ -276,8 +371,6 @@ async def test_loop_falls_through_to_global_when_recording_cache_misses(
     brain._current_goal = MagicMock(return_value=instruction)
     brain._enrich_tool_arguments = lambda name, args, _goal: args
 
-    monkeypatch.setattr("src.brain.module.sleep", lambda _seconds: None)
-
     def _lookup(instr: str, path=None):
         if path is not None:
             return None
@@ -323,7 +416,6 @@ async def test_loop_uses_cache_without_llm(monkeypatch: pytest.MonkeyPatch) -> N
     brain._save_step_messages = MagicMock()
     brain._current_goal = MagicMock(return_value="goal")
 
-    monkeypatch.setattr("src.brain.module.sleep", lambda _seconds: None)
     monkeypatch.setattr(
         "src.brain.module.lookup_tool_calls",
         lambda instruction, path=None: cached if instruction == "goal" else None,
@@ -368,7 +460,6 @@ async def test_loop_falls_back_to_llm_when_cache_replay_fails(monkeypatch: pytes
     brain._save_step_messages = MagicMock()
     brain._current_goal = MagicMock(return_value="goal")
 
-    monkeypatch.setattr("src.brain.module.sleep", lambda _seconds: None)
     monkeypatch.setattr(
         "src.brain.module.lookup_tool_calls",
         lambda instruction, path=None: cached if instruction == "goal" else None,
@@ -479,7 +570,6 @@ async def test_loop_rejects_completed_after_unresolved_tool_failure(
     )
     chat_messages = AsyncMock(side_effect=[tool_response, finish_response])
     brain.ollama = MagicMock(chat_messages=chat_messages)
-    monkeypatch.setattr("src.brain.module.sleep", lambda _seconds: None)
     monkeypatch.setattr("src.brain.module.get_prompt", lambda name: "prompt {task}")
     monkeypatch.setattr("src.brain.module.lookup_tool_calls", lambda _instruction, path=None: None)
     monkeypatch.setattr("src.brain.module.upsert_tool_calls", MagicMock())
@@ -572,7 +662,6 @@ async def test_loop_allows_completed_after_failed_tool_is_retried_successfully(
     )
     chat_messages = AsyncMock(side_effect=[first_tools, retry_tools, finish_response])
     brain.ollama = MagicMock(chat_messages=chat_messages)
-    monkeypatch.setattr("src.brain.module.sleep", lambda _seconds: None)
     monkeypatch.setattr("src.brain.module.get_prompt", lambda name: "prompt {task}")
     monkeypatch.setattr("src.brain.module.lookup_tool_calls", lambda _instruction, path=None: None)
     upsert = MagicMock()
@@ -642,7 +731,6 @@ async def test_loop_rejects_completed_after_unresolved_tool_failure(
     )
     chat_messages = AsyncMock(side_effect=[tool_response, finish_response])
     brain.ollama = MagicMock(chat_messages=chat_messages)
-    monkeypatch.setattr("src.brain.module.sleep", lambda _seconds: None)
     monkeypatch.setattr("src.brain.module.get_prompt", lambda name: "prompt {task}")
     monkeypatch.setattr("src.brain.module.lookup_tool_calls", lambda _instruction, path=None: None)
     monkeypatch.setattr("src.brain.module.upsert_tool_calls", MagicMock())
@@ -735,7 +823,6 @@ async def test_loop_allows_completed_after_failed_tool_is_retried_successfully(
     )
     chat_messages = AsyncMock(side_effect=[first_tools, retry_tools, finish_response])
     brain.ollama = MagicMock(chat_messages=chat_messages)
-    monkeypatch.setattr("src.brain.module.sleep", lambda _seconds: None)
     monkeypatch.setattr("src.brain.module.get_prompt", lambda name: "prompt {task}")
     monkeypatch.setattr("src.brain.module.lookup_tool_calls", lambda _instruction, path=None: None)
     upsert = MagicMock()
@@ -858,7 +945,6 @@ async def test_loop_ignores_finish_when_mixed_with_real_tools(
     brain.ollama = MagicMock(
         chat_messages=AsyncMock(side_effect=[mixed, completed])
     )
-    monkeypatch.setattr("src.brain.module.sleep", lambda _seconds: None)
     monkeypatch.setattr("src.brain.module.get_prompt", lambda name: "prompt {task}")
     monkeypatch.setattr("src.brain.module.lookup_tool_calls", lambda _instruction, path=None: None)
     monkeypatch.setattr("src.brain.module.upsert_tool_calls", MagicMock())

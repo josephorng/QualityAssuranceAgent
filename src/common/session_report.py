@@ -110,6 +110,51 @@ def _tool_payload_from_message(content: Any) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _message_has_screenshots(message: dict[str, Any]) -> bool:
+    images = message.get("images")
+    return isinstance(images, list) and bool(images)
+
+
+def _describe_tool_interval(
+    message: dict[str, Any],
+    next_message: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Label the interval after a tool result based on what happens next."""
+    payload = _tool_payload_from_message(message.get("content"))
+    entry: dict[str, Any] = {}
+    action = payload.get("action")
+    if isinstance(action, str) and action:
+        entry["action"] = action
+    if "ok" in payload:
+        entry["ok"] = bool(payload.get("ok"))
+
+    if isinstance(next_message, dict):
+        if next_message.get("role") == _ROLE_USER and _message_has_screenshots(next_message):
+            entry.update(
+                {
+                    "kind": "screenshot_capture",
+                    "label": "Screenshot capture and prompt prep for next decision",
+                }
+            )
+            return entry
+        if next_message.get("role") == _ROLE_TOOL:
+            entry.update(
+                {
+                    "kind": "post_tool_wait",
+                    "label": "Wait between consecutive tool executions",
+                }
+            )
+            return entry
+
+    entry.update(
+        {
+            "kind": "step_wrap_up",
+            "label": "Step wrap-up after final tool (settle / verify prep)",
+        }
+    )
+    return entry
+
+
 def _extract_assistant_tool_names(message: dict[str, Any]) -> list[str]:
     tool_calls = message.get("tool_calls")
     if not isinstance(tool_calls, list):
@@ -131,6 +176,7 @@ def _describe_time_profile_entry(
     message: dict[str, Any],
     *,
     for_verify: bool = False,
+    next_message: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Map a stamped transcript message to a human-readable phase description.
@@ -140,7 +186,8 @@ def _describe_time_profile_entry(
     - user: screenshots were sent; duration is LLM inference.
     - assistant with tool_calls: LLM chose tools; duration is hand execution.
     - assistant without tool_calls: LLM declared step done; duration is wrap-up.
-    - tool: tool result recorded; duration is post-action wait and next capture.
+    - tool: interval after a tool result—labeled by what follows (next decide
+      screenshot, another tool, or step wrap-up).
 
     When ``for_verify`` is True, user-role intervals are labeled ``verify_llm_inference``.
     """
@@ -174,17 +221,7 @@ def _describe_time_profile_entry(
             "label": "Step completion after final LLM response",
         }
     if role == _ROLE_TOOL:
-        payload = _tool_payload_from_message(message.get("content"))
-        action = payload.get("action")
-        entry: dict[str, Any] = {
-            "kind": "screenshot_capture",
-            "label": "Screenshot capture and prompt prep for next decision",
-        }
-        if isinstance(action, str) and action:
-            entry["action"] = action
-        if "ok" in payload:
-            entry["ok"] = bool(payload.get("ok"))
-        return entry
+        return _describe_tool_interval(message, next_message)
     role_label = str(role) if role else "unknown"
     return {"kind": role_label, "label": f"Unhandled message role: {role_label}"}
 
@@ -218,15 +255,23 @@ def _build_time_profile(
         if started is None:
             continue
 
+        next_message: dict[str, Any] | None = None
         if index + 1 < len(messages):
-            next_started = _parse_iso(messages[index + 1].get("timestamp_utc"))
+            candidate = messages[index + 1]
+            if isinstance(candidate, dict):
+                next_message = candidate
+            next_started = _parse_iso(candidate.get("timestamp_utc") if isinstance(candidate, dict) else None)
         else:
             next_started = end_boundary
 
         duration = _duration_seconds(started, next_started)
         entry: dict[str, Any] = {
             "started_at_utc": started.isoformat(),
-            **_describe_time_profile_entry(message, for_verify=for_verify),
+            **_describe_time_profile_entry(
+                message,
+                for_verify=for_verify,
+                next_message=next_message,
+            ),
         }
         if duration is not None:
             entry["duration_seconds"] = duration

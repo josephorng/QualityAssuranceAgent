@@ -172,7 +172,7 @@ def test_build_session_report_aggregates_steps_tools_and_profile(tmp_path: Path)
     assert profile[0]["duration_seconds"] == 2.0
     assert profile[1]["kind"] == "tool_execution"
     assert profile[1]["actions"] == ["click"]
-    assert profile[2]["kind"] == "screenshot_capture"
+    assert profile[2]["kind"] == "step_wrap_up"
     assert profile[2]["action"] == "click"
     assert profile[2]["ok"] is True
 
@@ -262,6 +262,106 @@ def test_build_session_report_splits_verify_llm_from_verification(tmp_path: Path
     assert report["summary"]["verify_llm_seconds"] == 3.0
     assert report["summary"]["execution_llm_seconds"] == 3.0
     assert report["summary"]["avg_step_seconds"] == 10.0
+
+
+def test_time_profile_labels_post_tool_screenshot_only_before_decide_user(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "task_decide_screenshot"
+    run_root.mkdir()
+    steps_dir = run_root / "steps"
+    _write_step(
+        steps_dir,
+        0,
+        0,
+        goal="Move then click",
+        messages=[
+            {
+                "role": "user",
+                "timestamp_utc": "2026-06-11T06:00:00+00:00",
+                "content": "decide",
+                "images": ["shot1.png"],
+            },
+            {
+                "role": "assistant",
+                "timestamp_utc": "2026-06-11T06:00:02+00:00",
+                "tool_calls": [
+                    {"function": {"name": "move_mouse", "arguments": {"instruction": "target"}}}
+                ],
+            },
+            {
+                "role": "tool",
+                "timestamp_utc": "2026-06-11T06:00:05+00:00",
+                "content": json.dumps({"action": "move_mouse", "ok": True}),
+            },
+            {
+                "role": "user",
+                "timestamp_utc": "2026-06-11T06:00:06+00:00",
+                "content": "decide next",
+                "images": ["shot2.png"],
+            },
+            {
+                "role": "assistant",
+                "timestamp_utc": "2026-06-11T06:00:08+00:00",
+                "content": '{"status":"completed"}',
+            },
+        ],
+    )
+
+    report = build_session_report(run_root, session_end_reason="completed")
+    profile = report["steps"][0]["time_profile"]
+    assert profile[2]["kind"] == "screenshot_capture"
+    assert profile[2]["action"] == "move_mouse"
+
+
+def test_time_profile_labels_cache_replay_tool_gaps_without_screenshot_capture(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "task_cache_replay"
+    run_root.mkdir()
+    steps_dir = run_root / "steps"
+    _write_step(
+        steps_dir,
+        0,
+        0,
+        goal="Replay move and click",
+        messages=[
+            {
+                "role": "user",
+                "timestamp_utc": "2026-06-11T06:00:00+00:00",
+                "content": "Cache replay for task: Replay move and click",
+                "images": ["shot1.png"],
+                "cache_replay": True,
+            },
+            {
+                "role": "assistant",
+                "timestamp_utc": "2026-06-11T06:00:00+00:00",
+                "cache_replay": True,
+                "tool_calls": [
+                    {"function": {"name": "move_mouse", "arguments": {"instruction": "target"}}},
+                    {"function": {"name": "click", "arguments": {"button": "left"}}},
+                ],
+            },
+            {
+                "role": "tool",
+                "timestamp_utc": "2026-06-11T06:00:03+00:00",
+                "content": json.dumps({"action": "move_mouse", "ok": True}),
+            },
+            {
+                "role": "tool",
+                "timestamp_utc": "2026-06-11T06:00:05+00:00",
+                "content": json.dumps({"action": "click", "ok": True}),
+            },
+        ],
+    )
+
+    report = build_session_report(run_root, session_end_reason="completed")
+    profile = report["steps"][0]["time_profile"]
+    assert profile[2]["kind"] == "post_tool_wait"
+    assert profile[2]["action"] == "move_mouse"
+    assert profile[3]["kind"] == "step_wrap_up"
+    assert profile[3]["action"] == "click"
+    assert report["steps"][0]["timing_summary"]["screenshot_seconds"] == 0.0
 
 
 def test_write_session_report_creates_report_json(tmp_path: Path) -> None:

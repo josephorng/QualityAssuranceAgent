@@ -181,6 +181,9 @@ class BrainModule:
         self._script_step_index = 0
         self._hand = hand
         self._eye = eye
+        # When vision verify is skipped, settle is deferred until the next step's
+        # first tool so prep work can overlap the recording settle window.
+        self._pending_settle_deadline_perf: float | None = None
         self._step_transcript_counter = (
             self._resume_step_transcript_counter()
             if is_runtime_command_mode() or is_smart_mode()
@@ -464,6 +467,35 @@ class BrainModule:
             return float(value)
         return None
 
+    def _clear_pending_settle_deadline(self) -> None:
+        self._pending_settle_deadline_perf = None
+
+    def _schedule_deferred_settle(self, settle_after: float) -> None:
+        """Record a settle deadline without sleeping (overlaps next-step prep)."""
+        seconds = float(settle_after)
+        self._pending_settle_deadline_perf = perf_counter() + seconds
+        self.manager.log_info(
+            f"Deferred settle: {seconds:.3f}s deadline set; continuing without blocking sleep"
+        )
+
+    async def _await_pending_settle_before_tool(self) -> None:
+        """Sleep only the remainder of a deferred settle before the next tool runs."""
+        deadline = getattr(self, "_pending_settle_deadline_perf", None)
+        if deadline is None:
+            return
+        remaining = deadline - perf_counter()
+        self._pending_settle_deadline_perf = None
+        if remaining > 0:
+            self.manager.log_info(
+                f"Deferred settle: waiting remaining {remaining:.3f}s before next tool"
+            )
+            await asyncio.sleep(remaining)
+        else:
+            self.manager.log_info(
+                "Deferred settle: already satisfied "
+                f"({abs(remaining):.3f}s past deadline) before next tool"
+            )
+
     def _format_numbered_script(self) -> str:
         """Numbered script lines with each step's recorded expected outcome."""
         lines: list[str] = []
@@ -488,6 +520,7 @@ class BrainModule:
         self.script_baseline_after_paths = [None]
         self.script_settle_after_seconds = [None]
         self._script_step_index = 0
+        self._clear_pending_settle_deadline()
 
     async def execute_instruction(self, instruction: str) -> bool:
         """
@@ -512,6 +545,7 @@ class BrainModule:
         self.script_baseline_after_paths = [None]
         self.script_settle_after_seconds = [None]
         self._script_step_index = 0
+        self._clear_pending_settle_deadline()
         self.manager.set_step_log_context(transcript_counter, script_step_index)
         started_iso = datetime.now(timezone.utc).isoformat()
         started_at = perf_counter()
@@ -554,6 +588,7 @@ class BrainModule:
                 path.unlink()
         self._step_transcript_counter = tc
         self._script_step_index = 0
+        self._clear_pending_settle_deadline()
         return True
 
     def _current_goal(self) -> str:
@@ -894,10 +929,12 @@ class BrainModule:
         idx = self._script_step_index
 
         if result.branch == "abort":
+            self._clear_pending_settle_deadline()
             self.manager.log_info(
                 f"Verify: branch=abort; holding step and stopping run. {result.reason}"
             )
         elif result.branch == "smart":
+            self._clear_pending_settle_deadline()
             # Primary handling is in process_step (nested recovery); hold index like retry.
             self.manager.log_info(
                 f"Verify: branch=smart; holding step for nested recovery. {result.reason}"
@@ -909,10 +946,11 @@ class BrainModule:
                 )
             self._script_step_index = idx + 1
         elif result.branch == "retry":
-            pass
+            self._clear_pending_settle_deadline()
         elif result.branch == "skip":
             self._script_step_index = idx + 1
         elif result.branch == "goto":
+            self._clear_pending_settle_deadline()
             assert result.target_step is not None
             target_0 = result.target_step - 1
             self._script_step_index = max(0, min(target_0, n - 1))
@@ -922,6 +960,8 @@ class BrainModule:
             )
 
         run_complete = self._script_step_index >= n
+        if run_complete:
+            self._clear_pending_settle_deadline()
         self.manager.log_info(
             f"Verify branch applied: index={self._script_step_index}/{n} "
             f"accomplished={result.accomplished} branch={result.branch} run_complete={run_complete} "
@@ -1359,6 +1399,7 @@ class BrainModule:
             ),
         ]
 
+        await self._await_pending_settle_before_tool()
         for call in cached_calls:
             arguments = self._normalize_tool_arguments(call.get("arguments"))
             try:
@@ -1457,6 +1498,7 @@ class BrainModule:
         llm_path_used = False
         # Actions that returned ok=false and have not succeeded on a later retry.
         unresolved_tool_failures: set[str] = set()
+        settle_gated_for_tools = False
 
         for _ in range(_MAX_INNER_DECIDE_STEPS):
             try:
@@ -1551,6 +1593,9 @@ class BrainModule:
 
                 abort_step = False
                 for tool_call in real_tool_calls:
+                    if not settle_gated_for_tools:
+                        await self._await_pending_settle_before_tool()
+                        settle_gated_for_tools = True
                     arguments = self._normalize_tool_arguments(
                         tool_call.function.arguments
                     )
@@ -1677,11 +1722,13 @@ class BrainModule:
 
         Happy path: empty expected outcome, no recording after-baseline, and actor
         success (all tools ok) auto-advances without a screenshot or verifier LLM.
+        In that case any recording ``settle_after`` is deferred until the next step's
+        first tool so next-step prep can overlap the settle window.
+
         Recovery path: actor failure, a recorded expected outcome, or a recording
         after-baseline still uses screenshot verification for `goto`/`retry`/`skip`/
-        `abort`/`smart`. When a baseline is attached, verify first compares live vs
-        recorded after-frame only and advances on match (or low-confidence mismatch);
-        only high-confidence mismatches run a second recovery round. Branch `smart` runs
+        `abort`/`smart`. Expected-outcome verify (no baseline) sleeps settle first;
+        with a baseline, verify polls at 1.0x/1.5x/2.0x of settle. Branch `smart` runs
         a bounded nested Plan→Act→Verify recovery, then retries the same script line on
         success (or stops the run on failure). After actor success, ambiguous verifier
         retries (`clearly_unmet=false`) are coerced to advance to reduce flaky false
@@ -1711,25 +1758,30 @@ class BrainModule:
             if step_succeeded:
                 settle_after = self._current_settle_after_seconds()
             # With a baseline, settle sleeps happen inside verify polls (1.0x/1.5x/2.0x).
-            # Without a baseline, sleep the full gap here before skip/outcome verify.
+            # With an expected outcome (no baseline), sleep the full gap before verify.
+            # When vision verify is skipped, defer settle until the next step's first tool.
             poll_settle = (
                 step_succeeded
                 and settle_after is not None
                 and settle_after > 0
                 and self._current_baseline_after_path() is not None
             )
+            skip_vision = self._should_skip_vision_verify(step_succeeded)
             if (
                 step_succeeded
                 and settle_after is not None
                 and settle_after > 0
                 and not poll_settle
             ):
-                self.manager.log_info(
-                    f"Script step {script_step_index + 1} settling "
-                    f"{settle_after:.3f}s before verify"
-                )
-                await asyncio.sleep(settle_after)
-            if self._should_skip_vision_verify(step_succeeded):
+                if skip_vision:
+                    self._schedule_deferred_settle(settle_after)
+                else:
+                    self.manager.log_info(
+                        f"Script step {script_step_index + 1} settling "
+                        f"{settle_after:.3f}s before verify"
+                    )
+                    await asyncio.sleep(settle_after)
+            if skip_vision:
                 self.manager.log_info(
                     f"Script step {script_step_index + 1} skipping vision verification "
                     "(empty expected outcome; no recording baseline; actor tools succeeded)"

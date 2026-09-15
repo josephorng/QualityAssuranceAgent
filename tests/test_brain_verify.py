@@ -38,6 +38,7 @@ def _brain_for_process_step(*, max_step_attempts: int = 0) -> BrainModule:
     brain.script_settle_after_seconds = [None, None, None]
     brain._script_step_index = 1
     brain._step_transcript_counter = 3
+    brain._pending_settle_deadline_perf = None
     brain._update_step_metadata = MagicMock()
     return brain
 
@@ -683,6 +684,62 @@ async def test_process_step_sleeps_settle_when_no_baseline(monkeypatch) -> None:
     assert result.step_finished is True
     sleep_mock.assert_awaited_once_with(3.0)
     assert brain._verify_script_step.await_args.kwargs["settle_after"] is None
+    assert brain._pending_settle_deadline_perf is None
+
+
+@pytest.mark.asyncio
+async def test_process_step_defers_settle_when_vision_verify_skipped(monkeypatch) -> None:
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = [None, None, None]
+    brain.script_baseline_after_paths = [None, None, None]
+    brain.script_settle_after_seconds = [None, 2.5, None]
+    brain.loop = AsyncMock(return_value=True)
+    brain._verify_script_step = AsyncMock()
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    sleep_mock.assert_not_awaited()
+    brain._verify_script_step.assert_not_awaited()
+    assert brain._pending_settle_deadline_perf is not None
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["settle_after_seconds"] == 2.5
+
+
+@pytest.mark.asyncio
+async def test_await_pending_settle_before_tool_waits_remainder(monkeypatch) -> None:
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = MagicMock()
+    brain.manager.log_info = MagicMock()
+    brain._pending_settle_deadline_perf = 100.0
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+    monkeypatch.setattr("src.brain.module.perf_counter", lambda: 97.5)
+
+    await brain._await_pending_settle_before_tool()
+
+    sleep_mock.assert_awaited_once_with(2.5)
+    assert brain._pending_settle_deadline_perf is None
+
+
+@pytest.mark.asyncio
+async def test_await_pending_settle_before_tool_skips_when_already_satisfied(
+    monkeypatch,
+) -> None:
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = MagicMock()
+    brain.manager.log_info = MagicMock()
+    brain._pending_settle_deadline_perf = 100.0
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+    monkeypatch.setattr("src.brain.module.perf_counter", lambda: 101.25)
+
+    await brain._await_pending_settle_before_tool()
+
+    sleep_mock.assert_not_awaited()
+    assert brain._pending_settle_deadline_perf is None
 
 
 @pytest.mark.asyncio

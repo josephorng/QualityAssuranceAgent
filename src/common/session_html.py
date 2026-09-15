@@ -4724,9 +4724,9 @@ def _render_recording_event_html(
         f'aria-label="選取步驟 {step_label}" title="選取步驟">'
         f'<label class="verify-step" title="啟用此步驟的驗證" '
         f'onclick="event.stopPropagation()">'
+        f"驗證"
         f'<input type="checkbox" class="use-expected-outcome"'
         f'{" checked" if use_expected_outcome else ""}>'
-        f"驗證"
         f"</label>"
         f'<span class="instruction-number">{step_label}</span>'
         f'<span class="instruction-summary-text">'

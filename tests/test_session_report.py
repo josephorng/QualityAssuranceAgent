@@ -314,7 +314,7 @@ def test_time_profile_labels_post_tool_screenshot_only_before_decide_user(
     assert profile[2]["action"] == "move_mouse"
 
 
-def test_time_profile_labels_cache_replay_tool_gaps_without_screenshot_capture(
+def test_time_profile_labels_tool_to_tool_gap_as_next_tool_execution(
     tmp_path: Path,
 ) -> None:
     run_root = tmp_path / "task_cache_replay"
@@ -357,11 +357,17 @@ def test_time_profile_labels_cache_replay_tool_gaps_without_screenshot_capture(
 
     report = build_session_report(run_root, session_end_reason="completed")
     profile = report["steps"][0]["time_profile"]
-    assert profile[2]["kind"] == "post_tool_wait"
-    assert profile[2]["action"] == "move_mouse"
+    assert profile[1]["kind"] == "tool_execution"
+    assert profile[1]["actions"] == ["move_mouse", "click"]
+    assert profile[1]["duration_seconds"] == 3.0
+    assert profile[2]["kind"] == "tool_execution"
+    assert profile[2]["actions"] == ["click"]
+    assert profile[2]["action"] == "click"
+    assert profile[2]["duration_seconds"] == 2.0
     assert profile[3]["kind"] == "step_wrap_up"
     assert profile[3]["action"] == "click"
     assert report["steps"][0]["timing_summary"]["screenshot_seconds"] == 0.0
+    assert report["steps"][0]["timing_summary"]["tool_execution_seconds"] == 5.0
 
 
 def test_write_session_report_creates_report_json(tmp_path: Path) -> None:

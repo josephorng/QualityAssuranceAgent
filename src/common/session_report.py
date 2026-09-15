@@ -138,12 +138,26 @@ def _describe_tool_interval(
             )
             return entry
         if next_message.get("role") == _ROLE_TOOL:
+            next_payload = _tool_payload_from_message(next_message.get("content"))
+            next_action = next_payload.get("action")
+            actions: list[str] = []
+            if isinstance(next_action, str) and next_action.strip():
+                actions = [next_action.strip()]
             entry.update(
                 {
-                    "kind": "post_tool_wait",
-                    "label": "Wait between consecutive tool executions",
+                    "kind": "tool_execution",
+                    "label": (
+                        f"Hand tool execution: {', '.join(actions)}"
+                        if actions
+                        else "Hand tool execution"
+                    ),
                 }
             )
+            if actions:
+                entry["actions"] = actions
+                entry["action"] = actions[0]
+            if "ok" in next_payload:
+                entry["ok"] = bool(next_payload.get("ok"))
             return entry
 
     entry.update(
@@ -187,7 +201,7 @@ def _describe_time_profile_entry(
     - assistant with tool_calls: LLM chose tools; duration is hand execution.
     - assistant without tool_calls: LLM declared step done; duration is wrap-up.
     - tool: interval after a tool result—labeled by what follows (next decide
-      screenshot, another tool, or step wrap-up).
+      screenshot, execution of the next batched tool, or step wrap-up).
 
     When ``for_verify`` is True, user-role intervals are labeled ``verify_llm_inference``.
     """

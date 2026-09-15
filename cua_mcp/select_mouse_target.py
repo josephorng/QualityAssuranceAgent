@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 import re
@@ -54,6 +55,7 @@ from src.common.io_utils import imread_bgr, imwrite_bgr
 from src.common.nearby_side import (
     NearbyHint,
     anchor_satisfies_side,
+    extract_nearby_hints_from_instruction,
     merge_nearby_hints,
     nearby_hints_to_labels,
     nearby_hints_to_phrases,
@@ -72,7 +74,7 @@ from cua_mcp.yolo_onnx import (
 )
 from src.common.monitor_prompt import selected_eye_monitor_indices
 from src.common.run_state import RunStateManager, get_run_state_manager, ts_name
-from src.eye.capture import active_monitor_offset, capture_monitor_to_file, monitor_details
+from src.eye.capture import active_monitor_offset, grab_monitor_bgr, monitor_details
 
 
 def _run_manager() -> RunStateManager:
@@ -86,6 +88,77 @@ def _log_info(text: str) -> None:
         _run_manager().log_info(text)
     except RuntimeError:
         pass
+
+
+@dataclass(frozen=True)
+class _MouseVisionPlan:
+    """Instruction-guided shortcuts for capture-time YOLO/OCR work."""
+
+    ocr_class_ids: frozenset[int]
+    refine_inputs: bool
+
+    def describe(self) -> str:
+        if not self.ocr_class_ids:
+            ocr = "none"
+        else:
+            names = []
+            for cls_id in sorted(self.ocr_class_ids):
+                names.append(YOLO_CLASS_NAMES.get(cls_id, str(cls_id)))
+            ocr = ",".join(names)
+        return f"ocr_classes={ocr} refine_inputs={self.refine_inputs}"
+
+
+def _mouse_vision_plan(
+    instruction: str,
+    nearby_objects: list[str] | None = None,
+) -> _MouseVisionPlan:
+    """Derive OCR/line-refine plan from raw instruction text (no LLM wait).
+
+    Hub scripts mark targets as ``…文字`` / ``…圖示`` / ``輸入欄`` / ``滾動條``.
+    Ambiguous phrases (no class cue) keep both OCR streams. Class-only input /
+    scrollbar targets skip OCR. Line refine runs only when an input or
+    scrollbar is referenced.
+    """
+    phrases: list[str] = []
+    raw = (instruction or "").strip()
+    if raw:
+        phrases.append(raw)
+    if nearby_objects:
+        phrases.extend(
+            p.strip() for p in nearby_objects if isinstance(p, str) and p.strip()
+        )
+    for hint in extract_nearby_hints_from_instruction(raw):
+        label = (hint.label or "").strip()
+        if label:
+            phrases.append(label)
+
+    need_text = False
+    need_icon = False
+    need_refine = False
+    ambiguous = False
+    for phrase in phrases:
+        if "輸入欄" in phrase or "滾動條" in phrase:
+            need_refine = True
+        if "文字" in phrase:
+            need_text = True
+        elif "圖示" in phrase or "元素" in phrase:
+            need_icon = True
+        elif "輸入欄" in phrase or "滾動條" in phrase:
+            continue
+        else:
+            # No class cue in this phrase — may need either OCR stream.
+            ambiguous = True
+
+    if ambiguous or (need_text and need_icon):
+        ocr_ids: frozenset[int] = frozenset({YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT})
+    elif need_text:
+        ocr_ids = frozenset({YOLO_CLASS_TEXT})
+    elif need_icon:
+        ocr_ids = frozenset({YOLO_CLASS_ELEMENT})
+    else:
+        ocr_ids = frozenset()
+
+    return _MouseVisionPlan(ocr_class_ids=ocr_ids, refine_inputs=need_refine)
 
 
 def _xyxy_row_to_bbox(row: np.ndarray, img_w: int, img_h: int) -> tuple[int, int, int, int]:
@@ -556,6 +629,8 @@ def _detect_mouse_targets_from_bgr(
     original_input_bboxes_out: list[tuple[int, int, int, int]] | None = None,
     coord_offset: tuple[int, int] = (0, 0),
     timing_out: dict[str, float] | None = None,
+    ocr_class_ids: frozenset[int] | set[int] | None = None,
+    refine_inputs: bool = True,
 ) -> list[UiDetection]:
     """Detect mouse-target UI elements on ``bgr`` via YOLO + OCR.
 
@@ -577,7 +652,15 @@ def _detect_mouse_targets_from_bgr(
 
     When ``timing_out`` is provided, writes ``yolo_s`` / ``line_s`` / ``ocr_s`` /
     ``total_s`` for this image (replacing prior values in that dict).
+
+    ``ocr_class_ids`` limits which YOLO classes are OCR'd (default: text +
+    element). ``refine_inputs=False`` skips input line-rectangle merge.
     """
+    if ocr_class_ids is None:
+        ocr_wanted = frozenset({YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT})
+    else:
+        ocr_wanted = frozenset(int(c) for c in ocr_class_ids)
+
     h, w = bgr.shape[:2]
     vision_started = time.perf_counter()
     yolo_started = time.perf_counter()
@@ -613,31 +696,37 @@ def _detect_mouse_targets_from_bgr(
                 other_non_ocr.append((bbox, cls_id))
 
     line_started = time.perf_counter()
-    horizontal_scrollbar_boxes = [
-        bbox
-        for bbox, cls_id in other_non_ocr
-        if cls_id == YOLO_CLASS_SCROLLBAR
-        and scrollbar_orientation(bbox) == "horizontal"
-    ]
-    pre_merge_inputs = list(input_boxes) if original_input_bboxes_out is not None else []
-    try:
-        input_boxes = merge_yolo_inputs_with_line_rectangles(
-            bgr,
-            input_boxes,
-            img_w=w,
-            img_h=h,
-            horizontal_scrollbar_boxes=horizontal_scrollbar_boxes,
+    line_elapsed = 0.0
+    if refine_inputs:
+        horizontal_scrollbar_boxes = [
+            bbox
+            for bbox, cls_id in other_non_ocr
+            if cls_id == YOLO_CLASS_SCROLLBAR
+            and scrollbar_orientation(bbox) == "horizontal"
+        ]
+        pre_merge_inputs = (
+            list(input_boxes) if original_input_bboxes_out is not None else []
         )
-    except Exception as exc:
-        _log_info(
-            f"move_mouse input-box line refine failed: {type(exc).__name__}: {exc}"
-        )
-    if original_input_bboxes_out is not None:
-        merged_inputs = set(input_boxes)
-        for bbox in pre_merge_inputs:
-            if bbox not in merged_inputs:
-                original_input_bboxes_out.append(bbox)
-    line_elapsed = time.perf_counter() - line_started
+        try:
+            input_boxes = merge_yolo_inputs_with_line_rectangles(
+                bgr,
+                input_boxes,
+                img_w=w,
+                img_h=h,
+                horizontal_scrollbar_boxes=horizontal_scrollbar_boxes,
+            )
+        except Exception as exc:
+            _log_info(
+                f"move_mouse input-box line refine failed: {type(exc).__name__}: {exc}"
+            )
+        if original_input_bboxes_out is not None:
+            merged_inputs = set(input_boxes)
+            for bbox in pre_merge_inputs:
+                if bbox not in merged_inputs:
+                    original_input_bboxes_out.append(bbox)
+        line_elapsed = time.perf_counter() - line_started
+    else:
+        line_elapsed = time.perf_counter() - line_started
     non_ocr: list[tuple[tuple[int, int, int, int], int]] = [
         (bbox, YOLO_CLASS_INPUT) for bbox in input_boxes
     ]
@@ -663,17 +752,19 @@ def _detect_mouse_targets_from_bgr(
         return []
 
     ocr_boxes: list[tuple[int, int, int, int]] = []
-    ocr_class_ids: list[int] = []
+    ocr_class_id_list: list[int] = []
     for boxes, cls_id in (
         (text_boxes, YOLO_CLASS_TEXT),
         (element_boxes, YOLO_CLASS_ELEMENT),
     ):
+        if cls_id not in ocr_wanted:
+            continue
         for bbox in merge_overlapping_boxes(boxes):
             ocr_boxes.append(bbox)
-            ocr_class_ids.append(cls_id)
+            ocr_class_id_list.append(cls_id)
 
     ocr_started = time.perf_counter()
-    ocr_modes = [ocr_mode_for_yolo_class(cls_id) for cls_id in ocr_class_ids]
+    ocr_modes = [ocr_mode_for_yolo_class(cls_id) for cls_id in ocr_class_id_list]
     ocr_preds = (
         _ocr_boxes_on_bgr(bgr, ocr_boxes, mode=ocr_modes) if ocr_boxes else []
     )
@@ -683,7 +774,9 @@ def _detect_mouse_targets_from_bgr(
     for bbox, cls_id in non_ocr:
         candidates.append(_detection_from_bbox(bbox, cls_id))
 
-    for bbox, cls_id, preds in zip(ocr_boxes, ocr_class_ids, ocr_preds, strict=True):
+    for bbox, cls_id, preds in zip(
+        ocr_boxes, ocr_class_id_list, ocr_preds, strict=True
+    ):
         text_value = "".join(preds).strip()
         if cls_id == YOLO_CLASS_TEXT and not text_value:
             continue
@@ -697,7 +790,8 @@ def _detect_mouse_targets_from_bgr(
             _detection_from_bbox(bbox, resolved_cls, text=text_value or None)
         )
 
-    candidates = _retry_empty_unknown_icon_ocr(bgr, candidates)
+    if YOLO_CLASS_ELEMENT in ocr_wanted:
+        candidates = _retry_empty_unknown_icon_ocr(bgr, candidates)
 
     candidates = _sort_detections_reading_order(candidates)
     pre_fit_scrollbars: list[tuple[int, tuple[int, int, int, int]]] = []
@@ -737,7 +831,7 @@ def _detect_mouse_targets_from_bgr(
         f"total_s={total_elapsed:.3f} "
         f"yolo_boxes={0 if xyxy.size == 0 else len(xyxy)} "
         f"input_boxes={len(input_boxes)} ocr_boxes={len(ocr_boxes)} "
-        f"candidates={len(candidates)}"
+        f"candidates={len(candidates)} refine_inputs={refine_inputs}"
     )
     if timing_out is not None:
         timing_out.clear()
@@ -1384,6 +1478,8 @@ def _detections_for_captured_monitor(
     *,
     yolo_conf_threshold: float,
     timing_out: dict[str, float] | None = None,
+    ocr_class_ids: frozenset[int] | set[int] | None = None,
+    refine_inputs: bool = True,
 ) -> list[UiDetection]:
     """YOLO+OCR on one monitor image, then map boxes into virtual-desktop coords."""
     left, top = active_monitor_offset(monitor_index)
@@ -1392,6 +1488,8 @@ def _detections_for_captured_monitor(
         yolo_conf_threshold=yolo_conf_threshold,
         coord_offset=(left, top),
         timing_out=timing_out,
+        ocr_class_ids=ocr_class_ids,
+        refine_inputs=refine_inputs,
     )
     return [_offset_detection(d, left, top) for d in local_candidates]
 
@@ -1450,6 +1548,8 @@ def _collect_monitor_detections(
     *,
     yolo_conf_threshold: float,
     timing_out: dict[str, float] | None = None,
+    ocr_class_ids: frozenset[int] | set[int] | None = None,
+    refine_inputs: bool = True,
 ) -> list[UiDetection]:
     """
     Run YOLO+OCR on captured monitors.
@@ -1475,6 +1575,8 @@ def _collect_monitor_detections(
             bgr,
             yolo_conf_threshold=yolo_conf_threshold,
             timing_out=timing_out,
+            ocr_class_ids=ocr_class_ids,
+            refine_inputs=refine_inputs,
         )
 
     all_detections: list[UiDetection] = []
@@ -1489,6 +1591,8 @@ def _collect_monitor_detections(
             bgr,
             yolo_conf_threshold=yolo_conf_threshold,
             timing_out=local_timing,
+            ocr_class_ids=ocr_class_ids,
+            refine_inputs=refine_inputs,
         )
         return dets, local_timing
 
@@ -1685,6 +1789,9 @@ async def _maybe_disambiguate_similar_selection(
 
 def _capture_and_detect_mouse_candidates(
     yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
+    *,
+    ocr_class_ids: frozenset[int] | set[int] | None = None,
+    refine_inputs: bool = True,
 ) -> tuple[
     list[int],
     list[str],
@@ -1697,6 +1804,9 @@ def _capture_and_detect_mouse_candidates(
 
     Sync helper so it can overlap with instruction parsing via ``asyncio.to_thread``.
     Capture stays sequential — desktop grabbers are often not concurrent-safe.
+
+    Screenshots are grabbed to BGR in memory for inference, then written once for
+    meta / multimodal paths (no PNG decode round-trip).
 
     Returns ``(monitor_indices, image_paths, captured, detections, timing)`` where
     ``timing`` includes ``capture_s`` plus summed vision phases.
@@ -1712,14 +1822,18 @@ def _capture_and_detect_mouse_candidates(
     for monitor_index in monitor_indices:
         name = f"{stamp}_mon{monitor_index}.png"
         out = paths.yolo_ocr_dir / name
-        capture_monitor_to_file(out, monitor_index)
-        image_path = str(out.resolve())
-        image_paths.append(image_path)
-
-        bgr = imread_bgr(image_path)
-        if bgr is None:
-            _log_info(f"move_mouse could not read captured image path={image_path}")
+        try:
+            _resolved_idx, bgr = grab_monitor_bgr(monitor_index)
+        except Exception as exc:
+            _log_info(
+                f"move_mouse grab failed monitor={monitor_index} "
+                f"{type(exc).__name__}: {exc}"
+            )
             continue
+        image_path = str(out.resolve())
+        if not imwrite_bgr(out, bgr):
+            _log_info(f"move_mouse could not write captured image path={image_path}")
+        image_paths.append(image_path)
         captured.append((monitor_index, bgr))
     capture_s = time.perf_counter() - capture_started
 
@@ -1728,6 +1842,8 @@ def _capture_and_detect_mouse_candidates(
         captured,
         yolo_conf_threshold=yolo_conf_threshold,
         timing_out=vision_timing,
+        ocr_class_ids=ocr_class_ids,
+        refine_inputs=refine_inputs,
     )
     detections = _sort_detections_reading_order(all_detections)
     _log_info(f"move_mouse yolo_candidates={len(detections)}")
@@ -1771,6 +1887,8 @@ async def find_mouse_point(
         raise ValueError("instruction must be non-empty")
 
     total_started = time.perf_counter()
+    vision_plan = _mouse_vision_plan(instruction_text, nearby_objects)
+    _log_info(f"move_mouse vision plan {vision_plan.describe()}")
 
     async def _timed_parse():
         started = time.perf_counter()
@@ -1782,6 +1900,8 @@ async def find_mouse_point(
         result = await asyncio.to_thread(
             _capture_and_detect_mouse_candidates,
             yolo_conf_threshold,
+            ocr_class_ids=vision_plan.ocr_class_ids,
+            refine_inputs=vision_plan.refine_inputs,
         )
         return result, time.perf_counter() - started
 

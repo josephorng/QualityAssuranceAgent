@@ -288,12 +288,8 @@ async def test_find_mouse_point_stage_a_on_similarity_miss(
             },
         )(),
     )
-    monkeypatch.setattr(smt, "capture_monitor_to_file", lambda *_a, **_k: None)
-    monkeypatch.setattr(
-        smt,
-        "imread_bgr",
-        lambda *_a, **_k: np.zeros((50, 50, 3), dtype=np.uint8),
-    )
+    monkeypatch.setattr(smt, "grab_monitor_bgr", lambda *_a, **_k: (1, np.zeros((50, 50, 3), dtype=np.uint8)))
+    monkeypatch.setattr(smt, "imwrite_bgr", lambda *_a, **_k: True)
     monkeypatch.setattr(
         smt,
         "_collect_monitor_detections",
@@ -366,12 +362,8 @@ async def test_find_mouse_point_stage_b_when_no_detections(
             },
         )(),
     )
-    monkeypatch.setattr(smt, "capture_monitor_to_file", lambda *_a, **_k: None)
-    monkeypatch.setattr(
-        smt,
-        "imread_bgr",
-        lambda *_a, **_k: np.zeros((50, 50, 3), dtype=np.uint8),
-    )
+    monkeypatch.setattr(smt, "grab_monitor_bgr", lambda *_a, **_k: (1, np.zeros((50, 50, 3), dtype=np.uint8)))
+    monkeypatch.setattr(smt, "imwrite_bgr", lambda *_a, **_k: True)
     monkeypatch.setattr(
         smt,
         "_collect_monitor_detections",

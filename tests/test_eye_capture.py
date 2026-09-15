@@ -87,6 +87,41 @@ def test_capture_active_monitor_to_file_clamps_requested_index(monkeypatch, tmp_
     assert (tmp_path / "capture.png").exists()
 
 
+def test_grab_monitor_bgr_returns_array_without_disk(monkeypatch, tmp_path: Path) -> None:
+    class _FakeShot:
+        size = (4, 3)
+        rgb = bytes([255, 0, 0] * (4 * 3))  # red RGB pixels
+
+    class _FakeSct:
+        def __init__(self) -> None:
+            self.monitors = [
+                {"left": 0, "top": 0, "width": 8, "height": 6},
+                {"left": 0, "top": 0, "width": 4, "height": 3},
+            ]
+
+        def grab(self, monitor: dict[str, int]) -> _FakeShot:
+            return _FakeShot()
+
+    class _FakeMssCtx:
+        def __init__(self) -> None:
+            self.obj = _FakeSct()
+
+        def __enter__(self) -> _FakeSct:
+            return self.obj
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+    monkeypatch.setattr(capture.mss, "mss", _FakeMssCtx)
+    idx, bgr = capture.grab_monitor_bgr(1)
+    assert idx == 1
+    assert bgr.shape == (3, 4, 3)
+    # OpenCV BGR: red channel is last.
+    assert int(bgr[0, 0, 2]) == 255
+    assert int(bgr[0, 0, 0]) == 0
+    assert not any(tmp_path.iterdir())
+
+
 def test_overlay_mouse_cursor_draws_when_cursor_is_in_bounds(monkeypatch) -> None:
     img = capture.Image.new("RGB", (100, 100), "gray")
     monkeypatch.setattr(capture.pyautogui, "position", lambda: type("P", (), {"x": 20, "y": 30})())

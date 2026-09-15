@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import mss
 import pyautogui
@@ -84,6 +85,30 @@ def grab_monitor_image(monitor_index: int) -> Image.Image:
         monitor = sct.monitors[idx]
         shot = sct.grab(monitor)
         return Image.frombytes("RGB", shot.size, shot.rgb)
+
+
+def grab_monitor_bgr(
+    monitor_index: int,
+    *,
+    include_cursor: bool = False,
+) -> tuple[int, Any]:
+    """Grab one monitor as a BGR ``uint8`` array without a disk round-trip.
+
+    Returns ``(resolved_monitor_index, bgr)``.
+    """
+    import cv2
+    import numpy as np
+
+    with mss.mss() as sct:
+        idx = resolve_monitor_index(sct, monitor_index)
+        monitor = sct.monitors[idx]
+        shot = sct.grab(monitor)
+        img = Image.frombytes("RGB", shot.size, shot.rgb)
+        if include_cursor:
+            overlay_mouse_cursor(img, int(monitor["left"]), int(monitor["top"]))
+    rgb = np.asarray(img, dtype=np.uint8)
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    return idx, bgr
 
 
 def capture_all_screens_to_file(dest: Path) -> None:

@@ -10,6 +10,7 @@ from cua_mcp.select_mouse_target import (
     _local_bbox_on_monitor,
     _merge_nearby_labels,
     _monitor_index_from_image_path,
+    _mouse_vision_plan,
     _normalize_nearby_labels,
     _prefilter_anchors_by_nearby,
     _write_indexed_bbox_overlay_images,
@@ -43,6 +44,115 @@ def test_mouse_target_class_ids() -> None:
         YOLO_CLASS_INPUT,
         YOLO_CLASS_SCROLLBAR,
     })
+
+
+def test_mouse_vision_plan_text_only_skips_icon_ocr_and_line_refine() -> None:
+    plan = _mouse_vision_plan("「類型」文字", nearby_objects=["在「修改日期」文字的下面"])
+    assert plan.ocr_class_ids == frozenset({YOLO_CLASS_TEXT})
+    assert plan.refine_inputs is False
+
+
+def test_mouse_vision_plan_icon_only() -> None:
+    plan = _mouse_vision_plan("「資料夾」圖示", nearby_objects=["「Edge」圖示"])
+    assert plan.ocr_class_ids == frozenset({YOLO_CLASS_ELEMENT})
+    assert plan.refine_inputs is False
+
+
+def test_mouse_vision_plan_input_keeps_line_refine_skips_ocr() -> None:
+    plan = _mouse_vision_plan("輸入欄")
+    assert plan.ocr_class_ids == frozenset()
+    assert plan.refine_inputs is True
+
+
+def test_mouse_vision_plan_text_near_input_ocr_text_and_refine() -> None:
+    plan = _mouse_vision_plan(
+        "「搜尋」文字",
+        nearby_objects=["在輸入欄的裡面"],
+    )
+    assert plan.ocr_class_ids == frozenset({YOLO_CLASS_TEXT})
+    assert plan.refine_inputs is True
+
+
+def test_mouse_vision_plan_mixed_text_and_icon() -> None:
+    plan = _mouse_vision_plan(
+        "「A」圖示",
+        nearby_objects=["「B」文字"],
+    )
+    assert plan.ocr_class_ids == frozenset({YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT})
+
+
+def test_mouse_vision_plan_ambiguous_keeps_both_ocr() -> None:
+    plan = _mouse_vision_plan("移到目標")
+    assert plan.ocr_class_ids == frozenset({YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT})
+    assert plan.refine_inputs is False
+
+
+def test_detect_skips_element_ocr_when_plan_is_text_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    from cua_mcp.select_mouse_target import _detect_mouse_targets_from_bgr
+
+    bgr = np.zeros((40, 40, 3), dtype=np.uint8)
+    xyxy = np.asarray([[1, 1, 10, 10], [15, 15, 25, 25]], dtype=np.float32)
+    scores = np.asarray([0.9, 0.9], dtype=np.float32)
+    class_ids = np.asarray([YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT], dtype=np.int32)
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.run_yolo_onnx_end2end",
+        lambda *_a, **_k: (xyxy, scores, class_ids),
+    )
+
+    ocr_calls: list[list[tuple[int, int, int, int]]] = []
+
+    def fake_ocr(bgr_img, boxes, *, mode=None, **_kwargs):
+        ocr_calls.append(list(boxes))
+        return [["類型"] for _ in boxes]
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._ocr_boxes_on_bgr",
+        fake_ocr,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.merge_yolo_inputs_with_line_rectangles",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("line refine should skip")),
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._retry_empty_unknown_icon_ocr",
+        lambda bgr_img, candidates: (_ for _ in ()).throw(
+            AssertionError("icon OCR retry should skip")
+        ),
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.fit_scrollbar_bboxes_to_arrow_controls",
+        lambda cands, **_k: cands,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.create_scrollbars_from_arrow_pairs",
+        lambda cands, **_k: cands,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.drop_scrollbars_without_arrow_ends",
+        lambda cands, **_k: cands,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.merge_overlapping_scrollbars",
+        lambda cands, **_k: cands,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.relabel_caption_button_detections",
+        lambda cands, **_k: cands,
+    )
+
+    dets = _detect_mouse_targets_from_bgr(
+        bgr,
+        ocr_class_ids=frozenset({YOLO_CLASS_TEXT}),
+        refine_inputs=False,
+    )
+    assert len(ocr_calls) == 1
+    assert len(ocr_calls[0]) == 1
+    assert all(d.class_name == "text" for d in dets)
+    assert dets[0].text == "類型"
 
 
 def test_normalize_nearby_labels_strips_and_dedupes() -> None:
@@ -86,12 +196,12 @@ async def test_resolve_mouse_point_merges_nearby_objects(monkeypatch: pytest.Mon
         lambda: [1],
     )
     monkeypatch.setattr(
-        "cua_mcp.select_mouse_target.capture_monitor_to_file",
-        lambda *_args, **_kwargs: None,
+        "cua_mcp.select_mouse_target.grab_monitor_bgr",
+        lambda *_args, **_kwargs: (1, np.zeros((10, 10, 3), dtype=np.uint8)),
     )
     monkeypatch.setattr(
-        "cua_mcp.select_mouse_target.imread_bgr",
-        lambda *_args, **_kwargs: np.zeros((10, 10, 3), dtype=np.uint8),
+        "cua_mcp.select_mouse_target.imwrite_bgr",
+        lambda *_args, **_kwargs: True,
     )
     monkeypatch.setattr(
         "cua_mcp.select_mouse_target._collect_monitor_detections",
@@ -153,7 +263,7 @@ async def test_find_mouse_point_overlaps_parse_with_capture_detect(
         await asyncio.sleep(branch_delay_s)
         return "目標", 0, 0, [], None, 0, None
 
-    def fake_capture_detect(yolo_conf_threshold: float = 0.25):
+    def fake_capture_detect(yolo_conf_threshold: float = 0.25, **_kwargs):
         time.sleep(branch_delay_s)
         det = _detection_from_bbox(
             (0, 0, 20, 20),
@@ -2480,12 +2590,12 @@ async def test_resolve_mouse_point_nearby_prefilter_skips_ollama(
         lambda: [1],
     )
     monkeypatch.setattr(
-        "cua_mcp.select_mouse_target.capture_monitor_to_file",
-        lambda *_args, **_kwargs: None,
+        "cua_mcp.select_mouse_target.grab_monitor_bgr",
+        lambda *_args, **_kwargs: (1, np.zeros((10, 10, 3), dtype=np.uint8)),
     )
     monkeypatch.setattr(
-        "cua_mcp.select_mouse_target.imread_bgr",
-        lambda *_args, **_kwargs: np.zeros((10, 10, 3), dtype=np.uint8),
+        "cua_mcp.select_mouse_target.imwrite_bgr",
+        lambda *_args, **_kwargs: True,
     )
     monkeypatch.setattr(
         "cua_mcp.select_mouse_target._collect_monitor_detections",
@@ -2569,12 +2679,12 @@ async def test_resolve_mouse_point_does_not_run_function_describe(
         lambda: [1],
     )
     monkeypatch.setattr(
-        "cua_mcp.select_mouse_target.capture_monitor_to_file",
-        lambda *_args, **_kwargs: None,
+        "cua_mcp.select_mouse_target.grab_monitor_bgr",
+        lambda *_args, **_kwargs: (1, np.zeros((10, 10, 3), dtype=np.uint8)),
     )
     monkeypatch.setattr(
-        "cua_mcp.select_mouse_target.imread_bgr",
-        lambda *_args, **_kwargs: np.zeros((10, 10, 3), dtype=np.uint8),
+        "cua_mcp.select_mouse_target.imwrite_bgr",
+        lambda *_args, **_kwargs: True,
     )
     monkeypatch.setattr(
         "cua_mcp.select_mouse_target._collect_monitor_detections",
@@ -2652,12 +2762,12 @@ async def test_resolve_mouse_point_skips_describe_when_unique(
         lambda: [1],
     )
     monkeypatch.setattr(
-        "cua_mcp.select_mouse_target.capture_monitor_to_file",
-        lambda *_args, **_kwargs: None,
+        "cua_mcp.select_mouse_target.grab_monitor_bgr",
+        lambda *_args, **_kwargs: (1, np.zeros((10, 10, 3), dtype=np.uint8)),
     )
     monkeypatch.setattr(
-        "cua_mcp.select_mouse_target.imread_bgr",
-        lambda *_args, **_kwargs: np.zeros((10, 10, 3), dtype=np.uint8),
+        "cua_mcp.select_mouse_target.imwrite_bgr",
+        lambda *_args, **_kwargs: True,
     )
     monkeypatch.setattr(
         "cua_mcp.select_mouse_target._collect_monitor_detections",
@@ -2851,12 +2961,12 @@ async def test_resolve_mouse_point_char_target_uses_span_center(
         lambda: [1],
     )
     monkeypatch.setattr(
-        "cua_mcp.select_mouse_target.capture_monitor_to_file",
-        lambda *_args, **_kwargs: None,
+        "cua_mcp.select_mouse_target.grab_monitor_bgr",
+        lambda *_args, **_kwargs: (1, np.zeros((100, 100, 3), dtype=np.uint8)),
     )
     monkeypatch.setattr(
-        "cua_mcp.select_mouse_target.imread_bgr",
-        lambda *_args, **_kwargs: np.zeros((100, 100, 3), dtype=np.uint8),
+        "cua_mcp.select_mouse_target.imwrite_bgr",
+        lambda *_args, **_kwargs: True,
     )
     monkeypatch.setattr(
         "cua_mcp.select_mouse_target._collect_monitor_detections",
@@ -2922,12 +3032,12 @@ async def test_resolve_mouse_point_scrollbar_track_percent(
         lambda: [1],
     )
     monkeypatch.setattr(
-        "cua_mcp.select_mouse_target.capture_monitor_to_file",
-        lambda *_args, **_kwargs: None,
+        "cua_mcp.select_mouse_target.grab_monitor_bgr",
+        lambda *_args, **_kwargs: (1, np.zeros((200, 200, 3), dtype=np.uint8)),
     )
     monkeypatch.setattr(
-        "cua_mcp.select_mouse_target.imread_bgr",
-        lambda *_args, **_kwargs: np.zeros((200, 200, 3), dtype=np.uint8),
+        "cua_mcp.select_mouse_target.imwrite_bgr",
+        lambda *_args, **_kwargs: True,
     )
     monkeypatch.setattr(
         "cua_mcp.select_mouse_target._collect_monitor_detections",

@@ -189,6 +189,12 @@ def prepare_run_session(
         rec = recording_run_dir(selected_script_path)
         if rec is not None:
             script_raw = collect_recording_script_text(rec)
+            try:
+                from src.recorder.compile_tool_calls import ensure_recording_tool_cache
+
+                ensure_recording_tool_cache(rec)
+            except Exception as exc:
+                manager.log_info(f"ensure_recording_tool_cache failed: {exc}")
         else:
             try:
                 script_raw = Path(selected_script_path).read_text(encoding="utf-8")

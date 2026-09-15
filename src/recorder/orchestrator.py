@@ -623,6 +623,9 @@ def _write_event_analysis(
     settle_after_seconds: float | None,
     text_resolution: dict[str, Any] | None,
 ) -> None:
+    from src.recorder.compile_tool_calls import compile_tool_calls
+
+    tool_calls = compile_tool_calls(event, instruction)
     write_json(
         analysis_path,
         {
@@ -668,6 +671,7 @@ def _write_event_analysis(
                 if event.window_snapshot_debug is not None
                 else {}
             ),
+            **({"tool_calls": tool_calls} if tool_calls is not None else {}),
         },
     )
 
@@ -909,6 +913,14 @@ async def analyze_recording_session(
             "expected_outcomes": expected_outcomes,
         }
         write_json(run_dir / "report.json", report)
+        try:
+            from src.recorder.compile_tool_calls import (
+                rebuild_recording_instruction_tool_cache,
+            )
+
+            rebuild_recording_instruction_tool_cache(run_dir)
+        except Exception as exc:
+            log_info(f"analyze_recording_session tool cache rebuild failed: {exc}")
         try:
             from src.common.session_html import write_recording_html_from_run
 

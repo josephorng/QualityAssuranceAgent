@@ -1327,7 +1327,19 @@ async def test_analyze_recording_session_writes_instructions(tmp_path: Path) -> 
     assert report["instructions"] == ["輸入「打電話的時候」"]
     analysis = json.loads((run_dir / "analysis" / "event_001.json").read_text(encoding="utf-8"))
     assert analysis["instruction"] == "輸入「打電話的時候」"
-    assert "tool_calls" not in analysis
+    assert analysis["tool_calls"] == [
+        {
+            "name": "type_text",
+            "arguments": {
+                "text": "打電話的時候",
+                "instruction": "輸入「打電話的時候」",
+            },
+        }
+    ]
+    cache = json.loads(
+        (run_dir / "instruction_tool_cache.json").read_text(encoding="utf-8")
+    )
+    assert "輸入「打電話的時候」" in cache["entries"]
     assert analysis["text_resolution"]["resolved_text"] == "打電話的時候"
     recording_html = run_dir / "recording_steps.html"
     assert recording_html.is_file()

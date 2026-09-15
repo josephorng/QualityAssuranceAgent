@@ -41,6 +41,7 @@ from src.common.runtime_context import (
     SCRIPT_BASELINE_AFTER_ENV,
     SCRIPT_LINES_ENV,
     SCRIPT_OUTCOMES_ENV,
+    SCRIPT_PATH_ENV,
     SCRIPT_SETTLE_AFTER_ENV,
     get_runtime_env,
     is_runtime_command_mode,
@@ -1427,7 +1428,24 @@ class BrainModule:
         second_prompt += mode_tool_policy
 
         if use_tool_cache_enabled():
-            cached_calls = lookup_tool_calls(goal)
+            cached_calls = None
+            recording_dir = None
+            script_path_raw = (os.environ.get(SCRIPT_PATH_ENV) or "").strip()
+            if script_path_raw:
+                from src.common.script_helper import recording_run_dir
+                from src.recorder.compile_tool_calls import (
+                    ensure_recording_tool_cache,
+                    recording_tool_cache_path,
+                )
+
+                recording_dir = recording_run_dir(Path(script_path_raw))
+                if recording_dir is not None:
+                    ensure_recording_tool_cache(recording_dir)
+                    cached_calls = lookup_tool_calls(
+                        goal, path=recording_tool_cache_path(recording_dir)
+                    )
+            if not cached_calls:
+                cached_calls = lookup_tool_calls(goal)
             if cached_calls:
                 self.manager.log_info(
                     f"Instruction tool cache hit ({len(cached_calls)} tool call(s)); replaying"
@@ -1598,6 +1616,25 @@ class BrainModule:
                 self.manager.log_info(
                     f"Instruction tool cache updated ({len(tool_calls)} tool call(s))"
                 )
+                script_path_raw = (os.environ.get(SCRIPT_PATH_ENV) or "").strip()
+                if script_path_raw:
+                    from src.common.script_helper import recording_run_dir
+                    from src.recorder.compile_tool_calls import (
+                        mirror_tool_calls_into_recording,
+                    )
+
+                    recording_dir = recording_run_dir(Path(script_path_raw))
+                    if recording_dir is not None:
+                        mirror_tool_calls_into_recording(
+                            recording_dir,
+                            goal,
+                            tool_calls,
+                            source_run_id=self.run_id,
+                        )
+                        self.manager.log_info(
+                            "Recording instruction tool cache updated "
+                            f"({len(tool_calls)} tool call(s))"
+                        )
 
         return step_succeeded
 

@@ -75,6 +75,39 @@ from src.recorder.vision_context import (
     vision_from_yolo_ocr,
 )
 
+
+def _persist_analysis_with_tool_calls(
+    run_dir: Path,
+    analysis_path: Path,
+    analysis: dict[str, Any],
+    *,
+    event: RecordedEvent | None = None,
+    event_index: int | None = None,
+) -> None:
+    """Write analysis JSON with recompiled ``tool_calls`` and rebuild recording cache."""
+    from src.recorder.compile_tool_calls import (
+        rebuild_recording_instruction_tool_cache,
+        set_analysis_tool_calls,
+    )
+
+    resolved_event = event
+    if resolved_event is None:
+        index = event_index
+        if index is None:
+            raw_index = analysis.get("event_index")
+            index = raw_index if isinstance(raw_index, int) else None
+        if isinstance(index, int):
+            payload = read_json(event_json_path(run_dir, index), None)
+            if isinstance(payload, dict):
+                resolved_event = RecordedEvent.from_dict(payload)
+    if resolved_event is not None:
+        set_analysis_tool_calls(analysis, resolved_event)
+    else:
+        analysis.pop("tool_calls", None)
+    write_json(analysis_path, analysis)
+    rebuild_recording_instruction_tool_cache(run_dir)
+
+
 # Allow Unicode folder names (CJK, spaces); reject path separators and Windows-illegal chars.
 _RUN_ID_ILLEGAL_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 _RUN_ID_MAX_LEN = 191
@@ -584,6 +617,8 @@ def sync_recording_events(run_dir: Path, events: list[RecordedEvent]) -> dict[st
 
 
 def _rebuild_recording_after_event_purge(run_dir: Path, remaining: int) -> None:
+    from src.recorder.compile_tool_calls import rebuild_recording_instruction_tool_cache
+
     report_path = run_dir / "report.json"
     report = read_json(report_path, {})
     if not isinstance(report, dict):
@@ -601,6 +636,7 @@ def _rebuild_recording_after_event_purge(run_dir: Path, remaining: int) -> None:
         report["cached"] = cached
     _rebuild_report_instructions(run_dir, report)
     write_json(report_path, report)
+    rebuild_recording_instruction_tool_cache(run_dir)
     write_recording_html_from_run(run_dir, update_index=True)
 
 
@@ -1009,7 +1045,13 @@ def add_recording_event(
             {"expected_outcome": cleaned_outcome}
         ),
     }
-    write_json(run_dir / "analysis" / f"event_{new_index:03d}.json", analysis_payload)
+    _persist_analysis_with_tool_calls(
+        run_dir,
+        run_dir / "analysis" / f"event_{new_index:03d}.json",
+        analysis_payload,
+        event=event,
+        event_index=new_index,
+    )
 
     new_rel = event_json_path(run_dir, new_index).relative_to(run_dir).as_posix()
     if after is None:
@@ -1185,7 +1227,12 @@ def apply_recording_event_landmarks(
 
     analysis["instruction"] = new_instruction
     analysis["landmarks"] = landmarks_payload
-    write_json(analysis_path, analysis)
+    _persist_analysis_with_tool_calls(
+        run_dir,
+        analysis_path,
+        analysis,
+        event_index=event_index,
+    )
 
     report_path = run_dir / "report.json"
     report = read_json(report_path, {})
@@ -1307,7 +1354,12 @@ def apply_recording_event_text(
         resolution["resolved_text"] = cleaned
         resolution["source"] = "user"
         resolution["reason"] = "edited in recording_steps.html"
-        write_json(analysis_path, analysis)
+        _persist_analysis_with_tool_calls(
+            run_dir,
+            analysis_path,
+            analysis,
+            event_index=event_index,
+        )
 
         report_path = run_dir / "report.json"
         report = read_json(report_path, {})
@@ -1412,7 +1464,12 @@ def apply_recording_event_instruction(
 
     analysis["instruction"] = cleaned
     analysis["use_char_target"] = parse_char_target_instruction(cleaned) is not None
-    write_json(analysis_path, analysis)
+    _persist_analysis_with_tool_calls(
+        run_dir,
+        analysis_path,
+        analysis,
+        event_index=event_index,
+    )
 
     report_path = run_dir / "report.json"
     report = read_json(report_path, {})
@@ -1489,7 +1546,13 @@ def apply_recording_event_char_target(
     new_instruction = apply_nearby_landmarks(rebuilt, start_hints, kind=kind)
     analysis["instruction"] = new_instruction
     analysis["use_char_target"] = use_char_target
-    write_json(analysis_path, analysis)
+    _persist_analysis_with_tool_calls(
+        run_dir,
+        analysis_path,
+        analysis,
+        event=event,
+        event_index=event_index,
+    )
 
     report_path = run_dir / "report.json"
     report = read_json(report_path, {})
@@ -1580,7 +1643,13 @@ def rerun_recording_event_yolo_ocr(
         analysis["use_char_target"] = use_char_target
     else:
         analysis.pop("use_char_target", None)
-    write_json(analysis_path, analysis)
+    _persist_analysis_with_tool_calls(
+        run_dir,
+        analysis_path,
+        analysis,
+        event=event,
+        event_index=event_index,
+    )
 
     report_path = run_dir / "report.json"
     report = read_json(report_path, {})
@@ -1690,7 +1759,13 @@ def pick_recording_event_target(
         analysis["use_char_target"] = use_char_target
     else:
         analysis.pop("use_char_target", None)
-    write_json(analysis_path, analysis)
+    _persist_analysis_with_tool_calls(
+        run_dir,
+        analysis_path,
+        analysis,
+        event=event,
+        event_index=event_index,
+    )
 
     report_path = run_dir / "report.json"
     report = read_json(report_path, {})

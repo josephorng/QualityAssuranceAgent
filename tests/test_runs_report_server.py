@@ -1684,6 +1684,34 @@ def test_add_recording_event_rejects_unknown_kind_and_empty_instruction(
 def test_apply_recording_event_instruction_persists(tmp_path: Path) -> None:
     runs_root = tmp_path / "runs"
     run_root = _make_recording_two_event_run(runs_root, "recording_edit_instruction")
+    # Seed an old cache entry for the previous instruction text.
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": "點擊「搜尋」按鈕",
+                "tool_calls": [
+                    {
+                        "name": "move_mouse",
+                        "arguments": {"instruction": "點擊「搜尋」按鈕"},
+                    },
+                    {
+                        "name": "click",
+                        "arguments": {
+                            "button": "left",
+                            "clicks": 1,
+                            "instruction": "點擊「搜尋」按鈕",
+                        },
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    from src.recorder.compile_tool_calls import rebuild_recording_instruction_tool_cache
+
+    rebuild_recording_instruction_tool_cache(run_root)
 
     result = apply_recording_event_instruction(
         runs_root,
@@ -1697,8 +1725,13 @@ def test_apply_recording_event_instruction_persists(tmp_path: Path) -> None:
     }
     analysis = json.loads((run_root / "analysis" / "event_001.json").read_text(encoding="utf-8"))
     assert analysis["instruction"] == "點擊「新目標」"
+    assert [c["name"] for c in analysis["tool_calls"]] == ["move_mouse", "click"]
     report = json.loads((run_root / "report.json").read_text(encoding="utf-8"))
     assert report["instructions"][0] == "點擊「新目標」"
+    cache = json.loads((run_root / "instruction_tool_cache.json").read_text(encoding="utf-8"))
+    assert "點擊「搜尋」按鈕" not in cache["entries"]
+    assert "點擊「新目標」" in cache["entries"]
+    assert cache["entries"]["點擊「新目標」"]["tool_calls"] == analysis["tool_calls"]
 
 
 def test_runs_report_server_add_event_endpoint(tmp_path: Path) -> None:

@@ -878,6 +878,87 @@ def test_pick_disambiguating_hints_skips_repeated_labels() -> None:
     assert picked[0].side == Side.RIGHT
 
 
+def _asset_grid_checkboxes() -> list[dict]:
+    """資產設備 row/header checkboxes from 7_7.log (primary = the test1 row)."""
+
+    def _checkbox(bbox: list[int], center: list[int]) -> dict:
+        return {
+            "bbox": bbox,
+            "center": center,
+            "class_name": "element",
+            "text": "",
+            "icons": [{"chinese_id": "方框、矩形框線"}],
+        }
+
+    return [
+        _checkbox([268, 114, 16, 15], [276, 121]),  # primary: test1 row
+        _checkbox([264, 94, 14, 15], [271, 101]),  # select-all header
+        _checkbox([269, 139, 14, 14], [276, 146]),
+        _checkbox([269, 160, 14, 15], [276, 167]),
+        _checkbox([269, 184, 14, 14], [276, 191]),
+        _checkbox([269, 207, 14, 14], [276, 214]),
+    ]
+
+
+_ASSET_GRID_ROW_ICON = {
+    # Per-row device icon beside test1; decoded differently on every run
+    # (相機 / 國旗 / 重新整理 / Python 終端機), so it is unusable at playback.
+    "bbox": [296, 115, 17, 13],
+    "center": [304, 122],
+    "class_name": "element",
+    "text": "",
+    "icons": [{"chinese_id": "Python 終端機"}],
+}
+_ASSET_GRID_ROW_TEXT = {
+    "bbox": [316, 117, 20, 10],
+    "center": [326, 122],
+    "class_name": "text",
+    "text": "test1",
+}
+
+
+def test_pick_disambiguating_hints_tier_gates_icon_behind_text() -> None:
+    """Reproduce 資產設備 7_7: same-row icon is closer, but text must still win.
+
+    Both landmarks separate all five peer checkboxes, and the icon is ~28px away
+    versus ~50px for the text, so it wins on ``locality``. Tier only broke ties
+    before, so the icon was emitted and then failed to match at playback.
+    """
+    from src.recorder.vision_context import _pick_disambiguating_hints
+
+    candidates = [
+        *_asset_grid_checkboxes(),
+        _ASSET_GRID_ROW_ICON,
+        _ASSET_GRID_ROW_TEXT,
+        # Column header: same side for every checkbox, so it separates nothing.
+        {
+            "bbox": [227, 74, 72, 13],
+            "center": [263, 80],
+            "class_name": "text",
+            "text": "資產設備清單",
+        },
+    ]
+    picked = _pick_disambiguating_hints(
+        candidates,
+        instruction="將滑鼠移到「方框、矩形框線」圖示",
+    )
+    labels = [hint.label for hint in picked]
+    assert "「test1」文字" in labels
+    assert "「Python 終端機」圖示" not in labels
+
+
+def test_pick_disambiguating_hints_still_uses_icon_as_last_resort() -> None:
+    """Icon-only neighbourhoods (toolbars) keep their landmarks; the gate is not a ban."""
+    from src.recorder.vision_context import _pick_disambiguating_hints
+
+    candidates = [*_asset_grid_checkboxes(), _ASSET_GRID_ROW_ICON]
+    picked = _pick_disambiguating_hints(
+        candidates,
+        instruction="將滑鼠移到「方框、矩形框線」圖示",
+    )
+    assert [hint.label for hint in picked] == ["「Python 終端機」圖示"]
+
+
 def test_collect_nearby_hints_set_cover_disambiguates_2x2_v_arrows() -> None:
     """Row+column landmarks together uniquely ID one of four identical V-arrows."""
     from src.common.nearby_side import NearbyHint, Side

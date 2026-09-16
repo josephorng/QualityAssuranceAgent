@@ -1660,12 +1660,17 @@ def _prefilter_anchors_by_nearby(
 ) -> list[UiDetection]:
     """Narrow anchors using exclusive nearby-landmark assignment.
 
-    Prefer anchors whose assigned neighbors cover **all** nearby hints (label and
-    optional side). Directed sides are checked against **all** ``nearby_matches``
-    for each anchor (so exclusive distance assignment cannot hide the correct
-    side). Undirected labels still use exclusive assignment. If directed sides
-    wipe every anchor, retry with label-only coverage. If none match, return
-    ``anchors`` unchanged.
+    Keep only the anchors with **maximal** hint coverage (label and optional
+    side); full coverage of every hint is just the best possible case. Ranking by
+    coverage matters when a hint is uncoverable — e.g. a landmark the OCR
+    mislabelled, leaving a same-named distractor elsewhere on screen: without
+    ranking, an anchor matching 1 of 3 hints survives alongside the one matching
+    2 of 3.
+
+    Directed sides are checked against **all** ``nearby_matches`` for each anchor
+    (so exclusive distance assignment cannot hide the correct side). Undirected
+    labels still use exclusive assignment. If directed sides wipe every anchor,
+    retry with label-only coverage. If none match, return ``anchors`` unchanged.
     """
     hints = normalize_nearby_hints(nearby_labels)
     if not anchors or not nearby_matches or not hints:
@@ -1693,16 +1698,12 @@ def _prefilter_anchors_by_nearby(
                     covered.add(li)
             coverage.append(covered)
 
-        n_hints = len(hints)
-        full = [
-            anchors[i] for i, covered in enumerate(coverage) if len(covered) == n_hints
+        best = max((len(covered) for covered in coverage), default=0)
+        if not best:
+            return []
+        return [
+            anchors[i] for i, covered in enumerate(coverage) if len(covered) == best
         ]
-        if full:
-            return full
-        partial = [anchors[i] for i, covered in enumerate(coverage) if covered]
-        if partial:
-            return partial
-        return []
 
     selected = _select(require_side=True)
     if selected:

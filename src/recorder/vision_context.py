@@ -1703,11 +1703,22 @@ def _pick_disambiguating_hints(
 
     Each pick must eliminate at least one still-confused peer. Stops when every
     peer is covered or ``max_count`` is reached. Only unique on-screen labels are
-    considered (see ``_score_disambiguating_landmarks``). Prefers landmarks that
-    clear more remaining peers, then closer to those peers, closer to the
-    primary, multi-char text, and betweenness. ``reserved_labels`` (e.g. forced
-    containing ``輸入欄``) are skipped so a duplicate bare class label cannot
-    consume a cover slot.
+    considered (see ``_score_disambiguating_landmarks``). ``reserved_labels``
+    (e.g. forced containing ``輸入欄``) are skipped so a duplicate bare class
+    label cannot consume a cover slot.
+
+    Tier **gates** the cover rather than merely breaking ties: the greedy runs
+    once per ascending tier, each pass restricted to landmarks at or below that
+    tier. A lower tier therefore gets first refusal on every peer it can
+    separate, and an icon (tier 2) only enters the set for peers that no text
+    landmark separates. Icon ``chinese_id`` decodes vary run to run — the same
+    grid cell read as 相機 / 國旗 / Python 終端機 across sibling rows — so an icon
+    beating a text landmark on mere proximity yields a hint that cannot be
+    matched back at playback.
+
+    Within a pass, picks prefer landmarks that clear more remaining peers, then
+    closer to those peers, then multi-char text, closer to the primary, and
+    betweenness.
     """
     if max_count <= 0:
         return []
@@ -1733,67 +1744,76 @@ def _pick_disambiguating_hints(
 
     picked: list[NearbyHint] = []
     used_labels: set[str] = set(reserved_labels or ())
-    while remaining and len(picked) < max_count:
-        best: (
-            tuple[int, float, int, float, float, NearbyHint, set[int]] | None
-        ) = None
-        for eliminated, between, tier, _order, _freq, center, hint in scored:
-            if hint.label in used_labels:
-                continue
-            newly = eliminated & remaining
-            if not newly:
-                continue
-            dist_vals = [
-                _dist_sq(center, peer_centers[pid])
-                for pid in newly
-                if pid in peer_centers
-            ]
-            min_peer_dist = (
-                min(dist_vals) ** 0.5 if dist_vals else float("inf")
-            )
-            primary_dist = (
-                _dist_sq(center, primary_center) ** 0.5
-                if primary_center is not None
-                else min_peer_dist
-            )
-            row_delta = (
-                float(abs(center[1] - primary_center[1]))
-                if primary_center is not None
-                else 0.0
-            )
-            # Penalize off-row landmarks lightly so same-row field labels win the
-            # first pick, while unique OK/Cancel buttons still beat distant grid
-            # text on later picks.
-            locality = min_peer_dist + 2.0 * row_delta
-            key = (
-                len(newly),
-                -locality,
-                -tier,
-                -primary_dist,
-                between,
-            )
-            if best is None or key > (
-                best[0],
-                -best[1],
-                -best[2],
-                -best[3],
-                best[4],
-            ):
-                best = (
-                    len(newly),
-                    locality,
-                    tier,
-                    primary_dist,
-                    between,
-                    hint,
-                    newly,
+
+    def _cover_within_tier(max_tier: int) -> None:
+        """Greedy-cover ``remaining`` using only landmarks at or below ``max_tier``."""
+        while remaining and len(picked) < max_count:
+            best: (
+                tuple[int, float, int, float, float, NearbyHint, set[int]] | None
+            ) = None
+            for eliminated, between, tier, _order, _freq, center, hint in scored:
+                if tier > max_tier or hint.label in used_labels:
+                    continue
+                newly = eliminated & remaining
+                if not newly:
+                    continue
+                dist_vals = [
+                    _dist_sq(center, peer_centers[pid])
+                    for pid in newly
+                    if pid in peer_centers
+                ]
+                min_peer_dist = (
+                    min(dist_vals) ** 0.5 if dist_vals else float("inf")
                 )
-        if best is None:
+                primary_dist = (
+                    _dist_sq(center, primary_center) ** 0.5
+                    if primary_center is not None
+                    else min_peer_dist
+                )
+                row_delta = (
+                    float(abs(center[1] - primary_center[1]))
+                    if primary_center is not None
+                    else 0.0
+                )
+                # Penalize off-row landmarks lightly so same-row field labels win
+                # the first pick, while unique OK/Cancel buttons still beat
+                # distant grid text on later picks.
+                locality = min_peer_dist + 2.0 * row_delta
+                key = (
+                    len(newly),
+                    -locality,
+                    -tier,
+                    -primary_dist,
+                    between,
+                )
+                if best is None or key > (
+                    best[0],
+                    -best[1],
+                    -best[2],
+                    -best[3],
+                    best[4],
+                ):
+                    best = (
+                        len(newly),
+                        locality,
+                        tier,
+                        primary_dist,
+                        between,
+                        hint,
+                        newly,
+                    )
+            if best is None:
+                return
+            _n, _loc, _tier, _pd, _between, hint, newly = best
+            picked.append(hint)
+            used_labels.add(hint.label)
+            remaining.difference_update(newly)
+
+    for max_tier in sorted({row[2] for row in scored}):
+        if not remaining or len(picked) >= max_count:
             break
-        _n, _loc, _tier, _pd, _between, hint, newly = best
-        picked.append(hint)
-        used_labels.add(hint.label)
-        remaining -= newly
+        _cover_within_tier(max_tier)
+
     return picked
 
 

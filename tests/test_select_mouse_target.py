@@ -2494,6 +2494,52 @@ def test_prefilter_anchors_by_nearby_partial_when_no_full_cover() -> None:
     assert kept == [anchors[0]]
 
 
+def test_prefilter_anchors_by_nearby_ranks_partial_coverage() -> None:
+    """Reproduce 資產設備 7_7.log: pick the row checkbox, not the select-all header.
+
+    Geometry is a stacked column of identical 「方框、矩形框線」checkboxes. The
+    「對話氣泡、評論」landmark beside test1 was OCR'd as 「Python 終端機」that run, so
+    the only match for that hint is the unrelated taskbar icon and no anchor can
+    cover all three hints. 資產設備清單/下面 is satisfied by every checkbox in the
+    column, so only test1/左邊 separates them: the test1 row covers 2 hints while
+    the header and the other rows cover 1.
+    """
+    from src.common.nearby_side import NearbyHint, Side
+
+    header = _detection_from_bbox(
+        (264, 94, 14, 15), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "方框、矩形框線"}]
+    )
+    row_test1 = _detection_from_bbox(
+        (268, 114, 16, 15), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "方框、矩形框線"}]
+    )
+    rows_below = [
+        _detection_from_bbox(
+            (269, top, 14, 15),
+            YOLO_CLASS_ELEMENT,
+            icons=[{"chinese_id": "方框、矩形框線"}],
+        )
+        for top in (139, 160, 184, 207)
+    ]
+    anchors = [header, row_test1, *rows_below]
+    nearby_matches = [
+        _detection_from_bbox((227, 74, 72, 13), YOLO_CLASS_TEXT, text="資產設備清單"),
+        _detection_from_bbox((316, 117, 20, 10), YOLO_CLASS_TEXT, text="test1"),
+        # Taskbar icon: the only 「對話氣泡、評論」on screen, 780px from the column.
+        _detection_from_bbox(
+            (407, 891, 18, 16),
+            YOLO_CLASS_ELEMENT,
+            icons=[{"chinese_id": "對話氣泡、評論"}],
+        ),
+    ]
+    hints = [
+        NearbyHint(label="「對話氣泡、評論」圖示", side=Side.LEFT),
+        NearbyHint(label="「test1」文字", side=Side.LEFT),
+        NearbyHint(label="「資產設備清單」文字", side=Side.BELOW),
+    ]
+    kept = _prefilter_anchors_by_nearby(anchors, nearby_matches, hints)
+    assert kept == [row_test1]
+
+
 def test_prefilter_anchors_by_nearby_noop_without_nearby() -> None:
     anchors = [
         _detection_from_bbox((0, 0, 20, 20), YOLO_CLASS_TEXT, text="文件"),

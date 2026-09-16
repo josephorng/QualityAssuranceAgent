@@ -2494,6 +2494,23 @@ def test_prefilter_anchors_by_nearby_partial_when_no_full_cover() -> None:
     assert kept == [anchors[0]]
 
 
+def _asset_grid_checkbox_anchors() -> list[UiDetection]:
+    """資產設備 grid checkboxes from 7_7.log: select-all header, then five row boxes."""
+    return [
+        _detection_from_bbox(
+            bbox, YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "方框、矩形框線"}]
+        )
+        for bbox in (
+            (264, 94, 14, 15),  # select-all header, center (271,101)
+            (268, 114, 16, 15),  # test1 row, center (276,121)
+            (269, 139, 14, 14),
+            (269, 160, 14, 15),
+            (269, 184, 14, 14),
+            (269, 207, 14, 14),
+        )
+    ]
+
+
 def test_prefilter_anchors_by_nearby_ranks_partial_coverage() -> None:
     """Reproduce 資產設備 7_7.log: pick the row checkbox, not the select-all header.
 
@@ -2506,21 +2523,8 @@ def test_prefilter_anchors_by_nearby_ranks_partial_coverage() -> None:
     """
     from src.common.nearby_side import NearbyHint, Side
 
-    header = _detection_from_bbox(
-        (264, 94, 14, 15), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "方框、矩形框線"}]
-    )
-    row_test1 = _detection_from_bbox(
-        (268, 114, 16, 15), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "方框、矩形框線"}]
-    )
-    rows_below = [
-        _detection_from_bbox(
-            (269, top, 14, 15),
-            YOLO_CLASS_ELEMENT,
-            icons=[{"chinese_id": "方框、矩形框線"}],
-        )
-        for top in (139, 160, 184, 207)
-    ]
-    anchors = [header, row_test1, *rows_below]
+    anchors = _asset_grid_checkbox_anchors()
+    row_test1 = anchors[1]
     nearby_matches = [
         _detection_from_bbox((227, 74, 72, 13), YOLO_CLASS_TEXT, text="資產設備清單"),
         _detection_from_bbox((316, 117, 20, 10), YOLO_CLASS_TEXT, text="test1"),
@@ -2538,6 +2542,53 @@ def test_prefilter_anchors_by_nearby_ranks_partial_coverage() -> None:
     ]
     kept = _prefilter_anchors_by_nearby(anchors, nearby_matches, hints)
     assert kept == [row_test1]
+
+
+def test_prefilter_anchors_by_nearby_ignores_far_landmark() -> None:
+    """A same-named detection across the screen must not satisfy a directed hint.
+
+    Generalizes the 資產設備 7_7 hazard: the landmark beside the target row was
+    misdecoded, leaving only a match 780px away that playback still accepted as a
+    constraint. Here the stray 「說明」 sits on the select-all header's row, so the
+    9-grid reads it as 在「說明」文字的左邊 for the header — without the locality
+    guard that ties the header with the real target and sends both to the picker.
+    """
+    from src.common.nearby_side import NearbyHint, Side
+
+    anchors = _asset_grid_checkbox_anchors()
+    row_test1 = anchors[1]
+    nearby_matches = [
+        _detection_from_bbox((316, 117, 20, 10), YOLO_CLASS_TEXT, text="test1"),
+        # Far right of the window, vertically aligned with the header row.
+        _detection_from_bbox((1780, 95, 40, 13), YOLO_CLASS_TEXT, text="說明"),
+    ]
+    hints = [
+        NearbyHint(label="「test1」文字", side=Side.LEFT),
+        NearbyHint(label="「說明」文字", side=Side.LEFT),
+    ]
+    kept = _prefilter_anchors_by_nearby(anchors, nearby_matches, hints)
+    assert kept == [row_test1]
+
+
+def test_anchor_locality_radius_tolerates_one_far_outlier_anchor() -> None:
+    """A stray far anchor must not stretch the radius across the whole screen.
+
+    7_7 had a spurious 「方框、矩形框線」 at (41,875) sharing the anchor label. A
+    max-peer-distance radius would grow to ~790px and re-admit the taskbar
+    landmark, so the radius scales by the median peer distance instead.
+    """
+    from cua_mcp.select_mouse_target import _anchor_locality_radius
+
+    outlier = _detection_from_bbox(
+        (36, 871, 11, 8), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "方框、矩形框線"}]
+    )
+    anchors = [*_asset_grid_checkbox_anchors(), outlier]
+    # Index 1 is the test1 row; its peers sit 20-113px away plus the outlier.
+    radius = _anchor_locality_radius(anchors, 1)
+    assert radius is not None
+    assert radius < 200
+    # Single-anchor pools have no peers to scale against, so the guard is off.
+    assert _anchor_locality_radius(anchors[:1], 0) is None
 
 
 def test_prefilter_anchors_by_nearby_noop_without_nearby() -> None:

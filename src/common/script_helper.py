@@ -232,11 +232,17 @@ def collect_recording_instructions(run_dir: Path) -> tuple[list[str], list[str |
     return instructions, expected_outcomes
 
 
-def collect_recording_baseline_after_paths(run_dir: Path) -> list[str | None]:
+def collect_recording_baseline_after_paths(
+    run_dir: Path,
+    *,
+    include_disabled: bool = False,
+) -> list[str | None]:
     """Collect recording after-screenshot paths aligned with ``collect_recording_instructions``.
 
     Action lines use ``after_screenshot_for_outcome``
     (next event before → typing/drag end → session ``final_after``).
+    ``include_disabled`` keeps baselines for steps whose verification checkbox is off,
+    so reports can show the recorded screen without turning verification on.
     """
     run_dir = Path(run_dir)
     analysis_dir = run_dir / "analysis"
@@ -271,7 +277,7 @@ def collect_recording_baseline_after_paths(run_dir: Path) -> list[str | None]:
 
     baselines: list[str | None] = []
     for index, (event, analysis) in enumerate(loaded):
-        if not use_expected_outcome_enabled(analysis):
+        if not include_disabled and not use_expected_outcome_enabled(analysis):
             # Opt-in verification: no baseline when the step's checkbox is off.
             baselines.append(None)
             continue

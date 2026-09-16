@@ -6,6 +6,7 @@ import json
 import os
 import re
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from html import escape
 from math import ceil
 from pathlib import Path
@@ -3085,6 +3086,104 @@ def _verify_live_path_from_group(group: dict[str, Any]) -> str | None:
     return None
 
 
+def _last_after_shot(operations: list[dict[str, Any]]) -> Path | None:
+    """Screen after the step's last action that captured one."""
+    for operation in reversed(operations):
+        after = operation.get("after")
+        if isinstance(after, Path):
+            return after
+    return None
+
+
+def _resolve_run_recording_dir(run_root: Path, report: dict[str, Any] | None) -> Path | None:
+    """Find the recording folder the run replayed, tolerating relocated absolute paths."""
+    from src.common.script_helper import is_recording_dir, recording_run_dir
+
+    candidates: list[str] = []
+    for payload in (report, _resolve_script_metadata(run_root)):
+        if not isinstance(payload, dict):
+            continue
+        raw = payload.get("script_path")
+        if isinstance(raw, str) and raw.strip():
+            candidates.append(raw.strip())
+    for raw in candidates:
+        recording = recording_run_dir(Path(raw))
+        if recording is not None:
+            return recording
+        name = Path(raw).name
+        if not name:
+            continue
+        for recordings_root in _recording_roots_for_remap(run_root):
+            mapped = recordings_root / name
+            if is_recording_dir(mapped):
+                return mapped
+    return None
+
+
+def _ordered_step_goals(groups: list[dict[str, Any]]) -> list[tuple[int, str]]:
+    """First goal seen for each script step index, in execution order (retries collapse)."""
+    ordered: list[tuple[int, str]] = []
+    seen: set[int] = set()
+    for group in groups:
+        step_index = group.get("script_step_index")
+        goal = group.get("goal")
+        if not isinstance(step_index, int) or step_index in seen:
+            continue
+        seen.add(step_index)
+        ordered.append((step_index, goal.strip() if isinstance(goal, str) else ""))
+    return ordered
+
+
+def _recording_baselines_by_step(
+    run_root: Path,
+    report: dict[str, Any] | None,
+    groups: list[dict[str, Any]],
+) -> dict[int, str]:
+    """Recorded after-screenshots per script step index, for report-only comparison.
+
+    Independent of the per-step verification checkbox, so the report can show the recorded
+    baseline next to the live screen even when vision verification was skipped. Steps are
+    matched to recording lines by goal text, which keeps old runs aligned after the script
+    gained or lost a step.
+    """
+    recording = _resolve_run_recording_dir(run_root, report)
+    if recording is None:
+        return {}
+    from src.common.script_helper import (
+        collect_recording_baseline_after_paths,
+        collect_recording_instructions,
+    )
+
+    try:
+        instructions, _ = collect_recording_instructions(recording)
+        baselines = collect_recording_baseline_after_paths(recording, include_disabled=True)
+    except (OSError, ValueError):
+        return {}
+    if len(instructions) != len(baselines):
+        return {}
+    step_goals = _ordered_step_goals(groups)
+    matcher = SequenceMatcher(
+        a=[goal for _, goal in step_goals],
+        b=[instruction.strip() for instruction in instructions],
+        autojunk=False,
+    )
+    resolved: dict[int, str] = {}
+    for block in matcher.get_matching_blocks():
+        for offset in range(block.size):
+            step_index = step_goals[block.a + offset][0]
+            baseline = baselines[block.b + offset]
+            if step_index not in resolved and isinstance(baseline, str) and baseline.strip():
+                resolved[step_index] = baseline.strip()
+    return resolved
+
+
+def _recording_baseline_for_group(group: dict[str, Any], baselines: dict[int, str]) -> str | None:
+    step_index = group.get("script_step_index")
+    if not isinstance(step_index, int):
+        return None
+    return baselines.get(step_index)
+
+
 def _load_step_verify_meta(run_root: Path) -> dict[tuple[int, int], dict[str, Any]]:
     """Load verification metadata from ``steps/*.json`` (source of truth for debugging)."""
     steps_dir = run_root / "steps"
@@ -3184,6 +3283,7 @@ def _load_instruction_groups(run_root: Path) -> list[dict[str, Any]]:
         goal = goals.get(key) or f"指令 {key[0] + 1}"
         entry: dict[str, Any] = {"goal": goal, "operations": groups[key]}
         entry.update(verify_meta.get(key, {}))
+        entry["script_step_index"] = key[1]
         grouped.append(entry)
 
     if ungrouped:
@@ -3267,12 +3367,18 @@ def _render_verify_panel_html(
     status: Any = None,
     verify_live_path: str | None = None,
     baseline_after_path: str | None = None,
+    live_fallback_shot: Path | None = None,
 ) -> str:
     """Render verifier decision for a scripted instruction group."""
     has_verify = isinstance(verify, dict)
     has_status = isinstance(status, str) and bool(status.strip())
     live_shot = _resolve_run_screenshot(verify_live_path, run_root)
+    live_label = "驗證時截圖（即時）"
     baseline_shot = _resolve_baseline_screenshot(baseline_after_path, run_root)
+    if live_shot is None and baseline_shot is not None and live_fallback_shot is not None:
+        # Verification may be off for the step; the last action's after shot is the live screen.
+        live_shot = live_fallback_shot
+        live_label = "執行後截圖（即時）"
     has_shots = live_shot is not None or baseline_shot is not None
     if not has_verify and not has_status and not has_shots:
         return ""
@@ -3315,7 +3421,7 @@ def _render_verify_panel_html(
     if has_shots:
         shot_parts: list[str] = []
         if live_shot is not None or verify_live_path:
-            shot_parts.append(_render_shot_html("驗證時截圖（即時）", live_shot, run_root))
+            shot_parts.append(_render_shot_html(live_label, live_shot, run_root))
         if baseline_shot is not None or baseline_after_path:
             shot_parts.append(
                 _render_shot_html("錄製基準截圖（after）", baseline_shot, run_root)
@@ -3400,6 +3506,7 @@ def _render_instruction_group_html(
         status=status,
         verify_live_path=verify_live_path,
         baseline_after_path=baseline_after_path,
+        live_fallback_shot=_last_after_shot(operations),
     )
 
     return (
@@ -5754,6 +5861,11 @@ def write_session_html_from_run(run_root: Path) -> Path:
         else 0
     )
     remaining_groups = instruction_groups[min(smart_actor_count, len(instruction_groups)) :]
+    recording_baselines = _recording_baselines_by_step(
+        run_root,
+        report if isinstance(report, dict) else None,
+        remaining_groups,
+    )
     groups_html = [
         _render_instruction_group_html(
             run_root=run_root,
@@ -5764,7 +5876,10 @@ def write_session_html_from_run(run_root: Path) -> Path:
             verify=group.get("verify"),
             status=group.get("status"),
             verify_live_path=_verify_live_path_from_group(group),
-            baseline_after_path=_baseline_path_from_group(group),
+            baseline_after_path=(
+                _baseline_path_from_group(group)
+                or _recording_baseline_for_group(group, recording_baselines)
+            ),
         )
         for index, group in enumerate(remaining_groups, start=smart_actor_count + 1)
     ]

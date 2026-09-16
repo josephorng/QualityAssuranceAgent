@@ -410,6 +410,199 @@ def test_write_session_html_shows_baseline_and_live_verify_shots(tmp_path: Path)
     assert "event_003.jpeg" in verify_panel
 
 
+def _write_playback_recording(recording: Path, instructions: list[str]) -> None:
+    """Recording fixture with verification switched off for every step."""
+    (recording / "events").mkdir(parents=True, exist_ok=True)
+    event_names: list[str] = []
+    for index, instruction in enumerate(instructions, start=1):
+        shot = _make_jpeg(recording / "screenshots" / f"event_{index:03d}.jpeg")
+        (recording / "events" / f"event_{index:03d}.json").write_text(
+            json.dumps(
+                {
+                    "index": index,
+                    "timestamp_utc": f"2026-07-21T04:0{index}:00+00:00",
+                    "kind": "click",
+                    "cursor_xy": [10, 20],
+                    "screenshot_path": str(shot),
+                    "text": None,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        event_names.append(f"events/event_{index:03d}.json")
+        (recording / "analysis").mkdir(exist_ok=True)
+        (recording / "analysis" / f"event_{index:03d}.json").write_text(
+            json.dumps(
+                {
+                    "event_index": index,
+                    "instruction": instruction,
+                    "use_expected_outcome": False,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    final_after = _make_jpeg(recording / "screenshots" / "final_after.jpeg")
+    (recording / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": recording.name,
+                "started_at_utc": "2026-07-21T04:00:00+00:00",
+                "stopped_at_utc": "2026-07-21T04:05:00+00:00",
+                "event_count": len(instructions),
+                "events": event_names,
+                "final_after_screenshot": str(final_after),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_write_session_html_shows_recording_baseline_when_verify_skipped(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = runs_root / "task_skipped_verify"
+    recording = tmp_path / "recordings" / "demo_rec"
+    instructions = ["點擊「搜尋」", "輸入「hello」"]
+    _write_playback_recording(recording, instructions)
+
+    first_after = _make_png(run_root / "eye" / "after_1.png")
+    second_after = _make_png(run_root / "eye" / "after_2.png")
+    timestamps = ["2026-06-11T06:00:05+00:00", "2026-06-11T06:00:15+00:00"]
+    for index, (instruction, timestamp) in enumerate(zip(instructions, timestamps)):
+        _write_step(
+            run_root,
+            transcript_counter=index,
+            script_step_index=index,
+            goal=instruction,
+            started_at=timestamp,
+            finished_at=timestamp,
+        )
+    _write_hand_csv(
+        run_root,
+        [
+            {
+                "timestamp": timestamps[0],
+                "action": "click",
+                "args": {"instruction": "「搜尋」"},
+                "ok": True,
+                "screenshot_name": "",
+                "screenshot_before_path": "",
+                "screenshot_after_path": str(first_after),
+                "message": "executed",
+            },
+            {
+                "timestamp": timestamps[1],
+                "action": "type_text",
+                "args": {"text": "hello"},
+                "ok": True,
+                "screenshot_name": "",
+                "screenshot_before_path": "",
+                "screenshot_after_path": str(second_after),
+                "message": "executed",
+            },
+        ],
+    )
+    (run_root / "report.json").write_text(
+        json.dumps(
+            {
+                # Relocated machine path: only the recording folder name still matches.
+                "script_path": r"C:\OtherMachine\ComputerUseAgent\recordings\demo_rec",
+                "script_name": "demo_rec",
+                "steps": [
+                    {
+                        "transcript_counter": index,
+                        "script_step_index": index,
+                        "goal": instruction,
+                    }
+                    for index, instruction in enumerate(instructions)
+                ],
+                "tool_results": [
+                    {
+                        "transcript_counter": index,
+                        "script_step_index": index,
+                        "timestamp_utc": timestamp,
+                    }
+                    for index, timestamp in enumerate(timestamps)
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_session_html_from_run(run_root).read_text(encoding="utf-8")
+
+    assert html.count("錄製基準截圖（after）") == 4
+    assert "執行後截圖（即時）" in html
+    assert "驗證時截圖（即時）" not in html
+    # Step 1 compares against the next event's before shot; the last step uses final_after.
+    assert 'src="../../recordings/demo_rec/screenshots/event_002.jpeg"' in html
+    assert 'src="../../recordings/demo_rec/screenshots/final_after.jpeg"' in html
+    assert 'src="eye/after_1.png"' in html
+    assert 'src="eye/after_2.png"' in html
+    assert "OtherMachine" not in html
+
+
+def test_write_session_html_skips_baseline_when_step_goal_shifted(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = runs_root / "task_shifted_script"
+    recording = tmp_path / "recordings" / "demo_rec"
+    _write_playback_recording(recording, ["點擊「搜尋」", "輸入「hello」"])
+
+    after = _make_png(run_root / "eye" / "after_1.png")
+    timestamp = "2026-06-11T06:00:05+00:00"
+    _write_step(
+        run_root,
+        transcript_counter=0,
+        script_step_index=0,
+        goal="點擊「設定」",
+        started_at=timestamp,
+        finished_at=timestamp,
+    )
+    _write_hand_csv(
+        run_root,
+        [
+            {
+                "timestamp": timestamp,
+                "action": "click",
+                "args": {"instruction": "「設定」"},
+                "ok": True,
+                "screenshot_name": "",
+                "screenshot_before_path": "",
+                "screenshot_after_path": str(after),
+                "message": "executed",
+            }
+        ],
+    )
+    (run_root / "report.json").write_text(
+        json.dumps(
+            {
+                "script_path": str(recording),
+                "script_name": "demo_rec",
+                "steps": [
+                    {"transcript_counter": 0, "script_step_index": 0, "goal": "點擊「設定」"}
+                ],
+                "tool_results": [
+                    {
+                        "transcript_counter": 0,
+                        "script_step_index": 0,
+                        "timestamp_utc": timestamp,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_session_html_from_run(run_root).read_text(encoding="utf-8")
+
+    assert "錄製基準截圖（after）" not in html
+    assert "執行後截圖（即時）" not in html
+
+
 def test_write_session_html_merges_smart_cycle_with_executed_tools(tmp_path: Path) -> None:
     run_root = tmp_path / "smart_20260730_090228_245442"
     timestamp = "2026-07-30T09:02:46+00:00"

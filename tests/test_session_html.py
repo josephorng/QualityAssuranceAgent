@@ -5,8 +5,10 @@ import json
 import re
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
+from src.common import settings as settings_module
 from src.common.session_html import (
     _typed_text_candidates,
     recording_html_path,
@@ -1792,6 +1794,46 @@ def test_write_runs_index_lists_sibling_recordings_folder(tmp_path: Path) -> Non
     ).read_text(encoding="utf-8")
     assert 'href="../recordings/recording_20260721_120000_000003/recording_steps.html"' in html
     assert "recording_20260721_120000_000003" in html
+
+
+def test_recording_page_links_primary_runs_index_when_dirs_are_siblings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs_root = tmp_path / "runs"
+    recordings_root = tmp_path / "recordings"
+    runs_root.mkdir()
+    recordings_root.mkdir()
+    monkeypatch.setattr(settings_module, "resolve_runs_dir", lambda *_, **__: runs_root.resolve())
+    monkeypatch.setattr(
+        settings_module, "resolve_recordings_dir", lambda *_, **__: recordings_root.resolve()
+    )
+
+    recording = recordings_root / "recording_20260721_120000_000004"
+    _write_recording_fixture(recording)
+
+    html = write_recording_html_from_run(recording, update_index=False).read_text(
+        encoding="utf-8"
+    )
+
+    assert 'href="../../runs/index.html#recordings"' in html
+
+
+def test_recordings_dir_index_redirects_to_primary_runs_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs_root = tmp_path / "runs"
+    recordings_root = tmp_path / "recordings"
+    runs_root.mkdir()
+    recordings_root.mkdir()
+    monkeypatch.setattr(settings_module, "resolve_runs_dir", lambda *_, **__: runs_root.resolve())
+    monkeypatch.setattr(
+        settings_module, "resolve_recordings_dir", lambda *_, **__: recordings_root.resolve()
+    )
+
+    html = write_runs_index_html(recordings_root).read_text(encoding="utf-8")
+
+    assert 'url=../runs/index.html#recordings' in html
+    assert 'data-tab="runs"' not in html
 
 
 def test_write_runs_index_lists_renamed_recording_without_prefix(tmp_path: Path) -> None:

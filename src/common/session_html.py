@@ -3705,6 +3705,36 @@ def _iter_recording_report_dirs(runs_root: Path) -> list[Path]:
     return found
 
 
+def _primary_runs_index_root(reports_dir: Path) -> Path | None:
+    """Primary runs dir when ``reports_dir`` is a recordings dir served beside it.
+
+    A recordings dir holds no run reports, so an ``index.html`` written there has
+    empty 執行報告 / 智能模式 tabs. When both dirs share a parent that parent is the
+    HTTP document root (see ``reports_serve_root``), so the primary runs index is
+    reachable from recordings pages and is used instead.
+    """
+    try:
+        from src.common.settings import resolve_recordings_dir, resolve_runs_dir
+
+        runs = resolve_runs_dir()
+        recordings = resolve_recordings_dir()
+    except Exception:
+        return None
+    if runs == recordings or runs.parent != recordings.parent:
+        return None
+    if Path(reports_dir).resolve() != recordings:
+        return None
+    return runs
+
+
+def _reports_index_href(run_root: Path, *, fragment: str = "") -> str:
+    """Link from a report page to the index that actually lists every report."""
+    run_root = Path(run_root).resolve()
+    index_dir = _primary_runs_index_root(run_root.parent) or run_root.parent
+    href = _href_relative_to_index(runs_index_html_path(index_dir), run_root)
+    return f"{href}{fragment}"
+
+
 def _default_recordings_root_for_index(runs_root: Path) -> Path:
     """When indexing the primary runs dir, also include the configured recordings dir."""
     try:
@@ -5049,12 +5079,34 @@ def _backfill_recording_html(runs_root: Path) -> None:
         write_recording_html_from_run(run_dir, update_index=False)
 
 
+def _write_reports_index_redirect(index_dir: Path, primary_runs_root: Path) -> Path:
+    """Point a recordings-dir ``index.html`` at the index that lists every report."""
+    href = _href_relative_to_index(runs_index_html_path(primary_runs_root), index_dir)
+    target = f"{href}#recordings"
+    html = (
+        "<!DOCTYPE html>\n"
+        '<html lang="zh-Hant">\n<head>\n'
+        '<meta charset="utf-8">\n'
+        f'<meta http-equiv="refresh" content="0; url={target}">\n'
+        "<title>工作階段報告列表</title>\n"
+        "</head>\n<body>\n"
+        f'<p><a href="{target}">前往報告列表</a></p>\n'
+        "</body>\n</html>\n"
+    )
+    path = runs_index_html_path(index_dir)
+    path.write_text(html, encoding="utf-8")
+    return path
+
+
 def write_runs_index_html(
     runs_root: Path, *, recordings_root: Path | None = None
 ) -> Path:
     """Build ``index.html`` with tabs for agent runs, smart mode, and recordings."""
     runs_root = Path(runs_root)
     runs_root.mkdir(parents=True, exist_ok=True)
+    primary_runs_root = _primary_runs_index_root(runs_root)
+    if primary_runs_root is not None:
+        return _write_reports_index_redirect(runs_root, primary_runs_root)
     if recordings_root is None:
         recordings_root = _default_recordings_root_for_index(runs_root)
     else:
@@ -5739,7 +5791,9 @@ def write_session_html_from_run(run_root: Path) -> Path:
     )
 
     title = escape(_resolve_session_title(run_root))
-    nav_href = "../index.html#smart" if _is_smart_run_dir(run_root) else "../index.html"
+    nav_href = _reports_index_href(
+        run_root, fragment="#smart" if _is_smart_run_dir(run_root) else ""
+    )
     html = (
         "<!DOCTYPE html>\n"
         '<html lang="zh-Hant">\n<head>\n'
@@ -5806,6 +5860,7 @@ def write_recording_html_from_run(run_root: Path, *, update_index: bool = True) 
         "</div>"
     )
     tabs = _render_page_tabs_nav()
+    nav_href = _reports_index_href(run_root, fragment="#recordings")
     profile_body = _render_recording_time_profile_html(run_root, events, manifest)
     body = (
         f"{tabs}\n"
@@ -5825,7 +5880,7 @@ def write_recording_html_from_run(run_root: Path, *, update_index: bool = True) 
         f"<title>{title}</title>\n"
         f"<style>\n{_STYLE}\n.empty {{ color: #8c959f; font-style: italic; }}\n</style>\n"
         "</head>\n<body>\n"
-        '<p class="nav"><a href="../index.html#recordings">← 報告列表</a></p>\n'
+        f'<p class="nav"><a href="{nav_href}">← 報告列表</a></p>\n'
         f"<h1>{title}</h1>\n"
         '<p class="intro">依錄製事件排列的操作紀錄。點選事件可展開細節與截圖。</p>\n'
         f"{body}\n"

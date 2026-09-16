@@ -2648,19 +2648,17 @@ class MainHub(ctk.CTk):
         run_id: str,
     ) -> None:
         html_path: Path | None = None
-        if folder is not None:
-            candidate = Path(folder) / "recording_steps.html"
-            if candidate.is_file():
-                html_path = candidate
-            elif Path(folder).is_dir():
-                try:
-                    from src.common.session_html import write_recording_html_from_run
+        if folder is not None and Path(folder).is_dir():
+            # Always rebuild: pages written by older versions carry stale links.
+            try:
+                from src.common.session_html import write_recording_html_from_run
 
-                    html_path = write_recording_html_from_run(
-                        Path(folder), update_index=False
-                    )
-                except Exception:
-                    html_path = None
+                html_path = write_recording_html_from_run(
+                    Path(folder), update_index=False
+                )
+            except Exception:
+                candidate = Path(folder) / "recording_steps.html"
+                html_path = candidate if candidate.is_file() else None
         if html_path is None and run_id:
             settings = load_settings()
             for root in (Path(settings.runs_dir), Path(settings.recordings_dir)):

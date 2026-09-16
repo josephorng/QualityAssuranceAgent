@@ -89,6 +89,7 @@ _HUB_UI_VERSION = 3
 _MODE_TAB_SINGLE = "單一腳本"
 _MODE_TAB_QUEUE = "佇列執行"
 _MODE_TAB_SMART = "智能模式"
+_HUB_HIDE_SETTLE_SECONDS = 0.4
 
 _RECORDING_FOLDER_RENAME_ERRORS = {
     "invalid run name": "資料夾名稱無效（不可為空白，也不可含 \\ / : * ? \" < > |）。",
@@ -2165,6 +2166,7 @@ class MainHub(ctk.CTk):
         if self._is_analysis_running():
             self._analysis_cancel_event.set()
         if self._recording_session.is_active():
+            self._hide_hub_before_final_capture()
             self._recording_session.stop()
             self._vision_prefetch.drain_and_stop(timeout=5.0)
         elif self._is_recording_finalizing():
@@ -2330,7 +2332,21 @@ class MainHub(ctk.CTk):
         self._recording_session.begin_stop()
         self._set_hub_controls_finalizing()
         self._status.configure(text="正在完成錄製…", text_color=("gray20", "gray65"))
+        # finalize_stop captures final_after; hide the hub first so the baseline shows
+        # the recorded app instead of the hub the user reopened to press stop.
+        self._hide_hub_before_final_capture()
         self._start_recording_finalize_worker(analyze=analyze)
+
+    def _hide_hub_before_final_capture(self) -> None:
+        """Iconify the hub and wait for the minimize animation to clear the screen."""
+        try:
+            if not self.winfo_viewable():
+                return
+            self.iconify()
+            self.update_idletasks()
+        except Exception:
+            return
+        time.sleep(_HUB_HIDE_SETTLE_SECONDS)
 
     def _start_recording_finalize_worker(self, *, analyze: bool) -> None:
         if self._recording_finalize_thread is not None and self._recording_finalize_thread.is_alive():

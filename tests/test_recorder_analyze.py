@@ -947,6 +947,88 @@ def test_pick_disambiguating_hints_tier_gates_icon_behind_text() -> None:
     assert "「Python 終端機」圖示" not in labels
 
 
+def _grid_text(cx: int, cy: int, w: int, h: int, s: str) -> dict:
+    return {
+        "bbox": [cx - w // 2, cy - h // 2, w, h],
+        "center": [cx, cy],
+        "class_name": "text",
+        "text": s,
+    }
+
+
+def _asset_grid_repeated_company_texts() -> list[dict]:
+    """「新竹公司」repeats down every row and across two columns of the grid."""
+    return [
+        _grid_text(cx, cy, 48, 14, "新竹公司")
+        for cx, cy in (
+            (450, 120),
+            (580, 120),
+            (450, 144),
+            (580, 143),
+            (450, 166),
+            (450, 189),
+            (450, 212),
+        )
+    ]
+
+
+def test_collect_nearby_hints_prefers_unique_label_over_repeated() -> None:
+    """A label repeated across grid rows pins nothing down at playback.
+
+    「新竹公司」sits on the target's own row and wins the fill on cell rank, but it
+    occurs seven times on screen, so the side check would pass against any of
+    them. The unique column header 「資產名稱」must take the slot instead.
+    """
+    from src.recorder.vision_context import collect_nearby_hints
+
+    vision = {
+        "used_vision": True,
+        "local_cursor": [276, 121],
+        "candidates": [
+            *_asset_grid_checkboxes(),
+            _ASSET_GRID_ROW_TEXT,
+            _grid_text(263, 80, 72, 13, "資產設備清單"),
+            _grid_text(349, 99, 49, 13, "資產名稱"),
+            *_asset_grid_repeated_company_texts(),
+        ],
+    }
+    labels = [
+        hint.label
+        for hint in collect_nearby_hints(
+            vision, instruction="將滑鼠移到「方框、矩形框線」圖示"
+        )
+    ]
+    assert "「資產名稱」文字" in labels
+    assert "「新竹公司」文字" not in labels
+
+
+def test_collect_nearby_hints_allows_repeated_label_when_nothing_unique() -> None:
+    """Preference, not prohibition: a weak hint still beats emitting none.
+
+    Only repeated text and unique icons are on offer here. The repeated text is
+    still chosen over the icons, since a hint that matches the wrong instance of
+    the right label degrades better than one whose label may not decode at all.
+    """
+    from src.recorder.vision_context import collect_nearby_hints
+
+    vision = {
+        "used_vision": True,
+        "local_cursor": [276, 121],
+        "candidates": [
+            *_asset_grid_checkboxes(),
+            _ASSET_GRID_ROW_ICON,
+            *_asset_grid_repeated_company_texts(),
+        ],
+    }
+    labels = [
+        hint.label
+        for hint in collect_nearby_hints(
+            vision, instruction="將滑鼠移到「方框、矩形框線」圖示"
+        )
+    ]
+    assert "「新竹公司」文字" in labels
+
+
 def test_pick_disambiguating_hints_still_uses_icon_as_last_resort() -> None:
     """Icon-only neighbourhoods (toolbars) keep their landmarks; the gate is not a ban."""
     from src.recorder.vision_context import _pick_disambiguating_hints

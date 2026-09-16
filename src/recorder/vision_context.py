@@ -1222,6 +1222,23 @@ def _label_already_in_instruction(label: str, instruction: str) -> bool:
     return False
 
 
+def _label_frequencies(candidates: list[Any]) -> dict[str, int]:
+    """Count how often each hint label appears among ``candidates``.
+
+    A label occurring more than once cannot be pinned down at playback: the side
+    check passes against *any* matching detection, so the hint stops identifying
+    a specific landmark.
+    """
+    freq: dict[str, int] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        label = _candidate_label_for_hint(candidate)
+        if label:
+            freq[label] = freq.get(label, 0) + 1
+    return freq
+
+
 def _nearby_hint_tier(candidate: dict[str, Any], label: str) -> int:
     """Lower tier is preferred when selecting nearby landmarks.
 
@@ -1620,13 +1637,7 @@ def _score_disambiguating_landmarks(
     if primary_bbox is None or primary_center is None:
         return []
 
-    label_freq: dict[str, int] = {}
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            continue
-        lab = _candidate_label_for_hint(candidate)
-        if lab:
-            label_freq[lab] = label_freq.get(lab, 0) + 1
+    label_freq = _label_frequencies(candidates)
 
     confusable_ids = {id(peer) for peer in confusables}
     peer_centers: dict[int, tuple[int, int]] = {}
@@ -1859,9 +1870,14 @@ def _prioritized_nearby_parts(
 ) -> tuple[list[NearbyHint], list[NearbyHint]]:
     """Split containing-container hints from ranked eligible neighbors.
 
-    Ranking matches ``collect_nearby_hints``: Tier 0 multi-char text first
-    (left → right → top → bottom, then diagonals/center), then other labels,
-    then icons. Within the same rank, keeps distance order from ``candidates``.
+    Ranking matches ``collect_nearby_hints``: Tier 0 multi-char text first, then
+    other labels, then icons; within a tier, labels unique on screen outrank
+    repeated ones, then left → right → top → bottom (then diagonals/center).
+    Within the same rank, keeps distance order from ``candidates``.
+
+    Uniqueness is preferred rather than required, unlike the greedy cover in
+    ``_pick_disambiguating_hints``: these are fill landmarks, so in a grid where
+    every label repeats a weak hint still beats emitting none.
     """
     candidates = vision.get("candidates") or []
     if len(candidates) < 2:
@@ -1888,7 +1904,9 @@ def _prioritized_nearby_parts(
     disambiguating_labels = {hint.label for hint in disambiguating}
     reserved_labels = forced_labels | disambiguating_labels
 
-    eligible: list[tuple[int, int, int, dict[str, Any], str]] = []
+    label_freq = _label_frequencies(candidates)
+
+    eligible: list[tuple[int, int, int, int, int, dict[str, Any], str]] = []
     seen: set[str] = set(reserved_labels)
     for order, candidate in enumerate(candidates[1:]):
         if not isinstance(candidate, dict):
@@ -1906,12 +1924,15 @@ def _prioritized_nearby_parts(
             else 0
         )
         spatial_rank = int(candidate.get("spatial_region_rank", 0))
-        eligible.append((spatial_rank, tier, cell_rank, order, candidate, label))
+        repeated = 1 if label_freq.get(label, 1) > 1 else 0
+        eligible.append(
+            (spatial_rank, tier, repeated, cell_rank, order, candidate, label)
+        )
 
-    eligible.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+    eligible.sort(key=lambda item: (item[0], item[1], item[2], item[3], item[4]))
 
     ranked: list[NearbyHint] = []
-    for _spatial, _tier, _cell_rank, _order, candidate, label in eligible:
+    for _spatial, _tier, _repeated, _cell_rank, _order, candidate, label in eligible:
         side = _neighbor_side_for_candidate(
             candidate,
             primary_bbox=primary_bbox,
@@ -1986,6 +2007,8 @@ def collect_nearby_hints(
 
     Walks neighbors until at least ``max_count`` multi-character text landmarks
     are found. If fewer exist, fills remaining slots with other neighbors.
+    Within a tier, labels unique on screen are preferred over repeated ones (a
+    repeated label matches any instance at playback, so it pins nothing down).
     Within Tier 0 (multi-char text), prefers landmarks on the left, then right,
     then top, then bottom of the target; diagonals/center follow. Within the
     same cell rank (and for lower tiers), keeps distance order from

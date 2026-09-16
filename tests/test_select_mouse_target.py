@@ -2544,19 +2544,21 @@ def test_prefilter_anchors_by_nearby_ranks_partial_coverage() -> None:
     assert kept == [row_test1]
 
 
-def test_prefilter_anchors_by_nearby_ignores_far_landmark() -> None:
-    """A same-named detection across the screen must not satisfy a directed hint.
+def test_prefilter_anchors_by_nearby_ties_on_far_landmark() -> None:
+    """A far same-named detection ties its anchor with the real target.
 
     Generalizes the 資產設備 7_7 hazard: the landmark beside the target row was
-    misdecoded, leaving only a match 780px away that playback still accepted as a
-    constraint. Here the stray 「說明」 sits on the select-all header's row, so the
-    9-grid reads it as 在「說明」文字的左邊 for the header — without the locality
-    guard that ties the header with the real target and sends both to the picker.
+    misdecoded, leaving only a match 780px away. Here the stray 「說明」 sits on
+    the select-all header's row, so the 9-grid reads it as 在「說明」文字的左邊 for
+    the header. Distance no longer disqualifies a landmark, so the header keeps
+    its single covered hint and ties with the test1 row — both go to the LLM
+    picker rather than one being committed to by ``select_unique``. The rows
+    below cover nothing and are still dropped.
     """
     from src.common.nearby_side import NearbyHint, Side
 
     anchors = _asset_grid_checkbox_anchors()
-    row_test1 = anchors[1]
+    header, row_test1 = anchors[0], anchors[1]
     nearby_matches = [
         _detection_from_bbox((316, 117, 20, 10), YOLO_CLASS_TEXT, text="test1"),
         # Far right of the window, vertically aligned with the header row.
@@ -2567,28 +2569,39 @@ def test_prefilter_anchors_by_nearby_ignores_far_landmark() -> None:
         NearbyHint(label="「說明」文字", side=Side.LEFT),
     ]
     kept = _prefilter_anchors_by_nearby(anchors, nearby_matches, hints)
-    assert kept == [row_test1]
+    assert kept == [header, row_test1]
 
 
-def test_anchor_locality_radius_tolerates_one_far_outlier_anchor() -> None:
-    """A stray far anchor must not stretch the radius across the whole screen.
+def test_prefilter_anchors_by_nearby_login_form_picks_labelled_field() -> None:
+    """Reproduce 打開神網 3_3.log: pick the 帳號 field, not the 密碼 field.
 
-    7_7 had a spurious 「方框、矩形框線」 at (41,875) sharing the anchor label. A
-    max-peer-distance radius would grow to ~790px and re-admit the taskbar
-    landmark, so the radius scales by the median peer distance instead.
+    Stacked login inputs sit 37px apart while their field labels sit ~123px to
+    the left of each input's center. The 帳號 field satisfies all four directed
+    hints; the 密碼 field satisfies only the two that are true of every row
+    (確定/上面 and 登入系統/右下方). A distance gate keyed on peer spacing dropped
+    the 帳號 field's own label and handed the step to the 密碼 field.
     """
-    from cua_mcp.select_mouse_target import _anchor_locality_radius
+    from src.common.nearby_side import NearbyHint, Side
 
-    outlier = _detection_from_bbox(
-        (36, 871, 11, 8), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "方框、矩形框線"}]
-    )
-    anchors = [*_asset_grid_checkbox_anchors(), outlier]
-    # Index 1 is the test1 row; its peers sit 20-113px away plus the outlier.
-    radius = _anchor_locality_radius(anchors, 1)
-    assert radius is not None
-    assert radius < 200
-    # Single-anchor pools have no peers to scale against, so the guard is off.
-    assert _anchor_locality_radius(anchors[:1], 0) is None
+    title_row = _detection_from_bbox((830, 365, 259, 19), YOLO_CLASS_INPUT)
+    account = _detection_from_bbox((897, 400, 157, 20), YOLO_CLASS_INPUT)
+    password = _detection_from_bbox((895, 436, 161, 23), YOLO_CLASS_INPUT)
+    taskbar_search = _detection_from_bbox((49, 879, 348, 40), YOLO_CLASS_INPUT)
+    anchors = [title_row, account, password, taskbar_search]
+    nearby_matches = [
+        _detection_from_bbox((833, 366, 50, 13), YOLO_CLASS_TEXT, text="登入系統"),
+        _detection_from_bbox((839, 402, 26, 13), YOLO_CLASS_TEXT, text="帳號"),
+        _detection_from_bbox((839, 439, 26, 13), YOLO_CLASS_TEXT, text="密碼"),
+        _detection_from_bbox((914, 481, 25, 13), YOLO_CLASS_TEXT, text="確定"),
+    ]
+    hints = [
+        NearbyHint(label="「帳號」文字", side=Side.RIGHT),
+        NearbyHint(label="「密碼」文字", side=Side.UPPER_RIGHT),
+        NearbyHint(label="「確定」文字", side=Side.ABOVE),
+        NearbyHint(label="「登入系統」文字", side=Side.LOWER_RIGHT),
+    ]
+    kept = _prefilter_anchors_by_nearby(anchors, nearby_matches, hints)
+    assert kept == [account]
 
 
 def test_prefilter_anchors_by_nearby_noop_without_nearby() -> None:

@@ -8,7 +8,6 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-import math
 from pathlib import Path
 import re
 import time
@@ -1025,10 +1024,6 @@ def _detection_similarity_to_query(det: UiDetection, query: str) -> float:
 # Minimum SequenceMatcher score to keep a candidate before the LLM filter.
 _MOUSE_FILTER_SIMILARITY_THRESHOLD = 0.5
 
-# Slack added to an anchor's locality radius, matching the recorder's pad in
-# ``_landmark_relevant_to_peer`` so field labels beside a control still count.
-_NEARBY_LOCALITY_PAD_PX = 80.0
-
 
 def _detections_label_similar(
     left: UiDetection,
@@ -1631,38 +1626,6 @@ def _merge_nearby_labels(*sources: list[str] | None) -> list[str]:
     return nearby_hints_to_phrases(merge_nearby_hints(*sources))
 
 
-def _center_distance(a: UiDetection, b: UiDetection) -> float:
-    """Euclidean distance between two detection centers."""
-    return float(math.hypot(a.cx - b.cx, a.cy - b.cy))
-
-
-def _anchor_locality_radius(anchors: list[UiDetection], index: int) -> float | None:
-    """How far a landmark may sit from ``anchors[index]`` and still constrain it.
-
-    Playback counterpart of the recorder's ``_landmark_relevant_to_peer``: a
-    landmark only disambiguates a target from its peers when it is roughly as
-    close to the target as those peers are. Without this, a same-named detection
-    anywhere on screen is a valid constraint — a taskbar 「對話氣泡、評論」 780px
-    away once "satisfied" a hint meant for the icon beside a grid row.
-
-    Scales by the **median** peer distance so one spurious far match in the anchor
-    pool (a stray taskbar detection sharing the anchor label) cannot stretch the
-    radius to cover the whole screen, while genuinely wide pools — e.g. a 2x2 grid
-    whose column cue is a distant OK button — keep their far landmarks.
-
-    Returns ``None`` when there are no peers, leaving the anchor unconstrained.
-    """
-    others = [d for i, d in enumerate(anchors) if i != index]
-    if not others:
-        return None
-    dists = sorted(_center_distance(anchors[index], d) for d in others)
-    mid = len(dists) // 2
-    median = (
-        dists[mid] if len(dists) % 2 else 0.5 * (dists[mid - 1] + dists[mid])
-    )
-    return median + _NEARBY_LOCALITY_PAD_PX
-
-
 def _hint_covered_by_neighbors(
     anchor: UiDetection,
     neighbors: list[UiDetection],
@@ -1670,16 +1633,9 @@ def _hint_covered_by_neighbors(
     *,
     threshold: float,
     require_side: bool,
-    max_distance: float | None = None,
 ) -> bool:
-    """True when some neighbor matches ``hint`` (label, optional side).
-
-    ``max_distance`` drops neighbors too far from ``anchor`` to be relevant
-    (see :func:`_anchor_locality_radius`); ``None`` disables the check.
-    """
+    """True when some neighbor matches ``hint`` (label, optional side)."""
     for neigh in neighbors:
-        if max_distance is not None and _center_distance(anchor, neigh) > max_distance:
-            continue
         if _detection_similarity_to_query(neigh, hint.label) < threshold:
             continue
         if require_side and hint.side is not None:
@@ -1712,34 +1668,16 @@ def _prefilter_anchors_by_nearby(
     2 of 3.
 
     Directed sides are checked against **all** ``nearby_matches`` for each anchor
-    (so exclusive distance assignment cannot hide the correct side), but only
-    within that anchor's locality radius (see :func:`_anchor_locality_radius`) so
-    a same-named detection across the screen cannot pose as the landmark.
-    Undirected labels still use exclusive assignment. If directed sides wipe every
-    anchor, retry with label-only coverage. If none match, return ``anchors``
-    unchanged.
+    (so exclusive distance assignment cannot hide the correct side); distance
+    never disqualifies a landmark. Undirected labels still use exclusive
+    assignment. If directed sides wipe every anchor, retry with label-only
+    coverage. If none match, return ``anchors`` unchanged.
     """
     hints = normalize_nearby_hints(nearby_labels)
     if not anchors or not nearby_matches or not hints:
         return anchors
 
     assigned = _assign_exclusive_neighbors_to_anchors(anchors, nearby_matches)
-    radii = [_anchor_locality_radius(anchors, i) for i in range(len(anchors))]
-
-    out_of_range = [
-        neigh
-        for neigh in nearby_matches
-        if all(
-            radius is not None and _center_distance(anchor, neigh) > radius
-            for anchor, radius in zip(anchors, radii, strict=True)
-        )
-    ]
-    if out_of_range:
-        centers = ", ".join(f"({d.cx},{d.cy})" for d in out_of_range)
-        _log_info(
-            "move_mouse nearby locality guard: ignoring landmark(s) too far "
-            f"from every anchor centers=[{centers}]"
-        )
 
     def _select(require_side: bool) -> list[UiDetection]:
         coverage: list[set[int]] = []
@@ -1757,7 +1695,6 @@ def _prefilter_anchors_by_nearby(
                     hint,
                     threshold=threshold,
                     require_side=require_side,
-                    max_distance=radii[i],
                 ):
                     covered.add(li)
             coverage.append(covered)

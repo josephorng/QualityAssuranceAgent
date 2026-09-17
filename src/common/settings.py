@@ -24,18 +24,16 @@ AGENT_SETTINGS_SCHEMA: tuple[tuple[str, str, str], ...] = (
     ("vision_backend", "Vision 後端", "option"),
 )
 
-VISION_BACKEND_CHOICES = frozenset({"triton_local", "triton_192_168_0_17"})
+VISION_BACKEND_CHOICES = frozenset({"triton_192_168_0_17"})
 _LEGACY_VISION_BACKEND_ALIASES = {
-    "auto": "triton_local",
-    "local": "triton_local",
-    "triton": "triton_local",
+    "auto": "triton_192_168_0_17",
+    "local": "triton_192_168_0_17",
+    "triton": "triton_192_168_0_17",
+    "triton_local": "triton_192_168_0_17",
 }
 
 # Fixed Triton host per vision preset (edited only via vision choice in the hub dialog).
 VISION_BACKEND_PRESETS: dict[str, dict[str, str]] = {
-    "triton_local": {
-        "triton_http_url": "http://127.0.0.1:9000",
-    },
     "triton_192_168_0_17": {
         "triton_http_url": "http://192.168.0.17:9000",
     },
@@ -218,7 +216,7 @@ def canonicalize_llm_backend(backend: str) -> str:
 
 
 def canonicalize_vision_backend(backend: str) -> str:
-    """Return a known vision preset key (e.g. ``triton_local``)."""
+    """Return a known vision preset key (e.g. ``triton_192_168_0_17``)."""
     key = str(backend).strip().lower()
     key = _LEGACY_VISION_BACKEND_ALIASES.get(key, key)
     if key not in VISION_BACKEND_CHOICES:

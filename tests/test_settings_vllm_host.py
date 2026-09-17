@@ -4,6 +4,7 @@ from src.common.settings import (
     apply_startup_triton_probe,
     apply_startup_vllm_host_probe,
     canonicalize_llm_backend,
+    canonicalize_vision_backend,
     normalize_agent_settings_dict,
     probe_llm_backend,
     probe_vision_backend,
@@ -78,13 +79,21 @@ def test_normalize_agent_settings_includes_vision_fields() -> None:
     out = normalize_agent_settings_dict(
         {
             "llm_backend": "vllm_server",
-            "vision_backend": "triton_local",
+            "vision_backend": "triton_192_168_0_17",
             "triton_http_url": "http://localhost:9000/",
         }
     )
-    assert out["vision_backend"] == "triton_local"
-    assert out["triton_http_url"] == "http://127.0.0.1:9000"
+    assert out["vision_backend"] == "triton_192_168_0_17"
+    assert out["triton_http_url"] == "http://192.168.0.17:9000"
     assert out["llm_backend"] == "vllm_server"
+
+
+def test_legacy_local_vision_backends_map_to_remote_preset() -> None:
+    for legacy in ("auto", "local", "triton", "triton_local"):
+        assert canonicalize_vision_backend(legacy) == "triton_192_168_0_17"
+    out = normalize_agent_settings_dict({"vision_backend": "triton_local"})
+    assert out["vision_backend"] == "triton_192_168_0_17"
+    assert out["triton_http_url"] == "http://192.168.0.17:9000"
 
 
 def test_normalize_agent_settings_remote_vision_preset() -> None:
@@ -100,10 +109,10 @@ def test_normalize_agent_settings_remote_vision_preset() -> None:
 
 def test_probe_vision_backend_triton_success(monkeypatch) -> None:
     monkeypatch.setattr("src.common.settings.triton_health_responds", lambda url: True)
-    ok, message = probe_vision_backend("triton_local")
+    ok, message = probe_vision_backend("triton_192_168_0_17")
     assert ok is True
     assert "Triton 連線成功" in message
-    assert "127.0.0.1:9000" in message
+    assert "192.168.0.17:9000" in message
 
 
 def test_probe_vision_backend_remote_preset(monkeypatch) -> None:
@@ -115,7 +124,7 @@ def test_probe_vision_backend_remote_preset(monkeypatch) -> None:
 
 def test_probe_vision_backend_triton_failure(monkeypatch) -> None:
     monkeypatch.setattr("src.common.settings.triton_health_responds", lambda url: False)
-    ok, message = probe_vision_backend("triton_local")
+    ok, message = probe_vision_backend("triton_192_168_0_17")
     assert ok is False
     assert "無法連線至 Triton" in message
 
@@ -127,8 +136,8 @@ def test_apply_startup_triton_probe_success(monkeypatch) -> None:
             "S",
             (),
             {
-                "triton_http_url": "http://localhost:9000",
-                "vision_backend": "triton_local",
+                "triton_http_url": "http://192.168.0.17:9000",
+                "vision_backend": "triton_192_168_0_17",
             },
         )(),
     )

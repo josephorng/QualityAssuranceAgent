@@ -35,12 +35,10 @@ _BACKEND_MENU_VALUES = [
 ]
 
 _VISION_BACKEND_LABELS: dict[str, str] = {
-    "triton_local": "triton（本機 127.0.0.1）",
     "triton_192_168_0_17": "triton（192.168.0.17）",
 }
 _VISION_LABEL_TO_BACKEND = {label: key for key, label in _VISION_BACKEND_LABELS.items()}
 _VISION_BACKEND_MENU_VALUES = [
-    _VISION_BACKEND_LABELS["triton_local"],
     _VISION_BACKEND_LABELS["triton_192_168_0_17"],
 ]
 

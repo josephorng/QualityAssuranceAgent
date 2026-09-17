@@ -4,6 +4,9 @@ split the image into overlapping 2×2 tiles, predict each, merge with NMS.
 
 Also optional overlap refine: when text boxes overlap / cross / look multi-line,
 crop each hard cluster and re-run YOLO at higher effective resolution.
+
+After that, optional line cut (Stage 4): any text box still holding multiple lines is
+split at row-profile valleys by :mod:`cua_mcp.text_line_cut` (model-free).
 """
 
 from __future__ import annotations
@@ -14,6 +17,8 @@ from typing import Any, Callable, Sequence
 
 import cv2
 import numpy as np
+
+from cua_mcp.text_line_cut import LINE_CUT_DEFAULT, cut_multiline_text_boxes
 
 # Ultralytics default ``max_det``; end2end ONNX exports often share this cap.
 YOLO_MAX_DET_DEFAULT: int = 300
@@ -61,6 +66,7 @@ class DetectArrays:
     full_count: int
     used_overlap_refine: bool = False
     refine_crop_count: int = 0
+    line_cut_count: int = 0
 
 
 def empty_detect_arrays(
@@ -69,6 +75,7 @@ def empty_detect_arrays(
     full_count: int = 0,
     used_overlap_refine: bool = False,
     refine_crop_count: int = 0,
+    line_cut_count: int = 0,
 ) -> DetectArrays:
     return DetectArrays(
         xyxy=np.zeros((0, 4), dtype=np.float32),
@@ -78,6 +85,7 @@ def empty_detect_arrays(
         full_count=full_count,
         used_overlap_refine=used_overlap_refine,
         refine_crop_count=refine_crop_count,
+        line_cut_count=line_cut_count,
     )
 
 
@@ -889,6 +897,7 @@ def predict_ultralytics_with_2x2_fallback(
     overlap_frac: float = TILE_OVERLAP_FRAC_DEFAULT,
     merge_iou: float = TILE_MERGE_IOU_DEFAULT,
     overlap_refine: bool = OVERLAP_REFINE_DEFAULT,
+    line_cut: bool = LINE_CUT_DEFAULT,
     text_class_id: int = OVERLAP_REFINE_TEXT_CLASS_ID,
     **predict_kwargs: Any,
 ) -> DetectArrays:
@@ -897,7 +906,8 @@ def predict_ultralytics_with_2x2_fallback(
     ``max_det``, re-run on overlapping 2×2 tiles and merge with NMS.
 
     When ``overlap_refine`` is True, crop overlapping / tall text clusters and
-    re-predict each crop to split mixed line boxes.
+    re-predict each crop to split mixed line boxes. When ``line_cut`` is True, any
+    text box still holding multiple lines is then split at row-profile valleys.
     """
     bgr = load_bgr(source)
     predict_kwargs = dict(predict_kwargs)
@@ -964,6 +974,16 @@ def predict_ultralytics_with_2x2_fallback(
         )
         used_overlap_refine = refine_crop_count > 0
 
+    line_cut_count = 0
+    if line_cut:
+        xyxy, scores, cls, line_cut_count = cut_multiline_text_boxes(
+            bgr,
+            xyxy,
+            scores,
+            cls,
+            text_class_id=text_class_id,
+        )
+
     return DetectArrays(
         xyxy=xyxy,
         scores=scores,
@@ -972,6 +992,7 @@ def predict_ultralytics_with_2x2_fallback(
         full_count=full_count,
         used_overlap_refine=used_overlap_refine,
         refine_crop_count=refine_crop_count,
+        line_cut_count=line_cut_count,
     )
 
 
@@ -983,6 +1004,7 @@ def predict_onnx_with_2x2_fallback(
     overlap_frac: float = TILE_OVERLAP_FRAC_DEFAULT,
     merge_iou: float = TILE_MERGE_IOU_DEFAULT,
     overlap_refine: bool = OVERLAP_REFINE_DEFAULT,
+    line_cut: bool = LINE_CUT_DEFAULT,
     text_class_id: int = OVERLAP_REFINE_TEXT_CLASS_ID,
     **predict_kwargs: Any,
 ) -> DetectArrays:
@@ -991,7 +1013,8 @@ def predict_onnx_with_2x2_fallback(
     ``max_det``, re-run on overlapping 2×2 tiles and merge with NMS.
 
     When ``overlap_refine`` is True, crop overlapping / tall text clusters and
-    re-predict each crop to split mixed line boxes.
+    re-predict each crop to split mixed line boxes. When ``line_cut`` is True, any
+    text box still holding multiple lines is then split at row-profile valleys.
 
     ``predict_fn`` is typically a *leaf* detector (e.g. Ultralytics or a Triton
     decode without its own tiling). Production ONNX already runs recursive
@@ -1055,6 +1078,16 @@ def predict_onnx_with_2x2_fallback(
         )
         used_overlap_refine = refine_crop_count > 0
 
+    line_cut_count = 0
+    if line_cut:
+        xyxy, scores, cls, line_cut_count = cut_multiline_text_boxes(
+            bgr,
+            xyxy,
+            scores,
+            cls,
+            text_class_id=text_class_id,
+        )
+
     return DetectArrays(
         xyxy=xyxy,
         scores=scores,
@@ -1063,4 +1096,5 @@ def predict_onnx_with_2x2_fallback(
         full_count=full_count,
         used_overlap_refine=used_overlap_refine,
         refine_crop_count=refine_crop_count,
+        line_cut_count=line_cut_count,
     )

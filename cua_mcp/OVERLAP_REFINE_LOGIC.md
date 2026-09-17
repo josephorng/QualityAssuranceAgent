@@ -1,6 +1,7 @@
-# YOLO Divide-and-Conquer & Overlap Refine
+# YOLO Divide-and-Conquer, Overlap Refine & Line Cut
 
-Logic specification for `yolo_divide_conquer.py` (Stage 3 + optional flat 2×2 helpers).
+Logic specification for `yolo_divide_conquer.py` (Stage 3 + optional flat 2×2 helpers) and
+`text_line_cut.py` (Stage 4).
 
 Used by:
 
@@ -10,12 +11,12 @@ Used by:
   - Stage 3: `refine_overlapping_text_with_crops` from this module
     (`overlap_refine=True` by default; crop predict uses the recursive path
     with refine disabled)
+  - Stage 4: `cut_multiline_text_boxes` from `text_line_cut.py`
+    (`line_cut=True` by default; model-free, runs even when Stage 3 changed nothing)
 - **Labeler / Ultralytics helpers** (flat non-recursive 2×2):
   - `predict_ultralytics_with_2x2_fallback`
   - `predict_onnx_with_2x2_fallback`  
     Do **not** wrap `run_yolo_onnx_end2end` with these helpers (nests tiling).
-
-Both Predict buttons in `app_real_screenshot_label.py` call the flat helpers above.
 
 ---
 
@@ -40,8 +41,16 @@ Input image (BGR)
 │ 3. Overlap refine           │
 │    (text class only;        │
 │     on by default)          │
+└─────────────┬───────────────┘
+              │
+              ▼
+┌─────────────────────────────┐
+│ 4. Line cut                 │
+│    (text class only;        │
+│     on by default;          │
+│     no model call)          │
 │    + re-apply small-text→   │
-│      element if accepted    │
+│      element if changed     │
 └─────────────┬───────────────┘
               │
               ▼
@@ -78,6 +87,13 @@ Input image (BGR)
                          └─────────────┬───────────┘
                                        │
                                        ▼
+                         ┌─────────────────────────┐
+                         │ 4. Line cut             │
+                         │    (text class only;    │
+                         │     on by default)      │
+                         └─────────────┬───────────┘
+                                       │
+                                       ▼
                               DetectArrays result
 ```
 
@@ -92,9 +108,10 @@ Result type for flat helpers: `DetectArrays`
 | `full_count` | Detection count from the full-frame pass |
 | `used_overlap_refine` | Whether any cluster was replaced |
 | `refine_crop_count` | Number of clusters accepted for replacement |
+| `line_cut_count` | Number of text boxes split into lines by Stage 4 |
 
 Production `run_yolo_onnx_end2end` returns `(xyxy, scores, cls)` only; refine
-activity is logged as `overlap-refine×N`.
+activity is logged as `overlap-refine×N` and line cuts as `line-cut×N`.
 
 ---
 
@@ -267,6 +284,83 @@ If pick returns `None` but the cluster is a single tall box, still accept `crop`
 
 ---
 
+## Stage 4 — Line cut (text)
+
+Enabled by default (`line_cut=True`), implemented in `text_line_cut.py`.
+Operates only on **text** class id **0**. No model call — pure NumPy / OpenCV.
+
+Goal: Stage 3 can only *swap in* boxes the detector re-found, so a tall box whose lines the model keeps merging survives untouched (crop output that is still multi-line is dropped by `_drop_tall_text_boxes`, and `_pick_best_cluster_boxes` then returns `None`). Stage 4 adds the missing **split**: cut a tall box at the valleys of its row ink profile.
+
+It runs **whether or not Stage 3 accepted anything** — a cluster Stage 3 declined is exactly the case that still needs splitting.
+
+### 4.1 Ink measurement (polarity-free)
+
+Per box crop, ink is deviation from a **per-row** background estimate, not an absolute intensity:
+
+1. Grayscale the crop.
+2. `row_bg = median(gray, axis=1)` — one background value per row.
+3. `dev = |gray - row_bg|`.
+4. `thr = max(LINE_CUT_MIN_DEV=12, 0.22 × (p98(gray) - p2(gray)))`.
+5. `mask = dev > thr`; rows where the mask ends up in the majority are inverted so ink is always the minority class in its row.
+
+Consequences:
+
+- **White-on-black and black-on-white behave identically** — only the magnitude of the deviation matters, never its sign.
+- Colored / selected rows, alternating table striping, and soft gradients stay neutral, because each row is compared against its own background.
+- A full-width separator rule is uniform within its own row, so its row median equals the rule color and the rule reads as a **valley**, not a peak. No special-case peak logic is needed.
+
+### 4.2 Profile & valleys
+
+- `profile[row] = fraction of ink pixels in that row` — text rows are peaks, blank rows are valleys.
+- A row is a **gap** when `profile ≤ max(LINE_CUT_ABS_GAP=0.02, 0.18 × p95(smoothed profile))`.
+  The peak reference comes from a 3-row smoothed copy (one spiky row cannot raise the bar), but the test itself runs on the **raw** profile: smoothing the decision would widen every band by a row and swallow the 2–3px valleys of tightly-leaded lines.
+  The absolute floor (2% of box width) is what absorbs single stray pixels in a blank row.
+- **Bands** are the runs of non-gap rows. A valley splits two bands when it spans at least `max(2, 0.10 × median_line_h)` rows **or** contains a fully blank row (`≤ LINE_CUT_ABS_GAP`).
+  The blank-row rule is what makes compact lists work: a 12px-pitch dropdown separates its items by exactly **one** empty row, and the row-count floor alone merges all of them back into a single band. Rows that merely dip below the soft gap threshold still need the full span, so a thin spot inside a glyph row cannot split a line.
+  Leading / trailing gaps are therefore dropped, each band is already trimmed to its own ink extent, and splitting between bands is equivalent to cutting at the center of the separating valley.
+- Bands thinner than `LINE_CUT_SLIVER_H_FRAC=0.5` × the box's own median band height are **dropped** as slivers (a highlighted / selected row leaves a 1px run at the edge of its background block). Dropping one sliver is better than letting it fail an otherwise clean split.
+- Each band's X extent is re-trimmed by a column projection inside that band — this only ever shrinks a box, and also tightens over-wide boxes inherited from a Stage 3 cluster union.
+
+### 4.3 Candidate gate
+
+A detection is attempted only when **all** hold:
+
+- class is **text**
+- `height ≥ 1.85 × median_text_height` (frame median; same factor as `OVERLAP_REFINE_TALL_HEIGHT_FACTOR`, so Stage 3 and Stage 4 agree on "suspiciously multi-line")
+- `height ≥ 16 px` and `width ≥ 8 px`
+- fewer than `LINE_CUT_MAX_BOXES=64` boxes attempted so far
+
+Everything else passes through untouched and in original order.
+
+### 4.4 Validation (all-or-nothing)
+
+Bands are judged **against each other**, not against the frame median. Stacked lines of one control share a pitch, whatever that pitch is; a compact list whose font is smaller than the frame's median text box is still perfectly valid. Anchoring the band-height window and an expected band count to the frame median rejected exactly the dense dropdowns this stage exists for.
+
+A split is accepted only when **every** check passes; otherwise the original box is kept, so the worst case equals no Stage 4 at all:
+
+- at least **2** bands (after slivers are dropped)
+- median band height ≥ `LINE_CUT_MIN_BAND_H_PX=5` — no real text line is thinner, and this is what stops blank rows *inside* glyphs (二, 三) from reading as line separators
+- tallest band ≤ `LINE_CUT_BAND_UNIFORM_MAX_FRAC=1.8` × the box's median band height (uniform pitch)
+- thinnest band ≥ `0.5` × the box's median band height
+- tallest band ≤ `LINE_CUT_BAND_MAX_H_FRAC=1.65` × `median_line_h` — the only frame-median tie, so an emitted band can never itself be multi-line
+- bands retain at least **60%** of the box's total ink
+
+### 4.5 Output
+
+1. The parent box is dropped; its bands are appended as **text** boxes inheriting the parent score.
+2. Bands are **disjoint in Y with no vertical padding**. This is a hard invariant: the OCR path unions any overlapping boxes transitively (`geometry.merge_overlapping_boxes`), which would re-merge padded bands into the tall box that was just split. Vertical margin for the OCR crop is added later by `_expand_box`, after that merge.
+3. Production logs `line-cut×N` and re-applies the small-text → element dual-stream; flat helpers report `line_cut_count`.
+
+Stage 4 must stay **after** `merge_touching_same_class_xyxy` — that merge would fuse the bands straight back together.
+
+### 4.6 Known limitations
+
+- Two-column content inside one box with offset baselines has no clean valley, as does a box mixing an icon with text. The uniformity checks reject both and keep the original box.
+- Genuinely touching glyph rows (zero blank rows between lines) cannot be split by projection at all.
+- The frame median still gates *candidacy*, so a two-line box in a font much smaller than the frame median can fall under `1.85 × median_text_height` and never be attempted.
+
+---
+
 ## Key defaults
 
 | Constant | Default | Role |
@@ -285,17 +379,31 @@ If pick returns `None` but the cluster is a single tall box, still accept `crop`
 | `OVERLAP_REFINE_STRIP_OVERLAP_FRAC` | 0.45 | Strip overlap |
 | `OVERLAP_REFINE_UNIQUE_LINE_IOU` | 0.35 | Unique-line / dedupe IoU |
 | `OVERLAP_REFINE_MAX_CROPS` | 24 | Max clusters processed |
+| `LINE_CUT_DEFAULT` | `True` | Enable Stage 4 |
+| `LINE_CUT_TALL_HEIGHT_FACTOR` | 1.85 | Candidate gate vs median text height |
+| `LINE_CUT_MIN_DEV` | 12.0 | Minimum ink deviation from row background |
+| `LINE_CUT_DEV_RANGE_FRAC` | 0.22 | Ink threshold as fraction of crop range |
+| `LINE_CUT_SMOOTH_ROWS` | 3 | Rows smoothed for the peak reference only |
+| `LINE_CUT_ABS_GAP` | 0.02 | Absolute gap-row ink floor |
+| `LINE_CUT_GAP_FRAC` | 0.18 | Gap threshold as fraction of profile p95 |
+| `LINE_CUT_MIN_GAP_FRAC` | 0.10 | Soft-valley rows needed to split (× line h) |
+| `LINE_CUT_SLIVER_H_FRAC` | 0.5 | Sliver-band drop / min band vs box median |
+| `LINE_CUT_BAND_UNIFORM_MAX_FRAC` | 1.8 | Max band height vs box median band |
+| `LINE_CUT_MIN_BAND_H_PX` | 5 | Absolute minimum median band height |
+| `LINE_CUT_BAND_MAX_H_FRAC` | 1.65 | Max band height vs **frame** median line h |
+| `LINE_CUT_MIN_COVERAGE_FRAC` | 0.6 | Minimum retained ink fraction |
+| `LINE_CUT_MAX_BOXES` | 64 | Max boxes attempted per frame |
 
 ---
 
 ## App-side follow-up (labeler)
 
-After `DetectArrays` returns, `app_real_screenshot_label.py` still:
+Where a labeler UI consumes `DetectArrays` directly, it still:
 
 1. Maps boxes into the image (and optional selection ROI offset).
 2. Drops same-class predictions with IoU `> 0.90`, keeping higher confidence.
 3. Skips geometry duplicates already on the canvas.
-4. Status may include `2×2 tiles (...)` and/or `overlap-refine×N`.
+4. Status may include `2×2 tiles (...)`, `overlap-refine×N`, and/or `line-cut×N`.
 
 That 90% dedupe is **separate** from the refine-stage NMS.
 
@@ -311,5 +419,9 @@ That 90% dedupe is **separate** from the refine-stage NMS.
    - Always compete against simple cluster NMS dedupe.
    - Never keep a crop that loses unique line coverage vs the original cluster.
 4. Prefer not changing clean detections; only replace when the ranking key improves.
-5. Production wires Stage 3 once at the end of `run_yolo_onnx_end2end` so OCR /
-   mouse-target callers get refine without nesting flat tile wrappers.
+5. Line cut last, for what the detector cannot fix:
+   - Deterministic and model-free, so it can split a box the model insists on merging.
+   - Polarity-free per-row ink, so themes / selected rows / striping do not matter.
+   - All-or-nothing per box, so a bad profile degrades to today's behavior.
+6. Production wires Stages 3–4 once at the end of `run_yolo_onnx_end2end` so OCR /
+   mouse-target callers get both without nesting flat tile wrappers.

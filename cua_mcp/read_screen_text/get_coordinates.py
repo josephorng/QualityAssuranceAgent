@@ -16,7 +16,12 @@ from typing import Optional
 
 import numpy as np
 
-from cua_mcp.geometry import clip_box, merge_overlapping_boxes, sort_by_reading_order
+from cua_mcp.geometry import (
+    clip_box,
+    merge_overlapping_boxes,
+    merge_same_line_boxes,
+    sort_by_reading_order,
+)
 from cua_mcp.yolo_onnx import (
     DEFAULT_CONF_YOLOV26_END2END,
     MOUSE_TARGET_CLASS_IDS,
@@ -222,7 +227,14 @@ def ocr_regions_from_image_path(
         (text_boxes, YOLO_CLASS_TEXT),
         (element_boxes, YOLO_CLASS_ELEMENT),
     ):
-        merged = _sort_boxes_reading_order(_merge_overlapping_boxes(boxes))
+        # Text merges only within a line; stacked list items overlap by a pixel or two
+        # and must not chain into one multi-line box.
+        merge = (
+            merge_same_line_boxes
+            if cls_id == YOLO_CLASS_TEXT
+            else _merge_overlapping_boxes
+        )
+        merged = _sort_boxes_reading_order(merge(boxes))
         for bbox in merged:
             ocr_classed.append((bbox, cls_id))
 

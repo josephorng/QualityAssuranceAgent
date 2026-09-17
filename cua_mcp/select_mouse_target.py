@@ -18,7 +18,13 @@ import cv2
 import numpy as np
 
 from cua_mcp.char_target import resolve_char_screen_point, screen_bbox_from_span
-from cua_mcp.geometry import boxes_overlap, clip_box, iou_xywh, merge_overlapping_boxes
+from cua_mcp.geometry import (
+    boxes_overlap,
+    clip_box,
+    iou_xywh,
+    merge_overlapping_boxes,
+    merge_same_line_boxes,
+)
 from cua_mcp.input_box_rectangles import merge_yolo_inputs_with_line_rectangles
 from cua_mcp.instruction_offset import parse_mouse_target_instruction
 from cua_mcp.scrollbar_arrows import point_from_scrollbar_percent
@@ -635,9 +641,10 @@ def _detect_mouse_targets_from_bgr(
     """Detect mouse-target UI elements on ``bgr`` via YOLO + OCR.
 
     Returns local-coordinate ``UiDetection`` candidates (text, icons, inputs,
-    scrollbars) for move_mouse / recording vision. Overlapping ``text`` /
-    ``element`` boxes are merged per class before OCR; results are sorted in
-    reading order. PUA-only element OCR with 2+ icons is split into one
+    scrollbars) for move_mouse / recording vision. Overlapping boxes are merged per
+    class before OCR — ``text`` only within a line (see
+    :func:`cua_mcp.geometry.merge_same_line_boxes`), so stacked list items that
+    overlap by a pixel stay separate; results are sorted in reading order. PUA-only element OCR with 2+ icons is split into one
     single-icon detection per glyph (via character spans).
 
     After YOLO, horizontal line-pair rectangles are detected and added as
@@ -759,7 +766,14 @@ def _detect_mouse_targets_from_bgr(
     ):
         if cls_id not in ocr_wanted:
             continue
-        for bbox in merge_overlapping_boxes(boxes):
+        # Text merges only within a line; stacked list items overlap by a pixel or two
+        # and must not chain into one multi-line box.
+        merge = (
+            merge_same_line_boxes
+            if cls_id == YOLO_CLASS_TEXT
+            else merge_overlapping_boxes
+        )
+        for bbox in merge(boxes):
             ocr_boxes.append(bbox)
             ocr_class_id_list.append(cls_id)
 

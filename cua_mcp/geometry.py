@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TypeVar
+from typing import Callable, TypeVar
 
 T = TypeVar("T")
 
@@ -35,10 +35,23 @@ def merge_two_boxes(
     return x1, y1, x2 - x1, y2 - y1
 
 
-def merge_overlapping_boxes(
+def vertical_overlap_frac(
+    a: tuple[int, int, int, int],
+    b: tuple[int, int, int, int],
+) -> float:
+    """Shared vertical extent as a fraction of the shorter box's height."""
+    _ax, ay, _aw, ah = a
+    _bx, by, _bw, bh = b
+    inter = max(0, min(ay + ah, by + bh) - max(ay, by))
+    return inter / max(1, min(ah, bh))
+
+
+def _merge_transitive(
     boxes: list[tuple[int, int, int, int]],
+    should_merge: Callable[
+        [tuple[int, int, int, int], tuple[int, int, int, int]], bool
+    ],
 ) -> list[tuple[int, int, int, int]]:
-    """Merge all transitive overlaps into single bounding boxes."""
     if len(boxes) < 2:
         return boxes
     merged = list(boxes)
@@ -50,7 +63,7 @@ def merge_overlapping_boxes(
             current = merged.pop()
             merged_with_current = False
             for i, other in enumerate(merged):
-                if boxes_overlap(current, other):
+                if should_merge(current, other):
                     current = merge_two_boxes(current, other)
                     merged.pop(i)
                     merged.append(current)
@@ -61,6 +74,41 @@ def merge_overlapping_boxes(
                 next_boxes.append(current)
         merged = next_boxes
     return merged
+
+
+def merge_overlapping_boxes(
+    boxes: list[tuple[int, int, int, int]],
+) -> list[tuple[int, int, int, int]]:
+    """Merge all transitive overlaps into single bounding boxes."""
+    return _merge_transitive(boxes, boxes_overlap)
+
+
+# Two boxes are treated as the same text line only when they share at least this much
+# of the shorter box's height.
+SAME_LINE_MIN_V_OVERLAP_FRAC: float = 0.6
+
+
+def merge_same_line_boxes(
+    boxes: list[tuple[int, int, int, int]],
+    *,
+    min_v_overlap_frac: float = SAME_LINE_MIN_V_OVERLAP_FRAC,
+) -> list[tuple[int, int, int, int]]:
+    """
+    Merge overlapping boxes that also share most of their vertical extent.
+
+    Fragments of a single text line overlap across nearly their whole height, whereas
+    lines stacked in a compact control (a dropdown at 12px pitch) overlap by only a
+    pixel or two. Plain :func:`merge_overlapping_boxes` chains those neighbors
+    transitively, fusing several separate lines into one tall box that then reaches OCR
+    as an unreadable multi-line crop.
+    """
+
+    def should_merge(
+        a: tuple[int, int, int, int], b: tuple[int, int, int, int]
+    ) -> bool:
+        return boxes_overlap(a, b) and vertical_overlap_frac(a, b) >= min_v_overlap_frac
+
+    return _merge_transitive(boxes, should_merge)
 
 
 def intersection_area_xywh(

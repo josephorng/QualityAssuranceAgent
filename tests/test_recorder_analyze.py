@@ -1130,6 +1130,61 @@ def test_collect_nearby_hints_set_cover_disambiguates_2x2_v_arrows() -> None:
     assert by_label["「確定」文字"] == Side.UPPER_LEFT
 
 
+def test_pick_disambiguating_hints_double_covers_each_peer() -> None:
+    """Reproduce 資產設備 event 3: one cue per peer is one OCR slip from useless.
+
+    The 篩選設定 dialog holds four identical chevrons. 「IP位址」separates the three
+    below the target and a single landmark between the two columns separates the
+    fourth, so a one-deep cover is already complete. That run spent the column
+    slot on 「關閉視窗」— a four-character decode of the 27px 「取消」 button — and at
+    playback the label matched the dialog close icon on the far side instead,
+    endorsing the wrong chevron. A second independent cue per peer survives that.
+    """
+    from src.recorder.vision_context import (
+        _find_confusable_peers,
+        _pick_disambiguating_hints,
+        _score_disambiguating_landmarks,
+    )
+
+    def _v_arrow(cx: int, cy: int) -> dict:
+        return {
+            "bbox": [cx - 5, cy - 5, 11, 10],
+            "center": [cx, cy],
+            "class_name": "element",
+            "text": "",
+            "icons": [{"chinese_id": "向下V箭頭"}],
+        }
+
+    candidates = [
+        _v_arrow(818, 396),  # primary: 資產名稱 field-name combo
+        _v_arrow(818, 432),
+        _v_arrow(1160, 396),
+        _v_arrow(1160, 432),
+        _grid_text(759, 396, 47, 13, "資產名稱"),
+        _grid_text(754, 432, 36, 12, "IP位址"),
+        _grid_text(750, 351, 50, 13, "篩選設定"),
+        _grid_text(1066, 511, 25, 12, "確定"),
+        _grid_text(1146, 511, 27, 12, "取消"),
+    ]
+    instruction = "將滑鼠移到「向下V箭頭」圖示"
+
+    picked = _pick_disambiguating_hints(candidates, instruction=instruction)
+    eliminated_by_label = {
+        hint.label: eliminated
+        for eliminated, _between, _tier, _order, _freq, _center, hint in (
+            _score_disambiguating_landmarks(candidates, instruction=instruction)
+        )
+    }
+    coverage: dict[int, int] = {
+        id(peer): 0 for peer in _find_confusable_peers(candidates)
+    }
+    for hint in picked:
+        for peer_id in eliminated_by_label[hint.label]:
+            coverage[peer_id] += 1
+
+    assert min(coverage.values()) >= 2, [hint.label for hint in picked]
+
+
 def test_list_nearby_landmark_options_boosts_disambiguating_landmark() -> None:
     from src.recorder.vision_context import list_nearby_landmark_options
 

@@ -64,6 +64,15 @@ from src.recorder.models import (
 )
 
 _MIN_NEARBY_TEXT_LANDMARKS = 2
+# Disambiguating landmarks: separate every rival peer with this many distinct
+# landmarks. One cue per peer leaves the step at the mercy of a single label: a
+# hover-only tooltip, or a bad decode (資產設備 event 3 read 取消 as 關閉視窗 and
+# spent the only column cue on it), takes the whole step down at playback.
+_DISAMBIGUATING_COVER_DEPTH = 2
+_MAX_DISAMBIGUATING_LANDMARKS = 4
+# Redundant cues must be text: icon chinese_id decodes vary run to run, so a
+# second icon cue adds noise instead of resilience.
+_REDUNDANT_COVER_MAX_TIER = 1
 _MIN_NEARBY_TEXT_CANDIDATES = 8
 _MIN_NEARBY_ICON_CANDIDATES = 5
 # Recording HTML「點擊目標」radio list: closest labeled candidates only.
@@ -1707,16 +1716,23 @@ def _pick_disambiguating_hints(
     candidates: list[Any],
     *,
     instruction: str,
-    max_count: int = _MIN_NEARBY_TEXT_LANDMARKS,
+    max_count: int = _MAX_DISAMBIGUATING_LANDMARKS,
     reserved_labels: set[str] | None = None,
+    cover_depth: int = _DISAMBIGUATING_COVER_DEPTH,
 ) -> list[NearbyHint]:
     """Greedy set-cover landmarks that together separate primary from similar peers.
 
-    Each pick must eliminate at least one still-confused peer. Stops when every
-    peer is covered or ``max_count`` is reached. Only unique on-screen labels are
-    considered (see ``_score_disambiguating_landmarks``). ``reserved_labels``
-    (e.g. forced containing ``輸入欄``) are skipped so a duplicate bare class
-    label cannot consume a cover slot.
+    Each pick must eliminate at least one under-covered peer. Stops when every
+    peer is separated by ``cover_depth`` distinct landmarks or ``max_count`` is
+    reached. Only unique on-screen labels are considered (see
+    ``_score_disambiguating_landmarks``). ``reserved_labels`` (e.g. forced
+    containing ``輸入欄``) are skipped so a duplicate bare class label cannot
+    consume a cover slot.
+
+    Every peer is covered once before any second cue is picked, and second cues
+    are text-only (``_REDUNDANT_COVER_MAX_TIER``): redundancy exists to survive a
+    landmark that mis-OCRs or disappears at playback, which is exactly what an
+    icon decode is prone to.
 
     Tier **gates** the cover rather than merely breaking ties: the greedy runs
     once per ascending tier, each pass restricted to landmarks at or below that
@@ -1747,18 +1763,22 @@ def _pick_disambiguating_hints(
         if center is not None:
             peer_centers[id(peer)] = center
 
-    remaining: set[int] = set()
+    covered: dict[int, int] = {}
     for eliminated, *_rest in scored:
-        remaining |= eliminated
-    if not remaining:
+        for peer_id in eliminated:
+            covered.setdefault(peer_id, 0)
+    if not covered:
         return []
 
     picked: list[NearbyHint] = []
     used_labels: set[str] = set(reserved_labels or ())
 
-    def _cover_within_tier(max_tier: int) -> None:
-        """Greedy-cover ``remaining`` using only landmarks at or below ``max_tier``."""
-        while remaining and len(picked) < max_count:
+    def _cover_within_tier(max_tier: int, *, depth: int) -> None:
+        """Cover every peer ``depth`` times using landmarks at or below ``max_tier``."""
+        while len(picked) < max_count:
+            remaining = {pid for pid, hits in covered.items() if hits < depth}
+            if not remaining:
+                return
             best: (
                 tuple[int, float, int, float, float, NearbyHint, set[int]] | None
             ) = None
@@ -1818,12 +1838,20 @@ def _pick_disambiguating_hints(
             _n, _loc, _tier, _pd, _between, hint, newly = best
             picked.append(hint)
             used_labels.add(hint.label)
-            remaining.difference_update(newly)
+            for peer_id in newly:
+                covered[peer_id] += 1
 
-    for max_tier in sorted({row[2] for row in scored}):
-        if not remaining or len(picked) >= max_count:
-            break
-        _cover_within_tier(max_tier)
+    tiers = sorted({row[2] for row in scored})
+    for depth in range(1, max(cover_depth, 1) + 1):
+        allowed_tiers = (
+            tiers
+            if depth == 1
+            else [tier for tier in tiers if tier <= _REDUNDANT_COVER_MAX_TIER]
+        )
+        for max_tier in allowed_tiers:
+            if len(picked) >= max_count:
+                break
+            _cover_within_tier(max_tier, depth=depth)
 
     return picked
 
@@ -1867,8 +1895,8 @@ def _prioritized_nearby_parts(
     vision: dict[str, Any],
     *,
     instruction: str,
-) -> tuple[list[NearbyHint], list[NearbyHint]]:
-    """Split containing-container hints from ranked eligible neighbors.
+) -> tuple[list[NearbyHint], list[NearbyHint], list[NearbyHint]]:
+    """Split forced containers and cover picks from ranked eligible neighbors.
 
     Ranking matches ``collect_nearby_hints``: Tier 0 multi-char text first, then
     other labels, then icons; within a tier, labels unique on screen outrank
@@ -1877,15 +1905,17 @@ def _prioritized_nearby_parts(
 
     Uniqueness is preferred rather than required, unlike the greedy cover in
     ``_pick_disambiguating_hints``: these are fill landmarks, so in a grid where
-    every label repeats a weak hint still beats emitting none.
+    every label repeats a weak hint still beats emitting none. The cover may take
+    up to ``_MAX_DISAMBIGUATING_LANDMARKS`` slots, since it now aims for a second
+    independent cue per rival peer.
     """
     candidates = vision.get("candidates") or []
     if len(candidates) < 2:
-        return [], []
+        return [], [], []
 
     primary = candidates[0]
     if not isinstance(primary, dict):
-        return [], []
+        return [], [], []
     primary_bbox = _as_bbox_xywh(primary.get("bbox"))
     click_xy = _click_xy_from_vision(vision, primary=primary)
 
@@ -1897,7 +1927,7 @@ def _prioritized_nearby_parts(
     disambiguating = _pick_disambiguating_hints(
         candidates,
         instruction=instruction,
-        max_count=_MIN_NEARBY_TEXT_LANDMARKS,
+        max_count=_MAX_DISAMBIGUATING_LANDMARKS,
         reserved_labels={hint.label for hint in forced},
     )
     forced_labels = {hint.label for hint in forced}
@@ -1939,7 +1969,7 @@ def _prioritized_nearby_parts(
             click_xy=click_xy,
         )
         ranked.append(NearbyHint(label=label, side=side))
-    return [*forced, *disambiguating], ranked
+    return forced, disambiguating, ranked
 
 
 def list_prioritized_nearby_hints(
@@ -1953,8 +1983,10 @@ def list_prioritized_nearby_hints(
     then every other eligible neighbor in the same order ``collect_nearby_hints``
     uses before cutting at ``max_count``.
     """
-    forced, ranked = _prioritized_nearby_parts(vision, instruction=instruction)
-    return [*forced, *ranked]
+    forced, disambiguating, ranked = _prioritized_nearby_parts(
+        vision, instruction=instruction
+    )
+    return [*forced, *disambiguating, *ranked]
 
 
 def _pick_side_diverse_hints(
@@ -2021,9 +2053,22 @@ def collect_nearby_hints(
     When the click lies inside a non-primary ``input`` / ``scrollbar``, that
     container is always prepended with ``side=inside`` (裡面), even if that
     exceeds ``max_count``.
+
+    ``max_count`` is the floor for landmarks that actually pin the target down,
+    so cover picks consume it: with a full cover there is no fill at all. Fill
+    landmarks separate no peer by construction, and once the unique labels are
+    spent the next ones repeat across the screen — a hint that matches any
+    instance of its label is noise the playback picker can be swayed by.
     """
-    forced, ranked = _prioritized_nearby_parts(vision, instruction=instruction)
-    return [*forced, *_pick_side_diverse_hints(ranked, max_count=max_count)]
+    forced, disambiguating, ranked = _prioritized_nearby_parts(
+        vision, instruction=instruction
+    )
+    fill_budget = max(0, max_count - len(disambiguating))
+    return [
+        *forced,
+        *disambiguating,
+        *_pick_side_diverse_hints(ranked, max_count=fill_budget),
+    ]
 
 
 def collect_nearby_hint_labels(

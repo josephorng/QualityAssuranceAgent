@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 import pytest
 
@@ -110,20 +112,20 @@ def test_no_split_when_under_cap(monkeypatch: pytest.MonkeyPatch):
 
 def test_split_once_when_full_image_hits_cap(monkeypatch: pytest.MonkeyPatch):
     """Full image returns 300 valid; each tile returns fewer → four extra infers."""
-    call_shapes: list[tuple[int, int]] = []  # (h0, w0) proxied via letterbox input only
+    call_shapes: list[tuple[int, ...]] = []
     call_i = {"n": 0}
+    lock = threading.Lock()
 
     def fake_infer(img_data: np.ndarray) -> np.ndarray:
-        n = call_i["n"]
-        call_i["n"] += 1
-        call_shapes.append(tuple(img_data.shape))
+        with lock:
+            n = call_i["n"]
+            call_i["n"] += 1
+            call_shapes.append(tuple(img_data.shape))
         if n == 0:
-            # Full image: at cap (discarded).
+            # Full image: at cap (discarded). Always first — runs before tile pool.
             return _fake_end2end(YOLO_END2END_MAX_DET)
-        # Tiles: one distinct box per tile in letterbox space (will scale differently
-        # per crop size, but each contributes ≥1 detection).
-        # Offset boxes slightly so NMS does not collapse everything.
-        dx = float((n - 1) * 40)
+        # Tiles (possibly concurrent): distinct boxes so NMS does not collapse all.
+        dx = float(n * 40)
         return _fake_end2end(
             5,
             box_xyxy=(10.0 + dx, 10.0, 40.0 + dx, 40.0),
@@ -156,11 +158,13 @@ def test_cross_tile_nms_collapses_duplicate_seam_boxes(
 ):
     """Overlapping tiles returning the same box (same class) collapse via NMS."""
     call_i = {"n": 0}
+    lock = threading.Lock()
     # Identical letterbox box on every tile → after scale+offset, high IoU duplicates.
 
     def fake_infer(img_data: np.ndarray) -> np.ndarray:
-        n = call_i["n"]
-        call_i["n"] += 1
+        with lock:
+            n = call_i["n"]
+            call_i["n"] += 1
         if n == 0:
             return _fake_end2end(YOLO_END2END_MAX_DET)
         return _fake_end2end(
@@ -188,25 +192,21 @@ def test_cross_tile_nms_collapses_duplicate_seam_boxes(
 
 def test_recurse_when_tile_also_hits_cap(monkeypatch: pytest.MonkeyPatch):
     """A first-level tile at cap produces grandchild crops (depth-limited)."""
-    # Track approximate crops by recording bgr via wrapping recursive worker is hard;
-    # count total infers. Large enough image to allow depth≥2.
-    # depth0 full: cap → 4 tiles
-    # first tile (call among tiles): also cap → 4 grandchildren
-    # remaining 3 tiles + 4 grandchildren: under cap
-    # Total: 1 + 4 + 4 = 9 if only first tile hits; but tile order is TL,TR,BL,BR
-    # and we don't know which fake maps to which tile easily by call index alone
-    # because only the first recursive after depth0 is the first tile (TL).
-
     call_i = {"n": 0}
+    lock = threading.Lock()
+    # Root is always the first infer. Exactly one depth-1 tile may claim a further split
+    # (tiles run concurrently, so call-index order among siblings is not stable).
+    cap_tiles_remaining = {"n": 1}
 
     def fake_infer(img_data: np.ndarray) -> np.ndarray:
-        n = call_i["n"]
-        call_i["n"] += 1
-        # Call 0: full image at cap.
-        # Call 1: first tile (TL) at cap → recurse again.
-        # Calls 2–5: TL's four grandchildren under cap.
-        # Calls 6–8: TR, BL, BR under cap.
-        if n in (0, 1):
+        with lock:
+            call_i["n"] += 1
+            n = call_i["n"]
+            claim_cap_tile = False
+            if n > 1 and cap_tiles_remaining["n"] > 0:
+                cap_tiles_remaining["n"] -= 1
+                claim_cap_tile = True
+        if n == 1 or claim_cap_tile:
             return _fake_end2end(YOLO_END2END_MAX_DET)
         return _fake_end2end(
             3,
@@ -224,6 +224,7 @@ def test_recurse_when_tile_also_hits_cap(monkeypatch: pytest.MonkeyPatch):
         overlap_refine=False,
     )
 
+    # 1 full + 4 depth-1 tiles + 4 grandchildren from the one capping tile.
     assert call_i["n"] == 9
     assert len(xyxy) > 0
     assert len(scores) == len(xyxy)
@@ -232,9 +233,11 @@ def test_recurse_when_tile_also_hits_cap(monkeypatch: pytest.MonkeyPatch):
 def test_safety_stops_split_on_small_image(monkeypatch: pytest.MonkeyPatch):
     """Tiny image at cap must not split (half side < min_side)."""
     call_i = {"n": 0}
+    lock = threading.Lock()
 
     def fake_infer(img_data: np.ndarray) -> np.ndarray:
-        call_i["n"] += 1
+        with lock:
+            call_i["n"] += 1
         return _fake_end2end(YOLO_END2END_MAX_DET)
 
     monkeypatch.setattr(yolo_mod, "_run_yolo_raw_output", fake_infer)
@@ -257,9 +260,11 @@ def test_safety_stops_split_on_small_image(monkeypatch: pytest.MonkeyPatch):
 def test_safety_stops_at_max_depth(monkeypatch: pytest.MonkeyPatch):
     """Even dense large images stop recursing at DEFAULT_QUADTREE_MAX_DEPTH."""
     call_i = {"n": 0}
+    lock = threading.Lock()
 
     def fake_infer(img_data: np.ndarray) -> np.ndarray:
-        call_i["n"] += 1
+        with lock:
+            call_i["n"] += 1
         # Always report full buffer so every split level tries to recurse.
         return _fake_end2end(YOLO_END2END_MAX_DET)
 
@@ -281,11 +286,13 @@ def test_safety_stops_at_max_depth(monkeypatch: pytest.MonkeyPatch):
 def test_cap_uses_raw_buffer_length(monkeypatch: pytest.MonkeyPatch):
     """Cap trigger follows ``raw.shape[1]`` when export slot count differs."""
     call_i = {"n": 0}
+    lock = threading.Lock()
     slots = 50
 
     def fake_infer(img_data: np.ndarray) -> np.ndarray:
-        n = call_i["n"]
-        call_i["n"] += 1
+        with lock:
+            n = call_i["n"]
+            call_i["n"] += 1
         if n == 0:
             return _fake_end2end(slots, slot_count=slots)
         return _fake_end2end(2, slot_count=slots)

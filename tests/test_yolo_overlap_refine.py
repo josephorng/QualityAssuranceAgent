@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
 import numpy as np
 import pytest
 
@@ -87,6 +90,68 @@ def test_refine_replaces_crossing_cluster_with_cleaner_crop():
     assert len(out_xy) == 2
     assert all(int(c) == 0 for c in out_cls)
     assert len(out_sc) == 2
+
+
+def test_refine_runs_independent_crop_predicts_in_parallel():
+    """Disjoint overlap clusters should overlap in wall time via the thread pool."""
+    bgr = np.zeros((400, 400, 3), dtype=np.uint8)
+    # Two disjoint overlapping pairs → two refine clusters.
+    xyxy = np.asarray(
+        [
+            [20.0, 20.0, 100.0, 50.0],
+            [30.0, 35.0, 110.0, 70.0],
+            [220.0, 20.0, 300.0, 50.0],
+            [230.0, 35.0, 310.0, 70.0],
+        ],
+        dtype=np.float32,
+    )
+    scores = np.asarray([0.9, 0.88, 0.91, 0.87], dtype=np.float32)
+    cls = np.asarray([0, 0, 0, 0], dtype=np.int32)
+
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def predict_crop(crop: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.08)
+        with lock:
+            active -= 1
+        # Place clean lines near the crop center so soft-union filtering keeps them.
+        h, w = crop.shape[:2]
+        y1, y2 = max(4, h // 5), max(8, 2 * h // 5)
+        y3, y4 = max(y2 + 4, 3 * h // 5), max(y2 + 8, 4 * h // 5)
+        x1, x2 = max(4, w // 6), min(w - 4, 5 * w // 6)
+        return (
+            np.asarray(
+                [
+                    [float(x1), float(y1), float(x2), float(y2)],
+                    [float(x1), float(y3), float(x2), float(y4)],
+                ],
+                dtype=np.float32,
+            ),
+            np.asarray([0.95, 0.94], dtype=np.float32),
+            np.asarray([0, 0], dtype=np.int32),
+        )
+
+    started = time.perf_counter()
+    _out_xy, _out_sc, _out_cls, accepted = refine_overlapping_text_with_crops(
+        bgr,
+        xyxy,
+        scores,
+        cls,
+        predict_crop_fn=predict_crop,
+        text_class_id=0,
+    )
+    elapsed = time.perf_counter() - started
+
+    assert accepted == 2
+    assert max_active >= 2
+    # Two 80ms sequential sleeps would be ≥160ms; parallel should finish nearer one sleep.
+    assert elapsed < 0.14
 
 
 def test_run_yolo_invokes_overlap_refine_when_enabled(

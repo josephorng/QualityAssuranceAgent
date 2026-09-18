@@ -9,7 +9,7 @@ coordinates are mapped back with the same ``scale_boxes`` math as ``ultralytics`
 End-to-end output ``(1, N, 6+)`` — ``x1,y1,x2,y2,score,cls``; NMS is in the graph
 (Ultralytics default ``max_det`` ⇒ ``N`` ≈ :data:`YOLO_END2END_MAX_DET`). When a pass
 fills that buffer, :func:`run_yolo_onnx_end2end` recursively splits the image into an
-overlapping 2×2 quadtree, re-infers each tile, and merges results.
+overlapping 2×2 quadtree, re-infers each tile (in parallel), and merges results.
 
 After the full-frame / quadtree pass, overlapping or tall ``text`` clusters can be
 crop-refined via :func:`cua_mcp.yolo_divide_conquer.refine_overlapping_text_with_crops`
@@ -29,6 +29,7 @@ Tune defaults via ``DEFAULT_CONF_*``, or pass keyword args per call.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import time
 
@@ -38,6 +39,7 @@ import numpy as np
 from cua_mcp.text_line_cut import LINE_CUT_DEFAULT, cut_multiline_text_boxes
 from cua_mcp.yolo_divide_conquer import (
     OVERLAP_REFINE_DEFAULT,
+    YOLO_CROP_INFER_MAX_WORKERS,
     refine_overlapping_text_with_crops,
 )
 
@@ -400,13 +402,17 @@ def _run_yolo_onnx_end2end_recursive(
         f"valid={valid} max_det={max_det} tiles={len(rois)}"
     )
 
-    all_xy: list[np.ndarray] = []
-    all_sc: list[np.ndarray] = []
-    all_cls: list[np.ndarray] = []
-    for x1, y1, x2, y2 in rois:
+    tile_jobs = [
+        (x1, y1, x2, y2)
+        for x1, y1, x2, y2 in rois
+        if bgr[y1:y2, x1:x2].size
+    ]
+
+    def _predict_tile(
+        roi: tuple[int, int, int, int],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        x1, y1, x2, y2 = roi
         tile = bgr[y1:y2, x1:x2]
-        if tile.size == 0:
-            continue
         t_xy, t_sc, t_cls = _run_yolo_onnx_end2end_recursive(
             tile,
             depth=depth + 1,
@@ -416,8 +422,24 @@ def _run_yolo_onnx_end2end_recursive(
             merge_same_class_iou_threshold=merge_same_class_iou_threshold,
         )
         if len(t_xy) == 0:
+            return None
+        return _offset_detections(t_xy, x1, y1), t_sc, t_cls
+
+    if len(tile_jobs) <= 1:
+        tile_results = [_predict_tile(job) for job in tile_jobs]
+    else:
+        workers = max(1, min(YOLO_CROP_INFER_MAX_WORKERS, len(tile_jobs)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            tile_results = list(pool.map(_predict_tile, tile_jobs))
+
+    all_xy: list[np.ndarray] = []
+    all_sc: list[np.ndarray] = []
+    all_cls: list[np.ndarray] = []
+    for result in tile_results:
+        if result is None:
             continue
-        all_xy.append(_offset_detections(t_xy, x1, y1))
+        t_xy, t_sc, t_cls = result
+        all_xy.append(t_xy)
         all_sc.append(t_sc)
         all_cls.append(t_cls)
 

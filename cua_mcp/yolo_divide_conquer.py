@@ -3,7 +3,8 @@ Divide-and-conquer YOLO inference: if a full-frame pass hits ``max_det``,
 split the image into overlapping 2×2 tiles, predict each, merge with NMS.
 
 Also optional overlap refine: when text boxes overlap / cross / look multi-line,
-crop each hard cluster and re-run YOLO at higher effective resolution.
+crop each hard cluster and re-run YOLO at higher effective resolution. Independent
+crop (and tall-ROI strip) predicts run concurrently via a thread pool.
 
 After that, optional line cut (Stage 4): any text box still holding multiple lines is
 split at row-profile valleys by :mod:`cua_mcp.text_line_cut` (model-free).
@@ -11,14 +12,38 @@ split at row-profile valleys by :mod:`cua_mcp.text_line_cut` (model-free).
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Sequence, TypeVar
 
 import cv2
 import numpy as np
 
 from cua_mcp.text_line_cut import LINE_CUT_DEFAULT, cut_multiline_text_boxes
+
+_T = TypeVar("_T")
+_R = TypeVar("_R")
+
+# Cap concurrent Triton crop/strip calls so one dense frame does not open dozens
+# of HTTP clients at once. Multi-monitor detection uses the same idea.
+YOLO_CROP_INFER_MAX_WORKERS: int = 8
+
+
+def _map_parallel(
+    fn: Callable[[_T], _R],
+    items: Sequence[_T],
+    *,
+    max_workers: int = YOLO_CROP_INFER_MAX_WORKERS,
+) -> list[_R]:
+    """Map ``fn`` over ``items``, using a thread pool when there is more than one."""
+    if not items:
+        return []
+    if len(items) == 1:
+        return [fn(items[0])]
+    workers = max(1, min(int(max_workers), len(items)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(fn, items))
 
 # Ultralytics default ``max_det``; end2end ONNX exports often share this cap.
 YOLO_MAX_DET_DEFAULT: int = 300
@@ -402,7 +427,8 @@ def _predict_roi_with_optional_strips(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Predict on ``bgr[y0:y1, x0:x1]``. If the ROI is tall vs median line height,
-    split into overlapping horizontal strips, predict each, and NMS-merge.
+    split into overlapping horizontal strips, predict each (in parallel), and
+    NMS-merge.
     """
     crop_h = max(1, y1 - y0)
     strip_h = max(48, int(round(strip_height_factor * max(1.0, median_h))))
@@ -423,31 +449,41 @@ def _predict_roi_with_optional_strips(
         return offset_xyxy(c_xyxy[:n], x0, y0), c_scores[:n], c_cls[:n]
 
     overlap = max(8, int(round(strip_overlap_frac * strip_h)))
-    parts_xyxy: list[np.ndarray] = []
-    parts_scores: list[np.ndarray] = []
-    parts_cls: list[np.ndarray] = []
+    strip_ranges: list[tuple[int, int]] = []
     y = y0
     while y < y1:
         ys = int(y)
         ye = min(y1, ys + strip_h)
         if ye <= ys:
             break
-        s_xyxy, s_scores, s_cls = predict_crop_fn(bgr[ys:ye, x0:x1])
-        s_xyxy = np.asarray(s_xyxy, dtype=np.float32)
-        s_scores = np.asarray(s_scores, dtype=np.float32).reshape(-1)
-        s_cls = np.asarray(s_cls).reshape(-1).astype(np.int32, copy=False)
-        if s_xyxy.size:
-            if s_xyxy.ndim != 2:
-                s_xyxy = s_xyxy.reshape(-1, 4)
-            n = min(len(s_xyxy), len(s_scores), len(s_cls))
-            parts_xyxy.append(offset_xyxy(s_xyxy[:n], x0, ys))
-            parts_scores.append(s_scores[:n])
-            parts_cls.append(s_cls[:n])
+        strip_ranges.append((ys, ye))
         if ye >= y1:
             break
         y = ye - overlap
         if y <= ys:
             y = ys + 1
+
+    def _predict_strip(range_yx: tuple[int, int]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        ys, ye = range_yx
+        s_xyxy, s_scores, s_cls = predict_crop_fn(bgr[ys:ye, x0:x1])
+        s_xyxy = np.asarray(s_xyxy, dtype=np.float32)
+        s_scores = np.asarray(s_scores, dtype=np.float32).reshape(-1)
+        s_cls = np.asarray(s_cls).reshape(-1).astype(np.int32, copy=False)
+        if not s_xyxy.size:
+            return (
+                np.zeros((0, 4), dtype=np.float32),
+                np.zeros((0,), dtype=np.float32),
+                np.zeros((0,), dtype=np.int32),
+            )
+        if s_xyxy.ndim != 2:
+            s_xyxy = s_xyxy.reshape(-1, 4)
+        n = min(len(s_xyxy), len(s_scores), len(s_cls))
+        return offset_xyxy(s_xyxy[:n], x0, ys), s_scores[:n], s_cls[:n]
+
+    strip_results = _map_parallel(_predict_strip, strip_ranges)
+    parts_xyxy = [xy for xy, _sc, _cl in strip_results if xy.size]
+    parts_scores = [sc for xy, sc, _cl in strip_results if xy.size]
+    parts_cls = [cl for xy, _sc, cl in strip_results if xy.size]
 
     merged_xyxy, merged_scores, merged_cls = _concat_parts(
         parts_xyxy, parts_scores, parts_cls
@@ -760,16 +796,18 @@ def refine_overlapping_text_with_crops(
     pad_x_px = max(float(min_pad_x_px), 0.75 * median_w)
     max_line_h = tall_height_factor * max(1.0, median_h)
 
-    replaced: set[int] = set()
-    new_parts_xyxy: list[np.ndarray] = []
-    new_parts_scores: list[np.ndarray] = []
-    new_parts_cls: list[np.ndarray] = []
-    accepted = 0
+    @dataclass(frozen=True)
+    class _RefineJob:
+        live: tuple[int, ...]
+        union: np.ndarray
+        x0: int
+        y0: int
+        x1: int
+        y1: int
 
+    jobs: list[_RefineJob] = []
     for cluster in clusters:
-        if accepted >= int(max_crops):
-            break
-        live = [i for i in cluster if i not in replaced]
+        live = tuple(int(i) for i in cluster)
         if not live:
             continue
         # Need a multi-box conflict or a single tall box.
@@ -787,87 +825,116 @@ def refine_overlapping_text_with_crops(
         )
         if (x1 - x0) < int(min_crop_side) or (y1 - y0) < int(min_crop_side):
             continue
+        jobs.append(_RefineJob(live=live, union=union, x0=x0, y0=y0, x1=x1, y1=y1))
 
-        c_xyxy, c_scores, c_cls = _predict_roi_with_optional_strips(
+    if not jobs:
+        return xyxy, scores, cls, 0
+
+    def _predict_job(
+        job: _RefineJob,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return _predict_roi_with_optional_strips(
             bgr,
-            x0=x0,
-            y0=y0,
-            x1=x1,
-            y1=y1,
+            x0=job.x0,
+            y0=job.y0,
+            x1=job.x1,
+            y1=job.y1,
             predict_crop_fn=predict_crop_fn,
             median_h=median_h,
             strip_height_factor=strip_height_factor,
             strip_overlap_frac=strip_overlap_frac,
             merge_iou=merge_iou,
         )
-        crop_roi = np.asarray([x0, y0, x1, y1], dtype=np.float32)
-        if c_xyxy.size:
-            # Prefer centers near the original cluster union (not the full padded crop),
-            # so neighboring labels pulled in by X-pad do not replace the cluster.
-            ux1, uy1, ux2, uy2 = (float(v) for v in union)
-            uw = max(1.0, ux2 - ux1)
-            uh = max(1.0, uy2 - uy1)
-            soft_union = np.asarray(
-                [
-                    max(float(x0), ux1 - 0.15 * uw),
-                    max(float(y0), uy1 - 0.15 * uh),
-                    min(float(x1), ux2 + 0.15 * uw),
-                    min(float(y1), uy2 + 0.15 * uh),
-                ],
-                dtype=np.float32,
-            )
-            c_xyxy, c_scores, c_cls = _filter_crop_dets_to_roi(
-                c_xyxy,
-                c_scores,
-                c_cls,
-                roi_xyxy=soft_union,
-                text_class_id=text_class_id,
-            )
-            # Drop multi-line merges from crop output; keep single-line candidates only.
-            c_xyxy, c_scores, c_cls = _drop_tall_text_boxes(
-                c_xyxy,
-                c_scores,
-                c_cls,
-                text_class_id=text_class_id,
-                max_height=max_line_h,
-            )
-        else:
-            c_xyxy = np.zeros((0, 4), dtype=np.float32)
-            c_scores = np.zeros((0,), dtype=np.float32)
-            c_cls = np.zeros((0,), dtype=np.int32)
 
-        old_xyxy = xyxy[live]
-        old_scores = scores[live]
-        old_cls = cls[live]
-        picked = _pick_best_cluster_boxes(
-            old_xyxy,
-            old_scores,
-            old_cls,
-            c_xyxy,
-            c_scores,
-            c_cls,
-            dedupe_iou=max(merge_iou, OVERLAP_REFINE_UNIQUE_LINE_IOU),
-        )
-        if picked is None:
-            # Singleton tall box: accept crop only when it clearly splits into lines.
-            if (
-                len(live) == 1
-                and len(c_xyxy) >= 2
-                and _approx_unique_box_count(c_xyxy) >= 2
-                and _overlap_pair_count(c_xyxy) == 0
-            ):
-                repl_xyxy, repl_scores, repl_cls = c_xyxy, c_scores, c_cls
+    replaced: set[int] = set()
+    new_parts_xyxy: list[np.ndarray] = []
+    new_parts_scores: list[np.ndarray] = []
+    new_parts_cls: list[np.ndarray] = []
+    accepted = 0
+    job_index = 0
+    max_accept = int(max_crops)
+
+    # Clusters from union-find are disjoint, so accept/reject order is stable.
+    # Predict in waves of ``max_crops - accepted`` so rejects can pull later jobs
+    # without issuing every crop up front.
+    while accepted < max_accept and job_index < len(jobs):
+        batch = jobs[job_index : job_index + (max_accept - accepted)]
+        job_index += len(batch)
+        predictions = _map_parallel(_predict_job, batch)
+
+        for job, (c_xyxy, c_scores, c_cls) in zip(batch, predictions, strict=True):
+            if accepted >= max_accept:
+                break
+            live = list(job.live)
+            x0, y0, x1, y1 = job.x0, job.y0, job.x1, job.y1
+            union = job.union
+            if c_xyxy.size:
+                # Prefer centers near the original cluster union (not the full padded crop),
+                # so neighboring labels pulled in by X-pad do not replace the cluster.
+                ux1, uy1, ux2, uy2 = (float(v) for v in union)
+                uw = max(1.0, ux2 - ux1)
+                uh = max(1.0, uy2 - uy1)
+                soft_union = np.asarray(
+                    [
+                        max(float(x0), ux1 - 0.15 * uw),
+                        max(float(y0), uy1 - 0.15 * uh),
+                        min(float(x1), ux2 + 0.15 * uw),
+                        min(float(y1), uy2 + 0.15 * uh),
+                    ],
+                    dtype=np.float32,
+                )
+                c_xyxy, c_scores, c_cls = _filter_crop_dets_to_roi(
+                    c_xyxy,
+                    c_scores,
+                    c_cls,
+                    roi_xyxy=soft_union,
+                    text_class_id=text_class_id,
+                )
+                # Drop multi-line merges from crop output; keep single-line candidates only.
+                c_xyxy, c_scores, c_cls = _drop_tall_text_boxes(
+                    c_xyxy,
+                    c_scores,
+                    c_cls,
+                    text_class_id=text_class_id,
+                    max_height=max_line_h,
+                )
             else:
-                continue
-        else:
-            repl_xyxy, repl_scores, repl_cls = picked
+                c_xyxy = np.zeros((0, 4), dtype=np.float32)
+                c_scores = np.zeros((0,), dtype=np.float32)
+                c_cls = np.zeros((0,), dtype=np.int32)
 
-        for i in live:
-            replaced.add(i)
-        new_parts_xyxy.append(repl_xyxy)
-        new_parts_scores.append(repl_scores)
-        new_parts_cls.append(repl_cls)
-        accepted += 1
+            old_xyxy = xyxy[live]
+            old_scores = scores[live]
+            old_cls = cls[live]
+            picked = _pick_best_cluster_boxes(
+                old_xyxy,
+                old_scores,
+                old_cls,
+                c_xyxy,
+                c_scores,
+                c_cls,
+                dedupe_iou=max(merge_iou, OVERLAP_REFINE_UNIQUE_LINE_IOU),
+            )
+            if picked is None:
+                # Singleton tall box: accept crop only when it clearly splits into lines.
+                if (
+                    len(live) == 1
+                    and len(c_xyxy) >= 2
+                    and _approx_unique_box_count(c_xyxy) >= 2
+                    and _overlap_pair_count(c_xyxy) == 0
+                ):
+                    repl_xyxy, repl_scores, repl_cls = c_xyxy, c_scores, c_cls
+                else:
+                    continue
+            else:
+                repl_xyxy, repl_scores, repl_cls = picked
+
+            for i in live:
+                replaced.add(i)
+            new_parts_xyxy.append(repl_xyxy)
+            new_parts_scores.append(repl_scores)
+            new_parts_cls.append(repl_cls)
+            accepted += 1
 
     if accepted == 0:
         return xyxy, scores, cls, 0

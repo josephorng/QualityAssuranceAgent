@@ -901,8 +901,16 @@ class RecordingSession:
         self._event_queue.put(_QUEUE_SENTINEL)
         return run_dir
 
-    def finalize_stop(self) -> Path | None:
-        """Wait for queued events, capture final screenshot, and write session artifacts."""
+    def finalize_stop(
+        self,
+        *,
+        on_after_screenshot: Callable[[], None] | None = None,
+    ) -> Path | None:
+        """Wait for queued events, capture final screenshot, and write session artifacts.
+
+        ``on_after_screenshot`` runs on this thread immediately after the final-after
+        frame is captured (or capture fails), before slower session HTML / cleanup work.
+        """
         with self._lock:
             if not self._finalizing:
                 return self._run_dir
@@ -920,14 +928,24 @@ class RecordingSession:
         if run_dir is None or run_id is None or started_at is None:
             with self._lock:
                 self._finalizing = False
+            if on_after_screenshot is not None:
+                try:
+                    on_after_screenshot()
+                except Exception:
+                    pass
             return None
 
-        # Capture settled UI before the hub restores (caller deiconifies after finalize).
+        # Capture settled UI before the hub restores (caller deiconifies after this).
         final_after = capture_final_after_screenshot(run_dir, events)
         if final_after is not None:
             self._log(run_dir, f"final after screenshot saved path={final_after}")
         else:
             self._log(run_dir, "final after screenshot capture failed")
+        if on_after_screenshot is not None:
+            try:
+                on_after_screenshot()
+            except Exception:
+                pass
 
         event_paths = recording_event_paths(run_dir)
         manifest = SessionManifest(

@@ -2407,8 +2407,18 @@ class MainHub(ctk.CTk):
             return
 
         def worker() -> None:
+            restored = threading.Event()
+
+            def restore_hub_soon() -> None:
+                if restored.is_set():
+                    return
+                restored.set()
+                self.after(0, self._restore_hub_after_final_capture)
+
             try:
-                run_dir = self._recording_session.finalize_stop()
+                run_dir = self._recording_session.finalize_stop(
+                    on_after_screenshot=restore_hub_soon,
+                )
                 event_count = self._recording_session.event_count()
 
                 def on_prefetch_progress(current: int, total: int) -> None:
@@ -2427,12 +2437,14 @@ class MainHub(ctk.CTk):
                             ),
                         )
 
+                # Vision prefetch can take a long time; hub already restored above.
                 self._vision_prefetch.drain_and_stop(on_progress=on_prefetch_progress)
                 self.after(
                     0,
                     lambda: self._on_recording_finalize_done(run_dir, event_count, analyze),
                 )
             except Exception as exc:
+                restore_hub_soon()
                 self._vision_prefetch.drain_and_stop(timeout=5.0)
                 self.after(0, lambda: self._on_recording_finalize_failed(exc))
 
@@ -2442,6 +2454,15 @@ class MainHub(ctk.CTk):
             daemon=True,
         )
         self._recording_finalize_thread.start()
+
+    def _restore_hub_after_final_capture(self) -> None:
+        """Show the hub as soon as final_after is captured (before vision prefetch)."""
+        self._destroy_recording_stop_overlay()
+        try:
+            self.deiconify()
+            self.lift()
+        except Exception:
+            pass
 
     def _wait_for_recording_finalize(self) -> None:
         thread = self._recording_finalize_thread
@@ -2455,13 +2476,8 @@ class MainHub(ctk.CTk):
         analyze: bool,
     ) -> None:
         self._recording_finalize_thread = None
-        self._destroy_recording_stop_overlay()
-        try:
-            # Restore hub only after final_after was captured (hub stayed minimized).
-            self.deiconify()
-            self.lift()
-        except Exception:
-            pass
+        # Idempotent: usually already restored right after final_after capture.
+        self._restore_hub_after_final_capture()
         if run_dir is None:
             self._set_hub_controls_idle()
             self._status.configure(text="錄製已停止。")
@@ -2494,12 +2510,7 @@ class MainHub(ctk.CTk):
 
     def _on_recording_finalize_failed(self, exc: Exception) -> None:
         self._recording_finalize_thread = None
-        self._destroy_recording_stop_overlay()
-        try:
-            self.deiconify()
-            self.lift()
-        except Exception:
-            pass
+        self._restore_hub_after_final_capture()
         self._set_hub_controls_idle()
         show_ctk_message(self, "錄製", f"完成錄製失敗：{exc}", kind="error")
         self._status.configure(text="完成錄製失敗。")

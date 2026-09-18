@@ -1648,6 +1648,34 @@ def test_begin_stop_and_finalize_stop_write_session(tmp_path) -> None:
     assert session.event_count() == 1
 
 
+def test_finalize_stop_invokes_on_after_screenshot_before_session_write(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+    seen: list[str] = []
+
+    def on_after() -> None:
+        seen.append("after_shot")
+        assert not (run_dir / "session.json").is_file()
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.capture_final_after_screenshot",
+        return_value=str(tmp_path / "final_after.jpeg"),
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import KeyCode
+
+            session._on_key_press(KeyCode.from_char("x"))
+        finally:
+            session.begin_stop()
+            session.finalize_stop(on_after_screenshot=on_after)
+
+    assert seen == ["after_shot"]
+    assert (run_dir / "session.json").is_file()
+
+
 def test_continue_recording_appends_into_existing_folder(tmp_path) -> None:
     existing = tmp_path / "opened_recording"
     (existing / "events").mkdir(parents=True)

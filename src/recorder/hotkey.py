@@ -6,6 +6,17 @@ from typing import Callable
 from pynput import keyboard
 
 _RECORDING_HOTKEY = "<ctrl>+<shift>+r"
+RECORDING_HOTKEY_DISPLAY = "Ctrl+Shift+R"
+# Modifier + key token as recorded by capture (lowercase letter token).
+RECORDING_TOGGLE_HOTKEY_KEYS = frozenset({"ctrl", "shift", "r"})
+
+
+def is_recording_toggle_hotkey(keys: list[str] | tuple[str, ...] | None) -> bool:
+    """True when ``keys`` is the global recording toggle (Ctrl+Shift+R)."""
+    if not keys:
+        return False
+    normalized = {str(k).strip().lower() for k in keys if str(k).strip()}
+    return normalized == RECORDING_TOGGLE_HOTKEY_KEYS
 
 
 class RecordingHotkeyManager:

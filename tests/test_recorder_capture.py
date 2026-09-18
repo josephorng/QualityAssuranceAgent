@@ -445,6 +445,57 @@ def test_ctrl_shift_letter_still_hotkey(tmp_path) -> None:
     assert raw["keys"] == ["ctrl", "shift", "S"]
 
 
+def test_ctrl_shift_r_recording_toggle_is_not_recorded(tmp_path) -> None:
+    """Ctrl+Shift+R is the global recording toggle and must not become a step."""
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            session._on_key_press(Key.ctrl_l)
+            session._on_key_press(Key.shift_l)
+            session._on_key_press(KeyCode.from_char("r"))
+            session._on_key_release(Key.shift_l)
+            session._on_key_release(Key.ctrl_l)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 0
+    assert not (run_dir / "events" / "event_001.json").is_file()
+
+
+def test_mouse_click_inside_any_ignore_rect_is_skipped(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+    rects = [(0, 0, 100, 100), (800, 800, 100, 100)]
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start(ignore_rect_provider=lambda: rects)
+        try:
+            from pynput.mouse import Button
+
+            session._on_mouse_click(50, 50, Button.left, True)
+            time.sleep(0.5)
+            session._on_mouse_click(850, 850, Button.left, True)
+            time.sleep(0.5)
+            _left_click(session, 400, 400)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    assert (run_dir / "events" / "event_001.json").is_file()
+
+
 def test_ctrl_v_with_text_records_as_text_input(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
 

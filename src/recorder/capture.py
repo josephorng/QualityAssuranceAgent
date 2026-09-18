@@ -36,6 +36,7 @@ from src.recorder.window_snapshot import (
     settle_delay_for_click,
     snapshot_top_level_windows,
 )
+from src.recorder.hotkey import is_recording_toggle_hotkey
 
 _DOUBLE_CLICK_INTERVAL_S = 0.35
 _DOUBLE_CLICK_MAX_DIST_PX = 8
@@ -176,7 +177,9 @@ _NUMPAD_VK_TO_CHAR: dict[int, str] = {
 _VK_A = 65
 _VK_Z = 90
 
-IgnoreRectProvider = Callable[[], tuple[int, int, int, int] | None]
+IgnoreRect = tuple[int, int, int, int]
+# Provider may return one rect, several rects (hub + stop overlay), or None.
+IgnoreRectProvider = Callable[[], IgnoreRect | list[IgnoreRect] | None]
 
 
 @dataclass(frozen=True)
@@ -488,6 +491,20 @@ def _point_in_rect(x: int, y: int, rect: tuple[int, int, int, int] | None) -> bo
     if width <= 0 or height <= 0:
         return False
     return left <= x < left + width and top <= y < top + height
+
+
+def _normalize_ignore_rects(
+    value: IgnoreRect | list[IgnoreRect] | None,
+) -> list[IgnoreRect]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [rect for rect in value if rect is not None]
+    return [value]
+
+
+def _point_in_any_rect(x: int, y: int, rects: list[IgnoreRect]) -> bool:
+    return any(_point_in_rect(x, y, rect) for rect in rects)
 
 
 def _windows_is_admin() -> bool | None:
@@ -957,20 +974,20 @@ class RecordingSession:
             except Exception:
                 pass
 
-    def _current_ignore_rect(self) -> tuple[int, int, int, int] | None:
+    def _current_ignore_rects(self) -> list[IgnoreRect]:
         provider = self._ignore_rect_provider
         if provider is None:
-            return None
+            return []
         try:
-            return provider()
+            return _normalize_ignore_rects(provider())
         except Exception:
-            return None
+            return []
 
     def _should_ignore_mouse_point(self, x: int, y: int) -> bool:
         with self._lock:
             if not self._accepting_input:
                 return True
-        return _point_in_rect(x, y, self._current_ignore_rect())
+        return _point_in_any_rect(x, y, self._current_ignore_rects())
 
     def _enqueue(self, item: _QueuedEvent) -> None:
         self._event_queue.put(item)
@@ -2430,6 +2447,9 @@ class RecordingSession:
                 return
 
         if mods:
+            if is_recording_toggle_hotkey(mods + [token]):
+                # Global recording toggle (Ctrl+Shift+R) — never record as a step.
+                return
             if _is_paste_hotkey(mods, token):
                 pasted = _safe_clipboard_text()
                 if pasted is not None and pasted.strip():

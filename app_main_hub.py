@@ -75,7 +75,8 @@ from src.common.settings import (
     reports_serve_root,
 )
 from src.recorder.capture import RecordingSession
-from src.recorder.hotkey import RecordingHotkeyManager
+from src.recorder.hotkey import RECORDING_HOTKEY_DISPLAY, RecordingHotkeyManager
+from src.recorder.stop_overlay import RecordingStopOverlay
 from src.recorder.models import RecordedEvent
 from src.recorder.vision_prefetch import VisionPrefetchWorker
 
@@ -268,6 +269,7 @@ class MainHub(ctk.CTk):
         self._recording_session = RecordingSession()
         self._recording_session.set_on_event(self._on_recording_event)
         self._recording_hotkey = RecordingHotkeyManager()
+        self._recording_stop_overlay: RecordingStopOverlay | None = None
         self._recording_analysis_thread: threading.Thread | None = None
         self._recording_finalize_thread: threading.Thread | None = None
         self._vision_prefetch = VisionPrefetchWorker()
@@ -2165,6 +2167,7 @@ class MainHub(ctk.CTk):
             return
         if self._is_analysis_running():
             self._analysis_cancel_event.set()
+        self._destroy_recording_stop_overlay()
         if self._recording_session.is_active():
             self._hide_hub_before_final_capture()
             self._recording_session.stop()
@@ -2194,8 +2197,40 @@ class MainHub(ctk.CTk):
             height,
         )
 
-    def _recording_ignore_rect_provider(self) -> tuple[int, int, int, int] | None:
-        return self._hub_ignore_rect()
+    def _recording_ignore_rect_provider(
+        self,
+    ) -> list[tuple[int, int, int, int]]:
+        """Rects that must not become recorded mouse events (hub + stop overlay)."""
+        rects: list[tuple[int, int, int, int]] = []
+        hub = self._hub_ignore_rect()
+        if hub is not None:
+            rects.append(hub)
+        overlay = self._recording_stop_overlay
+        if overlay is not None:
+            stop_rect = overlay.ignore_rect()
+            if stop_rect is not None:
+                rects.append(stop_rect)
+        return rects
+
+    def _recording_status_text(self, *, count: int, name: str, continuing: bool = False) -> str:
+        verb = "繼續錄製中" if continuing else "錄製中"
+        hint = f" · {RECORDING_HOTKEY_DISPLAY} 停止"
+        if name:
+            return f"{verb} ({count} 個事件){hint}… {name}"
+        return f"{verb} ({count} 個事件){hint}…"
+
+    def _show_recording_stop_overlay(self) -> None:
+        self._destroy_recording_stop_overlay()
+        self._recording_stop_overlay = RecordingStopOverlay(
+            self,
+            on_stop=self._on_record_button,
+        )
+
+    def _destroy_recording_stop_overlay(self) -> None:
+        overlay = self._recording_stop_overlay
+        self._recording_stop_overlay = None
+        if overlay is not None:
+            overlay.destroy()
 
     def _schedule_toggle_recording(self) -> None:
         self.after(0, self._toggle_recording)
@@ -2302,15 +2337,21 @@ class MainHub(ctk.CTk):
 
         self._set_hub_controls_recording()
         self._vision_prefetch.start(run_dir)
-        verb = "繼續錄製中" if existing_run_dir is not None else "錄製中"
+        continuing = existing_run_dir is not None
         self._status.configure(
-            text=f"{verb} (0 個事件)… {run_dir.name}",
+            text=self._recording_status_text(
+                count=0,
+                name=run_dir.name,
+                continuing=continuing,
+            ),
             text_color=("gray20", "gray65"),
         )
         try:
             self.iconify()
         except Exception:
             pass
+        # Stop without restoring the hub: floating control + hotkey while minimized.
+        self._show_recording_stop_overlay()
 
     def _on_recording_event(self, event: RecordedEvent) -> None:
         self._vision_prefetch.enqueue(event)
@@ -2320,7 +2361,7 @@ class MainHub(ctk.CTk):
         self.after(
             0,
             lambda: self._status.configure(
-                text=f"錄製中 ({count} 個事件)… {name}",
+                text=self._recording_status_text(count=count, name=name),
                 text_color=("gray20", "gray65"),
             ),
         )
@@ -2329,16 +2370,29 @@ class MainHub(ctk.CTk):
         if not self._recording_session.is_active() or self._is_recording_finalizing():
             return
         self._analysis_cancel_event.clear()
+        # Cut input first so restore/minimize of the hub cannot become events.
         self._recording_session.begin_stop()
+        self._destroy_recording_stop_overlay()
+        try:
+            self.update_idletasks()
+        except Exception:
+            pass
+        # Let the floating stop control clear before final_after capture.
+        time.sleep(_HUB_HIDE_SETTLE_SECONDS)
         self._set_hub_controls_finalizing()
         self._status.configure(text="正在完成錄製…", text_color=("gray20", "gray65"))
-        # finalize_stop captures final_after; hide the hub first so the baseline shows
-        # the recorded app instead of the hub the user reopened to press stop.
+        # Happy path: hub stays minimized → capture final_after → restore after.
+        # Fallback: if the user restored the hub to press Stop, hide it again so
+        # the baseline is the recorded app, not the hub chrome.
         self._hide_hub_before_final_capture()
         self._start_recording_finalize_worker(analyze=analyze)
 
     def _hide_hub_before_final_capture(self) -> None:
-        """Iconify the hub and wait for the minimize animation to clear the screen."""
+        """Iconify the hub only when it is currently visible (stop-via-hub fallback).
+
+        Preferred stop is hotkey / floating overlay while the hub stays minimized,
+        so final_after can be captured without a hide/show cycle.
+        """
         try:
             if not self.winfo_viewable():
                 return
@@ -2401,7 +2455,9 @@ class MainHub(ctk.CTk):
         analyze: bool,
     ) -> None:
         self._recording_finalize_thread = None
+        self._destroy_recording_stop_overlay()
         try:
+            # Restore hub only after final_after was captured (hub stayed minimized).
             self.deiconify()
             self.lift()
         except Exception:
@@ -2438,6 +2494,7 @@ class MainHub(ctk.CTk):
 
     def _on_recording_finalize_failed(self, exc: Exception) -> None:
         self._recording_finalize_thread = None
+        self._destroy_recording_stop_overlay()
         try:
             self.deiconify()
             self.lift()

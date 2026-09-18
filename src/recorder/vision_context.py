@@ -89,6 +89,23 @@ _BBOX_HIT_TOLERANCE_PX = 4
 _CONTAINER_LANDMARK_CLASSES = frozenset({"input", "scrollbar"})
 _SIMILAR_CLASS_LABELS = frozenset({"input", "scrollbar"})
 _CLASS_LABEL_BY_NAME = {"input": "輸入欄", "scrollbar": "滾動條"}
+# Icons that are themselves the clickable control. Only these beat overlapping
+# OCR text in click/drop primary ranking; decorative icons (頭像, Chrome, …)
+# lose to any visible text so labels like 「是」 win over misread glyph icons.
+_CONTROL_CHROME_ICON_IDS = frozenset(
+    {
+        "收合節點",
+        "展開節點",
+        "方框、矩形框線",
+        "向下V箭頭",
+        "向上V箭頭",
+        "空心圓圈、單選鈕",
+        "單選鈕核取",
+        "已勾選方框",
+        "向上雙V箭頭",
+        "向下雙V箭頭",
+    }
+)
 # All eight directed sides used for recording HTML landmark side groups.
 _DIRECTIONAL_LANDMARK_CELLS = frozenset(
     {
@@ -484,22 +501,54 @@ def _is_icon_detection(det: UiDetection) -> bool:
     return bool(det.icons)
 
 
+def _icons_include_control_chrome(icons: Any) -> bool:
+    """True when any icon ``chinese_id`` / ``id`` is a whitelisted control affordance."""
+    if not isinstance(icons, list):
+        return False
+    for icon in icons:
+        if not isinstance(icon, dict):
+            continue
+        label = str(icon.get("chinese_id") or icon.get("id") or "").strip()
+        if label in _CONTROL_CHROME_ICON_IDS:
+            return True
+    return False
+
+
 def _hit_content_priority(det: UiDetection) -> int:
     """Lower is better when several boxes share the same click distance.
 
     Priority:
     1. text with visible length > 1
-    2. icon object
-    3. text with visible length == 1
-    4. others (scrollbar, input, empty element, …)
+    2. control-chrome icon (checkbox, radio, tree toggle, chevron, …)
+    3. any other text (including single-char)
+    4. other icons
+    5. others (scrollbar, input, empty element, …)
     """
     if _is_multi_char_text_detection(det):
         return 0
-    if _is_icon_detection(det):
+    if _icons_include_control_chrome(det.icons):
         return 1
     if _is_single_char_text_detection(det):
         return 2
-    return 3
+    if _is_icon_detection(det):
+        return 3
+    return 4
+
+
+def _candidate_hit_content_priority(candidate: dict[str, Any]) -> int:
+    """Same ranking as ``_hit_content_priority`` for vision candidate dicts."""
+    class_name = str(candidate.get("class_name") or "").strip()
+    visible = _visible_text(candidate.get("text"))
+    icons = candidate.get("icons")
+    if class_name == "text" and len(visible) > 1:
+        return 0
+    if _icons_include_control_chrome(icons):
+        return 1
+    if class_name == "text" and visible:
+        return 2
+    if icons:
+        return 3
+    return 4
 
 
 def _nearest_candidate_rank_key(
@@ -507,7 +556,7 @@ def _nearest_candidate_rank_key(
     local_x: int,
     local_y: int,
     *,
-    content_priority: int = 3,
+    content_priority: int = 4,
 ) -> tuple[float, int, int]:
     """Sort key: distance, then content priority, then smallest area."""
     return (
@@ -631,8 +680,8 @@ def _nearest_candidates(
     """Return detections sorted by point-to-bbox distance (closest first).
 
     When several boxes contain the cursor (distance 0), prefer by content:
-    multi-char text, then icon, then single-char text, then others; within a
-    tier, prefer the smallest bbox.
+    multi-char text, then control-chrome icons, then other text, then other
+    icons, then others; within a tier, prefer the smallest bbox.
 
     By default, always includes the nearest detection as primary, then keeps
     appending neighbors until both quotas are met:
@@ -737,8 +786,9 @@ def _destination_target_at_point(
 ) -> UiDetection | None:
     """Return the preferred text/element whose bbox contains the drop point.
 
-    Uses the same content priority as click ranking (multi-char text, icon,
-    single-char text, then others), with smallest area as the final tie-breaker.
+    Uses the same content priority as click ranking (multi-char text,
+    control-chrome icons, other text, other icons, then others), with smallest
+    area as the final tie-breaker.
     """
     hits = [
         det
@@ -758,9 +808,10 @@ def _candidate_containing_click(
 ) -> dict[str, Any] | None:
     """Return the best candidate whose padded bbox contains the click, if any.
 
-    Prefers multi-char text, then icons, then single-char text, then others;
-    smallest area breaks ties. Includes inputs/scrollbars so an on-field click
-    keeps that container as the primary anchor.
+    Prefers multi-char text, then control-chrome icons, then other text, then
+    other icons, then others; smallest area breaks ties. Includes
+    inputs/scrollbars so an on-field click keeps that container as the primary
+    anchor.
     """
     hits = [
         candidate
@@ -772,19 +823,9 @@ def _candidate_containing_click(
         return None
 
     def _hit_key(candidate: dict[str, Any]) -> tuple[int, int]:
-        class_name = str(candidate.get("class_name") or "").strip()
-        visible = _visible_text(candidate.get("text"))
-        if class_name == "text" and len(visible) > 1:
-            priority = 0
-        elif candidate.get("icons"):
-            priority = 1
-        elif class_name == "text" and len(visible) == 1:
-            priority = 2
-        else:
-            priority = 3
         bbox = _as_bbox_xywh(candidate.get("bbox"))
         area = _bbox_area(bbox) if bbox is not None else 0
-        return priority, area
+        return _candidate_hit_content_priority(candidate), area
 
     return min(hits, key=_hit_key)
 

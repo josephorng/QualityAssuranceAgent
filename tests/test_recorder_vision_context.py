@@ -615,7 +615,7 @@ def test_nearest_candidates_prefers_icon_over_scrollbar() -> None:
 
 
 def test_nearest_candidates_prefers_content_priority_on_overlap() -> None:
-    """Overlapping hits: multi-char text > icon > single-char text > others."""
+    """Overlapping hits: multi-char text > control icon > other text > other icons."""
     scrollbar = _detection_from_bbox((0, 0, 100, 100), YOLO_CLASS_SCROLLBAR)
     single = _detection_from_bbox((10, 10, 20, 20), YOLO_CLASS_TEXT, text="中")
     icon = _detection_from_bbox(
@@ -628,14 +628,14 @@ def test_nearest_candidates_prefers_content_priority_on_overlap() -> None:
     nearest = _nearest_candidates(
         detections, 25, 25, min_multi_char_text_neighbors=None, limit=4
     )
-    assert [d for d in nearest] == [multi, icon, single, scrollbar]
+    assert [d for d in nearest] == [multi, single, icon, scrollbar]
 
 
-def test_nearest_candidates_prefers_icon_over_single_char_text() -> None:
+def test_nearest_candidates_prefers_control_icon_over_single_char_text() -> None:
     icon = _detection_from_bbox(
         (0, 0, 40, 40),
         YOLO_CLASS_ELEMENT,
-        icons=[{"chinese_id": "設定"}],
+        icons=[{"chinese_id": "展開節點"}],
     )
     single = _detection_from_bbox((5, 5, 10, 10), YOLO_CLASS_TEXT, text="×")
     nearest = _nearest_candidates(
@@ -643,6 +643,20 @@ def test_nearest_candidates_prefers_icon_over_single_char_text() -> None:
     )
     assert nearest[0] is icon
     assert nearest[1] is single
+
+
+def test_nearest_candidates_prefers_single_char_text_over_decorative_icon() -> None:
+    icon = _detection_from_bbox(
+        (0, 0, 40, 40),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "頭像、使用者頭像"}],
+    )
+    single = _detection_from_bbox((5, 5, 10, 10), YOLO_CLASS_TEXT, text="是")
+    nearest = _nearest_candidates(
+        [single, icon], 10, 10, min_multi_char_text_neighbors=None, limit=2
+    )
+    assert nearest[0] is single
+    assert nearest[1] is icon
 
 
 def test_nearest_candidates_prefers_multi_char_text_over_icon() -> None:
@@ -657,6 +671,52 @@ def test_nearest_candidates_prefers_multi_char_text_over_icon() -> None:
     )
     assert nearest[0] is multi
     assert nearest[1] is icon
+
+
+def test_select_click_primary_prefers_yes_text_over_avatar_icon() -> None:
+    """「是」 OCR must beat overlapping decorative 頭像 at the same click."""
+    click_xy = [1219, 828]
+    candidates = [
+        {
+            "bbox": [1209, 818, 20, 20],
+            "center": click_xy,
+            "class_name": "element",
+            "text": "\ue02d",
+            "icons": [{"chinese_id": "頭像、使用者頭像"}],
+        },
+        {
+            "bbox": [1208, 818, 21, 20],
+            "center": click_xy,
+            "class_name": "text",
+            "text": "是",
+        },
+    ]
+    primary = select_click_primary_candidate(candidates, click_xy[0], click_xy[1])
+    assert primary is not None
+    assert primary["text"] == "是"
+    assert primary["class_name"] == "text"
+
+
+def test_select_click_primary_prefers_checkbox_icon_over_single_char() -> None:
+    click_xy = [100, 100]
+    candidates = [
+        {
+            "bbox": [95, 95, 14, 14],
+            "center": click_xy,
+            "class_name": "text",
+            "text": "×",
+        },
+        {
+            "bbox": [90, 90, 20, 20],
+            "center": click_xy,
+            "class_name": "element",
+            "icons": [{"chinese_id": "方框、矩形框線"}],
+        },
+    ]
+    primary = select_click_primary_candidate(candidates, click_xy[0], click_xy[1])
+    assert primary is not None
+    assert primary.get("icons")
+    assert primary["icons"][0]["chinese_id"] == "方框、矩形框線"
 
 
 @pytest.mark.asyncio

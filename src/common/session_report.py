@@ -469,11 +469,25 @@ _KNOWN_TIMING_KINDS = frozenset(
         "screenshot_capture",
     }
 )
+# After the last tool, the interval until the next stamped message is often settle /
+# verify prep (hand after-action sleep or script settle before verify).
+_WAITING_PROFILE_KINDS = frozenset({"step_wrap_up"})
+
+
+def _coerce_positive_seconds(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    seconds = float(value)
+    if seconds <= 0:
+        return None
+    return seconds
 
 
 def _build_timing_summary(
     timing: dict[str, Any],
     time_profile: list[dict[str, Any]],
+    *,
+    settle_after_seconds: float | None = None,
 ) -> dict[str, Any]:
     execution_llm = _sum_profile_durations(time_profile, {"llm_inference"})
     verify_llm = _sum_profile_durations(time_profile, {"verify_llm_inference"})
@@ -493,16 +507,27 @@ def _build_timing_summary(
         profile_total = accounted + other_from_profile
         total = round(profile_total, 3) if profile_total > 0 else None
 
-    other = other_from_profile
+    # Wall-clock remainder holds settle sleeps and other unprofiled gaps.
+    raw_other = other_from_profile
     if total is not None:
-        # Prefer wall-clock remainder so unprofiled gaps (settle, etc.) surface as other.
-        other = round(max(0.0, total - accounted), 3)
+        raw_other = round(max(0.0, total - accounted), 3)
+
+    settle = _coerce_positive_seconds(settle_after_seconds)
+    if settle is None:
+        settle = _coerce_positive_seconds(timing.get("settle_after_seconds"))
+    wrap_up = _sum_profile_durations(time_profile, _WAITING_PROFILE_KINDS)
+    # Prefer the recording/script settle when present (often inside step_completion or
+    # wrap-up). Otherwise attribute post-tool wrap-up as waiting.
+    waiting_candidate = settle if settle is not None else wrap_up
+    waiting = round(min(float(waiting_candidate or 0.0), raw_other), 3)
+    other = round(max(0.0, raw_other - waiting), 3)
 
     summary: dict[str, Any] = {
         "execution_llm_seconds": execution_llm,
         "verify_llm_seconds": verify_llm,
         "tool_execution_seconds": tool_execution,
         "screenshot_seconds": screenshot,
+        "waiting_seconds": waiting,
         "other_seconds": other,
     }
     if total is not None:
@@ -529,7 +554,13 @@ def _build_step_records(
 
         timing = {
             key: step_timing[key]
-            for key in ("started_at_utc", "finished_at_utc", "duration_seconds", "status")
+            for key in (
+                "started_at_utc",
+                "finished_at_utc",
+                "duration_seconds",
+                "status",
+                "settle_after_seconds",
+            )
             if key in step_timing
         }
 
@@ -543,6 +574,7 @@ def _build_step_records(
             for_verify=True,
         )
         time_profile = actor_profile + verify_profile
+        settle_after = _coerce_positive_seconds(step_timing.get("settle_after_seconds"))
 
         record: dict[str, Any] = {
             "transcript_counter": transcript_counter,
@@ -550,7 +582,11 @@ def _build_step_records(
             "goal": _resolve_goal(transcript_counter, script_step_index, step_timing, runtime_goals),
             "timing": timing,
             "time_profile": time_profile,
-            "timing_summary": _build_timing_summary(timing, time_profile),
+            "timing_summary": _build_timing_summary(
+                timing,
+                time_profile,
+                settle_after_seconds=settle_after,
+            ),
         }
         expected_outcome = step_timing.get("expected_outcome")
         if isinstance(expected_outcome, str) and expected_outcome.strip():
@@ -664,6 +700,7 @@ def _build_summary(
         "verify_llm_seconds": 0.0,
         "tool_execution_seconds": 0.0,
         "screenshot_seconds": 0.0,
+        "waiting_seconds": 0.0,
         "other_seconds": 0.0,
     }
     has_category = False

@@ -1263,7 +1263,7 @@ def test_write_recording_html_uses_final_after_for_last_step(tmp_path: Path) -> 
     assert 'data-after-event-index="1"' in first_group
     assert 'data-duration-seconds="4"' in first_group
     assert "在此步驟後加入等待 4 秒" in first_group
-    assert "間隔" in first_group
+    assert "<dt>等待</dt>" in first_group
     assert "4 秒" in first_group
     assert 'class="add-wait-instruction"' in second_group
     assert 'data-after-event-index="2"' in second_group
@@ -2248,6 +2248,7 @@ def test_write_session_html_includes_time_profile_tab(tmp_path: Path) -> None:
                     "status": "completed",
                     "step_index": 0,
                     "goal": "開啟記事本",
+                    "settle_after_seconds": 2.0,
                 },
             },
             ensure_ascii=False,
@@ -2273,6 +2274,8 @@ def test_write_session_html_includes_time_profile_tab(tmp_path: Path) -> None:
     assert "類別總覽" in html
     assert "執行 LLM" in html
     assert "驗證 LLM" in html
+    assert "等待" in html
+    assert "settle_after" in html
     assert "YOLO（yolo_ocr）" in html
     assert "OCR（yolo_ocr）" in html
     assert "verify_llm_inference" in html
@@ -2369,7 +2372,16 @@ def test_write_recording_html_includes_time_profile_tab(tmp_path: Path) -> None:
     assert 'data-tab="profile"' in html
     assert "時間分析" in html
     assert "各事件時間" in html
+    assert '<th class="num">等待</th>' in html
+    assert "平均等待" in html
+    assert "等待合計" in html
     assert "Settle" in html
-    assert "沒有執行 LLM" in html
+    assert "2.50s" in html
+    assert "1.20s" in html
+    assert "與上一事件的間隔" in html
     assert "recording-toolbar" in html
     assert 'id="tab-steps"' in html
+
+    first_group = html.split('data-event-index="1"', 1)[1].split("</details>", 1)[0]
+    assert "<dt>Settle</dt>" in first_group
+    assert "1.20s" in first_group

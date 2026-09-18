@@ -4832,10 +4832,16 @@ def _render_recording_event_html(
         meta_rows.append(("捲動", escape(str(scroll_delta))))
     duration_seconds = event.get("duration_seconds")
     if isinstance(duration_seconds, (int, float)):
-        meta_rows.append(("等待", escape(str(duration_seconds))))
+        meta_rows.append(("等待", escape(f"{duration_seconds} 秒")))
     window_title = event.get("target_window_title")
     if isinstance(window_title, str) and window_title.strip():
         meta_rows.append(("視窗", escape(window_title.strip())))
+
+    # Post-action settle (UI idle before the next capture / analysis window).
+    if isinstance(analysis, dict):
+        settle_after = _recording_float_seconds(analysis.get("settle_after_seconds"))
+        if settle_after is not None and settle_after > 0:
+            meta_rows.append(("Settle", escape(_format_seconds_precise(settle_after))))
 
     # Gap after this step (from next event's elapsed / timestamps), used for
     # 「加入等待」 which inserts a wait after the current step.
@@ -4852,7 +4858,7 @@ def _render_recording_event_html(
             next_analysis if isinstance(next_analysis, dict) else None,
         )
     if after_wait_seconds is not None:
-        meta_rows.append(("間隔", escape(f"{after_wait_seconds} 秒")))
+        meta_rows.append(("等待", escape(f"{after_wait_seconds} 秒")))
 
     meta_html = "".join(f"<dt>{escape(label)}</dt><dd>{value}</dd>" for label, value in meta_rows)
 
@@ -5526,6 +5532,7 @@ def _render_session_time_profile_html(run_root: Path, report: dict[str, Any]) ->
         ("verify_llm_seconds", "驗證 LLM"),
         ("tool_execution_seconds", "工具執行"),
         ("screenshot_seconds", "截圖 / 準備"),
+        ("waiting_seconds", "等待"),
         ("other_seconds", "其他 / 未分類"),
     ]
     category_rows: list[tuple[str, float]] = []
@@ -5607,6 +5614,7 @@ def _render_session_time_profile_html(run_root: Path, report: dict[str, Any]) ->
             ("verify_llm_seconds", "驗證LLM"),
             ("tool_execution_seconds", "工具"),
             ("screenshot_seconds", "截圖"),
+            ("waiting_seconds", "等待"),
             ("other_seconds", "其他"),
         ):
             value = timing_summary.get(key)
@@ -5682,6 +5690,8 @@ def _render_session_time_profile_html(run_root: Path, report: dict[str, Any]) ->
     note = (
         '<p class="time-profile-note">'
         "執行 / 驗證 LLM、工具與截圖時間來自步驟訊息時間戳；"
+        "等待優先取自步驟的 settle_after（錄製間隔），否則取工具後 wrap-up；"
+        "從本步牆鐘剩餘時間中拆出，不與「其他」重複計算；"
         "move_mouse 工具列會展開 YOLO / OCR / 選取等內部階段（來自工具結果的 timing）；"
         "YOLO / OCR（yolo_ocr）合計來自本 run 的 <code>yolo_ocr/</code> sidecar（若有），"
         "為整次執行合計，未對應到單一指令。"
@@ -5785,8 +5795,8 @@ def _render_recording_time_profile_html(
     cards: list[tuple[str, str]] = [
         ("錄製總長", _format_seconds_precise(span_seconds) if span_seconds is not None else "—"),
         ("事件數", str(len(events))),
-        ("平均間隔", _format_seconds_precise(avg_gap) if avg_gap is not None else "—"),
-        ("間隔合計", _format_seconds_precise(elapsed_sum) if elapsed_count else "—"),
+        ("平均等待", _format_seconds_precise(avg_gap) if avg_gap is not None else "—"),
+        ("等待合計", _format_seconds_precise(elapsed_sum) if elapsed_count else "—"),
         ("Settle 合計", _format_seconds_precise(settle_sum) if settle_count else "—"),
     ]
     if hold_count:
@@ -5794,7 +5804,7 @@ def _render_recording_time_profile_html(
 
     category_rows: list[tuple[str, float]] = []
     if elapsed_count:
-        category_rows.append(("事件間隔", round(elapsed_sum, 3)))
+        category_rows.append(("等待", round(elapsed_sum, 3)))
     if settle_count:
         category_rows.append(("Settle", round(settle_sum, 3)))
     if hold_count:
@@ -5817,7 +5827,9 @@ def _render_recording_time_profile_html(
 
     note = (
         '<p class="time-profile-note">'
-        "錄製分析目前只保存事件間隔與 settle 時間，沒有執行 LLM、驗證 LLM、YOLO 或 OCR 的細部耗時。"
+        "「等待」是與上一事件的間隔（可轉成腳本等待指令）；"
+        "Settle 是動作後畫面穩定時間；Hold/Wait 來自長按或明確等待事件的 duration。"
+        "錄製分析沒有執行 LLM、驗證 LLM、YOLO 或 OCR 的細部耗時——"
         "若要優化回放路徑的視覺 / LLM 成本，請改看執行報告（session_steps）的時間分析。"
         "</p>"
     )
@@ -5830,7 +5842,7 @@ def _render_recording_time_profile_html(
         '<table class="time-profile-table">'
         "<thead><tr>"
         '<th class="num">#</th><th>指令</th>'
-        '<th class="num">間隔</th><th class="num">Settle</th><th class="num">Hold/Wait</th>'
+        '<th class="num">等待</th><th class="num">Settle</th><th class="num">Hold/Wait</th>'
         "</tr></thead>"
         f"<tbody>{''.join(table_rows)}</tbody>"
         "</table>"

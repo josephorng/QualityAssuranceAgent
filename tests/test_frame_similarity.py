@@ -9,6 +9,7 @@ from PIL import Image
 
 from src.recorder.frame_similarity import (
     apply_settle_sample,
+    compare_frames,
     frames_similar,
     mean_abs_diff,
 )
@@ -25,6 +26,9 @@ def test_mean_abs_diff_identical(tmp_path: Path) -> None:
     _write_gray(b, 128)
     assert mean_abs_diff(a, b) < 0.01
     assert frames_similar(a, b) is True
+    similar, mad = compare_frames(a, b)
+    assert similar is True
+    assert mad is not None and mad < 0.01
 
 
 def test_mean_abs_diff_different(tmp_path: Path) -> None:
@@ -34,6 +38,9 @@ def test_mean_abs_diff_different(tmp_path: Path) -> None:
     _write_gray(b, 255)
     assert mean_abs_diff(a, b) > 0.5
     assert frames_similar(a, b) is False
+    similar, mad = compare_frames(a, b)
+    assert similar is False
+    assert mad is not None and mad > 0.5
 
 
 def test_apply_settle_sample_first_keeps_staging(tmp_path: Path) -> None:

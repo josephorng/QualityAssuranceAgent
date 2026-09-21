@@ -84,7 +84,7 @@ def test_next_instruction_event_settle_prefers_observed() -> None:
         event=events[0],
         prepared_list=[object(), object()],
         instruction_results=[{"instruction": "a"}, {"instruction": "b"}],
-        stopped_at_utc="2026-09-07T00:00:20+00:00",
+        trailing_settle_end_utc="2026-09-07T00:00:20+00:00",
     )
     assert settle == 1.5
 
@@ -108,9 +108,203 @@ def test_next_instruction_event_settle_falls_back_to_gap() -> None:
         event=events[0],
         prepared_list=[object(), object()],
         instruction_results=[{"instruction": "a"}, {"instruction": "b"}],
-        stopped_at_utc="2026-09-07T00:00:20+00:00",
+        trailing_settle_end_utc="2026-09-07T00:00:20+00:00",
     )
     assert settle == 10.0
+
+
+def test_next_instruction_event_settle_last_ignores_stop_uses_trailing() -> None:
+    events = [
+        RecordedEvent(
+            index=0,
+            timestamp_utc="2026-09-07T00:00:00+00:00",
+            kind="click",
+        ),
+    ]
+    # Without trailing end, last event has no settle (stop time must not be used).
+    assert (
+        _next_instruction_event_settle(
+            events=events,
+            event_pos=0,
+            event=events[0],
+            prepared_list=[object()],
+            instruction_results=[{"instruction": "a"}],
+            trailing_settle_end_utc=None,
+        )
+        is None
+    )
+    # Trailing restore click timestamp is allowed as settle end for the last action.
+    assert (
+        _next_instruction_event_settle(
+            events=events,
+            event_pos=0,
+            event=events[0],
+            prepared_list=[object()],
+            instruction_results=[{"instruction": "a"}],
+            trailing_settle_end_utc="2026-09-07T00:00:04+00:00",
+        )
+        == 4.0
+    )
+
+
+def test_settle_probe_ticks_run_off_event_queue(tmp_path: Path, monkeypatch) -> None:
+    """Settle comparisons must not wait behind click-persist work on the event queue."""
+    from src.recorder.capture import RecordingSession, _SETTLE_PROBE_FIRST_S
+
+    run_dir = tmp_path / "rec"
+    (run_dir / "screenshots").mkdir(parents=True)
+    (run_dir / "events").mkdir(parents=True)
+
+    session = RecordingSession.__new__(RecordingSession)
+    session._lock = __import__("threading").Lock()
+    session._settle_tick_lock = __import__("threading").Lock()
+    session._run_dir = run_dir
+    session._events = []
+    session._settle_probe = None
+    session._settle_probe_timer = None
+    session._last_settle_frame = None
+    session._event_queue = __import__("queue").Queue()
+    session._log = lambda *_a, **_k: None  # type: ignore[method-assign]
+
+    fired: list[int] = []
+
+    def _fake_run(event_index: int) -> None:
+        fired.append(event_index)
+
+    monkeypatch.setattr(session, "_run_settle_probe_tick", _fake_run)
+
+    from src.recorder.capture import _SettleProbeState
+
+    session._settle_probe = _SettleProbeState(
+        event_index=7,
+        started_monotonic=__import__("time").monotonic(),
+        cursor_xy=(10, 10),
+    )
+    session._schedule_settle_probe_tick(0.05, 7)
+    assert session._event_queue.empty()
+    deadline = __import__("time").monotonic() + 1.0
+    while not fired and __import__("time").monotonic() < deadline:
+        __import__("time").sleep(0.01)
+    assert fired == [7]
+    # Keep default first delay documented for callers.
+    assert _SETTLE_PROBE_FIRST_S == 1.0
+
+
+def test_finish_settle_against_final_after_persists_observed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Last-step settle matches all-monitor samples to final_after."""
+    import json
+    import threading
+    import time
+
+    from src.recorder.capture import RecordingSession, _SettleProbeState
+    from src.recorder.models import RecordedEvent, event_json_path
+
+    run_dir = tmp_path / "rec"
+    (run_dir / "screenshots").mkdir(parents=True)
+    (run_dir / "events").mkdir(parents=True)
+
+    final_after = run_dir / "screenshots" / "final_after.jpeg"
+    _write_gray(final_after, 100)
+
+    event = RecordedEvent(
+        index=5,
+        timestamp_utc="2026-09-21T00:00:00+00:00",
+        kind="click",
+    )
+    event_json_path(run_dir, 5).write_text(
+        json.dumps(event.to_dict(), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    session = RecordingSession.__new__(RecordingSession)
+    session._lock = threading.Lock()
+    session._settle_tick_lock = threading.Lock()
+    session._run_dir = run_dir
+    session._events = [event]
+    session._settle_probe_timer = None
+    session._last_settle_frame = None
+    session._log = lambda *_a, **_k: None  # type: ignore[method-assign]
+    session._settle_probe = _SettleProbeState(
+        event_index=5,
+        started_monotonic=time.monotonic() - 1.25,
+        cursor_xy=(10, 10),
+    )
+
+    def _fake_capture(dest: Path) -> str:
+        _write_gray(Path(dest), 100)
+        return str(dest)
+
+    monkeypatch.setattr(
+        "src.recorder.capture.capture_all_screens_to_file",
+        _fake_capture,
+    )
+    monkeypatch.setattr(session, "_publish_last_settle_frame", lambda *_a, **_k: None)
+
+    session._finish_settle_against_final_after(final_after)
+
+    raw = json.loads(event_json_path(run_dir, 5).read_text(encoding="utf-8"))
+    assert raw["observed_settle_seconds"] >= 1.0
+    assert session._settle_probe is None
+
+
+def test_finish_settle_against_final_after_skips_when_already_observed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import json
+    import threading
+    import time
+
+    from src.recorder.capture import RecordingSession, _SettleProbeState
+    from src.recorder.models import RecordedEvent, event_json_path
+
+    run_dir = tmp_path / "rec"
+    (run_dir / "screenshots").mkdir(parents=True)
+    (run_dir / "events").mkdir(parents=True)
+    final_after = run_dir / "screenshots" / "final_after.jpeg"
+    _write_gray(final_after, 100)
+
+    event = RecordedEvent(
+        index=3,
+        timestamp_utc="2026-09-21T00:00:00+00:00",
+        kind="click",
+        observed_settle_seconds=1.031,
+    )
+    event_json_path(run_dir, 3).write_text(
+        json.dumps(event.to_dict(), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    session = RecordingSession.__new__(RecordingSession)
+    session._lock = threading.Lock()
+    session._settle_tick_lock = threading.Lock()
+    session._run_dir = run_dir
+    session._events = [event]
+    session._settle_probe_timer = None
+    session._last_settle_frame = None
+    session._log = lambda *_a, **_k: None  # type: ignore[method-assign]
+    session._settle_probe = _SettleProbeState(
+        event_index=3,
+        started_monotonic=time.monotonic(),
+    )
+
+    captures: list[Path] = []
+
+    def _fake_capture(dest: Path) -> str:
+        captures.append(Path(dest))
+        return str(dest)
+
+    monkeypatch.setattr(
+        "src.recorder.capture.capture_all_screens_to_file",
+        _fake_capture,
+    )
+
+    session._finish_settle_against_final_after(final_after)
+    assert captures == []
+    assert session._settle_probe is None
+    raw = json.loads(event_json_path(run_dir, 3).read_text(encoding="utf-8"))
+    assert raw["observed_settle_seconds"] == 1.031
 
 
 def test_pending_screenshot_reuses_last_settle_on_same_monitor(tmp_path: Path) -> None:

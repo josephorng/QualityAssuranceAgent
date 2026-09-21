@@ -2015,7 +2015,8 @@ async def test_analyze_recording_session_writes_settle_after_not_wait_instructio
     assert second_analysis["elapsed_since_previous_seconds"] == 10.0
     assert second_analysis["settle_after_seconds"] == 10.25
     assert third_analysis["elapsed_since_previous_seconds"] == 10.25
-    assert third_analysis["settle_after_seconds"] == 8.0
+    # Last event must not use stopped_at gap as settle (stop-UI latency).
+    assert "settle_after_seconds" not in third_analysis
 
 
 @pytest.mark.asyncio
@@ -2152,6 +2153,11 @@ async def test_analyze_recording_session_drops_trailing_agent_restore(
     import_log = (run_dir / "import.log").read_text(encoding="utf-8")
     assert "dropping trailing agent restore event index=2" in import_log
     assert "purged trailing agent restore event index=2 remaining=1" in import_log
+    first_analysis = json.loads(
+        (run_dir / "analysis" / "event_001.json").read_text(encoding="utf-8")
+    )
+    # Settle ends at the purged restore click, not an inflated session-stop gap.
+    assert first_analysis["settle_after_seconds"] == 1.0
 
 
 @pytest.mark.asyncio

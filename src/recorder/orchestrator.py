@@ -181,15 +181,18 @@ def _drop_trailing_agent_restore(
     *,
     run_dir: Path | None = None,
     log_info: Callable[[str], None] | None = None,
-) -> list[RecordedEvent]:
+) -> tuple[list[RecordedEvent], str | None]:
     """Omit trailing restores of the hub window (common stop-recording artifacts).
 
     Drops every consecutive trailing agent-restore event. When ``run_dir`` is set,
     also deletes those events' raw files and prefers the earliest dropped restore
     screenshot as the last action's after-frame (UI just before the hub restored).
+
+    Returns ``(kept_events, trailing_settle_end_utc)`` where the timestamp is the
+    earliest dropped restore click (a better settle end than session stop).
     """
     if not events:
-        return events
+        return events, None
 
     dropped: list[RecordedEvent] = []
     while events and _is_trailing_agent_restore(events[-1]):
@@ -207,6 +210,11 @@ def _drop_trailing_agent_restore(
             )
         dropped.append(last)
         events = events[:-1]
+
+    trailing_settle_end_utc: str | None = None
+    if dropped:
+        # dropped[-1] is the earliest restore (first click that brought the hub back).
+        trailing_settle_end_utc = dropped[-1].timestamp_utc
 
     if dropped and run_dir is not None:
         # dropped[0] is the last restore; dropped[-1] is the earliest (first restore click).
@@ -234,7 +242,7 @@ def _drop_trailing_agent_restore(
                         f"purge trailing agent restore event index={last.index} "
                         f"skipped: {exc}"
                     )
-    return events
+    return events, trailing_settle_end_utc
 
 
 def _resolve_final_after_screenshot(run_dir: Path) -> str | None:
@@ -717,13 +725,17 @@ def _next_instruction_event_settle(
     event: RecordedEvent,
     prepared_list: list[Any],
     instruction_results: list[Any],
-    stopped_at_utc: str | None = None,
+    trailing_settle_end_utc: str | None = None,
 ) -> float | None:
     """Forward settle for this instruction event.
 
     Prefer ``observed_settle_seconds`` from the recording settle probe when present.
-    Otherwise use the timestamp gap to the next instruction event (or session stop),
-    when the gap is at least ``_SETTLE_AFTER_MIN_SECONDS``.
+    Otherwise use the timestamp gap to the next instruction event when the gap is
+    at least ``_SETTLE_AFTER_MIN_SECONDS``.
+
+    For the last instruction event, optionally use ``trailing_settle_end_utc``
+    (e.g. a purged hub-restore click). Never use session ``stopped_at`` — that
+    includes stop-UI latency and inflates settle.
     """
     if event.kind == "wait":
         return None
@@ -739,7 +751,7 @@ def _next_instruction_event_settle(
         return _settle_after_if_long_enough(
             event.timestamp_utc, events[next_pos].timestamp_utc
         )
-    return _settle_after_if_long_enough(event.timestamp_utc, stopped_at_utc)
+    return _settle_after_if_long_enough(event.timestamp_utc, trailing_settle_end_utc)
 
 
 async def analyze_recording_session(
@@ -782,7 +794,7 @@ async def analyze_recording_session(
                 )
             )
         )
-        events = _drop_trailing_agent_restore(
+        events, trailing_settle_end_utc = _drop_trailing_agent_restore(
             events,
             run_dir=run_dir,
             log_info=log_info,
@@ -887,20 +899,13 @@ async def analyze_recording_session(
                     event.timestamp_utc,
                 )
 
-            stopped_at_utc = (
-                manifest_raw.get("stopped_at_utc")
-                if isinstance(manifest_raw, dict)
-                else None
-            )
             settle_after_seconds = _next_instruction_event_settle(
                 events=events,
                 event_pos=event_pos,
                 event=event,
                 prepared_list=prepared_list,
                 instruction_results=instruction_results,
-                stopped_at_utc=(
-                    stopped_at_utc if isinstance(stopped_at_utc, str) else None
-                ),
+                trailing_settle_end_utc=trailing_settle_end_utc,
             )
 
             instructions.append(instruction)

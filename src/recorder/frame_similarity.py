@@ -39,6 +39,21 @@ def mean_abs_diff(
     return float(np.mean(np.abs(arr_a - arr_b)) / 255.0)
 
 
+def compare_frames(
+    path_a: str | Path,
+    path_b: str | Path,
+    *,
+    threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+    size: tuple[int, int] = _COMPARE_SIZE,
+) -> tuple[bool, float | None]:
+    """Return ``(similar, mad)``; ``mad`` is ``None`` when compare fails."""
+    try:
+        diff = mean_abs_diff(path_a, path_b, size=size)
+    except (OSError, ValueError, Exception):
+        return False, None
+    return diff <= float(threshold), float(diff)
+
+
 def frames_similar(
     path_a: str | Path,
     path_b: str | Path,
@@ -47,11 +62,8 @@ def frames_similar(
     size: tuple[int, int] = _COMPARE_SIZE,
 ) -> bool:
     """True when downscaled grayscale MAD is at or below ``threshold``."""
-    try:
-        diff = mean_abs_diff(path_a, path_b, size=size)
-    except (OSError, ValueError, Exception):
-        return False
-    return diff <= float(threshold)
+    similar, _diff = compare_frames(path_a, path_b, threshold=threshold, size=size)
+    return similar
 
 
 def settle_probe_staging_path(run_dir: Path, event_index: int) -> Path:

@@ -98,7 +98,7 @@ def test_collect_recording_baseline_after_paths_ignores_virtual_wait(tmp_path: P
     assert baselines[0].endswith("event_001.jpeg")
     assert baselines[1] is not None
     assert baselines[1].endswith("final_after.jpeg")
-    assert settles == [9.0, 8.0]
+    assert settles == [9.0, None]
 
 
 def test_collect_recording_settle_prefers_analysis_settle_after(tmp_path: Path) -> None:
@@ -110,7 +110,7 @@ def test_collect_recording_settle_prefers_analysis_settle_after(tmp_path: Path) 
 
     settles = collect_recording_settle_after_seconds(run_dir)
     assert settles[0] == 2.5
-    assert settles[1] == 8.0
+    assert settles[1] is None
 
 
 def test_collect_recording_settle_prefers_observed_over_timestamp_gap(
@@ -124,7 +124,7 @@ def test_collect_recording_settle_prefers_observed_over_timestamp_gap(
 
     settles = collect_recording_settle_after_seconds(run_dir)
     assert settles[0] == 1.5
-    assert settles[1] == 8.0
+    assert settles[1] is None
 
 
 def test_collect_recording_settle_analysis_wins_over_observed(tmp_path: Path) -> None:
@@ -206,7 +206,7 @@ def test_prepare_run_session_seeds_baseline_and_settle_env(tmp_path: Path, monke
     assert len(baselines) == len(instructions)
     assert isinstance(baselines[0], str) and baselines[0].endswith("event_001.jpeg")
     assert isinstance(baselines[1], str) and baselines[1].endswith("final_after.jpeg")
-    assert settles == [9.0, 8.0]
+    assert settles == [9.0, None]
 
 
 def test_prepare_run_session_drops_baselines_when_script_edited(tmp_path: Path, monkeypatch) -> None:

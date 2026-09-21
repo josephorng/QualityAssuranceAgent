@@ -298,18 +298,13 @@ def collect_recording_settle_after_seconds(run_dir: Path) -> list[float | None]:
     Preference order per instruction event:
     1. ``analysis/event_NNN.json`` ``settle_after_seconds``
     2. event ``observed_settle_seconds`` (recording settle probe)
-    3. timestamp gap to next instruction event / session stop when ≥ 1s
+    3. timestamp gap to next instruction event when ≥ 1s
 
+    The last event does not fall back to session ``stopped_at`` (stop-UI latency).
     Gaps under 1s (legacy path) and ``kind=wait`` events yield ``None``.
     """
     run_dir = Path(run_dir)
     analysis_dir = run_dir / "analysis"
-    session = _load_json_dict(run_dir / "session.json") or {}
-    stopped_at_utc = (
-        session.get("stopped_at_utc") if isinstance(session, dict) else None
-    )
-    if not isinstance(stopped_at_utc, str):
-        stopped_at_utc = None
     loaded: list[tuple[RecordedEvent, dict[str, Any] | None]] = []
     for event_path in _recording_event_json_paths(run_dir):
         raw = _load_json_dict(event_path)
@@ -351,10 +346,10 @@ def collect_recording_settle_after_seconds(run_dir: Path) -> list[float | None]:
         ):
             settles.append(float(observed))
             continue
-        if index + 1 < len(loaded):
-            end_ts = loaded[index + 1][0].timestamp_utc
-        else:
-            end_ts = stopped_at_utc
+        if index + 1 >= len(loaded):
+            settles.append(None)
+            continue
+        end_ts = loaded[index + 1][0].timestamp_utc
         settle = _elapsed_seconds_between(event.timestamp_utc, end_ts)
         if settle is not None and settle >= 1.0:
             settles.append(settle)

@@ -714,14 +714,23 @@ async def test_await_pending_settle_before_tool_waits_remainder(monkeypatch) -> 
     brain.manager = MagicMock()
     brain.manager.log_info = MagicMock()
     brain._pending_settle_deadline_perf = 100.0
+    brain._step_deferred_settle_waited_seconds = 0.0
     sleep_mock = AsyncMock()
     monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
     monkeypatch.setattr("src.brain.module.perf_counter", lambda: 97.5)
+    messages: list[dict] = []
 
-    await brain._await_pending_settle_before_tool()
+    waited = await brain._await_pending_settle_before_tool(messages)
 
+    assert waited == 2.5
     sleep_mock.assert_awaited_once_with(2.5)
     assert brain._pending_settle_deadline_perf is None
+    assert brain._step_deferred_settle_waited_seconds == 2.5
+    assert len(messages) == 2
+    assert messages[0]["deferred_settle_wait_seconds"] == 2.5
+    assert messages[0]["role"] == "system"
+    assert messages[1]["deferred_settle_done"] is True
+    assert "waited 2.500s" in messages[1]["content"]
 
 
 @pytest.mark.asyncio
@@ -732,14 +741,32 @@ async def test_await_pending_settle_before_tool_skips_when_already_satisfied(
     brain.manager = MagicMock()
     brain.manager.log_info = MagicMock()
     brain._pending_settle_deadline_perf = 100.0
+    brain._step_deferred_settle_waited_seconds = 0.0
     sleep_mock = AsyncMock()
     monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
     monkeypatch.setattr("src.brain.module.perf_counter", lambda: 101.25)
+    messages: list[dict] = [{"role": "user", "content": "x"}]
 
-    await brain._await_pending_settle_before_tool()
+    waited = await brain._await_pending_settle_before_tool(messages)
 
+    assert waited == 0.0
     sleep_mock.assert_not_awaited()
     assert brain._pending_settle_deadline_perf is None
+    assert messages == [{"role": "user", "content": "x"}]
+    assert brain._step_deferred_settle_waited_seconds == 0.0
+
+
+def test_messages_for_llm_drops_deferred_settle_markers() -> None:
+    messages = [
+        {"role": "user", "content": "goal"},
+        {"role": "system", "deferred_settle_wait_seconds": 1.5, "content": "waiting"},
+        {"role": "system", "deferred_settle_done": True, "content": "done"},
+        {"role": "assistant", "content": "ok"},
+    ]
+    assert BrainModule._messages_for_llm(messages) == [
+        {"role": "user", "content": "goal"},
+        {"role": "assistant", "content": "ok"},
+    ]
 
 
 @pytest.mark.asyncio

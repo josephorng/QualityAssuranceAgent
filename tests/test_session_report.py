@@ -509,6 +509,82 @@ def test_timing_summary_attributes_settle_after_as_waiting(tmp_path: Path) -> No
     assert report["steps"][0]["timing"]["settle_after_seconds"] == 3.0
 
 
+def test_timing_summary_attributes_deferred_settle_at_execution_point(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "task_deferred_settle"
+    run_root.mkdir()
+    steps_dir = run_root / "steps"
+    steps_dir.mkdir()
+    payload = {
+        "messages": [
+            {
+                "role": "user",
+                "timestamp_utc": "2026-06-11T06:00:00+00:00",
+                "content": "Cache replay",
+                "cache_replay": True,
+            },
+            {
+                "role": "assistant",
+                "timestamp_utc": "2026-06-11T06:00:00+00:00",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "click",
+                            "arguments": {},
+                        }
+                    }
+                ],
+                "cache_replay": True,
+            },
+            {
+                "role": "system",
+                "timestamp_utc": "2026-06-11T06:00:01+00:00",
+                "content": "Deferred settle: waiting 6.000s before next tool",
+                "deferred_settle_wait_seconds": 6.0,
+            },
+            {
+                "role": "system",
+                "timestamp_utc": "2026-06-11T06:00:07+00:00",
+                "content": "Deferred settle: waited 6.000s before next tool",
+                "deferred_settle_done": True,
+            },
+            {
+                "role": "tool",
+                "timestamp_utc": "2026-06-11T06:00:10+00:00",
+                "content": json.dumps(
+                    {"ok": True, "action": "click", "message": "executed"}
+                ),
+            },
+        ],
+        "step_timing": {
+            "started_at_utc": "2026-06-11T06:00:00+00:00",
+            "finished_at_utc": "2026-06-11T06:00:10+00:00",
+            "duration_seconds": 10.0,
+            "status": "completed",
+            "step_index": 1,
+            "goal": "Click OK",
+            "settle_after_seconds": 1.9,
+            "deferred_settle_waited_seconds": 6.0,
+        },
+    }
+    (steps_dir / "1_1.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    report = build_session_report(run_root, session_end_reason="completed")
+    step = report["steps"][0]
+    kinds = [entry["kind"] for entry in step["time_profile"]]
+    assert "deferred_settle" in kinds
+    deferred = next(e for e in step["time_profile"] if e["kind"] == "deferred_settle")
+    assert deferred["duration_seconds"] == 6.0
+    assert "waited 6.000s" in deferred["label"]
+    summary = step["timing_summary"]
+    assert summary["deferred_settle_seconds"] == 6.0
+    assert summary["waiting_seconds"] == 6.0
+    # Outbound settle_after must not inflate waiting when inbound deferred settle ran.
+    assert summary["tool_execution_seconds"] == 3.0
+    assert step["timing"]["deferred_settle_waited_seconds"] == 6.0
+
+
 def test_write_session_report_creates_report_json(tmp_path: Path) -> None:
     run_root = tmp_path / "task_write"
     run_root.mkdir()

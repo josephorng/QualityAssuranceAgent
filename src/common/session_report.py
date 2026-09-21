@@ -351,9 +351,43 @@ def _describe_time_profile_entry(
     - assistant without tool_calls: LLM declared step done; duration is wrap-up.
     - tool: interval after a tool result—labeled by what follows (next decide
       screenshot, execution of the next batched tool, or step wrap-up).
+    - deferred settle markers: wait before tools, then hand execution after the wait.
 
     When ``for_verify`` is True, user-role intervals are labeled ``verify_llm_inference``.
     """
+    waited_raw = message.get("deferred_settle_wait_seconds")
+    if isinstance(waited_raw, (int, float)) and not isinstance(waited_raw, bool):
+        waited = float(waited_raw)
+        return {
+            "kind": "deferred_settle",
+            "label": f"Deferred settle waited {waited:.3f}s before next tool",
+        }
+    if message.get("deferred_settle_done") is True:
+        if isinstance(next_message, dict) and next_message.get("role") == _ROLE_TOOL:
+            payload = _tool_payload_from_message(next_message.get("content"))
+            action = payload.get("action")
+            actions: list[str] = []
+            if isinstance(action, str) and action.strip():
+                actions = [action.strip()]
+            entry: dict[str, Any] = {
+                "kind": "tool_execution",
+                "label": (
+                    f"Hand tool execution: {', '.join(actions)}"
+                    if actions
+                    else "Hand tool execution"
+                ),
+            }
+            if actions:
+                entry["actions"] = actions
+                entry["action"] = actions[0]
+            if "ok" in payload:
+                entry["ok"] = bool(payload.get("ok"))
+            return entry
+        return {
+            "kind": "step_prep",
+            "label": "After deferred settle before next phase",
+        }
+
     role = message.get("role")
     if role == _ROLE_USER:
         if for_verify:
@@ -368,6 +402,14 @@ def _describe_time_profile_entry(
     if role == _ROLE_ASSISTANT:
         tool_names = _extract_assistant_tool_names(message)
         if tool_names:
+            # Prefer the deferred-settle marker for the wait interval when present.
+            if isinstance(next_message, dict) and isinstance(
+                next_message.get("deferred_settle_wait_seconds"), (int, float)
+            ):
+                return {
+                    "kind": "step_prep",
+                    "label": "Decide complete; deferred settle starts next",
+                }
             joined = ", ".join(tool_names)
             return {
                 "kind": "tool_execution",
@@ -467,11 +509,13 @@ _KNOWN_TIMING_KINDS = frozenset(
         "verify_llm_inference",
         "tool_execution",
         "screenshot_capture",
+        "deferred_settle",
     }
 )
 # After the last tool, the interval until the next stamped message is often settle /
 # verify prep (hand after-action sleep or script settle before verify).
 _WAITING_PROFILE_KINDS = frozenset({"step_wrap_up"})
+_DEFERRED_SETTLE_PROFILE_KINDS = frozenset({"deferred_settle"})
 
 
 def _coerce_positive_seconds(value: Any) -> float | None:
@@ -493,6 +537,11 @@ def _build_timing_summary(
     verify_llm = _sum_profile_durations(time_profile, {"verify_llm_inference"})
     tool_execution = _sum_profile_durations(time_profile, {"tool_execution"})
     screenshot = _sum_profile_durations(time_profile, {"screenshot_capture"})
+    deferred_settle = _sum_profile_durations(time_profile, _DEFERRED_SETTLE_PROFILE_KINDS)
+    if deferred_settle <= 0:
+        timed = _coerce_positive_seconds(timing.get("deferred_settle_waited_seconds"))
+        if timed is not None:
+            deferred_settle = timed
     accounted = execution_llm + verify_llm + tool_execution + screenshot
     other_kinds = {
         str(entry.get("kind"))
@@ -504,7 +553,7 @@ def _build_timing_summary(
     total_raw = timing.get("duration_seconds")
     total: float | None = float(total_raw) if isinstance(total_raw, (int, float)) else None
     if total is None:
-        profile_total = accounted + other_from_profile
+        profile_total = accounted + deferred_settle + other_from_profile
         total = round(profile_total, 3) if profile_total > 0 else None
 
     # Wall-clock remainder holds settle sleeps and other unprofiled gaps.
@@ -516,10 +565,18 @@ def _build_timing_summary(
     if settle is None:
         settle = _coerce_positive_seconds(timing.get("settle_after_seconds"))
     wrap_up = _sum_profile_durations(time_profile, _WAITING_PROFILE_KINDS)
-    # Prefer the recording/script settle when present (often inside step_completion or
-    # wrap-up). Otherwise attribute post-tool wrap-up as waiting.
-    waiting_candidate = settle if settle is not None else wrap_up
-    waiting = round(min(float(waiting_candidate or 0.0), raw_other), 3)
+    # Explicit deferred-settle waits (executed before tools) count as waiting first.
+    # Outbound settle_after on this step is scheduled for a later step when deferred,
+    # so only peel settle_after / wrap-up from the leftover when there was no inbound
+    # deferred wait (blocking settle-before-verify / wrap-up case).
+    remainder_after_deferred = max(0.0, raw_other - deferred_settle)
+    if deferred_settle > 0:
+        extra_waiting = min(float(wrap_up or 0.0), remainder_after_deferred)
+    elif settle is not None:
+        extra_waiting = min(float(settle), remainder_after_deferred)
+    else:
+        extra_waiting = min(float(wrap_up or 0.0), remainder_after_deferred)
+    waiting = round(deferred_settle + extra_waiting, 3)
     other = round(max(0.0, raw_other - waiting), 3)
 
     summary: dict[str, Any] = {
@@ -530,6 +587,8 @@ def _build_timing_summary(
         "waiting_seconds": waiting,
         "other_seconds": other,
     }
+    if deferred_settle > 0:
+        summary["deferred_settle_seconds"] = round(deferred_settle, 3)
     if total is not None:
         summary["total_seconds"] = round(total, 3)
     return summary
@@ -560,6 +619,7 @@ def _build_step_records(
                 "duration_seconds",
                 "status",
                 "settle_after_seconds",
+                "deferred_settle_waited_seconds",
             )
             if key in step_timing
         }

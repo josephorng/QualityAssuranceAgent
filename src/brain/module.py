@@ -184,6 +184,7 @@ class BrainModule:
         # When vision verify is skipped, settle is deferred until the next step's
         # first tool so prep work can overlap the recording settle window.
         self._pending_settle_deadline_perf: float | None = None
+        self._step_deferred_settle_waited_seconds: float = 0.0
         self._step_transcript_counter = (
             self._resume_step_transcript_counter()
             if is_runtime_command_mode() or is_smart_mode()
@@ -290,6 +291,9 @@ class BrainModule:
                 existing_metadata = {}
 
         existing_metadata.update(metadata)
+        waited = float(getattr(self, "_step_deferred_settle_waited_seconds", 0.0) or 0.0)
+        if waited > 0 and "deferred_settle_waited_seconds" not in existing_metadata:
+            existing_metadata["deferred_settle_waited_seconds"] = round(waited, 3)
         payload["step_timing"] = existing_metadata
         write_json(out_path, payload)
 
@@ -478,23 +482,86 @@ class BrainModule:
             f"Deferred settle: {seconds:.3f}s deadline set; continuing without blocking sleep"
         )
 
-    async def _await_pending_settle_before_tool(self) -> None:
-        """Sleep only the remainder of a deferred settle before the next tool runs."""
+    @staticmethod
+    def _is_deferred_settle_transcript_message(message: dict[str, Any]) -> bool:
+        """True for system markers that must not be sent back to the decide LLM."""
+        return (
+            message.get("deferred_settle_wait_seconds") is not None
+            or message.get("deferred_settle_done") is True
+        )
+
+    @classmethod
+    def _messages_for_llm(cls, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Drop deferred-settle transcript markers from the LLM context."""
+        return [
+            message
+            for message in messages
+            if not (
+                isinstance(message, dict) and cls._is_deferred_settle_transcript_message(message)
+            )
+        ]
+
+    def _record_step_deferred_settle_wait(self, waited_seconds: float) -> None:
+        """Accumulate waited deferred-settle seconds on the current step."""
+        seconds = float(waited_seconds)
+        if seconds <= 0:
+            return
+        prior = float(getattr(self, "_step_deferred_settle_waited_seconds", 0.0) or 0.0)
+        self._step_deferred_settle_waited_seconds = prior + seconds
+
+    async def _await_pending_settle_before_tool(
+        self,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> float:
+        """Sleep only the remainder of a deferred settle before the next tool runs.
+
+        When ``messages`` is provided and a wait occurs, append transcript markers so
+        session timing/HTML can show the wait at the execution point (before tools).
+        Returns the seconds actually slept (0 when already satisfied or no deadline).
+        """
         deadline = getattr(self, "_pending_settle_deadline_perf", None)
         if deadline is None:
-            return
+            return 0.0
         remaining = deadline - perf_counter()
         self._pending_settle_deadline_perf = None
-        if remaining > 0:
-            self.manager.log_info(
-                f"Deferred settle: waiting remaining {remaining:.3f}s before next tool"
-            )
-            await asyncio.sleep(remaining)
-        else:
+        if remaining <= 0:
             self.manager.log_info(
                 "Deferred settle: already satisfied "
                 f"({abs(remaining):.3f}s past deadline) before next tool"
             )
+            return 0.0
+
+        waited = round(float(remaining), 3)
+        self.manager.log_info(
+            f"Deferred settle: waiting remaining {waited:.3f}s before next tool"
+        )
+        if messages is not None:
+            messages.append(
+                stamp_message(
+                    {
+                        "role": ROLE_SYSTEM,
+                        "content": (
+                            f"Deferred settle: waiting {waited:.3f}s before next tool"
+                        ),
+                        "deferred_settle_wait_seconds": waited,
+                    }
+                )
+            )
+        await asyncio.sleep(remaining)
+        if messages is not None:
+            messages.append(
+                stamp_message(
+                    {
+                        "role": ROLE_SYSTEM,
+                        "content": (
+                            f"Deferred settle: waited {waited:.3f}s before next tool"
+                        ),
+                        "deferred_settle_done": True,
+                    }
+                )
+            )
+        self._record_step_deferred_settle_wait(waited)
+        return waited
 
     def _format_numbered_script(self) -> str:
         """Numbered script lines with each step's recorded expected outcome."""
@@ -549,6 +616,7 @@ class BrainModule:
         self.manager.set_step_log_context(transcript_counter, script_step_index)
         started_iso = datetime.now(timezone.utc).isoformat()
         started_at = perf_counter()
+        self._step_deferred_settle_waited_seconds = 0.0
         try:
             step_succeeded = await self.loop()
             finished_iso = datetime.now(timezone.utc).isoformat()
@@ -1399,7 +1467,7 @@ class BrainModule:
             ),
         ]
 
-        await self._await_pending_settle_before_tool()
+        await self._await_pending_settle_before_tool(messages)
         for call in cached_calls:
             arguments = self._normalize_tool_arguments(call.get("arguments"))
             try:
@@ -1517,7 +1585,7 @@ class BrainModule:
                 )
                 response_message = await self.ollama.chat_messages(
                     self.settings.brain_lm,
-                    messages=messages,
+                    messages=self._messages_for_llm(messages),
                     tools=tool_functions,
                 )
                 if not response_message:
@@ -1594,7 +1662,7 @@ class BrainModule:
                 abort_step = False
                 for tool_call in real_tool_calls:
                     if not settle_gated_for_tools:
-                        await self._await_pending_settle_before_tool()
+                        await self._await_pending_settle_before_tool(messages)
                         settle_gated_for_tools = True
                     arguments = self._normalize_tool_arguments(
                         tool_call.function.arguments
@@ -1752,6 +1820,7 @@ class BrainModule:
         try:
             started_iso = datetime.now(timezone.utc).isoformat()
             started_at = perf_counter()
+            self._step_deferred_settle_waited_seconds = 0.0
 
             step_succeeded = await self.loop()
             settle_after = None

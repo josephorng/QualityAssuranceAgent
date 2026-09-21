@@ -5614,6 +5614,7 @@ def _render_session_time_profile_html(run_root: Path, report: dict[str, Any]) ->
             ("verify_llm_seconds", "驗證LLM"),
             ("tool_execution_seconds", "工具"),
             ("screenshot_seconds", "截圖"),
+            ("deferred_settle_seconds", "延後settle"),
             ("waiting_seconds", "等待"),
             ("other_seconds", "其他"),
         ):
@@ -5690,8 +5691,9 @@ def _render_session_time_profile_html(run_root: Path, report: dict[str, Any]) ->
     note = (
         '<p class="time-profile-note">'
         "執行 / 驗證 LLM、工具與截圖時間來自步驟訊息時間戳；"
-        "等待優先取自步驟的 settle_after（錄製間隔），否則取工具後 wrap-up；"
-        "從本步牆鐘剩餘時間中拆出，不與「其他」重複計算；"
+        "「等待」含本步實際執行的 deferred settle（上一步延後到本步第一個工具前的剩餘等待，"
+        "time_profile 的 deferred_settle），以及 settle_after / wrap-up 從牆鐘剩餘拆出的部分；"
+        "不與「其他」重複計算；"
         "move_mouse 工具列會展開 YOLO / OCR / 選取等內部階段（來自工具結果的 timing）；"
         "YOLO / OCR（yolo_ocr）合計來自本 run 的 <code>yolo_ocr/</code> sidecar（若有），"
         "為整次執行合計，未對應到單一指令。"

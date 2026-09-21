@@ -94,6 +94,9 @@ def apply_settle_sample(
     When ``observed_settle_seconds`` is not ``None``, the probe is complete
     (stable plateau found); callers should stop sampling.
 
+    On a similar pair, ``observed_settle_seconds`` is the age of the earlier
+    frame and ``new_kept_path`` is the later frame (freshest settled UI).
+
     ``similar`` may be supplied by tests; otherwise compares ``kept`` vs ``staging``.
     """
     staging = Path(staging_path)
@@ -109,12 +112,16 @@ def apply_settle_sample(
         similar = bool(frames_similar_fn(kept, staging))
 
     if similar:
-        # Stable: settle is age of the earlier (kept) frame; drop staging.
+        # Stable: settle is age of the earlier frame; keep the newer image
+        # so the next before-shot is the freshest settled UI.
+        observed = (
+            float(kept_age_s) if kept_age_s is not None else float(sample_age_s)
+        )
         try:
-            staging.unlink(missing_ok=True)
+            kept.unlink(missing_ok=True)
         except OSError:
             pass
-        return kept, kept_age_s, float(kept_age_s) if kept_age_s is not None else float(sample_age_s)
+        return staging, float(sample_age_s), observed
 
     # Still changing: drop old kept, promote staging.
     try:

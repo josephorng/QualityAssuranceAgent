@@ -60,8 +60,10 @@ def test_apply_settle_sample_change_then_stable(tmp_path: Path) -> None:
         sample_age_s=3.0,
     )
     assert observed == 2.0
-    assert kept == s2
-    assert not s3.is_file()
+    assert kept == s3
+    assert age == 3.0
+    assert s3.is_file()
+    assert not s2.is_file()
 
 
 def test_next_instruction_event_settle_prefers_observed() -> None:

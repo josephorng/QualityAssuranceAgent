@@ -87,8 +87,8 @@ def test_apply_settle_sample_similar_returns_observed(tmp_path: Path) -> None:
         staging_path=staging,
         sample_age_s=1.5,
     )
-    assert new_kept == kept
-    assert age == 1.0
+    assert new_kept == staging
+    assert age == 1.5
     assert observed == 1.0
-    assert kept.is_file()
-    assert not staging.is_file()
+    assert staging.is_file()
+    assert not kept.is_file()

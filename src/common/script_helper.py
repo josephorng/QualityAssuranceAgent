@@ -295,9 +295,12 @@ def collect_recording_baseline_after_paths(
 def collect_recording_settle_after_seconds(run_dir: Path) -> list[float | None]:
     """Collect post-action settle seconds aligned with ``collect_recording_instructions``.
 
-    Derived from event timestamps (this → next instruction event). The last action
-    uses ``session.stopped_at_utc`` when present. Gaps under 1s and ``kind=wait``
-    events yield ``None``.
+    Preference order per instruction event:
+    1. ``analysis/event_NNN.json`` ``settle_after_seconds``
+    2. event ``observed_settle_seconds`` (recording settle probe)
+    3. timestamp gap to next instruction event / session stop when ≥ 1s
+
+    Gaps under 1s (legacy path) and ``kind=wait`` events yield ``None``.
     """
     run_dir = Path(run_dir)
     analysis_dir = run_dir / "analysis"
@@ -307,7 +310,7 @@ def collect_recording_settle_after_seconds(run_dir: Path) -> list[float | None]:
     )
     if not isinstance(stopped_at_utc, str):
         stopped_at_utc = None
-    loaded: list[RecordedEvent] = []
+    loaded: list[tuple[RecordedEvent, dict[str, Any] | None]] = []
     for event_path in _recording_event_json_paths(run_dir):
         raw = _load_json_dict(event_path)
         if raw is None:
@@ -324,15 +327,32 @@ def collect_recording_settle_after_seconds(run_dir: Path) -> list[float | None]:
         event = _recorded_event_with_resolved_shots(run_dir, raw)
         if event is None:
             continue
-        loaded.append(event)
+        loaded.append((event, analysis if isinstance(analysis, dict) else None))
 
     settles: list[float | None] = []
-    for index, event in enumerate(loaded):
+    for index, (event, analysis) in enumerate(loaded):
         if event.kind == "wait":
             settles.append(None)
             continue
+        if isinstance(analysis, dict):
+            analysis_settle = analysis.get("settle_after_seconds")
+            if (
+                isinstance(analysis_settle, (int, float))
+                and not isinstance(analysis_settle, bool)
+                and float(analysis_settle) > 0
+            ):
+                settles.append(float(analysis_settle))
+                continue
+        observed = event.observed_settle_seconds
+        if (
+            isinstance(observed, (int, float))
+            and not isinstance(observed, bool)
+            and float(observed) > 0
+        ):
+            settles.append(float(observed))
+            continue
         if index + 1 < len(loaded):
-            end_ts = loaded[index + 1].timestamp_utc
+            end_ts = loaded[index + 1][0].timestamp_utc
         else:
             end_ts = stopped_at_utc
         settle = _elapsed_seconds_between(event.timestamp_utc, end_ts)

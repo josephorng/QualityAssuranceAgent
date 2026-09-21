@@ -719,9 +719,17 @@ def _next_instruction_event_settle(
     instruction_results: list[Any],
     stopped_at_utc: str | None = None,
 ) -> float | None:
-    """Forward gap to the next instruction event, or to session stop for the last action."""
+    """Forward settle for this instruction event.
+
+    Prefer ``observed_settle_seconds`` from the recording settle probe when present.
+    Otherwise use the timestamp gap to the next instruction event (or session stop),
+    when the gap is at least ``_SETTLE_AFTER_MIN_SECONDS``.
+    """
     if event.kind == "wait":
         return None
+    observed = event.observed_settle_seconds
+    if isinstance(observed, (int, float)) and not isinstance(observed, bool) and float(observed) > 0:
+        return float(observed)
     for next_pos in range(event_pos + 1, len(events)):
         if prepared_list[next_pos] is None:
             continue

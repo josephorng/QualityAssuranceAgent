@@ -101,6 +101,47 @@ def test_collect_recording_baseline_after_paths_ignores_virtual_wait(tmp_path: P
     assert settles == [9.0, 8.0]
 
 
+def test_collect_recording_settle_prefers_analysis_settle_after(tmp_path: Path) -> None:
+    run_dir = _write_recording(tmp_path)
+    first = run_dir / "analysis" / "event_000.json"
+    payload = json.loads(first.read_text(encoding="utf-8"))
+    payload["settle_after_seconds"] = 2.5
+    first.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    settles = collect_recording_settle_after_seconds(run_dir)
+    assert settles[0] == 2.5
+    assert settles[1] == 8.0
+
+
+def test_collect_recording_settle_prefers_observed_over_timestamp_gap(
+    tmp_path: Path,
+) -> None:
+    run_dir = _write_recording(tmp_path)
+    event0 = run_dir / "events" / "event_000.json"
+    payload = json.loads(event0.read_text(encoding="utf-8"))
+    payload["observed_settle_seconds"] = 1.5
+    event0.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    settles = collect_recording_settle_after_seconds(run_dir)
+    assert settles[0] == 1.5
+    assert settles[1] == 8.0
+
+
+def test_collect_recording_settle_analysis_wins_over_observed(tmp_path: Path) -> None:
+    run_dir = _write_recording(tmp_path)
+    event0 = run_dir / "events" / "event_000.json"
+    event_payload = json.loads(event0.read_text(encoding="utf-8"))
+    event_payload["observed_settle_seconds"] = 1.5
+    event0.write_text(json.dumps(event_payload, ensure_ascii=False), encoding="utf-8")
+    first = run_dir / "analysis" / "event_000.json"
+    analysis_payload = json.loads(first.read_text(encoding="utf-8"))
+    analysis_payload["settle_after_seconds"] = 2.25
+    first.write_text(json.dumps(analysis_payload, ensure_ascii=False), encoding="utf-8")
+
+    settles = collect_recording_settle_after_seconds(run_dir)
+    assert settles[0] == 2.25
+
+
 def test_collect_recording_baseline_after_paths_skips_disabled_verification(
     tmp_path: Path,
 ) -> None:

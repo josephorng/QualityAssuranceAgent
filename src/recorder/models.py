@@ -50,6 +50,8 @@ class RecordedEvent:
     window_change: dict[str, Any] | None = None
     target_window_title: str | None = None
     window_snapshot_debug: dict[str, Any] | None = None
+    # UI settle measured by consecutive screenshot stability during recording.
+    observed_settle_seconds: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -65,6 +67,8 @@ class RecordedEvent:
             data["anchor_click_xy"] = list(self.anchor_click_xy)
         if self.focus_rect is not None:
             data["focus_rect"] = list(self.focus_rect)
+        if self.observed_settle_seconds is None:
+            data.pop("observed_settle_seconds", None)
         return data
 
     @classmethod
@@ -77,6 +81,7 @@ class RecordedEvent:
         focus = raw.get("focus_rect")
         keys = raw.get("keys")
         modifiers = raw.get("modifiers")
+        observed_settle = raw.get("observed_settle_seconds")
         return cls(
             index=int(raw["index"]),
             timestamp_utc=str(raw["timestamp_utc"]),
@@ -118,6 +123,11 @@ class RecordedEvent:
             window_snapshot_debug=(
                 raw.get("window_snapshot_debug")
                 if isinstance(raw.get("window_snapshot_debug"), dict)
+                else None
+            ),
+            observed_settle_seconds=(
+                float(observed_settle)
+                if isinstance(observed_settle, (int, float)) and not isinstance(observed_settle, bool)
                 else None
             ),
         )

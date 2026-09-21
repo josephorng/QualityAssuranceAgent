@@ -19,6 +19,12 @@ from src.common.run_state import unique_run_folder_name
 from src.common.settings import load_settings
 from src.eye.capture import capture_all_screens_to_file, resolve_monitor_index
 from src.recorder.focus_point import resolve_typing_focus
+from src.recorder.frame_similarity import (
+    apply_settle_sample,
+    last_settle_frame_path,
+    settle_probe_kept_path,
+    settle_probe_staging_path,
+)
 from src.recorder.models import (
     RecordedEvent,
     SessionManifest,
@@ -50,8 +56,38 @@ _PRE_TYPE_FOCUS_MAX_DIST_PX = 48
 # After typing pauses, capture a settled frame for the next key_press before-shot.
 # LL hooks cannot screenshot before Tab/Enter is delivered; reuse this frame instead.
 _PRE_KEY_SETTLE_S = 0.3
+# Consecutive-screenshot settle probe (UI stability after an action).
+_SETTLE_PROBE_FIRST_S = 1.0
+_SETTLE_PROBE_INTERVAL_S = 1.0
+_SETTLE_PROBE_MAX_WINDOW_S = 15.0
+_SETTLE_PROBE_KINDS = frozenset(
+    {
+        "click",
+        "double_click",
+        "triple_click",
+        "right_click",
+        "middle_click",
+        "drag",
+        "hold",
+        "text_input",
+        "key_press",
+    }
+)
 _QUEUE_SENTINEL = object()
 _DRAIN_MARKER = object()
+
+
+@dataclass
+class _SettleProbeState:
+    """In-flight consecutive-frame settle measurement for one persisted event."""
+
+    event_index: int
+    started_monotonic: float
+    cursor_xy: tuple[int, int] | None = None
+    kept_path: str | None = None
+    kept_age_s: float | None = None
+    last_mon_index: int | None = None
+    last_mon_offset: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -75,7 +111,7 @@ class _DeferredCaptureJob:
     callback takes too long. Keep hook handlers cheap; run capture work here.
     """
 
-    action: str  # begin_text_input | flush_text_input | keyboard_event | settle_pre_key
+    action: str  # begin_text_input | flush_text_input | keyboard_event | settle_pre_key | settle_probe_tick
     meta: dict[str, Any] | None = None
     pending_pre_type: _PendingPreTypeShot | None = None
     pending_pre_key: _PendingPreTypeShot | None = None
@@ -661,6 +697,10 @@ class RecordingSession:
         # Settled frame for the next key_press before-shot (cannot capture on LL hook).
         self._pending_pre_key_screenshot: _PendingPreTypeShot | None = None
         self._pending_pre_key_timer: threading.Timer | None = None
+        self._settle_probe: _SettleProbeState | None = None
+        self._settle_probe_timer: threading.Timer | None = None
+        # Last settle-probe frame (path, monitor_index, monitor_offset) for next before-shot.
+        self._last_settle_frame: tuple[str, int, tuple[int, int]] | None = None
         self._last_pointer_cursor_xy: tuple[int, int] | None = None
         self._event_queue: queue.Queue[object] = queue.Queue()
         self._worker_thread: threading.Thread | None = None
@@ -759,6 +799,9 @@ class RecordingSession:
             self._pending_pre_type_screenshot = None
             self._pending_pre_key_screenshot = None
             self._cancel_pre_key_settle_timer_locked()
+            self._settle_probe = None
+            self._settle_probe_timer = None
+            self._last_settle_frame = None
             self._last_pointer_cursor_xy = None
             pending = self._pending_click_timer
             self._pending_click_timer = None
@@ -898,6 +941,7 @@ class RecordingSession:
             except Exception:
                 pass
 
+        self._cancel_settle_probe(cleanup_files=True)
         self._event_queue.put(_QUEUE_SENTINEL)
         return run_dir
 
@@ -1031,11 +1075,11 @@ class RecordingSession:
             return ()
 
     def _capture_pending_left_press(self, run_dir: Path, x: int, y: int) -> None:
-        """Capture the screen on mouse-down before the click is delivered to apps."""
+        """Capture (or reuse settle frame) on mouse-down before the click is delivered."""
         pending_dest = _pending_capture_path(run_dir)
         windows_before = self._snapshot_windows_before()
         try:
-            info = _capture_screenshot_at_point(x, y, pending_dest)
+            info = self._pending_screenshot_from_settle_or_capture(run_dir, x, y, pending_dest)
         except Exception:
             info = None
         with self._lock:
@@ -1043,16 +1087,73 @@ class RecordingSession:
             self._pending_windows_before = windows_before
 
     def _capture_pending_right_press(self, run_dir: Path, x: int, y: int) -> None:
-        """Capture the screen on right mouse-down before the click is delivered."""
+        """Capture (or reuse settle frame) on right mouse-down before the click is delivered."""
         pending_dest = _pending_right_capture_path(run_dir)
         windows_before = self._snapshot_windows_before()
         try:
-            info = _capture_screenshot_at_point(x, y, pending_dest)
+            info = self._pending_screenshot_from_settle_or_capture(run_dir, x, y, pending_dest)
         except Exception:
             info = None
         with self._lock:
             self._pending_right_screenshot = info
             self._pending_right_windows_before = windows_before
+
+    def _pending_screenshot_from_settle_or_capture(
+        self,
+        run_dir: Path,
+        x: int,
+        y: int,
+        dest: Path,
+    ) -> tuple[str, int, tuple[int, int]]:
+        """Prefer the last settle-probe frame on the same monitor; else live capture.
+
+        Reusing the settled frame avoids mid-animation before-shots when the user
+        clicks soon after a navigation/animation from the previous action.
+        """
+        click_mon, _, _, _, _ = _monitor_at_point(x, y)
+        with self._lock:
+            last = self._last_settle_frame
+        if last is not None:
+            last_path, last_mon, last_offset = last
+            src = Path(last_path)
+            if src.is_file() and int(last_mon) == int(click_mon):
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    if dest.is_file():
+                        dest.unlink()
+                except OSError:
+                    pass
+                try:
+                    import shutil
+
+                    shutil.copy2(src, dest)
+                    return str(dest), int(last_mon), tuple(last_offset)  # type: ignore[return-value]
+                except OSError:
+                    pass
+        return _capture_screenshot_at_point(x, y, dest)
+
+    def _publish_last_settle_frame(
+        self,
+        source: Path,
+        mon_index: int,
+        mon_offset: tuple[int, int],
+    ) -> None:
+        """Copy ``source`` into the durable next-before candidate frame."""
+        with self._lock:
+            run_dir = self._run_dir
+        if run_dir is None or not source.is_file():
+            return
+        dest = last_settle_frame_path(run_dir)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if dest.resolve() != source.resolve():
+                import shutil
+
+                shutil.copy2(source, dest)
+        except OSError:
+            return
+        with self._lock:
+            self._last_settle_frame = (str(dest), int(mon_index), (int(mon_offset[0]), int(mon_offset[1])))
 
     def _queue_event(self, item: _QueuedEvent) -> None:
         self._enqueue(item)
@@ -1925,6 +2026,219 @@ class RecordingSession:
             self._worker_keyboard_event(job)
         elif job.action == "settle_pre_key":
             self._refresh_pending_pre_key()
+        elif job.action == "settle_probe_tick":
+            self._worker_settle_probe_tick(job)
+
+    def _cancel_settle_probe(self, *, cleanup_files: bool = True) -> None:
+        """Stop the settle probe timer and clear probe state."""
+        with self._lock:
+            timer = self._settle_probe_timer
+            self._settle_probe_timer = None
+            probe = self._settle_probe
+            self._settle_probe = None
+            run_dir = self._run_dir
+        if timer is not None:
+            timer.cancel()
+        if not cleanup_files or probe is None or run_dir is None:
+            return
+        for path in (
+            settle_probe_staging_path(run_dir, probe.event_index),
+            settle_probe_kept_path(run_dir, probe.event_index),
+            Path(probe.kept_path) if probe.kept_path else None,
+        ):
+            if path is None:
+                continue
+            try:
+                # Never delete the durable next-before candidate.
+                if path.resolve() == last_settle_frame_path(run_dir).resolve():
+                    continue
+            except OSError:
+                pass
+            try:
+                if path.is_file():
+                    path.unlink()
+            except OSError:
+                pass
+
+    def _schedule_settle_probe_tick(self, delay_s: float, event_index: int) -> None:
+        with self._lock:
+            if self._settle_probe is None or self._settle_probe.event_index != event_index:
+                return
+            if self._finalizing and not self._accepting_input:
+                # Still allow ticks while finalizing only if probe was already started;
+                # begin_stop cancels explicitly before sentinel.
+                pass
+            prev = self._settle_probe_timer
+            self._settle_probe_timer = None
+
+        if prev is not None:
+            prev.cancel()
+
+        def _fire() -> None:
+            self._event_queue.put(
+                _DeferredCaptureJob(action="settle_probe_tick", event_index=event_index)
+            )
+
+        timer = threading.Timer(max(0.0, float(delay_s)), _fire)
+        timer.daemon = True
+        with self._lock:
+            if self._settle_probe is None or self._settle_probe.event_index != event_index:
+                return
+            self._settle_probe_timer = timer
+        timer.start()
+
+    def _start_settle_probe(self, event: RecordedEvent) -> None:
+        if event.kind not in _SETTLE_PROBE_KINDS:
+            return
+        self._cancel_settle_probe(cleanup_files=True)
+        cursor = event.cursor_xy or event.end_xy or event.anchor_click_xy
+        with self._lock:
+            if self._run_dir is None:
+                return
+            self._settle_probe = _SettleProbeState(
+                event_index=event.index,
+                started_monotonic=time.monotonic(),
+                cursor_xy=cursor,
+            )
+        self._schedule_settle_probe_tick(_SETTLE_PROBE_FIRST_S, event.index)
+
+    def _promote_settle_staging(self, staging: Path, kept_dest: Path) -> Path:
+        kept_dest.parent.mkdir(parents=True, exist_ok=True)
+        if staging.resolve() == kept_dest.resolve():
+            return kept_dest
+        try:
+            if kept_dest.is_file():
+                kept_dest.unlink()
+        except OSError:
+            pass
+        try:
+            staging.replace(kept_dest)
+        except OSError:
+            try:
+                import shutil
+
+                shutil.copy2(staging, kept_dest)
+                staging.unlink(missing_ok=True)
+            except OSError:
+                return staging
+        return kept_dest
+
+    def _persist_observed_settle(self, event_index: int, observed_settle_seconds: float) -> None:
+        with self._lock:
+            run_dir = self._run_dir
+            events = self._events
+        if run_dir is None:
+            return
+        path = event_json_path(run_dir, event_index)
+        raw = read_json(path, None)
+        if not isinstance(raw, dict):
+            return
+        seconds = round(float(observed_settle_seconds), 3)
+        raw["observed_settle_seconds"] = seconds
+        write_json(path, raw)
+        with self._lock:
+            for index, event in enumerate(events):
+                if event.index == event_index:
+                    events[index] = RecordedEvent.from_dict(raw)
+                    break
+        self._log(
+            run_dir,
+            f"settle probe stable event={event_index} observed_settle_seconds={seconds}",
+        )
+
+    def _worker_settle_probe_tick(self, job: _DeferredCaptureJob) -> None:
+        event_index = job.event_index
+        if not isinstance(event_index, int):
+            return
+        with self._lock:
+            probe = self._settle_probe
+            run_dir = self._run_dir
+            if (
+                probe is None
+                or run_dir is None
+                or probe.event_index != event_index
+            ):
+                return
+            started = probe.started_monotonic
+            kept_path = Path(probe.kept_path) if probe.kept_path else None
+            kept_age = probe.kept_age_s
+            cursor = probe.cursor_xy
+
+        sample_age = time.monotonic() - started
+        if sample_age > _SETTLE_PROBE_MAX_WINDOW_S:
+            self._cancel_settle_probe(cleanup_files=True)
+            return
+
+        staging = settle_probe_staging_path(run_dir, event_index)
+        mon_idx = 0
+        mon_offset: tuple[int, int] = (0, 0)
+        try:
+            if cursor is not None:
+                _, mon_idx, mon_offset = _capture_screenshot_at_point(
+                    int(cursor[0]), int(cursor[1]), staging
+                )
+            else:
+                capture_all_screens_to_file(staging)
+        except Exception as exc:
+            self._log(run_dir, f"settle probe capture failed event={event_index}: {exc}")
+            self._schedule_settle_probe_tick(_SETTLE_PROBE_INTERVAL_S, event_index)
+            return
+
+        new_kept, new_age, observed = apply_settle_sample(
+            kept_path=kept_path,
+            kept_age_s=kept_age,
+            staging_path=staging,
+            sample_age_s=sample_age,
+        )
+
+        if observed is not None:
+            # Publish stable frame as next before-shot candidate, then stop probe.
+            publish_src = Path(new_kept) if new_kept is not None else None
+            pub_mon = mon_idx
+            pub_off = mon_offset
+            with self._lock:
+                if probe.last_mon_index is not None and probe.last_mon_offset is not None:
+                    pub_mon = probe.last_mon_index
+                    pub_off = probe.last_mon_offset
+            if publish_src is not None and publish_src.is_file():
+                self._publish_last_settle_frame(publish_src, pub_mon, pub_off)
+            self._persist_observed_settle(event_index, observed)
+            with self._lock:
+                timer = self._settle_probe_timer
+                self._settle_probe_timer = None
+                self._settle_probe = None
+            if timer is not None:
+                timer.cancel()
+            # Drop probe-only temps; keep durable ``_last_settle_frame.jpeg``.
+            for path in (staging, settle_probe_kept_path(run_dir, event_index)):
+                try:
+                    if path.is_file() and path.resolve() != last_settle_frame_path(run_dir).resolve():
+                        path.unlink()
+                except OSError:
+                    pass
+            if (
+                publish_src is not None
+                and publish_src.is_file()
+                and publish_src.resolve() != last_settle_frame_path(run_dir).resolve()
+            ):
+                try:
+                    publish_src.unlink()
+                except OSError:
+                    pass
+            return
+
+        official = settle_probe_kept_path(run_dir, event_index)
+        if new_kept is not None:
+            official = self._promote_settle_staging(Path(new_kept), official)
+        self._publish_last_settle_frame(official, mon_idx, mon_offset)
+        with self._lock:
+            if self._settle_probe is None or self._settle_probe.event_index != event_index:
+                return
+            self._settle_probe.kept_path = str(official)
+            self._settle_probe.kept_age_s = new_age
+            self._settle_probe.last_mon_index = int(mon_idx)
+            self._settle_probe.last_mon_offset = (int(mon_offset[0]), int(mon_offset[1]))
+        self._schedule_settle_probe_tick(_SETTLE_PROBE_INTERVAL_S, event_index)
 
     def _discard_pending_pre_type_file(
         self,
@@ -2214,6 +2528,10 @@ class RecordingSession:
             write_json(event_json_path(run_dir, event.index), event.to_dict())
             self._events.append(event)
         self._notify_event(event)
+        if event.kind in _SETTLE_PROBE_KINDS:
+            self._start_settle_probe(event)
+        else:
+            self._cancel_settle_probe(cleanup_files=True)
 
     def _emit_pending_click(self, x: int, y: int, button: str) -> None:
         self._flush_pending_click(x, y, button)

@@ -181,6 +181,10 @@ def test_default_batch_size_constant() -> None:
     assert ocr_image._DEFAULT_CRNN_BATCH_SIZE == 64
 
 
+def test_default_max_width_ratio_constant() -> None:
+    assert ocr_image.DEFAULT_OCR_BATCH_MAX_WIDTH_RATIO == 3.0
+
+
 def test_partition_width_sorted_batches_splits_on_ratio() -> None:
     from cua_mcp.read_screen_text.ocr_image import _partition_width_sorted_batches
 

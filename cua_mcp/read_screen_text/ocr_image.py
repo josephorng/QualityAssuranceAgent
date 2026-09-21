@@ -24,7 +24,9 @@ from src.common.run_state import get_run_state_manager
 _DEFAULT_CRNN_BATCH_SIZE = 64
 # Within one zero-padded CRNN chunk, reject adding a wider row when
 # ``max_width / min_width`` would exceed this (width-sorted packing).
-DEFAULT_OCR_BATCH_MAX_WIDTH_RATIO = 1.5
+# Tuned on dual-monitor move_mouse screenshots (local Triton): 3.0 cuts
+# Triton round-trips vs 1.5 without the pad blow-up of unlimited packing.
+DEFAULT_OCR_BATCH_MAX_WIDTH_RATIO = 3.0
 
 _T = TypeVar("_T")
 

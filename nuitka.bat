@@ -21,7 +21,13 @@ timeout /t 1 /nobreak <nul >nul 2>&1
 :: Keep %OUTPUT_DIR%\%ENTRYSCRIPT:.py=.build% (Nuitka cache under --output-dir).
 echo Cleaning previous packaged output (keeping %OUTPUT_DIR%\%ENTRYSCRIPT:.py=.build%)...
 if not exist %OUTPUT_DIR% mkdir %OUTPUT_DIR%
-if exist %OUTPUT_DIR%\%APPNAME%.exe del /f /q %OUTPUT_DIR%\%APPNAME%.exe
+:: Archive previous exe as old version instead of deleting it.
+if exist %OUTPUT_DIR%\%APPNAME%.exe (
+    for /f %%I in ('powershell -NoProfile -Command "(Get-Date).ToString('yyyyMMdd_HHmmss')"') do set "EXE_BACKUP_STAMP=%%I"
+    set "EXE_BACKUP=%OUTPUT_DIR%\%APPNAME%_v%APP_VERSION%_!EXE_BACKUP_STAMP!.exe"
+    echo Keeping previous build as !EXE_BACKUP!
+    move /Y "%OUTPUT_DIR%\%APPNAME%.exe" "!EXE_BACKUP!" >nul
+)
 if exist %OUTPUT_DIR%\%ENTRYSCRIPT:.py=.dist% rd /s /q %OUTPUT_DIR%\%ENTRYSCRIPT:.py=.dist%
 if exist %OUTPUT_DIR%\%APPNAME%.dist rd /s /q %OUTPUT_DIR%\%APPNAME%.dist
 if exist %OUTPUT_DIR%\%ENTRYSCRIPT:.py=.onefile-build% rd /s /q %OUTPUT_DIR%\%ENTRYSCRIPT:.py=.onefile-build%

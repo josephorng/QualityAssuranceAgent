@@ -21,7 +21,9 @@ from src.eye.capture import capture_all_screens_to_file, resolve_monitor_index
 from src.recorder.focus_point import resolve_typing_focus
 from src.recorder.frame_similarity import (
     DEFAULT_SIMILARITY_THRESHOLD,
+    append_settle_probe_debug_record,
     apply_settle_sample,
+    archive_settle_probe_sample,
     compare_frames,
     last_settle_frame_path,
     settle_probe_kept_path,
@@ -62,6 +64,8 @@ _PRE_KEY_SETTLE_S = 0.3
 _SETTLE_PROBE_FIRST_S = 1.0
 _SETTLE_PROBE_INTERVAL_S = 1.0
 _SETTLE_PROBE_MAX_WINDOW_S = 15.0
+# Retain every settle-probe capture under screenshots/settle_debug/ for MAD tuning.
+_SETTLE_PROBE_KEEP_DEBUG_SAMPLES = False
 _SETTLE_PROBE_KINDS = frozenset(
     {
         "click",
@@ -90,6 +94,8 @@ class _SettleProbeState:
     kept_age_s: float | None = None
     last_mon_index: int | None = None
     last_mon_offset: tuple[int, int] | None = None
+    sample_seq: int = 0
+    kept_sample_seq: int | None = None
 
 
 @dataclass(frozen=True)
@@ -2218,6 +2224,20 @@ class RecordingSession:
                 threshold=DEFAULT_SIMILARITY_THRESHOLD,
             )
             mad_text = f"{mad:.6f}" if mad is not None else "error"
+            self._archive_settle_debug_sample(
+                run_dir=run_dir,
+                event_index=probe.event_index,
+                source=staging,
+                age_s=sample_age,
+                tag="final",
+                record={
+                    "kind": "match_final_after",
+                    "mad": mad,
+                    "threshold": DEFAULT_SIMILARITY_THRESHOLD,
+                    "similar": similar,
+                    "final_after": final_path.name,
+                },
+            )
             self._log(
                 run_dir,
                 f"settle probe match_final_after compare event={probe.event_index} "
@@ -2357,6 +2377,43 @@ class RecordingSession:
         if hit_max_window:
             self._cancel_settle_probe(cleanup_files=True, reason="max_window")
 
+    def _archive_settle_debug_sample(
+        self,
+        *,
+        run_dir: Path,
+        event_index: int,
+        source: Path,
+        age_s: float,
+        tag: str,
+        record: dict[str, Any],
+    ) -> int | None:
+        """Persist a settle sample + JSONL row when debug retention is enabled."""
+        if not _SETTLE_PROBE_KEEP_DEBUG_SAMPLES:
+            return None
+        with self._lock:
+            probe = self._settle_probe
+            if probe is None or probe.event_index != event_index:
+                return None
+            probe.sample_seq += 1
+            sample_index = probe.sample_seq
+        archived = archive_settle_probe_sample(
+            run_dir=run_dir,
+            event_index=event_index,
+            sample_index=sample_index,
+            source=source,
+            age_s=age_s,
+            tag=tag,
+        )
+        payload = {
+            "sample": sample_index,
+            "age_s": round(float(age_s), 3),
+            "tag": tag,
+            "path": archived.name if archived is not None else None,
+            **record,
+        }
+        append_settle_probe_debug_record(run_dir, event_index, payload)
+        return sample_index
+
     def _settle_probe_tick_body(
         self,
         *,
@@ -2385,12 +2442,33 @@ class RecordingSession:
             return
 
         similar: bool | None = None
+        mad: float | None = None
+        kept_sample_seq: int | None = None
+        with self._lock:
+            if self._settle_probe is not None and self._settle_probe.event_index == event_index:
+                kept_sample_seq = self._settle_probe.kept_sample_seq
+
         if kept_path is None or not kept_path.is_file():
+            sample_index = self._archive_settle_debug_sample(
+                run_dir=run_dir,
+                event_index=event_index,
+                source=staging,
+                age_s=sample_age,
+                tag="sample",
+                record={"kind": "first_keep"},
+            )
             self._log(
                 run_dir,
                 f"settle probe sample event={event_index} age_s={sample_age:.3f} "
                 "first_keep=True",
             )
+            if sample_index is not None:
+                with self._lock:
+                    if (
+                        self._settle_probe is not None
+                        and self._settle_probe.event_index == event_index
+                    ):
+                        self._settle_probe.kept_sample_seq = sample_index
         else:
             similar, mad = compare_frames(
                 kept_path,
@@ -2400,6 +2478,23 @@ class RecordingSession:
             mad_text = f"{mad:.6f}" if mad is not None else "error"
             kept_age_text = (
                 f"{kept_age:.3f}" if kept_age is not None else "none"
+            )
+            sample_index = self._archive_settle_debug_sample(
+                run_dir=run_dir,
+                event_index=event_index,
+                source=staging,
+                age_s=sample_age,
+                tag="sample",
+                record={
+                    "kind": "compare",
+                    "kept_sample": kept_sample_seq,
+                    "kept_age_s": (
+                        round(float(kept_age), 3) if kept_age is not None else None
+                    ),
+                    "mad": mad,
+                    "threshold": DEFAULT_SIMILARITY_THRESHOLD,
+                    "similar": similar,
+                },
             )
             self._log(
                 run_dir,
@@ -2435,7 +2530,8 @@ class RecordingSession:
                 self._settle_probe = None
             if timer is not None:
                 timer.cancel()
-            # Drop probe-only temps; keep durable ``_last_settle_frame.jpeg``.
+            # Drop probe-only temps; keep durable ``_last_settle_frame.jpeg``
+            # and settle_debug archives.
             for path in (staging, settle_probe_kept_path(run_dir, event_index)):
                 try:
                     if path.is_file() and path.resolve() != last_settle_frame_path(run_dir).resolve():
@@ -2464,6 +2560,9 @@ class RecordingSession:
             self._settle_probe.kept_age_s = new_age
             self._settle_probe.last_mon_index = int(mon_idx)
             self._settle_probe.last_mon_offset = (int(mon_offset[0]), int(mon_offset[1]))
+            # Current sample is now the kept frame (first keep or replace on change).
+            if sample_index is not None:
+                self._settle_probe.kept_sample_seq = sample_index
         self._schedule_settle_probe_tick(_SETTLE_PROBE_INTERVAL_S, event_index)
 
     def _discard_pending_pre_type_file(

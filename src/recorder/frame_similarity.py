@@ -79,6 +79,74 @@ def last_settle_frame_path(run_dir: Path) -> Path:
     return Path(run_dir) / "screenshots" / "_last_settle_frame.jpeg"
 
 
+def settle_probe_debug_dir(run_dir: Path, event_index: int) -> Path:
+    """Per-event folder for retained settle-probe samples (threshold tuning)."""
+    return Path(run_dir) / "screenshots" / "settle_debug" / f"event_{event_index:03d}"
+
+
+def settle_probe_debug_sample_path(
+    run_dir: Path,
+    event_index: int,
+    sample_index: int,
+    *,
+    age_s: float,
+    tag: str = "sample",
+) -> Path:
+    """Path for one archived settle sample (``tag`` e.g. ``sample`` / ``final``)."""
+    age_token = f"{float(age_s):.3f}".replace(".", "p")
+    return (
+        settle_probe_debug_dir(run_dir, event_index)
+        / f"{tag}_{int(sample_index):03d}_age{age_token}s.jpeg"
+    )
+
+
+def settle_probe_debug_log_path(run_dir: Path, event_index: int) -> Path:
+    return settle_probe_debug_dir(run_dir, event_index) / "comparisons.jsonl"
+
+
+def archive_settle_probe_sample(
+    *,
+    run_dir: Path,
+    event_index: int,
+    sample_index: int,
+    source: Path,
+    age_s: float,
+    tag: str = "sample",
+) -> Path | None:
+    """Copy ``source`` into the settle-debug folder; return the archive path."""
+    import shutil
+
+    src = Path(source)
+    if not src.is_file():
+        return None
+    dest = settle_probe_debug_sample_path(
+        run_dir, event_index, sample_index, age_s=age_s, tag=tag
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copy2(src, dest)
+    except OSError:
+        return None
+    return dest
+
+
+def append_settle_probe_debug_record(
+    run_dir: Path,
+    event_index: int,
+    record: dict[str, Any],
+) -> None:
+    """Append one JSON object to the per-event settle comparisons log."""
+    import json
+
+    path = settle_probe_debug_log_path(run_dir, event_index)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
 def apply_settle_sample(
     *,
     kept_path: Path | None,

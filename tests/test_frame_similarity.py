@@ -8,10 +8,14 @@ import pytest
 from PIL import Image
 
 from src.recorder.frame_similarity import (
+    append_settle_probe_debug_record,
     apply_settle_sample,
+    archive_settle_probe_sample,
     compare_frames,
     frames_similar,
     mean_abs_diff,
+    settle_probe_debug_dir,
+    settle_probe_debug_log_path,
 )
 
 
@@ -92,3 +96,50 @@ def test_apply_settle_sample_similar_returns_observed(tmp_path: Path) -> None:
     assert observed == 1.0
     assert staging.is_file()
     assert not kept.is_file()
+
+
+def test_archive_settle_probe_sample_and_debug_log(tmp_path: Path) -> None:
+    run_dir = tmp_path / "rec"
+    (run_dir / "screenshots").mkdir(parents=True)
+    source = tmp_path / "src.jpeg"
+    _write_gray(source, 80)
+
+    archived = archive_settle_probe_sample(
+        run_dir=run_dir,
+        event_index=2,
+        sample_index=1,
+        source=source,
+        age_s=1.016,
+        tag="sample",
+    )
+    assert archived is not None
+    assert archived.is_file()
+    assert archived.parent == settle_probe_debug_dir(run_dir, 2)
+    assert "age1p016s" in archived.name
+
+    append_settle_probe_debug_record(
+        run_dir,
+        2,
+        {
+            "sample": 1,
+            "age_s": 1.016,
+            "kind": "first_keep",
+            "path": archived.name,
+        },
+    )
+    append_settle_probe_debug_record(
+        run_dir,
+        2,
+        {
+            "sample": 2,
+            "age_s": 2.1,
+            "kind": "compare",
+            "mad": 0.03983,
+            "threshold": 0.02,
+            "similar": False,
+        },
+    )
+    log_path = settle_probe_debug_log_path(run_dir, 2)
+    lines = log_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 2
+    assert '"mad": 0.03983' in lines[1]

@@ -8,7 +8,8 @@ from PIL import Image
 
 from src.recorder.capture import (
     _SETTLE_PROBE_FIRST_S,
-    _SETTLE_PROBE_INTERVAL_S,
+    _SETTLE_PROBE_MAX_WINDOW_S,
+    settle_probe_interval_s,
 )
 from src.recorder.frame_similarity import apply_settle_sample, last_settle_frame_path
 from src.recorder.models import RecordedEvent
@@ -19,9 +20,22 @@ def _write_gray(path: Path, value: int) -> None:
     Image.new("L", (64, 64), color=int(value)).save(path, format="JPEG", quality=95)
 
 
-def test_settle_probe_timing_defaults_are_one_second() -> None:
+def test_settle_probe_interval_follows_fibonacci() -> None:
+    assert [settle_probe_interval_s(i) for i in range(10)] == [
+        1.0,
+        1.0,
+        2.0,
+        3.0,
+        5.0,
+        8.0,
+        13.0,
+        21.0,
+        34.0,
+        55.0,
+    ]
     assert _SETTLE_PROBE_FIRST_S == 1.0
-    assert _SETTLE_PROBE_INTERVAL_S == 1.0
+    assert _SETTLE_PROBE_MAX_WINDOW_S == 55.0
+    assert settle_probe_interval_s(-3) == 1.0
 
 
 def test_apply_settle_sample_change_then_stable(tmp_path: Path) -> None:
@@ -189,7 +203,45 @@ def test_settle_probe_ticks_run_off_event_queue(tmp_path: Path, monkeypatch) -> 
         __import__("time").sleep(0.01)
     assert fired == [7]
     # Keep default first delay documented for callers.
-    assert _SETTLE_PROBE_FIRST_S == 1.0
+    assert _SETTLE_PROBE_FIRST_S == settle_probe_interval_s(0) == 1.0
+
+
+def test_schedule_next_settle_probe_tick_advances_fibonacci(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import threading
+    import time
+
+    from src.recorder.capture import RecordingSession, _SettleProbeState
+
+    run_dir = tmp_path / "rec"
+    (run_dir / "screenshots").mkdir(parents=True)
+
+    session = RecordingSession.__new__(RecordingSession)
+    session._lock = threading.Lock()
+    session._settle_tick_lock = threading.Lock()
+    session._run_dir = run_dir
+    session._settle_probe = _SettleProbeState(
+        event_index=3,
+        started_monotonic=time.monotonic(),
+        interval_step=0,
+    )
+    session._settle_probe_timer = None
+
+    delays: list[float] = []
+
+    def _capture_schedule(delay_s: float, event_index: int) -> None:
+        delays.append(float(delay_s))
+        assert event_index == 3
+
+    monkeypatch.setattr(session, "_schedule_settle_probe_tick", _capture_schedule)
+
+    session._schedule_next_settle_probe_tick(3)
+    session._schedule_next_settle_probe_tick(3)
+    session._schedule_next_settle_probe_tick(3)
+    session._schedule_next_settle_probe_tick(3)
+    assert delays == [1.0, 1.0, 2.0, 3.0]
+    assert session._settle_probe.interval_step == 4
 
 
 def test_finish_settle_against_final_after_persists_observed(

@@ -61,9 +61,9 @@ _PRE_TYPE_FOCUS_MAX_DIST_PX = 48
 # LL hooks cannot screenshot before Tab/Enter is delivered; reuse this frame instead.
 _PRE_KEY_SETTLE_S = 0.3
 # Consecutive-screenshot settle probe (UI stability after an action).
-_SETTLE_PROBE_FIRST_S = 1.0
-_SETTLE_PROBE_INTERVAL_S = 1.0
-_SETTLE_PROBE_MAX_WINDOW_S = 15.0
+# Inter-sample delays follow Fibonacci seconds: 1, 1, 2, 3, 5, 8, 13, 21, 34, …
+# Dense early samples catch immediate settles; backoff cuts captures on long waits.
+_SETTLE_PROBE_MAX_WINDOW_S = 55.0
 # Retain every settle-probe capture under screenshots/settle_debug/ for MAD tuning.
 _SETTLE_PROBE_KEEP_DEBUG_SAMPLES = False
 _SETTLE_PROBE_KINDS = frozenset(
@@ -83,6 +83,22 @@ _QUEUE_SENTINEL = object()
 _DRAIN_MARKER = object()
 
 
+def settle_probe_interval_s(step: int) -> float:
+    """Return the Fibonacci delay (seconds) before settle sample ``step``.
+
+    ``step`` 0 → 1, 1 → 1, 2 → 2, 3 → 3, 4 → 5, 5 → 8, …
+    """
+    n = max(0, int(step))
+    a, b = 1, 1
+    for _ in range(n):
+        a, b = b, a + b
+    return float(a)
+
+
+# First probe delay (same as ``settle_probe_interval_s(0)``); kept for callers/tests.
+_SETTLE_PROBE_FIRST_S = settle_probe_interval_s(0)
+
+
 @dataclass
 class _SettleProbeState:
     """In-flight consecutive-frame settle measurement for one persisted event."""
@@ -96,6 +112,8 @@ class _SettleProbeState:
     last_mon_offset: tuple[int, int] | None = None
     sample_seq: int = 0
     kept_sample_seq: int | None = None
+    # Next Fibonacci index for ``settle_probe_interval_s`` when scheduling a tick.
+    interval_step: int = 0
 
 
 @dataclass(frozen=True)
@@ -2125,6 +2143,21 @@ class RecordingSession:
             self._settle_probe_timer = timer
         timer.start()
 
+    def _consume_settle_probe_delay_s(self, probe: _SettleProbeState) -> float:
+        """Advance Fibonacci backoff on ``probe`` and return the next delay."""
+        delay = settle_probe_interval_s(probe.interval_step)
+        probe.interval_step += 1
+        return delay
+
+    def _schedule_next_settle_probe_tick(self, event_index: int) -> None:
+        """Schedule the next settle sample using the probe's Fibonacci step."""
+        with self._lock:
+            probe = self._settle_probe
+            if probe is None or probe.event_index != event_index:
+                return
+            delay = self._consume_settle_probe_delay_s(probe)
+        self._schedule_settle_probe_tick(delay, event_index)
+
     def _event_already_has_observed_settle(self, event_index: int) -> bool:
         with self._lock:
             run_dir = self._run_dir
@@ -2215,7 +2248,7 @@ class RecordingSession:
                     f"settle probe match_final_after capture failed "
                     f"event={probe.event_index}: {exc}",
                 )
-                time.sleep(_SETTLE_PROBE_INTERVAL_S)
+                time.sleep(self._consume_settle_probe_delay_s(probe))
                 continue
 
             similar, mad = compare_frames(
@@ -2270,7 +2303,7 @@ class RecordingSession:
                 )
                 return
 
-            time.sleep(_SETTLE_PROBE_INTERVAL_S)
+            time.sleep(self._consume_settle_probe_delay_s(probe))
 
     def _start_settle_probe(self, event: RecordedEvent) -> None:
         if event.kind not in _SETTLE_PROBE_KINDS:
@@ -2287,15 +2320,18 @@ class RecordingSession:
                 event_index=event.index,
                 started_monotonic=time.monotonic(),
                 cursor_xy=cursor,
+                interval_step=0,
             )
             run_dir = self._run_dir
+            first_delay = self._consume_settle_probe_delay_s(self._settle_probe)
         self._log(
             run_dir,
             f"settle probe start event={event.index} "
-            f"first_s={_SETTLE_PROBE_FIRST_S} interval_s={_SETTLE_PROBE_INTERVAL_S} "
+            f"first_s={first_delay} fib_backoff=True "
+            f"max_window_s={_SETTLE_PROBE_MAX_WINDOW_S} "
             f"threshold={DEFAULT_SIMILARITY_THRESHOLD}",
         )
-        self._schedule_settle_probe_tick(_SETTLE_PROBE_FIRST_S, event.index)
+        self._schedule_settle_probe_tick(first_delay, event.index)
 
     def _promote_settle_staging(self, staging: Path, kept_dest: Path) -> Path:
         kept_dest.parent.mkdir(parents=True, exist_ok=True)
@@ -2438,7 +2474,7 @@ class RecordingSession:
                 capture_all_screens_to_file(staging)
         except Exception as exc:
             self._log(run_dir, f"settle probe capture failed event={event_index}: {exc}")
-            self._schedule_settle_probe_tick(_SETTLE_PROBE_INTERVAL_S, event_index)
+            self._schedule_next_settle_probe_tick(event_index)
             return
 
         similar: bool | None = None
@@ -2563,7 +2599,7 @@ class RecordingSession:
             # Current sample is now the kept frame (first keep or replace on change).
             if sample_index is not None:
                 self._settle_probe.kept_sample_seq = sample_index
-        self._schedule_settle_probe_tick(_SETTLE_PROBE_INTERVAL_S, event_index)
+        self._schedule_next_settle_probe_tick(event_index)
 
     def _discard_pending_pre_type_file(
         self,

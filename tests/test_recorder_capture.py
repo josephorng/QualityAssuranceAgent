@@ -743,6 +743,49 @@ def test_keyboard_hook_defers_screenshot_and_uia_off_thread(tmp_path) -> None:
     assert enter_event["key"] == "enter"
 
 
+def test_mouse_hook_defers_screenshot_and_window_snapshot_off_thread(tmp_path) -> None:
+    """Left click must not run mss/window snapshot on the hook callback thread."""
+    import threading
+
+    session = RecordingSession(runs_root=tmp_path)
+    click_thread_id = threading.get_ident()
+    sync_hook_work = {"count": 0}
+
+    def _track_shot(*_args, **_kwargs):
+        if threading.get_ident() == click_thread_id:
+            sync_hook_work["count"] += 1
+        return _mock_screenshot(*_args, **_kwargs)
+
+    def _track_windows():
+        if threading.get_ident() == click_thread_id:
+            sync_hook_work["count"] += 1
+        return []
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_track_shot,
+    ), patch(
+        "src.recorder.capture.snapshot_top_level_windows",
+        side_effect=_track_windows,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.mouse import Button
+
+            session._on_mouse_click(120, 240, Button.left, True)
+            session._on_mouse_click(120, 240, Button.left, False)
+            assert sync_hook_work["count"] == 0
+            time.sleep(_DOUBLE_CLICK_INTERVAL_S + 0.05)
+            session.wait_for_deferred_work()
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "click"
+    assert raw["cursor_xy"] == [120, 240]
+
+
 def test_backspace_edits_pending_text_input(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
 

@@ -137,7 +137,10 @@ class _DeferredCaptureJob:
     callback takes too long. Keep hook handlers cheap; run capture work here.
     """
 
-    action: str  # begin_text_input | flush_text_input | keyboard_event | settle_pre_key
+    action: str
+    # begin_text_input | flush_text_input | keyboard_event | settle_pre_key
+    # | pending_left_press | pending_right_press | pending_drag_end
+    # | emit_left_gesture | emit_right_gesture | mouse_pointer_event
     meta: dict[str, Any] | None = None
     pending_pre_type: _PendingPreTypeShot | None = None
     pending_pre_key: _PendingPreTypeShot | None = None
@@ -150,11 +153,18 @@ class _DeferredCaptureJob:
     shared_end_offset: tuple[int, int] | None = None
     kind: str | None = None
     cursor_xy: tuple[int, int] | None = None
+    end_xy: tuple[int, int] | None = None
     event_index: int | None = None
     timestamp_utc: str | None = None
     key: str | None = None
     keys: list[str] | None = None
     text: str | None = None
+    button: str | None = None
+    modifiers: list[str] | None = None
+    scroll_delta: int | None = None
+    duration_seconds: float | None = None
+    press_seq: int | None = None
+    text_event_index: int | None = None
     refresh_pre_type: bool = False
 
 
@@ -708,6 +718,17 @@ class RecordingSession:
         self._pending_screenshot: tuple[str, int, tuple[int, int]] | None = None
         self._pending_drag_end_captures: dict[int, tuple[str, int, tuple[int, int]]] | None = None
         self._pending_windows_before: tuple[WindowInfo, ...] | None = None
+        # Generation tokens so deferred press captures stay tied to the gesture that
+        # enqueued them (hook thread must not wait on mss/UIA).
+        self._left_press_seq: int = 0
+        self._right_press_seq: int = 0
+        self._left_press_captures: dict[
+            int, tuple[tuple[str, int, tuple[int, int]] | None, tuple[WindowInfo, ...] | None]
+        ] = {}
+        self._right_press_captures: dict[
+            int, tuple[tuple[str, int, tuple[int, int]] | None, tuple[WindowInfo, ...] | None]
+        ] = {}
+        self._drag_end_captures: dict[int, dict[int, tuple[str, int, tuple[int, int]]]] = {}
         self._pending_right_coords: tuple[int, int] | None = None
         self._pending_right_down_at: float | None = None
         self._pending_right_timestamp_utc: str | None = None
@@ -816,6 +837,11 @@ class RecordingSession:
             self._pending_screenshot = None
             self._pending_drag_end_captures = None
             self._pending_windows_before = None
+            self._left_press_seq = 0
+            self._right_press_seq = 0
+            self._left_press_captures = {}
+            self._right_press_captures = {}
+            self._drag_end_captures = {}
             self._pending_right_coords = None
             self._pending_right_down_at = None
             self._pending_right_timestamp_utc = None
@@ -939,7 +965,9 @@ class RecordingSession:
         with self._lock:
             leftover_drag_end = self._pending_drag_end_captures
             self._pending_drag_end_captures = None
-            self._clear_pending_right_gesture_locked()
+            stale_right, pending_right_shot = self._clear_pending_right_gesture_locked(
+                discard_capture=True,
+            )
             self._pending_screenshot = None
             self._pending_windows_before = None
             leftover_pre_type = self._pending_pre_type_screenshot
@@ -948,6 +976,14 @@ class RecordingSession:
             self._pending_pre_key_screenshot = None
             self._cancel_pre_key_settle_timer_locked()
         _discard_pending_drag_end_capture_files(leftover_drag_end)
+        self._discard_press_capture_entry(stale_right)
+        if pending_right_shot is not None:
+            right_pending = Path(pending_right_shot[0])
+            if right_pending.is_file():
+                try:
+                    right_pending.unlink()
+                except OSError:
+                    pass
         if leftover_pre_type is not None:
             pending_pre = Path(leftover_pre_type.path)
             if pending_pre.is_file():
@@ -1109,29 +1145,73 @@ class RecordingSession:
         except Exception:
             return ()
 
-    def _capture_pending_left_press(self, run_dir: Path, x: int, y: int) -> None:
-        """Capture (or reuse settle frame) on mouse-down before the click is delivered."""
-        pending_dest = _pending_capture_path(run_dir)
-        windows_before = self._snapshot_windows_before()
-        try:
-            info = self._pending_screenshot_from_settle_or_capture(run_dir, x, y, pending_dest)
-        except Exception:
-            info = None
+    def _discard_press_capture_entry(
+        self,
+        entry: tuple[
+            tuple[str, int, tuple[int, int]] | None,
+            tuple[WindowInfo, ...] | None,
+        ]
+        | None,
+    ) -> None:
+        if entry is None:
+            return
+        shot = entry[0]
+        if shot is None:
+            return
+        path = Path(shot[0])
+        if path.is_file():
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+    def _discard_drag_end_capture_entry(
+        self,
+        captures: dict[int, tuple[str, int, tuple[int, int]]] | None,
+    ) -> None:
+        _discard_pending_drag_end_capture_files(captures)
+
+    def _capture_pending_left_press(
+        self,
+        run_dir: Path,
+        x: int,
+        y: int,
+        *,
+        text_event_index: int | None = None,
+        text_meta: dict[str, Any] | None = None,
+    ) -> None:
+        """Enqueue before-shot + window snapshot off the mouse hook thread."""
+        _ = run_dir
         with self._lock:
-            self._pending_screenshot = info
-            self._pending_windows_before = windows_before
+            self._left_press_seq += 1
+            seq = self._left_press_seq
+            self._pending_screenshot = None
+            self._pending_windows_before = None
+        self._enqueue(
+            _DeferredCaptureJob(
+                action="pending_left_press",
+                cursor_xy=(x, y),
+                press_seq=seq,
+                text_event_index=text_event_index,
+                flush_meta=text_meta,
+            )
+        )
 
     def _capture_pending_right_press(self, run_dir: Path, x: int, y: int) -> None:
-        """Capture (or reuse settle frame) on right mouse-down before the click is delivered."""
-        pending_dest = _pending_right_capture_path(run_dir)
-        windows_before = self._snapshot_windows_before()
-        try:
-            info = self._pending_screenshot_from_settle_or_capture(run_dir, x, y, pending_dest)
-        except Exception:
-            info = None
+        """Enqueue right-press before-shot off the mouse hook thread."""
+        _ = run_dir
         with self._lock:
-            self._pending_right_screenshot = info
-            self._pending_right_windows_before = windows_before
+            self._right_press_seq += 1
+            seq = self._right_press_seq
+            self._pending_right_screenshot = None
+            self._pending_right_windows_before = None
+        self._enqueue(
+            _DeferredCaptureJob(
+                action="pending_right_press",
+                cursor_xy=(x, y),
+                press_seq=seq,
+            )
+        )
 
     def _pending_screenshot_from_settle_or_capture(
         self,
@@ -1207,6 +1287,7 @@ class RecordingSession:
         modifiers: list[str] | None = None,
         timestamp_utc: str | None = None,
     ) -> None:
+        """Reserve an index and enqueue screenshot/UIA work off the mouse hook thread."""
         action_timestamp_utc = timestamp_utc or utc_now_iso()
         with self._lock:
             run_dir = self._run_dir
@@ -1215,26 +1296,18 @@ class RecordingSession:
             index = self._next_index
             self._next_index += 1
         self._flush_pending_text_input(shared_end_index=index)
-        windows_before = self._snapshot_windows_before()
-        shot_path, mon_idx, mon_offset = self._capture_immediate_screenshot(
-            run_dir,
-            index,
-            cursor_xy,
-        )
         self._remember_pointer_cursor(cursor_xy)
-        self._queue_event(
-            _QueuedEvent(
+        self._enqueue(
+            _DeferredCaptureJob(
+                action="mouse_pointer_event",
                 kind=kind,
                 cursor_xy=cursor_xy,
                 event_index=index,
                 timestamp_utc=action_timestamp_utc,
-                screenshot_path=shot_path,
-                monitor_index=mon_idx,
-                monitor_offset=mon_offset,
                 button=button,
                 modifiers=modifiers,
                 scroll_delta=scroll_delta,
-                windows_before=windows_before or None,
+                refresh_pre_type=True,
             )
         )
 
@@ -1750,25 +1823,23 @@ class RecordingSession:
                 return
             if self._pending_drag_end_captures is not None:
                 return
-            run_dir = self._run_dir
-
-        try:
-            captures = _capture_all_monitors_to_pending(run_dir)
-        except Exception:
-            return
-
-        with self._lock:
-            if not self._left_press_dragging:
-                _discard_pending_drag_end_capture_files(captures)
+            if self._left_press_seq in self._drag_end_captures:
                 return
-            if self._pending_drag_end_captures is not None:
-                _discard_pending_drag_end_capture_files(captures)
-                return
-            self._pending_drag_end_captures = captures
+            press_seq = self._left_press_seq
+        self._enqueue(
+            _DeferredCaptureJob(
+                action="pending_drag_end",
+                press_seq=press_seq,
+            )
+        )
 
     def _clear_pending_left_gesture(self) -> None:
         self._discard_pending_drag_end_captures()
         with self._lock:
+            seq = self._left_press_seq
+            stale = self._left_press_captures.pop(seq, None)
+            drag_stale = self._drag_end_captures.pop(seq, None)
+            self._left_press_seq += 1
             self._pending_click_coords = None
             self._pending_click_down_at = None
             self._pending_click_timestamp_utc = None
@@ -1778,32 +1849,43 @@ class RecordingSession:
             self._last_move_xy = None
             self._pending_screenshot = None
             self._pending_windows_before = None
+        self._discard_press_capture_entry(stale)
+        self._discard_drag_end_capture_entry(drag_stale)
 
-    def _clear_pending_right_gesture_locked(self) -> None:
+    def _clear_pending_right_gesture_locked(
+        self,
+        *,
+        discard_capture: bool = True,
+    ) -> tuple[
+        tuple[tuple[str, int, tuple[int, int]] | None, tuple[WindowInfo, ...] | None] | None,
+        tuple[str, int, tuple[int, int]] | None,
+    ]:
+        seq = self._right_press_seq
+        stale = self._right_press_captures.pop(seq, None) if discard_capture else None
+        if discard_capture:
+            self._right_press_seq += 1
         self._pending_right_coords = None
         self._pending_right_down_at = None
         self._pending_right_timestamp_utc = None
         self._pending_right_modifiers = None
+        pending_shot = self._pending_right_screenshot
         self._pending_right_screenshot = None
         self._pending_right_windows_before = None
-
-    def _discard_pending_right_capture_file(self) -> None:
-        with self._lock:
-            pending = self._pending_right_screenshot
-            self._pending_right_screenshot = None
-        if pending is None:
-            return
-        src = Path(pending[0])
-        if src.is_file():
-            try:
-                src.unlink()
-            except OSError:
-                pass
+        return stale, pending_shot
 
     def _clear_pending_right_gesture(self) -> None:
-        self._discard_pending_right_capture_file()
         with self._lock:
-            self._clear_pending_right_gesture_locked()
+            stale, pending_shot = self._clear_pending_right_gesture_locked(
+                discard_capture=True,
+            )
+        self._discard_press_capture_entry(stale)
+        if pending_shot is not None:
+            src = Path(pending_shot[0])
+            if src.is_file():
+                try:
+                    src.unlink()
+                except OSError:
+                    pass
 
     def _snapshot_pressed_modifiers(self) -> list[str] | None:
         with self._lock:
@@ -1831,12 +1913,9 @@ class RecordingSession:
                 return
             click_index = self._next_index
             self._next_index += 1
-            pending_shot = self._pending_screenshot
-            pending_windows = self._pending_windows_before
+            press_seq = self._left_press_seq
             timestamp_utc = self._pending_click_timestamp_utc or utc_now_iso()
             modifiers = self._pending_click_modifiers
-            self._pending_screenshot = None
-            self._pending_windows_before = None
             self._pending_click_timer = None
             self._pending_click_coords = None
             self._pending_click_down_at = None
@@ -1845,34 +1924,22 @@ class RecordingSession:
             self._left_button_down = False
             self._left_press_dragging = False
             self._last_move_xy = None
-        self._flush_pending_text_input(
-            shared_end_index=click_index,
-            shared_end_monitor=pending_shot[1] if pending_shot is not None else None,
-            shared_end_offset=pending_shot[2] if pending_shot is not None else None,
-        )
+        self._flush_pending_text_input(shared_end_index=click_index)
         self._discard_pending_drag_end_captures()
-        shot_path, mon_idx, mon_offset = _finalize_screenshot(
-            run_dir,
-            click_index,
-            (x, y),
-            pending_shot,
-        )
         self._remember_pointer_cursor((x, y))
-        self._queue_event(
-            _QueuedEvent(
+        self._enqueue(
+            _DeferredCaptureJob(
+                action="emit_left_gesture",
                 kind="click",
                 cursor_xy=(x, y),
                 event_index=click_index,
                 timestamp_utc=timestamp_utc,
-                screenshot_path=shot_path,
-                monitor_index=mon_idx,
-                monitor_offset=mon_offset,
                 button=button,
                 modifiers=modifiers,
-                windows_before=pending_windows,
+                press_seq=press_seq,
+                refresh_pre_type=True,
             )
         )
-        self._refresh_pending_pre_type((x, y))
 
     def _flush_pending_hold(
         self,
@@ -1889,12 +1956,9 @@ class RecordingSession:
                 return
             hold_index = self._next_index
             self._next_index += 1
-            pending_shot = self._pending_screenshot
-            pending_windows = self._pending_windows_before
+            press_seq = self._left_press_seq
             timestamp_utc = self._pending_click_timestamp_utc or utc_now_iso()
             modifiers = self._pending_click_modifiers
-            self._pending_screenshot = None
-            self._pending_windows_before = None
             self._pending_click_timer = None
             self._pending_click_coords = None
             self._pending_click_down_at = None
@@ -1903,35 +1967,23 @@ class RecordingSession:
             self._left_button_down = False
             self._left_press_dragging = False
             self._last_move_xy = None
-        self._flush_pending_text_input(
-            shared_end_index=hold_index,
-            shared_end_monitor=pending_shot[1] if pending_shot is not None else None,
-            shared_end_offset=pending_shot[2] if pending_shot is not None else None,
-        )
+        self._flush_pending_text_input(shared_end_index=hold_index)
         self._discard_pending_drag_end_captures()
-        shot_path, mon_idx, mon_offset = _finalize_screenshot(
-            run_dir,
-            hold_index,
-            (x, y),
-            pending_shot,
-        )
         self._remember_pointer_cursor((x, y))
-        self._queue_event(
-            _QueuedEvent(
+        self._enqueue(
+            _DeferredCaptureJob(
+                action="emit_left_gesture",
                 kind="hold",
                 cursor_xy=(x, y),
                 event_index=hold_index,
                 timestamp_utc=timestamp_utc,
-                screenshot_path=shot_path,
-                monitor_index=mon_idx,
-                monitor_offset=mon_offset,
                 button=button,
                 modifiers=modifiers,
                 duration_seconds=round(float(duration_seconds), 3),
-                windows_before=pending_windows,
+                press_seq=press_seq,
+                refresh_pre_type=True,
             )
         )
-        self._refresh_pending_pre_type((x, y))
 
     def _flush_pending_right(
         self,
@@ -1949,41 +2001,29 @@ class RecordingSession:
                 return
             right_index = self._next_index
             self._next_index += 1
-            pending_shot = self._pending_right_screenshot
-            pending_windows = self._pending_right_windows_before
+            press_seq = self._right_press_seq
             timestamp_utc = self._pending_right_timestamp_utc or utc_now_iso()
             modifiers = self._pending_right_modifiers
-            self._clear_pending_right_gesture_locked()
-        self._flush_pending_text_input(
-            shared_end_index=right_index,
-            shared_end_monitor=pending_shot[1] if pending_shot is not None else None,
-            shared_end_offset=pending_shot[2] if pending_shot is not None else None,
-        )
-        shot_path, mon_idx, mon_offset = _finalize_screenshot(
-            run_dir,
-            right_index,
-            (x, y),
-            pending_shot,
-        )
+            # Keep press_seq + capture dict entry for the emit worker.
+            self._clear_pending_right_gesture_locked(discard_capture=False)
+        self._flush_pending_text_input(shared_end_index=right_index)
         self._remember_pointer_cursor((x, y))
-        self._queue_event(
-            _QueuedEvent(
+        self._enqueue(
+            _DeferredCaptureJob(
+                action="emit_right_gesture",
                 kind=kind,
                 cursor_xy=(x, y),
                 event_index=right_index,
                 timestamp_utc=timestamp_utc,
-                screenshot_path=shot_path,
-                monitor_index=mon_idx,
-                monitor_offset=mon_offset,
                 button="right",
                 modifiers=modifiers,
                 duration_seconds=(
                     round(float(duration_seconds), 3) if duration_seconds is not None else None
                 ),
-                windows_before=pending_windows,
+                press_seq=press_seq,
+                refresh_pre_type=True,
             )
         )
-        self._refresh_pending_pre_type((x, y))
 
     def _flush_pending_drag(
         self,
@@ -2001,14 +2041,13 @@ class RecordingSession:
                 return
             drag_index = self._next_index
             self._next_index += 1
-            pending_shot = self._pending_screenshot
-            pending_windows = self._pending_windows_before
+            press_seq = self._left_press_seq
             pending_drag_end = self._pending_drag_end_captures
+            self._pending_drag_end_captures = None
+            if pending_drag_end is not None:
+                self._drag_end_captures[press_seq] = pending_drag_end
             timestamp_utc = self._pending_click_timestamp_utc or utc_now_iso()
             modifiers = self._pending_click_modifiers
-            self._pending_screenshot = None
-            self._pending_windows_before = None
-            self._pending_drag_end_captures = None
             self._pending_click_timer = None
             self._pending_click_coords = None
             self._pending_click_down_at = None
@@ -2017,45 +2056,22 @@ class RecordingSession:
             self._left_button_down = False
             self._left_press_dragging = False
             self._last_move_xy = None
-        self._flush_pending_text_input(
-            shared_end_index=drag_index,
-            shared_end_monitor=pending_shot[1] if pending_shot is not None else None,
-            shared_end_offset=pending_shot[2] if pending_shot is not None else None,
-        )
-        shot_path, mon_idx, mon_offset = _finalize_screenshot(
-            run_dir,
-            drag_index,
-            (x1, y1),
-            pending_shot,
-        )
-        end_shot_path, end_mon_idx, end_mon_offset = _finalize_drag_end_screenshot(
-            run_dir,
-            drag_index,
-            (x2, y2),
-            pending_drag_end,
-            fallback_mon_idx=mon_idx,
-            fallback_mon_offset=mon_offset,
-        )
+        self._flush_pending_text_input(shared_end_index=drag_index)
         self._remember_pointer_cursor((x2, y2))
-        self._queue_event(
-            _QueuedEvent(
+        self._enqueue(
+            _DeferredCaptureJob(
+                action="emit_left_gesture",
                 kind="drag",
                 cursor_xy=(x1, y1),
                 end_xy=(x2, y2),
                 event_index=drag_index,
                 timestamp_utc=timestamp_utc,
-                screenshot_path=shot_path,
-                monitor_index=mon_idx,
-                monitor_offset=mon_offset,
-                end_screenshot_path=end_shot_path,
-                end_monitor_index=end_mon_idx,
-                end_monitor_offset=end_mon_offset,
                 button=button,
                 modifiers=modifiers,
-                windows_before=pending_windows,
+                press_seq=press_seq,
+                refresh_pre_type=True,
             )
         )
-        self._refresh_pending_pre_type((x2, y2))
 
     def _worker_loop(self) -> None:
         while True:
@@ -2091,6 +2107,18 @@ class RecordingSession:
             self._worker_keyboard_event(job)
         elif job.action == "settle_pre_key":
             self._refresh_pending_pre_key()
+        elif job.action == "pending_left_press":
+            self._worker_pending_left_press(job)
+        elif job.action == "pending_right_press":
+            self._worker_pending_right_press(job)
+        elif job.action == "pending_drag_end":
+            self._worker_pending_drag_end(job)
+        elif job.action == "emit_left_gesture":
+            self._worker_emit_left_gesture(job)
+        elif job.action == "emit_right_gesture":
+            self._worker_emit_right_gesture(job)
+        elif job.action == "mouse_pointer_event":
+            self._worker_mouse_pointer_event(job)
         # settle_probe_tick runs on its own timer thread (not this queue) so
         # window-settle sleeps on click persist cannot starve comparisons.
 
@@ -2644,6 +2672,237 @@ class RecordingSession:
             except OSError:
                 pass
 
+    def _worker_pending_left_press(self, job: _DeferredCaptureJob) -> None:
+        if job.press_seq is None or job.cursor_xy is None:
+            return
+        with self._lock:
+            run_dir = self._run_dir
+        if run_dir is None:
+            return
+
+        if job.text_event_index is not None and job.flush_meta is not None:
+            focus_xy = self._typing_focus_xy_for_ocr(job.flush_meta)
+            if focus_xy is not None:
+                self._capture_typing_ocr_end_shot(
+                    run_dir,
+                    int(job.text_event_index),
+                    focus_xy[0],
+                    focus_xy[1],
+                )
+
+        pending_dest = _pending_capture_path(run_dir)
+        windows_before = self._snapshot_windows_before()
+        try:
+            info = self._pending_screenshot_from_settle_or_capture(
+                run_dir,
+                int(job.cursor_xy[0]),
+                int(job.cursor_xy[1]),
+                pending_dest,
+            )
+        except Exception:
+            info = None
+        with self._lock:
+            self._left_press_captures[job.press_seq] = (info, windows_before or None)
+            if self._left_press_seq == job.press_seq:
+                self._pending_screenshot = info
+                self._pending_windows_before = windows_before or None
+
+    def _worker_pending_right_press(self, job: _DeferredCaptureJob) -> None:
+        if job.press_seq is None or job.cursor_xy is None:
+            return
+        with self._lock:
+            run_dir = self._run_dir
+        if run_dir is None:
+            return
+        pending_dest = _pending_right_capture_path(run_dir)
+        windows_before = self._snapshot_windows_before()
+        try:
+            info = self._pending_screenshot_from_settle_or_capture(
+                run_dir,
+                int(job.cursor_xy[0]),
+                int(job.cursor_xy[1]),
+                pending_dest,
+            )
+        except Exception:
+            info = None
+        with self._lock:
+            self._right_press_captures[job.press_seq] = (info, windows_before or None)
+            if self._right_press_seq == job.press_seq:
+                self._pending_right_screenshot = info
+                self._pending_right_windows_before = windows_before or None
+
+    def _worker_pending_drag_end(self, job: _DeferredCaptureJob) -> None:
+        if job.press_seq is None:
+            return
+        with self._lock:
+            run_dir = self._run_dir
+        if run_dir is None:
+            return
+        try:
+            captures = _capture_all_monitors_to_pending(run_dir)
+        except Exception:
+            return
+        with self._lock:
+            if job.press_seq not in self._left_press_captures and job.press_seq != self._left_press_seq:
+                # Gesture already cleared without emit; drop files.
+                _discard_pending_drag_end_capture_files(captures)
+                return
+            if job.press_seq in self._drag_end_captures:
+                _discard_pending_drag_end_capture_files(captures)
+                return
+            self._drag_end_captures[job.press_seq] = captures
+            if self._left_press_seq == job.press_seq:
+                self._pending_drag_end_captures = captures
+
+    def _worker_emit_left_gesture(self, job: _DeferredCaptureJob) -> None:
+        if job.event_index is None or job.kind is None or job.cursor_xy is None:
+            return
+        with self._lock:
+            run_dir = self._run_dir
+            press_seq = job.press_seq
+            entry = (
+                self._left_press_captures.pop(press_seq, None)
+                if press_seq is not None
+                else None
+            )
+            drag_end = (
+                self._drag_end_captures.pop(press_seq, None)
+                if press_seq is not None
+                else None
+            )
+            if entry is None and press_seq is not None and self._left_press_seq == press_seq:
+                entry = (self._pending_screenshot, self._pending_windows_before)
+                self._pending_screenshot = None
+                self._pending_windows_before = None
+            if drag_end is None and press_seq is not None and self._left_press_seq == press_seq:
+                drag_end = self._pending_drag_end_captures
+                self._pending_drag_end_captures = None
+        if run_dir is None:
+            self._discard_press_capture_entry(entry)
+            self._discard_drag_end_capture_entry(drag_end)
+            return
+
+        pending_shot = entry[0] if entry is not None else None
+        pending_windows = entry[1] if entry is not None else None
+        shot_path, mon_idx, mon_offset = _finalize_screenshot(
+            run_dir,
+            job.event_index,
+            job.cursor_xy,
+            pending_shot,
+        )
+        end_shot_path = ""
+        end_mon_idx: int | None = None
+        end_mon_offset: tuple[int, int] | None = None
+        if job.kind == "drag" and job.end_xy is not None:
+            end_shot_path, end_mon_idx, end_mon_offset = _finalize_drag_end_screenshot(
+                run_dir,
+                job.event_index,
+                job.end_xy,
+                drag_end,
+                fallback_mon_idx=mon_idx,
+                fallback_mon_offset=mon_offset,
+            )
+        else:
+            self._discard_drag_end_capture_entry(drag_end)
+
+        self._persist_queued_event(
+            _QueuedEvent(
+                kind=job.kind,
+                cursor_xy=job.cursor_xy,
+                end_xy=job.end_xy,
+                event_index=job.event_index,
+                timestamp_utc=job.timestamp_utc or utc_now_iso(),
+                screenshot_path=shot_path,
+                monitor_index=mon_idx,
+                monitor_offset=mon_offset,
+                end_screenshot_path=end_shot_path,
+                end_monitor_index=end_mon_idx,
+                end_monitor_offset=end_mon_offset,
+                button=job.button,
+                modifiers=job.modifiers,
+                duration_seconds=job.duration_seconds,
+                windows_before=pending_windows,
+            )
+        )
+        if job.refresh_pre_type:
+            refresh_xy = job.end_xy if job.kind == "drag" and job.end_xy is not None else job.cursor_xy
+            self._refresh_pending_pre_type(refresh_xy)
+
+    def _worker_emit_right_gesture(self, job: _DeferredCaptureJob) -> None:
+        if job.event_index is None or job.kind is None or job.cursor_xy is None:
+            return
+        with self._lock:
+            run_dir = self._run_dir
+            press_seq = job.press_seq
+            entry = (
+                self._right_press_captures.pop(press_seq, None)
+                if press_seq is not None
+                else None
+            )
+            if entry is None and press_seq is not None and self._right_press_seq == press_seq:
+                entry = (self._pending_right_screenshot, self._pending_right_windows_before)
+                self._pending_right_screenshot = None
+                self._pending_right_windows_before = None
+        if run_dir is None:
+            self._discard_press_capture_entry(entry)
+            return
+        pending_shot = entry[0] if entry is not None else None
+        pending_windows = entry[1] if entry is not None else None
+        shot_path, mon_idx, mon_offset = _finalize_screenshot(
+            run_dir,
+            job.event_index,
+            job.cursor_xy,
+            pending_shot,
+        )
+        self._persist_queued_event(
+            _QueuedEvent(
+                kind=job.kind,
+                cursor_xy=job.cursor_xy,
+                event_index=job.event_index,
+                timestamp_utc=job.timestamp_utc or utc_now_iso(),
+                screenshot_path=shot_path,
+                monitor_index=mon_idx,
+                monitor_offset=mon_offset,
+                button=job.button or "right",
+                modifiers=job.modifiers,
+                duration_seconds=job.duration_seconds,
+                windows_before=pending_windows,
+            )
+        )
+        if job.refresh_pre_type:
+            self._refresh_pending_pre_type(job.cursor_xy)
+
+    def _worker_mouse_pointer_event(self, job: _DeferredCaptureJob) -> None:
+        if job.event_index is None or job.kind is None or job.cursor_xy is None:
+            return
+        with self._lock:
+            run_dir = self._run_dir
+        if run_dir is None:
+            return
+        windows_before = self._snapshot_windows_before()
+        shot_path, mon_idx, mon_offset = self._capture_immediate_screenshot(
+            run_dir,
+            job.event_index,
+            job.cursor_xy,
+        )
+        self._persist_queued_event(
+            _QueuedEvent(
+                kind=job.kind,
+                cursor_xy=job.cursor_xy,
+                event_index=job.event_index,
+                timestamp_utc=job.timestamp_utc or utc_now_iso(),
+                screenshot_path=shot_path,
+                monitor_index=mon_idx,
+                monitor_offset=mon_offset,
+                button=job.button,
+                modifiers=job.modifiers,
+                scroll_delta=job.scroll_delta,
+                windows_before=windows_before or None,
+            )
+        )
+        if job.refresh_pre_type:
+            self._refresh_pending_pre_type(job.cursor_xy)
+
     def _worker_begin_text_input(self, job: _DeferredCaptureJob) -> None:
         meta = job.meta
         if meta is None:
@@ -3007,15 +3266,14 @@ class RecordingSession:
             and has_pending_text
             and text_meta is not None
         ):
-            focus_xy = self._typing_focus_xy_for_ocr(text_meta)
-            if focus_xy is not None:
-                self._capture_typing_ocr_end_shot(
-                    run_dir,
-                    int(text_meta["index"]),
-                    focus_xy[0],
-                    focus_xy[1],
-                )
-        if run_dir is not None:
+            self._capture_pending_left_press(
+                run_dir,
+                ix,
+                iy,
+                text_event_index=int(text_meta["index"]),
+                text_meta=text_meta,
+            )
+        elif run_dir is not None:
             self._capture_pending_left_press(run_dir, ix, iy)
 
     def _on_left_mouse_up(self, ix: int, iy: int) -> None:
@@ -3070,14 +3328,9 @@ class RecordingSession:
             and has_pending_text
             and text_meta is not None
         ):
-            focus_xy = self._typing_focus_xy_for_ocr(text_meta)
-            if focus_xy is not None:
-                self._capture_typing_ocr_end_shot(
-                    run_dir,
-                    int(text_meta["index"]),
-                    focus_xy[0],
-                    focus_xy[1],
-                )
+            # OCR end-shot for the prior text burst is handled when left-click
+            # also flushes; right-click only starts a new gesture off-hook.
+            pass
         if run_dir is not None:
             self._capture_pending_right_press(run_dir, ix, iy)
 

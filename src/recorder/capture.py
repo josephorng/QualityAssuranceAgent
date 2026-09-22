@@ -1708,6 +1708,36 @@ class RecordingSession:
         if pending is not None:
             pending.cancel()
 
+    def _flush_superseded_pending_left_gesture(self) -> None:
+        """Emit a pending deferred left click/hold/drag before a new press replaces it.
+
+        Left clicks stay pending for ``_DOUBLE_CLICK_INTERVAL_S`` after mouse-up.
+        A second press at a different location used to cancel that timer and
+        overwrite ``_pending_click_coords`` without emitting — dropping the first
+        click (e.g.「篩選」then a quick flyout pick). Flush first, same as stop.
+        """
+        self._cancel_pending_click_timer()
+        with self._lock:
+            pending_coords = self._pending_click_coords
+            pending_down_at = self._pending_click_down_at
+            left_press_dragging = self._left_press_dragging
+            last_move_xy = self._last_move_xy
+        if pending_coords is None:
+            return
+        sx, sy, button = pending_coords
+        if left_press_dragging and last_move_xy is not None:
+            ex, ey = last_move_xy
+            if abs(sx - ex) > _DRAG_THRESHOLD_PX or abs(sy - ey) > _DRAG_THRESHOLD_PX:
+                self._flush_pending_drag(sx, sy, ex, ey, button)
+                return
+        hold_duration = (
+            time.monotonic() - pending_down_at if pending_down_at is not None else 0.0
+        )
+        if hold_duration >= _HOLD_THRESHOLD_S:
+            self._flush_pending_hold(sx, sy, button, hold_duration)
+            return
+        self._flush_pending_click(sx, sy, button)
+
     def _discard_pending_drag_end_captures(self) -> None:
         with self._lock:
             captures = self._pending_drag_end_captures
@@ -2955,7 +2985,12 @@ class RecordingSession:
                 )
                 return
 
-        self._cancel_pending_click_timer()
+        # Not a double-click: keep any deferred first click instead of dropping it.
+        if pending_coords is not None:
+            self._flush_superseded_pending_left_gesture()
+            now = time.monotonic()
+        else:
+            self._cancel_pending_click_timer()
         with self._lock:
             run_dir = self._run_dir
             has_pending_text = bool(self._pending_text_chars)

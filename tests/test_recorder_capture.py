@@ -1501,6 +1501,36 @@ def test_shift_double_click_records_modifiers(tmp_path) -> None:
     assert raw["modifiers"] == ["shift"]
 
 
+def test_quick_second_click_elsewhere_keeps_both_clicks(tmp_path) -> None:
+    """Deferred click A must flush when press B arrives before the double-click timer."""
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.mouse import Button
+
+            session._on_mouse_click(100, 100, Button.left, True)
+            session._on_mouse_click(100, 100, Button.left, False)
+            # Second press far away inside the double-click deferral window.
+            session._on_mouse_click(500, 400, Button.left, True)
+            session._on_mouse_click(500, 400, Button.left, False)
+            time.sleep(_DOUBLE_CLICK_INTERVAL_S + 0.05)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 2
+    first = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    second = json.loads((run_dir / "events" / "event_002.json").read_text(encoding="utf-8"))
+    assert first["kind"] == "click"
+    assert first["cursor_xy"] == [100, 100]
+    assert second["kind"] == "click"
+    assert second["cursor_xy"] == [500, 400]
+
+
 def test_left_hold_records_hold_event(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
 

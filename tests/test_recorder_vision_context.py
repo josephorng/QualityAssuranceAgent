@@ -160,7 +160,7 @@ def test_build_vision_passes_click_window_as_ocr_roi(tmp_path: Path) -> None:
     assert vision["used_vision"] is True
 
 
-def test_build_vision_skips_ocr_roi_when_click_window_maximized(tmp_path: Path) -> None:
+def test_build_vision_passes_ocr_roi_when_click_window_maximized(tmp_path: Path) -> None:
     run_dir = tmp_path / "roi_max"
     (run_dir / "screenshots").mkdir(parents=True)
     (run_dir / "screenshots" / "event_001.jpeg").write_bytes(b"x")
@@ -200,7 +200,7 @@ def test_build_vision_skips_ocr_roi_when_click_window_maximized(tmp_path: Path) 
             run_dir=run_dir,
             persist_debug=False,
         )
-    assert seen["ocr_roi"] is None
+    assert seen["ocr_roi"] == (0, 0, 100, 80)
 
 
 def test_build_vision_context_at_point_records_missing_screenshot(tmp_path: Path) -> None:

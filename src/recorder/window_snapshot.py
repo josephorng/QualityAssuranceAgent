@@ -22,9 +22,6 @@ _FALLBACK_CAPTION_HEIGHT = 32
 _CAPTION_HIT_SLACK_PX = 12
 WINDOW_SETTLE_DELAY_S = 1.0
 WINDOW_SETTLE_TITLE_BAR_DELAY_S = 1.2
-# Image coverage above this skips OCR/enhance ROI gating (treat as full-frame).
-DEFAULT_OCR_ROI_MAX_COVERAGE = 0.8
-
 CaptionBounds = tuple[int, int, int, int]
 RectXywh = tuple[int, int, int, int]
 
@@ -1148,13 +1145,13 @@ def resolve_ocr_roi_local(
     image_w: int,
     image_h: int,
     monitor_offset: tuple[int, int] = (0, 0),
-    max_coverage: float = DEFAULT_OCR_ROI_MAX_COVERAGE,
 ) -> RectXywh | None:
     """Image-local xywh ROI for OCR/enhance gating, or ``None`` to leave ungated.
 
     Prefers a live window match (screen rect → local via ``monitor_offset``).
-    Falls back to the recorded local ``rect`` / screen fields. Returns ``None`` when
-    maximized, coverage ≥ ``max_coverage``, or the window does not intersect the image.
+    Falls back to the recorded local ``rect`` / screen fields. Maximized and
+    near-full-screen windows still return their clipped rect. Returns ``None``
+    only when ``click_window`` is missing or the window does not intersect the image.
     """
     if click_window is None or image_w <= 0 or image_h <= 0:
         return None
@@ -1170,8 +1167,6 @@ def resolve_ocr_roi_local(
     ox, oy = int(monitor_offset[0]), int(monitor_offset[1])
     live = find_matching_click_window(info)
     if live is not None:
-        if live.is_maximized:
-            return None
         local = (
             int(live.left) - ox,
             int(live.top) - oy,
@@ -1179,8 +1174,6 @@ def resolve_ocr_roi_local(
             int(live.height),
         )
     else:
-        if info.is_maximized:
-            return None
         # Recorded payload may already be image-local (``rect``) with offset (0,0),
         # or screen-space left/top when rebuilt without going through to_local_payload.
         if isinstance(click_window, dict) and isinstance(click_window.get("rect"), (list, tuple)):
@@ -1193,10 +1186,4 @@ def resolve_ocr_roi_local(
                 int(info.height),
             )
 
-    clipped = _clip_xywh_to_image(local, image_w=image_w, image_h=image_h)
-    if clipped is None:
-        return None
-    coverage = (clipped[2] * clipped[3]) / float(image_w * image_h)
-    if coverage >= float(max_coverage):
-        return None
-    return clipped
+    return _clip_xywh_to_image(local, image_w=image_w, image_h=image_h)

@@ -1648,9 +1648,10 @@ def _collect_monitor_detections(
     ``ocr_s`` / ``total_s`` (sums across monitors).
 
     When ``click_window`` is set, each monitor resolves its own ``ocr_roi`` via
-    :func:`resolve_ocr_roi_local`. If any monitor has an ROI, monitors that do not
-    intersect the window are skipped. Full-frame detection runs only when no
-    monitor has an ROI (missing ``click_window``, maximized, or coverage ≥ ~80%).
+    :func:`resolve_ocr_roi_local`, including maximized and near-full-screen windows.
+    If any monitor has an ROI, monitors that do not intersect the window are
+    skipped. Full-frame detection runs only when no monitor has an ROI (missing
+    ``click_window``, or the window misses every captured image).
     """
     if not captured:
         if timing_out is not None:

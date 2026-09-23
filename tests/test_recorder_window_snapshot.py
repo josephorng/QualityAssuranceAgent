@@ -714,7 +714,7 @@ def test_settle_delay_is_longer_for_title_bar_clicks() -> None:
     assert settle_delay_for_click((100, 410), [win]) > settle_delay_for_click((100, 600), [win])
 
 
-def test_resolve_ocr_roi_local_returns_none_when_maximized() -> None:
+def test_resolve_ocr_roi_local_keeps_rect_when_maximized() -> None:
     from src.recorder.window_snapshot import resolve_ocr_roi_local
 
     payload = {
@@ -727,12 +727,15 @@ def test_resolve_ocr_roi_local_returns_none_when_maximized() -> None:
         "src.recorder.window_snapshot.find_matching_click_window",
         return_value=None,
     ):
-        assert (
-            resolve_ocr_roi_local(payload, image_w=1000, image_h=800) is None
+        assert resolve_ocr_roi_local(payload, image_w=1000, image_h=800) == (
+            10,
+            10,
+            200,
+            150,
         )
 
 
-def test_resolve_ocr_roi_local_returns_none_when_coverage_high() -> None:
+def test_resolve_ocr_roi_local_keeps_rect_when_coverage_high() -> None:
     from src.recorder.window_snapshot import resolve_ocr_roi_local
 
     payload = {
@@ -745,11 +748,32 @@ def test_resolve_ocr_roi_local_returns_none_when_coverage_high() -> None:
         "src.recorder.window_snapshot.find_matching_click_window",
         return_value=None,
     ):
-        assert (
-            resolve_ocr_roi_local(
-                payload, image_w=1000, image_h=800, max_coverage=0.8
-            )
-            is None
+        assert resolve_ocr_roi_local(payload, image_w=1000, image_h=800) == (
+            0,
+            0,
+            950,
+            750,
+        )
+
+
+def test_resolve_ocr_roi_local_clips_maximized_window_to_image() -> None:
+    from src.recorder.window_snapshot import resolve_ocr_roi_local
+
+    payload = {
+        "hwnd": 1,
+        "title": "常用 - 檔案總管",
+        "rect": [-8, -8, 1936, 1048],
+        "is_maximized": True,
+    }
+    with patch(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        return_value=None,
+    ):
+        assert resolve_ocr_roi_local(payload, image_w=1920, image_h=1080) == (
+            0,
+            0,
+            1920,
+            1040,
         )
 
 

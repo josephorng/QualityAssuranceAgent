@@ -587,6 +587,16 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 .shot a { display: block; }
 .shot img { width: 100%; height: auto; border: 1px solid #d0d7de; border-radius: 6px; background: #fff; }
 .shot .missing { color: #8c959f; font-style: italic; }
+.playback-frame img { width: 100%; height: auto; border: 1px solid #d0d7de; border-radius: 6px; background: #fff; }
+.playback-caption { margin: .75rem 0; font-weight: 600; }
+.playback-controls { display: flex; flex-wrap: wrap; gap: .5rem; }
+.playback-controls button {
+  appearance: none; border: 1px solid #d0d7de; background: #fff;
+  border-radius: 6px; padding: .4rem .8rem; font: inherit; font-weight: 600;
+  color: #1f2328; cursor: pointer;
+}
+.playback-controls button:hover { background: #eaeef2; }
+.playback-controls button:disabled { color: #8c959f; cursor: default; background: #fff; }
 .tabs {
   display: flex; flex-wrap: wrap; gap: .35rem; margin: 0 0 1.25rem;
   border-bottom: 1px solid #d0d7de; padding-bottom: .35rem;
@@ -672,7 +682,11 @@ _PAGE_TABS_SCRIPT = """
   var buttons = Array.prototype.slice.call(document.querySelectorAll(".tabs button[data-tab]"));
   var panels = Array.prototype.slice.call(document.querySelectorAll(".tab-panel[data-tab]"));
   if (!buttons.length || !panels.length) return;
-  var allowed = { steps: true, profile: true };
+  var allowed = {};
+  buttons.forEach(function (btn) {
+    var id = btn.getAttribute("data-tab");
+    if (id) allowed[id] = true;
+  });
 
   function activate(tabId) {
     var resolved = allowed[tabId] ? tabId : "steps";
@@ -2133,6 +2147,108 @@ _RECORDING_SCRIPT = """
 })();
 """.strip()
 
+_RECORDING_PLAYBACK_SCRIPT = """
+(function () {
+  var panel = document.getElementById("tab-playback");
+  var dataEl = document.getElementById("recording-playback-frames");
+  var img = document.getElementById("playback-image");
+  var caption = document.getElementById("playback-caption");
+  var prevBtn = document.getElementById("playback-prev");
+  var toggleBtn = document.getElementById("playback-toggle");
+  var nextBtn = document.getElementById("playback-next");
+  var gotoBtn = document.getElementById("playback-goto");
+  if (!panel || !dataEl || !img || !caption || !prevBtn || !toggleBtn || !nextBtn || !gotoBtn) return;
+
+  var frames = [];
+  try { frames = JSON.parse(dataEl.textContent || "[]"); } catch (e) { frames = []; }
+  if (!frames.length) return;
+
+  var index = 0;
+  var timer = null;
+  var INTERVAL_MS = 800;
+
+  function captionText(frame) {
+    if (frame.step) return frame.step + ". " + (frame.label || "");
+    return frame.label || "";
+  }
+
+  function show(nextIndex) {
+    index = (nextIndex + frames.length) % frames.length;
+    var frame = frames[index];
+    img.src = frame.src || "";
+    img.alt = captionText(frame);
+    caption.textContent = captionText(frame);
+    gotoBtn.disabled = !frame.anchor;
+  }
+
+  function setToggleLabel() {
+    var playing = timer !== null;
+    toggleBtn.textContent = playing ? "暫停" : "播放";
+    toggleBtn.setAttribute("aria-label", playing ? "暫停" : "播放");
+  }
+
+  function play() {
+    if (timer !== null) return;
+    timer = setInterval(function () {
+      show(index + 1);
+    }, INTERVAL_MS);
+    setToggleLabel();
+  }
+
+  function pause() {
+    if (timer !== null) {
+      clearInterval(timer);
+      timer = null;
+    }
+    setToggleLabel();
+  }
+
+  function restartIfPlaying() {
+    if (timer === null) return;
+    pause();
+    play();
+  }
+
+  prevBtn.addEventListener("click", function () {
+    show(index - 1);
+    restartIfPlaying();
+  });
+  nextBtn.addEventListener("click", function () {
+    show(index + 1);
+    restartIfPlaying();
+  });
+  toggleBtn.addEventListener("click", function () {
+    if (timer !== null) pause();
+    else play();
+  });
+  gotoBtn.addEventListener("click", function () {
+    var frame = frames[index];
+    if (!frame || !frame.anchor) return;
+    var target = document.getElementById(frame.anchor);
+    if (window.location.hash !== "#steps") {
+      window.location.hash = "steps";
+    }
+    if (!target) return;
+    if (target.tagName === "DETAILS") target.open = true;
+    if (typeof target.scrollIntoView === "function") {
+      target.scrollIntoView({ block: "start" });
+    }
+  });
+
+  function syncPlaying() {
+    if (panel.hasAttribute("hidden")) pause();
+    else play();
+  }
+
+  show(0);
+  if (typeof MutationObserver === "function") {
+    var observer = new MutationObserver(syncPlaying);
+    observer.observe(panel, { attributes: true, attributeFilter: ["hidden"] });
+  }
+  syncPlaying();
+})();
+""".strip()
+
 _INDEX_STYLE = """
 :root { color-scheme: light dark; }
 * { box-sizing: border-box; }
@@ -3510,7 +3626,7 @@ def _render_instruction_group_html(
     )
 
     return (
-        f'<details class="instruction-group">'
+        f'<details class="instruction-group" id="step-{step_number}">'
         f"<summary>"
         f'<span class="instruction-number">{step_label}</span>'
         f'<span class="instruction-summary-text">'
@@ -5305,9 +5421,11 @@ def _render_smart_cycles_html(
     )
     blocks: list[str] = [goal_html, '<section class="smart-cycles"><h2>Plan → Act → Verify</h2>']
     actor_group_index = 0
+    shown = 0
     for cycle in cycles:
         if not isinstance(cycle, dict):
             continue
+        shown += 1
         number = cycle.get("cycle", "?")
         plan = cycle.get("plan") if isinstance(cycle.get("plan"), dict) else {}
         act = cycle.get("act") if isinstance(cycle.get("act"), dict) else {}
@@ -5347,7 +5465,7 @@ def _render_smart_cycles_html(
                     f"</div>"
                 )
         blocks.append(
-            f'<details class="instruction-group">'
+            f'<details class="instruction-group" id="smart-cycle-{shown}">'
             f"<summary>"
             f'<span class="instruction-number">{escape(str(number))}.</span>'
             f'<span class="instruction-title">{escape(str(instruction))}</span>'
@@ -5423,17 +5541,26 @@ def _load_yolo_ocr_timings(run_root: Path) -> dict[str, Any]:
     }
 
 
-def _render_page_tabs_nav(*, active: str = "steps") -> str:
+def _render_page_tabs_nav(*, active: str = "steps", include_playback: bool = False) -> str:
     steps_active = " active" if active == "steps" else ""
     profile_active = " active" if active == "profile" else ""
     steps_selected = "true" if active == "steps" else "false"
     profile_selected = "true" if active == "profile" else "false"
+    playback = ""
+    if include_playback:
+        playback_active = " active" if active == "playback" else ""
+        playback_selected = "true" if active == "playback" else "false"
+        playback = (
+            f'<button type="button" class="{playback_active.strip()}" data-tab="playback" role="tab" '
+            f'aria-selected="{playback_selected}" aria-controls="tab-playback">播放</button>'
+        )
     return (
         '<nav class="tabs" role="tablist" aria-label="報告內容">'
         f'<button type="button" class="{steps_active.strip()}" data-tab="steps" role="tab" '
         f'aria-selected="{steps_selected}" aria-controls="tab-steps">步驟</button>'
         f'<button type="button" class="{profile_active.strip()}" data-tab="profile" role="tab" '
         f'aria-selected="{profile_selected}" aria-controls="tab-profile">時間分析</button>'
+        f"{playback}"
         "</nav>"
     )
 
@@ -5908,7 +6035,15 @@ def write_session_html_from_run(run_root: Path) -> Path:
         run_root,
         report if isinstance(report, dict) else {},
     )
-    tabs = _render_page_tabs_nav()
+    tabs = _render_page_tabs_nav(include_playback=True)
+    playback_body = _render_recording_playback_html(
+        _session_playback_frames(
+            run_root=run_root,
+            instruction_groups=instruction_groups,
+            smart_cycles=smart_cycles,
+            smart_actor_count=smart_actor_count,
+        )
+    )
     body = (
         f"{tabs}\n"
         f'<section class="tab-panel" data-tab="steps" id="tab-steps" role="tabpanel">\n'
@@ -5916,6 +6051,9 @@ def write_session_html_from_run(run_root: Path) -> Path:
         f"</section>\n"
         f'<section class="tab-panel" data-tab="profile" id="tab-profile" role="tabpanel" hidden>\n'
         f"{profile_body}\n"
+        f"</section>\n"
+        f'<section class="tab-panel" data-tab="playback" id="tab-playback" role="tabpanel" hidden>\n'
+        f"{playback_body}\n"
         f"</section>"
     )
 
@@ -5935,7 +6073,7 @@ def write_session_html_from_run(run_root: Path) -> Path:
         f"<h1>{title}</h1>\n"
         '<p class="intro">依使用者指令分組的手部動作紀錄。點選指令可展開底下的動作列表。</p>\n'
         f"{body}\n"
-        f"<script>\n{_PAGE_TABS_SCRIPT}\n</script>\n"
+        f"<script>\n{_PAGE_TABS_SCRIPT}\n{_RECORDING_PLAYBACK_SCRIPT}\n</script>\n"
         "</body>\n</html>\n"
     )
 
@@ -5943,6 +6081,191 @@ def write_session_html_from_run(run_root: Path) -> Path:
     path.write_text(html, encoding="utf-8")
     write_runs_index_html(run_root.parent)
     return path
+
+
+def _recording_event_title(run_root: Path, event: dict[str, Any]) -> str:
+    raw_index = event.get("index")
+    index = raw_index if isinstance(raw_index, int) else 0
+    instruction = ""
+    if index:
+        analysis = _load_recording_analysis(run_root, index)
+        if isinstance(analysis, dict):
+            raw_instruction = analysis.get("instruction")
+            if isinstance(raw_instruction, str) and raw_instruction.strip():
+                instruction = raw_instruction.strip()
+    if instruction:
+        return instruction
+    return _recording_kind_label(str(event.get("kind") or ""), event.get("click_count"))
+
+
+def _recording_playback_frames(
+    run_root: Path,
+    events: list[dict[str, Any]],
+    final_after_screenshot: str | None,
+) -> list[dict[str, Any]]:
+    """One frame per event screenshot, plus a distinct final-after shot."""
+    frames: list[dict[str, Any]] = []
+    last_resolved: Path | None = None
+    for display_index, event in enumerate(events, start=1):
+        shot = _resolve_recording_screenshot(str(event.get("screenshot_path") or ""), run_root)
+        src = _relative_img_src(shot, run_root)
+        if shot is None or src is None:
+            continue
+        raw_index = event.get("index")
+        index = raw_index if isinstance(raw_index, int) else 0
+        frames.append(
+            {
+                "src": src,
+                "label": _recording_event_title(run_root, event),
+                "anchor": f"event-{index}",
+                "step": display_index,
+            }
+        )
+        last_resolved = shot.resolve()
+    if final_after_screenshot:
+        final_shot = _resolve_recording_screenshot(final_after_screenshot, run_root)
+        final_src = _relative_img_src(final_shot, run_root)
+        if final_shot is not None and final_src is not None:
+            resolved = final_shot.resolve()
+            if last_resolved is None or resolved != last_resolved:
+                frames.append(
+                    {
+                        "src": final_src,
+                        "label": "完成",
+                        "anchor": "",
+                        "step": None,
+                    }
+                )
+    return frames
+
+
+def _operation_playback_shot(operation: dict[str, Any]) -> Path | None:
+    """Screenshot that shows the action itself.
+
+    Click often reuses the previous move's before image, so the before shot
+    hides the move. The after shot is the screen once that action has happened.
+    """
+    after = operation.get("after")
+    if isinstance(after, Path):
+        return after
+    before = operation.get("before")
+    if isinstance(before, Path):
+        return before
+    return None
+
+
+def _operation_playback_label(step_label: str, operation: dict[str, Any]) -> str:
+    action = operation.get("action")
+    action_text = action.strip() if isinstance(action, str) else ""
+    if step_label and action_text:
+        return f"{step_label} · {action_text}"
+    return action_text or step_label
+
+
+def _extend_operation_playback_frames(
+    frames: list[dict[str, Any]],
+    *,
+    run_root: Path,
+    operations: list[Any],
+    label: str,
+    anchor: str,
+    step: int,
+) -> None:
+    """Append one frame per action, using that action's after screenshot."""
+    for operation in operations:
+        if not isinstance(operation, dict):
+            continue
+        shot = _operation_playback_shot(operation)
+        src = _relative_img_src(shot, run_root) if isinstance(shot, Path) else None
+        if not isinstance(shot, Path) or src is None:
+            continue
+        frames.append(
+            {
+                "src": src,
+                "label": _operation_playback_label(label, operation),
+                "anchor": anchor,
+                "step": step,
+            }
+        )
+
+
+def _session_playback_frames(
+    *,
+    run_root: Path,
+    instruction_groups: list[dict[str, Any]],
+    smart_cycles: Any,
+    smart_actor_count: int,
+) -> list[dict[str, Any]]:
+    """One frame per hand action, in the same order as the steps tab."""
+    frames: list[dict[str, Any]] = []
+    actor_group_index = 0
+    shown = 0
+    if isinstance(smart_cycles, list):
+        for cycle in smart_cycles:
+            if not isinstance(cycle, dict):
+                continue
+            shown += 1
+            plan = cycle.get("plan") if isinstance(cycle.get("plan"), dict) else {}
+            act = cycle.get("act") if isinstance(cycle.get("act"), dict) else {}
+            instruction = plan.get("instruction") or act.get("instruction") or "—"
+            label = str(instruction).strip() or "—"
+            raw_number = cycle.get("cycle")
+            step = raw_number if isinstance(raw_number, int) and raw_number > 0 else shown
+            operations: list[Any] = []
+            if act:
+                group = (
+                    instruction_groups[actor_group_index]
+                    if actor_group_index < len(instruction_groups)
+                    else None
+                )
+                actor_group_index += 1
+                if isinstance(group, dict) and isinstance(group.get("operations"), list):
+                    operations = group["operations"]
+            _extend_operation_playback_frames(
+                frames,
+                run_root=run_root,
+                operations=operations,
+                label=label,
+                anchor=f"smart-cycle-{shown}",
+                step=step,
+            )
+    remaining = instruction_groups[min(smart_actor_count, len(instruction_groups)) :]
+    for step_number, group in enumerate(remaining, start=smart_actor_count + 1):
+        if not isinstance(group, dict):
+            continue
+        goal = group.get("goal")
+        label = goal.strip() if isinstance(goal, str) and goal.strip() else _FALLBACK_GOAL
+        operations = group.get("operations") if isinstance(group.get("operations"), list) else []
+        _extend_operation_playback_frames(
+            frames,
+            run_root=run_root,
+            operations=operations,
+            label=label,
+            anchor=f"step-{step_number}",
+            step=step_number,
+        )
+    return frames
+
+
+def _render_recording_playback_html(frames: list[dict[str, Any]]) -> str:
+    if not frames:
+        return '<p class="empty">尚無截圖。</p>'
+    payload = json.dumps(frames, ensure_ascii=False).replace("<", "\\u003c")
+    return (
+        '<div class="playback" id="recording-playback">'
+        '<div class="playback-frame">'
+        '<img id="playback-image" alt="">'
+        "</div>"
+        '<p class="playback-caption" id="playback-caption"></p>'
+        '<div class="playback-controls">'
+        '<button type="button" id="playback-prev">上一步</button>'
+        '<button type="button" id="playback-toggle">播放</button>'
+        '<button type="button" id="playback-next">下一步</button>'
+        '<button type="button" id="playback-goto">前往步驟</button>'
+        "</div>"
+        "</div>"
+        f'<script type="application/json" id="recording-playback-frames">{payload}</script>'
+    )
 
 
 def write_recording_html_from_run(run_root: Path, *, update_index: bool = True) -> Path:
@@ -5988,9 +6311,12 @@ def write_recording_html_from_run(run_root: Path, *, update_index: bool = True) 
         'title="新增步驟" aria-label="新增步驟">新增步驟</button>'
         "</div>"
     )
-    tabs = _render_page_tabs_nav()
+    tabs = _render_page_tabs_nav(include_playback=True)
     nav_href = _reports_index_href(run_root, fragment="#recordings")
     profile_body = _render_recording_time_profile_html(run_root, events, manifest)
+    playback_body = _render_recording_playback_html(
+        _recording_playback_frames(run_root, events, final_after_screenshot)
+    )
     body = (
         f"{tabs}\n"
         f'<section class="tab-panel" data-tab="steps" id="tab-steps" role="tabpanel">\n'
@@ -5999,6 +6325,9 @@ def write_recording_html_from_run(run_root: Path, *, update_index: bool = True) 
         f"</section>\n"
         f'<section class="tab-panel" data-tab="profile" id="tab-profile" role="tabpanel" hidden>\n'
         f"{profile_body}\n"
+        f"</section>\n"
+        f'<section class="tab-panel" data-tab="playback" id="tab-playback" role="tabpanel" hidden>\n'
+        f"{playback_body}\n"
         f"</section>"
     )
     html = (
@@ -6014,7 +6343,7 @@ def write_recording_html_from_run(run_root: Path, *, update_index: bool = True) 
         '<p class="intro">依錄製事件排列的操作紀錄。點選事件可展開細節與截圖。</p>\n'
         f"{body}\n"
         f"{_recording_add_dialog_html()}\n"
-        f"<script>\n{_PAGE_TABS_SCRIPT}\n{_RECORDING_SCRIPT}\n</script>\n"
+        f"<script>\n{_PAGE_TABS_SCRIPT}\n{_RECORDING_SCRIPT}\n{_RECORDING_PLAYBACK_SCRIPT}\n</script>\n"
         "</body>\n</html>\n"
     )
 

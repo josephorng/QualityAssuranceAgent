@@ -186,7 +186,7 @@ def test_write_session_html_renders_all_steps(tmp_path: Path) -> None:
     assert "動作 1：click" in html
     assert "動作 2：type_text" in html
     assert '<a href="../index.html">← 報告列表</a>' in html
-    assert html.count('<details class="instruction-group">') == 1
+    assert html.count('class="instruction-group"') == 1
     assert '<span class="instruction-number">1.</span>' in html
     assert "手部動作" in html
     assert html.count('<details class="args"><summary>參數</summary>') == 2
@@ -201,6 +201,96 @@ def test_write_session_html_renders_all_steps(tmp_path: Path) -> None:
     assert 'src="eye/after.png"' in html
     # second step has no screenshots
     assert "無螢幕截圖" in html
+    assert 'id="step-1"' in html
+    frames = _playback_frames(html)
+    assert frames == [
+        {
+            "src": "eye/after.png",
+            "label": "手部動作 · click",
+            "anchor": "step-1",
+            "step": 1,
+        },
+    ]
+    playback_json = html.split('id="recording-playback-frames"', 1)[1].split("</script>", 1)[0]
+    assert "type_text" not in playback_json
+
+
+def test_write_session_html_playback_skips_duplicate_final_after(tmp_path: Path) -> None:
+    run_root = tmp_path / "task_playback_same_shot"
+    shot = _make_png(run_root / "eye" / "only.png")
+    _write_hand_csv(
+        run_root,
+        [
+            {
+                "timestamp": "2026-06-11T06:00:00+00:00",
+                "action": "click",
+                "args": {},
+                "ok": True,
+                "screenshot_name": str(shot),
+                "screenshot_before_path": "",
+                "screenshot_after_path": str(shot),
+                "message": "",
+            },
+        ],
+    )
+
+    frames = _playback_frames(write_session_html_from_run(run_root).read_text(encoding="utf-8"))
+    assert frames == [
+        {
+            "src": "eye/only.png",
+            "label": "手部動作 · click",
+            "anchor": "step-1",
+            "step": 1,
+        }
+    ]
+
+
+def test_write_session_html_playback_separates_move_and_click(tmp_path: Path) -> None:
+    run_root = tmp_path / "task_playback_move_click"
+    shared_before = _make_png(run_root / "eye" / "before.png")
+    moved = _make_png(run_root / "eye" / "moved.png")
+    clicked = _make_png(run_root / "eye" / "clicked.png")
+    _write_hand_csv(
+        run_root,
+        [
+            {
+                "timestamp": "2026-06-11T06:00:00+00:00",
+                "action": "move_mouse",
+                "args": {"instruction": "「搜尋」文字"},
+                "ok": True,
+                "screenshot_name": str(shared_before),
+                "screenshot_before_path": str(shared_before),
+                "screenshot_after_path": str(moved),
+                "message": "executed",
+            },
+            {
+                "timestamp": "2026-06-11T06:00:01+00:00",
+                "action": "click",
+                "args": {"button": "left"},
+                "ok": True,
+                "screenshot_name": str(shared_before),
+                "screenshot_before_path": str(shared_before),
+                "screenshot_after_path": str(clicked),
+                "message": "executed",
+            },
+        ],
+    )
+
+    frames = _playback_frames(write_session_html_from_run(run_root).read_text(encoding="utf-8"))
+    assert frames == [
+        {
+            "src": "eye/moved.png",
+            "label": "手部動作 · move_mouse",
+            "anchor": "step-1",
+            "step": 1,
+        },
+        {
+            "src": "eye/clicked.png",
+            "label": "手部動作 · click",
+            "anchor": "step-1",
+            "step": 1,
+        },
+    ]
 
 
 def test_write_session_html_groups_hand_operations_by_user_instruction(tmp_path: Path) -> None:
@@ -259,7 +349,7 @@ def test_write_session_html_groups_hand_operations_by_user_instruction(tmp_path:
 
     html = write_session_html_from_run(run_root).read_text(encoding="utf-8")
 
-    assert html.count('<details class="instruction-group">') == 2
+    assert html.count('class="instruction-group"') == 2
     assert '<span class="instruction-number">1.</span>' in html
     assert '<span class="instruction-number">2.</span>' in html
     assert "最小化所有視窗。" in html
@@ -671,7 +761,7 @@ def test_write_session_html_merges_smart_cycle_with_executed_tools(tmp_path: Pat
 
     html = write_session_html_from_run(run_root).read_text(encoding="utf-8")
 
-    assert html.count('<details class="instruction-group">') == 2
+    assert html.count('class="instruction-group"') == 2
     assert html.count("Executed tools (1)") == 1
     assert "Open Telegram first" in html
     assert "Telegram opens" in html
@@ -1078,6 +1168,130 @@ def test_write_recording_html_renders_events_and_instructions(tmp_path: Path) ->
     assert "動作後截圖" in html
     assert 'href="../index.html#recordings"' in html
     assert "游標" in html
+
+
+def _playback_frames(html: str) -> list[dict]:
+    match = re.search(
+        r'<script type="application/json" id="recording-playback-frames">(.*?)</script>',
+        html,
+    )
+    assert match is not None
+    return json.loads(match.group(1))
+
+
+def test_write_recording_html_playback_frames(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000050"
+    run_root.mkdir(parents=True)
+    (run_root / "events").mkdir()
+    (run_root / "screenshots").mkdir()
+    (run_root / "analysis").mkdir()
+    shot1 = _make_jpeg(run_root / "screenshots" / "event_001.jpeg")
+    final_after = _make_jpeg(run_root / "screenshots" / "final_after.jpeg")
+    (run_root / "events" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "index": 1,
+                "timestamp_utc": "2026-07-21T04:00:01+00:00",
+                "kind": "click",
+                "cursor_xy": [10, 20],
+                "screenshot_path": str(shot1),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "events" / "event_002.json").write_text(
+        json.dumps(
+            {
+                "index": 2,
+                "timestamp_utc": "2026-07-21T04:00:02+00:00",
+                "kind": "click",
+                "cursor_xy": [30, 40],
+                "screenshot_path": str(run_root / "screenshots" / "missing.jpeg"),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps({"event_index": 1, "instruction": "點擊「搜尋」按鈕"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (run_root / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_root.name,
+                "started_at_utc": "2026-07-21T04:00:00+00:00",
+                "stopped_at_utc": "2026-07-21T04:01:00+00:00",
+                "event_count": 2,
+                "events": ["events/event_001.json", "events/event_002.json"],
+                "final_after_screenshot": "screenshots/final_after.jpeg",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+    assert 'data-tab="playback"' in html
+    assert ">播放</button>" in html
+    assert 'id="playback-image"' in html
+    assert ">上一步</button>" in html
+    assert ">前往步驟</button>" in html
+    frames = _playback_frames(html)
+    assert frames == [
+        {
+            "src": "screenshots/event_001.jpeg",
+            "label": "點擊「搜尋」按鈕",
+            "anchor": "event-1",
+            "step": 1,
+        },
+        {
+            "src": "screenshots/final_after.jpeg",
+            "label": "完成",
+            "anchor": "",
+            "step": None,
+        },
+    ]
+    assert "missing.jpeg" not in html.split('id="recording-playback-frames"', 1)[1].split(
+        "</script>", 1
+    )[0]
+    assert final_after.is_file()
+
+    same_root = tmp_path / "recording_20260721_120000_000051"
+    same_root.mkdir()
+    (same_root / "events").mkdir()
+    (same_root / "screenshots").mkdir()
+    same_shot = _make_jpeg(same_root / "screenshots" / "event_001.jpeg")
+    (same_root / "events" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "index": 1,
+                "timestamp_utc": "2026-07-21T04:00:01+00:00",
+                "kind": "click",
+                "screenshot_path": str(same_shot),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (same_root / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": same_root.name,
+                "events": ["events/event_001.json"],
+                "final_after_screenshot": str(same_shot),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    same_frames = _playback_frames(
+        write_recording_html_from_run(same_root).read_text(encoding="utf-8")
+    )
+    assert len(same_frames) == 1
+    assert same_frames[0]["label"] == "點擊"
+    assert same_frames[0]["src"] == "screenshots/event_001.jpeg"
 
 
 def test_write_recording_html_uses_next_event_screenshot_as_after(tmp_path: Path) -> None:
@@ -2270,6 +2484,8 @@ def test_write_session_html_includes_time_profile_tab(tmp_path: Path) -> None:
     html = write_session_html_from_run(run_root).read_text(encoding="utf-8")
     assert 'data-tab="steps"' in html
     assert 'data-tab="profile"' in html
+    assert 'data-tab="playback"' in html
+    assert ">播放</button>" in html
     assert "時間分析" in html
     assert "類別總覽" in html
     assert "執行 LLM" in html

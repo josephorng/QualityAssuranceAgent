@@ -6,12 +6,15 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 import re
 import time
 import unicodedata
+from collections.abc import Iterator
 from typing import Any
 
 import cv2
@@ -1986,6 +1989,32 @@ def _capture_and_detect_mouse_candidates(
     return monitor_indices, image_paths, captured, detections, timing
 
 
+# Cache replay sets this so a recorded anchor must match by similarity.
+# A visual one-pass pick can click a different control that only means the same thing.
+_require_similarity_match: ContextVar[bool] = ContextVar(
+    "require_similarity_match", default=False
+)
+
+RECORDED_ANCHOR_MISS_MESSAGE = (
+    "No mouse target matched the instruction on selected monitor(s)."
+)
+
+
+def similarity_match_required() -> bool:
+    """True while a cache replay is executing recorded mouse targets."""
+    return _require_similarity_match.get()
+
+
+@contextmanager
+def require_similarity_match() -> Iterator[None]:
+    """Fail ``move_mouse`` when no detection is similar to the recorded anchor."""
+    token = _require_similarity_match.set(True)
+    try:
+        yield
+    finally:
+        _require_similarity_match.reset(token)
+
+
 async def find_mouse_point(
     instruction: str,
     *,
@@ -2003,6 +2032,9 @@ async def find_mouse_point(
 
     Returns ``(global_x, global_y, metadata)`` in virtual-desktop pixel space,
     or ``None`` when no YOLO candidates / no anchor match (soft miss).
+
+    While ``require_similarity_match()`` is active (cache replay), a similarity
+    miss returns ``None`` without the visual one-pass or Gemma ROI fallbacks.
 
     Successful metadata includes ``timing`` with capture / YOLO / OCR / parse /
     select phase seconds for session time profiles.
@@ -2063,6 +2095,12 @@ async def find_mouse_point(
 
     selection_method: str | None = None
     if not detections:
+        if similarity_match_required():
+            _log_info(
+                "move_mouse: no YOLO candidates; similarity match required, "
+                "skipping Gemma ROI fallback"
+            )
+            return None
         # Stage B: Gemma ROI → YOLO/OCR on crop → index pick.
         _log_info(
             "move_mouse: no YOLO candidates; trying Gemma ROI + YOLO-on-crop fallback"
@@ -2108,6 +2146,12 @@ async def find_mouse_point(
     select_phase = "select"
     select_started = time.perf_counter()
     if not anchor_matches:
+        if similarity_match_required():
+            _log_info(
+                "move_mouse: no similarity anchor matches; similarity match required, "
+                "skipping visual one-pass fallback"
+            )
+            return None
         # Stage A: similarity miss but detections exist → Gemma pick among all.
         _log_info(
             "move_mouse: no similarity anchor matches; "
@@ -2304,5 +2348,5 @@ async def resolve_mouse_point(
         click_window=click_window,
     )
     if found is None:
-        raise ValueError("No mouse target matched the instruction on selected monitor(s).")
+        raise ValueError(RECORDED_ANCHOR_MISS_MESSAGE)
     return found

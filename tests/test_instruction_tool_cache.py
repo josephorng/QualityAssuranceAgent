@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from ollama import Message
 
+from cua_mcp.select_mouse_target import RECORDED_ANCHOR_MISS_MESSAGE
 from src.brain.module import BrainModule
 from src.common.instruction_tool_cache import (
     extract_tool_calls_from_messages,
@@ -476,6 +477,64 @@ async def test_loop_falls_back_to_llm_when_cache_replay_fails(monkeypatch: pytes
 
     assert await brain.loop() is True
     chat_messages.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_loop_fails_step_when_cache_replay_anchor_misses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recorded target with no similarity match must not fall through to a visual re-pick."""
+    monkeypatch.setenv(USE_TOOL_CACHE_ENV, "1")
+    cached = [
+        {
+            "name": "move_mouse",
+            "arguments": {"instruction": "「檢視」文字"},
+        }
+    ]
+
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = MagicMock()
+    brain.manager.log_info = MagicMock()
+    brain.manager.log_error = MagicMock()
+    brain._step_transcript_counter = 0
+    brain._script_step_index = 0
+    brain.run_id = "test_run"
+    brain.settings = MagicMock()
+    brain.settings.brain_lm = "test-model"
+    brain._hand = MagicMock()
+    brain._eye = MagicMock()
+    brain._eye.capture_separated_images = AsyncMock(return_value=["shot.png"])
+    brain._normalize_tool_name = AsyncMock(return_value="move_mouse")
+    brain._enrich_tool_arguments = lambda name, args, _goal: args
+    brain._hand.execute_tool_command = AsyncMock(
+        return_value=ExecutionResult(
+            ok=False,
+            action="move_mouse",
+            args={"instruction": "「檢視」文字"},
+            message=RECORDED_ANCHOR_MISS_MESSAGE,
+        )
+    )
+    brain.sanitize_execution_result = BrainModule.sanitize_execution_result.__get__(
+        brain, BrainModule
+    )
+    brain.sanitize_message = BrainModule.sanitize_message.__get__(brain, BrainModule)
+    brain._append_failed_tool_call = MagicMock()
+    brain._save_step_messages = MagicMock()
+    brain._current_goal = MagicMock(return_value="將滑鼠移到「檢視」文字，並點擊滑鼠一下。")
+
+    monkeypatch.setattr(
+        "src.brain.module.lookup_tool_calls",
+        lambda instruction, path=None: cached if instruction == brain._current_goal() else None,
+    )
+    chat_messages = AsyncMock()
+    monkeypatch.setattr(
+        "src.brain.module.get_llm_client", lambda: MagicMock(chat_messages=chat_messages)
+    )
+    monkeypatch.setattr("src.brain.module.get_prompt", lambda name: "prompt {task}")
+
+    assert await brain.loop() is False
+    chat_messages.assert_not_called()
+    brain._hand.execute_tool_command.assert_awaited_once()
 
 
 @pytest.mark.asyncio

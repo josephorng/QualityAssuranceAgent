@@ -10,6 +10,10 @@ from pathlib import Path
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Literal
 
+from cua_mcp.select_mouse_target import (
+    RECORDED_ANCHOR_MISS_MESSAGE,
+    require_similarity_match,
+)
 from cua_mcp.tools import (
     TOOL_FUNCTIONS,
     VERIFICATION_TOOLS,
@@ -1433,12 +1437,23 @@ class BrainModule:
             return None, messages
         return self._parse_verify_result_from_content(repair_message.content), messages
 
+    @staticmethod
+    def _is_recorded_anchor_miss(result: ExecutionResult) -> bool:
+        message = result.message or ""
+        return RECORDED_ANCHOR_MISS_MESSAGE in message
+
     async def _try_replay_cached_tools(
         self,
         goal: str,
         cached_calls: list[dict[str, Any]],
-    ) -> bool:
-        """Execute cached tool calls in order. Returns True only if every tool succeeds."""
+    ) -> Literal["ok", "fallback", "anchor_miss"]:
+        """Execute cached tool calls in order.
+
+        ``ok`` means every tool succeeded. ``anchor_miss`` means a recorded mouse
+        target had no similarity match; the caller must fail the step instead of
+        asking the model to re-pick visually. ``fallback`` is any other replay
+        failure, which still goes to the decide loop.
+        """
         all_image_paths = await self._eye.capture_separated_images()
         before_screenshot = self._primary_decision_screenshot(all_image_paths)
         messages: list[dict[str, Any]] = [
@@ -1468,44 +1483,47 @@ class BrainModule:
         ]
 
         await self._await_pending_settle_before_tool(messages)
-        for call in cached_calls:
-            arguments = self._normalize_tool_arguments(call.get("arguments"))
-            try:
-                normalized_name = await self._normalize_tool_name(call["name"], arguments)
-            except Exception as e:
-                self.manager.log_error(f"Cache replay: error normalizing tool name: {e}")
-                self._save_step_messages(messages)
-                return False
-            arguments = self._enrich_tool_arguments(normalized_name, arguments, goal)
-            result = await self._hand.execute_tool_command(
-                ToolCommand(
-                    action=normalized_name,
-                    args=arguments,
-                    screenshot_before_path=before_screenshot,
+        with require_similarity_match():
+            for call in cached_calls:
+                arguments = self._normalize_tool_arguments(call.get("arguments"))
+                try:
+                    normalized_name = await self._normalize_tool_name(call["name"], arguments)
+                except Exception as e:
+                    self.manager.log_error(f"Cache replay: error normalizing tool name: {e}")
+                    self._save_step_messages(messages)
+                    return "fallback"
+                arguments = self._enrich_tool_arguments(normalized_name, arguments, goal)
+                result = await self._hand.execute_tool_command(
+                    ToolCommand(
+                        action=normalized_name,
+                        args=arguments,
+                        screenshot_before_path=before_screenshot,
+                    )
                 )
-            )
-            messages.append(
-                stamp_message(
-                    {
-                        "role": ROLE_TOOL,
-                        "content": json.dumps(
-                            self.sanitize_execution_result(result),
-                            ensure_ascii=False,
-                        ),
-                    }
+                messages.append(
+                    stamp_message(
+                        {
+                            "role": ROLE_TOOL,
+                            "content": json.dumps(
+                                self.sanitize_execution_result(result),
+                                ensure_ascii=False,
+                            ),
+                        }
+                    )
                 )
-            )
-            if not result.ok:
-                self._append_failed_tool_call(
-                    result.action,
-                    self._step_transcript_counter,
-                    self._script_step_index,
-                )
-                self._save_step_messages(messages)
-                return False
+                if not result.ok:
+                    self._append_failed_tool_call(
+                        result.action,
+                        self._step_transcript_counter,
+                        self._script_step_index,
+                    )
+                    self._save_step_messages(messages)
+                    if self._is_recorded_anchor_miss(result):
+                        return "anchor_miss"
+                    return "fallback"
 
         self._save_step_messages(messages)
-        return True
+        return "ok"
 
     async def loop(self) -> bool:
         """Run the capture → LLM (with tools) → execute tools loop until the model returns no tool calls or cap is hit."""
@@ -1557,8 +1575,15 @@ class BrainModule:
             self.manager.log_info(
                 f"Instruction tool cache hit ({len(cached_calls)} tool call(s)); replaying"
             )
-            if await self._try_replay_cached_tools(goal, cached_calls):
+            replay = await self._try_replay_cached_tools(goal, cached_calls)
+            if replay == "ok":
                 return True
+            if replay == "anchor_miss":
+                self.manager.log_info(
+                    "Cache replay found no similarity match for the recorded target; "
+                    "failing the step"
+                )
+                return False
             self.manager.log_info("Cache replay failed; falling back to LLM decide loop")
 
         messages: list[dict[str, Any]] = []

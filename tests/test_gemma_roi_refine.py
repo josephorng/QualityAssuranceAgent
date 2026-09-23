@@ -314,6 +314,58 @@ async def test_find_mouse_point_stage_a_on_similarity_miss(
 
 
 @pytest.mark.asyncio
+async def test_find_mouse_point_replay_skips_visual_fallback_on_similarity_miss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cua_mcp import select_mouse_target as smt
+
+    det = UiDetection(
+        bbox=(10, 20, 40, 16),
+        cx=30,
+        cy=28,
+        class_id=0,
+        class_name="text",
+        text="view",
+    )
+
+    async def fake_parse(instruction: str):
+        return ("「檢視」文字", 0, 0, [], None, 0, None)
+
+    async def fake_pick(*_a, **_k):
+        raise AssertionError("visual one-pass fallback must not run during replay")
+
+    monkeypatch.setattr(smt, "parse_mouse_target_instruction", fake_parse)
+    monkeypatch.setattr(smt, "selected_eye_monitor_indices", lambda: [1])
+    monkeypatch.setattr(
+        smt,
+        "_run_manager",
+        lambda: type(
+            "M",
+            (),
+            {
+                "require_paths": staticmethod(
+                    lambda: type(
+                        "P",
+                        (),
+                        {"yolo_ocr_dir": __import__("pathlib").Path(".")},
+                    )()
+                ),
+                "log_info": staticmethod(lambda *_a, **_k: None),
+            },
+        )(),
+    )
+    monkeypatch.setattr(smt, "grab_monitor_bgr", lambda *_a, **_k: (1, np.zeros((50, 50, 3), dtype=np.uint8)))
+    monkeypatch.setattr(smt, "imwrite_bgr", lambda *_a, **_k: True)
+    monkeypatch.setattr(smt, "_collect_monitor_detections", lambda *_a, **_k: [det])
+    monkeypatch.setattr(smt, "_filter_mouse_candidates", lambda *_a, **_k: ([], []))
+    monkeypatch.setattr("cua_mcp.gemma_roi_refine.pick_candidate_with_gemma", fake_pick)
+
+    with smt.require_similarity_match():
+        found = await smt.find_mouse_point("「檢視」文字")
+    assert found is None
+
+
+@pytest.mark.asyncio
 async def test_find_mouse_point_stage_b_when_no_detections(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

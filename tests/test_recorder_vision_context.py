@@ -116,6 +116,93 @@ def test_build_vision_context_at_point_uses_run_dir_screenshot_fallback(tmp_path
     assert vision["candidates"][0]["text"] == "搜尋"
 
 
+def test_build_vision_passes_click_window_as_ocr_roi(tmp_path: Path) -> None:
+    run_dir = tmp_path / "roi_vis"
+    (run_dir / "screenshots").mkdir(parents=True)
+    (run_dir / "screenshots" / "event_001.jpeg").write_bytes(b"x")
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(10, 20),
+        screenshot_path=str(run_dir / "screenshots" / "event_001.jpeg"),
+        click_window={
+            "hwnd": 1,
+            "title": "Small",
+            "rect": [20, 30, 100, 80],
+            "is_maximized": False,
+        },
+    )
+    seen: dict = {}
+
+    def fake_detect(_bgr, **kwargs):
+        seen["ocr_roi"] = kwargs.get("ocr_roi")
+        return [_detection_from_bbox((25, 35, 20, 20), YOLO_CLASS_TEXT, text="A")]
+
+    with patch(
+        "src.recorder.vision_context.imread_bgr",
+        return_value=np.zeros((400, 600, 3), dtype=np.uint8),
+    ), patch(
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
+        side_effect=fake_detect,
+    ), patch(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        return_value=None,
+    ):
+        vision = build_vision_context_at_point(
+            event,
+            local_x=30,
+            local_y=40,
+            run_dir=run_dir,
+            persist_debug=False,
+        )
+    assert seen["ocr_roi"] == (20, 30, 100, 80)
+    assert vision["used_vision"] is True
+
+
+def test_build_vision_skips_ocr_roi_when_click_window_maximized(tmp_path: Path) -> None:
+    run_dir = tmp_path / "roi_max"
+    (run_dir / "screenshots").mkdir(parents=True)
+    (run_dir / "screenshots" / "event_001.jpeg").write_bytes(b"x")
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(10, 20),
+        screenshot_path=str(run_dir / "screenshots" / "event_001.jpeg"),
+        click_window={
+            "hwnd": 1,
+            "title": "Max",
+            "rect": [0, 0, 100, 80],
+            "is_maximized": True,
+        },
+    )
+    seen: dict = {}
+
+    def fake_detect(_bgr, **kwargs):
+        seen["ocr_roi"] = kwargs.get("ocr_roi")
+        return []
+
+    with patch(
+        "src.recorder.vision_context.imread_bgr",
+        return_value=np.zeros((400, 600, 3), dtype=np.uint8),
+    ), patch(
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
+        side_effect=fake_detect,
+    ), patch(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        return_value=None,
+    ):
+        build_vision_context_at_point(
+            event,
+            local_x=30,
+            local_y=40,
+            run_dir=run_dir,
+            persist_debug=False,
+        )
+    assert seen["ocr_roi"] is None
+
+
 def test_build_vision_context_at_point_records_missing_screenshot(tmp_path: Path) -> None:
     event = RecordedEvent(
         index=1,

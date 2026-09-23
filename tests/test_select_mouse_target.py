@@ -155,6 +155,128 @@ def test_detect_skips_element_ocr_when_plan_is_text_only(
     assert dets[0].text == "類型"
 
 
+def test_detect_ocr_roi_passes_enhance_roi_and_drops_outside_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    from cua_mcp.select_mouse_target import _detect_mouse_targets_from_bgr
+
+    bgr = np.zeros((100, 200, 3), dtype=np.uint8)
+    # In-ROI text at center (25,25); out-of-ROI text at (150,25).
+    xyxy = np.asarray([[10, 10, 40, 40], [140, 10, 170, 40]], dtype=np.float32)
+    scores = np.asarray([0.9, 0.9], dtype=np.float32)
+    class_ids = np.asarray([YOLO_CLASS_TEXT, YOLO_CLASS_TEXT], dtype=np.int32)
+    yolo_kwargs: dict = {}
+
+    def fake_yolo(*_a, **kwargs):
+        yolo_kwargs.update(kwargs)
+        return xyxy, scores, class_ids
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.run_yolo_onnx_end2end",
+        fake_yolo,
+    )
+    ocr_calls: list[list[tuple[int, int, int, int]]] = []
+
+    def fake_ocr(_bgr, boxes, *, mode=None, **_kwargs):
+        ocr_calls.append(list(boxes))
+        return [["內"] for _ in boxes]
+
+    monkeypatch.setattr("cua_mcp.select_mouse_target._ocr_boxes_on_bgr", fake_ocr)
+    for name in (
+        "merge_yolo_inputs_with_line_rectangles",
+        "_retry_empty_unknown_icon_ocr",
+        "fit_scrollbar_bboxes_to_arrow_controls",
+        "create_scrollbars_from_arrow_pairs",
+        "drop_scrollbars_without_arrow_ends",
+        "merge_overlapping_scrollbars",
+        "relabel_caption_button_detections",
+    ):
+        if name == "merge_yolo_inputs_with_line_rectangles":
+            monkeypatch.setattr(
+                f"cua_mcp.select_mouse_target.{name}",
+                lambda *a, **k: a[1] if len(a) > 1 else [],
+            )
+        elif name == "_retry_empty_unknown_icon_ocr":
+            monkeypatch.setattr(
+                f"cua_mcp.select_mouse_target.{name}",
+                lambda _b, cands: cands,
+            )
+        else:
+            monkeypatch.setattr(
+                f"cua_mcp.select_mouse_target.{name}",
+                lambda cands, **_k: cands,
+            )
+
+    roi = (0, 0, 80, 80)
+    dets = _detect_mouse_targets_from_bgr(
+        bgr,
+        refine_inputs=False,
+        ocr_roi=roi,
+        ocr_roi_pad=0,
+    )
+    assert yolo_kwargs.get("enhance_roi") == roi
+    assert len(ocr_calls) == 1
+    assert len(ocr_calls[0]) == 1
+    assert len(dets) == 1
+    assert dets[0].text == "內"
+    assert dets[0].bbox[0] < 80
+
+
+def test_detect_refine_inputs_only_inside_ocr_roi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    from cua_mcp.select_mouse_target import _detect_mouse_targets_from_bgr
+    from cua_mcp.yolo_onnx import YOLO_CLASS_INPUT
+
+    bgr = np.zeros((100, 200, 3), dtype=np.uint8)
+    xyxy = np.asarray(
+        [[10, 10, 40, 30], [140, 10, 180, 30]],
+        dtype=np.float32,
+    )
+    scores = np.asarray([0.9, 0.9], dtype=np.float32)
+    class_ids = np.asarray([YOLO_CLASS_INPUT, YOLO_CLASS_INPUT], dtype=np.int32)
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.run_yolo_onnx_end2end",
+        lambda *_a, **_k: (xyxy, scores, class_ids),
+    )
+    merge_calls: list[list[tuple[int, int, int, int]]] = []
+
+    def fake_merge(_bgr, inputs, **_kwargs):
+        merge_calls.append(list(inputs))
+        return list(inputs)
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.merge_yolo_inputs_with_line_rectangles",
+        fake_merge,
+    )
+    for name in (
+        "fit_scrollbar_bboxes_to_arrow_controls",
+        "create_scrollbars_from_arrow_pairs",
+        "drop_scrollbars_without_arrow_ends",
+        "merge_overlapping_scrollbars",
+        "relabel_caption_button_detections",
+    ):
+        monkeypatch.setattr(
+            f"cua_mcp.select_mouse_target.{name}",
+            lambda cands, **_k: cands,
+        )
+
+    dets = _detect_mouse_targets_from_bgr(
+        bgr,
+        refine_inputs=True,
+        ocr_roi=(0, 0, 80, 80),
+        ocr_roi_pad=0,
+        ocr_class_ids=frozenset(),
+    )
+    assert len(merge_calls) == 1
+    assert len(merge_calls[0]) == 1
+    assert merge_calls[0][0][0] < 80
+    assert len(dets) == 1
+    assert dets[0].class_id == YOLO_CLASS_INPUT
+
+
 def test_normalize_nearby_labels_strips_and_dedupes() -> None:
     assert _normalize_nearby_labels(None) == []
     assert _normalize_nearby_labels([]) == []

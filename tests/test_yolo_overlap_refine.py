@@ -233,3 +233,93 @@ def test_run_yolo_skips_overlap_refine_without_text_class(
         overlap_refine=True,
     )
     assert calls["n"] == 0
+
+
+def test_find_clusters_drops_outside_enhance_roi():
+    xyxy = np.asarray(
+        [
+            [10.0, 10.0, 80.0, 30.0],
+            [20.0, 15.0, 90.0, 35.0],  # overlaps first — cluster A
+            [200.0, 10.0, 260.0, 28.0],
+            [210.0, 12.0, 270.0, 32.0],  # overlaps third — cluster B
+        ],
+        dtype=np.float32,
+    )
+    cls = np.asarray([0, 0, 0, 0], dtype=np.int32)
+    # ROI covers only the left cluster centers.
+    clusters = find_text_overlap_refine_clusters(
+        xyxy,
+        cls,
+        text_class_id=0,
+        enhance_roi=(0, 0, 100, 50),
+        enhance_roi_pad=0,
+    )
+    assert any(set(c) == {0, 1} for c in clusters)
+    assert not any(2 in c or 3 in c for c in clusters)
+
+
+def test_find_clusters_keeps_whole_cluster_if_any_member_in_roi():
+    xyxy = np.asarray(
+        [
+            [10.0, 10.0, 40.0, 30.0],  # center in ROI
+            [80.0, 10.0, 120.0, 30.0],  # center outside ROI but linked
+        ],
+        dtype=np.float32,
+    )
+    cls = np.asarray([0, 0], dtype=np.int32)
+    # Force link via high IoU overlap style: expand boxes to overlap.
+    xyxy = np.asarray(
+        [
+            [10.0, 10.0, 90.0, 30.0],
+            [50.0, 12.0, 140.0, 32.0],
+        ],
+        dtype=np.float32,
+    )
+    clusters = find_text_overlap_refine_clusters(
+        xyxy,
+        cls,
+        text_class_id=0,
+        enhance_roi=(0, 0, 60, 50),
+        enhance_roi_pad=0,
+    )
+    assert any(set(c) == {0, 1} for c in clusters)
+
+
+def test_run_yolo_forwards_enhance_roi_to_stage3_and_stage4(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        yolo_mod,
+        "_run_yolo_raw_output",
+        lambda _img: _fake_end2end(3),
+    )
+    seen: dict[str, object] = {}
+
+    def refine_spy(*args, **kwargs):
+        seen["refine_roi"] = kwargs.get("enhance_roi")
+        seen["refine_pad"] = kwargs.get("enhance_roi_pad")
+        xyxy, scores, cls = args[1], args[2], args[3]
+        return xyxy, scores, cls, 0
+
+    def cut_spy(*args, **kwargs):
+        seen["cut_roi"] = kwargs.get("enhance_roi")
+        seen["cut_pad"] = kwargs.get("enhance_roi_pad")
+        xyxy, scores, cls = args[1], args[2], args[3]
+        return xyxy, scores, cls, 0
+
+    monkeypatch.setattr(yolo_mod, "refine_overlapping_text_with_crops", refine_spy)
+    monkeypatch.setattr(yolo_mod, "cut_multiline_text_boxes", cut_spy)
+
+    roi = (10, 20, 100, 80)
+    run_yolo_onnx_end2end(
+        np.zeros((640, 640, 3), dtype=np.uint8),
+        class_ids={YOLO_CLASS_TEXT},
+        overlap_refine=True,
+        line_cut=True,
+        enhance_roi=roi,
+        enhance_roi_pad=8,
+    )
+    assert seen["refine_roi"] == roi
+    assert seen["refine_pad"] == 8
+    assert seen["cut_roi"] == roi
+    assert seen["cut_pad"] == 8

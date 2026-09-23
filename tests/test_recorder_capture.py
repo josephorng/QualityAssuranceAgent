@@ -743,22 +743,23 @@ def test_keyboard_hook_defers_screenshot_and_uia_off_thread(tmp_path) -> None:
     assert enter_event["key"] == "enter"
 
 
-def test_mouse_hook_defers_screenshot_and_window_snapshot_off_thread(tmp_path) -> None:
-    """Left click must not run mss/window snapshot on the hook callback thread."""
+def test_mouse_hook_defers_screenshot_off_thread(tmp_path) -> None:
+    """Left click must not run mss or EnumWindows on the hook callback thread."""
     import threading
 
     session = RecordingSession(runs_root=tmp_path)
     click_thread_id = threading.get_ident()
-    sync_hook_work = {"count": 0}
+    sync_shot_on_hook = {"count": 0}
+    sync_windows_on_hook = {"count": 0}
 
     def _track_shot(*_args, **_kwargs):
         if threading.get_ident() == click_thread_id:
-            sync_hook_work["count"] += 1
+            sync_shot_on_hook["count"] += 1
         return _mock_screenshot(*_args, **_kwargs)
 
     def _track_windows():
         if threading.get_ident() == click_thread_id:
-            sync_hook_work["count"] += 1
+            sync_windows_on_hook["count"] += 1
         return []
 
     with _default_capture_window_patches(), patch(
@@ -772,9 +773,11 @@ def test_mouse_hook_defers_screenshot_and_window_snapshot_off_thread(tmp_path) -
         try:
             from pynput.mouse import Button
 
+            windows_before_click = sync_windows_on_hook["count"]
             session._on_mouse_click(120, 240, Button.left, True)
             session._on_mouse_click(120, 240, Button.left, False)
-            assert sync_hook_work["count"] == 0
+            assert sync_shot_on_hook["count"] == 0
+            assert sync_windows_on_hook["count"] == windows_before_click
             time.sleep(_DOUBLE_CLICK_INTERVAL_S + 0.05)
             session.wait_for_deferred_work()
         finally:

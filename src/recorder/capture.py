@@ -41,8 +41,10 @@ from src.recorder.models import (
     utc_now_iso,
 )
 from src.recorder.window_snapshot import (
+    ClickWindowInfo,
     WindowInfo,
     diff_snapshots_with_debug,
+    resolve_click_window,
     settle_delay_for_click,
     snapshot_top_level_windows,
 )
@@ -141,6 +143,7 @@ class _DeferredCaptureJob:
     # begin_text_input | flush_text_input | keyboard_event | settle_pre_key
     # | pending_left_press | pending_right_press | pending_drag_end
     # | emit_left_gesture | emit_right_gesture | mouse_pointer_event
+    # | seed_settle_windows
     meta: dict[str, Any] | None = None
     pending_pre_type: _PendingPreTypeShot | None = None
     pending_pre_key: _PendingPreTypeShot | None = None
@@ -165,6 +168,8 @@ class _DeferredCaptureJob:
     duration_seconds: float | None = None
     press_seq: int | None = None
     text_event_index: int | None = None
+    windows_before: tuple[WindowInfo, ...] | None = None
+    click_window: ClickWindowInfo | None = None
     refresh_pre_type: bool = False
 
 
@@ -277,6 +282,8 @@ class _QueuedEvent:
     end_monitor_index: int | None = None
     end_monitor_offset: tuple[int, int] | None = None
     windows_before: tuple[WindowInfo, ...] | None = None
+    # Press-time ClickWindowInfo (screen coords); localized at persist.
+    click_window: ClickWindowInfo | None = None
 
 
 def _pending_capture_path(run_dir: Path) -> Path:
@@ -718,6 +725,7 @@ class RecordingSession:
         self._pending_screenshot: tuple[str, int, tuple[int, int]] | None = None
         self._pending_drag_end_captures: dict[int, tuple[str, int, tuple[int, int]]] | None = None
         self._pending_windows_before: tuple[WindowInfo, ...] | None = None
+        self._pending_click_window: ClickWindowInfo | None = None
         # Generation tokens so deferred press captures stay tied to the gesture that
         # enqueued them (hook thread must not wait on mss/UIA).
         self._left_press_seq: int = 0
@@ -728,6 +736,8 @@ class RecordingSession:
         self._right_press_captures: dict[
             int, tuple[tuple[str, int, tuple[int, int]] | None, tuple[WindowInfo, ...] | None]
         ] = {}
+        self._left_press_click_windows: dict[int, ClickWindowInfo | None] = {}
+        self._right_press_click_windows: dict[int, ClickWindowInfo | None] = {}
         self._drag_end_captures: dict[int, dict[int, tuple[str, int, tuple[int, int]]]] = {}
         self._pending_right_coords: tuple[int, int] | None = None
         self._pending_right_down_at: float | None = None
@@ -735,6 +745,7 @@ class RecordingSession:
         self._pending_right_modifiers: list[str] | None = None
         self._pending_right_screenshot: tuple[str, int, tuple[int, int]] | None = None
         self._pending_right_windows_before: tuple[WindowInfo, ...] | None = None
+        self._pending_right_click_window: ClickWindowInfo | None = None
         self._pending_text_chars: list[str] = []
         self._pending_text_caret: int = 0
         self._pending_text_meta: dict[str, Any] | None = None
@@ -750,6 +761,9 @@ class RecordingSession:
         self._settle_tick_lock = threading.Lock()
         # Last settle-probe frame (path, monitor_index, monitor_offset) for next before-shot.
         self._last_settle_frame: tuple[str, int, tuple[int, int]] | None = None
+        # Top-level windows captured with that frame; mouse-down reuses this as
+        # windows_before so EnumWindows never runs on the LL hook.
+        self._last_settle_windows: tuple[WindowInfo, ...] | None = None
         self._last_pointer_cursor_xy: tuple[int, int] | None = None
         self._event_queue: queue.Queue[object] = queue.Queue()
         self._worker_thread: threading.Thread | None = None
@@ -825,7 +839,7 @@ class RecordingSession:
             self._next_index = next_index
             self._started_at = started_at
             self._ignore_rect_provider = provider
-            self._accepting_input = True
+            self._accepting_input = False
             self._pressed_modifiers = set()
             self._pending_click_coords = None
             self._pending_click_down_at = None
@@ -837,10 +851,13 @@ class RecordingSession:
             self._pending_screenshot = None
             self._pending_drag_end_captures = None
             self._pending_windows_before = None
+            self._pending_click_window = None
             self._left_press_seq = 0
             self._right_press_seq = 0
             self._left_press_captures = {}
             self._right_press_captures = {}
+            self._left_press_click_windows = {}
+            self._right_press_click_windows = {}
             self._drag_end_captures = {}
             self._pending_right_coords = None
             self._pending_right_down_at = None
@@ -848,6 +865,7 @@ class RecordingSession:
             self._pending_right_modifiers = None
             self._pending_right_screenshot = None
             self._pending_right_windows_before = None
+            self._pending_right_click_window = None
             self._pending_text_chars = []
             self._pending_text_meta = None
             self._pending_pre_type_screenshot = None
@@ -856,6 +874,7 @@ class RecordingSession:
             self._settle_probe = None
             self._settle_probe_timer = None
             self._last_settle_frame = None
+            self._last_settle_windows = None
             self._last_pointer_cursor_xy = None
             pending = self._pending_click_timer
             self._pending_click_timer = None
@@ -870,6 +889,15 @@ class RecordingSession:
             daemon=True,
         )
         self._worker_thread.start()
+
+        seeded = threading.Event()
+        self._enqueue(
+            _DeferredCaptureJob(action="seed_settle_windows", meta={"done": seeded})
+        )
+        if not seeded.wait(5.0):
+            self._log(run_dir, "settle window seed timed out")
+        with self._lock:
+            self._accepting_input = True
 
         self._mouse_listener = mouse.Listener(
             on_click=self._on_mouse_click,
@@ -970,6 +998,7 @@ class RecordingSession:
             )
             self._pending_screenshot = None
             self._pending_windows_before = None
+            self._pending_click_window = None
             leftover_pre_type = self._pending_pre_type_screenshot
             self._pending_pre_type_screenshot = None
             leftover_pre_key = self._pending_pre_key_screenshot
@@ -1139,11 +1168,26 @@ class RecordingSession:
         except Exception:
             return str(target), 0, (0, 0)
 
-    def _snapshot_windows_before(self) -> tuple[WindowInfo, ...]:
+    def _refresh_last_settle_windows(self) -> None:
+        """Store the current top-level window list next to the settle frame.
+
+        Called from the settle loop and once at recording start (worker thread),
+        never from the mouse hook.
+        """
         try:
-            return tuple(snapshot_top_level_windows())
+            windows = tuple(snapshot_top_level_windows())
         except Exception:
-            return ()
+            return
+        with self._lock:
+            self._last_settle_windows = windows
+
+    def _cached_windows_before(self) -> tuple[WindowInfo, ...] | None:
+        """Pre-click window list from the last settle sample (or the start seed)."""
+        with self._lock:
+            cached = self._last_settle_windows
+        if not cached:
+            return None
+        return cached
 
     def _discard_press_capture_entry(
         self,
@@ -1180,13 +1224,23 @@ class RecordingSession:
         text_event_index: int | None = None,
         text_meta: dict[str, Any] | None = None,
     ) -> None:
-        """Enqueue before-shot + window snapshot off the mouse hook thread."""
+        """Reuse the settle-loop window cache; defer only the before-shot off the hook.
+
+        ``windows_before`` is the last settle snapshot (seeded at recording start),
+        so title-bar close still diffs against the pre-click window list without
+        enumerating windows inside ``WH_MOUSE_LL``.
+        """
         _ = run_dir
+        windows_before = self._cached_windows_before()
+        click_window = self._click_window_payload_at(x, y)
         with self._lock:
             self._left_press_seq += 1
             seq = self._left_press_seq
             self._pending_screenshot = None
-            self._pending_windows_before = None
+            self._pending_windows_before = windows_before or None
+            self._pending_click_window = click_window
+            self._left_press_captures[seq] = (None, windows_before or None)
+            self._left_press_click_windows[seq] = click_window
         self._enqueue(
             _DeferredCaptureJob(
                 action="pending_left_press",
@@ -1198,13 +1252,18 @@ class RecordingSession:
         )
 
     def _capture_pending_right_press(self, run_dir: Path, x: int, y: int) -> None:
-        """Enqueue right-press before-shot off the mouse hook thread."""
+        """Reuse the settle-loop window cache; defer only the right-press before-shot."""
         _ = run_dir
+        windows_before = self._cached_windows_before()
+        click_window = self._click_window_payload_at(x, y)
         with self._lock:
             self._right_press_seq += 1
             seq = self._right_press_seq
             self._pending_right_screenshot = None
-            self._pending_right_windows_before = None
+            self._pending_right_windows_before = windows_before or None
+            self._pending_right_click_window = click_window
+            self._right_press_captures[seq] = (None, windows_before or None)
+            self._right_press_click_windows[seq] = click_window
         self._enqueue(
             _DeferredCaptureJob(
                 action="pending_right_press",
@@ -1269,6 +1328,7 @@ class RecordingSession:
             return
         with self._lock:
             self._last_settle_frame = (str(dest), int(mon_index), (int(mon_offset[0]), int(mon_offset[1])))
+        self._refresh_last_settle_windows()
 
     def _queue_event(self, item: _QueuedEvent) -> None:
         self._enqueue(item)
@@ -1297,6 +1357,11 @@ class RecordingSession:
             self._next_index += 1
         self._flush_pending_text_input(shared_end_index=index)
         self._remember_pointer_cursor(cursor_xy)
+        # Pre-click window list comes from the settle cache. click_window is one
+        # WindowFromPoint (no full window scan) and stays on the hook.
+        # Screenshot stays deferred.
+        windows_before = self._cached_windows_before()
+        click_window = self._click_window_payload_at(int(cursor_xy[0]), int(cursor_xy[1]))
         self._enqueue(
             _DeferredCaptureJob(
                 action="mouse_pointer_event",
@@ -1307,6 +1372,8 @@ class RecordingSession:
                 button=button,
                 modifiers=modifiers,
                 scroll_delta=scroll_delta,
+                windows_before=windows_before or None,
+                click_window=click_window,
                 refresh_pre_type=True,
             )
         )
@@ -1849,6 +1916,8 @@ class RecordingSession:
             self._last_move_xy = None
             self._pending_screenshot = None
             self._pending_windows_before = None
+            self._pending_click_window = None
+            self._left_press_click_windows.pop(seq, None)
         self._discard_press_capture_entry(stale)
         self._discard_drag_end_capture_entry(drag_stale)
 
@@ -1871,6 +1940,8 @@ class RecordingSession:
         pending_shot = self._pending_right_screenshot
         self._pending_right_screenshot = None
         self._pending_right_windows_before = None
+        self._pending_right_click_window = None
+        self._right_press_click_windows.pop(seq, None)
         return stale, pending_shot
 
     def _clear_pending_right_gesture(self) -> None:
@@ -2119,6 +2190,13 @@ class RecordingSession:
             self._worker_emit_right_gesture(job)
         elif job.action == "mouse_pointer_event":
             self._worker_mouse_pointer_event(job)
+        elif job.action == "seed_settle_windows":
+            try:
+                self._refresh_last_settle_windows()
+            finally:
+                done = (job.meta or {}).get("done")
+                if isinstance(done, threading.Event):
+                    done.set()
         # settle_probe_tick runs on its own timer thread (not this queue) so
         # window-settle sleeps on click persist cannot starve comparisons.
 
@@ -2672,6 +2750,13 @@ class RecordingSession:
             except OSError:
                 pass
 
+    def _click_window_payload_at(self, x: int, y: int) -> ClickWindowInfo | None:
+        """Resolve press-time window under the cursor (screen coords)."""
+        try:
+            return resolve_click_window(int(x), int(y))
+        except Exception:
+            return None
+
     def _worker_pending_left_press(self, job: _DeferredCaptureJob) -> None:
         if job.press_seq is None or job.cursor_xy is None:
             return
@@ -2691,7 +2776,6 @@ class RecordingSession:
                 )
 
         pending_dest = _pending_capture_path(run_dir)
-        windows_before = self._snapshot_windows_before()
         try:
             info = self._pending_screenshot_from_settle_or_capture(
                 run_dir,
@@ -2702,10 +2786,13 @@ class RecordingSession:
         except Exception:
             info = None
         with self._lock:
-            self._left_press_captures[job.press_seq] = (info, windows_before or None)
+            prev = self._left_press_captures.get(job.press_seq)
+            windows_before = prev[1] if prev is not None else None
+            self._left_press_captures[job.press_seq] = (info, windows_before)
             if self._left_press_seq == job.press_seq:
                 self._pending_screenshot = info
-                self._pending_windows_before = windows_before or None
+                if windows_before is not None:
+                    self._pending_windows_before = windows_before
 
     def _worker_pending_right_press(self, job: _DeferredCaptureJob) -> None:
         if job.press_seq is None or job.cursor_xy is None:
@@ -2715,7 +2802,6 @@ class RecordingSession:
         if run_dir is None:
             return
         pending_dest = _pending_right_capture_path(run_dir)
-        windows_before = self._snapshot_windows_before()
         try:
             info = self._pending_screenshot_from_settle_or_capture(
                 run_dir,
@@ -2726,10 +2812,13 @@ class RecordingSession:
         except Exception:
             info = None
         with self._lock:
-            self._right_press_captures[job.press_seq] = (info, windows_before or None)
+            prev = self._right_press_captures.get(job.press_seq)
+            windows_before = prev[1] if prev is not None else None
+            self._right_press_captures[job.press_seq] = (info, windows_before)
             if self._right_press_seq == job.press_seq:
                 self._pending_right_screenshot = info
-                self._pending_right_windows_before = windows_before or None
+                if windows_before is not None:
+                    self._pending_right_windows_before = windows_before
 
     def _worker_pending_drag_end(self, job: _DeferredCaptureJob) -> None:
         if job.press_seq is None:
@@ -2765,6 +2854,11 @@ class RecordingSession:
                 if press_seq is not None
                 else None
             )
+            click_window = (
+                self._left_press_click_windows.pop(press_seq, None)
+                if press_seq is not None
+                else None
+            )
             drag_end = (
                 self._drag_end_captures.pop(press_seq, None)
                 if press_seq is not None
@@ -2772,8 +2866,10 @@ class RecordingSession:
             )
             if entry is None and press_seq is not None and self._left_press_seq == press_seq:
                 entry = (self._pending_screenshot, self._pending_windows_before)
+                click_window = self._pending_click_window
                 self._pending_screenshot = None
                 self._pending_windows_before = None
+                self._pending_click_window = None
             if drag_end is None and press_seq is not None and self._left_press_seq == press_seq:
                 drag_end = self._pending_drag_end_captures
                 self._pending_drag_end_captures = None
@@ -2822,6 +2918,7 @@ class RecordingSession:
                 modifiers=job.modifiers,
                 duration_seconds=job.duration_seconds,
                 windows_before=pending_windows,
+                click_window=click_window,
             )
         )
         if job.refresh_pre_type:
@@ -2839,10 +2936,17 @@ class RecordingSession:
                 if press_seq is not None
                 else None
             )
+            click_window = (
+                self._right_press_click_windows.pop(press_seq, None)
+                if press_seq is not None
+                else None
+            )
             if entry is None and press_seq is not None and self._right_press_seq == press_seq:
                 entry = (self._pending_right_screenshot, self._pending_right_windows_before)
+                click_window = self._pending_right_click_window
                 self._pending_right_screenshot = None
                 self._pending_right_windows_before = None
+                self._pending_right_click_window = None
         if run_dir is None:
             self._discard_press_capture_entry(entry)
             return
@@ -2867,6 +2971,7 @@ class RecordingSession:
                 modifiers=job.modifiers,
                 duration_seconds=job.duration_seconds,
                 windows_before=pending_windows,
+                click_window=click_window,
             )
         )
         if job.refresh_pre_type:
@@ -2879,7 +2984,6 @@ class RecordingSession:
             run_dir = self._run_dir
         if run_dir is None:
             return
-        windows_before = self._snapshot_windows_before()
         shot_path, mon_idx, mon_offset = self._capture_immediate_screenshot(
             run_dir,
             job.event_index,
@@ -2897,7 +3001,8 @@ class RecordingSession:
                 button=job.button,
                 modifiers=job.modifiers,
                 scroll_delta=job.scroll_delta,
-                windows_before=windows_before or None,
+                windows_before=job.windows_before,
+                click_window=job.click_window,
             )
         )
         if job.refresh_pre_type:
@@ -3147,6 +3252,11 @@ class RecordingSession:
 
         window_change, target_title, snapshot_debug = self._resolve_window_change(item)
 
+        click_window_payload: dict[str, Any] | None = None
+        if item.click_window is not None:
+            offset = item.monitor_offset if item.monitor_offset is not None else (0, 0)
+            click_window_payload = item.click_window.to_local_payload(offset)
+
         event = RecordedEvent(
             index=item.event_index,
             timestamp_utc=item.timestamp_utc,
@@ -3171,6 +3281,7 @@ class RecordingSession:
             window_change=window_change,
             target_window_title=target_title,
             window_snapshot_debug=snapshot_debug,
+            click_window=click_window_payload,
         )
         with self._lock:
             if self._run_dir is None:

@@ -2971,8 +2971,24 @@ def build_vision_context_at_point(
     assert bgr is not None
     offset = event.monitor_offset if event.monitor_offset is not None else (0, 0)
     yolo_error: str | None = None
+    # Prefer stored press-time click_window over live re-resolve (flyout may have
+    # closed / another window may sit under the same point after the click).
+    click_window_payload = event.click_window if isinstance(event.click_window, dict) else None
+    enhance_roi = None
+    if click_window_payload is not None:
+        from src.recorder.window_snapshot import resolve_ocr_roi_local
+
+        img_h, img_w = bgr.shape[:2]
+        enhance_roi = resolve_ocr_roi_local(
+            click_window_payload,
+            image_w=img_w,
+            image_h=img_h,
+            monitor_offset=(0, 0),  # payload already local via to_local_payload
+        )
     try:
-        all_detections = _detect_mouse_targets_from_bgr(bgr, coord_offset=offset)
+        all_detections = _detect_mouse_targets_from_bgr(
+            bgr, coord_offset=offset, ocr_roi=enhance_roi
+        )
     except RuntimeError as exc:
         all_detections = []
         yolo_error = str(exc)

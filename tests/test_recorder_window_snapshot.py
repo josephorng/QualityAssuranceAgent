@@ -16,6 +16,8 @@ from src.recorder.window_snapshot import (
     is_agent_app_restore,
     resolve_window_change,
     settle_delay_for_click,
+    snapshot_top_level_windows,
+    window_at_point as _window_at_point_impl,
 )
 
 
@@ -23,6 +25,103 @@ from src.recorder.window_snapshot import (
 def _no_live_window_at_point():
     with patch("src.recorder.window_snapshot.window_at_point", return_value=None):
         yield
+
+
+def test_window_at_point_reads_hwnd_without_full_scan() -> None:
+    """Press-time lookup must not call getAllWindows (that scan stalls the mouse hook)."""
+    import builtins
+
+    info = _win(9, "Excel")
+    user32 = type("User32", (), {})()
+    user32.WindowFromPoint = lambda pt: 7
+    user32.GetAncestor = lambda hwnd, ga: 9
+    real_import = builtins.__import__
+
+    def _import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "pygetwindow":
+            raise AssertionError("window_at_point enumerated every top-level window")
+        return real_import(name, globals, locals, fromlist, level)
+
+    with patch("src.recorder.window_snapshot.ctypes.windll.user32", user32), patch(
+        "src.recorder.window_snapshot._window_info_from_hwnd",
+        return_value=info,
+    ) as from_hwnd, patch("builtins.__import__", side_effect=_import):
+        got = _window_at_point_impl(3, 4)
+
+    assert got == info
+    from_hwnd.assert_called_once_with(9)
+
+
+def test_snapshot_top_level_windows_skips_library_scan_and_caption_query() -> None:
+    """Enumeration must not call getAllWindows or DWM once per window."""
+    import builtins
+
+    dwm_calls = {"n": 0}
+    read_hwnds: list[int] = []
+
+    def _enum(proc, lparam) -> bool:
+        proc(11, lparam)
+        proc(22, lparam)
+        return True
+
+    def _visible(hwnd: int) -> bool:
+        return int(hwnd) != 22
+
+    def _from_hwnd(hwnd: int) -> WindowInfo:
+        read_hwnds.append(int(hwnd))
+        return _win(int(hwnd), "App")
+
+    def _dwm(*_args, **_kwargs):
+        dwm_calls["n"] += 1
+        return None
+
+    user32 = type(
+        "User32",
+        (),
+        {"EnumWindows": staticmethod(_enum), "IsWindowVisible": staticmethod(_visible)},
+    )()
+    real_import = builtins.__import__
+
+    def _import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "pygetwindow":
+            raise AssertionError("snapshot enumerated windows via pygetwindow")
+        return real_import(name, globals, locals, fromlist, level)
+
+    with patch("src.recorder.window_snapshot.ctypes.windll.user32", user32), patch(
+        "src.recorder.window_snapshot._window_info_from_hwnd",
+        side_effect=_from_hwnd,
+    ), patch(
+        "src.recorder.window_snapshot._dwm_caption_button_bounds_screen",
+        side_effect=_dwm,
+    ), patch("builtins.__import__", side_effect=_import):
+        windows = snapshot_top_level_windows()
+
+    assert [win.hwnd for win in windows] == [11]
+    assert read_hwnds == [11]
+    assert dwm_calls["n"] == 0
+    assert windows[0].caption_button_bounds is None
+
+
+def test_caption_bounds_query_dwm_only_when_missing() -> None:
+    from src.recorder.window_snapshot import caption_button_bounds_for_window
+
+    missing = _win(5, "App", left=0, top=0, width=800, height=600)
+    with patch(
+        "src.recorder.window_snapshot._hwnd_still_valid",
+        return_value=True,
+    ), patch(
+        "src.recorder.window_snapshot._dwm_caption_button_bounds_screen",
+        return_value=(700, 0, 800, 32),
+    ) as dwm:
+        assert caption_button_bounds_for_window(missing) == (700, 0, 800, 32)
+    dwm.assert_called_once_with(5, 0, 0)
+
+    stored = _win(5, "App", caption_button_bounds=(1, 2, 3, 4))
+    with patch(
+        "src.recorder.window_snapshot._dwm_caption_button_bounds_screen",
+        side_effect=AssertionError("stored bounds should skip DWM"),
+    ):
+        assert caption_button_bounds_for_window(stored) == (1, 2, 3, 4)
 
 
 def _win(
@@ -613,3 +712,109 @@ def test_settle_delay_is_longer_for_title_bar_clicks() -> None:
     win = _win(1, "App", left=0, top=400, width=800, height=400)
     # Relative to window top (y=410), not absolute screen y<=80
     assert settle_delay_for_click((100, 410), [win]) > settle_delay_for_click((100, 600), [win])
+
+
+def test_resolve_ocr_roi_local_returns_none_when_maximized() -> None:
+    from src.recorder.window_snapshot import resolve_ocr_roi_local
+
+    payload = {
+        "hwnd": 1,
+        "title": "App",
+        "rect": [10, 10, 200, 150],
+        "is_maximized": True,
+    }
+    with patch(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        return_value=None,
+    ):
+        assert (
+            resolve_ocr_roi_local(payload, image_w=1000, image_h=800) is None
+        )
+
+
+def test_resolve_ocr_roi_local_returns_none_when_coverage_high() -> None:
+    from src.recorder.window_snapshot import resolve_ocr_roi_local
+
+    payload = {
+        "hwnd": 1,
+        "title": "App",
+        "rect": [0, 0, 950, 750],
+        "is_maximized": False,
+    }
+    with patch(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        return_value=None,
+    ):
+        assert (
+            resolve_ocr_roi_local(
+                payload, image_w=1000, image_h=800, max_coverage=0.8
+            )
+            is None
+        )
+
+
+def test_resolve_ocr_roi_local_returns_clipped_rect_for_small_window() -> None:
+    from src.recorder.window_snapshot import resolve_ocr_roi_local
+
+    payload = {
+        "hwnd": 1,
+        "title": "Taskbar",
+        "rect": [0, 700, 1000, 80],
+        "is_maximized": False,
+        "is_taskbar": True,
+    }
+    with patch(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        return_value=None,
+    ):
+        roi = resolve_ocr_roi_local(payload, image_w=1000, image_h=800)
+    assert roi == (0, 700, 1000, 80)
+
+
+def test_resolve_ocr_roi_local_none_on_other_monitor_offset() -> None:
+    from src.recorder.window_snapshot import ClickWindowInfo, resolve_ocr_roi_local
+
+    info = ClickWindowInfo(
+        hwnd=1,
+        title="App",
+        process_name="app.exe",
+        left=1920,
+        top=0,
+        width=400,
+        height=300,
+        is_maximized=False,
+    )
+    with patch(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        return_value=info,
+    ):
+        # Image is monitor 0; window lives on monitor 1 → no intersection.
+        assert (
+            resolve_ocr_roi_local(
+                info.to_dict(),
+                image_w=1920,
+                image_h=1080,
+                monitor_offset=(0, 0),
+            )
+            is None
+        )
+
+
+def test_click_window_to_local_payload_subtracts_monitor_offset() -> None:
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    info = ClickWindowInfo(
+        hwnd=7,
+        title="Flyout",
+        process_name="explorer.exe",
+        left=100,
+        top=200,
+        width=300,
+        height=400,
+        is_maximized=False,
+        is_flyout=True,
+        class_name="Windows.UI.Core.CoreWindow",
+    )
+    payload = info.to_local_payload((50, 80))
+    assert payload["rect"] == [50, 120, 300, 400]
+    assert payload["is_flyout"] is True

@@ -660,12 +660,17 @@ def find_text_overlap_refine_clusters(
     x_overlap_frac: float = OVERLAP_REFINE_X_OVERLAP_FRAC,
     max_v_gap_frac: float = OVERLAP_REFINE_MAX_V_GAP_FRAC,
     tall_height_factor: float = OVERLAP_REFINE_TALL_HEIGHT_FACTOR,
+    enhance_roi: tuple[int, int, int, int] | None = None,
+    enhance_roi_pad: int = 16,
 ) -> list[list[int]]:
     """
     Return clusters of global detection indices that should be crop-refined.
 
     Includes overlapping / crossing / densely stacked text boxes, and singleton
     text boxes that are unusually tall vs the median text height.
+
+    When ``enhance_roi`` is set, keep only clusters where at least one member
+    center falls inside the padded ROI.
     """
     xyxy = np.asarray(xyxy, dtype=np.float32)
     cls = np.asarray(cls).reshape(-1)
@@ -720,9 +725,50 @@ def find_text_overlap_refine_clusters(
         if _box_height(xyxy[i]) >= tall_height_factor * median_h:
             out.append([i])
 
+    if enhance_roi is not None:
+        out = [
+            cluster
+            for cluster in out
+            if _cluster_intersects_enhance_roi(
+                xyxy, cluster, enhance_roi, pad=enhance_roi_pad
+            )
+        ]
+
     # Prefer larger clusters first; cap applied by caller.
     out.sort(key=lambda c: (-len(c), c[0]))
     return out
+
+
+def _xyxy_center_in_xywh(
+    box: np.ndarray | Sequence[float],
+    rect: tuple[int, int, int, int],
+    *,
+    pad: int = 0,
+) -> bool:
+    x0, y0, x1, y1 = (float(v) for v in box[:4])
+    cx = 0.5 * (x0 + x1)
+    cy = 0.5 * (y0 + y1)
+    rx, ry, rw, rh = (int(v) for v in rect)
+    if rw <= 0 or rh <= 0:
+        return False
+    p = max(0, int(pad))
+    return (rx - p) <= cx < (rx + rw + p) and (ry - p) <= cy < (ry + rh + p)
+
+
+def _cluster_intersects_enhance_roi(
+    xyxy: np.ndarray,
+    cluster: Sequence[int],
+    roi: tuple[int, int, int, int],
+    *,
+    pad: int = 0,
+) -> bool:
+    for idx in cluster:
+        i = int(idx)
+        if i < 0 or i >= len(xyxy):
+            continue
+        if _xyxy_center_in_xywh(xyxy[i], roi, pad=pad):
+            return True
+    return False
 
 
 def refine_overlapping_text_with_crops(
@@ -747,6 +793,8 @@ def refine_overlapping_text_with_crops(
     strip_height_factor: float = OVERLAP_REFINE_STRIP_HEIGHT_FACTOR,
     strip_overlap_frac: float = OVERLAP_REFINE_STRIP_OVERLAP_FRAC,
     merge_iou: float = TILE_MERGE_IOU_DEFAULT,
+    enhance_roi: tuple[int, int, int, int] | None = None,
+    enhance_roi_pad: int = 16,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     """
     Crop hard text clusters and re-run ``predict_crop_fn``; replace a cluster when
@@ -754,6 +802,8 @@ def refine_overlapping_text_with_crops(
 
     ``predict_crop_fn(crop_bgr) -> (xyxy, scores, cls)`` in crop-local pixels.
     Returns ``(xyxy, scores, cls, num_crops_accepted)``.
+
+    When ``enhance_roi`` is set, only clusters intersecting the padded ROI are refined.
     """
     xyxy = np.asarray(xyxy, dtype=np.float32)
     scores = np.asarray(scores, dtype=np.float32).reshape(-1)
@@ -778,6 +828,8 @@ def refine_overlapping_text_with_crops(
         x_overlap_frac=x_overlap_frac,
         max_v_gap_frac=max_v_gap_frac,
         tall_height_factor=tall_height_factor,
+        enhance_roi=enhance_roi,
+        enhance_roi_pad=enhance_roi_pad,
     )
     if not clusters:
         return xyxy, scores, cls, 0

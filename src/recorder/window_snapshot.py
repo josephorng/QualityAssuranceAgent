@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Sequence
 
 # Windows-only: enumerate top-level windows and diff state around pointer events.
-# pygetwindow may miss some UWP/Electron windows; WindowFromPoint improves targeting.
+# EnumWindows plus per-hwnd reads; WindowFromPoint improves targeting.
 
 _GA_ROOT = 2
 _MAXIMIZE_AREA_GROWTH_RATIO = 1.4
@@ -22,8 +22,30 @@ _FALLBACK_CAPTION_HEIGHT = 32
 _CAPTION_HIT_SLACK_PX = 12
 WINDOW_SETTLE_DELAY_S = 1.0
 WINDOW_SETTLE_TITLE_BAR_DELAY_S = 1.2
+# Image coverage above this skips OCR/enhance ROI gating (treat as full-frame).
+DEFAULT_OCR_ROI_MAX_COVERAGE = 0.8
 
 CaptionBounds = tuple[int, int, int, int]
+RectXywh = tuple[int, int, int, int]
+
+_TASKBAR_CLASS_NAMES = frozenset(
+    {
+        "Shell_TrayWnd",
+        "Shell_SecondaryTrayWnd",
+        "NotifyIconOverflowWindow",
+    }
+)
+# Shell / Start / search overlays that should keep their own (often untitled) rect.
+_FLYOUT_CLASS_NAMES = frozenset(
+    {
+        "Windows.UI.Core.CoreWindow",
+        "XamlExplorerHostIslandWindow",
+        "Windows.Internal.Shell.TabProxyWindow",
+        "Shell_Flyout",
+        "NetUIHWND",
+    }
+)
+_FLYOUT_TITLES = frozenset({"快顯主機"})
 
 
 @dataclass(frozen=True)
@@ -76,6 +98,101 @@ class WindowInfo:
             is_minimized=bool(raw.get("is_minimized", False)),
             is_maximized=bool(raw.get("is_maximized", False)),
             caption_button_bounds=bounds,
+        )
+
+
+@dataclass(frozen=True)
+class ClickWindowInfo:
+    """Press-time window under the cursor (screen coords) for ROI gating / replay."""
+
+    hwnd: int
+    title: str
+    process_name: str | None
+    left: int
+    top: int
+    width: int
+    height: int
+    is_maximized: bool
+    is_taskbar: bool = False
+    is_flyout: bool = False
+    class_name: str = ""
+
+    def area(self) -> int:
+        return max(0, self.width) * max(0, self.height)
+
+    def screen_rect(self) -> RectXywh:
+        return (int(self.left), int(self.top), int(self.width), int(self.height))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "hwnd": int(self.hwnd),
+            "title": self.title,
+            "process_name": self.process_name,
+            "left": int(self.left),
+            "top": int(self.top),
+            "width": int(self.width),
+            "height": int(self.height),
+            "is_maximized": bool(self.is_maximized),
+            "is_taskbar": bool(self.is_taskbar),
+            "is_flyout": bool(self.is_flyout),
+            "class_name": self.class_name,
+        }
+
+    def to_local_payload(
+        self,
+        monitor_offset: tuple[int, int] = (0, 0),
+    ) -> dict[str, Any]:
+        """Serialize with image-local ``rect`` xywh for the given monitor origin."""
+        ox, oy = int(monitor_offset[0]), int(monitor_offset[1])
+        return {
+            "hwnd": int(self.hwnd),
+            "title": self.title,
+            "process_name": self.process_name,
+            "rect": [
+                int(self.left) - ox,
+                int(self.top) - oy,
+                int(self.width),
+                int(self.height),
+            ],
+            "is_maximized": bool(self.is_maximized),
+            "is_taskbar": bool(self.is_taskbar),
+            "is_flyout": bool(self.is_flyout),
+            "class_name": self.class_name,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> ClickWindowInfo | None:
+        if not isinstance(raw, dict):
+            return None
+        rect = raw.get("rect")
+        if isinstance(rect, (list, tuple)) and len(rect) == 4:
+            left, top, width, height = (int(v) for v in rect)
+        else:
+            try:
+                left = int(raw.get("left", 0))
+                top = int(raw.get("top", 0))
+                width = int(raw.get("width", 0))
+                height = int(raw.get("height", 0))
+            except (TypeError, ValueError):
+                return None
+        hwnd_raw = raw.get("hwnd")
+        try:
+            hwnd = int(hwnd_raw) if hwnd_raw is not None else 0
+        except (TypeError, ValueError):
+            hwnd = 0
+        process_name = raw.get("process_name")
+        return cls(
+            hwnd=hwnd,
+            title=str(raw.get("title", "") or ""),
+            process_name=str(process_name) if process_name else None,
+            left=left,
+            top=top,
+            width=width,
+            height=height,
+            is_maximized=bool(raw.get("is_maximized", False)),
+            is_taskbar=bool(raw.get("is_taskbar", False)),
+            is_flyout=bool(raw.get("is_flyout", False)),
+            class_name=str(raw.get("class_name", "") or ""),
         )
 
 
@@ -199,8 +316,18 @@ def _fallback_caption_button_bounds(win: WindowInfo) -> CaptionBounds | None:
 
 
 def caption_button_bounds_for_window(win: WindowInfo) -> CaptionBounds | None:
+    """Caption strip for a title-bar hit test.
+
+    Stored bounds win. Otherwise query DWM for this hwnd, then approximate
+    from the window rectangle. Snapshots leave the field empty so enumeration
+    does not call DWM once per window.
+    """
     if win.caption_button_bounds is not None:
         return win.caption_button_bounds
+    if _hwnd_still_valid(win.hwnd):
+        live = _dwm_caption_button_bounds_screen(win.hwnd, win.left, win.top)
+        if live is not None:
+            return live
     return _fallback_caption_button_bounds(win)
 
 
@@ -244,7 +371,6 @@ def _make_window_info(
     is_minimized: bool,
     is_maximized: bool,
 ) -> WindowInfo:
-    bounds = _dwm_caption_button_bounds_screen(hwnd, left, top)
     return WindowInfo(
         hwnd=hwnd,
         title=title,
@@ -255,66 +381,58 @@ def _make_window_info(
         height=height,
         is_minimized=is_minimized,
         is_maximized=is_maximized,
-        caption_button_bounds=bounds,
-    )
-
-
-def _window_info_from_pygetwindow(w: Any) -> WindowInfo | None:
-    try:
-        hwnd = int(getattr(w, "_hWnd", 0) or 0)
-    except Exception:
-        return None
-    if hwnd == 0:
-        return None
-    title = (getattr(w, "title", None) or "").strip()
-    try:
-        left = int(w.left)
-        top = int(w.top)
-        width = int(w.width)
-        height = int(w.height)
-    except Exception:
-        left = top = width = height = 0
-    is_minimized = bool(getattr(w, "isMinimized", False)) or _is_iconic(hwnd)
-    is_maximized = bool(getattr(w, "isMaximized", False)) or _is_zoomed(hwnd)
-    return _make_window_info(
-        hwnd=hwnd,
-        title=title,
-        pid=_pid_for_hwnd(hwnd),
-        left=left,
-        top=top,
-        width=width,
-        height=height,
-        is_minimized=is_minimized,
-        is_maximized=is_maximized,
     )
 
 
 def snapshot_top_level_windows() -> list[WindowInfo]:
-    """Return a snapshot of visible top-level windows (Windows only)."""
+    """Return visible top-level windows (Windows only).
+
+    Enumerates hwnds and reads each window's title and rectangle directly.
+    Caption-button bounds are filled later, only for a title-bar hit test.
+    """
     if os.name != "nt":
         return []
+    user32 = ctypes.windll.user32
+    hwnds: list[int] = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+    def _collect(hwnd: int, _lparam: int) -> int:
+        try:
+            hwnds.append(int(hwnd or 0))
+        except Exception:
+            return 1
+        return 1
+
     try:
-        import pygetwindow as gw
+        if not user32.EnumWindows(_collect, 0):
+            return []
     except Exception:
         return []
 
     out: list[WindowInfo] = []
     seen: set[int] = set()
-    try:
-        windows = gw.getAllWindows()
-    except Exception:
-        return []
-    for w in windows:
-        info = _window_info_from_pygetwindow(w)
-        if info is None or info.hwnd in seen:
+    for hwnd in hwnds:
+        if hwnd == 0 or hwnd in seen:
             continue
-        seen.add(info.hwnd)
-        out.append(info)
+        seen.add(hwnd)
+        try:
+            visible = bool(user32.IsWindowVisible(hwnd))
+        except Exception:
+            continue
+        if not visible:
+            continue
+        info = _window_info_from_hwnd(hwnd)
+        if info is not None:
+            out.append(info)
     return out
 
 
 def window_at_point(x: int, y: int) -> WindowInfo | None:
-    """Return the root top-level window under a desktop point (Windows only)."""
+    """Return the root top-level window under a desktop point (Windows only).
+
+    Reads that hwnd directly. A full ``getAllWindows`` scan here blocks the
+    mouse hook long enough for Windows to drop the matching mouse-up.
+    """
     if os.name != "nt":
         return None
     user32 = ctypes.windll.user32
@@ -329,41 +447,7 @@ def window_at_point(x: int, y: int) -> WindowInfo | None:
     root = int(user32.GetAncestor(hwnd, _GA_ROOT))
     if root == 0:
         root = hwnd
-
-    try:
-        import pygetwindow as gw
-
-        for w in gw.getAllWindows():
-            if int(getattr(w, "_hWnd", 0) or 0) == root:
-                return _window_info_from_pygetwindow(w)
-    except Exception:
-        pass
-
-    length = user32.GetWindowTextLengthW(root)
-    buf = ctypes.create_unicode_buffer(length + 1)
-    user32.GetWindowTextW(root, buf, length + 1)
-    title = buf.value.strip()
-    try:
-        from ctypes import wintypes
-
-        rect = wintypes.RECT()
-        user32.GetWindowRect(root, ctypes.byref(rect))
-        left, top = int(rect.left), int(rect.top)
-        width = int(rect.right - rect.left)
-        height = int(rect.bottom - rect.top)
-    except Exception:
-        left = top = width = height = 0
-    return _make_window_info(
-        hwnd=root,
-        title=title,
-        pid=_pid_for_hwnd(root),
-        left=left,
-        top=top,
-        width=width,
-        height=height,
-        is_minimized=_is_iconic(root),
-        is_maximized=_is_zoomed(root),
-    )
+    return _window_info_from_hwnd(root)
 
 
 def _index_by_hwnd(windows: list[WindowInfo]) -> dict[int, WindowInfo]:
@@ -864,3 +948,255 @@ def format_window_change_hint(change: WindowStateChange | dict[str, Any] | None)
             f"title={title!r}, confidence={confidence}"
         )
     return f"action={action}, title={title!r}, confidence={confidence}"
+
+
+def _window_class_name(hwnd: int) -> str:
+    if os.name != "nt" or hwnd == 0:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(256)
+        ctypes.windll.user32.GetClassNameW(int(hwnd), buf, 256)
+        return str(buf.value or "")
+    except Exception:
+        return ""
+
+
+def _process_name_for_pid(pid: int | None) -> str | None:
+    if os.name != "nt" or pid is None or int(pid) <= 0:
+        return None
+    try:
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid)
+        )
+        if not handle:
+            return None
+        try:
+            size = ctypes.c_ulong(260)
+            buf = ctypes.create_unicode_buffer(size.value)
+            ok = ctypes.windll.kernel32.QueryFullProcessImageNameW(
+                handle, 0, buf, ctypes.byref(size)
+            )
+            if not ok:
+                return None
+            path = str(buf.value or "").strip()
+            if not path:
+                return None
+            return os.path.basename(path)
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+    except Exception:
+        return None
+
+
+def _is_taskbar_class(class_name: str) -> bool:
+    return class_name in _TASKBAR_CLASS_NAMES
+
+
+def _is_flyout_window(*, class_name: str, title: str) -> bool:
+    if title.strip() in _FLYOUT_TITLES:
+        return True
+    return class_name in _FLYOUT_CLASS_NAMES
+
+
+def _click_window_from_window_info(win: WindowInfo) -> ClickWindowInfo:
+    class_name = _window_class_name(win.hwnd)
+    title = win.title or ""
+    return ClickWindowInfo(
+        hwnd=int(win.hwnd),
+        title=title,
+        process_name=_process_name_for_pid(win.pid),
+        left=int(win.left),
+        top=int(win.top),
+        width=int(win.width),
+        height=int(win.height),
+        is_maximized=bool(win.is_maximized),
+        is_taskbar=_is_taskbar_class(class_name),
+        is_flyout=_is_flyout_window(class_name=class_name, title=title),
+        class_name=class_name,
+    )
+
+
+def _hwnd_still_valid(hwnd: int) -> bool:
+    if os.name != "nt" or hwnd == 0:
+        return False
+    try:
+        return bool(ctypes.windll.user32.IsWindow(int(hwnd)))
+    except Exception:
+        return False
+
+
+def _window_info_from_hwnd(hwnd: int) -> WindowInfo | None:
+    if not _hwnd_still_valid(hwnd):
+        return None
+    user32 = ctypes.windll.user32
+    length = user32.GetWindowTextLengthW(int(hwnd))
+    buf = ctypes.create_unicode_buffer(length + 1)
+    user32.GetWindowTextW(int(hwnd), buf, length + 1)
+    title = buf.value.strip()
+    try:
+        from ctypes import wintypes
+
+        rect = wintypes.RECT()
+        user32.GetWindowRect(int(hwnd), ctypes.byref(rect))
+        left, top = int(rect.left), int(rect.top)
+        width = int(rect.right - rect.left)
+        height = int(rect.bottom - rect.top)
+    except Exception:
+        return None
+    return _make_window_info(
+        hwnd=int(hwnd),
+        title=title,
+        pid=_pid_for_hwnd(int(hwnd)),
+        left=left,
+        top=top,
+        width=width,
+        height=height,
+        is_minimized=_is_iconic(int(hwnd)),
+        is_maximized=_is_zoomed(int(hwnd)),
+    )
+
+
+def resolve_click_window(x: int, y: int) -> ClickWindowInfo | None:
+    """Return the press-time window under ``(x, y)`` for ROI / replay matching.
+
+    Uses :func:`window_at_point` (root under the point). Taskbar and shell flyouts
+    keep their own rects — do not replace with a later Explorer/owner window.
+    """
+    win = window_at_point(int(x), int(y))
+    if win is None:
+        return None
+    return _click_window_from_window_info(win)
+
+
+def find_matching_click_window(
+    click_window: ClickWindowInfo | dict[str, Any] | None,
+) -> ClickWindowInfo | None:
+    """Prefer a live match for a recorded ``click_window``; else ``None``."""
+    info = (
+        click_window
+        if isinstance(click_window, ClickWindowInfo)
+        else ClickWindowInfo.from_dict(click_window) if isinstance(click_window, dict) else None
+    )
+    if info is None:
+        return None
+
+    if info.hwnd and _hwnd_still_valid(info.hwnd):
+        live = _window_info_from_hwnd(info.hwnd)
+        if live is not None:
+            matched = _click_window_from_window_info(live)
+            # Keep recorded taskbar/flyout flags when class lookup is noisy.
+            if info.is_taskbar or info.is_flyout:
+                matched = ClickWindowInfo(
+                    hwnd=matched.hwnd,
+                    title=matched.title or info.title,
+                    process_name=matched.process_name or info.process_name,
+                    left=matched.left,
+                    top=matched.top,
+                    width=matched.width,
+                    height=matched.height,
+                    is_maximized=matched.is_maximized,
+                    is_taskbar=info.is_taskbar or matched.is_taskbar,
+                    is_flyout=info.is_flyout or matched.is_flyout,
+                    class_name=matched.class_name or info.class_name,
+                )
+            return matched
+
+    # Fall back: same process + title among top-level windows.
+    title_key = _normalize_title(info.title)
+    process_name = (info.process_name or "").lower()
+    best: ClickWindowInfo | None = None
+    best_area_delta: int | None = None
+    for win in snapshot_top_level_windows():
+        if title_key and _normalize_title(win.title) != title_key:
+            continue
+        live = _click_window_from_window_info(win)
+        if process_name:
+            live_proc = (live.process_name or "").lower()
+            if live_proc and live_proc != process_name:
+                continue
+        delta = abs(live.area() - info.area())
+        if best is None or best_area_delta is None or delta < best_area_delta:
+            best = live
+            best_area_delta = delta
+    return best
+
+
+def _clip_xywh_to_image(
+    rect: RectXywh,
+    *,
+    image_w: int,
+    image_h: int,
+) -> RectXywh | None:
+    x, y, w, h = (int(v) for v in rect)
+    x2 = x + w
+    y2 = y + h
+    x = max(0, min(x, image_w))
+    y = max(0, min(y, image_h))
+    x2 = max(0, min(x2, image_w))
+    y2 = max(0, min(y2, image_h))
+    w = x2 - x
+    h = y2 - y
+    if w <= 0 or h <= 0:
+        return None
+    return (x, y, w, h)
+
+
+def resolve_ocr_roi_local(
+    click_window: ClickWindowInfo | dict[str, Any] | None,
+    *,
+    image_w: int,
+    image_h: int,
+    monitor_offset: tuple[int, int] = (0, 0),
+    max_coverage: float = DEFAULT_OCR_ROI_MAX_COVERAGE,
+) -> RectXywh | None:
+    """Image-local xywh ROI for OCR/enhance gating, or ``None`` to leave ungated.
+
+    Prefers a live window match (screen rect → local via ``monitor_offset``).
+    Falls back to the recorded local ``rect`` / screen fields. Returns ``None`` when
+    maximized, coverage ≥ ``max_coverage``, or the window does not intersect the image.
+    """
+    if click_window is None or image_w <= 0 or image_h <= 0:
+        return None
+
+    info = (
+        click_window
+        if isinstance(click_window, ClickWindowInfo)
+        else ClickWindowInfo.from_dict(click_window)
+    )
+    if info is None:
+        return None
+
+    ox, oy = int(monitor_offset[0]), int(monitor_offset[1])
+    live = find_matching_click_window(info)
+    if live is not None:
+        if live.is_maximized:
+            return None
+        local = (
+            int(live.left) - ox,
+            int(live.top) - oy,
+            int(live.width),
+            int(live.height),
+        )
+    else:
+        if info.is_maximized:
+            return None
+        # Recorded payload may already be image-local (``rect``) with offset (0,0),
+        # or screen-space left/top when rebuilt without going through to_local_payload.
+        if isinstance(click_window, dict) and isinstance(click_window.get("rect"), (list, tuple)):
+            local = info.screen_rect()
+        else:
+            local = (
+                int(info.left) - ox,
+                int(info.top) - oy,
+                int(info.width),
+                int(info.height),
+            )
+
+    clipped = _clip_xywh_to_image(local, image_w=image_w, image_h=image_h)
+    if clipped is None:
+        return None
+    coverage = (clipped[2] * clipped[3]) / float(image_w * image_h)
+    if coverage >= float(max_coverage):
+        return None
+    return clipped

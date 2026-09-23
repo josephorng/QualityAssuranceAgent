@@ -169,6 +169,7 @@ def key(
 async def move_mouse(
     instruction: str,
     nearby_objects: list[str] | None = None,
+    click_window: dict | None = None,
 ):
     '''
     Take a screenshot, detect UI targets (text, element, input, scrollbar), and move
@@ -185,12 +186,15 @@ async def move_mouse(
     Undirected labels are fine only when the goal has no side
     (e.g. ["「Edge」圖示", "「Copilot」圖示"]). Prefer this over embedding
     （附近有…） comments inside instruction.
+    click_window: optional press-time window payload from recording (local rect) used
+    to gate OCR/enhance to that window during replay.
     '''
     duration: float = 0.0
     result = await _move_mouse(
         instruction=instruction,
         nearby_objects=nearby_objects,
         duration=duration,
+        click_window=click_window,
     )
     result["instruction"] = instruction
     return result

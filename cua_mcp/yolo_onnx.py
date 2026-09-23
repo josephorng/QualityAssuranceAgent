@@ -260,6 +260,8 @@ def run_yolo_onnx_end2end(
     merge_same_class_iou_threshold: float = DEFAULT_MERGE_SAME_CLASS_IOU_THRESHOLD,
     overlap_refine: bool = OVERLAP_REFINE_DEFAULT,
     line_cut: bool = LINE_CUT_DEFAULT,
+    enhance_roi: tuple[int, int, int, int] | None = None,
+    enhance_roi_pad: int = 16,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Preprocess ``bgr``, run YOLOv26 end2end via Triton, and return
@@ -282,6 +284,7 @@ def run_yolo_onnx_end2end(
     (overlap / crossing / tall multi-line) are crop-refined once on the full-image result
     via :func:`~cua_mcp.yolo_divide_conquer.refine_overlapping_text_with_crops`. Crop
     re-predict uses the same recursive detector with refine disabled to avoid recursion.
+    First YOLO (Stages 1–2) stays full-frame; Stage 3/4 may be limited to ``enhance_roi``.
 
     When ``line_cut`` is True and ``text`` is among ``class_ids``, tall ``text`` boxes that
     still hold multiple lines are split at row-profile valleys by
@@ -330,6 +333,8 @@ def run_yolo_onnx_end2end(
             predict_crop_fn=_predict_crop,
             text_class_id=YOLO_CLASS_TEXT,
             merge_iou=merge_same_class_iou_threshold,
+            enhance_roi=enhance_roi,
+            enhance_roi_pad=enhance_roi_pad,
         )
         if refine_crop_count > 0:
             _log_yolo_profile(f"overlap-refine×{refine_crop_count}")
@@ -345,6 +350,8 @@ def run_yolo_onnx_end2end(
             scores_f,
             cls_f,
             text_class_id=YOLO_CLASS_TEXT,
+            enhance_roi=enhance_roi,
+            enhance_roi_pad=enhance_roi_pad,
         )
         if line_cut_count > 0:
             _log_yolo_profile(f"line-cut×{line_cut_count}")

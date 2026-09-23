@@ -411,3 +411,34 @@ def test_run_yolo_runs_line_cut_when_overlap_refine_accepts_nothing(
         line_cut=True,
     )
     assert calls["n"] == 1
+
+
+def test_cut_multiline_skips_outside_enhance_roi():
+    bgr = _frame_with_tall_text_box()
+    xyxy, scores, cls = _tall_box_detections()
+    # Tall box is around x=10..; put ROI far away so center is outside.
+    out_xy, _out_sc, _out_cls, cut = cut_multiline_text_boxes(
+        bgr,
+        xyxy,
+        scores,
+        cls,
+        enhance_roi=(400, 400, 50, 50),
+        enhance_roi_pad=0,
+    )
+    assert cut == 0
+    assert np.array_equal(out_xy, xyxy)
+
+
+def test_cut_multiline_still_cuts_inside_enhance_roi():
+    bgr = _frame_with_tall_text_box()
+    xyxy, scores, cls = _tall_box_detections()
+    out_xy, _out_sc, _out_cls, cut = cut_multiline_text_boxes(
+        bgr,
+        xyxy,
+        scores,
+        cls,
+        enhance_roi=(0, 0, 200, 200),
+        enhance_roi_pad=0,
+    )
+    assert cut == 1
+    assert len(out_xy) == 4

@@ -183,8 +183,13 @@ def _nearby_object_phrases(instruction: str) -> list[str] | None:
     return phrases or None
 
 
-def _move_mouse_call(instruction: str, *, target: str | None = None) -> dict[str, Any]:
-    """Build move_mouse with a short target + optional nearby_objects."""
+def _move_mouse_call(
+    instruction: str,
+    *,
+    target: str | None = None,
+    click_window: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build move_mouse with a short target + optional nearby_objects / click_window."""
     resolved = (target if target is not None else _short_move_target(instruction)).strip()
     if not resolved:
         resolved = instruction.strip()
@@ -192,6 +197,8 @@ def _move_mouse_call(instruction: str, *, target: str | None = None) -> dict[str
     nearby = _nearby_object_phrases(instruction)
     if nearby:
         args["nearby_objects"] = nearby
+    if click_window is not None:
+        args["click_window"] = click_window
     return _call("move_mouse", **args)
 
 
@@ -202,7 +209,9 @@ def _compile_click_family(
         return None
     if not _short_move_target(instruction) and not instruction.strip():
         return None
-    calls: list[dict[str, Any]] = [_move_mouse_call(instruction)]
+    calls: list[dict[str, Any]] = [
+        _move_mouse_call(instruction, click_window=event.click_window)
+    ]
     modifiers = _modifier_list(event.modifiers)
     if event.kind == "hold":
         seconds = (
@@ -292,7 +301,13 @@ def _compile_scroll(event: RecordedEvent, instruction: str) -> list[dict[str, An
     calls: list[dict[str, Any]] = []
     hover = _SCROLL_HOVER_RE.match(instruction.strip())
     if hover:
-        calls.append(_move_mouse_call(instruction, target=hover.group(1).strip()))
+        calls.append(
+            _move_mouse_call(
+                instruction,
+                target=hover.group(1).strip(),
+                click_window=event.click_window,
+            )
+        )
     calls.append(_call("scroll", clicks=clicks, instruction=instruction))
     return calls
 

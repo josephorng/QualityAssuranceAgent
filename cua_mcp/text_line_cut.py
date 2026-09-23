@@ -291,6 +291,8 @@ def cut_multiline_text_boxes(
     text_class_id: int = LINE_CUT_TEXT_CLASS_ID,
     tall_height_factor: float = LINE_CUT_TALL_HEIGHT_FACTOR,
     max_boxes: int = LINE_CUT_MAX_BOXES,
+    enhance_roi: tuple[int, int, int, int] | None = None,
+    enhance_roi_pad: int = 16,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     """
     Split tall ``text`` boxes at row-profile valleys.
@@ -300,6 +302,9 @@ def cut_multiline_text_boxes(
     bands are disjoint in Y with no vertical padding, so the downstream per-class merge
     (``cua_mcp.geometry.merge_same_line_boxes``) cannot read two bands as one line and
     fuse the lines we just split.
+
+    When ``enhance_roi`` is set, only boxes whose center lies in the padded ROI are
+    considered for cutting; others pass through unchanged.
 
     Returns ``(xyxy, scores, cls, num_boxes_cut)``.
     """
@@ -338,6 +343,10 @@ def cut_multiline_text_boxes(
             int(cls[i]) == int(text_class_id)
             and attempted < int(max_boxes)
             and (float(box[3]) - float(box[1])) >= min_tall_h
+            and (
+                enhance_roi is None
+                or _xyxy_center_in_enhance_roi(box, enhance_roi, pad=enhance_roi_pad)
+            )
         ):
             x0 = int(max(0, np.floor(float(box[0]))))
             y0 = int(max(0, np.floor(float(box[1]))))
@@ -379,3 +388,19 @@ def cut_multiline_text_boxes(
         np.asarray(out_cls, dtype=np.int32),
         cut_count,
     )
+
+
+def _xyxy_center_in_enhance_roi(
+    box: np.ndarray,
+    rect: tuple[int, int, int, int],
+    *,
+    pad: int = 0,
+) -> bool:
+    x0, y0, x1, y1 = (float(v) for v in box[:4])
+    cx = 0.5 * (x0 + x1)
+    cy = 0.5 * (y0 + y1)
+    rx, ry, rw, rh = (int(v) for v in rect)
+    if rw <= 0 or rh <= 0:
+        return False
+    p = max(0, int(pad))
+    return (rx - p) <= cx < (rx + rw + p) and (ry - p) <= cy < (ry + rh + p)

@@ -13,6 +13,25 @@ def clip_box(x: int, y: int, w: int, h: int, img_w: int, img_h: int) -> tuple[in
     return x, y, w, h
 
 
+def point_in_rect_xywh(
+    x: float,
+    y: float,
+    rect: tuple[int, int, int, int],
+    *,
+    pad: int = 0,
+) -> bool:
+    """Return True when ``(x, y)`` lies in the padded ``(rx, ry, rw, rh)`` rect.
+
+    Half-open on the right/bottom edges (same convention as other xywh hit tests):
+    ``rx - pad <= x < rx + rw + pad`` and ``ry - pad <= y < ry + rh + pad``.
+    """
+    rx, ry, rw, rh = (int(v) for v in rect)
+    if rw <= 0 or rh <= 0:
+        return False
+    p = max(0, int(pad))
+    return (rx - p) <= x < (rx + rw + p) and (ry - p) <= y < (ry + rh + p)
+
+
 def boxes_overlap(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
     ax, ay, aw, ah = a
     bx, by, bw, bh = b

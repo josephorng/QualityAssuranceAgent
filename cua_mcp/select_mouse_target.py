@@ -24,6 +24,7 @@ from cua_mcp.geometry import (
     iou_xywh,
     merge_overlapping_boxes,
     merge_same_line_boxes,
+    point_in_rect_xywh,
 )
 from cua_mcp.input_box_rectangles import merge_yolo_inputs_with_line_rectangles
 from cua_mcp.instruction_offset import parse_mouse_target_instruction
@@ -81,6 +82,9 @@ from cua_mcp.yolo_onnx import (
 from src.common.monitor_prompt import selected_eye_monitor_indices
 from src.common.run_state import RunStateManager, get_run_state_manager, ts_name
 from src.eye.capture import active_monitor_offset, grab_monitor_bgr, monitor_details
+
+
+DEFAULT_OCR_ROI_PAD = 16
 
 
 def _run_manager() -> RunStateManager:
@@ -627,6 +631,19 @@ def _build_move_mouse_timing(
     }
 
 
+def _bbox_center_in_ocr_roi(
+    bbox: tuple[int, int, int, int],
+    ocr_roi: tuple[int, int, int, int] | None,
+    *,
+    pad: int = DEFAULT_OCR_ROI_PAD,
+) -> bool:
+    """True when bbox center is inside padded ``ocr_roi`` (or ROI is unset)."""
+    if ocr_roi is None:
+        return True
+    x, y, w, h = (int(v) for v in bbox)
+    return point_in_rect_xywh(x + w * 0.5, y + h * 0.5, ocr_roi, pad=pad)
+
+
 def _detect_mouse_targets_from_bgr(
     bgr: np.ndarray,
     *,
@@ -637,6 +654,8 @@ def _detect_mouse_targets_from_bgr(
     timing_out: dict[str, float] | None = None,
     ocr_class_ids: frozenset[int] | set[int] | None = None,
     refine_inputs: bool = True,
+    ocr_roi: tuple[int, int, int, int] | None = None,
+    ocr_roi_pad: int = DEFAULT_OCR_ROI_PAD,
 ) -> list[UiDetection]:
     """Detect mouse-target UI elements on ``bgr`` via YOLO + OCR.
 
@@ -662,6 +681,10 @@ def _detect_mouse_targets_from_bgr(
 
     ``ocr_class_ids`` limits which YOLO classes are OCR'd (default: text +
     element). ``refine_inputs=False`` skips input line-rectangle merge.
+
+    When ``ocr_roi`` is set (same geometry as YOLO ``enhance_roi``), Stage 3/4
+    enhance, input refine, OCR, and candidate admission are limited to boxes
+    whose centers fall in the padded ROI. First YOLO stays full-frame.
     """
     if ocr_class_ids is None:
         ocr_wanted = frozenset({YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT})
@@ -676,6 +699,8 @@ def _detect_mouse_targets_from_bgr(
             bgr,
             class_ids=set(MOUSE_TARGET_CLASS_IDS),
             conf_threshold=yolo_conf_threshold,
+            enhance_roi=ocr_roi,
+            enhance_roi_pad=ocr_roi_pad,
         )
     except Exception as exc:
         _log_info(f"move_mouse YOLO failed: {type(exc).__name__}: {exc}")
@@ -701,6 +726,38 @@ def _detect_mouse_targets_from_bgr(
                 input_boxes.append(bbox)
             else:
                 other_non_ocr.append((bbox, cls_id))
+
+    roi_pad = int(ocr_roi_pad)
+    text_before_roi = len(text_boxes)
+    element_before_roi = len(element_boxes)
+    input_before_roi = len(input_boxes)
+    other_before_roi = len(other_non_ocr)
+    if ocr_roi is not None:
+        text_boxes = [
+            b for b in text_boxes if _bbox_center_in_ocr_roi(b, ocr_roi, pad=roi_pad)
+        ]
+        element_boxes = [
+            b for b in element_boxes if _bbox_center_in_ocr_roi(b, ocr_roi, pad=roi_pad)
+        ]
+        input_boxes = [
+            b for b in input_boxes if _bbox_center_in_ocr_roi(b, ocr_roi, pad=roi_pad)
+        ]
+        other_non_ocr = [
+            (b, c)
+            for b, c in other_non_ocr
+            if _bbox_center_in_ocr_roi(b, ocr_roi, pad=roi_pad)
+        ]
+        skipped_boxes = (
+            (text_before_roi - len(text_boxes))
+            + (element_before_roi - len(element_boxes))
+            + (input_before_roi - len(input_boxes))
+            + (other_before_roi - len(other_non_ocr))
+        )
+        _log_info(
+            "move_mouse ocr_roi gate "
+            f"roi={tuple(int(v) for v in ocr_roi)} pad={roi_pad} "
+            f"boxes_dropped={skipped_boxes}"
+        )
 
     line_started = time.perf_counter()
     line_elapsed = 0.0
@@ -731,6 +788,13 @@ def _detect_mouse_targets_from_bgr(
             for bbox in pre_merge_inputs:
                 if bbox not in merged_inputs:
                     original_input_bboxes_out.append(bbox)
+        # Re-admit only in-ROI merged inputs when gating.
+        if ocr_roi is not None:
+            input_boxes = [
+                b
+                for b in input_boxes
+                if _bbox_center_in_ocr_roi(b, ocr_roi, pad=roi_pad)
+            ]
         line_elapsed = time.perf_counter() - line_started
     else:
         line_elapsed = time.perf_counter() - line_started
@@ -846,6 +910,7 @@ def _detect_mouse_targets_from_bgr(
         f"yolo_boxes={0 if xyxy.size == 0 else len(xyxy)} "
         f"input_boxes={len(input_boxes)} ocr_boxes={len(ocr_boxes)} "
         f"candidates={len(candidates)} refine_inputs={refine_inputs}"
+        + (f" ocr_roi={tuple(int(v) for v in ocr_roi)}" if ocr_roi is not None else "")
     )
     if timing_out is not None:
         timing_out.clear()
@@ -857,7 +922,6 @@ def _detect_mouse_targets_from_bgr(
                 "total_s": total_elapsed,
             }
         )
-
     return candidates
 
 
@@ -1494,6 +1558,8 @@ def _detections_for_captured_monitor(
     timing_out: dict[str, float] | None = None,
     ocr_class_ids: frozenset[int] | set[int] | None = None,
     refine_inputs: bool = True,
+    ocr_roi: tuple[int, int, int, int] | None = None,
+    ocr_roi_pad: int = DEFAULT_OCR_ROI_PAD,
 ) -> list[UiDetection]:
     """YOLO+OCR on one monitor image, then map boxes into virtual-desktop coords."""
     left, top = active_monitor_offset(monitor_index)
@@ -1504,6 +1570,8 @@ def _detections_for_captured_monitor(
         timing_out=timing_out,
         ocr_class_ids=ocr_class_ids,
         refine_inputs=refine_inputs,
+        ocr_roi=ocr_roi,
+        ocr_roi_pad=ocr_roi_pad,
     )
     return [_offset_detection(d, left, top) for d in local_candidates]
 
@@ -1564,6 +1632,8 @@ def _collect_monitor_detections(
     timing_out: dict[str, float] | None = None,
     ocr_class_ids: frozenset[int] | set[int] | None = None,
     refine_inputs: bool = True,
+    click_window: dict[str, Any] | None = None,
+    ocr_roi_pad: int = DEFAULT_OCR_ROI_PAD,
 ) -> list[UiDetection]:
     """
     Run YOLO+OCR on captured monitors.
@@ -1573,6 +1643,9 @@ def _collect_monitor_detections(
 
     When ``timing_out`` is set, accumulates per-monitor ``yolo_s`` / ``line_s`` /
     ``ocr_s`` / ``total_s`` (sums across monitors).
+
+    When ``click_window`` is set, each monitor resolves its own ``ocr_roi`` via
+    :func:`resolve_ocr_roi_local` (missing / maximized / huge → ungated).
     """
     if not captured:
         if timing_out is not None:
@@ -1581,6 +1654,20 @@ def _collect_monitor_detections(
                 {"yolo_s": 0.0, "line_s": 0.0, "ocr_s": 0.0, "total_s": 0.0}
             )
         return []
+
+    def _roi_for_monitor(monitor_index: int, bgr: np.ndarray) -> tuple[int, int, int, int] | None:
+        if click_window is None:
+            return None
+        # Lazy import: avoid cua_mcp ↔ recorder circular import at module load.
+        from src.recorder.window_snapshot import resolve_ocr_roi_local
+
+        img_h, img_w = bgr.shape[:2]
+        return resolve_ocr_roi_local(
+            click_window,
+            image_w=img_w,
+            image_h=img_h,
+            monitor_offset=active_monitor_offset(monitor_index),
+        )
 
     if len(captured) == 1:
         monitor_index, bgr = captured[0]
@@ -1591,6 +1678,8 @@ def _collect_monitor_detections(
             timing_out=timing_out,
             ocr_class_ids=ocr_class_ids,
             refine_inputs=refine_inputs,
+            ocr_roi=_roi_for_monitor(monitor_index, bgr),
+            ocr_roi_pad=ocr_roi_pad,
         )
 
     all_detections: list[UiDetection] = []
@@ -1607,6 +1696,8 @@ def _collect_monitor_detections(
             timing_out=local_timing,
             ocr_class_ids=ocr_class_ids,
             refine_inputs=refine_inputs,
+            ocr_roi=_roi_for_monitor(monitor_index, bgr),
+            ocr_roi_pad=ocr_roi_pad,
         )
         return dets, local_timing
 
@@ -1808,6 +1899,7 @@ def _capture_and_detect_mouse_candidates(
     *,
     ocr_class_ids: frozenset[int] | set[int] | None = None,
     refine_inputs: bool = True,
+    click_window: dict[str, Any] | None = None,
 ) -> tuple[
     list[int],
     list[str],
@@ -1860,6 +1952,7 @@ def _capture_and_detect_mouse_candidates(
         timing_out=vision_timing,
         ocr_class_ids=ocr_class_ids,
         refine_inputs=refine_inputs,
+        click_window=click_window,
     )
     detections = _sort_detections_reading_order(all_detections)
     _log_info(f"move_mouse yolo_candidates={len(detections)}")
@@ -1883,6 +1976,7 @@ async def find_mouse_point(
     *,
     nearby_objects: list[str] | None = None,
     yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
+    click_window: dict[str, Any] | None = None,
 ) -> tuple[int, int, dict[str, Any]] | None:
     """
     Capture selected monitor(s), build YOLO+OCR candidates, filter and pick via LLM.
@@ -1918,6 +2012,7 @@ async def find_mouse_point(
             yolo_conf_threshold,
             ocr_class_ids=vision_plan.ocr_class_ids,
             refine_inputs=vision_plan.refine_inputs,
+            click_window=click_window,
         )
         return result, time.perf_counter() - started
 
@@ -2174,6 +2269,7 @@ async def resolve_mouse_point(
     *,
     nearby_objects: list[str] | None = None,
     yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
+    click_window: dict[str, Any] | None = None,
 ) -> tuple[int, int, dict[str, Any]]:
     """
     Capture selected monitor(s), build YOLO+OCR candidates, filter and pick via LLM.
@@ -2190,6 +2286,7 @@ async def resolve_mouse_point(
         instruction,
         nearby_objects=nearby_objects,
         yolo_conf_threshold=yolo_conf_threshold,
+        click_window=click_window,
     )
     if found is None:
         raise ValueError("No mouse target matched the instruction on selected monitor(s).")

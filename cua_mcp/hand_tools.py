@@ -394,7 +394,7 @@ async def _llm_pick_window_indices(
     out = _parse_json_object_from_llm(content)
     raw = out.get("indices")
     if not isinstance(raw, list):
-        raise ValueError("ollama JSON must contain a non-empty list field \"indices\"")
+        raise ValueError('ollama JSON must contain a list field "indices"')
     indices: list[int] = []
     seen: set[int] = set()
     for item in raw:
@@ -406,9 +406,18 @@ async def _llm_pick_window_indices(
         if idx not in seen:
             seen.add(idx)
             indices.append(idx)
-    if not indices:
-        raise ValueError("ollama returned empty indices list")
     return indices
+
+
+def _targets_or_no_match(
+    needle: str,
+    candidates: list[tuple[Any, str]],
+    idxs: list[int],
+    selection_mode: str,
+) -> tuple[list[tuple[Any, str]], str]:
+    if not idxs:
+        raise ValueError(f"no window matched {needle!r}")
+    return [candidates[i] for i in idxs], selection_mode
 
 
 async def _select_target_windows(
@@ -420,7 +429,8 @@ async def _select_target_windows(
     Return windows to act on and how they were chosen.
 
     Single substring match -> no LLM. Zero or multiple substring matches ->
-    LLM returns one or more indices into the relevant candidate list.
+    LLM returns indices into the relevant candidate list. An empty selection
+    fails the tool instead of acting on a guessed window.
     """
     needle = (window_title_contains or "").strip()
     if not needle:
@@ -446,14 +456,18 @@ async def _select_target_windows(
             instruction=instruction,
             action=action,
         )
-        return [candidates[i] for i in idxs], "ollama_no_substring_match"
+        return _targets_or_no_match(
+            needle, candidates, idxs, "ollama_no_substring_match"
+        )
     idxs = await _llm_pick_window_indices(
         needle,
         substring_matches,
         instruction=instruction,
         action=action,
     )
-    return [substring_matches[i] for i in idxs], "ollama_disambiguate"
+    return _targets_or_no_match(
+        needle, substring_matches, idxs, "ollama_disambiguate"
+    )
 
 
 async def maximize_windows(
@@ -465,9 +479,9 @@ async def maximize_windows(
 
     First tries case-insensitive substring match on window titles. If exactly one
     window matches, it is used. If none or several match, asks the LLM (brain_lm)
-    to pick one or more indices from the relevant candidate list. For those
-    LLM calls, ``instruction`` (if non-empty) is included in the prompt as extra
-    disambiguation context.
+    to pick indices from the relevant candidate list. An empty selection raises
+    instead of acting on a guessed window. For those LLM calls, ``instruction``
+    (if non-empty) is included in the prompt as extra disambiguation context.
     """
     needle = (window_title_contains or "").strip()
     if not needle:
@@ -526,7 +540,8 @@ async def close_windows(
 
     First tries case-insensitive substring match on window titles. If exactly one
     window matches, it is used. If none or several match, asks the LLM (brain_lm)
-    to pick one or more indices from the relevant candidate list.
+    to pick indices from the relevant candidate list. An empty selection raises
+    instead of closing a guessed window.
     """
     needle = (window_title_contains or "").strip()
     if not needle:

@@ -459,9 +459,11 @@ PROMPTS: dict[str, list[dict[str, Any]]] = {
                 "Additional context from the operator (use to disambiguate):\n{instruction}\n\n"
                 "From the numbered list, choose every window that matches the user's intent. "
                 "Use a single-element list when only one window is appropriate. "
-                "Prefer main application windows over tiny dialogs or tool windows when unclear.\n"
+                "When several windows match and the request is ambiguous, prefer main application windows over tiny dialogs or tool windows. "
+                "If no listed window matches, return an empty list. "
+                "Do not substitute a different window that only shares an application name or a partial token.\n"
                 'Return JSON only in this exact shape: {{"indices": [<int>, ...]}}\n'
-                "Use 0-based indices from the list.\n\n"
+                "Use 0-based indices from the list. An empty list means no window matches.\n\n"
                 "Windows:\n{windows_list}\n"
             ),
             "models": ["gemma4:e2b", "gemma3:4b"],

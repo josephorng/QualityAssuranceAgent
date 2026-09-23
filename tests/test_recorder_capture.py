@@ -180,7 +180,7 @@ def test_event_timestamp_is_captured_before_worker_persistence(tmp_path) -> None
     ):
         session.start()
         try:
-            with patch.object(session, "_queue_event", side_effect=captured_items.append), patch(
+            with patch.object(session, "_enqueue", side_effect=captured_items.append), patch(
                 "src.recorder.capture.utc_now_iso",
                 return_value="2026-07-30T03:00:03.125000+00:00",
             ):
@@ -191,9 +191,10 @@ def test_event_timestamp_is_captured_before_worker_persistence(tmp_path) -> None
         finally:
             session.stop()
 
-    assert len(captured_items) == 1
-    assert captured_items[0].timestamp_utc == "2026-07-30T03:00:03.125000+00:00"
-    assert captured_items[0].kind == "right_click"
+    clicks = [item for item in captured_items if getattr(item, "kind", None) == "right_click"]
+    assert len(clicks) == 1
+    assert clicks[0].timestamp_utc == "2026-07-30T03:00:03.125000+00:00"
+    assert clicks[0].kind == "right_click"
 
 
 def test_typing_burst_coalesced_into_one_event(tmp_path) -> None:
@@ -232,7 +233,8 @@ def test_typing_burst_coalesced_into_one_event(tmp_path) -> None:
             for ch in "chrome":
                 session._on_key_press(KeyCode.from_char(ch))
             session.wait_for_deferred_work()
-            assert before_dests == ["event_001.jpeg"]
+            event_dests = [name for name in before_dests if not name.startswith("_pre_click_")]
+            assert event_dests == ["event_001.jpeg"]
             assert end_captures == []
             session.stop()
         finally:
@@ -1126,7 +1128,8 @@ def test_text_input_stores_before_on_first_key_and_after_on_flush(tmp_path) -> N
             if session.is_active():
                 session.stop()
 
-    assert dests[0] == "event_001.jpeg"
+    event_dests = [name for name in dests if not name.startswith("_pre_click_")]
+    assert event_dests[0] == "event_001.jpeg"
     assert "event_001_end.jpeg" in dests
     raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
     assert raw["text"] == "ab"
@@ -1169,7 +1172,11 @@ def test_text_input_reuses_pre_type_screenshot_from_prior_click(tmp_path) -> Non
             if session.is_active():
                 session.stop()
 
-    names = [name for _, _, name in captures]
+    names = [
+        name
+        for _, _, name in captures
+        if not name.startswith("_pre_click_")
+    ]
     assert "_pending_pre_type.jpeg" in names
     # Typing before-shot must reuse the pending file (no live event_002.jpeg grab).
     assert "event_002.jpeg" not in names
@@ -1213,7 +1220,8 @@ def test_text_input_falls_back_to_live_before_without_pre_type(tmp_path) -> None
                 session.stop()
 
     assert "_pending_pre_type.jpeg" not in dests
-    assert dests[0] == "event_001.jpeg"
+    event_dests = [name for name in dests if not name.startswith("_pre_click_")]
+    assert event_dests[0] == "event_001.jpeg"
     raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
     assert Path(raw["screenshot_path"]).read_bytes() == b"live"
 

@@ -68,6 +68,9 @@ _PRE_KEY_SETTLE_S = 0.3
 _SETTLE_PROBE_MAX_WINDOW_S = 55.0
 # Retain every settle-probe capture under screenshots/settle_debug/ for MAD tuning.
 _SETTLE_PROBE_KEEP_DEBUG_SAMPLES = False
+# Rolling pre-click frames. The before-shot must be a file finished before the
+# hook runs; a grab queued behind window-diff sleep is already the next UI.
+_PRE_CLICK_FRAME_INTERVAL_S = 0.1
 _SETTLE_PROBE_KINDS = frozenset(
     {
         "click",
@@ -168,6 +171,8 @@ class _DeferredCaptureJob:
     duration_seconds: float | None = None
     press_seq: int | None = None
     text_event_index: int | None = None
+    # Frame whose capture finished before this hook. Pinned until the worker copies it.
+    pre_click_frame: tuple[str, int, tuple[int, int]] | None = None
     windows_before: tuple[WindowInfo, ...] | None = None
     click_window: ClickWindowInfo | None = None
     refresh_pre_type: bool = False
@@ -762,6 +767,13 @@ class RecordingSession:
         self._settle_tick_lock = threading.Lock()
         # Last settle-probe frame (path, monitor_index, monitor_offset) for next before-shot.
         self._last_settle_frame: tuple[str, int, tuple[int, int]] | None = None
+        # Newest screen grab that finished before the next input hook.
+        self._pre_click_published: tuple[str, int, tuple[int, int]] | None = None
+        self._pre_click_pins: dict[str, int] = {}
+        self._pre_click_seq: int = 0
+        self._pre_click_monitors: tuple[tuple[int, int, int, int, int], ...] = ()
+        self._pre_click_stop = threading.Event()
+        self._pre_click_thread: threading.Thread | None = None
         # Top-level windows captured with that frame; mouse-down reuses this as
         # windows_before so EnumWindows never runs on the LL hook.
         self._last_settle_windows: tuple[WindowInfo, ...] | None = None
@@ -877,6 +889,10 @@ class RecordingSession:
             self._settle_probe_timer = None
             self._last_settle_frame = None
             self._last_settle_windows = None
+            self._pre_click_published = None
+            self._pre_click_pins = {}
+            self._pre_click_seq = 0
+            self._pre_click_monitors = ()
             self._last_pointer_cursor_xy = None
             pending = self._pending_click_timer
             self._pending_click_timer = None
@@ -900,6 +916,8 @@ class RecordingSession:
             self._log(run_dir, "settle window seed timed out")
         with self._lock:
             self._accepting_input = True
+
+        self._start_pre_click_pump()
 
         self._mouse_listener = mouse.Listener(
             on_click=self._on_mouse_click,
@@ -953,6 +971,8 @@ class RecordingSession:
             pending_right_coords = self._pending_right_coords
             pending_right_down_at = self._pending_right_down_at
             self._pending_click_timer = None
+
+        self._stop_pre_click_pump()
 
         self._flush_pending_text_input()
         if pending is not None:
@@ -1061,6 +1081,7 @@ class RecordingSession:
 
         if worker is not None and worker.is_alive():
             worker.join(timeout=15)
+        self._discard_unpinned_pre_click_frame()
 
         with self._lock:
             events = list(self._events)
@@ -1243,6 +1264,7 @@ class RecordingSession:
             self._pending_click_window = click_window
             self._left_press_captures[seq] = (None, windows_before or None)
             self._left_press_click_windows[seq] = click_window
+        latched = self._latch_pre_click_frame()
         self._enqueue(
             _DeferredCaptureJob(
                 action="pending_left_press",
@@ -1250,6 +1272,7 @@ class RecordingSession:
                 press_seq=seq,
                 text_event_index=text_event_index,
                 flush_meta=text_meta,
+                pre_click_frame=latched,
             )
         )
 
@@ -1266,13 +1289,216 @@ class RecordingSession:
             self._pending_right_click_window = click_window
             self._right_press_captures[seq] = (None, windows_before or None)
             self._right_press_click_windows[seq] = click_window
+        latched = self._latch_pre_click_frame()
         self._enqueue(
             _DeferredCaptureJob(
                 action="pending_right_press",
                 cursor_xy=(x, y),
                 press_seq=seq,
+                pre_click_frame=latched,
             )
         )
+
+    def _start_pre_click_pump(self) -> None:
+        """Keep the newest finished frame so a click can latch it inside the hook."""
+        self._stop_pre_click_pump()
+        self._pre_click_stop.clear()
+        thread = threading.Thread(
+            target=self._pre_click_frame_loop,
+            name="screen-recorder-preclick",
+            daemon=True,
+        )
+        with self._lock:
+            self._pre_click_thread = thread
+        self._refresh_pre_click_monitors()
+        thread.start()
+
+    def _stop_pre_click_pump(self) -> None:
+        self._pre_click_stop.set()
+        with self._lock:
+            thread = self._pre_click_thread
+            self._pre_click_thread = None
+        if (
+            thread is not None
+            and thread.is_alive()
+            and thread is not threading.current_thread()
+        ):
+            thread.join(timeout=1.0)
+        self._discard_unpinned_pre_click_frame()
+
+    def _pre_click_frame_loop(self) -> None:
+        """Capture the monitor under the cursor until stop. Never runs on the hook."""
+        me = threading.current_thread()
+        while not self._pre_click_stop.is_set():
+            with self._lock:
+                if self._pre_click_thread is not me:
+                    return
+                run_dir = self._run_dir
+                cursor = self._last_pointer_cursor_xy
+                accepting = self._accepting_input
+                seq = 0
+                if run_dir is not None and accepting:
+                    self._pre_click_seq += 1
+                    seq = self._pre_click_seq
+            if run_dir is None or not accepting:
+                if self._pre_click_stop.wait(_PRE_CLICK_FRAME_INTERVAL_S):
+                    return
+                continue
+            self._refresh_pre_click_monitors()
+            if cursor is None:
+                try:
+                    pos = pyautogui.position()
+                    cursor = (int(pos.x), int(pos.y))
+                except Exception:
+                    cursor = None
+            if cursor is None:
+                if self._pre_click_stop.wait(_PRE_CLICK_FRAME_INTERVAL_S):
+                    return
+                continue
+            dest = Path(run_dir) / "screenshots" / f"_pre_click_{seq:05d}.jpeg"
+            try:
+                info = _capture_screenshot_at_point(int(cursor[0]), int(cursor[1]), dest)
+            except Exception:
+                try:
+                    dest.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                info = None
+            if info is None:
+                if self._pre_click_stop.wait(_PRE_CLICK_FRAME_INTERVAL_S):
+                    return
+                continue
+            with self._lock:
+                still_current = self._pre_click_thread is me and not self._pre_click_stop.is_set()
+            if not still_current:
+                try:
+                    dest.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return
+            self._publish_pre_click_frame(info)
+            if self._pre_click_stop.wait(_PRE_CLICK_FRAME_INTERVAL_S):
+                return
+
+    def _refresh_pre_click_monitors(self) -> None:
+        """Cache monitor rectangles so a click can match a frame without grabbing."""
+        try:
+            with mss.mss() as sct:
+                monitors = tuple(
+                    (
+                        idx,
+                        int(sct.monitors[idx]["left"]),
+                        int(sct.monitors[idx]["top"]),
+                        int(sct.monitors[idx]["width"]),
+                        int(sct.monitors[idx]["height"]),
+                    )
+                    for idx in range(1, len(sct.monitors))
+                )
+        except Exception:
+            return
+        with self._lock:
+            self._pre_click_monitors = monitors
+
+    def _monitor_index_for_point(self, x: int, y: int) -> int | None:
+        with self._lock:
+            monitors = self._pre_click_monitors
+        for index, left, top, width, height in monitors:
+            if left <= int(x) < left + width and top <= int(y) < top + height:
+                return int(index)
+        try:
+            return int(_monitor_at_point(x, y)[0])
+        except Exception:
+            return None
+
+    def _publish_pre_click_frame(self, info: tuple[str, int, tuple[int, int]]) -> None:
+        """Publish a finished grab. Leave pinned files for in-flight clicks."""
+        with self._lock:
+            previous = self._pre_click_published
+            self._pre_click_published = info
+            stale: str | None = None
+            if previous is not None and previous[0] != info[0]:
+                if self._pre_click_pins.get(previous[0], 0) == 0:
+                    stale = previous[0]
+        if stale is not None:
+            try:
+                Path(stale).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _latch_pre_click_frame(self) -> tuple[str, int, tuple[int, int]] | None:
+        """Pin the newest finished frame. Hook-safe: no capture and no file copy."""
+        with self._lock:
+            published = self._pre_click_published
+            if published is None:
+                return None
+            path = published[0]
+            self._pre_click_pins[path] = self._pre_click_pins.get(path, 0) + 1
+            return published
+
+    def _unpin_pre_click_frame(
+        self,
+        info: tuple[str, int, tuple[int, int]] | None,
+    ) -> None:
+        if info is None:
+            return
+        path = info[0]
+        delete_path: str | None = None
+        with self._lock:
+            count = self._pre_click_pins.get(path, 0) - 1
+            if count > 0:
+                self._pre_click_pins[path] = count
+                return
+            self._pre_click_pins.pop(path, None)
+            current = self._pre_click_published
+            if current is None or current[0] != path:
+                delete_path = path
+        if delete_path is not None:
+            try:
+                Path(delete_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _discard_unpinned_pre_click_frame(self) -> None:
+        with self._lock:
+            current = self._pre_click_published
+            if current is None or self._pre_click_pins.get(current[0], 0) > 0:
+                return
+            self._pre_click_published = None
+            path = current[0]
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _take_latched_pre_click_frame(
+        self,
+        latched: tuple[str, int, tuple[int, int]] | None,
+        x: int,
+        y: int,
+        dest: Path,
+    ) -> tuple[str, int, tuple[int, int]] | None:
+        """Copy a pre-hook frame when it shows the click's monitor."""
+        if latched is None:
+            return None
+        try:
+            click_mon = self._monitor_index_for_point(x, y)
+            src = Path(latched[0])
+            if click_mon is None or int(latched[1]) != int(click_mon) or not src.is_file():
+                return None
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                if dest.is_file():
+                    dest.unlink()
+            except OSError:
+                pass
+            import shutil
+
+            shutil.copy2(src, dest)
+            return str(dest), int(latched[1]), (int(latched[2][0]), int(latched[2][1]))
+        except Exception:
+            return None
+        finally:
+            self._unpin_pre_click_frame(latched)
 
     def _pending_screenshot_from_settle_or_capture(
         self,
@@ -1280,12 +1506,16 @@ class RecordingSession:
         x: int,
         y: int,
         dest: Path,
+        latched: tuple[str, int, tuple[int, int]] | None = None,
     ) -> tuple[str, int, tuple[int, int]]:
-        """Prefer the last settle-probe frame on the same monitor; else live capture.
+        """Prefer a frame finished before the hook, then a settle frame, else live capture.
 
-        Reusing the settled frame avoids mid-animation before-shots when the user
-        clicks soon after a navigation/animation from the previous action.
+        The latched file is the screen from before this click. A settle frame or a
+        live grab can be seconds later, after the click has already changed the UI.
         """
+        taken = self._take_latched_pre_click_frame(latched, x, y, dest)
+        if taken is not None:
+            return taken
         click_mon, _, _, _, _ = _monitor_at_point(x, y)
         with self._lock:
             last = self._last_settle_frame
@@ -1364,6 +1594,7 @@ class RecordingSession:
         # Screenshot stays deferred.
         windows_before = self._cached_windows_before()
         click_window = self._click_window_payload_at(int(cursor_xy[0]), int(cursor_xy[1]))
+        latched = self._latch_pre_click_frame()
         self._enqueue(
             _DeferredCaptureJob(
                 action="mouse_pointer_event",
@@ -1377,6 +1608,7 @@ class RecordingSession:
                 windows_before=windows_before or None,
                 click_window=click_window,
                 refresh_pre_type=True,
+                pre_click_frame=latched,
             )
         )
 
@@ -2903,10 +3135,12 @@ class RecordingSession:
 
     def _worker_pending_left_press(self, job: _DeferredCaptureJob) -> None:
         if job.press_seq is None or job.cursor_xy is None:
+            self._unpin_pre_click_frame(job.pre_click_frame)
             return
         with self._lock:
             run_dir = self._run_dir
         if run_dir is None:
+            self._unpin_pre_click_frame(job.pre_click_frame)
             return
 
         if job.text_event_index is not None and job.flush_meta is not None:
@@ -2926,6 +3160,7 @@ class RecordingSession:
                 int(job.cursor_xy[0]),
                 int(job.cursor_xy[1]),
                 pending_dest,
+                job.pre_click_frame,
             )
         except Exception:
             info = None
@@ -2940,10 +3175,12 @@ class RecordingSession:
 
     def _worker_pending_right_press(self, job: _DeferredCaptureJob) -> None:
         if job.press_seq is None or job.cursor_xy is None:
+            self._unpin_pre_click_frame(job.pre_click_frame)
             return
         with self._lock:
             run_dir = self._run_dir
         if run_dir is None:
+            self._unpin_pre_click_frame(job.pre_click_frame)
             return
         pending_dest = _pending_right_capture_path(run_dir)
         try:
@@ -2952,6 +3189,7 @@ class RecordingSession:
                 int(job.cursor_xy[0]),
                 int(job.cursor_xy[1]),
                 pending_dest,
+                job.pre_click_frame,
             )
         except Exception:
             info = None
@@ -3123,16 +3361,28 @@ class RecordingSession:
 
     def _worker_mouse_pointer_event(self, job: _DeferredCaptureJob) -> None:
         if job.event_index is None or job.kind is None or job.cursor_xy is None:
+            self._unpin_pre_click_frame(job.pre_click_frame)
             return
         with self._lock:
             run_dir = self._run_dir
         if run_dir is None:
+            self._unpin_pre_click_frame(job.pre_click_frame)
             return
-        shot_path, mon_idx, mon_offset = self._capture_immediate_screenshot(
-            run_dir,
-            job.event_index,
-            job.cursor_xy,
-        )
+        dest = screenshot_path_for_event(run_dir, job.event_index)
+        try:
+            shot_path, mon_idx, mon_offset = self._pending_screenshot_from_settle_or_capture(
+                run_dir,
+                int(job.cursor_xy[0]),
+                int(job.cursor_xy[1]),
+                dest,
+                job.pre_click_frame,
+            )
+        except Exception:
+            shot_path, mon_idx, mon_offset = self._capture_immediate_screenshot(
+                run_dir,
+                job.event_index,
+                job.cursor_xy,
+            )
         self._persist_queued_event(
             _QueuedEvent(
                 kind=job.kind,
@@ -3448,6 +3698,7 @@ class RecordingSession:
         ix, iy = int(x), int(y)
         with self._lock:
             self._last_move_xy = (ix, iy)
+            self._last_pointer_cursor_xy = (ix, iy)
             if not self._left_button_down or self._pending_click_coords is None:
                 return
             sx, sy, _btn = self._pending_click_coords

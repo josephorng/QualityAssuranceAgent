@@ -394,6 +394,43 @@ def test_pending_screenshot_reuses_last_settle_on_same_monitor(tmp_path: Path) -
     assert dest.stat().st_size > 0
 
 
+def test_before_shot_uses_frame_finished_before_click(tmp_path: Path) -> None:
+    """A later settle frame must not replace the screen from before the click."""
+    from src.recorder.capture import RecordingSession
+
+    run_dir = tmp_path / "rec"
+    (run_dir / "screenshots").mkdir(parents=True)
+    search = run_dir / "screenshots" / "_pre_click_00001.jpeg"
+    explorer = last_settle_frame_path(run_dir)
+    Image.new("RGB", (40, 30), color=(0, 0, 200)).save(search, format="JPEG")
+    Image.new("RGB", (40, 30), color=(200, 0, 0)).save(explorer, format="JPEG")
+
+    session = RecordingSession.__new__(RecordingSession)
+    session._lock = __import__("threading").Lock()
+    session._pre_click_published = (str(search), 1, (0, 0))
+    session._pre_click_pins = {}
+    session._pre_click_monitors = ((1, 0, 0, 1920, 1080),)
+    session._last_settle_frame = (str(explorer), 1, (0, 0))
+    session._run_dir = run_dir
+
+    latched = session._latch_pre_click_frame()
+    assert latched is not None
+    newer = run_dir / "screenshots" / "_pre_click_00002.jpeg"
+    Image.new("RGB", (40, 30), color=(0, 200, 0)).save(newer, format="JPEG")
+    session._publish_pre_click_frame((str(newer), 1, (0, 0)))
+    assert search.is_file()
+
+    dest = run_dir / "screenshots" / "_pending_capture.jpeg"
+    info = session._pending_screenshot_from_settle_or_capture(
+        run_dir, 10, 10, dest, latched
+    )
+    assert info[1] == 1
+    _r, _g, b = Image.open(dest).convert("RGB").getpixel((0, 0))
+    assert b > 150
+    assert session._pre_click_pins == {}
+    assert not search.is_file()
+
+
 def test_pending_screenshot_live_captures_when_monitor_mismatches(
     tmp_path: Path, monkeypatch
 ) -> None:

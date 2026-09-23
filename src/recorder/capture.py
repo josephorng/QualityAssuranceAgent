@@ -143,7 +143,7 @@ class _DeferredCaptureJob:
     # begin_text_input | flush_text_input | keyboard_event | settle_pre_key
     # | pending_left_press | pending_right_press | pending_drag_end
     # | emit_left_gesture | emit_right_gesture | mouse_pointer_event
-    # | seed_settle_windows
+    # | seed_settle_windows | read_clipboard_paste
     meta: dict[str, Any] | None = None
     pending_pre_type: _PendingPreTypeShot | None = None
     pending_pre_key: _PendingPreTypeShot | None = None
@@ -749,6 +749,7 @@ class RecordingSession:
         self._pending_text_chars: list[str] = []
         self._pending_text_caret: int = 0
         self._pending_text_meta: dict[str, Any] | None = None
+        self._paste_seq: int = 0
         # Empty-field frame captured after focus settles (click/Tab/etc.), consumed
         # as the text_input before-shot so we do not race the first typed glyph.
         self._pending_pre_type_screenshot: _PendingPreTypeShot | None = None
@@ -868,6 +869,7 @@ class RecordingSession:
             self._pending_right_click_window = None
             self._pending_text_chars = []
             self._pending_text_meta = None
+            self._paste_seq = 0
             self._pending_pre_type_screenshot = None
             self._pending_pre_key_screenshot = None
             self._cancel_pre_key_settle_timer_locked()
@@ -1387,15 +1389,21 @@ class RecordingSession:
         keys: list[str] | None = None,
         text: str | None = None,
         timestamp_utc: str | None = None,
+        event_index: int | None = None,
     ) -> None:
         """Reserve indices and enqueue screenshot work off the keyboard hook thread."""
         action_timestamp_utc = timestamp_utc or utc_now_iso()
         with self._lock:
             if self._run_dir is None:
                 return
-            index = self._next_index
-            self._next_index += 1
-            flush_chars = list(self._pending_text_chars)
+            if event_index is None:
+                index = self._next_index
+                self._next_index += 1
+            else:
+                index = event_index
+            # Hand off the list object. A paste slot inside it can still be
+            # filled by an earlier queued clipboard read before this job runs.
+            flush_chars = self._pending_text_chars
             flush_meta = self._pending_text_meta
             self._pending_text_chars = []
             self._pending_text_caret = 0
@@ -1690,7 +1698,7 @@ class RecordingSession:
     ) -> None:
         """Detach pending typed text and enqueue OCR/screenshot work off-hook."""
         with self._lock:
-            chars = list(self._pending_text_chars)
+            chars = self._pending_text_chars
             meta = self._pending_text_meta
             self._pending_text_chars = []
             self._pending_text_caret = 0
@@ -1779,6 +1787,140 @@ class RecordingSession:
             self._pending_text_chars[caret:caret] = [char]
             self._pending_text_caret = caret + 1
         self._schedule_pre_key_settle()
+
+    def _paste_slot_token(self, paste_id: int) -> str:
+        return f"\ue000paste:{paste_id}\ue001"
+
+    def _defer_clipboard_paste(
+        self,
+        cursor_xy: tuple[int, int] | None,
+        *,
+        timestamp_utc: str,
+        hotkey_keys: list[str],
+    ) -> None:
+        """Enqueue a clipboard read. The hook must not call pyperclip.
+
+        A slot is reserved at the current caret so keys typed while the read
+        blocks stay after the pasted text. The worker fills that same list
+        even if a later flush already detached it.
+        """
+        with self._lock:
+            if self._run_dir is None:
+                return
+            need_begin = self._pending_text_meta is None
+        if need_begin:
+            self._begin_pending_text_input(cursor_xy, timestamp_utc=timestamp_utc)
+        with self._lock:
+            if self._pending_text_meta is None:
+                return
+            self._paste_seq += 1
+            slot = self._paste_slot_token(self._paste_seq)
+            chars = self._pending_text_chars
+            caret = max(0, min(self._pending_text_caret, len(chars)))
+            chars.insert(caret, slot)
+            self._pending_text_caret = caret + 1
+            raw_index = self._pending_text_meta.get("index")
+            text_index = raw_index if isinstance(raw_index, int) else None
+        self._enqueue(
+            _DeferredCaptureJob(
+                action="read_clipboard_paste",
+                cursor_xy=cursor_xy,
+                timestamp_utc=timestamp_utc,
+                keys=hotkey_keys,
+                meta={"paste_slot": slot, "chars": chars, "text_index": text_index},
+            )
+        )
+
+    def _fill_paste_slot_locked(self, chars: list[str], slot: str, text: str | None) -> None:
+        try:
+            idx = chars.index(slot)
+        except ValueError:
+            return
+        replacement = list(text) if text else []
+        chars[idx : idx + 1] = replacement
+        if chars is self._pending_text_chars and self._pending_text_caret > idx:
+            self._pending_text_caret += len(replacement) - 1
+
+    def _worker_read_clipboard_paste(self, job: _DeferredCaptureJob) -> None:
+        pasted = _safe_clipboard_text()
+        text = pasted if pasted is not None and pasted.strip() else None
+        meta = job.meta or {}
+        slot = meta.get("paste_slot")
+        chars = meta.get("chars")
+        if isinstance(slot, str) and isinstance(chars, list):
+            with self._lock:
+                self._fill_paste_slot_locked(chars, slot, text)
+            if text:
+                self._schedule_pre_key_settle()
+                return
+            self._persist_failed_paste_hotkey(job, chars)
+            return
+        if text:
+            self._append_text_input_text(
+                text,
+                job.cursor_xy,
+                timestamp_utc=job.timestamp_utc,
+            )
+            return
+        self._persist_failed_paste_hotkey(job, None)
+
+    def _persist_failed_paste_hotkey(
+        self,
+        job: _DeferredCaptureJob,
+        chars: list[str] | None,
+    ) -> None:
+        """Record Ctrl+V as a hotkey on this worker, before stop's sentinel.
+
+        An empty or failed clipboard read must not enqueue the hotkey behind
+        the stop sentinel, or the key press is dropped.
+        """
+        with self._lock:
+            if self._run_dir is None:
+                return
+            detached = chars is not None and chars is not self._pending_text_chars
+            flush_chars: list[str] = []
+            flush_meta = None
+            orphan_index: int | None = None
+            if not detached:
+                flush_chars = self._pending_text_chars
+                flush_meta = self._pending_text_meta
+                self._pending_text_chars = []
+                self._pending_text_caret = 0
+                self._pending_text_meta = None
+            chars_empty = chars is None or not chars
+            if chars_empty:
+                raw_index = (job.meta or {}).get("text_index")
+                if isinstance(raw_index, int):
+                    orphan_index = raw_index
+                if not detached:
+                    flush_meta = None
+                    flush_chars = []
+            if orphan_index is None:
+                orphan_index = self._next_index
+                self._next_index += 1
+            self._cancel_pre_key_settle_timer_locked()
+            pending_pre_key = self._pending_pre_key_screenshot
+            self._pending_pre_key_screenshot = None
+        if flush_chars and flush_meta is not None:
+            self._worker_flush_text_input(
+                _DeferredCaptureJob(
+                    action="flush_text_input",
+                    flush_chars=flush_chars,
+                    flush_meta=flush_meta,
+                )
+            )
+        self._worker_keyboard_event(
+            _DeferredCaptureJob(
+                action="keyboard_event",
+                kind="hotkey",
+                cursor_xy=job.cursor_xy,
+                event_index=orphan_index,
+                timestamp_utc=job.timestamp_utc,
+                keys=job.keys,
+                pending_pre_key=pending_pre_key,
+                refresh_pre_type=True,
+            )
+        )
 
     def _append_text_input_text(
         self,
@@ -2197,6 +2339,8 @@ class RecordingSession:
                 done = (job.meta or {}).get("done")
                 if isinstance(done, threading.Event):
                     done.set()
+        elif job.action == "read_clipboard_paste":
+            self._worker_read_clipboard_paste(job)
         # settle_probe_tick runs on its own timer thread (not this queue) so
         # window-settle sleeps on click persist cannot starve comparisons.
 
@@ -3550,14 +3694,14 @@ class RecordingSession:
                 # Global recording toggle (Ctrl+Shift+R) — never record as a step.
                 return
             if _is_paste_hotkey(mods, token):
-                pasted = _safe_clipboard_text()
-                if pasted is not None and pasted.strip():
-                    self._append_text_input_text(
-                        pasted,
-                        cursor_xy,
-                        timestamp_utc=timestamp_utc,
-                    )
-                    return
+                # Clipboard owners can block pyperclip.paste for a long time.
+                # Read it on the worker, same as screenshots, so this hook returns.
+                self._defer_clipboard_paste(
+                    cursor_xy,
+                    timestamp_utc=timestamp_utc,
+                    hotkey_keys=mods + [token],
+                )
+                return
             self._queue_keyboard_event_immediate(
                 kind="hotkey",
                 cursor_xy=cursor_xy,

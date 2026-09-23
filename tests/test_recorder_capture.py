@@ -525,6 +525,54 @@ def test_ctrl_v_with_text_records_as_text_input(tmp_path) -> None:
     assert raw["text"] == "hello world"
 
 
+def test_ctrl_v_reads_clipboard_off_the_hook_thread(tmp_path) -> None:
+    """pyperclip.paste must not run on the thread that handles the key."""
+    import threading
+
+    session = RecordingSession(runs_root=tmp_path)
+    hook_thread_id = threading.get_ident()
+    paste_on_hook = {"count": 0}
+    release = threading.Event()
+
+    def _blocked_paste() -> str:
+        if threading.get_ident() == hook_thread_id:
+            paste_on_hook["count"] += 1
+        release.wait(2.0)
+        return "X"
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.pyperclip.paste",
+        side_effect=_blocked_paste,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            started = time.monotonic()
+            session._on_key_press(KeyCode.from_char("a"))
+            session._on_key_press(Key.ctrl_l)
+            session._on_key_press(KeyCode(vk=86, char="\x16"))
+            session._on_key_release(Key.ctrl_l)
+            session._on_key_press(KeyCode.from_char("b"))
+            elapsed = time.monotonic() - started
+            assert paste_on_hook["count"] == 0
+            assert elapsed < 0.5
+            release.set()
+        finally:
+            release.set()
+            session.stop()
+
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "text_input"
+    assert raw["text"] == "aXb"
+
+
 def test_ctrl_v_empty_clipboard_stays_hotkey(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
 

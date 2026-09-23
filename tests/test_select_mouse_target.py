@@ -3160,6 +3160,110 @@ def test_collect_monitor_detections_preserves_order_and_offsets(
     assert set(calls) == {1, 2}
 
 
+def test_collect_skips_monitors_without_roi_when_another_has_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    from cua_mcp.select_mouse_target import _collect_monitor_detections
+    from cua_mcp.select_ui_element import UiDetection
+
+    seen: list[tuple[int, tuple[int, int, int, int] | None]] = []
+
+    def fake_build(bgr, *, yolo_conf_threshold: float = 0.05, ocr_roi=None, **_kwargs):
+        monitor_tag = int(bgr[0, 0, 0])
+        seen.append((monitor_tag, ocr_roi))
+        return [
+            UiDetection(
+                bbox=(1, 2, 3, 4),
+                cx=2,
+                cy=4,
+                class_id=YOLO_CLASS_TEXT,
+                class_name="text",
+                text=f"m{monitor_tag}",
+                icons=None,
+            )
+        ]
+
+    def fake_roi(_click_window, *, image_w, image_h, monitor_offset=(0, 0), **_kwargs):
+        left, _top = monitor_offset
+        if left == 0:
+            return (0, 1000, image_w, 40)
+        return None
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._detect_mouse_targets_from_bgr",
+        fake_build,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.active_monitor_offset",
+        lambda idx: (0, 0) if idx == 1 else (1920, 0),
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.resolve_ocr_roi_local",
+        fake_roi,
+    )
+
+    img1 = np.full((4, 4, 3), 1, dtype=np.uint8)
+    img2 = np.full((4, 4, 3), 2, dtype=np.uint8)
+    detections = _collect_monitor_detections(
+        [(1, img1), (2, img2)],
+        yolo_conf_threshold=0.05,
+        click_window={"hwnd": 1, "rect": [0, 1000, 1920, 40], "is_maximized": False},
+    )
+
+    assert seen == [(1, (0, 1000, 4, 40))]
+    assert [d.text for d in detections] == ["m1"]
+
+
+def test_collect_runs_every_monitor_when_no_roi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    from cua_mcp.select_mouse_target import _collect_monitor_detections
+    from cua_mcp.select_ui_element import UiDetection
+
+    seen: list[int] = []
+
+    def fake_build(bgr, *, yolo_conf_threshold: float = 0.05, ocr_roi=None, **_kwargs):
+        assert ocr_roi is None
+        seen.append(int(bgr[0, 0, 0]))
+        return [
+            UiDetection(
+                bbox=(0, 0, 1, 1),
+                cx=0,
+                cy=0,
+                class_id=YOLO_CLASS_TEXT,
+                class_name="text",
+                text="t",
+                icons=None,
+            )
+        ]
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._detect_mouse_targets_from_bgr",
+        fake_build,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.active_monitor_offset",
+        lambda idx: (0, 0) if idx == 1 else (1920, 0),
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.resolve_ocr_roi_local",
+        lambda *_a, **_k: None,
+    )
+
+    img1 = np.full((4, 4, 3), 1, dtype=np.uint8)
+    img2 = np.full((4, 4, 3), 2, dtype=np.uint8)
+    detections = _collect_monitor_detections(
+        [(1, img1), (2, img2)],
+        yolo_conf_threshold=0.05,
+        click_window={"hwnd": 1, "is_maximized": True, "rect": [0, 0, 1920, 1080]},
+    )
+
+    assert sorted(seen) == [1, 2]
+    assert len(detections) == 2
+
+
 @pytest.mark.asyncio
 async def test_resolve_mouse_point_char_target_uses_span_center(
     monkeypatch: pytest.MonkeyPatch,

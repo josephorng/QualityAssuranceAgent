@@ -1645,7 +1645,9 @@ def _collect_monitor_detections(
     ``ocr_s`` / ``total_s`` (sums across monitors).
 
     When ``click_window`` is set, each monitor resolves its own ``ocr_roi`` via
-    :func:`resolve_ocr_roi_local` (missing / maximized / huge → ungated).
+    :func:`resolve_ocr_roi_local`. If any monitor has an ROI, monitors that do not
+    intersect the window are skipped. Full-frame detection runs only when no
+    monitor has an ROI (missing ``click_window``, maximized, or coverage ≥ ~80%).
     """
     if not captured:
         if timing_out is not None:
@@ -1655,22 +1657,33 @@ def _collect_monitor_detections(
             )
         return []
 
-    def _roi_for_monitor(monitor_index: int, bgr: np.ndarray) -> tuple[int, int, int, int] | None:
-        if click_window is None:
-            return None
-        # Lazy import: avoid cua_mcp ↔ recorder circular import at module load.
-        from src.recorder.window_snapshot import resolve_ocr_roi_local
+    # Lazy import: avoid cua_mcp ↔ recorder circular import at module load.
+    from src.recorder.window_snapshot import resolve_ocr_roi_local
 
-        img_h, img_w = bgr.shape[:2]
-        return resolve_ocr_roi_local(
-            click_window,
-            image_w=img_w,
-            image_h=img_h,
-            monitor_offset=active_monitor_offset(monitor_index),
-        )
+    planned: list[tuple[int, np.ndarray, tuple[int, int, int, int] | None]] = []
+    for monitor_index, bgr in captured:
+        roi: tuple[int, int, int, int] | None = None
+        if click_window is not None:
+            img_h, img_w = bgr.shape[:2]
+            roi = resolve_ocr_roi_local(
+                click_window,
+                image_w=img_w,
+                image_h=img_h,
+                monitor_offset=active_monitor_offset(monitor_index),
+            )
+        planned.append((monitor_index, bgr, roi))
 
-    if len(captured) == 1:
-        monitor_index, bgr = captured[0]
+    if any(roi is not None for _idx, _bgr, roi in planned):
+        skipped = [idx for idx, _bgr, roi in planned if roi is None]
+        planned = [item for item in planned if item[2] is not None]
+        if skipped:
+            _log_info(
+                "move_mouse skip monitors without ocr_roi "
+                f"skipped={skipped} kept={[idx for idx, _bgr, _roi in planned]}"
+            )
+
+    if len(planned) == 1:
+        monitor_index, bgr, roi = planned[0]
         return _detections_for_captured_monitor(
             monitor_index,
             bgr,
@@ -1678,7 +1691,7 @@ def _collect_monitor_detections(
             timing_out=timing_out,
             ocr_class_ids=ocr_class_ids,
             refine_inputs=refine_inputs,
-            ocr_roi=_roi_for_monitor(monitor_index, bgr),
+            ocr_roi=roi,
             ocr_roi_pad=ocr_roi_pad,
         )
 
@@ -1686,7 +1699,9 @@ def _collect_monitor_detections(
     per_monitor_timings: list[dict[str, float]] = []
 
     def _detect_one(
-        monitor_index: int, bgr: np.ndarray
+        monitor_index: int,
+        bgr: np.ndarray,
+        ocr_roi: tuple[int, int, int, int] | None,
     ) -> tuple[list[UiDetection], dict[str, float]]:
         local_timing: dict[str, float] = {}
         dets = _detections_for_captured_monitor(
@@ -1696,15 +1711,15 @@ def _collect_monitor_detections(
             timing_out=local_timing,
             ocr_class_ids=ocr_class_ids,
             refine_inputs=refine_inputs,
-            ocr_roi=_roi_for_monitor(monitor_index, bgr),
+            ocr_roi=ocr_roi,
             ocr_roi_pad=ocr_roi_pad,
         )
         return dets, local_timing
 
-    with ThreadPoolExecutor(max_workers=len(captured)) as pool:
+    with ThreadPoolExecutor(max_workers=len(planned)) as pool:
         futures = [
-            pool.submit(_detect_one, monitor_index, bgr)
-            for monitor_index, bgr in captured
+            pool.submit(_detect_one, monitor_index, bgr, roi)
+            for monitor_index, bgr, roi in planned
         ]
         for future in futures:
             dets, local_timing = future.result()

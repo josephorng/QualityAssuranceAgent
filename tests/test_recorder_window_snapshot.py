@@ -842,3 +842,51 @@ def test_click_window_to_local_payload_subtracts_monitor_offset() -> None:
     payload = info.to_local_payload((50, 80))
     assert payload["rect"] == [50, 120, 300, 400]
     assert payload["is_flyout"] is True
+
+
+def test_nchittest_lparam_packs_signed_screen_coordinates() -> None:
+    import os
+
+    from src.recorder.window_snapshot import (
+        _nchittest_coord_fits,
+        _nchittest_lparam,
+        sample_caption_nchittest,
+    )
+
+    assert _nchittest_lparam(3815, 13) == ((13 & 0xFFFF) << 16) | (3815 & 0xFFFF)
+    assert _nchittest_lparam(-8, -8) == ((-8 & 0xFFFF) << 16) | (-8 & 0xFFFF)
+    assert _nchittest_coord_fits(3815, 13)
+    assert not _nchittest_coord_fits(40000, 0)
+    if os.name != "nt":
+        assert sample_caption_nchittest(1, (0, 0, 40, 20)) is None
+
+
+def test_sample_caption_nchittest_stops_when_window_does_not_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+
+    if os.name != "nt":
+        pytest.skip("WM_NCHITTEST sampling is Windows-only")
+
+    from src.recorder.window_snapshot import sample_caption_nchittest
+
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot._nchittest_sender",
+        lambda: object(),
+    )
+    calls = {"n": 0}
+
+    def _send(_send, _hwnd: int, x: int, y: int) -> int | None:
+        calls["n"] += 1
+        if calls["n"] > 2:
+            return None
+        return 20
+
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot._send_wm_nchittest",
+        _send,
+    )
+    samples = sample_caption_nchittest(1, (0, 0, 80, 30), step=10, slack=0)
+    assert samples is not None
+    assert [(x, y, code) for x, y, code in samples] == [(0, 15, 20), (10, 15, 20)]

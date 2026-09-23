@@ -450,6 +450,106 @@ async def test_find_mouse_point_overlaps_parse_with_capture_detect(
     assert timing["total_s"] >= timing["capture_s"]
 
 
+@pytest.mark.asyncio
+async def test_find_mouse_point_skips_vision_for_caption_button(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cua_mcp.select_mouse_target import find_mouse_point
+
+    def fail_vision(*_args, **_kwargs):
+        raise AssertionError("caption button click should skip vision")
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._capture_and_detect_mouse_candidates",
+        fail_vision,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.resolve_caption_button_mouse_point",
+        lambda _instruction, _click_window: (
+            3815,
+            13,
+            {
+                "selection_method": "caption_button",
+                "class_name": "element",
+                "target_kind": "element",
+                "target_text": "",
+                "target_icons": [{"chinese_id": "關閉視窗"}],
+                "target_bbox": {"x": 3796, "y": 0, "w": 44, "h": 32},
+                "caption_role": "關閉視窗",
+            },
+        ),
+    )
+
+    found = await find_mouse_point(
+        "「關閉視窗」圖示",
+        nearby_objects=["在「詳細資料」文字的上面"],
+        click_window={"hwnd": 7, "rect": [-8, -8, 1920, 1080], "is_maximized": True},
+    )
+    assert found is not None
+    assert found[0:2] == (3815, 13)
+    timing = found[2]["timing"]
+    assert timing["yolo_s"] == 0.0
+    assert timing["ocr_s"] == 0.0
+    assert timing["capture_s"] == 0.0
+    assert timing["phases"][-1]["name"] == "caption_button"
+    assert found[2]["nearby_objects"] == ["在「詳細資料」文字的上面"]
+
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_uses_vision_when_caption_hit_misses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+
+    from cua_mcp.select_mouse_target import find_mouse_point
+
+    called = {"vision": 0}
+
+    async def fake_parse(_instruction: str):
+        return "「關閉視窗」圖示", 0, 0, [], None, 0, None
+
+    def fake_capture_detect(*_args, **_kwargs):
+        called["vision"] += 1
+        det = _detection_from_bbox(
+            (0, 0, 20, 20),
+            YOLO_CLASS_ELEMENT,
+            icons=[{"chinese_id": "關閉視窗"}],
+        )
+        timing = {
+            "capture_s": 0.01,
+            "yolo_s": 0.02,
+            "line_s": 0.0,
+            "ocr_s": 0.03,
+            "total_s": 0.06,
+        }
+        return [1], ["shot.png"], [(1, np.zeros((10, 10, 3), dtype=np.uint8))], [det], timing
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.parse_mouse_target_instruction",
+        fake_parse,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._capture_and_detect_mouse_candidates",
+        fake_capture_detect,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.resolve_caption_button_mouse_point",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._filter_mouse_candidates",
+        lambda detections, _anchor, _nearby: ([detections[0]], []),
+    )
+
+    found = await find_mouse_point(
+        "「關閉視窗」圖示",
+        click_window={"hwnd": 7, "rect": [0, 0, 100, 40]},
+    )
+    assert found is not None
+    assert called["vision"] == 1
+    assert found[2]["timing"]["yolo_s"] == 0.02
+
+
 def test_detection_from_bbox_text() -> None:
     det = _detection_from_bbox((10, 20, 100, 30), YOLO_CLASS_TEXT, text="Submit")
     assert det.class_name == "text"
@@ -3213,6 +3313,105 @@ def test_collect_skips_monitors_without_roi_when_another_has_one(
 
     assert seen == [(1, (0, 1000, 4, 40))]
     assert [d.text for d in detections] == ["m1"]
+
+
+def test_collect_uses_caption_button_cell_and_skips_other_monitor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    from cua_mcp.select_mouse_target import _collect_monitor_detections
+    from cua_mcp.select_ui_element import UiDetection
+
+    seen: list[tuple[int, tuple[int, int, int, int] | None]] = []
+
+    def fake_build(bgr, *, yolo_conf_threshold: float = 0.05, ocr_roi=None, **_kwargs):
+        seen.append((int(bgr[0, 0, 0]), ocr_roi))
+        return [
+            UiDetection(
+                bbox=(0, 0, 1, 1),
+                cx=0,
+                cy=0,
+                class_id=YOLO_CLASS_ELEMENT,
+                class_name="element",
+                text=None,
+                icons=[{"chinese_id": "關閉視窗"}],
+            )
+        ]
+
+    def fail_window_roi(*_args, **_kwargs):
+        raise AssertionError("caption cell roi should replace the window roi")
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._detect_mouse_targets_from_bgr",
+        fake_build,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.active_monitor_offset",
+        lambda idx: (0, 0) if idx == 1 else (1920, 0),
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.resolve_ocr_roi_local",
+        fail_window_roi,
+    )
+
+    img1 = np.full((40, 200, 3), 1, dtype=np.uint8)
+    img2 = np.full((40, 200, 3), 2, dtype=np.uint8)
+    # Close cell on monitor 2: local x=150..190, y=0..30.
+    detections = _collect_monitor_detections(
+        [(1, img1), (2, img2)],
+        yolo_conf_threshold=0.05,
+        click_window={"hwnd": 7, "rect": [-8, -8, 1936, 1048], "is_maximized": True},
+        caption_roi_screen=(1920 + 150, 0, 1920 + 190, 30),
+    )
+
+    assert seen == [(2, (150, 0, 40, 30))]
+    assert len(detections) == 1
+
+
+def test_collect_falls_back_to_window_roi_when_caption_cell_misses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    from cua_mcp.select_mouse_target import _collect_monitor_detections
+    from cua_mcp.select_ui_element import UiDetection
+
+    seen: list[tuple[int, int, int, int] | None] = []
+
+    def fake_build(bgr, *, yolo_conf_threshold: float = 0.05, ocr_roi=None, **_kwargs):
+        seen.append(ocr_roi)
+        return [
+            UiDetection(
+                bbox=(0, 0, 1, 1),
+                cx=0,
+                cy=0,
+                class_id=YOLO_CLASS_TEXT,
+                class_name="text",
+                text="t",
+                icons=None,
+            )
+        ]
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._detect_mouse_targets_from_bgr",
+        fake_build,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.active_monitor_offset",
+        lambda idx: (0, 0),
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.resolve_ocr_roi_local",
+        lambda *_a, **_k: (0, 0, 80, 40),
+    )
+
+    img = np.full((40, 80, 3), 1, dtype=np.uint8)
+    _collect_monitor_detections(
+        [(1, img)],
+        yolo_conf_threshold=0.05,
+        click_window={"hwnd": 7, "rect": [0, 0, 80, 40]},
+        caption_roi_screen=(5000, 0, 5100, 30),
+    )
+    assert seen == [(0, 0, 80, 40)]
 
 
 def test_collect_runs_every_monitor_when_no_roi(

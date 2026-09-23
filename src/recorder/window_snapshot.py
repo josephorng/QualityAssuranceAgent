@@ -312,6 +312,20 @@ def _fallback_caption_button_bounds(win: WindowInfo) -> CaptionBounds | None:
     return (left, top, right, bottom)
 
 
+def dwm_caption_button_bounds(win: WindowInfo) -> CaptionBounds | None:
+    """DWM caption strip in screen coords, or stored bounds. No geometry guess.
+
+    A missing result means the window has no system caption buttons (custom
+    chrome). Callers that need a guess should use
+    :func:`caption_button_bounds_for_window`.
+    """
+    if win.caption_button_bounds is not None:
+        return win.caption_button_bounds
+    if not _hwnd_still_valid(win.hwnd):
+        return None
+    return _dwm_caption_button_bounds_screen(win.hwnd, win.left, win.top)
+
+
 def caption_button_bounds_for_window(win: WindowInfo) -> CaptionBounds | None:
     """Caption strip for a title-bar hit test.
 
@@ -319,13 +333,134 @@ def caption_button_bounds_for_window(win: WindowInfo) -> CaptionBounds | None:
     from the window rectangle. Snapshots leave the field empty so enumeration
     does not call DWM once per window.
     """
-    if win.caption_button_bounds is not None:
-        return win.caption_button_bounds
-    if _hwnd_still_valid(win.hwnd):
-        live = _dwm_caption_button_bounds_screen(win.hwnd, win.left, win.top)
-        if live is not None:
-            return live
+    live = dwm_caption_button_bounds(win)
+    if live is not None:
+        return live
     return _fallback_caption_button_bounds(win)
+
+
+# WM_NCHITTEST results for the three system caption buttons.
+HTMINBUTTON = 8
+HTMAXBUTTON = 9
+HTCLOSE = 20
+_WM_NCHITTEST = 0x0084
+_SMTO_ABORTIFHUNG = 0x0002
+_NCHITTEST_TIMEOUT_MS = 30
+_NCHITTEST_SAMPLE_STEP_PX = 4
+
+
+def _nchittest_lparam(x: int, y: int) -> int:
+    """Pack screen coordinates into the WM_NCHITTEST lParam (two signed shorts)."""
+    return ((int(y) & 0xFFFF) << 16) | (int(x) & 0xFFFF)
+
+
+def _nchittest_coord_fits(x: int, y: int) -> bool:
+    """WM_NCHITTEST carries each axis as a signed 16-bit screen coordinate."""
+    return -32768 <= int(x) <= 32767 and -32768 <= int(y) <= 32767
+
+
+def _nchittest_sender():
+    """Bound ``SendMessageTimeoutW`` prototype, or None when it cannot be built."""
+    if os.name != "nt":
+        return None
+    try:
+        from ctypes import wintypes
+
+        proto = ctypes.WINFUNCTYPE(
+            ctypes.c_void_p,
+            wintypes.HWND,
+            wintypes.UINT,
+            ctypes.c_size_t,
+            ctypes.c_ssize_t,
+            wintypes.UINT,
+            wintypes.UINT,
+            ctypes.POINTER(ctypes.c_size_t),
+        )
+        return proto(("SendMessageTimeoutW", ctypes.windll.user32))
+    except Exception:
+        return None
+
+
+def _send_wm_nchittest(send, hwnd: int, x: int, y: int) -> int | None:
+    """Return the hit code, or None when the window does not answer in time."""
+    if send is None or hwnd == 0 or not _nchittest_coord_fits(x, y):
+        return None
+    try:
+        from ctypes import wintypes
+
+        result = ctypes.c_size_t(0)
+        ok = send(
+            wintypes.HWND(int(hwnd)),
+            wintypes.UINT(_WM_NCHITTEST),
+            ctypes.c_size_t(0),
+            ctypes.c_ssize_t(_nchittest_lparam(x, y)),
+            wintypes.UINT(_SMTO_ABORTIFHUNG),
+            wintypes.UINT(_NCHITTEST_TIMEOUT_MS),
+            ctypes.byref(result),
+        )
+        if not ok:
+            return None
+        return int(result.value)
+    except Exception:
+        return None
+
+
+def sample_caption_nchittest(
+    hwnd: int,
+    bounds: CaptionBounds,
+    *,
+    step: int = _NCHITTEST_SAMPLE_STEP_PX,
+    slack: int = _CAPTION_HIT_SLACK_PX,
+    stop_at_hit: int | None = None,
+) -> list[tuple[int, int, int]] | None:
+    """Sample WM_NCHITTEST across a caption strip.
+
+    Returns ``(x, y, hit_code)`` rows, or None when hit-testing is unavailable
+    (not Windows, coordinates outside the 16-bit screen range, or the window
+    does not answer). An empty list means the strip was sampled and no point
+    answered. When ``stop_at_hit`` is set, sampling ends after the first row
+    that contains that code.
+    """
+    if os.name != "nt" or hwnd == 0:
+        return None
+    send = _nchittest_sender()
+    if send is None:
+        return None
+    left, top, right, bottom = (int(v) for v in bounds)
+    if right <= left or bottom <= top:
+        return []
+    stride = max(1, int(step))
+    pad = max(0, int(slack))
+    height = bottom - top
+    y_rows = [(top + bottom) // 2]
+    if height >= 8:
+        y_rows.append(top + max(1, height // 4))
+        y_rows.append(top + max(1, (height * 3) // 4))
+    seen_y: set[int] = set()
+    samples: list[tuple[int, int, int]] = []
+    x_start = left - pad
+    x_end = right + pad
+    for y in y_rows:
+        if y in seen_y:
+            continue
+        seen_y.add(y)
+        if not _nchittest_coord_fits(x_start, y) or not _nchittest_coord_fits(x_end, y):
+            return samples or None
+        row: list[tuple[int, int, int]] = []
+        x = x_start
+        while x <= x_end:
+            code = _send_wm_nchittest(send, hwnd, x, y)
+            if code is None:
+                # Keep points that already answered, including this row.
+                # A hung window with no samples at all stays on the vision path.
+                samples.extend(row)
+                return samples or None
+            row.append((x, y, code))
+            x += stride
+        samples.extend(row)
+        if stop_at_hit is not None and any(code == int(stop_at_hit) for _, _, code in row):
+            return samples
+    return samples
 
 
 def click_hits_caption_buttons(

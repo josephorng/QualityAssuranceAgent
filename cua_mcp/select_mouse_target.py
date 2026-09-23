@@ -43,7 +43,12 @@ from cua_mcp.read_screen_text.ocr_image import (
     ocr_box_with_spans,
     ocr_mode_for_yolo_class,
 )
-from cua_mcp.caption_buttons import relabel_caption_button_detections
+from cua_mcp.caption_buttons import (
+    caption_button_cell_screen_rect,
+    caption_role_from_instruction,
+    relabel_caption_button_detections,
+    resolve_caption_button_mouse_point,
+)
 from cua_mcp.scrollbar_arrows import (
     create_scrollbars_from_arrow_pairs,
     drop_scrollbars_without_arrow_ends,
@@ -1628,6 +1633,25 @@ def _resolve_char_target_point(
     return local_point[0] + left, local_point[1] + top
 
 
+def _screen_xyxy_to_image_roi(
+    screen_xyxy: tuple[int, int, int, int],
+    *,
+    image_w: int,
+    image_h: int,
+    monitor_offset: tuple[int, int],
+) -> tuple[int, int, int, int] | None:
+    """Clip a screen ``(left, top, right, bottom)`` rect to image-local xywh."""
+    from src.recorder.window_snapshot import _clip_xywh_to_image
+
+    left, top, right, bottom = (int(v) for v in screen_xyxy)
+    ox, oy = int(monitor_offset[0]), int(monitor_offset[1])
+    return _clip_xywh_to_image(
+        (left - ox, top - oy, right - left, bottom - top),
+        image_w=image_w,
+        image_h=image_h,
+    )
+
+
 def _collect_monitor_detections(
     captured: list[tuple[int, np.ndarray]],
     *,
@@ -1637,6 +1661,7 @@ def _collect_monitor_detections(
     refine_inputs: bool = True,
     click_window: dict[str, Any] | None = None,
     ocr_roi_pad: int = DEFAULT_OCR_ROI_PAD,
+    caption_roi_screen: tuple[int, int, int, int] | None = None,
 ) -> list[UiDetection]:
     """
     Run YOLO+OCR on captured monitors.
@@ -1649,8 +1674,11 @@ def _collect_monitor_detections(
 
     When ``click_window`` is set, each monitor resolves its own ``ocr_roi`` via
     :func:`resolve_ocr_roi_local`, including maximized and near-full-screen windows.
-    If any monitor has an ROI, monitors that do not intersect the window are
-    skipped. Full-frame detection runs only when no monitor has an ROI (missing
+    ``caption_roi_screen`` replaces that window rect with one caption-button cell
+    (screen ``left, top, right, bottom``). Monitors that miss the cell are skipped.
+    If the cell misses every image, detection falls back to the window ROI.
+    If any monitor has an ROI, monitors that do not intersect it are skipped.
+    Full-frame detection runs only when no monitor has an ROI (missing
     ``click_window``, or the window misses every captured image).
     """
     if not captured:
@@ -1664,18 +1692,46 @@ def _collect_monitor_detections(
     # Lazy import: avoid cua_mcp ↔ recorder circular import at module load.
     from src.recorder.window_snapshot import resolve_ocr_roi_local
 
+    def _window_roi(
+        monitor_index: int,
+        bgr: np.ndarray,
+    ) -> tuple[int, int, int, int] | None:
+        if click_window is None:
+            return None
+        img_h, img_w = bgr.shape[:2]
+        return resolve_ocr_roi_local(
+            click_window,
+            image_w=img_w,
+            image_h=img_h,
+            monitor_offset=active_monitor_offset(monitor_index),
+        )
+
     planned: list[tuple[int, np.ndarray, tuple[int, int, int, int] | None]] = []
-    for monitor_index, bgr in captured:
-        roi: tuple[int, int, int, int] | None = None
-        if click_window is not None:
+    if caption_roi_screen is not None:
+        for monitor_index, bgr in captured:
             img_h, img_w = bgr.shape[:2]
-            roi = resolve_ocr_roi_local(
-                click_window,
+            roi = _screen_xyxy_to_image_roi(
+                caption_roi_screen,
                 image_w=img_w,
                 image_h=img_h,
                 monitor_offset=active_monitor_offset(monitor_index),
             )
-        planned.append((monitor_index, bgr, roi))
+            planned.append((monitor_index, bgr, roi))
+        if any(roi is not None for _idx, _bgr, roi in planned):
+            _log_info(
+                "move_mouse caption button roi "
+                f"screen={tuple(int(v) for v in caption_roi_screen)}"
+            )
+        else:
+            _log_info(
+                "move_mouse caption button roi missed every monitor; "
+                "using window roi"
+            )
+            planned = []
+
+    if not planned:
+        for monitor_index, bgr in captured:
+            planned.append((monitor_index, bgr, _window_roi(monitor_index, bgr)))
 
     if any(roi is not None for _idx, _bgr, roi in planned):
         skipped = [idx for idx, _bgr, roi in planned if roi is None]
@@ -1919,6 +1975,7 @@ def _capture_and_detect_mouse_candidates(
     ocr_class_ids: frozenset[int] | set[int] | None = None,
     refine_inputs: bool = True,
     click_window: dict[str, Any] | None = None,
+    caption_roi_screen: tuple[int, int, int, int] | None = None,
 ) -> tuple[
     list[int],
     list[str],
@@ -1972,6 +2029,7 @@ def _capture_and_detect_mouse_candidates(
         ocr_class_ids=ocr_class_ids,
         refine_inputs=refine_inputs,
         click_window=click_window,
+        caption_roi_screen=caption_roi_screen,
     )
     detections = _sort_detections_reading_order(all_detections)
     _log_info(f"move_mouse yolo_candidates={len(detections)}")
@@ -2034,6 +2092,13 @@ async def find_mouse_point(
     Returns ``(global_x, global_y, metadata)`` in virtual-desktop pixel space,
     or ``None`` when no YOLO candidates / no anchor match (soft miss).
 
+    When ``click_window`` is set and the instruction is a system caption button
+    (關閉視窗 / 最小化視窗 / 最大化視窗 / 縮小視窗), the point is taken from that
+    window's DWM caption strip after WM_NCHITTEST confirms the button. That
+    path skips capture, YOLO, and OCR. If the strip exists but the hit-test
+    does not confirm the button, vision runs with the matching third of the
+    strip as the ROI. A missing DWM strip keeps the window ROI.
+
     While ``require_similarity_match()`` is active (cache replay), a similarity
     miss returns ``None`` without the visual one-pass or Gemma ROI fallbacks.
 
@@ -2045,6 +2110,54 @@ async def find_mouse_point(
         raise ValueError("instruction must be non-empty")
 
     total_started = time.perf_counter()
+    caption_role = caption_role_from_instruction(instruction_text)
+    if caption_role is not None and click_window:
+        caption_hit = await asyncio.to_thread(
+            resolve_caption_button_mouse_point,
+            instruction_text,
+            click_window,
+        )
+        if caption_hit is not None:
+            gx, gy, meta = caption_hit
+            if nearby_objects:
+                meta["nearby_objects"] = [
+                    item.strip()
+                    for item in nearby_objects
+                    if isinstance(item, str) and item.strip()
+                ]
+            elapsed = time.perf_counter() - total_started
+            meta["timing"] = _build_move_mouse_timing(
+                total_s=elapsed,
+                capture_s=0.0,
+                vision={},
+                parse_s=0.0,
+                select_s=elapsed,
+                select_phase="caption_button",
+            )
+            _log_info(
+                "move_mouse caption button "
+                f"role={caption_role} point=[{gx},{gy}]"
+            )
+            return gx, gy, meta
+        caption_roi_screen = await asyncio.to_thread(
+            caption_button_cell_screen_rect,
+            instruction_text,
+            click_window,
+        )
+        if caption_roi_screen is not None:
+            _log_info(
+                "move_mouse caption button "
+                f"role={caption_role} not confirmed; "
+                f"vision roi={tuple(int(v) for v in caption_roi_screen)}"
+            )
+        else:
+            _log_info(
+                "move_mouse caption button "
+                f"role={caption_role} not confirmed; using window vision"
+            )
+    else:
+        caption_roi_screen = None
+
     vision_plan = _mouse_vision_plan(instruction_text, nearby_objects)
     _log_info(f"move_mouse vision plan {vision_plan.describe()}")
 
@@ -2061,6 +2174,7 @@ async def find_mouse_point(
             ocr_class_ids=vision_plan.ocr_class_ids,
             refine_inputs=vision_plan.refine_inputs,
             click_window=click_window,
+            caption_roi_screen=caption_roi_screen,
         )
         return result, time.perf_counter() - started
 

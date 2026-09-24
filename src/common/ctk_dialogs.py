@@ -140,6 +140,36 @@ def prompt_script_continue_or_end(
     return bool(result["continue"])
 
 
+def format_recording_analysis_done_message(
+    *,
+    recorded: int,
+    cached: int,
+    skipped: int,
+    yolo_ocr_failed: int | None = None,
+    yolo_ocr_retried: int = 0,
+    yolo_ocr_recovered: int = 0,
+) -> str:
+    """Body text for the recording-analysis finish dialog.
+
+    ``yolo_ocr_failed`` is the number of pointer steps that still have no YOLO/OCR
+    target after the end-of-analysis retry. Omit it (``None``) when analysis was
+    cancelled before that pass.
+    """
+    lines = [
+        f"錄製 {recorded} 個事件。",
+        f"已寫入快取 {cached} 筆，略過 {skipped} 筆。",
+    ]
+    if yolo_ocr_failed is not None:
+        line = f"YOLO/OCR 未偵測到目標：{yolo_ocr_failed} 個步驟。"
+        if yolo_ocr_retried:
+            line = (
+                f"YOLO/OCR 未偵測到目標：{yolo_ocr_failed} 個步驟"
+                f"（已自動重新偵測 {yolo_ocr_retried} 個，修復 {yolo_ocr_recovered} 個）。"
+            )
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def prompt_append_recording_instructions(
     master: Any,
     message: str,

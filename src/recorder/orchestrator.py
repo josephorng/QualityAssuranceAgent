@@ -14,7 +14,15 @@ from src.common.run_state import get_run_state_manager, reset_run_state_manager
 from src.common.runtime_context import set_runtime_env
 from src.common.settings import load_settings
 from src.recorder.analyze import analyze_event_to_cache
-from src.recorder.models import RecordedEvent, final_after_screenshot_path
+from src.recorder.vision_context import (
+    build_vision_context,
+    primary_candidate_char_target,
+    recording_pointer_yolo_ocr_failed,
+    run_pointer_event_yolo_ocr,
+    save_text_resolution_cache,
+    try_rebuild_text_input_from_cache,
+    try_rebuild_vision_from_cache,
+)
 from src.recorder.coalesce import (
     coalesce_chinese_ime_candidate_keys,
     coalesce_consecutive_same_location_clicks,
@@ -29,12 +37,7 @@ from src.recorder.text_choose import (
     needs_llm_text_choice,
 )
 from src.recorder.text_resolve import event_with_resolved_text, resolve_text_input_text
-from src.recorder.vision_context import (
-    build_vision_context,
-    save_text_resolution_cache,
-    try_rebuild_text_input_from_cache,
-    try_rebuild_vision_from_cache,
-)
+from src.recorder.models import RecordedEvent, final_after_screenshot_path
 from src.recorder.window_snapshot import is_agent_app_restore, resolve_window_change
 
 
@@ -99,6 +102,14 @@ class _AnalysisProgress:
             return
         with self._lock:
             self._done = min(self._total, self._done + units)
+            self._emit_unlocked()
+
+    def reserve(self, units: int) -> None:
+        """Add work units so a late retry pass can move the progress bar."""
+        if units <= 0:
+            return
+        with self._lock:
+            self._total += units
             self._emit_unlocked()
 
     def complete(self) -> None:
@@ -706,6 +717,165 @@ def _write_event_analysis(
     )
 
 
+def _count_pointer_yolo_ocr_failures(
+    run_dir: Path,
+    events: list[RecordedEvent],
+) -> int:
+    """Pointer steps that still show 「YOLO/OCR 未偵測到目標」 in the recording HTML."""
+    return sum(
+        1
+        for event in events
+        if recording_pointer_yolo_ocr_failed(run_dir, event.index, event.kind)
+    )
+
+
+def _persist_retried_pointer_instruction(
+    run_dir: Path,
+    event: RecordedEvent,
+    vision: dict[str, Any],
+    log_info: Callable[[str], None],
+) -> bool:
+    """Rebuild a pointer instruction from a fresh YOLO/OCR pass.
+
+    Returns True when the stored instruction text changed. Steps with no click
+    point keep their instruction so the user can pick a target. Steps with no
+    analysis file keep the new detections only.
+    """
+    from src.recorder.analyze import rebuild_pointer_instruction, use_char_target_enabled
+    from src.recorder.compile_tool_calls import set_analysis_tool_calls
+
+    yolo_error = vision.get("yolo_error")
+    if yolo_error:
+        log_info(f"retry yolo/ocr event {event.index} still failed: {yolo_error}")
+        return False
+
+    destination = vision.get("destination") if isinstance(vision.get("destination"), dict) else {}
+    start_candidates = vision.get("candidates") if isinstance(vision.get("candidates"), list) else []
+    end_candidates = (
+        destination.get("candidates") if isinstance(destination.get("candidates"), list) else []
+    )
+    if not start_candidates and (event.kind != "drag" or not end_candidates):
+        log_info(f"retry yolo/ocr event {event.index} still has no targets")
+        return False
+    if event.cursor_xy is None:
+        log_info(
+            f"retry yolo/ocr event {event.index} detected targets; click point still missing"
+        )
+        return False
+
+    analysis_path = run_dir / "analysis" / f"event_{event.index:03d}.json"
+    analysis = read_json(analysis_path, None)
+    if not isinstance(analysis, dict):
+        log_info(
+            f"retry yolo/ocr event {event.index}: detections saved; no analysis file to update"
+        )
+        return False
+
+    use_char_target = use_char_target_enabled(analysis)
+    rebuilt = rebuild_pointer_instruction(
+        event,
+        vision,
+        destination,
+        include_nearby=True,
+        use_char_target=use_char_target,
+    )
+    if not rebuilt:
+        log_info(
+            f"retry yolo/ocr event {event.index}: detections saved but instruction was not rebuilt"
+        )
+        return False
+
+    previous = analysis.get("instruction")
+    analysis["instruction"] = rebuilt
+    analysis["vision"] = {
+        "used_vision": vision.get("used_vision"),
+        "candidate_text": vision.get("candidate_text"),
+    }
+    analysis.pop("landmarks", None)
+    if primary_candidate_char_target(vision) is not None:
+        analysis["use_char_target"] = use_char_target
+    else:
+        analysis.pop("use_char_target", None)
+    set_analysis_tool_calls(analysis, event)
+    write_json(analysis_path, analysis)
+    log_info(f"retry yolo/ocr event {event.index} rebuilt: {rebuilt}")
+    return previous != rebuilt
+
+
+async def _retry_failed_pointer_yolo_ocr(
+    events: list[RecordedEvent],
+    *,
+    run_dir: Path,
+    log_info: Callable[[str], None],
+    should_cancel: Callable[[], bool] | None,
+    on_reserve: Callable[[int], None] | None = None,
+    on_done: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    """Re-run YOLO/OCR once for pointer steps whose persisted detection failed.
+
+    Retries are sequential. The usual cause is a Triton timeout while several
+    vision jobs were in flight; a second pass after analysis is less likely to
+    time out. Returns counts for the finish dialog.
+    """
+    targets = [
+        event
+        for event in events
+        if recording_pointer_yolo_ocr_failed(
+            run_dir,
+            event.index,
+            event.kind,
+            require_payload=True,
+        )
+    ]
+    stats: dict[str, Any] = {
+        "retried": 0,
+        "recovered": 0,
+        "failed": 0,
+        "cancelled": False,
+        "instructions_changed": False,
+    }
+    if targets:
+        if on_reserve is not None:
+            on_reserve(len(targets))
+        log_info(f"retry yolo/ocr start events={len(targets)}")
+        for event in targets:
+            if should_cancel is not None and should_cancel():
+                stats["cancelled"] = True
+                log_info("retry yolo/ocr cancelled by user")
+                break
+            stats["retried"] += 1
+            log_info(f"retry yolo/ocr event {event.index} kind={event.kind}")
+            try:
+                vision = await asyncio.to_thread(
+                    run_pointer_event_yolo_ocr,
+                    event,
+                    run_dir=run_dir,
+                    persist_debug=True,
+                )
+            except Exception as exc:
+                log_info(
+                    f"retry yolo/ocr event {event.index} error: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            else:
+                if _persist_retried_pointer_instruction(run_dir, event, vision, log_info):
+                    stats["instructions_changed"] = True
+            if on_done is not None:
+                on_done()
+        attempted = targets[: int(stats["retried"])]
+        stats["recovered"] = sum(
+            1
+            for event in attempted
+            if not recording_pointer_yolo_ocr_failed(run_dir, event.index, event.kind)
+        )
+        log_info(
+            "retry yolo/ocr done "
+            f"retried={stats['retried']} recovered={stats['recovered']}"
+        )
+    stats["failed"] = _count_pointer_yolo_ocr_failures(run_dir, events)
+    return stats
+
+
 def _settle_after_if_long_enough(
     start_timestamp_utc: str, end_timestamp_utc: str | None
 ) -> float | None:
@@ -933,6 +1103,23 @@ async def analyze_recording_session(
                 last_analysis["use_expected_outcome"] = True
                 write_json(last_instruction_analysis_path, last_analysis)
 
+        yolo_stats: dict[str, Any] | None = None
+        if not cancelled:
+            yolo_stats = await _retry_failed_pointer_yolo_ocr(
+                events,
+                run_dir=run_dir,
+                log_info=log_info,
+                should_cancel=should_cancel,
+                on_reserve=progress.reserve,
+                on_done=progress.bump,
+            )
+            if yolo_stats["cancelled"]:
+                cancelled = True
+            elif yolo_stats["instructions_changed"]:
+                from src.common.script_helper import collect_recording_instructions
+
+                instructions, expected_outcomes = collect_recording_instructions(run_dir)
+
         if not cancelled:
             progress.complete()
 
@@ -947,6 +1134,10 @@ async def analyze_recording_session(
             "instructions": instructions,
             "expected_outcomes": expected_outcomes,
         }
+        if yolo_stats is not None and not yolo_stats["cancelled"]:
+            report["yolo_ocr_failed"] = int(yolo_stats["failed"])
+            report["yolo_ocr_retried"] = int(yolo_stats["retried"])
+            report["yolo_ocr_recovered"] = int(yolo_stats["recovered"])
         write_json(run_dir / "report.json", report)
         try:
             from src.recorder.compile_tool_calls import (
@@ -962,8 +1153,16 @@ async def analyze_recording_session(
             write_recording_html_from_run(run_dir)
         except Exception as exc:
             log_info(f"analyze_recording_session html write failed: {exc}")
+        failed_note = ""
+        if "yolo_ocr_failed" in report:
+            failed_note = (
+                f" yolo_ocr_failed={report['yolo_ocr_failed']}"
+                f" retried={report.get('yolo_ocr_retried', 0)}"
+                f" recovered={report.get('yolo_ocr_recovered', 0)}"
+            )
         log_info(
-            f"analyze_recording_session done recorded={len(events)} cached={cached} skipped={skipped}"
+            f"analyze_recording_session done recorded={len(events)} "
+            f"cached={cached} skipped={skipped}{failed_note}"
         )
         return report
     finally:

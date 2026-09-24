@@ -21,6 +21,7 @@ import tkinter as tk
 from main import analyze_screen_recording, dismiss_nuitka_onefile_splash, prepare_run_session, run_coordinator_sync
 from src.common.agent_settings_dialog import clamp_script_font_size, open_agent_settings_dialog
 from src.common.ctk_dialogs import (
+    format_recording_analysis_done_message,
     prompt_append_recording_instructions,
     prompt_script_continue_or_end,
     prompt_unsaved_script_changes,
@@ -2604,11 +2605,25 @@ class MainHub(ctk.CTk):
                     self._load_script_into_editor(self._script_path)
             show_ctk_message(self, "錄製分析已停止", msg, kind="warning")
             return
-        msg = (
-            f"錄製 {recorded} 個事件。\n"
-            f"已寫入快取 {cached} 筆，略過 {skipped} 筆。"
+        yolo_failed = report.get("yolo_ocr_failed")
+        msg = format_recording_analysis_done_message(
+            recorded=recorded,
+            cached=cached,
+            skipped=skipped,
+            yolo_ocr_failed=int(yolo_failed) if isinstance(yolo_failed, int) else None,
+            yolo_ocr_retried=int(report.get("yolo_ocr_retried") or 0),
+            yolo_ocr_recovered=int(report.get("yolo_ocr_recovered") or 0),
         )
-        self._status.configure(text=f"已寫入快取 {cached} 筆（略過 {skipped}）。")
+        self._status.configure(
+            text=(
+                f"已寫入快取 {cached} 筆（略過 {skipped}）。"
+                + (
+                    f" YOLO/OCR 未偵測到目標：{yolo_failed}。"
+                    if isinstance(yolo_failed, int)
+                    else ""
+                )
+            )
+        )
         run_id_raw = report.get("run_id")
         current_name = run_id_raw.strip() if isinstance(run_id_raw, str) else ""
         if not current_name and run_dir is not None:

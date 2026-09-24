@@ -4390,3 +4390,187 @@ async def test_analyze_recording_session_drops_multiple_trailing_agent_restores(
     session = json.loads((run_dir / "session.json").read_text(encoding="utf-8"))
     assert session["final_after_screenshot"] == "screenshots/final_after.jpeg"
     assert outcome_mock.await_count == 0
+
+
+def test_format_recording_analysis_done_message_includes_failed_steps() -> None:
+    from src.common.ctk_dialogs import format_recording_analysis_done_message
+
+    plain = format_recording_analysis_done_message(
+        recorded=4,
+        cached=4,
+        skipped=0,
+        yolo_ocr_failed=0,
+    )
+    assert plain == (
+        "錄製 4 個事件。\n"
+        "已寫入快取 4 筆，略過 0 筆。\n"
+        "YOLO/OCR 未偵測到目標：0 個步驟。"
+    )
+    retried = format_recording_analysis_done_message(
+        recorded=4,
+        cached=4,
+        skipped=0,
+        yolo_ocr_failed=1,
+        yolo_ocr_retried=3,
+        yolo_ocr_recovered=2,
+    )
+    assert "YOLO/OCR 未偵測到目標：1 個步驟" in retried
+    assert "已自動重新偵測 3 個，修復 2 個" in retried
+    cancelled = format_recording_analysis_done_message(recorded=1, cached=0, skipped=0)
+    assert "YOLO/OCR" not in cancelled
+
+
+def _write_click_recording(run_dir: Path, *, yolo_error: str | None) -> None:
+    (run_dir / "events").mkdir(parents=True)
+    (run_dir / "yolo_ocr").mkdir()
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="2026-09-23T08:00:00+00:00",
+        kind="click",
+        cursor_xy=(56, 48),
+        button="left",
+        screenshot_path="",
+    )
+    (run_dir / "events" / "event_001.json").write_text(
+        json.dumps(event.to_dict(), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (run_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "started_at_utc": event.timestamp_utc,
+                "stopped_at_utc": event.timestamp_utc,
+                "event_count": 1,
+                "events": ["events/event_001.json"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    payload: dict[str, object] = {
+        "event_index": 1,
+        "candidates": [],
+        "detection_count": 0,
+    }
+    if yolo_error:
+        payload["yolo_error"] = yolo_error
+    (run_dir / "yolo_ocr" / "event_001.json").write_text(
+        json.dumps(payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.asyncio
+async def test_analyze_recording_session_retries_failed_yolo_ocr(tmp_path: Path) -> None:
+    from src.common.run_state import reset_run_state_manager
+
+    reset_run_state_manager()
+    run_dir = tmp_path / "screen_record_yolo_retry"
+    _write_click_recording(run_dir, yolo_error="Triton infer timed out after 20s")
+    no_vision = {"used_vision": False, "candidate_text": "", "local_cursor": None}
+    candidates = [
+        {
+            "bbox": [40, 40, 32, 16],
+            "center": [56, 48],
+            "class_name": "text",
+            "text": "搜尋",
+        }
+    ]
+
+    def fake_yolo(event, *, run_dir, persist_debug=True):
+        del persist_debug
+        (run_dir / "yolo_ocr" / "event_001.json").write_text(
+            json.dumps(
+                {
+                    "event_index": event.index,
+                    "candidates": candidates,
+                    "detection_count": 1,
+                    "candidate_text": "搜尋",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return {
+            "used_vision": True,
+            "candidate_text": "搜尋",
+            "candidates": candidates,
+            "detection_count": 1,
+            "local_cursor": (56, 48),
+        }
+
+    with patch(
+        "src.recorder.orchestrator.build_vision_context",
+        new=AsyncMock(return_value=no_vision),
+    ), patch(
+        "src.recorder.orchestrator.analyze_event_to_cache",
+        new=AsyncMock(return_value={"instruction": "將滑鼠移到目標，並點擊滑鼠一下。"}),
+    ), patch(
+        "src.recorder.orchestrator.run_pointer_event_yolo_ocr",
+        fake_yolo,
+    ):
+        report = await analyze_recording_session(run_dir)
+
+    assert report["yolo_ocr_retried"] == 1
+    assert report["yolo_ocr_recovered"] == 1
+    assert report["yolo_ocr_failed"] == 0
+    assert "搜尋" in report["instructions"][0]
+    analysis = json.loads((run_dir / "analysis" / "event_001.json").read_text(encoding="utf-8"))
+    assert "搜尋" in analysis["instruction"]
+    html = (run_dir / "recording_steps.html").read_text(encoding="utf-8")
+    assert "YOLO/OCR 未偵測到目標" not in html
+
+
+@pytest.mark.asyncio
+async def test_analyze_recording_session_keeps_yolo_failure_after_retry(
+    tmp_path: Path,
+) -> None:
+    from src.common.run_state import reset_run_state_manager
+
+    reset_run_state_manager()
+    run_dir = tmp_path / "screen_record_yolo_retry_fail"
+    _write_click_recording(run_dir, yolo_error="Triton infer timed out after 20s")
+    no_vision = {"used_vision": False, "candidate_text": "", "local_cursor": None}
+    original = "將滑鼠移到目標，並點擊滑鼠一下。"
+
+    def fake_yolo(event, *, run_dir, persist_debug=True):
+        del persist_debug
+        (run_dir / "yolo_ocr" / "event_001.json").write_text(
+            json.dumps(
+                {
+                    "event_index": event.index,
+                    "candidates": [],
+                    "detection_count": 0,
+                    "yolo_error": "Triton infer timed out after 20s",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return {
+            "used_vision": False,
+            "candidate_text": "",
+            "candidates": [],
+            "detection_count": 0,
+            "yolo_error": "Triton infer timed out after 20s",
+            "local_cursor": (56, 48),
+        }
+
+    with patch(
+        "src.recorder.orchestrator.build_vision_context",
+        new=AsyncMock(return_value=no_vision),
+    ), patch(
+        "src.recorder.orchestrator.analyze_event_to_cache",
+        new=AsyncMock(return_value={"instruction": original}),
+    ), patch(
+        "src.recorder.orchestrator.run_pointer_event_yolo_ocr",
+        fake_yolo,
+    ):
+        report = await analyze_recording_session(run_dir)
+
+    assert report["yolo_ocr_retried"] == 1
+    assert report["yolo_ocr_recovered"] == 0
+    assert report["yolo_ocr_failed"] == 1
+    assert report["instructions"] == [original]
+    html = (run_dir / "recording_steps.html").read_text(encoding="utf-8")
+    assert "YOLO/OCR 未偵測到目標" in html

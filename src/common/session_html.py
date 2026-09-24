@@ -4409,27 +4409,15 @@ def _render_landmarks_panel_html(
 
 
 def _yolo_ocr_payload_has_candidates(payload: dict[str, Any] | None) -> bool:
-    if not isinstance(payload, dict):
-        return False
-    if payload.get("yolo_error"):
-        return False
-    candidates = payload.get("candidates")
-    if isinstance(candidates, list) and candidates:
-        return True
-    count = payload.get("detection_count")
-    return isinstance(count, int) and count > 0
+    from src.recorder.vision_context import yolo_ocr_payload_has_candidates
+
+    return yolo_ocr_payload_has_candidates(payload)
 
 
 def _recording_yolo_ocr_failed(run_root: Path, event_index: int, kind: str) -> bool:
-    from src.recorder.vision_context import load_yolo_ocr_payload
+    from src.recorder.vision_context import recording_pointer_yolo_ocr_failed
 
-    start = load_yolo_ocr_payload(run_root, event_index, suffix="")
-    if _yolo_ocr_payload_has_candidates(start):
-        return False
-    if kind == "drag":
-        end = load_yolo_ocr_payload(run_root, event_index, suffix="_end")
-        return not _yolo_ocr_payload_has_candidates(end)
-    return True
+    return recording_pointer_yolo_ocr_failed(run_root, event_index, kind)
 
 
 def _recording_needs_pick_target(

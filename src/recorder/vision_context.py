@@ -2257,6 +2257,49 @@ def load_yolo_ocr_payload(
     return payload if isinstance(payload, dict) else None
 
 
+def yolo_ocr_payload_has_candidates(payload: dict[str, Any] | None) -> bool:
+    """True when a persisted YOLO/OCR payload has usable detections."""
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("yolo_error"):
+        return False
+    candidates = payload.get("candidates")
+    if isinstance(candidates, list) and candidates:
+        return True
+    count = payload.get("detection_count")
+    return isinstance(count, int) and count > 0
+
+
+def recording_pointer_yolo_ocr_failed(
+    run_root: Path,
+    event_index: int,
+    kind: str,
+    *,
+    require_payload: bool = False,
+) -> bool:
+    """True when a pointer step would show 「YOLO/OCR 未偵測到目標」.
+
+    Drag steps fail only when both the start and end payloads lack detections.
+    ``require_payload`` skips events that never wrote a ``yolo_ocr`` file, so an
+    automatic retry does not invent a run for steps vision never persisted.
+    """
+    if kind not in POINTER_EVENT_KINDS:
+        return False
+    start = load_yolo_ocr_payload(run_root, event_index, suffix="")
+    end = (
+        load_yolo_ocr_payload(run_root, event_index, suffix="_end")
+        if kind == "drag"
+        else None
+    )
+    if require_payload and start is None and end is None:
+        return False
+    if yolo_ocr_payload_has_candidates(start):
+        return False
+    if kind == "drag":
+        return not yolo_ocr_payload_has_candidates(end)
+    return True
+
+
 def vision_from_yolo_ocr(
     run_root: Path,
     event_index: int,

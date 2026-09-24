@@ -715,6 +715,13 @@ def test_instruction_ignores_shell_experience_host_window() -> None:
 
 
 def test_settle_delay_is_longer_for_title_bar_clicks() -> None:
+    from src.recorder.window_snapshot import (
+        WINDOW_SETTLE_DELAY_S,
+        WINDOW_SETTLE_TITLE_BAR_DELAY_S,
+    )
+
+    assert WINDOW_SETTLE_DELAY_S == 0.25
+    assert WINDOW_SETTLE_TITLE_BAR_DELAY_S == 0.45
     assert settle_delay_for_click((100, 40)) > settle_delay_for_click((100, 200))
     win = _win(1, "App", left=0, top=400, width=800, height=400)
     # Relative to window top (y=410), not absolute screen y<=80

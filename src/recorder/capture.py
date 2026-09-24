@@ -45,6 +45,7 @@ from src.recorder.verify_signals import (
     capture_slow_signals,
     capture_step_signals,
     identity_from_click_window,
+    read_uia_for_kind,
 )
 from src.recorder.window_snapshot import (
     ClickWindowInfo,
@@ -78,6 +79,11 @@ _SETTLE_PROBE_MAX_WINDOW_S = 55.0
 _SETTLE_PROBE_KEEP_DEBUG_SAMPLES = False
 # Window list and UI Automation. Kept off the settle-probe timer.
 _PRE_CLICK_CONTEXT_INTERVAL_S = 0.25
+# UI Automation on a closing window can stall. The per-step thread gives up
+# and leaves window_change empty rather than blocking the next click.
+_WINDOW_UIA_TIMEOUT_S = 1.0
+# Stop waits this long for in-flight window-step threads to patch event JSON.
+_WINDOW_STEP_JOIN_TIMEOUT_S = 2.0
 _SETTLE_PROBE_KINDS = frozenset(
     {
         "click",
@@ -182,6 +188,8 @@ class _DeferredCaptureJob:
     click_window: ClickWindowInfo | None = None
     signals_before: dict[str, Any] | None = None
     refresh_pre_type: bool = False
+    # time.monotonic() when the gesture happened, for the window-settle sleep.
+    action_monotonic: float | None = None
 
 
 def _pre_type_focus_still_valid(
@@ -297,14 +305,21 @@ class _QueuedEvent:
     click_window: ClickWindowInfo | None = None
     # Light/UIA sample copied from the pre-click cache at input time.
     signals_before: dict[str, Any] | None = None
+    # time.monotonic() when the gesture happened. The window-step thread sleeps
+    # only the remainder of the settle delay from this instant.
+    action_monotonic: float | None = None
 
 
-def _pending_capture_path(run_dir: Path) -> Path:
-    return run_dir / "screenshots" / "_pending_capture.jpeg"
+def _pending_capture_path(run_dir: Path, press_seq: int | None = None) -> Path:
+    if press_seq is None:
+        return run_dir / "screenshots" / "_pending_capture.jpeg"
+    return run_dir / "screenshots" / f"_pending_capture_{int(press_seq)}.jpeg"
 
 
-def _pending_right_capture_path(run_dir: Path) -> Path:
-    return run_dir / "screenshots" / "_pending_right_capture.jpeg"
+def _pending_right_capture_path(run_dir: Path, press_seq: int | None = None) -> Path:
+    if press_seq is None:
+        return run_dir / "screenshots" / "_pending_right_capture.jpeg"
+    return run_dir / "screenshots" / f"_pending_right_capture_{int(press_seq)}.jpeg"
 
 
 def _pending_pre_type_capture_path(run_dir: Path) -> Path:
@@ -773,6 +788,9 @@ class RecordingSession:
         self._settle_probe_timer: threading.Timer | None = None
         # Serialize settle ticks (timer thread) vs cancel/start (capture worker).
         self._settle_tick_lock = threading.Lock()
+        # Event JSON is patched by the probe timer and by per-step window threads.
+        self._event_file_lock = threading.Lock()
+        self._window_step_threads: list[threading.Thread] = []
         # Last settle-probe frame (path, monitor_index, monitor_offset) for next before-shot.
         # The path is a unique ``_settle_pub_*.jpeg`` so a hook can pin it while the
         # next sample writes a new file.
@@ -910,6 +928,7 @@ class RecordingSession:
             self._cancel_pre_key_settle_timer_locked()
             self._settle_probe = None
             self._settle_probe_timer = None
+            self._window_step_threads = []
             self._last_settle_frame = None
             self._settle_pins = {}
             self._settle_pub_seq = 0
@@ -1110,6 +1129,7 @@ class RecordingSession:
 
         if worker is not None and worker.is_alive():
             worker.join(timeout=15)
+        self._join_window_step_threads()
 
         with self._lock:
             events = list(self._events)
@@ -1535,7 +1555,6 @@ class RecordingSession:
                 Path(stale).unlink(missing_ok=True)
             except OSError:
                 pass
-        self._refresh_last_settle_windows()
 
     def _latch_settle_frame(self) -> tuple[str, int, tuple[int, int]] | None:
         """Pin the newest finished settle sample. Hook-safe: no capture and no file copy."""
@@ -1689,6 +1708,7 @@ class RecordingSession:
                 signals_before=signals_before,
                 refresh_pre_type=True,
                 settle_frame=self._latch_settle_frame(),
+                action_monotonic=time.monotonic(),
             )
         )
 
@@ -1736,6 +1756,7 @@ class RecordingSession:
                 key=key,
                 keys=keys,
                 text=text,
+                action_monotonic=time.monotonic(),
                 flush_chars=flush_chars or None,
                 flush_meta=flush_meta,
                 shared_end_index=shared_index,
@@ -2453,6 +2474,7 @@ class RecordingSession:
             press_seq = self._left_press_seq
             timestamp_utc = self._pending_click_timestamp_utc or utc_now_iso()
             modifiers = self._pending_click_modifiers
+            action_monotonic = self._pending_click_down_at or time.monotonic()
             self._pending_click_timer = None
             self._pending_click_coords = None
             self._pending_click_down_at = None
@@ -2475,6 +2497,7 @@ class RecordingSession:
                 modifiers=modifiers,
                 press_seq=press_seq,
                 refresh_pre_type=True,
+                action_monotonic=action_monotonic,
             )
         )
 
@@ -2496,6 +2519,7 @@ class RecordingSession:
             press_seq = self._left_press_seq
             timestamp_utc = self._pending_click_timestamp_utc or utc_now_iso()
             modifiers = self._pending_click_modifiers
+            action_monotonic = self._pending_click_down_at or time.monotonic()
             self._pending_click_timer = None
             self._pending_click_coords = None
             self._pending_click_down_at = None
@@ -2519,6 +2543,7 @@ class RecordingSession:
                 duration_seconds=round(float(duration_seconds), 3),
                 press_seq=press_seq,
                 refresh_pre_type=True,
+                action_monotonic=action_monotonic,
             )
         )
 
@@ -2541,6 +2566,7 @@ class RecordingSession:
             press_seq = self._right_press_seq
             timestamp_utc = self._pending_right_timestamp_utc or utc_now_iso()
             modifiers = self._pending_right_modifiers
+            action_monotonic = self._pending_right_down_at or time.monotonic()
             # Keep press_seq + capture dict entry for the emit worker.
             self._clear_pending_right_gesture_locked(discard_capture=False)
         self._flush_pending_text_input(shared_end_index=right_index)
@@ -2559,6 +2585,7 @@ class RecordingSession:
                 ),
                 press_seq=press_seq,
                 refresh_pre_type=True,
+                action_monotonic=action_monotonic,
             )
         )
 
@@ -2585,6 +2612,7 @@ class RecordingSession:
                 self._drag_end_captures[press_seq] = pending_drag_end
             timestamp_utc = self._pending_click_timestamp_utc or utc_now_iso()
             modifiers = self._pending_click_modifiers
+            action_monotonic = self._pending_click_down_at or time.monotonic()
             self._pending_click_timer = None
             self._pending_click_coords = None
             self._pending_click_down_at = None
@@ -2607,6 +2635,7 @@ class RecordingSession:
                 modifiers=modifiers,
                 press_seq=press_seq,
                 refresh_pre_type=True,
+                action_monotonic=action_monotonic,
             )
         )
 
@@ -2671,8 +2700,9 @@ class RecordingSession:
                     done.set()
         elif job.action == "read_clipboard_paste":
             self._worker_read_clipboard_paste(job)
-        # settle_probe_tick runs on its own timer thread (not this queue) so
-        # window-settle sleeps on click persist cannot starve comparisons.
+        # settle_probe_tick runs on its own timer thread (not this queue).
+        # Window settle and UI Automation run on a per-step thread started
+        # after the event is saved, so they cannot delay the next probe.
 
     def _cancel_settle_probe(
         self,
@@ -2953,13 +2983,22 @@ class RecordingSession:
         )
         self._schedule_settle_probe_tick(first_delay, 0)
 
+    def _settle_probe_is_current_or_newer(self, event_index: int) -> bool:
+        with self._lock:
+            probe = self._settle_probe
+            return probe is not None and probe.event_index >= event_index
+
     def _start_settle_probe(self, event: RecordedEvent) -> None:
         if event.kind not in _SETTLE_PROBE_KINDS:
+            return
+        if self._settle_probe_is_current_or_newer(event.index):
             return
         self._cancel_settle_probe(
             cleanup_files=True,
             reason=f"replaced_by_event_{event.index}",
         )
+        if self._settle_probe_is_current_or_newer(event.index):
+            return
         cursor = event.cursor_xy or event.end_xy or event.anchor_click_xy
         with self._lock:
             if self._run_dir is None:
@@ -3002,6 +3041,15 @@ class RecordingSession:
                 return staging
         return kept_dest
 
+    def _event_json_lock(self) -> threading.Lock:
+        """Lock for event JSON. Sessions built without ``__init__`` get one on first use."""
+        lock = getattr(self, "_event_file_lock", None)
+        if lock is not None:
+            return lock
+        lock = threading.Lock()
+        self._event_file_lock = lock
+        return lock
+
     def _persist_observed_settle(self, event_index: int, observed_settle_seconds: float) -> None:
         with self._lock:
             run_dir = self._run_dir
@@ -3009,12 +3057,13 @@ class RecordingSession:
         if run_dir is None:
             return
         path = event_json_path(run_dir, event_index)
-        raw = read_json(path, None)
-        if not isinstance(raw, dict):
-            return
-        seconds = round(float(observed_settle_seconds), 3)
-        raw["observed_settle_seconds"] = seconds
-        write_json(path, raw)
+        with self._event_json_lock():
+            raw = read_json(path, None)
+            if not isinstance(raw, dict):
+                return
+            seconds = round(float(observed_settle_seconds), 3)
+            raw["observed_settle_seconds"] = seconds
+            write_json(path, raw)
         with self._lock:
             for index, event in enumerate(events):
                 if event.index == event_index:
@@ -3293,7 +3342,7 @@ class RecordingSession:
                     focus_xy[1],
                 )
 
-        pending_dest = _pending_capture_path(run_dir)
+        pending_dest = _pending_capture_path(run_dir, job.press_seq)
         try:
             info = self._pending_screenshot_from_settle_or_capture(
                 run_dir,
@@ -3322,7 +3371,7 @@ class RecordingSession:
         if run_dir is None:
             self._unpin_settle_frame(job.settle_frame)
             return
-        pending_dest = _pending_right_capture_path(run_dir)
+        pending_dest = _pending_right_capture_path(run_dir, job.press_seq)
         try:
             info = self._pending_screenshot_from_settle_or_capture(
                 run_dir,
@@ -3454,6 +3503,7 @@ class RecordingSession:
                 windows_before=pending_windows,
                 click_window=click_window,
                 signals_before=signals_before,
+                action_monotonic=job.action_monotonic,
             )
         )
         if job.refresh_pre_type:
@@ -3520,6 +3570,7 @@ class RecordingSession:
                 windows_before=pending_windows,
                 click_window=click_window,
                 signals_before=signals_before,
+                action_monotonic=job.action_monotonic,
             )
         )
         if job.refresh_pre_type:
@@ -3564,6 +3615,7 @@ class RecordingSession:
                 windows_before=job.windows_before or self._start_windows_before(),
                 click_window=job.click_window,
                 signals_before=job.signals_before or self._start_signals_before(),
+                action_monotonic=job.action_monotonic,
             )
         )
         if job.refresh_pre_type:
@@ -3716,6 +3768,7 @@ class RecordingSession:
                 focus_rect=meta.get("focus_rect"),
                 windows_before=meta.get("windows_before") or self._start_windows_before(),
                 signals_before=meta.get("signals_before") or self._start_signals_before(),
+                action_monotonic=job.action_monotonic,
             )
         )
 
@@ -3784,10 +3837,48 @@ class RecordingSession:
                 text=job.text,
                 windows_before=job.windows_before or self._start_windows_before(),
                 signals_before=job.signals_before or self._start_signals_before(),
+                action_monotonic=job.action_monotonic,
             )
         )
         if job.refresh_pre_type:
             self._refresh_pending_pre_type(job.cursor_xy)
+
+    def _sleep_remaining_window_settle(self, item: _QueuedEvent) -> None:
+        """Sleep only the settle time still left since the gesture."""
+        delay = settle_delay_for_click(item.cursor_xy, item.windows_before)
+        started = item.action_monotonic
+        if started is None:
+            time.sleep(delay)
+            return
+        remaining = delay - (time.monotonic() - float(started))
+        if remaining > 0:
+            time.sleep(remaining)
+
+    def _uia_reader_or_timeout(self) -> tuple[Callable[..., dict[str, Any]], dict[str, bool]]:
+        """Run UI Automation on a side thread and report when it exceeds the timeout."""
+        timed_out = {"value": False}
+
+        def reader(kind: str | None, cursor_xy: tuple[int, int] | None) -> dict[str, Any]:
+            done = threading.Event()
+            box: dict[str, Any] = {}
+
+            def _run() -> None:
+                try:
+                    value = read_uia_for_kind(kind, cursor_xy)
+                except Exception:
+                    value = {}
+                box["value"] = value if isinstance(value, dict) else {}
+                done.set()
+
+            thread = threading.Thread(target=_run, name="window-step-uia", daemon=True)
+            thread.start()
+            if not done.wait(_WINDOW_UIA_TIMEOUT_S):
+                timed_out["value"] = True
+                return {}
+            value = box.get("value", {})
+            return value if isinstance(value, dict) else {}
+
+        return reader, timed_out
 
     def _resolve_window_change(
         self,
@@ -3795,7 +3886,7 @@ class RecordingSession:
     ) -> tuple[dict[str, Any] | None, str | None, dict[str, Any] | None]:
         if not item.windows_before and not item.signals_before:
             return None, None, None
-        time.sleep(settle_delay_for_click(item.cursor_xy, item.windows_before))
+        self._sleep_remaining_window_settle(item)
         windows_after: list[WindowInfo] = []
         if item.windows_before:
             try:
@@ -3806,14 +3897,18 @@ class RecordingSession:
         point_before = identity_from_click_window(item.click_window)
         if point_before is not None:
             signals_before["point_window"] = point_before
+        uia_reader, uia_timed_out = self._uia_reader_or_timeout()
         try:
             signals_after = capture_step_signals(
                 windows_after,
                 cursor_xy=item.cursor_xy,
                 kind=item.kind,
+                uia_reader=uia_reader,
             )
         except Exception:
             signals_after = {}
+        if uia_timed_out["value"]:
+            return None, None, None
         change: dict[str, Any] | None = None
         title: str | None = None
         debug: dict[str, Any] = {}
@@ -3837,8 +3932,6 @@ class RecordingSession:
             if self._run_dir is None:
                 return
             run_dir = self._run_dir
-
-        window_change, target_title, snapshot_debug = self._resolve_window_change(item)
 
         click_window_payload: dict[str, Any] | None = None
         if item.click_window is not None:
@@ -3866,15 +3959,13 @@ class RecordingSession:
             end_monitor_offset=item.end_monitor_offset,
             anchor_click_xy=item.anchor_click_xy,
             focus_rect=item.focus_rect,
-            window_change=window_change,
-            target_window_title=target_title,
-            window_snapshot_debug=snapshot_debug,
             click_window=click_window_payload,
         )
+        with self._event_json_lock():
+            write_json(event_json_path(run_dir, event.index), event.to_dict())
         with self._lock:
             if self._run_dir is None:
                 return
-            write_json(event_json_path(run_dir, event.index), event.to_dict())
             self._events.append(event)
         self._notify_event(event)
         if event.kind in _SETTLE_PROBE_KINDS:
@@ -3884,6 +3975,67 @@ class RecordingSession:
                 cleanup_files=True,
                 reason=f"non_probe_event_{event.kind}_{event.index}",
             )
+        self._start_window_step(item)
+
+    def _start_window_step(self, item: _QueuedEvent) -> None:
+        """Diff windows off the fast lane so a stall cannot delay the settle probe."""
+        if not item.windows_before and not item.signals_before:
+            return
+        thread = threading.Thread(
+            target=self._window_step_body,
+            args=(item,),
+            name=f"window-step-{item.event_index}",
+            daemon=True,
+        )
+        with self._lock:
+            self._window_step_threads = [
+                running for running in self._window_step_threads if running.is_alive()
+            ]
+            self._window_step_threads.append(thread)
+        thread.start()
+
+    def _window_step_body(self, item: _QueuedEvent) -> None:
+        change, title, debug = self._resolve_window_change(item)
+        if change is None and title is None and debug is None:
+            return
+        self._patch_window_change(item.event_index, change, title, debug)
+
+    def _patch_window_change(
+        self,
+        event_index: int,
+        change: dict[str, Any] | None,
+        title: str | None,
+        debug: dict[str, Any] | None,
+    ) -> None:
+        with self._lock:
+            run_dir = self._run_dir
+        if run_dir is None:
+            return
+        path = event_json_path(run_dir, event_index)
+        with self._event_json_lock():
+            raw = read_json(path, None)
+            if not isinstance(raw, dict):
+                return
+            raw["window_change"] = change
+            raw["target_window_title"] = title
+            raw["window_snapshot_debug"] = debug
+            write_json(path, raw)
+        with self._lock:
+            events = self._events
+            for index, event in enumerate(events):
+                if event.index == event_index:
+                    events[index] = RecordedEvent.from_dict(raw)
+                    break
+
+    def _join_window_step_threads(self) -> None:
+        with self._lock:
+            threads = list(self._window_step_threads)
+        deadline = time.monotonic() + _WINDOW_STEP_JOIN_TIMEOUT_S
+        for thread in threads:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(remaining)
 
     def _emit_pending_click(self, x: int, y: int, button: str) -> None:
         self._flush_pending_click(x, y, button)

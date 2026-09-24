@@ -20,8 +20,8 @@ _FALLBACK_CAPTION_HEIGHT = 32
 # DWM caption button rects are often a few px short of the real hit target
 # (esp. maximized Chrome: recorded clicks land below the reported bottom).
 _CAPTION_HIT_SLACK_PX = 12
-WINDOW_SETTLE_DELAY_S = 1.0
-WINDOW_SETTLE_TITLE_BAR_DELAY_S = 1.2
+WINDOW_SETTLE_DELAY_S = 0.25
+WINDOW_SETTLE_TITLE_BAR_DELAY_S = 0.45
 CaptionBounds = tuple[int, int, int, int]
 RectXywh = tuple[int, int, int, int]
 

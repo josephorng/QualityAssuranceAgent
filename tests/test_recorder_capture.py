@@ -1070,7 +1070,7 @@ def test_left_click_uses_press_time_screenshot(tmp_path) -> None:
             session.stop()
 
     assert session.event_count() == 1
-    assert any(name.endswith("_pending_capture.jpeg") for name in captures)
+    assert any(Path(name).name.startswith("_pending_capture_") for name in captures)
     assert (run_dir / "screenshots" / "event_001.jpeg").is_file()
 
 
@@ -1386,6 +1386,114 @@ def test_text_input_uses_focus_point_not_anchor_click(tmp_path) -> None:
     assert text_event["anchor_click_xy"] is None
     resolve_mock.assert_called()
     assert resolve_mock.call_args.kwargs["last_click_xy"] == (400, 300)
+
+
+def test_pending_capture_paths_differ_per_press(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+    pending_names: list[str] = []
+
+    real_pending = __import__(
+        "src.recorder.capture", fromlist=["_pending_capture_path"]
+    )._pending_capture_path
+
+    def _track_pending(run_dir, press_seq=None):
+        path = real_pending(run_dir, press_seq)
+        pending_names.append(path.name)
+        return path
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture._pending_capture_path",
+        side_effect=_track_pending,
+    ):
+        session.start()
+        try:
+            _left_click(session, 100, 100)
+            _left_click(session, 200, 200)
+        finally:
+            session.stop()
+
+    assert len(pending_names) >= 2
+    assert len(set(pending_names)) >= 2
+    assert all(name.startswith("_pending_capture_") for name in pending_names)
+
+
+def test_blocked_window_step_does_not_delay_next_probe(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+    first_entered = threading.Event()
+    release = threading.Event()
+    calls = {"n": 0}
+    open_window = WindowInfo(
+        hwnd=100,
+        title="Editor",
+        pid=1,
+        left=0,
+        top=0,
+        width=800,
+        height=600,
+        is_minimized=False,
+        is_maximized=False,
+    )
+
+    def _signals(*_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            first_entered.set()
+            assert release.wait(3.0)
+        return {}
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.snapshot_top_level_windows",
+        return_value=[open_window],
+    ), patch(
+        "src.recorder.capture.capture_step_signals",
+        side_effect=_signals,
+    ):
+        session.start()
+        try:
+            _left_click(session, 10, 10)
+            assert first_entered.wait(2.0)
+            probe = session._settle_probe
+            assert probe is not None and probe.event_index == 1
+            _left_click(session, 30, 30)
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                probe = session._settle_probe
+                if probe is not None and probe.event_index == 2:
+                    break
+                time.sleep(0.02)
+            probe = session._settle_probe
+            assert probe is not None and probe.event_index == 2
+            assert not release.is_set()
+        finally:
+            release.set()
+            session.stop()
+
+
+def test_older_settle_probe_does_not_replace_newer(tmp_path) -> None:
+    from src.recorder.models import RecordedEvent
+
+    session = RecordingSession(runs_root=tmp_path)
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        session.start()
+        try:
+            newer = RecordedEvent(index=2, timestamp_utc="t", kind="click", cursor_xy=(1, 1))
+            older = RecordedEvent(index=1, timestamp_utc="t", kind="click", cursor_xy=(2, 2))
+            session._start_settle_probe(newer)
+            session._start_settle_probe(older)
+            probe = session._settle_probe
+            assert probe is not None
+            assert probe.event_index == 2
+        finally:
+            session.stop()
 
 
 def test_pointer_click_persists_window_change(tmp_path) -> None:

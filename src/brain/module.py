@@ -47,12 +47,24 @@ from src.common.runtime_context import (
     SCRIPT_OUTCOMES_ENV,
     SCRIPT_PATH_ENV,
     SCRIPT_SETTLE_AFTER_ENV,
+    SCRIPT_WINDOW_VERIFY_ENV,
     get_runtime_env,
     is_runtime_command_mode,
     is_smart_mode,
     use_tool_cache_enabled,
 )
 from src.common.settings import load_settings
+from src.recorder.verify_signals import (
+    capture_replay_after_signals,
+    predicate_has_signal_assertions,
+)
+from src.recorder.window_snapshot import (
+    WindowInfo,
+    build_window_verify_predicate,
+    snapshot_top_level_windows,
+    window_verify_has_assertions,
+    window_verify_satisfied,
+)
 
 SCRIPT_STEP_VERIFY_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -181,6 +193,11 @@ class BrainModule:
             []
             if is_runtime_command_mode() or is_smart_mode()
             else self._script_seed_settle_after_seconds(len(self.script_lines))
+        )
+        self.script_window_verifies = (
+            []
+            if is_runtime_command_mode() or is_smart_mode()
+            else self._script_seed_window_verifies(len(self.script_lines))
         )
         self._script_step_index = 0
         self._hand = hand
@@ -444,6 +461,24 @@ class BrainModule:
                     settles[index] = value
         return settles
 
+    def _script_seed_window_verifies(self, step_count: int) -> list[dict[str, Any]]:
+        """Load recorded window-diff predicates aligned with script steps."""
+        verifies: list[dict[str, Any]] = [{} for _ in range(step_count)]
+        raw = os.environ.get(SCRIPT_WINDOW_VERIFY_ENV, "")
+        if not raw:
+            return verifies
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return verifies
+        if not isinstance(parsed, list):
+            return verifies
+        for index in range(min(step_count, len(parsed))):
+            item = parsed[index]
+            if isinstance(item, dict) and window_verify_has_assertions(item):
+                verifies[index] = item
+        return verifies
+
     def _current_expected_outcome(self) -> str:
         if not self.script_expected_outcomes:
             return ""
@@ -474,6 +509,17 @@ class BrainModule:
         if isinstance(value, (int, float)) and float(value) > 0:
             return float(value)
         return None
+
+    def _current_window_verify(self) -> dict[str, Any]:
+        verifies = getattr(self, "script_window_verifies", None)
+        if not verifies:
+            return {}
+        if self._script_step_index >= len(verifies):
+            return {}
+        value = verifies[self._script_step_index]
+        if isinstance(value, dict) and window_verify_has_assertions(value):
+            return value
+        return {}
 
     def _clear_pending_settle_deadline(self) -> None:
         self._pending_settle_deadline_perf = None
@@ -590,6 +636,7 @@ class BrainModule:
         self.script_expected_outcomes = [None]
         self.script_baseline_after_paths = [None]
         self.script_settle_after_seconds = [None]
+        self.script_window_verifies = [{}]
         self._script_step_index = 0
         self._clear_pending_settle_deadline()
 
@@ -608,6 +655,7 @@ class BrainModule:
         saved_outcomes = list(self.script_expected_outcomes)
         saved_baselines = list(self.script_baseline_after_paths)
         saved_settles = list(self.script_settle_after_seconds)
+        saved_verifies = list(getattr(self, "script_window_verifies", []))
         saved_index = self._script_step_index
         transcript_counter = self._step_transcript_counter
         script_step_index = 0
@@ -615,6 +663,7 @@ class BrainModule:
         self.script_expected_outcomes = [None]
         self.script_baseline_after_paths = [None]
         self.script_settle_after_seconds = [None]
+        self.script_window_verifies = [{}]
         self._script_step_index = 0
         self._clear_pending_settle_deadline()
         self.manager.set_step_log_context(transcript_counter, script_step_index)
@@ -644,6 +693,7 @@ class BrainModule:
             self.script_expected_outcomes = saved_outcomes
             self.script_baseline_after_paths = saved_baselines
             self.script_settle_after_seconds = saved_settles
+            self.script_window_verifies = saved_verifies
             self._script_step_index = saved_index
             self.manager.clear_step_log_context()
 
@@ -1795,6 +1845,69 @@ class BrainModule:
             reason="Actor completed the step with all tools ok; no recorded expected outcome.",
         )
 
+    async def _snapshot_top_level_windows(self) -> list[WindowInfo] | None:
+        """Enumerate top-level windows off the event loop. None when the snapshot fails."""
+        try:
+            windows = await asyncio.to_thread(snapshot_top_level_windows)
+        except Exception as exc:
+            self.manager.log_info(f"window snapshot failed: {exc}")
+            return None
+        return list(windows)
+
+    async def _window_verify_miss(
+        self,
+        windows_before: list[WindowInfo] | None,
+        recorded: dict[str, Any],
+    ) -> ScriptStepVerifyResult | None:
+        """Return a clearly-unmet retry when the live delta misses the recorded one."""
+        if windows_before is None:
+            return ScriptStepVerifyResult(
+                accomplished=False,
+                branch="retry",
+                target_step=None,
+                clearly_unmet=True,
+                reason="Window snapshot before the step failed.",
+            )
+        windows_after = await self._snapshot_top_level_windows()
+        if windows_after is None:
+            return ScriptStepVerifyResult(
+                accomplished=False,
+                branch="retry",
+                target_step=None,
+                clearly_unmet=True,
+                reason="Window snapshot after the step failed.",
+            )
+        live = build_window_verify_predicate(windows_before, windows_after)
+        live_after: dict[str, Any] | None = None
+        if predicate_has_signal_assertions(recorded):
+            try:
+                live_after = await asyncio.to_thread(
+                    capture_replay_after_signals,
+                    windows_after,
+                    recorded,
+                )
+            except Exception as exc:
+                self.manager.log_info(f"signal snapshot failed: {exc}")
+                return ScriptStepVerifyResult(
+                    accomplished=False,
+                    branch="retry",
+                    target_step=None,
+                    clearly_unmet=True,
+                    reason="Signal snapshot after the step failed.",
+                )
+        ok, reason = window_verify_satisfied(recorded, live, live_after=live_after)
+        if ok:
+            self.manager.log_info("Window verify matched recorded delta")
+            return None
+        self.manager.log_info(f"Window verify failed: {reason}")
+        return ScriptStepVerifyResult(
+            accomplished=False,
+            branch="retry",
+            target_step=None,
+            clearly_unmet=True,
+            reason=reason,
+        )
+
     def _verify_result_metadata(
         self,
         verify_result: ScriptStepVerifyResult,
@@ -1813,10 +1926,12 @@ class BrainModule:
     async def process_step(self) -> BrainStepResult:
         """Run one script step: tool loop, then verification and index branching.
 
-        Happy path: empty expected outcome, no recording after-baseline, and actor
-        success (all tools ok) auto-advances without a screenshot or verifier LLM.
-        In that case any recording ``settle_after`` is deferred until the next step's
-        first tool so next-step prep can overlap the settle window.
+        Happy path: empty expected outcome, no recording after-baseline, no window
+        diff, and actor success (all tools ok) auto-advances without a screenshot or
+        verifier LLM. In that case any recording ``settle_after`` is deferred until
+        the next step's first tool so next-step prep can overlap the settle window.
+        A recorded window diff is checked after that settle; a miss retries with
+        ``clearly_unmet`` and does not run vision.
 
         Recovery path: actor failure, a recorded expected outcome, or a recording
         after-baseline still uses screenshot verification for `goto`/`retry`/`skip`/
@@ -1846,6 +1961,10 @@ class BrainModule:
             started_iso = datetime.now(timezone.utc).isoformat()
             started_at = perf_counter()
             self._step_deferred_settle_waited_seconds = 0.0
+            window_verify = self._current_window_verify()
+            windows_before: list[WindowInfo] | None = None
+            if window_verify:
+                windows_before = await self._snapshot_top_level_windows()
 
             step_succeeded = await self.loop()
             settle_after = None
@@ -1854,6 +1973,7 @@ class BrainModule:
             # With a baseline, settle sleeps happen inside verify polls (1.0x/1.5x/2.0x).
             # With an expected outcome (no baseline), sleep the full gap before verify.
             # When vision verify is skipped, defer settle until the next step's first tool.
+            # A recorded window diff sleeps that gap first, then compares snapshots.
             poll_settle = (
                 step_succeeded
                 and settle_after is not None
@@ -1861,7 +1981,15 @@ class BrainModule:
                 and self._current_baseline_after_path() is not None
             )
             skip_vision = self._should_skip_vision_verify(step_succeeded)
-            if (
+            run_window_verify = step_succeeded and bool(window_verify)
+            if run_window_verify and settle_after is not None and settle_after > 0:
+                self.manager.log_info(
+                    f"Script step {script_step_index + 1} settling "
+                    f"{settle_after:.3f}s before window verify"
+                )
+                await asyncio.sleep(settle_after)
+                poll_settle = False
+            elif (
                 step_succeeded
                 and settle_after is not None
                 and settle_after > 0
@@ -1875,7 +2003,12 @@ class BrainModule:
                         f"{settle_after:.3f}s before verify"
                     )
                     await asyncio.sleep(settle_after)
-            if skip_vision:
+            window_miss: ScriptStepVerifyResult | None = None
+            if run_window_verify:
+                window_miss = await self._window_verify_miss(windows_before, window_verify)
+            if window_miss is not None:
+                verify_result = window_miss
+            elif skip_vision:
                 self.manager.log_info(
                     f"Script step {script_step_index + 1} skipping vision verification "
                     "(empty expected outcome; no recording baseline; actor tools succeeded)"

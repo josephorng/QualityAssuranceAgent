@@ -58,6 +58,9 @@ class WindowInfo:
     is_maximized: bool
     # Screen-space caption min/max/close strip when known (DWM); else hit-test falls back.
     caption_button_bounds: CaptionBounds | None = None
+    class_name: str = ""
+    # Set only for flyout windows so a full snapshot does not OpenProcess each hwnd.
+    process_name: str | None = None
 
     def area(self) -> int:
         return max(0, self.width) * max(0, self.height)
@@ -95,6 +98,10 @@ class WindowInfo:
             is_minimized=bool(raw.get("is_minimized", False)),
             is_maximized=bool(raw.get("is_maximized", False)),
             caption_button_bounds=bounds,
+            class_name=str(raw.get("class_name", "") or ""),
+            process_name=(
+                str(raw["process_name"]) if raw.get("process_name") else None
+            ),
         )
 
 
@@ -502,6 +509,8 @@ def _make_window_info(
     height: int,
     is_minimized: bool,
     is_maximized: bool,
+    class_name: str = "",
+    process_name: str | None = None,
 ) -> WindowInfo:
     return WindowInfo(
         hwnd=hwnd,
@@ -513,6 +522,8 @@ def _make_window_info(
         height=height,
         is_minimized=is_minimized,
         is_maximized=is_maximized,
+        class_name=class_name,
+        process_name=process_name,
     )
 
 
@@ -843,6 +854,10 @@ def _window_debug_entry(win: WindowInfo) -> dict[str, Any]:
     }
     if win.caption_button_bounds is not None:
         entry["caption_button_bounds"] = list(win.caption_button_bounds)
+    if win.class_name:
+        entry["class_name"] = win.class_name
+    if win.process_name:
+        entry["process_name"] = win.process_name
     return entry
 
 
@@ -976,6 +991,211 @@ def is_agent_app_restore(change: WindowStateChange | dict[str, Any] | None) -> b
         str(data.get("action", "")).strip() == "restored"
         and str(data.get("title", "")).strip() == _AGENT_APP_WINDOW_TITLE
     )
+
+
+def _verify_identity(win: WindowInfo) -> tuple[str, str, str]:
+    process = win.process_name or ""
+    return (
+        (win.class_name or "").strip(),
+        _normalize_title(win.title),
+        process.strip(),
+    )
+
+
+def _verify_entry(win: WindowInfo, *, change: str | None = None) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "class_name": (win.class_name or "").strip(),
+        "title": win.title.strip(),
+    }
+    if win.process_name:
+        entry["process_name"] = win.process_name
+    if change:
+        entry["change"] = change
+    return entry
+
+
+def _is_agent_hub_window(win: WindowInfo) -> bool:
+    return win.title.strip() == _AGENT_APP_WINDOW_TITLE
+
+
+def _state_change_label(before: WindowInfo, after: WindowInfo) -> str | None:
+    if before.is_minimized != after.is_minimized:
+        return "minimized" if after.is_minimized else "restored"
+    if before.is_maximized != after.is_maximized:
+        return "maximized" if after.is_maximized else "unmaximized"
+    return None
+
+
+def _windows_from_raw(raw_list: list[Any]) -> list[WindowInfo]:
+    windows: list[WindowInfo] = []
+    for raw in raw_list:
+        if not isinstance(raw, dict) or "hwnd" not in raw:
+            continue
+        try:
+            windows.append(WindowInfo.from_dict(raw))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return windows
+
+
+def build_window_verify_predicate(
+    before: list[WindowInfo],
+    after: list[WindowInfo],
+) -> dict[str, Any]:
+    """Stable appear/disappear/state delta for replay. Match key is not hwnd.
+
+    Drops the agent hub window and a title change on an hwnd that is still present.
+    Flyouts such as 「快顯主機」 are included here; script instructions still ignore them.
+    """
+    before_wins = [win for win in before if not _is_agent_hub_window(win)]
+    after_wins = [win for win in after if not _is_agent_hub_window(win)]
+    before_by_hwnd = {win.hwnd: win for win in before_wins if win.hwnd}
+    after_by_hwnd = {win.hwnd: win for win in after_wins if win.hwnd}
+
+    disappeared: list[dict[str, Any]] = []
+    appeared: list[dict[str, Any]] = []
+    state: list[dict[str, Any]] = []
+
+    for win in before_wins:
+        match = after_by_hwnd.get(win.hwnd) if win.hwnd else None
+        if match is not None:
+            if _verify_identity(win) == _verify_identity(match):
+                label = _state_change_label(win, match)
+                if label is not None:
+                    state.append(_verify_entry(match, change=label))
+            continue
+        disappeared.append(_verify_entry(win))
+
+    for win in after_wins:
+        if win.hwnd and win.hwnd in before_by_hwnd:
+            continue
+        appeared.append(_verify_entry(win))
+
+    predicate: dict[str, Any] = {}
+    if appeared:
+        predicate["appeared"] = appeared
+    if disappeared:
+        predicate["disappeared"] = disappeared
+    if state:
+        predicate["state"] = state
+    return predicate
+
+
+def window_verify_from_debug(debug: dict[str, Any] | None) -> dict[str, Any]:
+    """Build a replay predicate from stored window lists and changed signals."""
+    if not isinstance(debug, dict):
+        return {}
+    before_windows: list[WindowInfo] = []
+    after_windows: list[WindowInfo] = []
+    predicate: dict[str, Any] = {}
+    before_raw = debug.get("windows_before")
+    after_raw = debug.get("windows_after")
+    if isinstance(before_raw, list) and isinstance(after_raw, list):
+        before_windows = _windows_from_raw(before_raw)
+        after_windows = _windows_from_raw(after_raw)
+        predicate = build_window_verify_predicate(before_windows, after_windows)
+    from src.recorder.verify_signals import signal_verify_fields
+
+    before_signals = debug.get("signals_before")
+    after_signals = debug.get("signals_after")
+    predicate.update(
+        signal_verify_fields(
+            before_signals if isinstance(before_signals, dict) else None,
+            after_signals if isinstance(after_signals, dict) else None,
+            kind=str(debug.get("signal_kind") or "") or None,
+            before_windows=before_windows,
+            after_windows=after_windows,
+        )
+    )
+    return predicate
+
+
+def window_verify_has_assertions(predicate: dict[str, Any] | None) -> bool:
+    if not isinstance(predicate, dict):
+        return False
+    for key in ("appeared", "disappeared", "state"):
+        items = predicate.get(key)
+        if isinstance(items, list) and any(isinstance(item, dict) for item in items):
+            return True
+    from src.recorder.verify_signals import predicate_has_signal_assertions
+
+    return predicate_has_signal_assertions(predicate)
+
+
+def _entry_identity(entry: dict[str, Any]) -> tuple[str, str, str]:
+    process = entry.get("process_name")
+    return (
+        str(entry.get("class_name", "") or "").strip(),
+        _normalize_title(str(entry.get("title", "") or "")),
+        str(process).strip() if process else "",
+    )
+
+
+def _entries_match(
+    recorded: dict[str, Any],
+    candidate: dict[str, Any],
+    *,
+    match_change: bool,
+) -> bool:
+    recorded_class, recorded_title, recorded_process = _entry_identity(recorded)
+    live_class, live_title, live_process = _entry_identity(candidate)
+    if recorded_title != live_title:
+        return False
+    # Blank recorded fields come from older snapshots that did not store them.
+    if recorded_class and recorded_class != live_class:
+        return False
+    if recorded_process and recorded_process != live_process:
+        return False
+    if match_change and str(recorded.get("change", "") or "") != str(
+        candidate.get("change", "") or ""
+    ):
+        return False
+    return True
+
+
+def _take_matching_entry(
+    available: list[dict[str, Any]],
+    item: dict[str, Any],
+    *,
+    match_change: bool,
+) -> dict[str, Any] | None:
+    for index, candidate in enumerate(available):
+        if _entries_match(item, candidate, match_change=match_change):
+            return available.pop(index)
+    return None
+
+
+def window_verify_satisfied(
+    recorded: dict[str, Any],
+    live: dict[str, Any],
+    live_after: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
+    """True when every recorded delta is present and each recorded signal matches.
+
+    Extra live window changes are ignored. Signal fields compare the live after
+    sample to the recorded after value; a missing recorded field adds no assertion.
+    """
+    for bucket in ("appeared", "disappeared", "state"):
+        needed = recorded.get(bucket)
+        if not isinstance(needed, list) or not needed:
+            continue
+        available = [
+            item for item in (live.get(bucket) or []) if isinstance(item, dict)
+        ]
+        for item in needed:
+            if not isinstance(item, dict):
+                continue
+            found = _take_matching_entry(
+                available,
+                item,
+                match_change=bucket == "state",
+            )
+            if found is None:
+                title = str(item.get("title", "") or "").strip()
+                return False, f"window verify missed {bucket}: {title or item}"
+    from src.recorder.verify_signals import signal_assertions_satisfied
+
+    return signal_assertions_satisfied(recorded, live_after)
 
 
 def resolve_window_change(
@@ -1176,16 +1396,25 @@ def _window_info_from_hwnd(hwnd: int) -> WindowInfo | None:
         height = int(rect.bottom - rect.top)
     except Exception:
         return None
+    pid = _pid_for_hwnd(int(hwnd))
+    class_name = _window_class_name(int(hwnd))
+    process_name = (
+        _process_name_for_pid(pid)
+        if _is_flyout_window(class_name=class_name, title=title)
+        else None
+    )
     return _make_window_info(
         hwnd=int(hwnd),
         title=title,
-        pid=_pid_for_hwnd(int(hwnd)),
+        pid=pid,
         left=left,
         top=top,
         width=width,
         height=height,
         is_minimized=_is_iconic(int(hwnd)),
         is_maximized=_is_zoomed(int(hwnd)),
+        class_name=class_name,
+        process_name=process_name,
     )
 
 

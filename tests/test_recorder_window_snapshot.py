@@ -7,6 +7,7 @@ import pytest
 from src.recorder.window_snapshot import (
     WindowInfo,
     WindowStateChange,
+    build_window_verify_predicate,
     click_hits_caption_buttons,
     diff_snapshots,
     diff_snapshots_with_debug,
@@ -16,6 +17,8 @@ from src.recorder.window_snapshot import (
     is_agent_app_restore,
     resolve_window_change,
     settle_delay_for_click,
+    window_verify_satisfied,
+    window_verify_from_debug,
     snapshot_top_level_windows,
     window_at_point as _window_at_point_impl,
 )
@@ -136,6 +139,8 @@ def _win(
     is_maximized: bool = False,
     pid: int | None = 1,
     caption_button_bounds: tuple[int, int, int, int] | None = None,
+    class_name: str = "",
+    process_name: str | None = None,
 ) -> WindowInfo:
     return WindowInfo(
         hwnd=hwnd,
@@ -148,6 +153,8 @@ def _win(
         is_minimized=is_minimized,
         is_maximized=is_maximized,
         caption_button_bounds=caption_button_bounds,
+        class_name=class_name,
+        process_name=process_name,
     )
 
 
@@ -890,3 +897,307 @@ def test_sample_caption_nchittest_stops_when_window_does_not_answer(
     samples = sample_caption_nchittest(1, (0, 0, 80, 30), step=10, slack=0)
     assert samples is not None
     assert [(x, y, code) for x, y, code in samples] == [(0, 15, 20), (10, 15, 20)]
+
+
+def test_window_verify_keeps_flyout_disappear() -> None:
+    before = [
+        _win(
+            9,
+            "快顯主機",
+            class_name="Microsoft.UI.Content.PopupWindowSiteBridge",
+            process_name="explorer.exe",
+            left=446,
+            top=139,
+            width=213,
+            height=217,
+        )
+    ]
+    predicate = build_window_verify_predicate(before, [])
+    assert predicate == {
+        "disappeared": [
+            {
+                "class_name": "Microsoft.UI.Content.PopupWindowSiteBridge",
+                "title": "快顯主機",
+                "process_name": "explorer.exe",
+            }
+        ]
+    }
+    ok, reason = window_verify_satisfied(predicate, {})
+    assert ok is False
+    assert "快顯主機" in reason
+    ok, _reason = window_verify_satisfied(
+        predicate,
+        {
+            "disappeared": predicate["disappeared"],
+            "appeared": [{"class_name": "Other", "title": "unrelated"}],
+        },
+    )
+    assert ok is True
+
+
+def test_window_verify_blank_class_matches_live_class() -> None:
+    recorded = {"disappeared": [{"class_name": "", "title": "快顯主機"}]}
+    live = {
+        "disappeared": [
+            {
+                "class_name": "Microsoft.UI.Content.PopupWindowSiteBridge",
+                "title": "快顯主機",
+                "process_name": "explorer.exe",
+            }
+        ]
+    }
+    ok, _reason = window_verify_satisfied(recorded, live)
+    assert ok is True
+
+
+def test_window_verify_drops_agent_hub_restore() -> None:
+    before = [
+        _win(
+            1,
+            "電腦使用代理",
+            is_minimized=True,
+            left=-32000,
+            top=-32000,
+            width=160,
+            height=28,
+        )
+    ]
+    after = [_win(1, "電腦使用代理", is_minimized=False)]
+    assert build_window_verify_predicate(before, after) == {}
+
+
+def test_window_verify_drops_same_hwnd_title_flicker() -> None:
+    before = [_win(5, "資料夾", class_name="CabinetWClass")]
+    after = [_win(5, "資料夾 - 檔案總管", class_name="CabinetWClass")]
+    assert build_window_verify_predicate(before, after) == {}
+
+
+def _explorer_foreground() -> dict[str, str]:
+    return {
+        "class_name": "CabinetWClass",
+        "title": "檔案總管",
+        "process_name": "explorer.exe",
+    }
+
+
+def _chrome_foreground() -> dict[str, str]:
+    return {
+        "class_name": "Chrome_WidgetWin_1",
+        "title": "Google Chrome",
+        "process_name": "chrome.exe",
+    }
+
+
+def test_window_verify_stores_foreground_only_when_it_changes() -> None:
+    from src.recorder.verify_signals import signal_verify_fields
+
+    explorer = _explorer_foreground()
+    chrome = _chrome_foreground()
+    assert "foreground" not in signal_verify_fields(
+        {"foreground": explorer},
+        {"foreground": explorer},
+        kind="click",
+    )
+    changed = signal_verify_fields(
+        {"foreground": explorer},
+        {"foreground": chrome},
+        kind="click",
+    )
+    assert changed["foreground"] == chrome
+    agent = {
+        "class_name": "Chrome_WidgetWin_1",
+        "title": "電腦使用代理",
+        "process_name": "python.exe",
+    }
+    assert "foreground" not in signal_verify_fields(
+        {"foreground": explorer},
+        {"foreground": agent},
+        kind="click",
+    )
+    ok, reason = window_verify_satisfied(
+        changed,
+        {},
+        live_after={"foreground": explorer},
+    )
+    assert ok is False
+    assert "foreground" in reason
+    ok, _reason = window_verify_satisfied(
+        changed,
+        {},
+        live_after={"foreground": chrome},
+    )
+    assert ok is True
+
+
+def test_window_verify_flyout_disappear_keeps_stable_foreground() -> None:
+    explorer = _win(1, "檔案總管", class_name="CabinetWClass", process_name="explorer.exe")
+    flyout = _win(
+        9,
+        "快顯主機",
+        class_name="Microsoft.UI.Content.PopupWindowSiteBridge",
+        process_name="explorer.exe",
+    )
+    foreground = _explorer_foreground()
+    predicate = window_verify_from_debug(
+        {
+            "windows_before": [explorer.to_dict(), flyout.to_dict()],
+            "windows_after": [explorer.to_dict()],
+            "signals_before": {"foreground": foreground},
+            "signals_after": {"foreground": foreground},
+            "signal_kind": "click",
+        }
+    )
+    assert "foreground" not in predicate
+    assert predicate["disappeared"][0]["title"] == "快顯主機"
+
+
+def test_window_verify_omits_unchanged_light_signals_and_requires_changes() -> None:
+    from src.recorder.verify_signals import signal_verify_fields
+
+    point = _explorer_foreground()
+    same = {
+        "point_window": point,
+        "clipboard": "old",
+        "pid_names": {},
+        "orphan_processes": [],
+        "caret": {"rect": [10, 10, 12, 26], "hwnd": 4},
+    }
+    assert signal_verify_fields(same, dict(same), kind="click") == {}
+    moved_caret = dict(same)
+    moved_caret["caret"] = {"rect": [80, 10, 82, 26], "hwnd": 4}
+    assert "caret" not in signal_verify_fields(same, moved_caret, kind="text_input")
+
+    copied = dict(same)
+    copied["clipboard"] = "copied text"
+    clipboard_fields = signal_verify_fields(same, copied, kind="hotkey")
+    assert clipboard_fields == {"clipboard": "copied text"}
+    ok, _reason = window_verify_satisfied(
+        clipboard_fields,
+        {},
+        live_after={"clipboard": "copied text"},
+    )
+    assert ok is True
+    ok, reason = window_verify_satisfied(
+        clipboard_fields,
+        {},
+        live_after={"clipboard": "old"},
+    )
+    assert ok is False
+    assert "clipboard" in reason
+
+    started = signal_verify_fields(
+        {"orphan_processes": [], "pid_names": {}},
+        {"orphan_processes": ["notepad.exe"], "pid_names": {}},
+        kind="click",
+    )
+    assert started["process_started"] == ["notepad.exe"]
+    explained = signal_verify_fields(
+        {"orphan_processes": [], "pid_names": {}},
+        {"orphan_processes": [], "pid_names": {"9": "notepad.exe"}},
+        kind="click",
+        before_windows=[],
+        after_windows=[_win(3, "Untitled - Notepad", pid=9, class_name="Notepad")],
+    )
+    assert "process_started" not in explained
+    ok, reason = window_verify_satisfied(
+        started,
+        {},
+        live_after={"pid_names": {}, "orphan_processes": []},
+    )
+    assert ok is False
+    assert "process_started" in reason
+
+    other_field = dict(same)
+    other_field["caret"] = {"rect": [10, 80, 12, 96], "hwnd": 8}
+    caret_fields = signal_verify_fields(same, other_field, kind="text_input")
+    assert caret_fields["caret"] == [10, 80, 12, 96]
+    assert "caret" not in signal_verify_fields(same, other_field, kind="click")
+
+    other_point = {
+        "class_name": "Microsoft.UI.Content.PopupWindowSiteBridge",
+        "title": "快顯主機",
+        "process_name": "explorer.exe",
+    }
+    click_fields = signal_verify_fields(
+        {"point_window": point},
+        {"point_window": other_point},
+        kind="click",
+    )
+    assert click_fields["click_window"] == other_point
+    assert "click_window" not in signal_verify_fields(
+        {"point_window": point},
+        {"point_window": point},
+        kind="click",
+    )
+
+
+def test_window_verify_uia_signals_only_when_the_step_changed_them(monkeypatch) -> None:
+    from src.recorder.verify_signals import (
+        capture_step_signals,
+        read_uia_for_kind,
+        signal_verify_fields,
+    )
+
+    def _boom(**_kwargs: object) -> dict[str, object]:
+        raise AssertionError("automation object")
+
+    monkeypatch.setattr("src.recorder.verify_signals.read_uia_fields", _boom)
+    assert read_uia_for_kind("drag", (1, 1)) == {}
+    assert read_uia_for_kind("key_press", (1, 1)) == {}
+
+    calls: list[str] = []
+
+    def _reader(kind: str | None, _cursor: tuple[int, int] | None) -> dict[str, object]:
+        calls.append(str(kind))
+        if kind == "text_input":
+            return {"focused": {"name": "Name", "value": "Ada"}}
+        if kind == "scroll":
+            return {"scroll": 40.0}
+        return {"control_state": "selected"}
+
+    capture_step_signals([], cursor_xy=(1, 1), kind="text_input", uia_reader=_reader)
+    capture_step_signals([], cursor_xy=(1, 1), kind="scroll", uia_reader=_reader)
+    capture_step_signals([], cursor_xy=(1, 1), kind="click", uia_reader=_reader)
+    capture_step_signals([], cursor_xy=(1, 1), kind="drag", uia_reader=_reader)
+    assert calls == ["text_input", "scroll", "click"]
+
+    assert "control_state" not in signal_verify_fields(
+        {"foreground": _explorer_foreground()},
+        {"foreground": _explorer_foreground()},
+        kind="click",
+    )
+    selected = signal_verify_fields(
+        {"control_state": "unselected"},
+        {"control_state": "selected"},
+        kind="click",
+    )
+    assert selected == {"control_state": "selected"}
+    ok, reason = window_verify_satisfied(
+        selected,
+        {},
+        live_after={"control_state": "unselected"},
+    )
+    assert ok is False
+    assert "control_state" in reason
+
+    focused = signal_verify_fields(
+        {
+            "foreground": _chrome_foreground(),
+            "focused": {"name": "Google Chrome", "value": ""},
+        },
+        {
+            "foreground": _chrome_foreground(),
+            "focused": {"name": "Google Chrome", "value": "hello"},
+        },
+        kind="text_input",
+    )
+    assert focused == {"focused": {"value": "hello"}}
+    scrolled = signal_verify_fields({"scroll": 10.0}, {"scroll": 40.0}, kind="scroll")
+    assert scrolled == {"scroll": 40.0}
+    assert "scroll" not in signal_verify_fields({"scroll": 10.0}, {"scroll": 10.2}, kind="scroll")
+    assert "scroll" not in signal_verify_fields({"scroll": 10.0}, {"scroll": 40.0}, kind="click")
+    ok, _reason = window_verify_satisfied(scrolled, {}, live_after={"scroll": 43.0})
+    assert ok is True
+    ok, reason = window_verify_satisfied(scrolled, {}, live_after={"scroll": 50.0})
+    assert ok is False
+    assert "scroll" in reason

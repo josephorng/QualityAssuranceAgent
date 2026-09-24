@@ -1854,7 +1854,9 @@ class MainHub(ctk.CTk):
     def _open_reports_index(self) -> None:
         runs_root = Path(load_settings().runs_dir)
         try:
-            index_path = write_runs_index_html(runs_root)
+            # List existing pages only. Recording HTML is written when a recording
+            # is saved or edited; rewriting it here blocks the window before the browser opens.
+            index_path = write_runs_index_html(runs_root, backfill=False)
         except Exception as e:
             show_ctk_message(self, "報告", f"無法建立報告列表：\n{e}", kind="error")
             return

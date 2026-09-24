@@ -358,6 +358,34 @@ def collect_recording_settle_after_seconds(run_dir: Path) -> list[float | None]:
     return settles
 
 
+def collect_recording_window_verifies(run_dir: Path) -> list[dict[str, Any]]:
+    """Collect window-diff predicates aligned with ``collect_recording_instructions``.
+
+    An empty dict means the step has no window assertion.
+    """
+    analysis_dir = Path(run_dir) / "analysis"
+    verifies: list[dict[str, Any]] = []
+    for event_path in _recording_event_json_paths(run_dir):
+        event = _load_json_dict(event_path)
+        if event is None:
+            continue
+        raw_index = event.get("index")
+        if not isinstance(raw_index, int):
+            continue
+        analysis = _load_json_dict(analysis_dir / f"event_{raw_index:03d}.json")
+        if analysis is None:
+            continue
+        instruction = analysis.get("instruction")
+        if not (isinstance(instruction, str) and instruction.strip()):
+            continue
+        raw = analysis.get("window_verify")
+        if isinstance(raw, dict):
+            verifies.append(raw)
+        else:
+            verifies.append({})
+    return verifies
+
+
 def _elapsed_seconds_between(
     previous_timestamp_utc: str, current_timestamp_utc: str | None
 ) -> float | None:

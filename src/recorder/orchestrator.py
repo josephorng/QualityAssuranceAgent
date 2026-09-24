@@ -38,7 +38,11 @@ from src.recorder.text_choose import (
 )
 from src.recorder.text_resolve import event_with_resolved_text, resolve_text_input_text
 from src.recorder.models import RecordedEvent, final_after_screenshot_path
-from src.recorder.window_snapshot import is_agent_app_restore, resolve_window_change
+from src.recorder.window_snapshot import (
+    is_agent_app_restore,
+    resolve_window_change,
+    window_verify_from_debug,
+)
 
 
 _SETTLE_AFTER_MIN_SECONDS = 1.0
@@ -712,6 +716,7 @@ def _write_event_analysis(
                 if event.window_snapshot_debug is not None
                 else {}
             ),
+            "window_verify": window_verify_from_debug(event.window_snapshot_debug),
             **({"tool_calls": tool_calls} if tool_calls is not None else {}),
         },
     )

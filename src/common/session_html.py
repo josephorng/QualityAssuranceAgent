@@ -2672,6 +2672,7 @@ _INDEX_SCRIPT = """
         if (!requireLocalServer()) return;
         setBulkBusy(true);
         var failures = [];
+        var dropped = false;
         var chain = Promise.resolve();
         items.forEach(function (item) {
           chain = chain.then(function () {
@@ -2683,12 +2684,12 @@ _INDEX_SCRIPT = """
                 failures.push(item.label + "：" + message);
               }
             }).catch(function () {
-              failures.push(item.label + "：無法連線本機服務");
+              dropped = true;
             });
           });
         });
         chain.then(function () {
-          if (!tbody.rows.length) {
+          if (dropped || !tbody.rows.length) {
             window.location.reload();
             return;
           }
@@ -2764,8 +2765,7 @@ _INDEX_SCRIPT = """
             updateBulkBar();
           })
           .catch(function () {
-            window.alert("無法刪除：請從主程式的「報告列表」開啟此頁（需本機服務）。");
-            btn.disabled = false;
+            window.location.reload();
           });
       });
     });
@@ -5291,8 +5291,37 @@ def _render_recordings_tab_panel(
     )
 
 
+def _recording_page_sources(run_dir: Path) -> list[Path]:
+    """Files that change the contents of ``recording_steps.html``."""
+    sources = [Path(__file__), run_dir / "session.json"]
+    sources.extend(recording_event_json_paths(run_dir))
+    for folder_name, pattern in (("analysis", "event_*.json"), ("yolo_ocr", "*.json")):
+        folder = run_dir / folder_name
+        if folder.is_dir():
+            sources.extend(path for path in folder.glob(pattern) if path.is_file())
+    return sources
+
+
+def _recording_page_is_current(run_dir: Path) -> bool:
+    """True when ``recording_steps.html`` is at least as new as its inputs."""
+    html_path = recording_html_path(run_dir)
+    try:
+        html_mtime = html_path.stat().st_mtime
+    except OSError:
+        return False
+    newest = 0.0
+    for source in _recording_page_sources(run_dir):
+        try:
+            newest = max(newest, source.stat().st_mtime)
+        except OSError:
+            continue
+    return html_mtime >= newest
+
+
 def _backfill_recording_html(runs_root: Path) -> None:
     for run_dir in _iter_recording_source_dirs(runs_root):
+        if _recording_page_is_current(run_dir):
+            continue
         write_recording_html_from_run(run_dir, update_index=False)
 
 
@@ -5316,9 +5345,17 @@ def _write_reports_index_redirect(index_dir: Path, primary_runs_root: Path) -> P
 
 
 def write_runs_index_html(
-    runs_root: Path, *, recordings_root: Path | None = None
+    runs_root: Path,
+    *,
+    recordings_root: Path | None = None,
+    backfill: bool = True,
 ) -> Path:
-    """Build ``index.html`` with tabs for agent runs, smart mode, and recordings."""
+    """Build ``index.html`` with tabs for agent runs, smart mode, and recordings.
+
+    ``backfill`` rewrites a recording page only when it is missing or older than
+    that recording's data or this module. Pass ``backfill=False`` to leave
+    recording pages untouched.
+    """
     runs_root = Path(runs_root)
     runs_root.mkdir(parents=True, exist_ok=True)
     primary_runs_root = _primary_runs_index_root(runs_root)
@@ -5330,9 +5367,10 @@ def write_runs_index_html(
         recordings_root = Path(recordings_root)
     recordings_root.mkdir(parents=True, exist_ok=True)
 
-    _backfill_recording_html(runs_root)
-    if recordings_root.resolve() != runs_root.resolve():
-        _backfill_recording_html(recordings_root)
+    if backfill:
+        _backfill_recording_html(runs_root)
+        if recordings_root.resolve() != runs_root.resolve():
+            _backfill_recording_html(recordings_root)
 
     run_dirs = _iter_report_run_dirs(runs_root)
     smart_dirs = _iter_smart_report_run_dirs(runs_root)

@@ -334,16 +334,16 @@ def _rebuild_reports_index(*, api_root: Path, mutated_parent: Path) -> None:
         runs = resolve_runs_dir()
         recordings = resolve_recordings_dir()
         if serve == reports_serve_root(runs, recordings):
-            write_runs_index_html(runs, recordings_root=recordings)
+            write_runs_index_html(runs, recordings_root=recordings, backfill=False)
             if (
                 parent == Path(recordings).resolve()
                 and Path(recordings).resolve() != Path(runs).resolve()
             ):
-                write_runs_index_html(parent)
+                write_runs_index_html(parent, backfill=False)
             return
     except Exception:
         pass
-    write_runs_index_html(parent)
+    write_runs_index_html(parent, backfill=False)
 
 
 def _static_allowed_roots(serve_root: Path) -> list[Path]:
@@ -1844,6 +1844,14 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
             # Keep hub console quiet during normal browsing.
             return
+
+        def handle(self) -> None:  # noqa: A003
+            try:
+                super().handle()
+            except ConnectionError:
+                # Browser closed the socket after the handler finished the
+                # mutation (common on Windows while a large delete was in flight).
+                return
 
         def do_POST(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)

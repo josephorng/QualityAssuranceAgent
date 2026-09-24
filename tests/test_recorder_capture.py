@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -55,8 +56,28 @@ def _default_capture_window_patches():
     ), patch(
         "src.recorder.capture.resolve_typing_focus",
         side_effect=_fake_resolve_typing_focus,
+    ), patch(
+        "src.recorder.capture.capture_slow_signals",
+        return_value={},
+    ), patch(
+        "src.recorder.capture.capture_fast_signals",
+        return_value={},
+    ), patch(
+        "src.recorder.capture.capture_step_signals",
+        return_value={},
+    ), patch(
+        "src.recorder.verify_signals.read_uia_for_kind",
+        return_value={},
     ):
         yield
+
+
+def _is_event_screenshot(name: str) -> bool:
+    return not (
+        name.startswith("_pre_click_")
+        or name.startswith("_settle_")
+        or name.startswith("_last_settle")
+    )
 
 
 def _mock_screenshot(*_args, **_kwargs) -> tuple[str, int, tuple[int, int]]:
@@ -233,7 +254,7 @@ def test_typing_burst_coalesced_into_one_event(tmp_path) -> None:
             for ch in "chrome":
                 session._on_key_press(KeyCode.from_char(ch))
             session.wait_for_deferred_work()
-            event_dests = [name for name in before_dests if not name.startswith("_pre_click_")]
+            event_dests = [name for name in before_dests if _is_event_screenshot(name)]
             assert event_dests == ["event_001.jpeg"]
             assert end_captures == []
             session.stop()
@@ -1128,7 +1149,7 @@ def test_text_input_stores_before_on_first_key_and_after_on_flush(tmp_path) -> N
             if session.is_active():
                 session.stop()
 
-    event_dests = [name for name in dests if not name.startswith("_pre_click_")]
+    event_dests = [name for name in dests if _is_event_screenshot(name)]
     assert event_dests[0] == "event_001.jpeg"
     assert "event_001_end.jpeg" in dests
     raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
@@ -1175,7 +1196,7 @@ def test_text_input_reuses_pre_type_screenshot_from_prior_click(tmp_path) -> Non
     names = [
         name
         for _, _, name in captures
-        if not name.startswith("_pre_click_")
+        if _is_event_screenshot(name)
     ]
     assert "_pending_pre_type.jpeg" in names
     # Typing before-shot must reuse the pending file (no live event_002.jpeg grab).
@@ -1220,7 +1241,7 @@ def test_text_input_falls_back_to_live_before_without_pre_type(tmp_path) -> None
                 session.stop()
 
     assert "_pending_pre_type.jpeg" not in dests
-    event_dests = [name for name in dests if not name.startswith("_pre_click_")]
+    event_dests = [name for name in dests if _is_event_screenshot(name)]
     assert event_dests[0] == "event_001.jpeg"
     raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
     assert Path(raw["screenshot_path"]).read_bytes() == b"live"
@@ -1396,13 +1417,14 @@ def test_pointer_click_persists_window_change(tmp_path) -> None:
         )
     ]
 
-    snapshot_calls = {"count": 0}
+    pressed = threading.Event()
 
     def _snapshot_side_effect() -> list[WindowInfo]:
-        snapshot_calls["count"] += 1
-        if snapshot_calls["count"] == 1:
-            return list(before)
-        return after
+        # Pre-click refreshes keep returning the open window until mouse-down
+        # has copied that cache. Later snapshots are the minimized after-state.
+        if pressed.is_set():
+            return after
+        return list(before)
 
     with _default_capture_window_patches(), patch(
         "src.recorder.capture._capture_screenshot_at_point",
@@ -1412,10 +1434,14 @@ def test_pointer_click_persists_window_change(tmp_path) -> None:
         side_effect=_snapshot_side_effect,
     ):
         run_dir = session.start()
+        assert session._settle_windows_ready.wait(2.0)
         try:
             from pynput.mouse import Button
 
-            _left_click(session, 400, 120)
+            session._on_mouse_click(400, 120, Button.left, True)
+            pressed.set()
+            session._on_mouse_click(400, 120, Button.left, False)
+            time.sleep(_DOUBLE_CLICK_INTERVAL_S + 0.05)
         finally:
             session.stop()
 
@@ -1430,6 +1456,108 @@ def test_pointer_click_persists_window_change(tmp_path) -> None:
     assert raw["window_snapshot_debug"]["target_hwnd"] == 100
     assert raw["window_snapshot_debug"]["detection_path"] == "target"
     assert raw["window_snapshot_debug"]["windows_before"][0]["title"] == "Google Chrome"
+    assert raw["window_snapshot_debug"]["windows_after"][0]["is_minimized"] is True
+
+
+def test_settle_probe_grabs_while_context_refresh_blocks(tmp_path) -> None:
+    """A stalled window or UI Automation refresh must not block the probe grab."""
+    session = RecordingSession(runs_root=tmp_path)
+    blocked = threading.Event()
+    release = threading.Event()
+    probe_grabs: list[str] = []
+
+    def _slow(*_args, **_kwargs):
+        blocked.set()
+        assert release.wait(3.0)
+        return {}
+
+    def _shot(_x, _y, dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"fake")
+        name = dest.name
+        if name.startswith("_settle_") or name.startswith("_last_settle"):
+            probe_grabs.append(name)
+        assert not name.startswith("_pre_click_")
+        return str(dest), 1, (0, 0)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 10, "y": 10})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_shot,
+    ), patch(
+        "src.recorder.capture.capture_slow_signals",
+        side_effect=_slow,
+    ):
+        session.start()
+        try:
+            assert blocked.wait(2.0)
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline and not probe_grabs:
+                time.sleep(0.05)
+            assert probe_grabs
+        finally:
+            release.set()
+            session.stop()
+
+
+def test_recording_accepts_input_before_window_seed(tmp_path) -> None:
+    """Hooks start before the first window scan, and an early click keeps that scan."""
+    session = RecordingSession(runs_root=tmp_path)
+    seed_entered = threading.Event()
+    release_seed = threading.Event()
+    open_window = WindowInfo(
+        hwnd=100,
+        title="Google Chrome",
+        pid=1,
+        left=100,
+        top=100,
+        width=800,
+        height=600,
+        is_minimized=False,
+        is_maximized=False,
+    )
+    minimized = WindowInfo(
+        hwnd=100,
+        title="Google Chrome",
+        pid=1,
+        left=-32000,
+        top=-32000,
+        width=160,
+        height=28,
+        is_minimized=True,
+        is_maximized=False,
+    )
+
+    def _snapshot() -> list[WindowInfo]:
+        if not seed_entered.is_set():
+            seed_entered.set()
+            assert release_seed.wait(2.0)
+            return [open_window]
+        return [minimized]
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.snapshot_top_level_windows",
+        side_effect=_snapshot,
+    ):
+        run_dir = session.start()
+        try:
+            assert session.is_active()
+            assert seed_entered.wait(2.0)
+            assert not session._settle_windows_ready.is_set()
+            _left_click(session, 400, 120)
+            release_seed.set()
+            session.wait_for_deferred_work()
+        finally:
+            release_seed.set()
+            session.stop()
+
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["window_snapshot_debug"]["windows_before"][0]["is_minimized"] is False
     assert raw["window_snapshot_debug"]["windows_after"][0]["is_minimized"] is True
 
 

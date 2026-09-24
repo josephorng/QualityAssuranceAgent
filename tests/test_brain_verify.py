@@ -6,6 +6,7 @@ import pytest
 
 from src.brain.module import BaselineMatchDecision, BrainModule
 from src.common.models import ScriptStepVerifyResult
+from src.recorder.window_snapshot import WindowInfo
 from src.common.prompting import get_prompt
 
 
@@ -604,6 +605,152 @@ async def test_process_step_skips_vision_verify_when_expected_empty_and_actor_ok
     assert metadata["expected_outcome"] is None
     assert metadata["verify"]["branch"] == "advance"
     assert metadata["verify"]["accomplished"] is True
+
+
+def _flyout_window() -> WindowInfo:
+    return WindowInfo(
+        hwnd=9,
+        title="快顯主機",
+        pid=1,
+        left=446,
+        top=139,
+        width=213,
+        height=217,
+        is_minimized=False,
+        is_maximized=False,
+        class_name="Microsoft.UI.Content.PopupWindowSiteBridge",
+        process_name="explorer.exe",
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_step_empty_window_verify_still_auto_advances(monkeypatch) -> None:
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = [None, None, None]
+    brain.script_baseline_after_paths = [None, None, None]
+    brain.script_window_verifies = [{}, {}, {}]
+    brain.loop = AsyncMock(return_value=True)
+    brain._verify_script_step = AsyncMock()
+    snapshot = MagicMock(return_value=[_flyout_window()])
+    monkeypatch.setattr("src.brain.module.snapshot_top_level_windows", snapshot)
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 2
+    brain._verify_script_step.assert_not_awaited()
+    snapshot.assert_not_called()
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["verify"]["branch"] == "advance"
+    assert metadata["verify"]["clearly_unmet"] is False
+
+
+@pytest.mark.asyncio
+async def test_process_step_window_verify_miss_retries_clearly_unmet(monkeypatch) -> None:
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = [None, None, None]
+    brain.script_baseline_after_paths = [None, None, None]
+    flyout_gone = {
+        "disappeared": [
+            {
+                "class_name": "Microsoft.UI.Content.PopupWindowSiteBridge",
+                "title": "快顯主機",
+                "process_name": "explorer.exe",
+            }
+        ]
+    }
+    brain.script_window_verifies = [{}, flyout_gone, {}]
+    brain.loop = AsyncMock(return_value=True)
+    brain._verify_script_step = AsyncMock()
+    monkeypatch.setattr(
+        "src.brain.module.snapshot_top_level_windows",
+        lambda: [_flyout_window()],
+    )
+
+    def _signals_must_not_run(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise AssertionError("signal snapshot is not used for a window-list predicate")
+
+    monkeypatch.setattr(
+        "src.brain.module.capture_replay_after_signals",
+        _signals_must_not_run,
+    )
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 1
+    brain._verify_script_step.assert_not_awaited()
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "verify_failed"
+    assert metadata["verify"]["branch"] == "retry"
+    assert metadata["verify"]["clearly_unmet"] is True
+    assert metadata["verify"]["accomplished"] is False
+
+
+@pytest.mark.asyncio
+async def test_process_step_foreground_miss_retries_clearly_unmet(monkeypatch) -> None:
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = [None, None, None]
+    brain.script_baseline_after_paths = [None, None, None]
+    chrome = {
+        "class_name": "Chrome_WidgetWin_1",
+        "title": "Google Chrome",
+        "process_name": "chrome.exe",
+    }
+    brain.script_window_verifies = [{}, {"foreground": chrome}, {}]
+    brain.loop = AsyncMock(return_value=True)
+    brain._verify_script_step = AsyncMock()
+    monkeypatch.setattr(
+        "src.brain.module.snapshot_top_level_windows",
+        lambda: [_flyout_window()],
+    )
+    monkeypatch.setattr(
+        "src.brain.module.capture_replay_after_signals",
+        lambda _windows, _recorded: {
+            "foreground": {
+                "class_name": "CabinetWClass",
+                "title": "檔案總管",
+                "process_name": "explorer.exe",
+            }
+        },
+    )
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 1
+    brain._verify_script_step.assert_not_awaited()
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["verify"]["branch"] == "retry"
+    assert metadata["verify"]["clearly_unmet"] is True
+    assert "foreground" in metadata["verify"]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_process_step_clipboard_miss_retries_clearly_unmet(monkeypatch) -> None:
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = [None, None, None]
+    brain.script_baseline_after_paths = [None, None, None]
+    brain.script_window_verifies = [{}, {"clipboard": "copied text"}, {}]
+    brain.loop = AsyncMock(return_value=True)
+    brain._verify_script_step = AsyncMock()
+    monkeypatch.setattr(
+        "src.brain.module.snapshot_top_level_windows",
+        lambda: [_flyout_window()],
+    )
+    monkeypatch.setattr(
+        "src.brain.module.capture_replay_after_signals",
+        lambda _windows, _recorded: {"clipboard": "something else"},
+    )
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 1
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["verify"]["branch"] == "retry"
+    assert metadata["verify"]["clearly_unmet"] is True
+    assert "clipboard" in metadata["verify"]["reason"]
 
 
 @pytest.mark.asyncio

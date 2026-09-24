@@ -2317,6 +2317,16 @@ def test_write_runs_index_lists_smart_runs_in_smart_tab(tmp_path: Path) -> None:
     assert "smart: true" in html
 
 
+def test_write_runs_index_skips_recording_backfill_when_disabled(tmp_path: Path) -> None:
+    recording = tmp_path / "recording_20260721_120000_000011"
+    _write_recording_fixture(recording, with_html=False)
+
+    html = write_runs_index_html(tmp_path, backfill=False).read_text(encoding="utf-8")
+
+    assert not (recording / "recording_steps.html").is_file()
+    assert "recording_20260721_120000_000011" not in html
+
+
 def test_write_runs_index_backfills_missing_recording_html(tmp_path: Path) -> None:
     recording = tmp_path / "recording_20260721_120000_000010"
     _write_recording_fixture(recording, with_html=False)
@@ -2330,9 +2340,22 @@ def test_write_runs_index_backfills_missing_recording_html(tmp_path: Path) -> No
     assert "點擊「搜尋」按鈕" in (recording / "recording_steps.html").read_text(encoding="utf-8")
 
 
-def test_write_runs_index_refreshes_existing_recording_html(tmp_path: Path) -> None:
+def test_write_runs_index_keeps_current_recording_html(tmp_path: Path) -> None:
     recording = tmp_path / "recording_20260721_120000_000012"
     _write_recording_fixture(recording, with_html=False)
+    html_path = recording / "recording_steps.html"
+    html_path.write_text("<html>current</html>", encoding="utf-8")
+
+    write_runs_index_html(tmp_path)
+
+    assert html_path.read_text(encoding="utf-8") == "<html>current</html>"
+
+
+def test_write_runs_index_refreshes_recording_html_when_events_are_newer(tmp_path: Path) -> None:
+    recording = tmp_path / "recording_20260721_120000_000013"
+    _write_recording_fixture(recording, with_html=False)
+    html_path = recording / "recording_steps.html"
+    html_path.write_text("<html>stale</html>", encoding="utf-8")
     (recording / "events" / "event_001.json").write_text(
         json.dumps(
             {
@@ -2346,11 +2369,10 @@ def test_write_runs_index_refreshes_existing_recording_html(tmp_path: Path) -> N
         ),
         encoding="utf-8",
     )
-    (recording / "recording_steps.html").write_text("<html>stale</html>", encoding="utf-8")
 
     write_runs_index_html(tmp_path)
 
-    html = (recording / "recording_steps.html").read_text(encoding="utf-8")
+    html = html_path.read_text(encoding="utf-8")
     assert "stale" not in html
     assert 'class="typed-text-input"' in html
     assert 'value="hello"' in html

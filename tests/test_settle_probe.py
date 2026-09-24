@@ -20,22 +20,12 @@ def _write_gray(path: Path, value: int) -> None:
     Image.new("L", (64, 64), color=int(value)).save(path, format="JPEG", quality=95)
 
 
-def test_settle_probe_interval_follows_fibonacci() -> None:
-    assert [settle_probe_interval_s(i) for i in range(10)] == [
-        1.0,
-        1.0,
-        2.0,
-        3.0,
-        5.0,
-        8.0,
-        13.0,
-        21.0,
-        34.0,
-        55.0,
-    ]
-    assert _SETTLE_PROBE_FIRST_S == 1.0
+def test_settle_probe_interval_is_fixed() -> None:
+    assert settle_probe_interval_s(0) == 0.0
+    assert [settle_probe_interval_s(i) for i in range(1, 10)] == [0.2] * 9
+    assert _SETTLE_PROBE_FIRST_S == 0.0
     assert _SETTLE_PROBE_MAX_WINDOW_S == 55.0
-    assert settle_probe_interval_s(-3) == 1.0
+    assert settle_probe_interval_s(-3) == 0.0
 
 
 def test_apply_settle_sample_change_then_stable(tmp_path: Path) -> None:
@@ -203,10 +193,10 @@ def test_settle_probe_ticks_run_off_event_queue(tmp_path: Path, monkeypatch) -> 
         __import__("time").sleep(0.01)
     assert fired == [7]
     # Keep default first delay documented for callers.
-    assert _SETTLE_PROBE_FIRST_S == settle_probe_interval_s(0) == 1.0
+    assert _SETTLE_PROBE_FIRST_S == settle_probe_interval_s(0) == 0.0
 
 
-def test_schedule_next_settle_probe_tick_advances_fibonacci(
+def test_schedule_next_settle_probe_tick_uses_fixed_interval(
     tmp_path: Path, monkeypatch
 ) -> None:
     import threading
@@ -240,7 +230,7 @@ def test_schedule_next_settle_probe_tick_advances_fibonacci(
     session._schedule_next_settle_probe_tick(3)
     session._schedule_next_settle_probe_tick(3)
     session._schedule_next_settle_probe_tick(3)
-    assert delays == [1.0, 1.0, 2.0, 3.0]
+    assert delays == [0.0, 0.2, 0.2, 0.2]
     assert session._settle_probe.interval_step == 4
 
 
@@ -394,41 +384,45 @@ def test_pending_screenshot_reuses_last_settle_on_same_monitor(tmp_path: Path) -
     assert dest.stat().st_size > 0
 
 
-def test_before_shot_uses_frame_finished_before_click(tmp_path: Path) -> None:
-    """A later settle frame must not replace the screen from before the click."""
+def test_before_shot_keeps_settle_sample_latched_at_click(tmp_path: Path) -> None:
+    """The next step's before-shot is the settle sample finished before the click."""
     from src.recorder.capture import RecordingSession
 
     run_dir = tmp_path / "rec"
     (run_dir / "screenshots").mkdir(parents=True)
-    search = run_dir / "screenshots" / "_pre_click_00001.jpeg"
-    explorer = last_settle_frame_path(run_dir)
-    Image.new("RGB", (40, 30), color=(0, 0, 200)).save(search, format="JPEG")
-    Image.new("RGB", (40, 30), color=(200, 0, 0)).save(explorer, format="JPEG")
+    latched_settle = run_dir / "screenshots" / "_settle_pub_00001.jpeg"
+    Image.new("RGB", (40, 30), color=(200, 0, 0)).save(latched_settle, format="JPEG")
 
     session = RecordingSession.__new__(RecordingSession)
     session._lock = __import__("threading").Lock()
-    session._pre_click_published = (str(search), 1, (0, 0))
-    session._pre_click_pins = {}
+    session._window_refresh_lock = __import__("threading").Lock()
+    session._context_epoch = 0
+    session._last_settle_signals = None
+    session._settle_pins = {}
+    session._settle_pub_seq = 1
     session._pre_click_monitors = ((1, 0, 0, 1920, 1080),)
-    session._last_settle_frame = (str(explorer), 1, (0, 0))
+    session._last_settle_frame = (str(latched_settle), 1, (0, 0))
     session._run_dir = run_dir
 
-    latched = session._latch_pre_click_frame()
-    assert latched is not None
-    newer = run_dir / "screenshots" / "_pre_click_00002.jpeg"
+    settle_latched = session._latch_settle_frame()
+    newer = run_dir / "screenshots" / "_settle_pub_00002.jpeg"
     Image.new("RGB", (40, 30), color=(0, 200, 0)).save(newer, format="JPEG")
-    session._publish_pre_click_frame((str(newer), 1, (0, 0)))
-    assert search.is_file()
+    session._publish_settle_frame((str(newer), 1, (0, 0)))
+    assert latched_settle.is_file()
 
-    dest = run_dir / "screenshots" / "_pending_capture.jpeg"
+    dest = run_dir / "screenshots" / "event_007.jpeg"
     info = session._pending_screenshot_from_settle_or_capture(
-        run_dir, 10, 10, dest, latched
+        run_dir,
+        10,
+        10,
+        dest,
+        settle_latched,
     )
     assert info[1] == 1
-    _r, _g, b = Image.open(dest).convert("RGB").getpixel((0, 0))
-    assert b > 150
-    assert session._pre_click_pins == {}
-    assert not search.is_file()
+    r, _g, _b = Image.open(dest).convert("RGB").getpixel((0, 0))
+    assert r > 150
+    assert session._settle_pins == {}
+    assert not latched_settle.is_file()
 
 
 def test_pending_screenshot_live_captures_when_monitor_mismatches(
@@ -484,10 +478,19 @@ def test_publish_last_settle_frame_copies_durable_candidate(tmp_path: Path) -> N
 
     session = RecordingSession.__new__(RecordingSession)
     session._lock = __import__("threading").Lock()
+    session._window_refresh_lock = __import__("threading").Lock()
+    session._context_epoch = 0
+    session._last_settle_signals = None
+    session._settle_pins = {}
+    session._settle_pub_seq = 0
     session._run_dir = run_dir
     session._last_settle_frame = None
     session._publish_last_settle_frame(source, 1, (0, 0))
 
     dest = last_settle_frame_path(run_dir)
     assert dest.is_file()
-    assert session._last_settle_frame == (str(dest), 1, (0, 0))
+    published = session._last_settle_frame
+    assert published is not None
+    assert Path(published[0]).is_file()
+    assert Path(published[0]).name.startswith("_settle_pub_")
+    assert published[1:] == (1, (0, 0))

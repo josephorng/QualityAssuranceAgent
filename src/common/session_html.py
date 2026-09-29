@@ -449,6 +449,45 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 .verify-conditions-empty {
   margin: 0; color: #57606a; font-size: .9rem;
 }
+.cached-tool-calls {
+  margin: 0 1.5rem 1rem; padding: .75rem 1rem;
+  border: 1px solid #d0d7de; border-radius: 8px; background: #f6f8fa;
+}
+.cached-tool-calls-title {
+  margin: 0 0 .5rem; font-size: .9rem; font-weight: 700; color: #57606a;
+  display: flex; flex-wrap: wrap; align-items: center; gap: .5rem;
+}
+.cached-tool-calls-list {
+  list-style: none; margin: 0; padding: 0;
+}
+.cached-tool-call {
+  margin: 0 0 .75rem; padding: .6rem .75rem;
+  border: 1px solid #d0d7de; border-radius: 6px; background: #fff;
+}
+.cached-tool-call:last-child { margin-bottom: 0; }
+.cached-tool-call-title {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .5rem;
+  margin: 0 0 .4rem;
+}
+.cached-tool-call-name {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: .9rem; font-weight: 700; color: #1f2328;
+}
+.cached-tool-call .meta { margin: 0 0 .5rem; }
+.cached-tool-call .meta dl {
+  display: grid; grid-template-columns: 8.5rem minmax(0, 1fr);
+  gap: .35rem .75rem; margin: 0;
+}
+.cached-tool-call .meta dt {
+  margin: 0; color: #57606a; font-size: .8rem; font-weight: 600;
+}
+.cached-tool-call .meta dd {
+  margin: 0; color: #1f2328; font-size: .9rem; word-break: break-word;
+}
+.cached-tool-call .args { margin: 0; }
+.cached-tool-calls-empty {
+  margin: 0; color: #57606a; font-size: .9rem;
+}
 .step-instruction {
   margin: 0; padding: .75rem 1rem;
   border: 1px solid #d0d7de; border-radius: 8px; background: #f6f8fa;
@@ -4913,6 +4952,58 @@ def _render_verify_conditions_panel_html(
     )
 
 
+def _render_cached_tool_call_item_html(
+    call: dict[str, Any],
+    *,
+    call_number: int,
+) -> str:
+    """Render one analysis ``tool_calls`` entry for recording debug HTML."""
+    raw_name = call.get("name")
+    name = raw_name.strip() if isinstance(raw_name, str) and raw_name.strip() else "（未知工具）"
+    arguments = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
+    instruction_meta = _render_instruction_meta_html(_instruction_meta_pairs(arguments))
+    meta_html = (
+        f'<div class="meta"><dl>{instruction_meta}</dl></div>' if instruction_meta else ""
+    )
+    return (
+        f'<li class="cached-tool-call">'
+        f'<div class="cached-tool-call-title">'
+        f'<span class="cached-tool-call-name">'
+        f"{escape(str(call_number))}. {escape(name)}"
+        f"</span>"
+        f"</div>"
+        f"{meta_html}"
+        f"{_render_args_html(_args_without_instructions(arguments))}"
+        f"</li>"
+    )
+
+
+def _render_cached_tool_calls_panel_html(*, analysis: dict[str, Any] | None) -> str:
+    """Read-only list of compiled / mirrored tool calls used on recording replay."""
+    raw_calls = analysis.get("tool_calls") if isinstance(analysis, dict) else None
+    calls = [call for call in raw_calls if isinstance(call, dict)] if isinstance(raw_calls, list) else []
+    if not calls:
+        body = (
+            '<p class="cached-tool-calls-empty">'
+            "尚無快取工具呼叫（重播時會改由模型決定）"
+            "</p>"
+        )
+        count_badge = ""
+    else:
+        items = "".join(
+            _render_cached_tool_call_item_html(call, call_number=index)
+            for index, call in enumerate(calls, start=1)
+        )
+        body = f'<ol class="cached-tool-calls-list">{items}</ol>'
+        count_badge = f'<span class="badge ok">{len(calls)}</span>'
+    return (
+        f'<div class="cached-tool-calls">'
+        f'<div class="cached-tool-calls-title">快取工具呼叫{count_badge}</div>'
+        f"{body}"
+        f"</div>"
+    )
+
+
 def _render_step_instruction_panel_html(*, instruction: str) -> str:
     return (
         f'<div class="step-instruction">'
@@ -5176,12 +5267,30 @@ def _render_recording_event_html(
         expected_outcome=expected_outcome,
         use_expected_outcome=use_expected_outcome,
     )
+    cached_tool_calls_html = _render_cached_tool_calls_panel_html(
+        analysis=analysis if isinstance(analysis, dict) else None,
+    )
     char_target_html = _render_char_target_panel_html(
         run_root=run_root,
         event_index=index,
         kind=kind,
         analysis=analysis if isinstance(analysis, dict) else None,
         instruction=instruction,
+    )
+
+    tool_calls_for_badge = (
+        analysis.get("tool_calls") if isinstance(analysis, dict) else None
+    )
+    cached_tool_count = (
+        sum(1 for call in tool_calls_for_badge if isinstance(call, dict))
+        if isinstance(tool_calls_for_badge, list)
+        else 0
+    )
+    tool_cache_badge = (
+        f'<span class="badge ok" title="快取工具呼叫數">'
+        f"工具×{cached_tool_count}</span>"
+        if cached_tool_count
+        else ""
     )
 
     copy_attr = escape(title, quote=True)
@@ -5239,6 +5348,7 @@ def _render_recording_event_html(
         f"{expected_summary}"
         f"</span>"
         f'<span class="badge neutral">{kind_badge}</span>'
+        f"{tool_cache_badge}"
         f'<button type="button" class="copy-instruction" data-instruction="{copy_attr}"'
         f'{outcome_attr}{use_outcome_attr} '
         f'title="複製指令" aria-label="複製指令">複製</button>'
@@ -5251,6 +5361,7 @@ def _render_recording_event_html(
         f'<div class="meta" style="padding: 1rem 1.5rem 0;"><dl>{meta_html}</dl></div>'
         f'<div class="instruction-edit-panels">{instruction_html}{expected_outcome_html}</div>'
         f"{verify_conditions_html}"
+        f"{cached_tool_calls_html}"
         f"{char_target_html}"
         f"{typed_text_html}"
         f"{yolo_retry_html}"

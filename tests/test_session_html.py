@@ -1743,6 +1743,68 @@ def test_write_recording_html_renders_empty_verify_conditions(tmp_path: Path) ->
     assert "無視窗／訊號驗證條件" in html
 
 
+def test_write_recording_html_renders_cached_tool_calls(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000033"
+    _write_recording_fixture(run_root)
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": "將滑鼠移到「搜尋」文字，並點擊滑鼠一下。",
+                "tool_calls": [
+                    {
+                        "name": "move_mouse",
+                        "arguments": {
+                            "instruction": "「搜尋」文字",
+                            "nearby_objects": ["在「開始」文字的右側"],
+                            "click_window": {
+                                "hwnd": 123,
+                                "title": "工作列",
+                                "process_name": "explorer.exe",
+                            },
+                        },
+                    },
+                    {
+                        "name": "click",
+                        "arguments": {
+                            "button": "left",
+                            "clicks": 1,
+                            "instruction": "將滑鼠移到「搜尋」文字，並點擊滑鼠一下。",
+                        },
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+
+    assert 'class="cached-tool-calls"' in html
+    assert "快取工具呼叫" in html
+    assert "工具×2" in html
+    assert 'class="cached-tool-call-name">1. move_mouse</span>' in html
+    assert 'class="cached-tool-call-name">2. click</span>' in html
+    assert "「搜尋」文字" in html
+    assert "nearby_objects[0]" in html
+    assert "click_window.title" in html
+    assert "工作列" in html
+    assert "button" in html
+    assert "left" in html
+
+
+def test_write_recording_html_renders_empty_cached_tool_calls(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000034"
+    _write_recording_fixture(run_root)
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+
+    assert 'class="cached-tool-calls"' in html
+    assert "尚無快取工具呼叫" in html
+    assert "工具×" not in html
+
+
 def test_write_recording_html_verification_checkbox_defaults_from_analysis(
     tmp_path: Path,
 ) -> None:

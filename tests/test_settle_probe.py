@@ -22,7 +22,7 @@ def _write_gray(path: Path, value: int) -> None:
 
 def test_settle_probe_interval_is_fixed() -> None:
     assert settle_probe_interval_s(0) == 0.0
-    assert [settle_probe_interval_s(i) for i in range(1, 10)] == [0.2] * 9
+    assert [settle_probe_interval_s(i) for i in range(1, 10)] == [0.25] * 9
     assert _SETTLE_PROBE_FIRST_S == 0.0
     assert _SETTLE_PROBE_MAX_WINDOW_S == 55.0
     assert settle_probe_interval_s(-3) == 0.0
@@ -230,8 +230,205 @@ def test_schedule_next_settle_probe_tick_uses_fixed_interval(
     session._schedule_next_settle_probe_tick(3)
     session._schedule_next_settle_probe_tick(3)
     session._schedule_next_settle_probe_tick(3)
-    assert delays == [0.0, 0.2, 0.2, 0.2]
+    assert delays == [0.0, 0.25, 0.25, 0.25]
     assert session._settle_probe.interval_step == 4
+
+
+def test_settle_probe_continues_after_first_similar_plateau(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Similar frames record observed_settle once but keep the probe running."""
+    import json
+    import threading
+    import time
+
+    from src.recorder.capture import RecordingSession, _SettleProbeState
+    from src.recorder.models import event_json_path
+
+    run_dir = tmp_path / "rec"
+    (run_dir / "screenshots").mkdir(parents=True)
+    (run_dir / "events").mkdir(parents=True)
+    event_path = event_json_path(run_dir, 2)
+    event_path.write_text(
+        json.dumps(
+            {
+                "index": 2,
+                "timestamp_utc": "2026-09-29T00:00:00+00:00",
+                "kind": "click",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    session = RecordingSession.__new__(RecordingSession)
+    session._lock = threading.Lock()
+    session._settle_tick_lock = threading.Lock()
+    session._event_file_lock = threading.Lock()
+    session._run_dir = run_dir
+    session._events = []
+    session._settle_pub_seq = 0
+    session._settle_pins = {}
+    session._last_settle_frame = None
+    session._settle_probe_timer = None
+    session._log = lambda *_a, **_k: None  # type: ignore[method-assign]
+    session._settle_probe = _SettleProbeState(
+        event_index=2,
+        started_monotonic=time.monotonic() - 1.0,
+        cursor_xy=(10, 10),
+    )
+
+    schedules: list[int] = []
+    monkeypatch.setattr(
+        session,
+        "_schedule_next_settle_probe_tick",
+        lambda event_index: schedules.append(int(event_index)),
+    )
+
+    gray = tmp_path / "frame.jpeg"
+    Image.new("L", (32, 24), color=40).save(gray, format="JPEG")
+
+    def _fake_capture(x, y, target):
+        import shutil
+
+        shutil.copy2(gray, target)
+        return str(target), 1, (0, 0)
+
+    import src.recorder.capture as capture_mod
+
+    monkeypatch.setattr(capture_mod, "_capture_screenshot_at_point", _fake_capture)
+    monkeypatch.setattr(
+        capture_mod,
+        "compare_frames",
+        lambda *_a, **_k: (True, 0.0),
+    )
+
+    # First sample: keep only.
+    session._run_settle_probe_tick(2)
+    assert session._settle_probe is not None
+    assert session._settle_probe.observed_recorded is False
+    assert schedules == [2]
+
+    # Second sample: similar → record observed, keep probing.
+    session._run_settle_probe_tick(2)
+    assert session._settle_probe is not None
+    assert session._settle_probe.observed_recorded is True
+    assert schedules == [2, 2]
+    raw = json.loads(event_path.read_text(encoding="utf-8"))
+    assert "observed_settle_seconds" in raw
+
+    # Third similar sample: do not overwrite observed; still scheduled.
+    first_observed = raw["observed_settle_seconds"]
+    session._run_settle_probe_tick(2)
+    assert session._settle_probe is not None
+    assert schedules == [2, 2, 2]
+    raw2 = json.loads(event_path.read_text(encoding="utf-8"))
+    assert raw2["observed_settle_seconds"] == first_observed
+
+
+def test_start_settle_probe_does_not_wait_for_inflight_tick(
+    tmp_path: Path,
+) -> None:
+    """Replacing the probe must not block on a tick that still holds the lock."""
+    import threading
+    import time
+
+    from src.recorder.capture import RecordingSession, _SettleProbeState
+    from src.recorder.models import RecordedEvent
+
+    run_dir = tmp_path / "rec"
+    (run_dir / "screenshots").mkdir(parents=True)
+
+    session = RecordingSession.__new__(RecordingSession)
+    session._lock = threading.Lock()
+    session._settle_tick_lock = threading.Lock()
+    session._run_dir = run_dir
+    session._events = []
+    session._settle_pub_seq = 0
+    session._settle_pins = {}
+    session._last_settle_frame = None
+    session._settle_probe_timer = None
+    session._log = lambda *_a, **_k: None  # type: ignore[method-assign]
+    session._settle_probe = _SettleProbeState(
+        event_index=2,
+        started_monotonic=time.monotonic(),
+        cursor_xy=(1, 1),
+    )
+
+    held = threading.Event()
+    release = threading.Event()
+
+    def _hold_tick_lock() -> None:
+        with session._settle_tick_lock:
+            held.set()
+            assert release.wait(2.0)
+
+    holder = threading.Thread(target=_hold_tick_lock, daemon=True)
+    holder.start()
+    assert held.wait(1.0)
+
+    newer = RecordedEvent(
+        index=3,
+        timestamp_utc="2026-09-29T00:00:00+00:00",
+        kind="click",
+        cursor_xy=(10, 10),
+    )
+    started = time.monotonic()
+    session._start_settle_probe(newer)
+    elapsed = time.monotonic() - started
+    release.set()
+    holder.join(timeout=1.0)
+
+    assert elapsed < 0.2
+    probe = session._settle_probe
+    assert probe is not None
+    assert probe.event_index == 3
+
+
+def test_superseded_tick_does_not_publish_over_newer_frame(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An old tick finishing after replace must not clobber the newer publish."""
+    import threading
+    import time
+
+    from PIL import Image
+
+    from src.recorder.capture import RecordingSession, _SettleProbeState
+
+    run_dir = tmp_path / "rec"
+    (run_dir / "screenshots").mkdir(parents=True)
+    old_src = run_dir / "screenshots" / "old.jpeg"
+    new_src = run_dir / "screenshots" / "new.jpeg"
+    Image.new("RGB", (16, 12), color=(200, 0, 0)).save(old_src, format="JPEG")
+    Image.new("RGB", (16, 12), color=(0, 0, 200)).save(new_src, format="JPEG")
+
+    session = RecordingSession.__new__(RecordingSession)
+    session._lock = threading.Lock()
+    session._settle_tick_lock = threading.Lock()
+    session._run_dir = run_dir
+    session._settle_pub_seq = 0
+    session._settle_pins = {}
+    session._last_settle_frame = None
+    session._settle_probe = _SettleProbeState(
+        event_index=4,
+        started_monotonic=time.monotonic(),
+    )
+
+    assert session._publish_last_settle_frame(
+        new_src, 1, (0, 0), event_index=4
+    )
+    published = session._last_settle_frame
+    assert published is not None
+    assert Path(published[0]).is_file()
+
+    # Simulate event-3 tick finishing after replace to event 4.
+    assert not session._publish_last_settle_frame(
+        old_src, 1, (0, 0), event_index=3
+    )
+    assert session._last_settle_frame == published
+    r, _g, b = Image.open(published[0]).convert("RGB").getpixel((0, 0))
+    assert b > 150
+    assert r < 50
 
 
 def test_finish_settle_against_final_after_persists_observed(

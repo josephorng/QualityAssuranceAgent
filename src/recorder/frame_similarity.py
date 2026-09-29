@@ -159,11 +159,11 @@ def apply_settle_sample(
     """Advance settle-probe retention given a new staging sample.
 
     Returns ``(new_kept_path, new_kept_age_s, observed_settle_seconds)``.
-    When ``observed_settle_seconds`` is not ``None``, the probe is complete
-    (stable plateau found); callers should stop sampling.
+    When ``observed_settle_seconds`` is not ``None``, a similar plateau was
+    found (age of the earlier frame). Callers record that once for timing but
+    keep sampling until the next event replaces the probe.
 
-    On a similar pair, ``observed_settle_seconds`` is the age of the earlier
-    frame and ``new_kept_path`` is the later frame (freshest settled UI).
+    On a similar pair, ``new_kept_path`` is the later frame (freshest UI).
 
     ``similar`` may be supplied by tests; otherwise compares ``kept`` vs ``staging``.
     """

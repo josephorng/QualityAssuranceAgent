@@ -40,7 +40,7 @@ flowchart LR
   KeyTimer -->|before-shot for Tab or Enter| Queue
 
   Context -->|every 0.25s| Windows
-  Probe -->|every 0.2s, on publish| Frame
+  Probe -->|every 0.25s, on publish| Frame
   Worker -->|read press-time copies| Queue
   Worker -->|write event JSON, then start probe| Probe
   Worker -->|hand off window diff| WindowStep
@@ -62,9 +62,9 @@ flowchart LR
 
 ### Settle-probe timer
 
-One slot. Recording starts it as event 0 so the first click has a frame to pin. After each recorded click, drag, hold, text input, or key press, the worker replaces that slot.
+One slot. Recording starts it as event 0 so the first click has a frame to pin. After each recorded click, drag, hold, text input, or key press, the worker replaces that slot without waiting for an in-flight tick: the timer is cancelled, the new probe starts, and a superseded tick no-ops before it publishes.
 
-The first sample is immediate. Later samples wait 0.2 seconds (`_SETTLE_PROBE_INTERVAL_S`), up to 55 seconds. Two similar samples stop the probe. Each published sample is copied to `screenshots/_settle_pub_NNNNN.jpeg` and stored as `_last_settle_frame`. The probe timer does not enumerate windows. The context loop owns that cache.
+The first sample is immediate. Later samples wait 0.25 seconds (`_SETTLE_PROBE_INTERVAL_S`), up to 55 seconds. The first similar pair records `observed_settle_seconds` but does not stop the probe; sampling continues until the next event replaces the slot (or the max window). Each published sample is copied to `screenshots/_settle_pub_NNNNN.jpeg` and stored as `_last_settle_frame`. The probe timer does not enumerate windows. The context loop owns that cache.
 
 The frame pinned by the next click is this step's after shot and the next step's before shot.
 
@@ -126,7 +126,7 @@ sequenceDiagram
   Worker->>Vision: Event JSON is saved
   Worker->>Probe: Start probe for this click when its index is newer
   Worker->>WindowStep: Sleep the remaining 0.25s or 0.45s, then window list and UI Automation
-  Probe->>Probe: Sample immediately, then every 0.2s
+  Probe->>Probe: Sample immediately, then every 0.25s (no early stop)
   Probe->>Mouse: Publish _last_settle_frame for the next click
   WindowStep->>WindowStep: Patch window_change onto the event file
 ```

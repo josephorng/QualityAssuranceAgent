@@ -793,6 +793,82 @@ def test_instruction_ignores_shell_experience_host_window() -> None:
     ) == "(none)"
 
 
+def test_flyout_dismiss_is_not_a_close_action_but_stays_in_verify() -> None:
+    """Menu dismiss must not become window_change close; verify still sees disappeared."""
+    explorer = _win(
+        1,
+        "常用 - 檔案總管",
+        class_name="CabinetWClass",
+        process_name="explorer.exe",
+        left=0,
+        top=0,
+        width=1920,
+        height=1040,
+    )
+    flyout = _win(
+        9,
+        "快顯主機",
+        class_name="Microsoft.UI.Content.PopupWindowSiteBridge",
+        process_name="explorer.exe",
+        left=438,
+        top=131,
+        width=213,
+        height=217,
+        # Cap strip overlaps menu body; must not become from_title_bar_close.
+        caption_button_bounds=(550, 131, 650, 160),
+    )
+    # Click on 「並排」 inside the flyout (would hit caption slack without flyout guard).
+    result = diff_snapshots_with_debug(
+        [explorer, flyout],
+        [explorer],
+        click_xy=(560, 150),
+    )
+    assert result.change is None
+
+    predicate = build_window_verify_predicate([explorer, flyout], [explorer])
+    assert predicate.get("disappeared") == [
+        {
+            "class_name": "Microsoft.UI.Content.PopupWindowSiteBridge",
+            "title": "快顯主機",
+            "process_name": "explorer.exe",
+        }
+    ]
+    assert expected_outcome_for_window_change(
+        {
+            "action": "close",
+            "title": "快顯主機",
+            "confidence": "high",
+            "from_title_bar_close": True,
+        }
+    ) is None
+
+
+def test_from_title_bar_close_never_true_for_flyout() -> None:
+    from src.recorder.window_snapshot import _from_title_bar_close
+
+    flyout = _win(
+        9,
+        "快顯主機",
+        class_name="Microsoft.UI.Content.PopupWindowSiteBridge",
+        left=100,
+        top=100,
+        width=200,
+        height=200,
+        caption_button_bounds=(150, 100, 300, 140),
+    )
+    assert _from_title_bar_close((200, 120), flyout) is False
+    normal = _win(
+        1,
+        "Notepad",
+        left=100,
+        top=100,
+        width=800,
+        height=600,
+        caption_button_bounds=(700, 100, 900, 140),
+    )
+    assert _from_title_bar_close((800, 120), normal) is True
+
+
 def test_settle_delay_is_longer_for_title_bar_clicks() -> None:
     from src.recorder.window_snapshot import (
         WINDOW_SETTLE_DELAY_S,

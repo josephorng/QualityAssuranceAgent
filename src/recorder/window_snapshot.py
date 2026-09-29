@@ -33,6 +33,7 @@ _TASKBAR_CLASS_NAMES = frozenset(
     }
 )
 # Shell / Start / search overlays that should keep their own (often untitled) rect.
+# Explorer WinUI popups (View/Sort/Filter menus) use PopupWindowSiteBridge.
 _FLYOUT_CLASS_NAMES = frozenset(
     {
         "Windows.UI.Core.CoreWindow",
@@ -40,6 +41,7 @@ _FLYOUT_CLASS_NAMES = frozenset(
         "Windows.Internal.Shell.TabProxyWindow",
         "Shell_Flyout",
         "NetUIHWND",
+        "Microsoft.UI.Content.PopupWindowSiteBridge",
     }
 )
 _FLYOUT_TITLES = frozenset({"快顯主機"})
@@ -491,6 +493,21 @@ def click_hits_caption_buttons(
     )
 
 
+def _from_title_bar_close(
+    click_xy: tuple[int, int] | None,
+    win: WindowInfo,
+) -> bool:
+    """True when a close was via the title-bar X; always False for flyouts.
+
+    Flyout menus (``快顯主機``, PopupWindowSiteBridge, …) dismiss when the user
+    picks an item or clicks away. Their small rects often trip the caption
+    hit-test, which must not become ``from_title_bar_close``.
+    """
+    if _is_flyout_window(class_name=win.class_name or "", title=win.title or ""):
+        return False
+    return click_hits_caption_buttons(click_xy, win)
+
+
 def _title_bar_height(win: WindowInfo) -> int:
     bounds = caption_button_bounds_for_window(win)
     if bounds is not None:
@@ -771,11 +788,18 @@ def _classify_target_change(
         # effect of Start/Search clicks; never treat that as a user close.
         if not before_win.title.strip():
             return None
+        # Flyout dismiss (menu item / click-away) is not a close action; replay
+        # still asserts disappearance via window_verify when the snapshot diffs.
+        if _is_flyout_window(
+            class_name=before_win.class_name or "",
+            title=before_win.title or "",
+        ):
+            return None
         return WindowStateChange(
             action="close",
             title=title,
             confidence="high",
-            from_title_bar_close=click_hits_caption_buttons(click_xy, before_win),
+            from_title_bar_close=_from_title_bar_close(click_xy, before_win),
         )
 
     minimize = _minimize_change(before_win, after_win)
@@ -934,13 +958,19 @@ def diff_snapshots_with_debug(
         for win in before:
             if _window_identity_key(win) == key:
                 if _find_match(win, after) is None:
+                    # Flyout gone ≠ title-bar close; keep disappeared in verify only.
+                    if _is_flyout_window(
+                        class_name=win.class_name or "",
+                        title=win.title or "",
+                    ):
+                        break
                     debug["detection_path"] = "identity_close"
                     return WindowDiffResult(
                         change=WindowStateChange(
                             action="close",
                             title=win.title,
                             confidence="medium",
-                            from_title_bar_close=click_hits_caption_buttons(click_xy, win),
+                            from_title_bar_close=_from_title_bar_close(click_xy, win),
                         ),
                         debug=debug,
                     )
@@ -962,9 +992,6 @@ def diff_snapshots_with_debug(
     return WindowDiffResult(change=None, debug=debug)
 
 
-# Windows shell host that often disappears as a side effect of unrelated clicks
-# (taskbar search, Start, etc.). Never treat it as the user's intended action.
-_IGNORED_WINDOW_CHANGE_TITLES = frozenset({"快顯主機"})
 # Hub app title; trailing restores are dropped during analysis (stop-recording artifact).
 _AGENT_APP_WINDOW_TITLE = "電腦使用代理"
 
@@ -977,9 +1004,20 @@ def _window_change_data(
     return change
 
 
-def _should_ignore_window_change(data: dict[str, Any]) -> bool:
+def should_ignore_window_change(data: dict[str, Any]) -> bool:
+    """True for shell flyouts: not a script close/minimize/maximize action.
+
+    ``快顯主機`` / PopupWindowSiteBridge dismissals stay in ``window_verify``
+    as ``disappeared`` / ``appeared``, but must not become ``close_windows``
+    or 「關閉…視窗」 instructions.
+    """
     title = str(data.get("title", "")).strip()
-    return title in _IGNORED_WINDOW_CHANGE_TITLES
+    class_name = str(data.get("class_name", "") or "").strip()
+    return _is_flyout_window(class_name=class_name, title=title)
+
+
+def _should_ignore_window_change(data: dict[str, Any]) -> bool:
+    return should_ignore_window_change(data)
 
 
 def is_agent_app_restore(change: WindowStateChange | dict[str, Any] | None) -> bool:

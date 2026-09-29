@@ -150,6 +150,49 @@ def test_compile_window_maximize() -> None:
     ]
 
 
+def test_compile_flyout_close_falls_through_to_click() -> None:
+    """Legacy analyses may mark 快顯主機 close + from_title_bar_close; never close_windows."""
+    instruction = (
+        "將滑鼠移到「並排」文字（在「快速存」文字的右邊、在「內容」文字的上面），"
+        "並點擊滑鼠一下。"
+    )
+    event = _event(
+        kind="click",
+        click_count=1,
+        window_change={
+            "action": "close",
+            "title": "快顯主機",
+            "confidence": "medium",
+            "from_title_bar_close": True,
+        },
+        click_window={
+            "hwnd": 1,
+            "title": "快顯主機",
+            "process_name": "explorer.exe",
+            "class_name": "Microsoft.UI.Content.PopupWindowSiteBridge",
+            "is_flyout": True,
+        },
+    )
+    calls = compile_tool_calls(event, instruction)
+    assert calls is not None
+    assert [c["name"] for c in calls] == ["move_mouse", "click"]
+    assert calls[0]["arguments"]["instruction"] == "「並排」文字"
+    assert "close_windows" not in {c["name"] for c in calls}
+
+
+def test_compile_never_emits_close_windows_for_flyout_title() -> None:
+    event = _event(
+        kind="click",
+        window_change={
+            "action": "close",
+            "title": "快顯主機",
+            "confidence": "high",
+            "from_title_bar_close": True,
+        },
+    )
+    assert compile_tool_calls(event, "關閉「快顯主機」視窗") is None
+
+
 def test_compile_drag() -> None:
     event = _event(kind="drag")
     instruction = "從「A」圖示拖到「B」文字（附近有「C」文字）"

@@ -1112,6 +1112,33 @@ def build_window_verify_predicate(
     return predicate
 
 
+def predicate_has_structural_window_assertions(predicate: dict[str, Any] | None) -> bool:
+    """True when appeared, disappeared, or state carries at least one window entry."""
+    if not isinstance(predicate, dict):
+        return False
+    for key in ("appeared", "disappeared", "state"):
+        items = predicate.get(key)
+        if isinstance(items, list) and any(isinstance(item, dict) for item in items):
+            return True
+    return False
+
+
+def omit_foreground_when_structural(predicate: dict[str, Any]) -> dict[str, Any]:
+    """Drop foreground when appear/disappear/state already assert the UI change.
+
+    Next-focus after close/open/maximize is session noise; structural window
+    assertions are the stable success signal. Older recordings may still store
+    both; replay strips foreground the same way.
+    """
+    if not predicate_has_structural_window_assertions(predicate):
+        return predicate
+    if "foreground" not in predicate:
+        return predicate
+    trimmed = dict(predicate)
+    trimmed.pop("foreground", None)
+    return trimmed
+
+
 def window_verify_from_debug(debug: dict[str, Any] | None) -> dict[str, Any]:
     """Build a replay predicate from stored window lists and changed signals."""
     if not isinstance(debug, dict):
@@ -1138,16 +1165,14 @@ def window_verify_from_debug(debug: dict[str, Any] | None) -> dict[str, Any]:
             after_windows=after_windows,
         )
     )
-    return predicate
+    return omit_foreground_when_structural(predicate)
 
 
 def window_verify_has_assertions(predicate: dict[str, Any] | None) -> bool:
     if not isinstance(predicate, dict):
         return False
-    for key in ("appeared", "disappeared", "state"):
-        items = predicate.get(key)
-        if isinstance(items, list) and any(isinstance(item, dict) for item in items):
-            return True
+    if predicate_has_structural_window_assertions(predicate):
+        return True
     from src.recorder.verify_signals import predicate_has_signal_assertions
 
     return predicate_has_signal_assertions(predicate)
@@ -1236,8 +1261,10 @@ def window_verify_satisfied(
     Without ``live_windows_after``, appear/disappear/state fall back to the live
     before→after delta. Extra live window changes are ignored. Signal fields
     compare the live after sample to the recorded after value; a missing recorded
-    field adds no assertion.
+    field adds no assertion. When appeared/disappeared/state are present,
+    recorded ``foreground`` is ignored (incidental next-focus after the change).
     """
+    recorded = omit_foreground_when_structural(recorded)
     after_windows: list[WindowInfo] | None = None
     after_entries: list[dict[str, Any]] | None = None
     if live_windows_after is not None:

@@ -8,6 +8,7 @@ from typing import Any
 
 from src.recorder.analyze import after_screenshot_for_outcome, use_expected_outcome_enabled
 from src.recorder.models import RecordedEvent
+from src.recorder.window_snapshot import omit_foreground_when_structural
 
 _EXPECTED_OUTCOME_PREFIX = "# expected_outcome:"
 _LEGACY_RECORDING_SCRIPT_FILENAME = "script.txt"
@@ -380,7 +381,7 @@ def collect_recording_window_verifies(run_dir: Path) -> list[dict[str, Any]]:
             continue
         raw = analysis.get("window_verify")
         if isinstance(raw, dict):
-            verifies.append(raw)
+            verifies.append(omit_foreground_when_structural(raw))
         else:
             verifies.append({})
     return verifies

@@ -62,6 +62,7 @@ from src.recorder.verify_signals import (
 from src.recorder.window_snapshot import (
     WindowInfo,
     build_window_verify_predicate,
+    omit_foreground_when_structural,
     snapshot_top_level_windows,
     window_verify_has_assertions,
     window_verify_satisfied,
@@ -478,7 +479,7 @@ class BrainModule:
         for index in range(min(step_count, len(parsed))):
             item = parsed[index]
             if isinstance(item, dict) and window_verify_has_assertions(item):
-                verifies[index] = item
+                verifies[index] = omit_foreground_when_structural(item)
         return verifies
 
     def _current_expected_outcome(self) -> str:

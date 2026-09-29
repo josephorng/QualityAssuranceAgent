@@ -1319,6 +1319,125 @@ def test_window_verify_flyout_disappear_keeps_stable_foreground() -> None:
     assert predicate["disappeared"][0]["title"] == "快顯主機"
 
 
+def test_window_verify_omits_foreground_when_disappeared_present() -> None:
+    explorer = _win(1, "常用 - 檔案總管", class_name="CabinetWClass", process_name="explorer.exe")
+    chrome = _win(2, "Google Chrome", class_name="Chrome_WidgetWin_1", process_name="chrome.exe")
+    predicate = window_verify_from_debug(
+        {
+            "windows_before": [explorer.to_dict(), chrome.to_dict()],
+            "windows_after": [chrome.to_dict()],
+            "signals_before": {"foreground": _explorer_foreground()},
+            "signals_after": {"foreground": _chrome_foreground()},
+            "signal_kind": "click",
+        }
+    )
+    assert predicate["disappeared"][0]["title"] == "常用 - 檔案總管"
+    assert "foreground" not in predicate
+
+
+def test_window_verify_omits_foreground_when_appeared_present() -> None:
+    chrome = _win(2, "Google Chrome", class_name="Chrome_WidgetWin_1", process_name="chrome.exe")
+    explorer = _win(1, "檔案總管", class_name="CabinetWClass", process_name="explorer.exe")
+    predicate = window_verify_from_debug(
+        {
+            "windows_before": [chrome.to_dict()],
+            "windows_after": [chrome.to_dict(), explorer.to_dict()],
+            "signals_before": {"foreground": _chrome_foreground()},
+            "signals_after": {"foreground": _explorer_foreground()},
+            "signal_kind": "click",
+        }
+    )
+    assert predicate["appeared"][0]["title"] == "檔案總管"
+    assert "foreground" not in predicate
+
+
+def test_window_verify_omits_foreground_when_state_present() -> None:
+    before = _win(
+        1,
+        "檔案總管",
+        class_name="CabinetWClass",
+        process_name="explorer.exe",
+        is_maximized=False,
+        width=800,
+        height=600,
+    )
+    after = _win(
+        1,
+        "檔案總管",
+        class_name="CabinetWClass",
+        process_name="explorer.exe",
+        is_maximized=True,
+        width=1920,
+        height=1080,
+    )
+    predicate = window_verify_from_debug(
+        {
+            "windows_before": [before.to_dict()],
+            "windows_after": [after.to_dict()],
+            "signals_before": {"foreground": _chrome_foreground()},
+            "signals_after": {"foreground": _explorer_foreground()},
+            "signal_kind": "click",
+        }
+    )
+    assert any(item.get("change") == "maximized" for item in predicate.get("state", []))
+    assert "foreground" not in predicate
+
+
+def test_window_verify_ignores_legacy_foreground_when_disappeared_present() -> None:
+    """Old analyses that stored both still pass when only disappeared holds."""
+    explorer = _win(1, "常用 - 檔案總管", class_name="CabinetWClass", process_name="explorer.exe")
+    chrome = _win(2, "YouTube", class_name="Chrome_WidgetWin_1", process_name="chrome.exe")
+    recorded = {
+        "disappeared": [
+            {
+                "class_name": "CabinetWClass",
+                "title": "常用 - 檔案總管",
+                "process_name": "explorer.exe",
+            }
+        ],
+        "foreground": {
+            "class_name": "Chrome_WidgetWin_1",
+            "title": "main.py - QualityAssuranceAgent - Cursor",
+            "process_name": "Cursor.exe",
+        },
+    }
+    ok, reason = window_verify_satisfied(
+        recorded,
+        {},
+        live_after={"foreground": _chrome_foreground()},
+        live_windows_after=[chrome],
+    )
+    assert ok is True
+    assert reason == ""
+    ok, reason = window_verify_satisfied(
+        recorded,
+        {},
+        live_after={"foreground": _chrome_foreground()},
+        live_windows_after=[explorer, chrome],
+    )
+    assert ok is False
+    assert "disappeared" in reason
+
+
+def test_window_verify_keeps_foreground_without_structural_assertions() -> None:
+    changed = {
+        "foreground": _chrome_foreground(),
+    }
+    ok, reason = window_verify_satisfied(
+        changed,
+        {},
+        live_after={"foreground": _explorer_foreground()},
+    )
+    assert ok is False
+    assert "foreground" in reason
+    ok, _reason = window_verify_satisfied(
+        changed,
+        {},
+        live_after={"foreground": _chrome_foreground()},
+    )
+    assert ok is True
+
+
 def test_window_verify_omits_unchanged_light_signals_and_requires_changes() -> None:
     from src.recorder.verify_signals import signal_verify_fields
 

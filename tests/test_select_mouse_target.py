@@ -209,11 +209,13 @@ def test_detect_ocr_roi_passes_enhance_roi_and_drops_outside_text(
             )
 
     roi = (0, 0, 80, 80)
+    timing_out: dict = {}
     dets = _detect_mouse_targets_from_bgr(
         bgr,
         refine_inputs=False,
         ocr_roi=roi,
         ocr_roi_pad=0,
+        timing_out=timing_out,
     )
     assert yolo_kwargs.get("enhance_roi") == roi
     assert len(ocr_calls) == 1
@@ -221,6 +223,33 @@ def test_detect_ocr_roi_passes_enhance_roi_and_drops_outside_text(
     assert len(dets) == 1
     assert dets[0].text == "內"
     assert dets[0].bbox[0] < 80
+    assert timing_out.get("ocr_roi") == [0, 0, 80, 80]
+    assert timing_out.get("ocr_roi_pad") == 0
+
+
+def test_build_move_mouse_timing_includes_ocr_roi_on_yolo_and_ocr_phases() -> None:
+    from cua_mcp.select_mouse_target import _build_move_mouse_timing
+
+    timing = _build_move_mouse_timing(
+        total_s=1.5,
+        capture_s=0.1,
+        vision={
+            "yolo_s": 0.5,
+            "line_s": 0.0,
+            "ocr_s": 0.4,
+            "ocr_roi": [12, 34, 100, 80],
+            "ocr_roi_pad": 16,
+        },
+        parse_s=0.2,
+        select_s=0.3,
+        select_phase="select_unique",
+    )
+    assert timing["ocr_roi"] == [12, 34, 100, 80]
+    assert timing["ocr_roi_pad"] == 16
+    by_name = {p["name"]: p for p in timing["phases"]}
+    assert by_name["yolo"]["ocr_roi"] == [12, 34, 100, 80]
+    assert by_name["ocr"]["ocr_roi"] == [12, 34, 100, 80]
+    assert "ocr_roi" not in by_name["capture"]
 
 
 def test_detect_refine_inputs_only_inside_ocr_roi(

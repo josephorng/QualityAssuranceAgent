@@ -155,6 +155,8 @@ def _details_from_move_mouse_timing(timing: dict[str, Any]) -> list[dict[str, An
     """Convert move_mouse ``timing.phases`` into time_profile detail rows."""
     phases = timing.get("phases")
     details: list[dict[str, Any]] = []
+    fallback_roi = _normalize_roi_xywh(timing.get("ocr_roi"))
+    fallback_rois = _normalize_roi_list(timing.get("ocr_rois"))
     if isinstance(phases, list):
         for phase in phases:
             if not isinstance(phase, dict):
@@ -168,13 +170,19 @@ def _details_from_move_mouse_timing(timing: dict[str, Any]) -> list[dict[str, An
             label = _MOVE_MOUSE_PHASE_LABELS.get(name, name)
             if phase.get("overlapped") is True and "(overlapped)" not in label:
                 label = f"{label} (overlapped)"
-            details.append(
-                {
-                    "kind": f"move_mouse_{name}",
-                    "label": label,
-                    "duration_seconds": round(float(seconds), 3),
-                }
-            )
+            detail: dict[str, Any] = {
+                "kind": f"move_mouse_{name}",
+                "label": label,
+                "duration_seconds": round(float(seconds), 3),
+            }
+            if name in {"yolo", "ocr"}:
+                _attach_roi_fields(
+                    detail,
+                    phase,
+                    fallback_roi=fallback_roi,
+                    fallback_rois=fallback_rois,
+                )
+            details.append(detail)
     if details:
         return details
     for key, label in (
@@ -188,14 +196,98 @@ def _details_from_move_mouse_timing(timing: dict[str, Any]) -> list[dict[str, An
     ):
         raw = timing.get(key)
         if isinstance(raw, (int, float)):
-            details.append(
-                {
-                    "kind": f"move_mouse_{key.removesuffix('_s')}",
-                    "label": label,
-                    "duration_seconds": round(float(raw), 3),
-                }
-            )
+            detail = {
+                "kind": f"move_mouse_{key.removesuffix('_s')}",
+                "label": label,
+                "duration_seconds": round(float(raw), 3),
+            }
+            phase_name = key.removesuffix("_s")
+            if phase_name in {"yolo", "ocr"}:
+                _attach_roi_fields(
+                    detail,
+                    timing,
+                    fallback_roi=fallback_roi,
+                    fallback_rois=fallback_rois,
+                )
+            details.append(detail)
     return details
+
+
+def _normalize_roi_xywh(raw: Any) -> list[int] | None:
+    if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+        return None
+    try:
+        return [int(v) for v in raw]
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_roi_list(raw: Any) -> list[list[int]] | None:
+    if not isinstance(raw, list):
+        return None
+    rois = [
+        roi
+        for item in raw
+        for roi in (_normalize_roi_xywh(item),)
+        if roi is not None
+    ]
+    return rois or None
+
+
+def _attach_roi_fields(
+    detail: dict[str, Any],
+    source: dict[str, Any],
+    *,
+    fallback_roi: list[int] | None = None,
+    fallback_rois: list[list[int]] | None = None,
+) -> None:
+    """Copy image-local OCR/YOLO ROI onto a time_profile detail row."""
+    roi = _normalize_roi_xywh(source.get("ocr_roi")) or fallback_roi
+    rois = _normalize_roi_list(source.get("ocr_rois")) or fallback_rois
+    if roi is not None:
+        detail["roi"] = roi
+    if rois is not None:
+        detail["rois"] = rois
+        if "roi" not in detail and len(rois) == 1:
+            detail["roi"] = rois[0]
+    pad = source.get("ocr_roi_pad")
+    if isinstance(pad, (int, float)):
+        detail["roi_pad"] = int(pad)
+
+
+def _ocr_roi_from_click_window_payload(payload: dict[str, Any]) -> list[int] | None:
+    """Best-effort image-local ROI from ``click_window`` + screenshot for older runs."""
+    args = payload.get("args")
+    if not isinstance(args, dict):
+        return None
+    click_window = args.get("click_window")
+    if not isinstance(click_window, dict):
+        return None
+    path_raw = args.get("screenshot_path")
+    if not isinstance(path_raw, str) or not path_raw.strip():
+        paths = args.get("screenshot_paths")
+        if isinstance(paths, list):
+            path_raw = next(
+                (p for p in paths if isinstance(p, str) and p.strip()),
+                None,
+            )
+    if not isinstance(path_raw, str) or not path_raw.strip():
+        return None
+    path = Path(path_raw)
+    if not path.is_file():
+        return None
+    try:
+        from src.common.io_utils import imread_bgr
+        from src.recorder.window_snapshot import resolve_ocr_roi_local
+
+        bgr = imread_bgr(path)
+        if bgr is None or getattr(bgr, "size", 0) == 0:
+            return None
+        img_h, img_w = bgr.shape[:2]
+        roi = resolve_ocr_roi_local(click_window, image_w=img_w, image_h=img_h)
+    except Exception:
+        return None
+    return _normalize_roi_xywh(roi)
 
 
 def _find_tool_payload_for_action(
@@ -253,6 +345,24 @@ def _attach_move_mouse_timing_details(
         return
     details = _details_from_move_mouse_timing(timing)
     if details:
+        needs_roi = any(
+            isinstance(d, dict)
+            and d.get("kind") in {"move_mouse_yolo", "move_mouse_ocr"}
+            and "roi" not in d
+            and "rois" not in d
+            for d in details
+        )
+        if needs_roi:
+            fallback_roi = _ocr_roi_from_click_window_payload(payload)
+            if fallback_roi is not None:
+                for detail in details:
+                    if not isinstance(detail, dict):
+                        continue
+                    if detail.get("kind") not in {"move_mouse_yolo", "move_mouse_ocr"}:
+                        continue
+                    if "roi" in detail or "rois" in detail:
+                        continue
+                    detail["roi"] = fallback_roi
         entry["details"] = details
         total = timing.get("total_s")
         if isinstance(total, (int, float)):

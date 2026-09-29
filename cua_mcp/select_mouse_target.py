@@ -594,19 +594,88 @@ def _round_timing_s(value: float) -> float:
     return round(max(0.0, float(value)), 3)
 
 
-def _add_vision_phase_timing(dst: dict[str, float], src: dict[str, float]) -> None:
-    """Accumulate YOLO/line/OCR phase seconds from one monitor into ``dst``."""
+def _normalize_ocr_roi_xywh(raw: Any) -> list[int] | None:
+    """Return image-local ``[x, y, w, h]`` when ``raw`` is a 4-number ROI."""
+    if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+        return None
+    try:
+        return [int(v) for v in raw]
+    except (TypeError, ValueError):
+        return None
+
+
+def _vision_roi_fields(vision: dict[str, Any]) -> dict[str, Any]:
+    """Pull ``ocr_roi`` / ``ocr_rois`` from a vision timing dict for tool results."""
+    out: dict[str, Any] = {}
+    single = _normalize_ocr_roi_xywh(vision.get("ocr_roi"))
+    if single is not None:
+        out["ocr_roi"] = single
+    raw_list = vision.get("ocr_rois")
+    if isinstance(raw_list, list):
+        rois = [
+            roi
+            for item in raw_list
+            for roi in (_normalize_ocr_roi_xywh(item),)
+            if roi is not None
+        ]
+        if rois:
+            out["ocr_rois"] = rois
+            if "ocr_roi" not in out and len(rois) == 1:
+                out["ocr_roi"] = rois[0]
+    pad = vision.get("ocr_roi_pad")
+    if isinstance(pad, (int, float)):
+        out["ocr_roi_pad"] = int(pad)
+    return out
+
+
+def _timing_payload_with_roi(
+    *,
+    yolo_s: float,
+    line_s: float,
+    ocr_s: float,
+    total_s: float,
+    ocr_roi: tuple[int, int, int, int] | None = None,
+    ocr_roi_pad: int | None = None,
+) -> dict[str, Any]:
+    """Build a per-monitor vision timing dict, optionally including the OCR ROI."""
+    payload: dict[str, Any] = {
+        "yolo_s": yolo_s,
+        "line_s": line_s,
+        "ocr_s": ocr_s,
+        "total_s": total_s,
+    }
+    roi = _normalize_ocr_roi_xywh(ocr_roi)
+    if roi is not None:
+        payload["ocr_roi"] = roi
+    if ocr_roi_pad is not None:
+        payload["ocr_roi_pad"] = int(ocr_roi_pad)
+    return payload
+
+
+def _add_vision_phase_timing(dst: dict[str, Any], src: dict[str, Any]) -> None:
+    """Accumulate YOLO/line/OCR phase seconds (and ROIs) from one monitor into ``dst``."""
     for key in ("yolo_s", "line_s", "ocr_s", "total_s"):
         raw = src.get(key)
         if isinstance(raw, (int, float)):
             dst[key] = float(dst.get(key, 0.0)) + float(raw)
+    roi = _normalize_ocr_roi_xywh(src.get("ocr_roi"))
+    if roi is not None:
+        rois = dst.setdefault("ocr_rois", [])
+        if isinstance(rois, list):
+            rois.append(roi)
+        if "ocr_roi" not in dst:
+            dst["ocr_roi"] = roi
+    if "ocr_roi_pad" not in dst:
+        pad = src.get("ocr_roi_pad")
+        if isinstance(pad, (int, float)):
+            dst["ocr_roi_pad"] = int(pad)
 
 
 def _build_move_mouse_timing(
     *,
     total_s: float,
     capture_s: float,
-    vision: dict[str, float],
+    vision: dict[str, Any],
     parse_s: float,
     select_s: float,
     select_phase: str = "select",
@@ -619,15 +688,18 @@ def _build_move_mouse_timing(
     parse_s = _round_timing_s(parse_s)
     select_s = _round_timing_s(select_s)
     total_s = _round_timing_s(total_s)
+    roi_fields = _vision_roi_fields(vision)
+    yolo_phase: dict[str, Any] = {"name": "yolo", "seconds": yolo_s, **roi_fields}
+    ocr_phase: dict[str, Any] = {"name": "ocr", "seconds": ocr_s, **roi_fields}
     phases: list[dict[str, Any]] = [
         {"name": "capture", "seconds": capture_s},
-        {"name": "yolo", "seconds": yolo_s},
+        yolo_phase,
         {"name": "line_refine", "seconds": line_s},
-        {"name": "ocr", "seconds": ocr_s},
+        ocr_phase,
         {"name": "parse_instruction", "seconds": parse_s, "overlapped": True},
         {"name": select_phase, "seconds": select_s},
     ]
-    return {
+    result: dict[str, Any] = {
         "total_s": total_s,
         "capture_s": capture_s,
         "yolo_s": yolo_s,
@@ -637,6 +709,8 @@ def _build_move_mouse_timing(
         "select_s": select_s,
         "phases": phases,
     }
+    result.update(roi_fields)
+    return result
 
 
 def _bbox_center_in_ocr_roi(
@@ -659,7 +733,7 @@ def _detect_mouse_targets_from_bgr(
     original_scrollbar_bboxes_out: list[tuple[int, int, int, int]] | None = None,
     original_input_bboxes_out: list[tuple[int, int, int, int]] | None = None,
     coord_offset: tuple[int, int] = (0, 0),
-    timing_out: dict[str, float] | None = None,
+    timing_out: dict[str, Any] | None = None,
     ocr_class_ids: frozenset[int] | set[int] | None = None,
     refine_inputs: bool = True,
     ocr_roi: tuple[int, int, int, int] | None = None,
@@ -685,7 +759,9 @@ def _detect_mouse_targets_from_bgr(
     YOLO ``input`` bbox that is absent from the post-merge input list.
 
     When ``timing_out`` is provided, writes ``yolo_s`` / ``line_s`` / ``ocr_s`` /
-    ``total_s`` for this image (replacing prior values in that dict).
+    ``total_s`` for this image (replacing prior values in that dict). When
+    ``ocr_roi`` is set, also records ``ocr_roi`` (image-local xywh) and
+    ``ocr_roi_pad``.
 
     ``ocr_class_ids`` limits which YOLO classes are OCR'd (default: text +
     element). ``refine_inputs=False`` skips input line-rectangle merge.
@@ -821,12 +897,14 @@ def _detect_mouse_targets_from_bgr(
         if timing_out is not None:
             timing_out.clear()
             timing_out.update(
-                {
-                    "yolo_s": yolo_elapsed,
-                    "line_s": line_elapsed,
-                    "ocr_s": 0.0,
-                    "total_s": total_elapsed,
-                }
+                _timing_payload_with_roi(
+                    yolo_s=yolo_elapsed,
+                    line_s=line_elapsed,
+                    ocr_s=0.0,
+                    total_s=total_elapsed,
+                    ocr_roi=ocr_roi,
+                    ocr_roi_pad=roi_pad,
+                )
             )
         return []
 
@@ -923,12 +1001,14 @@ def _detect_mouse_targets_from_bgr(
     if timing_out is not None:
         timing_out.clear()
         timing_out.update(
-            {
-                "yolo_s": yolo_elapsed,
-                "line_s": line_elapsed,
-                "ocr_s": ocr_elapsed,
-                "total_s": total_elapsed,
-            }
+            _timing_payload_with_roi(
+                yolo_s=yolo_elapsed,
+                line_s=line_elapsed,
+                ocr_s=ocr_elapsed,
+                total_s=total_elapsed,
+                ocr_roi=ocr_roi,
+                ocr_roi_pad=roi_pad,
+            )
         )
     return candidates
 
@@ -1563,7 +1643,7 @@ def _detections_for_captured_monitor(
     bgr: np.ndarray,
     *,
     yolo_conf_threshold: float,
-    timing_out: dict[str, float] | None = None,
+    timing_out: dict[str, Any] | None = None,
     ocr_class_ids: frozenset[int] | set[int] | None = None,
     refine_inputs: bool = True,
     ocr_roi: tuple[int, int, int, int] | None = None,
@@ -1656,7 +1736,7 @@ def _collect_monitor_detections(
     captured: list[tuple[int, np.ndarray]],
     *,
     yolo_conf_threshold: float,
-    timing_out: dict[str, float] | None = None,
+    timing_out: dict[str, Any] | None = None,
     ocr_class_ids: frozenset[int] | set[int] | None = None,
     refine_inputs: bool = True,
     click_window: dict[str, Any] | None = None,
@@ -1670,7 +1750,8 @@ def _collect_monitor_detections(
     than one monitor so Triton/ORT work can overlap.
 
     When ``timing_out`` is set, accumulates per-monitor ``yolo_s`` / ``line_s`` /
-    ``ocr_s`` / ``total_s`` (sums across monitors).
+    ``ocr_s`` / ``total_s`` (sums across monitors) and records ``ocr_roi`` /
+    ``ocr_rois`` when ROI gating was applied.
 
     When ``click_window`` is set, each monitor resolves its own ``ocr_roi`` via
     :func:`resolve_ocr_roi_local`, including maximized and near-full-screen windows.
@@ -1756,14 +1837,14 @@ def _collect_monitor_detections(
         )
 
     all_detections: list[UiDetection] = []
-    per_monitor_timings: list[dict[str, float]] = []
+    per_monitor_timings: list[dict[str, Any]] = []
 
     def _detect_one(
         monitor_index: int,
         bgr: np.ndarray,
         ocr_roi: tuple[int, int, int, int] | None,
-    ) -> tuple[list[UiDetection], dict[str, float]]:
-        local_timing: dict[str, float] = {}
+    ) -> tuple[list[UiDetection], dict[str, Any]]:
+        local_timing: dict[str, Any] = {}
         dets = _detections_for_captured_monitor(
             monitor_index,
             bgr,
@@ -2021,7 +2102,7 @@ def _capture_and_detect_mouse_candidates(
         captured.append((monitor_index, bgr))
     capture_s = time.perf_counter() - capture_started
 
-    vision_timing: dict[str, float] = {}
+    vision_timing: dict[str, Any] = {}
     all_detections = _collect_monitor_detections(
         captured,
         yolo_conf_threshold=yolo_conf_threshold,
@@ -2038,13 +2119,14 @@ def _capture_and_detect_mouse_candidates(
             "move_mouse all_ocr_candidates:\n"
             + _format_ui_candidates_text(detections, include_geometry=True)
         )
-    timing = {
+    timing: dict[str, Any] = {
         "capture_s": capture_s,
         "yolo_s": float(vision_timing.get("yolo_s", 0.0)),
         "line_s": float(vision_timing.get("line_s", 0.0)),
         "ocr_s": float(vision_timing.get("ocr_s", 0.0)),
         "total_s": capture_s + float(vision_timing.get("total_s", 0.0)),
     }
+    timing.update(_vision_roi_fields(vision_timing))
     return monitor_indices, image_paths, captured, detections, timing
 
 

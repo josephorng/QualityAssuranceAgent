@@ -2674,9 +2674,21 @@ def test_write_session_html_renders_move_mouse_timing_details(tmp_path: Path) ->
                                 "args": {
                                     "timing": {
                                         "total_s": 3.5,
+                                        "ocr_roi": [20, 30, 400, 300],
+                                        "ocr_roi_pad": 16,
                                         "phases": [
-                                            {"name": "yolo", "seconds": 1.0},
-                                            {"name": "ocr", "seconds": 2.0},
+                                            {
+                                                "name": "yolo",
+                                                "seconds": 1.0,
+                                                "ocr_roi": [20, 30, 400, 300],
+                                                "ocr_roi_pad": 16,
+                                            },
+                                            {
+                                                "name": "ocr",
+                                                "seconds": 2.0,
+                                                "ocr_roi": [20, 30, 400, 300],
+                                                "ocr_roi_pad": 16,
+                                            },
                                         ],
                                     }
                                 },
@@ -2703,6 +2715,9 @@ def test_write_session_html_renders_move_mouse_timing_details(tmp_path: Path) ->
     assert "move_mouse_ocr" in html
     assert "YOLO detect" in html
     assert "time-profile-detail" in html
+    assert "ROI xywh=(20, 30, 400, 300)" in html
+    assert "roi-meta" in html
+    assert "pad=16" in html
 
 
 def test_write_recording_html_includes_time_profile_tab(tmp_path: Path) -> None:

@@ -734,6 +734,10 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 }
 .time-profile-step .phase-table { margin: 0; border: none; border-radius: 0; box-shadow: none; }
 .time-profile-detail td { color: #656d76; font-size: 0.92em; }
+.time-profile-detail .roi-meta {
+  display: block; margin-top: .15rem; color: #8c959f;
+  font-weight: 500; font-variant-numeric: tabular-nums; font-size: 0.92em;
+}
 .time-profile .empty { color: #8c959f; font-style: italic; }
 @media (max-width: 720px) { .shots { grid-template-columns: 1fr; } }
 """.strip()
@@ -5778,6 +5782,40 @@ def _format_seconds_precise(value: Any) -> str:
     return f"{seconds:.2f}s"
 
 
+def _format_roi_xywh(raw: Any) -> str | None:
+    """Format an image-local ``[x, y, w, h]`` ROI for time-profile labels."""
+    if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+        return None
+    try:
+        x, y, w, h = (int(v) for v in raw)
+    except (TypeError, ValueError):
+        return None
+    return f"ROI xywh=({x}, {y}, {w}, {h})"
+
+
+def _format_detail_roi_meta(detail: dict[str, Any]) -> str:
+    """HTML snippet describing YOLO/OCR ROI rectangles on a detail row."""
+    parts: list[str] = []
+    rois_raw = detail.get("rois")
+    if isinstance(rois_raw, list) and len(rois_raw) > 1:
+        formatted = [_format_roi_xywh(item) for item in rois_raw]
+        labeled = [item for item in formatted if item]
+        if labeled:
+            parts.append("; ".join(labeled))
+    else:
+        single = _format_roi_xywh(detail.get("roi"))
+        if single is None and isinstance(rois_raw, list) and rois_raw:
+            single = _format_roi_xywh(rois_raw[0])
+        if single is not None:
+            parts.append(single)
+    pad = detail.get("roi_pad")
+    if isinstance(pad, (int, float)) and parts:
+        parts.append(f"pad={int(pad)}")
+    if not parts:
+        return ""
+    return f'<span class="roi-meta">{escape(" · ".join(parts))}</span>'
+
+
 def _percent_of(part: float, total: float) -> float:
     if total <= 0:
         return 0.0
@@ -6067,10 +6105,11 @@ def _render_session_time_profile_html(run_root: Path, report: dict[str, Any]) ->
                             else str(detail_kind)
                         )
                         detail_duration = detail.get("duration_seconds")
+                        roi_meta = _format_detail_roi_meta(detail)
                         phase_body.append(
                             '<tr class="time-profile-detail">'
                             f"<td>{escape(detail_kind)}</td>"
-                            f"<td>↳ {escape(detail_label)}</td>"
+                            f"<td>↳ {escape(detail_label)}{roi_meta}</td>"
                             f'<td class="num">'
                             f"{escape(_format_seconds_precise(detail_duration))}"
                             "</td>"
@@ -6104,6 +6143,7 @@ def _render_session_time_profile_html(run_root: Path, report: dict[str, Any]) ->
         "time_profile 的 deferred_settle），以及 settle_after / wrap-up 從牆鐘剩餘拆出的部分；"
         "不與「其他」重複計算；"
         "move_mouse 工具列會展開 YOLO / OCR / 選取等內部階段（來自工具結果的 timing）；"
+        "YOLO / OCR 列會附帶影像座標 ROI xywh（視窗閘控區域，若有）；"
         "YOLO / OCR（yolo_ocr）合計來自本 run 的 <code>yolo_ocr/</code> sidecar（若有），"
         "為整次執行合計，未對應到單一指令。"
         "</p>"

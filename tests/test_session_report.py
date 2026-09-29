@@ -386,11 +386,23 @@ def test_time_profile_includes_move_mouse_internal_timing_details(tmp_path: Path
         "parse_s": 0.3,
         "select_s": 0.4,
         "hand_move_s": 0.01,
+        "ocr_roi": [10, 20, 300, 200],
+        "ocr_roi_pad": 16,
         "phases": [
             {"name": "capture", "seconds": 0.2},
-            {"name": "yolo", "seconds": 1.0},
+            {
+                "name": "yolo",
+                "seconds": 1.0,
+                "ocr_roi": [10, 20, 300, 200],
+                "ocr_roi_pad": 16,
+            },
             {"name": "line_refine", "seconds": 0.1},
-            {"name": "ocr", "seconds": 2.5},
+            {
+                "name": "ocr",
+                "seconds": 2.5,
+                "ocr_roi": [10, 20, 300, 200],
+                "ocr_roi_pad": 16,
+            },
             {"name": "parse_instruction", "seconds": 0.3, "overlapped": True},
             {"name": "llm_pick", "seconds": 0.4},
             {"name": "hand_move", "seconds": 0.01},
@@ -450,8 +462,11 @@ def test_time_profile_includes_move_mouse_internal_timing_details(tmp_path: Path
     assert details[0]["kind"] == "move_mouse_capture"
     assert details[1]["kind"] == "move_mouse_yolo"
     assert details[1]["duration_seconds"] == 1.0
+    assert details[1]["roi"] == [10, 20, 300, 200]
+    assert details[1]["roi_pad"] == 16
     assert details[3]["kind"] == "move_mouse_ocr"
     assert details[3]["duration_seconds"] == 2.5
+    assert details[3]["roi"] == [10, 20, 300, 200]
     assert any(d["kind"] == "move_mouse_llm_pick" for d in details)
     assert any(d["kind"] == "move_mouse_hand_move" for d in details)
 

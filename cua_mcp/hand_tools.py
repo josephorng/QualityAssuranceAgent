@@ -84,6 +84,17 @@ def _parse_hotkey_keys(keys: list[str] | str) -> list[str]:
     return [raw]
 
 
+def _press_time_point_window(x: int, y: int) -> dict[str, Any] | None:
+    """Root window under ``(x, y)`` before the mouse button goes down."""
+    try:
+        from src.recorder.verify_signals import identity_from_window
+        from src.recorder.window_snapshot import window_at_point
+
+        return identity_from_window(window_at_point(int(x), int(y)))
+    except Exception:
+        return None
+
+
 def click(
     x: int | None = None,
     y: int | None = None,
@@ -96,20 +107,21 @@ def click(
 
     Optional ``modifiers`` (e.g. ``["ctrl"]``, ``["shift"]``) are held via
     keyDown for the duration of the click, then released in reverse order.
+    The root window under the click point is read before the button goes down.
     """
     button = _normalize_button(button)
     held = [_canonicalize_key(m) for m in (modifiers or []) if str(m).strip()]
+    if x is not None and y is not None:
+        rx, ry = int(x), int(y)
+    else:
+        pos = pyautogui.position()
+        rx, ry = int(pos.x), int(pos.y)
+    point_window = _press_time_point_window(rx, ry)
     for key in held:
         pyautogui.keyDown(key)
     try:
-        if x is not None and y is not None:
-            pyautogui.click(x=x, y=y, button=button, clicks=clicks, interval=interval)
-            rx, ry = x, y
-        else:
-            pyautogui.click(button=button, clicks=clicks, interval=interval)
-            pos = pyautogui.position()
-            rx, ry = int(pos.x), int(pos.y)
-        return {
+        pyautogui.click(x=rx, y=ry, button=button, clicks=clicks, interval=interval)
+        result: dict[str, Any] = {
             "x": rx,
             "y": ry,
             "button": button,
@@ -117,6 +129,9 @@ def click(
             "interval": interval,
             "modifiers": held,
         }
+        if isinstance(point_window, dict) and point_window:
+            result["point_window"] = point_window
+        return result
     finally:
         for key in reversed(held):
             pyautogui.keyUp(key)

@@ -40,6 +40,18 @@ from cua_mcp.tool_module import (
 
 mcp_server = FastMCP("ComputerUseAgent")
 
+
+def _with_instruction(result: dict[str, Any], instruction: str) -> dict[str, Any]:
+    """Attach ``instruction`` without dropping the tool payload.
+
+    ``dict.update`` returns ``None``. Returning that from a tool discards fields
+    such as press-time ``point_window`` that replay verification needs.
+    """
+    merged = dict(result)
+    merged["instruction"] = instruction
+    return merged
+
+
 @mcp_server.tool()
 def click(
     button: str = "left",
@@ -54,8 +66,9 @@ def click(
     for 連按3下.
     For Ctrl+click or Shift+click, pass modifiers=["ctrl"] or modifiers=["shift"].
     '''
-    return _click(button=button, modifiers=modifiers, clicks=clicks).update(
-        {"instruction": instruction}
+    return _with_instruction(
+        _click(button=button, modifiers=modifiers, clicks=clicks),
+        instruction,
     )
 
 
@@ -67,7 +80,7 @@ def type_text(
     '''
     Type or paste text into the focused input.
     '''
-    return _type_text(text=text).update({"instruction": instruction})
+    return _with_instruction(_type_text(text=text), instruction)
 
 
 @mcp_server.tool()
@@ -78,7 +91,7 @@ def press_key(
     '''
     Press a single keyboard key.
     '''
-    return _press_key(key=key).update({"instruction": instruction})
+    return _with_instruction(_press_key(key=key), instruction)
 
 
 @mcp_server.tool()
@@ -92,7 +105,7 @@ def hotkey(
     keys: key names as a list (e.g. ["win", "e"]) or string such as "win+e",
     "win,e", or "[win,e]".
     '''
-    return _hotkey(keys=keys).update({"instruction": instruction})
+    return _with_instruction(_hotkey(keys=keys), instruction)
 
 
 @mcp_server.tool()
@@ -103,7 +116,7 @@ def wait(
     '''
     Pause execution for a number of seconds.
     '''
-    return _wait(seconds=seconds).update({"instruction": instruction})
+    return _with_instruction(_wait(seconds=seconds), instruction)
 
 
 @mcp_server.tool()
@@ -116,7 +129,10 @@ def store_text(
     '''
     Save text to run storage.
     '''
-    return _store_text(text=text, title=title, tags=tags).update({"instruction": instruction})
+    return _with_instruction(
+        _store_text(text=text, title=title, tags=tags),
+        instruction,
+    )
 
 
 @mcp_server.tool()
@@ -129,7 +145,10 @@ def store_clipboard_text(
     '''
     Save current clipboard text to run storage.
     '''
-    return _store_clipboard_text(title=title, tags=tags, file_name=file_name).update({"instruction": instruction})
+    return _with_instruction(
+        _store_clipboard_text(title=title, tags=tags, file_name=file_name),
+        instruction,
+    )
 
 
 @mcp_server.tool()
@@ -143,12 +162,15 @@ def store_image(
     '''
     Save an image reference to run storage.
     '''
-    return _store_image(
-        image_path=image_path,
-        summary=summary,
-        alias=alias,
-        tags=tags,
-    ).update({"instruction": instruction})
+    return _with_instruction(
+        _store_image(
+            image_path=image_path,
+            summary=summary,
+            alias=alias,
+            tags=tags,
+        ),
+        instruction,
+    )
 
 
 # --- CUA action vocabulary (see ToolCommand / agent schema) ---
@@ -162,7 +184,7 @@ def key(
     '''
     Press and release one key.
     '''
-    return _key(key=key).update({"instruction": instruction})
+    return _with_instruction(_key(key=key), instruction)
 
 
 @mcp_server.tool()
@@ -281,7 +303,7 @@ def right_click(
     '''
     Right-click at the current cursor position.
     '''
-    return _right_click().update({"instruction": instruction})
+    return _with_instruction(_right_click(), instruction)
 
 
 @mcp_server.tool()
@@ -291,7 +313,7 @@ def middle_click(
     '''
     Middle-click at the current cursor position.
     '''
-    return _middle_click().update({"instruction": instruction})
+    return _with_instruction(_middle_click(), instruction)
 
 
 @mcp_server.tool()
@@ -304,7 +326,7 @@ def double_click(
     Do not use for a normal single click (點擊 / 點選) — use click instead.
     For Ctrl+double-click or Shift+double-click, pass modifiers=["ctrl"] or modifiers=["shift"].
     '''
-    return _double_click(modifiers=modifiers).update({"instruction": instruction})
+    return _with_instruction(_double_click(modifiers=modifiers), instruction)
 
 
 @mcp_server.tool()
@@ -316,7 +338,7 @@ def triple_click(
     Triple-click at the current cursor position (連按3下).
     For Ctrl+triple-click or Shift+triple-click, pass modifiers=["ctrl"] or modifiers=["shift"].
     '''
-    return _triple_click(modifiers=modifiers).update({"instruction": instruction})
+    return _with_instruction(_triple_click(modifiers=modifiers), instruction)
 
 
 @mcp_server.tool()
@@ -336,7 +358,7 @@ def left_mouse_down(
     '''
     Press and hold the left mouse button.
     '''
-    return _left_mouse_down().update({"instruction": instruction})
+    return _with_instruction(_left_mouse_down(), instruction)
 
 
 @mcp_server.tool()
@@ -346,7 +368,7 @@ def left_mouse_up(
     '''
     Release the left mouse button.
     '''
-    return _left_mouse_up().update({"instruction": instruction})
+    return _with_instruction(_left_mouse_up(), instruction)
 
 
 @mcp_server.tool()
@@ -359,7 +381,7 @@ def scroll(
     document downward (toward the bottom); negative move upward. Each unit is
     roughly one wheel detent. Hover the scrollable region before calling.
     '''
-    return _scroll(clicks=clicks).update({"instruction": instruction})
+    return _with_instruction(_scroll(clicks=clicks), instruction)
 
 
 @mcp_server.tool()
@@ -371,7 +393,7 @@ def hold_key(
     '''
     Hold a keyboard key for a duration.
     '''
-    return _hold_key(key=key, seconds=seconds).update({"instruction": instruction})
+    return _with_instruction(_hold_key(key=key, seconds=seconds), instruction)
 
 
 @mcp_server.tool()
@@ -385,8 +407,9 @@ def hold_mouse(
     Press and hold a mouse button for a duration, then release.
     Optional modifiers (e.g. ["ctrl"], ["shift"]) are held for the duration.
     '''
-    return _hold_mouse(seconds=seconds, button=button, modifiers=modifiers).update(
-        {"instruction": instruction}
+    return _with_instruction(
+        _hold_mouse(seconds=seconds, button=button, modifiers=modifiers),
+        instruction,
     )
 
 
@@ -398,7 +421,7 @@ def zoom(
     '''
     Zoom in or out using mouse wheel input.
     '''
-    return _zoom(scroll_clicks=scroll_clicks).update({"instruction": instruction})
+    return _with_instruction(_zoom(scroll_clicks=scroll_clicks), instruction)
 
 
 @mcp_server.tool()
@@ -410,10 +433,13 @@ async def maximize_windows(
     Maximize windows matching the title text. Set the window_title_contains
     to "all" to maximize all windows.
     '''
-    return (await _maximize_windows(
-        window_title_contains=window_title_contains,
-        instruction=instruction,
-    )).update({"instruction": instruction})
+    return _with_instruction(
+        await _maximize_windows(
+            window_title_contains=window_title_contains,
+            instruction=instruction,
+        ),
+        instruction,
+    )
 
 
 @mcp_server.tool()
@@ -424,10 +450,13 @@ async def close_windows(
     '''
     Close windows matching the title text. Set the window_title_contains to "all" to close all windows.
     '''
-    return (await _close_windows(
-        window_title_contains=window_title_contains,
-        instruction=instruction,
-    )).update({"instruction": instruction})
+    return _with_instruction(
+        await _close_windows(
+            window_title_contains=window_title_contains,
+            instruction=instruction,
+        ),
+        instruction,
+    )
 
 
 @mcp_server.tool()
@@ -439,10 +468,13 @@ async def minimize_windows(
     Minimize windows matching the title text. Set the window_title_contains
     to "all" to minimize all windows.
     '''
-    return (await _minimize_windows(
-        window_title_contains=window_title_contains,
-        instruction=instruction,
-    )).update({"instruction": instruction})
+    return _with_instruction(
+        await _minimize_windows(
+            window_title_contains=window_title_contains,
+            instruction=instruction,
+        ),
+        instruction,
+    )
 
 
 @mcp_server.tool()
@@ -480,7 +512,10 @@ def list_storage_files(
     '''
     List files in run storage.
     '''
-    return _list_storage_files(pattern=pattern, max_results=max_results).update({"instruction": instruction})
+    return _with_instruction(
+        _list_storage_files(pattern=pattern, max_results=max_results),
+        instruction,
+    )
 
 
 @mcp_server.tool()
@@ -493,8 +528,13 @@ def open_storage_text(
     '''
     Read a text file from run storage.
     '''
-    return _read_storage_text(file_name=file_name, max_chars=max_chars, encoding=encoding).update(
-        {"instruction": instruction}
+    return _with_instruction(
+        _read_storage_text(
+            file_name=file_name,
+            max_chars=max_chars,
+            encoding=encoding,
+        ),
+        instruction,
     )
 
 

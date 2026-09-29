@@ -696,6 +696,85 @@ def test_resolve_window_change_prefers_captured_then_rediffs_debug() -> None:
     }
 
 
+def test_reconcile_promotes_foreground_opened_when_list_lags() -> None:
+    from src.recorder.window_snapshot import reconcile_window_change_with_signals
+
+    debug = {
+        "windows_before": [
+            {
+                "hwnd": 1,
+                "title": "Git - 檔案總管",
+                "class_name": "CabinetWClass",
+                "process_name": "explorer.exe",
+            }
+        ],
+        "windows_after": [
+            {
+                "hwnd": 1,
+                "title": "Git - 檔案總管",
+                "class_name": "CabinetWClass",
+                "process_name": "explorer.exe",
+            }
+        ],
+        "detection_path": None,
+    }
+    change, out = reconcile_window_change_with_signals(
+        None,
+        debug,
+        {
+            "foreground": {
+                "class_name": "Windows.UI.Core.CoreWindow",
+                "title": "搜尋",
+                "process_name": "SearchHost.exe",
+            }
+        },
+        {
+            "foreground": {
+                "class_name": "CabinetWClass",
+                "title": "常用 - 檔案總管",
+                "process_name": "explorer.exe",
+            }
+        },
+    )
+    assert change == {
+        "action": "opened",
+        "title": "常用 - 檔案總管",
+        "confidence": "medium",
+    }
+    assert out["detection_path"] == "foreground_opened"
+
+
+def test_reconcile_suppresses_opened_when_already_foreground() -> None:
+    from src.recorder.window_snapshot import reconcile_window_change_with_signals
+
+    opened = {
+        "action": "opened",
+        "title": "常用 - 檔案總管",
+        "confidence": "medium",
+    }
+    change, out = reconcile_window_change_with_signals(
+        opened,
+        {"detection_path": "opened_at_click"},
+        {
+            "foreground": {
+                "class_name": "CabinetWClass",
+                "title": "檔案總管",
+                "process_name": "explorer.exe",
+            }
+        },
+        {
+            "foreground": {
+                "class_name": "CabinetWClass",
+                "title": "常用 - 檔案總管",
+                "process_name": "explorer.exe",
+            }
+        },
+    )
+    assert change is None
+    assert out["detection_path"] == "opened_suppressed_already_foreground"
+    assert out["suppressed_opened"] == opened
+
+
 def test_instruction_ignores_shell_experience_host_window() -> None:
     assert (
         instruction_for_window_change(
@@ -929,22 +1008,15 @@ def test_window_verify_keeps_flyout_disappear() -> None:
             }
         ]
     }
-    ok, reason = window_verify_satisfied(predicate, {})
+    ok, reason = window_verify_satisfied(predicate, {}, live_windows_after=before)
     assert ok is False
     assert "快顯主機" in reason
-    ok, _reason = window_verify_satisfied(
-        predicate,
-        {
-            "disappeared": predicate["disappeared"],
-            "appeared": [{"class_name": "Other", "title": "unrelated"}],
-        },
-    )
+    ok, _reason = window_verify_satisfied(predicate, {}, live_windows_after=[])
     assert ok is True
 
 
-def test_window_verify_blank_class_matches_live_class() -> None:
-    recorded = {"disappeared": [{"class_name": "", "title": "快顯主機"}]}
-    live = {
+def test_window_verify_disappeared_passes_when_flyout_was_never_open() -> None:
+    recorded = {
         "disappeared": [
             {
                 "class_name": "Microsoft.UI.Content.PopupWindowSiteBridge",
@@ -953,7 +1025,196 @@ def test_window_verify_blank_class_matches_live_class() -> None:
             }
         ]
     }
-    ok, _reason = window_verify_satisfied(recorded, live)
+    ok, _reason = window_verify_satisfied(recorded, {}, live_windows_after=[])
+    assert ok is True
+
+
+def test_window_verify_appeared_checks_live_after_not_the_delta() -> None:
+    recorded = {
+        "appeared": [
+            {
+                "class_name": "CabinetWClass",
+                "title": "常用 - 檔案總管",
+                "process_name": "explorer.exe",
+            }
+        ]
+    }
+    explorer = _win(
+        3,
+        "常用 - 檔案總管",
+        class_name="CabinetWClass",
+        process_name="explorer.exe",
+    )
+    ok, reason = window_verify_satisfied(recorded, {}, live_windows_after=[])
+    assert ok is False
+    assert "檔案總管" in reason
+    ok, _reason = window_verify_satisfied(
+        recorded,
+        {},
+        live_windows_after=[explorer],
+    )
+    assert ok is True
+
+
+def test_window_verify_state_checks_live_after_flags_not_the_delta() -> None:
+    recorded = {
+        "state": [
+            {
+                "class_name": "CabinetWClass",
+                "title": "常用 - 檔案總管",
+                "change": "maximized",
+            }
+        ]
+    }
+    snapped = _win(
+        3,
+        "常用 - 檔案總管",
+        class_name="CabinetWClass",
+        is_maximized=False,
+        left=0,
+        top=0,
+        width=960,
+        height=1040,
+    )
+    maximized = _win(
+        3,
+        "常用 - 檔案總管",
+        class_name="CabinetWClass",
+        is_maximized=True,
+        left=-8,
+        top=-8,
+        width=1936,
+        height=1048,
+    )
+    # Already maximized before the step: no live delta, but after flags hold.
+    ok, _reason = window_verify_satisfied(
+        recorded,
+        {"state": []},
+        live_windows_after=[maximized],
+    )
+    assert ok is True
+    ok, reason = window_verify_satisfied(
+        recorded,
+        {"state": []},
+        live_windows_after=[snapped],
+    )
+    assert ok is False
+    assert "常用 - 檔案總管" in reason
+    # Without live_windows_after, still require the before→after delta.
+    ok, reason = window_verify_satisfied(recorded, {"state": []})
+    assert ok is False
+    assert "常用 - 檔案總管" in reason
+    ok, _reason = window_verify_satisfied(
+        recorded,
+        {
+            "state": [
+                {
+                    "class_name": "CabinetWClass",
+                    "title": "常用 - 檔案總管",
+                    "change": "maximized",
+                }
+            ]
+        },
+    )
+    assert ok is True
+
+
+def test_window_verify_state_restored_and_minimized_use_after_flags() -> None:
+    restored_recorded = {
+        "state": [
+            {
+                "class_name": "Chrome_WidgetWin_1",
+                "title": "Google Chrome",
+                "change": "restored",
+            }
+        ]
+    }
+    minimized_recorded = {
+        "state": [
+            {
+                "class_name": "Chrome_WidgetWin_1",
+                "title": "Google Chrome",
+                "change": "minimized",
+            }
+        ]
+    }
+    open_win = _win(
+        4,
+        "Google Chrome",
+        class_name="Chrome_WidgetWin_1",
+        is_minimized=False,
+    )
+    min_win = _win(
+        4,
+        "Google Chrome",
+        class_name="Chrome_WidgetWin_1",
+        is_minimized=True,
+        left=-32000,
+        top=-32000,
+        width=160,
+        height=28,
+    )
+    ok, _reason = window_verify_satisfied(
+        restored_recorded,
+        {},
+        live_windows_after=[open_win],
+    )
+    assert ok is True
+    ok, reason = window_verify_satisfied(
+        restored_recorded,
+        {},
+        live_windows_after=[min_win],
+    )
+    assert ok is False
+    assert "Google Chrome" in reason
+    ok, _reason = window_verify_satisfied(
+        minimized_recorded,
+        {},
+        live_windows_after=[min_win],
+    )
+    assert ok is True
+    ok, reason = window_verify_satisfied(
+        minimized_recorded,
+        {},
+        live_windows_after=[open_win],
+    )
+    assert ok is False
+    assert "Google Chrome" in reason
+
+
+def test_window_verify_blank_class_matches_live_class() -> None:
+    recorded = {"disappeared": [{"class_name": "", "title": "快顯主機"}]}
+    ok, _reason = window_verify_satisfied(recorded, {}, live_windows_after=[])
+    assert ok is True
+    still_open = [
+        _win(
+            9,
+            "快顯主機",
+            class_name="Microsoft.UI.Content.PopupWindowSiteBridge",
+            process_name="explorer.exe",
+        )
+    ]
+    ok, reason = window_verify_satisfied(
+        recorded,
+        {},
+        live_windows_after=still_open,
+    )
+    assert ok is False
+    assert "快顯主機" in reason
+
+
+def test_window_verify_ignores_taskbar_appear_disappear() -> None:
+    before = [_win(1, "", class_name="Shell_TrayWnd", process_name="explorer.exe")]
+    after = [_win(2, "", class_name="Shell_TrayWnd", process_name="explorer.exe")]
+    assert build_window_verify_predicate(before, after) == {}
+    recorded = {
+        "disappeared": [{"class_name": "Shell_TrayWnd", "title": ""}],
+    }
+    ok, _reason = window_verify_satisfied(
+        recorded,
+        {},
+        live_windows_after=after,
+    )
     assert ok is True
 
 
@@ -1130,12 +1391,48 @@ def test_window_verify_omits_unchanged_light_signals_and_requires_changes() -> N
         {"point_window": other_point},
         kind="click",
     )
-    assert click_fields["click_window"] == other_point
+    assert click_fields["click_window"] == point
     assert "click_window" not in signal_verify_fields(
         {"point_window": point},
         {"point_window": point},
         kind="click",
     )
+
+
+def test_replay_click_window_uses_press_time_window_not_the_settled_cursor(
+    monkeypatch,
+) -> None:
+    from src.recorder.verify_signals import capture_replay_after_signals
+
+    def _cursor_must_not_run() -> tuple[int, int]:
+        raise AssertionError("settled cursor")
+
+    monkeypatch.setattr("src.recorder.verify_signals._cursor_xy", _cursor_must_not_run)
+    search = {
+        "class_name": "Windows.UI.Core.CoreWindow",
+        "title": "搜尋",
+        "process_name": "SearchHost.exe",
+    }
+    sample = capture_replay_after_signals(
+        [],
+        {"click_window": search},
+        search,
+    )
+    assert sample["point_window"] == search
+    ok, _reason = window_verify_satisfied(
+        {"click_window": search},
+        {},
+        live_after=sample,
+    )
+    assert ok is True
+    missed = capture_replay_after_signals([], {"click_window": search}, None)
+    ok, reason = window_verify_satisfied(
+        {"click_window": search},
+        {},
+        live_after=missed,
+    )
+    assert ok is False
+    assert "搜尋" in reason
 
 
 def test_window_verify_uia_signals_only_when_the_step_changed_them(monkeypatch) -> None:
@@ -1178,14 +1475,13 @@ def test_window_verify_uia_signals_only_when_the_step_changed_them(monkeypatch) 
         {"control_state": "selected"},
         kind="click",
     )
-    assert selected == {"control_state": "selected"}
-    ok, reason = window_verify_satisfied(
-        selected,
+    assert selected == {}
+    ok, _reason = window_verify_satisfied(
+        {"control_state": "selected"},
         {},
         live_after={"control_state": "unselected"},
     )
-    assert ok is False
-    assert "control_state" in reason
+    assert ok is True
 
     focused = signal_verify_fields(
         {

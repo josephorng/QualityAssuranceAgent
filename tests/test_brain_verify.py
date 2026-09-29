@@ -706,7 +706,7 @@ async def test_process_step_foreground_miss_retries_clearly_unmet(monkeypatch) -
     )
     monkeypatch.setattr(
         "src.brain.module.capture_replay_after_signals",
-        lambda _windows, _recorded: {
+        lambda _windows, _recorded, _press_point=None: {
             "foreground": {
                 "class_name": "CabinetWClass",
                 "title": "檔案總管",
@@ -740,7 +740,7 @@ async def test_process_step_clipboard_miss_retries_clearly_unmet(monkeypatch) ->
     )
     monkeypatch.setattr(
         "src.brain.module.capture_replay_after_signals",
-        lambda _windows, _recorded: {"clipboard": "something else"},
+        lambda _windows, _recorded, _press_point=None: {"clipboard": "something else"},
     )
 
     result = await brain.process_step()

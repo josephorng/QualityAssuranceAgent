@@ -538,39 +538,46 @@ def _cursor_xy() -> tuple[int, int] | None:
 def capture_replay_after_signals(
     windows: list[WindowInfo],
     recorded: dict[str, Any],
+    press_point_window: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Read only the after-values the recorded predicate actually asserts."""
+    """Read only the after-values the recorded predicate actually asserts.
+
+    ``click_window`` is compared to ``press_point_window``, the root window under
+    the cursor immediately before the replay click. This does not call
+    ``WindowFromPoint`` again after the step settles.
+    """
     need_foreground = isinstance(recorded.get("foreground"), dict)
     need_point = isinstance(recorded.get("click_window"), dict)
     need_clipboard = "clipboard" in recorded
     need_process = bool(recorded.get("process_started") or recorded.get("process_exited"))
     need_caret = isinstance(recorded.get("caret"), list)
-    need_control = bool(recorded.get("control_state"))
     need_focused = isinstance(recorded.get("focused"), dict) and bool(recorded["focused"])
     need_scroll = isinstance(recorded.get("scroll"), (int, float)) and not isinstance(
         recorded.get("scroll"), bool
     )
-    cursor = _cursor_xy() if (need_point or need_control or need_scroll) else None
+    cursor = _cursor_xy() if need_scroll else None
     sample: dict[str, Any] = {}
-    if need_foreground or need_point or need_process or need_caret:
+    if need_foreground or need_process or need_caret:
         sample.update(
             capture_fast_signals(
                 windows,
-                cursor_xy=cursor if need_point else None,
+                cursor_xy=None,
                 include_foreground=need_foreground,
                 include_processes=need_process,
                 include_caret=need_caret,
             )
         )
+    if need_point and isinstance(press_point_window, dict) and press_point_window:
+        sample["point_window"] = press_point_window
     if need_clipboard:
         text = _read_clipboard()
         if text is not None:
             sample["clipboard"] = text
-    if need_control or need_focused or need_scroll:
+    if need_focused or need_scroll:
         sample.update(
             read_uia_fields(
                 cursor_xy=cursor,
-                want_control=need_control,
+                want_control=False,
                 want_focused=need_focused,
                 want_scroll=need_scroll,
             )
@@ -588,8 +595,6 @@ def predicate_has_signal_assertions(predicate: dict[str, Any] | None) -> bool:
     if "clipboard" in predicate:
         return True
     if isinstance(predicate.get("caret"), list) and len(predicate["caret"]) == 4:
-        return True
-    if predicate.get("control_state"):
         return True
     if isinstance(predicate.get("focused"), dict) and predicate["focused"]:
         return True
@@ -777,10 +782,13 @@ def signal_verify_fields(
     if kind in CLICK_KINDS:
         before_point = before.get("point_window")
         after_point = after.get("point_window")
-        if isinstance(after_point, dict) and after_point and not identities_equal(
+        # The press-time window is the one that received the click. The window
+        # under the same point after settle is whatever was revealed when a
+        # flyout closed, so it is not the click target.
+        if isinstance(before_point, dict) and before_point and not identities_equal(
             before_point, after_point
         ):
-            fields["click_window"] = after_point
+            fields["click_window"] = before_point
 
     if "clipboard" in before and "clipboard" in after:
         before_text = str(before.get("clipboard") or "")
@@ -828,17 +836,9 @@ def signal_verify_fields(
         if focused is not None:
             fields["focused"] = focused
 
-    if kind in CLICK_KINDS:
-        before_state = before.get("control_state")
-        after_state = after.get("control_state")
-        if (
-            isinstance(before_state, str)
-            and isinstance(after_state, str)
-            and before_state
-            and after_state
-            and before_state != after_state
-        ):
-            fields["control_state"] = after_state
+    # control_state is captured for debug in signals_before/after but is not a
+    # replay assertion: after a flyout closes, ElementFromPoint often hits a
+    # different window under the same cursor and the state is noise.
 
     if kind in SCROLL_KINDS:
         before_scroll = _scroll_percent(before)
@@ -918,10 +918,6 @@ def signal_assertions_satisfied(
         live_rect, _hwnd = _caret_parts(live_after)
         if live_rect is None or not _rects_close(caret, live_rect, _CARET_REPLAY_SLACK_PX):
             return False, "window verify missed caret"
-
-    if recorded.get("control_state"):
-        if str(live_after.get("control_state") or "") != str(recorded.get("control_state") or ""):
-            return False, "window verify missed control_state"
 
     focused = recorded.get("focused")
     if isinstance(focused, dict) and focused:

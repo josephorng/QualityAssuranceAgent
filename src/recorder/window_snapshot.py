@@ -1018,6 +1018,13 @@ def _is_agent_hub_window(win: WindowInfo) -> bool:
     return win.title.strip() == _AGENT_APP_WINDOW_TITLE
 
 
+def _is_taskbar_verify_noise(win: WindowInfo | dict[str, Any]) -> bool:
+    """Taskbar hwnd churn is not a useful appear/disappear assertion."""
+    if isinstance(win, WindowInfo):
+        return _is_taskbar_class(win.class_name or "")
+    return _is_taskbar_class(str(win.get("class_name", "") or ""))
+
+
 def _state_change_label(before: WindowInfo, after: WindowInfo) -> str | None:
     if before.is_minimized != after.is_minimized:
         return "minimized" if after.is_minimized else "restored"
@@ -1044,11 +1051,21 @@ def build_window_verify_predicate(
 ) -> dict[str, Any]:
     """Stable appear/disappear/state delta for replay. Match key is not hwnd.
 
-    Drops the agent hub window and a title change on an hwnd that is still present.
-    Flyouts such as 「快顯主機」 are included here; script instructions still ignore them.
+    Drops the agent hub window, the taskbar, and a title change on an hwnd that
+    is still present. Flyouts such as 「快顯主機」 are included here; script
+    instructions still ignore them. Same-identity appear and disappear pairs
+    within one step cancel out (hwnd churn).
     """
-    before_wins = [win for win in before if not _is_agent_hub_window(win)]
-    after_wins = [win for win in after if not _is_agent_hub_window(win)]
+    before_wins = [
+        win
+        for win in before
+        if not _is_agent_hub_window(win) and not _is_taskbar_verify_noise(win)
+    ]
+    after_wins = [
+        win
+        for win in after
+        if not _is_agent_hub_window(win) and not _is_taskbar_verify_noise(win)
+    ]
     before_by_hwnd = {win.hwnd: win for win in before_wins if win.hwnd}
     after_by_hwnd = {win.hwnd: win for win in after_wins if win.hwnd}
 
@@ -1070,6 +1087,20 @@ def build_window_verify_predicate(
         if win.hwnd and win.hwnd in before_by_hwnd:
             continue
         appeared.append(_verify_entry(win))
+
+    # Hwnd replacement with the same class/title/process is not a real close/open.
+    remaining_appeared = list(appeared)
+    kept_disappeared: list[dict[str, Any]] = []
+    for item in disappeared:
+        matched = _take_matching_entry(
+            remaining_appeared,
+            item,
+            match_change=False,
+        )
+        if matched is None:
+            kept_disappeared.append(item)
+    disappeared = kept_disappeared
+    appeared = remaining_appeared
 
     predicate: dict[str, Any] = {}
     if appeared:
@@ -1165,37 +1196,246 @@ def _take_matching_entry(
     return None
 
 
+def _after_state_matches(win: WindowInfo, change: str) -> bool:
+    """True when ``win`` already holds the absolute end state for a recorded change."""
+    label = str(change or "").strip()
+    if label == "maximized":
+        return bool(win.is_maximized) and not bool(win.is_minimized)
+    if label == "unmaximized":
+        return not bool(win.is_maximized)
+    if label == "minimized":
+        return bool(win.is_minimized)
+    if label == "restored":
+        return not bool(win.is_minimized)
+    return False
+
+
+def _find_matching_after_window(
+    windows: list[WindowInfo],
+    item: dict[str, Any],
+) -> WindowInfo | None:
+    for win in windows:
+        if _entries_match(item, _verify_entry(win), match_change=False):
+            return win
+    return None
+
+
 def window_verify_satisfied(
     recorded: dict[str, Any],
     live: dict[str, Any],
     live_after: dict[str, Any] | None = None,
+    live_windows_after: list[WindowInfo] | None = None,
 ) -> tuple[bool, str]:
-    """True when every recorded delta is present and each recorded signal matches.
+    """True when recorded end-state and signal assertions hold.
 
-    Extra live window changes are ignored. Signal fields compare the live after
-    sample to the recorded after value; a missing recorded field adds no assertion.
+    ``appeared`` / ``disappeared`` / ``state`` are checked against the live after
+    window list when ``live_windows_after`` is provided: appeared must be present,
+    disappeared must be absent, and state labels must match absolute after flags
+    (for example ``maximized`` requires ``is_maximized``). That tolerates a
+    different starting desk (already maximized, or a flyout that was never open).
+    Without ``live_windows_after``, appear/disappear/state fall back to the live
+    before→after delta. Extra live window changes are ignored. Signal fields
+    compare the live after sample to the recorded after value; a missing recorded
+    field adds no assertion.
     """
-    for bucket in ("appeared", "disappeared", "state"):
-        needed = recorded.get(bucket)
-        if not isinstance(needed, list) or not needed:
-            continue
-        available = [
-            item for item in (live.get(bucket) or []) if isinstance(item, dict)
+    after_windows: list[WindowInfo] | None = None
+    after_entries: list[dict[str, Any]] | None = None
+    if live_windows_after is not None:
+        after_windows = [
+            win
+            for win in live_windows_after
+            if not _is_agent_hub_window(win) and not _is_taskbar_verify_noise(win)
         ]
-        for item in needed:
-            if not isinstance(item, dict):
-                continue
-            found = _take_matching_entry(
-                available,
-                item,
-                match_change=bucket == "state",
-            )
-            if found is None:
+        after_entries = [_verify_entry(win) for win in after_windows]
+
+    needed_appeared = recorded.get("appeared")
+    if isinstance(needed_appeared, list) and needed_appeared:
+        if after_entries is None:
+            available = [
+                item for item in (live.get("appeared") or []) if isinstance(item, dict)
+            ]
+            for item in needed_appeared:
+                if not isinstance(item, dict) or _is_taskbar_verify_noise(item):
+                    continue
+                if _take_matching_entry(available, item, match_change=False) is None:
+                    title = str(item.get("title", "") or "").strip()
+                    return False, f"window verify missed appeared: {title or item}"
+        else:
+            available = list(after_entries)
+            for item in needed_appeared:
+                if not isinstance(item, dict) or _is_taskbar_verify_noise(item):
+                    continue
+                if _take_matching_entry(available, item, match_change=False) is None:
+                    title = str(item.get("title", "") or "").strip()
+                    return False, f"window verify missed appeared: {title or item}"
+
+    needed_disappeared = recorded.get("disappeared")
+    if isinstance(needed_disappeared, list) and needed_disappeared:
+        if after_entries is None:
+            available = [
+                item
+                for item in (live.get("disappeared") or [])
+                if isinstance(item, dict)
+            ]
+            for item in needed_disappeared:
+                if not isinstance(item, dict) or _is_taskbar_verify_noise(item):
+                    continue
+                if _take_matching_entry(available, item, match_change=False) is None:
+                    title = str(item.get("title", "") or "").strip()
+                    return False, f"window verify missed disappeared: {title or item}"
+        else:
+            for item in needed_disappeared:
+                if not isinstance(item, dict) or _is_taskbar_verify_noise(item):
+                    continue
+                still_present = any(
+                    _entries_match(item, candidate, match_change=False)
+                    for candidate in after_entries
+                )
+                if still_present:
+                    title = str(item.get("title", "") or "").strip()
+                    return False, f"window verify missed disappeared: {title or item}"
+
+    needed_state = recorded.get("state")
+    if isinstance(needed_state, list) and needed_state:
+        if after_windows is not None:
+            for item in needed_state:
+                if not isinstance(item, dict):
+                    continue
                 title = str(item.get("title", "") or "").strip()
-                return False, f"window verify missed {bucket}: {title or item}"
+                change = str(item.get("change", "") or "").strip()
+                match = _find_matching_after_window(after_windows, item)
+                if match is None or not _after_state_matches(match, change):
+                    return False, f"window verify missed state: {title or item}"
+        else:
+            available = [
+                item for item in (live.get("state") or []) if isinstance(item, dict)
+            ]
+            for item in needed_state:
+                if not isinstance(item, dict):
+                    continue
+                found = _take_matching_entry(available, item, match_change=True)
+                if found is None:
+                    title = str(item.get("title", "") or "").strip()
+                    return False, f"window verify missed state: {title or item}"
+
     from src.recorder.verify_signals import signal_assertions_satisfied
 
     return signal_assertions_satisfied(recorded, live_after)
+
+
+def _signal_identity_key(identity: dict[str, Any] | None) -> tuple[str, str, str] | None:
+    if not isinstance(identity, dict):
+        return None
+    title = _normalize_title(str(identity.get("title") or ""))
+    class_name = str(identity.get("class_name") or "").strip()
+    process = str(identity.get("process_name") or "").strip()
+    if not title and not class_name and not process:
+        return None
+    return (class_name, title, process)
+
+
+def _titles_same_shell_window(before_title: str, opened_title: str) -> bool:
+    """True when Explorer-style titles describe the same window as it finishes loading.
+
+    Launch often goes ``檔案總管`` → ``常用 - 檔案總管`` before the hwnd is stable
+    in the top-level list.
+    """
+    before = _normalize_title(before_title)
+    opened = _normalize_title(opened_title)
+    if not before or not opened:
+        return False
+    if before == opened:
+        return True
+    return opened.endswith(before) or before.endswith(opened)
+
+
+def _signal_matches_window_entry(
+    identity: dict[str, Any],
+    entry: dict[str, Any],
+) -> bool:
+    id_class = str(identity.get("class_name") or "").strip()
+    id_process = str(identity.get("process_name") or "").strip()
+    id_title = str(identity.get("title") or "")
+    entry_class = str(entry.get("class_name") or "").strip()
+    entry_process = str(entry.get("process_name") or "").strip()
+    entry_title = str(entry.get("title") or "")
+    if id_class and entry_class and id_class != entry_class:
+        return False
+    if id_process and entry_process and id_process != entry_process:
+        return False
+    if _normalize_title(id_title) == _normalize_title(entry_title):
+        return True
+    if id_class and entry_class and id_process and entry_process:
+        return _titles_same_shell_window(id_title, entry_title)
+    return _titles_same_shell_window(id_title, entry_title)
+
+
+def _signal_in_window_debug_list(
+    identity: dict[str, Any] | None,
+    windows: list[Any] | None,
+) -> bool:
+    if not isinstance(identity, dict) or not isinstance(windows, list):
+        return False
+    for raw in windows:
+        if isinstance(raw, dict) and _signal_matches_window_entry(identity, raw):
+            return True
+    return False
+
+
+def reconcile_window_change_with_signals(
+    change: dict[str, Any] | None,
+    debug: dict[str, Any],
+    signals_before: dict[str, Any] | None,
+    signals_after: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Align list-diff ``opened`` with foreground signals when EnumWindows lags.
+
+    Search/Start launches often make the new app foreground before its hwnd is
+    visible in the top-level list. The next click then looks like ``opened`` even
+    though the window was already up. Use foreground to promote the open onto the
+    launch click and suppress a false open on the follow-up click.
+    """
+    before_fg = None
+    after_fg = None
+    if isinstance(signals_before, dict):
+        raw = signals_before.get("foreground")
+        if isinstance(raw, dict):
+            before_fg = raw
+    if isinstance(signals_after, dict):
+        raw = signals_after.get("foreground")
+        if isinstance(raw, dict):
+            after_fg = raw
+
+    out_debug = dict(debug)
+    if isinstance(change, dict) and str(change.get("action") or "").strip() == "opened":
+        opened_title = str(change.get("title") or "").strip()
+        before_title = str((before_fg or {}).get("title") or "")
+        # Already foreground before this click (title may still be evolving).
+        if before_fg is not None and opened_title and _titles_same_shell_window(
+            before_title, opened_title
+        ):
+            out_debug["detection_path"] = "opened_suppressed_already_foreground"
+            out_debug["suppressed_opened"] = dict(change)
+            return None, out_debug
+
+    if change is None and after_fg is not None:
+        after_title = str(after_fg.get("title") or "").strip()
+        if after_title and not _should_ignore_window_change({"title": after_title}):
+            before_key = _signal_identity_key(before_fg)
+            after_key = _signal_identity_key(after_fg)
+            if after_key is not None and after_key != before_key:
+                before_windows = out_debug.get("windows_before")
+                if not _signal_in_window_debug_list(after_fg, before_windows):
+                    out_debug["detection_path"] = "foreground_opened"
+                    return (
+                        {
+                            "action": "opened",
+                            "title": after_title,
+                            "confidence": "medium",
+                        },
+                        out_debug,
+                    )
+    return change, out_debug
 
 
 def resolve_window_change(

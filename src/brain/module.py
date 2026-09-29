@@ -55,6 +55,7 @@ from src.common.runtime_context import (
 )
 from src.common.settings import load_settings
 from src.recorder.verify_signals import (
+    CLICK_KINDS,
     capture_replay_after_signals,
     predicate_has_signal_assertions,
 )
@@ -206,6 +207,7 @@ class BrainModule:
         # first tool so prep work can overlap the recording settle window.
         self._pending_settle_deadline_perf: float | None = None
         self._step_deferred_settle_waited_seconds: float = 0.0
+        self._replay_press_point_window: dict[str, Any] | None = None
         self._step_transcript_counter = (
             self._resume_step_transcript_counter()
             if is_runtime_command_mode() or is_smart_mode()
@@ -1550,6 +1552,7 @@ class BrainModule:
                         screenshot_before_path=before_screenshot,
                     )
                 )
+                self._remember_replay_press_point(result)
                 messages.append(
                     stamp_message(
                         {
@@ -1761,6 +1764,7 @@ class BrainModule:
                             screenshot_before_path=before_screenshot,
                         )
                     )
+                    self._remember_replay_press_point(result)
                     messages.append(
                         stamp_message(
                             {
@@ -1845,6 +1849,13 @@ class BrainModule:
             reason="Actor completed the step with all tools ok; no recorded expected outcome.",
         )
 
+    def _remember_replay_press_point(self, result: ExecutionResult) -> None:
+        """Keep the root window read immediately before this step's click."""
+        if not result.ok or result.action not in CLICK_KINDS:
+            return
+        point = result.args.get("point_window") if isinstance(result.args, dict) else None
+        self._replay_press_point_window = point if isinstance(point, dict) and point else None
+
     async def _snapshot_top_level_windows(self) -> list[WindowInfo] | None:
         """Enumerate top-level windows off the event loop. None when the snapshot fails."""
         try:
@@ -1881,10 +1892,12 @@ class BrainModule:
         live_after: dict[str, Any] | None = None
         if predicate_has_signal_assertions(recorded):
             try:
+                press_point = self._replay_press_point_window
                 live_after = await asyncio.to_thread(
                     capture_replay_after_signals,
                     windows_after,
                     recorded,
+                    press_point,
                 )
             except Exception as exc:
                 self.manager.log_info(f"signal snapshot failed: {exc}")
@@ -1895,9 +1908,14 @@ class BrainModule:
                     clearly_unmet=True,
                     reason="Signal snapshot after the step failed.",
                 )
-        ok, reason = window_verify_satisfied(recorded, live, live_after=live_after)
+        ok, reason = window_verify_satisfied(
+            recorded,
+            live,
+            live_after=live_after,
+            live_windows_after=windows_after,
+        )
         if ok:
-            self.manager.log_info("Window verify matched recorded delta")
+            self.manager.log_info("Window verify matched recorded end state")
             return None
         self.manager.log_info(f"Window verify failed: {reason}")
         return ScriptStepVerifyResult(
@@ -1961,6 +1979,7 @@ class BrainModule:
             started_iso = datetime.now(timezone.utc).isoformat()
             started_at = perf_counter()
             self._step_deferred_settle_waited_seconds = 0.0
+            self._replay_press_point_window = None
             window_verify = self._current_window_verify()
             windows_before: list[WindowInfo] | None = None
             if window_verify:

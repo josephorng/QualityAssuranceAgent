@@ -1689,6 +1689,60 @@ def test_write_recording_html_copy_includes_expected_outcome(tmp_path: Path) -> 
     assert "instruction-expected" in html
 
 
+def test_write_recording_html_renders_window_verify_conditions(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000031"
+    _write_recording_fixture(run_root)
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": "點擊「全選」文字",
+                "expected_outcome": "選單已關閉",
+                "use_expected_outcome": True,
+                "window_verify": {
+                    "disappeared": [
+                        {
+                            "class_name": "Microsoft.UI.Content.PopupWindowSiteBridge",
+                            "title": "快顯主機",
+                            "process_name": "explorer.exe",
+                        }
+                    ],
+                    "click_window": {
+                        "class_name": "Microsoft.UI.Content.PopupWindowSiteBridge",
+                        "title": "快顯主機",
+                        "process_name": "explorer.exe",
+                    },
+                    "control_state": "unselected",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+
+    assert 'class="verify-conditions"' in html
+    assert "驗證條件" in html
+    assert "視窗消失" in html
+    assert "快顯主機" in html
+    assert "點擊視窗" in html
+    assert "控制項狀態" not in html
+    assert "unselected" not in html
+    assert "畫面預期結果" in html
+    assert "選單已關閉" in html
+
+
+def test_write_recording_html_renders_empty_verify_conditions(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000032"
+    _write_recording_fixture(run_root)
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+
+    assert 'class="verify-conditions"' in html
+    assert "無視窗／訊號驗證條件" in html
+
+
 def test_write_recording_html_verification_checkbox_defaults_from_analysis(
     tmp_path: Path,
 ) -> None:

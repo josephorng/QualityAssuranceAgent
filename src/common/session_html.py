@@ -427,6 +427,28 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
   font-size: .75rem; color: #57606a; font-weight: 600;
 }
 .expected-outcome-status.error { color: #cf222e; }
+.verify-conditions {
+  margin: 0 1.5rem 1rem; padding: .75rem 1rem;
+  border: 1px solid #d0d7de; border-radius: 8px; background: #f6f8fa;
+}
+.verify-conditions-title {
+  margin: 0 0 .5rem; font-size: .9rem; font-weight: 700; color: #57606a;
+}
+.verify-conditions .meta { margin: 0; }
+.verify-conditions .meta dl {
+  display: grid; grid-template-columns: 8.5rem minmax(0, 1fr);
+  gap: .35rem .75rem; margin: 0;
+}
+.verify-conditions .meta dt {
+  margin: 0; color: #57606a; font-size: .8rem; font-weight: 600;
+}
+.verify-conditions .meta dd {
+  margin: 0; color: #1f2328; font-size: .9rem; word-break: break-word;
+}
+.verify-conditions .meta dd .mono { font-size: .85rem; }
+.verify-conditions-empty {
+  margin: 0; color: #57606a; font-size: .9rem;
+}
 .step-instruction {
   margin: 0; padding: .75rem 1rem;
   border: 1px solid #d0d7de; border-radius: 8px; background: #f6f8fa;
@@ -4774,6 +4796,123 @@ def _render_expected_outcome_panel_html(
     )
 
 
+_WINDOW_VERIFY_LABELS: dict[str, str] = {
+    "appeared": "視窗出現",
+    "disappeared": "視窗消失",
+    "state": "視窗狀態",
+    "foreground": "前景視窗",
+    "click_window": "點擊視窗",
+    "clipboard": "剪貼簿",
+    "process_started": "行程啟動",
+    "process_exited": "行程結束",
+    "caret": "插入點",
+    "focused": "焦點元素",
+    "scroll": "捲動位置",
+}
+
+
+def _format_window_verify_identity(entry: dict[str, Any]) -> str:
+    title = str(entry.get("title") or "").strip() or "—"
+    class_name = str(entry.get("class_name") or "").strip()
+    process = str(entry.get("process_name") or "").strip()
+    change = str(entry.get("change") or "").strip()
+    parts = [title]
+    detail = " / ".join(part for part in (class_name, process) if part)
+    if detail:
+        parts.append(f"({detail})")
+    if change:
+        parts.append(f"[{change}]")
+    return " ".join(parts)
+
+
+def _format_window_verify_value(key: str, value: Any) -> str | None:
+    if key in {"appeared", "disappeared", "state"}:
+        if not isinstance(value, list):
+            return None
+        lines = [
+            _format_window_verify_identity(item)
+            for item in value
+            if isinstance(item, dict)
+        ]
+        return "<br>".join(escape(line) for line in lines) if lines else None
+    if key in {"foreground", "click_window"}:
+        if not isinstance(value, dict) or not value:
+            return None
+        return escape(_format_window_verify_identity(value))
+    if key == "clipboard":
+        text = "" if value is None else str(value)
+        preview = text if len(text) <= 120 else f"{text[:117]}..."
+        return f'<span class="mono">{escape(preview)}</span>'
+    if key in {"process_started", "process_exited"}:
+        if not isinstance(value, list) or not value:
+            return None
+        return escape(", ".join(str(item) for item in value))
+    if key == "caret":
+        if not isinstance(value, list) or len(value) != 4:
+            return None
+        return escape(", ".join(str(item) for item in value))
+    if key == "focused":
+        if not isinstance(value, dict) or not value:
+            return None
+        parts: list[str] = []
+        if "name" in value:
+            parts.append(f"name={value.get('name')!r}")
+        if "value" in value:
+            parts.append(f"value={value.get('value')!r}")
+        return (
+            f'<span class="mono">{escape(", ".join(parts))}</span>' if parts else None
+        )
+    if key == "scroll":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return escape(f"{float(value):.1f}%")
+    return None
+
+
+def _window_verify_condition_rows(predicate: dict[str, Any] | None) -> list[tuple[str, str]]:
+    if not isinstance(predicate, dict) or not predicate:
+        return []
+    rows: list[tuple[str, str]] = []
+    for key, label in _WINDOW_VERIFY_LABELS.items():
+        if key not in predicate:
+            continue
+        formatted = _format_window_verify_value(key, predicate.get(key))
+        if formatted:
+            rows.append((label, formatted))
+    return rows
+
+
+def _render_verify_conditions_panel_html(
+    *,
+    analysis: dict[str, Any] | None,
+    expected_outcome: str,
+    use_expected_outcome: bool,
+) -> str:
+    """Read-only list of replay checks for this recorded step."""
+    predicate = analysis.get("window_verify") if isinstance(analysis, dict) else None
+    rows = _window_verify_condition_rows(predicate if isinstance(predicate, dict) else None)
+    if use_expected_outcome and expected_outcome.strip():
+        rows.append(("畫面預期結果", escape(expected_outcome.strip())))
+    elif use_expected_outcome:
+        rows.append(("畫面預期結果", "（已啟用，但文字為空）"))
+
+    if not rows:
+        body = (
+            '<p class="verify-conditions-empty">'
+            "無視窗／訊號驗證條件（動作成功且未啟用畫面驗證時直接前進）"
+            "</p>"
+        )
+    else:
+        meta = "".join(f"<dt>{escape(label)}</dt><dd>{value}</dd>" for label, value in rows)
+        body = f'<div class="meta"><dl>{meta}</dl></div>'
+    return (
+        f'<div class="verify-conditions">'
+        f'<div class="verify-conditions-title">驗證條件</div>'
+        f"{body}"
+        f"</div>"
+    )
+
+
 def _render_step_instruction_panel_html(*, instruction: str) -> str:
     return (
         f'<div class="step-instruction">'
@@ -5032,6 +5171,11 @@ def _render_recording_event_html(
         show=bool(instruction) or bool(expected_outcome),
     )
     instruction_html = _render_step_instruction_panel_html(instruction=instruction)
+    verify_conditions_html = _render_verify_conditions_panel_html(
+        analysis=analysis if isinstance(analysis, dict) else None,
+        expected_outcome=expected_outcome,
+        use_expected_outcome=use_expected_outcome,
+    )
     char_target_html = _render_char_target_panel_html(
         run_root=run_root,
         event_index=index,
@@ -5106,6 +5250,7 @@ def _render_recording_event_html(
         f"</summary>"
         f'<div class="meta" style="padding: 1rem 1.5rem 0;"><dl>{meta_html}</dl></div>'
         f'<div class="instruction-edit-panels">{instruction_html}{expected_outcome_html}</div>'
+        f"{verify_conditions_html}"
         f"{char_target_html}"
         f"{typed_text_html}"
         f"{yolo_retry_html}"

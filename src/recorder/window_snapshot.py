@@ -1162,19 +1162,32 @@ def predicate_has_structural_window_assertions(predicate: dict[str, Any] | None)
 
 
 def omit_foreground_when_structural(predicate: dict[str, Any]) -> dict[str, Any]:
-    """Drop foreground when appear/disappear/state already assert the UI change.
+    """Drop incidental signals when appear/disappear/state assert the UI change.
 
-    Next-focus after close/open/maximize is session noise; structural window
-    assertions are the stable success signal. Older recordings may still store
-    both; replay strips foreground the same way.
+    Next-focus after close/open/maximize is session noise. A ``click_window`` that
+    identity-matches a ``disappeared`` entry is also redundant: the close itself
+    is the success signal, and chrome tools (``close_windows``) never produce a
+    press-point window for replay. Older recordings may still store both; replay
+    strips them the same way.
     """
-    if not predicate_has_structural_window_assertions(predicate):
-        return predicate
-    if "foreground" not in predicate:
+    if not isinstance(predicate, dict):
         return predicate
     trimmed = dict(predicate)
-    trimmed.pop("foreground", None)
-    return trimmed
+    changed = False
+    if predicate_has_structural_window_assertions(trimmed) and "foreground" in trimmed:
+        trimmed.pop("foreground", None)
+        changed = True
+    click = trimmed.get("click_window")
+    disappeared = trimmed.get("disappeared")
+    if isinstance(click, dict) and click and isinstance(disappeared, list):
+        for item in disappeared:
+            # Match with disappeared as recorded so blank class/process on the
+            # structural entry still pairs with a fuller click_window identity.
+            if isinstance(item, dict) and _entries_match(item, click, match_change=False):
+                trimmed.pop("click_window", None)
+                changed = True
+                break
+    return trimmed if changed else predicate
 
 
 def window_verify_from_debug(debug: dict[str, Any] | None) -> dict[str, Any]:

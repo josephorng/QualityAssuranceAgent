@@ -1594,6 +1594,93 @@ def test_window_verify_omits_unchanged_light_signals_and_requires_changes() -> N
     )
 
 
+def test_window_verify_omits_click_window_when_it_matches_disappeared() -> None:
+    """Close-button click: press-time window is the one that disappeared."""
+    explorer = _win(1, "常用 - 檔案總管", class_name="CabinetWClass", process_name="explorer.exe")
+    chrome = _win(2, "Google Chrome", class_name="Chrome_WidgetWin_1", process_name="chrome.exe")
+    explorer_id = {
+        "class_name": "CabinetWClass",
+        "title": "常用 - 檔案總管",
+        "process_name": "explorer.exe",
+    }
+    predicate = window_verify_from_debug(
+        {
+            "windows_before": [explorer.to_dict(), chrome.to_dict()],
+            "windows_after": [chrome.to_dict()],
+            "signals_before": {"point_window": explorer_id},
+            "signals_after": {
+                "point_window": {
+                    "class_name": "Chrome_WidgetWin_1",
+                    "title": "Google Chrome",
+                    "process_name": "chrome.exe",
+                }
+            },
+            "signal_kind": "click",
+        }
+    )
+    assert predicate["disappeared"][0]["title"] == "常用 - 檔案總管"
+    assert "click_window" not in predicate
+
+
+def test_window_verify_keeps_click_window_when_disappeared_is_different() -> None:
+    """Flyout dismiss: click landed on explorer, not on the flyout that closed."""
+    explorer = _win(1, "常用 - 檔案總管", class_name="CabinetWClass", process_name="explorer.exe")
+    flyout = _win(
+        9,
+        "快顯主機",
+        class_name="Microsoft.UI.Content.PopupWindowSiteBridge",
+        process_name="explorer.exe",
+    )
+    explorer_id = {
+        "class_name": "CabinetWClass",
+        "title": "常用 - 檔案總管",
+        "process_name": "explorer.exe",
+    }
+    predicate = window_verify_from_debug(
+        {
+            "windows_before": [explorer.to_dict(), flyout.to_dict()],
+            "windows_after": [explorer.to_dict()],
+            "signals_before": {"point_window": explorer_id},
+            "signals_after": {
+                "point_window": {
+                    "class_name": "Shell_TrayWnd",
+                    "title": "",
+                    "process_name": "explorer.exe",
+                }
+            },
+            "signal_kind": "click",
+        }
+    )
+    assert predicate["disappeared"][0]["title"] == "快顯主機"
+    assert predicate["click_window"] == explorer_id
+
+
+def test_window_verify_ignores_legacy_click_window_matching_disappeared() -> None:
+    """close_windows replay has no press point; matching click_window must not fail."""
+    chrome = _win(2, "YouTube", class_name="Chrome_WidgetWin_1", process_name="chrome.exe")
+    recorded = {
+        "disappeared": [
+            {
+                "class_name": "CabinetWClass",
+                "title": "常用 - 檔案總管",
+            }
+        ],
+        "click_window": {
+            "class_name": "CabinetWClass",
+            "title": "常用 - 檔案總管",
+            "process_name": "explorer.exe",
+        },
+    }
+    ok, reason = window_verify_satisfied(
+        recorded,
+        {},
+        live_after={},
+        live_windows_after=[chrome],
+    )
+    assert ok is True
+    assert reason == ""
+
+
 def test_replay_click_window_uses_press_time_window_not_the_settled_cursor(
     monkeypatch,
 ) -> None:

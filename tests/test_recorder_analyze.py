@@ -4159,7 +4159,7 @@ async def test_analyze_recording_session_skips_expected_outcome_by_default(
     )
     assert first_analysis.get("expected_outcome") is None
     assert first_analysis["use_expected_outcome"] is False
-    assert last_analysis["use_expected_outcome"] is True
+    assert last_analysis["use_expected_outcome"] is False
     assert outcome_mock.await_count == 0
 
 
@@ -4240,7 +4240,7 @@ async def test_analyze_recording_session_enter_skips_window_outcome_by_default(
     )
     assert first_analysis.get("expected_outcome") is None
     assert first_analysis["use_expected_outcome"] is False
-    assert last_analysis["use_expected_outcome"] is True
+    assert last_analysis["use_expected_outcome"] is False
     assert outcome_mock.await_count == 0
 
 

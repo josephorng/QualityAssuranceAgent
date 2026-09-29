@@ -327,7 +327,7 @@ def use_expected_outcome_enabled(analysis: dict[str, Any] | None) -> bool:
 
     An explicit ``use_expected_outcome`` field wins. Otherwise older recordings
     with non-empty ``expected_outcome`` text keep verification enabled.
-    New analysis defaults to False for all but the last instruction step
+    New analysis defaults to False for every instruction step
     (opt-in via recording_steps.html).
     """
     if isinstance(analysis, dict) and "use_expected_outcome" in analysis:

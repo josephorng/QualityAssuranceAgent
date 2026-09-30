@@ -46,7 +46,13 @@ _EXPECTED_OUTCOME_RESPONSE_SCHEMA: dict[str, Any] = {
 }
 
 _DRAG_ANCHOR_RE = re.compile(r"拖到「([^」]+)」")
-_DRAG_SOURCE_RE = re.compile(r"^從「[^」]+」(?:文字|圖示|檔案|資料夾|按鈕|元素)*(?=拖到)")
+_DRAG_SOURCE_RE = re.compile(
+    r"^從「[^」]+」(?:文字|圖示|檔案|資料夾|按鈕|元素)*"
+    r"(?:(?:左方|右方|上方|下方)\d+個像素"
+    r"(?:、(?:左方|右方|上方|下方)\d+個像素)*)?"
+    r"(?:的位置)?"
+    r"(?=拖到)"
+)
 _DRAG_DESTINATION_SUFFIX_RE = re.compile(r"(文字|圖示|檔案|資料夾|按鈕|元素)*")
 _CLICK_TARGET_SUFFIX_RE = re.compile(r"(文字|圖示|檔案|資料夾|按鈕|元素|未知|輸入欄)*")
 _DRAG_OFFSET_PHRASE_RE = re.compile(
@@ -166,6 +172,46 @@ def enrich_drag_instruction_destination(
     return instruction[: match.start()] + f"拖到{anchor}" + remainder
 
 
+def _anchor_with_drag_offset(anchor: str, offset_phrase: str | None) -> str:
+    if offset_phrase:
+        return f"{anchor}{offset_phrase}的位置"
+    return anchor
+
+
+def enrich_drag_instruction_source_offset(
+    instruction: str,
+    vision: dict[str, Any],
+) -> str:
+    """Insert the press offset before 拖到, including when the press is inside the anchor."""
+    if "拖到" not in instruction:
+        return instruction
+    if scrollbar_track_percent_phrase(vision):
+        return instruction
+
+    candidates = vision.get("candidates") or []
+    if not candidates:
+        return instruction
+    anchor_name = candidate_anchor_name(candidates[0])
+    if not anchor_name:
+        return instruction
+    offset_phrase = candidate_offset_for_instruction(
+        vision,
+        anchor_name,
+        omit_when_inside=False,
+    )
+    if not offset_phrase:
+        return instruction
+
+    drag_at = instruction.index("拖到")
+    head = instruction[:drag_at]
+    head = re.sub(
+        rf"(?:{_DRAG_OFFSET_PHRASE_RE.pattern})(?:的位置)?$",
+        "",
+        head,
+    )
+    return head + offset_phrase + "的位置" + instruction[drag_at:]
+
+
 def enrich_drag_instruction_offset(
     instruction: str,
     destination: dict[str, Any],
@@ -180,7 +226,11 @@ def enrich_drag_instruction_offset(
     if not match:
         return instruction
 
-    offset_phrase = candidate_offset_for_instruction(destination, match.group(1))
+    offset_phrase = candidate_offset_for_instruction(
+        destination,
+        match.group(1),
+        omit_when_inside=False,
+    )
     if not offset_phrase:
         return instruction
 
@@ -207,6 +257,7 @@ def enrich_drag_instruction(
         # Track-% drag instructions are already fully specified; do not rewrite.
         return instruction
     instruction = enrich_drag_instruction_source(instruction, vision)
+    instruction = enrich_drag_instruction_source_offset(instruction, vision)
     instruction = enrich_drag_instruction_destination(instruction, destination)
     return enrich_drag_instruction_offset(instruction, destination)
 
@@ -508,15 +559,30 @@ def instruction_for_drag(
     if not source_anchor or not dest_anchor:
         return None
 
+    source_name = candidate_anchor_name(source_candidates[0])
+    source_offset = (
+        candidate_offset_for_instruction(
+            vision,
+            source_name,
+            omit_when_inside=False,
+        )
+        if source_name
+        else None
+    )
     dest_name = candidate_anchor_name(dest_candidates[0])
-    offset_phrase = (
-        candidate_offset_for_instruction(destination, dest_name)
+    dest_offset = (
+        candidate_offset_for_instruction(
+            destination,
+            dest_name,
+            omit_when_inside=False,
+        )
         if dest_name
         else None
     )
-    if offset_phrase:
-        return f"從{source_anchor}拖到{dest_anchor}{offset_phrase}的位置"
-    return f"從{source_anchor}拖到{dest_anchor}"
+    return (
+        f"從{_anchor_with_drag_offset(source_anchor, source_offset)}"
+        f"拖到{_anchor_with_drag_offset(dest_anchor, dest_offset)}"
+    )
 
 
 def _format_hold_duration_label(duration_seconds: float | None) -> str:
@@ -760,9 +826,9 @@ async def analyze_event_to_cache(
     destination_field_context = destination.get("field_context") or "(none)"
     destination_candidate_text = destination.get("candidate_text") or "(none)"
     if event.kind == "drag":
-        destination_offset_hints = (
-            destination.get("destination_offset_hints")
-            or format_drag_destination_offset_hints(destination)
+        destination_offset_hints = format_drag_destination_offset_hints(
+            destination,
+            omit_when_inside=False,
         )
     elif event.kind in _CLICK_POINTER_KINDS:
         destination_offset_hints = format_drag_destination_offset_hints(vision)

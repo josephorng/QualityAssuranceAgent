@@ -2517,6 +2517,98 @@ def test_instruction_for_drag_event_six_like_case() -> None:
     )
 
 
+def test_instruction_for_drag_keeps_offsets_inside_anchor_boxes() -> None:
+    vision = {
+        "local_cursor": (922, 309),
+        "candidates": [
+            {
+                "bbox": [55, 302, 29, 15],
+                "center": [69, 309],
+                "class_name": "text",
+                "text": "文件",
+            },
+        ],
+    }
+    destination = {
+        "local_cursor": (718, 175),
+        "candidates": [
+            {
+                "bbox": [694, 140, 70, 91],
+                "center": [729, 185],
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "選單"}],
+            },
+        ],
+    }
+    assert instruction_for_drag(vision, destination) == (
+        "從「文件」文字右方853個像素的位置"
+        "拖到「選單」圖示左方11個像素、上方10個像素的位置"
+    )
+
+
+def test_instruction_for_drag_omits_subthreshold_offset_inside_box() -> None:
+    vision = {
+        "local_cursor": (70, 310),
+        "candidates": [
+            {
+                "bbox": [55, 302, 29, 15],
+                "center": [69, 309],
+                "class_name": "text",
+                "text": "文件",
+            },
+        ],
+    }
+    destination = {
+        "local_cursor": (730, 186),
+        "candidates": [
+            {
+                "bbox": [694, 140, 70, 91],
+                "center": [729, 185],
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "選單"}],
+            },
+        ],
+    }
+    assert instruction_for_drag(vision, destination) == "從「文件」文字拖到「選單」圖示"
+
+
+def test_enrich_drag_instruction_keeps_source_and_inside_destination_offsets() -> None:
+    vision = {
+        "local_cursor": (922, 309),
+        "candidates": [
+            {
+                "bbox": [55, 302, 29, 15],
+                "center": [69, 309],
+                "class_name": "text",
+                "text": "文件",
+            },
+        ],
+    }
+    destination = {
+        "local_cursor": (718, 175),
+        "candidates": [
+            {
+                "bbox": [694, 140, 70, 91],
+                "center": [729, 185],
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "選單"}],
+            },
+        ],
+    }
+    enriched = enrich_drag_instruction(
+        "從「a」元素右方3個像素的位置拖到「b」圖示",
+        vision=vision,
+        destination=destination,
+    )
+    assert enriched == (
+        "從「文件」文字右方853個像素的位置"
+        "拖到「選單」圖示左方11個像素、上方10個像素的位置"
+    )
+
+
 def test_instruction_for_drag_returns_none_without_candidates() -> None:
     assert instruction_for_drag({"candidates": []}, {"candidates": [{"text": "x"}]}) is None
     assert instruction_for_drag({"candidates": [{"text": "x"}]}, {"candidates": []}) is None

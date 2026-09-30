@@ -1344,6 +1344,43 @@ def test_format_drag_destination_offset_hints_when_drop_inside_anchor() -> None:
     assert "[index 0] 「振銓」: (on anchor, offset negligible)" in hints
 
 
+def test_format_drag_destination_offset_hints_keeps_inside_box_offset_for_drag() -> None:
+    destination = {
+        "local_cursor": (718, 175),
+        "candidates": [
+            {
+                "bbox": [694, 140, 70, 91],
+                "center": [729, 185],
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "選單"}],
+            },
+        ],
+    }
+    hints = format_drag_destination_offset_hints(destination, omit_when_inside=False)
+    assert "[index 0] 「選單」圖示: 左方11個像素、上方10個像素" in hints
+
+
+def test_candidate_offset_for_instruction_keeps_inside_box_offset_for_drag() -> None:
+    destination = {
+        "local_cursor": (718, 175),
+        "candidates": [
+            {
+                "bbox": [694, 140, 70, 91],
+                "center": [729, 185],
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "選單"}],
+            },
+        ],
+    }
+    assert candidate_offset_for_instruction(
+        destination,
+        "選單",
+        omit_when_inside=False,
+    ) == "左方11個像素、上方10個像素"
+
+
 def test_candidate_offset_for_instruction_when_drop_inside_anchor() -> None:
     destination = {
         "local_cursor": (188, 672),

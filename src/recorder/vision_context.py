@@ -299,7 +299,8 @@ def try_rebuild_vision_from_cache(
             if isinstance(filtered_track, dict):
                 end_compact["scrollbar_track"] = filtered_track
             end_compact["destination_offset_hints"] = format_drag_destination_offset_hints(
-                end_compact
+                end_compact,
+                omit_when_inside=False,
             )
         elif end_local is not None:
             end_result = _vision_from_yolo_payload(end_payload)
@@ -2610,8 +2611,17 @@ def _candidate_matches_anchor(candidate: dict[str, Any], anchor: str) -> bool:
     return False
 
 
-def format_drag_destination_offset_hints(destination: dict[str, Any]) -> str:
-    """Format per-candidate drop offsets for the drag destination LLM prompt."""
+def format_drag_destination_offset_hints(
+    destination: dict[str, Any],
+    *,
+    omit_when_inside: bool = True,
+) -> str:
+    """Format per-candidate drop offsets for the drag destination LLM prompt.
+
+    ``omit_when_inside`` keeps click hints quiet when the pointer is inside the
+    anchor box. Drag recording passes False so an in-box point still reports
+    its center offset.
+    """
     local = destination.get("local_cursor")
     if not isinstance(local, (list, tuple)) or len(local) != 2:
         return "(none)"
@@ -2623,7 +2633,7 @@ def format_drag_destination_offset_hints(destination: dict[str, Any]) -> str:
     lines: list[str] = []
     for index, candidate in enumerate(candidates):
         label = _candidate_display_label(candidate)
-        if _drop_point_inside_candidate(drop_x, drop_y, candidate):
+        if omit_when_inside and _drop_point_inside_candidate(drop_x, drop_y, candidate):
             lines.append(f"[index {index}] {label}: (on anchor, offset negligible)")
             continue
         center = _candidate_center(candidate)
@@ -2660,8 +2670,15 @@ def candidate_anchor_name(candidate: dict[str, Any]) -> str | None:
 def candidate_offset_for_instruction(
     destination: dict[str, Any],
     anchor_text: str,
+    *,
+    omit_when_inside: bool = True,
 ) -> str | None:
-    """Return the offset phrase for a destination anchor named in a drag instruction."""
+    """Return the offset phrase for an anchor named in a pointer instruction.
+
+    Clicks pass the default and skip the phrase when the pointer is inside the
+    anchor box. Drag recording passes ``omit_when_inside=False`` so replay can
+    aim at the recorded point inside that box.
+    """
     anchor = anchor_text.strip()
     if not anchor:
         return None
@@ -2672,7 +2689,7 @@ def candidate_offset_for_instruction(
     for candidate in destination.get("candidates") or []:
         if not _candidate_matches_anchor(candidate, anchor):
             continue
-        if _drop_point_inside_candidate(drop_x, drop_y, candidate):
+        if omit_when_inside and _drop_point_inside_candidate(drop_x, drop_y, candidate):
             return None
         center = _candidate_center(candidate)
         if center is None:
@@ -2769,7 +2786,10 @@ def _build_filtered_destination_vision(
             }
         ),
     }
-    vision["destination_offset_hints"] = format_drag_destination_offset_hints(vision)
+    vision["destination_offset_hints"] = format_drag_destination_offset_hints(
+        vision,
+        omit_when_inside=False,
+    )
     return vision
 
 

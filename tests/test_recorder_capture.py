@@ -82,6 +82,7 @@ def _is_event_screenshot(name: str) -> bool:
         name.startswith("_pre_click_")
         or name.startswith("_settle_")
         or name.startswith("_last_settle")
+        or name.startswith("_before_shot")
     )
 
 

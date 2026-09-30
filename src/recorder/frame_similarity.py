@@ -181,7 +181,8 @@ def apply_settle_sample(
 
     if similar:
         # Stable: settle is age of the earlier frame; keep the newer image
-        # so the next before-shot is the freshest settled UI.
+        # as this probe's comparison baseline. Before-shots come from the
+        # before-shot loop, not from this file.
         observed = (
             float(kept_age_s) if kept_age_s is not None else float(sample_age_s)
         )

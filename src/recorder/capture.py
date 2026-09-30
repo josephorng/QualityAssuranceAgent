@@ -70,12 +70,12 @@ _PRE_TYPE_FOCUS_MAX_DIST_PX = 48
 # LL hooks cannot screenshot before Tab/Enter is delivered; reuse this frame instead.
 _PRE_KEY_SETTLE_S = 0.3
 # Consecutive-screenshot settle probe (UI stability after an action).
-# Samples: the first shot is immediate, then every 0.25s. The probe starts when
-# recording starts so a click can pin a frame that finished before the hook.
-# That frame is the next step's before-shot and this step's after-shot.
-# The probe does not stop on the first similar pair; it keeps publishing until
-# the next event replaces it (or the max window elapses).
-_SETTLE_PROBE_INTERVAL_S = 0.25
+# Samples: the first shot is immediate, then every 1s. The probe only
+# measures observed_settle; it does not publish the next step's before-shot.
+# A separate before-shot loop grabs for the whole recording and publishes every
+# finished frame, so a click pins the latest screenshot even when the previous
+# action's probe has not sampled yet.
+_SETTLE_PROBE_INTERVAL_S = 1.0
 _SETTLE_PROBE_MAX_WINDOW_S = 55.0
 # Retain every settle-probe capture under screenshots/settle_debug/ for MAD tuning.
 _SETTLE_PROBE_KEEP_DEBUG_SAMPLES = False
@@ -809,12 +809,18 @@ class RecordingSession:
         self._settle_probe_timer: threading.Timer | None = None
         # Serialize settle ticks (timer thread) vs cancel/start (capture worker).
         self._settle_tick_lock = threading.Lock()
+        # One desktop grab at a time. The before-shot loop and the settle probe
+        # both call mss; sharing an instance across threads is not safe, and
+        # overlapping grabs stall the latest-frame publish.
+        self._screenshot_grab_lock = threading.Lock()
+        self._before_shot_stop = threading.Event()
+        self._before_shot_thread: threading.Thread | None = None
         # Event JSON is patched by the probe timer and by per-step window threads.
         self._event_file_lock = threading.Lock()
         self._window_step_threads: list[threading.Thread] = []
-        # Last settle-probe frame (path, monitor_index, monitor_offset) for next before-shot.
+        # Latest finished before-shot (path, monitor_index, monitor_offset).
         # The path is a unique ``_settle_pub_*.jpeg`` so a hook can pin it while the
-        # next sample writes a new file.
+        # next sample writes a new file. The settle probe does not write this.
         self._last_settle_frame: tuple[str, int, tuple[int, int]] | None = None
         self._settle_pins: dict[str, int] = {}
         self._settle_pub_seq: int = 0
@@ -949,6 +955,8 @@ class RecordingSession:
             self._cancel_pre_key_settle_timer_locked()
             self._settle_probe = None
             self._settle_probe_timer = None
+            self._before_shot_stop.clear()
+            self._before_shot_thread = None
             self._window_step_threads = []
             self._last_settle_frame = None
             self._settle_pins = {}
@@ -985,7 +993,7 @@ class RecordingSession:
             self._accepting_input = True
 
         self._start_pre_click_pump()
-        self._start_baseline_settle_probe()
+        self._start_before_shot_loop()
 
         self._mouse_listener = mouse.Listener(
             on_click=self._on_mouse_click,
@@ -1041,6 +1049,7 @@ class RecordingSession:
             self._pending_click_timer = None
 
         self._stop_pre_click_pump(invalidate_context=True)
+        self._stop_before_shot_loop()
 
         self._flush_pending_text_input()
         if pending is not None:
@@ -1540,7 +1549,7 @@ class RecordingSession:
     ) -> bool:
         """Copy ``source`` into a unique file the next hook can pin.
 
-        A single shared file would be overwritten by the next 0.25s sample before
+        A single shared file would be overwritten by the next sample before
         the worker copies the frame latched at the click.
 
         When ``event_index`` is set, install the pointer only if that event is
@@ -1612,7 +1621,7 @@ class RecordingSession:
                 pass
 
     def _latch_settle_frame(self) -> tuple[str, int, tuple[int, int]] | None:
-        """Pin the newest finished settle sample. Hook-safe: no capture and no file copy."""
+        """Pin the newest finished before-shot. Hook-safe: no capture and no file copy."""
         with self._lock:
             published = self._last_settle_frame
             if published is None:
@@ -1682,12 +1691,11 @@ class RecordingSession:
         dest: Path,
         settle_frame: tuple[str, int, tuple[int, int]] | None = None,
     ) -> tuple[str, int, tuple[int, int]]:
-        """Copy the settle sample latched at the hook.
+        """Copy the before-shot frame pinned at the hook.
 
-        That file is the newest probe sample finished before this click, so the
-        next step's before-shot is this step's after-shot. With no latched
-        sample, use the current probe frame only when the hook found none.
-        Otherwise grab live.
+        That file is the newest before-shot loop sample finished before this
+        click. With no pinned sample, use the current published frame only when
+        the hook found none. Otherwise grab live.
         """
         taken = self._take_latched_settle_frame(settle_frame, x, y, dest)
         if taken is not None:
@@ -2868,7 +2876,7 @@ class RecordingSession:
         return delay
 
     def _schedule_next_settle_probe_tick(self, event_index: int) -> None:
-        """Schedule the next settle sample using the fixed 0.25s interval."""
+        """Schedule the next settle sample using the fixed 1s interval."""
         with self._lock:
             probe = self._settle_probe
             if probe is None or probe.event_index != event_index:
@@ -3034,11 +3042,91 @@ class RecordingSession:
         except Exception:
             return None
 
-    def _start_baseline_settle_probe(self) -> None:
-        """Grab immediately, then every 0.25s, until the next action replaces this probe.
+    def _grab_screenshot(
+        self,
+        cursor: tuple[int, int] | None,
+        dest: Path,
+    ) -> tuple[int, tuple[int, int]]:
+        """Capture one frame. One grab at a time across before-shot and settle."""
+        lock = getattr(self, "_screenshot_grab_lock", None)
+        if lock is not None:
+            lock.acquire()
+        try:
+            if cursor is not None:
+                _, mon_idx, mon_offset = _capture_screenshot_at_point(
+                    int(cursor[0]), int(cursor[1]), dest
+                )
+                return int(mon_idx), (int(mon_offset[0]), int(mon_offset[1]))
+            capture_all_screens_to_file(dest)
+            return 0, (0, 0)
+        finally:
+            if lock is not None:
+                lock.release()
 
-        Event index 0 is not a recorded step. Its samples exist so the first
-        click can pin a frame that finished before the hook.
+    def _start_before_shot_loop(self) -> None:
+        """Publish a fresh screenshot for the whole recording.
+
+        Mouse-down pins the last frame this loop finished. The loop does not
+        wait for a settle probe, so the next action still gets a frame when the
+        previous probe has not sampled yet.
+        """
+        self._before_shot_stop.clear()
+        thread = threading.Thread(
+            target=self._before_shot_loop,
+            name="screen-recorder-before-shot",
+            daemon=True,
+        )
+        with self._lock:
+            self._before_shot_thread = thread
+            run_dir = self._run_dir
+        thread.start()
+        if run_dir is not None:
+            self._log(run_dir, "before-shot loop start")
+
+    def _stop_before_shot_loop(self) -> None:
+        stop = getattr(self, "_before_shot_stop", None)
+        if stop is not None:
+            stop.set()
+        with self._lock:
+            thread = getattr(self, "_before_shot_thread", None)
+            self._before_shot_thread = None
+        if (
+            thread is not None
+            and thread.is_alive()
+            and thread is not threading.current_thread()
+        ):
+            thread.join(timeout=2.0)
+
+    def _before_shot_loop(self) -> None:
+        while not self._before_shot_stop.is_set():
+            published = self._capture_and_publish_before_shot()
+            if self._before_shot_stop.is_set():
+                return
+            if not published and self._before_shot_stop.wait(0.05):
+                return
+
+    def _capture_and_publish_before_shot(self) -> bool:
+        """Grab once and install it as the latest before-shot."""
+        with self._lock:
+            run_dir = self._run_dir
+        if run_dir is None or self._before_shot_stop.is_set():
+            return False
+        cursor = self._pointer_cursor_for_capture()
+        staging = run_dir / "screenshots" / "_before_shot_staging.jpeg"
+        try:
+            mon_idx, mon_offset = self._grab_screenshot(cursor, staging)
+        except Exception as exc:
+            self._log(run_dir, f"before-shot capture failed: {exc}")
+            return False
+        if self._before_shot_stop.is_set():
+            return False
+        return self._publish_last_settle_frame(staging, mon_idx, mon_offset)
+
+    def _start_baseline_settle_probe(self) -> None:
+        """Grab immediately, then every 1s, until the next action replaces this probe.
+
+        Event index 0 is not a recorded step. Recording start uses the
+        before-shot loop for pre-click frames; this probe is not started there.
         """
         cursor = self._pointer_cursor_for_capture()
         with self._lock:
@@ -3243,8 +3331,8 @@ class RecordingSession:
     ) -> None:
         """Inner settle tick; caller holds ``_settle_tick_lock``.
 
-        If this event was replaced while capturing, return without publishing so a
-        newer probe's frame is not overwritten.
+        If this event was replaced while capturing, drop the sample. This tick
+        measures settle only and does not publish a before-shot.
         """
         if event_index == 0:
             fresh = self._pointer_cursor_for_capture()
@@ -3254,12 +3342,7 @@ class RecordingSession:
         mon_idx = 0
         mon_offset: tuple[int, int] = (0, 0)
         try:
-            if cursor is not None:
-                _, mon_idx, mon_offset = _capture_screenshot_at_point(
-                    int(cursor[0]), int(cursor[1]), staging
-                )
-            else:
-                capture_all_screens_to_file(staging)
+            mon_idx, mon_offset = self._grab_screenshot(cursor, staging)
         except Exception as exc:
             self._log(run_dir, f"settle probe capture failed event={event_index}: {exc}")
             self._schedule_next_settle_probe_tick(event_index)
@@ -3353,9 +3436,9 @@ class RecordingSession:
             similar=similar,
         )
 
-        # First similar pair records observed_settle for timing, but the probe
-        # keeps sampling so the next click pins a fresh frame, not an early
-        # false plateau (e.g. Search closed before Explorer painted).
+        # First similar pair records observed_settle. Later pairs leave that
+        # value alone. The probe keeps sampling until the next event replaces
+        # it. Before-shots are published by the before-shot loop.
         if observed is not None:
             record_observed = False
             with self._lock:
@@ -3375,13 +3458,8 @@ class RecordingSession:
         official = settle_probe_kept_path(run_dir, event_index)
         if new_kept is not None:
             official = self._promote_settle_staging(Path(new_kept), official)
-        if not self._publish_last_settle_frame(
-            official,
-            mon_idx,
-            mon_offset,
-            event_index=event_index,
-        ):
-            return
+        # Settle samples stay on the probe. The before-shot loop is the only
+        # writer of ``_last_settle_frame``.
         with self._lock:
             if self._settle_probe is None or self._settle_probe.event_index != event_index:
                 return

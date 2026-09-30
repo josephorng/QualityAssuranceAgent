@@ -22,7 +22,7 @@ def _write_gray(path: Path, value: int) -> None:
 
 def test_settle_probe_interval_is_fixed() -> None:
     assert settle_probe_interval_s(0) == 0.0
-    assert [settle_probe_interval_s(i) for i in range(1, 10)] == [0.25] * 9
+    assert [settle_probe_interval_s(i) for i in range(1, 10)] == [1.0] * 9
     assert _SETTLE_PROBE_FIRST_S == 0.0
     assert _SETTLE_PROBE_MAX_WINDOW_S == 55.0
     assert settle_probe_interval_s(-3) == 0.0
@@ -230,7 +230,7 @@ def test_schedule_next_settle_probe_tick_uses_fixed_interval(
     session._schedule_next_settle_probe_tick(3)
     session._schedule_next_settle_probe_tick(3)
     session._schedule_next_settle_probe_tick(3)
-    assert delays == [0.0, 0.25, 0.25, 0.25]
+    assert delays == [0.0, 1.0, 1.0, 1.0]
     assert session._settle_probe.interval_step == 4
 
 
@@ -663,6 +663,104 @@ def test_pending_screenshot_live_captures_when_monitor_mismatches(
     # Live capture path used (monitor mismatch).
     r, _g, _b = Image.open(dest).convert("RGB").getpixel((0, 0))
     assert r > 150
+
+
+def test_before_shot_capture_publishes_without_settle_probe(tmp_path: Path, monkeypatch) -> None:
+    """A click can pin a frame before any settle probe has sampled."""
+    import threading
+
+    from src.recorder.capture import RecordingSession
+
+    run_dir = tmp_path / "rec"
+    (run_dir / "screenshots").mkdir(parents=True)
+    shot = run_dir / "screenshots" / "grab.jpeg"
+    Image.new("RGB", (16, 12), color=(0, 180, 0)).save(shot, format="JPEG")
+
+    session = RecordingSession.__new__(RecordingSession)
+    session._lock = threading.Lock()
+    session._screenshot_grab_lock = threading.Lock()
+    session._before_shot_stop = threading.Event()
+    session._run_dir = run_dir
+    session._settle_pub_seq = 0
+    session._settle_pins = {}
+    session._last_settle_frame = None
+    session._settle_probe = None
+    session._log = lambda *_a, **_k: None  # type: ignore[method-assign]
+    session._last_pointer_cursor_xy = (4, 4)
+
+    def _fake_capture(x, y, target):
+        import shutil
+
+        shutil.copy2(shot, target)
+        return str(target), 2, (0, 0)
+
+    import src.recorder.capture as capture_mod
+
+    monkeypatch.setattr(capture_mod, "_capture_screenshot_at_point", _fake_capture)
+
+    assert session._capture_and_publish_before_shot()
+    published = session._last_settle_frame
+    assert published is not None
+    assert Path(published[0]).name.startswith("_settle_pub_")
+    assert published[1:] == (2, (0, 0))
+    _r, g, _b = Image.open(published[0]).convert("RGB").getpixel((0, 0))
+    assert g > 150
+
+
+def test_settle_tick_does_not_replace_before_shot(tmp_path: Path, monkeypatch) -> None:
+    """Settle samples must not clobber the frame the next click will pin."""
+    import threading
+    import time
+
+    from src.recorder.capture import RecordingSession, _SettleProbeState
+
+    run_dir = tmp_path / "rec"
+    (run_dir / "screenshots").mkdir(parents=True)
+    before = run_dir / "screenshots" / "before.jpeg"
+    settle = run_dir / "screenshots" / "settle.jpeg"
+    Image.new("RGB", (16, 12), color=(200, 0, 0)).save(before, format="JPEG")
+    Image.new("RGB", (16, 12), color=(0, 0, 200)).save(settle, format="JPEG")
+
+    session = RecordingSession.__new__(RecordingSession)
+    session._lock = threading.Lock()
+    session._settle_tick_lock = threading.Lock()
+    session._screenshot_grab_lock = threading.Lock()
+    session._event_file_lock = threading.Lock()
+    session._run_dir = run_dir
+    session._events = []
+    session._settle_pub_seq = 0
+    session._settle_pins = {}
+    session._last_settle_frame = None
+    session._settle_probe_timer = None
+    session._log = lambda *_a, **_k: None  # type: ignore[method-assign]
+    session._last_pointer_cursor_xy = (1, 1)
+    session._settle_probe = _SettleProbeState(
+        event_index=4,
+        started_monotonic=time.monotonic(),
+        cursor_xy=(1, 1),
+    )
+    assert session._publish_last_settle_frame(before, 1, (0, 0))
+    pinned = session._last_settle_frame
+    assert pinned is not None
+
+    def _fake_capture(x, y, target):
+        import shutil
+
+        shutil.copy2(settle, target)
+        return str(target), 1, (0, 0)
+
+    import src.recorder.capture as capture_mod
+
+    monkeypatch.setattr(capture_mod, "_capture_screenshot_at_point", _fake_capture)
+    monkeypatch.setattr(session, "_schedule_next_settle_probe_tick", lambda *_a, **_k: None)
+
+    session._run_settle_probe_tick(4)
+    assert session._last_settle_frame == pinned
+    r, _g, b = Image.open(pinned[0]).convert("RGB").getpixel((0, 0))
+    assert r > 150
+    assert b < 50
+    assert session._settle_probe is not None
+    assert session._settle_probe.kept_path
 
 
 def test_publish_last_settle_frame_copies_durable_candidate(tmp_path: Path) -> None:

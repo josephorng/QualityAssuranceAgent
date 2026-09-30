@@ -471,6 +471,104 @@ def test_time_profile_includes_move_mouse_internal_timing_details(tmp_path: Path
     assert any(d["kind"] == "move_mouse_hand_move" for d in details)
 
 
+def test_time_profile_includes_drag_start_and_destination_timing_details(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "task_drag_timing"
+    run_root.mkdir()
+    steps_dir = run_root / "steps"
+    _write_step(
+        steps_dir,
+        0,
+        0,
+        goal="Drag file onto folder",
+        messages=[
+            {
+                "role": "user",
+                "timestamp_utc": "2026-06-11T06:00:00+00:00",
+                "content": "Cache replay",
+                "images": ["shot1.png"],
+                "cache_replay": True,
+            },
+            {
+                "role": "assistant",
+                "timestamp_utc": "2026-06-11T06:00:00+00:00",
+                "cache_replay": True,
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "drag",
+                            "arguments": {
+                                "start_instruction": "file",
+                                "destination_instruction": "folder",
+                            },
+                        }
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "timestamp_utc": "2026-06-11T06:00:08+00:00",
+                "content": json.dumps(
+                    {
+                        "action": "drag",
+                        "ok": True,
+                        "args": {
+                            "start_target": {
+                                "timing": {
+                                    "total_s": 2.0,
+                                    "phases": [
+                                        {
+                                            "name": "yolo",
+                                            "seconds": 1.1,
+                                            "ocr_roi": [1, 2, 30, 40],
+                                            "ocr_roi_pad": 16,
+                                        },
+                                        {"name": "select_unique", "seconds": 0.2},
+                                    ],
+                                }
+                            },
+                            "destination_target": {
+                                "timing": {
+                                    "total_s": 3.5,
+                                    "phases": [
+                                        {
+                                            "name": "ocr",
+                                            "seconds": 1.4,
+                                            "ocr_roi": [5, 6, 70, 80],
+                                        },
+                                        {"name": "llm_pick", "seconds": 2.0},
+                                    ],
+                                }
+                            },
+                        },
+                    }
+                ),
+            },
+        ],
+    )
+
+    report = build_session_report(run_root, session_end_reason="completed")
+    profile = report["steps"][0]["time_profile"]
+    drag_entry = profile[1]
+    assert drag_entry["kind"] == "tool_execution"
+    assert drag_entry["actions"] == ["drag"]
+    assert drag_entry["tool_internal_seconds"] == 5.5
+    details = drag_entry["details"]
+    assert [d["kind"] for d in details] == [
+        "drag_start_yolo",
+        "drag_start_select_unique",
+        "drag_destination_ocr",
+        "drag_destination_llm_pick",
+    ]
+    assert details[0]["label"] == "起點 · YOLO detect"
+    assert details[0]["roi"] == [1, 2, 30, 40]
+    assert details[0]["roi_pad"] == 16
+    assert details[2]["label"] == "終點 · OCR"
+    assert details[2]["roi"] == [5, 6, 70, 80]
+    assert details[3]["label"] == "終點 · LLM target pick"
+
+
 def test_timing_summary_attributes_settle_after_as_waiting(tmp_path: Path) -> None:
     run_root = tmp_path / "task_settle_waiting"
     run_root.mkdir()

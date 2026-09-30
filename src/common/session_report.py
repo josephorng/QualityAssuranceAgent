@@ -113,6 +113,8 @@ def _tool_payload_from_message(content: Any) -> dict[str, Any]:
 _MOVE_MOUSE_TIMING_ACTIONS = frozenset(
     {"move_mouse", "move_mouse_visual", "check_object_exists"}
 )
+_DRAG_TIMING_ACTION = "drag"
+_TOOL_TIMING_ACTIONS = _MOVE_MOUSE_TIMING_ACTIONS | {_DRAG_TIMING_ACTION}
 
 _MOVE_MOUSE_PHASE_LABELS = {
     "capture": "Screenshot capture",
@@ -129,6 +131,15 @@ _MOVE_MOUSE_PHASE_LABELS = {
 }
 
 
+def _structured_timing(raw: Any) -> dict[str, Any] | None:
+    """Accept a tool ``timing`` object that has phases or a total."""
+    if not isinstance(raw, dict):
+        return None
+    if isinstance(raw.get("phases"), list) or isinstance(raw.get("total_s"), (int, float)):
+        return raw
+    return None
+
+
 def _move_mouse_timing_from_tool_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
     """Pull structured ``timing`` from a move_mouse-family tool result payload."""
     action = payload.get("action")
@@ -138,17 +149,14 @@ def _move_mouse_timing_from_tool_payload(payload: dict[str, Any]) -> dict[str, A
         timing = args.get("timing")
     elif isinstance(payload.get("timing"), dict):
         timing = payload.get("timing")
-    if not isinstance(timing, dict):
+    timing = _structured_timing(timing)
+    if timing is None:
         return None
     if isinstance(action, str) and action not in _MOVE_MOUSE_TIMING_ACTIONS:
         # Still accept when timing is nested under args from a move-family tool merge.
         if not (isinstance(args, dict) and "timing" in args):
             return None
-    if isinstance(timing.get("phases"), list) or isinstance(
-        timing.get("total_s"), (int, float)
-    ):
-        return timing
-    return None
+    return timing
 
 
 def _details_from_move_mouse_timing(timing: dict[str, Any]) -> list[dict[str, Any]]:
@@ -304,6 +312,92 @@ def _find_tool_payload_for_action(
     return None
 
 
+def _prefix_phase_details(
+    details: list[dict[str, Any]],
+    *,
+    kind_prefix: str,
+    label_prefix: str,
+) -> list[dict[str, Any]]:
+    """Relabel move-mouse phase rows as one side of a drag."""
+    prefixed: list[dict[str, Any]] = []
+    for detail in details:
+        item = dict(detail)
+        kind = item.get("kind")
+        phase = kind.removeprefix("move_mouse_") if isinstance(kind, str) else "phase"
+        item["kind"] = f"{kind_prefix}_{phase}"
+        label = item.get("label")
+        if isinstance(label, str) and label.strip():
+            item["label"] = f"{label_prefix} · {label}"
+        prefixed.append(item)
+    return prefixed
+
+
+def _target_timing(payload: dict[str, Any], key: str) -> dict[str, Any] | None:
+    """Pull ``timing`` from ``args.<key>`` or a top-level target object."""
+    args = payload.get("args")
+    target = args.get(key) if isinstance(args, dict) else None
+    if not isinstance(target, dict):
+        target = payload.get(key)
+    if not isinstance(target, dict):
+        return None
+    return _structured_timing(target.get("timing"))
+
+
+def _details_from_drag_payload(
+    payload: dict[str, Any],
+) -> tuple[list[dict[str, Any]], float | None]:
+    """Start and destination resolve phases, in that order."""
+    details: list[dict[str, Any]] = []
+    totals: list[float] = []
+    for key, kind_prefix, label_prefix in (
+        ("start_target", "drag_start", "起點"),
+        ("destination_target", "drag_destination", "終點"),
+    ):
+        timing = _target_timing(payload, key)
+        if timing is None:
+            continue
+        details.extend(
+            _prefix_phase_details(
+                _details_from_move_mouse_timing(timing),
+                kind_prefix=kind_prefix,
+                label_prefix=label_prefix,
+            )
+        )
+        total = timing.get("total_s")
+        if isinstance(total, (int, float)):
+            totals.append(float(total))
+    internal = round(sum(totals), 3) if totals else None
+    return details, internal
+
+
+def _apply_click_window_roi_fallback(
+    details: list[dict[str, Any]],
+    payload: dict[str, Any],
+    *,
+    roi_kinds: set[str],
+) -> None:
+    needs_roi = any(
+        isinstance(d, dict)
+        and d.get("kind") in roi_kinds
+        and "roi" not in d
+        and "rois" not in d
+        for d in details
+    )
+    if not needs_roi:
+        return
+    fallback_roi = _ocr_roi_from_click_window_payload(payload)
+    if fallback_roi is None:
+        return
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+        if detail.get("kind") not in roi_kinds:
+            continue
+        if "roi" in detail or "rois" in detail:
+            continue
+        detail["roi"] = fallback_roi
+
+
 def _attach_move_mouse_timing_details(
     entry: dict[str, Any],
     *,
@@ -311,7 +405,7 @@ def _attach_move_mouse_timing_details(
     message_index: int,
     next_message: dict[str, Any] | None,
 ) -> None:
-    """Attach nested move_mouse phase timings onto a tool_execution profile row."""
+    """Attach nested move_mouse or drag phase timings onto a tool_execution row."""
     if entry.get("kind") != "tool_execution":
         return
     actions = entry.get("actions")
@@ -321,12 +415,12 @@ def _attach_move_mouse_timing_details(
         else []
     )
     target_action = next(
-        (name for name in action_names if name in _MOVE_MOUSE_TIMING_ACTIONS),
+        (name for name in action_names if name in _TOOL_TIMING_ACTIONS),
         None,
     )
     if target_action is None:
         raw_action = entry.get("action")
-        if isinstance(raw_action, str) and raw_action in _MOVE_MOUSE_TIMING_ACTIONS:
+        if isinstance(raw_action, str) and raw_action in _TOOL_TIMING_ACTIONS:
             target_action = raw_action
     if target_action is None:
         return
@@ -340,29 +434,24 @@ def _attach_move_mouse_timing_details(
         payload = _find_tool_payload_for_action(messages, message_index, target_action)
     if payload is None:
         return
+    if target_action == _DRAG_TIMING_ACTION:
+        details, internal = _details_from_drag_payload(payload)
+        if not details:
+            return
+        entry["details"] = details
+        if internal is not None:
+            entry["tool_internal_seconds"] = internal
+        return
     timing = _move_mouse_timing_from_tool_payload(payload)
     if timing is None:
         return
     details = _details_from_move_mouse_timing(timing)
     if details:
-        needs_roi = any(
-            isinstance(d, dict)
-            and d.get("kind") in {"move_mouse_yolo", "move_mouse_ocr"}
-            and "roi" not in d
-            and "rois" not in d
-            for d in details
+        _apply_click_window_roi_fallback(
+            details,
+            payload,
+            roi_kinds={"move_mouse_yolo", "move_mouse_ocr"},
         )
-        if needs_roi:
-            fallback_roi = _ocr_roi_from_click_window_payload(payload)
-            if fallback_roi is not None:
-                for detail in details:
-                    if not isinstance(detail, dict):
-                        continue
-                    if detail.get("kind") not in {"move_mouse_yolo", "move_mouse_ocr"}:
-                        continue
-                    if "roi" in detail or "rois" in detail:
-                        continue
-                    detail["roi"] = fallback_roi
         entry["details"] = details
         total = timing.get("total_s")
         if isinstance(total, (int, float)):

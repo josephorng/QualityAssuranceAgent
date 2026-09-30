@@ -146,6 +146,8 @@ def vision_source_fingerprint(event: RecordedEvent) -> str:
             list(event.anchor_click_xy) if event.anchor_click_xy is not None else None
         ),
     }
+    if event.end_click_window is not None:
+        payload["end_click_window"] = event.end_click_window
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -2985,8 +2987,13 @@ def build_vision_context_at_point(
     image_path: str | None = None,
     debug_name: str | None = None,
     source_fingerprint: str | None = None,
+    click_window: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Run YOLO+OCR and rank candidates nearest to explicit screenshot-local coords."""
+    """Run YOLO+OCR and rank candidates nearest to explicit screenshot-local coords.
+
+    ``click_window`` overrides the event press-time window used as the OCR ROI.
+    Pass the drag release window when ranking the drop point.
+    """
     empty: dict[str, Any] = {
         "used_vision": False,
         "candidate_text": "",
@@ -3034,9 +3041,10 @@ def build_vision_context_at_point(
     assert bgr is not None
     offset = event.monitor_offset if event.monitor_offset is not None else (0, 0)
     yolo_error: str | None = None
-    # Prefer stored press-time click_window over live re-resolve (flyout may have
-    # closed / another window may sit under the same point after the click).
-    click_window_payload = event.click_window if isinstance(event.click_window, dict) else None
+    # Prefer the stored window over live re-resolve (flyout may have closed /
+    # another window may sit under the same point after the gesture).
+    stored_window = click_window if click_window is not None else event.click_window
+    click_window_payload = stored_window if isinstance(stored_window, dict) else None
     enhance_roi = None
     if click_window_payload is not None:
         from src.recorder.window_snapshot import resolve_ocr_roi_local
@@ -3393,6 +3401,7 @@ def run_pointer_event_yolo_ocr(
                 image_path=end_image,
                 debug_name="_end",
                 source_fingerprint=fingerprint,
+                click_window=event.end_click_window,
             )
             start_result = start_future.result()
             end_result = end_future.result()

@@ -901,6 +901,54 @@ async def test_build_vision_context_drag_includes_start_and_destination(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_drag_vision_uses_separate_click_windows(tmp_path) -> None:
+    start_shot = tmp_path / "event_start.jpeg"
+    end_shot = tmp_path / "event_end.jpeg"
+    start_shot.write_bytes(b"not-a-real-jpeg")
+    end_shot.write_bytes(b"not-a-real-jpeg")
+    event = RecordedEvent(
+        index=8,
+        timestamp_utc="t",
+        kind="drag",
+        cursor_xy=(110, 210),
+        end_xy=(310, 210),
+        monitor_offset=(100, 200),
+        end_monitor_offset=(1920, 0),
+        screenshot_path=str(start_shot),
+        end_screenshot_path=str(end_shot),
+        click_window={"hwnd": 1, "title": "圖片", "rect": [1, 2, 30, 40]},
+        end_click_window={"hwnd": 2, "title": "下載", "rect": [50, 60, 40, 30]},
+    )
+    rois: dict[int, tuple[int, int, int, int] | None] = {}
+    start_img = np.zeros((100, 100, 3), dtype=np.uint8)
+    end_img = np.full((100, 100, 3), 1, dtype=np.uint8)
+
+    def fake_imread(path):
+        name = Path(path).name.lower()
+        return end_img if "end" in name else start_img
+
+    def fake_build(bgr, **kwargs):
+        rois[int(bgr[0, 0, 0])] = kwargs.get("ocr_roi")
+        text = "end" if int(bgr[0, 0, 0]) == 1 else "start"
+        return [_detection_from_bbox((8, 8, 10, 10), YOLO_CLASS_TEXT, text=text)]
+
+    with patch(
+        "src.recorder.vision_context.imread_bgr",
+        side_effect=fake_imread,
+    ), patch(
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
+        side_effect=fake_build,
+    ), patch(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        return_value=None,
+    ):
+        await build_vision_context(event, run_dir=tmp_path, persist_debug=False)
+
+    assert rois[0] == (1, 2, 30, 40)
+    assert rois[1] == (50, 60, 40, 30)
+
+
+@pytest.mark.asyncio
 async def test_drag_destination_keeps_nearest_candidates_without_exclusion(tmp_path) -> None:
     start_shot = tmp_path / "event_start.jpeg"
     end_shot = tmp_path / "event_end.jpeg"

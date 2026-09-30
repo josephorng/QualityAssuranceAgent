@@ -103,6 +103,28 @@ def test_recorded_event_round_trip_drag_end_screenshot() -> None:
     assert restored.end_monitor_offset == (0, 0)
 
 
+def test_recorded_event_round_trip_drag_click_windows() -> None:
+    start_window = {"hwnd": 1, "title": "圖片", "rect": [0, 0, 400, 300]}
+    end_window = {"hwnd": 2, "title": "下載", "rect": [10, 20, 500, 400]}
+    event = RecordedEvent(
+        index=7,
+        timestamp_utc="2026-07-02T00:00:00+00:00",
+        kind="drag",
+        cursor_xy=(100, 200),
+        end_xy=(300, 400),
+        click_window=start_window,
+        end_click_window=end_window,
+    )
+    restored = RecordedEvent.from_dict(event.to_dict())
+    assert restored.click_window == start_window
+    assert restored.end_click_window == end_window
+    assert "end_click_window" not in RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+    ).to_dict()
+
+
 def test_recorded_event_round_trip_hold() -> None:
     event = RecordedEvent(
         index=6,

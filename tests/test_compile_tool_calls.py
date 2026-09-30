@@ -209,6 +209,28 @@ def test_compile_drag() -> None:
     ]
 
 
+def test_compile_drag_passes_start_and_destination_click_windows() -> None:
+    start_window = {"hwnd": 1, "title": "圖片", "rect": [0, 0, 800, 600]}
+    end_window = {"hwnd": 2, "title": "下載", "rect": [900, 0, 700, 500]}
+    event = _event(
+        kind="drag",
+        click_window=start_window,
+        end_click_window=end_window,
+    )
+    calls = compile_tool_calls(event, "從「A」圖示拖到「B」文字")
+    assert calls == [
+        {
+            "name": "drag",
+            "arguments": {
+                "start_instruction": "「A」圖示",
+                "destination_instruction": "「B」文字",
+                "start_click_window": start_window,
+                "destination_click_window": end_window,
+            },
+        }
+    ]
+
+
 def test_compile_drag_with_start_and_end_landmarks() -> None:
     event = _event(kind="drag")
     instruction = (

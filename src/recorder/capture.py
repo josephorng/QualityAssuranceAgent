@@ -190,6 +190,8 @@ class _DeferredCaptureJob:
     settle_frame: tuple[str, int, tuple[int, int]] | None = None
     windows_before: tuple[WindowInfo, ...] | None = None
     click_window: ClickWindowInfo | None = None
+    # Drag release window under end_xy (screen coords); localized at persist.
+    end_click_window: ClickWindowInfo | None = None
     signals_before: dict[str, Any] | None = None
     refresh_pre_type: bool = False
     # time.monotonic() when the gesture happened, for the window-settle sleep.
@@ -307,6 +309,8 @@ class _QueuedEvent:
     windows_before: tuple[WindowInfo, ...] | None = None
     # Press-time ClickWindowInfo (screen coords); localized at persist.
     click_window: ClickWindowInfo | None = None
+    # Drag release ClickWindowInfo under end_xy (screen coords); localized at persist.
+    end_click_window: ClickWindowInfo | None = None
     # Light/UIA sample copied from the pre-click cache at input time.
     signals_before: dict[str, Any] | None = None
     # time.monotonic() when the gesture happened. The window-step thread sleeps
@@ -2684,6 +2688,7 @@ class RecordingSession:
             self._left_button_down = False
             self._left_press_dragging = False
             self._last_move_xy = None
+        end_click_window = self._click_window_payload_at(x2, y2)
         self._flush_pending_text_input(shared_end_index=drag_index)
         self._remember_pointer_cursor((x2, y2))
         self._enqueue(
@@ -2699,6 +2704,7 @@ class RecordingSession:
                 press_seq=press_seq,
                 refresh_pre_type=True,
                 action_monotonic=action_monotonic,
+                end_click_window=end_click_window,
             )
         )
 
@@ -3672,6 +3678,7 @@ class RecordingSession:
                 duration_seconds=job.duration_seconds,
                 windows_before=pending_windows,
                 click_window=click_window,
+                end_click_window=job.end_click_window,
                 signals_before=signals_before,
                 action_monotonic=job.action_monotonic,
             )
@@ -4107,6 +4114,12 @@ class RecordingSession:
         if item.click_window is not None:
             offset = item.monitor_offset if item.monitor_offset is not None else (0, 0)
             click_window_payload = item.click_window.to_local_payload(offset)
+        end_click_window_payload: dict[str, Any] | None = None
+        if item.end_click_window is not None:
+            end_offset = (
+                item.end_monitor_offset if item.end_monitor_offset is not None else (0, 0)
+            )
+            end_click_window_payload = item.end_click_window.to_local_payload(end_offset)
 
         event = RecordedEvent(
             index=item.event_index,
@@ -4130,6 +4143,7 @@ class RecordingSession:
             anchor_click_xy=item.anchor_click_xy,
             focus_rect=item.focus_rect,
             click_window=click_window_payload,
+            end_click_window=end_click_window_payload,
         )
         with self._event_json_lock():
             write_json(event_json_path(run_dir, event.index), event.to_dict())

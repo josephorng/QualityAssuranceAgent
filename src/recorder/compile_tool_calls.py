@@ -291,6 +291,10 @@ def _compile_drag(event: RecordedEvent, instruction: str) -> list[dict[str, Any]
         args["start_nearby_objects"] = start_nearby
     if dest_nearby:
         args["destination_nearby_objects"] = dest_nearby
+    if isinstance(event.click_window, dict):
+        args["start_click_window"] = event.click_window
+    if isinstance(event.end_click_window, dict):
+        args["destination_click_window"] = event.end_click_window
     return [_call("drag", **args)]
 
 

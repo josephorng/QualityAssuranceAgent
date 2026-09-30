@@ -127,6 +127,50 @@ def test_left_drag_records_single_drag_event(tmp_path) -> None:
     assert raw["end_screenshot_path"].endswith("event_001_end.jpeg")
 
 
+def test_drag_records_press_and_release_click_windows(tmp_path) -> None:
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    def _window_at(x: int, y: int) -> ClickWindowInfo:
+        title = "start" if (x, y) == (100, 100) else "end"
+        hwnd = 11 if title == "start" else 22
+        left = 40 if title == "start" else 1920
+        return ClickWindowInfo(
+            hwnd=hwnd,
+            title=title,
+            process_name="explorer.exe",
+            left=left,
+            top=10,
+            width=800,
+            height=600,
+            is_maximized=False,
+        )
+
+    session = RecordingSession(runs_root=tmp_path)
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.resolve_click_window",
+        side_effect=_window_at,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.mouse import Button
+
+            session._on_mouse_click(100, 100, Button.left, True)
+            session._on_mouse_move(150, 150)
+            session._on_mouse_click(200, 200, Button.left, False)
+        finally:
+            session.stop()
+
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "drag"
+    assert raw["click_window"]["title"] == "start"
+    assert raw["click_window"]["rect"] == [40, 10, 800, 600]
+    assert raw["end_click_window"]["title"] == "end"
+    assert raw["end_click_window"]["rect"] == [1920, 10, 800, 600]
+
+
 def test_small_move_still_records_click(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
 

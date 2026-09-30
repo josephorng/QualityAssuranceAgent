@@ -271,6 +271,8 @@ async def drag(
     destination_instruction: str,
     start_nearby_objects: list[str] | None = None,
     destination_nearby_objects: list[str] | None = None,
+    start_click_window: dict | None = None,
+    destination_click_window: dict | None = None,
     duration: float = 0.5,
     button: str = "left",
 ):
@@ -285,12 +287,18 @@ async def drag(
     destination_nearby_objects: optional list of nearby landmark labels used to disambiguate
     the drag destination (e.g. ["「新增文字文件txt」文字"]). Prefer this over embedding
     （附近有…） / （終點附近有…） comments inside destination_instruction.
+    start_click_window: optional press-time window payload from recording (local rect) used
+    to gate OCR/enhance to the drag source window during replay, same as move_mouse click_window.
+    destination_click_window: optional release-time window payload from recording (local rect)
+    used to gate OCR/enhance to the drop window during replay.
     '''
     return await _drag(
         start_instruction=start_instruction,
         destination_instruction=destination_instruction,
         start_nearby_objects=start_nearby_objects,
         destination_nearby_objects=destination_nearby_objects,
+        start_click_window=start_click_window,
+        destination_click_window=destination_click_window,
         duration=duration,
         button=button,
     )

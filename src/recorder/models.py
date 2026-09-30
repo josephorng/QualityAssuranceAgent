@@ -52,6 +52,8 @@ class RecordedEvent:
     window_snapshot_debug: dict[str, Any] | None = None
     # Press-time window under the cursor (local rect) for ROI-gated vision / replay.
     click_window: dict[str, Any] | None = None
+    # Release-time window under a drag drop point (local rect). Same ROI role as click_window.
+    end_click_window: dict[str, Any] | None = None
     # UI settle measured by consecutive screenshot stability during recording.
     observed_settle_seconds: float | None = None
 
@@ -71,6 +73,8 @@ class RecordedEvent:
             data["focus_rect"] = list(self.focus_rect)
         if self.click_window is None:
             data.pop("click_window", None)
+        if self.end_click_window is None:
+            data.pop("end_click_window", None)
         if self.observed_settle_seconds is None:
             data.pop("observed_settle_seconds", None)
         return data
@@ -132,6 +136,11 @@ class RecordedEvent:
             click_window=(
                 raw.get("click_window")
                 if isinstance(raw.get("click_window"), dict)
+                else None
+            ),
+            end_click_window=(
+                raw.get("end_click_window")
+                if isinstance(raw.get("end_click_window"), dict)
                 else None
             ),
             observed_settle_seconds=(

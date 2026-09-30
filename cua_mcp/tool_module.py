@@ -245,6 +245,8 @@ async def _drag(
     destination_instruction: str,
     start_nearby_objects: list[str] | None = None,
     destination_nearby_objects: list[str] | None = None,
+    start_click_window: dict | None = None,
+    destination_click_window: dict | None = None,
     duration: float = 0.5,
     button: str = "left",
 ) -> dict[str, Any]:
@@ -274,6 +276,7 @@ async def _drag(
         x1, y1, start_meta = await resolve_mouse_point(
             start_instruction,
             nearby_objects=start_nearby_objects,
+            click_window=start_click_window,
         )
         dest_track_percent = _destination_track_percent_on_pinned_scrollbar(
             start_instruction,
@@ -295,6 +298,7 @@ async def _drag(
             x2, y2, end_meta = await resolve_mouse_point(
                 destination_instruction,
                 nearby_objects=destination_nearby_objects,
+                click_window=destination_click_window,
             )
         default_kind = "mouse_target"
     result = _drag_at_points(x1, y1, x2, y2, duration=duration, button=button)
@@ -305,6 +309,10 @@ async def _drag(
         merged["start_nearby_objects_arg"] = list(start_nearby_objects)
     if destination_nearby_objects is not None:
         merged["destination_nearby_objects_arg"] = list(destination_nearby_objects)
+    if start_click_window is not None:
+        merged["start_click_window"] = start_click_window
+    if destination_click_window is not None:
+        merged["destination_click_window"] = destination_click_window
     merged["start_target"] = dict(start_meta)
     merged["destination_target"] = dict(end_meta)
     return _with_unified_target_metadata(

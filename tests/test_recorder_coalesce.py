@@ -4,11 +4,43 @@ from src.recorder.coalesce import (
     coalesce_chinese_ime_candidate_keys,
     coalesce_consecutive_same_location_clicks,
     coalesce_consecutive_text_inputs,
+    reclassify_flyout_pick_drags_as_clicks,
     reclassify_negligible_drags_as_clicks,
     retarget_ime_candidate_end_screenshots,
     text_contains_cjk,
 )
 from src.recorder.models import RecordedEvent
+
+
+def _flyout_entry(hwnd: int = 1001) -> dict:
+    return {
+        "hwnd": hwnd,
+        "title": "快顯主機",
+        "pid": 1,
+        "left": 0,
+        "top": 100,
+        "width": 280,
+        "height": 360,
+        "is_minimized": False,
+        "is_maximized": False,
+        "class_name": "Microsoft.UI.Content.PopupWindowSiteBridge",
+        "process_name": "explorer.exe",
+    }
+
+
+def _snapshot_debug(
+    *,
+    before: list[dict] | None = None,
+    after: list[dict] | None = None,
+) -> dict:
+    before_list = list(before or [])
+    after_list = list(after or [])
+    return {
+        "windows_before_count": len(before_list),
+        "windows_after_count": len(after_list),
+        "windows_before": before_list,
+        "windows_after": after_list,
+    }
 
 
 def _text_event(index: int, text: str) -> RecordedEvent:
@@ -41,27 +73,6 @@ def _key_press_event(
     )
 
 
-def _click_event(
-    index: int,
-    *,
-    timestamp_utc: str,
-    cursor_xy: tuple[int, int] = (100, 200),
-    kind: str = "click",
-    button: str = "left",
-    modifiers: list[str] | None = None,
-    screenshot_path: str = "",
-) -> RecordedEvent:
-    return RecordedEvent(
-        index=index,
-        timestamp_utc=timestamp_utc,
-        kind=kind,
-        cursor_xy=cursor_xy,
-        button=button,
-        modifiers=modifiers,
-        screenshot_path=screenshot_path,
-    )
-
-
 def _drag_event(
     index: int,
     *,
@@ -69,6 +80,7 @@ def _drag_event(
     end_xy: tuple[int, int],
     timestamp_utc: str = "2026-08-12T00:00:00+00:00",
     screenshot_path: str = "drag.jpeg",
+    window_snapshot_debug: dict | None = None,
 ) -> RecordedEvent:
     return RecordedEvent(
         index=index,
@@ -81,6 +93,30 @@ def _drag_event(
         end_screenshot_path="drag_end.jpeg",
         end_monitor_index=1,
         end_monitor_offset=(0, 0),
+        window_snapshot_debug=window_snapshot_debug,
+    )
+
+
+def _click_event(
+    index: int,
+    *,
+    timestamp_utc: str,
+    cursor_xy: tuple[int, int] = (100, 200),
+    kind: str = "click",
+    button: str = "left",
+    modifiers: list[str] | None = None,
+    screenshot_path: str = "",
+    window_snapshot_debug: dict | None = None,
+) -> RecordedEvent:
+    return RecordedEvent(
+        index=index,
+        timestamp_utc=timestamp_utc,
+        kind=kind,
+        cursor_xy=cursor_xy,
+        button=button,
+        modifiers=modifiers,
+        screenshot_path=screenshot_path,
+        window_snapshot_debug=window_snapshot_debug,
     )
 
 
@@ -394,3 +430,83 @@ def test_reclassify_then_coalesce_with_adjacent_click() -> None:
     assert len(result) == 1
     assert result[0].kind == "double_click"
     assert result[0].screenshot_path == "a.jpeg"
+
+
+def test_reclassify_flyout_pick_drag_as_click() -> None:
+    """Toolbar→flyout false drag + pick click → click at press, keep pick."""
+    flyout = _flyout_entry()
+    events = [
+        _drag_event(
+            8,
+            cursor_xy=(61, 107),
+            end_xy=(82, 374),
+            window_snapshot_debug=_snapshot_debug(before=[], after=[flyout]),
+        ),
+        _click_event(
+            9,
+            timestamp_utc="2026-09-29T09:02:29+00:00",
+            cursor_xy=(82, 374),
+            window_snapshot_debug=_snapshot_debug(before=[flyout], after=[]),
+        ),
+    ]
+    result = reclassify_flyout_pick_drags_as_clicks(events)
+    assert len(result) == 2
+    assert result[0].kind == "click"
+    assert result[0].cursor_xy == (61, 107)
+    assert result[0].end_xy is None
+    assert result[1].kind == "click"
+    assert result[1].cursor_xy == (82, 374)
+
+
+def test_reclassify_flyout_pick_keeps_drag_without_flyout() -> None:
+    events = [
+        _drag_event(1, cursor_xy=(100, 100), end_xy=(200, 200)),
+        _click_event(
+            2,
+            timestamp_utc="t2",
+            cursor_xy=(200, 200),
+        ),
+    ]
+    result = reclassify_flyout_pick_drags_as_clicks(events)
+    assert result[0].kind == "drag"
+    assert result[0].end_xy == (200, 200)
+
+
+def test_reclassify_flyout_pick_keeps_drag_when_pick_far_from_end() -> None:
+    flyout = _flyout_entry()
+    events = [
+        _drag_event(
+            1,
+            cursor_xy=(61, 107),
+            end_xy=(82, 374),
+            window_snapshot_debug=_snapshot_debug(before=[], after=[flyout]),
+        ),
+        _click_event(
+            2,
+            timestamp_utc="t2",
+            cursor_xy=(500, 500),
+            window_snapshot_debug=_snapshot_debug(before=[flyout], after=[]),
+        ),
+    ]
+    result = reclassify_flyout_pick_drags_as_clicks(events)
+    assert result[0].kind == "drag"
+
+
+def test_reclassify_flyout_pick_keeps_drag_when_flyout_still_open() -> None:
+    flyout = _flyout_entry()
+    events = [
+        _drag_event(
+            1,
+            cursor_xy=(61, 107),
+            end_xy=(82, 374),
+            window_snapshot_debug=_snapshot_debug(before=[], after=[flyout]),
+        ),
+        _click_event(
+            2,
+            timestamp_utc="t2",
+            cursor_xy=(82, 374),
+            window_snapshot_debug=_snapshot_debug(before=[flyout], after=[flyout]),
+        ),
+    ]
+    result = reclassify_flyout_pick_drags_as_clicks(events)
+    assert result[0].kind == "drag"

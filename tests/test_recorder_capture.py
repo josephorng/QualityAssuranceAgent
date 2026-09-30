@@ -68,6 +68,11 @@ def _default_capture_window_patches():
     ), patch(
         "src.recorder.verify_signals.read_uia_for_kind",
         return_value={},
+    ), patch(
+        # Simulated clicks do not hold the real OS button; keep presses sticky
+        # unless a test explicitly patches a missed-up (False).
+        "src.recorder.capture._os_mouse_button_down",
+        return_value=True,
     ):
         yield
 
@@ -169,6 +174,100 @@ def test_drag_returning_near_start_records_click(tmp_path) -> None:
     assert raw["kind"] == "click"
     assert raw["cursor_xy"] == [2698, 278]
     assert raw.get("end_xy") is None
+
+
+def test_left_up_inside_ignore_rect_still_releases_tracked_press(tmp_path) -> None:
+    """Down outside ignore + up inside must not leave a sticky press → false drag."""
+    session = RecordingSession(runs_root=tmp_path)
+    ignore = (500, 500, 200, 200)  # covers (550, 550)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start(ignore_rect=ignore)
+        try:
+            from pynput.mouse import Button
+
+            session._on_mouse_click(100, 100, Button.left, True)
+            # Release lands inside ignore rect — must still clear the press.
+            session._on_mouse_click(550, 550, Button.left, False)
+            time.sleep(_DOUBLE_CLICK_INTERVAL_S + 0.05)
+            # Far move after release must not become a drag.
+            session._on_mouse_move(100, 400)
+            _left_click(session, 100, 400)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 2
+    first = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    second = json.loads((run_dir / "events" / "event_002.json").read_text(encoding="utf-8"))
+    assert first["kind"] == "click"
+    assert first["cursor_xy"] == [100, 100]
+    assert second["kind"] == "click"
+    assert second["cursor_xy"] == [100, 400]
+
+
+def test_os_reconcile_missed_left_up_emits_click_not_drag(tmp_path) -> None:
+    """If OS says left is up while we track a press, synthesize up at press point."""
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture._os_mouse_button_down",
+        return_value=False,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.mouse import Button
+
+            session._on_mouse_click(61, 107, Button.left, True)
+            # Missed up: move far with OS reporting button up → click at press.
+            session._on_mouse_move(82, 374)
+            time.sleep(_DOUBLE_CLICK_INTERVAL_S + 0.05)
+            # Real second click on the flyout pick.
+            _left_click(session, 82, 374)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 2
+    first = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    second = json.loads((run_dir / "events" / "event_002.json").read_text(encoding="utf-8"))
+    assert first["kind"] == "click"
+    assert first["cursor_xy"] == [61, 107]
+    assert first.get("end_xy") is None
+    assert second["kind"] == "click"
+    assert second["cursor_xy"] == [82, 374]
+
+
+def test_os_reconcile_keeps_real_drag_when_button_still_down(tmp_path) -> None:
+    """OS still down + far move + far release → drag (unchanged)."""
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture._os_mouse_button_down",
+        return_value=True,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.mouse import Button
+
+            session._on_mouse_click(100, 100, Button.left, True)
+            session._on_mouse_move(150, 150)
+            session._on_mouse_click(200, 200, Button.left, False)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "drag"
+    assert raw["cursor_xy"] == [100, 100]
+    assert raw["end_xy"] == [200, 200]
 
 
 def test_keyboard_events_not_filtered_by_ignore_rect(tmp_path) -> None:

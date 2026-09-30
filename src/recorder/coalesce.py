@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from src.recorder.models import RecordedEvent
+from src.recorder.window_snapshot import should_ignore_window_change
 
 _MULTI_CLICK_MAX_GAP_S = 1.0
 _MULTI_CLICK_MAX_DIST_PX = 8
 # Match capture._DRAG_THRESHOLD_PX: start/end within this → treat drag as click.
 _NEGLIGIBLE_DRAG_DIST_PX = 8
+# Follow-up flyout pick may land a few px off the drag end (menu item targeting).
+_FLYOUT_PICK_MAX_DIST_PX = 16
 _COALESCABLE_CLICK_KINDS = frozenset({"click", "double_click", "triple_click"})
 _IME_CANDIDATE_KEYS = frozenset({"up", "down", "left", "right", "enter"})
 
@@ -354,6 +358,86 @@ def reclassify_negligible_drags_as_clicks(
         _drag_as_click(event) if _drag_start_end_too_close(event) else event
         for event in events
     ]
+
+
+def _debug_window_entries(debug: dict[str, Any] | None, key: str) -> list[dict[str, Any]]:
+    if not isinstance(debug, dict):
+        return []
+    raw = debug.get(key)
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def _flyout_hwnds(entries: list[dict[str, Any]]) -> set[int]:
+    hwnds: set[int] = set()
+    for item in entries:
+        if not should_ignore_window_change(item):
+            continue
+        try:
+            hwnds.add(int(item["hwnd"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return hwnds
+
+
+def _flyout_appeared(debug: dict[str, Any] | None) -> bool:
+    """True when a shell flyout hwnd is present after but not before."""
+    before = _flyout_hwnds(_debug_window_entries(debug, "windows_before"))
+    after = _flyout_hwnds(_debug_window_entries(debug, "windows_after"))
+    return bool(after - before)
+
+
+def _flyout_dismissed(debug: dict[str, Any] | None) -> bool:
+    """True when a shell flyout hwnd is present before but not after."""
+    before = _flyout_hwnds(_debug_window_entries(debug, "windows_before"))
+    after = _flyout_hwnds(_debug_window_entries(debug, "windows_after"))
+    return bool(before - after)
+
+
+def _points_within(a: tuple[int, int], b: tuple[int, int], max_dist: int) -> bool:
+    return abs(a[0] - b[0]) <= max_dist and abs(a[1] - b[1]) <= max_dist
+
+
+def _is_flyout_pick_false_drag(drag: RecordedEvent, pick: RecordedEvent) -> bool:
+    """Toolbar click → flyout pick mis-recorded as one drag, then a real pick click."""
+    if drag.kind != "drag" or pick.kind not in _COALESCABLE_CLICK_KINDS:
+        return False
+    if (pick.button or "left") != "left":
+        return False
+    if drag.cursor_xy is None or drag.end_xy is None or pick.cursor_xy is None:
+        return False
+    if not _points_within(drag.end_xy, pick.cursor_xy, _FLYOUT_PICK_MAX_DIST_PX):
+        return False
+    if not _flyout_appeared(drag.window_snapshot_debug):
+        return False
+    if not _flyout_dismissed(pick.window_snapshot_debug):
+        return False
+    return True
+
+
+def reclassify_flyout_pick_drags_as_clicks(
+    events: list[RecordedEvent],
+) -> list[RecordedEvent]:
+    """Split false toolbar→flyout drags into a click at the press point.
+
+    Pattern: drag opens a shell flyout and leaves it open; the next left click
+    near the drag end dismisses that flyout (the real menu pick). Convert the
+    drag to a click at ``cursor_xy`` and keep the pick click.
+    """
+    if not events:
+        return []
+    out: list[RecordedEvent] = []
+    i = 0
+    while i < len(events):
+        cur = events[i]
+        if i + 1 < len(events) and _is_flyout_pick_false_drag(cur, events[i + 1]):
+            out.append(_drag_as_click(cur))
+            i += 1
+            continue
+        out.append(cur)
+        i += 1
+    return out
 
 
 def coalesce_consecutive_same_location_clicks(

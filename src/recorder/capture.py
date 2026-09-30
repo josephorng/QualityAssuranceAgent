@@ -499,12 +499,29 @@ def capture_final_after_screenshot(
         return None
 
 
+_VK_LBUTTON = 0x01
+
+
 def _normalize_button(button: mouse.Button) -> str:
     if button == mouse.Button.right:
         return "right"
     if button == mouse.Button.middle:
         return "middle"
     return "left"
+
+
+def _os_mouse_button_down(vk: int) -> bool | None:
+    """Return whether the OS currently reports ``vk`` as down.
+
+    ``None`` means unavailable (non-Windows or query failed) — callers must
+    trust pynput and must not synthesize a release.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        return bool(ctypes.windll.user32.GetAsyncKeyState(int(vk)) & 0x8000)
+    except Exception:
+        return None
 
 
 def _ascii_control_to_letter(ch: str) -> str | None:
@@ -4124,6 +4141,13 @@ class RecordingSession:
                 return
             sx, sy, _btn = self._pending_click_coords
             dragging = self._left_press_dragging
+        # Missed mouse-up: OS says released but we still track a press. Synthesize
+        # up at the press point so a later far move cannot become a false drag
+        # (toolbar click → flyout pick).
+        os_down = _os_mouse_button_down(_VK_LBUTTON)
+        if os_down is False:
+            self._on_left_mouse_up(sx, sy)
+            return
         if dragging:
             return
         if abs(sx - ix) > _DRAG_THRESHOLD_PX or abs(sy - iy) > _DRAG_THRESHOLD_PX:
@@ -4276,10 +4300,25 @@ class RecordingSession:
 
     def _on_mouse_click(self, x: int, y: int, button: mouse.Button, pressed: bool) -> None:
         timestamp_utc = utc_now_iso()
-        if self._should_ignore_mouse_point(int(x), int(y)):
-            return
         btn = _normalize_button(button)
         ix, iy = int(x), int(y)
+        # Never drop a release while we already track that button as down —
+        # ignore_rect must not swallow the matching up (sticky press → false drag).
+        if not pressed:
+            if btn == "left":
+                with self._lock:
+                    tracking_left = self._left_button_down
+                if tracking_left:
+                    self._on_left_mouse_up(ix, iy)
+                    return
+            elif btn == "right":
+                with self._lock:
+                    tracking_right = self._pending_right_coords is not None
+                if tracking_right:
+                    self._on_right_mouse_up(ix, iy)
+                    return
+        if self._should_ignore_mouse_point(ix, iy):
+            return
         if btn == "left":
             if pressed:
                 self._on_left_mouse_down(ix, iy, btn, timestamp_utc=timestamp_utc)

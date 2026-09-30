@@ -27,6 +27,7 @@ from src.recorder.coalesce import (
     coalesce_chinese_ime_candidate_keys,
     coalesce_consecutive_same_location_clicks,
     coalesce_consecutive_text_inputs,
+    reclassify_flyout_pick_drags_as_clicks,
     reclassify_negligible_drags_as_clicks,
     retarget_ime_candidate_end_screenshots,
     text_contains_cjk,
@@ -965,7 +966,9 @@ async def analyze_recording_session(
         events = coalesce_consecutive_same_location_clicks(
             retarget_ime_candidate_end_screenshots(
                 coalesce_consecutive_text_inputs(
-                    reclassify_negligible_drags_as_clicks(_load_events(run_dir))
+                    reclassify_flyout_pick_drags_as_clicks(
+                        reclassify_negligible_drags_as_clicks(_load_events(run_dir))
+                    )
                 )
             )
         )

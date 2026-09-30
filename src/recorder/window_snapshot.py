@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import re
 from dataclasses import asdict, dataclass
 from typing import Any, Sequence
 
@@ -1325,6 +1326,142 @@ def window_verify_has_assertions(predicate: dict[str, Any] | None) -> bool:
     from src.recorder.verify_signals import predicate_has_signal_assertions
 
     return predicate_has_signal_assertions(predicate)
+
+
+# List fields the recording HTML can toggle one entry at a time.
+_ITEMIZED_VERIFY_KEYS = frozenset(
+    {
+        "appeared",
+        "disappeared",
+        "state",
+        "process_started",
+        "process_exited",
+    }
+)
+_VERIFY_SELECTOR_RE = re.compile(r"^([a-z_]+)(?::(\d+))?$")
+
+
+def _selector_sort_key(selector: str) -> tuple[str, int]:
+    key, _, index = selector.partition(":")
+    return (key, int(index) if index.isdigit() else -1)
+
+
+def normalize_window_verify_disabled(
+    predicate: dict[str, Any] | None,
+    disabled: Any,
+    *,
+    strict: bool = True,
+) -> list[str]:
+    """Return sorted ``key`` / ``key:index`` selectors for unchecked conditions.
+
+    Itemized keys (appeared, disappeared, state, process start/exit) use
+    ``key:index``. Other fields use the bare key. ``strict`` raises
+    ``ValueError`` for a malformed payload; otherwise invalid entries are dropped.
+    """
+    if not isinstance(disabled, list):
+        if strict:
+            raise ValueError("disabled must be a list of strings")
+        return []
+    recorded = predicate if isinstance(predicate, dict) else {}
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for item in disabled:
+        if not isinstance(item, str) or not item.strip():
+            if strict:
+                raise ValueError("disabled entries must be strings")
+            continue
+        selector = item.strip()
+        match = _VERIFY_SELECTOR_RE.fullmatch(selector)
+        if match is None:
+            if strict:
+                raise ValueError(f"invalid verify condition: {selector}")
+            continue
+        key = match.group(1)
+        index_raw = match.group(2)
+        if key not in recorded:
+            if strict:
+                raise ValueError(f"unknown verify condition: {key}")
+            continue
+        value = recorded.get(key)
+        if index_raw is None:
+            if key in _ITEMIZED_VERIFY_KEYS:
+                if strict:
+                    raise ValueError(f"{key} conditions must include an index")
+                continue
+            stored = key
+        else:
+            if key not in _ITEMIZED_VERIFY_KEYS or not isinstance(value, list):
+                if strict:
+                    raise ValueError(f"{key} is not a list condition")
+                continue
+            index = int(index_raw)
+            if index < 0 or index >= len(value):
+                if strict:
+                    raise ValueError(f"verify condition index out of range: {selector}")
+                continue
+            stored = f"{key}:{index}"
+        if stored not in seen:
+            seen.add(stored)
+            normalized.append(stored)
+    normalized.sort(key=_selector_sort_key)
+    return normalized
+
+
+def window_verify_condition_enabled(
+    disabled: Any,
+    key: str,
+    index: int | None = None,
+) -> bool:
+    """True when this displayed condition is still checked."""
+    selectors = _raw_verify_selectors(disabled)
+    if index is None:
+        return key not in selectors
+    return key not in selectors and f"{key}:{index}" not in selectors
+
+
+def _raw_verify_selectors(disabled: Any) -> set[str]:
+    """Lenient selector set used for display and filtering."""
+    if not isinstance(disabled, list):
+        return set()
+    found: set[str] = set()
+    for item in disabled:
+        if not isinstance(item, str):
+            continue
+        selector = item.strip()
+        if _VERIFY_SELECTOR_RE.fullmatch(selector):
+            found.add(selector)
+    return found
+
+
+def filter_disabled_window_verify(
+    predicate: dict[str, Any] | None,
+    disabled: Any,
+) -> dict[str, Any]:
+    """Drop conditions the user unchecked in ``recording_steps.html``."""
+    if not isinstance(predicate, dict) or not predicate:
+        return {}
+    selectors = _raw_verify_selectors(disabled)
+    if not selectors:
+        return dict(predicate)
+    whole = {selector for selector in selectors if ":" not in selector}
+    indexed: dict[str, set[int]] = {}
+    for selector in selectors:
+        if ":" not in selector:
+            continue
+        key, _, raw_index = selector.partition(":")
+        indexed.setdefault(key, set()).add(int(raw_index))
+    filtered: dict[str, Any] = {}
+    for key, value in predicate.items():
+        if key in whole:
+            continue
+        drop = indexed.get(key)
+        if drop and key in _ITEMIZED_VERIFY_KEYS and isinstance(value, list):
+            kept = [item for item_index, item in enumerate(value) if item_index not in drop]
+            if kept:
+                filtered[key] = kept
+            continue
+        filtered[key] = value
+    return filtered
 
 
 def _entry_identity(entry: dict[str, Any]) -> tuple[str, str, str]:

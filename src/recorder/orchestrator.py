@@ -41,6 +41,7 @@ from src.recorder.text_resolve import event_with_resolved_text, resolve_text_inp
 from src.recorder.models import RecordedEvent, final_after_screenshot_path
 from src.recorder.window_snapshot import (
     is_agent_app_restore,
+    normalize_window_verify_disabled,
     resolve_window_change,
     window_verify_from_debug,
 )
@@ -656,6 +657,24 @@ async def _analyze_all_event_instructions(
     return results, cancelled
 
 
+def _preserved_window_verify_disabled(
+    analysis_path: Path,
+    predicate: dict[str, Any],
+) -> list[str]:
+    """Keep unchecked conditions across re-analysis when they still apply."""
+    try:
+        existing = read_json(analysis_path, None)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(existing, dict):
+        return []
+    return normalize_window_verify_disabled(
+        predicate,
+        existing.get("window_verify_disabled"),
+        strict=False,
+    )
+
+
 def _write_event_analysis(
     analysis_path: Path,
     *,
@@ -672,6 +691,8 @@ def _write_event_analysis(
     from src.recorder.compile_tool_calls import compile_tool_calls
 
     tool_calls = compile_tool_calls(event, instruction)
+    window_verify = window_verify_from_debug(event.window_snapshot_debug)
+    disabled = _preserved_window_verify_disabled(analysis_path, window_verify)
     write_json(
         analysis_path,
         {
@@ -717,7 +738,12 @@ def _write_event_analysis(
                 if event.window_snapshot_debug is not None
                 else {}
             ),
-            "window_verify": window_verify_from_debug(event.window_snapshot_debug),
+            "window_verify": window_verify,
+            **(
+                {"window_verify_disabled": disabled}
+                if disabled
+                else {}
+            ),
             **({"tool_calls": tool_calls} if tool_calls is not None else {}),
         },
     )

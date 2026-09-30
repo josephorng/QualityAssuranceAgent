@@ -17,6 +17,9 @@ from src.recorder.window_snapshot import (
     is_agent_app_restore,
     resolve_window_change,
     settle_delay_for_click,
+    filter_disabled_window_verify,
+    normalize_window_verify_disabled,
+    window_verify_condition_enabled,
     window_verify_satisfied,
     window_verify_from_debug,
     snapshot_top_level_windows,
@@ -1867,3 +1870,44 @@ def test_window_verify_uia_signals_only_when_the_step_changed_them(monkeypatch) 
     ok, reason = window_verify_satisfied(scrolled, {}, live_after={"scroll": 50.0})
     assert ok is False
     assert "scroll" in reason
+
+
+def test_filter_disabled_window_verify_drops_unchecked_entries() -> None:
+    predicate = {
+        "disappeared": [
+            {"title": "快顯主機", "class_name": "Popup", "process_name": "explorer.exe"},
+            {"title": "檔案總管", "class_name": "CabinetWClass", "process_name": "explorer.exe"},
+        ],
+        "click_window": {
+            "title": "檔案總管",
+            "class_name": "CabinetWClass",
+            "process_name": "explorer.exe",
+        },
+        "clipboard": "copied",
+    }
+    assert normalize_window_verify_disabled(
+        predicate, ["click_window", "disappeared:0", "disappeared:0"]
+    ) == ["click_window", "disappeared:0"]
+    assert window_verify_condition_enabled(["disappeared:0"], "disappeared", 0) is False
+    assert window_verify_condition_enabled(["disappeared:0"], "disappeared", 1) is True
+    filtered = filter_disabled_window_verify(
+        predicate, ["disappeared:0", "click_window"]
+    )
+    assert filtered == {
+        "disappeared": [
+            {"title": "檔案總管", "class_name": "CabinetWClass", "process_name": "explorer.exe"}
+        ],
+        "clipboard": "copied",
+    }
+    assert (
+        filter_disabled_window_verify(
+            predicate,
+            ["clipboard", "disappeared:0", "disappeared:1", "click_window"],
+        )
+        == {}
+    )
+    with pytest.raises(ValueError):
+        normalize_window_verify_disabled(predicate, ["disappeared"])
+    with pytest.raises(ValueError):
+        normalize_window_verify_disabled(predicate, ["disappeared:9"])
+    assert normalize_window_verify_disabled(predicate, ["missing", "disappeared:9"], strict=False) == []

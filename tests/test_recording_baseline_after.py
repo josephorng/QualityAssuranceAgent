@@ -19,6 +19,7 @@ from src.common.script_helper import (
     collect_recording_baseline_after_paths,
     collect_recording_instructions,
     collect_recording_settle_after_seconds,
+    collect_recording_window_verifies,
 )
 
 
@@ -227,3 +228,47 @@ def test_prepare_run_session_drops_baselines_when_script_edited(tmp_path: Path, 
     settles = json.loads(os.environ[SCRIPT_SETTLE_AFTER_ENV])
     assert baselines == [None]
     assert settles == [None]
+
+
+def test_collect_recording_window_verifies_skips_unchecked(tmp_path: Path) -> None:
+    run_dir = tmp_path / "rec_verify"
+    (run_dir / "events").mkdir(parents=True)
+    (run_dir / "analysis").mkdir()
+    (run_dir / "events" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "index": 1,
+                "timestamp_utc": "2026-09-07T00:00:00+00:00",
+                "kind": "click",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "instruction": "點擊「搜尋」",
+                "window_verify": {
+                    "disappeared": [
+                        {"title": "快顯主機", "class_name": "Popup", "process_name": "explorer.exe"},
+                        {"title": "檔案總管", "class_name": "CabinetWClass", "process_name": "explorer.exe"},
+                    ],
+                    "clipboard": "copied",
+                },
+                "window_verify_disabled": ["disappeared:0", "clipboard"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    verifies = collect_recording_window_verifies(run_dir)
+
+    assert verifies == [
+        {
+            "disappeared": [
+                {"title": "檔案總管", "class_name": "CabinetWClass", "process_name": "explorer.exe"}
+            ]
+        }
+    ]

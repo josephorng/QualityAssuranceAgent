@@ -15,6 +15,7 @@ from src.common.runs_report_server import (
     apply_recording_event_instruction,
     apply_recording_event_landmarks,
     apply_recording_event_text,
+    apply_recording_event_verify_conditions,
     delete_recording_event,
     delete_recording_events,
     delete_run_report_folder,
@@ -1383,6 +1384,56 @@ def test_apply_recording_event_expected_outcome_persists_and_rebuilds(
     assert 'class="expected-outcome-input"' in html
     assert "對話框已開啟" in html
     assert 'data-expected-outcome="對話框已開啟"' in html
+
+
+def test_apply_recording_event_verify_conditions_persists_unchecked(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_landmark_run(runs_root, "recording_verify_toggle")
+    analysis_path = run_root / "analysis" / "event_001.json"
+    analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+    analysis["window_verify"] = {
+        "disappeared": [
+            {"title": "快顯主機", "class_name": "Popup", "process_name": "explorer.exe"},
+            {"title": "檔案總管", "class_name": "CabinetWClass", "process_name": "explorer.exe"},
+        ],
+        "clipboard": "copied",
+    }
+    analysis_path.write_text(json.dumps(analysis, ensure_ascii=False), encoding="utf-8")
+
+    result = apply_recording_event_verify_conditions(
+        runs_root,
+        "recording_verify_toggle",
+        1,
+        disabled=["disappeared:0", "clipboard"],
+    )
+
+    assert result == {"disabled": ["clipboard", "disappeared:0"]}
+    saved = json.loads(analysis_path.read_text(encoding="utf-8"))
+    assert saved["window_verify_disabled"] == ["clipboard", "disappeared:0"]
+    assert len(saved["window_verify"]["disappeared"]) == 2
+    html = (run_root / "recording_steps.html").read_text(encoding="utf-8")
+    assert 'data-verify-key="disappeared" data-verify-index="0">' in html
+    assert 'data-verify-key="disappeared" data-verify-index="1" checked' in html
+    assert 'data-verify-key="clipboard">' in html
+
+    cleared = apply_recording_event_verify_conditions(
+        runs_root,
+        "recording_verify_toggle",
+        1,
+        disabled=[],
+    )
+    assert cleared == {"disabled": []}
+    saved = json.loads(analysis_path.read_text(encoding="utf-8"))
+    assert "window_verify_disabled" not in saved
+    with pytest.raises(ValueError):
+        apply_recording_event_verify_conditions(
+            runs_root,
+            "recording_verify_toggle",
+            1,
+            disabled=["disappeared"],
+        )
 
 
 def test_apply_recording_event_expected_outcome_clears_when_empty(

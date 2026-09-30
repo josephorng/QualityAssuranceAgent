@@ -433,19 +433,29 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 }
 .verify-conditions-title {
   margin: 0 0 .5rem; font-size: .9rem; font-weight: 700; color: #57606a;
+  display: flex; flex-wrap: wrap; align-items: center; gap: .5rem;
 }
-.verify-conditions .meta { margin: 0; }
-.verify-conditions .meta dl {
-  display: grid; grid-template-columns: 8.5rem minmax(0, 1fr);
-  gap: .35rem .75rem; margin: 0;
+.verify-conditions-status {
+  font-size: .75rem; font-weight: 600; color: #57606a;
 }
-.verify-conditions .meta dt {
-  margin: 0; color: #57606a; font-size: .8rem; font-weight: 600;
+.verify-conditions-status.error { color: #cf222e; }
+.verify-conditions-list {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: .35rem;
 }
-.verify-conditions .meta dd {
-  margin: 0; color: #1f2328; font-size: .9rem; word-break: break-word;
+.verify-condition-row label {
+  display: grid; grid-template-columns: auto 8.5rem minmax(0, 1fr);
+  gap: .35rem .75rem; align-items: start; cursor: pointer; margin: 0;
 }
-.verify-conditions .meta dd .mono { font-size: .85rem; }
+.verify-condition-row input { margin: .15rem 0 0; cursor: pointer; }
+.verify-condition-label {
+  color: #57606a; font-size: .8rem; font-weight: 600;
+}
+.verify-condition-value {
+  color: #1f2328; font-size: .9rem; word-break: break-word;
+}
+.verify-condition-value .mono { font-size: .85rem; }
+.verify-condition-row.is-off .verify-condition-value { color: #8c959f; }
 .verify-conditions-empty {
   margin: 0; color: #57606a; font-size: .9rem;
 }
@@ -1621,10 +1631,11 @@ _RECORDING_SCRIPT = """
       event.stopPropagation();
       var group = checkbox.closest(".instruction-group");
       if (!group) return;
+      syncExpectedOutcomeVerifyRow(group, checkbox.checked);
       var panel = group.querySelector(".expected-outcome");
       var btn = panel ? panel.querySelector("button.apply-expected-outcome") : null;
       if (btn) {
-        applyExpectedOutcome(btn);
+        applyExpectedOutcome(btn, checkbox);
         return;
       }
       applyVerificationToggle(group, checkbox);
@@ -1660,12 +1671,14 @@ _RECORDING_SCRIPT = """
           checkbox.disabled = false;
           if (!result.ok || !result.payload || !result.payload.ok) {
             checkbox.checked = !enabled;
+            syncExpectedOutcomeVerifyRow(group, checkbox.checked);
             return;
           }
           var saved = result.payload.expected_outcome;
           if (saved == null) saved = "";
           var savedEnabled = !!result.payload.use_expected_outcome;
           checkbox.checked = savedEnabled;
+          syncExpectedOutcomeVerifyRow(group, savedEnabled);
           if (copyBtn) {
             if (savedEnabled && saved) {
               copyBtn.setAttribute("data-expected-outcome", saved);
@@ -1679,30 +1692,183 @@ _RECORDING_SCRIPT = """
         .catch(function () {
           checkbox.disabled = false;
           checkbox.checked = !enabled;
+          syncExpectedOutcomeVerifyRow(group, checkbox.checked);
         });
   }
 
-  function applyExpectedOutcome(btn) {
+  function setVerifyConditionOff(checkbox, off) {
+    var row = checkbox.closest(".verify-condition-row");
+    if (row) row.classList.toggle("is-off", !!off);
+  }
+
+  function syncExpectedOutcomeVerifyRow(group, enabled) {
+    if (!group) return;
+    var box = group.querySelector('input.use-verify-condition[data-verify-key="expected_outcome"]');
+    if (!box) return;
+    box.checked = !!enabled;
+    setVerifyConditionOff(box, !enabled);
+  }
+
+  function setVerifyConditionsStatus(group, text, isError) {
+    var status = group.querySelector(".verify-conditions-status");
+    if (!status) return;
+    status.textContent = text || "";
+    if (isError) status.classList.add("error");
+    else status.classList.remove("error");
+  }
+
+  function verifyConditionSelector(checkbox) {
+    var key = checkbox.getAttribute("data-verify-key") || "";
+    if (!key || key === "expected_outcome") return "";
+    var index = checkbox.getAttribute("data-verify-index");
+    if (index == null || index === "") return key;
+    return key + ":" + index;
+  }
+
+  function collectDisabledVerifyConditions(group) {
+    var disabled = [];
+    Array.prototype.slice.call(group.querySelectorAll("input.use-verify-condition")).forEach(function (box) {
+      if (box.checked) return;
+      var selector = verifyConditionSelector(box);
+      if (selector) disabled.push(selector);
+    });
+    return disabled;
+  }
+
+  function setWindowVerifyBusy(group, busy) {
+    Array.prototype.slice.call(group.querySelectorAll("input.use-verify-condition")).forEach(function (box) {
+      if (box.getAttribute("data-verify-key") === "expected_outcome") return;
+      box.disabled = !!busy;
+    });
+  }
+
+  function applyVerifyConditions(group, checkbox) {
+    var previous = !checkbox.checked;
+    if (window.location.protocol === "file:") {
+      checkbox.checked = previous;
+      setVerifyConditionOff(checkbox, !checkbox.checked);
+      setVerifyConditionsStatus(group, "請透過主程式開啟報告以修改驗證條件。", true);
+      return;
+    }
+    var runId = group.getAttribute("data-run-id") || "";
+    var eventIndex = group.getAttribute("data-event-index") || "";
+    if (!runId || !eventIndex) {
+      checkbox.checked = previous;
+      setVerifyConditionOff(checkbox, !checkbox.checked);
+      setVerifyConditionsStatus(group, "缺少事件資訊。", true);
+      return;
+    }
+    var disabled = collectDisabledVerifyConditions(group);
+    setWindowVerifyBusy(group, true);
+    setVerifyConditionsStatus(group, "儲存中…", false);
+    fetch("/api/runs/" + encodeURIComponent(runId) + "/events/" + encodeURIComponent(eventIndex) + "/verify_conditions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ disabled: disabled })
+    })
+      .then(function (response) {
+        return response.json().then(function (payload) {
+          return { ok: response.ok, payload: payload };
+        });
+      })
+      .then(function (result) {
+        setWindowVerifyBusy(group, false);
+        if (!result.ok || !result.payload || !result.payload.ok) {
+          checkbox.checked = previous;
+          setVerifyConditionOff(checkbox, !checkbox.checked);
+          var err = (result.payload && result.payload.error) || "儲存失敗";
+          setVerifyConditionsStatus(group, err, true);
+          return;
+        }
+        var saved = result.payload.disabled;
+        if (!Array.isArray(saved)) saved = [];
+        var savedSet = {};
+        saved.forEach(function (selector) { savedSet[selector] = true; });
+        Array.prototype.slice.call(group.querySelectorAll("input.use-verify-condition")).forEach(function (box) {
+          var selector = verifyConditionSelector(box);
+          if (!selector) return;
+          var on = !savedSet[selector];
+          box.checked = on;
+          setVerifyConditionOff(box, !on);
+        });
+        setVerifyConditionsStatus(group, "已儲存", false);
+        window.setTimeout(function () {
+          var status = group.querySelector(".verify-conditions-status");
+          if (status && status.textContent === "已儲存") status.textContent = "";
+        }, 1200);
+      })
+      .catch(function () {
+        setWindowVerifyBusy(group, false);
+        checkbox.checked = previous;
+        setVerifyConditionOff(checkbox, !checkbox.checked);
+        setVerifyConditionsStatus(group, "無法連線主程式，請確認主程式正在執行。", true);
+      });
+  }
+
+  Array.prototype.slice.call(document.querySelectorAll("input.use-verify-condition")).forEach(function (checkbox) {
+    checkbox.addEventListener("click", function (event) {
+      event.stopPropagation();
+    });
+    checkbox.addEventListener("change", function (event) {
+      event.stopPropagation();
+      var group = checkbox.closest(".instruction-group");
+      if (!group) return;
+      setVerifyConditionOff(checkbox, !checkbox.checked);
+      if (checkbox.getAttribute("data-verify-key") === "expected_outcome") {
+        var summaryBox = group.querySelector(".verify-step input.use-expected-outcome");
+        if (summaryBox) summaryBox.checked = checkbox.checked;
+        var outcomePanel = group.querySelector(".expected-outcome");
+        var outcomeBtn = outcomePanel ? outcomePanel.querySelector("button.apply-expected-outcome") : null;
+        if (outcomeBtn) {
+          applyExpectedOutcome(outcomeBtn, checkbox);
+          return;
+        }
+        if (summaryBox) applyVerificationToggle(group, summaryBox);
+        else applyVerificationToggle(group, checkbox);
+        return;
+      }
+      applyVerifyConditions(group, checkbox);
+    });
+  });
+
+  function applyExpectedOutcome(btn, revertCheckbox) {
       var panel = btn.closest(".expected-outcome");
       var group = btn.closest(".instruction-group");
-      if (!panel || !group) return;
+      function revertExpectedToggle() {
+        if (!revertCheckbox || !group) return;
+        revertCheckbox.checked = !revertCheckbox.checked;
+        var summary = group.querySelector(".verify-step input.use-expected-outcome");
+        if (summary && summary !== revertCheckbox) summary.checked = revertCheckbox.checked;
+        syncExpectedOutcomeVerifyRow(group, summary ? summary.checked : revertCheckbox.checked);
+      }
+      if (!panel || !group) {
+        revertExpectedToggle();
+        return;
+      }
       var input = panel.querySelector(".expected-outcome-input");
       var checkbox = group.querySelector("input.use-expected-outcome");
-      if (!input) return;
+      if (!input) {
+        revertExpectedToggle();
+        return;
+      }
       if (window.location.protocol === "file:") {
+        revertExpectedToggle();
         setExpectedOutcomeStatus(panel, "請透過主程式開啟報告以修改預期結果。", true);
         return;
       }
       var runId = group.getAttribute("data-run-id") || "";
       var eventIndex = group.getAttribute("data-event-index") || "";
       if (!runId || !eventIndex) {
+        revertExpectedToggle();
         setExpectedOutcomeStatus(panel, "缺少事件資訊。", true);
         return;
       }
       var text = input.value || "";
       var enabled = checkbox ? !!checkbox.checked : false;
+      var outcomeBox = group.querySelector('input.use-verify-condition[data-verify-key="expected_outcome"]');
       btn.disabled = true;
       if (checkbox) checkbox.disabled = true;
+      if (outcomeBox) outcomeBox.disabled = true;
       setExpectedOutcomeStatus(panel, "套用中…", false);
       fetch("/api/runs/" + encodeURIComponent(runId) + "/events/" + encodeURIComponent(eventIndex) + "/expected_outcome", {
         method: "POST",
@@ -1717,7 +1883,9 @@ _RECORDING_SCRIPT = """
         .then(function (result) {
           btn.disabled = false;
           if (checkbox) checkbox.disabled = false;
+          if (outcomeBox) outcomeBox.disabled = false;
           if (!result.ok || !result.payload || !result.payload.ok) {
+            revertExpectedToggle();
             var err = (result.payload && result.payload.error) || "套用失敗";
             setExpectedOutcomeStatus(panel, err, true);
             return;
@@ -1727,6 +1895,7 @@ _RECORDING_SCRIPT = """
           input.value = saved;
           var enabled = !!result.payload.use_expected_outcome;
           if (checkbox) checkbox.checked = enabled;
+          syncExpectedOutcomeVerifyRow(group, enabled);
           var copyBtn = group.querySelector("button.copy-instruction");
           if (copyBtn) {
             if (enabled && saved) {
@@ -1761,6 +1930,8 @@ _RECORDING_SCRIPT = """
         .catch(function () {
           btn.disabled = false;
           if (checkbox) checkbox.disabled = false;
+          if (outcomeBox) outcomeBox.disabled = false;
+          revertExpectedToggle();
           setExpectedOutcomeStatus(panel, "無法連線主程式，請確認主程式正在執行。", true);
         });
   }
@@ -4912,17 +5083,81 @@ def _format_window_verify_value(key: str, value: Any) -> str | None:
     return None
 
 
-def _window_verify_condition_rows(predicate: dict[str, Any] | None) -> list[tuple[str, str]]:
+def _window_verify_condition_rows(
+    predicate: dict[str, Any] | None,
+    disabled: Any,
+) -> list[tuple[str, int | None, str, str, bool]]:
+    """Return ``(key, index, label, value_html, enabled)`` for each check."""
+    from src.recorder.window_snapshot import (
+        _ITEMIZED_VERIFY_KEYS,
+        window_verify_condition_enabled,
+    )
+
     if not isinstance(predicate, dict) or not predicate:
         return []
-    rows: list[tuple[str, str]] = []
+    rows: list[tuple[str, int | None, str, str, bool]] = []
     for key, label in _WINDOW_VERIFY_LABELS.items():
         if key not in predicate:
             continue
-        formatted = _format_window_verify_value(key, predicate.get(key))
-        if formatted:
-            rows.append((label, formatted))
+        value = predicate.get(key)
+        if key in _ITEMIZED_VERIFY_KEYS and isinstance(value, list):
+            for index, item in enumerate(value):
+                if key in {"appeared", "disappeared", "state"}:
+                    if not isinstance(item, dict):
+                        continue
+                    text = _format_window_verify_identity(item)
+                    formatted = escape(text) if text else None
+                else:
+                    text = str(item).strip()
+                    formatted = escape(text) if text else None
+                if not formatted:
+                    continue
+                rows.append(
+                    (
+                        key,
+                        index,
+                        label,
+                        formatted,
+                        window_verify_condition_enabled(disabled, key, index),
+                    )
+                )
+            continue
+        formatted = _format_window_verify_value(key, value)
+        if not formatted:
+            continue
+        rows.append(
+            (
+                key,
+                None,
+                label,
+                formatted,
+                window_verify_condition_enabled(disabled, key, None),
+            )
+        )
     return rows
+
+
+def _render_verify_condition_row_html(
+    *,
+    key: str,
+    index: int | None,
+    label: str,
+    value_html: str,
+    enabled: bool,
+) -> str:
+    index_attr = f' data-verify-index="{index}"' if index is not None else ""
+    checked_attr = " checked" if enabled else ""
+    off_class = "" if enabled else " is-off"
+    return (
+        f'<li class="verify-condition-row{off_class}">'
+        f"<label>"
+        f'<input type="checkbox" class="use-verify-condition" '
+        f'data-verify-key="{escape(key, quote=True)}"{index_attr}{checked_attr}>'
+        f'<span class="verify-condition-label">{escape(label)}</span>'
+        f'<span class="verify-condition-value">{value_html}</span>'
+        f"</label>"
+        f"</li>"
+    )
 
 
 def _render_verify_conditions_panel_html(
@@ -4931,13 +5166,17 @@ def _render_verify_conditions_panel_html(
     expected_outcome: str,
     use_expected_outcome: bool,
 ) -> str:
-    """Read-only list of replay checks for this recorded step."""
+    """Checklist of replay checks for this recorded step. Unchecked items are skipped."""
     predicate = analysis.get("window_verify") if isinstance(analysis, dict) else None
-    rows = _window_verify_condition_rows(predicate if isinstance(predicate, dict) else None)
-    if use_expected_outcome and expected_outcome.strip():
-        rows.append(("畫面預期結果", escape(expected_outcome.strip())))
-    elif use_expected_outcome:
-        rows.append(("畫面預期結果", "（已啟用，但文字為空）"))
+    disabled = analysis.get("window_verify_disabled") if isinstance(analysis, dict) else None
+    rows = _window_verify_condition_rows(
+        predicate if isinstance(predicate, dict) else None,
+        disabled,
+    )
+    outcome_text = expected_outcome.strip()
+    if use_expected_outcome or outcome_text:
+        value_html = escape(outcome_text) if outcome_text else "（已啟用，但文字為空）"
+        rows.append(("expected_outcome", None, "畫面預期結果", value_html, use_expected_outcome))
 
     if not rows:
         body = (
@@ -4946,11 +5185,22 @@ def _render_verify_conditions_panel_html(
             "</p>"
         )
     else:
-        meta = "".join(f"<dt>{escape(label)}</dt><dd>{value}</dd>" for label, value in rows)
-        body = f'<div class="meta"><dl>{meta}</dl></div>'
+        items = "".join(
+            _render_verify_condition_row_html(
+                key=key,
+                index=index,
+                label=label,
+                value_html=value_html,
+                enabled=enabled,
+            )
+            for key, index, label, value_html, enabled in rows
+        )
+        body = f'<ul class="verify-conditions-list">{items}</ul>'
     return (
         f'<div class="verify-conditions">'
-        f'<div class="verify-conditions-title">驗證條件</div>'
+        f'<div class="verify-conditions-title">驗證條件'
+        f'<span class="verify-conditions-status" aria-live="polite"></span>'
+        f"</div>"
         f"{body}"
         f"</div>"
     )

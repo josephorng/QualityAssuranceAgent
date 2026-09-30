@@ -7,6 +7,7 @@ Recording landmark edits POST to ``/api/runs/<id>/events/<n>/landmarks``
 (also accepts optional primary-target index swaps).
 Recording typed-text edits POST to ``/api/runs/<id>/events/<n>/text``.
 Recording expected-outcome edits POST to ``/api/runs/<id>/events/<n>/expected_outcome``.
+Recording verify-condition toggles POST to ``/api/runs/<id>/events/<n>/verify_conditions``.
 Recording event deletes POST to ``/api/runs/<id>/events/<n>/delete``.
 Recording bulk event deletes POST to ``/api/runs/<id>/events/delete`` with
 ``{"event_indices": [1, 2, ...]}``.
@@ -34,6 +35,7 @@ from urllib.parse import unquote, urlparse
 
 from cua_mcp.char_target import parse_char_target_instruction
 from src.common.io_utils import read_json, write_json
+from src.recorder.window_snapshot import normalize_window_verify_disabled
 from src.common.nearby_side import (
     NearbyHint,
     apply_nearby_landmarks,
@@ -128,6 +130,9 @@ _EVENT_TEXT_PATH_RE = re.compile(
 )
 _EVENT_EXPECTED_OUTCOME_PATH_RE = re.compile(
     r"^/api/runs/([^/]+)/events/(\d+)/expected_outcome/?$"
+)
+_EVENT_VERIFY_CONDITIONS_PATH_RE = re.compile(
+    r"^/api/runs/([^/]+)/events/(\d+)/verify_conditions/?$"
 )
 _EVENT_INSTRUCTION_PATH_RE = re.compile(
     r"^/api/runs/([^/]+)/events/(\d+)/instruction/?$"
@@ -1433,6 +1438,48 @@ def apply_recording_event_expected_outcome(
     return {"expected_outcome": cleaned, "use_expected_outcome": enabled}
 
 
+def apply_recording_event_verify_conditions(
+    runs_root: Path,
+    run_id: str,
+    event_index: int,
+    *,
+    disabled: Any,
+) -> dict[str, Any]:
+    """Persist which window/signal checks are unchecked for one recorded event.
+
+    ``disabled`` is a list of ``key`` or ``key:index`` selectors. An empty list
+    checks every condition again. Replay skips the stored selectors.
+    Returns ``{"disabled": list[str]}``.
+    """
+    run_dir = resolve_deletable_run_folder(runs_root, run_id)
+    if not isinstance(event_index, int) or event_index < 1:
+        raise ValueError("invalid event index")
+
+    event_path = event_json_path(run_dir, event_index)
+    event_payload = read_json(event_path, None)
+    if not isinstance(event_payload, dict):
+        raise ValueError("event not found")
+
+    analysis_path = run_dir / "analysis" / f"event_{event_index:03d}.json"
+    analysis = read_json(analysis_path, None)
+    if not isinstance(analysis, dict):
+        raise ValueError("analysis not found")
+
+    predicate = analysis.get("window_verify")
+    normalized = normalize_window_verify_disabled(
+        predicate if isinstance(predicate, dict) else {},
+        disabled,
+        strict=True,
+    )
+    if normalized:
+        analysis["window_verify_disabled"] = normalized
+    else:
+        analysis.pop("window_verify_disabled", None)
+    write_json(analysis_path, analysis)
+    write_recording_html_from_run(run_dir, update_index=False)
+    return {"disabled": normalized}
+
+
 def apply_recording_event_instruction(
     runs_root: Path,
     run_id: str,
@@ -1861,6 +1908,7 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
             landmarks_match = _LANDMARKS_PATH_RE.fullmatch(path)
             event_text_match = _EVENT_TEXT_PATH_RE.fullmatch(path)
             event_outcome_match = _EVENT_EXPECTED_OUTCOME_PATH_RE.fullmatch(path)
+            event_verify_match = _EVENT_VERIFY_CONDITIONS_PATH_RE.fullmatch(path)
             event_instruction_match = _EVENT_INSTRUCTION_PATH_RE.fullmatch(path)
             event_char_target_match = _EVENT_CHAR_TARGET_PATH_RE.fullmatch(path)
             event_yolo_ocr_match = _EVENT_YOLO_OCR_PATH_RE.fullmatch(path)
@@ -1974,6 +2022,27 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
                         event_index,
                         expected_outcome=body.get("expected_outcome"),
                         use_expected_outcome=body.get("use_expected_outcome"),
+                    )
+                except ValueError as exc:
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                    return
+                except OSError as exc:
+                    self._send_json(500, {"ok": False, "error": str(exc)})
+                    return
+                self._send_json(200, {"ok": True, **result})
+                return
+
+            if event_verify_match is not None:
+                run_id = event_verify_match.group(1)
+                event_index_raw = event_verify_match.group(2)
+                try:
+                    event_index = int(event_index_raw)
+                    body = self._read_json_body()
+                    result = apply_recording_event_verify_conditions(
+                        root,
+                        run_id,
+                        event_index,
+                        disabled=body.get("disabled"),
                     )
                 except ValueError as exc:
                     self._send_json(400, {"ok": False, "error": str(exc)})

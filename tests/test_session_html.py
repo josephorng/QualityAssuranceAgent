@@ -1731,6 +1731,58 @@ def test_write_recording_html_renders_window_verify_conditions(tmp_path: Path) -
     assert "unselected" not in html
     assert "畫面預期結果" in html
     assert "選單已關閉" in html
+    assert 'class="use-verify-condition"' in html
+    assert 'data-verify-key="disappeared" data-verify-index="0" checked' in html
+    assert 'data-verify-key="click_window" checked' in html
+    assert 'data-verify-key="expected_outcome" checked' in html
+    assert "function applyVerifyConditions" in html
+
+
+def test_write_recording_html_renders_unchecked_verify_conditions(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000031b"
+    _write_recording_fixture(run_root)
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": "點擊「全選」文字",
+                "expected_outcome": "選單已關閉",
+                "use_expected_outcome": False,
+                "window_verify": {
+                    "disappeared": [
+                        {
+                            "class_name": "Popup",
+                            "title": "快顯主機",
+                            "process_name": "explorer.exe",
+                        },
+                        {
+                            "class_name": "CabinetWClass",
+                            "title": "檔案總管",
+                            "process_name": "explorer.exe",
+                        },
+                    ],
+                    "click_window": {
+                        "class_name": "CabinetWClass",
+                        "title": "檔案總管",
+                        "process_name": "explorer.exe",
+                    },
+                },
+                "window_verify_disabled": ["disappeared:0", "click_window"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+
+    assert 'data-verify-key="disappeared" data-verify-index="0">' in html
+    assert 'data-verify-key="disappeared" data-verify-index="1" checked' in html
+    assert 'data-verify-key="click_window">' in html
+    assert 'data-verify-key="expected_outcome">' in html
+    assert "快顯主機" in html
+    assert "檔案總管" in html
+    assert "選單已關閉" in html
 
 
 def test_write_recording_html_renders_empty_verify_conditions(tmp_path: Path) -> None:

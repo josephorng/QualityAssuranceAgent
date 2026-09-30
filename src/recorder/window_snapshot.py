@@ -631,6 +631,25 @@ def _find_match(target: WindowInfo, windows: list[WindowInfo]) -> WindowInfo | N
     return None
 
 
+def _find_successor(
+    target: WindowInfo,
+    before: list[WindowInfo],
+    after: list[WindowInfo],
+) -> WindowInfo | None:
+    """After-state of ``target``.
+
+    A different hwnd counts only when it is new. A window that was already open
+    with the same pid and title is a sibling, not this window minimized, restored,
+    or replaced.
+    """
+    match = _find_match(target, after)
+    if match is None or match.hwnd == target.hwnd:
+        return match
+    if any(win.hwnd == match.hwnd for win in before):
+        return None
+    return match
+
+
 def _is_title_bar_click(
     click_xy: tuple[int, int] | None,
     windows: Sequence[WindowInfo] | None = None,
@@ -816,12 +835,75 @@ def _classify_target_change(
     return None
 
 
+def _titled_windows_without_successor(
+    before: list[WindowInfo],
+    after: list[WindowInfo],
+) -> list[WindowInfo]:
+    """Before windows whose hwnd is gone and were not replaced by a new hwnd."""
+    gone: list[WindowInfo] = []
+    for win in before:
+        if not win.title.strip():
+            continue
+        if _is_flyout_window(class_name=win.class_name or "", title=win.title or ""):
+            continue
+        if _find_successor(win, before, after) is None:
+            gone.append(win)
+    return gone
+
+
+def _pick_vanished_at_click(
+    before: list[WindowInfo],
+    after: list[WindowInfo],
+    click_xy: tuple[int, int] | None,
+) -> WindowInfo | None:
+    """The single titled window under the click that left the after list."""
+    if click_xy is None:
+        return None
+    x, y = int(click_xy[0]), int(click_xy[1])
+    vanished = [
+        win
+        for win in _titled_windows_without_successor(before, after)
+        if win.contains_point(x, y)
+    ]
+    if len(vanished) != 1:
+        return None
+    return vanished[0]
+
+
+def _pick_sibling_close(
+    before: list[WindowInfo],
+    after: list[WindowInfo],
+    click_xy: tuple[int, int] | None,
+) -> WindowStateChange | None:
+    """Close when one hwnd vanishes but another window keeps its pid and title.
+
+    Identity diff sees no removal in that case, and pairing the vanished hwnd
+    with the sibling looks like a minimize.
+    """
+    gone = _titled_windows_without_successor(before, after)
+    if len(gone) != 1:
+        return None
+    win = gone[0]
+    after_keys = {_window_identity_key(item) for item in after if item.title}
+    if _window_identity_key(win) not in after_keys:
+        return None
+    before_hwnds = {item.hwnd for item in before}
+    if any(item.title.strip() and item.hwnd not in before_hwnds for item in after):
+        return None
+    return WindowStateChange(
+        action="close",
+        title=win.title,
+        confidence="medium",
+        from_title_bar_close=_from_title_bar_close(click_xy, win),
+    )
+
+
 def _pick_global_minimize(before: list[WindowInfo], after: list[WindowInfo]) -> WindowStateChange | None:
     transitions: list[WindowInfo] = []
     for before_win in before:
         if not before_win.title:
             continue
-        after_win = _find_match(before_win, after)
+        after_win = _find_successor(before_win, before, after)
         if after_win is None:
             continue
         if _minimize_change(before_win, after_win) is not None:
@@ -838,7 +920,7 @@ def _pick_global_restore(before: list[WindowInfo], after: list[WindowInfo]) -> W
     for before_win in before:
         if not before_win.title:
             continue
-        after_win = _find_match(before_win, after)
+        after_win = _find_successor(before_win, before, after)
         if after_win is None:
             continue
         if _restore_change(before_win, after_win) is not None:
@@ -925,10 +1007,21 @@ def diff_snapshots_with_debug(
     target = _pick_target_from_click(before, click_xy)
     if target is not None:
         debug["target_hwnd"] = target.hwnd
-        after_match = _find_match(target, after)
+        after_match = _find_successor(target, before, after)
         change = _classify_target_change(target, after_match, click_xy)
         if change is not None:
             debug["detection_path"] = "target"
+            return WindowDiffResult(change=change, debug=debug)
+
+    # WindowFromPoint is sampled after the click. Once the clicked window is
+    # gone it returns whatever was behind it, so a title-bar close looks like
+    # a click on an unchanged window.
+    vanished = _pick_vanished_at_click(before, after, click_xy)
+    if vanished is not None and (target is None or target.hwnd != vanished.hwnd):
+        change = _classify_target_change(vanished, None, click_xy)
+        if change is not None:
+            debug["target_hwnd"] = vanished.hwnd
+            debug["detection_path"] = "closed_at_click"
             return WindowDiffResult(change=change, debug=debug)
 
     opened = _pick_opened_at_click(before, after, click_xy)
@@ -945,6 +1038,11 @@ def diff_snapshots_with_debug(
     if global_restore is not None:
         debug["detection_path"] = "global_restore"
         return WindowDiffResult(change=global_restore, debug=debug)
+
+    sibling_close = _pick_sibling_close(before, after, click_xy)
+    if sibling_close is not None:
+        debug["detection_path"] = "hwnd_close"
+        return WindowDiffResult(change=sibling_close, debug=debug)
 
     before_set = {_window_identity_key(w) for w in before if w.title}
     after_set = {_window_identity_key(w) for w in after if w.title}

@@ -368,6 +368,87 @@ def test_diff_global_minimize_fallback_when_target_not_at_click() -> None:
     assert change == WindowStateChange(action="minimize", title="Google Chrome", confidence="medium")
 
 
+def test_diff_close_does_not_pair_vanished_window_with_minimized_sibling() -> None:
+    """Closing one Explorer must not become a minimize of another with the same title.
+
+    WindowFromPoint after the close hits the window that was behind it.
+    """
+    visible = _win(
+        261229422,
+        "圖片 - 檔案總管",
+        left=-8,
+        top=-8,
+        width=1936,
+        height=1048,
+        is_maximized=True,
+        pid=52892,
+        class_name="CabinetWClass",
+        caption_button_bounds=(1790, 0, 1928, 28),
+    )
+    already_minimized = _win(
+        2557630,
+        "圖片 - 檔案總管",
+        left=-32000,
+        top=-32000,
+        width=160,
+        height=28,
+        is_minimized=True,
+        pid=52892,
+        class_name="CabinetWClass",
+    )
+    behind = _win(
+        264204,
+        "main.py - QualityAssuranceAgent - Cursor",
+        left=-8,
+        top=-8,
+        width=1936,
+        height=1048,
+        is_maximized=True,
+        pid=16048,
+        class_name="Chrome_WidgetWin_1",
+    )
+    before = [visible, already_minimized, behind]
+    after = [already_minimized, behind]
+    click_xy = (1898, 14)
+    with patch("src.recorder.window_snapshot.window_at_point", return_value=behind):
+        result = diff_snapshots_with_debug(before, after, click_xy=click_xy)
+    assert result.change == WindowStateChange(
+        action="close",
+        title="圖片 - 檔案總管",
+        confidence="high",
+        from_title_bar_close=True,
+    )
+    assert result.debug["detection_path"] == "closed_at_click"
+    assert result.debug["target_hwnd"] == 261229422
+    assert instruction_for_window_change(result.change) == "關閉「圖片 - 檔案總管」視窗"
+
+
+def test_diff_sibling_close_when_click_misses_the_vanished_window() -> None:
+    visible = _win(10, "圖片 - 檔案總管", left=0, top=0, width=800, height=600, pid=5)
+    sibling = _win(
+        11,
+        "圖片 - 檔案總管",
+        left=-32000,
+        top=-32000,
+        width=160,
+        height=28,
+        is_minimized=True,
+        pid=5,
+    )
+    result = diff_snapshots_with_debug(
+        [visible, sibling],
+        [sibling],
+        click_xy=(2000, 2000),
+    )
+    assert result.change == WindowStateChange(
+        action="close",
+        title="圖片 - 檔案總管",
+        confidence="medium",
+        from_title_bar_close=False,
+    )
+    assert result.debug["detection_path"] == "hwnd_close"
+
+
 def test_diff_global_restore_from_taskbar_click() -> None:
     """Taskbar click hits the shell strip, not the app; restore is off-target."""
     taskbar = _win(65714, "", left=0, top=880, width=1918, height=40, pid=6324)

@@ -155,6 +155,195 @@ def test_detect_skips_element_ocr_when_plan_is_text_only(
     assert dets[0].text == "類型"
 
 
+def _pattern_bgr(height: int, width: int) -> "np.ndarray":
+    import numpy as np
+
+    image = np.zeros((height, width, 3), dtype=np.uint8)
+    image[:, :, 0] = np.arange(width, dtype=np.uint8)[None, :]
+    image[:, :, 1] = np.arange(height, dtype=np.uint8)[:, None]
+    return image
+
+
+def test_assign_reused_ocr_texts_accepts_one_pixel_box_shift() -> None:
+    from cua_mcp.geometry import iou_xywh
+    from cua_mcp.select_mouse_target import _OcrFrameEntry, _assign_reused_ocr_texts
+
+    image = _pattern_bgr(40, 60)
+    previous = (10, 10, 20, 16)
+    shifted = (11, 10, 20, 16)
+    assert iou_xywh(previous, shifted) >= 0.85
+    reused = _assign_reused_ocr_texts(
+        image,
+        [_OcrFrameEntry(bbox=previous, mode="text", text=("Keep",))],
+        image,
+        [shifted],
+        ["text"],
+    )
+    assert reused == [["Keep"]]
+
+
+def test_assign_reused_ocr_texts_rejects_changed_pixel_low_iou_and_mode() -> None:
+    from cua_mcp.geometry import iou_xywh
+    from cua_mcp.select_mouse_target import _OcrFrameEntry, _assign_reused_ocr_texts
+
+    image = _pattern_bgr(40, 80)
+    box = (10, 10, 20, 16)
+    entry = _OcrFrameEntry(bbox=box, mode="text", text=("Keep",))
+
+    changed = image.copy()
+    changed[18, 18] = (9, 8, 7)
+    assert _assign_reused_ocr_texts(image, [entry], changed, [box], ["text"]) == [None]
+
+    distant = (40, 10, 20, 16)
+    assert iou_xywh(box, distant) < 0.85
+    assert _assign_reused_ocr_texts(image, [entry], image, [distant], ["text"]) == [None]
+
+    assert _assign_reused_ocr_texts(image, [entry], image, [box], ["icon"]) == [None]
+
+
+def test_assign_reused_ocr_texts_gives_one_previous_box_to_one_new_box() -> None:
+    from cua_mcp.geometry import iou_xywh
+    from cua_mcp.select_mouse_target import _OcrFrameEntry, _assign_reused_ocr_texts
+
+    image = _pattern_bgr(40, 80)
+    previous = (10, 10, 40, 20)
+    exact = previous
+    shifted = (12, 10, 40, 20)
+    assert iou_xywh(previous, exact) >= iou_xywh(previous, shifted) >= 0.85
+    reused = _assign_reused_ocr_texts(
+        image,
+        [_OcrFrameEntry(bbox=previous, mode="text", text=("Only",))],
+        image,
+        [shifted, exact],
+        ["text", "text"],
+    )
+    assert reused == [None, ["Only"]]
+
+
+def _install_cached_detect_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    frames: list["np.ndarray"],
+    ocr_calls: list[list[tuple[int, int, int, int]]],
+    labels: dict[str, str],
+) -> None:
+    import numpy as np
+
+    pending = list(frames)
+
+    def fake_yolo(*_args, **_kwargs):
+        xyxy = pending.pop(0)
+        scores = np.ones((len(xyxy),), dtype=np.float32)
+        class_ids = np.full((len(xyxy),), YOLO_CLASS_TEXT, dtype=np.int32)
+        return xyxy, scores, class_ids
+
+    def fake_ocr(_bgr, boxes, *, mode=None, **_kwargs):
+        del mode
+        copied = [tuple(int(v) for v in box) for box in boxes]
+        ocr_calls.append(copied)
+        return [[labels["text"]] for _ in copied]
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.run_yolo_onnx_end2end",
+        fake_yolo,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._ocr_boxes_on_bgr",
+        fake_ocr,
+    )
+
+
+def test_detect_reuses_ocr_when_box_shifts_one_pixel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    from cua_mcp.select_mouse_target import (
+        _detect_mouse_targets_from_bgr,
+        clear_ocr_frame_cache,
+    )
+
+    clear_ocr_frame_cache()
+    image = _pattern_bgr(80, 80)
+    first = np.asarray([[10, 10, 30, 26]], dtype=np.float32)
+    second = np.asarray([[11, 10, 31, 26], [10, 50, 26, 66]], dtype=np.float32)
+    ocr_calls: list[list[tuple[int, int, int, int]]] = []
+    labels = {"text": "Keep"}
+
+    def fake_ocr(_bgr, boxes, *, mode=None, **_kwargs):
+        del mode
+        copied = [tuple(int(v) for v in box) for box in boxes]
+        ocr_calls.append(copied)
+        texts = []
+        for box in copied:
+            texts.append(["New"] if box[1] >= 40 else [labels["text"]])
+        return texts
+
+    pending = [first, second]
+
+    def fake_yolo(*_args, **_kwargs):
+        xyxy = pending.pop(0)
+        scores = np.ones((len(xyxy),), dtype=np.float32)
+        class_ids = np.full((len(xyxy),), YOLO_CLASS_TEXT, dtype=np.int32)
+        return xyxy, scores, class_ids
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.run_yolo_onnx_end2end",
+        fake_yolo,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._ocr_boxes_on_bgr",
+        fake_ocr,
+    )
+
+    kwargs = {
+        "ocr_class_ids": frozenset({YOLO_CLASS_TEXT}),
+        "refine_inputs": False,
+        "ocr_cache_key": 1,
+    }
+    first_dets = _detect_mouse_targets_from_bgr(image, **kwargs)
+    second_dets = _detect_mouse_targets_from_bgr(image, **kwargs)
+
+    assert first_dets[0].text == "Keep"
+    assert [det.text for det in second_dets] == ["Keep", "New"]
+    assert len(ocr_calls) == 2
+    assert all(box[1] >= 40 for box in ocr_calls[1])
+    clear_ocr_frame_cache()
+
+
+def test_detect_without_cache_key_always_runs_ocr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    from cua_mcp.select_mouse_target import (
+        _detect_mouse_targets_from_bgr,
+        clear_ocr_frame_cache,
+    )
+
+    clear_ocr_frame_cache()
+    image = _pattern_bgr(40, 40)
+    xyxy = np.asarray([[8, 8, 24, 24]], dtype=np.float32)
+    ocr_calls: list[list[tuple[int, int, int, int]]] = []
+    labels = {"text": "Fresh"}
+    _install_cached_detect_fakes(monkeypatch, [xyxy, xyxy, xyxy], ocr_calls, labels)
+    common = {
+        "ocr_class_ids": frozenset({YOLO_CLASS_TEXT}),
+        "refine_inputs": False,
+    }
+
+    seeded = _detect_mouse_targets_from_bgr(image, ocr_cache_key=3, **common)
+    assert seeded[0].text == "Fresh"
+    assert len(ocr_calls) == 1
+
+    labels["text"] = "Other"
+    uncached = _detect_mouse_targets_from_bgr(image, **common)
+    assert uncached[0].text == "Other"
+    assert len(ocr_calls) == 2
+
+    again = _detect_mouse_targets_from_bgr(image, ocr_cache_key=3, **common)
+    assert again[0].text == "Fresh"
+    assert len(ocr_calls) == 2
+    clear_ocr_frame_cache()
+
+
 def test_detect_ocr_roi_passes_enhance_roi_and_drops_outside_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

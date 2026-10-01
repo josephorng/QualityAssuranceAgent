@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 import re
+import threading
 import time
 import unicodedata
 from collections.abc import Iterator
@@ -39,6 +40,7 @@ from cua_mcp.icon_map import (
     text_has_pua,
 )
 from cua_mcp.read_screen_text.ocr_image import (
+    _expand_box,
     _ocr_boxes_on_bgr,
     ocr_box_with_spans,
     ocr_mode_for_yolo_class,
@@ -93,6 +95,9 @@ from src.eye.capture import active_monitor_offset, grab_monitor_bgr, monitor_det
 
 
 DEFAULT_OCR_ROI_PAD = 16
+# YOLO boxes must overlap at least this much before identical screen pixels
+# can reuse the previous frame's OCR string.
+OCR_REUSE_MIN_IOU = 0.85
 
 
 def _run_manager() -> RunStateManager:
@@ -726,6 +731,192 @@ def _bbox_center_in_ocr_roi(
     return point_in_rect_xywh(x + w * 0.5, y + h * 0.5, ocr_roi, pad=pad)
 
 
+@dataclass(frozen=True)
+class _OcrFrameEntry:
+    """One OCR box remembered from the previous full-monitor capture."""
+
+    bbox: tuple[int, int, int, int]
+    mode: str
+    text: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _OcrFrameSlot:
+    """Last screenshot and OCR results for one monitor."""
+
+    shape: tuple[int, ...]
+    bgr: np.ndarray
+    entries: tuple[_OcrFrameEntry, ...]
+
+
+_OCR_FRAME_CACHE: dict[int, _OcrFrameSlot] = {}
+_OCR_FRAME_CACHE_LOCK = threading.Lock()
+
+
+def clear_ocr_frame_cache() -> None:
+    """Drop remembered monitor screenshots. Tests use this for isolation."""
+    with _OCR_FRAME_CACHE_LOCK:
+        _OCR_FRAME_CACHE.clear()
+
+
+def _store_ocr_frame_cache(
+    cache_key: int,
+    bgr: np.ndarray,
+    entries: list[_OcrFrameEntry],
+) -> None:
+    slot = _OcrFrameSlot(
+        shape=tuple(int(v) for v in bgr.shape),
+        bgr=np.array(bgr, copy=True),
+        entries=tuple(entries),
+    )
+    with _OCR_FRAME_CACHE_LOCK:
+        _OCR_FRAME_CACHE[cache_key] = slot
+
+
+def _take_ocr_frame_cache(cache_key: int, shape: tuple[int, ...]) -> _OcrFrameSlot | None:
+    """Return the previous slot when its image shape matches, else drop it."""
+    with _OCR_FRAME_CACHE_LOCK:
+        slot = _OCR_FRAME_CACHE.get(cache_key)
+        if slot is None:
+            return None
+        if slot.shape != shape:
+            _OCR_FRAME_CACHE.pop(cache_key, None)
+            return None
+        return slot
+
+
+def _ocr_overlap_pixels_equal(
+    prev_bgr: np.ndarray,
+    prev_box: tuple[int, int, int, int],
+    new_bgr: np.ndarray,
+    new_box: tuple[int, int, int, int],
+) -> bool:
+    """True when the expanded boxes share identical pixels at the same coordinates.
+
+    Expansion matches the margin ``_ocr_boxes_on_bgr`` adds before CRNN. A 1-pixel
+    box shift on a still screen still matches; a changed glyph does not.
+    """
+    img_h, img_w = int(new_bgr.shape[0]), int(new_bgr.shape[1])
+    if prev_bgr.shape[:2] != (img_h, img_w):
+        return False
+    px, py, pw, ph = _expand_box(*prev_box, img_w, img_h)
+    nx, ny, nw, nh = _expand_box(*new_box, img_w, img_h)
+    ix1, iy1 = max(px, nx), max(py, ny)
+    ix2, iy2 = min(px + pw, nx + nw), min(py + ph, ny + nh)
+    if ix2 <= ix1 or iy2 <= iy1:
+        return False
+    return bool(
+        np.array_equal(
+            prev_bgr[iy1:iy2, ix1:ix2],
+            new_bgr[iy1:iy2, ix1:ix2],
+        )
+    )
+
+
+def _assign_reused_ocr_texts(
+    prev_bgr: np.ndarray,
+    prev_entries: tuple[_OcrFrameEntry, ...] | list[_OcrFrameEntry],
+    new_bgr: np.ndarray,
+    boxes: list[tuple[int, int, int, int]],
+    modes: list[str],
+) -> list[list[str] | None]:
+    """Map each new box to a previous OCR string, or None when it must be read.
+
+    One previous box is given to at most one new box. Higher IoU wins. The pair
+    must share a decode mode, overlap by at least :data:`OCR_REUSE_MIN_IOU`, and
+    have identical pixels on the intersection of the expanded rects.
+    """
+    reused: list[list[str] | None] = [None] * len(boxes)
+    if prev_bgr.shape[:2] != new_bgr.shape[:2] or not prev_entries or not boxes:
+        return reused
+
+    pairs: list[tuple[float, int, int]] = []
+    for new_i, (box, mode) in enumerate(zip(boxes, modes, strict=True)):
+        for old_i, entry in enumerate(prev_entries):
+            if entry.mode != mode:
+                continue
+            score = iou_xywh(box, entry.bbox)
+            if score >= OCR_REUSE_MIN_IOU:
+                pairs.append((score, new_i, old_i))
+    pairs.sort(key=lambda item: item[0], reverse=True)
+
+    used_new: set[int] = set()
+    used_old: set[int] = set()
+    assigned: dict[int, int] = {}
+    for _score, new_i, old_i in pairs:
+        if new_i in used_new or old_i in used_old:
+            continue
+        used_new.add(new_i)
+        used_old.add(old_i)
+        assigned[new_i] = old_i
+
+    for new_i, old_i in assigned.items():
+        entry = prev_entries[old_i]
+        if _ocr_overlap_pixels_equal(prev_bgr, entry.bbox, new_bgr, boxes[new_i]):
+            reused[new_i] = list(entry.text)
+    return reused
+
+
+def _recognize_ocr_boxes(
+    bgr: np.ndarray,
+    boxes: list[tuple[int, int, int, int]],
+    modes: list[str],
+    *,
+    cache_key: int | None,
+) -> tuple[list[list[str]], int, int]:
+    """OCR ``boxes``, reusing identical regions when ``cache_key`` is set.
+
+    Returns ``(predictions, reused_count, fresh_count)``. A missing key never
+    reads or writes the monitor cache. A set key replaces that monitor's slot
+    with this frame, including when there is nothing to read.
+    """
+    if len(modes) != len(boxes):
+        raise ValueError(
+            f"mode length {len(modes)} does not match box count {len(boxes)}"
+        )
+    reused: list[list[str] | None] = [None] * len(boxes)
+    if cache_key is not None and boxes:
+        slot = _take_ocr_frame_cache(cache_key, tuple(int(v) for v in bgr.shape))
+        if slot is not None:
+            reused = _assign_reused_ocr_texts(
+                slot.bgr,
+                slot.entries,
+                bgr,
+                boxes,
+                modes,
+            )
+
+    fresh_indices = [i for i, pred in enumerate(reused) if pred is None]
+    fresh_boxes = [boxes[i] for i in fresh_indices]
+    fresh_modes = [modes[i] for i in fresh_indices]
+    fresh_preds = (
+        _ocr_boxes_on_bgr(bgr, fresh_boxes, mode=fresh_modes) if fresh_boxes else []
+    )
+    if len(fresh_preds) != len(fresh_indices):
+        raise RuntimeError(
+            f"OCR returned {len(fresh_preds)} results for {len(fresh_indices)} boxes"
+        )
+
+    preds: list[list[str]] = []
+    entries: list[_OcrFrameEntry] = []
+    fresh_cursor = 0
+    for i, box in enumerate(boxes):
+        cached = reused[i]
+        if cached is None:
+            pred = list(fresh_preds[fresh_cursor])
+            fresh_cursor += 1
+        else:
+            pred = cached
+        preds.append(pred)
+        entries.append(
+            _OcrFrameEntry(bbox=box, mode=modes[i], text=tuple(pred))
+        )
+
+    if cache_key is not None:
+        _store_ocr_frame_cache(cache_key, bgr, entries)
+    return preds, len(boxes) - len(fresh_indices), len(fresh_indices)
+
+
 def _detect_mouse_targets_from_bgr(
     bgr: np.ndarray,
     *,
@@ -738,6 +929,7 @@ def _detect_mouse_targets_from_bgr(
     refine_inputs: bool = True,
     ocr_roi: tuple[int, int, int, int] | None = None,
     ocr_roi_pad: int = DEFAULT_OCR_ROI_PAD,
+    ocr_cache_key: int | None = None,
 ) -> list[UiDetection]:
     """Detect mouse-target UI elements on ``bgr`` via YOLO + OCR.
 
@@ -769,6 +961,10 @@ def _detect_mouse_targets_from_bgr(
     When ``ocr_roi`` is set (same geometry as YOLO ``enhance_roi``), Stage 3/4
     enhance, input refine, OCR, and candidate admission are limited to boxes
     whose centers fall in the padded ROI. First YOLO stays full-frame.
+
+    ``ocr_cache_key`` opts this capture into the per-monitor OCR frame cache
+    (live ``move_mouse`` only). Unset leaves recording, crops, and the viewer
+    uncached.
     """
     if ocr_class_ids is None:
         ocr_wanted = frozenset({YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT})
@@ -888,10 +1084,13 @@ def _detect_mouse_targets_from_bgr(
     non_ocr.extend(other_non_ocr)
 
     if not text_boxes and not element_boxes and not non_ocr:
+        if ocr_cache_key is not None:
+            _store_ocr_frame_cache(ocr_cache_key, bgr, [])
         total_elapsed = time.perf_counter() - vision_started
         _log_info(
             f"move_mouse vision profile yolo_s={yolo_elapsed:.3f} "
             f"line_s={line_elapsed:.3f} ocr_s=0.000 "
+            f"ocr_reused=0 ocr_fresh=0 "
             f"total_s={total_elapsed:.3f} detections=0"
         )
         if timing_out is not None:
@@ -929,8 +1128,11 @@ def _detect_mouse_targets_from_bgr(
 
     ocr_started = time.perf_counter()
     ocr_modes = [ocr_mode_for_yolo_class(cls_id) for cls_id in ocr_class_id_list]
-    ocr_preds = (
-        _ocr_boxes_on_bgr(bgr, ocr_boxes, mode=ocr_modes) if ocr_boxes else []
+    ocr_preds, ocr_reused, ocr_fresh = _recognize_ocr_boxes(
+        bgr,
+        ocr_boxes,
+        ocr_modes,
+        cache_key=ocr_cache_key,
     )
     ocr_elapsed = time.perf_counter() - ocr_started
 
@@ -992,6 +1194,7 @@ def _detect_mouse_targets_from_bgr(
         "move_mouse vision profile "
         f"yolo_s={yolo_elapsed:.3f} line_s={line_elapsed:.3f} "
         f"ocr_s={ocr_elapsed:.3f} "
+        f"ocr_reused={ocr_reused} ocr_fresh={ocr_fresh} "
         f"total_s={total_elapsed:.3f} "
         f"yolo_boxes={0 if xyxy.size == 0 else len(xyxy)} "
         f"input_boxes={len(input_boxes)} ocr_boxes={len(ocr_boxes)} "
@@ -1660,6 +1863,7 @@ def _detections_for_captured_monitor(
         refine_inputs=refine_inputs,
         ocr_roi=ocr_roi,
         ocr_roi_pad=ocr_roi_pad,
+        ocr_cache_key=monitor_index,
     )
     return [_offset_detection(d, left, top) for d in local_candidates]
 

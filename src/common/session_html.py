@@ -6043,6 +6043,18 @@ def _format_roi_xywh(raw: Any) -> str | None:
     return f"ROI xywh=({x}, {y}, {w}, {h})"
 
 
+def _format_detail_ocr_reuse_meta(detail: dict[str, Any]) -> str:
+    """HTML snippet for how many OCR boxes were reused versus read again."""
+    reused = detail.get("ocr_reused")
+    fresh = detail.get("ocr_fresh")
+    if isinstance(reused, bool) or not isinstance(reused, int):
+        return ""
+    parts = [f"skipped {int(reused)}"]
+    if isinstance(fresh, int) and not isinstance(fresh, bool):
+        parts.append(f"read {int(fresh)}")
+    return f'<span class="roi-meta">{escape(" · ".join(parts))}</span>'
+
+
 def _format_detail_roi_meta(detail: dict[str, Any]) -> str:
     """HTML snippet describing YOLO/OCR ROI rectangles on a detail row."""
     parts: list[str] = []
@@ -6356,10 +6368,11 @@ def _render_session_time_profile_html(run_root: Path, report: dict[str, Any]) ->
                         )
                         detail_duration = detail.get("duration_seconds")
                         roi_meta = _format_detail_roi_meta(detail)
+                        reuse_meta = _format_detail_ocr_reuse_meta(detail)
                         phase_body.append(
                             '<tr class="time-profile-detail">'
                             f"<td>{escape(detail_kind)}</td>"
-                            f"<td>↳ {escape(detail_label)}{roi_meta}</td>"
+                            f"<td>↳ {escape(detail_label)}{roi_meta}{reuse_meta}</td>"
                             f'<td class="num">'
                             f"{escape(_format_seconds_precise(detail_duration))}"
                             "</td>"
@@ -6395,6 +6408,7 @@ def _render_session_time_profile_html(run_root: Path, report: dict[str, Any]) ->
         "move_mouse 與 drag 工具列會展開 YOLO / OCR / 選取等內部階段"
         "（drag 分起點與終點，來自工具結果的 timing）；"
         "YOLO / OCR 列會附帶影像座標 ROI xywh（視窗閘控區域，若有）；"
+        "OCR 列另附 skipped / read 物件數（略過的與新讀的，若有）；"
         "YOLO / OCR（yolo_ocr）合計來自本 run 的 <code>yolo_ocr/</code> sidecar（若有），"
         "為整次執行合計，未對應到單一指令。"
         "</p>"

@@ -299,13 +299,19 @@ def test_detect_reuses_ocr_when_box_shifts_one_pixel(
         "refine_inputs": False,
         "ocr_cache_key": 1,
     }
-    first_dets = _detect_mouse_targets_from_bgr(image, **kwargs)
-    second_dets = _detect_mouse_targets_from_bgr(image, **kwargs)
+    first_timing: dict = {}
+    second_timing: dict = {}
+    first_dets = _detect_mouse_targets_from_bgr(image, timing_out=first_timing, **kwargs)
+    second_dets = _detect_mouse_targets_from_bgr(image, timing_out=second_timing, **kwargs)
 
     assert first_dets[0].text == "Keep"
     assert [det.text for det in second_dets] == ["Keep", "New"]
     assert len(ocr_calls) == 2
     assert all(box[1] >= 40 for box in ocr_calls[1])
+    assert first_timing["ocr_reused"] == 0
+    assert first_timing["ocr_fresh"] == 1
+    assert second_timing["ocr_reused"] == 1
+    assert second_timing["ocr_fresh"] == 1
     clear_ocr_frame_cache()
 
 
@@ -341,6 +347,196 @@ def test_detect_without_cache_key_always_runs_ocr(
     again = _detect_mouse_targets_from_bgr(image, ocr_cache_key=3, **common)
     assert again[0].text == "Fresh"
     assert len(ocr_calls) == 2
+    clear_ocr_frame_cache()
+
+
+def test_recognize_ocr_boxes_keeps_entries_outside_this_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cua_mcp.select_mouse_target import _recognize_ocr_boxes, clear_ocr_frame_cache
+
+    clear_ocr_frame_cache()
+    image = _pattern_bgr(80, 80)
+    box_a = (10, 10, 20, 16)
+    box_b = (10, 50, 16, 16)
+    calls: list[list[tuple[int, int, int, int]]] = []
+
+    def fake_ocr(_bgr, boxes, *, mode=None, **_kwargs):
+        del mode
+        copied = [tuple(int(v) for v in box) for box in boxes]
+        calls.append(copied)
+        return [["A"] if box[1] < 40 else ["B"] for box in copied]
+
+    monkeypatch.setattr("cua_mcp.select_mouse_target._ocr_boxes_on_bgr", fake_ocr)
+
+    first, reused, fresh = _recognize_ocr_boxes(
+        image, [box_a, box_b], ["text", "text"], cache_key=7
+    )
+    assert first == [["A"], ["B"]]
+    assert (reused, fresh) == (0, 2)
+
+    second, reused, fresh = _recognize_ocr_boxes(
+        image, [box_b], ["text"], cache_key=7
+    )
+    assert second == [["B"]]
+    assert (reused, fresh) == (1, 0)
+    assert len(calls) == 1
+
+    third, reused, fresh = _recognize_ocr_boxes(
+        image, [box_a, box_b], ["text", "text"], cache_key=7
+    )
+    assert third == [["A"], ["B"]]
+    assert (reused, fresh) == (2, 0)
+    assert len(calls) == 1
+    clear_ocr_frame_cache()
+
+
+def test_recognize_ocr_boxes_drops_entry_when_pixels_change_off_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cua_mcp.select_mouse_target import _recognize_ocr_boxes, clear_ocr_frame_cache
+
+    clear_ocr_frame_cache()
+    image = _pattern_bgr(80, 80)
+    changed = image.copy()
+    changed[18, 18] = (9, 8, 7)
+    box_a = (10, 10, 20, 16)
+    box_b = (10, 50, 16, 16)
+    calls: list[list[tuple[int, int, int, int]]] = []
+
+    def fake_ocr(_bgr, boxes, *, mode=None, **_kwargs):
+        del mode
+        copied = [tuple(int(v) for v in box) for box in boxes]
+        calls.append(copied)
+        return [["A"] if box[1] < 40 else ["B"] for box in copied]
+
+    monkeypatch.setattr("cua_mcp.select_mouse_target._ocr_boxes_on_bgr", fake_ocr)
+
+    _recognize_ocr_boxes(image, [box_a, box_b], ["text", "text"], cache_key=8)
+    _recognize_ocr_boxes(changed, [box_b], ["text"], cache_key=8)
+    preds, reused, fresh = _recognize_ocr_boxes(
+        changed, [box_a, box_b], ["text", "text"], cache_key=8
+    )
+    assert preds == [["A"], ["B"]]
+    assert (reused, fresh) == (1, 1)
+    assert calls[-1] == [box_a]
+    clear_ocr_frame_cache()
+
+
+def test_recognize_ocr_boxes_empty_request_keeps_unchanged_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cua_mcp.select_mouse_target import _recognize_ocr_boxes, clear_ocr_frame_cache
+
+    clear_ocr_frame_cache()
+    image = _pattern_bgr(40, 40)
+    box = (8, 8, 16, 16)
+    calls: list[int] = []
+
+    def fake_ocr(_bgr, boxes, *, mode=None, **_kwargs):
+        del mode
+        calls.append(len(boxes))
+        return [["Keep"] for _ in boxes]
+
+    monkeypatch.setattr("cua_mcp.select_mouse_target._ocr_boxes_on_bgr", fake_ocr)
+
+    _recognize_ocr_boxes(image, [box], ["text"], cache_key=9)
+    empty, reused, fresh = _recognize_ocr_boxes(image, [], [], cache_key=9)
+    assert empty == []
+    assert (reused, fresh) == (0, 0)
+    again, reused, fresh = _recognize_ocr_boxes(image, [box], ["text"], cache_key=9)
+    assert again == [["Keep"]]
+    assert (reused, fresh) == (1, 0)
+    assert calls == [1]
+    clear_ocr_frame_cache()
+
+
+def test_detect_roi_capture_keeps_ocr_cache_outside_roi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    from cua_mcp.select_mouse_target import (
+        _detect_mouse_targets_from_bgr,
+        clear_ocr_frame_cache,
+    )
+
+    clear_ocr_frame_cache()
+    image = _pattern_bgr(80, 80)
+    both = np.asarray([[10, 10, 30, 26], [10, 50, 26, 66]], dtype=np.float32)
+    lower_only_roi = (0, 40, 80, 40)
+    frames = [both, both, both]
+    calls: list[list[tuple[int, int, int, int]]] = []
+
+    def fake_yolo(*_args, **_kwargs):
+        xyxy = frames.pop(0)
+        scores = np.ones((len(xyxy),), dtype=np.float32)
+        class_ids = np.full((len(xyxy),), YOLO_CLASS_TEXT, dtype=np.int32)
+        return xyxy, scores, class_ids
+
+    def fake_ocr(_bgr, boxes, *, mode=None, **_kwargs):
+        del mode
+        copied = [tuple(int(v) for v in box) for box in boxes]
+        calls.append(copied)
+        return [["Upper"] if box[1] < 40 else ["Lower"] for box in copied]
+
+    monkeypatch.setattr("cua_mcp.select_mouse_target.run_yolo_onnx_end2end", fake_yolo)
+    monkeypatch.setattr("cua_mcp.select_mouse_target._ocr_boxes_on_bgr", fake_ocr)
+    common = {
+        "ocr_class_ids": frozenset({YOLO_CLASS_TEXT}),
+        "refine_inputs": False,
+        "ocr_cache_key": 4,
+    }
+    _detect_mouse_targets_from_bgr(image, **common)
+    roi_dets = _detect_mouse_targets_from_bgr(
+        image, ocr_roi=lower_only_roi, ocr_roi_pad=0, **common
+    )
+    assert [det.text for det in roi_dets] == ["Lower"]
+    assert len(calls) == 1
+    full_dets = _detect_mouse_targets_from_bgr(image, **common)
+    assert [det.text for det in full_dets] == ["Upper", "Lower"]
+    assert len(calls) == 1
+    clear_ocr_frame_cache()
+
+
+def test_detect_empty_frame_keeps_ocr_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    from cua_mcp.select_mouse_target import (
+        _detect_mouse_targets_from_bgr,
+        clear_ocr_frame_cache,
+    )
+
+    clear_ocr_frame_cache()
+    image = _pattern_bgr(40, 40)
+    box = np.asarray([[8, 8, 24, 24]], dtype=np.float32)
+    empty = np.zeros((0, 4), dtype=np.float32)
+    frames = [box, empty, box]
+    calls: list[int] = []
+
+    def fake_yolo(*_args, **_kwargs):
+        xyxy = frames.pop(0)
+        scores = np.ones((len(xyxy),), dtype=np.float32)
+        class_ids = np.full((len(xyxy),), YOLO_CLASS_TEXT, dtype=np.int32)
+        return xyxy, scores, class_ids
+
+    def fake_ocr(_bgr, boxes, *, mode=None, **_kwargs):
+        del mode
+        calls.append(len(boxes))
+        return [["Keep"] for _ in boxes]
+
+    monkeypatch.setattr("cua_mcp.select_mouse_target.run_yolo_onnx_end2end", fake_yolo)
+    monkeypatch.setattr("cua_mcp.select_mouse_target._ocr_boxes_on_bgr", fake_ocr)
+    common = {
+        "ocr_class_ids": frozenset({YOLO_CLASS_TEXT}),
+        "refine_inputs": False,
+        "ocr_cache_key": 5,
+    }
+    _detect_mouse_targets_from_bgr(image, **common)
+    assert _detect_mouse_targets_from_bgr(image, **common) == []
+    again = _detect_mouse_targets_from_bgr(image, **common)
+    assert again[0].text == "Keep"
+    assert calls == [1]
     clear_ocr_frame_cache()
 
 
@@ -428,6 +624,8 @@ def test_build_move_mouse_timing_includes_ocr_roi_on_yolo_and_ocr_phases() -> No
             "ocr_s": 0.4,
             "ocr_roi": [12, 34, 100, 80],
             "ocr_roi_pad": 16,
+            "ocr_reused": 12,
+            "ocr_fresh": 3,
         },
         parse_s=0.2,
         select_s=0.3,
@@ -438,7 +636,87 @@ def test_build_move_mouse_timing_includes_ocr_roi_on_yolo_and_ocr_phases() -> No
     by_name = {p["name"]: p for p in timing["phases"]}
     assert by_name["yolo"]["ocr_roi"] == [12, 34, 100, 80]
     assert by_name["ocr"]["ocr_roi"] == [12, 34, 100, 80]
+    assert by_name["ocr"]["ocr_reused"] == 12
+    assert by_name["ocr"]["ocr_fresh"] == 3
+    assert timing["ocr_reused"] == 12
+    assert timing["ocr_fresh"] == 3
+    assert "ocr_reused" not in by_name["yolo"]
     assert "ocr_roi" not in by_name["capture"]
+
+
+def test_capture_and_detect_keeps_ocr_reuse_counts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import numpy as np
+
+    from cua_mcp.select_mouse_target import _capture_and_detect_mouse_candidates
+
+    yolo_dir = tmp_path / "yolo_ocr"
+    yolo_dir.mkdir()
+
+    class _Paths:
+        yolo_ocr_dir = yolo_dir
+
+    class _Manager:
+        @staticmethod
+        def require_paths() -> _Paths:
+            return _Paths()
+
+        @staticmethod
+        def log_info(*_args: object, **_kwargs: object) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._run_manager",
+        lambda: _Manager(),
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.selected_eye_monitor_indices",
+        lambda: [1],
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.grab_monitor_bgr",
+        lambda _index: (1, np.zeros((4, 4, 3), dtype=np.uint8)),
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.imwrite_bgr",
+        lambda *_args, **_kwargs: True,
+    )
+
+    def fake_collect(_captured, *, timing_out, **_kwargs):
+        timing_out.clear()
+        timing_out.update(
+            {
+                "yolo_s": 0.1,
+                "line_s": 0.0,
+                "ocr_s": 0.2,
+                "total_s": 0.3,
+                "ocr_reused": 20,
+                "ocr_fresh": 16,
+            }
+        )
+        return []
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._collect_monitor_detections",
+        fake_collect,
+    )
+
+    *_, timing = _capture_and_detect_mouse_candidates()
+    assert timing["ocr_reused"] == 20
+    assert timing["ocr_fresh"] == 16
+
+
+def test_add_vision_phase_timing_sums_ocr_reuse_counts() -> None:
+    from cua_mcp.select_mouse_target import _add_vision_phase_timing
+
+    total: dict = {"yolo_s": 0.0, "line_s": 0.0, "ocr_s": 0.0, "total_s": 0.0}
+    _add_vision_phase_timing(total, {"ocr_s": 0.2, "ocr_reused": 4, "ocr_fresh": 1})
+    _add_vision_phase_timing(total, {"ocr_s": 0.1, "ocr_reused": 2, "ocr_fresh": 3})
+    assert total["ocr_reused"] == 6
+    assert total["ocr_fresh"] == 4
+    assert round(total["ocr_s"], 3) == 0.3
 
 
 def test_detect_refine_inputs_only_inside_ocr_roi(

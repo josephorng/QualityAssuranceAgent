@@ -2740,6 +2740,8 @@ def test_write_session_html_renders_move_mouse_timing_details(tmp_path: Path) ->
                                                 "seconds": 2.0,
                                                 "ocr_roi": [20, 30, 400, 300],
                                                 "ocr_roi_pad": 16,
+                                                "ocr_reused": 12,
+                                                "ocr_fresh": 3,
                                             },
                                         ],
                                     }
@@ -2770,6 +2772,8 @@ def test_write_session_html_renders_move_mouse_timing_details(tmp_path: Path) ->
     assert "ROI xywh=(20, 30, 400, 300)" in html
     assert "roi-meta" in html
     assert "pad=16" in html
+    assert "skipped 12" in html
+    assert "read 3" in html
 
 
 def test_write_session_html_renders_drag_timing_details(tmp_path: Path) -> None:

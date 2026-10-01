@@ -402,6 +402,8 @@ def test_time_profile_includes_move_mouse_internal_timing_details(tmp_path: Path
                 "seconds": 2.5,
                 "ocr_roi": [10, 20, 300, 200],
                 "ocr_roi_pad": 16,
+                "ocr_reused": 12,
+                "ocr_fresh": 3,
             },
             {"name": "parse_instruction", "seconds": 0.3, "overlapped": True},
             {"name": "llm_pick", "seconds": 0.4},
@@ -467,6 +469,9 @@ def test_time_profile_includes_move_mouse_internal_timing_details(tmp_path: Path
     assert details[3]["kind"] == "move_mouse_ocr"
     assert details[3]["duration_seconds"] == 2.5
     assert details[3]["roi"] == [10, 20, 300, 200]
+    assert details[3]["ocr_reused"] == 12
+    assert details[3]["ocr_fresh"] == 3
+    assert "ocr_reused" not in details[1]
     assert any(d["kind"] == "move_mouse_llm_pick" for d in details)
     assert any(d["kind"] == "move_mouse_hand_move" for d in details)
 
@@ -536,6 +541,8 @@ def test_time_profile_includes_drag_start_and_destination_timing_details(
                                             "name": "ocr",
                                             "seconds": 1.4,
                                             "ocr_roi": [5, 6, 70, 80],
+                                            "ocr_reused": 4,
+                                            "ocr_fresh": 1,
                                         },
                                         {"name": "llm_pick", "seconds": 2.0},
                                     ],
@@ -566,6 +573,8 @@ def test_time_profile_includes_drag_start_and_destination_timing_details(
     assert details[0]["roi_pad"] == 16
     assert details[2]["label"] == "終點 · OCR"
     assert details[2]["roi"] == [5, 6, 70, 80]
+    assert details[2]["ocr_reused"] == 4
+    assert details[2]["ocr_fresh"] == 1
     assert details[3]["label"] == "終點 · LLM target pick"
 
 

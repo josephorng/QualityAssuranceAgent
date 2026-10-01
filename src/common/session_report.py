@@ -190,6 +190,8 @@ def _details_from_move_mouse_timing(timing: dict[str, Any]) -> list[dict[str, An
                     fallback_roi=fallback_roi,
                     fallback_rois=fallback_rois,
                 )
+            if name == "ocr":
+                _attach_ocr_reuse_counts(detail, phase)
             details.append(detail)
     if details:
         return details
@@ -217,6 +219,8 @@ def _details_from_move_mouse_timing(timing: dict[str, Any]) -> list[dict[str, An
                     fallback_roi=fallback_roi,
                     fallback_rois=fallback_rois,
                 )
+            if phase_name == "ocr":
+                _attach_ocr_reuse_counts(detail, timing)
             details.append(detail)
     return details
 
@@ -261,6 +265,15 @@ def _attach_roi_fields(
     pad = source.get("ocr_roi_pad")
     if isinstance(pad, (int, float)):
         detail["roi_pad"] = int(pad)
+
+
+def _attach_ocr_reuse_counts(detail: dict[str, Any], source: dict[str, Any]) -> None:
+    """Copy skipped and newly read OCR box counts onto an OCR detail row."""
+    for key in ("ocr_reused", "ocr_fresh"):
+        raw = source.get(key)
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            continue
+        detail[key] = int(raw)
 
 
 def _ocr_roi_from_click_window_payload(payload: dict[str, Any]) -> list[int] | None:

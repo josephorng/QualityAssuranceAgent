@@ -203,6 +203,63 @@ def test_build_vision_passes_ocr_roi_when_click_window_maximized(tmp_path: Path)
     assert seen["ocr_roi"] == (0, 0, 100, 80)
 
 
+def test_build_vision_converts_live_secondary_monitor_window(tmp_path: Path) -> None:
+    """Live screen rects are shifted by the screenshot monitor, not left at offset 0."""
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    run_dir = tmp_path / "roi_mon2"
+    (run_dir / "screenshots").mkdir(parents=True)
+    (run_dir / "screenshots" / "event_001.jpeg").write_bytes(b"x")
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(2620, 27),
+        monitor_offset=(1920, -1),
+        screenshot_path=str(run_dir / "screenshots" / "event_001.jpeg"),
+        click_window={
+            "hwnd": 7,
+            "title": "Chrome",
+            "rect": [-8, -8, 1936, 1048],
+            "is_maximized": True,
+        },
+    )
+    live = ClickWindowInfo(
+        hwnd=7,
+        title="Chrome",
+        process_name="chrome.exe",
+        left=1912,
+        top=-9,
+        width=1936,
+        height=1048,
+        is_maximized=True,
+    )
+    seen: dict = {}
+
+    def fake_detect(_bgr, **kwargs):
+        seen["ocr_roi"] = kwargs.get("ocr_roi")
+        return [_detection_from_bbox((691, 19, 16, 16), YOLO_CLASS_ELEMENT, text="+")]
+
+    with patch(
+        "src.recorder.vision_context.imread_bgr",
+        return_value=np.zeros((1080, 1920, 3), dtype=np.uint8),
+    ), patch(
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
+        side_effect=fake_detect,
+    ), patch(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        return_value=live,
+    ):
+        build_vision_context_at_point(
+            event,
+            local_x=700,
+            local_y=28,
+            run_dir=run_dir,
+            persist_debug=False,
+        )
+    assert seen["ocr_roi"] == (0, 0, 1920, 1040)
+
+
 def test_build_vision_context_at_point_records_missing_screenshot(tmp_path: Path) -> None:
     event = RecordedEvent(
         index=1,
@@ -946,6 +1003,77 @@ async def test_drag_vision_uses_separate_click_windows(tmp_path) -> None:
 
     assert rois[0] == (1, 2, 30, 40)
     assert rois[1] == (50, 60, 40, 30)
+
+
+@pytest.mark.asyncio
+async def test_drag_end_live_window_uses_end_monitor_offset(tmp_path) -> None:
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    start_shot = tmp_path / "event_start.jpeg"
+    end_shot = tmp_path / "event_end.jpeg"
+    start_shot.write_bytes(b"not-a-real-jpeg")
+    end_shot.write_bytes(b"not-a-real-jpeg")
+    event = RecordedEvent(
+        index=8,
+        timestamp_utc="t",
+        kind="drag",
+        cursor_xy=(110, 210),
+        end_xy=(2620, 27),
+        monitor_offset=(0, 0),
+        end_monitor_offset=(1920, -1),
+        screenshot_path=str(start_shot),
+        end_screenshot_path=str(end_shot),
+        click_window={"hwnd": 1, "title": "Start", "rect": [1, 2, 30, 40]},
+        end_click_window={
+            "hwnd": 7,
+            "title": "Chrome",
+            "rect": [-8, -8, 1936, 1048],
+            "is_maximized": True,
+        },
+    )
+    live = ClickWindowInfo(
+        hwnd=7,
+        title="Chrome",
+        process_name="chrome.exe",
+        left=1912,
+        top=-9,
+        width=1936,
+        height=1048,
+        is_maximized=True,
+    )
+    rois: dict[int, tuple[int, int, int, int] | None] = {}
+    start_img = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    end_img = np.full((1080, 1920, 3), 1, dtype=np.uint8)
+
+    def fake_imread(path):
+        name = Path(path).name.lower()
+        return end_img if "end" in name else start_img
+
+    def fake_build(bgr, **kwargs):
+        rois[int(bgr[0, 0, 0])] = kwargs.get("ocr_roi")
+        text = "end" if int(bgr[0, 0, 0]) == 1 else "start"
+        return [_detection_from_bbox((8, 8, 10, 10), YOLO_CLASS_TEXT, text=text)]
+
+    def fake_live(info):
+        hwnd = getattr(info, "hwnd", None)
+        if hwnd is None and isinstance(info, dict):
+            hwnd = info.get("hwnd")
+        return live if int(hwnd or 0) == 7 else None
+
+    with patch(
+        "src.recorder.vision_context.imread_bgr",
+        side_effect=fake_imread,
+    ), patch(
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
+        side_effect=fake_build,
+    ), patch(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        side_effect=fake_live,
+    ):
+        await build_vision_context(event, run_dir=tmp_path, persist_debug=False)
+
+    assert rois[0] == (1, 2, 30, 40)
+    assert rois[1] == (0, 0, 1920, 1040)
 
 
 @pytest.mark.asyncio

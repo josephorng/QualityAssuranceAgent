@@ -290,6 +290,7 @@ async def resolve_text_input_text(
     # Prefer the dedicated typing end frame (captured at focus on the typing monitor).
     # Shared next-action screenshots can be on another monitor and break OCR anchoring.
     typing_end = screenshot_path_for_event_end(run_dir, event.index)
+    roi_monitor_offset = event.monitor_offset
     if typing_end.is_file():
         local = _global_to_local(event, anchor)
         debug_name = "_end"
@@ -304,6 +305,8 @@ async def resolve_text_input_text(
             ocr_reason = "after-screenshot OCR"
             ocr_image_path = None
             use_end = True
+            if event.end_monitor_offset is not None:
+                roi_monitor_offset = event.end_monitor_offset
         else:
             local = _global_to_local(event, anchor)
             debug_name = None
@@ -322,6 +325,7 @@ async def resolve_text_input_text(
         debug_name=debug_name,
         image_path=ocr_image_path,
         source_fingerprint=vision_source_fingerprint(event),
+        monitor_offset=roi_monitor_offset,
     )
     bgr = vision.pop("bgr", None)
     all_detections = vision.pop("all_detections", [])

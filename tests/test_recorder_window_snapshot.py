@@ -1048,6 +1048,39 @@ def test_resolve_ocr_roi_local_returns_clipped_rect_for_small_window() -> None:
     assert roi == (0, 700, 1000, 80)
 
 
+def test_resolve_ocr_roi_local_live_window_uses_monitor_offset() -> None:
+    """A maximized window on monitor 2 must cover that screenshot, not an 8px strip."""
+    from src.recorder.window_snapshot import ClickWindowInfo, resolve_ocr_roi_local
+
+    payload = {
+        "hwnd": 7,
+        "title": "Chrome",
+        "rect": [-8, -8, 1936, 1048],
+        "is_maximized": True,
+    }
+    live = ClickWindowInfo(
+        hwnd=7,
+        title="Chrome",
+        process_name="chrome.exe",
+        left=1912,
+        top=-9,
+        width=1936,
+        height=1048,
+        is_maximized=True,
+    )
+    with patch(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        return_value=live,
+    ):
+        roi = resolve_ocr_roi_local(
+            payload,
+            image_w=1920,
+            image_h=1080,
+            monitor_offset=(1920, -1),
+        )
+    assert roi == (0, 0, 1920, 1040)
+
+
 def test_resolve_ocr_roi_local_none_on_other_monitor_offset() -> None:
     from src.recorder.window_snapshot import ClickWindowInfo, resolve_ocr_roi_local
 

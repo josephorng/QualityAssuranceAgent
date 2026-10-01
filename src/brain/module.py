@@ -40,6 +40,7 @@ from src.common.llm_factory import get_llm_client
 from src.common.llm_text import strip_llm_quote_wrappers
 from src.common.nearby_side import enrich_tool_arguments_from_goal
 from src.common.prompting import get_prompt
+from src.common.run_control import notify_active_step, publish_script_steps
 from src.common.run_state import get_run_state_manager
 from src.common.runtime_context import (
     SCRIPT_BASELINE_AFTER_ENV,
@@ -202,6 +203,8 @@ class BrainModule:
             else self._script_seed_window_verifies(len(self.script_lines))
         )
         self._script_step_index = 0
+        # Recording event id for each script step. Filled on the first disk reload.
+        self._script_event_indices: list[int | None] = []
         self._hand = hand
         self._eye = eye
         # When vision verify is skipped, settle is deferred until the next step's
@@ -384,6 +387,87 @@ class BrainModule:
         failed_tool_calls.append(tool_name)
         payload["failed_tool_calls"] = failed_tool_calls
         write_json(out_path, payload)
+
+    def reload_pending_recording_steps(self) -> None:
+        """Replace steps that have not started with the recording's saved settings.
+
+        The step already inside ``process_step`` keeps the copy it started with.
+        Pause is checked between steps, so edits made while paused apply to the
+        next step and every step after it.
+        """
+        if is_runtime_command_mode() or is_smart_mode():
+            return
+        script_path_raw = (os.environ.get(SCRIPT_PATH_ENV) or "").strip()
+        if not script_path_raw:
+            return
+        from src.common.script_helper import (
+            load_recording_replay_steps,
+            merge_unstarted_recording_steps,
+            recording_run_dir,
+        )
+
+        recording_dir = recording_run_dir(Path(script_path_raw))
+        if recording_dir is None:
+            return
+        try:
+            fresh = load_recording_replay_steps(recording_dir)
+        except Exception as exc:
+            self.manager.log_info(f"Recording reload skipped: {exc}")
+            return
+        merged = merge_unstarted_recording_steps(
+            step_index=self._script_step_index,
+            current_lines=list(self.script_lines),
+            current_outcomes=list(self.script_expected_outcomes),
+            current_baselines=list(self.script_baseline_after_paths),
+            current_settles=list(self.script_settle_after_seconds),
+            current_verifies=[
+                dict(item) if isinstance(item, dict) else {}
+                for item in self.script_window_verifies
+            ],
+            current_event_indices=list(self._script_event_indices),
+            fresh_lines=fresh[0],
+            fresh_outcomes=fresh[1],
+            fresh_baselines=fresh[2],
+            fresh_settles=fresh[3],
+            fresh_verifies=fresh[4],
+            fresh_event_indices=fresh[5],
+        )
+        content_same = (
+            merged[0] == list(self.script_lines)
+            and merged[1] == list(self.script_expected_outcomes)
+            and merged[2] == list(self.script_baseline_after_paths)
+            and merged[3] == list(self.script_settle_after_seconds)
+            and merged[4] == [
+                dict(item) if isinstance(item, dict) else {}
+                for item in self.script_window_verifies
+            ]
+        )
+        self._script_event_indices = list(merged[5])
+        if content_same:
+            return
+        self.script_lines = list(merged[0])
+        self.script_expected_outcomes = list(merged[1])
+        self.script_baseline_after_paths = list(merged[2])
+        self.script_settle_after_seconds = list(merged[3])
+        self.script_window_verifies = list(merged[4])
+        pending = max(0, len(self.script_lines) - self._script_step_index)
+        self.manager.log_info(
+            f"Applied recording edits to {pending} unstarted step(s); "
+            f"next step {self._script_step_index + 1}/{max(len(self.script_lines), 1)}"
+        )
+
+    def jump_to_script_step(self, index: int) -> None:
+        """Run ``index`` next. The step already in progress is left to finish."""
+        if not self.script_lines:
+            return
+        target = max(0, min(int(index), len(self.script_lines) - 1))
+        if target == self._script_step_index:
+            return
+        self.manager.log_info(
+            f"Replay jump: step {self._script_step_index + 1} -> {target + 1}"
+        )
+        self._script_step_index = target
+        self._clear_pending_settle_deadline()
 
     def _script_seed_steps(self) -> list[str]:
         """Load non-empty script lines from `SCRIPT_LINES_ENV` (JSON array of strings)."""
@@ -1966,6 +2050,8 @@ class BrainModule:
         """
         # await self._validate_tool_functions_match_mcp()
 
+        self.reload_pending_recording_steps()
+        publish_script_steps(list(self.script_lines), list(self._script_event_indices))
         if self._script_step_index >= len(self.script_lines):
             return BrainStepResult(
                 reason="All script steps complete",
@@ -1976,6 +2062,23 @@ class BrainModule:
         transcript_counter = self._step_transcript_counter
         script_step_index = self._script_step_index
         self.manager.set_step_log_context(transcript_counter, script_step_index)
+        event_ids = self._script_event_indices
+        event_index = (
+            event_ids[script_step_index]
+            if 0 <= script_step_index < len(event_ids)
+            and isinstance(event_ids[script_step_index], int)
+            else None
+        )
+        instruction = (
+            self.script_lines[script_step_index]
+            if 0 <= script_step_index < len(self.script_lines)
+            else None
+        )
+        notify_active_step(
+            script_step_index,
+            instruction=instruction,
+            event_index=event_index,
+        )
         try:
             started_iso = datetime.now(timezone.utc).isoformat()
             started_at = perf_counter()

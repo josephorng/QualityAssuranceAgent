@@ -156,6 +156,61 @@ def test_run_control_step_status_callback_reset() -> None:
     assert events == [(2, "ok")]
 
 
+def test_run_control_step_error_persists_across_retry_until_success() -> None:
+    run_control.reset_run_control()
+    events: list[tuple[int, str]] = []
+    run_control.set_step_status_callback(lambda index, status: events.append((index, status)))
+    run_control.notify_step_status(1, "ok", reason="  window missing  ", retry=True)
+    assert events == [(1, "ok")]
+    assert run_control.step_error(1) == "window missing"
+    run_control.notify_active_step(1, instruction="open the dialog")
+    assert run_control.step_error(1) == "window missing"
+    run_control.notify_step_status(1, "ok", reason="Verify: still missing", retry=True)
+    assert run_control.step_error(1) == "Verify: still missing"
+    run_control.notify_step_status(1, "ok")
+    assert run_control.step_error(1) is None
+    run_control.notify_step_status(1, "fail", reason="  window missing  ")
+    assert run_control.step_error(1) == "window missing"
+    run_control.notify_step_status(1, "fail", reason="   ")
+    assert run_control.step_error(1) == "window missing"
+    run_control.notify_step_status(2, "fail", reason="tool failed")
+    assert run_control.step_errors() == {1: "window missing", 2: "tool failed"}
+    run_control.reset_run_control()
+    assert run_control.step_errors() == {}
+    assert events == [(1, "ok"), (1, "ok"), (1, "ok"), (1, "fail"), (1, "fail"), (2, "fail")]
+
+
+def test_run_control_active_step_reset() -> None:
+    run_control.reset_run_control()
+    seen: list[int | None] = []
+    run_control.notify_active_step(2)
+    assert run_control.active_step_index() == 2
+    assert seen == []
+    run_control.set_active_step_callback(seen.append)
+    run_control.notify_active_step(4, instruction="click save", event_index=7)
+    assert run_control.active_step_index() == 4
+    assert run_control.active_step_instruction() == "click save"
+    assert run_control.active_step_event_index() == 7
+    assert seen == [4]
+    run_control.notify_active_step(None)
+    assert run_control.active_step_index() is None
+    assert run_control.active_step_instruction() is None
+    assert run_control.active_step_event_index() is None
+    assert seen == [4, None]
+    run_control.reset_run_control()
+    assert run_control.active_step_index() is None
+    run_control.notify_active_step(1)
+    assert seen == [4, None]
+    assert run_control.active_step_index() == 1
+    run_control.request_step_jump(3)
+    assert run_control.peek_pending_step_jump() == 3
+    assert run_control.take_pending_step_jump() == 3
+    assert run_control.take_pending_step_jump() is None
+    run_control.request_step_jump(1)
+    run_control.reset_run_control()
+    assert run_control.peek_pending_step_jump() is None
+
+
 def test_wait_while_paused_blocking_unblocks_on_resume() -> None:
     run_control.reset_run_control()
     run_control.pause_run()

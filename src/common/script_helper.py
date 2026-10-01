@@ -208,15 +208,17 @@ def _recorded_event_with_resolved_shots(
     return event
 
 
-def collect_recording_instructions(run_dir: Path) -> tuple[list[str], list[str | None]]:
-    """Collect hub-script lines from recording analysis files.
+def _iter_recording_instructions(
+    run_dir: Path,
+) -> list[tuple[int, str, dict[str, Any]]]:
+    """Instruction events in replay order: ``(event index, instruction, analysis)``.
 
     Virtual ``wait_instruction`` fields are ignored; manual ``kind=wait`` events
-    still appear via their own analysis ``instruction``.
+    still appear via their own analysis ``instruction``. Events with no analysis
+    or a blank instruction are skipped.
     """
     analysis_dir = Path(run_dir) / "analysis"
-    instructions: list[str] = []
-    expected_outcomes: list[str | None] = []
+    found: list[tuple[int, str, dict[str, Any]]] = []
     for event_path in _recording_event_json_paths(run_dir):
         event = _load_json_dict(event_path)
         if event is None:
@@ -229,15 +231,36 @@ def collect_recording_instructions(run_dir: Path) -> tuple[list[str], list[str |
             continue
         instruction = analysis.get("instruction")
         if isinstance(instruction, str) and instruction.strip():
-            instructions.append(instruction.strip())
-            if use_expected_outcome_enabled(analysis):
-                outcome = analysis.get("expected_outcome")
-                if isinstance(outcome, str) and outcome.strip():
-                    expected_outcomes.append(outcome.strip())
-                else:
-                    expected_outcomes.append(None)
+            found.append((raw_index, instruction.strip(), analysis))
+    return found
+
+
+def collect_recording_instruction_event_indices(run_dir: Path) -> list[int]:
+    """Recording event ids aligned with ``collect_recording_instructions``.
+
+    These are the ``id="event-N"`` anchors in ``recording_steps.html``.
+    """
+    return [index for index, _instruction, _analysis in _iter_recording_instructions(run_dir)]
+
+
+def collect_recording_instructions(run_dir: Path) -> tuple[list[str], list[str | None]]:
+    """Collect hub-script lines from recording analysis files.
+
+    Virtual ``wait_instruction`` fields are ignored; manual ``kind=wait`` events
+    still appear via their own analysis ``instruction``.
+    """
+    instructions: list[str] = []
+    expected_outcomes: list[str | None] = []
+    for _index, instruction, analysis in _iter_recording_instructions(run_dir):
+        instructions.append(instruction)
+        if use_expected_outcome_enabled(analysis):
+            outcome = analysis.get("expected_outcome")
+            if isinstance(outcome, str) and outcome.strip():
+                expected_outcomes.append(outcome.strip())
             else:
                 expected_outcomes.append(None)
+        else:
+            expected_outcomes.append(None)
     return instructions, expected_outcomes
 
 
@@ -422,6 +445,173 @@ def collect_recording_window_verifies(run_dir: Path) -> list[dict[str, Any]]:
         else:
             verifies.append({})
     return verifies
+
+
+def recording_replay_steps(
+    lines: list[str],
+    outcomes: list[str | None],
+    baselines: list[str | None],
+    settles: list[float | None],
+    verifies: list[dict[str, Any]],
+    event_indices: list[int | None],
+) -> tuple[
+    list[str],
+    list[str | None],
+    list[str | None],
+    list[float | None],
+    list[dict[str, Any]],
+    list[int | None],
+]:
+    """Pad collectors to ``len(lines)`` and copy verify dicts."""
+    count = len(lines)
+    padded_outcomes: list[str | None] = []
+    padded_baselines: list[str | None] = []
+    padded_settles: list[float | None] = []
+    padded_verifies: list[dict[str, Any]] = []
+    padded_events: list[int | None] = []
+    for index in range(count):
+        outcome = outcomes[index] if index < len(outcomes) else None
+        padded_outcomes.append(outcome if isinstance(outcome, str) and outcome.strip() else None)
+        baseline = baselines[index] if index < len(baselines) else None
+        padded_baselines.append(baseline if isinstance(baseline, str) and baseline.strip() else None)
+        settle = settles[index] if index < len(settles) else None
+        if isinstance(settle, bool) or settle is None:
+            padded_settles.append(None)
+        elif isinstance(settle, (int, float)):
+            padded_settles.append(float(settle))
+        else:
+            padded_settles.append(None)
+        verify = verifies[index] if index < len(verifies) else {}
+        padded_verifies.append(dict(verify) if isinstance(verify, dict) else {})
+        event_index = event_indices[index] if index < len(event_indices) else None
+        padded_events.append(event_index if isinstance(event_index, int) else None)
+    return (
+        list(lines),
+        padded_outcomes,
+        padded_baselines,
+        padded_settles,
+        padded_verifies,
+        padded_events,
+    )
+
+
+def load_recording_replay_steps(
+    run_dir: Path,
+) -> tuple[
+    list[str],
+    list[str | None],
+    list[str | None],
+    list[float | None],
+    list[dict[str, Any]],
+    list[int | None],
+]:
+    """Read the recording's current replay steps from disk."""
+    instructions, outcomes = collect_recording_instructions(run_dir)
+    return recording_replay_steps(
+        instructions,
+        outcomes,
+        collect_recording_baseline_after_paths(run_dir),
+        collect_recording_settle_after_seconds(run_dir),
+        collect_recording_window_verifies(run_dir),
+        collect_recording_instruction_event_indices(run_dir),
+    )
+
+
+def merge_unstarted_recording_steps(
+    *,
+    step_index: int,
+    current_lines: list[str],
+    current_outcomes: list[str | None],
+    current_baselines: list[str | None],
+    current_settles: list[float | None],
+    current_verifies: list[dict[str, Any]],
+    current_event_indices: list[int | None],
+    fresh_lines: list[str],
+    fresh_outcomes: list[str | None],
+    fresh_baselines: list[str | None],
+    fresh_settles: list[float | None],
+    fresh_verifies: list[dict[str, Any]],
+    fresh_event_indices: list[int | None],
+) -> tuple[
+    list[str],
+    list[str | None],
+    list[str | None],
+    list[float | None],
+    list[dict[str, Any]],
+    list[int | None],
+]:
+    """Keep steps that already started, and replace the rest from ``fresh``.
+
+    Completed steps stay put so the step cursor does not shift. Unstarted steps
+    are matched by recording event id when those ids are known, so an edit,
+    insert, or delete of a step that has not started is picked up. Without ids,
+    the unstarted tail is taken by position.
+    """
+    fresh = recording_replay_steps(
+        fresh_lines,
+        fresh_outcomes,
+        fresh_baselines,
+        fresh_settles,
+        fresh_verifies,
+        fresh_event_indices,
+    )
+    prefix_len = max(0, min(step_index, len(current_lines)))
+    if prefix_len == 0:
+        return fresh
+
+    prefix_ids: list[int | None] = []
+    for index in range(prefix_len):
+        event_index = (
+            current_event_indices[index] if index < len(current_event_indices) else None
+        )
+        prefix_ids.append(event_index if isinstance(event_index, int) else None)
+    id_aligned = all(isinstance(event_index, int) for event_index in prefix_ids)
+
+    if id_aligned:
+        consumed = {event_index for event_index in prefix_ids if isinstance(event_index, int)}
+        tail_indexes = [
+            index
+            for index, event_index in enumerate(fresh[5])
+            if isinstance(event_index, int) and event_index not in consumed
+        ]
+    else:
+        tail_indexes = list(range(prefix_len, len(fresh[0])))
+
+    lines = [current_lines[index] for index in range(prefix_len)]
+    outcomes: list[str | None] = []
+    baselines: list[str | None] = []
+    settles: list[float | None] = []
+    verifies: list[dict[str, Any]] = []
+    event_indices: list[int | None] = list(prefix_ids)
+    for index in range(prefix_len):
+        outcome = current_outcomes[index] if index < len(current_outcomes) else None
+        outcomes.append(outcome if isinstance(outcome, str) and outcome.strip() else None)
+        baseline = current_baselines[index] if index < len(current_baselines) else None
+        baselines.append(baseline if isinstance(baseline, str) and baseline.strip() else None)
+        settle = current_settles[index] if index < len(current_settles) else None
+        if isinstance(settle, bool) or settle is None:
+            settles.append(None)
+        elif isinstance(settle, (int, float)):
+            settles.append(float(settle))
+        else:
+            settles.append(None)
+        verify = current_verifies[index] if index < len(current_verifies) else {}
+        verifies.append(dict(verify) if isinstance(verify, dict) else {})
+
+    fresh_lines_aligned = fresh[0]
+    fresh_outcomes_aligned = fresh[1]
+    fresh_baselines_aligned = fresh[2]
+    fresh_settles_aligned = fresh[3]
+    fresh_verifies_aligned = fresh[4]
+    fresh_events_aligned = fresh[5]
+    for index in tail_indexes:
+        lines.append(fresh_lines_aligned[index])
+        outcomes.append(fresh_outcomes_aligned[index])
+        baselines.append(fresh_baselines_aligned[index])
+        settles.append(fresh_settles_aligned[index])
+        verifies.append(dict(fresh_verifies_aligned[index]))
+        event_indices.append(fresh_events_aligned[index])
+    return (lines, outcomes, baselines, settles, verifies, event_indices)
 
 
 def _elapsed_seconds_between(

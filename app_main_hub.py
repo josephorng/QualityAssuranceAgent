@@ -30,10 +30,20 @@ from src.common.ctk_dialogs import (
 from src.common.folder_dialogs import ask_directories
 from src.common.io_utils import append_text, pop_last_nonempty_line, read_json, write_json
 from src.common.run_control import (
+    active_step_event_index,
+    active_step_index,
+    active_step_instruction,
+    notify_active_step,
     pause_run,
+    request_step_jump,
+    take_pending_step_jump,
     reset_run_control,
     resume_run,
+    set_active_step_callback,
+    set_script_steps_callback,
     set_step_status_callback,
+    step_error,
+    step_errors,
     wait_while_paused_blocking,
 )
 from src.common.run_state import (
@@ -55,6 +65,8 @@ from src.common.runtime_command_dialog import (
 )
 from src.common.runtime_context import USE_TOOL_CACHE_ENV
 from src.common.script_helper import (
+    collect_recording_instruction_event_indices,
+    collect_recording_instructions,
     collect_recording_script_text,
     executable_source_line_numbers,
     format_script_lines_with_outcomes,
@@ -77,7 +89,7 @@ from src.common.settings import (
 )
 from src.recorder.capture import RecordingSession
 from src.recorder.hotkey import RECORDING_HOTKEY_DISPLAY, RecordingHotkeyManager
-from src.recorder.stop_overlay import RecordingStopOverlay
+from src.recorder.stop_overlay import RecordingStopOverlay, ReplayControlOverlay
 from src.recorder.models import RecordedEvent
 from src.recorder.vision_prefetch import VisionPrefetchWorker
 
@@ -271,6 +283,16 @@ class MainHub(ctk.CTk):
         self._recording_session.set_on_event(self._on_recording_event)
         self._recording_hotkey = RecordingHotkeyManager()
         self._recording_stop_overlay: RecordingStopOverlay | None = None
+        self._replay_overlay: ReplayControlOverlay | None = None
+        self._active_recording_dir: Path | None = None
+        self._replay_step_instructions: list[str] = []
+        self._replay_event_indices: list[int | None] = []
+        self._replay_nav_index: int | None = None
+        self._replay_nav_held = False
+        self._replay_step_errors: dict[int, str] = {}
+        self._replay_hold_for_error = False
+        self._track_script_step_status = False
+        self._active_replay_event_index: int | None = None
         self._recording_analysis_thread: threading.Thread | None = None
         self._recording_finalize_thread: threading.Thread | None = None
         self._vision_prefetch = VisionPrefetchWorker()
@@ -900,8 +922,20 @@ class MainHub(ctk.CTk):
         """Apply a green check / red cross next to the matching script line (coordinator thread)."""
         if status not in ("ok", "fail"):
             return
+        reason = step_error(step_index) or ""
 
         def apply() -> None:
+            if not self._replay_hold_for_error:
+                if reason:
+                    self._replay_step_errors[step_index] = reason
+                    if status == "fail":
+                        self._replay_nav_held = False
+                        self._replay_nav_index = step_index
+                elif status == "ok":
+                    self._replay_step_errors.pop(step_index, None)
+                self._show_replay_step(self._replay_display_index())
+            if not self._track_script_step_status:
+                return
             line: int | None = None
             if self._script_step_line_numbers:
                 if 0 <= step_index < len(self._script_step_line_numbers):
@@ -2130,6 +2164,9 @@ class MainHub(ctk.CTk):
             return
         pause_run()
         self._set_pause_button_paused()
+        overlay = self._replay_overlay
+        if overlay is not None:
+            overlay.set_paused(True)
         self._status.configure(text="已暫停（點繼續以恢復）")
 
     def _on_resume_run(self) -> None:
@@ -2137,11 +2174,17 @@ class MainHub(ctk.CTk):
             return
         resume_run()
         self._set_run_button_running()
+        overlay = self._replay_overlay
+        if overlay is not None:
+            overlay.set_paused(False)
         self._status.configure(text="執行中…")
 
     def _on_stop_run(self) -> None:
         from main import request_coordinator_cancel
 
+        if self._worker_thread is None or not self._worker_thread.is_alive():
+            self._release_replay_overlay()
+            return
         self._user_requested_stop = True
         self._status.configure(text="正在停止…")
         # Unblock a paused wait so cancel can proceed promptly.
@@ -2171,6 +2214,7 @@ class MainHub(ctk.CTk):
         if self._is_analysis_running():
             self._analysis_cancel_event.set()
         self._destroy_recording_stop_overlay()
+        self._destroy_replay_overlay()
         if self._recording_session.is_active():
             self._hide_hub_before_final_capture()
             self._recording_session.stop()
@@ -2228,6 +2272,227 @@ class MainHub(ctk.CTk):
             self,
             on_stop=self._on_record_button,
         )
+
+    def _remember_replay_steps(self, raw: str, recording_dir: Path | None) -> None:
+        """Cache step text for the overlay and enable edit only for a recording."""
+        if recording_dir is not None:
+            instructions, _outcomes = collect_recording_instructions(recording_dir)
+            self._replay_step_instructions = instructions
+        else:
+            self._replay_step_instructions = parse_executable_lines_from_text(raw)
+        self._active_recording_dir = recording_dir
+        self._replay_event_indices = []
+        self._replay_nav_held = False
+        self._replay_step_errors = {}
+        self._replay_hold_for_error = False
+        take_pending_step_jump()
+        self._replay_nav_index = 0 if self._replay_step_instructions else None
+        overlay = self._replay_overlay
+        if overlay is None:
+            return
+        overlay.set_edit_enabled(recording_dir is not None)
+        self._apply_active_step_to_overlay(overlay)
+
+    def _replay_display_index(self) -> int | None:
+        if self._replay_nav_index is not None:
+            return self._replay_nav_index
+        active = active_step_index()
+        if active is not None:
+            return active
+        if self._replay_step_instructions:
+            return 0
+        return None
+
+    def _show_replay_step(self, index: int | None) -> None:
+        overlay = self._replay_overlay
+        if overlay is None:
+            return
+        total = len(self._replay_step_instructions)
+        snippet = ""
+        if index is not None and 0 <= index < total:
+            snippet = self._replay_step_instructions[index]
+        error = self._replay_step_errors.get(index, "") if index is not None else ""
+        overlay.set_step(index, snippet, total, error=error)
+
+    def _apply_active_step_to_overlay(self, overlay: ReplayControlOverlay) -> None:
+        del overlay
+        self._show_replay_step(self._replay_display_index())
+
+    def _on_replay_step_delta(self, delta: int) -> None:
+        """Pause and queue a jump to an earlier or later step."""
+        total = len(self._replay_step_instructions)
+        if total <= 0:
+            return
+        current = self._replay_display_index()
+        if current is None:
+            current = 0
+        target = max(0, min(total - 1, current + delta))
+        if target == current and (
+            (delta < 0 and current == 0) or (delta > 0 and current >= total - 1)
+        ):
+            return
+        self._replay_nav_held = True
+        self._replay_nav_index = target
+        request_step_jump(target)
+        self._on_pause_run()
+        self._show_replay_step(target)
+
+    def _on_script_steps_from_worker(
+        self,
+        lines: list[str],
+        event_indices: list[int | None],
+    ) -> None:
+        """Keep the overlay step list aligned with the run, including recording edits."""
+
+        def apply() -> None:
+            if self._replay_hold_for_error:
+                return
+            self._replay_step_instructions = list(lines)
+            self._replay_event_indices = list(event_indices)
+            if self._replay_nav_index is not None and lines:
+                self._replay_nav_index = min(self._replay_nav_index, len(lines) - 1)
+            elif self._replay_nav_index is None and lines:
+                active = active_step_index()
+                self._replay_nav_index = active if active is not None else 0
+            if self._replay_nav_held:
+                self._show_replay_step(self._replay_nav_index)
+                return
+            self._show_replay_step(self._replay_display_index())
+
+        try:
+            self.after(0, apply)
+        except Exception:
+            return
+
+    def _on_active_step_from_worker(self, step_index: int | None) -> None:
+        """Refresh the replay overlay label from the coordinator thread."""
+        instruction = active_step_instruction()
+        event_index = active_step_event_index()
+
+        def apply() -> None:
+            if self._replay_hold_for_error:
+                return
+            self._active_replay_event_index = event_index
+            if step_index is not None and not step_error(step_index):
+                self._replay_step_errors.pop(step_index, None)
+            if step_index is not None and isinstance(instruction, str) and instruction:
+                while len(self._replay_step_instructions) <= step_index:
+                    self._replay_step_instructions.append("")
+                self._replay_step_instructions[step_index] = instruction
+            if self._replay_nav_held and step_index != self._replay_nav_index:
+                return
+            self._replay_nav_held = False
+            if step_index is not None:
+                self._replay_nav_index = step_index
+            self._show_replay_step(self._replay_display_index())
+
+        try:
+            self.after(0, apply)
+        except Exception:
+            return
+
+    def _sync_replay_steps_from_worker(self, raw: str, script_path: Path) -> None:
+        """Publish the queue item's steps on the Tk thread before that script starts."""
+        recording_dir = recording_run_dir(script_path)
+        applied = threading.Event()
+
+        def apply() -> None:
+            try:
+                self._remember_replay_steps(raw, recording_dir)
+            finally:
+                applied.set()
+
+        try:
+            self.after(0, apply)
+        except Exception:
+            self._remember_replay_steps(raw, recording_dir)
+            return
+        applied.wait(timeout=5.0)
+
+    def _show_replay_overlay(self) -> None:
+        self._destroy_replay_overlay()
+        overlay = ReplayControlOverlay(
+            self,
+            on_pause=self._on_pause_run,
+            on_resume=self._on_resume_run,
+            on_stop=self._on_stop_run,
+            on_edit=self._on_edit_replay_step,
+            on_previous=lambda: self._on_replay_step_delta(-1),
+            on_next=lambda: self._on_replay_step_delta(1),
+            edit_enabled=self._active_recording_dir is not None,
+        )
+        self._replay_overlay = overlay
+        self._apply_active_step_to_overlay(overlay)
+
+    def _destroy_replay_overlay(self) -> None:
+        overlay = self._replay_overlay
+        self._replay_overlay = None
+        if overlay is not None:
+            overlay.destroy()
+
+    def _release_replay_overlay(self) -> None:
+        """Drop the replay overlay and the step text it was showing."""
+        self._replay_hold_for_error = False
+        self._active_recording_dir = None
+        self._replay_step_instructions = []
+        self._replay_event_indices = []
+        self._replay_nav_index = None
+        self._replay_nav_held = False
+        self._replay_step_errors = {}
+        self._active_replay_event_index = None
+        self._destroy_replay_overlay()
+
+    def _on_edit_replay_step(self) -> None:
+        """Pause and open the in-progress step in the recording report."""
+        self._on_pause_run()
+        recording_dir = self._active_recording_dir
+        if recording_dir is None:
+            return
+        event_index: int | None = None
+        step = self._replay_display_index()
+        if step is not None and 0 <= step < len(self._replay_event_indices):
+            raw_event = self._replay_event_indices[step]
+            if isinstance(raw_event, int):
+                event_index = raw_event
+        if event_index is None and step is not None and step == active_step_index():
+            event_index = self._active_replay_event_index
+        if event_index is None and step is not None:
+            indices = collect_recording_instruction_event_indices(recording_dir)
+            if 0 <= step < len(indices):
+                event_index = indices[step]
+        self._open_recording_step_report(recording_dir, event_index)
+
+    def _open_recording_step_report(
+        self,
+        recording_dir: Path,
+        event_index: int | None,
+    ) -> None:
+        html_path = Path(recording_dir) / "recording_steps.html"
+        if not html_path.is_file():
+            try:
+                from src.common.session_html import write_recording_html_from_run
+
+                html_path = write_recording_html_from_run(
+                    Path(recording_dir), update_index=False
+                )
+            except Exception as exc:
+                show_ctk_message(
+                    self,
+                    "錄製報告",
+                    f"無法建立錄製報告：\n{exc}",
+                    kind="error",
+                )
+                return
+        if not html_path.is_file():
+            show_ctk_message(self, "錄製報告", "找不到錄製報告路徑。", kind="warning")
+            return
+        url = self._report_http_url(html_path)
+        if event_index is not None:
+            url = f"{url}#event-{event_index}"
+        try:
+            webbrowser.open(url)
+        except Exception as exc:
+            show_ctk_message(self, "錄製報告", f"無法開啟報告：\n{exc}", kind="error")
 
     def _destroy_recording_stop_overlay(self) -> None:
         overlay = self._recording_stop_overlay
@@ -2894,8 +3159,10 @@ class MainHub(ctk.CTk):
 
     def _begin_worker_run(self, args: _WorkerArgs) -> None:
         reset_run_control()
-        if args.run_mode in ("script", "runtime"):
-            set_step_status_callback(self._on_step_status_from_worker)
+        set_active_step_callback(self._on_active_step_from_worker)
+        set_script_steps_callback(self._on_script_steps_from_worker)
+        self._track_script_step_status = args.run_mode in ("script", "runtime")
+        set_step_status_callback(self._on_step_status_from_worker)
         self._set_run_button_running()
         self._hide_report_button()
         self._settings_btn.configure(state="disabled")
@@ -2908,6 +3175,16 @@ class MainHub(ctk.CTk):
         if self._record_btn is not None:
             self._record_btn.configure(state="disabled")
         self._status.configure(text="執行中…")
+        if args.run_mode == "queue":
+            self._remember_replay_steps("", None)
+        else:
+            recording_dir = (
+                recording_run_dir(args.script_disk_path)
+                if args.script_disk_path is not None
+                else None
+            )
+            self._remember_replay_steps(args.script_raw, recording_dir)
+        self._show_replay_overlay()
         self._worker_thread = threading.Thread(target=self._worker_main, args=(args,), daemon=True)
         self._worker_thread.start()
         self.after(80, self._poll_worker_finished)
@@ -3222,6 +3499,8 @@ class MainHub(ctk.CTk):
                     run_root_for_row = paths_obj.root
                     self._active_run_root = paths_obj.root
                     manager.log_info(f"Queue starting coordinator for {name}")
+                    notify_active_step(None)
+                    self._sync_replay_steps_from_worker(raw, script_path)
                     run_coordinator_sync()
                     # Coordinator sets session_end_reason on the process-wide manager
                     # (get_run_state_manager), not the local prepare_run_session instance.
@@ -3378,6 +3657,20 @@ class MainHub(ctk.CTk):
         kind, msg = self._worker_outcome
         script_finished = self._last_run_was_script_mode and kind == "ok"
         self._last_run_was_script_mode = False
+        pending_errors = {
+            index: text for index, text in step_errors().items() if text.strip()
+        }
+        if pending_errors:
+            self._replay_step_errors.update(pending_errors)
+        keep_overlay = bool(self._replay_step_errors) and not user_stopped
+        if keep_overlay and self._replay_overlay is not None:
+            failed_index = max(self._replay_step_errors)
+            self._replay_nav_held = False
+            self._replay_nav_index = failed_index
+            self._replay_hold_for_error = True
+            self._show_replay_step(failed_index)
+        else:
+            self._release_replay_overlay()
         try:
             self.deiconify()
             self.lift()

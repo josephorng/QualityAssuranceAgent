@@ -17,6 +17,7 @@ from src.common.runtime_context import (
 )
 from src.common.script_helper import (
     collect_recording_baseline_after_paths,
+    collect_recording_instruction_event_indices,
     collect_recording_instructions,
     collect_recording_settle_after_seconds,
     collect_recording_window_verifies,
@@ -100,6 +101,77 @@ def test_collect_recording_baseline_after_paths_ignores_virtual_wait(tmp_path: P
     assert baselines[1] is not None
     assert baselines[1].endswith("final_after.jpeg")
     assert settles == [9.0, None]
+
+
+def test_instruction_event_indices_skip_events_without_instruction(tmp_path: Path) -> None:
+    run_dir = _write_recording(tmp_path)
+    (run_dir / "events" / "event_002.json").write_text(
+        json.dumps(
+            {
+                "index": 2,
+                "timestamp_utc": "2026-09-07T00:00:10+00:00",
+                "kind": "click",
+                "screenshot_path": "",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "events" / "event_003.json").write_text(
+        json.dumps(
+            {
+                "index": 3,
+                "timestamp_utc": "2026-09-07T00:00:12+00:00",
+                "kind": "click",
+                "screenshot_path": "",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "analysis" / "event_003.json").write_text(
+        json.dumps(
+            {
+                "instruction": "click step 3",
+                "expected_outcome": None,
+                "use_expected_outcome": False,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "events" / "event_004.json").write_text(
+        json.dumps(
+            {
+                "index": 4,
+                "timestamp_utc": "2026-09-07T00:00:13+00:00",
+                "kind": "click",
+                "screenshot_path": "",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "analysis" / "event_004.json").write_text(
+        json.dumps({"instruction": "   "}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    session_path = run_dir / "session.json"
+    session = json.loads(session_path.read_text(encoding="utf-8"))
+    session["events"] = [
+        "events/event_000.json",
+        "events/event_002.json",
+        "events/event_001.json",
+        "events/event_004.json",
+        "events/event_003.json",
+    ]
+    session_path.write_text(json.dumps(session, ensure_ascii=False), encoding="utf-8")
+
+    instructions, _outcomes = collect_recording_instructions(run_dir)
+    indices = collect_recording_instruction_event_indices(run_dir)
+    assert instructions == ["click step 0", "click step 1", "click step 3"]
+    assert indices == [0, 1, 3]
+    assert len(indices) == len(instructions)
 
 
 def test_collect_recording_settle_prefers_analysis_settle_after(tmp_path: Path) -> None:

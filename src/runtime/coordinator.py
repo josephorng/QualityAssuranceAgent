@@ -5,7 +5,12 @@ from pathlib import Path
 
 from src.brain.module import BrainModule
 from src.common.io_utils import append_text, pop_last_nonempty_line
-from src.common.run_control import notify_step_status, take_pause_log, wait_while_paused
+from src.common.run_control import (
+    notify_step_status,
+    take_pause_log,
+    take_pending_step_jump,
+    wait_while_paused,
+)
 from src.common.run_state import get_run_state_manager
 from src.common.runtime_command_dialog import (
     prompt_runtime_command_popup,
@@ -54,6 +59,11 @@ class RuntimeCoordinator:
             if take_pause_log():
                 self.manager.log_info("Coordinator paused")
             await wait_while_paused()
+            if not is_runtime_command_mode():
+                jump_target = take_pending_step_jump()
+                jump_to_step = getattr(self.brain, "jump_to_script_step", None)
+                if jump_target is not None and callable(jump_to_step):
+                    jump_to_step(jump_target)
             if is_runtime_command_mode():
                 cmd = prompt_runtime_command_popup()
                 if cmd is None:
@@ -65,9 +75,18 @@ class RuntimeCoordinator:
                 self.brain.prepare_runtime_step(cmd)
             step_result = await self.brain.process_step()
             if step_result.step_index is not None:
+                holding_retry = (
+                    step_result.step_finished
+                    and not step_result.run_complete
+                    and getattr(self.brain, "_script_step_index", None) == step_result.step_index
+                )
                 notify_step_status(
                     step_result.step_index,
                     "ok" if step_result.step_finished else "fail",
+                    None
+                    if step_result.step_finished and not holding_retry
+                    else (step_result.reason or "Coordinator failed to process step"),
+                    retry=holding_retry,
                 )
             if not step_result.step_finished:
                 self.manager.log_info(step_result.reason or "Coordinator failed to process step")

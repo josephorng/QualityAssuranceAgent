@@ -29,7 +29,7 @@ Recording stores two samples on `window_snapshot_debug`, then `window_verify_fro
 | --- | --- | --- |
 | Before | Copied from the pre-click context cache at the gesture | `screen-recorder-preclick-context`. Every 0.25 seconds: top-level windows, foreground, caret. At most once a second: clipboard, process names, UI Automation. |
 | Press-time point | On the mouse hook, at the click coordinates | `WindowFromPoint` + `GetAncestor(GA_ROOT)`. This overwrites `signals_before.point_window`. It is also the `click_window` passed to `move_mouse`. |
-| After | Window-step thread, after the remaining 0.25 seconds (0.45 seconds for a title-bar click) | A fresh top-level window list, then `capture_step_signals` at the same cursor. UI Automation runs only for a click, text input, or scroll, with a 1 second timeout. On timeout the patch is skipped. |
+| After | Window-step thread, after the remaining 0.25 seconds (0.45 seconds for a title-bar click). A text step flushed by the next click or key uses the settle cache copied on the hook before that gesture, so the gesture's window change stays on the gesture. | A fresh top-level window list, then `capture_step_signals` at the same cursor. UI Automation runs only for a click, text input, or scroll, with a 1 second timeout. On timeout the patch is skipped. The sealed text after-sample skips that live read. |
 
 `signal_verify_fields` keeps only values that changed. The stored value is the after-sample.
 

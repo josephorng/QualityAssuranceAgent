@@ -14,7 +14,7 @@ from src.recorder.capture import (
     _finalize_drag_end_screenshot,
 )
 from src.recorder.focus_point import TypingFocus
-from src.recorder.window_snapshot import WindowInfo
+from src.recorder.window_snapshot import WindowInfo, window_verify_from_debug
 
 
 @contextmanager
@@ -1300,6 +1300,159 @@ def test_text_input_stores_before_on_first_key_and_after_on_flush(tmp_path) -> N
     assert raw["text"] == "ab"
     assert raw["screenshot_path"].endswith("event_001.jpeg")
     assert raw["end_screenshot_path"].endswith("event_001_end.jpeg")
+
+
+def _login_and_logo_windows() -> tuple[WindowInfo, WindowInfo]:
+    login = WindowInfo(
+        hwnd=2098012,
+        title="登入系統",
+        pid=3504,
+        left=800,
+        top=300,
+        width=300,
+        height=200,
+        is_minimized=False,
+        is_maximized=False,
+        class_name="WindowsForms10.Window.8.app.0.141b42a_r8_ad1",
+        process_name="WM7Ldr.exe",
+    )
+    logo = WindowInfo(
+        hwnd=2163548,
+        title="wmcLogo",
+        pid=3504,
+        left=700,
+        top=200,
+        width=512,
+        height=386,
+        is_minimized=False,
+        is_maximized=False,
+        class_name="WindowsForms10.Window.8.app.0.141b42a_r8_ad1",
+        process_name="WM7Ldr.exe",
+    )
+    return login, logo
+
+
+def test_text_flushed_by_click_does_not_inherit_click_windows(tmp_path) -> None:
+    """Typing flushed by the next click keeps the pre-click window sample.
+
+    The click is already delivered when the text window step would otherwise
+    enumerate windows, so a live after-read records the click's close/open on
+    the typing step.
+    """
+    session = RecordingSession(runs_root=tmp_path)
+    login, logo = _login_and_logo_windows()
+    live_is_logo = {"value": False}
+
+    def _snapshot() -> list[WindowInfo]:
+        return [logo] if live_is_logo["value"] else [login]
+
+    def _signals(*_args, **_kwargs) -> dict:
+        return {
+            "foreground": {
+                "class_name": logo.class_name,
+                "title": logo.title,
+                "process_name": logo.process_name,
+            },
+            "focused": {"name": "WinMaster7 Console", "value": ""},
+        }
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.snapshot_top_level_windows",
+        side_effect=_snapshot,
+    ), patch(
+        "src.recorder.capture.capture_step_signals",
+        side_effect=_signals,
+    ), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 900, "y": 400})(),
+    ):
+        run_dir = session.start()
+        acquired = False
+        try:
+            assert session._settle_windows_ready.wait(2.0)
+            acquired = session._window_refresh_lock.acquire(timeout=2.0)
+            assert acquired
+            session._last_settle_signals = {
+                "foreground": {
+                    "class_name": login.class_name,
+                    "title": login.title,
+                    "process_name": login.process_name,
+                },
+                "focused": {"name": "密碼|Textbox|txt_Password", "value": ""},
+            }
+            from pynput.keyboard import KeyCode
+
+            session._on_key_press(KeyCode.from_char("a"))
+            live_is_logo["value"] = True
+            _left_click(session, 900, 400)
+        finally:
+            if acquired:
+                session._window_refresh_lock.release()
+            session.stop()
+
+    text_raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    click_raw = json.loads((run_dir / "events" / "event_002.json").read_text(encoding="utf-8"))
+    assert text_raw["kind"] == "text_input"
+    assert click_raw["kind"] == "click"
+    text_after = text_raw["window_snapshot_debug"]["windows_after"]
+    click_after = click_raw["window_snapshot_debug"]["windows_after"]
+    assert text_after[0]["title"] == "登入系統"
+    assert click_after[0]["title"] == "wmcLogo"
+    assert text_raw["window_snapshot_debug"]["signals_after"]["focused"]["name"] == (
+        "密碼|Textbox|txt_Password"
+    )
+    text_verify = window_verify_from_debug(text_raw["window_snapshot_debug"])
+    assert "appeared" not in text_verify
+    assert "disappeared" not in text_verify
+    assert "focused" not in text_verify
+    click_verify = window_verify_from_debug(click_raw["window_snapshot_debug"])
+    assert click_verify["disappeared"][0]["title"] == "登入系統"
+    assert click_verify["appeared"][0]["title"] == "wmcLogo"
+
+
+def test_text_flushed_by_enter_does_not_inherit_key_windows(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+    login, logo = _login_and_logo_windows()
+    live_is_logo = {"value": False}
+
+    def _snapshot() -> list[WindowInfo]:
+        return [logo] if live_is_logo["value"] else [login]
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.snapshot_top_level_windows",
+        side_effect=_snapshot,
+    ), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 900, "y": 400})(),
+    ):
+        run_dir = session.start()
+        acquired = False
+        try:
+            assert session._settle_windows_ready.wait(2.0)
+            acquired = session._window_refresh_lock.acquire(timeout=2.0)
+            assert acquired
+            from pynput.keyboard import Key, KeyCode
+
+            session._on_key_press(KeyCode.from_char("a"))
+            live_is_logo["value"] = True
+            session._on_key_press(Key.enter)
+        finally:
+            if acquired:
+                session._window_refresh_lock.release()
+            session.stop()
+
+    text_raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    key_raw = json.loads((run_dir / "events" / "event_002.json").read_text(encoding="utf-8"))
+    assert text_raw["kind"] == "text_input"
+    assert key_raw["kind"] == "key_press"
+    assert text_raw["window_snapshot_debug"]["windows_after"][0]["title"] == "登入系統"
+    assert key_raw["window_snapshot_debug"]["windows_after"][0]["title"] == "wmcLogo"
 
 
 def test_text_input_reuses_pre_type_screenshot_from_prior_click(tmp_path) -> None:

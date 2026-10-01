@@ -196,6 +196,11 @@ class _DeferredCaptureJob:
     refresh_pre_type: bool = False
     # time.monotonic() when the gesture happened, for the window-settle sleep.
     action_monotonic: float | None = None
+    # Text flushed by a later gesture: after-sample is the settle cache from
+    # before that gesture, not a live read taken after it has changed the UI.
+    window_after_sealed: bool = False
+    sealed_windows_after: tuple[WindowInfo, ...] | None = None
+    sealed_signals_after: dict[str, Any] | None = None
 
 
 def _pre_type_focus_still_valid(
@@ -316,6 +321,10 @@ class _QueuedEvent:
     # time.monotonic() when the gesture happened. The window-step thread sleeps
     # only the remainder of the settle delay from this instant.
     action_monotonic: float | None = None
+    # Text flushed by the next gesture. The after list is the pre-gesture cache.
+    window_after_sealed: bool = False
+    windows_after: tuple[WindowInfo, ...] | None = None
+    signals_after: dict[str, Any] | None = None
 
 
 def _pending_capture_path(run_dir: Path, press_seq: int | None = None) -> Path:
@@ -1055,7 +1064,11 @@ class RecordingSession:
         self._stop_pre_click_pump(invalidate_context=True)
         self._stop_before_shot_loop()
 
-        self._flush_pending_text_input()
+        # A pending click/drag/right-click is flushed next and has already been
+        # delivered. Seal the text after-sample so that gesture's window change
+        # is not recorded on the typing step.
+        following_gesture = pending_coords is not None or pending_right_coords is not None
+        self._flush_pending_text_input(seal_after_to_cache=following_gesture)
         if pending is not None:
             pending.cancel()
         if left_press_dragging and pending_coords is not None and last_move_xy is not None:
@@ -1752,7 +1765,7 @@ class RecordingSession:
                 return
             index = self._next_index
             self._next_index += 1
-        self._flush_pending_text_input(shared_end_index=index)
+        self._flush_pending_text_input(shared_end_index=index, seal_after_to_cache=True)
         self._remember_pointer_cursor(cursor_xy)
         # Pre-click window list comes from the settle cache. click_window is one
         # WindowFromPoint (no full window scan) and stays on the hook.
@@ -1831,6 +1844,9 @@ class RecordingSession:
                 windows_before=windows_before,
                 signals_before=signals_before,
                 refresh_pre_type=True,
+                window_after_sealed=windows_before is not None,
+                sealed_windows_after=windows_before,
+                sealed_signals_after=signals_before,
             )
         )
 
@@ -2099,8 +2115,15 @@ class RecordingSession:
         shared_end_index: int | None = None,
         shared_end_monitor: int | None = None,
         shared_end_offset: tuple[int, int] | None = None,
+        seal_after_to_cache: bool = False,
     ) -> None:
-        """Detach pending typed text and enqueue OCR/screenshot work off-hook."""
+        """Detach pending typed text and enqueue OCR/screenshot work off-hook.
+
+        ``seal_after_to_cache`` is set when a later gesture is flushing this
+        text. The after-sample is the settle cache copied here, on the hook,
+        before that gesture is processed. A live window read would run after
+        the gesture and attribute its window change to the typing step.
+        """
         with self._lock:
             chars = self._pending_text_chars
             meta = self._pending_text_meta
@@ -2110,6 +2133,8 @@ class RecordingSession:
             self._cancel_pre_key_settle_timer_locked()
         if not chars or meta is None:
             return
+        sealed_windows = self._cached_windows_before() if seal_after_to_cache else None
+        sealed_signals = self._cached_signals_before() if seal_after_to_cache else None
         self._enqueue(
             _DeferredCaptureJob(
                 action="flush_text_input",
@@ -2118,6 +2143,9 @@ class RecordingSession:
                 shared_end_index=shared_end_index,
                 shared_end_monitor=shared_end_monitor,
                 shared_end_offset=shared_end_offset,
+                window_after_sealed=sealed_windows is not None,
+                sealed_windows_after=sealed_windows,
+                sealed_signals_after=sealed_signals,
             )
         )
 
@@ -2310,11 +2338,15 @@ class RecordingSession:
             pending_pre_key = self._pending_pre_key_screenshot
             self._pending_pre_key_screenshot = None
         if flush_chars and flush_meta is not None:
+            sealed_windows = self._cached_windows_before()
             self._worker_flush_text_input(
                 _DeferredCaptureJob(
                     action="flush_text_input",
                     flush_chars=flush_chars,
                     flush_meta=flush_meta,
+                    window_after_sealed=sealed_windows is not None,
+                    sealed_windows_after=sealed_windows,
+                    sealed_signals_after=self._cached_signals_before(),
                 )
             )
         self._worker_keyboard_event(
@@ -2550,7 +2582,9 @@ class RecordingSession:
             self._left_button_down = False
             self._left_press_dragging = False
             self._last_move_xy = None
-        self._flush_pending_text_input(shared_end_index=click_index)
+        self._flush_pending_text_input(
+            shared_end_index=click_index, seal_after_to_cache=True
+        )
         self._discard_pending_drag_end_captures()
         self._remember_pointer_cursor((x, y))
         self._enqueue(
@@ -2595,7 +2629,9 @@ class RecordingSession:
             self._left_button_down = False
             self._left_press_dragging = False
             self._last_move_xy = None
-        self._flush_pending_text_input(shared_end_index=hold_index)
+        self._flush_pending_text_input(
+            shared_end_index=hold_index, seal_after_to_cache=True
+        )
         self._discard_pending_drag_end_captures()
         self._remember_pointer_cursor((x, y))
         self._enqueue(
@@ -2636,7 +2672,9 @@ class RecordingSession:
             action_monotonic = self._pending_right_down_at or time.monotonic()
             # Keep press_seq + capture dict entry for the emit worker.
             self._clear_pending_right_gesture_locked(discard_capture=False)
-        self._flush_pending_text_input(shared_end_index=right_index)
+        self._flush_pending_text_input(
+            shared_end_index=right_index, seal_after_to_cache=True
+        )
         self._remember_pointer_cursor((x, y))
         self._enqueue(
             _DeferredCaptureJob(
@@ -2689,7 +2727,9 @@ class RecordingSession:
             self._left_press_dragging = False
             self._last_move_xy = None
         end_click_window = self._click_window_payload_at(x2, y2)
-        self._flush_pending_text_input(shared_end_index=drag_index)
+        self._flush_pending_text_input(
+            shared_end_index=drag_index, seal_after_to_cache=True
+        )
         self._remember_pointer_cursor((x2, y2))
         self._enqueue(
             _DeferredCaptureJob(
@@ -3946,6 +3986,9 @@ class RecordingSession:
                 windows_before=meta.get("windows_before") or self._start_windows_before(),
                 signals_before=meta.get("signals_before") or self._start_signals_before(),
                 action_monotonic=job.action_monotonic,
+                window_after_sealed=job.window_after_sealed,
+                windows_after=job.sealed_windows_after,
+                signals_after=job.sealed_signals_after,
             )
         )
 
@@ -3971,6 +4014,9 @@ class RecordingSession:
                     shared_end_monitor=job.shared_end_monitor,
                     shared_end_offset=job.shared_end_offset,
                     pending_pre_key=pending_pre_key,
+                    window_after_sealed=job.window_after_sealed,
+                    sealed_windows_after=job.sealed_windows_after,
+                    sealed_signals_after=job.sealed_signals_after,
                 )
             )
 
@@ -4063,29 +4109,35 @@ class RecordingSession:
     ) -> tuple[dict[str, Any] | None, str | None, dict[str, Any] | None]:
         if not item.windows_before and not item.signals_before:
             return None, None, None
-        self._sleep_remaining_window_settle(item)
-        windows_after: list[WindowInfo] = []
-        if item.windows_before:
-            try:
-                windows_after = snapshot_top_level_windows()
-            except Exception:
-                return None, None, None
         signals_before = dict(item.signals_before or {})
         point_before = identity_from_click_window(item.click_window)
         if point_before is not None:
             signals_before["point_window"] = point_before
-        uia_reader, uia_timed_out = self._uia_reader_or_timeout()
-        try:
-            signals_after = capture_step_signals(
-                windows_after,
-                cursor_xy=item.cursor_xy,
-                kind=item.kind,
-                uia_reader=uia_reader,
-            )
-        except Exception:
-            signals_after = {}
-        if uia_timed_out["value"]:
-            return None, None, None
+        if item.window_after_sealed:
+            # The next gesture already happened. Use the cache copied before it
+            # instead of enumerating windows now.
+            windows_after = list(item.windows_after or [])
+            signals_after = dict(item.signals_after or {})
+        else:
+            self._sleep_remaining_window_settle(item)
+            windows_after = []
+            if item.windows_before:
+                try:
+                    windows_after = snapshot_top_level_windows()
+                except Exception:
+                    return None, None, None
+            uia_reader, uia_timed_out = self._uia_reader_or_timeout()
+            try:
+                signals_after = capture_step_signals(
+                    windows_after,
+                    cursor_xy=item.cursor_xy,
+                    kind=item.kind,
+                    uia_reader=uia_reader,
+                )
+            except Exception:
+                signals_after = {}
+            if uia_timed_out["value"]:
+                return None, None, None
         change: dict[str, Any] | None = None
         title: str | None = None
         debug: dict[str, Any] = {}

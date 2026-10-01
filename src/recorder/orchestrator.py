@@ -931,9 +931,10 @@ def _next_instruction_event_settle(
 ) -> float | None:
     """Forward settle for this instruction event.
 
-    Prefer ``observed_settle_seconds`` from the recording settle probe when present.
-    Otherwise use the timestamp gap to the next instruction event when the gap is
-    at least ``_SETTLE_AFTER_MIN_SECONDS``.
+    Prefer ``observed_settle_seconds`` from the recording settle probe when it is
+    zero or positive. Zero means the screen was already still, and is not replaced
+    by the timestamp gap. Otherwise use the timestamp gap to the next instruction
+    event when the gap is at least ``_SETTLE_AFTER_MIN_SECONDS``.
 
     For the last instruction event, optionally use ``trailing_settle_end_utc``
     (e.g. a purged hub-restore click). Never use session ``stopped_at`` — that
@@ -942,7 +943,7 @@ def _next_instruction_event_settle(
     if event.kind == "wait":
         return None
     observed = event.observed_settle_seconds
-    if isinstance(observed, (int, float)) and not isinstance(observed, bool) and float(observed) > 0:
+    if isinstance(observed, (int, float)) and not isinstance(observed, bool) and float(observed) >= 0:
         return float(observed)
     for next_pos in range(event_pos + 1, len(events)):
         if prepared_list[next_pos] is None:

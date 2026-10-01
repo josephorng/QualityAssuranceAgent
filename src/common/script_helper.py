@@ -300,8 +300,8 @@ def collect_recording_settle_after_seconds(run_dir: Path) -> list[float | None]:
     """Collect post-action settle seconds aligned with ``collect_recording_instructions``.
 
     Preference order per instruction event:
-    1. ``analysis/event_NNN.json`` ``settle_after_seconds``
-    2. event ``observed_settle_seconds`` (recording settle probe)
+    1. ``analysis/event_NNN.json`` ``settle_after_seconds`` (including 0)
+    2. event ``observed_settle_seconds`` (recording settle probe, including 0)
     3. timestamp gap to next instruction event when ≥ 1s
 
     The last event does not fall back to session ``stopped_at`` (stop-UI latency).
@@ -338,7 +338,7 @@ def collect_recording_settle_after_seconds(run_dir: Path) -> list[float | None]:
             if (
                 isinstance(analysis_settle, (int, float))
                 and not isinstance(analysis_settle, bool)
-                and float(analysis_settle) > 0
+                and float(analysis_settle) >= 0
             ):
                 settles.append(float(analysis_settle))
                 continue
@@ -346,7 +346,7 @@ def collect_recording_settle_after_seconds(run_dir: Path) -> list[float | None]:
         if (
             isinstance(observed, (int, float))
             and not isinstance(observed, bool)
-            and float(observed) > 0
+            and float(observed) >= 0
         ):
             settles.append(float(observed))
             continue

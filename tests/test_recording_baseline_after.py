@@ -114,6 +114,30 @@ def test_collect_recording_settle_prefers_analysis_settle_after(tmp_path: Path) 
     assert settles[1] is None
 
 
+def test_collect_recording_settle_keeps_zero_observed(tmp_path: Path) -> None:
+    run_dir = _write_recording(tmp_path)
+    event0 = run_dir / "events" / "event_000.json"
+    payload = json.loads(event0.read_text(encoding="utf-8"))
+    payload["observed_settle_seconds"] = 0.0
+    event0.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    settles = collect_recording_settle_after_seconds(run_dir)
+    assert settles[0] == 0.0
+    assert settles[1] is None
+
+
+def test_collect_recording_settle_keeps_zero_analysis_settle(tmp_path: Path) -> None:
+    run_dir = _write_recording(tmp_path)
+    first = run_dir / "analysis" / "event_000.json"
+    payload = json.loads(first.read_text(encoding="utf-8"))
+    payload["settle_after_seconds"] = 0.0
+    first.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    settles = collect_recording_settle_after_seconds(run_dir)
+    assert settles[0] == 0.0
+    assert settles[1] is None
+
+
 def test_collect_recording_settle_prefers_observed_over_timestamp_gap(
     tmp_path: Path,
 ) -> None:

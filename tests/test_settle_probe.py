@@ -95,6 +95,31 @@ def test_next_instruction_event_settle_prefers_observed() -> None:
     assert settle == 1.5
 
 
+def test_next_instruction_event_settle_keeps_zero_observed() -> None:
+    events = [
+        RecordedEvent(
+            index=0,
+            timestamp_utc="2026-09-07T00:00:00+00:00",
+            kind="click",
+            observed_settle_seconds=0.0,
+        ),
+        RecordedEvent(
+            index=1,
+            timestamp_utc="2026-09-07T00:00:10+00:00",
+            kind="click",
+        ),
+    ]
+    settle = _next_instruction_event_settle(
+        events=events,
+        event_pos=0,
+        event=events[0],
+        prepared_list=[object(), object()],
+        instruction_results=[{"instruction": "a"}, {"instruction": "b"}],
+        trailing_settle_end_utc="2026-09-07T00:00:20+00:00",
+    )
+    assert settle == 0.0
+
+
 def test_next_instruction_event_settle_falls_back_to_gap() -> None:
     events = [
         RecordedEvent(

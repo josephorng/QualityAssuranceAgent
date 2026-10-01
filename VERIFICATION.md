@@ -35,12 +35,12 @@ Recording stores two samples on `window_snapshot_debug`, then `window_verify_fro
 
 ## Window list
 
-`snapshot_top_level_windows` enumerates visible top-level windows. Match key is class, normalized title, and process name. The hwnd is used only to pair a window with itself between the two lists. The agent hub window (`電腦使用代理`) is dropped. A title change on an hwnd that is still present is not an appear or disappear.
+`snapshot_top_level_windows` enumerates visible top-level windows. Match key is class, normalized title, and process name. The hwnd is used only to pair a window with itself between the two lists. The agent hub window (`電腦使用代理`), the taskbar, and the input-pane strip (`EdgeUiInputTopWndClass`) are dropped. Replay skips those classes when an older analysis still lists them. A title change on an hwnd that is still present is not an appear or disappear.
 
 | Point | Recorded when | Replay read |
 | --- | --- | --- |
-| `appeared` | An hwnd is in the after list and was not in the before list. Taskbar and the agent hub are dropped. Same-identity hwnd churn cancels out. | The window must be present in the live after list. It does not need to newly appear during the step. |
-| `disappeared` | An hwnd was in the before list and is gone after. Taskbar and the agent hub are dropped. | The window must be absent from the live after list. It does not need to have been open before the step. |
+| `appeared` | An hwnd is in the after list and was not in the before list. Taskbar, the input-pane strip, and the agent hub are dropped. Same-identity hwnd churn cancels out. | The window must be present in the live after list. It does not need to newly appear during the step. |
+| `disappeared` | An hwnd was in the before list and is gone after. Taskbar, the input-pane strip, and the agent hub are dropped. | The window must be absent from the live after list. It does not need to have been open before the step. |
 | `state` | The same hwnd is still there and `is_minimized` or `is_maximized` flipped. Label is `minimized`, `restored`, `maximized`, or `unmaximized`. | The matching window must be present in the live after list and already hold that end flag (`maximized` → `is_maximized`, `minimized` → `is_minimized`, `restored` → not minimized, `unmaximized` → not maximized). It does not need to flip during the step. |
 
 Replay takes the before list at the start of the step and the after list after `settle_after`.

@@ -33,6 +33,10 @@ _TASKBAR_CLASS_NAMES = frozenset(
         "NotifyIconOverflowWindow",
     }
 )
+# Touch-keyboard / input-pane strips: one per monitor, a few pixels tall, untitled.
+# Hwnds flicker when focus changes. A sibling with the same class usually remains,
+# so an appear/disappear entry for this class can never pass replay.
+_INPUT_PANE_CLASS_NAMES = frozenset({"EdgeUiInputTopWndClass"})
 # Shell / Start / search overlays that should keep their own (often untitled) rect.
 # Explorer WinUI popups (View/Sort/Filter menus) use PopupWindowSiteBridge.
 _FLYOUT_CLASS_NAMES = frozenset(
@@ -1155,11 +1159,15 @@ def _is_agent_hub_window(win: WindowInfo) -> bool:
     return win.title.strip() == _AGENT_APP_WINDOW_TITLE
 
 
-def _is_taskbar_verify_noise(win: WindowInfo | dict[str, Any]) -> bool:
-    """Taskbar hwnd churn is not a useful appear/disappear assertion."""
+def _verify_noise_class(class_name: str) -> bool:
+    return class_name in _TASKBAR_CLASS_NAMES or class_name in _INPUT_PANE_CLASS_NAMES
+
+
+def _is_window_verify_noise(win: WindowInfo | dict[str, Any]) -> bool:
+    """Taskbar and input-pane hwnd churn is not an appear/disappear assertion."""
     if isinstance(win, WindowInfo):
-        return _is_taskbar_class(win.class_name or "")
-    return _is_taskbar_class(str(win.get("class_name", "") or ""))
+        return _verify_noise_class(win.class_name or "")
+    return _verify_noise_class(str(win.get("class_name", "") or ""))
 
 
 def _state_change_label(before: WindowInfo, after: WindowInfo) -> str | None:
@@ -1188,20 +1196,20 @@ def build_window_verify_predicate(
 ) -> dict[str, Any]:
     """Stable appear/disappear/state delta for replay. Match key is not hwnd.
 
-    Drops the agent hub window, the taskbar, and a title change on an hwnd that
-    is still present. Flyouts such as 「快顯主機」 are included here; script
-    instructions still ignore them. Same-identity appear and disappear pairs
-    within one step cancel out (hwnd churn).
+    Drops the agent hub window, the taskbar, input-pane strips, and a title
+    change on an hwnd that is still present. Flyouts such as 「快顯主機」 are
+    included here; script instructions still ignore them. Same-identity appear
+    and disappear pairs within one step cancel out (hwnd churn).
     """
     before_wins = [
         win
         for win in before
-        if not _is_agent_hub_window(win) and not _is_taskbar_verify_noise(win)
+        if not _is_agent_hub_window(win) and not _is_window_verify_noise(win)
     ]
     after_wins = [
         win
         for win in after
-        if not _is_agent_hub_window(win) and not _is_taskbar_verify_noise(win)
+        if not _is_agent_hub_window(win) and not _is_window_verify_noise(win)
     ]
     before_by_hwnd = {win.hwnd: win for win in before_wins if win.hwnd}
     after_by_hwnd = {win.hwnd: win for win in after_wins if win.hwnd}
@@ -1557,7 +1565,7 @@ def window_verify_satisfied(
         after_windows = [
             win
             for win in live_windows_after
-            if not _is_agent_hub_window(win) and not _is_taskbar_verify_noise(win)
+            if not _is_agent_hub_window(win) and not _is_window_verify_noise(win)
         ]
         after_entries = [_verify_entry(win) for win in after_windows]
 
@@ -1568,7 +1576,7 @@ def window_verify_satisfied(
                 item for item in (live.get("appeared") or []) if isinstance(item, dict)
             ]
             for item in needed_appeared:
-                if not isinstance(item, dict) or _is_taskbar_verify_noise(item):
+                if not isinstance(item, dict) or _is_window_verify_noise(item):
                     continue
                 if _take_matching_entry(available, item, match_change=False) is None:
                     title = str(item.get("title", "") or "").strip()
@@ -1576,7 +1584,7 @@ def window_verify_satisfied(
         else:
             available = list(after_entries)
             for item in needed_appeared:
-                if not isinstance(item, dict) or _is_taskbar_verify_noise(item):
+                if not isinstance(item, dict) or _is_window_verify_noise(item):
                     continue
                 if _take_matching_entry(available, item, match_change=False) is None:
                     title = str(item.get("title", "") or "").strip()
@@ -1591,14 +1599,14 @@ def window_verify_satisfied(
                 if isinstance(item, dict)
             ]
             for item in needed_disappeared:
-                if not isinstance(item, dict) or _is_taskbar_verify_noise(item):
+                if not isinstance(item, dict) or _is_window_verify_noise(item):
                     continue
                 if _take_matching_entry(available, item, match_change=False) is None:
                     title = str(item.get("title", "") or "").strip()
                     return False, f"window verify missed disappeared: {title or item}"
         else:
             for item in needed_disappeared:
-                if not isinstance(item, dict) or _is_taskbar_verify_noise(item):
+                if not isinstance(item, dict) or _is_window_verify_noise(item):
                     continue
                 still_present = any(
                     _entries_match(item, candidate, match_change=False)

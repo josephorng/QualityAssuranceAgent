@@ -1363,6 +1363,36 @@ def test_window_verify_blank_class_matches_live_class() -> None:
     assert "快顯主機" in reason
 
 
+def test_window_verify_ignores_input_pane_appear_disappear() -> None:
+    """A flickering EdgeUi strip must not block replay while a sibling remains."""
+    strip = dict(class_name="EdgeUiInputTopWndClass", height=4, width=1905)
+    before = [
+        _win(1, "", left=15, top=0, **strip),
+        _win(2, "", left=1935, top=-1, **strip),
+    ]
+    after = [
+        _win(2, "", left=1935, top=-1, **strip),
+        _win(3, "Google Chrome", class_name="Chrome_WidgetWin_1"),
+    ]
+    predicate = build_window_verify_predicate(before, after)
+    assert predicate == {
+        "appeared": [{"class_name": "Chrome_WidgetWin_1", "title": "Google Chrome"}]
+    }
+    recorded = {
+        "appeared": [{"class_name": "Chrome_WidgetWin_1", "title": "Google Chrome"}],
+        "disappeared": [{"class_name": "EdgeUiInputTopWndClass", "title": ""}],
+    }
+    ok, _reason = window_verify_satisfied(recorded, {}, live_windows_after=after)
+    assert ok is True
+    ok, reason = window_verify_satisfied(
+        recorded,
+        {},
+        live_windows_after=[_win(2, "", left=1935, top=-1, **strip)],
+    )
+    assert ok is False
+    assert "Google Chrome" in reason
+
+
 def test_window_verify_ignores_taskbar_appear_disappear() -> None:
     before = [_win(1, "", class_name="Shell_TrayWnd", process_name="explorer.exe")]
     after = [_win(2, "", class_name="Shell_TrayWnd", process_name="explorer.exe")]

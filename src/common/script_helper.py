@@ -6,8 +6,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from src.recorder.analyze import after_screenshot_for_outcome, use_expected_outcome_enabled
+from src.recorder.analyze import (
+    after_screenshot_for_outcome,
+    typed_text_from_instruction,
+    use_expected_outcome_enabled,
+)
 from src.recorder.models import RecordedEvent
+from src.recorder.verify_signals import omit_focused_value_unrelated_to_typed_text
 from src.recorder.window_snapshot import (
     filter_disabled_window_verify,
     omit_foreground_when_structural,
@@ -362,6 +367,28 @@ def collect_recording_settle_after_seconds(run_dir: Path) -> list[float | None]:
     return settles
 
 
+def _replay_typed_text(analysis: dict[str, Any]) -> str | None:
+    """Text ``type_text`` will enter for this step, when the analysis records it."""
+    calls = analysis.get("tool_calls")
+    if isinstance(calls, list):
+        chunks: list[str] = []
+        for call in calls:
+            if not isinstance(call, dict) or call.get("name") != "type_text":
+                continue
+            arguments = call.get("arguments")
+            if not isinstance(arguments, dict):
+                continue
+            text = arguments.get("text")
+            if isinstance(text, str) and text:
+                chunks.append(text)
+        if chunks:
+            return "".join(chunks)
+    instruction = analysis.get("instruction")
+    if isinstance(instruction, str):
+        return typed_text_from_instruction(instruction)
+    return None
+
+
 def collect_recording_window_verifies(run_dir: Path) -> list[dict[str, Any]]:
     """Collect window-diff predicates aligned with ``collect_recording_instructions``.
 
@@ -387,7 +414,11 @@ def collect_recording_window_verifies(run_dir: Path) -> list[dict[str, Any]]:
             active = filter_disabled_window_verify(
                 raw, analysis.get("window_verify_disabled")
             )
-            verifies.append(omit_foreground_when_structural(active))
+            active = omit_focused_value_unrelated_to_typed_text(
+                omit_foreground_when_structural(active),
+                _replay_typed_text(analysis),
+            )
+            verifies.append(active)
         else:
             verifies.append({})
     return verifies

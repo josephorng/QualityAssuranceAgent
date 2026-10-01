@@ -1297,7 +1297,11 @@ def omit_foreground_when_structural(predicate: dict[str, Any]) -> dict[str, Any]
     return trimmed if changed else predicate
 
 
-def window_verify_from_debug(debug: dict[str, Any] | None) -> dict[str, Any]:
+def window_verify_from_debug(
+    debug: dict[str, Any] | None,
+    *,
+    typed_text: str | None = None,
+) -> dict[str, Any]:
     """Build a replay predicate from stored window lists and changed signals."""
     if not isinstance(debug, dict):
         return {}
@@ -1310,7 +1314,10 @@ def window_verify_from_debug(debug: dict[str, Any] | None) -> dict[str, Any]:
         before_windows = _windows_from_raw(before_raw)
         after_windows = _windows_from_raw(after_raw)
         predicate = build_window_verify_predicate(before_windows, after_windows)
-    from src.recorder.verify_signals import signal_verify_fields
+    from src.recorder.verify_signals import (
+        omit_focused_value_unrelated_to_typed_text,
+        signal_verify_fields,
+    )
 
     before_signals = debug.get("signals_before")
     after_signals = debug.get("signals_after")
@@ -1323,7 +1330,10 @@ def window_verify_from_debug(debug: dict[str, Any] | None) -> dict[str, Any]:
             after_windows=after_windows,
         )
     )
-    return omit_foreground_when_structural(predicate)
+    return omit_focused_value_unrelated_to_typed_text(
+        omit_foreground_when_structural(predicate),
+        typed_text,
+    )
 
 
 def window_verify_has_assertions(predicate: dict[str, Any] | None) -> bool:

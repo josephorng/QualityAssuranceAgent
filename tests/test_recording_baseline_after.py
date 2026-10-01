@@ -296,3 +296,39 @@ def test_collect_recording_window_verifies_skips_unchecked(tmp_path: Path) -> No
             ]
         }
     ]
+
+
+def test_collect_recording_window_verifies_drops_unrelated_focused_value(tmp_path: Path) -> None:
+    run_dir = tmp_path / "rec_focus"
+    (run_dir / "events").mkdir(parents=True)
+    (run_dir / "analysis").mkdir()
+    (run_dir / "events" / "event_006.json").write_text(
+        json.dumps(
+            {
+                "index": 6,
+                "timestamp_utc": "2026-10-01T06:34:00+00:00",
+                "kind": "text_input",
+                "text": "nbanba live",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "analysis" / "event_006.json").write_text(
+        json.dumps(
+            {
+                "instruction": "輸入「nbanba live」",
+                "window_verify": {"focused": {"value": "nba l"}},
+                "tool_calls": [
+                    {
+                        "name": "type_text",
+                        "arguments": {"text": "nbanba live", "instruction": "輸入「nbanba live」"},
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert collect_recording_window_verifies(run_dir) == [{}]

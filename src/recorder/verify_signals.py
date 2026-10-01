@@ -713,6 +713,50 @@ def _caret_moved_field(
     return after_rect
 
 
+def focused_values_match(recorded: str, live: str) -> bool:
+    """True when the strings are equal, or one is a prefix of the other.
+
+    An address bar often exposes only the characters the user typed and paints
+    the suggestion tail separately. Record and replay can each include or omit
+    that tail, so ``nba l`` and ``nba live`` are the same field.
+    """
+    if recorded == live:
+        return True
+    if not recorded or not live:
+        return False
+    return live.startswith(recorded) or recorded.startswith(live)
+
+
+def omit_focused_value_unrelated_to_typed_text(
+    predicate: dict[str, Any] | None,
+    typed_text: str | None,
+) -> dict[str, Any]:
+    """Drop a focused value that is not the text this step types.
+
+    Chrome's address bar can report a fragment such as ``nba l`` while the step
+    types ``nbanba live``. That fragment is not a stable end state, so it must
+    not become an exact replay assertion.
+    """
+    if not isinstance(predicate, dict):
+        return {}
+    focused = predicate.get("focused")
+    if not isinstance(focused, dict) or "value" not in focused:
+        return predicate
+    typed = typed_text if isinstance(typed_text, str) else ""
+    if not typed:
+        return predicate
+    value = str(focused.get("value") or "")
+    if not value or focused_values_match(value, typed):
+        return predicate
+    trimmed = dict(predicate)
+    kept = {key: item for key, item in focused.items() if key != "value"}
+    if kept:
+        trimmed["focused"] = kept
+    else:
+        trimmed.pop("focused", None)
+    return trimmed
+
+
 def _focused_changed(
     before: dict[str, Any] | None,
     after: dict[str, Any] | None,
@@ -926,8 +970,9 @@ def signal_assertions_satisfied(
             return False, "window verify missed focused"
         if "name" in focused and str(live_focused.get("name") or "") != str(focused.get("name") or ""):
             return False, "window verify missed focused"
-        if "value" in focused and str(live_focused.get("value") or "") != str(
-            focused.get("value") or ""
+        if "value" in focused and not focused_values_match(
+            str(focused.get("value") or ""),
+            str(live_focused.get("value") or ""),
         ):
             return False, "window verify missed focused"
 

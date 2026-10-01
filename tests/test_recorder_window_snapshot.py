@@ -1935,6 +1935,51 @@ def test_window_verify_uia_signals_only_when_the_step_changed_them(monkeypatch) 
     assert "scroll" in reason
 
 
+def test_window_verify_focused_value_allows_autocomplete_tail() -> None:
+    recorded = {"focused": {"value": "nba l"}}
+    ok, _reason = window_verify_satisfied(
+        recorded,
+        {},
+        live_after={"focused": {"name": "網址與搜尋列", "value": "nba live"}},
+    )
+    assert ok is True
+    ok, _reason = window_verify_satisfied(
+        {"focused": {"value": "nba live"}},
+        {},
+        live_after={"focused": {"value": "nba l"}},
+    )
+    assert ok is True
+    ok, reason = window_verify_satisfied(
+        recorded,
+        {},
+        live_after={"focused": {"value": "nbanba live"}},
+    )
+    assert ok is False
+    assert "focused" in reason
+    ok, reason = window_verify_satisfied(
+        {"focused": {"name": "網址與搜尋列", "value": "nba l"}},
+        {},
+        live_after={"focused": {"name": "搜尋", "value": "nba l"}},
+    )
+    assert ok is False
+    assert "focused" in reason
+
+
+def test_window_verify_drops_focused_value_unrelated_to_typed_text() -> None:
+    debug = {
+        "signal_kind": "text_input",
+        "signals_before": {"focused": {"name": "網址與搜尋列", "value": ""}},
+        "signals_after": {"focused": {"name": "網址與搜尋列", "value": "nba l"}},
+    }
+    assert window_verify_from_debug(debug, typed_text="nbanba live") == {}
+    assert window_verify_from_debug(debug, typed_text="nba live") == {
+        "focused": {"value": "nba l"}
+    }
+    assert window_verify_from_debug(debug, typed_text="nba l") == {
+        "focused": {"value": "nba l"}
+    }
+
+
 def test_filter_disabled_window_verify_drops_unchecked_entries() -> None:
     predicate = {
         "disappeared": [

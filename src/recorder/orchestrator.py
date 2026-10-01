@@ -691,7 +691,10 @@ def _write_event_analysis(
     from src.recorder.compile_tool_calls import compile_tool_calls
 
     tool_calls = compile_tool_calls(event, instruction)
-    window_verify = window_verify_from_debug(event.window_snapshot_debug)
+    window_verify = window_verify_from_debug(
+        event.window_snapshot_debug,
+        typed_text=event.text if event.kind == "text_input" else None,
+    )
     disabled = _preserved_window_verify_disabled(analysis_path, window_verify)
     write_json(
         analysis_path,

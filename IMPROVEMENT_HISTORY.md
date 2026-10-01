@@ -1,126 +1,152 @@
-# Improvement History
+# 改進歷程
 
-Reconstructed on 2026-09-24 from the git history (366 commits, 2026-04-16 through 2026-09-24, author SMR-AIT) and the Cursor conversation record for this repo (about 650 parent chats). Commit subjects are often short; the chats are what explain why each change was made.
+本文於 2026-09-24 依 git 歷史（366 筆提交，2026-04-16 至 2026-09-24，作者 SMR-AIT）以及本儲存庫的 Cursor 對話紀錄（約 650 則父對話）重建。提交標題往往很短；真正說明每項變更原因的是那些對話。
 
-The project started as a multi-process desktop agent and became a record-and-replay quality-assurance tool: capture a Windows session, turn it into a script of mouse and keyboard steps, then replay those steps with YOLO, OCR, and a language model.
+專案起初是一個多行程的桌面代理，後來成為錄製並重播的品質保證工具：擷取一段 Windows 工作階段，轉成滑鼠與鍵盤步驟的腳本，再以 YOLO、OCR 與語言模型重播這些步驟。
 
-| Month | Commits | Main theme |
+| 月份 | 提交數 | 主軸 |
 | --- | ---: | --- |
-| 2026-04 | 35 | Rebuild around modules, MCP tools, and a step loop |
-| 2026-05 | 42 | GUI hub, ONNX vision, Chinese UI, packaged exe |
-| 2026-06 | 15 | One mouse-move path, reports, remote vLLM |
-| 2026-07 | 51 | Screen recorder, nearby landmarks, queue and smart mode |
-| 2026-08 | 107 | Recording as the script, verification, typing and scrollbars |
-| 2026-09 | 115 | Replay cache, settle timing, window ROI, before/after shots |
+| 2026-04 | 35 | 改以模組、MCP 工具與步驟迴圈重建 |
+| 2026-05 | 42 | GUI 中樞、ONNX 視覺、中文介面、打包 exe |
+| 2026-06 | 15 | 單一滑鼠移動路徑、報告、遠端 vLLM |
+| 2026-07 | 51 | 螢幕錄製、鄰近地標、佇列與智能模式 |
+| 2026-08 | 107 | 錄製即腳本、驗證、打字與捲軸 |
+| 2026-09 | 115 | 重播快取、穩定等待時間、視窗 ROI、前後截圖 |
 
-## April 16–24: first shape
+## 4 月 16–24 日：最初形貌
 
-`6351b36` (2026-04-16) is the first commit. The next few days cleaned the repo, rebuilt the project, stopped saving every screenshot, and added MCP (`2d21557`). Memory moved from `brain.txt` to `long_term_memory.txt`. Tools, monitor settings, and an OCR viewer followed. Prompts were renamed from skills to instructions. Text entry switched to paste so multilingual input would survive. Object detection was removed, and a prompt viewer plus a step mechanism were added so each script line could carry an image and an instruction.
+`6351b36`（2026-04-16）是第一筆提交。接下來幾天清理儲存庫、重建專案、停止保存每一張截圖，並加入 MCP（`2d21557`）。記憶從 `brain.txt` 改存到 `long_term_memory.txt`。接著是工具、螢幕設定，以及一個 OCR 檢視器。提示詞從 skills 改名為 instructions。文字輸入改為貼上，讓多語內容能夠保留。物件偵測被移除，並加入提示詞檢視器與步驟機制，使每一行腳本都能帶一張圖與一則指令。
 
-The working idea at this point was a script of steps, each decided by a model and executed through MCP tools.
+此時的運作構想是一份步驟腳本：每一步由模型決定，再透過 MCP 工具執行。
 
-## April 30: drop the servers
+## 4 月 30 日：拿掉伺服器
 
-The largest architectural change of the month came from a series of chats on April 30. The request was to stop running brain and hand as servers and use in-process modules instead. Ports and `TASK_INPUT_ENV` were removed (`877635e`, `1557013`). Screenshot and monitor code moved into `src/eye/`. The old step files were deleted (`066d2ed`) and replaced by a message loop: the brain decides a tool, the hand runs it, and the messages are saved (`e406f26`).
+這個月最大的架構變更來自 4 月 30 日的一連串對話。需求是停止把 brain 與 hand 當成伺服器執行，改為行程內模組。連接埠與 `TASK_INPUT_ENV` 被移除（`877635e`、`1557013`）。截圖與螢幕程式碼移入 `src/eye/`。舊的步驟檔被刪除（`066d2ed`），改由訊息迴圈取代：brain 決定工具、hand 執行它，訊息則被保存（`e406f26`）。
 
-That loop is still the coordinator’s core. Later modes (script, queue, smart, recording replay) all sit on it.
+這個迴圈至今仍是協調器的核心。後來的模式（腳本、佇列、智能、錄製重播）都建立在它之上。
 
-## May: make it a desktop app
+## 5 月：做成桌面應用程式
 
-May was spent making the agent usable without a developer console.
+5 月用來讓代理在沒有開發者主控台的情況下也能使用。
 
-- Coordinate selection learned to match instruction text to OCR regions by similarity (`05e7100`, May 7) instead of asking the model for raw pixels.
-- A runtime-command mode let the user type the next instruction before each loop (`445516f`). Window tools learned to close, minimize, and maximize a list of windows. A storage folder held pasted text as files, not one JSON blob.
-- Local PyTorch weights were replaced by ONNX, then by an end-to-end YOLO model, and Torch was removed (`aa9ebc8`, `8ae59d5`, May 14). `nuitka.bat` appeared the same day.
-- `cb18455` (May 14) created the GUI. The following day laid out the main window, added stop, clear, monitor selection, and automatic focus on the command box. The UI language switched to Chinese (`e7f1073`).
-- Late May simplified configuration: unused constants were removed, `eye_vlm` was dropped, and JSON config files were collapsed into code (`cb246f0`, `fe484fd`). A splash image was added for the packaged exe.
+- 座標選擇學會依相似度把指令文字對到 OCR 區域（`05e7100`，5 月 7 日），不再請模型直接給原始像素。
+- 執行期指令模式讓使用者在每一圈迴圈前輸入下一則指令（`445516f`）。視窗工具學會關閉、最小化與最大化一組視窗。儲存資料夾把貼上的文字存成檔案，而不是單一 JSON 區塊。
+- 本機 PyTorch 權重先換成 ONNX，再換成端到端 YOLO 模型，Torch 隨之移除（`aa9ebc8`、`8ae59d5`，5 月 14 日）。同一天出現 `nuitka.bat`。
+- `cb18455`（5 月 14 日）建立 GUI。隔天排出主視窗版面，加入停止、清除、螢幕選擇，以及指令框自動取得焦點。介面語言改為中文（`e7f1073`）。
+- 5 月下旬簡化設定：移除未使用的常數、拿掉 `eye_vlm`，並把 JSON 設定檔收進程式碼（`cb246f0`、`fe484fd`）。打包後的 exe 加入啟動畫面。
 
-Chats in this period kept circling the same failures: hotkeys that did not fire, paste that inserted the previous clipboard, the last script step never running, and OCR that was too slow on CPU. The fixes were smaller tools and a shared LLM client that could point at a remote OpenAI-compatible server (`321363c`, May 13), which later became the vLLM host.
+這段期間的對話一再繞著同一批失敗：熱鍵沒有觸發、貼上時插入的是上一份剪貼簿、腳本最後一步從未執行，以及 OCR 在 CPU 上太慢。修正方向是更小的工具，以及一個可指向遠端 OpenAI 相容伺服器的共用 LLM 用戶端（`321363c`，5 月 13 日），後來成為 vLLM 主機。
 
-## June: one way to move the mouse
+## 6 月：只有一種移動滑鼠的方式
 
-June is the shortest month in git (15 commits) and almost absent from dated chats, but the commits change the vision path.
+6 月是 git 裡最短的一個月（15 筆提交），有日期的對話也幾乎沒有，但這些提交改變了視覺路徑。
 
-A UI-element recognizer was folded into the existing OCR flow (`29f8031`). Screenshots started including the mouse cursor (`130c788`). A report mechanism was added (`94002e8`). The separate “move to text” and “move to UI element” tools became one `move_mouse` (`5287981`, June 16), then the mouse-move logic was unified again (`e9edb4d`). A cache of successful tool calls was added (`c65033f`) so a repeated script line could skip the model. `eae2588` (July 1, committed at the edge of this work) added Triton as the vision server.
+UI 元素辨識被併入既有的 OCR 流程（`29f8031`）。截圖開始包含滑鼠游標（`130c788`）。加入報告機制（`94002e8`）。分開的「移到文字」與「移到 UI 元素」工具合併成一個 `move_mouse`（`5287981`，6 月 16 日），接著滑鼠移動邏輯再次統一（`e9edb4d`）。成功的工具呼叫被快取（`c65033f`），讓重複的腳本行可以跳過模型。`eae2588`（7 月 1 日，提交於這段工作的邊緣）加入 Triton 作為視覺伺服器。
 
-The direction is already the later product: vision on a remote inference server, one mouse tool, and a written report of what the run did.
+方向已經是後來的產品：視覺跑在遠端推論伺服器上、只有一個滑鼠工具，以及一份寫下這次執行做了什麼的報告。
 
-## July: record a session instead of writing a script
+## 7 月：錄下工作階段，而不是手寫腳本
 
-`7dd1f63` (July 3) added the recorder. The next commits optimized screen capture and window detection, then added drag (`5ab1d84`). From here, most chats are about a recorded event that produced the wrong instruction, or a replay that clicked the wrong icon.
+`7dd1f63`（7 月 3 日）加入錄製器。接下來的提交最佳化螢幕擷取與視窗偵測，然後加入拖曳（`5ab1d84`）。從這裡開始，多數對話都在談：某次錄製事件產生了錯誤指令，或重播時點到錯誤圖示。
 
-The stability idea that stuck is the nearby landmark. A click is not “the folder icon”; it is “the folder icon, with Edge and Copilot beside it” (`4c45d07`, July 8). Replay stopped asking the model to invent coordinates and started matching that description against OCR and YOLO candidates. Through July 13–15 the matching was rewritten several times because small models dropped the parenthetical hint, picked a duplicate label, or ignored a pixel offset. Landmarks were reduced to the single closest anchor (`fec94bc`), then expanded again to one candidate on each side. Click and double-click were distinguished (`3b6f73c`). A `find existing text or element` tool was added so a step could be conditional (`3626400`). The model’s job was narrowed toward translation and verification rather than free assistance (`2059b95`).
+留下來的穩定做法是鄰近地標。一次點擊不是「資料夾圖示」，而是「旁邊有 Edge 與 Copilot 的資料夾圖示」（`4c45d07`，7 月 8 日）。重播不再請模型自己發明座標，改為把這段描述拿去對 OCR 與 YOLO 候選。7 月 13–15 日匹配被重寫了好幾次，因為小模型會丟掉括號裡的提示、選到重複標籤，或忽略像素偏移。地標先縮成單一最近錨點（`fec94bc`），再擴回每一側各一個候選。單擊與雙擊被區分開來（`3b6f73c`）。加入 `find existing text or element` 工具，讓步驟可以是條件式的（`3626400`）。模型的工作收窄成翻譯與驗證，而不是自由協助（`2059b95`）。
 
-Around the same days the product surface grew:
+同一段日子裡，產品表面也在擴大：
 
-- HTML session reports, an analysis button, and an index page (`fe6f037`, `19e1d2d`, `b4c06f1`).
-- A queue of scripts (`eaff0a1` era; the July 17 chat asked for sequential runs).
-- Pause, unsaved-script warnings, red cross on failure (`d2d1b6b`), and “save as new file” after analysis.
-- 智能模式 (`9a76971`, July 30): the whole text box is one goal, and the loop is plan, act, verify. Drag in that mode uses visual mouse resolution, and the tool-call cache is disabled because a cached click is the wrong idea for an open goal (`a5a69f3`).
-- Elapsed time between recorded actions becomes a wait line when the gap is long (`62f9141`).
+- HTML 工作階段報告、分析按鈕，以及索引頁（`fe6f037`、`19e1d2d`、`b4c06f1`）。
+- 腳本佇列（`eaff0a1` 前後；7 月 17 日的對話要求依序執行）。
+- 暫停、未儲存腳本警告、失敗時的紅叉（`d2d1b6b`），以及分析後「另存新檔」。
+- 智能模式（`9a76971`，7 月 30 日）：整個文字框是一個目標，迴圈是計畫、行動、驗證。該模式的拖曳使用視覺滑鼠解析度，並停用工具呼叫快取，因為對開放目標來說，快取的點擊是錯誤的想法（`a5a69f3`）。
+- 錄製動作之間的經過時間，在間隔夠長時會變成一行等待（`62f9141`）。
 
-Window bookkeeping was a repeated failure. Closing a popup host was recorded as closing File Explorer. The recorder learned to ignore that host, to prefer the innermost control under the cursor (`7562f9d`), and to describe landmarks with a side (left, right, above, below) instead of a vague “nearby” (`99a1603`).
+視窗記帳是反覆出現的失敗。關閉彈出視窗的主機被錄成關閉檔案總管。錄製器學會忽略那個主機、偏好游標下最內層的控制項（`7562f9d`），並用地標的方位（左、右、上、下）來描述，而不是含糊的「附近」（`99a1603`）。
 
-## August: the recording is the script
+## 8 月：錄製本身就是腳本
 
-August has 107 commits. The chats stop treating the recording as a way to fill a script box and start treating the recording folder as the thing you run.
+8 月有 107 筆提交。對話不再把錄製當成填腳本框的手段，而開始把錄製資料夾當成要執行的東西。
 
-Replay reliability:
+重播可靠性：
 
-- Text targets outrank icons when they overlap (`3be7588`, `d4201e2`).
-- Scrollbars are fitted and created from arrow pairs instead of trusted as raw YOLO boxes (`195b47a` and the August 11 chats).
-- Serial clicks on the same spot collapse into one step (`9d2ada5`). Shift+letter and Ctrl+V become typed text, not hotkeys (`9eb7809`, `097658a`). Ctrl+A is recorded whole (`37d3eea`).
-- The brain is capped at 10 inner decide steps (`b84c890`) after chats about a loop that never finished, including a model that kept calling a tool named `finish`.
-- Verification text is generated during analysis (`b51e1f8`), then edited in `recording_steps.html` (`2f5e068`, `b0f4737`). Before and after screenshots are shown per step (`2d6d8ed`). A final after-shot is taken before the hub window comes back (`86b7253`).
-- OCR decode becomes width-aware and returns a span per character (`68c0ac8`, `dbc5bd3`), so a click inside a word can name the character.
-- Users can insert a step, including a conditional step, without re-recording (`a27d880`, `b94f70d`). Queue “add recording” accepts many folders (`cebdedf`). A run started from a recording is named after that folder (`857e9fc`).
-- Typing screenshots were wrong because the first character was already on screen. The capture plan became “photo on the first key, flush after the burst” (`303b819`, `72df698`). The caret and UI Automation focus locate where the typing happened (`e7b2e82`). Recorded keystrokes are preferred over a second OCR of the field (`43c8ad6`).
-- Near-miss clicks count as on target by padding OCR boxes (`bf2a078`). Chinese paths broke OpenCV’s `imread`; images are decoded in a Unicode-safe way (`20d8f00`).
+- 文字目標與圖示重疊時，文字優先（`3be7588`、`d4201e2`）。
+- 捲軸由箭頭配對擬合並建立，不再直接信任原始 YOLO 框（`195b47a` 與 8 月 11 日的對話）。
+- 同一位置的連續點擊收成一步（`9d2ada5`）。Shift+字母與 Ctrl+V 變成輸入的文字，而不是熱鍵（`9eb7809`、`097658a`）。Ctrl+A 整段被錄下來（`37d3eea`）。
+- brain 的內層決策步數上限為 10（`b84c890`），起因是對話裡有迴圈永遠結束不了，包括模型一直呼叫名為 `finish` 的工具。
+- 驗證文字在分析時產生（`b51e1f8`），再於 `recording_steps.html` 中編輯（`2f5e068`、`b0f4737`）。每一步顯示前後截圖（`2d6d8ed`）。中樞視窗回來之前會先拍最後一張事後截圖（`86b7253`）。
+- OCR 解碼改為依寬度感知，並回傳每個字元的跨距（`68c0ac8`、`dbc5bd3`），因此點在單字內部時可以指出那個字元。
+- 使用者可以插入步驟，包括條件步驟，而不必重新錄製（`a27d880`、`b94f70d`）。佇列的「加入錄製」接受多個資料夾（`cebdedf`）。從錄製啟動的執行會以該資料夾命名（`857e9fc`）。
+- 打字截圖不對，是因為第一個字元已經在畫面上。擷取計畫改成「第一個按鍵時拍照，連續輸入結束後再沖出」（`303b819`、`72df698`）。插入點與 UI Automation 焦點用來定位打字發生的位置（`e7b2e82`）。錄下的按鍵優先於對該欄位做第二次 OCR（`43c8ad6`）。
+- 差一點的點擊，藉由擴充 OCR 框的邊距，算作命中目標（`bf2a078`）。中文路徑會讓 OpenCV 的 `imread` 失敗；影像改以支援 Unicode 的方式解碼（`20d8f00`）。
 
-The hub UX in the same month: per-step green check and red cross, copy and delete on each recorded instruction, start the queue from any item (`6d38d09`), side-by-side instruction and expected-outcome editors, and a larger gutter so step 10’s checkmark is visible.
+同一個月的中樞使用體驗：每一步的綠色勾與紅色叉、每則錄製指令的複製與刪除、從佇列任一項開始（`6d38d09`）、並排的指令與預期結果編輯器，以及較寬的邊欄，讓第 10 步的勾選標記看得見。
 
-Hold-to-click was added (`31fef48`) after a chat asking whether a long left- or right-button press could be recorded. YOLO’s 300-detection cap was handled by splitting the image (`ae32baf`). Clipboard contents are preserved when the type tool runs (`aa601bf`), which had been overwriting whatever the user had copied.
+長按點擊被加入（`31fef48`），起因是一則對話問左鍵或右鍵長按能否被錄下來。YOLO 的 300 個偵測上限改以分割影像處理（`ae32baf`）。打字工具執行時會保留剪貼簿內容（`aa601bf`）；先前它會覆寫使用者已複製的東西。
 
-## September: replay what was recorded, on the right window
+## 9 月：在正確的視窗上重播錄製內容
 
-September is the densest month (115 commits) and is almost entirely about making replay match the recording.
+9 月是最密集的一個月（115 筆提交），幾乎全在讓重播對上錄製。
 
-Verification was the first focus. Expected outcomes are off unless the user turns them on. Scripted steps gained a retry limit (`5daef6d`) and a verify-branch abort when recovery cannot succeed (`e920dc4`). Verify was split into a baseline-image match and then a recovery round (`e9311e8`), polled at 1×, 1.5×, and 2× the recorded settle time (`431bf6f`). Session HTML shows the live shot next to the recorded baseline (`30672f1`, `15bcb75`). Gemma is a fallback when YOLO and OCR miss the target (`8db179d`).
+驗證是第一個焦點。預期結果預設關閉，除非使用者打開。腳本步驟加上重試上限（`5daef6d`），以及復原無法成功時的驗證分支中止（`e920dc4`）。驗證拆成先做基準影像比對、再做一輪復原（`e9311e8`），並以錄製穩定時間的 1 倍、1.5 倍與 2 倍輪詢（`431bf6f`）。工作階段 HTML 把即時畫面與錄製基準並排顯示（`30672f1`、`15bcb75`）。YOLO 與 OCR 都沒抓到目標時，以 Gemma 作為後備（`8db179d`）。
 
-Vision kept being tuned against real recordings (控制面板, 軟體資產, 打開神網, 資產設備):
+視覺持續依真實錄製調整（控制面板、軟體資產、打開神網、資產設備）：
 
-- Scrollbar fit, create, and merge from arrow pairs, including vertical-plus-horizontal corners, while rejecting bars that overlap text or inputs (`f54a1e2` through `8a01487`).
-- Identical icons are disambiguated with a set-cover of landmarks (`637bb23`). Each confusable peer gets two landmarks (`6663cca`). Repeated on-screen labels are skipped (`ecfa7c2`).
-- Tiny YOLO text boxes are also emitted as element detections so OCR can run both streams (`d2b49e8`).
-- A second OCR pass retries unknown icons (`ea945cb`, `3dc2a23`).
-- `yolo_ui_small` was added and became the default (`f4090b6`, `e50f1f1`). Local Triton was removed from the hub; saved configs point at the remote host (`671f0ec`).
-- Overlapping text is refined by a quadtree re-detect and then split on row-profile valleys (`ac67e03`, `77dd210`). Text boxes merge only inside one line (`d868c4e`).
-- Chinese IME candidate keys are folded into the typed string (`cc27731`). A text-only model chooses between recorded keystrokes and OCR for typing steps (`11a6e47`).
+- 捲軸由箭頭配對擬合、建立與合併，包含垂直加水平的轉角，同時拒絕與文字或輸入框重疊的條（`f54a1e2` 至 `8a01487`）。
+- 相同圖示以地標的集合覆蓋來消歧（`637bb23`）。每個容易混淆的同類各給兩個地標（`6663cca`）。畫面上重複的標籤會被略過（`ecfa7c2`）。
+- 極小的 YOLO 文字框也會當成元素偵測輸出，讓 OCR 可以跑兩條串流（`d2b49e8`）。
+- 第二次 OCR 會重試未知圖示（`ea945cb`、`3dc2a23`）。
+- 加入 `yolo_ui_small` 並成為預設（`f4090b6`、`e50f1f1`）。本機 Triton 從中樞移除；已存設定指向遠端主機（`671f0ec`）。
+- 重疊文字先以四元樹重新偵測，再依列輪廓的谷底切開（`ac67e03`、`77dd210`）。文字框只在同一行內合併（`d868c4e`）。
+- 中文輸入法的候選鍵被併入打出來的字串（`cc27731`）。純文字模型在打字步驟上，於錄下的按鍵與 OCR 之間做選擇（`11a6e47`）。
 
-Replay speed and correctness then moved together:
+重播速度與正確性接著一起推進：
 
-- Analysis compiles each step’s tool call and replay always uses that cache (`584b2a5`, `0e8b0a2`). The brain no longer re-decides a recorded step.
-- Settle time is measured while recording, with Fibonacci backoff between probes (`c4e3039`, `e43a528`). Replay waits that long before the next tool, and the wait shows up in the HTML time profile (`ed1cdd1`, `3223551`).
-- Mouse and keyboard screenshots, clipboard reads, and full window scans were moved off the low-level hook thread so the recorder would not drop keys (`649dc9f`, `c53bdfa`, `4e75106`, `16dd3de`).
-- Vision during replay stays inside the window that was under the click, including maximized windows (`032ef55`, `ee73478`). A click on a confirmed caption button goes straight to that button (`7f5ead0`). If the window selector finds nothing, the action fails instead of clicking somewhere else (`9be1905`). If a recorded mouse target has no similarity match, cache replay fails (`66efac6`).
-- Before-shots are latched from the frame before mouse-down (`6d22f45`). After-shots come from the settle probe (`c896ef4`). The hub is hidden before the final baseline and restored right after (`c44e532`, `7c2e5fe`).
-- Recording steps HTML gained a playback tab (`ec4f5b8`), per-step verification checkboxes (`f818bf4`), and a time-profile tab (`56e200b`). Steps whose YOLO or OCR timed out are retried at the end of analysis, and the UI reports how many still have no target (`d6af3e1`).
+- 分析會編譯每一步的工具呼叫，重播一律使用該快取（`584b2a5`、`0e8b0a2`）。brain 不再重新決定已錄製的步驟。
+- 穩定時間在錄製時量測，探測之間使用費波那契退避（`c4e3039`、`e43a528`）。重播在下一個工具之前會等那麼久，這段等待也會出現在 HTML 時間剖面（`ed1cdd1`、`3223551`）。
+- 滑鼠與鍵盤截圖、剪貼簿讀取，以及完整視窗掃描，都移出低階掛鉤執行緒，以免錄製器漏掉按鍵（`649dc9f`、`c53bdfa`、`4e75106`、`16dd3de`）。
+- 重播期間的視覺停留在點擊所在的視窗內，包含最大化視窗（`032ef55`、`ee73478`）。點到已確認的標題列按鈕時，直接前往該按鈕（`7f5ead0`）。視窗選擇器什麼都找不到時，動作失敗，而不是點到別處（`9be1905`）。錄製的滑鼠目標沒有相似度匹配時，快取重播失敗（`66efac6`）。
+- 事前截圖鎖定自滑鼠按下前的畫面（`6d22f45`）。事後截圖來自穩定探測（`c896ef4`）。中樞在最後一張基準圖之前隱藏，並在之後立刻還原（`c44e532`、`7c2e5fe`）。
+- 錄製步驟 HTML 加入播放分頁（`ec4f5b8`）、每步驗證核取方塊（`f818bf4`），以及時間剖面分頁（`56e200b`）。YOLO 或 OCR 逾時的步驟會在分析結束時重試，介面也會回報還有多少步仍然沒有目標（`d6af3e1`）。
 
-The September 23–24 chats are still on the same problem: an after-shot that is really the next step’s before-shot, a dropdown that never appears in the recorded frame, and a click that did not close the menu. `window_snapshot.py` is the in-progress work for recording which window an action belongs to, so replay can check that predicate.
+9 月 23–24 日的對話仍在同一個問題上：事後截圖其實是下一步的事前截圖、下拉選單從未出現在錄製畫面裡，以及一次點擊沒有把選單關掉。`window_snapshot.py` 是進行中的工作，用來記錄一個動作屬於哪個視窗，讓重播可以檢查該述詞。
 
-## What the project is now
+## 10 月 1 日：沒變的 OCR 框不必再送 Triton
 
-`README.md` describes the current shape: a GUI hub (`main.py` → `app_main_hub.py`) with Eye (screenshots), Brain (script, queue, smart, and verify via vLLM), and Hand (MCP tools). Vision is a remote Triton server running YOLO and OCR. A recording folder under `recordings/` is a runnable script. A run under `runs/` keeps the step log, screenshots, and HTML report.
+`d4f5442` 讓 `move_mouse` 重用上一張螢幕裡像素沒變的 OCR 字串。同一天用檔案總管的一張 1920×1080 截圖量過這件事值不值得：`runs/recording_20261001_005404_631023_20261001_011156_321861/yolo_ocr/20261001_011339_576643_mon2.png`。YOLO 在這張圖上得到 131 個文字與圖示框，對 `http://192.168.0.17:9000` 的 CRNN 各跑 3 次。重用的字串與全新讀取一致。
 
-The improvement line, read from the commits and the chats together, is:
+| 路徑 | 送出的內容 | 中位數 |
+| --- | --- | --- |
+| 131 框全部送出 | 4 次請求：64、49、16、2 列，寬度 34、84、256、514 | 1.00 秒（0.45–1.18 秒） |
+| 131 框全部重用 | 0 次請求 | 0.007 秒 |
 
-1. Replace servers and free-form plans with a step loop.
-2. Replace local Torch with ONNX, then Triton, and ship a Chinese GUI.
-3. Replace handwritten scripts with a recording.
-4. Replace model-chosen pixels with landmarks, character spans, and compiled tool calls.
-5. Replace “click and hope” with baseline verify, measured settle time, and a window ROI.
+重用大約快 140 倍，這一幀省下約 1 秒。主程式同時也在呼叫 Triton 時，全部送出的中位數升到 1.80 秒（最高 2.25 秒），重用仍是 0.007 秒。API 時間跟著伺服器負載走，重用時間不走。
 
-## Sources
+只改一部分像素時，沒變的框仍然不送：
 
-- Git: `git log` from `6351b36` (2026-04-16, “first commit”) through `c896ef4` (2026-09-24, settle-probe screenshots and window-verify predicates). Counts above are commits whose dates fall in each month.
-- Conversations: first user request of each parent Cursor chat for this workspace, dated when the transcript included a timestamp (about 490 of 648). Subagent transcripts were not counted separately. Undated early chats line up with the April 30 server-removal work and the early May tool fixes.
+| 重新讀取 | 重用 | 中位數 | 最後一次的 CRNN batch |
+| --- | ---: | --- | --- |
+| 15 | 116 | 0.14 秒 | `[14, 32, 56]`、`[1, 32, 138]` |
+| 32 | 99 | 0.89 秒 | `[29, 32, 58]`、`[3, 32, 123]` |
+| 66 | 65 | 0.82 秒 | 含寬 514 的 `[2, 32, 514]` |
+| 125 | 6 | 0.83 秒 | 與全部送出相同的 4 個 batch |
+
+仍被重用的那 6 框是工作列上 3 個區域各存了兩份（文字與圖示）。實驗把每個區域反相兩次，像素回到原狀，所以比對把它們留下是對的。一旦新鮮的集合裡有很寬的列，時間就回到接近整屏送出，因為 CRNN 的代價跟著序列寬度走。
+
+因此沒有改批次打包。每一列先縮到高 32，再由窄到寬排序，湊到 64 列、或下一列會讓該批最寬／最窄達到 3 倍時，就另開一次 Triton 請求。3 倍這條線是先前在真實 `move_mouse` 截圖上掃過的（`scripts/bench_ocr_max_width_ratio.py`）。這次實驗量到的加速來自少呼叫 Triton，不是把剩下的請求再切更細。
+
+快取本身還有一個洞。它每個螢幕只留上一張擷取，而且 ROI 過濾後的框會整槽覆蓋。同一次執行的紀錄是：全螢幕讀了 94 框，下一步重用 20；側欄 ROI `(0, 131, 281, 359)` 把槽換成約 11 框；接著的全螢幕只重用 1、新讀 47。`b489df9` 改成跨擷取保留：展開後的像素沒變就留著，即使這次 ROI 沒看它；像素變了，或同一個模式的新框以 IoU 至少 0.85 重疊並重新讀取，才換掉舊的。空偵測只更新截圖並丟掉變過的區域，不再把整個螢幕的字串清掉。
+
+## 專案現在是什麼
+
+`README.md` 描述目前的形貌：一個 GUI 中樞（`main.py` → `app_main_hub.py`），含 Eye（截圖）、Brain（腳本、佇列、智能，以及透過 vLLM 的驗證）與 Hand（MCP 工具）。視覺是一台執行 YOLO 與 OCR 的遠端 Triton 伺服器。`recordings/` 下的錄製資料夾是可執行的腳本。`runs/` 下的一次執行保留步驟紀錄、截圖與 HTML 報告。
+
+把提交與對話放在一起讀，改進的主線是：
+
+1. 以步驟迴圈取代伺服器與自由形式的計畫。
+2. 以 ONNX 取代本機 Torch，再換成 Triton，並交付中文 GUI。
+3. 以錄製取代手寫腳本。
+4. 以地標、字元跨距與編譯後的工具呼叫取代模型自選的像素。
+5. 以基準驗證、量測到的穩定時間，以及視窗 ROI 取代「點下去再指望」。
+
+## 來源
+
+- Git：`git log` 從 `6351b36`（2026-04-16，「first commit」）到 `c896ef4`（2026-09-24，穩定探測截圖與視窗驗證述詞）。上表計數是日期落在該月的提交。10 月 1 日的 OCR 計時是對上述檔案總管截圖的控制實驗，不在這張月份表裡。
+- 對話：本工作區每一則父級 Cursor 對話的第一則使用者請求；轉錄稿含時間戳時才標日期（648 則中約 490 則）。子代理轉錄稿未另外計入。沒有日期的早期對話對得上 4 月 30 日移除伺服器的工作，以及 5 月初的工具修正。

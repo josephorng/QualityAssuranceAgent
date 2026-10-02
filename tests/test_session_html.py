@@ -1132,9 +1132,12 @@ def test_write_recording_html_renders_events_and_instructions(tmp_path: Path) ->
     assert 'class="collapse-instruction"' in html
     assert 'class="select-step"' in html
     assert 'class="select-all-steps"' in html
+    assert 'class="verify-all-steps"' in html
     assert 'class="bulk-delete-steps"' in html
     assert "刪除選取" in html
     assert "全選" in html
+    assert "全部驗證" in html
+    assert "/verifications" in html
     assert "initStepSelection" in html
     assert "/events/delete" in html
     assert 'data-instruction="點擊「搜尋」按鈕"' in html

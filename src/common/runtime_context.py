@@ -16,6 +16,7 @@ RUNTIME_COMMAND_MODE_ENV = "CUA_RUNTIME_COMMAND_MODE"
 SMART_MODE_ENV = "CUA_SMART_MODE"
 SMART_GOAL_ENV = "CUA_SMART_GOAL"
 USE_TOOL_CACHE_ENV = "CUA_USE_TOOL_CACHE"
+SKIP_VERIFICATION_ENV = "CUA_SKIP_VERIFICATION"
 
 
 def is_runtime_command_mode() -> bool:
@@ -30,6 +31,12 @@ def is_smart_mode() -> bool:
 
 def get_smart_goal() -> str:
     return (os.getenv(SMART_GOAL_ENV) or "").strip()
+
+
+def skip_verification_enabled() -> bool:
+    """True when this run should advance without window or vision checks."""
+    raw = os.getenv(SKIP_VERIFICATION_ENV, "").strip().lower()
+    return raw in ("1", "true", "yes")
 
 
 def use_tool_cache_enabled() -> bool:

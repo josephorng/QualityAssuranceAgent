@@ -52,6 +52,7 @@ from src.common.runtime_context import (
     get_runtime_env,
     is_runtime_command_mode,
     is_smart_mode,
+    skip_verification_enabled,
     use_tool_cache_enabled,
 )
 from src.common.settings import load_settings
@@ -2074,7 +2075,10 @@ class BrainModule:
 
         Recovery path: actor failure, a recorded expected outcome, or a recording
         after-baseline still uses screenshot verification for `goto`/`retry`/`skip`/
-        `abort`/`smart`. Expected-outcome verify (no baseline) sleeps settle first;
+        `abort`/`smart`. Single-script and queue runs can skip every check
+        (`CUA_SKIP_VERIFICATION`):
+        a successful actor advances, and a failed actor stops the step without a
+        verifier call. Expected-outcome verify (no baseline) sleeps settle first;
         with a baseline, verify polls at 1.0x/1.5x/2.0x of settle. Branch `smart` runs
         a bounded nested Plan→Act→Verify recovery, then retries the same script line on
         success (or stops the run on failure). After actor success, ambiguous verifier
@@ -2120,7 +2124,8 @@ class BrainModule:
         try:
             self._step_deferred_settle_waited_seconds = 0.0
             self._replay_press_point_window = None
-            window_verify = self._current_window_verify()
+            skip_verification = skip_verification_enabled()
+            window_verify = {} if skip_verification else self._current_window_verify()
             windows_before: list[WindowInfo] | None = None
             if window_verify:
                 windows_before = await self._snapshot_top_level_windows()
@@ -2139,7 +2144,13 @@ class BrainModule:
                 and settle_after > 0
                 and self._current_baseline_after_path() is not None
             )
-            skip_vision = self._should_skip_vision_verify(step_succeeded)
+            if skip_verification:
+                # No verifier polls, so the recording gap is deferred like a step
+                # that has nothing to check.
+                poll_settle = False
+            skip_vision = self._should_skip_vision_verify(step_succeeded) or (
+                skip_verification and step_succeeded
+            )
             run_window_verify = step_succeeded and bool(window_verify)
             if run_window_verify and settle_after is not None and settle_after > 0:
                 self.manager.log_info(
@@ -2168,11 +2179,27 @@ class BrainModule:
             if window_miss is not None:
                 verify_result = window_miss
             elif skip_vision:
+                if skip_verification:
+                    self.manager.log_info(
+                        f"Script step {script_step_index + 1} skipping verification"
+                    )
+                    verify_result = ScriptStepVerifyResult(
+                        accomplished=True,
+                        branch="advance",
+                        target_step=None,
+                        reason="Verification skipped for this queue run.",
+                    )
+                else:
+                    self.manager.log_info(
+                        f"Script step {script_step_index + 1} skipping vision verification "
+                        "(empty expected outcome; no recording baseline; actor tools succeeded)"
+                    )
+                    verify_result = self._auto_advance_verify_result()
+            elif skip_verification:
                 self.manager.log_info(
-                    f"Script step {script_step_index + 1} skipping vision verification "
-                    "(empty expected outcome; no recording baseline; actor tools succeeded)"
+                    f"Script step {script_step_index + 1} skipping verification; actor failed"
                 )
-                verify_result = self._auto_advance_verify_result()
+                verify_result = None
             else:
                 if not step_succeeded:
                     self.manager.log_info(

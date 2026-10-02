@@ -1623,6 +1623,51 @@ _RECORDING_SCRIPT = """
     });
   });
 
+  function verificationCheckboxes() {
+    return Array.prototype.slice.call(document.querySelectorAll(
+      "input.use-expected-outcome, input.use-verify-condition"
+    ));
+  }
+
+  var verifyAllBusy = false;
+
+  function syncVerifyAllSteps() {
+    var master = document.querySelector("input.verify-all-steps");
+    if (!master || verifyAllBusy) return;
+    var boxes = verificationCheckboxes();
+    var total = boxes.length;
+    var count = 0;
+    boxes.forEach(function (box) {
+      if (box.checked) count += 1;
+    });
+    master.disabled = total === 0;
+    master.checked = count > 0;
+    master.indeterminate = count > 0 && count < total;
+  }
+
+  function syncExpectedOutcomeSummary(group, enabled) {
+    if (!group) return;
+    syncExpectedOutcomeVerifyRow(group, enabled);
+    var copyBtn = group.querySelector("button.copy-instruction");
+    var saved = copyBtn ? (copyBtn.getAttribute("data-expected-outcome") || "").trim() : "";
+    if (copyBtn) copyBtn.setAttribute("data-use-expected-outcome", enabled ? "1" : "0");
+    var summaryText = group.querySelector(".instruction-summary-text");
+    var expectedEl = group.querySelector(".instruction-expected");
+    if (enabled && saved) {
+      if (!expectedEl && summaryText) {
+        expectedEl = document.createElement("span");
+        expectedEl.className = "instruction-expected";
+        summaryText.appendChild(expectedEl);
+      }
+      if (expectedEl) {
+        expectedEl.classList.remove("instruction-expected-empty");
+        expectedEl.textContent = "預期結果：" + saved;
+      }
+    } else if (expectedEl) {
+      expectedEl.remove();
+    }
+  }
+
   Array.prototype.slice.call(document.querySelectorAll("input.use-expected-outcome")).forEach(function (checkbox) {
     checkbox.addEventListener("click", function (event) {
       event.stopPropagation();
@@ -1632,6 +1677,7 @@ _RECORDING_SCRIPT = """
       var group = checkbox.closest(".instruction-group");
       if (!group) return;
       syncExpectedOutcomeVerifyRow(group, checkbox.checked);
+      syncVerifyAllSteps();
       var panel = group.querySelector(".expected-outcome");
       var btn = panel ? panel.querySelector("button.apply-expected-outcome") : null;
       if (btn) {
@@ -1645,12 +1691,14 @@ _RECORDING_SCRIPT = """
   function applyVerificationToggle(group, checkbox) {
       if (window.location.protocol === "file:") {
         checkbox.checked = !checkbox.checked;
+        syncVerifyAllSteps();
         return;
       }
       var runId = group.getAttribute("data-run-id") || "";
       var eventIndex = group.getAttribute("data-event-index") || "";
       if (!runId || !eventIndex) {
         checkbox.checked = !checkbox.checked;
+        syncVerifyAllSteps();
         return;
       }
       var copyBtn = group.querySelector("button.copy-instruction");
@@ -1672,6 +1720,7 @@ _RECORDING_SCRIPT = """
           if (!result.ok || !result.payload || !result.payload.ok) {
             checkbox.checked = !enabled;
             syncExpectedOutcomeVerifyRow(group, checkbox.checked);
+            syncVerifyAllSteps();
             return;
           }
           var saved = result.payload.expected_outcome;
@@ -1679,6 +1728,7 @@ _RECORDING_SCRIPT = """
           var savedEnabled = !!result.payload.use_expected_outcome;
           checkbox.checked = savedEnabled;
           syncExpectedOutcomeVerifyRow(group, savedEnabled);
+          syncVerifyAllSteps();
           if (copyBtn) {
             if (savedEnabled && saved) {
               copyBtn.setAttribute("data-expected-outcome", saved);
@@ -1693,6 +1743,7 @@ _RECORDING_SCRIPT = """
           checkbox.disabled = false;
           checkbox.checked = !enabled;
           syncExpectedOutcomeVerifyRow(group, checkbox.checked);
+          syncVerifyAllSteps();
         });
   }
 
@@ -1748,6 +1799,7 @@ _RECORDING_SCRIPT = """
       checkbox.checked = previous;
       setVerifyConditionOff(checkbox, !checkbox.checked);
       setVerifyConditionsStatus(group, "請透過主程式開啟報告以修改驗證條件。", true);
+      syncVerifyAllSteps();
       return;
     }
     var runId = group.getAttribute("data-run-id") || "";
@@ -1756,6 +1808,7 @@ _RECORDING_SCRIPT = """
       checkbox.checked = previous;
       setVerifyConditionOff(checkbox, !checkbox.checked);
       setVerifyConditionsStatus(group, "缺少事件資訊。", true);
+      syncVerifyAllSteps();
       return;
     }
     var disabled = collectDisabledVerifyConditions(group);
@@ -1778,6 +1831,7 @@ _RECORDING_SCRIPT = """
           setVerifyConditionOff(checkbox, !checkbox.checked);
           var err = (result.payload && result.payload.error) || "儲存失敗";
           setVerifyConditionsStatus(group, err, true);
+          syncVerifyAllSteps();
           return;
         }
         var saved = result.payload.disabled;
@@ -1791,6 +1845,7 @@ _RECORDING_SCRIPT = """
           box.checked = on;
           setVerifyConditionOff(box, !on);
         });
+        syncVerifyAllSteps();
         setVerifyConditionsStatus(group, "已儲存", false);
         window.setTimeout(function () {
           var status = group.querySelector(".verify-conditions-status");
@@ -1802,6 +1857,7 @@ _RECORDING_SCRIPT = """
         checkbox.checked = previous;
         setVerifyConditionOff(checkbox, !checkbox.checked);
         setVerifyConditionsStatus(group, "無法連線主程式，請確認主程式正在執行。", true);
+        syncVerifyAllSteps();
       });
   }
 
@@ -1817,6 +1873,7 @@ _RECORDING_SCRIPT = """
       if (checkbox.getAttribute("data-verify-key") === "expected_outcome") {
         var summaryBox = group.querySelector(".verify-step input.use-expected-outcome");
         if (summaryBox) summaryBox.checked = checkbox.checked;
+        syncVerifyAllSteps();
         var outcomePanel = group.querySelector(".expected-outcome");
         var outcomeBtn = outcomePanel ? outcomePanel.querySelector("button.apply-expected-outcome") : null;
         if (outcomeBtn) {
@@ -1827,9 +1884,93 @@ _RECORDING_SCRIPT = """
         else applyVerificationToggle(group, checkbox);
         return;
       }
+      syncVerifyAllSteps();
       applyVerifyConditions(group, checkbox);
     });
   });
+
+  (function initVerifyAll() {
+    var master = document.querySelector("input.verify-all-steps");
+    if (!master) return;
+
+    function restoreBoxes(boxes, previous) {
+      boxes.forEach(function (box, index) {
+        box.checked = previous[index];
+        box.disabled = false;
+        setVerifyConditionOff(box, !box.checked);
+      });
+      Array.prototype.slice.call(document.querySelectorAll(".instruction-group")).forEach(function (group) {
+        var summary = group.querySelector("input.use-expected-outcome");
+        syncExpectedOutcomeSummary(group, summary ? summary.checked : false);
+      });
+    }
+
+    master.addEventListener("change", function () {
+      var enabled = !!master.checked;
+      master.indeterminate = false;
+      if (window.location.protocol === "file:") {
+        syncVerifyAllSteps();
+        window.alert("請透過主程式開啟報告以修改驗證條件。");
+        return;
+      }
+      var runId = toolbarRunId();
+      if (!runId) {
+        syncVerifyAllSteps();
+        window.alert("缺少事件資訊。");
+        return;
+      }
+      var boxes = verificationCheckboxes();
+      var previous = boxes.map(function (box) { return box.checked; });
+      verifyAllBusy = true;
+      master.disabled = true;
+      boxes.forEach(function (box) {
+        box.checked = enabled;
+        box.disabled = true;
+        setVerifyConditionOff(box, !enabled);
+      });
+      Array.prototype.slice.call(document.querySelectorAll(".instruction-group")).forEach(function (group) {
+        syncExpectedOutcomeSummary(group, enabled);
+      });
+      fetch("/api/runs/" + encodeURIComponent(runId) + "/verifications", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: enabled })
+      })
+        .then(function (response) {
+          return response.json().then(function (payload) {
+            return { ok: response.ok, payload: payload };
+          });
+        })
+        .then(function (result) {
+          verifyAllBusy = false;
+          if (!result.ok || !result.payload || !result.payload.ok) {
+            restoreBoxes(boxes, previous);
+            syncVerifyAllSteps();
+            var err = (result.payload && result.payload.error) || "儲存失敗";
+            window.alert(err);
+            return;
+          }
+          var savedEnabled = !!result.payload.enabled;
+          boxes.forEach(function (box) {
+            box.checked = savedEnabled;
+            box.disabled = false;
+            setVerifyConditionOff(box, !savedEnabled);
+          });
+          Array.prototype.slice.call(document.querySelectorAll(".instruction-group")).forEach(function (group) {
+            syncExpectedOutcomeSummary(group, savedEnabled);
+          });
+          syncVerifyAllSteps();
+        })
+        .catch(function () {
+          verifyAllBusy = false;
+          restoreBoxes(boxes, previous);
+          syncVerifyAllSteps();
+          window.alert("無法連線主程式，請確認主程式正在執行。");
+        });
+    });
+
+    syncVerifyAllSteps();
+  })();
 
   function applyExpectedOutcome(btn, revertCheckbox) {
       var panel = btn.closest(".expected-outcome");
@@ -1840,6 +1981,7 @@ _RECORDING_SCRIPT = """
         var summary = group.querySelector(".verify-step input.use-expected-outcome");
         if (summary && summary !== revertCheckbox) summary.checked = revertCheckbox.checked;
         syncExpectedOutcomeVerifyRow(group, summary ? summary.checked : revertCheckbox.checked);
+        syncVerifyAllSteps();
       }
       if (!panel || !group) {
         revertExpectedToggle();
@@ -1921,6 +2063,7 @@ _RECORDING_SCRIPT = """
           } else if (expectedEl) {
             expectedEl.remove();
           }
+          syncVerifyAllSteps();
           btn.classList.add("applied");
           setExpectedOutcomeStatus(panel, "已套用", false);
           window.setTimeout(function () {
@@ -6919,6 +7062,11 @@ def write_recording_html_from_run(run_root: Path, *, update_index: bool = True) 
         f'<input type="checkbox" class="select-all-steps" aria-label="全選步驟"'
         f"{copy_all_disabled}>"
         f"全選</label>"
+        f'<label class="select-all-steps-label">'
+        f'<input type="checkbox" class="verify-all-steps" aria-label="全部驗證"'
+        f' title="取消勾選會關閉所有步驟的驗證；勾選會全部開啟"'
+        f"{copy_all_disabled}>"
+        f"全部驗證</label>"
         f'<span class="bulk-step-count">已選 0 筆</span>'
         f'<button type="button" class="bulk-delete-steps" disabled '
         f'title="刪除選取的步驟" aria-label="刪除選取的步驟">刪除選取</button>'

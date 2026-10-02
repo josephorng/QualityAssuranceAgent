@@ -107,6 +107,15 @@ def test_is_smart_mode_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert get_smart_goal() == "do the thing"
 
 
+def test_skip_verification_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.common.runtime_context import SKIP_VERIFICATION_ENV, skip_verification_enabled
+
+    monkeypatch.delenv(SKIP_VERIFICATION_ENV, raising=False)
+    assert skip_verification_enabled() is False
+    monkeypatch.setenv(SKIP_VERIFICATION_ENV, "1")
+    assert skip_verification_enabled() is True
+
+
 def test_use_tool_cache_disabled_in_smart_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(USE_TOOL_CACHE_ENV, "1")
     monkeypatch.delenv(SMART_MODE_ENV, raising=False)

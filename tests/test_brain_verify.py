@@ -6,6 +6,7 @@ import pytest
 
 from src.brain.module import BaselineMatchDecision, BrainModule
 from src.common.models import ScriptStepVerifyResult
+from src.common.runtime_context import SKIP_VERIFICATION_ENV
 from src.recorder.window_snapshot import WindowInfo
 from src.common.prompting import get_prompt
 
@@ -620,6 +621,67 @@ def test_recover_verify_result_payload_scrapes_abort() -> None:
     assert payload["branch"] == "abort"
     result = ScriptStepVerifyResult.model_validate(payload)
     assert result.branch == "abort"
+
+
+@pytest.mark.asyncio
+async def test_process_step_skip_verification_advances_without_checks(monkeypatch) -> None:
+    brain = _brain_for_process_step()
+    brain.script_baseline_after_paths = [None, "after.jpeg", None]
+    brain.script_settle_after_seconds = [None, 2.5, None]
+    brain.script_window_verifies = [
+        {},
+        {
+            "disappeared": [
+                {
+                    "class_name": "Popup",
+                    "title": "快顯",
+                    "process_name": "explorer.exe",
+                }
+            ]
+        },
+        {},
+    ]
+    brain.loop = AsyncMock(return_value=True)
+    brain._verify_script_step = AsyncMock()
+    monkeypatch.setenv(SKIP_VERIFICATION_ENV, "1")
+
+    def _must_not_snapshot() -> list[WindowInfo]:
+        raise AssertionError("window snapshot should not run")
+
+    monkeypatch.setattr("src.brain.module.snapshot_top_level_windows", _must_not_snapshot)
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 2
+    brain._verify_script_step.assert_not_awaited()
+    sleep_mock.assert_not_awaited()
+    assert brain._pending_settle_deadline_perf is not None
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "completed"
+    assert metadata["verify"]["branch"] == "advance"
+    assert metadata["verify"]["reason"] == "Verification skipped for this queue run."
+
+
+@pytest.mark.asyncio
+async def test_process_step_skip_verification_fails_actor_without_verifier(
+    monkeypatch,
+) -> None:
+    brain = _brain_for_process_step()
+    brain.loop = AsyncMock(return_value=False)
+    brain._verify_script_step = AsyncMock()
+    monkeypatch.setenv(SKIP_VERIFICATION_ENV, "1")
+
+    result = await brain.process_step()
+
+    assert result.step_finished is False
+    assert brain._script_step_index == 1
+    brain._verify_script_step.assert_not_awaited()
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "failed"
+    assert metadata["verify"] is None
 
 
 @pytest.mark.asyncio

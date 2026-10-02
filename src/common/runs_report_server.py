@@ -8,6 +8,8 @@ Recording landmark edits POST to ``/api/runs/<id>/events/<n>/landmarks``
 Recording typed-text edits POST to ``/api/runs/<id>/events/<n>/text``.
 Recording expected-outcome edits POST to ``/api/runs/<id>/events/<n>/expected_outcome``.
 Recording verify-condition toggles POST to ``/api/runs/<id>/events/<n>/verify_conditions``.
+Recording bulk verification toggles POST to ``/api/runs/<id>/verifications``
+with ``{"enabled": false}`` to uncheck every step, or ``true`` to check them.
 Recording event deletes POST to ``/api/runs/<id>/events/<n>/delete``.
 Recording bulk event deletes POST to ``/api/runs/<id>/events/delete`` with
 ``{"event_indices": [1, 2, ...]}``.
@@ -45,6 +47,7 @@ from src.common.nearby_side import (
 from src.common.script_helper import collect_recording_instructions
 from src.common.session_html import (
     recording_event_json_paths,
+    window_verify_check_rows,
     write_recording_html_from_run,
     write_runs_index_html,
 )
@@ -133,6 +136,9 @@ _EVENT_EXPECTED_OUTCOME_PATH_RE = re.compile(
 )
 _EVENT_VERIFY_CONDITIONS_PATH_RE = re.compile(
     r"^/api/runs/([^/]+)/events/(\d+)/verify_conditions/?$"
+)
+_RECORDING_VERIFICATIONS_PATH_RE = re.compile(
+    r"^/api/runs/([^/]+)/verifications/?$"
 )
 _EVENT_INSTRUCTION_PATH_RE = re.compile(
     r"^/api/runs/([^/]+)/events/(\d+)/instruction/?$"
@@ -1480,6 +1486,69 @@ def apply_recording_event_verify_conditions(
     return {"disabled": normalized}
 
 
+def _all_window_verify_selectors(analysis: dict[str, Any]) -> list[str]:
+    """Selectors for every window/signal check shown on the recording page."""
+    raw: list[str] = []
+    for key, index, _label, _value, _enabled in window_verify_check_rows(analysis):
+        raw.append(key if index is None else f"{key}:{index}")
+    predicate = analysis.get("window_verify")
+    return normalize_window_verify_disabled(
+        predicate if isinstance(predicate, dict) else {},
+        raw,
+        strict=False,
+    )
+
+
+def apply_recording_verifications(
+    runs_root: Path,
+    run_id: str,
+    *,
+    enabled: Any,
+) -> dict[str, Any]:
+    """Check or uncheck every verification box on every recorded step.
+
+    ``enabled`` false clears ``use_expected_outcome`` and disables every
+    window/signal condition. ``enabled`` true turns those checks back on.
+    Expected-outcome text is left in place. Returns ``{"enabled": bool, "updated": int}``.
+    """
+    if not isinstance(enabled, bool):
+        raise ValueError("enabled must be a boolean")
+    run_dir = resolve_deletable_run_folder(runs_root, run_id)
+    updated = 0
+    for event_path in recording_event_json_paths(run_dir):
+        payload = read_json(event_path, None)
+        if not isinstance(payload, dict):
+            continue
+        raw_index = payload.get("index")
+        if isinstance(raw_index, bool) or not isinstance(raw_index, int) or raw_index < 1:
+            continue
+        analysis_path = run_dir / "analysis" / f"event_{raw_index:03d}.json"
+        analysis = read_json(analysis_path, None)
+        if not isinstance(analysis, dict):
+            continue
+        analysis["use_expected_outcome"] = enabled
+        if enabled:
+            analysis.pop("window_verify_disabled", None)
+        else:
+            selectors = _all_window_verify_selectors(analysis)
+            if selectors:
+                analysis["window_verify_disabled"] = selectors
+            else:
+                analysis.pop("window_verify_disabled", None)
+        write_json(analysis_path, analysis)
+        updated += 1
+
+    if updated:
+        report_path = run_dir / "report.json"
+        report = read_json(report_path, {})
+        if not isinstance(report, dict):
+            report = {}
+        _rebuild_report_instructions(run_dir, report)
+        write_json(report_path, report)
+        write_recording_html_from_run(run_dir, update_index=False)
+    return {"enabled": enabled, "updated": updated}
+
+
 def apply_recording_event_instruction(
     runs_root: Path,
     run_id: str,
@@ -1909,6 +1978,7 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
             event_text_match = _EVENT_TEXT_PATH_RE.fullmatch(path)
             event_outcome_match = _EVENT_EXPECTED_OUTCOME_PATH_RE.fullmatch(path)
             event_verify_match = _EVENT_VERIFY_CONDITIONS_PATH_RE.fullmatch(path)
+            recording_verifications_match = _RECORDING_VERIFICATIONS_PATH_RE.fullmatch(path)
             event_instruction_match = _EVENT_INSTRUCTION_PATH_RE.fullmatch(path)
             event_char_target_match = _EVENT_CHAR_TARGET_PATH_RE.fullmatch(path)
             event_yolo_ocr_match = _EVENT_YOLO_OCR_PATH_RE.fullmatch(path)
@@ -2043,6 +2113,24 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
                         run_id,
                         event_index,
                         disabled=body.get("disabled"),
+                    )
+                except ValueError as exc:
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                    return
+                except OSError as exc:
+                    self._send_json(500, {"ok": False, "error": str(exc)})
+                    return
+                self._send_json(200, {"ok": True, **result})
+                return
+
+            if recording_verifications_match is not None:
+                run_id = recording_verifications_match.group(1)
+                try:
+                    body = self._read_json_body()
+                    result = apply_recording_verifications(
+                        root,
+                        run_id,
+                        enabled=body.get("enabled"),
                     )
                 except ValueError as exc:
                     self._send_json(400, {"ok": False, "error": str(exc)})

@@ -16,6 +16,7 @@ from src.common.runs_report_server import (
     apply_recording_event_landmarks,
     apply_recording_event_text,
     apply_recording_event_verify_conditions,
+    apply_recording_verifications,
     delete_recording_event,
     delete_recording_events,
     delete_run_report_folder,
@@ -1433,6 +1434,115 @@ def test_apply_recording_event_verify_conditions_persists_unchecked(
             "recording_verify_toggle",
             1,
             disabled=["disappeared"],
+        )
+
+
+def test_apply_recording_verifications_toggles_every_step(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = runs_root / "recording_verify_all"
+    run_root.mkdir(parents=True)
+    (run_root / "events").mkdir()
+    (run_root / "analysis").mkdir()
+    for index, enabled in ((1, True), (2, False)):
+        (run_root / "events" / f"event_{index:03d}.json").write_text(
+            json.dumps(
+                {
+                    "index": index,
+                    "timestamp_utc": f"2026-07-21T12:00:0{index}+00:00",
+                    "kind": "click",
+                    "screenshot_path": "",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        analysis: dict = {
+            "event_index": index,
+            "instruction": f"步驟 {index}",
+            "expected_outcome": f"結果 {index}",
+            "use_expected_outcome": enabled,
+            "window_verify": {
+                "disappeared": [
+                    {
+                        "title": "快顯",
+                        "class_name": "Popup",
+                        "process_name": "explorer.exe",
+                    }
+                ],
+                "clipboard": "copied",
+            },
+        }
+        if index == 2:
+            analysis["window_verify_disabled"] = ["clipboard"]
+        (run_root / "analysis" / f"event_{index:03d}.json").write_text(
+            json.dumps(analysis, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    (run_root / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": "recording_verify_all",
+                "event_count": 2,
+                "events": ["events/event_001.json", "events/event_002.json"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "report.json").write_text(
+        json.dumps(
+            {
+                "instructions": ["步驟 1", "步驟 2"],
+                "expected_outcomes": ["結果 1", None],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = apply_recording_verifications(
+        runs_root,
+        "recording_verify_all",
+        enabled=False,
+    )
+
+    assert result == {"enabled": False, "updated": 2}
+    for index in (1, 2):
+        saved = json.loads(
+            (run_root / "analysis" / f"event_{index:03d}.json").read_text(encoding="utf-8")
+        )
+        assert saved["use_expected_outcome"] is False
+        assert saved["expected_outcome"] == f"結果 {index}"
+        assert saved["window_verify_disabled"] == ["clipboard", "disappeared:0"]
+    report = json.loads((run_root / "report.json").read_text(encoding="utf-8"))
+    assert report["expected_outcomes"] == [None, None]
+    html = (run_root / "recording_steps.html").read_text(encoding="utf-8")
+    assert 'class="verify-all-steps"' in html
+    for event_id in ("event-1", "event-2"):
+        section = html.split(f'id="{event_id}"', 1)[1].split('id="event-', 1)[0]
+        assert 'class="use-expected-outcome"' in section
+        assert 'class="use-expected-outcome" checked' not in section
+        assert 'data-verify-key="clipboard" checked' not in section
+        assert 'data-verify-key="disappeared" data-verify-index="0" checked' not in section
+        assert 'data-verify-key="expected_outcome" checked' not in section
+
+    turned_on = apply_recording_verifications(
+        runs_root,
+        "recording_verify_all",
+        enabled=True,
+    )
+    assert turned_on == {"enabled": True, "updated": 2}
+    saved = json.loads(
+        (run_root / "analysis" / "event_001.json").read_text(encoding="utf-8")
+    )
+    assert saved["use_expected_outcome"] is True
+    assert saved["expected_outcome"] == "結果 1"
+    assert "window_verify_disabled" not in saved
+    with pytest.raises(ValueError):
+        apply_recording_verifications(
+            runs_root,
+            "recording_verify_all",
+            enabled="no",
         )
 
 

@@ -70,7 +70,7 @@ from src.common.runtime_command_dialog import (
     consume_runtime_user_ended_at_prompt,
     reset_runtime_user_ended_at_prompt,
 )
-from src.common.runtime_context import USE_TOOL_CACHE_ENV
+from src.common.runtime_context import SKIP_VERIFICATION_ENV, USE_TOOL_CACHE_ENV
 from src.common.script_helper import (
     collect_recording_instruction_event_indices,
     collect_recording_instructions,
@@ -153,6 +153,7 @@ def _default_hub_ui_dict() -> dict[str, Any]:
         "selected_mode": _MODE_TAB_SINGLE,
         "use_tool_cache": False,
         "recording_hotkey_enabled": True,
+        "skip_verification": False,
         "queue_script_paths": [],
     }
 
@@ -202,6 +203,9 @@ def _normalize_hub_ui_state(raw: Any) -> dict[str, Any]:
         base["selected_mode"] = selected_mode
     base["use_tool_cache"] = bool(raw.get("use_tool_cache", False))
     base["recording_hotkey_enabled"] = bool(raw.get("recording_hotkey_enabled", True))
+    base["skip_verification"] = bool(
+        raw.get("skip_verification", raw.get("queue_skip_verification", False))
+    )
     base["queue_script_paths"] = _coerce_str_list(raw.get("queue_script_paths"))
     return base
 
@@ -226,6 +230,7 @@ class _WorkerArgs:
     script_disk_path: Path | None
     run_folder_name: str | None = None
     use_tool_cache: bool = False
+    skip_verification: bool = False
     queue_paths: list[Path] | None = None
     # Original UI indices aligned with queue_paths (for mid-queue starts / status icons).
     queue_path_indices: list[int] | None = None
@@ -249,6 +254,7 @@ class MainHub(ctk.CTk):
         self._appearance_dark = bool(hub["appearance_dark"])
         self._script_font_size = clamp_script_font_size(hub.get("script_font_size", 14))
         self._use_tool_cache = bool(hub.get("use_tool_cache", False))
+        self._skip_verification = bool(hub.get("skip_verification", False))
         self._recording_hotkey_enabled = bool(hub.get("recording_hotkey_enabled", True))
         ctk.set_appearance_mode("dark" if self._appearance_dark else "light")
         ctk.set_default_color_theme("dark-blue")
@@ -1215,6 +1221,7 @@ class MainHub(ctk.CTk):
                 "selected_mode": selected_mode,
                 "use_tool_cache": bool(self._use_tool_cache),
                 "recording_hotkey_enabled": self._recording_hotkey_enabled,
+                "skip_verification": bool(self._skip_verification),
                 "queue_script_paths": [str(p) for p in self._queue_paths],
             }
             write_json(_hub_ui_state_path(), data)
@@ -1760,15 +1767,26 @@ class MainHub(ctk.CTk):
     def _build_actions_row(self) -> None:
         row = ctk.CTkFrame(self, fg_color="transparent")
         row.pack(side="bottom", fill="x", padx=24, pady=(12, 8))
+        self._run_options_row = ctk.CTkFrame(row, fg_color="transparent")
+        self._run_options_row.pack(pady=(0, 10))
         self._use_tool_cache_checkbox = ctk.CTkCheckBox(
-            row,
+            self._run_options_row,
             text="使用快取工具（略過 LLM）",
             font=ctk.CTkFont(size=13),
             command=self._on_use_tool_cache_changed,
         )
-        self._use_tool_cache_checkbox.pack(pady=(0, 10))
+        self._use_tool_cache_checkbox.pack(side="left")
         if self._use_tool_cache:
             self._use_tool_cache_checkbox.select()
+        self._skip_verification_checkbox = ctk.CTkCheckBox(
+            self._run_options_row,
+            text="略過全部驗證",
+            font=ctk.CTkFont(size=13),
+            command=self._on_skip_verification_changed,
+        )
+        self._skip_verification_checkbox.pack(side="left", padx=(16, 0))
+        if self._skip_verification:
+            self._skip_verification_checkbox.select()
         self._actions_btn_row = ctk.CTkFrame(row, fg_color="transparent")
         btn_row = self._actions_btn_row
         btn_row.pack()
@@ -1828,27 +1846,46 @@ class MainHub(ctk.CTk):
         self._analysis_progress_frame.pack(fill="x", pady=(20, 0))
         self._analysis_progress_frame.pack_forget()
 
+    def _on_skip_verification_changed(self) -> None:
+        checkbox = getattr(self, "_skip_verification_checkbox", None)
+        self._skip_verification = checkbox is not None and checkbox.get() == 1
+        self._persist_hub_ui_state()
+
+    def _skip_verification_enabled(self) -> bool:
+        checkbox = getattr(self, "_skip_verification_checkbox", None)
+        if checkbox is None:
+            return bool(self._skip_verification)
+        return checkbox.get() == 1
+
+    def _set_run_option_checkboxes_state(self, state: str) -> None:
+        for checkbox in (
+            getattr(self, "_use_tool_cache_checkbox", None),
+            getattr(self, "_skip_verification_checkbox", None),
+        ):
+            if checkbox is not None:
+                checkbox.configure(state=state)
+
     def _on_use_tool_cache_changed(self) -> None:
         self._use_tool_cache = self._use_tool_cache_checkbox.get() == 1
         self._persist_hub_ui_state()
 
     def _sync_tool_cache_checkbox_for_mode(self) -> None:
-        """Hide tool-cache option in 智能模式; cache replay is not applicable there."""
-        checkbox = getattr(self, "_use_tool_cache_checkbox", None)
-        if checkbox is None:
+        """Hide run options in 智能模式; cache replay and skip-verify are not used there."""
+        options = getattr(self, "_run_options_row", None)
+        if options is None:
             return
         try:
             selected = self._mode_tabs.get()
         except Exception:
             return
         if selected == _MODE_TAB_SMART:
-            checkbox.pack_forget()
+            options.pack_forget()
             return
         btn_row = getattr(self, "_actions_btn_row", None)
         if btn_row is not None:
-            checkbox.pack(pady=(0, 10), before=btn_row)
+            options.pack(pady=(0, 10), before=btn_row)
         else:
-            checkbox.pack(pady=(0, 10))
+            options.pack(pady=(0, 10))
 
     def _tool_cache_enabled_for_run(self) -> bool:
         try:
@@ -1970,7 +2007,7 @@ class MainHub(ctk.CTk):
         for w in self._smart_controls:
             w.configure(state="normal")
         self._set_queue_control_widgets_state("normal")
-        self._use_tool_cache_checkbox.configure(state="normal")
+        self._set_run_option_checkboxes_state("normal")
         if self._record_btn is not None:
             self._record_btn.configure(
                 text=self._record_button_idle_label(),
@@ -1990,7 +2027,7 @@ class MainHub(ctk.CTk):
         for w in self._smart_controls:
             w.configure(state="disabled")
         self._set_queue_control_widgets_state("disabled")
-        self._use_tool_cache_checkbox.configure(state="disabled")
+        self._set_run_option_checkboxes_state("disabled")
         if self._record_btn is not None:
             self._record_btn.configure(text="停止錄製", state="normal", command=self._on_record_button)
         self._hide_analysis_progress()
@@ -2005,7 +2042,7 @@ class MainHub(ctk.CTk):
         for w in self._smart_controls:
             w.configure(state="disabled")
         self._set_queue_control_widgets_state("disabled")
-        self._use_tool_cache_checkbox.configure(state="disabled")
+        self._set_run_option_checkboxes_state("disabled")
         if self._record_btn is not None:
             self._record_btn.configure(text="停止分析", state="normal", command=self._on_record_button)
         self._hide_analysis_progress()
@@ -2021,7 +2058,7 @@ class MainHub(ctk.CTk):
         for w in self._smart_controls:
             w.configure(state="disabled")
         self._set_queue_control_widgets_state("disabled")
-        self._use_tool_cache_checkbox.configure(state="disabled")
+        self._set_run_option_checkboxes_state("disabled")
         if self._record_btn is not None:
             self._record_btn.configure(text="停止分析", state="normal", command=self._on_record_button)
         self._show_analysis_progress()
@@ -3564,7 +3601,7 @@ class MainHub(ctk.CTk):
         for w in self._smart_controls:
             w.configure(state="disabled")
         self._set_queue_control_widgets_state("disabled")
-        self._use_tool_cache_checkbox.configure(state="disabled")
+        self._set_run_option_checkboxes_state("disabled")
         if self._record_btn is not None:
             self._record_btn.configure(state="disabled")
         self._status.configure(text="執行中…")
@@ -3630,6 +3667,7 @@ class MainHub(ctk.CTk):
             script_disk_path=None,
             run_folder_name=self._last_script_run_folder,
             use_tool_cache=self._tool_cache_enabled_for_run(),
+            skip_verification=self._skip_verification_enabled(),
         )
         self._begin_worker_run(args)
 
@@ -3662,6 +3700,7 @@ class MainHub(ctk.CTk):
             script_raw="",
             script_disk_path=None,
             use_tool_cache=self._tool_cache_enabled_for_run(),
+            skip_verification=self._skip_verification_enabled(),
             queue_paths=list(paths),
             queue_path_indices=list(path_indices),
         )
@@ -3756,6 +3795,7 @@ class MainHub(ctk.CTk):
                 script_raw=raw,
                 script_disk_path=script_disk_path,
                 use_tool_cache=self._tool_cache_enabled_for_run(),
+                skip_verification=self._skip_verification_enabled(),
             )
         else:
             # Empty script box → interactive step-by-step runtime commands.
@@ -3781,6 +3821,7 @@ class MainHub(ctk.CTk):
                 script_raw="",
                 script_disk_path=None,
                 use_tool_cache=self._tool_cache_enabled_for_run(),
+                skip_verification=self._skip_verification_enabled(),
             )
 
             def on_runtime_command(cmd: str) -> None:
@@ -3891,7 +3932,12 @@ class MainHub(ctk.CTk):
                     )
                     run_root_for_row = paths_obj.root
                     self._active_run_root = paths_obj.root
-                    manager.log_info(f"Queue starting coordinator for {name}")
+                    if args.skip_verification:
+                        manager.log_info(
+                            f"Queue starting coordinator for {name} (skipping all verification)"
+                        )
+                    else:
+                        manager.log_info(f"Queue starting coordinator for {name}")
                     notify_active_step(None)
                     self._sync_replay_steps_from_worker(raw, script_path)
                     run_coordinator_sync()
@@ -3938,6 +3984,10 @@ class MainHub(ctk.CTk):
             os.environ[USE_TOOL_CACHE_ENV] = "1"
         else:
             os.environ.pop(USE_TOOL_CACHE_ENV, None)
+        if args.skip_verification:
+            os.environ[SKIP_VERIFICATION_ENV] = "1"
+        else:
+            os.environ.pop(SKIP_VERIFICATION_ENV, None)
         try:
             if args.run_mode == "queue" or args.queue_paths is not None:
                 self._run_queue_worker(args)
@@ -4029,6 +4079,8 @@ class MainHub(ctk.CTk):
             self._worker_outcome = ("ok_quiet", "")
         except BaseException as e:
             self._worker_outcome = ("err", str(e))
+        finally:
+            os.environ.pop(SKIP_VERIFICATION_ENV, None)
 
     def _poll_worker_finished(self) -> None:
         if self._worker_thread is None:

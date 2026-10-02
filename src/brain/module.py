@@ -324,6 +324,42 @@ class BrainModule:
         payload["step_timing"] = existing_metadata
         write_json(out_path, payload)
 
+    def _save_interrupted_step_record(
+        self,
+        transcript_counter: int,
+        script_step_index: int,
+        started_iso: str,
+        started_at: float,
+        reason: str,
+    ) -> None:
+        """Write goal and timing when a step stops before its normal metadata update."""
+        finished_iso = datetime.now(timezone.utc).isoformat()
+        duration_seconds = round(perf_counter() - started_at, 3)
+        self.manager.log_info(reason)
+        goal = ""
+        try:
+            goal = self._current_goal()
+        except Exception:
+            goal = ""
+        expected = ""
+        try:
+            expected = self._current_expected_outcome()
+        except Exception:
+            expected = ""
+        self._update_step_metadata(
+            transcript_counter,
+            script_step_index,
+            {
+                "started_at_utc": started_iso,
+                "finished_at_utc": finished_iso,
+                "duration_seconds": duration_seconds,
+                "status": "failed",
+                "step_index": script_step_index,
+                "goal": goal,
+                "expected_outcome": expected or None,
+            },
+        )
+
     def _append_step_messages(
         self,
         messages: list[dict[str, Any]],
@@ -2079,9 +2115,9 @@ class BrainModule:
             instruction=instruction,
             event_index=event_index,
         )
+        started_iso = datetime.now(timezone.utc).isoformat()
+        started_at = perf_counter()
         try:
-            started_iso = datetime.now(timezone.utc).isoformat()
-            started_at = perf_counter()
             self._step_deferred_settle_waited_seconds = 0.0
             self._replay_press_point_window = None
             window_verify = self._current_window_verify()
@@ -2399,6 +2435,29 @@ class BrainModule:
                 reason=f"Verify: {verify_result.reason}",
                 step_finished=True,
                 run_complete=run_complete,
+                step_index=script_step_index,
+            )
+        except asyncio.CancelledError:
+            self._save_interrupted_step_record(
+                transcript_counter,
+                script_step_index,
+                started_iso,
+                started_at,
+                f"Script step {script_step_index + 1} cancelled",
+            )
+            raise
+        except Exception as exc:
+            reason = f"Script step {script_step_index + 1} failed: {exc}"
+            self._save_interrupted_step_record(
+                transcript_counter,
+                script_step_index,
+                started_iso,
+                started_at,
+                reason,
+            )
+            return BrainStepResult(
+                reason=reason,
+                step_finished=False,
                 step_index=script_step_index,
             )
         finally:

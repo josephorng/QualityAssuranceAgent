@@ -38,6 +38,7 @@ def _brain_for_process_step(*, max_step_attempts: int = 0) -> BrainModule:
     brain.script_baseline_after_paths = [None, None, None]
     brain.script_settle_after_seconds = [None, None, None]
     brain._script_step_index = 1
+    brain._script_event_indices = []
     brain._step_transcript_counter = 3
     brain._pending_settle_deadline_perf = None
     brain._update_step_metadata = MagicMock()
@@ -505,6 +506,41 @@ def test_build_recovery_goal_mentions_script_step() -> None:
     assert "click search" in text
     assert "UAC dialog" in text
     assert "Do not advance the recorded script" in text
+
+
+@pytest.mark.asyncio
+async def test_process_step_saves_record_when_actor_raises() -> None:
+    brain = _brain_for_process_step()
+    brain.loop = AsyncMock(side_effect=ConnectionError("All connection attempts failed"))
+
+    result = await brain.process_step()
+
+    assert result.step_finished is False
+    assert result.step_index == 1
+    assert "All connection attempts failed" in result.reason
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "failed"
+    assert metadata["goal"] == "click calculator"
+    assert metadata["started_at_utc"]
+    assert metadata["finished_at_utc"]
+    brain.manager.clear_step_log_context.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_process_step_saves_record_when_cancelled() -> None:
+    import asyncio
+
+    brain = _brain_for_process_step()
+    brain.loop = AsyncMock(side_effect=asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        await brain.process_step()
+
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "failed"
+    assert metadata["goal"] == "click calculator"
+    assert metadata["started_at_utc"]
+    assert metadata["finished_at_utc"]
 
 
 @pytest.mark.asyncio

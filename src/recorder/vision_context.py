@@ -104,6 +104,7 @@ _CONTROL_CHROME_ICON_IDS = frozenset(
         "已勾選方框",
         "向上雙V箭頭",
         "向下雙V箭頭",
+        "加號"
     }
 )
 # All eight directed sides used for recording HTML landmark side groups.

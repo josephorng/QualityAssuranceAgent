@@ -28,15 +28,15 @@ from src.recorder.focus_point import (
 from src.recorder.window_snapshot import (
     ClickWindowInfo,
     WindowInfo,
+    _pid_for_hwnd,
     _process_name_for_pid,
+    _window_class_name,
     _window_info_from_hwnd,
     window_at_point,
 )
 
 _AGENT_APP_WINDOW_TITLE = "電腦使用代理"
 _CLIPBOARD_MAX_CHARS = 4000
-_CARET_REPLAY_SLACK_PX = 24
-_CARET_LINE_SLACK_PX = 40
 _SCROLL_TOLERANCE_PERCENT = 5.0
 _SCROLL_CHANGE_PERCENT = 0.5
 _UIA_PARENT_WALK_CONTROL = 4
@@ -274,6 +274,7 @@ def _caret_snapshot() -> dict[str, Any] | None:
             return None
         if not user32.ClientToScreen(info.hwndCaret, ctypes.byref(bottom_right)):
             return None
+        hwnd = int(info.hwndCaret)
         return {
             "rect": [
                 int(top_left.x),
@@ -281,7 +282,9 @@ def _caret_snapshot() -> dict[str, Any] | None:
                 int(bottom_right.x),
                 int(bottom_right.y),
             ],
-            "hwnd": int(info.hwndCaret),
+            "hwnd": hwnd,
+            "class_name": _window_class_name(hwnd).strip(),
+            "process_name": (_process_name_for_pid(_pid_for_hwnd(hwnd)) or "").strip(),
         }
     except Exception:
         return None
@@ -550,7 +553,7 @@ def capture_replay_after_signals(
     need_point = isinstance(recorded.get("click_window"), dict)
     need_clipboard = "clipboard" in recorded
     need_process = bool(recorded.get("process_started") or recorded.get("process_exited"))
-    need_caret = isinstance(recorded.get("caret"), list)
+    need_caret = _caret_verify_identity(recorded.get("caret")) is not None
     need_focused = isinstance(recorded.get("focused"), dict) and bool(recorded["focused"])
     need_scroll = isinstance(recorded.get("scroll"), (int, float)) and not isinstance(
         recorded.get("scroll"), bool
@@ -594,7 +597,7 @@ def predicate_has_signal_assertions(predicate: dict[str, Any] | None) -> bool:
         return True
     if "clipboard" in predicate:
         return True
-    if isinstance(predicate.get("caret"), list) and len(predicate["caret"]) == 4:
+    if _caret_verify_identity(predicate.get("caret")) is not None:
         return True
     if isinstance(predicate.get("focused"), dict) and predicate["focused"]:
         return True
@@ -672,45 +675,51 @@ def _explained_process_names(
     return names
 
 
-def _caret_parts(sample: dict[str, Any] | None) -> tuple[list[int] | None, int | None]:
-    if not isinstance(sample, dict):
-        return None, None
-    caret = sample.get("caret")
-    hwnd: int | None = None
-    rect_raw: Any = caret
-    if isinstance(caret, dict):
-        try:
-            hwnd = int(caret.get("hwnd") or 0) or None
-        except (TypeError, ValueError):
-            hwnd = None
-        rect_raw = caret.get("rect")
-    if not isinstance(rect_raw, list) or len(rect_raw) != 4:
-        return None, hwnd
+def _caret_verify_identity(caret: Any) -> dict[str, str] | None:
+    """Class name and executable of the caret window. Both are required."""
+    if not isinstance(caret, dict):
+        return None
+    class_name = str(caret.get("class_name") or "").strip()
+    process_name = str(caret.get("process_name") or "").strip()
+    if not class_name or not process_name:
+        return None
+    return {"class_name": class_name, "process_name": process_name}
+
+
+def _caret_hwnd(caret: Any) -> int | None:
+    if not isinstance(caret, dict):
+        return None
     try:
-        return [int(value) for value in rect_raw], hwnd
+        hwnd = int(caret.get("hwnd") or 0)
     except (TypeError, ValueError):
-        return None, hwnd
+        return None
+    return hwnd or None
 
 
 def _caret_moved_field(
     before: dict[str, Any] | None,
     after: dict[str, Any] | None,
-) -> list[int] | None:
-    before_rect, before_hwnd = _caret_parts(before)
-    after_rect, after_hwnd = _caret_parts(after)
-    if after_rect is None:
+) -> dict[str, str] | None:
+    """After class and executable when the caret window changed.
+
+    Movement inside the same hwnd is not an assertion. Screen position is not
+    stored: replay compares class name and executable file name only.
+    """
+    after_caret = after.get("caret") if isinstance(after, dict) else None
+    after_id = _caret_verify_identity(after_caret)
+    if after_id is None:
         return None
-    if before_rect is None:
-        return after_rect
+    before_caret = before.get("caret") if isinstance(before, dict) else None
+    before_hwnd = _caret_hwnd(before_caret)
+    after_hwnd = _caret_hwnd(after_caret)
     if before_hwnd and after_hwnd and before_hwnd == after_hwnd:
         return None
     if before_hwnd and after_hwnd and before_hwnd != after_hwnd:
-        return after_rect
-    before_y = (before_rect[1] + before_rect[3]) / 2
-    after_y = (after_rect[1] + after_rect[3]) / 2
-    if abs(before_y - after_y) <= _CARET_LINE_SLACK_PX:
-        return None
-    return after_rect
+        return after_id
+    before_id = _caret_verify_identity(before_caret)
+    if before_id is None or before_id != after_id:
+        return after_id
+    return None
 
 
 def focused_values_match(recorded: str, live: str) -> bool:
@@ -897,15 +906,6 @@ def signal_verify_fields(
     return fields
 
 
-def _rects_close(recorded: list[Any], live: list[Any], slack: int) -> bool:
-    if len(recorded) != 4 or len(live) != 4:
-        return False
-    try:
-        return all(abs(int(left) - int(right)) <= slack for left, right in zip(recorded, live))
-    except (TypeError, ValueError):
-        return False
-
-
 def _tracked_process_names(sample: dict[str, Any]) -> set[str]:
     names = set(_pid_name_map(sample).values())
     names.update(_name_set(sample, "orphan_processes"))
@@ -957,11 +957,16 @@ def signal_assertions_satisfied(
             if str(name) in live_names:
                 return False, f"window verify missed process_exited: {name}"
 
-    caret = recorded.get("caret")
-    if isinstance(caret, list) and len(caret) == 4:
-        live_rect, _hwnd = _caret_parts(live_after)
-        if live_rect is None or not _rects_close(caret, live_rect, _CARET_REPLAY_SLACK_PX):
-            return False, "window verify missed caret"
+    recorded_caret = _caret_verify_identity(recorded.get("caret"))
+    if recorded_caret is not None:
+        live_caret = _caret_verify_identity(
+            live_after.get("caret") if isinstance(live_after, dict) else None
+        )
+        if live_caret != recorded_caret:
+            return False, (
+                "window verify missed caret: "
+                f"{recorded_caret['class_name']} / {recorded_caret['process_name']}"
+            )
 
     focused = recorded.get("focused")
     if isinstance(focused, dict) and focused:

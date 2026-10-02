@@ -1670,11 +1670,21 @@ def test_window_verify_omits_unchanged_light_signals_and_requires_changes() -> N
         "clipboard": "old",
         "pid_names": {},
         "orphan_processes": [],
-        "caret": {"rect": [10, 10, 12, 26], "hwnd": 4},
+        "caret": {
+            "rect": [10, 10, 12, 26],
+            "hwnd": 4,
+            "class_name": "Edit",
+            "process_name": "notepad.exe",
+        },
     }
     assert signal_verify_fields(same, dict(same), kind="click") == {}
     moved_caret = dict(same)
-    moved_caret["caret"] = {"rect": [80, 10, 82, 26], "hwnd": 4}
+    moved_caret["caret"] = {
+        "rect": [80, 10, 82, 26],
+        "hwnd": 4,
+        "class_name": "Edit",
+        "process_name": "notepad.exe",
+    }
     assert "caret" not in signal_verify_fields(same, moved_caret, kind="text_input")
 
     copied = dict(same)
@@ -1718,10 +1728,43 @@ def test_window_verify_omits_unchanged_light_signals_and_requires_changes() -> N
     assert "process_started" in reason
 
     other_field = dict(same)
-    other_field["caret"] = {"rect": [10, 80, 12, 96], "hwnd": 8}
+    other_field["caret"] = {
+        "rect": [10, 80, 12, 96],
+        "hwnd": 8,
+        "class_name": "Chrome_WidgetWin_1",
+        "process_name": "chrome.exe",
+    }
     caret_fields = signal_verify_fields(same, other_field, kind="text_input")
-    assert caret_fields["caret"] == [10, 80, 12, 96]
+    assert caret_fields["caret"] == {
+        "class_name": "Chrome_WidgetWin_1",
+        "process_name": "chrome.exe",
+    }
     assert "caret" not in signal_verify_fields(same, other_field, kind="click")
+    ok, _reason = window_verify_satisfied(
+        caret_fields,
+        {},
+        live_after={
+            "caret": {
+                "rect": [400, 500, 402, 520],
+                "hwnd": 99,
+                "class_name": "Chrome_WidgetWin_1",
+                "process_name": "chrome.exe",
+            }
+        },
+    )
+    assert ok is True
+    ok, reason = window_verify_satisfied(
+        caret_fields,
+        {},
+        live_after={
+            "caret": {"class_name": "Edit", "process_name": "notepad.exe"}
+        },
+    )
+    assert ok is False
+    assert "caret" in reason
+    incomplete = dict(same)
+    incomplete["caret"] = {"rect": [10, 80, 12, 96], "hwnd": 8, "class_name": "Edit"}
+    assert "caret" not in signal_verify_fields(same, incomplete, kind="text_input")
 
     other_point = {
         "class_name": "Microsoft.UI.Content.PopupWindowSiteBridge",

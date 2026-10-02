@@ -5062,9 +5062,13 @@ def _format_window_verify_value(key: str, value: Any) -> str | None:
             return None
         return escape(", ".join(str(item) for item in value))
     if key == "caret":
-        if not isinstance(value, list) or len(value) != 4:
+        if not isinstance(value, dict):
             return None
-        return escape(", ".join(str(item) for item in value))
+        class_name = str(value.get("class_name") or "").strip()
+        process_name = str(value.get("process_name") or "").strip()
+        if not class_name or not process_name:
+            return None
+        return escape(f"{class_name} / {process_name}")
     if key == "focused":
         if not isinstance(value, dict) or not value:
             return None

@@ -939,12 +939,17 @@ def _next_instruction_event_settle(
     by the timestamp gap. Otherwise use the timestamp gap to the next instruction
     event when the gap is at least ``_SETTLE_AFTER_MIN_SECONDS``.
 
+    ``text_input`` always settles for one second. Replay pastes the string, so
+    neither the keystroke span nor a pause before the next action is a wait.
+
     For the last instruction event, optionally use ``trailing_settle_end_utc``
     (e.g. a purged hub-restore click). Never use session ``stopped_at`` — that
     includes stop-UI latency and inflates settle.
     """
     if event.kind == "wait":
         return None
+    if event.kind == "text_input":
+        return float(_SETTLE_AFTER_MIN_SECONDS)
     observed = event.observed_settle_seconds
     if isinstance(observed, (int, float)) and not isinstance(observed, bool) and float(observed) >= 0:
         return float(observed)

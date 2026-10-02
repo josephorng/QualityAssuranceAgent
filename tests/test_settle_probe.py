@@ -178,6 +178,52 @@ def test_next_instruction_event_settle_last_ignores_stop_uses_trailing() -> None
     )
 
 
+def test_text_input_settle_is_one_second() -> None:
+    """Typing steps settle for one second. Keystroke time and later pauses are not waits."""
+    events = [
+        RecordedEvent(
+            index=0,
+            timestamp_utc="2026-09-07T00:00:00+00:00",
+            kind="text_input",
+            text="google",
+            observed_settle_seconds=4.5,
+        ),
+        RecordedEvent(
+            index=1,
+            timestamp_utc="2026-09-07T00:00:08+00:00",
+            kind="click",
+        ),
+    ]
+    settle = _next_instruction_event_settle(
+        events=events,
+        event_pos=0,
+        event=events[0],
+        prepared_list=[object(), object()],
+        instruction_results=[{"instruction": "type"}, {"instruction": "click"}],
+    )
+    assert settle == 1.0
+
+
+def test_text_input_settle_last_step_is_one_second() -> None:
+    events = [
+        RecordedEvent(
+            index=0,
+            timestamp_utc="2026-09-07T00:00:00+00:00",
+            kind="text_input",
+            text="done",
+        ),
+    ]
+    settle = _next_instruction_event_settle(
+        events=events,
+        event_pos=0,
+        event=events[0],
+        prepared_list=[object()],
+        instruction_results=[{"instruction": "type"}],
+        trailing_settle_end_utc="2026-09-07T00:00:06+00:00",
+    )
+    assert settle == 1.0
+
+
 def test_settle_probe_ticks_run_off_event_queue(tmp_path: Path, monkeypatch) -> None:
     """Settle comparisons must not wait behind click-persist work on the event queue."""
     from src.recorder.capture import RecordingSession, _SETTLE_PROBE_FIRST_S

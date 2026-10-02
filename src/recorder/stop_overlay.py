@@ -16,6 +16,7 @@ _POLL_MS = 80
 _OVERLAY_MARGIN = 16
 _STEP_SNIPPET_LIMIT = 42
 _STEP_ERROR_LIMIT = 160
+_ERROR_SHOW_MS = 3000
 
 
 def clip_step_snippet(text: str, *, limit: int = _STEP_SNIPPET_LIMIT) -> str:
@@ -365,6 +366,10 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
         self._on_next = on_next
         self._paused = False
         self._edit_enabled = edit_enabled
+        self._shown_error = ""
+        self._error_show_after_id: str | None = None
+        self._countdown_active = False
+        self._countdown_label: ctk.CTkLabel | None = None
         self._nav_index: int | None = None
         self._nav_total = 0
         self._step_label: ctk.CTkLabel | None = None
@@ -419,6 +424,13 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
             text_color=("#b91c1c", "#f87171"),
             wraplength=292,
             justify="left",
+            anchor="w",
+        )
+        self._countdown_label = ctk.CTkLabel(
+            frame,
+            text="",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=("#9a6700", "#d4a72c"),
             anchor="w",
         )
 
@@ -484,6 +496,53 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
         else:
             button.configure(text="暫停", command=self._handle_pause)
 
+    def set_countdown(self, seconds: int | None) -> None:
+        """Show ``N 秒後繼續`` and keep the overlay up until the countdown ends."""
+        label = self._countdown_label
+        if label is None or self._destroyed:
+            return
+        if seconds is None or seconds <= 0:
+            self._countdown_active = False
+            try:
+                label.pack_forget()
+            except Exception:
+                pass
+            self._pinned = False
+            self._measure_and_hide_if_hidden()
+            self._hide_if_cursor_away()
+            return
+        self._cancel_error_show()
+        self._countdown_active = True
+        self._pinned = True
+        label.configure(text=f"{int(seconds)} 秒後繼續")
+        try:
+            if not label.winfo_ismapped():
+                pack_kwargs: dict[str, Any] = {
+                    "anchor": "w",
+                    "padx": 14,
+                    "pady": (0, 8),
+                    "fill": "x",
+                }
+                if self._nav_frame is not None:
+                    pack_kwargs["before"] = self._nav_frame
+                label.pack(**pack_kwargs)
+        except Exception:
+            pass
+        self._measure_and_hide_if_hidden()
+        if not self._visible:
+            self.reveal()
+
+    def _hide_if_cursor_away(self) -> None:
+        try:
+            pos = pyautogui.position()
+            x, y = int(pos.x), int(pos.y)
+        except Exception:
+            self._hide()
+            return
+        if self._cursor_at_top_edge(x, y) or self._cursor_over_overlay(x, y):
+            return
+        self._hide()
+
     def set_edit_enabled(self, enabled: bool) -> None:
         """Enable edit only when the running script is a recording folder."""
         self._edit_enabled = enabled
@@ -521,14 +580,20 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
         if self._pinned and not self._visible:
             self.reveal()
 
+    def destroy(self) -> None:
+        self._cancel_error_show()
+        super().destroy()
+
     def _apply_error(self, text: str) -> None:
-        """Show ``text`` under the step, and keep the overlay up while it is shown."""
+        """Show ``text`` under the step, and keep the overlay up for a few seconds."""
         label = self._error_label
         if label is None or self._destroyed:
             return
         cleaned = clip_step_snippet(text, limit=_STEP_ERROR_LIMIT)
-        self._pinned = bool(cleaned)
         if not cleaned:
+            self._pinned = False
+            self._shown_error = ""
+            self._cancel_error_show()
             self._cancel_hide()
             try:
                 label.pack_forget()
@@ -549,6 +614,36 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
                 label.pack(**pack_kwargs)
         except Exception:
             pass
+        if cleaned == self._shown_error:
+            return
+        self._shown_error = cleaned
+        self._begin_error_show()
+
+    def _begin_error_show(self) -> None:
+        """Pin the overlay, then let the normal edge hide resume after three seconds."""
+        self._cancel_error_show()
+        self._pinned = True
+        try:
+            self._error_show_after_id = self._master.after(_ERROR_SHOW_MS, self._end_error_show)
+        except Exception:
+            self._error_show_after_id = None
+
+    def _cancel_error_show(self) -> None:
+        after_id = self._error_show_after_id
+        self._error_show_after_id = None
+        if after_id is None:
+            return
+        try:
+            self._master.after_cancel(after_id)
+        except Exception:
+            pass
+
+    def _end_error_show(self) -> None:
+        self._error_show_after_id = None
+        if self._destroyed or self._countdown_active:
+            return
+        self._pinned = False
+        self._hide_if_cursor_away()
 
     def _sync_nav_buttons(self) -> None:
         previous = self._prev_btn

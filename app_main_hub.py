@@ -33,6 +33,7 @@ from src.common.run_control import (
     active_step_event_index,
     active_step_index,
     active_step_instruction,
+    is_paused,
     notify_active_step,
     pause_run,
     request_step_jump,
@@ -291,6 +292,8 @@ class MainHub(ctk.CTk):
         self._replay_nav_held = False
         self._replay_step_errors: dict[int, str] = {}
         self._replay_hold_for_error = False
+        self._retry_countdown_after_id: str | None = None
+        self._retry_countdown_left = 0
         self._track_script_step_status = False
         self._active_replay_event_index: int | None = None
         self._recording_analysis_thread: threading.Thread | None = None
@@ -923,6 +926,9 @@ class MainHub(ctk.CTk):
         if status not in ("ok", "fail"):
             return
         reason = step_error(step_index) or ""
+        retry_pause = status == "ok" and bool(reason) and not is_paused()
+        if retry_pause:
+            pause_run()
 
         def apply() -> None:
             if not self._replay_hold_for_error:
@@ -934,6 +940,8 @@ class MainHub(ctk.CTk):
                 elif status == "ok":
                     self._replay_step_errors.pop(step_index, None)
                 self._show_replay_step(self._replay_display_index())
+                if retry_pause:
+                    self._start_retry_countdown()
             if not self._track_script_step_status:
                 return
             line: int | None = None
@@ -2170,6 +2178,7 @@ class MainHub(ctk.CTk):
         self._status.configure(text="已暫停（點繼續以恢復）")
 
     def _on_resume_run(self) -> None:
+        self._cancel_retry_countdown()
         if self._worker_thread is None or not self._worker_thread.is_alive():
             return
         resume_run()
@@ -2179,8 +2188,55 @@ class MainHub(ctk.CTk):
             overlay.set_paused(False)
         self._status.configure(text="執行中…")
 
+    def _start_retry_countdown(self) -> None:
+        """Pause is already set. Show 30 seconds, then resume unless 繼續 is clicked."""
+        self._cancel_retry_countdown()
+        self._retry_countdown_left = 30
+        self._set_pause_button_paused()
+        overlay = self._replay_overlay
+        if overlay is not None:
+            overlay.set_paused(True)
+            overlay.set_countdown(self._retry_countdown_left)
+        self._status.configure(text=f"已暫停（{self._retry_countdown_left} 秒後繼續）")
+        self._retry_countdown_after_id = self.after(1000, self._tick_retry_countdown)
+
+    def _tick_retry_countdown(self) -> None:
+        self._retry_countdown_after_id = None
+        if self._worker_thread is None or not self._worker_thread.is_alive():
+            self._cancel_retry_countdown()
+            return
+        self._retry_countdown_left -= 1
+        overlay = self._replay_overlay
+        if self._retry_countdown_left <= 0:
+            if overlay is not None:
+                overlay.set_countdown(None)
+            self._on_resume_run()
+            return
+        if overlay is not None:
+            overlay.set_countdown(self._retry_countdown_left)
+        self._status.configure(text=f"已暫停（{self._retry_countdown_left} 秒後繼續）")
+        self._retry_countdown_after_id = self.after(1000, self._tick_retry_countdown)
+
+    def _cancel_retry_countdown(self) -> None:
+        after_id = self._retry_countdown_after_id
+        was_counting = after_id is not None or self._retry_countdown_left > 0
+        self._retry_countdown_after_id = None
+        self._retry_countdown_left = 0
+        if after_id is not None:
+            try:
+                self.after_cancel(after_id)
+            except Exception:
+                pass
+        if not was_counting:
+            return
+        overlay = self._replay_overlay
+        if overlay is not None:
+            overlay.set_countdown(None)
+
     def _on_stop_run(self) -> None:
         from main import request_coordinator_cancel
+
+        self._cancel_retry_countdown()
 
         if self._worker_thread is None or not self._worker_thread.is_alive():
             self._release_replay_overlay()
@@ -2425,6 +2481,7 @@ class MainHub(ctk.CTk):
         self._apply_active_step_to_overlay(overlay)
 
     def _destroy_replay_overlay(self) -> None:
+        self._cancel_retry_countdown()
         overlay = self._replay_overlay
         self._replay_overlay = None
         if overlay is not None:

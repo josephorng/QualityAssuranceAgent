@@ -71,6 +71,81 @@ def show_ctk_message(
     root.wait_window(dialog)
 
 
+def confirm_ctk_message(
+    master: Any,
+    title: str,
+    message: str,
+    *,
+    confirm_text: str = "刪除",
+    cancel_text: str = "取消",
+) -> bool:
+    """Modal yes/no dialog. Returns True when the confirm button is pressed."""
+    import customtkinter as ctk
+
+    result = {"ok": False}
+    dialog = ctk.CTkToplevel(master)
+    dialog.title(title)
+    dialog.resizable(False, False)
+    dialog.attributes("-topmost", True)
+    try:
+        dialog.transient(master.winfo_toplevel())
+    except Exception:
+        pass
+
+    inner = ctk.CTkFrame(dialog, fg_color="transparent")
+    inner.pack(fill="both", expand=True, padx=22, pady=22)
+    ctk.CTkLabel(
+        master=inner,
+        text=message,
+        wraplength=420,
+        justify="left",
+        font=ctk.CTkFont(size=14),
+    ).pack(anchor="w", pady=(0, 18))
+
+    row = ctk.CTkFrame(inner, fg_color="transparent")
+    row.pack()
+
+    def _confirm() -> None:
+        result["ok"] = True
+        dialog.destroy()
+
+    def _cancel() -> None:
+        dialog.destroy()
+
+    dialog.protocol("WM_DELETE_WINDOW", _cancel)
+    ctk.CTkButton(
+        master=row,
+        text=confirm_text,
+        width=120,
+        height=36,
+        fg_color="#C0392B",
+        hover_color="#E74C3C",
+        command=_confirm,
+    ).pack(side="left", padx=(0, 8))
+    ctk.CTkButton(
+        master=row,
+        text=cancel_text,
+        width=120,
+        height=36,
+        command=_cancel,
+    ).pack(side="left")
+
+    try:
+        dialog.grab_set()
+    except Exception:
+        pass
+    dialog.update_idletasks()
+    w, h = dialog.winfo_reqwidth(), dialog.winfo_reqheight()
+    sw, sh = dialog.winfo_screenwidth(), dialog.winfo_screenheight()
+    dialog.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
+    try:
+        dialog.lift()
+    except Exception:
+        pass
+    master.winfo_toplevel().wait_window(dialog)
+    return result["ok"]
+
+
 def prompt_script_continue_or_end(
     master: Any,
     message: str,

@@ -21,6 +21,7 @@ import tkinter as tk
 from main import analyze_screen_recording, dismiss_nuitka_onefile_splash, prepare_run_session, run_coordinator_sync
 from src.common.agent_settings_dialog import clamp_script_font_size, open_agent_settings_dialog
 from src.common.ctk_dialogs import (
+    confirm_ctk_message,
     format_recording_analysis_done_message,
     prompt_append_recording_instructions,
     prompt_script_continue_or_end,
@@ -36,7 +37,9 @@ from src.common.run_control import (
     is_paused,
     notify_active_step,
     pause_run,
+    peek_pending_step_jump,
     request_step_jump,
+    step_is_busy,
     take_pending_step_jump,
     reset_run_control,
     resume_run,
@@ -54,6 +57,9 @@ from src.common.run_state import (
 )
 from src.common.session_html import write_runs_index_html
 from src.common.runs_report_server import (
+    apply_recording_event_instruction,
+    apply_recording_event_verify_conditions,
+    delete_recording_event,
     ensure_runs_report_server,
     rename_recording_folder,
     stop_runs_report_server,
@@ -292,6 +298,8 @@ class MainHub(ctk.CTk):
         self._replay_nav_held = False
         self._replay_step_errors: dict[int, str] = {}
         self._replay_hold_for_error = False
+        self._replay_run_index = 0
+        self._pending_replay_delete: tuple[int, int] | None = None
         self._retry_countdown_after_id: str | None = None
         self._retry_countdown_left = 0
         self._track_script_step_status = False
@@ -931,6 +939,10 @@ class MainHub(ctk.CTk):
             pause_run()
 
         def apply() -> None:
+            if status == "ok" and reason:
+                self._replay_run_index = step_index
+            elif status == "ok":
+                self._replay_run_index = step_index + 1
             if not self._replay_hold_for_error:
                 if reason:
                     self._replay_step_errors[step_index] = reason
@@ -942,6 +954,9 @@ class MainHub(ctk.CTk):
                 self._show_replay_step(self._replay_display_index())
                 if retry_pause:
                     self._start_retry_countdown()
+            self._commit_pending_replay_delete(
+                keep_in_session=not (status == "ok" and bool(reason))
+            )
             if not self._track_script_step_status:
                 return
             line: int | None = None
@@ -2178,6 +2193,7 @@ class MainHub(ctk.CTk):
         self._status.configure(text="已暫停（點繼續以恢復）")
 
     def _on_resume_run(self) -> None:
+        self._close_replay_editor()
         self._cancel_retry_countdown()
         if self._worker_thread is None or not self._worker_thread.is_alive():
             return
@@ -2247,6 +2263,7 @@ class MainHub(ctk.CTk):
     def _on_stop_run(self) -> None:
         from main import request_coordinator_cancel
 
+        self._close_replay_editor()
         self._cancel_retry_countdown()
 
         if self._worker_thread is None or not self._worker_thread.is_alive():
@@ -2354,6 +2371,8 @@ class MainHub(ctk.CTk):
         self._replay_hold_for_error = False
         take_pending_step_jump()
         self._replay_nav_index = 0 if self._replay_step_instructions else None
+        self._replay_run_index = 0
+        self._pending_replay_delete = None
         overlay = self._replay_overlay
         if overlay is None:
             return
@@ -2485,6 +2504,9 @@ class MainHub(ctk.CTk):
             on_hold_pause=self._hold_retry_pause,
             on_stop=self._on_stop_run,
             on_edit=self._on_edit_replay_step,
+            on_delete=self._on_delete_replay_step,
+            on_save_edit=self._on_save_replay_step_edit,
+            on_open_report=self._on_open_replay_step_report,
             on_previous=lambda: self._on_replay_step_delta(-1),
             on_next=lambda: self._on_replay_step_delta(1),
             edit_enabled=self._active_recording_dir is not None,
@@ -2501,6 +2523,9 @@ class MainHub(ctk.CTk):
 
     def _release_replay_overlay(self) -> None:
         """Drop the replay overlay and the step text it was showing."""
+        worker = self._worker_thread
+        if worker is None or not worker.is_alive():
+            self._commit_pending_replay_delete(keep_in_session=True)
         self._replay_hold_for_error = False
         self._active_recording_dir = None
         self._replay_step_instructions = []
@@ -2511,12 +2536,16 @@ class MainHub(ctk.CTk):
         self._active_replay_event_index = None
         self._destroy_replay_overlay()
 
-    def _on_edit_replay_step(self) -> None:
-        """Pause and open the in-progress step in the recording report."""
-        self._on_pause_run()
+    def _close_replay_editor(self) -> None:
+        overlay = self._replay_overlay
+        if overlay is not None and overlay.is_editing():
+            overlay.end_edit()
+
+    def _current_replay_event_index(self) -> int | None:
+        """Recording event id for the step the overlay is showing."""
         recording_dir = self._active_recording_dir
         if recording_dir is None:
-            return
+            return None
         event_index: int | None = None
         step = self._replay_display_index()
         if step is not None and 0 <= step < len(self._replay_event_indices):
@@ -2529,7 +2558,302 @@ class MainHub(ctk.CTk):
             indices = collect_recording_instruction_event_indices(recording_dir)
             if 0 <= step < len(indices):
                 event_index = indices[step]
-        self._open_recording_step_report(recording_dir, event_index)
+        return event_index
+
+    def _replay_reload_index(self) -> int:
+        """Script index whose earlier steps stay in this run after a recording edit."""
+        jump = peek_pending_step_jump()
+        if isinstance(jump, int):
+            return max(0, jump)
+        return max(0, int(self._replay_run_index))
+
+    def _on_delete_replay_step(self) -> None:
+        """Pause, confirm, and delete the step the overlay is showing."""
+        if self._replay_overlay is None or self._active_recording_dir is None:
+            return
+        self._cancel_retry_countdown()
+        self._on_pause_run()
+        display_index = self._replay_display_index()
+        event_index = self._current_replay_event_index()
+        if display_index is None or event_index is None:
+            show_ctk_message(
+                self,
+                "刪除步驟",
+                "找不到這個步驟的錄製內容。",
+                kind="warning",
+            )
+            return
+        snippet = ""
+        if 0 <= display_index < len(self._replay_step_instructions):
+            snippet = self._replay_step_instructions[display_index].strip()
+        lines = ["確定刪除這個步驟？", "將從錄製中移除，且無法復原。"]
+        if snippet:
+            lines.insert(1, snippet)
+        waiting = step_is_busy() and event_index == active_step_event_index()
+        if waiting:
+            lines.append("這個步驟會先做完，完成後才從錄製移除。")
+        elif display_index < self._replay_reload_index():
+            lines.append("這次執行會保留它的位置。下一輪重播不會再包含它。")
+        else:
+            lines.append("繼續後會從下一個步驟執行。")
+        if not confirm_ctk_message(self, "刪除步驟", "\n".join(lines)):
+            return
+        self._close_replay_editor()
+        if waiting:
+            self._pending_replay_delete = (event_index, display_index)
+            self._set_replay_delete_status("此步驟結束後會從錄製刪除")
+            return
+        self._finish_replay_step_delete(
+            event_index,
+            display_index,
+            keep_in_session=display_index < self._replay_reload_index(),
+        )
+
+    def _commit_pending_replay_delete(self, *, keep_in_session: bool) -> None:
+        pending = self._pending_replay_delete
+        if pending is None:
+            return
+        self._pending_replay_delete = None
+        event_index, display_index = pending
+        self._finish_replay_step_delete(
+            event_index,
+            display_index,
+            keep_in_session=keep_in_session,
+        )
+
+    def _finish_replay_step_delete(
+        self,
+        event_index: int,
+        display_index: int,
+        *,
+        keep_in_session: bool,
+    ) -> None:
+        recording_dir = self._active_recording_dir
+        if recording_dir is None:
+            return
+        try:
+            delete_recording_event(
+                Path(recording_dir).parent,
+                Path(recording_dir).name,
+                event_index,
+            )
+        except ValueError as exc:
+            show_ctk_message(
+                self,
+                "刪除步驟",
+                self._replay_edit_error_text(exc),
+                kind="error",
+            )
+            return
+        except Exception as exc:
+            show_ctk_message(self, "刪除步驟", f"無法刪除：{exc}", kind="error")
+            return
+        if keep_in_session:
+            self._set_replay_delete_status("已從錄製刪除，這次執行仍保留此步驟的位置")
+            return
+        self._drop_replay_step_from_overlay(display_index)
+        if self._replay_step_instructions:
+            self._set_replay_delete_status("已刪除步驟，繼續後會從下一個步驟執行")
+        else:
+            self._set_replay_delete_status("已刪除最後一個步驟")
+
+    def _drop_replay_step_from_overlay(self, display_index: int) -> None:
+        """Remove one not-yet-started step from the overlay list."""
+        if 0 <= display_index < len(self._replay_step_instructions):
+            del self._replay_step_instructions[display_index]
+        if 0 <= display_index < len(self._replay_event_indices):
+            del self._replay_event_indices[display_index]
+        shifted: dict[int, str] = {}
+        for index, text in self._replay_step_errors.items():
+            if index == display_index:
+                continue
+            shifted[index - 1 if index > display_index else index] = text
+        self._replay_step_errors = shifted
+        total = len(self._replay_step_instructions)
+        jump = peek_pending_step_jump()
+        if total <= 0:
+            self._replay_nav_index = None
+            self._replay_nav_held = False
+            self._show_replay_step(None)
+            return
+        nav = self._replay_nav_index if self._replay_nav_index is not None else display_index
+        if jump is not None:
+            if jump > display_index:
+                jump -= 1
+            elif jump == display_index:
+                jump = min(display_index, total - 1)
+            request_step_jump(jump)
+            nav = jump
+            self._replay_nav_held = True
+        elif nav > display_index:
+            nav -= 1
+        elif nav >= display_index:
+            nav = min(display_index, total - 1)
+        self._replay_nav_index = max(0, min(nav, total - 1))
+        self._show_replay_step(self._replay_nav_index)
+
+    def _set_replay_delete_status(self, text: str) -> None:
+        if is_paused():
+            text = f"已暫停（{text}）"
+        try:
+            self._status.configure(text=text)
+        except Exception:
+            pass
+
+    def _on_open_replay_step_report(self) -> None:
+        """Open the recording page for window checks and the baseline image."""
+        recording_dir = self._active_recording_dir
+        if recording_dir is None:
+            return
+        self._open_recording_step_report(recording_dir, self._current_replay_event_index())
+
+    def _on_edit_replay_step(self) -> None:
+        """Pause and edit this step's instruction and verification checks."""
+        overlay = self._replay_overlay
+        if overlay is None or overlay.is_editing():
+            return
+        self._cancel_retry_countdown()
+        self._on_pause_run()
+        recording_dir = self._active_recording_dir
+        if recording_dir is None:
+            return
+        event_index = self._current_replay_event_index()
+        fields = None if event_index is None else self._load_replay_step_fields(
+            recording_dir, event_index
+        )
+        if event_index is None or fields is None:
+            show_ctk_message(
+                self,
+                "編輯步驟",
+                "找不到這個步驟的錄製內容。",
+                kind="warning",
+            )
+            return
+        instruction, checks = fields
+        overlay.begin_edit(instruction, checks)
+
+    def _load_replay_step_fields(
+        self,
+        recording_dir: Path,
+        event_index: int,
+    ) -> tuple[str, list[tuple[str, int | None, str, str, bool]]] | None:
+        from src.common.session_html import window_verify_check_rows
+
+        analysis = read_json(
+            Path(recording_dir) / "analysis" / f"event_{event_index:03d}.json",
+            None,
+        )
+        if not isinstance(analysis, dict):
+            return None
+        instruction = analysis.get("instruction")
+        if not isinstance(instruction, str):
+            instruction = ""
+        return instruction, window_verify_check_rows(analysis)
+
+    def _on_save_replay_step_edit(
+        self,
+        instruction: str,
+        disabled: list[str],
+    ) -> bool:
+        """Write the overlay instruction and unchecked checks for this step."""
+        overlay = self._replay_overlay
+        recording_dir = self._active_recording_dir
+        event_index = self._current_replay_event_index()
+        if recording_dir is None or event_index is None:
+            if overlay is not None:
+                overlay.set_edit_message("找不到這個步驟的錄製內容。")
+            return False
+        try:
+            self._persist_replay_step_edit(
+                recording_dir,
+                event_index,
+                instruction=instruction,
+                disabled=disabled,
+            )
+        except ValueError as exc:
+            if overlay is not None:
+                overlay.set_edit_message(self._replay_edit_error_text(exc))
+            return False
+        except Exception as exc:
+            if overlay is not None:
+                overlay.set_edit_message(f"無法儲存：{exc}")
+            return False
+        step = self._replay_display_index()
+        cleaned = instruction.strip()
+        if step is not None:
+            while len(self._replay_step_instructions) <= step:
+                self._replay_step_instructions.append("")
+            self._replay_step_instructions[step] = cleaned
+            self._show_replay_step(step)
+        if is_paused():
+            self._status.configure(text="已暫停（步驟內容已儲存）")
+        else:
+            self._status.configure(text="步驟內容已儲存")
+        return True
+
+    def _persist_replay_step_edit(
+        self,
+        recording_dir: Path,
+        event_index: int,
+        *,
+        instruction: str,
+        disabled: list[str],
+    ) -> None:
+        from src.recorder.window_snapshot import normalize_window_verify_disabled
+
+        analysis = read_json(
+            Path(recording_dir) / "analysis" / f"event_{event_index:03d}.json",
+            {},
+        )
+        if not isinstance(analysis, dict):
+            analysis = {}
+        current_instruction = analysis.get("instruction")
+        if not isinstance(current_instruction, str):
+            current_instruction = ""
+        if len(instruction) > 8192:
+            raise ValueError("instruction is too long")
+        if instruction.strip() != current_instruction.strip() and not instruction.strip():
+            raise ValueError("instruction is empty")
+        predicate = analysis.get("window_verify")
+        recorded = predicate if isinstance(predicate, dict) else {}
+        normalized = (
+            normalize_window_verify_disabled(recorded, disabled, strict=True)
+            if recorded
+            else []
+        )
+        current_disabled = analysis.get("window_verify_disabled")
+        previous = normalize_window_verify_disabled(
+            recorded,
+            current_disabled if isinstance(current_disabled, list) else [],
+            strict=False,
+        )
+        runs_root = Path(recording_dir).parent
+        run_id = Path(recording_dir).name
+        if instruction.strip() != current_instruction.strip():
+            apply_recording_event_instruction(
+                runs_root,
+                run_id,
+                event_index,
+                instruction=instruction,
+            )
+        if recorded and normalized != previous:
+            apply_recording_event_verify_conditions(
+                runs_root,
+                run_id,
+                event_index,
+                disabled=normalized,
+            )
+
+    @staticmethod
+    def _replay_edit_error_text(exc: ValueError) -> str:
+        message = str(exc)
+        if message == "instruction is empty":
+            return "指令不可為空白"
+        if message == "instruction is too long":
+            return "指令過長"
+        if message in {"event not found", "analysis not found", "invalid event index"}:
+            return "找不到這個步驟的錄製內容"
+        return f"無法儲存：{message}"
 
     def _open_recording_step_report(
         self,
@@ -3721,6 +4045,7 @@ class MainHub(ctk.CTk):
             except OSError:
                 pass
             self._post_run_unlink = None
+        self._commit_pending_replay_delete(keep_in_session=True)
         user_stopped = self._user_requested_stop
         self._user_requested_stop = False
         kind, msg = self._worker_outcome

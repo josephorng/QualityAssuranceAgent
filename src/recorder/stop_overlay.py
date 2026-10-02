@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 import customtkinter as ctk
+import tkinter as tk
 import mss
 import pyautogui
 
@@ -356,17 +357,24 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
         on_edit: Callable[[], None],
         on_previous: Callable[[], None],
         on_next: Callable[[], None],
+        on_delete: Callable[[], None] | None = None,
         on_hold_pause: Callable[[], None] | None = None,
+        on_save_edit: Callable[[str, list[str]], bool] | None = None,
+        on_open_report: Callable[[], None] | None = None,
         edit_enabled: bool = False,
     ) -> None:
         self._on_pause = on_pause
         self._on_resume = on_resume
         self._on_stop = on_stop
         self._on_edit = on_edit
+        self._on_delete = on_delete
         self._on_previous = on_previous
         self._on_next = on_next
         self._on_hold_pause = on_hold_pause
+        self._on_save_edit = on_save_edit
+        self._on_open_report = on_open_report
         self._paused = False
+        self._editing = False
         self._edit_enabled = edit_enabled
         self._shown_error = ""
         self._error_show_after_id: str | None = None
@@ -381,8 +389,15 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
         self._hold_pause_btn: ctk.CTkButton | None = None
         self._stop_btn: ctk.CTkButton | None = None
         self._edit_btn: ctk.CTkButton | None = None
+        self._delete_btn: ctk.CTkButton | None = None
         self._prev_btn: ctk.CTkButton | None = None
         self._next_btn: ctk.CTkButton | None = None
+        self._edit_frame: ctk.CTkFrame | None = None
+        self._instruction_box: ctk.CTkTextbox | None = None
+        self._checks_empty: ctk.CTkLabel | None = None
+        self._checks_scroll: ctk.CTkScrollableFrame | None = None
+        self._check_vars: list[tuple[tk.BooleanVar, str]] = []
+        self._edit_message: ctk.CTkLabel | None = None
         super().__init__(master)
 
     def _min_size(self) -> tuple[int, int]:
@@ -460,6 +475,53 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
         )
         self._next_btn.pack(side="left")
 
+        edit = ctk.CTkFrame(frame, fg_color="transparent")
+        self._edit_frame = edit
+        ctk.CTkLabel(edit, text="指令", anchor="w").pack(anchor="w")
+        self._instruction_box = ctk.CTkTextbox(edit, width=312, height=52)
+        self._instruction_box.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(edit, text="驗證檢查", anchor="w").pack(anchor="w")
+        self._checks_empty = ctk.CTkLabel(
+            edit,
+            text="這個步驟沒有驗證檢查",
+            font=ctk.CTkFont(size=11),
+            text_color=("gray30", "gray65"),
+            anchor="w",
+        )
+        self._edit_message = ctk.CTkLabel(
+            edit,
+            text="",
+            font=ctk.CTkFont(size=11),
+            text_color=("#b91c1c", "#f87171"),
+            wraplength=292,
+            justify="left",
+            anchor="w",
+        )
+        self._edit_message.pack(anchor="w", fill="x", pady=(0, 6))
+        edit_buttons = ctk.CTkFrame(edit, fg_color="transparent")
+        edit_buttons.pack(anchor="w")
+        ctk.CTkButton(
+            edit_buttons,
+            text="儲存",
+            width=88,
+            height=32,
+            command=self._handle_save_edit,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            edit_buttons,
+            text="取消",
+            width=88,
+            height=32,
+            command=self._handle_cancel_edit,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            edit_buttons,
+            text="完整報告",
+            width=100,
+            height=32,
+            command=self._handle_open_report,
+        ).pack(side="left")
+
         buttons = ctk.CTkFrame(frame, fg_color="transparent")
         buttons.pack(padx=14, pady=(0, 14), fill="x")
         self._pause_btn = ctk.CTkButton(
@@ -495,7 +557,18 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
             command=self._handle_edit,
             state="normal" if self._edit_enabled else "disabled",
         )
-        self._edit_btn.pack(side="left")
+        self._edit_btn.pack(side="left", padx=(0, 8))
+        self._delete_btn = ctk.CTkButton(
+            buttons,
+            text="刪除步驟",
+            width=100,
+            height=34,
+            fg_color=("#7f1d1d", "#7f1d1d"),
+            hover_color=("#991b1b", "#991b1b"),
+            command=self._handle_delete,
+            state="normal" if self._edit_enabled else "disabled",
+        )
+        self._delete_btn.pack(side="left")
 
     def set_paused(self, paused: bool) -> None:
         """Switch the pause button between 暫停 and 繼續."""
@@ -519,10 +592,11 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
                 label.pack_forget()
             except Exception:
                 pass
-            self._pinned = False
             self._set_hold_pause_visible(False)
             self._measure_and_hide_if_hidden()
-            self._hide_if_cursor_away()
+            if not self.is_editing():
+                self._pinned = False
+                self._hide_if_cursor_away()
             return
         self._cancel_error_show()
         self._countdown_active = True
@@ -574,12 +648,13 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
         self._hide()
 
     def set_edit_enabled(self, enabled: bool) -> None:
-        """Enable edit only when the running script is a recording folder."""
+        """Enable edit and delete only when the running script is a recording folder."""
         self._edit_enabled = enabled
-        button = self._edit_btn
-        if button is None or self._destroyed:
-            return
-        button.configure(state="normal" if enabled else "disabled")
+        state = "normal" if enabled else "disabled"
+        for button in (self._edit_btn, self._delete_btn):
+            if button is None or self._destroyed:
+                continue
+            button.configure(state=state)
 
     def set_step(
         self,
@@ -621,7 +696,8 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
             return
         cleaned = clip_step_snippet(text, limit=_STEP_ERROR_LIMIT)
         if not cleaned:
-            self._pinned = False
+            if not self._countdown_active and not self.is_editing():
+                self._pinned = False
             self._shown_error = ""
             self._cancel_error_show()
             self._cancel_hide()
@@ -670,20 +746,208 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
 
     def _end_error_show(self) -> None:
         self._error_show_after_id = None
-        if self._destroyed or self._countdown_active:
+        if self._destroyed or self._countdown_active or self.is_editing():
             return
         self._pinned = False
         self._hide_if_cursor_away()
 
+    def is_editing(self) -> bool:
+        """True while the instruction and verification checks are open."""
+        return bool(getattr(self, "_editing", False))
+
+    def begin_edit(
+        self,
+        instruction: str,
+        checks: list[tuple[str, int | None, str, str, bool]],
+    ) -> None:
+        """Pin the overlay and show the instruction and verification checks."""
+        if self._destroyed or self._edit_frame is None:
+            return
+        self._editing = True
+        self._pinned = True
+        self._cancel_error_show()
+        self._set_textbox(self._instruction_box, instruction)
+        self._fill_verify_checks(checks)
+        self.set_edit_message("")
+        try:
+            if not self._edit_frame.winfo_ismapped():
+                pack_kwargs: dict[str, Any] = {"padx": 14, "pady": (0, 8), "fill": "x"}
+                if self._nav_frame is not None:
+                    pack_kwargs["before"] = self._nav_frame
+                self._edit_frame.pack(**pack_kwargs)
+        except Exception:
+            pass
+        self._sync_nav_buttons()
+        self._measure_and_hide_if_hidden()
+        if not self._visible:
+            self.reveal()
+        win = self._window
+        if win is not None:
+            try:
+                win.focus_force()
+            except Exception:
+                pass
+        box = self._instruction_box
+        if box is not None:
+            try:
+                box.focus_set()
+            except Exception:
+                pass
+
+    def end_edit(self) -> None:
+        """Close the editor. Unsaved text is dropped."""
+        if not self.is_editing() and (
+            self._edit_frame is None or not self._edit_frame.winfo_ismapped()
+        ):
+            self._editing = False
+            return
+        self._editing = False
+        frame = self._edit_frame
+        if frame is not None:
+            try:
+                frame.pack_forget()
+            except Exception:
+                pass
+        self.set_edit_message("")
+        self._sync_nav_buttons()
+        self._measure_and_hide_if_hidden()
+        if not self._countdown_active:
+            self._pinned = False
+            self._hide_if_cursor_away()
+
+    def set_edit_message(self, text: str) -> None:
+        """Show a save error under the verification checks."""
+        label = self._edit_message
+        if label is None or self._destroyed:
+            return
+        try:
+            label.configure(text=text)
+        except Exception:
+            pass
+
+    def _set_textbox(self, box: ctk.CTkTextbox | None, text: str) -> None:
+        if box is None:
+            return
+        try:
+            box.delete("1.0", "end")
+            if text:
+                box.insert("1.0", text)
+        except Exception:
+            pass
+
+    def _fill_verify_checks(
+        self,
+        checks: list[tuple[str, int | None, str, str, bool]],
+    ) -> None:
+        """Rebuild the checklist. Unchecked rows are skipped on replay."""
+        old = self._checks_scroll
+        if old is not None:
+            try:
+                old.destroy()
+            except Exception:
+                pass
+            self._checks_scroll = None
+        self._check_vars = []
+        empty = self._checks_empty
+        message = self._edit_message
+        frame = self._edit_frame
+        if frame is None:
+            return
+        if not checks:
+            if empty is not None:
+                try:
+                    empty.configure(text="這個步驟沒有驗證檢查")
+                    if not empty.winfo_ismapped():
+                        pack_kwargs: dict[str, Any] = {
+                            "anchor": "w",
+                            "fill": "x",
+                            "pady": (0, 6),
+                        }
+                        if message is not None:
+                            pack_kwargs["before"] = message
+                        empty.pack(**pack_kwargs)
+                except Exception:
+                    pass
+            return
+        if empty is not None:
+            try:
+                empty.pack_forget()
+            except Exception:
+                pass
+        height = min(200, max(56, 48 * len(checks)))
+        scroll = ctk.CTkScrollableFrame(
+            frame,
+            width=300,
+            height=height,
+            fg_color="transparent",
+        )
+        try:
+            pack_kwargs = {"fill": "x", "pady": (0, 6)}
+            if message is not None:
+                pack_kwargs["before"] = message
+            scroll.pack(**pack_kwargs)
+        except Exception:
+            return
+        self._checks_scroll = scroll
+        master = self._window
+        for key, index, label, value, enabled in checks:
+            selector = key if index is None else f"{key}:{index}"
+            text = " ".join(f"{label}：{value}".split())
+            row = ctk.CTkFrame(scroll, fg_color="transparent")
+            row.pack(fill="x", pady=1)
+            var = tk.BooleanVar(master=master, value=bool(enabled))
+            ctk.CTkCheckBox(row, text="", variable=var, width=24).pack(
+                side="left", anchor="n", padx=(0, 4)
+            )
+            caption = ctk.CTkLabel(
+                row,
+                text=text,
+                font=ctk.CTkFont(size=11),
+                wraplength=250,
+                justify="left",
+                anchor="w",
+            )
+            caption.pack(side="left", fill="x", expand=True)
+
+            def _toggle(_event: object, target: tk.BooleanVar = var) -> None:
+                try:
+                    target.set(not bool(target.get()))
+                except Exception:
+                    pass
+
+            try:
+                caption.bind("<Button-1>", _toggle)
+            except Exception:
+                pass
+            self._check_vars.append((var, selector))
+
+    def _edit_values(self) -> tuple[str, list[str]]:
+        instruction = ""
+        if self._instruction_box is not None:
+            instruction = self._instruction_box.get("1.0", "end").strip()
+        disabled: list[str] = []
+        for var, selector in self._check_vars:
+            try:
+                checked = bool(var.get())
+            except Exception:
+                continue
+            if not checked:
+                disabled.append(selector)
+        return instruction, disabled
+
     def _sync_nav_buttons(self) -> None:
+        editing = self.is_editing()
         previous = self._prev_btn
         nxt = self._next_btn
         if previous is not None and not self._destroyed:
-            can_go_back = self._nav_index is not None and self._nav_index > 0
+            can_go_back = (
+                not editing and self._nav_index is not None and self._nav_index > 0
+            )
             previous.configure(state="normal" if can_go_back else "disabled")
         if nxt is not None and not self._destroyed:
             can_go_forward = (
-                self._nav_index is not None
+                not editing
+                and self._nav_index is not None
                 and self._nav_total > 0
                 and self._nav_index < self._nav_total - 1
             )
@@ -733,18 +997,53 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
             pass
 
     def _handle_edit(self) -> None:
+        if self.is_editing():
+            return
         try:
             self._on_edit()
         except Exception:
             pass
 
+    def _handle_delete(self) -> None:
+        try:
+            if self._on_delete is not None:
+                self._on_delete()
+        except Exception:
+            pass
+
+    def _handle_save_edit(self) -> None:
+        instruction, disabled = self._edit_values()
+        try:
+            if self._on_save_edit is None:
+                saved = True
+            else:
+                saved = bool(self._on_save_edit(instruction, disabled))
+        except Exception:
+            return
+        if saved:
+            self.end_edit()
+
+    def _handle_cancel_edit(self) -> None:
+        self.end_edit()
+
+    def _handle_open_report(self) -> None:
+        try:
+            if self._on_open_report is not None:
+                self._on_open_report()
+        except Exception:
+            pass
+
     def _handle_previous(self) -> None:
+        if self.is_editing():
+            return
         try:
             self._on_previous()
         except Exception:
             pass
 
     def _handle_next(self) -> None:
+        if self.is_editing():
+            return
         try:
             self._on_next()
         except Exception:

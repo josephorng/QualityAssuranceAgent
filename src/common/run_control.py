@@ -217,11 +217,29 @@ def script_step_event_indices() -> list[int | None]:
         return list(_script_step_event_indices)
 
 
+_step_busy = False
+_step_busy_lock = threading.Lock()
+
+
+def set_step_busy(busy: bool) -> None:
+    """Mark whether a script step is inside ``process_step``."""
+    global _step_busy
+    with _step_busy_lock:
+        _step_busy = bool(busy)
+
+
+def step_is_busy() -> bool:
+    """True while the current step is still executing."""
+    with _step_busy_lock:
+        return _step_busy
+
+
 def reset_run_control() -> None:
     """Clear pause state, step-status callback, and the in-progress step at run start/end."""
     resume_run()
     clear_step_status_callback()
     clear_active_step()
+    set_step_busy(False)
 
 
 def is_paused() -> bool:

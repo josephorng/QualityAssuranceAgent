@@ -150,6 +150,35 @@ def test_retry_countdown_pins_until_cleared(monkeypatch) -> None:
     assert hidden == [True]
 
 
+def test_editing_keeps_overlay_pinned(monkeypatch) -> None:
+    overlay = ReplayControlOverlay.__new__(ReplayControlOverlay)
+    overlay._destroyed = False
+    overlay._pinned = True
+    overlay._visible = True
+    overlay._editing = True
+    overlay._countdown_active = False
+    overlay._error_show_after_id = None
+    overlay._countdown_label = _ErrorLabel()
+    overlay._hold_pause_btn = _ErrorLabel()
+    overlay._hold_pause_btn.mapped = True
+    overlay._stop_btn = None
+    hidden: list[bool] = []
+    overlay._hide = lambda: hidden.append(True)
+    overlay._measure_and_hide_if_hidden = lambda: None
+    monkeypatch.setattr(
+        "src.recorder.stop_overlay.pyautogui.position",
+        lambda: type("Pos", (), {"x": 100, "y": 400})(),
+    )
+    overlay._cursor_at_top_edge = lambda x, y: False
+    overlay._cursor_over_overlay = lambda x, y: False
+
+    overlay._end_error_show()
+    overlay.set_countdown(None)
+
+    assert overlay._pinned is True
+    assert hidden == []
+
+
 def test_cursor_at_top_edge_uses_monitor_top(monkeypatch) -> None:
     overlay = RecordingStopOverlay.__new__(RecordingStopOverlay)
     overlay._monitors_cache = [

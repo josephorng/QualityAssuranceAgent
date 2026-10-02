@@ -7,6 +7,7 @@ from src.brain.module import BrainModule
 from src.common.io_utils import append_text, pop_last_nonempty_line
 from src.common.run_control import (
     notify_step_status,
+    set_step_busy,
     take_pause_log,
     take_pending_step_jump,
     wait_while_paused,
@@ -73,7 +74,11 @@ class RuntimeCoordinator:
                 run_root = self.manager.require_paths().root
                 append_text(_runtime_command_script_path(run_root), cmd + "\n")
                 self.brain.prepare_runtime_step(cmd)
-            step_result = await self.brain.process_step()
+            set_step_busy(True)
+            try:
+                step_result = await self.brain.process_step()
+            finally:
+                set_step_busy(False)
             if step_result.step_index is not None:
                 holding_retry = (
                     step_result.step_finished

@@ -2092,3 +2092,113 @@ def test_runs_report_server_pick_target_endpoint(tmp_path: Path, monkeypatch) ->
         assert "確定" in payload["instruction"]
     finally:
         server.stop()
+
+
+def test_replay_overlay_save_persists_instruction_and_verify_checks(tmp_path: Path) -> None:
+    from app_main_hub import MainHub
+    from src.common.session_html import window_verify_check_rows
+
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_two_event_run(runs_root, "recording_overlay_edit")
+    analysis_path = run_root / "analysis" / "event_001.json"
+    analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+    analysis["window_verify"] = {
+        "disappeared": [
+            {"title": "快顯主機", "class_name": "Popup", "process_name": "explorer.exe"},
+        ],
+        "clipboard": "copied",
+    }
+    analysis["window_verify_disabled"] = ["clipboard"]
+    analysis_path.write_text(json.dumps(analysis, ensure_ascii=False), encoding="utf-8")
+    rows = window_verify_check_rows(analysis)
+    assert rows[0][0] == "disappeared"
+    assert rows[0][1] == 0
+    assert rows[0][2] == "視窗消失"
+    assert "快顯主機" in rows[0][3]
+    assert "<" not in rows[0][3]
+    assert rows[0][4] is True
+    assert ("clipboard", None, "剪貼簿", "copied", False) in rows
+
+    hub = MainHub.__new__(MainHub)
+    hub._persist_replay_step_edit(
+        run_root,
+        1,
+        instruction="點擊「新目標」",
+        disabled=["disappeared:0"],
+    )
+
+    saved = json.loads(analysis_path.read_text(encoding="utf-8"))
+    assert saved["instruction"] == "點擊「新目標」"
+    assert saved["window_verify_disabled"] == ["disappeared:0"]
+
+    with pytest.raises(ValueError, match="empty"):
+        hub._persist_replay_step_edit(
+            run_root,
+            1,
+            instruction="   ",
+            disabled=["disappeared:0"],
+        )
+    saved = json.loads(analysis_path.read_text(encoding="utf-8"))
+    assert saved["instruction"] == "點擊「新目標」"
+
+
+def test_replay_overlay_delete_drops_unstarted_step_and_keeps_finished(
+    tmp_path: Path,
+) -> None:
+    from app_main_hub import MainHub
+    from src.common.run_control import (
+        peek_pending_step_jump,
+        request_step_jump,
+        reset_run_control,
+        set_step_busy,
+        step_is_busy,
+    )
+
+    set_step_busy(True)
+    assert step_is_busy() is True
+    reset_run_control()
+    assert step_is_busy() is False
+
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_two_event_run(runs_root, "recording_overlay_delete")
+    hub = MainHub.__new__(MainHub)
+    hub._active_recording_dir = run_root
+    hub._replay_step_instructions = ["first", "second"]
+    hub._replay_event_indices = [1, 2]
+    hub._replay_nav_index = 1
+    hub._replay_nav_held = False
+    hub._replay_step_errors = {0: "kept"}
+    hub._replay_overlay = None
+    hub._replay_run_index = 0
+    hub._pending_replay_delete = None
+    hub._status = type("Status", (), {"configure": lambda *args, **kwargs: None})()
+
+    hub._finish_replay_step_delete(2, 1, keep_in_session=False)
+
+    assert not (run_root / "events" / "event_002.json").is_file()
+    assert not (run_root / "analysis" / "event_002.json").is_file()
+    assert hub._replay_step_instructions == ["first"]
+    assert hub._replay_event_indices == [1]
+    assert hub._replay_nav_index == 0
+    assert hub._replay_step_errors == {0: "kept"}
+
+    hub._replay_step_instructions = ["first", "second"]
+    hub._replay_event_indices = [1, 2]
+    hub._replay_run_index = 1
+    hub._finish_replay_step_delete(1, 0, keep_in_session=True)
+
+    assert not (run_root / "events" / "event_001.json").is_file()
+    assert hub._replay_step_instructions == ["first", "second"]
+
+    request_step_jump(2)
+    hub._replay_step_instructions = ["a", "b", "c"]
+    hub._replay_event_indices = [1, 2, 3]
+    hub._replay_nav_index = 2
+    hub._replay_nav_held = True
+    hub._replay_step_errors = {}
+    hub._drop_replay_step_from_overlay(0)
+
+    assert peek_pending_step_jump() == 1
+    assert hub._replay_step_instructions == ["b", "c"]
+    assert hub._replay_nav_index == 1
+    reset_run_control()

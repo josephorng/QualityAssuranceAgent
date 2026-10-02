@@ -7,7 +7,7 @@ import os
 import re
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
-from html import escape
+from html import escape, unescape
 from math import ceil
 from pathlib import Path
 from typing import Any
@@ -5135,6 +5135,34 @@ def _window_verify_condition_rows(
             )
         )
     return rows
+
+
+def window_verify_check_rows(
+    analysis: dict[str, Any] | None,
+) -> list[tuple[str, int | None, str, str, bool]]:
+    """Plain-text window and signal checks for one recorded step.
+
+    Each row is ``(key, index, label, value, enabled)``. ``index`` is set for
+    itemized conditions. Unchecked rows are the ones replay skips.
+    """
+    if not isinstance(analysis, dict):
+        return []
+    predicate = analysis.get("window_verify")
+    disabled = analysis.get("window_verify_disabled")
+    rows = _window_verify_condition_rows(
+        predicate if isinstance(predicate, dict) else None,
+        disabled,
+    )
+    return [
+        (key, index, label, _html_to_plain(value_html), enabled)
+        for key, index, label, value_html, enabled in rows
+    ]
+
+
+def _html_to_plain(value_html: str) -> str:
+    text = re.sub(r"<br\s*/?>", "\n", value_html, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    return unescape(text).strip()
 
 
 def _render_verify_condition_row_html(

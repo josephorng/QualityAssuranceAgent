@@ -113,6 +113,8 @@ def test_retry_countdown_pins_until_cleared(monkeypatch) -> None:
     overlay._countdown_active = False
     overlay._error_show_after_id = "error-timer"
     overlay._countdown_label = _ErrorLabel()
+    overlay._hold_pause_btn = _ErrorLabel()
+    overlay._stop_btn = None
     overlay._nav_frame = object()
     cancelled: list[str] = []
     overlay._master = type(
@@ -136,6 +138,7 @@ def test_retry_countdown_pins_until_cleared(monkeypatch) -> None:
     assert overlay._pinned is True
     assert overlay._countdown_active is True
     assert overlay._countdown_label.text == "30 秒後繼續"
+    assert overlay._hold_pause_btn.mapped is True
     assert cancelled == ["error-timer"]
     assert hidden == []
 
@@ -143,6 +146,7 @@ def test_retry_countdown_pins_until_cleared(monkeypatch) -> None:
 
     assert overlay._pinned is False
     assert overlay._countdown_active is False
+    assert overlay._hold_pause_btn.mapped is False
     assert hidden == [True]
 
 

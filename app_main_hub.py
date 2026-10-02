@@ -2188,6 +2188,17 @@ class MainHub(ctk.CTk):
             overlay.set_paused(False)
         self._status.configure(text="執行中…")
 
+    def _hold_retry_pause(self) -> None:
+        """Cancel the retry countdown and leave the run paused."""
+        self._cancel_retry_countdown()
+        if self._worker_thread is None or not self._worker_thread.is_alive():
+            return
+        self._set_pause_button_paused()
+        overlay = self._replay_overlay
+        if overlay is not None:
+            overlay.set_paused(True)
+        self._status.configure(text="已暫停（點繼續以恢復）")
+
     def _start_retry_countdown(self) -> None:
         """Pause is already set. Show 30 seconds, then resume unless 繼續 is clicked."""
         self._cancel_retry_countdown()
@@ -2471,6 +2482,7 @@ class MainHub(ctk.CTk):
             self,
             on_pause=self._on_pause_run,
             on_resume=self._on_resume_run,
+            on_hold_pause=self._hold_retry_pause,
             on_stop=self._on_stop_run,
             on_edit=self._on_edit_replay_step,
             on_previous=lambda: self._on_replay_step_delta(-1),

@@ -356,6 +356,7 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
         on_edit: Callable[[], None],
         on_previous: Callable[[], None],
         on_next: Callable[[], None],
+        on_hold_pause: Callable[[], None] | None = None,
         edit_enabled: bool = False,
     ) -> None:
         self._on_pause = on_pause
@@ -364,6 +365,7 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
         self._on_edit = on_edit
         self._on_previous = on_previous
         self._on_next = on_next
+        self._on_hold_pause = on_hold_pause
         self._paused = False
         self._edit_enabled = edit_enabled
         self._shown_error = ""
@@ -376,6 +378,8 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
         self._error_label: ctk.CTkLabel | None = None
         self._nav_frame: ctk.CTkFrame | None = None
         self._pause_btn: ctk.CTkButton | None = None
+        self._hold_pause_btn: ctk.CTkButton | None = None
+        self._stop_btn: ctk.CTkButton | None = None
         self._edit_btn: ctk.CTkButton | None = None
         self._prev_btn: ctk.CTkButton | None = None
         self._next_btn: ctk.CTkButton | None = None
@@ -466,7 +470,14 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
             command=self._handle_pause,
         )
         self._pause_btn.pack(side="left", padx=(0, 8))
-        ctk.CTkButton(
+        self._hold_pause_btn = ctk.CTkButton(
+            buttons,
+            text="停止倒數",
+            width=100,
+            height=34,
+            command=self._handle_hold_pause,
+        )
+        self._stop_btn = ctk.CTkButton(
             buttons,
             text="停止",
             width=88,
@@ -474,7 +485,8 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
             fg_color=("#c0392b", "#a93226"),
             hover_color=("#a93226", "#922b21"),
             command=self._handle_stop,
-        ).pack(side="left", padx=(0, 8))
+        )
+        self._stop_btn.pack(side="left", padx=(0, 8))
         self._edit_btn = ctk.CTkButton(
             buttons,
             text="編輯步驟",
@@ -508,6 +520,7 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
             except Exception:
                 pass
             self._pinned = False
+            self._set_hold_pause_visible(False)
             self._measure_and_hide_if_hidden()
             self._hide_if_cursor_away()
             return
@@ -529,8 +542,25 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
         except Exception:
             pass
         self._measure_and_hide_if_hidden()
+        self._set_hold_pause_visible(True)
         if not self._visible:
             self.reveal()
+
+    def _set_hold_pause_visible(self, visible: bool) -> None:
+        button = self._hold_pause_btn
+        if button is None or self._destroyed:
+            return
+        try:
+            if visible:
+                if not button.winfo_ismapped():
+                    pack_kwargs: dict[str, Any] = {"side": "left", "padx": (0, 8)}
+                    if self._stop_btn is not None:
+                        pack_kwargs["before"] = self._stop_btn
+                    button.pack(**pack_kwargs)
+            else:
+                button.pack_forget()
+        except Exception:
+            pass
 
     def _hide_if_cursor_away(self) -> None:
         try:
@@ -686,6 +716,13 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
     def _handle_resume(self) -> None:
         try:
             self._on_resume()
+        except Exception:
+            pass
+
+    def _handle_hold_pause(self) -> None:
+        try:
+            if self._on_hold_pause is not None:
+                self._on_hold_pause()
         except Exception:
             pass
 

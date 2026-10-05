@@ -3,7 +3,7 @@ from __future__ import annotations
 import ctypes
 import os
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Sequence
 
 # Windows-only: enumerate top-level windows and diff state around pointer events.
@@ -66,7 +66,8 @@ class WindowInfo:
     # Screen-space caption min/max/close strip when known (DWM); else hit-test falls back.
     caption_button_bounds: CaptionBounds | None = None
     class_name: str = ""
-    # Set only for flyout windows so a full snapshot does not OpenProcess each hwnd.
+    # Executable file name. A full snapshot fills this from one process list,
+    # not an OpenProcess call per hwnd.
     process_name: str | None = None
 
     def area(self) -> int:
@@ -589,7 +590,31 @@ def snapshot_top_level_windows() -> list[WindowInfo]:
         info = _window_info_from_hwnd(hwnd)
         if info is not None:
             out.append(info)
-    return out
+    return _attach_process_names(out)
+
+
+def _attach_process_names(windows: list[WindowInfo]) -> list[WindowInfo]:
+    """Set each window's executable name from one process snapshot.
+
+    ``appeared``, ``disappeared``, and ``state`` copy this name. A missing pid
+    in that snapshot falls back to ``OpenProcess`` for that pid only.
+    """
+    if not windows:
+        return windows
+    from src.recorder.verify_signals import _process_names_by_pid
+
+    names = _process_names_by_pid()
+    filled: list[WindowInfo] = []
+    for win in windows:
+        if win.process_name or not win.pid:
+            filled.append(win)
+            continue
+        name = names.get(int(win.pid)) or _process_name_for_pid(win.pid)
+        if not name:
+            filled.append(win)
+            continue
+        filled.append(replace(win, process_name=name))
+    return filled
 
 
 def window_at_point(x: int, y: int) -> WindowInfo | None:

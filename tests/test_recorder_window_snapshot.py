@@ -161,6 +161,42 @@ def _win(
     )
 
 
+def test_attach_process_names_fills_executable_for_every_window(monkeypatch) -> None:
+    from src.recorder.window_snapshot import _attach_process_names
+
+    chrome = _win(2, "Google Chrome", class_name="Chrome_WidgetWin_1", pid=42)
+    notepad = _win(3, "Untitled - Notepad", class_name="Notepad", pid=9)
+    named = _win(
+        4,
+        "快顯主機",
+        class_name="Popup",
+        pid=7,
+        process_name="explorer.exe",
+    )
+    monkeypatch.setattr(
+        "src.recorder.verify_signals._process_names_by_pid",
+        lambda: {42: "chrome.exe"},
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot._process_name_for_pid",
+        lambda pid: "notepad.exe" if pid == 9 else None,
+    )
+    filled = _attach_process_names([chrome, notepad, named])
+    assert [win.process_name for win in filled] == [
+        "chrome.exe",
+        "notepad.exe",
+        "explorer.exe",
+    ]
+    predicate = build_window_verify_predicate([], [filled[0]])
+    assert predicate["appeared"] == [
+        {
+            "class_name": "Chrome_WidgetWin_1",
+            "title": "Google Chrome",
+            "process_name": "chrome.exe",
+        }
+    ]
+
+
 def test_diff_detects_minimize_at_click_target() -> None:
     before = [_win(100, "Google Chrome", left=100, top=100, width=800, height=600)]
     after = [

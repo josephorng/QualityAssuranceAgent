@@ -2029,6 +2029,9 @@ def test_drag_prefers_pre_captured_monitor_on_release(tmp_path) -> None:
     ), patch(
         "src.recorder.capture._monitor_at_point",
         return_value=(2, 1920, 0, 1920, 1080),
+    ), patch(
+        "src.recorder.capture._release_monitor_index",
+        return_value=2,
     ):
         run_dir = session.start()
         try:
@@ -2049,7 +2052,7 @@ def test_drag_prefers_pre_captured_monitor_on_release(tmp_path) -> None:
     assert raw["end_monitor_offset"] == [1920, 0]
 
 
-def test_drag_end_capture_runs_once_at_drag_start(tmp_path) -> None:
+def test_same_monitor_drag_end_reuses_mouse_down_screenshot(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
     capture_calls = {"all": 0}
 
@@ -2059,7 +2062,7 @@ def test_drag_end_capture_runs_once_at_drag_start(tmp_path) -> None:
             1: (str(run_dir / "screenshots" / "_pending_drag_end_mon1.jpeg"), 1, (0, 0)),
         }
         Path(pending[1][0]).parent.mkdir(parents=True, exist_ok=True)
-        Path(pending[1][0]).write_bytes(b"mon1")
+        Path(pending[1][0]).write_bytes(b"mon1-mousedown-other")
         return pending
 
     with _default_capture_window_patches(), patch(
@@ -2068,12 +2071,17 @@ def test_drag_end_capture_runs_once_at_drag_start(tmp_path) -> None:
     ), patch(
         "src.recorder.capture._capture_screenshot_at_point",
         side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture._release_monitor_index",
+        return_value=1,
     ):
         run_dir = session.start()
         try:
             from pynput.mouse import Button
 
             session._on_mouse_click(100, 100, Button.left, True)
+            session.wait_for_deferred_work()
+            assert capture_calls["all"] == 1
             session._on_mouse_move(150, 150)
             session._on_mouse_move(300, 300)
             session._on_mouse_move(450, 450)
@@ -2082,7 +2090,11 @@ def test_drag_end_capture_runs_once_at_drag_start(tmp_path) -> None:
             session.stop()
 
     assert capture_calls["all"] == 1
-    assert (run_dir / "screenshots" / "event_001_end.jpeg").is_file()
+    press = (run_dir / "screenshots" / "event_001.jpeg").read_bytes()
+    end = (run_dir / "screenshots" / "event_001_end.jpeg").read_bytes()
+    assert press == b"fake"
+    assert end == press
+    assert not (run_dir / "screenshots" / "_pending_drag_end_mon1.jpeg").exists()
 
 
 def test_ctrl_click_records_modifiers(tmp_path) -> None:

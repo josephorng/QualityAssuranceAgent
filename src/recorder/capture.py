@@ -60,6 +60,9 @@ from src.recorder.hotkey import is_recording_toggle_hotkey
 _DOUBLE_CLICK_INTERVAL_S = 0.35
 _DOUBLE_CLICK_MAX_DIST_PX = 8
 _DRAG_THRESHOLD_PX = 8
+# Distinct from None, which means mouse-up reserved the drag-end slot
+# before the mouse-down monitor grab finished.
+_DRAG_END_UNCLAIMED = object()
 # Must exceed the double-click window so short presses still defer for double-click.
 _HOLD_THRESHOLD_S = 0.5
 # Pre-type frames are only reused when typing focus is still near the capture point.
@@ -354,7 +357,7 @@ def _pending_drag_end_capture_path(run_dir: Path, monitor_index: int) -> Path:
 def _capture_all_monitors_to_pending(
     run_dir: Path,
 ) -> dict[int, tuple[str, int, tuple[int, int]]]:
-    """Capture every physical monitor into temporary drag-end pending files."""
+    """Capture every physical monitor at mouse-down, before a drag ghost exists."""
     captures: dict[int, tuple[str, int, tuple[int, int]]] = {}
     with mss.mss() as sct:
         for raw_idx in range(1, len(sct.monitors)):
@@ -395,7 +398,11 @@ def _finalize_drag_end_screenshot(
     fallback_mon_idx: int,
     fallback_mon_offset: tuple[int, int],
 ) -> tuple[str, int, tuple[int, int]]:
-    """Pick the pre-captured monitor at ``end_xy`` and save it as ``event_{index}_end``."""
+    """Pick the mouse-down monitor at ``end_xy`` and save it as ``event_{index}_end``.
+
+    Used when the release is on a different monitor from the press shot.
+    Same-monitor drops copy the press screenshot instead.
+    """
     end_dest = screenshot_path_for_event_end(run_dir, index)
     if not pending_captures:
         try:
@@ -434,6 +441,42 @@ def _finalize_drag_end_screenshot(
             pending.unlink()
 
     return str(end_dest), entry[1], entry[2]
+
+
+def _release_monitor_index(end_xy: tuple[int, int]) -> int | None:
+    """Resolved mss monitor index under the drag release point."""
+    try:
+        raw_idx, _, _, _, _ = _monitor_at_point(end_xy[0], end_xy[1])
+    except Exception:
+        return None
+    try:
+        with mss.mss() as sct:
+            return int(resolve_monitor_index(sct, raw_idx))
+    except Exception:
+        return int(raw_idx)
+
+
+def _copy_mouse_down_screenshot_as_drag_end(
+    run_dir: Path,
+    index: int,
+    press_shot_path: str,
+    press_mon_idx: int,
+    press_mon_offset: tuple[int, int],
+) -> tuple[str, int, tuple[int, int]]:
+    """Use the mouse-down press frame as the drag end shot (same pixels)."""
+    end_dest = screenshot_path_for_event_end(run_dir, index)
+    src = Path(press_shot_path)
+    end_dest.parent.mkdir(parents=True, exist_ok=True)
+    if src.is_file() and src.resolve() != end_dest.resolve():
+        try:
+            if end_dest.is_file():
+                end_dest.unlink()
+        except OSError:
+            pass
+        import shutil
+
+        shutil.copy2(src, end_dest)
+    return str(end_dest), press_mon_idx, press_mon_offset
 
 
 def _finalize_screenshot(
@@ -1444,6 +1487,8 @@ class RecordingSession:
                 settle_frame=self._latch_settle_frame(),
             )
         )
+        # Other monitors, captured now so a later cross-monitor drop is pre-drag.
+        self._capture_pending_drag_end_screens()
 
     def _capture_pending_right_press(self, run_dir: Path, x: int, y: int) -> None:
         """Reuse the settle-loop window cache; defer only the right-press before-shot."""
@@ -2467,8 +2512,9 @@ class RecordingSession:
         _discard_pending_drag_end_capture_files(captures)
 
     def _capture_pending_drag_end_screens(self) -> None:
+        """Grab every monitor at mouse-down for a possible cross-monitor drop."""
         with self._lock:
-            if not self._left_press_dragging or self._run_dir is None:
+            if self._run_dir is None:
                 return
             if self._pending_drag_end_captures is not None:
                 return
@@ -2713,7 +2759,10 @@ class RecordingSession:
             press_seq = self._left_press_seq
             pending_drag_end = self._pending_drag_end_captures
             self._pending_drag_end_captures = None
-            if pending_drag_end is not None:
+            # Claim the slot even when the mouse-down grab is still queued.
+            # None means the worker should fill this slot. Stop must not delete
+            # those files out from under the emit job.
+            if pending_drag_end is not None or press_seq not in self._drag_end_captures:
                 self._drag_end_captures[press_seq] = pending_drag_end
             timestamp_utc = self._pending_click_timestamp_utc or utc_now_iso()
             modifiers = self._pending_click_modifiers
@@ -3619,16 +3668,27 @@ class RecordingSession:
         except Exception:
             return
         with self._lock:
-            if job.press_seq not in self._left_press_captures and job.press_seq != self._left_press_seq:
+            claimed = self._drag_end_captures.get(job.press_seq, _DRAG_END_UNCLAIMED)
+            gesture_gone = (
+                job.press_seq not in self._left_press_captures
+                and job.press_seq != self._left_press_seq
+                and claimed is _DRAG_END_UNCLAIMED
+            )
+            if gesture_gone:
                 # Gesture already cleared without emit; drop files.
                 _discard_pending_drag_end_capture_files(captures)
                 return
-            if job.press_seq in self._drag_end_captures:
-                _discard_pending_drag_end_capture_files(captures)
+            if claimed is _DRAG_END_UNCLAIMED:
+                self._drag_end_captures[job.press_seq] = captures
+                if self._left_press_seq == job.press_seq:
+                    self._pending_drag_end_captures = captures
                 return
-            self._drag_end_captures[job.press_seq] = captures
-            if self._left_press_seq == job.press_seq:
-                self._pending_drag_end_captures = captures
+            if claimed is None:
+                # Mouse-up already reserved this slot. Keep the files off the
+                # pending pointer so stop() cannot unlink them before emit.
+                self._drag_end_captures[job.press_seq] = captures
+                return
+            _discard_pending_drag_end_capture_files(captures)
 
     def _worker_emit_left_gesture(self, job: _DeferredCaptureJob) -> None:
         if job.event_index is None or job.kind is None or job.cursor_xy is None:
@@ -3689,14 +3749,35 @@ class RecordingSession:
         end_mon_idx: int | None = None
         end_mon_offset: tuple[int, int] | None = None
         if job.kind == "drag" and job.end_xy is not None:
-            end_shot_path, end_mon_idx, end_mon_offset = _finalize_drag_end_screenshot(
-                run_dir,
-                job.event_index,
-                job.end_xy,
-                drag_end,
-                fallback_mon_idx=mon_idx,
-                fallback_mon_offset=mon_offset,
-            )
+            release_mon = _release_monitor_index(job.end_xy)
+            if (
+                release_mon is not None
+                and int(release_mon) == int(mon_idx)
+                and shot_path
+                and Path(shot_path).is_file()
+            ):
+                # Drop stayed on the press monitor: both anchors share that frame.
+                end_shot_path, end_mon_idx, end_mon_offset = (
+                    _copy_mouse_down_screenshot_as_drag_end(
+                        run_dir,
+                        job.event_index,
+                        shot_path,
+                        mon_idx,
+                        mon_offset,
+                    )
+                )
+                self._discard_drag_end_capture_entry(drag_end)
+            else:
+                end_shot_path, end_mon_idx, end_mon_offset = (
+                    _finalize_drag_end_screenshot(
+                        run_dir,
+                        job.event_index,
+                        job.end_xy,
+                        drag_end,
+                        fallback_mon_idx=mon_idx,
+                        fallback_mon_offset=mon_offset,
+                    )
+                )
         else:
             self._discard_drag_end_capture_entry(drag_end)
 
@@ -4298,7 +4379,6 @@ class RecordingSession:
             with self._lock:
                 self._left_press_dragging = True
             self._cancel_pending_click_timer()
-            self._capture_pending_drag_end_screens()
 
     def _on_left_mouse_down(
         self,

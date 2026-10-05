@@ -39,7 +39,7 @@ Recording stores two samples on `window_snapshot_debug`, then `window_verify_fro
 
 | Point | Recorded when | Replay read |
 | --- | --- | --- |
-| `appeared` | An hwnd is in the after list and was not in the before list. Taskbar, the input-pane strip, and the agent hub are dropped. Same-identity hwnd churn cancels out. | The window must be present in the live after list. It does not need to newly appear during the step. |
+| `appeared` | An hwnd is in the after list and was not in the before list. Taskbar, the input-pane strip, and the agent hub are dropped. Same-identity hwnd churn cancels out. The entry is kept only when this step's after-foreground, or a later step's foreground, has the same class name and executable name. | The window must be present in the live after list. It does not need to newly appear during the step. |
 | `disappeared` | An hwnd was in the before list and is gone after. Taskbar, the input-pane strip, and the agent hub are dropped. | The window must be absent from the live after list. It does not need to have been open before the step. |
 | `state` | The same hwnd is still there and `is_minimized` or `is_maximized` flipped. Label is `minimized`, `restored`, `maximized`, or `unmaximized`. | The matching window must be present in the live after list and already hold that end flag (`maximized` → `is_maximized`, `minimized` → `is_minimized`, `restored` → not minimized, `unmaximized` → not maximized). It does not need to flip during the step. |
 

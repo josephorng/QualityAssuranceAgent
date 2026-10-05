@@ -1525,6 +1525,37 @@ def test_window_verify_ignores_title_when_class_and_process_match() -> None:
     assert ok is True
 
 
+def test_limit_appeared_to_windows_that_become_foreground() -> None:
+    from src.recorder.window_snapshot import limit_appeared_to_later_foreground
+
+    predicate = {
+        "appeared": [
+            {
+                "class_name": "Chrome_WidgetWin_1",
+                "title": "Google Chrome",
+                "process_name": "chrome.exe",
+            },
+            {
+                "class_name": "Windows.UI.Core.CoreWindow",
+                "title": "搜尋",
+                "process_name": "SearchHost.exe",
+            },
+        ],
+        "disappeared": [
+            {"class_name": "Notepad", "title": "Untitled", "process_name": "notepad.exe"}
+        ],
+    }
+    chrome_later = {
+        "class_name": "Chrome_WidgetWin_1",
+        "title": "新分頁 - Google Chrome",
+        "process_name": "chrome.exe",
+    }
+    limited = limit_appeared_to_later_foreground(predicate, [chrome_later])
+    assert limited["appeared"] == [predicate["appeared"][0]]
+    assert limited["disappeared"] == predicate["disappeared"]
+    assert "appeared" not in limit_appeared_to_later_foreground(predicate, [])
+
+
 def test_window_verify_title_alone_does_not_match() -> None:
     """A recorded entry with no class and no process is not identified by title."""
     recorded = {"disappeared": [{"class_name": "", "title": "快顯主機"}]}

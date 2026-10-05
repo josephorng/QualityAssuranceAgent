@@ -40,7 +40,9 @@ from src.recorder.text_choose import (
 from src.recorder.text_resolve import event_with_resolved_text, resolve_text_input_text
 from src.recorder.models import RecordedEvent, final_after_screenshot_path
 from src.recorder.window_snapshot import (
+    foreground_identities_from_debug,
     is_agent_app_restore,
+    limit_appeared_to_later_foreground,
     normalize_window_verify_disabled,
     resolve_window_change,
     window_verify_from_debug,
@@ -657,6 +659,26 @@ async def _analyze_all_event_instructions(
     return results, cancelled
 
 
+def _foregrounds_after_appeared(
+    events: list[RecordedEvent],
+    event_pos: int,
+) -> list[dict[str, Any]]:
+    """Foregrounds that can justify an appeared window on this step.
+
+    Includes this step's after-foreground, because the new window often becomes
+    foreground before the next step, and every later step's foreground.
+    """
+    if event_pos < 0 or event_pos >= len(events):
+        return []
+    found = foreground_identities_from_debug(
+        events[event_pos].window_snapshot_debug,
+        include_before=False,
+    )
+    for later in events[event_pos + 1 :]:
+        found.extend(foreground_identities_from_debug(later.window_snapshot_debug))
+    return found
+
+
 def _preserved_window_verify_disabled(
     analysis_path: Path,
     predicate: dict[str, Any],
@@ -687,6 +709,7 @@ def _write_event_analysis(
     elapsed_since_previous: float | None,
     settle_after_seconds: float | None,
     text_resolution: dict[str, Any] | None,
+    later_foregrounds: list[dict[str, Any]] | None = None,
 ) -> None:
     from src.recorder.compile_tool_calls import compile_tool_calls
 
@@ -694,6 +717,10 @@ def _write_event_analysis(
     window_verify = window_verify_from_debug(
         event.window_snapshot_debug,
         typed_text=event.text if event.kind == "text_input" else None,
+    )
+    window_verify = limit_appeared_to_later_foreground(
+        window_verify,
+        later_foregrounds or [],
     )
     disabled = _preserved_window_verify_disabled(analysis_path, window_verify)
     write_json(
@@ -1134,6 +1161,7 @@ async def analyze_recording_session(
                 elapsed_since_previous=elapsed_since_previous,
                 settle_after_seconds=settle_after_seconds,
                 text_resolution=text_resolution,
+                later_foregrounds=_foregrounds_after_appeared(events, event_pos),
             )
             log_info(f"cached event {event.index}: {instruction}")
 

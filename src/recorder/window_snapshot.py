@@ -1361,6 +1361,59 @@ def window_verify_from_debug(
     )
 
 
+def foreground_identities_from_debug(
+    debug: dict[str, Any] | None,
+    *,
+    include_before: bool = True,
+) -> list[dict[str, Any]]:
+    """Foreground samples stored on one step's window debug."""
+    if not isinstance(debug, dict):
+        return []
+    keys = ("signals_before", "signals_after") if include_before else ("signals_after",)
+    found: list[dict[str, Any]] = []
+    for key in keys:
+        signals = debug.get(key)
+        if not isinstance(signals, dict):
+            continue
+        foreground = signals.get("foreground")
+        if isinstance(foreground, dict) and foreground:
+            found.append(foreground)
+    return found
+
+
+def limit_appeared_to_later_foreground(
+    predicate: dict[str, Any],
+    foregrounds: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Drop appeared windows that never become the foreground.
+
+    A window stays when this step's after-foreground, or any later step's
+    foreground, has the same class name and executable name. Title is ignored.
+    """
+    appeared = predicate.get("appeared")
+    if not isinstance(appeared, list) or not appeared:
+        return predicate
+    from src.recorder.verify_signals import identity_matches_recorded
+
+    kept = [
+        item
+        for item in appeared
+        if isinstance(item, dict)
+        and any(
+            isinstance(foreground, dict) and identity_matches_recorded(item, foreground)
+            for foreground in foregrounds
+        )
+    ]
+    if kept == appeared:
+        return predicate
+    trimmed = dict(predicate)
+    if kept:
+        trimmed["appeared"] = kept
+    else:
+        trimmed.pop("appeared", None)
+    return trimmed
+
+
 def window_verify_has_assertions(predicate: dict[str, Any] | None) -> bool:
     if not isinstance(predicate, dict):
         return False

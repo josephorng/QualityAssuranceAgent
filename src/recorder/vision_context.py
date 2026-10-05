@@ -3387,7 +3387,9 @@ def run_pointer_event_yolo_ocr(
             return empty
 
         end_image = event.end_screenshot_path or event.screenshot_path
-        # Start/end frames are independent images — run YOLO+OCR concurrently.
+        # Same-monitor drops store the mouse-down frame in both paths. A
+        # cross-monitor drop uses that other monitor's mouse-down frame.
+        # Run YOLO+OCR concurrently either way.
         with ThreadPoolExecutor(max_workers=2) as pool:
             start_future = pool.submit(
                 build_vision_context_at_point,

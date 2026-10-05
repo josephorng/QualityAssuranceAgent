@@ -1496,10 +1496,15 @@ def _entries_match(
     candidate: dict[str, Any],
     *,
     match_change: bool,
+    match_title: bool = True,
 ) -> bool:
     recorded_class, recorded_title, recorded_process = _entry_identity(recorded)
     live_class, live_title, live_process = _entry_identity(candidate)
-    if recorded_title != live_title:
+    if match_title:
+        if recorded_title != live_title:
+            return False
+    elif not recorded_class and not recorded_process:
+        # Replay ignores title. Class or process is required to identify a window.
         return False
     # Blank recorded fields come from older snapshots that did not store them.
     if recorded_class and recorded_class != live_class:
@@ -1518,9 +1523,15 @@ def _take_matching_entry(
     item: dict[str, Any],
     *,
     match_change: bool,
+    match_title: bool = True,
 ) -> dict[str, Any] | None:
     for index, candidate in enumerate(available):
-        if _entries_match(item, candidate, match_change=match_change):
+        if _entries_match(
+            item,
+            candidate,
+            match_change=match_change,
+            match_title=match_title,
+        ):
             return available.pop(index)
     return None
 
@@ -1537,16 +1548,6 @@ def _after_state_matches(win: WindowInfo, change: str) -> bool:
     if label == "restored":
         return not bool(win.is_minimized)
     return False
-
-
-def _find_matching_after_window(
-    windows: list[WindowInfo],
-    item: dict[str, Any],
-) -> WindowInfo | None:
-    for win in windows:
-        if _entries_match(item, _verify_entry(win), match_change=False):
-            return win
-    return None
 
 
 def window_verify_satisfied(
@@ -1588,7 +1589,9 @@ def window_verify_satisfied(
             for item in needed_appeared:
                 if not isinstance(item, dict) or _is_window_verify_noise(item):
                     continue
-                if _take_matching_entry(available, item, match_change=False) is None:
+                if _take_matching_entry(
+                    available, item, match_change=False, match_title=False
+                ) is None:
                     title = str(item.get("title", "") or "").strip()
                     return False, f"window verify missed appeared: {title or item}"
         else:
@@ -1596,7 +1599,9 @@ def window_verify_satisfied(
             for item in needed_appeared:
                 if not isinstance(item, dict) or _is_window_verify_noise(item):
                     continue
-                if _take_matching_entry(available, item, match_change=False) is None:
+                if _take_matching_entry(
+                    available, item, match_change=False, match_title=False
+                ) is None:
                     title = str(item.get("title", "") or "").strip()
                     return False, f"window verify missed appeared: {title or item}"
 
@@ -1611,7 +1616,9 @@ def window_verify_satisfied(
             for item in needed_disappeared:
                 if not isinstance(item, dict) or _is_window_verify_noise(item):
                     continue
-                if _take_matching_entry(available, item, match_change=False) is None:
+                if _take_matching_entry(
+                    available, item, match_change=False, match_title=False
+                ) is None:
                     title = str(item.get("title", "") or "").strip()
                     return False, f"window verify missed disappeared: {title or item}"
         else:
@@ -1619,7 +1626,9 @@ def window_verify_satisfied(
                 if not isinstance(item, dict) or _is_window_verify_noise(item):
                     continue
                 still_present = any(
-                    _entries_match(item, candidate, match_change=False)
+                    _entries_match(
+                        item, candidate, match_change=False, match_title=False
+                    )
                     for candidate in after_entries
                 )
                 if still_present:
@@ -1634,8 +1643,19 @@ def window_verify_satisfied(
                     continue
                 title = str(item.get("title", "") or "").strip()
                 change = str(item.get("change", "") or "").strip()
-                match = _find_matching_after_window(after_windows, item)
-                if match is None or not _after_state_matches(match, change):
+                matched = [
+                    win
+                    for win in after_windows
+                    if _entries_match(
+                        item,
+                        _verify_entry(win),
+                        match_change=False,
+                        match_title=False,
+                    )
+                ]
+                if not matched or not any(
+                    _after_state_matches(win, change) for win in matched
+                ):
                     return False, f"window verify missed state: {title or item}"
         else:
             available = [
@@ -1644,7 +1664,9 @@ def window_verify_satisfied(
             for item in needed_state:
                 if not isinstance(item, dict):
                     continue
-                found = _take_matching_entry(available, item, match_change=True)
+                found = _take_matching_entry(
+                    available, item, match_change=True, match_title=False
+                )
                 if found is None:
                     title = str(item.get("title", "") or "").strip()
                     return False, f"window verify missed state: {title or item}"

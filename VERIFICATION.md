@@ -35,7 +35,7 @@ Recording stores two samples on `window_snapshot_debug`, then `window_verify_fro
 
 ## Window list
 
-`snapshot_top_level_windows` enumerates visible top-level windows. Match key is class, normalized title, and process name. The hwnd is used only to pair a window with itself between the two lists. The agent hub window (`電腦使用代理`), the taskbar, and the input-pane strip (`EdgeUiInputTopWndClass`) are dropped. Replay skips those classes when an older analysis still lists them. A title change on an hwnd that is still present is not an appear or disappear.
+`snapshot_top_level_windows` enumerates visible top-level windows. Recording still pairs a window with itself by hwnd, and same-identity hwnd churn uses class, normalized title, and process name. Replay of `appeared`, `disappeared`, and `state` compares class name and process name only. Title is stored for display and is not compared, because it can differ on the next run. A blank recorded class or process matches any live value. An entry with neither does not match. The agent hub window (`電腦使用代理`), the taskbar, and the input-pane strip (`EdgeUiInputTopWndClass`) are dropped. Replay skips those classes when an older analysis still lists them. A title change on an hwnd that is still present is not an appear or disappear.
 
 | Point | Recorded when | Replay read |
 | --- | --- | --- |
@@ -47,7 +47,7 @@ Replay takes the before list at the start of the step and the after list after `
 
 ## Signals
 
-Replay reads a signal only when the recorded predicate contains that field (`capture_replay_after_signals`). Identity match is class, normalized title, and process. A blank recorded class or process matches any live value.
+Replay reads a signal only when the recorded predicate contains that field (`capture_replay_after_signals`). `foreground` and `click_window` match on class name and process name. Title is not compared. A blank recorded class or process matches any live value. An entry with neither does not match.
 
 | Point | Recorded when | How the after value is read | Replay read |
 | --- | --- | --- | --- |

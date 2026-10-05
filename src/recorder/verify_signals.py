@@ -176,19 +176,21 @@ def identities_equal(left: Any, right: Any) -> bool:
 
 
 def identity_matches_recorded(recorded: Any, live: Any) -> bool:
-    """Blank recorded class or process matches any live value (older snapshots)."""
+    """Replay match is class and process. Title is not compared.
+
+    A blank recorded class or process matches any live value. An entry with
+    neither does not match.
+    """
     if not isinstance(recorded, dict) or not isinstance(live, dict):
-        return False
-    recorded_title = _normalize_title(str(recorded.get("title") or ""))
-    live_title = _normalize_title(str(live.get("title") or ""))
-    if recorded_title != live_title:
         return False
     recorded_class = str(recorded.get("class_name") or "").strip()
     live_class = str(live.get("class_name") or "").strip()
-    if recorded_class and recorded_class != live_class:
-        return False
     recorded_process = str(recorded.get("process_name") or "").strip()
     live_process = str(live.get("process_name") or "").strip()
+    if not recorded_class and not recorded_process:
+        return False
+    if recorded_class and recorded_class != live_class:
+        return False
     if recorded_process and recorded_process != live_process:
         return False
     return True

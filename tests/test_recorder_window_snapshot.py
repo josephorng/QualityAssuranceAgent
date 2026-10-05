@@ -1375,7 +1375,122 @@ def test_window_verify_state_restored_and_minimized_use_after_flags() -> None:
     assert "Google Chrome" in reason
 
 
-def test_window_verify_blank_class_matches_live_class() -> None:
+def test_window_verify_ignores_title_when_class_and_process_match() -> None:
+    recorded_appeared = {
+        "appeared": [
+            {
+                "class_name": "CabinetWClass",
+                "title": "常用 - 檔案總管",
+                "process_name": "explorer.exe",
+            }
+        ]
+    }
+    renamed = _win(
+        3,
+        "下載 - 檔案總管",
+        class_name="CabinetWClass",
+        process_name="explorer.exe",
+    )
+    ok, _reason = window_verify_satisfied(
+        recorded_appeared,
+        {},
+        live_windows_after=[renamed],
+    )
+    assert ok is True
+    other_process = _win(
+        4,
+        "常用 - 檔案總管",
+        class_name="CabinetWClass",
+        process_name="chrome.exe",
+    )
+    ok, reason = window_verify_satisfied(
+        recorded_appeared,
+        {},
+        live_windows_after=[other_process],
+    )
+    assert ok is False
+    assert "檔案總管" in reason
+
+    recorded_state = {
+        "state": [
+            {
+                "class_name": "CabinetWClass",
+                "title": "常用 - 檔案總管",
+                "process_name": "explorer.exe",
+                "change": "maximized",
+            }
+        ]
+    }
+    maximized = _win(
+        3,
+        "下載 - 檔案總管",
+        class_name="CabinetWClass",
+        process_name="explorer.exe",
+        is_maximized=True,
+    )
+    ok, _reason = window_verify_satisfied(
+        recorded_state,
+        {},
+        live_windows_after=[maximized],
+    )
+    assert ok is True
+
+    recorded_foreground = {
+        "foreground": {
+            "class_name": "Chrome_WidgetWin_1",
+            "title": "新分頁 - Google Chrome",
+            "process_name": "chrome.exe",
+        }
+    }
+    ok, _reason = window_verify_satisfied(
+        recorded_foreground,
+        {},
+        live_after={
+            "foreground": {
+                "class_name": "Chrome_WidgetWin_1",
+                "title": "YouTube - Google Chrome",
+                "process_name": "chrome.exe",
+            }
+        },
+    )
+    assert ok is True
+    ok, reason = window_verify_satisfied(
+        recorded_foreground,
+        {},
+        live_after={
+            "foreground": {
+                "class_name": "Chrome_WidgetWin_1",
+                "title": "新分頁 - Google Chrome",
+                "process_name": "msedge.exe",
+            }
+        },
+    )
+    assert ok is False
+    assert "foreground" in reason
+
+    recorded_click = {
+        "click_window": {
+            "class_name": "CabinetWClass",
+            "title": "常用 - 檔案總管",
+            "process_name": "explorer.exe",
+        }
+    }
+    ok, _reason = window_verify_satisfied(
+        recorded_click,
+        {},
+        live_after={
+            "point_window": {
+                "class_name": "CabinetWClass",
+                "title": "下載 - 檔案總管",
+                "process_name": "explorer.exe",
+            }
+        },
+    )
+    assert ok is True
+
+
+def test_window_verify_title_alone_does_not_match() -> None:
+    """A recorded entry with no class and no process is not identified by title."""
     recorded = {"disappeared": [{"class_name": "", "title": "快顯主機"}]}
     ok, _reason = window_verify_satisfied(recorded, {}, live_windows_after=[])
     assert ok is True
@@ -1387,13 +1502,12 @@ def test_window_verify_blank_class_matches_live_class() -> None:
             process_name="explorer.exe",
         )
     ]
-    ok, reason = window_verify_satisfied(
+    ok, _reason = window_verify_satisfied(
         recorded,
         {},
         live_windows_after=still_open,
     )
-    assert ok is False
-    assert "快顯主機" in reason
+    assert ok is True
 
 
 def test_window_verify_ignores_input_pane_appear_disappear() -> None:

@@ -98,6 +98,9 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 .instruction-group > summary .instruction-expected {
   font-size: .82rem; font-weight: 500; color: #57606a; line-height: 1.35;
 }
+.instruction-group > summary .instruction-verify-miss {
+  font-size: .82rem; font-weight: 700; color: #cf222e; line-height: 1.35;
+}
 .instruction-group > summary .instruction-expected-empty {
   color: #8c959f; font-style: italic;
 }
@@ -456,6 +459,15 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 }
 .verify-condition-value .mono { font-size: .85rem; }
 .verify-condition-row.is-off .verify-condition-value { color: #8c959f; }
+.verify-condition-row.is-mismatch {
+  margin: 0 -.35rem; padding: .2rem .35rem; border-radius: 6px;
+  background: #ffebe9; outline: 1px solid #ff8182;
+}
+.verify-condition-row.is-mismatch .verify-condition-label,
+.verify-condition-row.is-mismatch .verify-condition-value { color: #cf222e; }
+.verify-conditions.is-readonly .verify-condition-row.is-mismatch input { accent-color: #cf222e; }
+.verify-conditions.is-readonly .verify-condition-row label,
+.verify-conditions.is-readonly .verify-condition-row input { cursor: default; }
 .verify-conditions-empty {
   margin: 0; color: #57606a; font-size: .9rem;
 }
@@ -3679,6 +3691,52 @@ def _recording_baseline_for_group(group: dict[str, Any], baselines: dict[int, st
     return baselines.get(step_index)
 
 
+def _recording_analyses_by_step(
+    run_root: Path,
+    report: dict[str, Any] | None,
+    groups: list[dict[str, Any]],
+) -> dict[int, dict[str, Any]]:
+    """Recording analysis per script step, including every verify condition.
+
+    Matched the same way as recorded after-screenshots: goal text against the
+    recording instruction, so a shifted script does not attach the wrong checks.
+    """
+    recording = _resolve_run_recording_dir(run_root, report)
+    if recording is None:
+        return {}
+    from src.common.script_helper import _iter_recording_instructions
+
+    try:
+        rows = _iter_recording_instructions(recording)
+    except (OSError, ValueError):
+        return {}
+    step_goals = _ordered_step_goals(groups)
+    matcher = SequenceMatcher(
+        a=[goal for _, goal in step_goals],
+        b=[instruction for _index, instruction, _analysis in rows],
+        autojunk=False,
+    )
+    resolved: dict[int, dict[str, Any]] = {}
+    for block in matcher.get_matching_blocks():
+        for offset in range(block.size):
+            step_index = step_goals[block.a + offset][0]
+            analysis = rows[block.b + offset][2]
+            if step_index not in resolved and isinstance(analysis, dict):
+                resolved[step_index] = analysis
+    return resolved
+
+
+def _recording_analysis_for_group(
+    group: dict[str, Any],
+    analyses: dict[int, dict[str, Any]],
+) -> dict[str, Any] | None:
+    step_index = group.get("script_step_index")
+    if not isinstance(step_index, int):
+        return None
+    analysis = analyses.get(step_index)
+    return analysis if isinstance(analysis, dict) else None
+
+
 def _load_step_verify_meta(run_root: Path) -> dict[tuple[int, int], dict[str, Any]]:
     """Load verification metadata from ``steps/*.json`` (source of truth for debugging)."""
     steps_dir = run_root / "steps"
@@ -3943,6 +4001,7 @@ def _render_instruction_group_html(
     status: Any = None,
     verify_live_path: str | None = None,
     baseline_after_path: str | None = None,
+    recording_analysis: dict[str, Any] | None = None,
 ) -> str:
     operation_count = len(operations)
     count_label = escape(f"{operation_count} 個動作")
@@ -4003,6 +4062,16 @@ def _render_instruction_group_html(
         baseline_after_path=baseline_after_path,
         live_fallback_shot=_last_after_shot(operations),
     )
+    conditions_panel, verify_miss = _render_session_verify_conditions_html(
+        recording_analysis,
+        verify=verify,
+        status=status,
+    )
+    miss_summary = (
+        f'<span class="instruction-verify-miss">{escape(verify_miss)}</span>'
+        if verify_miss
+        else ""
+    )
 
     return (
         f'<details class="instruction-group" id="step-{step_number}">'
@@ -4011,10 +4080,12 @@ def _render_instruction_group_html(
         f'<span class="instruction-summary-text">'
         f'<span class="instruction-title">{escape(goal)}</span>'
         f"{expected_summary}"
+        f"{miss_summary}"
         f"</span>"
         f"{badges}"
         f"</summary>"
         f"{verify_panel}"
+        f"{conditions_panel}"
         f"{body}"
         f"</details>"
     )
@@ -5312,6 +5383,125 @@ def _html_to_plain(value_html: str) -> str:
     return unescape(text).strip()
 
 
+_WINDOW_VERIFY_MISS_RE = re.compile(
+    r"^window verify missed ([a-z_]+)(?::\s*(.*))?$",
+    re.DOTALL,
+)
+
+
+def _window_verify_miss(reason: Any) -> tuple[str, str] | None:
+    """Parse ``window verify missed <key>: <detail>`` from a replay failure."""
+    if not isinstance(reason, str):
+        return None
+    match = _WINDOW_VERIFY_MISS_RE.match(reason.strip())
+    if match is None:
+        return None
+    return match.group(1), (match.group(2) or "").strip()
+
+
+def _step_verify_failed(verify: Any, status: Any) -> bool:
+    if isinstance(verify, dict):
+        if verify.get("accomplished") is False:
+            return True
+        if verify.get("branch") in {
+            "retry",
+            "goto",
+            "skip",
+            "abort",
+            "smart",
+            "stop",
+            "replan",
+            "backtrack",
+        }:
+            return True
+    if isinstance(status, str) and status.strip().lower() in {"failed", "verify_failed", "error"}:
+        return True
+    return False
+
+
+def _predicate_item(predicate: dict[str, Any], key: str, index: int | None) -> Any:
+    value = predicate.get(key)
+    if index is None:
+        return value
+    if isinstance(value, list) and 0 <= index < len(value):
+        return value[index]
+    return None
+
+
+def _detail_matches_verify_item(detail: str, item: Any) -> bool:
+    """True when a miss reason's detail names this recorded condition."""
+    if isinstance(item, str):
+        return bool(detail) and detail == item.strip()
+    if not isinstance(item, dict) or not detail:
+        return False
+    title = str(item.get("title") or "").strip()
+    if title and detail == title:
+        return True
+    identity = _format_window_verify_identity(item)
+    if detail == identity:
+        return True
+    class_name = str(item.get("class_name") or "").strip()
+    process_name = str(item.get("process_name") or "").strip()
+    if class_name and process_name and detail == f"{class_name} / {process_name}":
+        return True
+    if class_name and class_name not in detail:
+        return False
+    if process_name and process_name not in detail:
+        return False
+    if title and title not in detail:
+        return False
+    return bool(class_name or process_name or title)
+
+
+def _mismatched_verify_condition(
+    *,
+    rows: list[tuple[str, int | None, str, str, bool]],
+    predicate: dict[str, Any] | None,
+    reason: Any,
+    step_failed: bool,
+) -> tuple[str, int | None, str] | None:
+    """Return ``(key, index, summary)`` for the check a failed replay missed.
+
+    Window-verify reasons name one field. A vision failure highlights the
+    enabled expected-outcome row. Disabled checks are never highlighted.
+    """
+    recorded = predicate if isinstance(predicate, dict) else {}
+    miss = _window_verify_miss(reason)
+    if miss is not None:
+        key, detail = miss
+        enabled = [row for row in rows if row[0] == key and row[4]]
+        chosen: tuple[str, int | None, str, str] | None = None
+        if len(enabled) == 1:
+            chosen = enabled[0][0], enabled[0][1], enabled[0][2], enabled[0][3]
+        else:
+            for row_key, index, label, value_html, _enabled in enabled:
+                plain = _html_to_plain(value_html)
+                item = _predicate_item(recorded, row_key, index)
+                title_hit = bool(detail) and (
+                    detail == plain or plain.startswith(f"{detail} ") or plain.startswith(f"{detail}(")
+                )
+                if title_hit or _detail_matches_verify_item(detail, item):
+                    chosen = (row_key, index, label, value_html)
+                    break
+        if chosen is None:
+            return None
+        row_key, index, label, value_html = chosen
+        return (row_key, index, _verify_miss_summary(label, row_key, _html_to_plain(value_html)))
+    if not step_failed:
+        return None
+    for key, index, label, _value_html, enabled in rows:
+        if key == "expected_outcome" and enabled:
+            return (key, index, _verify_miss_summary(label, key, ""))
+    return None
+
+
+def _verify_miss_summary(label: str, key: str, plain: str) -> str:
+    if key == "expected_outcome" or not plain:
+        return f"不符：{label}"
+    short = plain if len(plain) <= 60 else f"{plain[:57]}…"
+    return f"不符：{label} · {short}"
+
+
 def _render_verify_condition_row_html(
     *,
     key: str,
@@ -5319,15 +5509,19 @@ def _render_verify_condition_row_html(
     label: str,
     value_html: str,
     enabled: bool,
+    readonly: bool = False,
+    mismatch: bool = False,
 ) -> str:
     index_attr = f' data-verify-index="{index}"' if index is not None else ""
     checked_attr = " checked" if enabled else ""
+    disabled_attr = " disabled" if readonly else ""
     off_class = "" if enabled else " is-off"
+    mismatch_class = " is-mismatch" if mismatch else ""
     return (
-        f'<li class="verify-condition-row{off_class}">'
+        f'<li class="verify-condition-row{off_class}{mismatch_class}">'
         f"<label>"
         f'<input type="checkbox" class="use-verify-condition" '
-        f'data-verify-key="{escape(key, quote=True)}"{index_attr}{checked_attr}>'
+        f'data-verify-key="{escape(key, quote=True)}"{index_attr}{checked_attr}{disabled_attr}>'
         f'<span class="verify-condition-label">{escape(label)}</span>'
         f'<span class="verify-condition-value">{value_html}</span>'
         f"</label>"
@@ -5340,8 +5534,14 @@ def _render_verify_conditions_panel_html(
     analysis: dict[str, Any] | None,
     expected_outcome: str,
     use_expected_outcome: bool,
-) -> str:
-    """Checklist of replay checks for this recorded step. Unchecked items are skipped."""
+    readonly: bool = False,
+    verify: Any = None,
+    status: Any = None,
+) -> tuple[str, str]:
+    """Checklist of replay checks for this recorded step. Unchecked items are skipped.
+
+    Returns the panel HTML and a short miss summary (empty when nothing mismatched).
+    """
     predicate = analysis.get("window_verify") if isinstance(analysis, dict) else None
     disabled = analysis.get("window_verify_disabled") if isinstance(analysis, dict) else None
     rows = _window_verify_condition_rows(
@@ -5352,6 +5552,17 @@ def _render_verify_conditions_panel_html(
     if use_expected_outcome or outcome_text:
         value_html = escape(outcome_text) if outcome_text else "（已啟用，但文字為空）"
         rows.append(("expected_outcome", None, "畫面預期結果", value_html, use_expected_outcome))
+
+    reason = verify.get("reason") if isinstance(verify, dict) else None
+    mismatch = _mismatched_verify_condition(
+        rows=rows,
+        predicate=predicate if isinstance(predicate, dict) else None,
+        reason=reason,
+        step_failed=_step_verify_failed(verify, status),
+    )
+    mismatch_key = mismatch[0] if mismatch is not None else None
+    mismatch_index = mismatch[1] if mismatch is not None else None
+    miss_summary = mismatch[2] if mismatch is not None else ""
 
     if not rows:
         body = (
@@ -5367,17 +5578,46 @@ def _render_verify_conditions_panel_html(
                 label=label,
                 value_html=value_html,
                 enabled=enabled,
+                readonly=readonly,
+                mismatch=key == mismatch_key and index == mismatch_index,
             )
             for key, index, label, value_html, enabled in rows
         )
         body = f'<ul class="verify-conditions-list">{items}</ul>'
-    return (
-        f'<div class="verify-conditions">'
+    readonly_class = " is-readonly" if readonly else ""
+    panel = (
+        f'<div class="verify-conditions{readonly_class}">'
         f'<div class="verify-conditions-title">驗證條件'
         f'<span class="verify-conditions-status" aria-live="polite"></span>'
         f"</div>"
         f"{body}"
         f"</div>"
+    )
+    return panel, miss_summary
+
+
+def _render_session_verify_conditions_html(
+    analysis: dict[str, Any] | None,
+    *,
+    verify: Any = None,
+    status: Any = None,
+) -> tuple[str, str]:
+    """Read-only copy of the recording's verify checklist for a replay step."""
+    if not isinstance(analysis, dict):
+        return "", ""
+    expected_outcome = ""
+    raw_outcome = analysis.get("expected_outcome")
+    if isinstance(raw_outcome, str) and raw_outcome.strip():
+        expected_outcome = raw_outcome.strip()
+    from src.recorder.analyze import use_expected_outcome_enabled
+
+    return _render_verify_conditions_panel_html(
+        analysis=analysis,
+        expected_outcome=expected_outcome,
+        use_expected_outcome=use_expected_outcome_enabled(analysis),
+        readonly=True,
+        verify=verify,
+        status=status,
     )
 
 
@@ -5691,7 +5931,7 @@ def _render_recording_event_html(
         show=bool(instruction) or bool(expected_outcome),
     )
     instruction_html = _render_step_instruction_panel_html(instruction=instruction)
-    verify_conditions_html = _render_verify_conditions_panel_html(
+    verify_conditions_html, _ = _render_verify_conditions_panel_html(
         analysis=analysis if isinstance(analysis, dict) else None,
         expected_outcome=expected_outcome,
         use_expected_outcome=use_expected_outcome,
@@ -6764,9 +7004,15 @@ def write_session_html_from_run(run_root: Path) -> Path:
         else 0
     )
     remaining_groups = instruction_groups[min(smart_actor_count, len(instruction_groups)) :]
+    report_payload = report if isinstance(report, dict) else None
     recording_baselines = _recording_baselines_by_step(
         run_root,
-        report if isinstance(report, dict) else None,
+        report_payload,
+        remaining_groups,
+    )
+    recording_analyses = _recording_analyses_by_step(
+        run_root,
+        report_payload,
         remaining_groups,
     )
     groups_html = [
@@ -6783,6 +7029,7 @@ def write_session_html_from_run(run_root: Path) -> Path:
                 _baseline_path_from_group(group)
                 or _recording_baseline_for_group(group, recording_baselines)
             ),
+            recording_analysis=_recording_analysis_for_group(group, recording_analyses),
         )
         for index, group in enumerate(remaining_groups, start=smart_actor_count + 1)
     ]

@@ -635,6 +635,353 @@ def test_write_session_html_shows_recording_baseline_when_verify_skipped(tmp_pat
     assert "OtherMachine" not in html
 
 
+def test_write_session_html_shows_recording_verify_conditions(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = runs_root / "task_verify_conditions"
+    recording = tmp_path / "recordings" / "demo_rec"
+    instructions = ["點擊「搜尋」", "輸入「hello」"]
+    _write_playback_recording(recording, instructions)
+    (recording / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": instructions[0],
+                "use_expected_outcome": False,
+                "expected_outcome": "搜尋介面已開啟",
+                "window_verify": {
+                    "disappeared": [
+                        {
+                            "class_name": "Popup",
+                            "title": "快顯主機",
+                            "process_name": "explorer.exe",
+                        },
+                        {
+                            "class_name": "CabinetWClass",
+                            "title": "檔案總管",
+                            "process_name": "explorer.exe",
+                        },
+                    ],
+                    "foreground": {
+                        "class_name": "ApplicationManager_DesktopShellWindow",
+                        "title": "",
+                        "process_name": "explorer.exe",
+                    },
+                    "click_window": {
+                        "class_name": "Shell_TrayWnd",
+                        "title": "",
+                        "process_name": "explorer.exe",
+                    },
+                },
+                "window_verify_disabled": ["disappeared:0", "click_window"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (recording / "analysis" / "event_002.json").write_text(
+        json.dumps(
+            {
+                "event_index": 2,
+                "instruction": instructions[1],
+                "use_expected_outcome": True,
+                "expected_outcome": "輸入欄顯示 hello",
+                "window_verify": {
+                    "focused": {"name": "位址列", "value": "hello"},
+                    "process_started": ["WINWORD.EXE"],
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    timestamps = ["2026-06-11T06:00:05+00:00", "2026-06-11T06:00:15+00:00"]
+    for index, (instruction, timestamp) in enumerate(zip(instructions, timestamps)):
+        _write_step(
+            run_root,
+            transcript_counter=index,
+            script_step_index=index,
+            goal=instruction,
+            started_at=timestamp,
+            finished_at=timestamp,
+        )
+    _write_hand_csv(
+        run_root,
+        [
+            {
+                "timestamp": timestamps[0],
+                "action": "click",
+                "args": {"instruction": "「搜尋」"},
+                "ok": True,
+                "screenshot_name": "",
+                "screenshot_before_path": "",
+                "screenshot_after_path": "",
+                "message": "executed",
+            },
+            {
+                "timestamp": timestamps[1],
+                "action": "type_text",
+                "args": {"text": "hello"},
+                "ok": True,
+                "screenshot_name": "",
+                "screenshot_before_path": "",
+                "screenshot_after_path": "",
+                "message": "executed",
+            },
+        ],
+    )
+    (run_root / "report.json").write_text(
+        json.dumps(
+            {
+                "script_path": str(recording),
+                "steps": [
+                    {
+                        "transcript_counter": index,
+                        "script_step_index": index,
+                        "goal": instruction,
+                    }
+                    for index, instruction in enumerate(instructions)
+                ],
+                "tool_results": [
+                    {
+                        "transcript_counter": index,
+                        "script_step_index": index,
+                        "timestamp_utc": timestamp,
+                    }
+                    for index, timestamp in enumerate(timestamps)
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_session_html_from_run(run_root).read_text(encoding="utf-8")
+
+    step_one = html.split('id="step-1"', 1)[1].split('id="step-2"', 1)[0]
+    step_two = html.split('id="step-2"', 1)[1]
+    assert 'class="verify-conditions is-readonly"' in step_one
+    assert "驗證條件" in step_one
+    assert "視窗消失" in step_one
+    assert "快顯主機" in step_one
+    assert "檔案總管" in step_one
+    assert "前景視窗" in step_one
+    assert "ApplicationManager_DesktopShellWindow" in step_one
+    assert "點擊視窗" in step_one
+    assert "畫面預期結果" in step_one
+    assert "搜尋介面已開啟" in step_one
+    assert 'data-verify-key="disappeared" data-verify-index="0" disabled' in step_one
+    assert 'data-verify-key="disappeared" data-verify-index="1" checked disabled' in step_one
+    assert 'data-verify-key="foreground" checked disabled' in step_one
+    assert 'data-verify-key="click_window" disabled' in step_one
+    assert 'data-verify-key="expected_outcome" disabled' in step_one
+    assert "焦點元素" in step_two
+    assert "位址列" in step_two
+    assert "行程啟動" in step_two
+    assert "WINWORD.EXE" in step_two
+    assert "輸入欄顯示 hello" in step_two
+    assert 'data-verify-key="expected_outcome" checked disabled' in step_two
+    assert 'is-mismatch"' not in html
+    assert 'class="instruction-verify-miss"' not in html
+
+
+def _verify_condition_row(html: str, key: str, index: int | None = None) -> str:
+    needle = f'data-verify-key="{key}"'
+    if index is not None:
+        needle += f' data-verify-index="{index}"'
+    key_at = html.find(needle)
+    assert key_at >= 0
+    start = html.rfind('<li class="verify-condition-row', 0, key_at)
+    end = html.find("</li>", key_at)
+    return html[start:end]
+
+
+def test_write_session_html_highlights_mismatched_verify_condition(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = runs_root / "task_verify_mismatch"
+    recording = tmp_path / "recordings" / "demo_rec"
+    instructions = ["點擊「搜尋」", "開啟 Word", "確認搜尋介面"]
+    _write_playback_recording(recording, instructions)
+    (recording / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": instructions[0],
+                "use_expected_outcome": False,
+                "window_verify": {
+                    "disappeared": [
+                        {
+                            "class_name": "Popup",
+                            "title": "快顯主機",
+                            "process_name": "explorer.exe",
+                        }
+                    ],
+                    "foreground": {
+                        "class_name": "ApplicationManager_DesktopShellWindow",
+                        "title": "",
+                        "process_name": "explorer.exe",
+                    },
+                    "click_window": {
+                        "class_name": "Shell_TrayWnd",
+                        "title": "",
+                        "process_name": "explorer.exe",
+                    },
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (recording / "analysis" / "event_002.json").write_text(
+        json.dumps(
+            {
+                "event_index": 2,
+                "instruction": instructions[1],
+                "use_expected_outcome": False,
+                "window_verify": {
+                    "process_started": ["EXCEL.EXE", "WINWORD.EXE"],
+                    "disappeared": [
+                        {
+                            "class_name": "Popup",
+                            "title": "快顯主機",
+                            "process_name": "explorer.exe",
+                        },
+                        {
+                            "class_name": "CabinetWClass",
+                            "title": "檔案總管",
+                            "process_name": "explorer.exe",
+                        },
+                    ],
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (recording / "analysis" / "event_003.json").write_text(
+        json.dumps(
+            {
+                "event_index": 3,
+                "instruction": instructions[2],
+                "use_expected_outcome": True,
+                "expected_outcome": "搜尋介面已開啟",
+                "window_verify": {"focused": {"name": "搜尋", "value": ""}},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    reasons = [
+        (
+            "verify_failed",
+            "window verify missed foreground: "
+            "{'class_name': 'ApplicationManager_DesktopShellWindow', "
+            "'title': '', 'process_name': 'explorer.exe'}",
+        ),
+        ("verify_failed", "window verify missed disappeared: 檔案總管"),
+        ("verify_failed", "Search panel is still closed"),
+    ]
+    timestamps = [
+        "2026-06-11T06:00:05+00:00",
+        "2026-06-11T06:00:15+00:00",
+        "2026-06-11T06:00:25+00:00",
+    ]
+    for index, (instruction, timestamp, (status, reason)) in enumerate(
+        zip(instructions, timestamps, reasons)
+    ):
+        _write_step(
+            run_root,
+            transcript_counter=index,
+            script_step_index=index,
+            goal=instruction,
+            started_at=timestamp,
+            finished_at=timestamp,
+        )
+        step_path = run_root / "steps" / f"{index}_{index}.json"
+        payload = json.loads(step_path.read_text(encoding="utf-8"))
+        payload["step_timing"].update(
+            {
+                "status": status,
+                "verify": {
+                    "accomplished": False,
+                    "branch": "retry",
+                    "target_step": None,
+                    "clearly_unmet": True,
+                    "reason": reason,
+                },
+            }
+        )
+        step_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    _write_hand_csv(
+        run_root,
+        [
+            {
+                "timestamp": timestamp,
+                "action": "click",
+                "args": {"instruction": instruction},
+                "ok": True,
+                "screenshot_name": "",
+                "screenshot_before_path": "",
+                "screenshot_after_path": "",
+                "message": "executed",
+            }
+            for instruction, timestamp in zip(instructions, timestamps)
+        ],
+    )
+    (run_root / "report.json").write_text(
+        json.dumps(
+            {
+                "script_path": str(recording),
+                "steps": [
+                    {
+                        "transcript_counter": index,
+                        "script_step_index": index,
+                        "goal": instruction,
+                    }
+                    for index, instruction in enumerate(instructions)
+                ],
+                "tool_results": [
+                    {
+                        "transcript_counter": index,
+                        "script_step_index": index,
+                        "timestamp_utc": timestamp,
+                    }
+                    for index, timestamp in enumerate(timestamps)
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_session_html_from_run(run_root).read_text(encoding="utf-8")
+    step_one = html.split('id="step-1"', 1)[1].split('id="step-2"', 1)[0]
+    step_two = html.split('id="step-2"', 1)[1].split('id="step-3"', 1)[0]
+    step_three = html.split('id="step-3"', 1)[1]
+
+    foreground = _verify_condition_row(step_one, "foreground")
+    click_window = _verify_condition_row(step_one, "click_window")
+    assert "is-mismatch" in foreground
+    assert "is-mismatch" not in click_window
+    assert "不符：前景視窗" in step_one
+    assert "ApplicationManager_DesktopShellWindow" in step_one
+
+    missed = _verify_condition_row(step_two, "disappeared", 1)
+    kept = _verify_condition_row(step_two, "disappeared", 0)
+    excel = _verify_condition_row(step_two, "process_started", 0)
+    assert "is-mismatch" in missed
+    assert "is-mismatch" not in kept
+    assert "is-mismatch" not in excel
+    assert "不符：視窗消失 · 檔案總管" in step_two
+
+    outcome = _verify_condition_row(step_three, "expected_outcome")
+    focused = _verify_condition_row(step_three, "focused")
+    assert "is-mismatch" in outcome
+    assert "is-mismatch" not in focused
+    assert "不符：畫面預期結果" in step_three
+
+
 def test_write_session_html_skips_baseline_when_step_goal_shifted(tmp_path: Path) -> None:
     runs_root = tmp_path / "runs"
     run_root = runs_root / "task_shifted_script"

@@ -1434,7 +1434,7 @@ def test_list_primary_target_options_includes_unknown() -> None:
     assert options[1]["label"] == "「設定」文字"
 
 
-def test_list_nearby_landmark_options_includes_unknown() -> None:
+def test_list_nearby_landmark_options_skips_unknown() -> None:
     from src.recorder.vision_context import list_nearby_landmark_options
 
     options = list_nearby_landmark_options(
@@ -1452,7 +1452,7 @@ def test_list_nearby_landmark_options_includes_unknown() -> None:
                     "bbox": [40, 0, 20, 20],
                     "center": [50, 10],
                     "class_name": "unknown",
-                    "text": "v",
+                    "text": "\ue01a",
                 },
                 {
                     "bbox": [0, 40, 40, 20],
@@ -1465,7 +1465,8 @@ def test_list_nearby_landmark_options_includes_unknown() -> None:
         instruction="點擊「Chrome」圖示",
     )
     labels = [opt["label"] for opt in options]
-    assert "「v」未知" in labels
+    assert labels == ["「OneNote」文字"]
+    assert not any("未知" in label for label in labels)
 
 
 def test_format_drag_destination_offset_hints_desktop_like() -> None:

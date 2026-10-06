@@ -1233,9 +1233,11 @@ def format_drag_candidate_anchor(candidate: dict[str, Any]) -> str | None:
 def _candidate_label_for_hint(candidate: dict[str, Any]) -> str | None:
     """Return a hub-style label for a nearby-context hint, or None if not meaningful.
 
-    Bare class labels ``輸入欄``, ``滾動條``, and ``未知`` are kept so empty
-    inputs/scrollbars/ambiguous elements can be selected in recording HTML.
-    Generic ``文字`` / ``元素`` / ``按鈕`` alone are still dropped.
+    Bare class labels ``輸入欄`` and ``滾動條`` are kept so empty inputs and
+    scrollbars can be selected in recording HTML. ``未知`` labels are kept here
+    so an unknown click target can still be named; nearby-landmark pickers drop
+    them via ``_is_unknown_nearby_landmark``. Generic ``文字`` / ``元素`` /
+    ``按鈕`` alone are still dropped.
     """
     anchor = format_drag_candidate_anchor(candidate)
     if anchor is None:
@@ -1246,15 +1248,25 @@ def _candidate_label_for_hint(candidate: dict[str, Any]) -> str | None:
     return anchor
 
 
+def _is_unknown_nearby_landmark(label: str, candidate: dict[str, Any]) -> bool:
+    """True when a neighbor is an unknown-class detection and must not be a landmark.
+
+    Unknown boxes (including PUA-only OCR such as 「」未知) are not stable
+    references at playback, so they are excluded from auto-picked nearby comments
+    and from the recording HTML landmark list.
+    """
+    if str(candidate.get("class_name") or "").strip() == "unknown":
+        return True
+    return not label or label == "未知" or label.endswith("未知")
+
+
 def _is_stable_disambiguation_label(label: str, candidate: dict[str, Any]) -> bool:
     """True when ``label`` is stable enough to auto-pick for peer set-cover.
 
-    Drops ``未知`` anchors, PUA-containing phrases, and quoted OCR that starts
-    with underscore noise (e.g. 「_未分類黏署」).
+    Drops unknown-class anchors, PUA-containing phrases, and quoted OCR that
+    starts with underscore noise (e.g. 「_未分類黏署」).
     """
-    if not label or label == "未知" or label.endswith("未知"):
-        return False
-    if str(candidate.get("class_name") or "").strip() == "unknown":
+    if _is_unknown_nearby_landmark(label, candidate):
         return False
     if any(is_pua_char(ch) for ch in label):
         return False
@@ -1989,6 +2001,8 @@ def _prioritized_nearby_parts(
         label = _candidate_label_for_hint(candidate)
         if not label or label in seen:
             continue
+        if _is_unknown_nearby_landmark(label, candidate):
+            continue
         if _label_already_in_instruction(label, instruction):
             continue
         seen.add(label)
@@ -2189,6 +2203,8 @@ def list_nearby_landmark_options(
             continue
         label = _candidate_label_for_hint(candidate)
         if not label or label in seen:
+            continue
+        if _is_unknown_nearby_landmark(label, candidate):
             continue
         if base_instruction and _label_already_in_instruction(label, base_instruction):
             continue

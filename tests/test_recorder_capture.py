@@ -1409,8 +1409,8 @@ def test_text_flushed_by_click_does_not_inherit_click_windows(tmp_path) -> None:
     assert "disappeared" not in text_verify
     assert "focused" not in text_verify
     click_verify = window_verify_from_debug(click_raw["window_snapshot_debug"])
-    assert click_verify["disappeared"][0]["title"] == "登入系統"
-    assert click_verify["appeared"][0]["title"] == "wmcLogo"
+    assert "disappeared" not in click_verify
+    assert "appeared" not in click_verify
 
 
 def test_text_flushed_by_enter_does_not_inherit_key_windows(tmp_path) -> None:

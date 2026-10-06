@@ -1258,6 +1258,73 @@ def test_window_verify_disappeared_passes_when_flyout_was_never_open() -> None:
     assert ok is True
 
 
+def test_window_verify_disappeared_ignores_other_titles_of_same_app() -> None:
+    """Closing one Chrome window leaves sibling Chrome windows open."""
+    recorded = {
+        "disappeared": [
+            {
+                "class_name": "Chrome_WidgetWin_1",
+                "title": "新分頁 - Google Chrome",
+                "process_name": "chrome.exe",
+            }
+        ]
+    }
+    siblings = [
+        _win(1, "子母畫面", class_name="Chrome_WidgetWin_1", process_name="chrome.exe"),
+        _win(
+            2,
+            "Stock Stalker TW - Google Chrome",
+            class_name="Chrome_WidgetWin_1",
+            process_name="chrome.exe",
+        ),
+    ]
+    ok, _reason = window_verify_satisfied(recorded, {}, live_windows_after=siblings)
+    assert ok is True
+    still_open = [
+        *siblings,
+        _win(
+            3,
+            "新分頁 - Google Chrome",
+            class_name="Chrome_WidgetWin_1",
+            process_name="chrome.exe",
+        ),
+    ]
+    ok, reason = window_verify_satisfied(recorded, {}, live_windows_after=still_open)
+    assert ok is False
+    assert "新分頁" in reason
+    wrong_close = {
+        "disappeared": [
+            {
+                "class_name": "Chrome_WidgetWin_1",
+                "title": "子母畫面",
+                "process_name": "chrome.exe",
+            }
+        ]
+    }
+    ok, reason = window_verify_satisfied(recorded, wrong_close)
+    assert ok is False
+    assert "新分頁" in reason
+    ok, _reason = window_verify_satisfied(recorded, recorded)
+    assert ok is True
+
+
+def test_window_verify_blank_disappeared_title_matches_any_same_app_window() -> None:
+    recorded = {
+        "disappeared": [
+            {
+                "class_name": "Chrome_WidgetWin_1",
+                "title": "",
+                "process_name": "chrome.exe",
+            }
+        ]
+    }
+    sibling = _win(1, "子母畫面", class_name="Chrome_WidgetWin_1", process_name="chrome.exe")
+    ok, _reason = window_verify_satisfied(recorded, {}, live_windows_after=[sibling])
+    assert ok is False
+    ok, _reason = window_verify_satisfied(recorded, {}, live_windows_after=[])
+    assert ok is True
+
+
 def test_window_verify_appeared_checks_live_after_not_the_delta() -> None:
     recorded = {
         "appeared": [
@@ -1556,6 +1623,73 @@ def test_limit_appeared_to_windows_that_become_foreground() -> None:
     assert "appeared" not in limit_appeared_to_later_foreground(predicate, [])
 
 
+def test_disappeared_dropped_when_same_window_is_in_next_before() -> None:
+    from src.recorder.window_snapshot import limit_disappeared_absent_from_next_before
+
+    notepad = {
+        "class_name": "Notepad",
+        "title": "Untitled - Notepad",
+        "process_name": "notepad.exe",
+    }
+    chrome = {
+        "class_name": "Chrome_WidgetWin_1",
+        "title": "Google Chrome",
+        "process_name": "chrome.exe",
+    }
+    predicate = {
+        "disappeared": [notepad, chrome],
+        "appeared": [
+            {
+                "class_name": "Chrome_WidgetWin_1",
+                "title": "新分頁 - Google Chrome",
+                "process_name": "chrome.exe",
+            }
+        ],
+    }
+    next_before = [
+        _win(
+            9,
+            "Untitled - Notepad",
+            class_name="Notepad",
+            process_name="notepad.exe",
+        ).to_dict(),
+        _win(
+            10,
+            "新分頁 - Google Chrome",
+            class_name="Chrome_WidgetWin_1",
+            process_name="chrome.exe",
+        ).to_dict(),
+    ]
+    limited = limit_disappeared_absent_from_next_before(predicate, next_before)
+    assert limited["disappeared"] == [chrome]
+    assert limited["appeared"] == predicate["appeared"]
+
+    stayed_gone = limit_disappeared_absent_from_next_before(
+        predicate,
+        [
+            _win(
+                10,
+                "新分頁 - Google Chrome",
+                class_name="Chrome_WidgetWin_1",
+                process_name="chrome.exe",
+            ).to_dict()
+        ],
+    )
+    assert stayed_gone["disappeared"] == predicate["disappeared"]
+    assert limit_disappeared_absent_from_next_before(predicate, None) is predicate
+    assert "disappeared" not in limit_disappeared_absent_from_next_before(
+        {"disappeared": [notepad]},
+        [
+            _win(
+                9,
+                "Untitled - Notepad",
+                class_name="Notepad",
+                process_name="notepad.exe",
+            ).to_dict()
+        ],
+    )
+
+
 def test_window_verify_title_alone_does_not_match() -> None:
     """A recorded entry with no class and no process is not identified by title."""
     recorded = {"disappeared": [{"class_name": "", "title": "快顯主機"}]}
@@ -1636,6 +1770,58 @@ def test_window_verify_drops_agent_hub_restore() -> None:
     ]
     after = [_win(1, "電腦使用代理", is_minimized=False)]
     assert build_window_verify_predicate(before, after) == {}
+
+
+def test_window_verify_cancels_retitled_window_of_same_class_and_process() -> None:
+    """A Chrome profile picker replaced by a guest window is not a close."""
+    youtube = _win(
+        1,
+        "YouTube - Google Chrome",
+        class_name="Chrome_WidgetWin_1",
+        process_name="chrome.exe",
+    )
+    picker = _win(
+        2,
+        "Google Chrome",
+        class_name="Chrome_WidgetWin_1",
+        process_name="chrome.exe",
+    )
+    cursor = _win(
+        3,
+        "main.py - Cursor",
+        class_name="Chrome_WidgetWin_1",
+        process_name="Cursor.exe",
+    )
+    guest = _win(
+        4,
+        "新分頁 - Google Chrome",
+        class_name="Chrome_WidgetWin_1",
+        process_name="chrome.exe",
+    )
+    assert build_window_verify_predicate(
+        [youtube, picker, cursor],
+        [youtube, guest, cursor],
+    ) == {}
+
+    cursor_only = _win(
+        5,
+        "main.py - Cursor",
+        class_name="Chrome_WidgetWin_1",
+        process_name="Cursor.exe",
+    )
+    swapped_process = build_window_verify_predicate([picker], [cursor_only])
+    assert swapped_process["disappeared"][0]["title"] == "Google Chrome"
+    assert swapped_process["appeared"][0]["process_name"] == "Cursor.exe"
+
+    extra_close = build_window_verify_predicate([picker, youtube], [guest])
+    assert "appeared" not in extra_close
+    assert extra_close["disappeared"] == [
+        {
+            "class_name": "Chrome_WidgetWin_1",
+            "title": "YouTube - Google Chrome",
+            "process_name": "chrome.exe",
+        }
+    ]
 
 
 def test_window_verify_drops_same_hwnd_title_flicker() -> None:

@@ -43,6 +43,7 @@ from src.recorder.window_snapshot import (
     foreground_identities_from_debug,
     is_agent_app_restore,
     limit_appeared_to_later_foreground,
+    limit_disappeared_absent_from_next_before,
     normalize_window_verify_disabled,
     resolve_window_change,
     window_verify_from_debug,
@@ -679,6 +680,23 @@ def _foregrounds_after_appeared(
     return found
 
 
+def _next_step_windows_before(
+    events: list[RecordedEvent],
+    event_pos: int,
+) -> list[Any] | None:
+    """``windows_before`` of the following step, or None on the last step."""
+    next_pos = event_pos + 1
+    if next_pos < 0 or next_pos >= len(events):
+        return None
+    debug = events[next_pos].window_snapshot_debug
+    if not isinstance(debug, dict):
+        return None
+    raw = debug.get("windows_before")
+    if not isinstance(raw, list):
+        return None
+    return raw
+
+
 def _preserved_window_verify_disabled(
     analysis_path: Path,
     predicate: dict[str, Any],
@@ -710,6 +728,7 @@ def _write_event_analysis(
     settle_after_seconds: float | None,
     text_resolution: dict[str, Any] | None,
     later_foregrounds: list[dict[str, Any]] | None = None,
+    next_windows_before: list[Any] | None = None,
 ) -> None:
     from src.recorder.compile_tool_calls import compile_tool_calls
 
@@ -721,6 +740,10 @@ def _write_event_analysis(
     window_verify = limit_appeared_to_later_foreground(
         window_verify,
         later_foregrounds or [],
+    )
+    window_verify = limit_disappeared_absent_from_next_before(
+        window_verify,
+        next_windows_before,
     )
     disabled = _preserved_window_verify_disabled(analysis_path, window_verify)
     write_json(
@@ -1162,6 +1185,7 @@ async def analyze_recording_session(
                 settle_after_seconds=settle_after_seconds,
                 text_resolution=text_resolution,
                 later_foregrounds=_foregrounds_after_appeared(events, event_pos),
+                next_windows_before=_next_step_windows_before(events, event_pos),
             )
             log_info(f"cached event {event.index}: {instruction}")
 

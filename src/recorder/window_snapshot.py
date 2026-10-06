@@ -1215,6 +1215,17 @@ def _windows_from_raw(raw_list: list[Any]) -> list[WindowInfo]:
     return windows
 
 
+def _same_class_and_process(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """True when both entries name the same non-empty class and executable."""
+    left_class = str(left.get("class_name") or "").strip()
+    right_class = str(right.get("class_name") or "").strip()
+    left_process = str(left.get("process_name") or "").strip()
+    right_process = str(right.get("process_name") or "").strip()
+    if not left_class or not left_process:
+        return False
+    return left_class == right_class and left_process == right_process
+
+
 def build_window_verify_predicate(
     before: list[WindowInfo],
     after: list[WindowInfo],
@@ -1223,8 +1234,10 @@ def build_window_verify_predicate(
 
     Drops the agent hub window, the taskbar, input-pane strips, and a title
     change on an hwnd that is still present. Flyouts such as 「快顯主機」 are
-    included here; script instructions still ignore them. Same-identity appear
-    and disappear pairs within one step cancel out (hwnd churn).
+    included here; script instructions still ignore them. An appeared window
+    and a disappeared window that share class and process cancel one-to-one.
+    Title is ignored, so a profile picker replaced by 「新分頁 - Google Chrome」
+    is not recorded as a close.
     """
     before_wins = [
         win
@@ -1258,17 +1271,22 @@ def build_window_verify_predicate(
             continue
         appeared.append(_verify_entry(win))
 
-    # Hwnd replacement with the same class/title/process is not a real close/open.
+    # One new window of the same class and process replaces one that closed.
     remaining_appeared = list(appeared)
     kept_disappeared: list[dict[str, Any]] = []
     for item in disappeared:
-        matched = _take_matching_entry(
-            remaining_appeared,
-            item,
-            match_change=False,
+        match_index = next(
+            (
+                index
+                for index, candidate in enumerate(remaining_appeared)
+                if _same_class_and_process(item, candidate)
+            ),
+            None,
         )
-        if matched is None:
+        if match_index is None:
             kept_disappeared.append(item)
+        else:
+            remaining_appeared.pop(match_index)
     disappeared = kept_disappeared
     appeared = remaining_appeared
 
@@ -1411,6 +1429,48 @@ def limit_appeared_to_later_foreground(
         trimmed["appeared"] = kept
     else:
         trimmed.pop("appeared", None)
+    return trimmed
+
+
+def limit_disappeared_absent_from_next_before(
+    predicate: dict[str, Any],
+    next_windows_before: list[Any] | None,
+) -> dict[str, Any]:
+    """Drop a disappeared window that is open again at the next step's start.
+
+    A disappearance is a verification point only when that class, title, and
+    process are also absent from the next step's ``windows_before`` list.
+    ``None`` means there is no next step, and the entries stay.
+    """
+    if next_windows_before is None:
+        return predicate
+    disappeared = predicate.get("disappeared")
+    if not isinstance(disappeared, list) or not disappeared:
+        return predicate
+    if not isinstance(next_windows_before, list):
+        return predicate
+    next_entries = [
+        _verify_entry(win)
+        for win in _windows_from_raw(next_windows_before)
+        if not _is_agent_hub_window(win) and not _is_window_verify_noise(win)
+    ]
+    kept: list[Any] = []
+    changed = False
+    for item in disappeared:
+        if isinstance(item, dict) and any(
+            _entries_match(item, candidate, match_change=False)
+            for candidate in next_entries
+        ):
+            changed = True
+            continue
+        kept.append(item)
+    if not changed:
+        return predicate
+    trimmed = dict(predicate)
+    if kept:
+        trimmed["disappeared"] = kept
+    else:
+        trimmed.pop("disappeared", None)
     return trimmed
 
 
@@ -1614,6 +1674,18 @@ def _take_matching_entry(
     return None
 
 
+def _disappeared_matches_by_title(item: dict[str, Any]) -> bool:
+    """True when a disappeared entry can be identified by its title.
+
+    Title is paired with class or process. A blank title keeps the class-and-process
+    check, and a title with neither class nor process is not an identity.
+    """
+    class_name, title, process = _entry_identity(item)
+    if not title:
+        return False
+    return bool(class_name or process)
+
+
 def _after_state_matches(win: WindowInfo, change: str) -> bool:
     """True when ``win`` already holds the absolute end state for a recorded change."""
     label = str(change or "").strip()
@@ -1639,10 +1711,13 @@ def window_verify_satisfied(
     ``appeared`` / ``disappeared`` / ``state`` are checked against the live after
     window list when ``live_windows_after`` is provided: appeared must be present,
     disappeared must be absent, and state labels must match absolute after flags
-    (for example ``maximized`` requires ``is_maximized``). That tolerates a
-    different starting desk (already maximized, or a flyout that was never open).
-    Without ``live_windows_after``, appear/disappear/state fall back to the live
-    before→after delta. Extra live window changes are ignored. Signal fields
+    (for example ``maximized`` requires ``is_maximized``). A disappeared entry
+    with a title matches that title as well as class and process, so other
+    windows of the same application may remain. A blank title still matches
+    class and process only. That tolerates a different starting desk (already
+    maximized, or a flyout that was never open). Without ``live_windows_after``,
+    appear/disappear/state fall back to the live before→after delta. Extra live
+    window changes are ignored. Signal fields
     compare the live after sample to the recorded after value; a missing recorded
     field adds no assertion. When appeared/disappeared/state are present,
     recorded ``foreground`` is ignored (incidental next-focus after the change).
@@ -1695,7 +1770,10 @@ def window_verify_satisfied(
                 if not isinstance(item, dict) or _is_window_verify_noise(item):
                     continue
                 if _take_matching_entry(
-                    available, item, match_change=False, match_title=False
+                    available,
+                    item,
+                    match_change=False,
+                    match_title=_disappeared_matches_by_title(item),
                 ) is None:
                     title = str(item.get("title", "") or "").strip()
                     return False, f"window verify missed disappeared: {title or item}"
@@ -1703,9 +1781,13 @@ def window_verify_satisfied(
             for item in needed_disappeared:
                 if not isinstance(item, dict) or _is_window_verify_noise(item):
                     continue
+                match_title = _disappeared_matches_by_title(item)
                 still_present = any(
                     _entries_match(
-                        item, candidate, match_change=False, match_title=False
+                        item,
+                        candidate,
+                        match_change=False,
+                        match_title=match_title,
                     )
                     for candidate in after_entries
                 )

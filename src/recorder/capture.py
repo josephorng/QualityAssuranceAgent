@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import ctypes
 import os
@@ -50,6 +50,7 @@ from src.recorder.verify_signals import (
 from src.recorder.window_snapshot import (
     ClickWindowInfo,
     WindowInfo,
+    _windows_debug_list,
     diff_snapshots_with_debug,
     resolve_click_window,
     settle_delay_for_click,
@@ -385,8 +386,11 @@ def _discard_pending_drag_end_capture_files(
         return
     for path, _, _ in captures.values():
         pending = Path(path)
-        if pending.is_file():
-            pending.unlink()
+        try:
+            if pending.is_file():
+                pending.unlink()
+        except OSError:
+            pass
 
 
 def _finalize_drag_end_screenshot(
@@ -801,6 +805,29 @@ def _wait_for_input_listeners(
     return issues
 
 
+def _apply_next_before_to_debug(
+    debug: dict[str, Any],
+    windows: tuple[WindowInfo, ...] | None,
+    signals: dict[str, Any] | None,
+) -> None:
+    """Replace the after-cache with the next gesture's before-cache.
+
+    ``point_window`` stays from this gesture's own after sample so
+    ``click_window`` still names the window that received this click.
+    """
+    if windows is not None:
+        debug["windows_after"] = _windows_debug_list(list(windows))
+        debug["windows_after_count"] = len(windows)
+    if signals is None:
+        return
+    merged = dict(signals)
+    merged.pop("point_window", None)
+    existing = debug.get("signals_after")
+    if isinstance(existing, dict) and "point_window" in existing:
+        merged["point_window"] = existing["point_window"]
+    debug["signals_after"] = merged
+
+
 class RecordingSession:
     """Capture desktop input events with per-event screenshots."""
 
@@ -874,6 +901,12 @@ class RecordingSession:
         # Event JSON is patched by the probe timer and by per-step window threads.
         self._event_file_lock = threading.Lock()
         self._window_step_threads: list[threading.Thread] = []
+        # Latest event whose after-cache is still the 0.25s sample. The next
+        # gesture replaces it with the settle cache copied as that gesture's before.
+        self._after_owner_index: int | None = None
+        self._after_seals: dict[
+            int, tuple[tuple[WindowInfo, ...] | None, dict[str, Any] | None]
+        ] = {}
         # Latest finished before-shot (path, monitor_index, monitor_offset).
         # The path is a unique ``_settle_pub_*.jpeg`` so a hook can pin it while the
         # next sample writes a new file. The settle probe does not write this.
@@ -1102,16 +1135,27 @@ class RecordingSession:
             last_move_xy = self._last_move_xy
             pending_right_coords = self._pending_right_coords
             pending_right_down_at = self._pending_right_down_at
+            if pending_coords is not None:
+                press_windows = self._pending_windows_before
+                press_signals = self._pending_signals_before
+            else:
+                press_windows = self._pending_right_windows_before
+                press_signals = self._pending_right_signals_before
             self._pending_click_timer = None
 
         self._stop_pre_click_pump(invalidate_context=True)
         self._stop_before_shot_loop()
 
         # A pending click/drag/right-click is flushed next and has already been
-        # delivered. Seal the text after-sample so that gesture's window change
-        # is not recorded on the typing step.
+        # delivered. Seal the text after-sample from that press copy so a cache
+        # refresh cannot give the typing step a different foreground.
         following_gesture = pending_coords is not None or pending_right_coords is not None
-        self._flush_pending_text_input(seal_after_to_cache=following_gesture)
+        self._flush_pending_text_input(
+            seal_after_to_cache=following_gesture,
+            sealed_windows=press_windows,
+            sealed_signals=press_signals,
+            seal_sample_supplied=following_gesture,
+        )
         if pending is not None:
             pending.cancel()
         if left_press_dragging and pending_coords is not None and last_move_xy is not None:
@@ -1407,6 +1451,90 @@ class RecordingSession:
             return None
         return dict(cached)
 
+    def _claim_after_owner(self, event_index: int) -> None:
+        """This event's after-cache is the 0.25s sample until a later gesture seals it.
+
+        A newer owner is left in place. The last event is never sealed, so its
+        0.25s sample remains the after-cache when recording stops.
+        """
+        with self._lock:
+            if event_index in self._after_seals:
+                return
+            owner = self._after_owner_index
+            if owner is None or owner == event_index:
+                self._after_owner_index = event_index
+
+    def _seal_open_after_cache(
+        self,
+        windows: tuple[WindowInfo, ...] | None,
+        signals: dict[str, Any] | None,
+    ) -> None:
+        """Write this gesture's before-cache as the previous event's after-cache."""
+        if not windows and not signals:
+            return
+        seal = (
+            tuple(windows) if windows else None,
+            dict(signals) if signals else None,
+        )
+        with self._lock:
+            owner = self._after_owner_index
+            if owner is None:
+                return
+            self._after_owner_index = None
+            self._after_seals[owner] = seal
+            run_dir = self._run_dir
+        if run_dir is None:
+            return
+        # The hook must not rewrite event JSON. A window step that has not
+        # finished applies the seal itself; this thread patches one that has.
+        thread = threading.Thread(
+            target=self._apply_stored_after_seal,
+            args=(run_dir, owner),
+            name=f"window-after-seal-{owner}",
+            daemon=True,
+        )
+        thread.start()
+        with self._lock:
+            self._window_step_threads.append(thread)
+
+    def _apply_stored_after_seal(self, run_dir: Path, event_index: int) -> None:
+        """Patch an after-cache that the window step already wrote."""
+        with self._event_json_lock():
+            with self._lock:
+                seal = self._after_seals.get(event_index)
+            if seal is None:
+                return
+            if not self._patch_sealed_after_cache(run_dir, event_index, seal):
+                return
+            with self._lock:
+                if self._after_seals.get(event_index) == seal:
+                    self._after_seals.pop(event_index, None)
+
+    def _patch_sealed_after_cache(
+        self,
+        run_dir: Path,
+        event_index: int,
+        seal: tuple[tuple[WindowInfo, ...] | None, dict[str, Any] | None],
+    ) -> bool:
+        """Patch a finished window debug. Caller holds the event JSON lock."""
+        path = event_json_path(run_dir, event_index)
+        raw = read_json(path, None)
+        if not isinstance(raw, dict):
+            return False
+        debug = raw.get("window_snapshot_debug")
+        if not isinstance(debug, dict):
+            return False
+        _apply_next_before_to_debug(debug, seal[0], seal[1])
+        raw["window_snapshot_debug"] = debug
+        write_json(path, raw)
+        with self._lock:
+            events = self._events
+            for index, event in enumerate(events):
+                if event.index == event_index:
+                    events[index] = RecordedEvent.from_dict(raw)
+                    break
+        return True
+
     def _start_windows_before(self) -> tuple[WindowInfo, ...] | None:
         """Window list from the recording-start scan, if that scan has finished."""
         with self._lock:
@@ -1466,6 +1594,7 @@ class RecordingSession:
         _ = run_dir
         windows_before = self._cached_windows_before()
         signals_before = self._cached_signals_before()
+        self._seal_open_after_cache(windows_before, signals_before)
         click_window = self._click_window_payload_at(x, y)
         with self._lock:
             self._left_press_seq += 1
@@ -1495,6 +1624,7 @@ class RecordingSession:
         _ = run_dir
         windows_before = self._cached_windows_before()
         signals_before = self._cached_signals_before()
+        self._seal_open_after_cache(windows_before, signals_before)
         click_window = self._click_window_payload_at(x, y)
         with self._lock:
             self._right_press_seq += 1
@@ -1810,13 +1940,23 @@ class RecordingSession:
                 return
             index = self._next_index
             self._next_index += 1
-        self._flush_pending_text_input(shared_end_index=index, seal_after_to_cache=True)
+        # One settle-cache copy feeds the flushed text, this event's before-sample,
+        # and the previous event's after-cache.
+        windows_before = self._cached_windows_before()
+        signals_before = self._cached_signals_before()
+        self._flush_pending_text_input(
+            shared_end_index=index,
+            seal_after_to_cache=True,
+            sealed_windows=windows_before,
+            sealed_signals=signals_before,
+            seal_sample_supplied=True,
+        )
         self._remember_pointer_cursor(cursor_xy)
         # Pre-click window list comes from the settle cache. click_window is one
         # WindowFromPoint (no full window scan) and stays on the hook.
         # Screenshot stays deferred.
-        windows_before = self._cached_windows_before()
-        signals_before = self._cached_signals_before()
+        self._seal_open_after_cache(windows_before, signals_before)
+        self._claim_after_owner(index)
         click_window = self._click_window_payload_at(int(cursor_xy[0]), int(cursor_xy[1]))
         self._enqueue(
             _DeferredCaptureJob(
@@ -1871,6 +2011,8 @@ class RecordingSession:
         shared_index = index if cursor_xy is not None else None
         windows_before = self._cached_windows_before()
         signals_before = self._cached_signals_before()
+        self._seal_open_after_cache(windows_before, signals_before)
+        self._claim_after_owner(index)
         self._enqueue(
             _DeferredCaptureJob(
                 action="keyboard_event",
@@ -2161,13 +2303,17 @@ class RecordingSession:
         shared_end_monitor: int | None = None,
         shared_end_offset: tuple[int, int] | None = None,
         seal_after_to_cache: bool = False,
+        sealed_windows: tuple[WindowInfo, ...] | None = None,
+        sealed_signals: dict[str, Any] | None = None,
+        seal_sample_supplied: bool = False,
     ) -> None:
         """Detach pending typed text and enqueue OCR/screenshot work off-hook.
 
         ``seal_after_to_cache`` is set when a later gesture is flushing this
-        text. The after-sample is the settle cache copied here, on the hook,
-        before that gesture is processed. A live window read would run after
-        the gesture and attribute its window change to the typing step.
+        text. The after-sample is that gesture's already-copied settle cache,
+        not a second read. A live window read would run after the gesture and
+        attribute its window change to the typing step. ``point_window`` stays
+        off this sample; the gesture records its own click target.
         """
         with self._lock:
             chars = self._pending_text_chars
@@ -2178,8 +2324,15 @@ class RecordingSession:
             self._cancel_pre_key_settle_timer_locked()
         if not chars or meta is None:
             return
-        sealed_windows = self._cached_windows_before() if seal_after_to_cache else None
-        sealed_signals = self._cached_signals_before() if seal_after_to_cache else None
+        if seal_after_to_cache and not seal_sample_supplied:
+            sealed_windows = self._cached_windows_before()
+            sealed_signals = self._cached_signals_before()
+        elif not seal_after_to_cache:
+            sealed_windows = None
+            sealed_signals = None
+        if isinstance(sealed_signals, dict):
+            sealed_signals = dict(sealed_signals)
+            sealed_signals.pop("point_window", None)
         self._enqueue(
             _DeferredCaptureJob(
                 action="flush_text_input",
@@ -2238,6 +2391,10 @@ class RecordingSession:
                 ),
             }
             self._pending_text_meta = meta
+        self._seal_open_after_cache(
+            meta.get("windows_before") if isinstance(meta.get("windows_before"), tuple) else None,
+            meta.get("signals_before") if isinstance(meta.get("signals_before"), dict) else None,
+        )
         self._enqueue(
             _DeferredCaptureJob(
                 action="begin_text_input",
@@ -2628,8 +2785,15 @@ class RecordingSession:
             self._left_button_down = False
             self._left_press_dragging = False
             self._last_move_xy = None
+            press_windows = self._pending_windows_before
+            press_signals = self._pending_signals_before
+        self._claim_after_owner(click_index)
         self._flush_pending_text_input(
-            shared_end_index=click_index, seal_after_to_cache=True
+            shared_end_index=click_index,
+            seal_after_to_cache=True,
+            sealed_windows=press_windows,
+            sealed_signals=press_signals,
+            seal_sample_supplied=True,
         )
         self._discard_pending_drag_end_captures()
         self._remember_pointer_cursor((x, y))
@@ -2675,8 +2839,15 @@ class RecordingSession:
             self._left_button_down = False
             self._left_press_dragging = False
             self._last_move_xy = None
+            press_windows = self._pending_windows_before
+            press_signals = self._pending_signals_before
+        self._claim_after_owner(hold_index)
         self._flush_pending_text_input(
-            shared_end_index=hold_index, seal_after_to_cache=True
+            shared_end_index=hold_index,
+            seal_after_to_cache=True,
+            sealed_windows=press_windows,
+            sealed_signals=press_signals,
+            seal_sample_supplied=True,
         )
         self._discard_pending_drag_end_captures()
         self._remember_pointer_cursor((x, y))
@@ -2716,10 +2887,17 @@ class RecordingSession:
             timestamp_utc = self._pending_right_timestamp_utc or utc_now_iso()
             modifiers = self._pending_right_modifiers
             action_monotonic = self._pending_right_down_at or time.monotonic()
+            press_windows = self._pending_right_windows_before
+            press_signals = self._pending_right_signals_before
             # Keep press_seq + capture dict entry for the emit worker.
             self._clear_pending_right_gesture_locked(discard_capture=False)
+        self._claim_after_owner(right_index)
         self._flush_pending_text_input(
-            shared_end_index=right_index, seal_after_to_cache=True
+            shared_end_index=right_index,
+            seal_after_to_cache=True,
+            sealed_windows=press_windows,
+            sealed_signals=press_signals,
+            seal_sample_supplied=True,
         )
         self._remember_pointer_cursor((x, y))
         self._enqueue(
@@ -2775,9 +2953,16 @@ class RecordingSession:
             self._left_button_down = False
             self._left_press_dragging = False
             self._last_move_xy = None
+            press_windows = self._pending_windows_before
+            press_signals = self._pending_signals_before
+        self._claim_after_owner(drag_index)
         end_click_window = self._click_window_payload_at(x2, y2)
         self._flush_pending_text_input(
-            shared_end_index=drag_index, seal_after_to_cache=True
+            shared_end_index=drag_index,
+            seal_after_to_cache=True,
+            sealed_windows=press_windows,
+            sealed_signals=press_signals,
+            seal_sample_supplied=True,
         )
         self._remember_pointer_cursor((x2, y2))
         self._enqueue(
@@ -4330,19 +4515,26 @@ class RecordingSession:
             return
         path = event_json_path(run_dir, event_index)
         with self._event_json_lock():
+            with self._lock:
+                seal = self._after_seals.pop(event_index, None)
+            if seal is not None and isinstance(debug, dict):
+                _apply_next_before_to_debug(debug, seal[0], seal[1])
             raw = read_json(path, None)
             if not isinstance(raw, dict):
+                if seal is not None:
+                    with self._lock:
+                        self._after_seals.setdefault(event_index, seal)
                 return
             raw["window_change"] = change
             raw["target_window_title"] = title
             raw["window_snapshot_debug"] = debug
             write_json(path, raw)
-        with self._lock:
-            events = self._events
-            for index, event in enumerate(events):
-                if event.index == event_index:
-                    events[index] = RecordedEvent.from_dict(raw)
-                    break
+            with self._lock:
+                events = self._events
+                for index, event in enumerate(events):
+                    if event.index == event_index:
+                        events[index] = RecordedEvent.from_dict(raw)
+                        break
 
     def _join_window_step_threads(self) -> None:
         with self._lock:

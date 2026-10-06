@@ -14,7 +14,7 @@ from src.recorder.capture import (
     _finalize_drag_end_screenshot,
 )
 from src.recorder.focus_point import TypingFocus
-from src.recorder.window_snapshot import WindowInfo, window_verify_from_debug
+from src.recorder.window_snapshot import ClickWindowInfo, WindowInfo, window_verify_from_debug
 
 
 @contextmanager
@@ -1411,6 +1411,292 @@ def test_text_flushed_by_click_does_not_inherit_click_windows(tmp_path) -> None:
     click_verify = window_verify_from_debug(click_raw["window_snapshot_debug"])
     assert "disappeared" not in click_verify
     assert "appeared" not in click_verify
+
+
+def test_text_after_cache_matches_click_press_when_cache_refreshes(tmp_path) -> None:
+    """A refresh between press and release must not split the shared sample."""
+    session = RecordingSession(runs_root=tmp_path)
+    shell = WindowInfo(
+        hwnd=2,
+        title="Transient Shell",
+        pid=11,
+        left=0,
+        top=0,
+        width=400,
+        height=400,
+        is_minimized=False,
+        is_maximized=False,
+        class_name="ApplicationManager_DesktopShellWindow",
+        process_name="explorer.exe",
+    )
+    search = WindowInfo(
+        hwnd=1,
+        title="搜尋",
+        pid=10,
+        left=800,
+        top=800,
+        width=100,
+        height=100,
+        is_minimized=False,
+        is_maximized=False,
+        class_name="Windows.UI.Core.CoreWindow",
+        process_name="SearchHost.exe",
+    )
+
+    def _snapshot() -> list[WindowInfo]:
+        return [search]
+
+    def _signals(*_args, **_kwargs) -> dict:
+        return {
+            "foreground": {
+                "class_name": search.class_name,
+                "title": search.title,
+                "process_name": search.process_name,
+            },
+            "point_window": {
+                "class_name": search.class_name,
+                "title": search.title,
+                "process_name": search.process_name,
+            },
+        }
+
+    def _click_window(_x: int, _y: int) -> ClickWindowInfo:
+        return ClickWindowInfo(
+            hwnd=search.hwnd,
+            title="點擊目標",
+            process_name=search.process_name,
+            left=search.left,
+            top=search.top,
+            width=search.width,
+            height=search.height,
+            is_maximized=False,
+            class_name=search.class_name,
+        )
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.snapshot_top_level_windows",
+        side_effect=_snapshot,
+    ), patch(
+        "src.recorder.capture.capture_step_signals",
+        side_effect=_signals,
+    ), patch(
+        "src.recorder.capture.resolve_click_window",
+        side_effect=_click_window,
+    ):
+        run_dir = session.start()
+        acquired = False
+        try:
+            assert session._settle_windows_ready.wait(2.0)
+            acquired = session._window_refresh_lock.acquire(timeout=2.0)
+            assert acquired
+            session._last_settle_windows = (shell,)
+            session._last_settle_signals = {
+                "foreground": {
+                    "class_name": shell.class_name,
+                    "title": shell.title,
+                    "process_name": shell.process_name,
+                }
+            }
+            from pynput.keyboard import KeyCode
+            from pynput.mouse import Button
+
+            session._on_key_press(KeyCode.from_char("a"))
+            session._on_mouse_click(100, 100, Button.left, True)
+            session._last_settle_windows = (search,)
+            session._last_settle_signals = {
+                "foreground": {
+                    "class_name": search.class_name,
+                    "title": search.title,
+                    "process_name": search.process_name,
+                },
+                "point_window": {
+                    "class_name": search.class_name,
+                    "title": search.title,
+                    "process_name": search.process_name,
+                },
+            }
+            session._on_mouse_click(100, 100, Button.left, False)
+            time.sleep(_DOUBLE_CLICK_INTERVAL_S + 0.05)
+        finally:
+            if acquired:
+                session._window_refresh_lock.release()
+            session.stop()
+
+    text_raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    click_raw = json.loads((run_dir / "events" / "event_002.json").read_text(encoding="utf-8"))
+    assert text_raw["kind"] == "text_input"
+    assert click_raw["kind"] == "click"
+    text_debug = text_raw["window_snapshot_debug"]
+    click_debug = click_raw["window_snapshot_debug"]
+    assert text_debug["windows_after"][0]["title"] == "Transient Shell"
+    assert click_debug["windows_before"][0]["title"] == "Transient Shell"
+    assert text_debug["signals_after"]["foreground"] == click_debug["signals_before"]["foreground"]
+    assert text_debug["signals_after"]["foreground"]["process_name"] == "explorer.exe"
+    assert "point_window" not in text_debug["signals_after"]
+    assert click_debug["signals_before"]["point_window"]["title"] == "點擊目標"
+
+
+def test_click_after_cache_comes_from_next_gesture_before_cache(tmp_path) -> None:
+    """The 0.25s sample stays window_change. The after-cache is the next gesture."""
+    session = RecordingSession(runs_root=tmp_path)
+    search = WindowInfo(
+        hwnd=1,
+        title="搜尋",
+        pid=10,
+        left=800,
+        top=800,
+        width=100,
+        height=100,
+        is_minimized=False,
+        is_maximized=False,
+        class_name="Windows.UI.Core.CoreWindow",
+        process_name="SearchHost.exe",
+    )
+    transient = WindowInfo(
+        hwnd=2,
+        title="Transient Shell",
+        pid=11,
+        left=0,
+        top=0,
+        width=400,
+        height=400,
+        is_minimized=False,
+        is_maximized=False,
+        class_name="ApplicationManager_DesktopShellWindow",
+        process_name="explorer.exe",
+    )
+    copilot = WindowInfo(
+        hwnd=3,
+        title="Microsoft 365 Copilot",
+        pid=12,
+        left=100,
+        top=100,
+        width=800,
+        height=600,
+        is_minimized=False,
+        is_maximized=False,
+        class_name="Microsoft 365 Copilot Host",
+        process_name="M365Copilot.exe",
+    )
+    final_live = WindowInfo(
+        hwnd=4,
+        title="Final Live",
+        pid=13,
+        left=0,
+        top=0,
+        width=200,
+        height=200,
+        is_minimized=False,
+        is_maximized=False,
+        class_name="OpusApp",
+        process_name="WINWORD.EXE",
+    )
+    live_windows = {"value": [transient]}
+
+    def _snapshot() -> list[WindowInfo]:
+        return list(live_windows["value"])
+
+    def _signals(*_args, **_kwargs) -> dict:
+        return {
+            "foreground": {
+                "class_name": transient.class_name,
+                "title": transient.title,
+                "process_name": transient.process_name,
+            },
+            "point_window": {
+                "class_name": search.class_name,
+                "title": search.title,
+                "process_name": search.process_name,
+            },
+        }
+
+    def _click_window(_x: int, _y: int) -> ClickWindowInfo:
+        return ClickWindowInfo(
+            hwnd=search.hwnd,
+            title=search.title,
+            process_name=search.process_name,
+            left=search.left,
+            top=search.top,
+            width=search.width,
+            height=search.height,
+            is_maximized=False,
+            class_name=search.class_name,
+        )
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.snapshot_top_level_windows",
+        side_effect=_snapshot,
+    ), patch(
+        "src.recorder.capture.capture_step_signals",
+        side_effect=_signals,
+    ), patch(
+        "src.recorder.capture.resolve_click_window",
+        side_effect=_click_window,
+    ):
+        run_dir = session.start()
+        acquired = False
+        try:
+            assert session._settle_windows_ready.wait(2.0)
+            acquired = session._window_refresh_lock.acquire(timeout=2.0)
+            assert acquired
+            session._last_settle_windows = (search,)
+            session._last_settle_signals = {
+                "foreground": {
+                    "class_name": search.class_name,
+                    "title": search.title,
+                    "process_name": search.process_name,
+                }
+            }
+            _left_click(session, 100, 100)
+            deadline = time.monotonic() + 3.0
+            first_path = run_dir / "events" / "event_001.json"
+            while time.monotonic() < deadline:
+                if first_path.is_file():
+                    pending = json.loads(first_path.read_text(encoding="utf-8"))
+                    if isinstance(pending.get("window_snapshot_debug"), dict):
+                        break
+                time.sleep(0.02)
+            else:
+                raise AssertionError("first click window sample was not written")
+            session._last_settle_windows = (copilot,)
+            session._last_settle_signals = {
+                "foreground": {
+                    "class_name": copilot.class_name,
+                    "title": copilot.title,
+                    "process_name": copilot.process_name,
+                }
+            }
+            live_windows["value"] = [final_live]
+            _left_click(session, 120, 120)
+        finally:
+            if acquired:
+                session._window_refresh_lock.release()
+            session.stop()
+
+    first = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    second = json.loads((run_dir / "events" / "event_002.json").read_text(encoding="utf-8"))
+    assert first["window_change"]["action"] == "opened"
+    assert first["window_change"]["title"] == "Transient Shell"
+    assert first["window_snapshot_debug"]["windows_after"][0]["title"] == "Microsoft 365 Copilot"
+    assert first["window_snapshot_debug"]["signals_after"]["foreground"] == {
+        "class_name": copilot.class_name,
+        "title": copilot.title,
+        "process_name": copilot.process_name,
+    }
+    assert first["window_snapshot_debug"]["signals_after"]["point_window"]["title"] == "搜尋"
+    verify = window_verify_from_debug(first["window_snapshot_debug"])
+    verify_text = json.dumps(verify)
+    assert "M365Copilot.exe" in verify_text
+    assert "explorer.exe" not in verify_text
+    assert "ApplicationManager_DesktopShellWindow" not in verify_text
+    assert second["window_snapshot_debug"]["windows_after"][0]["title"] == "Final Live"
+    assert second["window_snapshot_debug"]["signals_after"]["foreground"]["title"] == "Transient Shell"
 
 
 def test_text_flushed_by_enter_does_not_inherit_key_windows(tmp_path) -> None:

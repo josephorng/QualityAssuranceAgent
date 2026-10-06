@@ -12,6 +12,7 @@ services:
       - --http-port=9000
     ports:
       - "9000:9000"
+      - "9003:22"
     volumes:
       - ./model_repository:/models
     deploy:

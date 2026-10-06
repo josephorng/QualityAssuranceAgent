@@ -2086,6 +2086,36 @@ def test_window_verify_omits_unchanged_light_signals_and_requires_changes() -> N
         after_windows=[_win(3, "Untitled - Notepad", pid=9, class_name="Notepad")],
     )
     assert "process_started" not in explained
+    promoted = signal_verify_fields(
+        {"orphan_processes": ["M365Copilot.exe"], "pid_names": {}},
+        {"orphan_processes": [], "pid_names": {"50452": "M365Copilot.exe"}},
+        kind="click",
+        before_windows=[],
+        after_windows=[
+            _win(
+                7,
+                "Microsoft 365 Copilot",
+                pid=50452,
+                class_name="Microsoft 365 Copilot Host",
+                process_name="M365Copilot.exe",
+            )
+        ],
+    )
+    assert "process_started" not in promoted
+    assert "process_exited" not in promoted
+    orphan_gone = signal_verify_fields(
+        {"orphan_processes": ["helper.exe"], "pid_names": {}},
+        {"orphan_processes": [], "pid_names": {}},
+        kind="click",
+    )
+    assert orphan_gone["process_exited"] == ["helper.exe"]
+    demoted = signal_verify_fields(
+        {"orphan_processes": [], "pid_names": {"9": "notepad.exe"}},
+        {"orphan_processes": ["notepad.exe"], "pid_names": {}},
+        kind="click",
+    )
+    assert "process_started" not in demoted
+    assert "process_exited" not in demoted
     ok, reason = window_verify_satisfied(
         started,
         {},

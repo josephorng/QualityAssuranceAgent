@@ -870,14 +870,12 @@ def signal_verify_fields(
             after,
             started=False,
         )
-        started = sorted(
-            (after_window_names - before_window_names - explained_started)
-            | (after_orphans - before_orphans - explained_started)
-        )
-        exited = sorted(
-            (before_window_names - after_window_names - explained_exited)
-            | (before_orphans - after_orphans - explained_exited)
-        )
+        # A name that only moves between a window and the orphan list is still
+        # running. Start and exit are membership changes in the combined set.
+        before_tracked = before_window_names | before_orphans
+        after_tracked = after_window_names | after_orphans
+        started = sorted(after_tracked - before_tracked - explained_started)
+        exited = sorted(before_tracked - after_tracked - explained_exited)
         if started:
             fields["process_started"] = started
         if exited:

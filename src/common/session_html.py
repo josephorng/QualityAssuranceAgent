@@ -2328,7 +2328,7 @@ _RECORDING_SCRIPT = """
     setAddStatus("", false);
   }
 
-  function openAddDialog(afterEventIndex) {
+  function openAddDialog(afterEventIndex, runId) {
     if (!addDialog || !addForm) return;
     if (window.location.protocol === "file:") {
       window.alert("無法新增：請從主程式的「報告列表」開啟此頁（需本機服務）。");
@@ -2337,6 +2337,7 @@ _RECORDING_SCRIPT = """
     addForm.reset();
     instructionDirty = false;
     addForm.setAttribute("data-after-event-index", afterEventIndex == null ? "" : String(afterEventIndex));
+    addForm.setAttribute("data-run-id", runId || toolbarRunId() || "");
     var kindSelect = addForm.querySelector('[name="kind"]');
     if (kindSelect) kindSelect.value = "click";
     syncKindFields();
@@ -2354,7 +2355,8 @@ _RECORDING_SCRIPT = """
       var group = btn.closest(".instruction-group");
       var eventIndex = group ? group.getAttribute("data-event-index") : "";
       var parsed = eventIndex ? parseInt(eventIndex, 10) : NaN;
-      openAddDialog(Number.isFinite(parsed) ? parsed : null);
+      var runId = group ? (group.getAttribute("data-run-id") || "") : "";
+      openAddDialog(Number.isFinite(parsed) ? parsed : null, runId);
     });
   });
 
@@ -2416,7 +2418,7 @@ _RECORDING_SCRIPT = """
   if (addToolbar) {
     addToolbar.addEventListener("click", function (event) {
       event.preventDefault();
-      openAddDialog(null);
+      openAddDialog(null, toolbarRunId());
     });
   }
 
@@ -2461,7 +2463,7 @@ _RECORDING_SCRIPT = """
     }
     addForm.addEventListener("submit", function (event) {
       event.preventDefault();
-      var runId = toolbarRunId();
+      var runId = addForm.getAttribute("data-run-id") || toolbarRunId();
       if (!runId) {
         setAddStatus("缺少錄製資訊。", true);
         return;
@@ -2529,6 +2531,11 @@ _RECORDING_SCRIPT = """
     var match = hash.match(/^#event-(\\d+)$/);
     if (!match) return;
     var group = document.getElementById("event-" + match[1]);
+    if (!group) {
+      group = document.querySelector(
+        '.instruction-group[data-event-index="' + match[1] + '"]'
+      );
+    }
     if (!group) return;
     group.open = true;
     if (typeof group.scrollIntoView === "function") {
@@ -3691,15 +3698,16 @@ def _recording_baseline_for_group(group: dict[str, Any], baselines: dict[int, st
     return baselines.get(step_index)
 
 
-def _recording_analyses_by_step(
+def _recording_edit_targets_by_step(
     run_root: Path,
     report: dict[str, Any] | None,
     groups: list[dict[str, Any]],
 ) -> dict[int, dict[str, Any]]:
-    """Recording analysis per script step, including every verify condition.
+    """Recording event per script step, so a replay report can edit that event.
 
     Matched the same way as recorded after-screenshots: goal text against the
-    recording instruction, so a shifted script does not attach the wrong checks.
+    recording instruction, so a shifted script does not attach the wrong event.
+    Retries share one script step index and therefore the same recording event.
     """
     recording = _resolve_run_recording_dir(run_root, report)
     if recording is None:
@@ -3708,8 +3716,19 @@ def _recording_analyses_by_step(
 
     try:
         rows = _iter_recording_instructions(recording)
+        events = _load_recording_events(recording)
     except (OSError, ValueError):
         return {}
+    if not rows:
+        return {}
+    events_by_index: dict[int, dict[str, Any]] = {}
+    next_by_index: dict[int, dict[str, Any] | None] = {}
+    for position, event in enumerate(events):
+        raw_index = event.get("index")
+        if not isinstance(raw_index, int):
+            continue
+        events_by_index[raw_index] = event
+        next_by_index[raw_index] = events[position + 1] if position + 1 < len(events) else None
     step_goals = _ordered_step_goals(groups)
     matcher = SequenceMatcher(
         a=[goal for _, goal in step_goals],
@@ -3720,10 +3739,51 @@ def _recording_analyses_by_step(
     for block in matcher.get_matching_blocks():
         for offset in range(block.size):
             step_index = step_goals[block.a + offset][0]
-            analysis = rows[block.b + offset][2]
-            if step_index not in resolved and isinstance(analysis, dict):
-                resolved[step_index] = analysis
+            event_index, _instruction, analysis = rows[block.b + offset]
+            if step_index in resolved or not isinstance(analysis, dict):
+                continue
+            event = events_by_index.get(event_index)
+            if not isinstance(event, dict):
+                continue
+            resolved[step_index] = {
+                "recording": recording,
+                "event": event,
+                "next_event": next_by_index.get(event_index),
+                "analysis": analysis,
+            }
     return resolved
+
+
+def _recording_analyses_by_step(
+    run_root: Path,
+    report: dict[str, Any] | None,
+    groups: list[dict[str, Any]],
+) -> dict[int, dict[str, Any]]:
+    """Recording analysis per script step, including every verify condition.
+
+    Matched the same way as recorded after-screenshots: goal text against the
+    recording instruction, so a shifted script does not attach the wrong checks.
+    """
+    return {
+        step_index: target["analysis"]
+        for step_index, target in _recording_edit_targets_by_step(
+            run_root,
+            report,
+            groups,
+        ).items()
+        if isinstance(target.get("analysis"), dict)
+    }
+
+
+def _recording_target_for_group(
+    group: dict[str, Any],
+    targets: dict[int, dict[str, Any]],
+) -> dict[str, Any] | None:
+    step_index = group.get("script_step_index")
+    if not isinstance(step_index, int):
+        return None
+    target = targets.get(step_index)
+    return target if isinstance(target, dict) else None
 
 
 def _recording_analysis_for_group(
@@ -4002,6 +4062,7 @@ def _render_instruction_group_html(
     verify_live_path: str | None = None,
     baseline_after_path: str | None = None,
     recording_analysis: dict[str, Any] | None = None,
+    recording_target: dict[str, Any] | None = None,
 ) -> str:
     operation_count = len(operations)
     count_label = escape(f"{operation_count} 個動作")
@@ -4062,31 +4123,93 @@ def _render_instruction_group_html(
         baseline_after_path=baseline_after_path,
         live_fallback_shot=_last_after_shot(operations),
     )
-    conditions_panel, verify_miss = _render_session_verify_conditions_html(
-        recording_analysis,
-        verify=verify,
-        status=status,
+    editor = (
+        _editor_for_recording_target(
+            recording_target,
+            verify=verify,
+            status=status,
+        )
+        if isinstance(recording_target, dict)
+        else None
     )
+    if editor is not None:
+        conditions_panel = ""
+        verify_miss = editor.get("miss_summary") or ""
+    else:
+        conditions_panel, verify_miss = _render_session_verify_conditions_html(
+            recording_analysis,
+            verify=verify,
+            status=status,
+        )
     miss_summary = (
         f'<span class="instruction-verify-miss">{escape(verify_miss)}</span>'
         if verify_miss
         else ""
     )
 
+    edit_attrs = ""
+    verify_label = ""
+    recording_badges = ""
+    summary_actions = ""
+    editor_panels = ""
+    collapse_html = ""
+    title_text = goal
+    if editor is not None and isinstance(recording_target, dict):
+        analysis = recording_target.get("analysis")
+        if isinstance(analysis, dict):
+            raw_instruction = analysis.get("instruction")
+            if isinstance(raw_instruction, str) and raw_instruction.strip():
+                title_text = raw_instruction.strip()
+        event = recording_target.get("event")
+        recording = recording_target.get("recording")
+        raw_index = event.get("index") if isinstance(event, dict) else None
+        event_index = raw_index if isinstance(raw_index, int) else 0
+        run_id = recording.name if isinstance(recording, Path) else ""
+        kind = editor.get("kind") or ""
+        edit_attrs = (
+            f' data-run-id="{escape(run_id, quote=True)}"'
+            f' data-event-index="{event_index}"'
+            f' data-kind="{escape(kind, quote=True)}"'
+        )
+        click_count = event.get("click_count") if isinstance(event, dict) else None
+        verify_label = editor["verify_label"]
+        recording_badges = (
+            f'<span class="badge neutral">{escape(_recording_kind_label(kind, click_count))}</span>'
+            f'{editor["tool_cache_badge"]}'
+        )
+        summary_actions = (
+            f'{editor["copy_button_html"]}'
+            f'{editor["add_wait_html"]}'
+            f'{editor["add_button_html"]}'
+            f'{editor["delete_button_html"]}'
+        )
+        editor_panels = editor["panels_html"]
+        collapse_html = (
+            '<div class="collapse-row">'
+            '<button type="button" class="collapse-instruction" '
+            'title="收合" aria-label="收合">▲</button>'
+            "</div>"
+        )
+
     return (
-        f'<details class="instruction-group" id="step-{step_number}">'
+        f'<details class="instruction-group" id="step-{step_number}"{edit_attrs}>'
         f"<summary>"
+        f"{verify_label}"
         f'<span class="instruction-number">{step_label}</span>'
         f'<span class="instruction-summary-text">'
-        f'<span class="instruction-title">{escape(goal)}</span>'
+        f'<span class="instruction-title">{escape(title_text)}</span>'
         f"{expected_summary}"
         f"{miss_summary}"
         f"</span>"
         f"{badges}"
+        f"{recording_badges}"
+        f"{summary_actions}"
         f"</summary>"
         f"{verify_panel}"
         f"{conditions_panel}"
+        f"{editor_panels}"
         f"{body}"
+        f"{collapse_html}"
         f"</details>"
     )
 
@@ -5767,6 +5890,247 @@ def _recording_add_dialog_html() -> str:
 """.strip()
 
 
+def _render_recording_step_editor_html(
+    *,
+    run_root: Path,
+    event: dict[str, Any],
+    next_event: dict[str, Any] | None,
+    analysis: dict[str, Any] | None,
+    instruction: str,
+    title: str,
+    expected_outcome: str,
+    use_expected_outcome: bool,
+    after_wait_seconds: int | None,
+    verify: Any = None,
+    status: Any = None,
+) -> dict[str, str]:
+    """Editor controls shared by ``recording_steps.html`` and replay reports."""
+    raw_index = event.get("index")
+    index = raw_index if isinstance(raw_index, int) else 0
+    kind = str(event.get("kind") or "")
+
+    landmarks_html = ""
+    pick_target_html = ""
+    needs_pick = _recording_needs_pick_target(run_root, event, index, kind)
+    missing_cursor = False
+    if kind in {
+        "click",
+        "double_click",
+        "triple_click",
+        "right_click",
+        "middle_click",
+        "scroll",
+        "hold",
+    }:
+        cursor = event.get("cursor_xy")
+        missing_cursor = not (isinstance(cursor, (list, tuple)) and len(cursor) == 2)
+    if needs_pick:
+        pick_target_html = _render_pick_target_panel_html(
+            run_root=run_root,
+            event_index=index,
+        )
+    else:
+        landmarks_html = _render_landmarks_panel_html(
+            run_root=run_root,
+            event_index=index,
+            kind=kind,
+            instruction=instruction,
+        )
+    yolo_retry_html = _render_yolo_retry_panel_html(
+        run_root=run_root,
+        event_index=index,
+        kind=kind,
+        needs_pick_target=needs_pick,
+        missing_cursor=missing_cursor,
+    )
+    typed_text_html = _render_typed_text_panel_html(
+        event=event,
+        analysis=analysis,
+        instruction=instruction,
+    )
+    expected_outcome_html = _render_expected_outcome_panel_html(
+        expected_outcome=expected_outcome,
+        use_expected_outcome=use_expected_outcome,
+        show=bool(instruction) or bool(expected_outcome),
+    )
+    instruction_html = _render_step_instruction_panel_html(instruction=instruction)
+    verify_conditions_html, miss_summary = _render_verify_conditions_panel_html(
+        analysis=analysis,
+        expected_outcome=expected_outcome,
+        use_expected_outcome=use_expected_outcome,
+        verify=verify,
+        status=status,
+    )
+    cached_tool_calls_html = _render_cached_tool_calls_panel_html(analysis=analysis)
+    char_target_html = _render_char_target_panel_html(
+        run_root=run_root,
+        event_index=index,
+        kind=kind,
+        analysis=analysis,
+        instruction=instruction,
+    )
+
+    tool_calls_for_badge = analysis.get("tool_calls") if isinstance(analysis, dict) else None
+    cached_tool_count = (
+        sum(1 for call in tool_calls_for_badge if isinstance(call, dict))
+        if isinstance(tool_calls_for_badge, list)
+        else 0
+    )
+    tool_cache_badge = (
+        f'<span class="badge ok" title="快取工具呼叫數">'
+        f"工具×{cached_tool_count}</span>"
+        if cached_tool_count
+        else ""
+    )
+
+    copy_attr = escape(title, quote=True)
+    outcome_attr = (
+        f' data-expected-outcome="{escape(expected_outcome, quote=True)}"'
+        if expected_outcome
+        else ""
+    )
+    use_outcome_attr = (
+        ' data-use-expected-outcome="1"'
+        if use_expected_outcome
+        else ' data-use-expected-outcome="0"'
+    )
+    if use_expected_outcome and expected_outcome:
+        expected_summary = (
+            f'<span class="instruction-expected">'
+            f"預期結果：{escape(expected_outcome)}"
+            f"</span>"
+        )
+    else:
+        expected_summary = ""
+
+    add_wait_html = ""
+    add_wait_seconds: int | None = None
+    if index >= 1:
+        if next_event is None:
+            add_wait_seconds = _RECORDING_LAST_STEP_WAIT_SECONDS
+        elif kind != "wait":
+            add_wait_seconds = after_wait_seconds
+    if add_wait_seconds is not None:
+        add_wait_html = (
+            f'<button type="button" class="add-wait-instruction" '
+            f'data-after-event-index="{index}" '
+            f'data-duration-seconds="{add_wait_seconds}" '
+            f'title="在此步驟後加入等待 {add_wait_seconds} 秒" '
+            f'aria-label="加入等待 {add_wait_seconds} 秒">'
+            f"加入等待</button>"
+        )
+
+    verify_label = (
+        f'<label class="verify-step" title="啟用此步驟的驗證" '
+        f'onclick="event.stopPropagation()">'
+        f"驗證"
+        f'<input type="checkbox" class="use-expected-outcome"'
+        f'{" checked" if use_expected_outcome else ""}>'
+        f"</label>"
+    )
+    copy_button_html = (
+        f'<button type="button" class="copy-instruction" data-instruction="{copy_attr}"'
+        f'{outcome_attr}{use_outcome_attr} '
+        f'title="複製指令" aria-label="複製指令">複製</button>'
+    )
+    add_button_html = (
+        '<button type="button" class="add-instruction" '
+        'title="在此步驟後新增" aria-label="新增步驟">新增</button>'
+    )
+    delete_button_html = (
+        '<button type="button" class="delete-instruction" '
+        'title="刪除指令" aria-label="刪除指令">刪除</button>'
+    )
+    panels_html = (
+        f'<div class="instruction-edit-panels">{instruction_html}{expected_outcome_html}</div>'
+        f"{verify_conditions_html}"
+        f"{cached_tool_calls_html}"
+        f"{char_target_html}"
+        f"{typed_text_html}"
+        f"{yolo_retry_html}"
+        f"{pick_target_html}"
+        f"{landmarks_html}"
+    )
+    return {
+        "landmarks_html": landmarks_html,
+        "pick_target_html": pick_target_html,
+        "yolo_retry_html": yolo_retry_html,
+        "typed_text_html": typed_text_html,
+        "expected_outcome_html": expected_outcome_html,
+        "instruction_html": instruction_html,
+        "verify_conditions_html": verify_conditions_html,
+        "cached_tool_calls_html": cached_tool_calls_html,
+        "char_target_html": char_target_html,
+        "tool_cache_badge": tool_cache_badge,
+        "expected_summary": expected_summary,
+        "add_wait_html": add_wait_html,
+        "copy_button_html": copy_button_html,
+        "verify_label": verify_label,
+        "add_button_html": add_button_html,
+        "delete_button_html": delete_button_html,
+        "panels_html": panels_html,
+        "miss_summary": miss_summary,
+        "kind": kind,
+    }
+
+
+def _editor_for_recording_target(
+    target: dict[str, Any],
+    *,
+    verify: Any = None,
+    status: Any = None,
+) -> dict[str, str] | None:
+    """Build recording-step editors for a replay group matched to one event."""
+    recording = target.get("recording")
+    event = target.get("event")
+    if not isinstance(recording, Path) or not isinstance(event, dict):
+        return None
+    analysis = target.get("analysis") if isinstance(target.get("analysis"), dict) else None
+    next_event = target.get("next_event") if isinstance(target.get("next_event"), dict) else None
+    instruction = ""
+    expected_outcome = ""
+    use_expected_outcome = False
+    if isinstance(analysis, dict):
+        raw_instruction = analysis.get("instruction")
+        if isinstance(raw_instruction, str) and raw_instruction.strip():
+            instruction = raw_instruction.strip()
+        raw_outcome = analysis.get("expected_outcome")
+        if isinstance(raw_outcome, str) and raw_outcome.strip():
+            expected_outcome = raw_outcome.strip()
+        from src.recorder.analyze import use_expected_outcome_enabled
+
+        use_expected_outcome = use_expected_outcome_enabled(analysis)
+    kind = str(event.get("kind") or "")
+    title = instruction or _recording_kind_label(kind, event.get("click_count"))
+    after_wait_seconds: int | None = None
+    raw_index = event.get("index")
+    index = raw_index if isinstance(raw_index, int) else 0
+    if kind != "wait" and next_event is not None:
+        next_raw = next_event.get("index")
+        next_index = next_raw if isinstance(next_raw, int) else None
+        next_analysis = (
+            _load_recording_analysis(recording, next_index) if next_index else None
+        )
+        after_wait_seconds = _recording_elapsed_wait_seconds(
+            event,
+            next_event,
+            next_analysis if isinstance(next_analysis, dict) else None,
+        )
+    return _render_recording_step_editor_html(
+        run_root=recording,
+        event=event,
+        next_event=next_event,
+        analysis=analysis,
+        instruction=instruction,
+        title=title,
+        expected_outcome=expected_outcome,
+        use_expected_outcome=use_expected_outcome,
+        after_wait_seconds=after_wait_seconds,
+        verify=verify,
+        status=status,
+    )
+
+
 def _render_recording_event_html(
     *,
     run_root: Path,
@@ -5886,118 +6250,30 @@ def _render_recording_event_html(
         "動作後截圖", after, run_root
     )
 
-    landmarks_html = ""
-    pick_target_html = ""
-    needs_pick = _recording_needs_pick_target(run_root, event, index, kind)
-    missing_cursor = False
-    if kind in {
-        "click",
-        "double_click",
-        "triple_click",
-        "right_click",
-        "middle_click",
-        "scroll",
-        "hold",
-    }:
-        cursor = event.get("cursor_xy")
-        missing_cursor = not (isinstance(cursor, (list, tuple)) and len(cursor) == 2)
-    if needs_pick:
-        pick_target_html = _render_pick_target_panel_html(
-            run_root=run_root,
-            event_index=index,
-        )
-    else:
-        landmarks_html = _render_landmarks_panel_html(
-            run_root=run_root,
-            event_index=index,
-            kind=kind,
-            instruction=instruction,
-        )
-    yolo_retry_html = _render_yolo_retry_panel_html(
+    editor = _render_recording_step_editor_html(
         run_root=run_root,
-        event_index=index,
-        kind=kind,
-        needs_pick_target=needs_pick,
-        missing_cursor=missing_cursor,
-    )
-    typed_text_html = _render_typed_text_panel_html(
         event=event,
+        next_event=next_event,
         analysis=analysis if isinstance(analysis, dict) else None,
         instruction=instruction,
-    )
-    expected_outcome_html = _render_expected_outcome_panel_html(
+        title=title,
         expected_outcome=expected_outcome,
         use_expected_outcome=use_expected_outcome,
-        show=bool(instruction) or bool(expected_outcome),
+        after_wait_seconds=after_wait_seconds,
     )
-    instruction_html = _render_step_instruction_panel_html(instruction=instruction)
-    verify_conditions_html, _ = _render_verify_conditions_panel_html(
-        analysis=analysis if isinstance(analysis, dict) else None,
-        expected_outcome=expected_outcome,
-        use_expected_outcome=use_expected_outcome,
-    )
-    cached_tool_calls_html = _render_cached_tool_calls_panel_html(
-        analysis=analysis if isinstance(analysis, dict) else None,
-    )
-    char_target_html = _render_char_target_panel_html(
-        run_root=run_root,
-        event_index=index,
-        kind=kind,
-        analysis=analysis if isinstance(analysis, dict) else None,
-        instruction=instruction,
-    )
-
-    tool_calls_for_badge = (
-        analysis.get("tool_calls") if isinstance(analysis, dict) else None
-    )
-    cached_tool_count = (
-        sum(1 for call in tool_calls_for_badge if isinstance(call, dict))
-        if isinstance(tool_calls_for_badge, list)
-        else 0
-    )
-    tool_cache_badge = (
-        f'<span class="badge ok" title="快取工具呼叫數">'
-        f"工具×{cached_tool_count}</span>"
-        if cached_tool_count
-        else ""
-    )
-
-    copy_attr = escape(title, quote=True)
-    outcome_attr = (
-        f' data-expected-outcome="{escape(expected_outcome, quote=True)}"'
-        if expected_outcome
-        else ""
-    )
-    use_outcome_attr = (
-        ' data-use-expected-outcome="1"'
-        if use_expected_outcome
-        else ' data-use-expected-outcome="0"'
-    )
-    if use_expected_outcome and expected_outcome:
-        expected_summary = (
-            f'<span class="instruction-expected">'
-            f"預期結果：{escape(expected_outcome)}"
-            f"</span>"
-        )
-    else:
-        expected_summary = ""
-
-    add_wait_html = ""
-    add_wait_seconds: int | None = None
-    if index >= 1:
-        if next_event is None:
-            add_wait_seconds = _RECORDING_LAST_STEP_WAIT_SECONDS
-        elif kind != "wait":
-            add_wait_seconds = after_wait_seconds
-    if add_wait_seconds is not None:
-        add_wait_html = (
-            f'<button type="button" class="add-wait-instruction" '
-            f'data-after-event-index="{index}" '
-            f'data-duration-seconds="{add_wait_seconds}" '
-            f'title="在此步驟後加入等待 {add_wait_seconds} 秒" '
-            f'aria-label="加入等待 {add_wait_seconds} 秒">'
-            f"加入等待</button>"
-        )
+    landmarks_html = editor["landmarks_html"]
+    pick_target_html = editor["pick_target_html"]
+    yolo_retry_html = editor["yolo_retry_html"]
+    typed_text_html = editor["typed_text_html"]
+    expected_outcome_html = editor["expected_outcome_html"]
+    instruction_html = editor["instruction_html"]
+    verify_conditions_html = editor["verify_conditions_html"]
+    cached_tool_calls_html = editor["cached_tool_calls_html"]
+    char_target_html = editor["char_target_html"]
+    tool_cache_badge = editor["tool_cache_badge"]
+    expected_summary = editor["expected_summary"]
+    add_wait_html = editor["add_wait_html"]
+    copy_button_html = editor["copy_button_html"]
 
     return (
         f'<details class="instruction-group" id="event-{index}" data-run-id="{run_id}" '
@@ -6018,9 +6294,7 @@ def _render_recording_event_html(
         f"</span>"
         f'<span class="badge neutral">{kind_badge}</span>'
         f"{tool_cache_badge}"
-        f'<button type="button" class="copy-instruction" data-instruction="{copy_attr}"'
-        f'{outcome_attr}{use_outcome_attr} '
-        f'title="複製指令" aria-label="複製指令">複製</button>'
+        f"{copy_button_html}"
         f"{add_wait_html}"
         f'<button type="button" class="add-instruction" '
         f'title="在此步驟後新增" aria-label="新增步驟">新增</button>'
@@ -6981,12 +7255,15 @@ def _render_recording_time_profile_html(
     )
 
 
-def write_session_html_from_run(run_root: Path) -> Path:
+def write_session_html_from_run(run_root: Path, *, update_index: bool = True) -> Path:
     """Build ``session_steps.html`` from ``hand.csv`` in a single pass (O(n)).
 
     Screenshots are referenced relatively (e.g. ``eye/<file>.png``) so the report stays tiny; keep
     the run folder together when sharing. Safe to call repeatedly and for rebuilding old runs, and
     handles both headered ``hand.csv`` files and legacy header-less ones.
+
+    When the run replayed a recording, each matched step includes the same editors as
+    ``recording_steps.html``. Those controls write back to the recording folder.
     """
     run_root = Path(run_root)
     run_root.mkdir(parents=True, exist_ok=True)
@@ -7005,16 +7282,22 @@ def write_session_html_from_run(run_root: Path) -> Path:
     )
     remaining_groups = instruction_groups[min(smart_actor_count, len(instruction_groups)) :]
     report_payload = report if isinstance(report, dict) else None
+    recording_dir = _resolve_run_recording_dir(run_root, report_payload)
     recording_baselines = _recording_baselines_by_step(
         run_root,
         report_payload,
         remaining_groups,
     )
-    recording_analyses = _recording_analyses_by_step(
+    edit_targets = _recording_edit_targets_by_step(
         run_root,
         report_payload,
         remaining_groups,
     )
+    recording_analyses = {
+        step_index: target["analysis"]
+        for step_index, target in edit_targets.items()
+        if isinstance(target.get("analysis"), dict)
+    }
     groups_html = [
         _render_instruction_group_html(
             run_root=run_root,
@@ -7030,6 +7313,7 @@ def write_session_html_from_run(run_root: Path) -> Path:
                 or _recording_baseline_for_group(group, recording_baselines)
             ),
             recording_analysis=_recording_analysis_for_group(group, recording_analyses),
+            recording_target=_recording_target_for_group(group, edit_targets),
         )
         for index, group in enumerate(remaining_groups, start=smart_actor_count + 1)
     ]
@@ -7039,6 +7323,11 @@ def write_session_html_from_run(run_root: Path) -> Path:
         instruction_groups=instruction_groups,
     )
 
+    toolbar = (
+        _render_session_recording_toolbar(recording_dir)
+        if recording_dir is not None
+        else ""
+    )
     steps_body = smart_html + "\n" + "\n".join(groups_html)
     profile_body = _render_session_time_profile_html(
         run_root,
@@ -7056,6 +7345,7 @@ def write_session_html_from_run(run_root: Path) -> Path:
     body = (
         f"{tabs}\n"
         f'<section class="tab-panel" data-tab="steps" id="tab-steps" role="tabpanel">\n'
+        f"{toolbar}\n"
         f"{steps_body}\n"
         f"</section>\n"
         f'<section class="tab-panel" data-tab="profile" id="tab-profile" role="tabpanel" hidden>\n'
@@ -7070,6 +7360,13 @@ def write_session_html_from_run(run_root: Path) -> Path:
     nav_href = _reports_index_href(
         run_root, fragment="#smart" if _is_smart_run_dir(run_root) else ""
     )
+    intro = "依使用者指令分組的手部動作紀錄。點選指令可展開底下的動作列表。"
+    page_script = f"{_PAGE_TABS_SCRIPT}\n{_RECORDING_PLAYBACK_SCRIPT}"
+    add_dialog = ""
+    if recording_dir is not None:
+        intro += " 此執行來自錄製，可在此直接修改對應的錄製步驟。"
+        page_script = f"{_PAGE_TABS_SCRIPT}\n{_RECORDING_SCRIPT}\n{_RECORDING_PLAYBACK_SCRIPT}"
+        add_dialog = _recording_add_dialog_html()
     html = (
         "<!DOCTYPE html>\n"
         '<html lang="zh-Hant">\n<head>\n'
@@ -7080,16 +7377,73 @@ def write_session_html_from_run(run_root: Path) -> Path:
         "</head>\n<body>\n"
         f'<p class="nav"><a href="{nav_href}">← 報告列表</a></p>\n'
         f"<h1>{title}</h1>\n"
-        '<p class="intro">依使用者指令分組的手部動作紀錄。點選指令可展開底下的動作列表。</p>\n'
+        f'<p class="intro">{intro}</p>\n'
         f"{body}\n"
-        f"<script>\n{_PAGE_TABS_SCRIPT}\n{_RECORDING_PLAYBACK_SCRIPT}\n</script>\n"
+        f"{add_dialog}\n"
+        f"<script>\n{page_script}\n</script>\n"
         "</body>\n</html>\n"
     )
 
     path = session_html_path(run_root)
     path.write_text(html, encoding="utf-8")
-    write_runs_index_html(run_root.parent)
+    if update_index:
+        write_runs_index_html(run_root.parent)
     return path
+
+
+def _render_session_recording_toolbar(recording: Path) -> str:
+    run_id_attr = escape(recording.name, quote=True)
+    return (
+        f'<div class="recording-toolbar" data-run-id="{run_id_attr}">'
+        f'<label class="select-all-steps-label">'
+        f'<input type="checkbox" class="verify-all-steps" aria-label="全部驗證" '
+        f'title="取消勾選會關閉所有步驟的驗證；勾選會全部開啟">'
+        f"全部驗證</label>"
+        '<button type="button" class="add-recording-step" '
+        'title="新增步驟" aria-label="新增步驟">新增步驟</button>'
+        "</div>"
+    )
+
+
+def _session_page_sources(run_root: Path) -> list[Path]:
+    """Files that change the contents of ``session_steps.html``."""
+    sources = [Path(__file__), run_root / "hand.csv", run_root / "report.json"]
+    steps_dir = run_root / "steps"
+    if steps_dir.is_dir():
+        sources.extend(path for path in steps_dir.glob("*.json") if path.is_file())
+    recording = _resolve_run_recording_dir(run_root, _load_run_report(run_root))
+    if recording is not None:
+        sources.extend(_recording_page_sources(recording))
+    return sources
+
+
+def _session_page_is_current(run_root: Path) -> bool:
+    """True when ``session_steps.html`` is at least as new as its inputs."""
+    html_path = session_html_path(run_root)
+    try:
+        html_mtime = html_path.stat().st_mtime
+    except OSError:
+        return False
+    newest = 0.0
+    for source in _session_page_sources(run_root):
+        try:
+            newest = max(newest, source.stat().st_mtime)
+        except OSError:
+            continue
+    return html_mtime >= newest
+
+
+def refresh_session_html_if_stale(run_root: Path) -> bool:
+    """Rewrite ``session_steps.html`` when the run or its recording is newer."""
+    run_root = Path(run_root)
+    if not run_root.is_dir():
+        return False
+    if not (run_root / "hand.csv").is_file() and not (run_root / "report.json").is_file():
+        return False
+    if _session_page_is_current(run_root):
+        return False
+    write_session_html_from_run(run_root, update_index=False)
+    return True
 
 
 def _recording_event_title(run_root: Path, event: dict[str, Any]) -> str:

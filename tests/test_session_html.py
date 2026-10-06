@@ -185,6 +185,8 @@ def test_write_session_html_renders_all_steps(tmp_path: Path) -> None:
     assert "<h1>task_html</h1>" in html
     assert "動作 1：click" in html
     assert "動作 2：type_text" in html
+    assert 'id="add-step-dialog"' not in html
+    assert "data-event-index" not in html
     assert '<a href="../index.html">← 報告列表</a>' in html
     assert html.count('class="instruction-group"') == 1
     assert '<span class="instruction-number">1.</span>' in html
@@ -760,7 +762,15 @@ def test_write_session_html_shows_recording_verify_conditions(tmp_path: Path) ->
 
     step_one = html.split('id="step-1"', 1)[1].split('id="step-2"', 1)[0]
     step_two = html.split('id="step-2"', 1)[1]
-    assert 'class="verify-conditions is-readonly"' in step_one
+    assert 'class="verify-conditions"' in step_one
+    assert "is-readonly" not in step_one
+    assert 'data-run-id="demo_rec"' in step_one
+    assert 'data-event-index="1"' in step_one
+    assert 'data-kind="click"' in step_one
+    assert 'class="apply-step-instruction"' in step_one
+    assert 'class="delete-instruction"' in step_one
+    assert 'class="add-instruction"' in step_one
+    assert 'class="use-expected-outcome"' in step_one
     assert "驗證條件" in step_one
     assert "視窗消失" in step_one
     assert "快顯主機" in step_one
@@ -770,19 +780,23 @@ def test_write_session_html_shows_recording_verify_conditions(tmp_path: Path) ->
     assert "點擊視窗" in step_one
     assert "畫面預期結果" in step_one
     assert "搜尋介面已開啟" in step_one
-    assert 'data-verify-key="disappeared" data-verify-index="0" disabled' in step_one
-    assert 'data-verify-key="disappeared" data-verify-index="1" checked disabled' in step_one
-    assert 'data-verify-key="foreground" checked disabled' in step_one
-    assert 'data-verify-key="click_window" disabled' in step_one
-    assert 'data-verify-key="expected_outcome" disabled' in step_one
+    assert 'data-verify-key="disappeared" data-verify-index="0">' in step_one
+    assert 'data-verify-key="disappeared" data-verify-index="1" checked>' in step_one
+    assert 'data-verify-key="foreground" checked>' in step_one
+    assert 'data-verify-key="click_window">' in step_one
+    assert 'data-verify-key="expected_outcome">' in step_one
     assert "焦點元素" in step_two
     assert "位址列" in step_two
     assert "行程啟動" in step_two
     assert "WINWORD.EXE" in step_two
     assert "輸入欄顯示 hello" in step_two
-    assert 'data-verify-key="expected_outcome" checked disabled' in step_two
+    assert 'data-verify-key="expected_outcome" checked>' in step_two
+    assert 'data-event-index="2"' in step_two
     assert 'is-mismatch"' not in html
     assert 'class="instruction-verify-miss"' not in html
+    assert 'id="add-step-dialog"' in html
+    assert 'class="recording-toolbar" data-run-id="demo_rec"' in html
+    assert "此執行來自錄製" in html
 
 
 def _verify_condition_row(html: str, key: str, index: int | None = None) -> str:

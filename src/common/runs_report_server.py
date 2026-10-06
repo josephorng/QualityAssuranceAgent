@@ -47,6 +47,7 @@ from src.common.nearby_side import (
 from src.common.script_helper import collect_recording_instructions
 from src.common.session_html import (
     recording_event_json_paths,
+    refresh_session_html_if_stale,
     window_verify_check_rows,
     write_recording_html_from_run,
     write_runs_index_html,
@@ -1967,6 +1968,29 @@ def _make_handler(runs_root: Path) -> type[SimpleHTTPRequestHandler]:
             except ConnectionError:
                 # Browser closed the socket after the handler finished the
                 # mutation (common on Windows while a large delete was in flight).
+                return
+
+        def do_GET(self) -> None:  # noqa: N802
+            self._refresh_requested_session_html()
+            super().do_GET()
+
+        def do_HEAD(self) -> None:  # noqa: N802
+            self._refresh_requested_session_html()
+            super().do_HEAD()
+
+        def _refresh_requested_session_html(self) -> None:
+            parsed = urlparse(self.path)
+            if Path(unquote(parsed.path)).name != "session_steps.html":
+                return
+            try:
+                translated = Path(self.translate_path(parsed.path))
+            except (OSError, ValueError):
+                return
+            if translated.name != "session_steps.html":
+                return
+            try:
+                refresh_session_html_if_stale(translated.parent)
+            except (OSError, ValueError):
                 return
 
         def do_POST(self) -> None:  # noqa: N802

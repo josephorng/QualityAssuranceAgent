@@ -2166,7 +2166,11 @@ def test_settle_probe_grabs_while_context_refresh_blocks(tmp_path) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(b"fake")
         name = dest.name
-        if name.startswith("_settle_") or name.startswith("_last_settle"):
+        if (
+            name.startswith("_settle_")
+            or name.startswith("_last_settle")
+            or name.startswith("_before_shot_")
+        ):
             probe_grabs.append(name)
         assert not name.startswith("_pre_click_")
         return str(dest), 1, (0, 0)

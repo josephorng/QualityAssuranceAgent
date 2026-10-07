@@ -2017,7 +2017,6 @@ class BrainModule:
                 press_point = self._replay_press_point_window
                 live_after = await asyncio.to_thread(
                     capture_replay_after_signals,
-                    windows_after,
                     recorded,
                     press_point,
                 )

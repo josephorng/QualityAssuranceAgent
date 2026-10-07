@@ -689,7 +689,6 @@ def test_write_session_html_shows_recording_verify_conditions(tmp_path: Path) ->
                 "expected_outcome": "輸入欄顯示 hello",
                 "window_verify": {
                     "focused": {"name": "位址列", "value": "hello"},
-                    "process_started": ["WINWORD.EXE"],
                 },
             },
             ensure_ascii=False,
@@ -787,8 +786,6 @@ def test_write_session_html_shows_recording_verify_conditions(tmp_path: Path) ->
     assert 'data-verify-key="expected_outcome">' in step_one
     assert "焦點元素" in step_two
     assert "位址列" in step_two
-    assert "行程啟動" in step_two
-    assert "WINWORD.EXE" in step_two
     assert "輸入欄顯示 hello" in step_two
     assert 'data-verify-key="expected_outcome" checked>' in step_two
     assert 'data-event-index="2"' in step_two
@@ -853,7 +850,6 @@ def test_write_session_html_highlights_mismatched_verify_condition(tmp_path: Pat
                 "instruction": instructions[1],
                 "use_expected_outcome": False,
                 "window_verify": {
-                    "process_started": ["EXCEL.EXE", "WINWORD.EXE"],
                     "disappeared": [
                         {
                             "class_name": "Popup",
@@ -983,10 +979,8 @@ def test_write_session_html_highlights_mismatched_verify_condition(tmp_path: Pat
 
     missed = _verify_condition_row(step_two, "disappeared", 1)
     kept = _verify_condition_row(step_two, "disappeared", 0)
-    excel = _verify_condition_row(step_two, "process_started", 0)
     assert "is-mismatch" in missed
     assert "is-mismatch" not in kept
-    assert "is-mismatch" not in excel
     assert "不符：視窗消失 · 檔案總管" in step_two
 
     outcome = _verify_condition_row(step_three, "expected_outcome")

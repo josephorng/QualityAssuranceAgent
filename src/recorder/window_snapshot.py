@@ -1369,8 +1369,6 @@ def window_verify_from_debug(
             before_signals if isinstance(before_signals, dict) else None,
             after_signals if isinstance(after_signals, dict) else None,
             kind=str(debug.get("signal_kind") or "") or None,
-            before_windows=before_windows,
-            after_windows=after_windows,
         )
     )
     return omit_focused_value_unrelated_to_typed_text(
@@ -1490,8 +1488,6 @@ _ITEMIZED_VERIFY_KEYS = frozenset(
         "appeared",
         "disappeared",
         "state",
-        "process_started",
-        "process_exited",
     }
 )
 _VERIFY_SELECTOR_RE = re.compile(r"^([a-z_]+)(?::(\d+))?$")
@@ -1510,8 +1506,8 @@ def normalize_window_verify_disabled(
 ) -> list[str]:
     """Return sorted ``key`` / ``key:index`` selectors for unchecked conditions.
 
-    Itemized keys (appeared, disappeared, state, process start/exit) use
-    ``key:index``. Other fields use the bare key. ``strict`` raises
+    Itemized keys (appeared, disappeared, state) use ``key:index``. Other fields
+    use the bare key. ``strict`` raises
     ``ValueError`` for a malformed payload; otherwise invalid entries are dropped.
     """
     if not isinstance(disabled, list):

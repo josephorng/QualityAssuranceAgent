@@ -2072,57 +2072,20 @@ def test_window_verify_omits_unchanged_light_signals_and_requires_changes() -> N
     assert ok is False
     assert "clipboard" in reason
 
-    started = signal_verify_fields(
+    process_noise = signal_verify_fields(
         {"orphan_processes": [], "pid_names": {}},
-        {"orphan_processes": ["notepad.exe"], "pid_names": {}},
+        {"orphan_processes": ["git.exe"], "pid_names": {"9": "notepad.exe"}},
         kind="click",
     )
-    assert started["process_started"] == ["notepad.exe"]
-    explained = signal_verify_fields(
-        {"orphan_processes": [], "pid_names": {}},
-        {"orphan_processes": [], "pid_names": {"9": "notepad.exe"}},
-        kind="click",
-        before_windows=[],
-        after_windows=[_win(3, "Untitled - Notepad", pid=9, class_name="Notepad")],
-    )
-    assert "process_started" not in explained
-    promoted = signal_verify_fields(
-        {"orphan_processes": ["M365Copilot.exe"], "pid_names": {}},
-        {"orphan_processes": [], "pid_names": {"50452": "M365Copilot.exe"}},
-        kind="click",
-        before_windows=[],
-        after_windows=[
-            _win(
-                7,
-                "Microsoft 365 Copilot",
-                pid=50452,
-                class_name="Microsoft 365 Copilot Host",
-                process_name="M365Copilot.exe",
-            )
-        ],
-    )
-    assert "process_started" not in promoted
-    assert "process_exited" not in promoted
-    orphan_gone = signal_verify_fields(
-        {"orphan_processes": ["helper.exe"], "pid_names": {}},
-        {"orphan_processes": [], "pid_names": {}},
-        kind="click",
-    )
-    assert orphan_gone["process_exited"] == ["helper.exe"]
-    demoted = signal_verify_fields(
-        {"orphan_processes": [], "pid_names": {"9": "notepad.exe"}},
-        {"orphan_processes": ["notepad.exe"], "pid_names": {}},
-        kind="click",
-    )
-    assert "process_started" not in demoted
-    assert "process_exited" not in demoted
+    assert "process_started" not in process_noise
+    assert "process_exited" not in process_noise
     ok, reason = window_verify_satisfied(
-        started,
+        {"process_started": ["git.exe"], "process_exited": ["helper.exe"]},
         {},
         live_after={"pid_names": {}, "orphan_processes": []},
     )
-    assert ok is False
-    assert "process_started" in reason
+    assert ok is True
+    assert reason == ""
 
     other_field = dict(same)
     other_field["caret"] = {
@@ -2283,7 +2246,6 @@ def test_replay_click_window_uses_press_time_window_not_the_settled_cursor(
         "process_name": "SearchHost.exe",
     }
     sample = capture_replay_after_signals(
-        [],
         {"click_window": search},
         search,
     )
@@ -2294,7 +2256,7 @@ def test_replay_click_window_uses_press_time_window_not_the_settled_cursor(
         live_after=sample,
     )
     assert ok is True
-    missed = capture_replay_after_signals([], {"click_window": search}, None)
+    missed = capture_replay_after_signals({"click_window": search}, None)
     ok, reason = window_verify_satisfied(
         {"click_window": search},
         {},
@@ -2328,10 +2290,10 @@ def test_window_verify_uia_signals_only_when_the_step_changed_them(monkeypatch) 
             return {"scroll": 40.0}
         return {"control_state": "selected"}
 
-    capture_step_signals([], cursor_xy=(1, 1), kind="text_input", uia_reader=_reader)
-    capture_step_signals([], cursor_xy=(1, 1), kind="scroll", uia_reader=_reader)
-    capture_step_signals([], cursor_xy=(1, 1), kind="click", uia_reader=_reader)
-    capture_step_signals([], cursor_xy=(1, 1), kind="drag", uia_reader=_reader)
+    capture_step_signals(cursor_xy=(1, 1), kind="text_input", uia_reader=_reader)
+    capture_step_signals(cursor_xy=(1, 1), kind="scroll", uia_reader=_reader)
+    capture_step_signals(cursor_xy=(1, 1), kind="click", uia_reader=_reader)
+    capture_step_signals(cursor_xy=(1, 1), kind="drag", uia_reader=_reader)
     assert calls == ["text_input", "scroll", "click"]
 
     assert "control_state" not in signal_verify_fields(

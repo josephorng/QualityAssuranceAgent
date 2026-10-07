@@ -5354,8 +5354,6 @@ _WINDOW_VERIFY_LABELS: dict[str, str] = {
     "foreground": "前景視窗",
     "click_window": "點擊視窗",
     "clipboard": "剪貼簿",
-    "process_started": "行程啟動",
-    "process_exited": "行程結束",
     "caret": "插入點",
     "focused": "焦點元素",
     "scroll": "捲動位置",
@@ -5394,10 +5392,6 @@ def _format_window_verify_value(key: str, value: Any) -> str | None:
         text = "" if value is None else str(value)
         preview = text if len(text) <= 120 else f"{text[:117]}..."
         return f'<span class="mono">{escape(preview)}</span>'
-    if key in {"process_started", "process_exited"}:
-        if not isinstance(value, list) or not value:
-            return None
-        return escape(", ".join(str(item) for item in value))
     if key == "caret":
         if not isinstance(value, dict):
             return None

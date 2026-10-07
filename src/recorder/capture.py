@@ -1390,7 +1390,7 @@ class RecordingSession:
             except Exception:
                 return
             try:
-                signals = capture_fast_signals(windows, include_processes=False)
+                signals = capture_fast_signals()
             except Exception:
                 signals = {}
             with self._lock:
@@ -1413,7 +1413,6 @@ class RecordingSession:
                 return
             self._slow_signal_mono = now
             cursor = self._last_pointer_cursor_xy
-            windows = self._last_settle_windows
             run_dir = self._run_dir
             epoch = self._context_epoch
         if cursor is None:
@@ -1423,7 +1422,7 @@ class RecordingSession:
             except Exception:
                 cursor = None
         try:
-            slow = capture_slow_signals(cursor, windows)
+            slow = capture_slow_signals(cursor)
         except Exception:
             return
         if not slow:
@@ -4395,7 +4394,6 @@ class RecordingSession:
             uia_reader, uia_timed_out = self._uia_reader_or_timeout()
             try:
                 signals_after = capture_step_signals(
-                    windows_after,
                     cursor_xy=item.cursor_xy,
                     kind=item.kind,
                     uia_reader=uia_reader,

@@ -1,9 +1,9 @@
 """Changed-only signals stored beside the window-list verify predicate.
 
-Light reads (foreground, window under the cursor, clipboard, process names, caret)
-run with the window snapshot, off the mouse hook. UI Automation runs only for the
-click, type, or scroll step that needs it, and again on replay only when the
-recorded predicate contains that field.
+Light reads (foreground, window under the cursor, clipboard, caret) run with
+the window snapshot, off the mouse hook. UI Automation runs only for the click,
+type, or scroll step that needs it, and again on replay only when the recorded
+predicate contains that field.
 """
 
 from __future__ import annotations
@@ -77,50 +77,6 @@ TYPE_KINDS = frozenset({"text_input"})
 SCROLL_KINDS = frozenset({"scroll"})
 
 _TH32CS_SNAPPROCESS = 0x00000002
-# Session helpers and service hosts. A user app that starts with no window yet
-# is still recorded; these names are not.
-_SYSTEM_PROCESS_NAMES = frozenset(
-    {
-        "svchost.exe",
-        "csrss.exe",
-        "smss.exe",
-        "lsass.exe",
-        "services.exe",
-        "wininit.exe",
-        "winlogon.exe",
-        "dwm.exe",
-        "fontdrvhost.exe",
-        "sihost.exe",
-        "taskhostw.exe",
-        "ctfmon.exe",
-        "runtimebroker.exe",
-        "dllhost.exe",
-        "conhost.exe",
-        "searchhost.exe",
-        "startmenuexperiencehost.exe",
-        "textinputhost.exe",
-        "shellexperiencehost.exe",
-        "securityhealthservice.exe",
-        "securityhealthsystray.exe",
-        "msmpeng.exe",
-        "nissrv.exe",
-        "registry",
-        "system",
-        "idle",
-        "spoolsv.exe",
-        "audiodg.exe",
-        "dashost.exe",
-        "searchindexer.exe",
-        "wmiprvse.exe",
-        "unsecapp.exe",
-        "backgroundtaskhost.exe",
-        "applicationframehost.exe",
-        "systemsettingsbroker.exe",
-        "lockapp.exe",
-        "smartscreen.exe",
-        "memory compression",
-    }
-)
 
 UiaReader = Callable[[str | None, tuple[int, int] | None], dict[str, Any]]
 
@@ -361,73 +317,13 @@ def _process_names_by_pid() -> dict[int, str]:
     return names
 
 
-def _session_id_for_pid(pid: int) -> int | None:
-    if os.name != "nt":
-        return None
-    try:
-        query = _kernel32_fn(
-            "ProcessIdToSessionId",
-            wintypes.BOOL,
-            wintypes.DWORD,
-            ctypes.POINTER(wintypes.DWORD),
-        )
-        session = wintypes.DWORD()
-        if not query(int(pid), ctypes.byref(session)):
-            return None
-        return int(session.value)
-    except Exception:
-        return None
-
-
-def _current_session_id() -> int | None:
-    if os.name != "nt":
-        return None
-    try:
-        return _session_id_for_pid(int(ctypes.windll.kernel32.GetCurrentProcessId()))
-    except Exception:
-        return None
-
-
-def _pid_in_current_session(pid: int, session_id: int | None) -> bool:
-    if session_id is None:
-        return True
-    return _session_id_for_pid(pid) == session_id
-
-
-def _process_sample(windows: list[WindowInfo]) -> dict[str, Any]:
-    names_by_pid = _process_names_by_pid()
-    window_pids = {int(win.pid) for win in windows if win.pid}
-    pid_names: dict[str, str] = {}
-    for pid in window_pids:
-        name = names_by_pid.get(pid)
-        if name:
-            pid_names[str(pid)] = name
-    session_id = _current_session_id()
-    window_names = {name.lower() for name in pid_names.values()}
-    orphans: set[str] = set()
-    for pid, name in names_by_pid.items():
-        if pid in window_pids:
-            continue
-        if name.lower() in _SYSTEM_PROCESS_NAMES or name.lower() in window_names:
-            continue
-        if not _pid_in_current_session(pid, session_id):
-            continue
-        orphans.add(name)
-    return {
-        "pid_names": pid_names,
-        "orphan_processes": sorted(orphans),
-    }
-
-
 def capture_fast_signals(
-    windows: list[WindowInfo] | tuple[WindowInfo, ...],
     *,
     cursor_xy: tuple[int, int] | None = None,
     include_foreground: bool = True,
-    include_processes: bool = True,
     include_caret: bool = True,
 ) -> dict[str, Any]:
-    """Foreground, process names, caret, and optional window-under-point.
+    """Foreground, caret, and optional window-under-point.
 
     No clipboard and no UI Automation. Safe to run on the pre-click thread.
     """
@@ -436,12 +332,6 @@ def capture_fast_signals(
         sample["foreground"] = _foreground_identity()
     if cursor_xy is not None:
         sample["point_window"] = _point_identity(cursor_xy)
-    if include_processes:
-        try:
-            sample.update(_process_sample(list(windows)))
-        except Exception:
-            sample["pid_names"] = {}
-            sample["orphan_processes"] = []
     if include_caret:
         sample["caret"] = _caret_snapshot()
     return sample
@@ -449,9 +339,8 @@ def capture_fast_signals(
 
 def capture_slow_signals(
     cursor_xy: tuple[int, int] | None,
-    windows: list[WindowInfo] | tuple[WindowInfo, ...] | None = None,
 ) -> dict[str, Any]:
-    """Clipboard, process names, and a throttled UI Automation sample.
+    """Clipboard and a throttled UI Automation sample.
 
     Clipboard owners and UI Automation providers can stall, so this stays off
     the mouse hook and off the window-list refresh.
@@ -460,11 +349,6 @@ def capture_slow_signals(
     text = _read_clipboard()
     if text is not None:
         sample["clipboard"] = text
-    try:
-        sample.update(_process_sample(list(windows or ())))
-    except Exception:
-        sample["pid_names"] = {}
-        sample["orphan_processes"] = []
     try:
         sample.update(
             read_uia_fields(
@@ -480,14 +364,13 @@ def capture_slow_signals(
 
 
 def capture_step_signals(
-    windows: list[WindowInfo] | tuple[WindowInfo, ...],
     *,
     cursor_xy: tuple[int, int] | None,
     kind: str | None,
     uia_reader: UiaReader | None = None,
 ) -> dict[str, Any]:
     """After-settle sample. UI Automation runs only for click, type, or scroll."""
-    sample = capture_fast_signals(windows, cursor_xy=cursor_xy)
+    sample = capture_fast_signals(cursor_xy=cursor_xy)
     text = _read_clipboard()
     if text is not None:
         sample["clipboard"] = text
@@ -541,7 +424,6 @@ def _cursor_xy() -> tuple[int, int] | None:
 
 
 def capture_replay_after_signals(
-    windows: list[WindowInfo],
     recorded: dict[str, Any],
     press_point_window: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -554,7 +436,6 @@ def capture_replay_after_signals(
     need_foreground = isinstance(recorded.get("foreground"), dict)
     need_point = isinstance(recorded.get("click_window"), dict)
     need_clipboard = "clipboard" in recorded
-    need_process = bool(recorded.get("process_started") or recorded.get("process_exited"))
     need_caret = _caret_verify_identity(recorded.get("caret")) is not None
     need_focused = isinstance(recorded.get("focused"), dict) and bool(recorded["focused"])
     need_scroll = isinstance(recorded.get("scroll"), (int, float)) and not isinstance(
@@ -562,13 +443,11 @@ def capture_replay_after_signals(
     )
     cursor = _cursor_xy() if need_scroll else None
     sample: dict[str, Any] = {}
-    if need_foreground or need_process or need_caret:
+    if need_foreground or need_caret:
         sample.update(
             capture_fast_signals(
-                windows,
                 cursor_xy=None,
                 include_foreground=need_foreground,
-                include_processes=need_process,
                 include_caret=need_caret,
             )
         )
@@ -607,74 +486,7 @@ def predicate_has_signal_assertions(predicate: dict[str, Any] | None) -> bool:
         predicate.get("scroll"), bool
     ):
         return True
-    for key in ("process_started", "process_exited"):
-        items = predicate.get(key)
-        if isinstance(items, list) and any(items):
-            return True
     return False
-
-
-def _pid_name_map(sample: dict[str, Any] | None) -> dict[int, str]:
-    if not isinstance(sample, dict):
-        return {}
-    raw = sample.get("pid_names")
-    if not isinstance(raw, dict):
-        return {}
-    names: dict[int, str] = {}
-    for key, value in raw.items():
-        try:
-            pid = int(key)
-        except (TypeError, ValueError):
-            continue
-        name = str(value or "").strip()
-        if name:
-            names[pid] = name
-    return names
-
-
-def _name_set(sample: dict[str, Any] | None, key: str) -> set[str]:
-    if not isinstance(sample, dict):
-        return set()
-    raw = sample.get(key)
-    if not isinstance(raw, list):
-        return set()
-    return {str(item).strip() for item in raw if str(item).strip()}
-
-
-def _window_pids(windows: list[WindowInfo] | None) -> set[int]:
-    if not windows:
-        return set()
-    return {int(win.pid) for win in windows if win.pid}
-
-
-def _explained_process_names(
-    before_windows: list[WindowInfo] | None,
-    after_windows: list[WindowInfo] | None,
-    before_signals: dict[str, Any] | None,
-    after_signals: dict[str, Any] | None,
-    *,
-    started: bool,
-) -> set[str]:
-    before_pids = _window_pids(before_windows)
-    after_pids = _window_pids(after_windows)
-    names: set[str] = set()
-    if started:
-        pid_names = _pid_name_map(after_signals)
-        for win in after_windows or []:
-            if not win.pid or int(win.pid) in before_pids:
-                continue
-            name = pid_names.get(int(win.pid)) or (win.process_name or "")
-            if name:
-                names.add(name)
-        return names
-    pid_names = _pid_name_map(before_signals)
-    for win in before_windows or []:
-        if not win.pid or int(win.pid) in after_pids:
-            continue
-        name = pid_names.get(int(win.pid)) or (win.process_name or "")
-        if name:
-            names.add(name)
-    return names
 
 
 def _caret_verify_identity(caret: Any) -> dict[str, str] | None:
@@ -816,8 +628,6 @@ def signal_verify_fields(
     after: dict[str, Any] | None,
     *,
     kind: str | None,
-    before_windows: list[WindowInfo] | None = None,
-    after_windows: list[WindowInfo] | None = None,
 ) -> dict[str, Any]:
     """Predicate fields for signals that changed. Omitted fields assert nothing."""
     if not isinstance(before, dict) or not isinstance(after, dict):
@@ -851,36 +661,6 @@ def signal_verify_fields(
         if before_text != after_text:
             fields["clipboard"] = after_text
 
-    if "pid_names" in before and "pid_names" in after:
-        before_window_names = set(_pid_name_map(before).values())
-        after_window_names = set(_pid_name_map(after).values())
-        before_orphans = _name_set(before, "orphan_processes")
-        after_orphans = _name_set(after, "orphan_processes")
-        explained_started = _explained_process_names(
-            before_windows,
-            after_windows,
-            before,
-            after,
-            started=True,
-        )
-        explained_exited = _explained_process_names(
-            before_windows,
-            after_windows,
-            before,
-            after,
-            started=False,
-        )
-        # A name that only moves between a window and the orphan list is still
-        # running. Start and exit are membership changes in the combined set.
-        before_tracked = before_window_names | before_orphans
-        after_tracked = after_window_names | after_orphans
-        started = sorted(after_tracked - before_tracked - explained_started)
-        exited = sorted(before_tracked - after_tracked - explained_exited)
-        if started:
-            fields["process_started"] = started
-        if exited:
-            fields["process_exited"] = exited
-
     if kind in TYPE_KINDS:
         caret = _caret_moved_field(before, after)
         if caret is not None:
@@ -904,12 +684,6 @@ def signal_verify_fields(
             fields["scroll"] = round(after_scroll, 1)
 
     return fields
-
-
-def _tracked_process_names(sample: dict[str, Any]) -> set[str]:
-    names = set(_pid_name_map(sample).values())
-    names.update(_name_set(sample, "orphan_processes"))
-    return names
 
 
 def signal_assertions_satisfied(
@@ -942,20 +716,6 @@ def signal_assertions_satisfied(
     if "clipboard" in recorded:
         if str(live_after.get("clipboard") or "") != str(recorded.get("clipboard") or ""):
             return False, "window verify missed clipboard"
-
-    started = recorded.get("process_started")
-    if isinstance(started, list) and started:
-        live_names = _tracked_process_names(live_after)
-        for name in started:
-            if str(name) not in live_names:
-                return False, f"window verify missed process_started: {name}"
-
-    exited = recorded.get("process_exited")
-    if isinstance(exited, list) and exited:
-        live_names = _tracked_process_names(live_after)
-        for name in exited:
-            if str(name) in live_names:
-                return False, f"window verify missed process_exited: {name}"
 
     recorded_caret = _caret_verify_identity(recorded.get("caret"))
     if recorded_caret is not None:

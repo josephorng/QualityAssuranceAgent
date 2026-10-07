@@ -34,8 +34,12 @@ from cua_mcp.scrollbar_arrows import (
 )
 from cua_mcp.select_mouse_target import (
     _MOUSE_FILTER_SIMILARITY_THRESHOLD,
+    _box_edge_gap,
     _detect_mouse_targets_from_bgr,
     _label_similarity,
+    _LANDMARK_CLOSEST_GAP_TIE_PX,
+    _landmark_hints_locate,
+    _within_landmark_gap,
 )
 from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text
 from cua_mcp.yolo_onnx import (
@@ -64,6 +68,9 @@ from src.recorder.models import (
 )
 
 _MIN_NEARBY_TEXT_LANDMARKS = 2
+# Extra texts added only when the current hints would not uniquely locate the
+# click once the target's own label is ignored.
+_MAX_NO_ANCHOR_EXTRA_LANDMARKS = 2
 # Disambiguating landmarks: separate every rival peer with this many distinct
 # landmarks. One cue per peer leaves the step at the mercy of a single label: a
 # hover-only tooltip, or a bad decode (資產設備 event 3 read 取消 as 關閉視窗 and
@@ -2088,6 +2095,125 @@ def _pick_side_diverse_hints(
     return picked
 
 
+def _append_no_anchor_landmark_hints(
+    hints: list[NearbyHint],
+    candidates: list[Any],
+    *,
+    instruction: str,
+) -> list[NearbyHint]:
+    """Add up to two texts when current hints do not uniquely locate the click.
+
+    Simulates playback with the target label ignored. An extra must be a unique
+    multi-character text. Texts inside the playback gap limit are tried first.
+    When none are that close, the closest text is tried instead. Sides the
+    current hints do not already use come first. Icon labels and repeated
+    labels are skipped. When the current hints already leave only the primary,
+    or no extra can do that, the list is unchanged.
+    """
+    if len(candidates) < 2 or not isinstance(candidates[0], dict):
+        return hints
+
+    pairs: list[tuple[dict[str, Any], UiDetection]] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        det = _dict_to_detection(candidate)
+        if det is None:
+            continue
+        pairs.append((candidate, det))
+    if len(pairs) < 2:
+        return hints
+
+    primary_candidate, primary = pairs[0]
+    detections = [det for _candidate, det in pairs]
+    anchor = _candidate_label_for_hint(primary_candidate) or ""
+    if not any(
+        token in anchor
+        for token in ("圖示", "文字", "輸入欄", "滾動條", "按鈕", "元素", "未知")
+    ):
+        class_name = str(primary_candidate.get("class_name") or "")
+        anchor = {
+            "text": "「目標」文字",
+            "element": "「目標」圖示",
+            "input": "輸入欄",
+            "scrollbar": "滾動條",
+            "button": "按鈕",
+            "unknown": "未知",
+        }.get(class_name, anchor)
+    if _landmark_hints_locate(detections, hints, primary, anchor=anchor):
+        return hints
+
+    label_freq = _label_frequencies(candidates)
+    used_labels = {hint.label for hint in hints}
+    used_sides = {hint.side for hint in hints if hint.side is not None}
+    primary_bbox = _as_bbox_xywh(primary_candidate.get("bbox")) or primary.bbox
+    click_xy = _click_xy_from_vision(
+        {"local_cursor": None},
+        primary=primary_candidate,
+    )
+    gathered: list[tuple[int, float, NearbyHint, bool]] = []
+    for candidate, det in pairs[1:]:
+        label = _candidate_label_for_hint(candidate)
+        if not label or label in used_labels:
+            continue
+        if label_freq.get(label, 0) != 1:
+            continue
+        if _is_unknown_nearby_landmark(label, candidate):
+            continue
+        if not _is_multi_char_text_candidate(candidate, label):
+            continue
+        if label.endswith("圖示"):
+            continue
+        if instruction and _label_already_in_instruction(label, instruction):
+            continue
+        side = _neighbor_side_for_candidate(
+            candidate,
+            primary_bbox=primary_bbox,
+            click_xy=click_xy,
+        )
+        if side is None:
+            continue
+        gap = _box_edge_gap(primary.bbox, det.bbox)
+        gathered.append(
+            (
+                0 if side not in used_sides else 1,
+                gap,
+                NearbyHint(label=label, side=side),
+                _within_landmark_gap(primary.bbox, det.bbox),
+            )
+        )
+    near = [item for item in gathered if item[3]]
+    if near:
+        pool = [(rank, gap, hint) for rank, gap, hint, _within in near]
+    elif gathered:
+        closest_gap = min(gap for _rank, gap, _hint, _within in gathered)
+        pool = [
+            (rank, gap, hint)
+            for rank, gap, hint, _within in gathered
+            if gap <= closest_gap + _LANDMARK_CLOSEST_GAP_TIE_PX
+        ]
+    else:
+        pool = []
+    pool.sort(key=lambda row: (row[0], row[1], row[2].label))
+    if _MAX_NO_ANCHOR_EXTRA_LANDMARKS < 1 or not pool:
+        return hints
+
+    def _locates(trial: list[NearbyHint]) -> bool:
+        return _landmark_hints_locate(detections, trial, primary, anchor=anchor)
+
+    for _side_rank, _gap, extra in pool:
+        if _locates([*hints, extra]):
+            return [*hints, extra]
+
+    if _MAX_NO_ANCHOR_EXTRA_LANDMARKS >= 2:
+        for index, left in enumerate(pool):
+            for right in pool[index + 1 :]:
+                trial = [*hints, left[2], right[2]]
+                if _locates(trial):
+                    return trial
+    return hints
+
+
 def collect_nearby_hints(
     vision: dict[str, Any],
     *,
@@ -2118,16 +2244,25 @@ def collect_nearby_hints(
     landmarks separate no peer by construction, and once the unique labels are
     spent the next ones repeat across the screen — a hint that matches any
     instance of its label is noise the playback picker can be swayed by.
+
+    After that list is built, up to ``_MAX_NO_ANCHOR_EXTRA_LANDMARKS`` extra
+    unique texts are appended when the hints would not uniquely locate the
+    click if the target label itself were missing.
     """
     forced, disambiguating, ranked = _prioritized_nearby_parts(
         vision, instruction=instruction
     )
     fill_budget = max(0, max_count - len(disambiguating))
-    return [
+    hints = [
         *forced,
         *disambiguating,
         *_pick_side_diverse_hints(ranked, max_count=fill_budget),
     ]
+    return _append_no_anchor_landmark_hints(
+        hints,
+        vision.get("candidates") or [],
+        instruction=instruction,
+    )
 
 
 def collect_nearby_hint_labels(

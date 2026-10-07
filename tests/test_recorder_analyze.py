@@ -277,6 +277,127 @@ def test_collect_nearby_hints_allows_same_side_when_no_alternative() -> None:
     ]
 
 
+def _icon_candidate(bbox: list[int], icon_id: str) -> dict:
+    x, y, w, h = bbox
+    return {
+        "bbox": bbox,
+        "center": [x + w // 2, y + h // 2],
+        "class_name": "element",
+        "text": "",
+        "icons": [{"chinese_id": icon_id}],
+    }
+
+
+def _text_candidate(bbox: list[int], text: str) -> dict:
+    x, y, w, h = bbox
+    return {
+        "bbox": bbox,
+        "center": [x + w // 2, y + h // 2],
+        "class_name": "text",
+        "text": text,
+    }
+
+
+def test_collect_nearby_hints_adds_text_when_icons_share_sides() -> None:
+    """Two right-side texts that fit several icons gain one text on another side."""
+    from src.common.nearby_side import NearbyHint, Side
+    from src.recorder.vision_context import _dict_to_detection, collect_nearby_hints
+    from cua_mcp.select_mouse_target import _landmark_hints_locate
+
+    vision = {
+        "used_vision": True,
+        "candidates": [
+            _icon_candidate([200, 96, 16, 16], "網格檢視"),
+            _icon_candidate([240, 96, 16, 16], "側邊欄"),
+            _text_candidate([120, 96, 40, 16], "Copilot"),
+            _text_candidate([270, 96, 30, 16], "視窗"),
+            _text_candidate([200, 130, 16, 16], "筆記"),
+            _text_candidate([200, 160, 16, 16], "重複"),
+            _text_candidate([0, 0, 40, 16], "重複"),
+            _icon_candidate([200, 180, 16, 16], "其他"),
+        ],
+    }
+    hints = collect_nearby_hints(vision, instruction="點擊「網格檢視」圖示")
+    assert hints == [
+        NearbyHint("「Copilot」文字", Side.RIGHT),
+        NearbyHint("「視窗」文字", Side.LEFT),
+        NearbyHint("「筆記」文字", Side.ABOVE),
+    ]
+    detections = [
+        det
+        for candidate in vision["candidates"]
+        if (det := _dict_to_detection(candidate)) is not None
+    ]
+    assert _landmark_hints_locate(
+        detections,
+        hints,
+        detections[0],
+        anchor="「網格檢視」圖示",
+    )
+
+
+def test_collect_nearby_hints_skips_extra_when_already_unique() -> None:
+    from src.common.nearby_side import NearbyHint, Side
+    from src.recorder.vision_context import collect_nearby_hints
+
+    vision = {
+        "used_vision": True,
+        "candidates": [
+            _icon_candidate([200, 96, 16, 16], "網格檢視"),
+            _text_candidate([120, 96, 40, 16], "Copilot"),
+            _text_candidate([270, 96, 30, 16], "視窗"),
+            _text_candidate([200, 130, 16, 16], "筆記"),
+        ],
+    }
+    hints = collect_nearby_hints(vision, instruction="點擊「網格檢視」圖示")
+    assert hints == [
+        NearbyHint("「Copilot」文字", Side.RIGHT),
+        NearbyHint("「視窗」文字", Side.LEFT),
+    ]
+
+
+def test_collect_nearby_hints_uses_closest_text_when_none_are_near() -> None:
+    """A text outside the gap limit is still stored when it is the closest."""
+    from src.common.nearby_side import NearbyHint, Side
+    from src.recorder.vision_context import collect_nearby_hints
+
+    vision = {
+        "used_vision": True,
+        "candidates": [
+            _icon_candidate([400, 80, 16, 16], "網格檢視"),
+            _icon_candidate([400, 200, 16, 16], "側邊欄"),
+            _text_candidate([20, 70, 40, 160], "Copilot"),
+            _text_candidate([800, 70, 40, 160], "視窗"),
+            _text_candidate([400, 160, 16, 16], "筆記"),
+        ],
+    }
+    hints = collect_nearby_hints(vision, instruction="點擊「網格檢視」圖示")
+    assert NearbyHint("「筆記」文字", Side.ABOVE) in hints
+
+
+def test_collect_nearby_hints_does_not_add_repeated_or_icon_landmark() -> None:
+    from src.common.nearby_side import NearbyHint, Side
+    from src.recorder.vision_context import collect_nearby_hints
+
+    vision = {
+        "used_vision": True,
+        "candidates": [
+            _icon_candidate([200, 96, 16, 16], "網格檢視"),
+            _icon_candidate([240, 96, 16, 16], "側邊欄"),
+            _text_candidate([120, 96, 40, 16], "Copilot"),
+            _text_candidate([270, 96, 30, 16], "視窗"),
+            _text_candidate([200, 130, 16, 16], "重複"),
+            _text_candidate([0, 0, 40, 16], "重複"),
+            _icon_candidate([200, 160, 16, 16], "其他"),
+        ],
+    }
+    hints = collect_nearby_hints(vision, instruction="點擊「網格檢視」圖示")
+    assert hints == [
+        NearbyHint("「Copilot」文字", Side.RIGHT),
+        NearbyHint("「視窗」文字", Side.LEFT),
+    ]
+
+
 def test_collect_nearby_hint_labels_keeps_collecting_until_two_texts() -> None:
     """Keep taking multi-char text landmarks until two are found, skipping closer icons."""
     vision = {

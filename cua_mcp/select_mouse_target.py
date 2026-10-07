@@ -11,6 +11,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
+import math
 import re
 import threading
 import time
@@ -2292,6 +2293,302 @@ def _prefilter_anchors_by_nearby(
     return anchors
 
 
+# Box-edge gap may be at most this many times the longer side of the larger box.
+_LANDMARK_UNIQUE_GAP_SIDE_RATIO = 2.0
+# Gaps within this many pixels of the minimum count as the same closest tier.
+_LANDMARK_CLOSEST_GAP_TIE_PX = 1.0
+
+
+def _box_edge_gap(
+    a: tuple[int, int, int, int],
+    b: tuple[int, int, int, int],
+) -> float:
+    """Euclidean gap between the closest edges of two ``(x, y, w, h)`` boxes.
+
+    Overlapping or touching boxes have gap 0.
+    """
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    ax2, ay2 = ax + aw, ay + ah
+    bx2, by2 = bx + bw, by + bh
+    if ax2 < bx:
+        dx = float(bx - ax2)
+    elif bx2 < ax:
+        dx = float(ax - bx2)
+    else:
+        dx = 0.0
+    if ay2 < by:
+        dy = float(by - ay2)
+    elif by2 < ay:
+        dy = float(ay - by2)
+    else:
+        dy = 0.0
+    return math.hypot(dx, dy)
+
+
+def _within_landmark_gap(
+    a: tuple[int, int, int, int],
+    b: tuple[int, int, int, int],
+    *,
+    ratio: float = _LANDMARK_UNIQUE_GAP_SIDE_RATIO,
+) -> bool:
+    """True when the boxes are adjacent within ``ratio`` times the larger side."""
+    longer = max(max(a[2], a[3]), max(b[2], b[3]), 1)
+    return _box_edge_gap(a, b) <= ratio * longer
+
+
+def _detections_same_place(a: UiDetection, b: UiDetection) -> bool:
+    """True when ``a`` and ``b`` are the same on-screen control.
+
+    Heavy overlap counts, as does either center lying inside the other box.
+    """
+    if iou_xywh(a.bbox, b.bbox) > DEFAULT_DEDUPE_OVERLAP_IOU_THRESHOLD:
+        return True
+    if point_in_rect_xywh(a.cx, a.cy, b.bbox):
+        return True
+    return point_in_rect_xywh(b.cx, b.cy, a.bbox)
+
+
+def _anchor_type_suffix(anchor: str) -> str | None:
+    """Return the class suffix in ``anchor`` (圖示, 文字, …), if any."""
+    text = anchor or ""
+    for suffix in ("圖示", "輸入欄", "滾動條", "按鈕", "文字", "未知", "元素"):
+        if suffix in text:
+            return suffix
+    return None
+
+
+def _matches_landmark_fallback_type(det: UiDetection, anchor: str) -> bool:
+    """True when ``det`` is the kind of control ``anchor`` names.
+
+    ``圖示`` keeps icon-labeled elements and blank unknowns no larger than
+    :data:`_ICON_PEER_FALLBACK_MAX_SIDE_PX`, including a mislabeled glyph.
+    Other suffixes stay on that class. An anchor with no suffix accepts any box.
+    """
+    suffix = _anchor_type_suffix(anchor)
+    if suffix is None:
+        return True
+    if suffix == "圖示":
+        if _is_element_with_icon_labels(det):
+            return True
+        if not _is_blank_unknown_icon_candidate(det):
+            return False
+        return max(det.bbox[2], det.bbox[3]) <= _ICON_PEER_FALLBACK_MAX_SIDE_PX
+    expected = {
+        "輸入欄": "input",
+        "滾動條": "scrollbar",
+        "按鈕": "button",
+        "文字": "text",
+        "未知": "unknown",
+        "元素": "element",
+    }[suffix]
+    if det.class_name == expected:
+        return True
+    class_ids = {
+        "text": YOLO_CLASS_TEXT,
+        "element": YOLO_CLASS_ELEMENT,
+        "input": YOLO_CLASS_INPUT,
+        "scrollbar": YOLO_CLASS_SCROLLBAR,
+        "unknown": PICKER_CLASS_UNKNOWN,
+    }
+    expected_id = class_ids.get(expected)
+    return expected_id is not None and det.class_id == expected_id
+
+
+def _directed_landmark_gap(
+    candidate: UiDetection,
+    landmark: UiDetection,
+    hint: NearbyHint,
+) -> float | None:
+    """Gap when ``candidate`` sits on ``hint.side`` of ``landmark``, else None."""
+    if hint.side is None:
+        return None
+    if not anchor_satisfies_side(
+        candidate.bbox,
+        landmark.cx,
+        landmark.cy,
+        hint.side,
+        landmark_bbox=landmark.bbox,
+    ):
+        return None
+    return _box_edge_gap(candidate.bbox, landmark.bbox)
+
+
+def _hint_satisfied_by_nearby_landmark(
+    candidate: UiDetection,
+    landmarks: list[UiDetection],
+    hint: NearbyHint,
+    peers: list[UiDetection],
+    *,
+    threshold: float,
+) -> bool:
+    """True when ``candidate`` matches ``hint`` against a nearby landmark.
+
+    A pair inside the gap limit matches. When no peer is inside that limit,
+    the closest peer on the required side matches instead, including ties.
+    """
+    if hint.side is None:
+        return False
+    matching = [
+        neigh
+        for neigh in landmarks
+        if id(neigh) != id(candidate)
+        and _detection_similarity_to_query(neigh, hint.label) >= threshold
+    ]
+    if not matching:
+        return False
+
+    def _gaps(det: UiDetection) -> list[float]:
+        found: list[float] = []
+        for neigh in matching:
+            gap = _directed_landmark_gap(det, neigh, hint)
+            if gap is not None:
+                found.append(gap)
+        return found
+
+    candidate_gaps = _gaps(candidate)
+    if not candidate_gaps:
+        return False
+    for neigh in matching:
+        gap = _directed_landmark_gap(candidate, neigh, hint)
+        if gap is not None and _within_landmark_gap(candidate.bbox, neigh.bbox):
+            return True
+
+    closest = min(candidate_gaps)
+    any_peer_within = False
+    for peer in peers:
+        for neigh in matching:
+            gap = _directed_landmark_gap(peer, neigh, hint)
+            if gap is None:
+                continue
+            if gap + _LANDMARK_CLOSEST_GAP_TIE_PX < closest:
+                return False
+            if _within_landmark_gap(peer.bbox, neigh.bbox):
+                any_peer_within = True
+    return not any_peer_within
+
+
+def _group_same_place(eligible: list[UiDetection]) -> list[UiDetection]:
+    """Collapse co-located boxes to one representative per place."""
+    count = len(eligible)
+    if count <= 1:
+        return list(eligible)
+    parent = list(range(count))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        root_left = find(left)
+        root_right = find(right)
+        if root_left != root_right:
+            parent[root_right] = root_left
+
+    for i in range(count):
+        for j in range(i + 1, count):
+            if _detections_same_place(eligible[i], eligible[j]):
+                union(i, j)
+
+    groups: dict[int, list[UiDetection]] = {}
+    for index, det in enumerate(eligible):
+        groups.setdefault(find(index), []).append(det)
+    return [
+        max(group, key=_detection_preference_score) for group in groups.values()
+    ]
+
+
+def _landmark_fallback_places(
+    detections: list[UiDetection],
+    nearby_hints: list[str] | list[NearbyHint] | None,
+    *,
+    anchor: str,
+    threshold: float = _MOUSE_FILTER_SIMILARITY_THRESHOLD,
+) -> list[UiDetection]:
+    """Places that satisfy every directed nearby hint.
+
+    Landmarks are detections whose label matches a directed hint. Those boxes,
+    and any box that heavily overlaps one, are not selectable. Undirected hints
+    are ignored. With no directed hint, no place qualifies. Sides are not
+    relaxed: a hint with no matching nearby landmark drops every candidate.
+    When no selectable box is inside the gap limit for a hint, the closest
+    box on that side is accepted.
+    """
+    hints = normalize_nearby_hints(nearby_hints)
+    directed = [hint for hint in hints if hint.side is not None]
+    if not detections or not directed:
+        return []
+
+    landmarks: list[UiDetection] = []
+    for det in detections:
+        if any(
+            _detection_similarity_to_query(det, hint.label) >= threshold
+            for hint in directed
+        ):
+            landmarks.append(det)
+    if not landmarks:
+        return []
+
+    landmark_ids = {id(det) for det in landmarks}
+    selectable: list[UiDetection] = []
+    for det in detections:
+        if id(det) in landmark_ids:
+            continue
+        if any(
+            iou_xywh(det.bbox, landmark.bbox) > DEFAULT_DEDUPE_OVERLAP_IOU_THRESHOLD
+            for landmark in landmarks
+        ):
+            continue
+        if not _matches_landmark_fallback_type(det, anchor):
+            continue
+        selectable.append(det)
+    eligible = [
+        det
+        for det in selectable
+        if all(
+            _hint_satisfied_by_nearby_landmark(
+                det,
+                landmarks,
+                hint,
+                selectable,
+                threshold=threshold,
+            )
+            for hint in directed
+        )
+    ]
+    return _group_same_place(eligible)
+
+
+def _unique_target_from_landmarks(
+    detections: list[UiDetection],
+    nearby_hints: list[str] | list[NearbyHint] | None,
+    *,
+    anchor: str,
+) -> UiDetection | None:
+    """Return the only place the directed landmarks describe, or None."""
+    places = _landmark_fallback_places(detections, nearby_hints, anchor=anchor)
+    if len(places) != 1:
+        return None
+    return places[0]
+
+
+def _landmark_hints_locate(
+    detections: list[UiDetection],
+    nearby_hints: list[str] | list[NearbyHint] | None,
+    primary: UiDetection,
+    *,
+    anchor: str,
+) -> bool:
+    """True when the hints leave exactly one place and it is ``primary``."""
+    places = _landmark_fallback_places(detections, nearby_hints, anchor=anchor)
+    if len(places) != 1:
+        return False
+    chosen = places[0]
+    return chosen is primary or _detections_same_place(chosen, primary)
+
+
 async def _maybe_disambiguate_similar_selection(
     *,
     chosen: UiDetection,
@@ -2496,7 +2793,8 @@ async def find_mouse_point(
     strip as the ROI. A missing DWM strip keeps the window ROI.
 
     While ``require_similarity_match()`` is active (cache replay), a similarity
-    miss returns ``None`` without the visual one-pass or Gemma ROI fallbacks.
+    miss returns ``None`` without the visual one-pass or Gemma ROI fallbacks,
+    unless the directed nearby landmarks describe exactly one nearby place.
 
     Successful metadata includes ``timing`` with capture / YOLO / OCR / parse /
     select phase seconds for session time profiles.
@@ -2657,38 +2955,54 @@ async def find_mouse_point(
     select_phase = "select"
     select_started = time.perf_counter()
     if not anchor_matches:
-        if similarity_match_required():
+        unique = _unique_target_from_landmarks(
+            detections,
+            nearby_hints,
+            anchor=anchor,
+        )
+        if unique is not None:
+            chosen = unique
+            idx = detections.index(unique)
+            selection_method = "landmark_unique"
+            select_phase = "landmark_unique"
+            _log_info(
+                "move_mouse: landmark-unique fallback "
+                f"center=[{chosen.cx},{chosen.cy}] "
+                f"nearby_labels={nearby_phrases!r}"
+            )
+        elif similarity_match_required():
             _log_info(
                 "move_mouse: no similarity anchor matches; similarity match required, "
                 "skipping visual one-pass fallback"
             )
             return None
-        # Stage A: similarity miss but detections exist → Gemma pick among all.
-        _log_info(
-            "move_mouse: no similarity anchor matches; "
-            "trying visual one-pass fallback over all detections"
-        )
-        from cua_mcp.gemma_roi_refine import pick_candidate_with_gemma
-
-        try:
-            idx, selected_text, chosen = await pick_candidate_with_gemma(
-                instruction_text,
-                detections,
-                image_paths,
-            )
-        except Exception as exc:
+        else:
+            # Stage A: similarity miss but detections exist → Gemma pick among all.
             _log_info(
-                "move_mouse: visual one-pass fallback failed: "
-                f"{type(exc).__name__}: {exc}"
+                "move_mouse: no similarity anchor matches; "
+                "trying visual one-pass fallback over all detections"
             )
-            return None
-        selection_method = "visual_one_pass_fallback"
-        select_phase = "visual_one_pass"
-        _log_info(
-            "move_mouse: visual one-pass fallback "
-            f"index={idx} text={selected_text!r} center=[{chosen.cx},{chosen.cy}]"
-        )
-        nearby_matches = []
+            from cua_mcp.gemma_roi_refine import pick_candidate_with_gemma
+
+            try:
+                idx, selected_text, chosen = await pick_candidate_with_gemma(
+                    instruction_text,
+                    detections,
+                    image_paths,
+                )
+            except Exception as exc:
+                _log_info(
+                    "move_mouse: visual one-pass fallback failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                return None
+            selection_method = "visual_one_pass_fallback"
+            select_phase = "visual_one_pass"
+            _log_info(
+                "move_mouse: visual one-pass fallback "
+                f"index={idx} text={selected_text!r} center=[{chosen.cx},{chosen.cy}]"
+            )
+            nearby_matches = []
     else:
         before_nearby = len(anchor_matches)
         admitted_unknowns = _admit_unknown_icon_peers(

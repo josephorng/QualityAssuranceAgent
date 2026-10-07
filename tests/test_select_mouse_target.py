@@ -3364,6 +3364,151 @@ def test_prefilter_anchors_by_nearby_respects_inside_side() -> None:
     assert kept == [inside_anchor]
 
 
+def test_unique_target_from_landmarks_picks_only_nearby_icon() -> None:
+    from src.common.nearby_side import NearbyHint, Side
+
+    from cua_mcp.select_mouse_target import _unique_target_from_landmarks
+
+    target = _detection_from_bbox(
+        (200, 96, 16, 16),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "垂直更多"}],
+    )
+    far = _detection_from_bbox(
+        (800, 96, 16, 16),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "關閉視窗"}],
+    )
+    copilot = _detection_from_bbox((120, 96, 40, 16), YOLO_CLASS_TEXT, text="Copilot")
+    chat = _detection_from_bbox((100, 130, 60, 16), YOLO_CLASS_TEXT, text="新聊天")
+    hints = [
+        NearbyHint("「Copilot」文字", Side.RIGHT),
+        NearbyHint("「新聊天」文字", Side.UPPER_RIGHT),
+    ]
+    chosen = _unique_target_from_landmarks(
+        [target, far, copilot, chat],
+        hints,
+        anchor="「網格檢視」圖示",
+    )
+    assert chosen is target
+
+
+def test_unique_target_from_landmarks_refuses_two_icons() -> None:
+    from src.common.nearby_side import NearbyHint, Side
+
+    from cua_mcp.select_mouse_target import _unique_target_from_landmarks
+
+    left = _detection_from_bbox(
+        (200, 96, 16, 16),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "垂直更多"}],
+    )
+    right = _detection_from_bbox(
+        (230, 96, 16, 16),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "側邊欄"}],
+    )
+    copilot = _detection_from_bbox((120, 96, 40, 16), YOLO_CLASS_TEXT, text="Copilot")
+    chat = _detection_from_bbox((100, 130, 60, 16), YOLO_CLASS_TEXT, text="新聊天")
+    hints = [
+        NearbyHint("「Copilot」文字", Side.RIGHT),
+        NearbyHint("「新聊天」文字", Side.UPPER_RIGHT),
+    ]
+    assert (
+        _unique_target_from_landmarks(
+            [left, right, copilot, chat],
+            hints,
+            anchor="「網格檢視」圖示",
+        )
+        is None
+    )
+
+
+def test_unique_target_from_landmarks_collapses_colocated_boxes() -> None:
+    from src.common.nearby_side import NearbyHint, Side
+
+    from cua_mcp.select_mouse_target import _unique_target_from_landmarks
+
+    first = _detection_from_bbox(
+        (200, 96, 16, 16),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "垂直更多"}],
+    )
+    second = _detection_from_bbox(
+        (202, 96, 16, 16),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "網格"}],
+    )
+    copilot = _detection_from_bbox((120, 96, 40, 16), YOLO_CLASS_TEXT, text="Copilot")
+    chat = _detection_from_bbox((100, 130, 60, 16), YOLO_CLASS_TEXT, text="新聊天")
+    hints = [
+        NearbyHint("「Copilot」文字", Side.RIGHT),
+        NearbyHint("「新聊天」文字", Side.UPPER_RIGHT),
+    ]
+    chosen = _unique_target_from_landmarks(
+        [first, second, copilot, chat],
+        hints,
+        anchor="「網格檢視」圖示",
+    )
+    assert chosen is first
+
+
+def test_unique_target_from_landmarks_uses_closest_when_none_are_near() -> None:
+    """Outside the gap limit, the closest icon on those sides is the target."""
+    from src.common.nearby_side import NearbyHint, Side
+
+    from cua_mcp.select_mouse_target import _unique_target_from_landmarks
+
+    closer = _detection_from_bbox(
+        (300, 96, 16, 16),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "垂直更多"}],
+    )
+    farther = _detection_from_bbox(
+        (500, 96, 16, 16),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "關閉視窗"}],
+    )
+    copilot = _detection_from_bbox((120, 96, 40, 16), YOLO_CLASS_TEXT, text="Copilot")
+    chat = _detection_from_bbox((100, 130, 60, 16), YOLO_CLASS_TEXT, text="新聊天")
+    hints = [
+        NearbyHint("「Copilot」文字", Side.RIGHT),
+        NearbyHint("「新聊天」文字", Side.UPPER_RIGHT),
+    ]
+    chosen = _unique_target_from_landmarks(
+        [closer, farther, copilot, chat],
+        hints,
+        anchor="「網格檢視」圖示",
+    )
+    assert chosen is closer
+
+
+def test_unique_target_from_landmarks_skips_landmark_box() -> None:
+    from src.common.nearby_side import NearbyHint, Side
+
+    from cua_mcp.select_mouse_target import _unique_target_from_landmarks
+
+    on_landmark = _detection_from_bbox(
+        (120, 96, 40, 16),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "垂直更多"}],
+    )
+    copilot = _detection_from_bbox((120, 96, 40, 16), YOLO_CLASS_TEXT, text="Copilot")
+    chat = _detection_from_bbox((100, 130, 60, 16), YOLO_CLASS_TEXT, text="新聊天")
+    hints = [
+        NearbyHint("「Copilot」文字", Side.RIGHT),
+        NearbyHint("「新聊天」文字", Side.UPPER_RIGHT),
+    ]
+    assert (
+        _unique_target_from_landmarks(
+            [on_landmark, copilot, chat],
+            hints,
+            anchor="「網格檢視」圖示",
+        )
+        is None
+    )
+
+
 def test_prefilter_anchors_by_nearby_relaxes_side_when_none_match() -> None:
     from src.common.nearby_side import NearbyHint, Side
 
@@ -4097,3 +4242,147 @@ async def test_resolve_mouse_point_scrollbar_track_percent(
     assert (gx, gy) == expected
     assert meta["track_percent"] == 60
     assert meta["relative_offset"] == {"dx": 0, "dy": 0}
+
+
+def _install_find_mouse_point_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    detections: list[UiDetection],
+    *,
+    pick,
+) -> None:
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+
+    async def fake_parse(instruction: str):
+        return ("「網格檢視」圖示", 0, 0, [], None, 0, None)
+
+    monkeypatch.setattr(smt, "parse_mouse_target_instruction", fake_parse)
+    monkeypatch.setattr(smt, "selected_eye_monitor_indices", lambda: [1])
+    monkeypatch.setattr(
+        smt,
+        "grab_monitor_bgr",
+        lambda *_a, **_k: (1, np.zeros((50, 50, 3), dtype=np.uint8)),
+    )
+    monkeypatch.setattr(smt, "imwrite_bgr", lambda *_a, **_k: True)
+    monkeypatch.setattr(smt, "_collect_monitor_detections", lambda *_a, **_k: detections)
+    monkeypatch.setattr(
+        "cua_mcp.gemma_roi_refine.pick_candidate_with_gemma",
+        pick,
+    )
+    monkeypatch.setattr(
+        smt,
+        "_run_manager",
+        lambda: type(
+            "M",
+            (),
+            {
+                "require_paths": staticmethod(
+                    lambda: type("P", (), {"yolo_ocr_dir": Path(".")})()
+                ),
+                "log_info": staticmethod(lambda *_a, **_k: None),
+            },
+        )(),
+    )
+
+
+def _grid_icon_scene(*, second_icon: bool) -> list[UiDetection]:
+    target = _detection_from_bbox(
+        (200, 96, 16, 16),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "垂直更多"}],
+    )
+    detections = [target]
+    if second_icon:
+        detections.append(
+            _detection_from_bbox(
+                (230, 96, 16, 16),
+                YOLO_CLASS_ELEMENT,
+                icons=[{"chinese_id": "側邊欄"}],
+            )
+        )
+    detections.extend(
+        [
+            _detection_from_bbox((120, 96, 40, 16), YOLO_CLASS_TEXT, text="Copilot"),
+            _detection_from_bbox((100, 130, 60, 16), YOLO_CLASS_TEXT, text="新聊天"),
+        ]
+    )
+    return detections
+
+
+_GRID_NEARBY = [
+    "在「Copilot」文字的右邊",
+    "在「新聊天」文字的右上方",
+]
+
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_replay_uses_unique_landmark(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cua_mcp import select_mouse_target as smt
+
+    async def fake_pick(*_a, **_k):
+        raise AssertionError("visual one-pass fallback must not run during replay")
+
+    detections = _grid_icon_scene(second_icon=False)
+    _install_find_mouse_point_fakes(monkeypatch, detections, pick=fake_pick)
+    with smt.require_similarity_match():
+        found = await smt.find_mouse_point(
+            "「網格檢視」圖示",
+            nearby_objects=_GRID_NEARBY,
+        )
+    assert found is not None
+    assert (found[0], found[1]) == (detections[0].cx, detections[0].cy)
+    assert found[2]["selection_method"] == "landmark_unique"
+
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_replay_miss_stays_unresolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cua_mcp import select_mouse_target as smt
+
+    async def fake_pick(*_a, **_k):
+        raise AssertionError("visual one-pass fallback must not run during replay")
+
+    _install_find_mouse_point_fakes(
+        monkeypatch,
+        _grid_icon_scene(second_icon=True),
+        pick=fake_pick,
+    )
+    with smt.require_similarity_match():
+        found = await smt.find_mouse_point(
+            "「網格檢視」圖示",
+            nearby_objects=_GRID_NEARBY,
+        )
+    assert found is None
+
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_live_miss_still_uses_visual_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cua_mcp import select_mouse_target as smt
+
+    called = {"n": 0, "center": (0, 0)}
+
+    async def fake_pick(_instruction, dets, _paths):
+        called["n"] += 1
+        chosen = dets[1]
+        called["center"] = (chosen.cx, chosen.cy)
+        return 1, "側邊欄", chosen
+
+    _install_find_mouse_point_fakes(
+        monkeypatch,
+        _grid_icon_scene(second_icon=True),
+        pick=fake_pick,
+    )
+    found = await smt.find_mouse_point(
+        "「網格檢視」圖示",
+        nearby_objects=_GRID_NEARBY,
+    )
+    assert called["n"] == 1
+    assert found is not None
+    assert found[2]["selection_method"] == "visual_one_pass_fallback"
+    assert (found[0], found[1]) == called["center"]

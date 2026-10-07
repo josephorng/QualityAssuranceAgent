@@ -38,8 +38,8 @@ from cua_mcp.select_mouse_target import (
     _detect_mouse_targets_from_bgr,
     _label_similarity,
     _LANDMARK_CLOSEST_GAP_TIE_PX,
+    _detections_same_place,
     _landmark_hints_locate,
-    _within_landmark_gap,
 )
 from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text
 from cua_mcp.yolo_onnx import (
@@ -2101,14 +2101,14 @@ def _append_no_anchor_landmark_hints(
     *,
     instruction: str,
 ) -> list[NearbyHint]:
-    """Add up to two texts when current hints do not uniquely locate the click.
+    """Add up to two landmarks when current hints do not uniquely locate the click.
 
     Simulates playback with the target label ignored. An extra must be a unique
-    multi-character text. Texts inside the playback gap limit are tried first.
-    When none are that close, the closest text is tried instead. Sides the
-    current hints do not already use come first. Icon labels and repeated
-    labels are skipped. When the current hints already leave only the primary,
-    or no extra can do that, the list is unchanged.
+    multi-character text or a unique icon, and only the closest one of each
+    kind is tried. Text is tried before icons. Among ties, a side the current
+    hints do not already use comes first. Repeated labels are skipped, as is an
+    icon sitting on the click itself. When the current hints already leave only
+    the primary, or no extra can do that, the list is unchanged.
     """
     if len(candidates) < 2 or not isinstance(candidates[0], dict):
         return hints
@@ -2151,7 +2151,8 @@ def _append_no_anchor_landmark_hints(
         {"local_cursor": None},
         primary=primary_candidate,
     )
-    gathered: list[tuple[int, float, NearbyHint, bool]] = []
+    texts: list[tuple[int, float, NearbyHint]] = []
+    icons: list[tuple[int, float, NearbyHint]] = []
     for candidate, det in pairs[1:]:
         label = _candidate_label_for_hint(candidate)
         if not label or label in used_labels:
@@ -2160,9 +2161,11 @@ def _append_no_anchor_landmark_hints(
             continue
         if _is_unknown_nearby_landmark(label, candidate):
             continue
-        if not _is_multi_char_text_candidate(candidate, label):
+        if _detections_same_place(primary, det):
             continue
-        if label.endswith("圖示"):
+        is_text = _is_multi_char_text_candidate(candidate, label)
+        is_icon = label.endswith("圖示")
+        if not is_text and not is_icon:
             continue
         if instruction and _label_already_in_instruction(label, instruction):
             continue
@@ -2174,27 +2177,30 @@ def _append_no_anchor_landmark_hints(
         if side is None:
             continue
         gap = _box_edge_gap(primary.bbox, det.bbox)
-        gathered.append(
+        bucket = texts if is_text else icons
+        bucket.append(
             (
                 0 if side not in used_sides else 1,
                 gap,
                 NearbyHint(label=label, side=side),
-                _within_landmark_gap(primary.bbox, det.bbox),
             )
         )
-    near = [item for item in gathered if item[3]]
-    if near:
-        pool = [(rank, gap, hint) for rank, gap, hint, _within in near]
-    elif gathered:
-        closest_gap = min(gap for _rank, gap, _hint, _within in gathered)
-        pool = [
-            (rank, gap, hint)
-            for rank, gap, hint, _within in gathered
-            if gap <= closest_gap + _LANDMARK_CLOSEST_GAP_TIE_PX
+
+    def _closest(
+        items: list[tuple[int, float, NearbyHint]],
+    ) -> list[tuple[int, float, NearbyHint]]:
+        if not items:
+            return []
+        closest_gap = min(gap for _rank, gap, _hint in items)
+        chosen = [
+            item
+            for item in items
+            if item[1] <= closest_gap + _LANDMARK_CLOSEST_GAP_TIE_PX
         ]
-    else:
-        pool = []
-    pool.sort(key=lambda row: (row[0], row[1], row[2].label))
+        chosen.sort(key=lambda row: (row[0], row[1], row[2].label))
+        return chosen
+
+    pool = _closest(texts) + _closest(icons)
     if _MAX_NO_ANCHOR_EXTRA_LANDMARKS < 1 or not pool:
         return hints
 
@@ -2246,8 +2252,9 @@ def collect_nearby_hints(
     instance of its label is noise the playback picker can be swayed by.
 
     After that list is built, up to ``_MAX_NO_ANCHOR_EXTRA_LANDMARKS`` extra
-    unique texts are appended when the hints would not uniquely locate the
-    click if the target label itself were missing.
+    unique texts or icons are appended when the hints would not uniquely locate
+    the click if the target label itself were missing. Text extras are tried
+    before icon extras.
     """
     forced, disambiguating, ranked = _prioritized_nearby_parts(
         vision, instruction=instruction

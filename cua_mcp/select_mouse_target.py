@@ -2293,8 +2293,6 @@ def _prefilter_anchors_by_nearby(
     return anchors
 
 
-# Box-edge gap may be at most this many times the longer side of the larger box.
-_LANDMARK_UNIQUE_GAP_SIDE_RATIO = 2.0
 # Gaps within this many pixels of the minimum count as the same closest tier.
 _LANDMARK_CLOSEST_GAP_TIE_PX = 1.0
 
@@ -2324,17 +2322,6 @@ def _box_edge_gap(
     else:
         dy = 0.0
     return math.hypot(dx, dy)
-
-
-def _within_landmark_gap(
-    a: tuple[int, int, int, int],
-    b: tuple[int, int, int, int],
-    *,
-    ratio: float = _LANDMARK_UNIQUE_GAP_SIDE_RATIO,
-) -> bool:
-    """True when the boxes are adjacent within ``ratio`` times the larger side."""
-    longer = max(max(a[2], a[3]), max(b[2], b[3]), 1)
-    return _box_edge_gap(a, b) <= ratio * longer
 
 
 def _detections_same_place(a: UiDetection, b: UiDetection) -> bool:
@@ -2422,10 +2409,11 @@ def _hint_satisfied_by_nearby_landmark(
     *,
     threshold: float,
 ) -> bool:
-    """True when ``candidate`` matches ``hint`` against a nearby landmark.
+    """True when ``candidate`` is a closest peer on ``hint``'s side.
 
-    A pair inside the gap limit matches. When no peer is inside that limit,
-    the closest peer on the required side matches instead, including ties.
+    For each landmark whose label matches the hint, peers on the required side
+    are ranked by box-edge gap. ``candidate`` matches when it ties the nearest
+    peer of any such landmark.
     """
     if hint.side is None:
         return False
@@ -2438,34 +2426,24 @@ def _hint_satisfied_by_nearby_landmark(
     if not matching:
         return False
 
-    def _gaps(det: UiDetection) -> list[float]:
-        found: list[float] = []
-        for neigh in matching:
-            gap = _directed_landmark_gap(det, neigh, hint)
-            if gap is not None:
-                found.append(gap)
-        return found
-
-    candidate_gaps = _gaps(candidate)
-    if not candidate_gaps:
-        return False
     for neigh in matching:
-        gap = _directed_landmark_gap(candidate, neigh, hint)
-        if gap is not None and _within_landmark_gap(candidate.bbox, neigh.bbox):
-            return True
-
-    closest = min(candidate_gaps)
-    any_peer_within = False
-    for peer in peers:
-        for neigh in matching:
+        candidate_gap: float | None = None
+        nearest: float | None = None
+        for peer in peers:
             gap = _directed_landmark_gap(peer, neigh, hint)
             if gap is None:
                 continue
-            if gap + _LANDMARK_CLOSEST_GAP_TIE_PX < closest:
-                return False
-            if _within_landmark_gap(peer.bbox, neigh.bbox):
-                any_peer_within = True
-    return not any_peer_within
+            if nearest is None or gap < nearest:
+                nearest = gap
+            if id(peer) == id(candidate):
+                candidate_gap = gap
+        if (
+            candidate_gap is not None
+            and nearest is not None
+            and candidate_gap <= nearest + _LANDMARK_CLOSEST_GAP_TIE_PX
+        ):
+            return True
+    return False
 
 
 def _group_same_place(eligible: list[UiDetection]) -> list[UiDetection]:
@@ -2513,8 +2491,8 @@ def _landmark_fallback_places(
     and any box that heavily overlaps one, are not selectable. Undirected hints
     are ignored. With no directed hint, no place qualifies. Sides are not
     relaxed: a hint with no matching nearby landmark drops every candidate.
-    When no selectable box is inside the gap limit for a hint, the closest
-    box on that side is accepted.
+    A hint matches the closest selectable box on that side of the landmark,
+    including a gap tie.
     """
     hints = normalize_nearby_hints(nearby_hints)
     directed = [hint for hint in hints if hint.side is not None]

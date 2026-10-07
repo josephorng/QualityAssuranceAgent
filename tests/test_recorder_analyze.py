@@ -298,8 +298,8 @@ def _text_candidate(bbox: list[int], text: str) -> dict:
     }
 
 
-def test_collect_nearby_hints_adds_text_when_icons_share_sides() -> None:
-    """Two right-side texts that fit several icons gain one text on another side."""
+def test_collect_nearby_hints_adds_icon_when_texts_split_the_icons() -> None:
+    """Each icon is closest to a different text, so the sibling icon is stored."""
     from src.common.nearby_side import NearbyHint, Side
     from src.recorder.vision_context import _dict_to_detection, collect_nearby_hints
     from cua_mcp.select_mouse_target import _landmark_hints_locate
@@ -321,7 +321,7 @@ def test_collect_nearby_hints_adds_text_when_icons_share_sides() -> None:
     assert hints == [
         NearbyHint("「Copilot」文字", Side.RIGHT),
         NearbyHint("「視窗」文字", Side.LEFT),
-        NearbyHint("「筆記」文字", Side.ABOVE),
+        NearbyHint("「側邊欄」圖示", Side.LEFT),
     ]
     detections = [
         det
@@ -357,7 +357,7 @@ def test_collect_nearby_hints_skips_extra_when_already_unique() -> None:
 
 
 def test_collect_nearby_hints_uses_closest_text_when_none_are_near() -> None:
-    """A text outside the gap limit is still stored when it is the closest."""
+    """The closest text is stored when it isolates the click."""
     from src.common.nearby_side import NearbyHint, Side
     from src.recorder.vision_context import collect_nearby_hints
 
@@ -375,7 +375,8 @@ def test_collect_nearby_hints_uses_closest_text_when_none_are_near() -> None:
     assert NearbyHint("「筆記」文字", Side.ABOVE) in hints
 
 
-def test_collect_nearby_hints_does_not_add_repeated_or_icon_landmark() -> None:
+def test_collect_nearby_hints_adds_icon_when_text_cannot_locate() -> None:
+    """A unique icon is stored when no text extra isolates the click."""
     from src.common.nearby_side import NearbyHint, Side
     from src.recorder.vision_context import collect_nearby_hints
 
@@ -395,6 +396,7 @@ def test_collect_nearby_hints_does_not_add_repeated_or_icon_landmark() -> None:
     assert hints == [
         NearbyHint("「Copilot」文字", Side.RIGHT),
         NearbyHint("「視窗」文字", Side.LEFT),
+        NearbyHint("「側邊欄」圖示", Side.LEFT),
     ]
 
 

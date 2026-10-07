@@ -3393,7 +3393,7 @@ def test_unique_target_from_landmarks_picks_only_nearby_icon() -> None:
     assert chosen is target
 
 
-def test_unique_target_from_landmarks_refuses_two_icons() -> None:
+def test_unique_target_from_landmarks_picks_closer_of_two_icons() -> None:
     from src.common.nearby_side import NearbyHint, Side
 
     from cua_mcp.select_mouse_target import _unique_target_from_landmarks
@@ -3414,9 +3414,38 @@ def test_unique_target_from_landmarks_refuses_two_icons() -> None:
         NearbyHint("「Copilot」文字", Side.RIGHT),
         NearbyHint("「新聊天」文字", Side.UPPER_RIGHT),
     ]
+    chosen = _unique_target_from_landmarks(
+        [left, right, copilot, chat],
+        hints,
+        anchor="「網格檢視」圖示",
+    )
+    assert chosen is left
+
+
+def test_unique_target_from_landmarks_refuses_tied_icons() -> None:
+    from src.common.nearby_side import NearbyHint, Side
+
+    from cua_mcp.select_mouse_target import _unique_target_from_landmarks
+
+    upper = _detection_from_bbox(
+        (200, 80, 16, 16),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "垂直更多"}],
+    )
+    lower = _detection_from_bbox(
+        (200, 180, 16, 16),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "側邊欄"}],
+    )
+    left_text = _detection_from_bbox((20, 70, 40, 160), YOLO_CLASS_TEXT, text="Copilot")
+    right_text = _detection_from_bbox((800, 70, 40, 160), YOLO_CLASS_TEXT, text="視窗")
+    hints = [
+        NearbyHint("「Copilot」文字", Side.RIGHT),
+        NearbyHint("「視窗」文字", Side.LEFT),
+    ]
     assert (
         _unique_target_from_landmarks(
-            [left, right, copilot, chat],
+            [upper, lower, left_text, right_text],
             hints,
             anchor="「網格檢視」圖示",
         )
@@ -3454,7 +3483,7 @@ def test_unique_target_from_landmarks_collapses_colocated_boxes() -> None:
 
 
 def test_unique_target_from_landmarks_uses_closest_when_none_are_near() -> None:
-    """Outside the gap limit, the closest icon on those sides is the target."""
+    """The closest icon on those sides is the target."""
     from src.common.nearby_side import NearbyHint, Side
 
     from cua_mcp.select_mouse_target import _unique_target_from_landmarks
@@ -4316,6 +4345,30 @@ _GRID_NEARBY = [
 ]
 
 
+def _tied_icon_scene() -> list[UiDetection]:
+    """Two icons at the same distance from both landmarks."""
+    return [
+        _detection_from_bbox(
+            (200, 80, 16, 16),
+            YOLO_CLASS_ELEMENT,
+            icons=[{"chinese_id": "垂直更多"}],
+        ),
+        _detection_from_bbox(
+            (200, 180, 16, 16),
+            YOLO_CLASS_ELEMENT,
+            icons=[{"chinese_id": "側邊欄"}],
+        ),
+        _detection_from_bbox((20, 70, 40, 160), YOLO_CLASS_TEXT, text="Copilot"),
+        _detection_from_bbox((800, 70, 40, 160), YOLO_CLASS_TEXT, text="視窗"),
+    ]
+
+
+_TIED_NEARBY = [
+    "在「Copilot」文字的右邊",
+    "在「視窗」文字的左邊",
+]
+
+
 @pytest.mark.asyncio
 async def test_find_mouse_point_replay_uses_unique_landmark(
     monkeypatch: pytest.MonkeyPatch,
@@ -4348,13 +4401,13 @@ async def test_find_mouse_point_replay_miss_stays_unresolved(
 
     _install_find_mouse_point_fakes(
         monkeypatch,
-        _grid_icon_scene(second_icon=True),
+        _tied_icon_scene(),
         pick=fake_pick,
     )
     with smt.require_similarity_match():
         found = await smt.find_mouse_point(
             "「網格檢視」圖示",
-            nearby_objects=_GRID_NEARBY,
+            nearby_objects=_TIED_NEARBY,
         )
     assert found is None
 
@@ -4375,12 +4428,12 @@ async def test_find_mouse_point_live_miss_still_uses_visual_fallback(
 
     _install_find_mouse_point_fakes(
         monkeypatch,
-        _grid_icon_scene(second_icon=True),
+        _tied_icon_scene(),
         pick=fake_pick,
     )
     found = await smt.find_mouse_point(
         "「網格檢視」圖示",
-        nearby_objects=_GRID_NEARBY,
+        nearby_objects=_TIED_NEARBY,
     )
     assert called["n"] == 1
     assert found is not None

@@ -9,6 +9,7 @@ import pytest
 from PIL import Image
 
 from src.common import settings as settings_module
+from src.common.io_utils import imread_bgr
 from src.common.session_html import (
     _typed_text_candidates,
     recording_html_path,
@@ -1471,6 +1472,215 @@ def test_write_runs_index_empty_when_no_reports(tmp_path: Path) -> None:
     assert "執行報告" in html
     assert "錄製紀錄" in html
     assert "尚無錄製" in html
+
+
+def test_write_recording_html_bakes_focus_rect_into_screenshot(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_focus_rect"
+    run_root.mkdir(parents=True)
+    (run_root / "events").mkdir()
+    (run_root / "screenshots").mkdir()
+    (run_root / "analysis").mkdir()
+    shot = run_root / "screenshots" / "event_001.jpeg"
+    end_shot = run_root / "screenshots" / "event_001_end.jpeg"
+    # Paint a distinct pixel so we can tell the original was copied then annotated.
+    Image.new("RGB", (64, 48), color=(10, 20, 30)).save(shot, format="JPEG")
+    Image.new("RGB", (64, 48), color=(10, 20, 30)).save(end_shot, format="JPEG")
+    next_shot = _make_jpeg(run_root / "screenshots" / "event_002.jpeg")
+    (run_root / "events" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "index": 1,
+                "timestamp_utc": "2026-07-21T04:00:00+00:00",
+                "kind": "text_input",
+                "cursor_xy": [20, 18],
+                "monitor_offset": [0, 0],
+                "end_monitor_offset": [0, 0],
+                "focus_rect": [8, 6, 40, 28],
+                "screenshot_path": str(shot),
+                "end_screenshot_path": str(end_shot),
+                "text": "office",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "events" / "event_002.json").write_text(
+        json.dumps(
+            {
+                "index": 2,
+                "timestamp_utc": "2026-07-21T04:00:01+00:00",
+                "kind": "click",
+                "cursor_xy": [10, 20],
+                "screenshot_path": str(next_shot),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps({"event_index": 1, "instruction": "輸入「office」"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (run_root / "analysis" / "event_002.json").write_text(
+        json.dumps({"event_index": 2, "instruction": "點擊「確定」"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (run_root / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_root.name,
+                "started_at_utc": "2026-07-21T04:00:00+00:00",
+                "event_count": 2,
+                "events": ["events/event_001.json", "events/event_002.json"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+    first_group = html.split('data-event-index="1"', 1)[1].split("</details>", 1)[0]
+    assert "focus_rect_debug/" in first_group
+    assert "focus-rect-overlay" not in html
+    assert "Focus rect" in first_group
+    # Prefer the typing end frame over the next event's before shot.
+    assert "event_001_end_" in first_group or "event_001_" in first_group
+    assert "screenshots/event_002.jpeg" not in first_group
+    debug_dir = run_root / "focus_rect_debug"
+    annotated = list(debug_dir.glob("*.png"))
+    assert len(annotated) >= 2
+    for path in annotated:
+        pixels = imread_bgr(path)
+        assert pixels is not None
+        assert tuple(int(v) for v in pixels[6, 8]) == (255, 0, 255)
+
+
+def test_write_session_html_bakes_focus_rect_on_matched_recording_shots(
+    tmp_path: Path,
+) -> None:
+    recordings = tmp_path / "recordings"
+    recording = recordings / "script_focus"
+    recording.mkdir(parents=True)
+    (recording / "events").mkdir()
+    (recording / "screenshots").mkdir()
+    (recording / "analysis").mkdir()
+    baseline = recording / "screenshots" / "event_001.jpeg"
+    Image.new("RGB", (64, 48), color=(10, 20, 30)).save(baseline, format="JPEG")
+    (recording / "events" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "index": 1,
+                "timestamp_utc": "2026-07-21T04:00:00+00:00",
+                "kind": "text_input",
+                "cursor_xy": [20, 18],
+                "monitor_offset": [0, 0],
+                "focus_rect": [8, 6, 40, 28],
+                "screenshot_path": str(baseline),
+                "end_screenshot_path": str(baseline),
+                "text": "office",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (recording / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": "輸入「office」",
+                "use_expected_outcome": False,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (recording / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": recording.name,
+                "started_at_utc": "2026-07-21T04:00:00+00:00",
+                "event_count": 1,
+                "events": ["events/event_001.json"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    run_root = tmp_path / "runs" / "script_focus_20260721_040000_000001"
+    run_root.mkdir(parents=True)
+    eye = _make_png(run_root / "eye" / "live.png")
+    # Full-desktop-style width so session path uses screen coords.
+    Image.new("RGB", (128, 48), color=(40, 50, 60)).save(eye)
+    with (run_root / "hand.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "timestamp",
+                "action",
+                "args",
+                "ok",
+                "message",
+                "screenshot_before_path",
+                "screenshot_after_path",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "timestamp": "2026-07-21T04:00:01+00:00",
+                "action": "type_text",
+                "args": json.dumps({"text": "office"}),
+                "ok": "true",
+                "message": "executed",
+                "screenshot_before_path": str(eye),
+                "screenshot_after_path": str(eye),
+            }
+        )
+    (run_root / "report.json").write_text(
+        json.dumps(
+            {
+                "script_path": str(recording),
+                "script_name": recording.name,
+                "tool_results": [
+                    {
+                        "timestamp_utc": "2026-07-21T04:00:01+00:00",
+                        "transcript_counter": 0,
+                        "script_step_index": 0,
+                    }
+                ],
+                "steps": [
+                    {
+                        "transcript_counter": 0,
+                        "script_step_index": 0,
+                        "goal": "輸入「office」",
+                        "status": "ok",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "steps").mkdir()
+    (run_root / "steps" / "0_0.json").write_text(
+        json.dumps(
+            {
+                "messages": [],
+                "step_timing": {
+                    "goal": "輸入「office」",
+                    "status": "ok",
+                    "step_index": 0,
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_session_html_from_run(run_root).read_text(encoding="utf-8")
+    assert "focus_rect_debug/" in html
+    assert "focus-rect-overlay" not in html
+    annotated = list((run_root / "focus_rect_debug").glob("*.png"))
+    assert annotated
 
 
 def test_write_recording_html_renders_events_and_instructions(tmp_path: Path) -> None:

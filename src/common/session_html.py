@@ -668,11 +668,6 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 .shot { min-width: 0; }
 .shot .label { font-weight: 600; color: #57606a; margin: 0 0 .4rem; font-size: .9rem; }
 .shot a { display: block; }
-.shot a.shot-media { position: relative; display: block; }
-.shot a.shot-media .focus-rect-overlay {
-  position: absolute; left: 0; top: 0; width: 100%; height: 100%;
-  pointer-events: none;
-}
 .shot img { width: 100%; height: auto; border: 1px solid #d0d7de; border-radius: 6px; background: #fff; }
 .shot .missing { color: #8c959f; font-style: italic; }
 .playback-frame img { width: 100%; height: auto; border: 1px solid #d0d7de; border-radius: 6px; background: #fff; }
@@ -3451,73 +3446,13 @@ def _relative_img_src(screenshot: Path | None, run_root: Path) -> str | None:
         return resolved.as_uri()
 
 
-def _image_size_wh(path: Path) -> tuple[int, int] | None:
-    """Return ``(width, height)`` for an image file without requiring OpenCV."""
+def _parse_focus_rect(raw: Any) -> tuple[int, int, int, int] | None:
+    if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+        return None
     try:
-        from PIL import Image
-
-        with Image.open(path) as image:
-            width, height = image.size
-            if width > 0 and height > 0:
-                return int(width), int(height)
-    except Exception:
-        pass
-    try:
-        from src.common.io_utils import imread_bgr
-
-        bgr = imread_bgr(path)
-    except Exception:
+        return (int(raw[0]), int(raw[1]), int(raw[2]), int(raw[3]))
+    except (TypeError, ValueError):
         return None
-    if bgr is None:
-        return None
-    height, width = bgr.shape[:2]
-    if width <= 0 or height <= 0:
-        return None
-    return int(width), int(height)
-
-
-def _expand_thin_focus_rect_for_overlay(
-    rect: tuple[int, int, int, int],
-    *,
-    min_size: int = 4,
-) -> tuple[int, int, int, int]:
-    left, top, right, bottom = rect
-    if right < left:
-        left, right = right, left
-    if bottom < top:
-        top, bottom = bottom, top
-    width = right - left
-    height = bottom - top
-    if width < min_size:
-        pad = (min_size - width + 1) // 2
-        left -= pad
-        right = left + min_size
-    if height < min_size:
-        pad = (min_size - height + 1) // 2
-        top -= pad
-        bottom = top + min_size
-    return left, top, right, bottom
-
-
-def _focus_rect_overlay_svg(
-    focus_rect_local: tuple[int, int, int, int],
-    image_wh: tuple[int, int],
-) -> str:
-    width, height = image_wh
-    left, top, right, bottom = _expand_thin_focus_rect_for_overlay(focus_rect_local)
-    left = max(0, min(left, width - 1))
-    right = max(0, min(right, width - 1))
-    top = max(0, min(top, height - 1))
-    bottom = max(0, min(bottom, height - 1))
-    box_w = max(1, right - left)
-    box_h = max(1, bottom - top)
-    return (
-        f'<svg class="focus-rect-overlay" viewBox="0 0 {width} {height}" '
-        f'preserveAspectRatio="none" aria-hidden="true">'
-        f'<rect x="{left}" y="{top}" width="{box_w}" height="{box_h}" '
-        f'fill="none" stroke="#ff00ff" stroke-width="3"/>'
-        f"</svg>"
-    )
 
 
 def _local_focus_rect_from_event(
@@ -3525,13 +3460,10 @@ def _local_focus_rect_from_event(
     *,
     use_end: bool,
 ) -> tuple[int, int, int, int] | None:
-    raw = event.get("focus_rect")
-    if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+    parsed = _parse_focus_rect(event.get("focus_rect"))
+    if parsed is None:
         return None
-    try:
-        left, top, right, bottom = (int(raw[0]), int(raw[1]), int(raw[2]), int(raw[3]))
-    except (TypeError, ValueError):
-        return None
+    left, top, right, bottom = parsed
     offset = event.get("end_monitor_offset") if use_end else event.get("monitor_offset")
     if use_end and not (isinstance(offset, (list, tuple)) and len(offset) == 2):
         offset = event.get("monitor_offset")
@@ -3544,28 +3476,141 @@ def _local_focus_rect_from_event(
     return left - ox, top - oy, right - ox, bottom - oy
 
 
+def _focus_rect_for_screenshot(
+    event: dict[str, Any] | None,
+    screenshot: Path | None,
+    *,
+    use_end: bool = False,
+) -> tuple[int, int, int, int] | None:
+    """Map ``focus_rect`` into the screenshot's pixel space.
+
+    Recording monitor shots use monitor-local coords. Live eye / full-desktop
+    shots keep screen coords so a dual-monitor capture still lines up.
+    """
+    if event is None or screenshot is None:
+        return None
+    parsed = _parse_focus_rect(event.get("focus_rect"))
+    if parsed is None:
+        return None
+    if "screenshots" in {part.lower() for part in screenshot.parts}:
+        return _local_focus_rect_from_event(event, use_end=use_end)
+    return parsed
+
+
+def _ensure_focus_rect_annotated_image(
+    screenshot: Path,
+    focus_rect: tuple[int, int, int, int],
+    *,
+    run_root: Path,
+    cursor_xy: tuple[int, int] | None = None,
+) -> Path | None:
+    """Bake ``focus_rect`` into a cached copy under ``run_root/focus_rect_debug``."""
+    import hashlib
+
+    from src.common.io_utils import imread_bgr, imwrite_bgr
+    from src.recorder.text_resolve import draw_focus_rect_bgr
+
+    try:
+        mtime_ns = screenshot.stat().st_mtime_ns
+    except OSError:
+        return None
+    cursor_key = ""
+    if cursor_xy is not None:
+        cursor_key = f"|{int(cursor_xy[0])},{int(cursor_xy[1])}"
+    digest = hashlib.sha1(
+        f"{screenshot.resolve()}|{mtime_ns}|{focus_rect}{cursor_key}".encode("utf-8")
+    ).hexdigest()[:16]
+    dest = Path(run_root) / "focus_rect_debug" / f"{screenshot.stem}_{digest}.png"
+    if dest.is_file():
+        return dest
+    bgr = imread_bgr(screenshot)
+    if bgr is None:
+        return None
+    annotated = draw_focus_rect_bgr(bgr, focus_rect, cursor_local=cursor_xy)
+    if not imwrite_bgr(dest, annotated):
+        return None
+    return dest
+
+
+def _display_screenshot_with_focus_rect(
+    screenshot: Path | None,
+    run_root: Path,
+    *,
+    focus_rect: tuple[int, int, int, int] | None = None,
+    cursor_xy: tuple[int, int] | None = None,
+) -> Path | None:
+    if screenshot is None:
+        return None
+    if focus_rect is None:
+        return screenshot
+    annotated = _ensure_focus_rect_annotated_image(
+        screenshot,
+        focus_rect,
+        run_root=run_root,
+        cursor_xy=cursor_xy,
+    )
+    return annotated if annotated is not None else screenshot
+
+
+def _cursor_xy_from_event(event: dict[str, Any] | None) -> tuple[int, int] | None:
+    if event is None:
+        return None
+    cursor = event.get("cursor_xy")
+    if not isinstance(cursor, (list, tuple)) or len(cursor) != 2:
+        return None
+    try:
+        return int(cursor[0]), int(cursor[1])
+    except (TypeError, ValueError):
+        return None
+
+
+def _local_cursor_for_screenshot(
+    event: dict[str, Any] | None,
+    screenshot: Path | None,
+    *,
+    use_end: bool = False,
+) -> tuple[int, int] | None:
+    """Cursor in the same coordinate space as ``_focus_rect_for_screenshot``."""
+    if event is None or screenshot is None:
+        return None
+    cursor = _cursor_xy_from_event(event)
+    if cursor is None:
+        return None
+    if "screenshots" not in {part.lower() for part in screenshot.parts}:
+        return cursor
+    offset = event.get("end_monitor_offset") if use_end else event.get("monitor_offset")
+    if use_end and not (isinstance(offset, (list, tuple)) and len(offset) == 2):
+        offset = event.get("monitor_offset")
+    if isinstance(offset, (list, tuple)) and len(offset) == 2:
+        try:
+            return cursor[0] - int(offset[0]), cursor[1] - int(offset[1])
+        except (TypeError, ValueError):
+            return cursor
+    return cursor
+
+
 def _render_shot_html(
     label: str,
     screenshot: Path | None,
     run_root: Path,
     *,
     focus_rect_local: tuple[int, int, int, int] | None = None,
+    cursor_xy: tuple[int, int] | None = None,
 ) -> str:
-    src = _relative_img_src(screenshot, run_root)
+    display = _display_screenshot_with_focus_rect(
+        screenshot,
+        run_root,
+        focus_rect=focus_rect_local,
+        cursor_xy=cursor_xy,
+    )
+    src = _relative_img_src(display, run_root)
     if src is None:
         body = '<p class="missing">無螢幕截圖</p>'
     else:
         esc = escape(src, quote=True)
-        overlay = ""
-        if focus_rect_local is not None and screenshot is not None:
-            image_wh = _image_size_wh(screenshot)
-            if image_wh is not None:
-                overlay = _focus_rect_overlay_svg(focus_rect_local, image_wh)
-        media_class = ' class="shot-media"' if overlay else ""
         body = (
-            f'<a href="{esc}" target="_blank" rel="noopener"{media_class}>'
-            f'<img src="{esc}" alt="{escape(label)}" loading="lazy">'
-            f"{overlay}</a>"
+            f'<a href="{esc}" target="_blank" rel="noopener">'
+            f'<img src="{esc}" alt="{escape(label)}" loading="lazy"></a>'
         )
     return f'<div class="shot"><p class="label">{escape(label)}</p>{body}</div>'
 
@@ -4019,7 +4064,12 @@ def _load_instruction_groups(run_root: Path) -> list[dict[str, Any]]:
     return grouped
 
 
-def _render_hand_operation_html(*, run_root: Path, operation: dict[str, Any]) -> str:
+def _render_hand_operation_html(
+    *,
+    run_root: Path,
+    operation: dict[str, Any],
+    recording_event: dict[str, Any] | None = None,
+) -> str:
     action = operation["action"]
     args = operation["args"]
     ok = operation["ok"]
@@ -4036,8 +4086,22 @@ def _render_hand_operation_html(*, run_root: Path, operation: dict[str, Any]) ->
     message_text = escape(message or "（無）")
     instruction_meta = _render_instruction_meta_html(_instruction_meta_pairs(args))
 
-    shots = _render_shot_html("動作前截圖", before, run_root) + _render_shot_html(
-        "動作後截圖", after, run_root
+    before_focus = _focus_rect_for_screenshot(recording_event, before, use_end=False)
+    after_focus = _focus_rect_for_screenshot(recording_event, after, use_end=False)
+    before_cursor = _local_cursor_for_screenshot(recording_event, before, use_end=False)
+    after_cursor = _local_cursor_for_screenshot(recording_event, after, use_end=False)
+    shots = _render_shot_html(
+        "動作前截圖",
+        before,
+        run_root,
+        focus_rect_local=before_focus,
+        cursor_xy=before_cursor,
+    ) + _render_shot_html(
+        "動作後截圖",
+        after,
+        run_root,
+        focus_rect_local=after_focus,
+        cursor_xy=after_cursor,
     )
 
     return (
@@ -4095,6 +4159,7 @@ def _render_verify_panel_html(
     verify_live_path: str | None = None,
     baseline_after_path: str | None = None,
     live_fallback_shot: Path | None = None,
+    recording_event: dict[str, Any] | None = None,
 ) -> str:
     """Render verifier decision for a scripted instruction group."""
     has_verify = isinstance(verify, dict)
@@ -4148,10 +4213,36 @@ def _render_verify_panel_html(
     if has_shots:
         shot_parts: list[str] = []
         if live_shot is not None or verify_live_path:
-            shot_parts.append(_render_shot_html(live_label, live_shot, run_root))
-        if baseline_shot is not None or baseline_after_path:
+            live_focus = _focus_rect_for_screenshot(
+                recording_event, live_shot, use_end=False
+            )
+            live_cursor = _local_cursor_for_screenshot(
+                recording_event, live_shot, use_end=False
+            )
             shot_parts.append(
-                _render_shot_html("錄製基準截圖（after）", baseline_shot, run_root)
+                _render_shot_html(
+                    live_label,
+                    live_shot,
+                    run_root,
+                    focus_rect_local=live_focus,
+                    cursor_xy=live_cursor,
+                )
+            )
+        if baseline_shot is not None or baseline_after_path:
+            baseline_focus = _focus_rect_for_screenshot(
+                recording_event, baseline_shot, use_end=True
+            )
+            baseline_cursor = _local_cursor_for_screenshot(
+                recording_event, baseline_shot, use_end=True
+            )
+            shot_parts.append(
+                _render_shot_html(
+                    "錄製基準截圖（after）",
+                    baseline_shot,
+                    run_root,
+                    focus_rect_local=baseline_focus,
+                    cursor_xy=baseline_cursor,
+                )
             )
         shots_html = f'<div class="shots">{"".join(shot_parts)}</div>'
 
@@ -4215,9 +4306,19 @@ def _render_instruction_group_html(
     else:
         expected_summary = ""
 
+    recording_event = (
+        recording_target.get("event")
+        if isinstance(recording_target, dict)
+        and isinstance(recording_target.get("event"), dict)
+        else None
+    )
     if operations:
         items = "".join(
-            _render_hand_operation_html(run_root=run_root, operation=operation)
+            _render_hand_operation_html(
+                run_root=run_root,
+                operation=operation,
+                recording_event=recording_event,
+            )
             for operation in operations
         )
         body = f'<ul class="hand-ops">{items}</ul>'
@@ -4236,6 +4337,7 @@ def _render_instruction_group_html(
         verify_live_path=verify_live_path,
         baseline_after_path=baseline_after_path,
         live_fallback_shot=_last_after_shot(operations),
+        recording_event=recording_event,
     )
     editor = (
         _editor_for_recording_target(
@@ -6349,27 +6451,38 @@ def _render_recording_event_html(
 
     before = _resolve_recording_screenshot(str(event.get("screenshot_path") or ""), run_root)
     after: Path | None = None
-    after_is_end_shot = False
-    if next_event is not None:
+    after_is_own_shot = False
+    # Prefer this event's end frame so typing focus_rect can be baked onto the
+    # after shot (same as session HTML). Fall back to the next event's before,
+    # then the run's final-after frame.
+    end_shot = _resolve_recording_screenshot(
+        str(event.get("end_screenshot_path") or ""),
+        run_root,
+    )
+    if end_shot is not None:
+        after = end_shot
+        after_is_own_shot = True
+    elif next_event is not None:
         after = _resolve_recording_screenshot(
             str(next_event.get("screenshot_path") or ""),
             run_root,
         )
-    if after is None:
-        after = _resolve_recording_screenshot(
-            str(event.get("end_screenshot_path") or ""),
-            run_root,
-        )
-        after_is_end_shot = after is not None
     if after is None and next_event is None:
         after = _resolve_recording_screenshot(
             str(final_after_screenshot or ""),
             run_root,
         )
-    before_focus = _local_focus_rect_from_event(event, use_end=False)
+    before_focus = _focus_rect_for_screenshot(event, before, use_end=False)
+    # Only bake onto this event's own end frame — never onto the next step's before.
     after_focus = (
-        _local_focus_rect_from_event(event, use_end=True)
-        if after_is_end_shot
+        _focus_rect_for_screenshot(event, after, use_end=True)
+        if after_is_own_shot
+        else None
+    )
+    before_cursor = _local_cursor_for_screenshot(event, before, use_end=False)
+    after_cursor = (
+        _local_cursor_for_screenshot(event, after, use_end=True)
+        if after_is_own_shot
         else None
     )
     shots = _render_shot_html(
@@ -6377,11 +6490,13 @@ def _render_recording_event_html(
         before,
         run_root,
         focus_rect_local=before_focus,
+        cursor_xy=before_cursor,
     ) + _render_shot_html(
         "動作後截圖",
         after,
         run_root,
         focus_rect_local=after_focus,
+        cursor_xy=after_cursor,
     )
 
     editor = _render_recording_step_editor_html(
@@ -7474,6 +7589,7 @@ def write_session_html_from_run(run_root: Path, *, update_index: bool = True) ->
             instruction_groups=instruction_groups,
             smart_cycles=smart_cycles,
             smart_actor_count=smart_actor_count,
+            edit_targets=edit_targets,
         )
     )
     body = (
@@ -7605,7 +7721,15 @@ def _recording_playback_frames(
     last_resolved: Path | None = None
     for display_index, event in enumerate(events, start=1):
         shot = _resolve_recording_screenshot(str(event.get("screenshot_path") or ""), run_root)
-        src = _relative_img_src(shot, run_root)
+        focus = _focus_rect_for_screenshot(event, shot, use_end=False)
+        cursor = _local_cursor_for_screenshot(event, shot, use_end=False)
+        display = _display_screenshot_with_focus_rect(
+            shot,
+            run_root,
+            focus_rect=focus,
+            cursor_xy=cursor,
+        )
+        src = _relative_img_src(display, run_root)
         if shot is None or src is None:
             continue
         raw_index = event.get("index")
@@ -7667,14 +7791,25 @@ def _extend_operation_playback_frames(
     label: str,
     anchor: str,
     step: int,
+    recording_event: dict[str, Any] | None = None,
 ) -> None:
     """Append one frame per action, using that action's after screenshot."""
     for operation in operations:
         if not isinstance(operation, dict):
             continue
         shot = _operation_playback_shot(operation)
-        src = _relative_img_src(shot, run_root) if isinstance(shot, Path) else None
-        if not isinstance(shot, Path) or src is None:
+        if not isinstance(shot, Path):
+            continue
+        focus = _focus_rect_for_screenshot(recording_event, shot, use_end=False)
+        cursor = _local_cursor_for_screenshot(recording_event, shot, use_end=False)
+        display = _display_screenshot_with_focus_rect(
+            shot,
+            run_root,
+            focus_rect=focus,
+            cursor_xy=cursor,
+        )
+        src = _relative_img_src(display, run_root)
+        if src is None:
             continue
         frames.append(
             {
@@ -7692,11 +7827,13 @@ def _session_playback_frames(
     instruction_groups: list[dict[str, Any]],
     smart_cycles: Any,
     smart_actor_count: int,
+    edit_targets: dict[int, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """One frame per hand action, in the same order as the steps tab."""
     frames: list[dict[str, Any]] = []
     actor_group_index = 0
     shown = 0
+    targets = edit_targets or {}
     if isinstance(smart_cycles, list):
         for cycle in smart_cycles:
             if not isinstance(cycle, dict):
@@ -7733,6 +7870,12 @@ def _session_playback_frames(
         goal = group.get("goal")
         label = goal.strip() if isinstance(goal, str) and goal.strip() else _FALLBACK_GOAL
         operations = group.get("operations") if isinstance(group.get("operations"), list) else []
+        target = _recording_target_for_group(group, targets)
+        recording_event = (
+            target.get("event")
+            if isinstance(target, dict) and isinstance(target.get("event"), dict)
+            else None
+        )
         _extend_operation_playback_frames(
             frames,
             run_root=run_root,
@@ -7740,6 +7883,7 @@ def _session_playback_frames(
             label=label,
             anchor=f"step-{step_number}",
             step=step_number,
+            recording_event=recording_event,
         )
     return frames
 

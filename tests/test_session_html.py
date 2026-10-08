@@ -1496,6 +1496,10 @@ def test_write_recording_html_bakes_focus_rect_into_screenshot(tmp_path: Path) -
                 "monitor_offset": [0, 0],
                 "end_monitor_offset": [0, 0],
                 "focus_rect": [8, 6, 40, 28],
+                "window_snapshot_debug": {
+                    "signals_before": {"foreground_rect": [2, 2, 60, 44]},
+                    "signals_after": {"foreground_rect": [2, 2, 60, 44]},
+                },
                 "screenshot_path": str(shot),
                 "end_screenshot_path": str(end_shot),
                 "text": "office",
@@ -1542,16 +1546,24 @@ def test_write_recording_html_bakes_focus_rect_into_screenshot(tmp_path: Path) -
     assert "focus_rect_debug/" in first_group
     assert "focus-rect-overlay" not in html
     assert "Focus rect" in first_group
+    assert "Foreground rect" in first_group
     # Prefer the typing end frame over the next event's before shot.
     assert "event_001_end_" in first_group or "event_001_" in first_group
     assert "screenshots/event_002.jpeg" not in first_group
     debug_dir = run_root / "focus_rect_debug"
     annotated = list(debug_dir.glob("*.png"))
     assert len(annotated) >= 2
+    saw_magenta = False
+    saw_cyan = False
     for path in annotated:
         pixels = imread_bgr(path)
         assert pixels is not None
-        assert tuple(int(v) for v in pixels[6, 8]) == (255, 0, 255)
+        if tuple(int(v) for v in pixels[6, 8]) == (255, 0, 255):
+            saw_magenta = True
+        if tuple(int(v) for v in pixels[2, 2]) == (0, 255, 255):
+            saw_cyan = True
+    assert saw_magenta
+    assert saw_cyan
 
 
 def test_write_session_html_bakes_live_focus_rect_after_from_hand_csv(
@@ -1574,6 +1586,7 @@ def test_write_session_html_bakes_live_focus_rect_after_from_hand_csv(
                 "screenshot_after_path",
                 "message",
                 "focus_rect_after",
+                "foreground_rect_after",
             ],
         )
         writer.writeheader()
@@ -1588,6 +1601,7 @@ def test_write_session_html_bakes_live_focus_rect_after_from_hand_csv(
                 "screenshot_after_path": str(eye),
                 "message": "executed",
                 "focus_rect_after": "[8,6,40,28]",
+                "foreground_rect_after": "[4,4,120,56]",
             }
         )
     (run_root / "report.json").write_text(
@@ -1633,9 +1647,17 @@ def test_write_session_html_bakes_live_focus_rect_after_from_hand_csv(
     assert "focus_rect_debug/" in html
     annotated = list((run_root / "focus_rect_debug").glob("*.png"))
     assert annotated
-    pixels = imread_bgr(annotated[0])
-    assert pixels is not None
-    assert tuple(int(v) for v in pixels[6, 8]) == (255, 0, 255)
+    saw_magenta = False
+    saw_cyan = False
+    for path in annotated:
+        pixels = imread_bgr(path)
+        assert pixels is not None
+        if tuple(int(v) for v in pixels[6, 8]) == (255, 0, 255):
+            saw_magenta = True
+        if tuple(int(v) for v in pixels[4, 4]) == (0, 255, 255):
+            saw_cyan = True
+    assert saw_magenta
+    assert saw_cyan
 
 
 def test_write_session_html_bakes_focus_rect_on_matched_recording_shots(

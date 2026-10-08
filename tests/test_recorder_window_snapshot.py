@@ -1846,6 +1846,40 @@ def _chrome_foreground() -> dict[str, str]:
     }
 
 
+def test_signal_verify_fields_ignores_foreground_rect_sibling() -> None:
+    from src.recorder.verify_signals import signal_verify_fields
+
+    explorer = _explorer_foreground()
+    chrome = _chrome_foreground()
+    fields = signal_verify_fields(
+        {
+            "foreground": explorer,
+            "foreground_rect": [0, 0, 100, 80],
+        },
+        {
+            "foreground": chrome,
+            "foreground_rect": [10, 10, 200, 160],
+        },
+        kind="click",
+    )
+    assert fields["foreground"] == chrome
+    assert "foreground_rect" not in fields
+    # Unchanged identity still omits foreground; rect sibling never becomes a predicate.
+    unchanged = signal_verify_fields(
+        {
+            "foreground": explorer,
+            "foreground_rect": [0, 0, 100, 80],
+        },
+        {
+            "foreground": explorer,
+            "foreground_rect": [50, 50, 150, 120],
+        },
+        kind="click",
+    )
+    assert "foreground" not in unchanged
+    assert "foreground_rect" not in unchanged
+
+
 def test_window_verify_stores_foreground_only_when_it_changes() -> None:
     from src.recorder.verify_signals import signal_verify_fields
 

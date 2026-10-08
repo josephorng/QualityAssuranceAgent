@@ -85,33 +85,74 @@ def _expand_thin_rect_for_debug(
     return (left, top, right, bottom)
 
 
+# Magenta focus / caret; cyan foreground window. Both stand out on light and dark UI.
+_FOCUS_RECT_BGR = (255, 0, 255)
+_FOREGROUND_RECT_BGR = (0, 255, 255)
+
+
+def _draw_rect_bgr(
+    canvas: Any,
+    rect_local: tuple[int, int, int, int],
+    color: tuple[int, int, int],
+    *,
+    expand_thin: bool = True,
+) -> None:
+    import cv2
+
+    left, top, right, bottom = (
+        _expand_thin_rect_for_debug(rect_local) if expand_thin else rect_local
+    )
+    height, width = canvas.shape[:2]
+    left = max(0, min(int(left), width - 1))
+    right = max(0, min(int(right), width - 1))
+    top = max(0, min(int(top), height - 1))
+    bottom = max(0, min(int(bottom), height - 1))
+    if right <= left or bottom <= top:
+        return
+    cv2.rectangle(canvas, (left, top), (right, bottom), color, 2)
+
+
 def draw_focus_rect_bgr(
     bgr: Any,
-    focus_rect_local: tuple[int, int, int, int],
+    focus_rect_local: tuple[int, int, int, int] | None = None,
     *,
     cursor_local: tuple[int, int] | None = None,
+    foreground_rect_local: tuple[int, int, int, int] | None = None,
 ) -> Any:
-    """Draw ``focus_rect`` (and optional cursor) onto a copy of ``bgr`` for debug."""
+    """Draw focus and/or foreground window rects (and optional cursor) for debug."""
     import cv2
     import numpy as np
 
     canvas = np.ascontiguousarray(bgr.copy())
-    left, top, right, bottom = _expand_thin_rect_for_debug(focus_rect_local)
     height, width = canvas.shape[:2]
-    left = max(0, min(left, width - 1))
-    right = max(0, min(right, width - 1))
-    top = max(0, min(top, height - 1))
-    bottom = max(0, min(bottom, height - 1))
-    # Magenta stands out on light and dark UI chrome.
-    color = (255, 0, 255)
-    cv2.rectangle(canvas, (left, top), (right, bottom), color, 2)
-    if cursor_local is not None:
+    if foreground_rect_local is not None:
+        # Window chrome is already large; do not expand like a caret strip.
+        _draw_rect_bgr(
+            canvas,
+            foreground_rect_local,
+            _FOREGROUND_RECT_BGR,
+            expand_thin=False,
+        )
+    if focus_rect_local is not None:
+        _draw_rect_bgr(canvas, focus_rect_local, _FOCUS_RECT_BGR, expand_thin=True)
+        if cursor_local is not None:
+            cx, cy = int(cursor_local[0]), int(cursor_local[1])
+            if 0 <= cx < width and 0 <= cy < height:
+                cv2.drawMarker(
+                    canvas,
+                    (cx, cy),
+                    _FOCUS_RECT_BGR,
+                    markerType=cv2.MARKER_CROSS,
+                    markerSize=16,
+                    thickness=2,
+                )
+    elif cursor_local is not None:
         cx, cy = int(cursor_local[0]), int(cursor_local[1])
         if 0 <= cx < width and 0 <= cy < height:
             cv2.drawMarker(
                 canvas,
                 (cx, cy),
-                color,
+                _FOCUS_RECT_BGR,
                 markerType=cv2.MARKER_CROSS,
                 markerSize=16,
                 thickness=2,
@@ -125,14 +166,16 @@ def write_focus_rect_debug_image(
     focus_rect_local: tuple[int, int, int, int],
     dest: Path,
     cursor_local: tuple[int, int] | None = None,
+    foreground_rect_local: tuple[int, int, int, int] | None = None,
 ) -> Path | None:
-    """Persist a magenta ``focus_rect`` overlay next to YOLO/OCR debug artifacts."""
+    """Persist magenta focus / cyan foreground overlays next to YOLO/OCR debug artifacts."""
     from src.common.io_utils import imwrite_bgr
 
     annotated = draw_focus_rect_bgr(
         bgr,
         focus_rect_local,
         cursor_local=cursor_local,
+        foreground_rect_local=foreground_rect_local,
     )
     if not imwrite_bgr(dest, annotated):
         return None

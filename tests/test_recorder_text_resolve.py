@@ -37,6 +37,18 @@ def test_draw_focus_rect_bgr_paints_magenta_box() -> None:
     assert tuple(int(v) for v in out[18, 25]) == (255, 0, 255)
 
 
+def test_draw_focus_rect_bgr_paints_cyan_foreground_window() -> None:
+    bgr = np.zeros((40, 60, 3), dtype=np.uint8)
+    out = draw_focus_rect_bgr(
+        bgr,
+        (12, 10, 30, 22),
+        foreground_rect_local=(4, 4, 56, 36),
+    )
+    # Cyan BGR on the foreground window edge; magenta on the focus box.
+    assert tuple(int(v) for v in out[4, 4]) == (0, 255, 255)
+    assert tuple(int(v) for v in out[10, 12]) == (255, 0, 255)
+
+
 def test_extract_nearest_text_prefers_nearest_with_text() -> None:
     bgr = np.zeros((100, 100, 3), dtype=np.uint8)
     detections = [

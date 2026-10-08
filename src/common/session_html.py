@@ -56,6 +56,7 @@ _HAND_CSV_FIELDS = [
     "message",
     # Trailing so headerless legacy rows still map ``message`` correctly.
     "focus_rect_after",
+    "foreground_rect_after",
 ]
 
 _STYLE = """
@@ -3457,15 +3458,13 @@ def _parse_focus_rect(raw: Any) -> tuple[int, int, int, int] | None:
         return None
 
 
-def _local_focus_rect_from_event(
+def _local_screen_rect_from_event(
     event: dict[str, Any],
+    rect: tuple[int, int, int, int],
     *,
     use_end: bool,
-) -> tuple[int, int, int, int] | None:
-    parsed = _parse_focus_rect(event.get("focus_rect"))
-    if parsed is None:
-        return None
-    left, top, right, bottom = parsed
+) -> tuple[int, int, int, int]:
+    left, top, right, bottom = rect
     offset = event.get("end_monitor_offset") if use_end else event.get("monitor_offset")
     if use_end and not (isinstance(offset, (list, tuple)) and len(offset) == 2):
         offset = event.get("monitor_offset")
@@ -3476,6 +3475,32 @@ def _local_focus_rect_from_event(
         except (TypeError, ValueError):
             ox = oy = 0
     return left - ox, top - oy, right - ox, bottom - oy
+
+
+def _local_focus_rect_from_event(
+    event: dict[str, Any],
+    *,
+    use_end: bool,
+) -> tuple[int, int, int, int] | None:
+    parsed = _parse_focus_rect(event.get("focus_rect"))
+    if parsed is None:
+        return None
+    return _local_screen_rect_from_event(event, parsed, use_end=use_end)
+
+
+def _rect_for_screenshot(
+    event: dict[str, Any] | None,
+    screenshot: Path | None,
+    rect: tuple[int, int, int, int] | None,
+    *,
+    use_end: bool = False,
+) -> tuple[int, int, int, int] | None:
+    """Map a screen LTRB into the screenshot's pixel space."""
+    if event is None or screenshot is None or rect is None:
+        return None
+    if "screenshots" in {part.lower() for part in screenshot.parts}:
+        return _local_screen_rect_from_event(event, rect, use_end=use_end)
+    return rect
 
 
 def _focus_rect_for_screenshot(
@@ -3489,29 +3514,64 @@ def _focus_rect_for_screenshot(
     Recording monitor shots use monitor-local coords. Live eye / full-desktop
     shots keep screen coords so a dual-monitor capture still lines up.
     """
-    if event is None or screenshot is None:
+    if event is None:
         return None
-    parsed = _parse_focus_rect(event.get("focus_rect"))
-    if parsed is None:
+    return _rect_for_screenshot(
+        event,
+        screenshot,
+        _parse_focus_rect(event.get("focus_rect")),
+        use_end=use_end,
+    )
+
+
+def _foreground_rect_from_event_signals(
+    event: dict[str, Any] | None,
+    *,
+    after: bool,
+) -> tuple[int, int, int, int] | None:
+    """Display-only foreground window LTRB from ``window_snapshot_debug`` signals."""
+    if event is None:
         return None
-    if "screenshots" in {part.lower() for part in screenshot.parts}:
-        return _local_focus_rect_from_event(event, use_end=use_end)
-    return parsed
+    debug = event.get("window_snapshot_debug")
+    if not isinstance(debug, dict):
+        return None
+    signals = debug.get("signals_after" if after else "signals_before")
+    if not isinstance(signals, dict):
+        return None
+    return _parse_focus_rect(signals.get("foreground_rect"))
+
+
+def _foreground_rect_for_screenshot(
+    event: dict[str, Any] | None,
+    screenshot: Path | None,
+    *,
+    after: bool,
+    use_end: bool = False,
+) -> tuple[int, int, int, int] | None:
+    return _rect_for_screenshot(
+        event,
+        screenshot,
+        _foreground_rect_from_event_signals(event, after=after),
+        use_end=use_end,
+    )
 
 
 def _ensure_focus_rect_annotated_image(
     screenshot: Path,
-    focus_rect: tuple[int, int, int, int],
+    focus_rect: tuple[int, int, int, int] | None = None,
     *,
     run_root: Path,
     cursor_xy: tuple[int, int] | None = None,
+    foreground_rect: tuple[int, int, int, int] | None = None,
 ) -> Path | None:
-    """Bake ``focus_rect`` into a cached copy under ``run_root/focus_rect_debug``."""
+    """Bake focus / foreground rects into a cached copy under ``run_root/focus_rect_debug``."""
     import hashlib
 
     from src.common.io_utils import imread_bgr, imwrite_bgr
     from src.recorder.text_resolve import draw_focus_rect_bgr
 
+    if focus_rect is None and foreground_rect is None:
+        return None
     try:
         mtime_ns = screenshot.stat().st_mtime_ns
     except OSError:
@@ -3520,7 +3580,10 @@ def _ensure_focus_rect_annotated_image(
     if cursor_xy is not None:
         cursor_key = f"|{int(cursor_xy[0])},{int(cursor_xy[1])}"
     digest = hashlib.sha1(
-        f"{screenshot.resolve()}|{mtime_ns}|{focus_rect}{cursor_key}".encode("utf-8")
+        (
+            f"{screenshot.resolve()}|{mtime_ns}|{focus_rect}|{foreground_rect}"
+            f"{cursor_key}"
+        ).encode("utf-8")
     ).hexdigest()[:16]
     dest = Path(run_root) / "focus_rect_debug" / f"{screenshot.stem}_{digest}.png"
     if dest.is_file():
@@ -3528,7 +3591,12 @@ def _ensure_focus_rect_annotated_image(
     bgr = imread_bgr(screenshot)
     if bgr is None:
         return None
-    annotated = draw_focus_rect_bgr(bgr, focus_rect, cursor_local=cursor_xy)
+    annotated = draw_focus_rect_bgr(
+        bgr,
+        focus_rect,
+        cursor_local=cursor_xy,
+        foreground_rect_local=foreground_rect,
+    )
     if not imwrite_bgr(dest, annotated):
         return None
     return dest
@@ -3540,16 +3608,18 @@ def _display_screenshot_with_focus_rect(
     *,
     focus_rect: tuple[int, int, int, int] | None = None,
     cursor_xy: tuple[int, int] | None = None,
+    foreground_rect: tuple[int, int, int, int] | None = None,
 ) -> Path | None:
     if screenshot is None:
         return None
-    if focus_rect is None:
+    if focus_rect is None and foreground_rect is None:
         return screenshot
     annotated = _ensure_focus_rect_annotated_image(
         screenshot,
         focus_rect,
         run_root=run_root,
         cursor_xy=cursor_xy,
+        foreground_rect=foreground_rect,
     )
     return annotated if annotated is not None else screenshot
 
@@ -3598,12 +3668,14 @@ def _render_shot_html(
     *,
     focus_rect_local: tuple[int, int, int, int] | None = None,
     cursor_xy: tuple[int, int] | None = None,
+    foreground_rect_local: tuple[int, int, int, int] | None = None,
 ) -> str:
     display = _display_screenshot_with_focus_rect(
         screenshot,
         run_root,
         focus_rect=focus_rect_local,
         cursor_xy=cursor_xy,
+        foreground_rect=foreground_rect_local,
     )
     src = _relative_img_src(display, run_root)
     if src is None:
@@ -3696,6 +3768,7 @@ def _hand_operation_from_row(
         "before": before,
         "after": after,
         "focus_rect_after": _parse_focus_rect_csv(row.get("focus_rect_after")),
+        "foreground_rect_after": _parse_focus_rect_csv(row.get("foreground_rect_after")),
     }
 
 
@@ -4107,9 +4180,18 @@ def _render_hand_operation_html(
     live_after_focus = operation.get("focus_rect_after")
     if not (isinstance(live_after_focus, tuple) and len(live_after_focus) == 4):
         live_after_focus = None
+    live_after_foreground = operation.get("foreground_rect_after")
+    if not (isinstance(live_after_foreground, tuple) and len(live_after_foreground) == 4):
+        live_after_foreground = None
     before_focus = _focus_rect_for_screenshot(recording_event, before, use_end=False)
     after_focus = live_after_focus or _focus_rect_for_screenshot(
         recording_event, after, use_end=False
+    )
+    before_foreground = _foreground_rect_for_screenshot(
+        recording_event, before, after=False, use_end=False
+    )
+    after_foreground = live_after_foreground or _foreground_rect_for_screenshot(
+        recording_event, after, after=True, use_end=False
     )
     before_cursor = _local_cursor_for_screenshot(recording_event, before, use_end=False)
     after_cursor = (
@@ -4123,12 +4205,14 @@ def _render_hand_operation_html(
         run_root,
         focus_rect_local=before_focus,
         cursor_xy=before_cursor,
+        foreground_rect_local=before_foreground,
     ) + _render_shot_html(
         "動作後截圖",
         after,
         run_root,
         focus_rect_local=after_focus,
         cursor_xy=after_cursor,
+        foreground_rect_local=after_foreground,
     )
 
     return (
@@ -4243,6 +4327,9 @@ def _render_verify_panel_html(
             live_focus = _focus_rect_for_screenshot(
                 recording_event, live_shot, use_end=False
             )
+            live_foreground = _foreground_rect_for_screenshot(
+                recording_event, live_shot, after=True, use_end=False
+            )
             live_cursor = _local_cursor_for_screenshot(
                 recording_event, live_shot, use_end=False
             )
@@ -4253,11 +4340,15 @@ def _render_verify_panel_html(
                     run_root,
                     focus_rect_local=live_focus,
                     cursor_xy=live_cursor,
+                    foreground_rect_local=live_foreground,
                 )
             )
         if baseline_shot is not None or baseline_after_path:
             baseline_focus = _focus_rect_for_screenshot(
                 recording_event, baseline_shot, use_end=True
+            )
+            baseline_foreground = _foreground_rect_for_screenshot(
+                recording_event, baseline_shot, after=True, use_end=True
             )
             baseline_cursor = _local_cursor_for_screenshot(
                 recording_event, baseline_shot, use_end=True
@@ -4269,6 +4360,7 @@ def _render_verify_panel_html(
                     run_root,
                     focus_rect_local=baseline_focus,
                     cursor_xy=baseline_cursor,
+                    foreground_rect_local=baseline_foreground,
                 )
             )
         shots_html = f'<div class="shots">{"".join(shot_parts)}</div>'
@@ -6421,6 +6513,19 @@ def _render_recording_event_html(
         except (TypeError, ValueError):
             focus_text = str(list(focus_rect))
         meta_rows.append(("Focus rect", escape(focus_text)))
+    foreground_rect = _foreground_rect_from_event_signals(event, after=True) or (
+        _foreground_rect_from_event_signals(event, after=False)
+    )
+    if foreground_rect is not None:
+        meta_rows.append(
+            (
+                "Foreground rect",
+                escape(
+                    f"({foreground_rect[0]}, {foreground_rect[1]})–"
+                    f"({foreground_rect[2]}, {foreground_rect[3]})"
+                ),
+            )
+        )
     text = event.get("text")
     if kind == "condition":
         presence = event.get("presence")
@@ -6506,6 +6611,17 @@ def _render_recording_event_html(
         if after_is_own_shot
         else None
     )
+    before_foreground = _foreground_rect_for_screenshot(
+        event, before, after=False, use_end=False
+    )
+    # signals_after is sealed from the next gesture's before-cache when that is
+    # the after image, so the after-foreground rect still matches that frame.
+    after_foreground = _foreground_rect_for_screenshot(
+        event,
+        after,
+        after=True,
+        use_end=after_is_own_shot,
+    )
     before_cursor = _local_cursor_for_screenshot(event, before, use_end=False)
     after_cursor = (
         _local_cursor_for_screenshot(event, after, use_end=True)
@@ -6518,12 +6634,14 @@ def _render_recording_event_html(
         run_root,
         focus_rect_local=before_focus,
         cursor_xy=before_cursor,
+        foreground_rect_local=before_foreground,
     ) + _render_shot_html(
         "動作後截圖",
         after,
         run_root,
         focus_rect_local=after_focus,
         cursor_xy=after_cursor,
+        foreground_rect_local=after_foreground,
     )
 
     editor = _render_recording_step_editor_html(
@@ -7749,12 +7867,16 @@ def _recording_playback_frames(
     for display_index, event in enumerate(events, start=1):
         shot = _resolve_recording_screenshot(str(event.get("screenshot_path") or ""), run_root)
         focus = _focus_rect_for_screenshot(event, shot, use_end=False)
+        foreground = _foreground_rect_for_screenshot(
+            event, shot, after=False, use_end=False
+        )
         cursor = _local_cursor_for_screenshot(event, shot, use_end=False)
         display = _display_screenshot_with_focus_rect(
             shot,
             run_root,
             focus_rect=focus,
             cursor_xy=cursor,
+            foreground_rect=foreground,
         )
         src = _relative_img_src(display, run_root)
         if shot is None or src is None:
@@ -7830,9 +7952,15 @@ def _extend_operation_playback_frames(
         live_focus = operation.get("focus_rect_after")
         if not (isinstance(live_focus, tuple) and len(live_focus) == 4):
             live_focus = None
+        live_foreground = operation.get("foreground_rect_after")
+        if not (isinstance(live_foreground, tuple) and len(live_foreground) == 4):
+            live_foreground = None
         # Playback prefers the after shot; live after-focus matches that frame.
         focus = live_focus or _focus_rect_for_screenshot(
             recording_event, shot, use_end=False
+        )
+        foreground = live_foreground or _foreground_rect_for_screenshot(
+            recording_event, shot, after=True, use_end=False
         )
         cursor = (
             None
@@ -7844,6 +7972,7 @@ def _extend_operation_playback_frames(
             run_root,
             focus_rect=focus,
             cursor_xy=cursor,
+            foreground_rect=foreground,
         )
         src = _relative_img_src(display, run_root)
         if src is None:

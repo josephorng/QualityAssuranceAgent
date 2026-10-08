@@ -6,6 +6,7 @@ from src.hand.module import (
     _after_action_settle_s,
     _focus_rect_after_csv,
     _sample_debug_focus_rect_after,
+    _sample_debug_foreground_rect_after,
 )
 
 
@@ -28,3 +29,11 @@ def test_sample_debug_focus_rect_after_formats_list(monkeypatch) -> None:
     assert _sample_debug_focus_rect_after() == [10, 20, 30, 40]
     assert _focus_rect_after_csv([10, 20, 30, 40]) == "[10,20,30,40]"
     assert _focus_rect_after_csv(None) == ""
+
+
+def test_sample_debug_foreground_rect_after_formats_list(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.recorder.verify_signals.sample_debug_foreground_rect",
+        lambda: [1, 2, 300, 200],
+    )
+    assert _sample_debug_foreground_rect_after() == [1, 2, 300, 200]

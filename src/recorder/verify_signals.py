@@ -164,6 +164,32 @@ def _foreground_identity() -> dict[str, Any] | None:
     return identity_from_window(_window_info_from_hwnd(hwnd))
 
 
+def _foreground_window_rect() -> list[int] | None:
+    """Screen LTRB of the foreground window. Display-only; not a verify field."""
+    if os.name != "nt":
+        return None
+    try:
+        hwnd = int(ctypes.windll.user32.GetForegroundWindow() or 0)
+    except Exception:
+        return None
+    if hwnd == 0:
+        return None
+    win = _window_info_from_hwnd(hwnd)
+    if win is None or win.width <= 0 or win.height <= 0:
+        return None
+    return [
+        int(win.left),
+        int(win.top),
+        int(win.left + win.width),
+        int(win.top + win.height),
+    ]
+
+
+def sample_debug_foreground_rect() -> list[int] | None:
+    """Screen LTRB of the foreground window for report screenshot overlays only."""
+    return _foreground_window_rect()
+
+
 def _point_identity(cursor_xy: tuple[int, int] | None) -> dict[str, Any] | None:
     if cursor_xy is None:
         return None
@@ -330,6 +356,8 @@ def capture_fast_signals(
     sample: dict[str, Any] = {}
     if include_foreground:
         sample["foreground"] = _foreground_identity()
+        # Sibling of identity. signal_verify_fields never copies this key.
+        sample["foreground_rect"] = _foreground_window_rect()
     if cursor_xy is not None:
         sample["point_window"] = _point_identity(cursor_xy)
     if include_caret:

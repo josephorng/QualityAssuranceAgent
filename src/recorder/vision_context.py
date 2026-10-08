@@ -5,7 +5,6 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import hashlib
-from itertools import combinations
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -38,7 +37,6 @@ from cua_mcp.select_mouse_target import (
     _box_edge_gap,
     _detect_mouse_targets_from_bgr,
     _detections_same_place,
-    _landmark_hints_locate_sides,
 )
 from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text
 from cua_mcp.yolo_onnx import (
@@ -66,12 +64,7 @@ from src.recorder.models import (
     screenshot_path_for_event_end,
 )
 
-# Smallest directed set that locates the click: search up to this many landmarks.
-_MAX_MINIMAL_LOCATE_LANDMARKS = 3
-# Cap combinatorial search on the closest unique texts / known icons.
-_MAX_LOCATE_TEXT_POOL = 10
-_MAX_LOCATE_ICON_POOL = 5
-# First-pass hybrid: closest unique multi-char text on each directed script side
+# Closest unique multi-char text/icon on each directed script side
 # (four cardinals + four diagonals). INSIDE is reserved for container landmarks.
 _DIRECTED_LOCATE_SIDES = frozenset(
     {
@@ -1534,49 +1527,9 @@ def _is_known_icon_candidate(candidate: dict[str, Any], label: str) -> bool:
     return False
 
 
-def _primary_locate_anchor(primary: dict[str, Any]) -> str:
-    """Hub-style anchor used when simulating landmark playback for the primary."""
-    anchor = _candidate_label_for_hint(primary) or ""
-    if any(
-        token in anchor
-        for token in ("圖示", "文字", "輸入欄", "滾動條", "按鈕", "元素", "未知")
-    ):
-        return anchor
-    class_name = str(primary.get("class_name") or "")
-    return {
-        "text": "「目標」文字",
-        "element": "「目標」圖示",
-        "input": "輸入欄",
-        "scrollbar": "滾動條",
-        "button": "按鈕",
-        "unknown": "未知",
-    }.get(class_name, anchor)
-
-
-def _vision_detections_and_primary(
-    candidates: list[Any],
-) -> tuple[list[UiDetection], UiDetection, dict[str, Any]] | None:
-    """Build detections for landmark locate; return None when primary is missing."""
-    if len(candidates) < 2 or not isinstance(candidates[0], dict):
-        return None
-    pairs: list[tuple[dict[str, Any], UiDetection]] = []
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            continue
-        det = _dict_to_detection(candidate)
-        if det is None:
-            continue
-        pairs.append((candidate, det))
-    if len(pairs) < 2:
-        return None
-    primary_candidate, primary = pairs[0]
-    detections = [det for _candidate, det in pairs]
-    return detections, primary, primary_candidate
-
-
 @dataclass(frozen=True)
 class _LocateLandmark:
-    """One directed neighbor eligible for the minimal locate search."""
+    """One directed neighbor eligible as a closest-per-side landmark."""
 
     hint: NearbyHint
     gap: float
@@ -1634,106 +1587,25 @@ def _eligible_locate_landmarks(
     return pool
 
 
-def _hints_locate_sides(
-    hints: list[NearbyHint],
-    *,
-    detections: list[UiDetection],
-    primary: UiDetection,
-    anchor: str,
-) -> bool:
-    """True when only ``primary`` sits on every directed hint side."""
-    return _landmark_hints_locate_sides(
-        detections, hints, primary, anchor=anchor
-    )
-
-
-def _closest_directed_text_landmarks(
-    texts: list[_LocateLandmark],
+def _closest_directed_landmarks(
+    pool: list[_LocateLandmark],
 ) -> list[_LocateLandmark]:
-    """Closest unique multi-char text on each directed script side, if any."""
+    """Closest unique multi-char text per side; else closest known icon on that side."""
     best: dict[Side, _LocateLandmark] = {}
-    for item in texts:
+    for item in pool:
         side = item.hint.side
         if side is None or side not in _DIRECTED_LOCATE_SIDES:
             continue
         prev = best.get(side)
-        if (
-            prev is None
-            or item.gap < prev.gap
-            or (item.gap == prev.gap and item.hint.label < prev.hint.label)
-        ):
+        if prev is None:
+            best[side] = item
+            continue
+        # Text always beats icon on the same side; among the same kind, closer wins.
+        item_key = (0 if item.is_text else 1, item.gap, item.hint.label)
+        prev_key = (0 if prev.is_text else 1, prev.gap, prev.hint.label)
+        if item_key < prev_key:
             best[side] = item
     return [best[side] for side in _DIRECTED_SIDE_ORDER if side in best]
-
-
-def _search_minimal_locating_set(
-    pool: list[_LocateLandmark],
-    *,
-    detections: list[UiDetection],
-    primary: UiDetection,
-    anchor: str,
-    max_size: int = _MAX_MINIMAL_LOCATE_LANDMARKS,
-) -> list[NearbyHint] | None:
-    """Return the smallest locating subset; prefer more text among equal sizes."""
-    if not pool:
-        return None
-
-    for size in range(1, max(1, max_size) + 1):
-        if size > len(pool):
-            break
-        best: tuple[int, float, list[NearbyHint]] | None = None
-        for combo in combinations(pool, size):
-            hints = [item.hint for item in combo]
-            if not _hints_locate_sides(
-                hints, detections=detections, primary=primary, anchor=anchor
-            ):
-                continue
-            text_count = sum(1 for item in combo if item.is_text)
-            gap_sum = sum(item.gap for item in combo)
-            key = (text_count, -gap_sum)
-            if best is None or key > (best[0], -best[1]):
-                best = (text_count, gap_sum, hints)
-        if best is not None:
-            return best[2]
-    return None
-
-
-def _extend_seed_until_locates(
-    seed: list[NearbyHint],
-    extras: list[_LocateLandmark],
-    *,
-    detections: list[UiDetection],
-    primary: UiDetection,
-    anchor: str,
-    max_extra: int = _MAX_MINIMAL_LOCATE_LANDMARKS,
-) -> list[NearbyHint] | None:
-    """Keep ``seed`` and add the smallest locating extras (prefer more text)."""
-    if seed and _hints_locate_sides(
-        seed, detections=detections, primary=primary, anchor=anchor
-    ):
-        return list(seed)
-
-    seed_labels = {hint.label for hint in seed}
-    unused = [item for item in extras if item.hint.label not in seed_labels]
-    if not unused:
-        return None
-
-    for size in range(1, min(len(unused), max(1, max_extra)) + 1):
-        best: tuple[int, float, list[NearbyHint]] | None = None
-        for combo in combinations(unused, size):
-            hints = [*seed, *[item.hint for item in combo]]
-            if not _hints_locate_sides(
-                hints, detections=detections, primary=primary, anchor=anchor
-            ):
-                continue
-            text_count = sum(1 for item in combo if item.is_text)
-            gap_sum = sum(item.gap for item in combo)
-            key = (text_count, -gap_sum)
-            if best is None or key > (best[0], -best[1]):
-                best = (text_count, gap_sum, hints)
-        if best is not None:
-            return best[2]
-    return None
 
 
 def _pick_minimal_locating_hints(
@@ -1744,23 +1616,16 @@ def _pick_minimal_locating_hints(
     primary_bbox: tuple[int, int, int, int] | None,
     click_xy: tuple[int, int] | None,
 ) -> list[NearbyHint]:
-    """Directed landmarks that locate the click without the target name.
+    """Closest unique multi-char text per side (else icon), plus a spare text.
 
-    Hybrid:
-    1. Take the closest unique multi-character text on each of the eight
-       directed sides when one exists.
-    2. Keep side-only uniqueness (every box on those sides, not closest-gap).
-    3. If that set is not unique, add the smallest set of next-closest unique
-       texts / known icons that makes it unique — or fall back to a smallest
-       locating set when no directed texts exist.
-    4. Always append the closest other unique multi-character text as a spare
-       when one remains in the pool.
+    Does not prove replay uniqueness against every detection; that check was too
+    expensive for dense OCR screens and often returned no hints after long work.
     """
-    built = _vision_detections_and_primary(candidates)
-    if built is None:
+    if len(candidates) < 2 or not isinstance(candidates[0], dict):
         return []
-    detections, primary, primary_candidate = built
-    anchor = _primary_locate_anchor(primary_candidate)
+    primary = _dict_to_detection(candidates[0])
+    if primary is None:
+        return []
     pool = _eligible_locate_landmarks(
         candidates,
         instruction=instruction,
@@ -1769,50 +1634,13 @@ def _pick_minimal_locating_hints(
         click_xy=click_xy,
         reserved_labels=reserved_labels,
     )
-    texts = [item for item in pool if item.is_text][:_MAX_LOCATE_TEXT_POOL]
-    icons = [item for item in pool if not item.is_text][:_MAX_LOCATE_ICON_POOL]
-
-    directed = _closest_directed_text_landmarks(texts)
-    picked: list[NearbyHint] | None = None
-    if directed:
-        seed = [item.hint for item in directed]
-        # Prefer text-only extensions before pulling in icons.
-        picked = _extend_seed_until_locates(
-            seed,
-            texts,
-            detections=detections,
-            primary=primary,
-            anchor=anchor,
-        )
-        if picked is None:
-            picked = _extend_seed_until_locates(
-                seed,
-                [*texts, *icons],
-                detections=detections,
-                primary=primary,
-                anchor=anchor,
-            )
-
-    if picked is None:
-        picked = _search_minimal_locating_set(
-            texts,
-            detections=detections,
-            primary=primary,
-            anchor=anchor,
-        )
-    if picked is None:
-        picked = _search_minimal_locating_set(
-            [*texts, *icons],
-            detections=detections,
-            primary=primary,
-            anchor=anchor,
-        )
+    picked = [item.hint for item in _closest_directed_landmarks(pool)]
     if not picked:
         return []
 
     used_labels = {hint.label for hint in picked}
-    for item in texts:
-        if item.hint.label in used_labels:
+    for item in pool:
+        if not item.is_text or item.hint.label in used_labels:
             continue
         return [*picked, item.hint]
     return picked
@@ -1908,14 +1736,13 @@ def collect_nearby_hints(
     *,
     instruction: str,
 ) -> list[NearbyHint]:
-    """Collect directed landmarks that locate the click.
+    """Collect directed landmarks near the click.
 
     Forced containing ``input`` / ``scrollbar`` landmarks (``side=inside``) come
     first. Then the closest unique multi-character text on each of the eight
-    directed sides, grown with next-closest texts / known icons until side-only
-    uniqueness holds (target name ignored; text and icon interchangeable).
-    Falls back to a smallest locating set when no directed texts exist. A spare
-    unique multi-character text is always appended when one remains.
+    directed sides, falling back to the closest known icon when a side has no
+    unique text. A spare unique multi-character text is appended when one remains
+    unused.
     """
     candidates = vision.get("candidates") or []
     if len(candidates) < 2 or not isinstance(candidates[0], dict):

@@ -150,7 +150,7 @@ def test_write_final_after_copies_when_single_monitor(tmp_path: Path) -> None:
 
 
 def test_collect_nearby_hint_labels_prefers_text_over_icons() -> None:
-    """Text landmarks win when they already locate the click."""
+    """On a side that has both, unique text beats a closer icon."""
     vision = {
         "used_vision": True,
         "candidates": [
@@ -161,6 +161,7 @@ def test_collect_nearby_hint_labels_prefers_text_over_icons() -> None:
                 "text": "",
                 "icons": [{"chinese_id": "Chrome"}],
             },
+            # Closer on the right than OneNote, but text must still win that side.
             {
                 "bbox": [140, 100, 20, 20],
                 "center": [150, 110],
@@ -169,15 +170,8 @@ def test_collect_nearby_hint_labels_prefers_text_over_icons() -> None:
                 "icons": [{"chinese_id": "Docker"}],
             },
             {
-                "bbox": [180, 100, 20, 20],
-                "center": [190, 110],
-                "class_name": "element",
-                "text": "",
-                "icons": [{"chinese_id": "Edge"}],
-            },
-            {
-                "bbox": [40, 100, 40, 16],
-                "center": [60, 108],
+                "bbox": [180, 100, 40, 16],
+                "center": [200, 108],
                 "class_name": "text",
                 "text": "OneNote",
             },
@@ -190,15 +184,15 @@ def test_collect_nearby_hint_labels_prefers_text_over_icons() -> None:
         ],
     }
     labels = collect_nearby_hint_labels(vision, instruction="點擊「Chrome」圖示")
-    assert labels[0] == "「OneNote」文字"
-    assert all(not label.endswith("圖示") for label in labels)
+    assert "「OneNote」文字" in labels
+    assert "「Docker」圖示" not in labels
+    assert "「Slack」文字" in labels
 
 
 def test_collect_nearby_hints_prefers_closest_directed_texts() -> None:
     """Closest unique multi-char text on each directed side, including diagonals."""
     from src.common.nearby_side import NearbyHint, Side
-    from src.recorder.vision_context import _dict_to_detection, collect_nearby_hints
-    from cua_mcp.select_mouse_target import _landmark_hints_locate_sides
+    from src.recorder.vision_context import collect_nearby_hints
 
     vision = {
         "used_vision": True,
@@ -219,23 +213,11 @@ def test_collect_nearby_hints_prefers_closest_directed_texts() -> None:
     assert NearbyHint("「對角」文字", Side.UPPER_RIGHT) in hints
     # Farther left text must not replace Copilot; it may appear only as spare.
     assert sum(1 for h in hints if h.label == "「遠左」文字") <= 1
-    detections = [
-        det
-        for candidate in vision["candidates"]
-        if (det := _dict_to_detection(candidate)) is not None
-    ]
-    assert _landmark_hints_locate_sides(
-        detections,
-        hints,
-        detections[0],
-        anchor="「網格檢視」圖示",
-    )
 
 
 def test_collect_nearby_hints_minimal_set_plus_spare_text() -> None:
-    """Cardinal / locating set always gets another unique text when one remains."""
-    from src.recorder.vision_context import _dict_to_detection, collect_nearby_hints
-    from cua_mcp.select_mouse_target import _landmark_hints_locate_sides
+    """Directed sides always get another unique text spare when one remains."""
+    from src.recorder.vision_context import collect_nearby_hints
 
     vision = {
         "used_vision": True,
@@ -249,21 +231,10 @@ def test_collect_nearby_hints_minimal_set_plus_spare_text() -> None:
     hints = collect_nearby_hints(vision, instruction="點擊「網格檢視」圖示")
     text_hints = [h for h in hints if h.label.endswith("文字")]
     assert len(text_hints) >= 2
-    detections = [
-        det
-        for candidate in vision["candidates"]
-        if (det := _dict_to_detection(candidate)) is not None
-    ]
-    assert _landmark_hints_locate_sides(
-        detections,
-        hints,
-        detections[0],
-        anchor="「網格檢視」圖示",
-    )
 
 
 def test_collect_nearby_hints_adds_icon_when_text_cannot_locate() -> None:
-    """A known icon enters the set only when no text-only set locates."""
+    """Known icons fill directed sides when no unique multi-char text is available."""
     from src.recorder.vision_context import collect_nearby_hints
 
     vision = {
@@ -307,12 +278,8 @@ def test_collect_nearby_hints_skips_unknown_icon() -> None:
 
 
 def test_collect_nearby_hints_same_box_text_icon_swap() -> None:
-    """「此」文字 primary still locates via landmarks after the text box is gone."""
-    from src.recorder.vision_context import _dict_to_detection, collect_nearby_hints
-    from cua_mcp.select_mouse_target import (
-        _landmark_hints_locate,
-        _landmark_hints_locate_sides,
-    )
+    """「此」文字 primary still gets directed nearby landmarks for replay."""
+    from src.recorder.vision_context import collect_nearby_hints
 
     text_primary = _text_candidate([251, 19, 22, 22], "此")
     grid_icon = _icon_candidate([251, 19, 22, 22], "網格檢視")
@@ -323,44 +290,15 @@ def test_collect_nearby_hints_same_box_text_icon_swap() -> None:
         "candidates": [text_primary, grid_icon, apps, auto],
     }
     hints = collect_nearby_hints(vision, instruction="點擊「此」文字")
-    assert hints
-    detections = [
-        det
-        for candidate in vision["candidates"]
-        if (det := _dict_to_detection(candidate)) is not None
-    ]
-    assert _landmark_hints_locate_sides(
-        detections,
-        hints,
-        detections[0],
-        anchor="「此」文字",
-    )
-    # Replay: primary text missing; only the grid icon remains at that place.
-    replay = [
-        det
-        for candidate in [grid_icon, apps, auto]
-        if (det := _dict_to_detection(candidate)) is not None
-    ]
-    assert _landmark_hints_locate(
-        replay,
-        hints,
-        replay[0],
-        anchor="「此」文字",
-    )
+    labels = {h.label for h in hints}
+    assert "「應用程式及其他」文字" in labels
+    assert "「自動」文字" in labels
 
 
-def test_collect_nearby_hints_rejects_set_that_also_matches_sibling_icon() -> None:
-    """Side-only uniqueness: 「應用程式及其他」+「新聊天」also match 「側邊欄」.
-
-    Closest-gap playback would still pick 「此」, but recording must refuse that
-    pair and bring in 「側邊欄」圖示 (or another cue) so only one box remains.
-    """
+def test_collect_nearby_hints_includes_closest_icon_on_its_side() -> None:
+    """Closest unique icon on a side is kept alongside closest texts on others."""
     from src.common.nearby_side import NearbyHint, Side
-    from src.recorder.vision_context import _dict_to_detection, collect_nearby_hints
-    from cua_mcp.select_mouse_target import (
-        _landmark_hints_locate,
-        _landmark_hints_locate_sides,
-    )
+    from src.recorder.vision_context import collect_nearby_hints
 
     text_primary = _text_candidate([251, 19, 22, 22], "此")
     grid_icon = _icon_candidate([251, 19, 22, 22], "網格檢視")
@@ -371,27 +309,12 @@ def test_collect_nearby_hints_rejects_set_that_also_matches_sibling_icon() -> No
         "used_vision": True,
         "candidates": [text_primary, grid_icon, sidebar, apps, chat],
     }
-    unsafe = [
-        NearbyHint("「應用程式及其他」文字", Side.ABOVE),
-        NearbyHint("「新聊天」文字", Side.UPPER_RIGHT),
-    ]
-    detections = [
-        det
-        for candidate in vision["candidates"]
-        if (det := _dict_to_detection(candidate)) is not None
-    ]
-    assert _landmark_hints_locate(
-        detections, unsafe, detections[0], anchor="「此」文字"
-    )
-    assert not _landmark_hints_locate_sides(
-        detections, unsafe, detections[0], anchor="「此」文字"
-    )
-
     hints = collect_nearby_hints(vision, instruction="點擊「此」文字")
-    assert any(h.label == "「側邊欄」圖示" for h in hints)
-    assert _landmark_hints_locate_sides(
-        detections, hints, detections[0], anchor="「此」文字"
+    assert NearbyHint("「側邊欄」圖示", Side.LEFT) in hints or any(
+        h.label == "「側邊欄」圖示" for h in hints
     )
+    assert any(h.label == "「應用程式及其他」文字" for h in hints)
+    assert any(h.label == "「新聊天」文字" for h in hints)
 
 
 def test_collect_nearby_hint_labels_skips_single_char_text() -> None:
@@ -951,7 +874,7 @@ def test_collect_nearby_hints_uses_icon_when_only_repeated_text() -> None:
 
 
 def test_collect_nearby_hints_set_cover_disambiguates_2x2_v_arrows() -> None:
-    """Row+column landmarks together uniquely ID one of four identical V-arrows."""
+    """Containing input plus closest unique texts frame one of four V-arrows."""
     from src.common.nearby_side import NearbyHint, Side
     from src.recorder.vision_context import collect_nearby_hints
 

@@ -142,6 +142,10 @@ def _mouse_vision_plan(
     Ambiguous phrases (no class cue) keep both OCR streams. Class-only input /
     scrollbar targets skip OCR. Line refine runs only when an input or
     scrollbar is referenced.
+
+    Directed nearby landmarks force both text and element OCR even when every
+    phrase says only ``文字`` or only ``圖示``: the real control may be the
+    other class at the same place (e.g. 「此」文字 vs 網格檢視).
     """
     phrases: list[str] = []
     raw = (instruction or "").strip()
@@ -151,7 +155,10 @@ def _mouse_vision_plan(
         phrases.extend(
             p.strip() for p in nearby_objects if isinstance(p, str) and p.strip()
         )
-    for hint in extract_nearby_hints_from_instruction(raw):
+    nearby_hints = list(extract_nearby_hints_from_instruction(raw))
+    if nearby_objects:
+        nearby_hints.extend(normalize_nearby_hints(nearby_objects))
+    for hint in nearby_hints:
         label = (hint.label or "").strip()
         if label:
             phrases.append(label)
@@ -181,6 +188,13 @@ def _mouse_vision_plan(
         ocr_ids = frozenset({YOLO_CLASS_ELEMENT})
     else:
         ocr_ids = frozenset()
+
+    directed_nearby = any(hint.side is not None for hint in nearby_hints)
+    if directed_nearby and ocr_ids in (
+        frozenset({YOLO_CLASS_TEXT}),
+        frozenset({YOLO_CLASS_ELEMENT}),
+    ):
+        ocr_ids = frozenset({YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT})
 
     return _MouseVisionPlan(ocr_class_ids=ocr_ids, refine_inputs=need_refine)
 
@@ -2348,32 +2362,35 @@ def _anchor_type_suffix(anchor: str) -> str | None:
 def _matches_landmark_fallback_type(det: UiDetection, anchor: str) -> bool:
     """True when ``det`` is the kind of control ``anchor`` names.
 
-    ``圖示`` keeps icon-labeled elements and blank unknowns no larger than
-    :data:`_ICON_PEER_FALLBACK_MAX_SIDE_PX`, including a mislabeled glyph.
-    Other suffixes stay on that class. An anchor with no suffix accepts any box.
+    ``文字`` / ``圖示`` / ``元素`` accept either text or element boxes so a
+    same-place OCR/icon swap (e.g. 「此」文字 vs 網格檢視) still locates. Blank
+    unknown icon peers within :data:`_ICON_PEER_FALLBACK_MAX_SIDE_PX` stay
+    eligible for icon-style anchors. ``輸入欄`` / ``滾動條`` stay on that class.
+    An anchor with no suffix accepts any box.
     """
     suffix = _anchor_type_suffix(anchor)
     if suffix is None:
         return True
-    if suffix == "圖示":
-        if _is_element_with_icon_labels(det):
+    if suffix in ("文字", "圖示", "元素"):
+        if (
+            det.class_name in ("text", "element")
+            or det.class_id in (YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT)
+        ):
             return True
-        if not _is_blank_unknown_icon_candidate(det):
-            return False
-        return max(det.bbox[2], det.bbox[3]) <= _ICON_PEER_FALLBACK_MAX_SIDE_PX
+        if suffix in ("圖示", "元素"):
+            if not _is_blank_unknown_icon_candidate(det):
+                return False
+            return max(det.bbox[2], det.bbox[3]) <= _ICON_PEER_FALLBACK_MAX_SIDE_PX
+        return False
     expected = {
         "輸入欄": "input",
         "滾動條": "scrollbar",
         "按鈕": "button",
-        "文字": "text",
         "未知": "unknown",
-        "元素": "element",
     }[suffix]
     if det.class_name == expected:
         return True
     class_ids = {
-        "text": YOLO_CLASS_TEXT,
-        "element": YOLO_CLASS_ELEMENT,
         "input": YOLO_CLASS_INPUT,
         "scrollbar": YOLO_CLASS_SCROLLBAR,
         "unknown": PICKER_CLASS_UNKNOWN,
@@ -2559,8 +2576,123 @@ def _landmark_hints_locate(
     *,
     anchor: str,
 ) -> bool:
-    """True when the hints leave exactly one place and it is ``primary``."""
+    """True when the hints leave exactly one place and it is ``primary``.
+
+    Uses playback's closest-on-side matching (see
+    :func:`_landmark_fallback_places`).
+    """
     places = _landmark_fallback_places(detections, nearby_hints, anchor=anchor)
+    if len(places) != 1:
+        return False
+    chosen = places[0]
+    return chosen is primary or _detections_same_place(chosen, primary)
+
+
+def _hint_satisfied_by_landmark_side(
+    candidate: UiDetection,
+    landmarks: list[UiDetection],
+    hint: NearbyHint,
+    *,
+    threshold: float,
+) -> bool:
+    """True when ``candidate`` sits on ``hint.side`` of any matching landmark.
+
+    Unlike :func:`_hint_satisfied_by_nearby_landmark`, this ignores closest-gap:
+    every box on the required side counts. Recording uses this so auto-picked
+    landmarks are safe even when a sibling icon also lies on those sides.
+    """
+    if hint.side is None:
+        return False
+    matching = [
+        neigh
+        for neigh in landmarks
+        if id(neigh) != id(candidate)
+        and _detection_similarity_to_query(neigh, hint.label) >= threshold
+    ]
+    if not matching:
+        return False
+    return any(
+        anchor_satisfies_side(
+            candidate.bbox,
+            neigh.cx,
+            neigh.cy,
+            hint.side,
+            landmark_bbox=neigh.bbox,
+        )
+        for neigh in matching
+    )
+
+
+def _landmark_side_unique_places(
+    detections: list[UiDetection],
+    nearby_hints: list[str] | list[NearbyHint] | None,
+    *,
+    anchor: str,
+    threshold: float = _MOUSE_FILTER_SIMILARITY_THRESHOLD,
+) -> list[UiDetection]:
+    """Places that sit on every directed hint side (no closest-gap filter).
+
+    Same landmark / selectable construction as
+    :func:`_landmark_fallback_places`, but a candidate matches a hint whenever
+    it lies on that side of any label-matching landmark.
+    """
+    hints = normalize_nearby_hints(nearby_hints)
+    directed = [hint for hint in hints if hint.side is not None]
+    if not detections or not directed:
+        return []
+
+    landmarks: list[UiDetection] = []
+    for det in detections:
+        if any(
+            _detection_similarity_to_query(det, hint.label) >= threshold
+            for hint in directed
+        ):
+            landmarks.append(det)
+    if not landmarks:
+        return []
+
+    landmark_ids = {id(det) for det in landmarks}
+    selectable: list[UiDetection] = []
+    for det in detections:
+        if id(det) in landmark_ids:
+            continue
+        if any(
+            iou_xywh(det.bbox, landmark.bbox) > DEFAULT_DEDUPE_OVERLAP_IOU_THRESHOLD
+            for landmark in landmarks
+        ):
+            continue
+        if not _matches_landmark_fallback_type(det, anchor):
+            continue
+        selectable.append(det)
+    eligible = [
+        det
+        for det in selectable
+        if all(
+            _hint_satisfied_by_landmark_side(
+                det,
+                landmarks,
+                hint,
+                threshold=threshold,
+            )
+            for hint in directed
+        )
+    ]
+    return _group_same_place(eligible)
+
+
+def _landmark_hints_locate_sides(
+    detections: list[UiDetection],
+    nearby_hints: list[str] | list[NearbyHint] | None,
+    primary: UiDetection,
+    *,
+    anchor: str,
+) -> bool:
+    """True when only ``primary``'s place sits on every directed hint side.
+
+    Recording auto-pick uses this stricter check so a sibling control on the
+    same sides (e.g. 「側邊欄」 next to 「此」) blocks an unsafe landmark set.
+    """
+    places = _landmark_side_unique_places(detections, nearby_hints, anchor=anchor)
     if len(places) != 1:
         return False
     chosen = places[0]

@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 import hashlib
+from itertools import combinations
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -24,7 +26,7 @@ from cua_mcp.color_spatial_segment import (
     segment_image_by_color,
     spatial_region_rank_for_detections,
 )
-from cua_mcp.icon_map import is_pua_char
+from cua_mcp.icon_map import is_pua_char, is_unknown_icon_record
 from cua_mcp.read_screen_text.ocr_image import _ocr_boxes_on_bgr
 from cua_mcp.scrollbar_arrows import (
     is_scrollbar_end_arrow_candidate,
@@ -33,13 +35,10 @@ from cua_mcp.scrollbar_arrows import (
     scrollbar_orientation,
 )
 from cua_mcp.select_mouse_target import (
-    _MOUSE_FILTER_SIMILARITY_THRESHOLD,
     _box_edge_gap,
     _detect_mouse_targets_from_bgr,
-    _label_similarity,
-    _LANDMARK_CLOSEST_GAP_TIE_PX,
     _detections_same_place,
-    _landmark_hints_locate,
+    _landmark_hints_locate_sides,
 )
 from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text
 from cua_mcp.yolo_onnx import (
@@ -67,19 +66,35 @@ from src.recorder.models import (
     screenshot_path_for_event_end,
 )
 
-_MIN_NEARBY_TEXT_LANDMARKS = 2
-# Extra texts added only when the current hints would not uniquely locate the
-# click once the target's own label is ignored.
-_MAX_NO_ANCHOR_EXTRA_LANDMARKS = 2
-# Disambiguating landmarks: separate every rival peer with this many distinct
-# landmarks. One cue per peer leaves the step at the mercy of a single label: a
-# hover-only tooltip, or a bad decode (資產設備 event 3 read 取消 as 關閉視窗 and
-# spent the only column cue on it), takes the whole step down at playback.
-_DISAMBIGUATING_COVER_DEPTH = 2
-_MAX_DISAMBIGUATING_LANDMARKS = 4
-# Redundant cues must be text: icon chinese_id decodes vary run to run, so a
-# second icon cue adds noise instead of resilience.
-_REDUNDANT_COVER_MAX_TIER = 1
+# Smallest directed set that locates the click: search up to this many landmarks.
+_MAX_MINIMAL_LOCATE_LANDMARKS = 3
+# Cap combinatorial search on the closest unique texts / known icons.
+_MAX_LOCATE_TEXT_POOL = 10
+_MAX_LOCATE_ICON_POOL = 5
+# First-pass hybrid: closest unique multi-char text on each directed script side
+# (four cardinals + four diagonals). INSIDE is reserved for container landmarks.
+_DIRECTED_LOCATE_SIDES = frozenset(
+    {
+        Side.LEFT,
+        Side.RIGHT,
+        Side.ABOVE,
+        Side.BELOW,
+        Side.UPPER_LEFT,
+        Side.UPPER_RIGHT,
+        Side.LOWER_LEFT,
+        Side.LOWER_RIGHT,
+    }
+)
+_DIRECTED_SIDE_ORDER = (
+    Side.LEFT,
+    Side.RIGHT,
+    Side.ABOVE,
+    Side.BELOW,
+    Side.UPPER_LEFT,
+    Side.UPPER_RIGHT,
+    Side.LOWER_LEFT,
+    Side.LOWER_RIGHT,
+)
 _MIN_NEARBY_TEXT_CANDIDATES = 8
 _MIN_NEARBY_ICON_CANDIDATES = 5
 # Recording HTML「點擊目標」radio list: closest labeled candidates only.
@@ -94,8 +109,6 @@ _DRAG_OFFSET_THRESHOLD_PX = 5
 # OCR boxes hug glyphs; pad so a near-miss click still counts as on-target.
 _BBOX_HIT_TOLERANCE_PX = 4
 _CONTAINER_LANDMARK_CLASSES = frozenset({"input", "scrollbar"})
-_SIMILAR_CLASS_LABELS = frozenset({"input", "scrollbar"})
-_CLASS_LABEL_BY_NAME = {"input": "輸入欄", "scrollbar": "滾動條"}
 # Icons that are themselves the clickable control. Only these beat overlapping
 # OCR text in click/drop primary ranking; decorative icons (頭像, Chrome, …)
 # lose to any visible text so labels like 「是」 win over misread glyph icons.
@@ -1268,7 +1281,7 @@ def _is_unknown_nearby_landmark(label: str, candidate: dict[str, Any]) -> bool:
 
 
 def _is_stable_disambiguation_label(label: str, candidate: dict[str, Any]) -> bool:
-    """True when ``label`` is stable enough to auto-pick for peer set-cover.
+    """True when ``label`` is stable enough to auto-pick as a nearby landmark.
 
     Drops unknown-class anchors, PUA-containing phrases, and quoted OCR that
     starts with underscore noise (e.g. 「_未分類黏署」).
@@ -1466,460 +1479,6 @@ def _neighbor_side_for_candidate(
     return None
 
 
-def _candidate_icon_ids(candidate: dict[str, Any]) -> set[str]:
-    """Return icon ``chinese_id`` / ``id`` labels on ``candidate``."""
-    labels: set[str] = set()
-    for icon in candidate.get("icons") or []:
-        if not isinstance(icon, dict):
-            continue
-        label = str(icon.get("chinese_id") or icon.get("id") or "").strip()
-        if label:
-            labels.add(label)
-    return labels
-
-
-def _candidate_non_icon_labels(candidate: dict[str, Any]) -> set[str]:
-    """OCR text and input/scrollbar class labels (excludes icon ids)."""
-    labels: set[str] = set()
-    visible = _visible_text(candidate.get("text"))
-    if visible:
-        labels.add(visible)
-    class_name = str(candidate.get("class_name") or "").strip()
-    if class_name in _SIMILAR_CLASS_LABELS:
-        class_label = _CLASS_LABEL_BY_NAME.get(class_name, "").strip()
-        if class_label:
-            labels.add(class_label)
-    return labels
-
-
-def _candidate_match_labels(candidate: dict[str, Any]) -> set[str]:
-    """Labels used to find confusable peers (OCR, icons, class names for input/scrollbar)."""
-    return _candidate_icon_ids(candidate) | _candidate_non_icon_labels(candidate)
-
-
-def _any_label_pair_similar(
-    left_labels: set[str],
-    right_labels: set[str],
-    *,
-    threshold: float,
-) -> bool:
-    """True when any cross-pair scores at least ``threshold``."""
-    if not left_labels or not right_labels:
-        return False
-    for a in left_labels:
-        for b in right_labels:
-            if _label_similarity(a, b) >= threshold:
-                return True
-    return False
-
-
-def _candidates_label_similar(
-    left: dict[str, Any],
-    right: dict[str, Any],
-    *,
-    threshold: float = _MOUSE_FILTER_SIMILARITY_THRESHOLD,
-) -> bool:
-    """True when candidates share a confusable label.
-
-    Icon ids match only on exact ``chinese_id`` overlap (so ``向下V箭頭`` does not
-    match ``向左滾動箭頭``). OCR / class labels still use fuzzy similarity, including
-    icon-vs-text pairs (e.g. icon ``Edge`` vs text ``Edge``).
-    """
-    icons_left = _candidate_icon_ids(left)
-    icons_right = _candidate_icon_ids(right)
-    if icons_left & icons_right:
-        return True
-
-    texts_left = _candidate_non_icon_labels(left)
-    texts_right = _candidate_non_icon_labels(right)
-    if _any_label_pair_similar(texts_left, texts_right, threshold=threshold):
-        return True
-    if _any_label_pair_similar(icons_left, texts_right, threshold=threshold):
-        return True
-    if _any_label_pair_similar(texts_left, icons_right, threshold=threshold):
-        return True
-    return False
-
-
-def _find_confusable_peers(
-    candidates: list[Any],
-    *,
-    threshold: float = _MOUSE_FILTER_SIMILARITY_THRESHOLD,
-) -> list[dict[str, Any]]:
-    """Return neighbors label-similar to ``candidates[0]`` (excluding the primary)."""
-    if not candidates or not isinstance(candidates[0], dict):
-        return []
-    primary = candidates[0]
-    peers: list[dict[str, Any]] = []
-    for candidate in candidates[1:]:
-        if not isinstance(candidate, dict):
-            continue
-        if _candidates_label_similar(primary, candidate, threshold=threshold):
-            peers.append(candidate)
-    return peers
-
-
-def _betweenness_score(
-    landmark_center: tuple[int, int],
-    primary_center: tuple[int, int],
-    peer_center: tuple[int, int],
-) -> float:
-    """Higher when landmark lies between primary and peer on the separating axis."""
-    lx, ly = landmark_center
-    px, py = primary_center
-    cx, cy = peer_center
-    dx, dy = px - cx, py - cy
-    if abs(dx) >= abs(dy):
-        lo, hi = sorted((px, cx))
-        if lo < lx < hi:
-            mid = (lo + hi) / 2
-            return 1.0 - abs(lx - mid) / max(hi - lo, 1)
-    else:
-        lo, hi = sorted((py, cy))
-        if lo < ly < hi:
-            mid = (lo + hi) / 2
-            return 1.0 - abs(ly - mid) / max(hi - lo, 1)
-    return 0.0
-
-
-def _dist_sq(a: tuple[int, int], b: tuple[int, int]) -> float:
-    """Squared Euclidean distance between two points."""
-    dx = a[0] - b[0]
-    dy = a[1] - b[1]
-    return float(dx * dx + dy * dy)
-
-
-def _landmark_relevant_to_peer(
-    landmark_center: tuple[int, int],
-    primary_center: tuple[int, int],
-    peer_center: tuple[int, int],
-) -> bool:
-    """True when ``landmark`` is local enough to count as separating ``peer``.
-
-    Far landmarks (e.g. sidebar text) can create spurious unique sides via the
-    9-section grid. Count an elimination only when the landmark lies between
-    primary and peer, or is near the primary relative to the peer distance.
-    """
-    if _betweenness_score(landmark_center, primary_center, peer_center) > 0.0:
-        return True
-    peer_dist_sq = _dist_sq(primary_center, peer_center)
-    # Allow field labels beside the control; pad so near-miss geometry still counts.
-    max_dist_sq = peer_dist_sq + 2.0 * (peer_dist_sq**0.5) * 80.0 + 80.0 * 80.0
-    return _dist_sq(landmark_center, primary_center) <= max_dist_sq
-
-
-def _peers_eliminated_by_landmark(
-    landmark: dict[str, Any],
-    *,
-    primary_bbox: tuple[int, int, int, int],
-    primary_center: tuple[int, int],
-    confusables: list[dict[str, Any]],
-) -> tuple[Side | None, set[int]]:
-    """Return ``(primary_side, eliminated_peer_ids)`` for a partial separator.
-
-    A peer is eliminated when it does **not** satisfy the same directed side as
-    the primary relative to ``landmark``, and the landmark is local to that
-    primary/peer pair. Returns ``(None, empty)`` when the landmark has no
-    directed side for the primary or eliminates nobody.
-    """
-    center = _candidate_center(landmark)
-    if center is None:
-        return None, set()
-
-    lm_bbox = _as_bbox_xywh(landmark.get("bbox"))
-    primary_side = side_from_anchor_bbox(
-        primary_bbox,
-        center[0],
-        center[1],
-        landmark_bbox=lm_bbox,
-    )
-    if primary_side is None:
-        return None, set()
-
-    eliminated: set[int] = set()
-    for peer in confusables:
-        peer_bbox = _as_bbox_xywh(peer.get("bbox"))
-        peer_center = _candidate_center(peer)
-        if peer_bbox is None or peer_center is None:
-            continue
-        if anchor_satisfies_side(
-            peer_bbox,
-            center[0],
-            center[1],
-            primary_side,
-            landmark_bbox=lm_bbox,
-        ):
-            continue
-        if not _landmark_relevant_to_peer(center, primary_center, peer_center):
-            continue
-        eliminated.add(id(peer))
-    if not eliminated:
-        return None, set()
-    return primary_side, eliminated
-
-
-def _landmark_separates_primary_from_peers(
-    landmark: dict[str, Any],
-    *,
-    primary_bbox: tuple[int, int, int, int],
-    confusables: list[dict[str, Any]],
-    primary_center: tuple[int, int] | None = None,
-) -> Side | None:
-    """Return the script side for primary when landmark uniquely separates all peers."""
-    center = primary_center
-    if center is None:
-        # Derive from bbox when callers omit an explicit primary center.
-        x, y, w, h = primary_bbox
-        center = (x + w // 2, y + h // 2)
-    side, eliminated = _peers_eliminated_by_landmark(
-        landmark,
-        primary_bbox=primary_bbox,
-        primary_center=center,
-        confusables=confusables,
-    )
-    if side is None or len(eliminated) < len(confusables):
-        return None
-    return side
-
-
-def _score_disambiguating_landmarks(
-    candidates: list[Any],
-    *,
-    instruction: str,
-) -> list[tuple[set[int], float, int, int, int, tuple[int, int], NearbyHint]]:
-    """Score neighbor landmarks that eliminate at least one label-similar peer.
-
-    Each row is
-    ``(eliminated_peer_ids, betweenness, tier, order, label_freq, center, hint)``.
-    Landmarks need not separate every peer alone; callers greedy-cover the peer
-    set. Only **unique** on-screen labels (``label_freq == 1``) are scored:
-    repeated icons/text (e.g. many 「已勾選方框」) look strong against one fixed
-    instance at record time but fail at playback, where the side must hold
-    against *any* matching landmark.
-    """
-    if len(candidates) < 2 or not isinstance(candidates[0], dict):
-        return []
-
-    confusables = _find_confusable_peers(candidates)
-    if not confusables:
-        return []
-
-    primary = candidates[0]
-    primary_bbox = _as_bbox_xywh(primary.get("bbox"))
-    primary_center = _candidate_center(primary)
-    if primary_bbox is None or primary_center is None:
-        return []
-
-    label_freq = _label_frequencies(candidates)
-
-    confusable_ids = {id(peer) for peer in confusables}
-    peer_centers: dict[int, tuple[int, int]] = {}
-    for peer in confusables:
-        center = _candidate_center(peer)
-        if center is not None:
-            peer_centers[id(peer)] = center
-
-    scored: list[
-        tuple[set[int], float, int, int, int, tuple[int, int], NearbyHint]
-    ] = []
-
-    for order, candidate in enumerate(candidates[1:]):
-        if not isinstance(candidate, dict) or id(candidate) in confusable_ids:
-            continue
-        label = _candidate_label_for_hint(candidate)
-        if not label or _label_already_in_instruction(label, instruction):
-            continue
-        if not _is_stable_disambiguation_label(label, candidate):
-            continue
-        # Skip labels that appear more than once on the screenshot.
-        if label_freq.get(label, 1) > 1:
-            continue
-
-        side, eliminated = _peers_eliminated_by_landmark(
-            candidate,
-            primary_bbox=primary_bbox,
-            primary_center=primary_center,
-            confusables=confusables,
-        )
-        if side is None or not eliminated:
-            continue
-
-        center = _candidate_center(candidate)
-        if center is None:
-            continue
-
-        between = 0.0
-        for peer_id in eliminated:
-            peer_center = peer_centers.get(peer_id)
-            if peer_center is None:
-                continue
-            between = max(
-                between, _betweenness_score(center, primary_center, peer_center)
-            )
-
-        tier = _nearby_hint_tier(candidate, label)
-        scored.append(
-            (
-                eliminated,
-                between,
-                tier,
-                order,
-                label_freq.get(label, 1),
-                center,
-                NearbyHint(label=label, side=side),
-            )
-        )
-
-    # More peers covered, better tier, closer order, higher between.
-    # (freq is always 1 here; kept in the tuple for callers/tests.)
-    scored.sort(key=lambda item: (-len(item[0]), item[2], item[3], -item[1]))
-    return scored
-
-
-def _pick_disambiguating_hints(
-    candidates: list[Any],
-    *,
-    instruction: str,
-    max_count: int = _MAX_DISAMBIGUATING_LANDMARKS,
-    reserved_labels: set[str] | None = None,
-    cover_depth: int = _DISAMBIGUATING_COVER_DEPTH,
-) -> list[NearbyHint]:
-    """Greedy set-cover landmarks that together separate primary from similar peers.
-
-    Each pick must eliminate at least one under-covered peer. Stops when every
-    peer is separated by ``cover_depth`` distinct landmarks or ``max_count`` is
-    reached. Only unique on-screen labels are considered (see
-    ``_score_disambiguating_landmarks``). ``reserved_labels`` (e.g. forced
-    containing ``輸入欄``) are skipped so a duplicate bare class label cannot
-    consume a cover slot.
-
-    Every peer is covered once before any second cue is picked, and second cues
-    are text-only (``_REDUNDANT_COVER_MAX_TIER``): redundancy exists to survive a
-    landmark that mis-OCRs or disappears at playback, which is exactly what an
-    icon decode is prone to.
-
-    Tier **gates** the cover rather than merely breaking ties: the greedy runs
-    once per ascending tier, each pass restricted to landmarks at or below that
-    tier. A lower tier therefore gets first refusal on every peer it can
-    separate, and an icon (tier 2) only enters the set for peers that no text
-    landmark separates. Icon ``chinese_id`` decodes vary run to run — the same
-    grid cell read as 相機 / 國旗 / Python 終端機 across sibling rows — so an icon
-    beating a text landmark on mere proximity yields a hint that cannot be
-    matched back at playback.
-
-    Within a pass, picks prefer landmarks that clear more remaining peers, then
-    closer to those peers, then multi-char text, closer to the primary, and
-    betweenness.
-    """
-    if max_count <= 0:
-        return []
-    scored = _score_disambiguating_landmarks(candidates, instruction=instruction)
-    if not scored:
-        return []
-
-    confusables = _find_confusable_peers(candidates)
-    primary_center = None
-    if candidates and isinstance(candidates[0], dict):
-        primary_center = _candidate_center(candidates[0])
-    peer_centers: dict[int, tuple[int, int]] = {}
-    for peer in confusables:
-        center = _candidate_center(peer)
-        if center is not None:
-            peer_centers[id(peer)] = center
-
-    covered: dict[int, int] = {}
-    for eliminated, *_rest in scored:
-        for peer_id in eliminated:
-            covered.setdefault(peer_id, 0)
-    if not covered:
-        return []
-
-    picked: list[NearbyHint] = []
-    used_labels: set[str] = set(reserved_labels or ())
-
-    def _cover_within_tier(max_tier: int, *, depth: int) -> None:
-        """Cover every peer ``depth`` times using landmarks at or below ``max_tier``."""
-        while len(picked) < max_count:
-            remaining = {pid for pid, hits in covered.items() if hits < depth}
-            if not remaining:
-                return
-            best: (
-                tuple[int, float, int, float, float, NearbyHint, set[int]] | None
-            ) = None
-            for eliminated, between, tier, _order, _freq, center, hint in scored:
-                if tier > max_tier or hint.label in used_labels:
-                    continue
-                newly = eliminated & remaining
-                if not newly:
-                    continue
-                dist_vals = [
-                    _dist_sq(center, peer_centers[pid])
-                    for pid in newly
-                    if pid in peer_centers
-                ]
-                min_peer_dist = (
-                    min(dist_vals) ** 0.5 if dist_vals else float("inf")
-                )
-                primary_dist = (
-                    _dist_sq(center, primary_center) ** 0.5
-                    if primary_center is not None
-                    else min_peer_dist
-                )
-                row_delta = (
-                    float(abs(center[1] - primary_center[1]))
-                    if primary_center is not None
-                    else 0.0
-                )
-                # Penalize off-row landmarks lightly so same-row field labels win
-                # the first pick, while unique OK/Cancel buttons still beat
-                # distant grid text on later picks.
-                locality = min_peer_dist + 2.0 * row_delta
-                key = (
-                    len(newly),
-                    -locality,
-                    -tier,
-                    -primary_dist,
-                    between,
-                )
-                if best is None or key > (
-                    best[0],
-                    -best[1],
-                    -best[2],
-                    -best[3],
-                    best[4],
-                ):
-                    best = (
-                        len(newly),
-                        locality,
-                        tier,
-                        primary_dist,
-                        between,
-                        hint,
-                        newly,
-                    )
-            if best is None:
-                return
-            _n, _loc, _tier, _pd, _between, hint, newly = best
-            picked.append(hint)
-            used_labels.add(hint.label)
-            for peer_id in newly:
-                covered[peer_id] += 1
-
-    tiers = sorted({row[2] for row in scored})
-    for depth in range(1, max(cover_depth, 1) + 1):
-        allowed_tiers = (
-            tiers
-            if depth == 1
-            else [tier for tier in tiers if tier <= _REDUNDANT_COVER_MAX_TIER]
-        )
-        for max_tier in allowed_tiers:
-            if len(picked) >= max_count:
-                break
-            _cover_within_tier(max_tier, depth=depth)
-
-    return picked
-
-
 def _collect_containing_container_hints(
     candidates: list[Any],
     *,
@@ -1955,54 +1514,340 @@ def _collect_containing_container_hints(
     return hints
 
 
-def _prioritized_nearby_parts(
+
+def _is_known_icon_candidate(candidate: dict[str, Any], label: str) -> bool:
+    """True when ``candidate`` is a known (non-unknown) icon landmark."""
+    if not label.endswith("圖示"):
+        return False
+    icons = candidate.get("icons")
+    if not isinstance(icons, list) or not icons:
+        return False
+    for icon in icons:
+        if not isinstance(icon, dict):
+            continue
+        chinese_id = str(icon.get("chinese_id") or "").strip()
+        if not chinese_id:
+            continue
+        if is_unknown_icon_record(icon):
+            continue
+        return True
+    return False
+
+
+def _primary_locate_anchor(primary: dict[str, Any]) -> str:
+    """Hub-style anchor used when simulating landmark playback for the primary."""
+    anchor = _candidate_label_for_hint(primary) or ""
+    if any(
+        token in anchor
+        for token in ("圖示", "文字", "輸入欄", "滾動條", "按鈕", "元素", "未知")
+    ):
+        return anchor
+    class_name = str(primary.get("class_name") or "")
+    return {
+        "text": "「目標」文字",
+        "element": "「目標」圖示",
+        "input": "輸入欄",
+        "scrollbar": "滾動條",
+        "button": "按鈕",
+        "unknown": "未知",
+    }.get(class_name, anchor)
+
+
+def _vision_detections_and_primary(
+    candidates: list[Any],
+) -> tuple[list[UiDetection], UiDetection, dict[str, Any]] | None:
+    """Build detections for landmark locate; return None when primary is missing."""
+    if len(candidates) < 2 or not isinstance(candidates[0], dict):
+        return None
+    pairs: list[tuple[dict[str, Any], UiDetection]] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        det = _dict_to_detection(candidate)
+        if det is None:
+            continue
+        pairs.append((candidate, det))
+    if len(pairs) < 2:
+        return None
+    primary_candidate, primary = pairs[0]
+    detections = [det for _candidate, det in pairs]
+    return detections, primary, primary_candidate
+
+
+@dataclass(frozen=True)
+class _LocateLandmark:
+    """One directed neighbor eligible for the minimal locate search."""
+
+    hint: NearbyHint
+    gap: float
+    is_text: bool
+
+
+def _eligible_locate_landmarks(
+    candidates: list[Any],
+    *,
+    instruction: str,
+    primary: UiDetection,
+    primary_bbox: tuple[int, int, int, int] | None,
+    click_xy: tuple[int, int] | None,
+    reserved_labels: set[str],
+) -> list[_LocateLandmark]:
+    """Unique directed neighbors stable enough to auto-pick as landmarks."""
+    label_freq = _label_frequencies(candidates)
+    seen: set[str] = set(reserved_labels)
+    pool: list[_LocateLandmark] = []
+    for candidate in candidates[1:]:
+        if not isinstance(candidate, dict):
+            continue
+        label = _candidate_label_for_hint(candidate)
+        if not label or label in seen:
+            continue
+        if not _is_stable_disambiguation_label(label, candidate):
+            continue
+        if label_freq.get(label, 1) != 1:
+            continue
+        if _label_already_in_instruction(label, instruction):
+            continue
+        det = _dict_to_detection(candidate)
+        if det is None or _detections_same_place(primary, det):
+            continue
+        is_text = _is_multi_char_text_candidate(candidate, label)
+        is_icon = _is_known_icon_candidate(candidate, label)
+        if not is_text and not is_icon:
+            continue
+        side = _neighbor_side_for_candidate(
+            candidate,
+            primary_bbox=primary_bbox,
+            click_xy=click_xy,
+        )
+        if side is None:
+            continue
+        seen.add(label)
+        pool.append(
+            _LocateLandmark(
+                hint=NearbyHint(label=label, side=side),
+                gap=_box_edge_gap(primary.bbox, det.bbox),
+                is_text=is_text,
+            )
+        )
+    pool.sort(key=lambda item: (0 if item.is_text else 1, item.gap, item.hint.label))
+    return pool
+
+
+def _hints_locate_sides(
+    hints: list[NearbyHint],
+    *,
+    detections: list[UiDetection],
+    primary: UiDetection,
+    anchor: str,
+) -> bool:
+    """True when only ``primary`` sits on every directed hint side."""
+    return _landmark_hints_locate_sides(
+        detections, hints, primary, anchor=anchor
+    )
+
+
+def _closest_directed_text_landmarks(
+    texts: list[_LocateLandmark],
+) -> list[_LocateLandmark]:
+    """Closest unique multi-char text on each directed script side, if any."""
+    best: dict[Side, _LocateLandmark] = {}
+    for item in texts:
+        side = item.hint.side
+        if side is None or side not in _DIRECTED_LOCATE_SIDES:
+            continue
+        prev = best.get(side)
+        if (
+            prev is None
+            or item.gap < prev.gap
+            or (item.gap == prev.gap and item.hint.label < prev.hint.label)
+        ):
+            best[side] = item
+    return [best[side] for side in _DIRECTED_SIDE_ORDER if side in best]
+
+
+def _search_minimal_locating_set(
+    pool: list[_LocateLandmark],
+    *,
+    detections: list[UiDetection],
+    primary: UiDetection,
+    anchor: str,
+    max_size: int = _MAX_MINIMAL_LOCATE_LANDMARKS,
+) -> list[NearbyHint] | None:
+    """Return the smallest locating subset; prefer more text among equal sizes."""
+    if not pool:
+        return None
+
+    for size in range(1, max(1, max_size) + 1):
+        if size > len(pool):
+            break
+        best: tuple[int, float, list[NearbyHint]] | None = None
+        for combo in combinations(pool, size):
+            hints = [item.hint for item in combo]
+            if not _hints_locate_sides(
+                hints, detections=detections, primary=primary, anchor=anchor
+            ):
+                continue
+            text_count = sum(1 for item in combo if item.is_text)
+            gap_sum = sum(item.gap for item in combo)
+            key = (text_count, -gap_sum)
+            if best is None or key > (best[0], -best[1]):
+                best = (text_count, gap_sum, hints)
+        if best is not None:
+            return best[2]
+    return None
+
+
+def _extend_seed_until_locates(
+    seed: list[NearbyHint],
+    extras: list[_LocateLandmark],
+    *,
+    detections: list[UiDetection],
+    primary: UiDetection,
+    anchor: str,
+    max_extra: int = _MAX_MINIMAL_LOCATE_LANDMARKS,
+) -> list[NearbyHint] | None:
+    """Keep ``seed`` and add the smallest locating extras (prefer more text)."""
+    if seed and _hints_locate_sides(
+        seed, detections=detections, primary=primary, anchor=anchor
+    ):
+        return list(seed)
+
+    seed_labels = {hint.label for hint in seed}
+    unused = [item for item in extras if item.hint.label not in seed_labels]
+    if not unused:
+        return None
+
+    for size in range(1, min(len(unused), max(1, max_extra)) + 1):
+        best: tuple[int, float, list[NearbyHint]] | None = None
+        for combo in combinations(unused, size):
+            hints = [*seed, *[item.hint for item in combo]]
+            if not _hints_locate_sides(
+                hints, detections=detections, primary=primary, anchor=anchor
+            ):
+                continue
+            text_count = sum(1 for item in combo if item.is_text)
+            gap_sum = sum(item.gap for item in combo)
+            key = (text_count, -gap_sum)
+            if best is None or key > (best[0], -best[1]):
+                best = (text_count, gap_sum, hints)
+        if best is not None:
+            return best[2]
+    return None
+
+
+def _pick_minimal_locating_hints(
+    candidates: list[Any],
+    *,
+    instruction: str,
+    reserved_labels: set[str],
+    primary_bbox: tuple[int, int, int, int] | None,
+    click_xy: tuple[int, int] | None,
+) -> list[NearbyHint]:
+    """Directed landmarks that locate the click without the target name.
+
+    Hybrid:
+    1. Take the closest unique multi-character text on each of the eight
+       directed sides when one exists.
+    2. Keep side-only uniqueness (every box on those sides, not closest-gap).
+    3. If that set is not unique, add the smallest set of next-closest unique
+       texts / known icons that makes it unique — or fall back to a smallest
+       locating set when no directed texts exist.
+    4. Always append the closest other unique multi-character text as a spare
+       when one remains in the pool.
+    """
+    built = _vision_detections_and_primary(candidates)
+    if built is None:
+        return []
+    detections, primary, primary_candidate = built
+    anchor = _primary_locate_anchor(primary_candidate)
+    pool = _eligible_locate_landmarks(
+        candidates,
+        instruction=instruction,
+        primary=primary,
+        primary_bbox=primary_bbox,
+        click_xy=click_xy,
+        reserved_labels=reserved_labels,
+    )
+    texts = [item for item in pool if item.is_text][:_MAX_LOCATE_TEXT_POOL]
+    icons = [item for item in pool if not item.is_text][:_MAX_LOCATE_ICON_POOL]
+
+    directed = _closest_directed_text_landmarks(texts)
+    picked: list[NearbyHint] | None = None
+    if directed:
+        seed = [item.hint for item in directed]
+        # Prefer text-only extensions before pulling in icons.
+        picked = _extend_seed_until_locates(
+            seed,
+            texts,
+            detections=detections,
+            primary=primary,
+            anchor=anchor,
+        )
+        if picked is None:
+            picked = _extend_seed_until_locates(
+                seed,
+                [*texts, *icons],
+                detections=detections,
+                primary=primary,
+                anchor=anchor,
+            )
+
+    if picked is None:
+        picked = _search_minimal_locating_set(
+            texts,
+            detections=detections,
+            primary=primary,
+            anchor=anchor,
+        )
+    if picked is None:
+        picked = _search_minimal_locating_set(
+            [*texts, *icons],
+            detections=detections,
+            primary=primary,
+            anchor=anchor,
+        )
+    if not picked:
+        return []
+
+    used_labels = {hint.label for hint in picked}
+    for item in texts:
+        if item.hint.label in used_labels:
+            continue
+        return [*picked, item.hint]
+    return picked
+
+
+def _ranked_eligible_nearby_hints(
     vision: dict[str, Any],
     *,
     instruction: str,
-) -> tuple[list[NearbyHint], list[NearbyHint], list[NearbyHint]]:
-    """Split forced containers and cover picks from ranked eligible neighbors.
-
-    Ranking matches ``collect_nearby_hints``: Tier 0 multi-char text first, then
-    other labels, then icons; within a tier, labels unique on screen outrank
-    repeated ones, then left → right → top → bottom (then diagonals/center).
-    Within the same rank, keeps distance order from ``candidates``.
-
-    Uniqueness is preferred rather than required, unlike the greedy cover in
-    ``_pick_disambiguating_hints``: these are fill landmarks, so in a grid where
-    every label repeats a weak hint still beats emitting none. The cover may take
-    up to ``_MAX_DISAMBIGUATING_LANDMARKS`` slots, since it now aims for a second
-    independent cue per rival peer.
-    """
+    reserved_labels: set[str] | None = None,
+) -> list[NearbyHint]:
+    """All eligible directed neighbors ordered closest-first (text before icons)."""
     candidates = vision.get("candidates") or []
-    if len(candidates) < 2:
-        return [], [], []
-
+    if len(candidates) < 2 or not isinstance(candidates[0], dict):
+        return []
     primary = candidates[0]
-    if not isinstance(primary, dict):
-        return [], [], []
     primary_bbox = _as_bbox_xywh(primary.get("bbox"))
     click_xy = _click_xy_from_vision(vision, primary=primary)
-
-    forced = _collect_containing_container_hints(
+    primary_det = _dict_to_detection(primary)
+    if primary_det is None:
+        return []
+    pool = _eligible_locate_landmarks(
         candidates,
         instruction=instruction,
+        primary=primary_det,
+        primary_bbox=primary_bbox,
         click_xy=click_xy,
+        reserved_labels=set(reserved_labels or ()),
     )
-    disambiguating = _pick_disambiguating_hints(
-        candidates,
-        instruction=instruction,
-        max_count=_MAX_DISAMBIGUATING_LANDMARKS,
-        reserved_labels={hint.label for hint in forced},
-    )
-    forced_labels = {hint.label for hint in forced}
-    disambiguating_labels = {hint.label for hint in disambiguating}
-    reserved_labels = forced_labels | disambiguating_labels
-
+    # Also surface unique non-text/non-icon neighbors (e.g. bare 輸入欄 not containing
+    # the click) for the uncapped HTML ranking list.
     label_freq = _label_frequencies(candidates)
-
-    eligible: list[tuple[int, int, int, int, int, dict[str, Any], str]] = []
-    seen: set[str] = set(reserved_labels)
-    for order, candidate in enumerate(candidates[1:]):
+    seen = {item.hint.label for item in pool} | set(reserved_labels or ())
+    extras: list[tuple[float, NearbyHint]] = []
+    for candidate in candidates[1:]:
         if not isinstance(candidate, dict):
             continue
         label = _candidate_label_for_hint(candidate)
@@ -2012,30 +1857,21 @@ def _prioritized_nearby_parts(
             continue
         if _label_already_in_instruction(label, instruction):
             continue
-        seen.add(label)
-        tier = _nearby_hint_tier(candidate, label)
-        cell_rank = (
-            _tier0_cell_rank(candidate, primary_bbox=primary_bbox)
-            if tier == 0
-            else 0
-        )
-        spatial_rank = int(candidate.get("spatial_region_rank", 0))
-        repeated = 1 if label_freq.get(label, 1) > 1 else 0
-        eligible.append(
-            (spatial_rank, tier, repeated, cell_rank, order, candidate, label)
-        )
-
-    eligible.sort(key=lambda item: (item[0], item[1], item[2], item[3], item[4]))
-
-    ranked: list[NearbyHint] = []
-    for _spatial, _tier, _repeated, _cell_rank, _order, candidate, label in eligible:
+        if label_freq.get(label, 1) > 1 and not label.endswith(("輸入欄", "滾動條")):
+            continue
+        det = _dict_to_detection(candidate)
+        if det is None or _detections_same_place(primary_det, det):
+            continue
         side = _neighbor_side_for_candidate(
             candidate,
             primary_bbox=primary_bbox,
             click_xy=click_xy,
         )
-        ranked.append(NearbyHint(label=label, side=side))
-    return forced, disambiguating, ranked
+        gap = _box_edge_gap(primary_det.bbox, det.bbox)
+        seen.add(label)
+        extras.append((gap, NearbyHint(label=label, side=side)))
+    extras.sort(key=lambda row: (row[0], row[1].label))
+    return [item.hint for item in pool] + [hint for _gap, hint in extras]
 
 
 def list_prioritized_nearby_hints(
@@ -2046,244 +1882,71 @@ def list_prioritized_nearby_hints(
     """Return all nearby hints in rank order, with no auto-pick cap.
 
     Containing ``input`` / ``scrollbar`` landmarks come first (``side=inside``),
-    then every other eligible neighbor in the same order ``collect_nearby_hints``
-    uses before cutting at ``max_count``.
+    then every other eligible neighbor closest-first (multi-char text before
+    known icons).
     """
-    forced, disambiguating, ranked = _prioritized_nearby_parts(
-        vision, instruction=instruction
-    )
-    return [*forced, *disambiguating, *ranked]
-
-
-def _pick_side_diverse_hints(
-    ranked: list[NearbyHint],
-    *,
-    max_count: int,
-) -> list[NearbyHint]:
-    """Pick up to ``max_count`` hints, preferring distinct directed sides.
-
-    Keeps rank order. A second (or later) candidate with the same non-None
-    ``side`` as an already-picked hint is skipped while a different-side
-    option remains. If diversity cannot fill ``max_count``, remaining slots
-    are filled from unused ranked hints regardless of side.
-    """
-    if max_count <= 0 or not ranked:
-        return []
-
-    picked: list[NearbyHint] = []
-    used_sides: set[Side] = set()
-    for hint in ranked:
-        if len(picked) >= max_count:
-            break
-        if hint.side is not None and hint.side in used_sides:
-            continue
-        picked.append(hint)
-        if hint.side is not None:
-            used_sides.add(hint.side)
-
-    if len(picked) >= max_count:
-        return picked
-
-    picked_labels = {hint.label for hint in picked}
-    for hint in ranked:
-        if len(picked) >= max_count:
-            break
-        if hint.label in picked_labels:
-            continue
-        picked.append(hint)
-        picked_labels.add(hint.label)
-    return picked
-
-
-def _append_no_anchor_landmark_hints(
-    hints: list[NearbyHint],
-    candidates: list[Any],
-    *,
-    instruction: str,
-) -> list[NearbyHint]:
-    """Add up to two landmarks when current hints do not uniquely locate the click.
-
-    Simulates playback with the target label ignored. An extra must be a unique
-    multi-character text or a unique icon, and only the closest one of each
-    kind is tried. Text is tried before icons. Among ties, a side the current
-    hints do not already use comes first. Repeated labels are skipped, as is an
-    icon sitting on the click itself. When the current hints already leave only
-    the primary, or no extra can do that, the list is unchanged.
-    """
+    candidates = vision.get("candidates") or []
     if len(candidates) < 2 or not isinstance(candidates[0], dict):
-        return hints
-
-    pairs: list[tuple[dict[str, Any], UiDetection]] = []
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            continue
-        det = _dict_to_detection(candidate)
-        if det is None:
-            continue
-        pairs.append((candidate, det))
-    if len(pairs) < 2:
-        return hints
-
-    primary_candidate, primary = pairs[0]
-    detections = [det for _candidate, det in pairs]
-    anchor = _candidate_label_for_hint(primary_candidate) or ""
-    if not any(
-        token in anchor
-        for token in ("圖示", "文字", "輸入欄", "滾動條", "按鈕", "元素", "未知")
-    ):
-        class_name = str(primary_candidate.get("class_name") or "")
-        anchor = {
-            "text": "「目標」文字",
-            "element": "「目標」圖示",
-            "input": "輸入欄",
-            "scrollbar": "滾動條",
-            "button": "按鈕",
-            "unknown": "未知",
-        }.get(class_name, anchor)
-    if _landmark_hints_locate(detections, hints, primary, anchor=anchor):
-        return hints
-
-    label_freq = _label_frequencies(candidates)
-    used_labels = {hint.label for hint in hints}
-    used_sides = {hint.side for hint in hints if hint.side is not None}
-    primary_bbox = _as_bbox_xywh(primary_candidate.get("bbox")) or primary.bbox
-    click_xy = _click_xy_from_vision(
-        {"local_cursor": None},
-        primary=primary_candidate,
+        return []
+    primary = candidates[0]
+    click_xy = _click_xy_from_vision(vision, primary=primary)
+    forced = _collect_containing_container_hints(
+        candidates,
+        instruction=instruction,
+        click_xy=click_xy,
     )
-    texts: list[tuple[int, float, NearbyHint]] = []
-    icons: list[tuple[int, float, NearbyHint]] = []
-    for candidate, det in pairs[1:]:
-        label = _candidate_label_for_hint(candidate)
-        if not label or label in used_labels:
-            continue
-        if label_freq.get(label, 0) != 1:
-            continue
-        if _is_unknown_nearby_landmark(label, candidate):
-            continue
-        if _detections_same_place(primary, det):
-            continue
-        is_text = _is_multi_char_text_candidate(candidate, label)
-        is_icon = label.endswith("圖示")
-        if not is_text and not is_icon:
-            continue
-        if instruction and _label_already_in_instruction(label, instruction):
-            continue
-        side = _neighbor_side_for_candidate(
-            candidate,
-            primary_bbox=primary_bbox,
-            click_xy=click_xy,
-        )
-        if side is None:
-            continue
-        gap = _box_edge_gap(primary.bbox, det.bbox)
-        bucket = texts if is_text else icons
-        bucket.append(
-            (
-                0 if side not in used_sides else 1,
-                gap,
-                NearbyHint(label=label, side=side),
-            )
-        )
-
-    def _closest(
-        items: list[tuple[int, float, NearbyHint]],
-    ) -> list[tuple[int, float, NearbyHint]]:
-        if not items:
-            return []
-        closest_gap = min(gap for _rank, gap, _hint in items)
-        chosen = [
-            item
-            for item in items
-            if item[1] <= closest_gap + _LANDMARK_CLOSEST_GAP_TIE_PX
-        ]
-        chosen.sort(key=lambda row: (row[0], row[1], row[2].label))
-        return chosen
-
-    pool = _closest(texts) + _closest(icons)
-    if _MAX_NO_ANCHOR_EXTRA_LANDMARKS < 1 or not pool:
-        return hints
-
-    def _locates(trial: list[NearbyHint]) -> bool:
-        return _landmark_hints_locate(detections, trial, primary, anchor=anchor)
-
-    for _side_rank, _gap, extra in pool:
-        if _locates([*hints, extra]):
-            return [*hints, extra]
-
-    if _MAX_NO_ANCHOR_EXTRA_LANDMARKS >= 2:
-        for index, left in enumerate(pool):
-            for right in pool[index + 1 :]:
-                trial = [*hints, left[2], right[2]]
-                if _locates(trial):
-                    return trial
-    return hints
+    ranked = _ranked_eligible_nearby_hints(
+        vision,
+        instruction=instruction,
+        reserved_labels={hint.label for hint in forced},
+    )
+    return [*forced, *ranked]
 
 
 def collect_nearby_hints(
     vision: dict[str, Any],
     *,
     instruction: str,
-    max_count: int = _MIN_NEARBY_TEXT_LANDMARKS,
 ) -> list[NearbyHint]:
-    """Collect nearby hints from candidates after the primary.
+    """Collect directed landmarks that locate the click.
 
-    Walks neighbors until at least ``max_count`` multi-character text landmarks
-    are found. If fewer exist, fills remaining slots with other neighbors.
-    Within a tier, labels unique on screen are preferred over repeated ones (a
-    repeated label matches any instance at playback, so it pins nothing down).
-    Within Tier 0 (multi-char text), prefers landmarks on the left, then right,
-    then top, then bottom of the target; diagonals/center follow. Within the
-    same cell rank (and for lower tiers), keeps distance order from
-    ``candidates``. Auto-picks prefer landmarks on different directed sides
-    (e.g. left+right rather than two on the right). Uses the primary candidate
-    bbox and each neighbor center to assign an optional script side via the
-    9-section grid. Neighbors whose center falls in the CENTER cell stay
-    undirected (``side=None``).
-
-    When the click lies inside a non-primary ``input`` / ``scrollbar``, that
-    container is always prepended with ``side=inside`` (裡面), even if that
-    exceeds ``max_count``.
-
-    ``max_count`` is the floor for landmarks that actually pin the target down,
-    so cover picks consume it: with a full cover there is no fill at all. Fill
-    landmarks separate no peer by construction, and once the unique labels are
-    spent the next ones repeat across the screen — a hint that matches any
-    instance of its label is noise the playback picker can be swayed by.
-
-    After that list is built, up to ``_MAX_NO_ANCHOR_EXTRA_LANDMARKS`` extra
-    unique texts or icons are appended when the hints would not uniquely locate
-    the click if the target label itself were missing. Text extras are tried
-    before icon extras.
+    Forced containing ``input`` / ``scrollbar`` landmarks (``side=inside``) come
+    first. Then the closest unique multi-character text on each of the eight
+    directed sides, grown with next-closest texts / known icons until side-only
+    uniqueness holds (target name ignored; text and icon interchangeable).
+    Falls back to a smallest locating set when no directed texts exist. A spare
+    unique multi-character text is always appended when one remains.
     """
-    forced, disambiguating, ranked = _prioritized_nearby_parts(
-        vision, instruction=instruction
-    )
-    fill_budget = max(0, max_count - len(disambiguating))
-    hints = [
-        *forced,
-        *disambiguating,
-        *_pick_side_diverse_hints(ranked, max_count=fill_budget),
-    ]
-    return _append_no_anchor_landmark_hints(
-        hints,
-        vision.get("candidates") or [],
+    candidates = vision.get("candidates") or []
+    if len(candidates) < 2 or not isinstance(candidates[0], dict):
+        return []
+    primary = candidates[0]
+    primary_bbox = _as_bbox_xywh(primary.get("bbox"))
+    click_xy = _click_xy_from_vision(vision, primary=primary)
+    forced = _collect_containing_container_hints(
+        candidates,
         instruction=instruction,
+        click_xy=click_xy,
     )
+    locating = _pick_minimal_locating_hints(
+        candidates,
+        instruction=instruction,
+        reserved_labels={hint.label for hint in forced},
+        primary_bbox=primary_bbox,
+        click_xy=click_xy,
+    )
+    return [*forced, *locating]
 
 
 def collect_nearby_hint_labels(
     vision: dict[str, Any],
     *,
     instruction: str,
-    max_count: int = _MIN_NEARBY_TEXT_LANDMARKS,
 ) -> list[str]:
-    """Collect up to max_count nearby candidate labels, skipping the primary target."""
+    """Collect auto-picked nearby candidate labels, skipping the primary target."""
     return [
         hint.label
-        for hint in collect_nearby_hints(
-            vision, instruction=instruction, max_count=max_count
-        )
+        for hint in collect_nearby_hints(vision, instruction=instruction)
     ]
 
 
@@ -2319,26 +1982,8 @@ def list_nearby_landmark_options(
 
     base_instruction = strip_nearby_context_comments(instruction) if instruction else ""
 
-    # Boost any landmark that eliminates ≥1 confusable peer (not only the
-    # greedy cover set used in auto-picked nearby comments).
-    disambig_by_label = {
-        hint.label: hint.side
-        for (
-            _elim,
-            _between,
-            _tier,
-            _order,
-            _freq,
-            _center,
-            hint,
-        ) in _score_disambiguating_landmarks(
-            candidates,
-            instruction=base_instruction,
-        )
-    }
-
-    # (disambig_boost, spatial_rank, distance_sq, order, option)
-    pending: list[tuple[int, int, float, int, dict[str, Any]]] = []
+    # (spatial_rank, distance_sq, order, option) — closest per side for the HTML picker.
+    pending: list[tuple[int, float, int, dict[str, Any]]] = []
     seen: set[str] = set()
     for order, candidate in enumerate(candidates[1:]):
         if not isinstance(candidate, dict):
@@ -2351,15 +1996,11 @@ def list_nearby_landmark_options(
         if base_instruction and _label_already_in_instruction(label, base_instruction):
             continue
         seen.add(label)
-        disambig_side = disambig_by_label.get(label)
-        if disambig_side is not None:
-            side = disambig_side
-        else:
-            side = _neighbor_side_for_candidate(
-                candidate,
-                primary_bbox=primary_bbox,
-                click_xy=click_xy,
-            )
+        side = _neighbor_side_for_candidate(
+            candidate,
+            primary_bbox=primary_bbox,
+            click_xy=click_xy,
+        )
         if side is not None:
             display = f"{label}（{side_to_zh(side)}）"
         else:
@@ -2370,10 +2011,8 @@ def list_nearby_landmark_options(
         else:
             dist_sq = float(order)
         spatial_rank = int(candidate.get("spatial_region_rank", 0))
-        disambig_boost = 0 if label in disambig_by_label else 1
         pending.append(
             (
-                disambig_boost,
                 spatial_rank,
                 dist_sq,
                 order,
@@ -2385,21 +2024,21 @@ def list_nearby_landmark_options(
             )
         )
 
-    by_side: dict[str | None, list[tuple[int, int, float, int, dict[str, Any]]]] = {}
+    by_side: dict[str | None, list[tuple[int, float, int, dict[str, Any]]]] = {}
     for item in pending:
-        side_key = item[4].get("side")
+        side_key = item[3].get("side")
         if side_key is None or side_key == "":
             bucket: str | None = None
         else:
             bucket = str(side_key)
         by_side.setdefault(bucket, []).append(item)
 
-    kept: list[tuple[int, int, float, int, dict[str, Any]]] = []
+    kept: list[tuple[int, float, int, dict[str, Any]]] = []
     for items in by_side.values():
-        items.sort(key=lambda row: (row[0], row[1], row[2], row[3]))
+        items.sort(key=lambda row: (row[0], row[1], row[2]))
         kept.extend(items[:_MAX_NEARBY_LANDMARK_OPTIONS_PER_SIDE])
-    kept.sort(key=lambda row: (row[0], row[1], row[2], row[3]))
-    return [option for _, _, _, _, option in kept]
+    kept.sort(key=lambda row: (row[0], row[1], row[2]))
+    return [option for _, _, _, option in kept]
 
 
 def load_yolo_ocr_payload(

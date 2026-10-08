@@ -47,8 +47,19 @@ def test_mouse_target_class_ids() -> None:
 
 
 def test_mouse_vision_plan_text_only_skips_icon_ocr_and_line_refine() -> None:
-    plan = _mouse_vision_plan("「類型」文字", nearby_objects=["在「修改日期」文字的下面"])
+    """Undirected text neighbors stay text-OCR-only."""
+    plan = _mouse_vision_plan("「類型」文字", nearby_objects=["「修改日期」文字"])
     assert plan.ocr_class_ids == frozenset({YOLO_CLASS_TEXT})
+    assert plan.refine_inputs is False
+
+
+def test_mouse_vision_plan_directed_text_landmarks_ocr_both_classes() -> None:
+    """Directed landmarks force element OCR so a same-place icon can be clicked."""
+    plan = _mouse_vision_plan(
+        "「類型」文字",
+        nearby_objects=["在「修改日期」文字的下面"],
+    )
+    assert plan.ocr_class_ids == frozenset({YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT})
     assert plan.refine_inputs is False
 
 
@@ -69,7 +80,8 @@ def test_mouse_vision_plan_text_near_input_ocr_text_and_refine() -> None:
         "「搜尋」文字",
         nearby_objects=["在輸入欄的裡面"],
     )
-    assert plan.ocr_class_ids == frozenset({YOLO_CLASS_TEXT})
+    # Directed landmark → both OCR streams; input still triggers line refine.
+    assert plan.ocr_class_ids == frozenset({YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT})
     assert plan.refine_inputs is True
 
 
@@ -3362,6 +3374,58 @@ def test_prefilter_anchors_by_nearby_respects_inside_side() -> None:
         [NearbyHint(label="輸入欄", side=Side.INSIDE)],
     )
     assert kept == [inside_anchor]
+
+
+def test_unique_target_from_landmarks_text_anchor_accepts_same_place_icon() -> None:
+    """A 「…文字」anchor still clicks the co-located icon when OCR text is gone."""
+    from src.common.nearby_side import NearbyHint, Side
+
+    from cua_mcp.select_mouse_target import _unique_target_from_landmarks
+
+    grid = _detection_from_bbox(
+        (200, 96, 16, 16),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "網格檢視"}],
+    )
+    neighbor_icon = _detection_from_bbox(
+        (240, 96, 16, 16),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "側邊欄"}],
+    )
+    copilot = _detection_from_bbox((120, 96, 40, 16), YOLO_CLASS_TEXT, text="Copilot")
+    chat = _detection_from_bbox((100, 130, 60, 16), YOLO_CLASS_TEXT, text="新聊天")
+    hints = [
+        NearbyHint("「Copilot」文字", Side.RIGHT),
+        NearbyHint("「新聊天」文字", Side.UPPER_RIGHT),
+    ]
+    chosen = _unique_target_from_landmarks(
+        [grid, neighbor_icon, copilot, chat],
+        hints,
+        anchor="「此」文字",
+    )
+    assert chosen is grid
+
+
+def test_unique_target_from_landmarks_input_anchor_keeps_type() -> None:
+    """輸入欄 anchors still ignore neighboring text and icons."""
+    from src.common.nearby_side import NearbyHint, Side
+
+    from cua_mcp.select_mouse_target import _unique_target_from_landmarks
+
+    field = _detection_from_bbox((900, 400, 160, 20), YOLO_CLASS_INPUT)
+    label = _detection_from_bbox((840, 402, 26, 13), YOLO_CLASS_TEXT, text="帳號")
+    icon = _detection_from_bbox(
+        (920, 400, 16, 16),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "資料夾"}],
+    )
+    hints = [NearbyHint("「帳號」文字", Side.RIGHT)]
+    chosen = _unique_target_from_landmarks(
+        [field, label, icon],
+        hints,
+        anchor="輸入欄",
+    )
+    assert chosen is field
 
 
 def test_unique_target_from_landmarks_picks_only_nearby_icon() -> None:

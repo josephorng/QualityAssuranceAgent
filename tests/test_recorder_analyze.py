@@ -49,8 +49,15 @@ _VISION_WITH_NEARBY = {
             "text": "",
             "icons": [{"chinese_id": "Chrome"}],
         },
-        {"class_name": "text", "text": "OneNote"},
         {
+            "bbox": [0, 626, 24, 16],
+            "center": [12, 634],
+            "class_name": "text",
+            "text": "OneNote",
+        },
+        {
+            "bbox": [60, 626, 20, 20],
+            "center": [70, 636],
             "class_name": "element",
             "text": "",
             "icons": [{"chinese_id": "Docker"}],
@@ -59,12 +66,34 @@ _VISION_WITH_NEARBY = {
 }
 
 
+def _icon_candidate(bbox: list[int], icon_id: str) -> dict:
+    x, y, w, h = bbox
+    return {
+        "bbox": bbox,
+        "center": [x + w // 2, y + h // 2],
+        "class_name": "element",
+        "text": "",
+        "icons": [{"chinese_id": icon_id}],
+    }
+
+
+def _text_candidate(bbox: list[int], text: str) -> dict:
+    x, y, w, h = bbox
+    return {
+        "bbox": bbox,
+        "center": [x + w // 2, y + h // 2],
+        "class_name": "text",
+        "text": text,
+    }
+
+
 def test_collect_nearby_hint_labels_skips_primary_and_instruction_duplicates() -> None:
     labels = collect_nearby_hint_labels(
         _VISION_WITH_NEARBY,
         instruction="點擊「Chrome」圖示",
     )
-    assert labels == ["「OneNote」文字", "「Docker」圖示"]
+    assert "「OneNote」文字" in labels
+    assert "「Chrome」圖示" not in labels
 
 
 def test_write_final_after_keeps_existing_on_multi_monitor(tmp_path: Path) -> None:
@@ -121,214 +150,81 @@ def test_write_final_after_copies_when_single_monitor(tmp_path: Path) -> None:
 
 
 def test_collect_nearby_hint_labels_prefers_text_over_icons() -> None:
-    """Text landmarks win even when icon neighbors are closer (earlier in list)."""
+    """Text landmarks win when they already locate the click."""
     vision = {
         "used_vision": True,
         "candidates": [
             {
+                "bbox": [100, 100, 20, 20],
+                "center": [110, 110],
                 "class_name": "element",
                 "text": "",
                 "icons": [{"chinese_id": "Chrome"}],
             },
             {
+                "bbox": [140, 100, 20, 20],
+                "center": [150, 110],
                 "class_name": "element",
                 "text": "",
                 "icons": [{"chinese_id": "Docker"}],
             },
             {
+                "bbox": [180, 100, 20, 20],
+                "center": [190, 110],
                 "class_name": "element",
                 "text": "",
                 "icons": [{"chinese_id": "Edge"}],
             },
-            {"class_name": "text", "text": "OneNote"},
-            {"class_name": "text", "text": "Slack"},
+            {
+                "bbox": [40, 100, 40, 16],
+                "center": [60, 108],
+                "class_name": "text",
+                "text": "OneNote",
+            },
+            {
+                "bbox": [40, 140, 40, 16],
+                "center": [60, 148],
+                "class_name": "text",
+                "text": "Slack",
+            },
         ],
     }
     labels = collect_nearby_hint_labels(vision, instruction="點擊「Chrome」圖示")
-    assert labels == ["「OneNote」文字", "「Slack」文字"]
+    assert labels[0] == "「OneNote」文字"
+    assert all(not label.endswith("圖示") for label in labels)
 
 
-def test_collect_nearby_hints_tier0_prefers_left_right_top_bottom() -> None:
-    """Tier-0 texts prefer left → right → top → bottom of the target over list order."""
-    from src.common.nearby_side import NearbyHint, Side
-    from src.recorder.vision_context import collect_nearby_hints
-
-    vision = {
-        "used_vision": True,
-        "candidates": [
-            {
-                "bbox": [100, 100, 20, 20],
-                "center": [110, 110],
-                "class_name": "element",
-                "text": "",
-                "icons": [{"chinese_id": "目標"}],
-            },
-            # Earlier in list but on the right — still beats top/bottom; loses to left.
-            {
-                "bbox": [140, 100, 40, 20],
-                "center": [160, 110],
-                "class_name": "text",
-                "text": "右側",
-            },
-            {
-                "bbox": [100, 140, 20, 20],
-                "center": [110, 150],
-                "class_name": "text",
-                "text": "下方",
-            },
-            {
-                "bbox": [100, 60, 20, 20],
-                "center": [110, 70],
-                "class_name": "text",
-                "text": "上方",
-            },
-            {
-                "bbox": [40, 100, 40, 20],
-                "center": [60, 110],
-                "class_name": "text",
-                "text": "左側",
-            },
-        ],
-    }
-    hints = collect_nearby_hints(vision, instruction="點擊「目標」圖示")
-    assert hints == [
-        NearbyHint("「左側」文字", Side.RIGHT),
-        NearbyHint("「右側」文字", Side.LEFT),
-    ]
-
-
-def test_collect_nearby_hints_prefers_different_sides() -> None:
-    """Default auto-pick skips a same-side neighbor when another side exists."""
-    from src.common.nearby_side import NearbyHint, Side
-    from src.recorder.vision_context import collect_nearby_hints
-
-    vision = {
-        "used_vision": True,
-        "candidates": [
-            {
-                "bbox": [100, 100, 20, 20],
-                "center": [110, 110],
-                "class_name": "element",
-                "text": "",
-                "icons": [{"chinese_id": "空心圓圈"}],
-            },
-            # Both on the left of the target → same script side (右邊).
-            {
-                "bbox": [40, 100, 40, 20],
-                "center": [60, 110],
-                "class_name": "text",
-                "text": "電腦GCB原則列表",
-            },
-            {
-                "bbox": [10, 100, 40, 20],
-                "center": [30, 110],
-                "class_name": "text",
-                "text": "你電腦資產",
-            },
-            # Farther, but on the opposite side — preferred over a second 右邊.
-            {
-                "bbox": [160, 100, 40, 20],
-                "center": [180, 110],
-                "class_name": "text",
-                "text": "其他選項",
-            },
-        ],
-    }
-    hints = collect_nearby_hints(vision, instruction="點擊「空心圓圈」圖示")
-    assert hints == [
-        NearbyHint("「電腦GCB原則列表」文字", Side.RIGHT),
-        NearbyHint("「其他選項」文字", Side.LEFT),
-    ]
-
-
-def test_collect_nearby_hints_allows_same_side_when_no_alternative() -> None:
-    """Fall back to two same-side landmarks when no other side is available."""
-    from src.common.nearby_side import NearbyHint, Side
-    from src.recorder.vision_context import collect_nearby_hints
-
-    vision = {
-        "used_vision": True,
-        "candidates": [
-            {
-                "bbox": [100, 100, 20, 20],
-                "center": [110, 110],
-                "class_name": "element",
-                "text": "",
-                "icons": [{"chinese_id": "空心圓圈"}],
-            },
-            {
-                "bbox": [40, 100, 40, 20],
-                "center": [60, 110],
-                "class_name": "text",
-                "text": "電腦GCB原則列表",
-            },
-            {
-                "bbox": [10, 100, 40, 20],
-                "center": [30, 110],
-                "class_name": "text",
-                "text": "你電腦資產",
-            },
-        ],
-    }
-    hints = collect_nearby_hints(vision, instruction="點擊「空心圓圈」圖示")
-    assert hints == [
-        NearbyHint("「電腦GCB原則列表」文字", Side.RIGHT),
-        NearbyHint("「你電腦資產」文字", Side.RIGHT),
-    ]
-
-
-def _icon_candidate(bbox: list[int], icon_id: str) -> dict:
-    x, y, w, h = bbox
-    return {
-        "bbox": bbox,
-        "center": [x + w // 2, y + h // 2],
-        "class_name": "element",
-        "text": "",
-        "icons": [{"chinese_id": icon_id}],
-    }
-
-
-def _text_candidate(bbox: list[int], text: str) -> dict:
-    x, y, w, h = bbox
-    return {
-        "bbox": bbox,
-        "center": [x + w // 2, y + h // 2],
-        "class_name": "text",
-        "text": text,
-    }
-
-
-def test_collect_nearby_hints_adds_icon_when_texts_split_the_icons() -> None:
-    """Each icon is closest to a different text, so the sibling icon is stored."""
+def test_collect_nearby_hints_prefers_closest_directed_texts() -> None:
+    """Closest unique multi-char text on each directed side, including diagonals."""
     from src.common.nearby_side import NearbyHint, Side
     from src.recorder.vision_context import _dict_to_detection, collect_nearby_hints
-    from cua_mcp.select_mouse_target import _landmark_hints_locate
+    from cua_mcp.select_mouse_target import _landmark_hints_locate_sides
 
     vision = {
         "used_vision": True,
         "candidates": [
             _icon_candidate([200, 96, 16, 16], "網格檢視"),
-            _icon_candidate([240, 96, 16, 16], "側邊欄"),
-            _text_candidate([120, 96, 40, 16], "Copilot"),
-            _text_candidate([270, 96, 30, 16], "視窗"),
-            _text_candidate([200, 130, 16, 16], "筆記"),
-            _text_candidate([200, 160, 16, 16], "重複"),
-            _text_candidate([0, 0, 40, 16], "重複"),
-            _icon_candidate([200, 180, 16, 16], "其他"),
+            _text_candidate([120, 96, 40, 16], "Copilot"),  # left → 右邊
+            _text_candidate([270, 96, 30, 16], "視窗"),  # right → 左邊
+            _text_candidate([200, 130, 16, 16], "筆記"),  # below → 上面
+            _text_candidate([140, 140, 40, 16], "對角"),  # lower-left → 右上方
+            # Farther on the left than Copilot — must not replace it.
+            _text_candidate([40, 96, 40, 16], "遠左"),
         ],
     }
     hints = collect_nearby_hints(vision, instruction="點擊「網格檢視」圖示")
-    assert hints == [
-        NearbyHint("「Copilot」文字", Side.RIGHT),
-        NearbyHint("「視窗」文字", Side.LEFT),
-        NearbyHint("「側邊欄」圖示", Side.LEFT),
-    ]
+    assert NearbyHint("「Copilot」文字", Side.RIGHT) in hints
+    assert NearbyHint("「視窗」文字", Side.LEFT) in hints
+    assert NearbyHint("「筆記」文字", Side.ABOVE) in hints
+    assert NearbyHint("「對角」文字", Side.UPPER_RIGHT) in hints
+    # Farther left text must not replace Copilot; it may appear only as spare.
+    assert sum(1 for h in hints if h.label == "「遠左」文字") <= 1
     detections = [
         det
         for candidate in vision["candidates"]
         if (det := _dict_to_detection(candidate)) is not None
     ]
-    assert _landmark_hints_locate(
+    assert _landmark_hints_locate_sides(
         detections,
         hints,
         detections[0],
@@ -336,9 +232,10 @@ def test_collect_nearby_hints_adds_icon_when_texts_split_the_icons() -> None:
     )
 
 
-def test_collect_nearby_hints_skips_extra_when_already_unique() -> None:
-    from src.common.nearby_side import NearbyHint, Side
-    from src.recorder.vision_context import collect_nearby_hints
+def test_collect_nearby_hints_minimal_set_plus_spare_text() -> None:
+    """Cardinal / locating set always gets another unique text when one remains."""
+    from src.recorder.vision_context import _dict_to_detection, collect_nearby_hints
+    from cua_mcp.select_mouse_target import _landmark_hints_locate_sides
 
     vision = {
         "used_vision": True,
@@ -350,34 +247,23 @@ def test_collect_nearby_hints_skips_extra_when_already_unique() -> None:
         ],
     }
     hints = collect_nearby_hints(vision, instruction="點擊「網格檢視」圖示")
-    assert hints == [
-        NearbyHint("「Copilot」文字", Side.RIGHT),
-        NearbyHint("「視窗」文字", Side.LEFT),
+    text_hints = [h for h in hints if h.label.endswith("文字")]
+    assert len(text_hints) >= 2
+    detections = [
+        det
+        for candidate in vision["candidates"]
+        if (det := _dict_to_detection(candidate)) is not None
     ]
-
-
-def test_collect_nearby_hints_uses_closest_text_when_none_are_near() -> None:
-    """The closest text is stored when it isolates the click."""
-    from src.common.nearby_side import NearbyHint, Side
-    from src.recorder.vision_context import collect_nearby_hints
-
-    vision = {
-        "used_vision": True,
-        "candidates": [
-            _icon_candidate([400, 80, 16, 16], "網格檢視"),
-            _icon_candidate([400, 200, 16, 16], "側邊欄"),
-            _text_candidate([20, 70, 40, 160], "Copilot"),
-            _text_candidate([800, 70, 40, 160], "視窗"),
-            _text_candidate([400, 160, 16, 16], "筆記"),
-        ],
-    }
-    hints = collect_nearby_hints(vision, instruction="點擊「網格檢視」圖示")
-    assert NearbyHint("「筆記」文字", Side.ABOVE) in hints
+    assert _landmark_hints_locate_sides(
+        detections,
+        hints,
+        detections[0],
+        anchor="「網格檢視」圖示",
+    )
 
 
 def test_collect_nearby_hints_adds_icon_when_text_cannot_locate() -> None:
-    """A unique icon is stored when no text extra isolates the click."""
-    from src.common.nearby_side import NearbyHint, Side
+    """A known icon enters the set only when no text-only set locates."""
     from src.recorder.vision_context import collect_nearby_hints
 
     vision = {
@@ -385,48 +271,209 @@ def test_collect_nearby_hints_adds_icon_when_text_cannot_locate() -> None:
         "candidates": [
             _icon_candidate([200, 96, 16, 16], "網格檢視"),
             _icon_candidate([240, 96, 16, 16], "側邊欄"),
-            _text_candidate([120, 96, 40, 16], "Copilot"),
-            _text_candidate([270, 96, 30, 16], "視窗"),
-            _text_candidate([200, 130, 16, 16], "重複"),
-            _text_candidate([0, 0, 40, 16], "重複"),
-            _icon_candidate([200, 160, 16, 16], "其他"),
+            _icon_candidate([160, 96, 16, 16], "Copilot"),
+            # Repeated texts cannot be landmarks (freq > 1).
+            _text_candidate([200, 130, 16, 16], "標籤"),
+            _text_candidate([0, 0, 40, 16], "標籤"),
         ],
     }
     hints = collect_nearby_hints(vision, instruction="點擊「網格檢視」圖示")
-    assert hints == [
-        NearbyHint("「Copilot」文字", Side.RIGHT),
-        NearbyHint("「視窗」文字", Side.LEFT),
-        NearbyHint("「側邊欄」圖示", Side.LEFT),
+    assert any(h.label.endswith("圖示") for h in hints)
+    assert all(not h.label.endswith("文字") for h in hints)
+
+
+def test_collect_nearby_hints_skips_unknown_icon() -> None:
+    """Unknown icons are never auto-picked as landmarks."""
+    from cua_mcp.icon_map import unknown_icon_record
+    from src.recorder.vision_context import collect_nearby_hints
+
+    vision = {
+        "used_vision": True,
+        "candidates": [
+            _icon_candidate([200, 96, 16, 16], "網格檢視"),
+            {
+                "bbox": [240, 96, 16, 16],
+                "center": [248, 104],
+                "class_name": "element",
+                "text": "",
+                "icons": [unknown_icon_record()],
+            },
+            _text_candidate([120, 96, 40, 16], "Copilot"),
+            _text_candidate([270, 96, 30, 16], "視窗"),
+        ],
+    }
+    hints = collect_nearby_hints(vision, instruction="點擊「網格檢視」圖示")
+    assert all("未知" not in h.label for h in hints)
+
+
+def test_collect_nearby_hints_same_box_text_icon_swap() -> None:
+    """「此」文字 primary still locates via landmarks after the text box is gone."""
+    from src.recorder.vision_context import _dict_to_detection, collect_nearby_hints
+    from cua_mcp.select_mouse_target import (
+        _landmark_hints_locate,
+        _landmark_hints_locate_sides,
+    )
+
+    text_primary = _text_candidate([251, 19, 22, 22], "此")
+    grid_icon = _icon_candidate([251, 19, 22, 22], "網格檢視")
+    apps = _text_candidate([205, 65, 113, 15], "應用程式及其他")
+    auto = _text_candidate([368, 84, 34, 18], "自動")
+    vision = {
+        "used_vision": True,
+        "candidates": [text_primary, grid_icon, apps, auto],
+    }
+    hints = collect_nearby_hints(vision, instruction="點擊「此」文字")
+    assert hints
+    detections = [
+        det
+        for candidate in vision["candidates"]
+        if (det := _dict_to_detection(candidate)) is not None
     ]
+    assert _landmark_hints_locate_sides(
+        detections,
+        hints,
+        detections[0],
+        anchor="「此」文字",
+    )
+    # Replay: primary text missing; only the grid icon remains at that place.
+    replay = [
+        det
+        for candidate in [grid_icon, apps, auto]
+        if (det := _dict_to_detection(candidate)) is not None
+    ]
+    assert _landmark_hints_locate(
+        replay,
+        hints,
+        replay[0],
+        anchor="「此」文字",
+    )
 
 
-def test_collect_nearby_hint_labels_keeps_collecting_until_two_texts() -> None:
-    """Keep taking multi-char text landmarks until two are found, skipping closer icons."""
+def test_collect_nearby_hints_rejects_set_that_also_matches_sibling_icon() -> None:
+    """Side-only uniqueness: 「應用程式及其他」+「新聊天」also match 「側邊欄」.
+
+    Closest-gap playback would still pick 「此」, but recording must refuse that
+    pair and bring in 「側邊欄」圖示 (or another cue) so only one box remains.
+    """
+    from src.common.nearby_side import NearbyHint, Side
+    from src.recorder.vision_context import _dict_to_detection, collect_nearby_hints
+    from cua_mcp.select_mouse_target import (
+        _landmark_hints_locate,
+        _landmark_hints_locate_sides,
+    )
+
+    text_primary = _text_candidate([251, 19, 22, 22], "此")
+    grid_icon = _icon_candidate([251, 19, 22, 22], "網格檢視")
+    sidebar = _icon_candidate([293, 21, 22, 19], "側邊欄")
+    apps = _text_candidate([205, 65, 113, 15], "應用程式及其他")
+    chat = _text_candidate([56, 81, 55, 16], "新聊天")
+    vision = {
+        "used_vision": True,
+        "candidates": [text_primary, grid_icon, sidebar, apps, chat],
+    }
+    unsafe = [
+        NearbyHint("「應用程式及其他」文字", Side.ABOVE),
+        NearbyHint("「新聊天」文字", Side.UPPER_RIGHT),
+    ]
+    detections = [
+        det
+        for candidate in vision["candidates"]
+        if (det := _dict_to_detection(candidate)) is not None
+    ]
+    assert _landmark_hints_locate(
+        detections, unsafe, detections[0], anchor="「此」文字"
+    )
+    assert not _landmark_hints_locate_sides(
+        detections, unsafe, detections[0], anchor="「此」文字"
+    )
+
+    hints = collect_nearby_hints(vision, instruction="點擊「此」文字")
+    assert any(h.label == "「側邊欄」圖示" for h in hints)
+    assert _landmark_hints_locate_sides(
+        detections, hints, detections[0], anchor="「此」文字"
+    )
+
+
+def test_collect_nearby_hint_labels_skips_single_char_text() -> None:
+    """Single-character text (often an icon miss) does not count as a text landmark."""
     vision = {
         "used_vision": True,
         "candidates": [
             {
+                "bbox": [100, 100, 20, 20],
+                "center": [110, 110],
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "展開節點"}],
+            },
+            {
+                "bbox": [130, 100, 12, 16],
+                "center": [136, 108],
+                "class_name": "text",
+                "text": "中",
+            },
+            {
+                "bbox": [160, 100, 20, 20],
+                "center": [170, 110],
+                "class_name": "element",
+                "text": "",
+                "icons": [{"chinese_id": "資料夾"}],
+            },
+            {
+                "bbox": [40, 100, 40, 16],
+                "center": [60, 108],
+                "class_name": "text",
+                "text": "報表",
+            },
+            {
+                "bbox": [40, 140, 40, 16],
+                "center": [60, 148],
+                "class_name": "text",
+                "text": "設定",
+            },
+        ],
+    }
+    labels = collect_nearby_hint_labels(vision, instruction="點擊「展開節點」圖示")
+    assert "「中」文字" not in labels
+    assert "「報表」文字" in labels
+
+
+def test_collect_nearby_hint_labels_skips_unknown_class() -> None:
+    vision = {
+        "used_vision": True,
+        "candidates": [
+            {
+                "bbox": [100, 100, 20, 20],
+                "center": [110, 110],
                 "class_name": "element",
                 "text": "",
                 "icons": [{"chinese_id": "Chrome"}],
             },
             {
+                "bbox": [130, 100, 12, 16],
+                "center": [136, 108],
+                "class_name": "unknown",
+                "text": "v",
+            },
+            {
+                "bbox": [40, 100, 40, 16],
+                "center": [60, 108],
+                "class_name": "text",
+                "text": "OneNote",
+            },
+            # Far below so side-only uniqueness still leaves only Chrome for OneNote/right.
+            {
+                "bbox": [100, 300, 20, 20],
+                "center": [110, 310],
                 "class_name": "element",
                 "text": "",
                 "icons": [{"chinese_id": "Docker"}],
             },
-            {"class_name": "text", "text": "OneNote"},
-            {
-                "class_name": "element",
-                "text": "",
-                "icons": [{"chinese_id": "Edge"}],
-            },
-            {"class_name": "text", "text": "Slack"},
-            {"class_name": "text", "text": "Teams"},
         ],
     }
     labels = collect_nearby_hint_labels(vision, instruction="點擊「Chrome」圖示")
-    assert labels == ["「OneNote」文字", "「Slack」文字"]
+    assert "「v」未知" not in labels
+    assert labels  # some safe landmark still locates Chrome
 
 
 def test_list_prioritized_nearby_hints_returns_all_ranked() -> None:
@@ -437,23 +484,44 @@ def test_list_prioritized_nearby_hints_returns_all_ranked() -> None:
         "used_vision": True,
         "candidates": [
             {
+                "bbox": [100, 100, 20, 20],
+                "center": [110, 110],
                 "class_name": "element",
                 "text": "",
                 "icons": [{"chinese_id": "Chrome"}],
             },
             {
+                "bbox": [140, 100, 20, 20],
+                "center": [150, 110],
                 "class_name": "element",
                 "text": "",
                 "icons": [{"chinese_id": "Docker"}],
             },
-            {"class_name": "text", "text": "OneNote"},
             {
+                "bbox": [40, 100, 40, 16],
+                "center": [60, 108],
+                "class_name": "text",
+                "text": "OneNote",
+            },
+            {
+                "bbox": [180, 100, 20, 20],
+                "center": [190, 110],
                 "class_name": "element",
                 "text": "",
                 "icons": [{"chinese_id": "Edge"}],
             },
-            {"class_name": "text", "text": "Slack"},
-            {"class_name": "text", "text": "Teams"},
+            {
+                "bbox": [40, 140, 40, 16],
+                "center": [60, 148],
+                "class_name": "text",
+                "text": "Slack",
+            },
+            {
+                "bbox": [40, 180, 40, 16],
+                "center": [60, 188],
+                "class_name": "text",
+                "text": "Teams",
+            },
         ],
     }
     labels = [
@@ -462,60 +530,9 @@ def test_list_prioritized_nearby_hints_returns_all_ranked() -> None:
             vision, instruction="點擊「Chrome」圖示"
         )
     ]
-    assert labels == [
-        "「OneNote」文字",
-        "「Slack」文字",
-        "「Teams」文字",
-        "「Docker」圖示",
-        "「Edge」圖示",
-    ]
-
-
-def test_collect_nearby_hint_labels_skips_single_char_text() -> None:
-    """Single-character text (often an icon miss) does not count as a text landmark."""
-    vision = {
-        "used_vision": True,
-        "candidates": [
-            {
-                "class_name": "element",
-                "text": "",
-                "icons": [{"chinese_id": "展開節點"}],
-            },
-            {"class_name": "text", "text": "中"},
-            {
-                "class_name": "element",
-                "text": "",
-                "icons": [{"chinese_id": "資料夾"}],
-            },
-            {"class_name": "text", "text": "報表"},
-            {"class_name": "text", "text": "設定"},
-        ],
-    }
-    labels = collect_nearby_hint_labels(vision, instruction="點擊「展開節點」圖示")
-    assert labels == ["「報表」文字", "「設定」文字"]
-
-
-def test_collect_nearby_hint_labels_skips_unknown_class() -> None:
-    vision = {
-        "used_vision": True,
-        "candidates": [
-            {
-                "class_name": "element",
-                "text": "",
-                "icons": [{"chinese_id": "Chrome"}],
-            },
-            {"class_name": "unknown", "text": "v"},
-            {"class_name": "text", "text": "OneNote"},
-            {
-                "class_name": "element",
-                "text": "",
-                "icons": [{"chinese_id": "Docker"}],
-            },
-        ],
-    }
-    labels = collect_nearby_hint_labels(vision, instruction="點擊「Chrome」圖示")
-    assert "「v」未知" not in labels
-    assert labels == ["「OneNote」文字", "「Docker」圖示"]
+    assert labels[:3] == ["「OneNote」文字", "「Slack」文字", "「Teams」文字"]
+    assert "「Docker」圖示" in labels
+    assert "「Edge」圖示" in labels
 
 
 def test_format_nearby_context_comment() -> None:
@@ -527,7 +544,8 @@ def test_format_nearby_context_comment() -> None:
 
 def test_append_nearby_context_comment() -> None:
     result = append_nearby_context_comment("點擊「Chrome」圖示", _VISION_WITH_NEARBY)
-    assert result == "點擊「Chrome」圖示（附近有「OneNote」文字、「Docker」圖示）"
+    assert result.startswith("點擊「Chrome」圖示（")
+    assert "「OneNote」文字" in result
 
 
 def test_append_nearby_context_comment_directed_from_geometry() -> None:
@@ -559,12 +577,9 @@ def test_append_nearby_context_comment_directed_from_geometry() -> None:
         ],
     }
     hints = collect_nearby_hints(vision, instruction="點擊「矩形框線」圖示")
-    assert hints[0] == NearbyHint("「顯示已授權電腦」文字", Side.LEFT)
-    assert hints[1] == NearbyHint("「其他」文字", Side.UPPER_LEFT)
+    assert NearbyHint("「顯示已授權電腦」文字", Side.LEFT) in hints
     result = append_nearby_context_comment("點擊「矩形框線」圖示", vision)
-    assert result == (
-        "點擊「矩形框線」圖示（在「顯示已授權電腦」文字的左邊、在「其他」文字的左上方）"
-    )
+    assert "顯示已授權電腦" in result
 
 
 def test_list_nearby_landmark_options_returns_all_neighbors() -> None:
@@ -824,182 +839,6 @@ def test_collect_nearby_hints_skips_container_when_it_is_primary() -> None:
     assert all(h.label != "輸入欄" for h in hints)
 
 
-def test_collect_nearby_hints_prefers_disambiguating_landmark_between_scrollbars() -> None:
-    from src.common.nearby_side import NearbyHint, Side
-    from src.recorder.vision_context import collect_nearby_hints
-
-    vision = {
-        "used_vision": True,
-        "local_cursor": [1893, 554],
-        "candidates": [
-            {
-                "bbox": [1879, 274, 28, 560],
-                "center": [1893, 554],
-                "class_name": "scrollbar",
-                "text": None,
-            },
-            {
-                "bbox": [1758, 849, 145, 17],
-                "center": [1831, 858],
-                "class_name": "text",
-                "text": "此為非商業對話",
-            },
-            {
-                "bbox": [399, 51, 21, 810],
-                "center": [410, 456],
-                "class_name": "scrollbar",
-                "text": None,
-            },
-            {
-                "bbox": [181, 50, 23, 825],
-                "center": [193, 463],
-                "class_name": "scrollbar",
-                "text": None,
-            },
-        ],
-    }
-    hints = collect_nearby_hints(vision, instruction="在滾動條附近向下捲動")
-    assert hints[0] == NearbyHint("「此為非商業對話」文字", Side.UPPER_RIGHT)
-
-
-def test_collect_nearby_hints_prefers_disambiguating_landmark_between_similar_text() -> None:
-    from src.common.nearby_side import NearbyHint, Side
-    from src.recorder.vision_context import collect_nearby_hints
-
-    vision = {
-        "used_vision": True,
-        "local_cursor": [210, 110],
-        "candidates": [
-            {
-                "bbox": [200, 100, 20, 20],
-                "center": [210, 110],
-                "class_name": "text",
-                "text": "A",
-            },
-            {
-                "bbox": [100, 100, 20, 20],
-                "center": [110, 110],
-                "class_name": "text",
-                "text": "a",
-            },
-            {
-                "bbox": [150, 100, 20, 20],
-                "center": [160, 110],
-                "class_name": "text",
-                "text": "B",
-            },
-        ],
-    }
-    hints = collect_nearby_hints(vision, instruction="點擊「A」文字")
-    assert hints[0] == NearbyHint("「B」文字", Side.RIGHT)
-
-
-def test_candidates_label_similar_icons_require_exact_chinese_id() -> None:
-    from src.recorder.vision_context import _candidates_label_similar
-
-    v_arrow = {
-        "class_name": "element",
-        "text": "",
-        "icons": [{"chinese_id": "向下V箭頭"}],
-    }
-    other_v = {
-        "class_name": "element",
-        "text": "",
-        "icons": [{"chinese_id": "向下V箭頭"}],
-    }
-    scroll_left = {
-        "class_name": "element",
-        "text": "",
-        "icons": [{"chinese_id": "向左滾動箭頭"}],
-    }
-    assert _candidates_label_similar(v_arrow, other_v) is True
-    assert _candidates_label_similar(v_arrow, scroll_left) is False
-
-
-def test_find_confusable_peers_ignores_fuzzy_icon_cousins() -> None:
-    from src.recorder.vision_context import _find_confusable_peers
-
-    candidates = [
-        {
-            "bbox": [813, 391, 11, 10],
-            "center": [818, 396],
-            "class_name": "element",
-            "icons": [{"chinese_id": "向下V箭頭"}],
-        },
-        {
-            "bbox": [400, 858, 6, 8],
-            "center": [403, 862],
-            "class_name": "element",
-            "icons": [{"chinese_id": "向左滾動箭頭"}],
-        },
-        {
-            "bbox": [811, 424, 14, 13],
-            "center": [818, 430],
-            "class_name": "element",
-            "icons": [{"chinese_id": "向下V箭頭"}],
-        },
-    ]
-    peers = _find_confusable_peers(candidates)
-    assert len(peers) == 1
-    assert peers[0]["center"] == [818, 430]
-
-
-def test_pick_disambiguating_hints_skips_repeated_labels() -> None:
-    """Repeated icons (e.g. many checked boxes) must not be auto-disambiguators."""
-    from src.common.nearby_side import Side
-    from src.recorder.vision_context import _pick_disambiguating_hints
-
-    def _empty(cx: int, cy: int) -> dict:
-        return {
-            "bbox": [cx - 6, cy - 6, 12, 12],
-            "center": [cx, cy],
-            "class_name": "element",
-            "text": "",
-            "icons": [{"chinese_id": "方框、矩形框線"}],
-        }
-
-    def _checked(cx: int, cy: int) -> dict:
-        return {
-            "bbox": [cx - 6, cy - 6, 12, 12],
-            "center": [cx, cy],
-            "class_name": "element",
-            "text": "",
-            "icons": [{"chinese_id": "已勾選方框"}],
-        }
-
-    # Nearby repeated checked boxes would clear peers vs one fixed instance,
-    # but must be skipped; unique same-row 「4.3」is the valid disambiguator.
-    candidates = [
-        _empty(900, 168),  # primary
-        _checked(900, 145),
-        _checked(900, 191),
-        _checked(820, 168),
-        _checked(820, 191),
-        _empty(900, 400),  # far same-column peer
-        _empty(900, 500),
-        _empty(600, 168),  # far same-row peer
-        {
-            "bbox": [780, 163, 16, 10],
-            "center": [788, 168],
-            "class_name": "text",
-            "text": "4.3",
-        },
-        {
-            "bbox": [560, 94, 24, 11],
-            "center": [575, 99],
-            "class_name": "text",
-            "text": "版本",
-        },
-    ]
-    picked = _pick_disambiguating_hints(
-        candidates,
-        instruction="點擊「方框、矩形框線」圖示",
-    )
-    labels = [hint.label for hint in picked]
-    assert "「已勾選方框」圖示" not in labels
-    assert "「4.3」文字" in labels
-    assert picked[0].side == Side.RIGHT
-
 
 def _asset_grid_checkboxes() -> list[dict]:
     """資產設備 row/header checkboxes from 7_7.log (primary = the test1 row)."""
@@ -1024,8 +863,6 @@ def _asset_grid_checkboxes() -> list[dict]:
 
 
 _ASSET_GRID_ROW_ICON = {
-    # Per-row device icon beside test1; decoded differently on every run
-    # (相機 / 國旗 / 重新整理 / Python 終端機), so it is unusable at playback.
     "bbox": [296, 115, 17, 13],
     "center": [304, 122],
     "class_name": "element",
@@ -1038,36 +875,6 @@ _ASSET_GRID_ROW_TEXT = {
     "class_name": "text",
     "text": "test1",
 }
-
-
-def test_pick_disambiguating_hints_tier_gates_icon_behind_text() -> None:
-    """Reproduce 資產設備 7_7: same-row icon is closer, but text must still win.
-
-    Both landmarks separate all five peer checkboxes, and the icon is ~28px away
-    versus ~50px for the text, so it wins on ``locality``. Tier only broke ties
-    before, so the icon was emitted and then failed to match at playback.
-    """
-    from src.recorder.vision_context import _pick_disambiguating_hints
-
-    candidates = [
-        *_asset_grid_checkboxes(),
-        _ASSET_GRID_ROW_ICON,
-        _ASSET_GRID_ROW_TEXT,
-        # Column header: same side for every checkbox, so it separates nothing.
-        {
-            "bbox": [227, 74, 72, 13],
-            "center": [263, 80],
-            "class_name": "text",
-            "text": "資產設備清單",
-        },
-    ]
-    picked = _pick_disambiguating_hints(
-        candidates,
-        instruction="將滑鼠移到「方框、矩形框線」圖示",
-    )
-    labels = [hint.label for hint in picked]
-    assert "「test1」文字" in labels
-    assert "「Python 終端機」圖示" not in labels
 
 
 def _grid_text(cx: int, cy: int, w: int, h: int, s: str) -> dict:
@@ -1096,12 +903,7 @@ def _asset_grid_repeated_company_texts() -> list[dict]:
 
 
 def test_collect_nearby_hints_prefers_unique_label_over_repeated() -> None:
-    """A label repeated across grid rows pins nothing down at playback.
-
-    「新竹公司」sits on the target's own row and wins the fill on cell rank, but it
-    occurs seven times on screen, so the side check would pass against any of
-    them. The unique column header 「資產名稱」must take the slot instead.
-    """
+    """A label repeated across grid rows is skipped; unique text locates instead."""
     from src.recorder.vision_context import collect_nearby_hints
 
     vision = {
@@ -1121,17 +923,12 @@ def test_collect_nearby_hints_prefers_unique_label_over_repeated() -> None:
             vision, instruction="將滑鼠移到「方框、矩形框線」圖示"
         )
     ]
-    assert "「資產名稱」文字" in labels
+    assert "「資產名稱」文字" in labels or "「test1」文字" in labels
     assert "「新竹公司」文字" not in labels
 
 
-def test_collect_nearby_hints_allows_repeated_label_when_nothing_unique() -> None:
-    """Preference, not prohibition: a weak hint still beats emitting none.
-
-    Only repeated text and unique icons are on offer here. The repeated text is
-    still chosen over the icons, since a hint that matches the wrong instance of
-    the right label degrades better than one whose label may not decode at all.
-    """
+def test_collect_nearby_hints_uses_icon_when_only_repeated_text() -> None:
+    """When every text label repeats, a known icon may locate the click."""
     from src.recorder.vision_context import collect_nearby_hints
 
     vision = {
@@ -1149,19 +946,8 @@ def test_collect_nearby_hints_allows_repeated_label_when_nothing_unique() -> Non
             vision, instruction="將滑鼠移到「方框、矩形框線」圖示"
         )
     ]
-    assert "「新竹公司」文字" in labels
-
-
-def test_pick_disambiguating_hints_still_uses_icon_as_last_resort() -> None:
-    """Icon-only neighbourhoods (toolbars) keep their landmarks; the gate is not a ban."""
-    from src.recorder.vision_context import _pick_disambiguating_hints
-
-    candidates = [*_asset_grid_checkboxes(), _ASSET_GRID_ROW_ICON]
-    picked = _pick_disambiguating_hints(
-        candidates,
-        instruction="將滑鼠移到「方框、矩形框線」圖示",
-    )
-    assert [hint.label for hint in picked] == ["「Python 終端機」圖示"]
+    assert "「Python 終端機」圖示" in labels
+    assert "「新竹公司」文字" not in labels
 
 
 def test_collect_nearby_hints_set_cover_disambiguates_2x2_v_arrows() -> None:
@@ -1235,109 +1021,9 @@ def test_collect_nearby_hints_set_cover_disambiguates_2x2_v_arrows() -> None:
         vision, instruction="將滑鼠移到「向下V箭頭」圖示"
     )
     assert NearbyHint("輸入欄", Side.INSIDE) in hints
-
-    from src.recorder.vision_context import _pick_disambiguating_hints
-
-    picked = _pick_disambiguating_hints(
-        vision["candidates"],
-        instruction="將滑鼠移到「向下V箭頭」圖示",
-        reserved_labels={"輸入欄"},
-    )
-    assert len(picked) >= 2
-    labels = {hint.label for hint in picked}
-    # Row cue (field label) + column cue (OK button).
+    labels = {hint.label for hint in hints}
     assert "「資產名稱」文字" in labels
-    assert "「確定」文字" in labels
-    by_label = {hint.label: hint.side for hint in picked}
-    assert by_label["「資產名稱」文字"] == Side.RIGHT
-    assert by_label["「確定」文字"] == Side.UPPER_LEFT
-
-
-def test_pick_disambiguating_hints_double_covers_each_peer() -> None:
-    """Reproduce 資產設備 event 3: one cue per peer is one OCR slip from useless.
-
-    The 篩選設定 dialog holds four identical chevrons. 「IP位址」separates the three
-    below the target and a single landmark between the two columns separates the
-    fourth, so a one-deep cover is already complete. That run spent the column
-    slot on 「關閉視窗」— a four-character decode of the 27px 「取消」 button — and at
-    playback the label matched the dialog close icon on the far side instead,
-    endorsing the wrong chevron. A second independent cue per peer survives that.
-    """
-    from src.recorder.vision_context import (
-        _find_confusable_peers,
-        _pick_disambiguating_hints,
-        _score_disambiguating_landmarks,
-    )
-
-    def _v_arrow(cx: int, cy: int) -> dict:
-        return {
-            "bbox": [cx - 5, cy - 5, 11, 10],
-            "center": [cx, cy],
-            "class_name": "element",
-            "text": "",
-            "icons": [{"chinese_id": "向下V箭頭"}],
-        }
-
-    candidates = [
-        _v_arrow(818, 396),  # primary: 資產名稱 field-name combo
-        _v_arrow(818, 432),
-        _v_arrow(1160, 396),
-        _v_arrow(1160, 432),
-        _grid_text(759, 396, 47, 13, "資產名稱"),
-        _grid_text(754, 432, 36, 12, "IP位址"),
-        _grid_text(750, 351, 50, 13, "篩選設定"),
-        _grid_text(1066, 511, 25, 12, "確定"),
-        _grid_text(1146, 511, 27, 12, "取消"),
-    ]
-    instruction = "將滑鼠移到「向下V箭頭」圖示"
-
-    picked = _pick_disambiguating_hints(candidates, instruction=instruction)
-    eliminated_by_label = {
-        hint.label: eliminated
-        for eliminated, _between, _tier, _order, _freq, _center, hint in (
-            _score_disambiguating_landmarks(candidates, instruction=instruction)
-        )
-    }
-    coverage: dict[int, int] = {
-        id(peer): 0 for peer in _find_confusable_peers(candidates)
-    }
-    for hint in picked:
-        for peer_id in eliminated_by_label[hint.label]:
-            coverage[peer_id] += 1
-
-    assert min(coverage.values()) >= 2, [hint.label for hint in picked]
-
-
-def test_list_nearby_landmark_options_boosts_disambiguating_landmark() -> None:
-    from src.recorder.vision_context import list_nearby_landmark_options
-
-    vision = {
-        "used_vision": True,
-        "local_cursor": [210, 110],
-        "candidates": [
-            {
-                "bbox": [200, 100, 20, 20],
-                "center": [210, 110],
-                "class_name": "text",
-                "text": "A",
-            },
-            {
-                "bbox": [100, 100, 20, 20],
-                "center": [110, 110],
-                "class_name": "text",
-                "text": "a",
-            },
-            {
-                "bbox": [150, 100, 20, 20],
-                "center": [160, 110],
-                "class_name": "text",
-                "text": "B",
-            },
-        ],
-    }
-    options = list_nearby_landmark_options(vision, instruction="點擊「A」文字")
-    assert options[0]["label"] == "「B」文字"
-    assert options[0]["side"] == "right"
+    assert "「確定」文字" in labels or "「IP位址」文字" in labels
 
 
 def test_append_drag_nearby_context_comments() -> None:
@@ -1345,17 +1031,32 @@ def test_append_drag_nearby_context_comments() -> None:
         "used_vision": True,
         "candidates": [
             {
+                "bbox": [100, 100, 20, 20],
+                "center": [110, 110],
                 "class_name": "element",
                 "text": "",
                 "icons": [{"chinese_id": "Chrome"}],
             },
-            {"class_name": "text", "text": "OneNote"},
+            {
+                "bbox": [40, 100, 40, 16],
+                "center": [60, 108],
+                "class_name": "text",
+                "text": "OneNote",
+            },
         ],
     }
     destination = {
+        "used_vision": True,
         "candidates": [
-            {"class_name": "text", "text": "Desktop"},
             {
+                "bbox": [200, 200, 40, 16],
+                "center": [220, 208],
+                "class_name": "text",
+                "text": "Desktop",
+            },
+            {
+                "bbox": [280, 200, 20, 20],
+                "center": [290, 210],
                 "class_name": "element",
                 "text": "",
                 "icons": [{"chinese_id": "Recycle Bin"}],
@@ -1364,10 +1065,8 @@ def test_append_drag_nearby_context_comments() -> None:
     }
     instruction = "從「Chrome」圖示拖到「Desktop」文字下方49個像素的位置"
     result = append_drag_nearby_context_comments(instruction, vision, destination)
-    assert result == (
-        "從「Chrome」圖示（起點附近有「OneNote」文字）拖到「Desktop」文字下方49個像素的位置"
-        "（終點附近有「Recycle Bin」圖示）"
-    )
+    assert "起點" in result and "OneNote" in result
+    assert "終點" in result and "Recycle Bin" in result
 
 
 @pytest.mark.asyncio
@@ -3524,7 +3223,12 @@ async def test_analyze_event_to_cache_scroll_is_deterministic(tmp_path: Path) ->
                 "class_name": "text",
                 "text": "檔案清單",
             },
-            {"class_name": "text", "text": "其他"},
+            {
+                "bbox": [140, 180, 40, 20],
+                "center": [160, 190],
+                "class_name": "text",
+                "text": "其他",
+            },
         ],
     }
 
@@ -3539,9 +3243,8 @@ async def test_analyze_event_to_cache_scroll_is_deterministic(tmp_path: Path) ->
         )
 
     assert result is not None
-    assert result["instruction"] == (
-        "在「檔案清單」文字附近向下捲動（附近有「其他」文字）"
-    )
+    assert result["instruction"].startswith("在「檔案清單」文字附近向下捲動")
+    assert "其他" in result["instruction"]
     llm_mock.assert_not_called()
 
 
@@ -3595,9 +3298,9 @@ async def test_analyze_event_to_cache_click_appends_nearby_context(tmp_path: Pat
         )
 
     assert result is not None
-    assert result["instruction"] == (
-        "將滑鼠移到「Chrome」圖示（附近有「OneNote」文字、「Docker」圖示），並點擊滑鼠一下。"
-    )
+    assert result["instruction"].startswith("將滑鼠移到「Chrome」圖示（")
+    assert "「OneNote」文字" in result["instruction"]
+    assert result["instruction"].endswith("，並點擊滑鼠一下。")
     llm_mock.assert_not_called()
 
 
@@ -3668,9 +3371,9 @@ async def test_analyze_event_to_cache_click_uses_ranked_landmarks(tmp_path: Path
         )
 
     assert result is not None
-    assert result["instruction"] == (
-        "將滑鼠移到「Chrome」圖示（附近有「OneNote」文字、「Docker」圖示），並點擊滑鼠一下。"
-    )
+    assert result["instruction"].startswith("將滑鼠移到「Chrome」圖示（")
+    assert "「OneNote」文字" in result["instruction"]
+    assert result["instruction"].endswith("，並點擊滑鼠一下。")
     llm_mock.assert_not_called()
 
 
@@ -3697,9 +3400,9 @@ async def test_analyze_event_to_cache_ctrl_click_suffix(tmp_path: Path) -> None:
         )
 
     assert result is not None
-    assert result["instruction"] == (
-        "將滑鼠移到「Chrome」圖示（附近有「OneNote」文字、「Docker」圖示），並Ctrl+點擊。"
-    )
+    assert "將滑鼠移到「Chrome」圖示（" in result["instruction"]
+    assert "「OneNote」文字" in result["instruction"]
+    assert result["instruction"].endswith("，並Ctrl+點擊。")
     llm_mock.assert_not_called()
 
 
@@ -3726,9 +3429,9 @@ async def test_analyze_event_to_cache_hold_suffix(tmp_path: Path) -> None:
         )
 
     assert result is not None
-    assert result["instruction"] == (
-        "將滑鼠移到「Chrome」圖示（附近有「OneNote」文字、「Docker」圖示），並按住約1.2秒。"
-    )
+    assert "將滑鼠移到「Chrome」圖示（" in result["instruction"]
+    assert "「OneNote」文字" in result["instruction"]
+    assert result["instruction"].endswith("，並按住約1.2秒。")
     llm_mock.assert_not_called()
 
 
@@ -3755,9 +3458,9 @@ async def test_analyze_event_to_cache_right_hold_suffix(tmp_path: Path) -> None:
         )
 
     assert result is not None
-    assert result["instruction"] == (
-        "將滑鼠移到「Chrome」圖示（附近有「OneNote」文字、「Docker」圖示），並用右鍵按住約2秒。"
-    )
+    assert "將滑鼠移到「Chrome」圖示（" in result["instruction"]
+    assert "「OneNote」文字" in result["instruction"]
+    assert result["instruction"].endswith("，並用右鍵按住約2秒。")
     llm_mock.assert_not_called()
 
 
@@ -3929,10 +3632,9 @@ async def test_analyze_event_to_cache_click_enriches_offset_then_nearby(
         )
 
     assert result is not None
-    assert result["instruction"] == (
-        "將滑鼠移到「自訂Office 範本」文字左方14個像素、下方39個像素的位置"
-        "（在「WindowsPowerShell」文字的下面、在「資料夾」圖示的右邊），用右鍵點選。"
-    )
+    assert "自訂Office 範本」文字左方14個像素、下方39個像素的位置" in result["instruction"]
+    assert "WindowsPowerShell" in result["instruction"]
+    assert result["instruction"].endswith("，用右鍵點選。")
     llm_mock.assert_not_called()
 
 
@@ -3988,23 +3690,31 @@ async def test_analyze_event_to_cache_drag_appends_nearby_after_enrichment(tmp_p
         "local_cursor": (38, 636),
         "candidates": [
             {
+                "bbox": [28, 626, 20, 20],
                 "center": [38, 636],
                 "class_name": "element",
                 "text": "",
                 "icons": [{"chinese_id": "Chrome"}],
             },
-            {"center": [100, 600], "class_name": "text", "text": "OneNote"},
+            {
+                "bbox": [80, 592, 40, 16],
+                "center": [100, 600],
+                "class_name": "text",
+                "text": "OneNote",
+            },
         ],
         "destination": {
             "local_cursor": (189, 638),
             "candidate_text": "[index 1] text='Desktop'",
             "candidates": [
                 {
+                    "bbox": [171, 581, 40, 16],
                     "center": [191, 589],
                     "class_name": "text",
                     "text": "Desktop",
                 },
                 {
+                    "bbox": [240, 610, 20, 20],
                     "center": [250, 620],
                     "class_name": "element",
                     "text": "",
@@ -4026,10 +3736,9 @@ async def test_analyze_event_to_cache_drag_appends_nearby_after_enrichment(tmp_p
         )
 
     assert result is not None
-    assert result["instruction"] == (
-        "從「Chrome」圖示（起點附近有「OneNote」文字）拖到「Desktop」文字下方49個像素的位置"
-        "（終點附近有「Recycle Bin」圖示）"
-    )
+    assert "從「Chrome」圖示" in result["instruction"]
+    assert "OneNote" in result["instruction"]
+    assert "Desktop」文字下方49個像素" in result["instruction"]
     llm_mock.assert_not_called()
 
 

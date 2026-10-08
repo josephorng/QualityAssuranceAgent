@@ -721,6 +721,34 @@ def _flyout_window() -> WindowInfo:
     )
 
 
+def _word_window() -> WindowInfo:
+    return WindowInfo(
+        hwnd=42,
+        title="Word",
+        pid=2,
+        left=0,
+        top=0,
+        width=800,
+        height=600,
+        is_minimized=False,
+        is_maximized=True,
+        class_name="OpusApp",
+        process_name="WINWORD.EXE",
+    )
+
+
+def _appeared_word_verify() -> dict:
+    return {
+        "appeared": [
+            {
+                "class_name": "OpusApp",
+                "title": "Word",
+                "process_name": "WINWORD.EXE",
+            }
+        ]
+    }
+
+
 @pytest.mark.asyncio
 async def test_process_step_empty_window_verify_still_auto_advances(monkeypatch) -> None:
     brain = _brain_for_process_step()
@@ -849,6 +877,112 @@ async def test_process_step_clipboard_miss_retries_clearly_unmet(monkeypatch) ->
     assert metadata["verify"]["branch"] == "retry"
     assert metadata["verify"]["clearly_unmet"] is True
     assert "clipboard" in metadata["verify"]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_process_step_window_verify_polls_until_appeared(
+    monkeypatch,
+) -> None:
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = [None, None, None]
+    brain.script_baseline_after_paths = [None, None, None]
+    brain.script_settle_after_seconds = [None, 2.0, None]
+    brain.script_window_verifies = [{}, _appeared_word_verify(), {}]
+    brain.loop = AsyncMock(return_value=True)
+    brain._verify_script_step = AsyncMock()
+
+    snapshots = [
+        [],  # before
+        [],  # 1.0x miss
+        [],  # 1.5x miss
+        [_word_window()],  # 2.0x pass
+    ]
+
+    def _next_snapshot() -> list[WindowInfo]:
+        assert snapshots
+        return snapshots.pop(0)
+
+    monkeypatch.setattr(
+        "src.brain.module.snapshot_top_level_windows",
+        _next_snapshot,
+    )
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 2
+    assert sleep_mock.await_count == 3
+    assert [call.args[0] for call in sleep_mock.await_args_list] == pytest.approx(
+        [2.0, 1.0, 1.0]
+    )
+    brain._verify_script_step.assert_not_awaited()
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "completed"
+    assert metadata["verify"]["branch"] == "advance"
+
+
+@pytest.mark.asyncio
+async def test_process_step_window_verify_fails_only_at_2x_settle(
+    monkeypatch,
+) -> None:
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = [None, None, None]
+    brain.script_baseline_after_paths = [None, None, None]
+    brain.script_settle_after_seconds = [None, 2.0, None]
+    brain.script_window_verifies = [{}, _appeared_word_verify(), {}]
+    brain.loop = AsyncMock(return_value=True)
+    brain._verify_script_step = AsyncMock()
+    monkeypatch.setattr(
+        "src.brain.module.snapshot_top_level_windows",
+        lambda: [],
+    )
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 1
+    assert sleep_mock.await_count == 3
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "verify_failed"
+    assert metadata["verify"]["branch"] == "retry"
+    assert metadata["verify"]["clearly_unmet"] is True
+    assert "appeared" in metadata["verify"]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_process_step_appeared_without_settle_uses_poll_floor(
+    monkeypatch,
+) -> None:
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = [None, None, None]
+    brain.script_baseline_after_paths = [None, None, None]
+    brain.script_settle_after_seconds = [None, None, None]
+    brain.script_window_verifies = [{}, _appeared_word_verify(), {}]
+    brain.loop = AsyncMock(return_value=True)
+    brain._verify_script_step = AsyncMock()
+    monkeypatch.setattr(
+        "src.brain.module.snapshot_top_level_windows",
+        lambda: [],
+    )
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 1
+    # Floor is 2.0s → polls at 1.0x/1.5x/2.0x.
+    assert sleep_mock.await_count == 3
+    assert [call.args[0] for call in sleep_mock.await_args_list] == pytest.approx(
+        [2.0, 1.0, 1.0]
+    )
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["verify"]["branch"] == "retry"
+    assert "appeared" in metadata["verify"]["reason"]
 
 
 @pytest.mark.asyncio

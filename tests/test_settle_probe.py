@@ -358,15 +358,14 @@ def test_settle_probe_continues_after_first_similar_plateau(
     gray = tmp_path / "frame.jpeg"
     Image.new("L", (32, 24), color=40).save(gray, format="JPEG")
 
-    def _fake_capture(x, y, target):
+    def _fake_all_screens(target):
         import shutil
 
         shutil.copy2(gray, target)
-        return str(target), 1, (0, 0)
 
     import src.recorder.capture as capture_mod
 
-    monkeypatch.setattr(capture_mod, "_capture_screenshot_at_point", _fake_capture)
+    monkeypatch.setattr(capture_mod, "capture_all_screens_to_file", _fake_all_screens)
     monkeypatch.setattr(
         capture_mod,
         "compare_frames",
@@ -814,15 +813,14 @@ def test_settle_tick_does_not_replace_before_shot(tmp_path: Path, monkeypatch) -
     pinned = session._last_settle_frame
     assert pinned is not None
 
-    def _fake_capture(x, y, target):
+    def _fake_all_screens(target):
         import shutil
 
         shutil.copy2(settle, target)
-        return str(target), 1, (0, 0)
 
     import src.recorder.capture as capture_mod
 
-    monkeypatch.setattr(capture_mod, "_capture_screenshot_at_point", _fake_capture)
+    monkeypatch.setattr(capture_mod, "capture_all_screens_to_file", _fake_all_screens)
     monkeypatch.setattr(session, "_schedule_next_settle_probe_tick", lambda *_a, **_k: None)
 
     session._run_settle_probe_tick(4)

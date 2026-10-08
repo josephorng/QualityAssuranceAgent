@@ -74,11 +74,12 @@ _PRE_TYPE_FOCUS_MAX_DIST_PX = 48
 # LL hooks cannot screenshot before Tab/Enter is delivered; reuse this frame instead.
 _PRE_KEY_SETTLE_S = 0.3
 # Consecutive-screenshot settle probe (UI stability after an action).
-# Samples: the first shot is immediate, then every 1s. The probe only
-# measures observed_settle; it does not publish the next step's before-shot.
-# A separate before-shot loop grabs for the whole recording and publishes every
-# finished frame, so a click pins the latest screenshot even when the previous
-# action's probe has not sampled yet.
+# Samples: the first shot is immediate, then every 1s. Each sample grabs the
+# full virtual desktop so a window appearing on another monitor is still seen.
+# The probe only measures observed_settle; it does not publish the next step's
+# before-shot. A separate before-shot loop grabs for the whole recording and
+# publishes every finished frame, so a click pins the latest screenshot even
+# when the previous action's probe has not sampled yet.
 _SETTLE_PROBE_INTERVAL_S = 1.0
 _SETTLE_PROBE_MAX_WINDOW_S = 55.0
 # Retain every settle-probe capture under screenshots/settle_debug/ for MAD tuning.
@@ -3542,7 +3543,6 @@ class RecordingSession:
                 started = probe.started_monotonic
                 kept_path = Path(probe.kept_path) if probe.kept_path else None
                 kept_age = probe.kept_age_s
-                cursor = probe.cursor_xy
 
             sample_age = time.monotonic() - started
             if sample_age > _SETTLE_PROBE_MAX_WINDOW_S:
@@ -3551,10 +3551,8 @@ class RecordingSession:
                 self._settle_probe_tick_body(
                     event_index=event_index,
                     run_dir=run_dir,
-                    probe=probe,
                     kept_path=kept_path,
                     kept_age=kept_age,
-                    cursor=cursor,
                     sample_age=sample_age,
                 )
         if hit_max_window:
@@ -3602,26 +3600,23 @@ class RecordingSession:
         *,
         event_index: int,
         run_dir: Path,
-        probe: _SettleProbeState,
         kept_path: Path | None,
         kept_age: float | None,
-        cursor: tuple[int, int] | None,
         sample_age: float,
     ) -> None:
         """Inner settle tick; caller holds ``_settle_tick_lock``.
 
         If this event was replaced while capturing, drop the sample. This tick
         measures settle only and does not publish a before-shot.
+
+        Always grabs the full virtual desktop (all monitors). A click on one
+        monitor must still see a window that opens or closes on another.
         """
-        if event_index == 0:
-            fresh = self._pointer_cursor_for_capture()
-            if fresh is not None:
-                cursor = fresh
         staging = settle_probe_staging_path(run_dir, event_index)
         mon_idx = 0
         mon_offset: tuple[int, int] = (0, 0)
         try:
-            mon_idx, mon_offset = self._grab_screenshot(cursor, staging)
+            mon_idx, mon_offset = self._grab_screenshot(None, staging)
         except Exception as exc:
             self._log(run_dir, f"settle probe capture failed event={event_index}: {exc}")
             self._schedule_next_settle_probe_tick(event_index)

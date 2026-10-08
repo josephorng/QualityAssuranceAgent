@@ -449,6 +449,213 @@ def test_numpad_vk_keys_recorded_as_text_input(tmp_path) -> None:
     assert raw["text"] == "123."
 
 
+class _HookKey:
+    def __init__(self, vk: int, scan: int, flags: int = 0) -> None:
+        self.vkCode = vk
+        self.scanCode = scan
+        self.flags = flags
+
+
+def _press_hardware(
+    session: RecordingSession,
+    key: object,
+    *,
+    vk: int,
+    scan: int,
+    flags: int = 0,
+    message: int = 0x0100,
+) -> None:
+    session._on_win32_key_filter(message, _HookKey(vk, scan, flags))
+    session._on_key_press(key)
+
+
+def test_numpad_arrow_scans_record_digits_when_numlock_on(tmp_path) -> None:
+    """Numpad 2/4/6/8 share scan codes with the arrows. The extended bit tells them apart."""
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture._numlock_on",
+        return_value=True,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            session._on_key_press(KeyCode.from_char("1"))
+            # vk is the arrow twin; scan is the non-extended numpad key.
+            for vk, scan, key in (
+                (40, 80, Key.down),
+                (37, 75, Key.left),
+                (39, 77, Key.right),
+                (38, 72, Key.up),
+            ):
+                _press_hardware(session, key, vk=vk, scan=scan)
+            session.stop()
+        finally:
+            if session.is_active():
+                session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "text_input"
+    assert raw["text"] == "12468"
+
+
+def test_numpad_scan_stays_arrow_when_numlock_off(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture._numlock_on",
+        return_value=False,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key
+
+            _press_hardware(session, Key.down, vk=40, scan=80)
+            session.stop()
+        finally:
+            if session.is_active():
+                session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "key_press"
+    assert raw["key"] == "down"
+
+
+def test_extended_arrow_scan_stays_arrow_when_numlock_on(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture._numlock_on",
+        return_value=True,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key
+
+            _press_hardware(session, Key.down, vk=40, scan=80, flags=0x01)
+            session.stop()
+        finally:
+            if session.is_active():
+                session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "key_press"
+    assert raw["key"] == "down"
+
+
+def test_vk_packet_scan_is_not_a_numpad_digit(tmp_path) -> None:
+    """VK_PACKET stores a UTF-16 character in scanCode. 80 is 'P', not numpad 2."""
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture._numlock_on",
+        return_value=True,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import KeyCode
+
+            _press_hardware(session, KeyCode.from_char("P"), vk=0xE7, scan=80)
+            session.stop()
+        finally:
+            if session.is_active():
+                session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "text_input"
+    assert raw["text"] == "P"
+
+
+def test_key_up_does_not_consume_following_numpad_press(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture._numlock_on",
+        return_value=True,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key
+
+            session._on_win32_key_filter(0x0101, _HookKey(40, 80, 0))
+            session._on_key_press(Key.down)
+            session.stop()
+        finally:
+            if session.is_active():
+                session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "key_press"
+    assert raw["key"] == "down"
+
+
+def test_alt_numpad_hotkey_uses_digit_token(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture._numlock_on",
+        return_value=True,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key
+
+            session._on_key_press(Key.alt_l)
+            _press_hardware(session, Key.down, vk=40, scan=80, message=0x0104)
+            session._on_key_release(Key.alt_l)
+            session.stop()
+        finally:
+            if session.is_active():
+                session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "hotkey"
+    assert raw["keys"] == ["alt", "2"]
+
+
 def test_ctrl_letter_hotkey_uses_letter_not_control_char(tmp_path) -> None:
     """Windows pynput reports Ctrl+A as char='\\x01'; store 'a' instead."""
     session = RecordingSession(runs_root=tmp_path)

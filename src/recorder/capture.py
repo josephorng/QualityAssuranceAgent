@@ -5,6 +5,7 @@ import os
 import queue
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -285,6 +286,53 @@ _NUMPAD_VK_TO_CHAR: dict[int, str] = {
     110: ".",
     111: "/",
 }
+# Set-1 scan codes for the numpad cluster. Dedicated arrows share these
+# scans but set LLKHF_EXTENDED; the numpad key does not.
+_NUMPAD_SCAN_TO_CHAR: dict[int, str] = {
+    71: "7",
+    72: "8",
+    73: "9",
+    75: "4",
+    76: "5",
+    77: "6",
+    79: "1",
+    80: "2",
+    81: "3",
+    82: "0",
+    83: ".",
+}
+# Navigation virtual keys that share a scan code with a numpad key, plus the
+# numpad digit/decimal virtual keys themselves.
+_NUMPAD_OR_NAV_VKS = frozenset(
+    {
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        45,
+        46,
+        96,
+        97,
+        98,
+        99,
+        100,
+        101,
+        102,
+        103,
+        104,
+        105,
+        110,
+    }
+)
+_VK_NUMLOCK = 0x90
+_VK_PACKET = 0xE7
+_LLKHF_EXTENDED = 0x01
+_WM_KEYDOWN = 0x0100
+_WM_SYSKEYDOWN = 0x0104
 # Windows VK_A..VK_Z
 _VK_A = 65
 _VK_Z = 90
@@ -604,6 +652,45 @@ def _vk_to_letter(vk: int) -> str | None:
     return None
 
 
+@dataclass(frozen=True)
+class _HardwareKeySample:
+    """One key-down as delivered by the low-level hook, before pynput translation."""
+
+    vk: int
+    scan: int
+    extended: bool
+
+
+def _numlock_on() -> bool:
+    """Return whether NumLock is toggled on.
+
+    ``GetKeyState``'s low bit is the toggle state. ``GetAsyncKeyState`` only
+    reports whether the key is currently held down.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        return bool(ctypes.windll.user32.GetKeyState(_VK_NUMLOCK) & 1)
+    except Exception:
+        return False
+
+
+def _numpad_char_from_hardware(sample: _HardwareKeySample | None) -> str | None:
+    """Return a numpad digit when the hardware key is the numpad cluster.
+
+    A dedicated arrow uses the same scan code with the extended bit set, and
+    NumLock off makes the numpad key itself that arrow. ``VK_PACKET`` carries
+    a UTF-16 character in ``scanCode``, so it is excluded by the virtual-key set.
+    """
+    if sample is None or sample.extended or sample.vk == _VK_PACKET:
+        return None
+    if sample.vk not in _NUMPAD_OR_NAV_VKS:
+        return None
+    if not _numlock_on():
+        return None
+    return _NUMPAD_SCAN_TO_CHAR.get(sample.scan)
+
+
 def _key_char(key: keyboard.Key | keyboard.KeyCode) -> str | None:
     """Return the typed character for a key, including numpad / Ctrl VK fallbacks."""
     if not isinstance(key, keyboard.KeyCode):
@@ -847,6 +934,7 @@ class RecordingSession:
         self._mouse_listener: mouse.Listener | None = None
         self._keyboard_listener: keyboard.Listener | None = None
         self._pressed_modifiers: set[str] = set()
+        self._hardware_key_presses: deque[_HardwareKeySample] = deque()
         self._pending_click_timer: threading.Timer | None = None
         self._pending_click_coords: tuple[int, int, str] | None = None
         self._pending_click_down_at: float | None = None
@@ -1012,6 +1100,7 @@ class RecordingSession:
             self._ignore_rect_provider = provider
             self._accepting_input = False
             self._pressed_modifiers = set()
+            self._hardware_key_presses.clear()
             self._pending_click_coords = None
             self._pending_click_down_at = None
             self._pending_click_timestamp_utc = None
@@ -1093,6 +1182,7 @@ class RecordingSession:
         self._keyboard_listener = keyboard.Listener(
             on_press=self._on_key_press,
             on_release=self._on_key_release,
+            win32_event_filter=self._on_win32_key_filter,
         )
         self._mouse_listener.start()
         self._keyboard_listener.start()
@@ -4803,11 +4893,39 @@ class RecordingSession:
             timestamp_utc=timestamp_utc,
         )
 
+    def _on_win32_key_filter(self, msg: int, data: Any) -> None:
+        """Stash the hardware scan code for this key-down. Must stay cheap.
+
+        pynput calls this on the low-level hook thread and then drops
+        ``scanCode`` and ``flags``. Returning ``None`` still delivers the key.
+        """
+        if int(msg) not in (_WM_KEYDOWN, _WM_SYSKEYDOWN):
+            return None
+        try:
+            sample = _HardwareKeySample(
+                vk=int(data.vkCode),
+                scan=int(data.scanCode),
+                extended=bool(int(data.flags) & _LLKHF_EXTENDED),
+            )
+        except Exception:
+            return None
+        with self._lock:
+            self._hardware_key_presses.append(sample)
+        return None
+
+    def _pop_hardware_key_sample_locked(self) -> _HardwareKeySample | None:
+        if not self._hardware_key_presses:
+            return None
+        return self._hardware_key_presses.popleft()
+
     def _on_key_press(self, key: keyboard.Key | keyboard.KeyCode) -> None:
         timestamp_utc = utc_now_iso()
         with self._lock:
             suppress = self._suppress_hotkey_keys
             active = self._accepting_input
+            # Pop even when this press is ignored so the queue stays aligned
+            # with key-down callbacks.
+            hardware = self._pop_hardware_key_sample_locked()
         if not active:
             return
         if suppress and key in _HOTKEY_SUPPRESS_KEYS:
@@ -4832,11 +4950,12 @@ class RecordingSession:
         with self._lock:
             mods = sorted(self._pressed_modifiers)
 
-        token = _key_token(key)
+        hardware_char = _numpad_char_from_hardware(hardware)
+        token = hardware_char or _key_token(key)
         if token is None:
             return
 
-        typed = _key_char(key)
+        typed = hardware_char or _key_char(key)
         # Shift alone only changes case/symbols — treat printable keys as typing,
         # not hotkeys. Ctrl/Alt/Win (+ optional Shift) remain hotkeys.
         if mods == ["shift"]:

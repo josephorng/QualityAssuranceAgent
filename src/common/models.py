@@ -24,6 +24,8 @@ class ExecutionResult(BaseModel):
     screenshot_name: str | None = None
     screenshot_before_path: str | None = None
     screenshot_after_path: str | None = None
+    # Debug-only focused-element bounds after the action (screen LTRB). Not verify.
+    focus_rect_after: list[int] | None = None
     message: str = ""
 
 

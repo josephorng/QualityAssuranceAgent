@@ -18,7 +18,7 @@ from src.common.io_utils import append_text, read_json, write_json
 from src.common.run_state import unique_run_folder_name
 from src.common.settings import load_settings
 from src.eye.capture import capture_all_screens_to_file, resolve_monitor_index
-from src.recorder.focus_point import resolve_typing_focus
+from src.recorder.focus_point import resolve_typing_focus, sample_debug_focus_rect
 from src.recorder.frame_similarity import (
     DEFAULT_SIMILARITY_THRESHOLD,
     append_settle_probe_debug_record,
@@ -4473,9 +4473,7 @@ class RecordingSession:
         self._start_window_step(item)
 
     def _start_window_step(self, item: _QueuedEvent) -> None:
-        """Diff windows off the fast lane so a stall cannot delay the settle probe."""
-        if not item.windows_before and not item.signals_before:
-            return
+        """Diff windows and sample debug focus_rect off the fast lane."""
         thread = threading.Thread(
             target=self._window_step_body,
             args=(item,),
@@ -4489,11 +4487,40 @@ class RecordingSession:
             self._window_step_threads.append(thread)
         thread.start()
 
+    def _sample_debug_focus_rect_for_item(
+        self,
+        item: _QueuedEvent,
+    ) -> tuple[int, int, int, int] | None:
+        """Focused-element bounds after settle, for screenshot overlays only."""
+        return sample_debug_focus_rect(
+            last_click_xy=item.cursor_xy,
+            mouse_xy=item.cursor_xy,
+        )
+
     def _window_step_body(self, item: _QueuedEvent) -> None:
-        change, title, debug = self._resolve_window_change(item)
-        if change is None and title is None and debug is None:
+        change: dict[str, Any] | None = None
+        title: str | None = None
+        debug: dict[str, Any] | None = None
+        focus_rect: tuple[int, int, int, int] | None = None
+        need_window = bool(item.windows_before or item.signals_before)
+        if need_window:
+            change, title, debug = self._resolve_window_change(item)
+            # Sealed after-cache means the next gesture already ran; sampling
+            # focus now would describe that later gesture, not this one.
+            if not item.window_after_sealed:
+                focus_rect = self._sample_debug_focus_rect_for_item(item)
+        else:
+            self._sleep_remaining_window_settle(item)
+            focus_rect = self._sample_debug_focus_rect_for_item(item)
+        if change is None and title is None and debug is None and focus_rect is None:
             return
-        self._patch_window_change(item.event_index, change, title, debug)
+        self._patch_window_change(
+            item.event_index,
+            change,
+            title,
+            debug,
+            focus_rect=focus_rect,
+        )
 
     def _patch_window_change(
         self,
@@ -4501,6 +4528,8 @@ class RecordingSession:
         change: dict[str, Any] | None,
         title: str | None,
         debug: dict[str, Any] | None,
+        *,
+        focus_rect: tuple[int, int, int, int] | None = None,
     ) -> None:
         with self._lock:
             run_dir = self._run_dir
@@ -4518,9 +4547,18 @@ class RecordingSession:
                     with self._lock:
                         self._after_seals.setdefault(event_index, seal)
                 return
-            raw["window_change"] = change
-            raw["target_window_title"] = title
-            raw["window_snapshot_debug"] = debug
+            if change is not None or title is not None or debug is not None:
+                raw["window_change"] = change
+                raw["target_window_title"] = title
+                raw["window_snapshot_debug"] = debug
+            # Keep typing-time focus_rect when already set; fill clicks/keys here.
+            if focus_rect is not None and raw.get("focus_rect") is None:
+                raw["focus_rect"] = [
+                    int(focus_rect[0]),
+                    int(focus_rect[1]),
+                    int(focus_rect[2]),
+                    int(focus_rect[3]),
+                ]
             write_json(path, raw)
             with self._lock:
                 events = self._events

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from src.recorder.focus_point import resolve_typing_focus, resolve_typing_screen_xy
+from src.recorder.focus_point import (
+    resolve_typing_focus,
+    resolve_typing_screen_xy,
+    sample_debug_focus_rect,
+)
 
 
 def test_resolve_typing_prefers_rect_center_when_last_click_outside_focus_rect() -> None:
@@ -90,3 +94,23 @@ def test_resolve_typing_ignores_empty_caret_and_uses_uia() -> None:
         uia_rect_fn=lambda: (10, 20, 30, 40),
     )
     assert point == (20, 30)
+
+
+def test_sample_debug_focus_rect_returns_uia_bounds(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.recorder.focus_point.resolve_typing_focus",
+        lambda **_kwargs: type(
+            "Focus",
+            (),
+            {"rect": (1, 2, 3, 4), "point": (2, 3)},
+        )(),
+    )
+    assert sample_debug_focus_rect() == (1, 2, 3, 4)
+
+
+def test_sample_debug_focus_rect_swallows_errors(monkeypatch) -> None:
+    def _boom(**_kwargs):
+        raise RuntimeError("uia down")
+
+    monkeypatch.setattr("src.recorder.focus_point.resolve_typing_focus", _boom)
+    assert sample_debug_focus_rect() is None

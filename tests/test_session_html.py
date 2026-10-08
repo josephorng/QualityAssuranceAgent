@@ -1554,6 +1554,90 @@ def test_write_recording_html_bakes_focus_rect_into_screenshot(tmp_path: Path) -
         assert tuple(int(v) for v in pixels[6, 8]) == (255, 0, 255)
 
 
+def test_write_session_html_bakes_live_focus_rect_after_from_hand_csv(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "runs" / "live_focus_20260721_040000_000001"
+    (run_root / "eye").mkdir(parents=True)
+    eye = run_root / "eye" / "after.png"
+    Image.new("RGB", (128, 64), color=(40, 50, 60)).save(eye)
+    with (run_root / "hand.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "timestamp",
+                "action",
+                "args",
+                "ok",
+                "screenshot_name",
+                "screenshot_before_path",
+                "screenshot_after_path",
+                "message",
+                "focus_rect_after",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "timestamp": "2026-07-21T04:00:01+00:00",
+                "action": "click",
+                "args": "{}",
+                "ok": "true",
+                "screenshot_name": str(eye),
+                "screenshot_before_path": str(eye),
+                "screenshot_after_path": str(eye),
+                "message": "executed",
+                "focus_rect_after": "[8,6,40,28]",
+            }
+        )
+    (run_root / "report.json").write_text(
+        json.dumps(
+            {
+                "tool_results": [
+                    {
+                        "timestamp_utc": "2026-07-21T04:00:01+00:00",
+                        "transcript_counter": 0,
+                        "script_step_index": 0,
+                    }
+                ],
+                "steps": [
+                    {
+                        "transcript_counter": 0,
+                        "script_step_index": 0,
+                        "goal": "點擊輸入框",
+                        "status": "ok",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "steps").mkdir()
+    (run_root / "steps" / "0_0.json").write_text(
+        json.dumps(
+            {
+                "messages": [],
+                "step_timing": {
+                    "goal": "點擊輸入框",
+                    "status": "ok",
+                    "step_index": 0,
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_session_html_from_run(run_root).read_text(encoding="utf-8")
+    assert "focus_rect_debug/" in html
+    annotated = list((run_root / "focus_rect_debug").glob("*.png"))
+    assert annotated
+    pixels = imread_bgr(annotated[0])
+    assert pixels is not None
+    assert tuple(int(v) for v in pixels[6, 8]) == (255, 0, 255)
+
+
 def test_write_session_html_bakes_focus_rect_on_matched_recording_shots(
     tmp_path: Path,
 ) -> None:

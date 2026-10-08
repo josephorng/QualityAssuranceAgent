@@ -54,6 +54,8 @@ _HAND_CSV_FIELDS = [
     "screenshot_before_path",
     "screenshot_after_path",
     "message",
+    # Trailing so headerless legacy rows still map ``message`` correctly.
+    "focus_rect_after",
 ]
 
 _STYLE = """
@@ -3658,6 +3660,21 @@ def _iter_hand_csv_rows(run_root: Path) -> list[dict[str, str]]:
     return rows
 
 
+def _parse_focus_rect_csv(raw: str | None) -> tuple[int, int, int, int] | None:
+    """Parse ``hand.csv`` ``focus_rect_after`` JSON or legacy Python-list text."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            parsed = ast.literal_eval(text)
+        except (SyntaxError, ValueError):
+            return None
+    return _parse_focus_rect(parsed)
+
+
 def _hand_operation_from_row(
     *,
     run_root: Path,
@@ -3678,6 +3695,7 @@ def _hand_operation_from_row(
         "timestamp": row.get("timestamp") or None,
         "before": before,
         "after": after,
+        "focus_rect_after": _parse_focus_rect_csv(row.get("focus_rect_after")),
     }
 
 
@@ -4086,10 +4104,19 @@ def _render_hand_operation_html(
     message_text = escape(message or "（無）")
     instruction_meta = _render_instruction_meta_html(_instruction_meta_pairs(args))
 
+    live_after_focus = operation.get("focus_rect_after")
+    if not (isinstance(live_after_focus, tuple) and len(live_after_focus) == 4):
+        live_after_focus = None
     before_focus = _focus_rect_for_screenshot(recording_event, before, use_end=False)
-    after_focus = _focus_rect_for_screenshot(recording_event, after, use_end=False)
+    after_focus = live_after_focus or _focus_rect_for_screenshot(
+        recording_event, after, use_end=False
+    )
     before_cursor = _local_cursor_for_screenshot(recording_event, before, use_end=False)
-    after_cursor = _local_cursor_for_screenshot(recording_event, after, use_end=False)
+    after_cursor = (
+        None
+        if live_after_focus is not None
+        else _local_cursor_for_screenshot(recording_event, after, use_end=False)
+    )
     shots = _render_shot_html(
         "動作前截圖",
         before,
@@ -7800,8 +7827,18 @@ def _extend_operation_playback_frames(
         shot = _operation_playback_shot(operation)
         if not isinstance(shot, Path):
             continue
-        focus = _focus_rect_for_screenshot(recording_event, shot, use_end=False)
-        cursor = _local_cursor_for_screenshot(recording_event, shot, use_end=False)
+        live_focus = operation.get("focus_rect_after")
+        if not (isinstance(live_focus, tuple) and len(live_focus) == 4):
+            live_focus = None
+        # Playback prefers the after shot; live after-focus matches that frame.
+        focus = live_focus or _focus_rect_for_screenshot(
+            recording_event, shot, use_end=False
+        )
+        cursor = (
+            None
+            if live_focus is not None
+            else _local_cursor_for_screenshot(recording_event, shot, use_end=False)
+        )
         display = _display_screenshot_with_focus_rect(
             shot,
             run_root,

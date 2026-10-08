@@ -273,3 +273,21 @@ def resolve_typing_screen_xy(
         caret_rect_fn=caret_rect_fn,
         uia_rect_fn=uia_rect_fn,
     ).point
+
+
+def sample_debug_focus_rect(
+    *,
+    last_click_xy: ScreenPoint | None = None,
+    mouse_xy: ScreenPoint | None = None,
+) -> ScreenRect | None:
+    """Return focused caret/UIA bounds for screenshot debug overlays only.
+
+    Not used by window verify or ``focused`` name/value matching.
+    """
+    try:
+        return resolve_typing_focus(
+            last_click_xy=last_click_xy,
+            mouse_xy=mouse_xy,
+        ).rect
+    except Exception:
+        return None

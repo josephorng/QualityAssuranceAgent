@@ -64,6 +64,25 @@ def _merged_tool_args(original: dict[str, Any], tool_output: Any) -> dict[str, A
     return {**original, **parsed}
 
 
+def _sample_debug_focus_rect_after() -> list[int] | None:
+    """Screen LTRB of the focused element for report screenshot overlays only."""
+    try:
+        from src.recorder.focus_point import sample_debug_focus_rect
+
+        rect = sample_debug_focus_rect()
+    except Exception:
+        return None
+    if rect is None:
+        return None
+    return [int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])]
+
+
+def _focus_rect_after_csv(value: list[int] | None) -> str:
+    if not value or len(value) != 4:
+        return ""
+    return json.dumps([int(v) for v in value], separators=(",", ":"))
+
+
 class HandModule:
     def __init__(self, eye: EyeModule | None = None) -> None:
         self.settings = load_settings()
@@ -186,6 +205,7 @@ class HandModule:
                 screenshot_name=screenshot_before_path,
                 screenshot_before_path=screenshot_before_path,
                 screenshot_after_path=screenshot_after_path,
+                focus_rect_after=_sample_debug_focus_rect_after(),
                 message=cmd.reason or "executed",
             )
         except Exception as exc:
@@ -209,6 +229,7 @@ class HandModule:
                             screenshot_name=screenshot_before_path,
                             screenshot_before_path=screenshot_before_path,
                             screenshot_after_path=screenshot_after_path,
+                            focus_rect_after=_sample_debug_focus_rect_after(),
                             message=f"{cmd.reason or 'executed'} (remapped from {action})",
                         )
                     except Exception as remap_exc:
@@ -227,6 +248,7 @@ class HandModule:
                 screenshot_name=screenshot_before_path,
                 screenshot_before_path=screenshot_before_path,
                 screenshot_after_path=screenshot_after_path,
+                focus_rect_after=_sample_debug_focus_rect_after(),
                 message=error_message,
             )
 
@@ -246,6 +268,7 @@ class HandModule:
                     "screenshot_before_path",
                     "screenshot_after_path",
                     "message",
+                    "focus_rect_after",
                 ],
                 row={
                     "timestamp": result.timestamp.isoformat(),
@@ -256,6 +279,7 @@ class HandModule:
                     "screenshot_before_path": result.screenshot_before_path or "",
                     "screenshot_after_path": result.screenshot_after_path or "",
                     "message": result.message,
+                    "focus_rect_after": _focus_rect_after_csv(result.focus_rect_after),
                 },
             )
             self._busy = False

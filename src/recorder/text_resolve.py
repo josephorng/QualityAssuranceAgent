@@ -65,6 +65,89 @@ def _normalize_ltrb(
     return (left, top, right, bottom)
 
 
+def _expand_thin_rect_for_debug(
+    local_rect: tuple[int, int, int, int],
+    *,
+    min_size: int = 4,
+) -> tuple[int, int, int, int]:
+    """Grow a caret-thin rect so a 1px strip stays visible in debug overlays."""
+    left, top, right, bottom = _normalize_ltrb(local_rect)
+    width = right - left
+    height = bottom - top
+    if width < min_size:
+        pad = (min_size - width + 1) // 2
+        left -= pad
+        right = left + min_size
+    if height < min_size:
+        pad = (min_size - height + 1) // 2
+        top -= pad
+        bottom = top + min_size
+    return (left, top, right, bottom)
+
+
+def draw_focus_rect_bgr(
+    bgr: Any,
+    focus_rect_local: tuple[int, int, int, int],
+    *,
+    cursor_local: tuple[int, int] | None = None,
+) -> Any:
+    """Draw ``focus_rect`` (and optional cursor) onto a copy of ``bgr`` for debug."""
+    import cv2
+    import numpy as np
+
+    canvas = np.ascontiguousarray(bgr.copy())
+    left, top, right, bottom = _expand_thin_rect_for_debug(focus_rect_local)
+    height, width = canvas.shape[:2]
+    left = max(0, min(left, width - 1))
+    right = max(0, min(right, width - 1))
+    top = max(0, min(top, height - 1))
+    bottom = max(0, min(bottom, height - 1))
+    # Magenta stands out on light and dark UI chrome.
+    color = (255, 0, 255)
+    cv2.rectangle(canvas, (left, top), (right, bottom), color, 2)
+    if cursor_local is not None:
+        cx, cy = int(cursor_local[0]), int(cursor_local[1])
+        if 0 <= cx < width and 0 <= cy < height:
+            cv2.drawMarker(
+                canvas,
+                (cx, cy),
+                color,
+                markerType=cv2.MARKER_CROSS,
+                markerSize=16,
+                thickness=2,
+            )
+    return canvas
+
+
+def write_focus_rect_debug_image(
+    *,
+    bgr: Any,
+    focus_rect_local: tuple[int, int, int, int],
+    dest: Path,
+    cursor_local: tuple[int, int] | None = None,
+) -> Path | None:
+    """Persist a magenta ``focus_rect`` overlay next to YOLO/OCR debug artifacts."""
+    from src.common.io_utils import imwrite_bgr
+
+    annotated = draw_focus_rect_bgr(
+        bgr,
+        focus_rect_local,
+        cursor_local=cursor_local,
+    )
+    if not imwrite_bgr(dest, annotated):
+        return None
+    return Path(dest)
+
+
+def focus_rect_debug_image_path(
+    run_dir: Path,
+    event_index: int,
+    *,
+    suffix: str = "",
+) -> Path:
+    return Path(run_dir) / "yolo_ocr" / f"event_{int(event_index):03d}{suffix}_focus_rect.png"
+
+
 def _is_caret_thin_rect(local_rect: tuple[int, int, int, int]) -> bool:
     """True when ``local_rect`` looks like a caret strip, not an edit-field bounds."""
     left, top, right, bottom = _normalize_ltrb(local_rect)
@@ -331,18 +414,29 @@ async def resolve_text_input_text(
     all_detections = vision.pop("all_detections", [])
     ocr_text: str | None = None
     ocr_options: list[str] = []
+    focus_local = (
+        _focus_rect_to_local(event, event.focus_rect, use_end=use_end)
+        if event.focus_rect is not None
+        else None
+    )
     if bgr is not None and all_detections:
-        focus_local = (
-            _focus_rect_to_local(event, event.focus_rect, use_end=use_end)
-            if event.focus_rect is not None
-            else None
-        )
         ocr_text, ocr_options = _resolve_ocr_from_detections(
             bgr=bgr,
             all_detections=all_detections,
             local_x=local[0],
             local_y=local[1],
             focus_rect_local=focus_local,
+        )
+    if bgr is not None and focus_local is not None:
+        write_focus_rect_debug_image(
+            bgr=bgr,
+            focus_rect_local=focus_local,
+            dest=focus_rect_debug_image_path(
+                run_dir,
+                event.index,
+                suffix=debug_name or "",
+            ),
+            cursor_local=local,
         )
 
     vision_for_llm = _vision_for_llm(vision)

@@ -11,9 +11,12 @@ from src.recorder.models import RecordedEvent
 from src.recorder.text_resolve import (
     _is_caret_thin_rect,
     _strip_ocr_caret,
+    draw_focus_rect_bgr,
     event_with_resolved_text,
+    focus_rect_debug_image_path,
     resolve_text_input_text,
 )
+from src.common.io_utils import imread_bgr
 from src.recorder.vision_context import extract_nearest_text
 
 
@@ -23,6 +26,15 @@ def test_strip_ocr_caret_removes_trailing_pipe() -> None:
     assert _strip_ocr_caret("office") == "office"
     assert _strip_ocr_caret("|") == ""
     assert _strip_ocr_caret("a|b") == "a|b"
+
+
+def test_draw_focus_rect_bgr_paints_magenta_box() -> None:
+    bgr = np.zeros((40, 60, 3), dtype=np.uint8)
+    out = draw_focus_rect_bgr(bgr, (10, 8, 40, 28), cursor_local=(25, 18))
+    assert out is not bgr
+    # Magenta BGR on the rectangle edge.
+    assert tuple(int(v) for v in out[8, 10]) == (255, 0, 255)
+    assert tuple(int(v) for v in out[18, 25]) == (255, 0, 255)
 
 
 def test_extract_nearest_text_prefers_nearest_with_text() -> None:
@@ -342,6 +354,11 @@ async def test_resolve_text_input_lists_ocr_options_inside_focus_rect(tmp_path) 
     assert resolved["ocr_options"] == ["Google", "什麼是套利?", "搜尋"]
     # Nearest in-rect text to caret (960,540) is the omnibox query, not taskbar 搜尋.
     assert resolved["ocr_text"] == "什麼是套利?"
+    debug_path = focus_rect_debug_image_path(tmp_path, event.index, suffix="")
+    assert debug_path.is_file()
+    annotated = imread_bgr(debug_path)
+    assert annotated is not None
+    assert tuple(int(v) for v in annotated[0, 0]) == (255, 0, 255)
 
 
 @pytest.mark.asyncio

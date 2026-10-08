@@ -668,6 +668,11 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 .shot { min-width: 0; }
 .shot .label { font-weight: 600; color: #57606a; margin: 0 0 .4rem; font-size: .9rem; }
 .shot a { display: block; }
+.shot a.shot-media { position: relative; display: block; }
+.shot a.shot-media .focus-rect-overlay {
+  position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+  pointer-events: none;
+}
 .shot img { width: 100%; height: auto; border: 1px solid #d0d7de; border-radius: 6px; background: #fff; }
 .shot .missing { color: #8c959f; font-style: italic; }
 .playback-frame img { width: 100%; height: auto; border: 1px solid #d0d7de; border-radius: 6px; background: #fff; }
@@ -3446,13 +3451,122 @@ def _relative_img_src(screenshot: Path | None, run_root: Path) -> str | None:
         return resolved.as_uri()
 
 
-def _render_shot_html(label: str, screenshot: Path | None, run_root: Path) -> str:
+def _image_size_wh(path: Path) -> tuple[int, int] | None:
+    """Return ``(width, height)`` for an image file without requiring OpenCV."""
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            width, height = image.size
+            if width > 0 and height > 0:
+                return int(width), int(height)
+    except Exception:
+        pass
+    try:
+        from src.common.io_utils import imread_bgr
+
+        bgr = imread_bgr(path)
+    except Exception:
+        return None
+    if bgr is None:
+        return None
+    height, width = bgr.shape[:2]
+    if width <= 0 or height <= 0:
+        return None
+    return int(width), int(height)
+
+
+def _expand_thin_focus_rect_for_overlay(
+    rect: tuple[int, int, int, int],
+    *,
+    min_size: int = 4,
+) -> tuple[int, int, int, int]:
+    left, top, right, bottom = rect
+    if right < left:
+        left, right = right, left
+    if bottom < top:
+        top, bottom = bottom, top
+    width = right - left
+    height = bottom - top
+    if width < min_size:
+        pad = (min_size - width + 1) // 2
+        left -= pad
+        right = left + min_size
+    if height < min_size:
+        pad = (min_size - height + 1) // 2
+        top -= pad
+        bottom = top + min_size
+    return left, top, right, bottom
+
+
+def _focus_rect_overlay_svg(
+    focus_rect_local: tuple[int, int, int, int],
+    image_wh: tuple[int, int],
+) -> str:
+    width, height = image_wh
+    left, top, right, bottom = _expand_thin_focus_rect_for_overlay(focus_rect_local)
+    left = max(0, min(left, width - 1))
+    right = max(0, min(right, width - 1))
+    top = max(0, min(top, height - 1))
+    bottom = max(0, min(bottom, height - 1))
+    box_w = max(1, right - left)
+    box_h = max(1, bottom - top)
+    return (
+        f'<svg class="focus-rect-overlay" viewBox="0 0 {width} {height}" '
+        f'preserveAspectRatio="none" aria-hidden="true">'
+        f'<rect x="{left}" y="{top}" width="{box_w}" height="{box_h}" '
+        f'fill="none" stroke="#ff00ff" stroke-width="3"/>'
+        f"</svg>"
+    )
+
+
+def _local_focus_rect_from_event(
+    event: dict[str, Any],
+    *,
+    use_end: bool,
+) -> tuple[int, int, int, int] | None:
+    raw = event.get("focus_rect")
+    if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+        return None
+    try:
+        left, top, right, bottom = (int(raw[0]), int(raw[1]), int(raw[2]), int(raw[3]))
+    except (TypeError, ValueError):
+        return None
+    offset = event.get("end_monitor_offset") if use_end else event.get("monitor_offset")
+    if use_end and not (isinstance(offset, (list, tuple)) and len(offset) == 2):
+        offset = event.get("monitor_offset")
+    ox = oy = 0
+    if isinstance(offset, (list, tuple)) and len(offset) == 2:
+        try:
+            ox, oy = int(offset[0]), int(offset[1])
+        except (TypeError, ValueError):
+            ox = oy = 0
+    return left - ox, top - oy, right - ox, bottom - oy
+
+
+def _render_shot_html(
+    label: str,
+    screenshot: Path | None,
+    run_root: Path,
+    *,
+    focus_rect_local: tuple[int, int, int, int] | None = None,
+) -> str:
     src = _relative_img_src(screenshot, run_root)
     if src is None:
         body = '<p class="missing">無螢幕截圖</p>'
     else:
         esc = escape(src, quote=True)
-        body = f'<a href="{esc}" target="_blank" rel="noopener"><img src="{esc}" alt="{escape(label)}" loading="lazy"></a>'
+        overlay = ""
+        if focus_rect_local is not None and screenshot is not None:
+            image_wh = _image_size_wh(screenshot)
+            if image_wh is not None:
+                overlay = _focus_rect_overlay_svg(focus_rect_local, image_wh)
+        media_class = ' class="shot-media"' if overlay else ""
+        body = (
+            f'<a href="{esc}" target="_blank" rel="noopener"{media_class}>'
+            f'<img src="{esc}" alt="{escape(label)}" loading="lazy">'
+            f"{overlay}</a>"
+        )
     return f'<div class="shot"><p class="label">{escape(label)}</p>{body}</div>'
 
 
@@ -6168,6 +6282,16 @@ def _render_recording_event_html(
     end_xy = _format_xy(event.get("end_xy"))
     if end_xy:
         meta_rows.append(("終點", escape(end_xy)))
+    focus_rect = event.get("focus_rect")
+    if isinstance(focus_rect, (list, tuple)) and len(focus_rect) == 4:
+        try:
+            focus_text = (
+                f"({int(focus_rect[0])}, {int(focus_rect[1])})–"
+                f"({int(focus_rect[2])}, {int(focus_rect[3])})"
+            )
+        except (TypeError, ValueError):
+            focus_text = str(list(focus_rect))
+        meta_rows.append(("Focus rect", escape(focus_text)))
     text = event.get("text")
     if kind == "condition":
         presence = event.get("presence")
@@ -6225,6 +6349,7 @@ def _render_recording_event_html(
 
     before = _resolve_recording_screenshot(str(event.get("screenshot_path") or ""), run_root)
     after: Path | None = None
+    after_is_end_shot = False
     if next_event is not None:
         after = _resolve_recording_screenshot(
             str(next_event.get("screenshot_path") or ""),
@@ -6235,13 +6360,28 @@ def _render_recording_event_html(
             str(event.get("end_screenshot_path") or ""),
             run_root,
         )
+        after_is_end_shot = after is not None
     if after is None and next_event is None:
         after = _resolve_recording_screenshot(
             str(final_after_screenshot or ""),
             run_root,
         )
-    shots = _render_shot_html("動作前截圖", before, run_root) + _render_shot_html(
-        "動作後截圖", after, run_root
+    before_focus = _local_focus_rect_from_event(event, use_end=False)
+    after_focus = (
+        _local_focus_rect_from_event(event, use_end=True)
+        if after_is_end_shot
+        else None
+    )
+    shots = _render_shot_html(
+        "動作前截圖",
+        before,
+        run_root,
+        focus_rect_local=before_focus,
+    ) + _render_shot_html(
+        "動作後截圖",
+        after,
+        run_root,
+        focus_rect_local=after_focus,
     )
 
     editor = _render_recording_step_editor_html(

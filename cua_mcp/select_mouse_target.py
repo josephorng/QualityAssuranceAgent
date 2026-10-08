@@ -2502,14 +2502,14 @@ def _landmark_fallback_places(
     anchor: str,
     threshold: float = _MOUSE_FILTER_SIMILARITY_THRESHOLD,
 ) -> list[UiDetection]:
-    """Places that satisfy every directed nearby hint.
+    """Places that satisfy every available directed nearby hint.
 
     Landmarks are detections whose label matches a directed hint. Those boxes,
     and any box that heavily overlaps one, are not selectable. Undirected hints
-    are ignored. With no directed hint, no place qualifies. Sides are not
-    relaxed: a hint with no matching nearby landmark drops every candidate.
-    A hint matches the closest selectable box on that side of the landmark,
-    including a gap tie.
+    are ignored. Directed hints with no matching landmark on screen are skipped
+    so a partial landmark set can still uniquely locate the target. With no
+    available directed hint, no place qualifies. A hint matches the closest
+    selectable box on that side of the landmark, including a gap tie.
     """
     hints = normalize_nearby_hints(nearby_hints)
     directed = [hint for hint in hints if hint.side is not None]
@@ -2524,6 +2524,17 @@ def _landmark_fallback_places(
         ):
             landmarks.append(det)
     if not landmarks:
+        return []
+
+    available = [
+        hint
+        for hint in directed
+        if any(
+            _detection_similarity_to_query(neigh, hint.label) >= threshold
+            for neigh in landmarks
+        )
+    ]
+    if not available:
         return []
 
     landmark_ids = {id(det) for det in landmarks}
@@ -2550,7 +2561,7 @@ def _landmark_fallback_places(
                 selectable,
                 threshold=threshold,
             )
-            for hint in directed
+            for hint in available
         )
     ]
     return _group_same_place(eligible)
@@ -2562,7 +2573,7 @@ def _unique_target_from_landmarks(
     *,
     anchor: str,
 ) -> UiDetection | None:
-    """Return the only place the directed landmarks describe, or None."""
+    """Return the only place available directed landmarks describe, or None."""
     places = _landmark_fallback_places(detections, nearby_hints, anchor=anchor)
     if len(places) != 1:
         return None

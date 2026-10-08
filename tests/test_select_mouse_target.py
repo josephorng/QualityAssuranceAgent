@@ -3602,6 +3602,50 @@ def test_unique_target_from_landmarks_skips_landmark_box() -> None:
     )
 
 
+def test_unique_target_from_landmarks_skips_missing_directed_hint() -> None:
+    """Replay still locates when one recorded landmark is absent from OCR.
+
+    Mirrors copilot_8 step 3: 「此」/「應用程式及其他」 missing, same-place icon
+    misread as 垂直更多; the remaining directed sides uniquely pick [262,30].
+    """
+    from cua_mcp.select_mouse_target import _unique_target_from_landmarks
+
+    target = _detection_from_bbox(
+        (251, 19, 22, 22),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "垂直更多"}],
+    )
+    sidebar = _detection_from_bbox(
+        (293, 21, 21, 19),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "側邊欄"}],
+    )
+    copilot = _detection_from_bbox((19, 19, 84, 24), YOLO_CLASS_TEXT, text="Copilot")
+    chat = _detection_from_bbox((56, 81, 55, 16), YOLO_CLASS_TEXT, text="新聊天")
+    auto = _detection_from_bbox((367, 84, 33, 17), YOLO_CLASS_TEXT, text="自動")
+    search = _detection_from_bbox((56, 123, 37, 18), YOLO_CLASS_TEXT, text="搜尋")
+    far = _detection_from_bbox(
+        (1760, 18, 23, 22),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "最小化視窗"}],
+    )
+    hints = [
+        "在「Copilot」文字的右邊",
+        "在「應用程式及其他」文字的上面",
+        "在「自動」文字的左上方",
+        "在「新聊天」文字的右上方",
+        "在「側邊欄」圖示的左邊",
+        "在「搜尋」文字的右上方",
+    ]
+    chosen = _unique_target_from_landmarks(
+        [target, sidebar, copilot, chat, auto, search, far],
+        hints,
+        anchor="「此」文字",
+    )
+    assert chosen is target
+    assert (chosen.cx, chosen.cy) == (262, 30)
+
+
 def test_prefilter_anchors_by_nearby_relaxes_side_when_none_match() -> None:
     from src.common.nearby_side import NearbyHint, Side
 

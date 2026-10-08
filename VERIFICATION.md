@@ -19,7 +19,7 @@ flowchart TD
   Next -->|either, or tools failed| Vision[Screenshot verifier]
 ```
 
-`settle_after` is the gap until the next recorded event when that gap is at least 1 second. Window verify sleeps that full gap once. A baseline with no window predicate polls the screenshot at 1.0×, 1.5×, and 2.0× of the gap (1.0× only when the gap is under 2 seconds).
+`settle_after` is the gap until the next recorded event when that gap is at least 1 second. Window verify polls at 1.0×, 1.5×, and 2.0× of the gap (1.0× only when the gap is under 2 seconds), failing only after the final poll. When the predicate includes `appeared`, the poll settle is floored to 5 seconds so the final check is at least 10 seconds (slow app launches). A baseline with no window predicate uses the same multiplier schedule.
 
 ## Where the recorded predicate comes from
 

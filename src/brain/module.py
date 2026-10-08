@@ -113,6 +113,8 @@ class BaselineMatchDecision:
 # Gaps under ``_SETTLE_POLL_MULTI_MIN_SECONDS`` only poll once at 1.0x.
 _SETTLE_BASELINE_POLL_MULTIPLIERS: tuple[float, ...] = (1.0, 1.5, 2.0)
 _SETTLE_POLL_MULTI_MIN_SECONDS = 2.0
+# Appeared asserts floor the poll settle so 2.0x lands at least at 10s (slow launches).
+_APPEARED_POLL_MIN_SECONDS = 5.0
 
 
 ROLE_USER = "user"
@@ -1994,16 +1996,21 @@ class BrainModule:
     ) -> float | None:
         """Settle budget for window-verify polls.
 
-        Prefer the recording ``settle_after``. When that is missing/zero but the
-        step expects a new window (``appeared``), use
-        ``_SETTLE_POLL_MULTI_MIN_SECONDS`` so a slow launch is not checked once
-        and failed immediately.
+        Prefer the recording ``settle_after``. When the step expects a new window
+        (``appeared``), floor the budget at ``_APPEARED_POLL_MIN_SECONDS`` so a
+        slow launch is not checked once on a tiny gap and failed immediately.
+        With the usual 1.0x/1.5x/2.0x multipliers that puts the final poll at
+        least at 10s.
         """
-        if settle_after is not None and float(settle_after) > 0:
-            return float(settle_after)
         appeared = recorded.get("appeared")
-        if isinstance(appeared, list) and appeared:
-            return float(_SETTLE_POLL_MULTI_MIN_SECONDS)
+        has_appeared = isinstance(appeared, list) and bool(appeared)
+        if settle_after is not None and float(settle_after) > 0:
+            base = float(settle_after)
+            if has_appeared:
+                return max(base, float(_APPEARED_POLL_MIN_SECONDS))
+            return base
+        if has_appeared:
+            return float(_APPEARED_POLL_MIN_SECONDS)
         return None
 
     async def _window_verify_miss(
@@ -2133,7 +2140,8 @@ class BrainModule:
         verifier LLM. In that case any recording ``settle_after`` is deferred until
         the next step's first tool so next-step prep can overlap the settle window.
         A recorded window diff polls at 1.0x/1.5x/2.0x of settle (fail only at
-        2.0x); a miss retries with ``clearly_unmet`` and does not run vision.
+        2.0x; ``appeared`` floors settle so the final poll is at least 10s); a
+        miss retries with ``clearly_unmet`` and does not run vision.
 
         Recovery path: actor failure, a recorded expected outcome, or a recording
         after-baseline still uses screenshot verification for `goto`/`retry`/`skip`/

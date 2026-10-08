@@ -914,8 +914,9 @@ async def test_process_step_window_verify_polls_until_appeared(
     assert result.step_finished is True
     assert brain._script_step_index == 2
     assert sleep_mock.await_count == 3
+    # Appeared floors settle to 5.0s → 1.0x/1.5x/2.0x delays.
     assert [call.args[0] for call in sleep_mock.await_args_list] == pytest.approx(
-        [2.0, 1.0, 1.0]
+        [5.0, 2.5, 2.5]
     )
     brain._verify_script_step.assert_not_awaited()
     metadata = brain._update_step_metadata.call_args.args[2]
@@ -975,10 +976,42 @@ async def test_process_step_appeared_without_settle_uses_poll_floor(
 
     assert result.step_finished is True
     assert brain._script_step_index == 1
-    # Floor is 2.0s → polls at 1.0x/1.5x/2.0x.
+    # Floor is 5.0s → polls at 1.0x/1.5x/2.0x (final check at 10s).
     assert sleep_mock.await_count == 3
     assert [call.args[0] for call in sleep_mock.await_args_list] == pytest.approx(
-        [2.0, 1.0, 1.0]
+        [5.0, 2.5, 2.5]
+    )
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["verify"]["branch"] == "retry"
+    assert "appeared" in metadata["verify"]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_process_step_appeared_tiny_settle_uses_poll_floor(
+    monkeypatch,
+) -> None:
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = [None, None, None]
+    brain.script_baseline_after_paths = [None, None, None]
+    brain.script_settle_after_seconds = [None, 0.109, None]
+    brain.script_window_verifies = [{}, _appeared_word_verify(), {}]
+    brain.loop = AsyncMock(return_value=True)
+    brain._verify_script_step = AsyncMock()
+    monkeypatch.setattr(
+        "src.brain.module.snapshot_top_level_windows",
+        lambda: [],
+    )
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 1
+    # Tiny positive settle is floored to 5.0s for appeared asserts.
+    assert sleep_mock.await_count == 3
+    assert [call.args[0] for call in sleep_mock.await_args_list] == pytest.approx(
+        [5.0, 2.5, 2.5]
     )
     metadata = brain._update_step_metadata.call_args.args[2]
     assert metadata["verify"]["branch"] == "retry"

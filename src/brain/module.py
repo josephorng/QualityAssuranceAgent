@@ -69,10 +69,10 @@ from src.recorder.window_snapshot import (
     window_verify_satisfied,
 )
 
-# Window-verify settle polls at these multiples of the gap.
-# Gaps under ``_SETTLE_POLL_MULTI_MIN_SECONDS`` only poll once at 1.0x.
-_SETTLE_BASELINE_POLL_MULTIPLIERS: tuple[float, ...] = (1.0, 1.5, 2.0)
+# Window-verify polls continuously after actions; deadline is 2.0x of settle when
+# settle is at least ``_SETTLE_POLL_MULTI_MIN_SECONDS``, else 1.0x.
 _SETTLE_POLL_MULTI_MIN_SECONDS = 2.0
+_WINDOW_VERIFY_POLL_INTERVAL_SECONDS = 0.1
 # Appeared asserts floor the poll settle so 2.0x lands at least at 10s (slow launches).
 _APPEARED_POLL_MIN_SECONDS = 5.0
 
@@ -1408,13 +1408,12 @@ class BrainModule:
         settle_after: float | None,
         recorded: dict[str, Any],
     ) -> float | None:
-        """Settle budget for window-verify polls.
+        """Settle budget base for window-verify continuous polling.
 
         Prefer the recording ``settle_after``. When the step expects a new window
         (``appeared``), floor the budget at ``_APPEARED_POLL_MIN_SECONDS`` so a
-        slow launch is not checked once on a tiny gap and failed immediately.
-        With the usual 1.0x/1.5x/2.0x multipliers that puts the final poll at
-        least at 10s.
+        slow launch keeps a long enough deadline (2.0x of this base is at least
+        10s). Polling starts immediately after actions and early-exits on match.
         """
         appeared = recorded.get("appeared")
         has_appeared = isinstance(appeared, list) and bool(appeared)
@@ -1431,6 +1430,8 @@ class BrainModule:
         self,
         windows_before: list[WindowInfo] | None,
         recorded: dict[str, Any],
+        *,
+        log_result: bool = True,
     ) -> ScriptStepVerifyResult | None:
         """Return a clearly-unmet retry when the live delta misses the recorded one."""
         if windows_before is None:
@@ -1476,9 +1477,11 @@ class BrainModule:
             live_windows_after=windows_after,
         )
         if ok:
-            self.manager.log_info("Window verify matched recorded end state")
+            if log_result:
+                self.manager.log_info("Window verify matched recorded end state")
             return None
-        self.manager.log_info(f"Window verify failed: {reason}")
+        if log_result:
+            self.manager.log_info(f"Window verify failed: {reason}")
         return ScriptStepVerifyResult(
             accomplished=False,
             branch="retry",
@@ -1495,41 +1498,52 @@ class BrainModule:
         settle_after: float,
         script_step_index: int,
     ) -> ScriptStepVerifyResult | None:
-        """Poll window verify at 1.0x / 1.5x / 2.0x of ``settle_after`` (1.0x only under 2s).
+        """Poll window verify continuously until match or deadline.
 
-        Returns ``None`` on the first pass. Failure is only returned after the
-        final poll (2.0x when the gap is long enough).
+        Deadline is ``2.0x`` of ``settle_after`` when settle is at least
+        ``_SETTLE_POLL_MULTI_MIN_SECONDS``, otherwise ``1.0x``. Checks start
+        immediately after step actions and repeat every
+        ``_WINDOW_VERIFY_POLL_INTERVAL_SECONDS``. Returns ``None`` on the first
+        pass; failure is only returned after the deadline.
         """
-        multipliers = (
-            _SETTLE_BASELINE_POLL_MULTIPLIERS
+        deadline = (
+            settle_after * 2.0
             if settle_after >= _SETTLE_POLL_MULTI_MIN_SECONDS
-            else (1.0,)
+            else settle_after
+        )
+        interval = float(_WINDOW_VERIFY_POLL_INTERVAL_SECONDS)
+        self.manager.log_info(
+            f"Script step {script_step_index + 1} window verify polling "
+            f"every {interval:.1f}s up to {deadline:.3f}s"
         )
         elapsed = 0.0
         last_miss: ScriptStepVerifyResult | None = None
-        for attempt_index, mult in enumerate(multipliers):
-            target = settle_after * mult
-            delay = max(0.0, target - elapsed)
-            if delay > 0:
-                self.manager.log_info(
-                    f"Script step {script_step_index + 1} settling "
-                    f"{delay:.3f}s to {mult:.1f}x gap ({target:.3f}s) "
-                    f"before window verify "
-                    f"({attempt_index + 1}/{len(multipliers)})"
-                )
-                await asyncio.sleep(delay)
-                elapsed = target
-            miss = await self._window_verify_miss(windows_before, recorded)
+        while True:
+            miss = await self._window_verify_miss(
+                windows_before,
+                recorded,
+                log_result=False,
+            )
             if miss is None:
+                self.manager.log_info(
+                    f"Script step {script_step_index + 1} window verify "
+                    f"matched after {elapsed:.3f}s"
+                )
                 return None
             last_miss = miss
-            is_last = attempt_index + 1 >= len(multipliers)
-            if not is_last:
+            if elapsed >= deadline:
                 self.manager.log_info(
-                    f"Window verify miss at {mult:.1f}x; "
-                    f"waiting for next settle poll. {miss.reason}"
+                    f"Script step {script_step_index + 1} window verify "
+                    f"still unmet after {elapsed:.3f}s "
+                    f"(deadline {deadline:.3f}s); {miss.reason}"
                 )
-        return last_miss
+                return last_miss
+            delay = min(interval, max(0.0, deadline - elapsed))
+            if delay > 0:
+                await asyncio.sleep(delay)
+                elapsed += delay
+            else:
+                return last_miss
 
     def _verify_result_metadata(
         self,
@@ -1552,9 +1566,10 @@ class BrainModule:
         Happy path: no recorded window/signal assert and actor success (all tools ok)
         auto-advances without a screenshot or verifier LLM. Any recording
         ``settle_after`` is deferred until the next step's first tool so next-step
-        prep can overlap the settle window. A recorded window diff polls at
-        1.0x/1.5x/2.0x of settle (fail only at 2.0x; ``appeared`` floors settle so
-        the final poll is at least 10s); a miss retries with ``clearly_unmet``.
+        prep can overlap the settle window. A recorded window diff polls
+        continuously after actions (early-exit on match; fail only at 2.0x of
+        settle, or 1.0x when settle is under 2s; ``appeared`` floors settle so
+        the deadline is at least 10s); a miss retries with ``clearly_unmet``.
 
         Screenshot/LLM vision verification is not used. Actor failure without a
         window miss fails the step with no image-based recovery. Single-script and
@@ -1610,8 +1625,8 @@ class BrainModule:
             settle_after = None
             if step_succeeded:
                 settle_after = self._current_settle_after_seconds()
-            # Window verify polls settle at 1.0x/1.5x/2.0x when present; otherwise
-            # defer the recording gap until the next step's first tool.
+            # Window verify polls continuously when present; otherwise defer the
+            # recording gap until the next step's first tool.
             run_window_verify = step_succeeded and bool(window_verify)
             window_poll_settle = (
                 self._window_verify_poll_settle(settle_after, window_verify)

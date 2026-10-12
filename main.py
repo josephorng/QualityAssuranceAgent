@@ -285,9 +285,13 @@ def run_coordinator_sync(*, smart_mode: bool = False) -> None:
                 _coordinator_loop = None
                 _coordinator_main_task = None
 
+    from cua_mcp import hand_tools
+
+    hand_tools.backup_clipboard()
     try:
         asyncio.run(_main())
     finally:
+        hand_tools.restore_clipboard()
         if os.environ.get("CUA_WRITE_SESSION_REPORT") == "1":
             from src.common.run_state import get_run_state_manager
             from src.common.session_report import write_session_report

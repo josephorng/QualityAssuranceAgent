@@ -145,31 +145,51 @@ def _safe_clipboard_text() -> str | None:
         return None
 
 
+# Text clipboard captured at run start; restored when the run ends.
+# None means unread or non-restorable. Cleared after restore.
+_clipboard_backup: str | None = None
+_clipboard_backup_set: bool = False
+
+
+def backup_clipboard() -> dict[str, Any]:
+    """Capture current clipboard text for restore at run end."""
+    global _clipboard_backup, _clipboard_backup_set
+    _clipboard_backup = _safe_clipboard_text()
+    _clipboard_backup_set = True
+    return {"backed_up": _clipboard_backup is not None}
+
+
+def restore_clipboard() -> dict[str, Any]:
+    """Restore clipboard text captured by ``backup_clipboard``, then clear the backup."""
+    global _clipboard_backup, _clipboard_backup_set
+    restored = False
+    if _clipboard_backup_set and _clipboard_backup is not None:
+        try:
+            pyperclip.copy(_clipboard_backup)
+            restored = True
+        except Exception:
+            pass
+    _clipboard_backup = None
+    _clipboard_backup_set = False
+    return {"restored": restored}
+
+
 def type_text(
     text: str,
 ) -> dict[str, Any]:
     """Paste text via clipboard (Ctrl+V) at the current keyboard focus.
 
-    Does not move or click the mouse. Best-effort restores prior clipboard text
-    after pasting (non-text clipboard contents cannot be restored via pyperclip).
+    Does not move or click the mouse. Leaves the pasted text on the clipboard;
+    the run lifecycle restores a pre-run backup via ``restore_clipboard``.
     """
     text = _normalize_typed_text(text)
-    previous = _safe_clipboard_text()
-    try:
-        pyperclip.copy(text)
-        sleep(0.5)
-        pyautogui.hotkey("ctrl", "v")
-        sleep(0.05)
-    finally:
-        if previous is not None:
-            try:
-                pyperclip.copy(previous)
-            except Exception:
-                pass
+    pyperclip.copy(text)
+    sleep(0.5)
+    pyautogui.hotkey("ctrl", "v")
+    sleep(0.05)
     return {
         "text": text,
         "effective_mode": "paste",
-        "clipboard_restored": previous is not None,
     }
 
 

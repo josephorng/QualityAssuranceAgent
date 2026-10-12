@@ -1623,6 +1623,36 @@ def test_limit_appeared_to_windows_that_become_foreground() -> None:
     assert "appeared" not in limit_appeared_to_later_foreground(predicate, [])
 
 
+def test_limit_appeared_keeps_one_per_class_process_matching_foreground() -> None:
+    from src.recorder.window_snapshot import limit_appeared_to_later_foreground
+
+    net_ui = {
+        "class_name": "Net UI Tool Window",
+        "title": "",
+        "process_name": "WINWORD.EXE",
+    }
+    chrome = {
+        "class_name": "Chrome_WidgetWin_1",
+        "title": "Google Chrome",
+        "process_name": "chrome.exe",
+    }
+    predicate = {"appeared": [net_ui, dict(net_ui), chrome]}
+    foregrounds = [
+        {
+            "class_name": "Net UI Tool Window",
+            "title": "",
+            "process_name": "WINWORD.EXE",
+        },
+        {
+            "class_name": "Chrome_WidgetWin_1",
+            "title": "新分頁 - Google Chrome",
+            "process_name": "chrome.exe",
+        },
+    ]
+    limited = limit_appeared_to_later_foreground(predicate, foregrounds)
+    assert limited["appeared"] == [net_ui, chrome]
+
+
 def test_disappeared_dropped_when_same_window_is_in_next_before() -> None:
     from src.recorder.window_snapshot import limit_disappeared_absent_from_next_before
 

@@ -1405,21 +1405,32 @@ def limit_appeared_to_later_foreground(
 
     A window stays when this step's after-foreground, or any later step's
     foreground, has the same class name and executable name. Title is ignored.
+    When several appeared entries share that class and process and match the
+    same foreground identity, keep only the first — sibling Office chrome
+    (dropdown + one-line helper) must not require two live matches.
     """
     appeared = predicate.get("appeared")
     if not isinstance(appeared, list) or not appeared:
         return predicate
     from src.recorder.verify_signals import identity_matches_recorded
 
-    kept = [
-        item
-        for item in appeared
-        if isinstance(item, dict)
-        and any(
+    kept: list[dict[str, Any]] = []
+    seen_class_process: set[tuple[str, str]] = set()
+    for item in appeared:
+        if not isinstance(item, dict):
+            continue
+        if not any(
             isinstance(foreground, dict) and identity_matches_recorded(item, foreground)
             for foreground in foregrounds
-        )
-    ]
+        ):
+            continue
+        class_name = str(item.get("class_name") or "").strip()
+        process_name = str(item.get("process_name") or "").strip()
+        key = (class_name, process_name)
+        if key in seen_class_process:
+            continue
+        seen_class_process.add(key)
+        kept.append(item)
     if kept == appeared:
         return predicate
     trimmed = dict(predicate)

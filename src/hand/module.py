@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from mcp.types import TextContent
 
 from cua_mcp.tools import mcp_server
-from src.common.io_utils import append_csv_row
+from src.common.io_utils import append_csv_row, update_csv_last_row
 from src.common.models import ExecutionResult, ToolCommand
 from src.common.llm_factory import get_llm_client
 from src.common.prompting import get_prompt
@@ -20,16 +20,18 @@ from src.common.settings import load_settings
 if TYPE_CHECKING:
     from src.eye.module import EyeModule
 
-_AFTER_ACTION_SETTLE_S = 1.0
-_AFTER_MOVE_SETTLE_S = 0.15
-_MOVE_ACTIONS = frozenset({"move_mouse", "move_mouse_visual"})
-
-
-def _after_action_settle_s(action: str) -> float:
-    """Shorter post-move settle reduces hover tooltip dwell before screenshots."""
-    if action in _MOVE_ACTIONS:
-        return _AFTER_MOVE_SETTLE_S
-    return _AFTER_ACTION_SETTLE_S
+HAND_CSV_FIELDNAMES = [
+    "timestamp",
+    "action",
+    "args",
+    "ok",
+    "screenshot_name",
+    "screenshot_before_path",
+    "screenshot_after_path",
+    "message",
+    "focus_rect_after",
+    "foreground_rect_after",
+]
 
 
 def _parse_mcp_tool_result(tool_output: Any) -> dict[str, Any] | None:
@@ -197,19 +199,16 @@ class HandModule:
         action = cmd.action
         args = cmd.args
         screenshot_before_path = self._resolve_screenshot_path(cmd.screenshot_before_path)
+        # After-shots are deferred to Brain (last tool after verify / deferred settle).
+        # Keep only an explicitly provided after path from the command.
         screenshot_after_path = self._resolve_screenshot_path(cmd.screenshot_after_path)
         screenshot_path = screenshot_before_path or self._resolve_screenshot_path(cmd.screenshot_name)
 
         if screenshot_before_path is None:
             screenshot_before_path = await self._capture_report_screenshot("before-action")
 
-        settle_delay = _after_action_settle_s(action)
         try:
             tool_output = await mcp_server.call_tool(action, args)
-            if screenshot_after_path is None:
-                screenshot_after_path = await self._capture_report_screenshot(
-                    "after-action", settle_delay=settle_delay
-                )
             return ExecutionResult(
                 ok=True,
                 action=action,
@@ -218,8 +217,8 @@ class HandModule:
                 screenshot_name=screenshot_before_path,
                 screenshot_before_path=screenshot_before_path,
                 screenshot_after_path=screenshot_after_path,
-                focus_rect_after=_sample_debug_focus_rect_after(),
-                foreground_rect_after=_sample_debug_foreground_rect_after(),
+                focus_rect_after=None,
+                foreground_rect_after=None,
                 message=cmd.reason or "executed",
             )
         except Exception as exc:
@@ -230,11 +229,6 @@ class HandModule:
                     remapped_action, remapped_args = remapped
                     try:
                         tool_output = await mcp_server.call_tool(remapped_action, remapped_args)
-                        if screenshot_after_path is None:
-                            screenshot_after_path = await self._capture_report_screenshot(
-                                "after-action",
-                                settle_delay=_after_action_settle_s(remapped_action),
-                            )
                         return ExecutionResult(
                             ok=True,
                             action=remapped_action,
@@ -243,18 +237,14 @@ class HandModule:
                             screenshot_name=screenshot_before_path,
                             screenshot_before_path=screenshot_before_path,
                             screenshot_after_path=screenshot_after_path,
-                            focus_rect_after=_sample_debug_focus_rect_after(),
-                            foreground_rect_after=_sample_debug_foreground_rect_after(),
+                            focus_rect_after=None,
+                            foreground_rect_after=None,
                             message=f"{cmd.reason or 'executed'} (remapped from {action})",
                         )
                     except Exception as remap_exc:
                         error_message = (
                             f"{error_message}; remap retry failed with {remapped_action}: {remap_exc}"
                         )
-            if screenshot_after_path is None:
-                screenshot_after_path = await self._capture_report_screenshot(
-                    "after-action", settle_delay=settle_delay
-                )
             return ExecutionResult(
                 ok=False,
                 action=action,
@@ -263,45 +253,65 @@ class HandModule:
                 screenshot_name=screenshot_before_path,
                 screenshot_before_path=screenshot_before_path,
                 screenshot_after_path=screenshot_after_path,
-                focus_rect_after=_sample_debug_focus_rect_after(),
-                foreground_rect_after=_sample_debug_foreground_rect_after(),
+                focus_rect_after=None,
+                foreground_rect_after=None,
                 message=error_message,
             )
+
+    def _append_hand_csv_row(self, result: ExecutionResult) -> None:
+        paths = self.manager.require_paths()
+        append_csv_row(
+            paths.hand_csv,
+            fieldnames=HAND_CSV_FIELDNAMES,
+            row={
+                "timestamp": result.timestamp.isoformat(),
+                "action": result.action,
+                "args": result.args,
+                "ok": result.ok,
+                "screenshot_name": result.screenshot_name or "",
+                "screenshot_before_path": result.screenshot_before_path or "",
+                "screenshot_after_path": result.screenshot_after_path or "",
+                "message": result.message,
+                "focus_rect_after": _focus_rect_after_csv(result.focus_rect_after),
+                "foreground_rect_after": _focus_rect_after_csv(
+                    result.foreground_rect_after
+                ),
+            },
+        )
+
+    async def capture_after_for_last_action(self) -> dict[str, Any] | None:
+        """Capture after-screenshot + focus overlays for the last hand.csv row.
+
+        Called by Brain after verify / deferred settle so report frames show settled UI
+        without a fixed per-tool after-action sleep during tool execution.
+        """
+        async with self._lock:
+            screenshot_after_path = await self._capture_report_screenshot("after-action")
+            focus_rect_after = _sample_debug_focus_rect_after()
+            foreground_rect_after = _sample_debug_foreground_rect_after()
+            updates = {
+                "screenshot_after_path": screenshot_after_path or "",
+                "focus_rect_after": _focus_rect_after_csv(focus_rect_after),
+                "foreground_rect_after": _focus_rect_after_csv(foreground_rect_after),
+            }
+            paths = self.manager.require_paths()
+            if not update_csv_last_row(paths.hand_csv, updates):
+                self.manager.log_error(
+                    "capture_after_for_last_action: no hand.csv row to update"
+                )
+                return None
+            return {
+                "screenshot_after_path": screenshot_after_path,
+                "focus_rect_after": focus_rect_after,
+                "foreground_rect_after": foreground_rect_after,
+            }
 
     async def execute_tool_command(self, cmd: ToolCommand) -> ExecutionResult:
         async with self._lock:
             self._busy = True
-            result = await self._exec_action(cmd)
-            paths = self.manager.require_paths()
-            append_csv_row(
-                paths.hand_csv,
-                fieldnames=[
-                    "timestamp",
-                    "action",
-                    "args",
-                    "ok",
-                    "screenshot_name",
-                    "screenshot_before_path",
-                    "screenshot_after_path",
-                    "message",
-                    "focus_rect_after",
-                    "foreground_rect_after",
-                ],
-                row={
-                    "timestamp": result.timestamp.isoformat(),
-                    "action": result.action,
-                    "args": result.args,
-                    "ok": result.ok,
-                    "screenshot_name": result.screenshot_name or "",
-                    "screenshot_before_path": result.screenshot_before_path or "",
-                    "screenshot_after_path": result.screenshot_after_path or "",
-                    "message": result.message,
-                    "focus_rect_after": _focus_rect_after_csv(result.focus_rect_after),
-                    "foreground_rect_after": _focus_rect_after_csv(
-                        result.foreground_rect_after
-                    ),
-                },
-            )
-            self._busy = False
-            return result
-
+            try:
+                result = await self._exec_action(cmd)
+                self._append_hand_csv_row(result)
+                return result
+            finally:
+                self._busy = False

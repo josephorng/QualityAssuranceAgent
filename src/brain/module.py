@@ -179,6 +179,8 @@ class BrainModule:
         # deferred until the next step's first tool so prep can overlap the gap.
         self._pending_settle_deadline_perf: float | None = None
         self._step_deferred_settle_waited_seconds: float = 0.0
+        # Last-tool after-screenshot deferred until verify / deferred settle completes.
+        self._pending_after_capture: bool = False
         self._replay_press_point_window: dict[str, Any] | None = None
         self._step_transcript_counter = (
             self._resume_step_transcript_counter()
@@ -659,6 +661,24 @@ class BrainModule:
         prior = float(getattr(self, "_step_deferred_settle_waited_seconds", 0.0) or 0.0)
         self._step_deferred_settle_waited_seconds = prior + seconds
 
+    async def _flush_pending_after_capture(self) -> None:
+        """Capture the deferred last-tool after-screenshot when one is pending."""
+        if not getattr(self, "_pending_after_capture", False):
+            return
+        self._pending_after_capture = False
+        hand = getattr(self, "_hand", None)
+        if hand is None:
+            return
+        try:
+            await hand.capture_after_for_last_action()
+        except Exception as exc:
+            self.manager.log_error(
+                f"Failed to capture deferred after-action screenshot: {exc}"
+            )
+
+    def _mark_pending_after_capture(self) -> None:
+        self._pending_after_capture = True
+
     async def _await_pending_settle_before_tool(
         self,
         messages: list[dict[str, Any]] | None = None,
@@ -668,9 +688,12 @@ class BrainModule:
         When ``messages`` is provided and a wait occurs, append transcript markers so
         session timing/HTML can show the wait at the execution point (before tools).
         Returns the seconds actually slept (0 when already satisfied or no deadline).
+        Flushes a pending last-tool after-screenshot after the settle window (or
+        immediately when no deadline remains) so report frames show settled UI.
         """
         deadline = getattr(self, "_pending_settle_deadline_perf", None)
         if deadline is None:
+            await self._flush_pending_after_capture()
             return 0.0
         remaining = deadline - perf_counter()
         self._pending_settle_deadline_perf = None
@@ -679,6 +702,7 @@ class BrainModule:
                 "Deferred settle: already satisfied "
                 f"({abs(remaining):.3f}s past deadline) before next tool"
             )
+            await self._flush_pending_after_capture()
             return 0.0
 
         waited = round(float(remaining), 3)
@@ -711,6 +735,7 @@ class BrainModule:
                 )
             )
         self._record_step_deferred_settle_wait(waited)
+        await self._flush_pending_after_capture()
         return waited
 
     def prepare_runtime_step(self, command: str) -> None:
@@ -1117,6 +1142,7 @@ class BrainModule:
                         screenshot_before_path=before_screenshot,
                     )
                 )
+                self._mark_pending_after_capture()
                 self._remember_replay_press_point(result)
                 messages.append(
                     stamp_message(
@@ -1329,6 +1355,7 @@ class BrainModule:
                             screenshot_before_path=before_screenshot,
                         )
                     )
+                    self._mark_pending_after_capture()
                     self._remember_replay_press_point(result)
                     messages.append(
                         stamp_message(
@@ -1626,6 +1653,9 @@ class BrainModule:
         )
         started_iso = datetime.now(timezone.utc).isoformat()
         started_at = perf_counter()
+        # When True, leave last-tool after-shot pending until deferred settle completes
+        # (next tool gate or run_complete flush below).
+        defer_after_capture = False
         try:
             self._step_deferred_settle_waited_seconds = 0.0
             self._replay_press_point_window = None
@@ -1698,6 +1728,12 @@ class BrainModule:
                         "no screenshot verification recovery"
                     )
                 verify_result = None
+            if (
+                verify_result is not None
+                and verify_result.accomplished
+                and self._pending_settle_deadline_perf is not None
+            ):
+                defer_after_capture = True
             finished_iso = datetime.now(timezone.utc).isoformat()
             duration_seconds = round(perf_counter() - started_at, 3)
             self._step_transcript_counter += 1
@@ -1903,6 +1939,9 @@ class BrainModule:
                     step_index=script_step_index,
                 )
             run_complete = self._apply_verify_branch(verify_result)
+            if run_complete and defer_after_capture:
+                await self._await_pending_settle_before_tool()
+                defer_after_capture = False
             if verify_result.accomplished:
                 status = "completed"
             elif not step_succeeded:
@@ -1931,6 +1970,7 @@ class BrainModule:
                 step_index=script_step_index,
             )
         except asyncio.CancelledError:
+            defer_after_capture = False
             self._save_interrupted_step_record(
                 transcript_counter,
                 script_step_index,
@@ -1940,6 +1980,7 @@ class BrainModule:
             )
             raise
         except Exception as exc:
+            defer_after_capture = False
             reason = f"Script step {script_step_index + 1} failed: {exc}"
             self._save_interrupted_step_record(
                 transcript_counter,
@@ -1954,4 +1995,6 @@ class BrainModule:
                 step_index=script_step_index,
             )
         finally:
+            if not defer_after_capture:
+                await self._flush_pending_after_capture()
             self.manager.clear_step_log_context()

@@ -102,3 +102,32 @@ def append_csv_row(path: Path, fieldnames: list[str], row: dict[str, Any]) -> No
         if needs_header:
             writer.writeheader()
         writer.writerow(row)
+
+
+def update_csv_last_row(path: Path, updates: dict[str, Any]) -> bool:
+    """Patch columns on the last data row of a CSV. Returns True when a row was updated."""
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    with path.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames:
+            return False
+        fieldnames = list(reader.fieldnames)
+        rows = list(reader)
+    if not rows:
+        return False
+    last = dict(rows[-1])
+    changed = False
+    for key, value in updates.items():
+        if key not in fieldnames:
+            continue
+        last[key] = value
+        changed = True
+    if not changed:
+        return False
+    rows[-1] = last
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    return True

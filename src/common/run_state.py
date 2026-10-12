@@ -51,6 +51,92 @@ def unique_named_run_folder(base_name: str) -> str:
     return f"{cleaned}_{stamp}"
 
 
+def step_artifact_stem(transcript_counter: int, script_step_index: int) -> str:
+    """Filename stem for ``steps/``; memory indices are 0-based, disk names are 1-based."""
+    if transcript_counter < 0 or script_step_index < 0:
+        raise ValueError("step indices must be >= 0")
+    return f"{transcript_counter + 1}_{script_step_index + 1}"
+
+
+def step_artifact_name(
+    transcript_counter: int,
+    script_step_index: int,
+    *,
+    suffix: str = ".json",
+) -> str:
+    """Filename under ``steps/`` for one transcript (``.json`` / ``.log``)."""
+    return step_artifact_stem(transcript_counter, script_step_index) + suffix
+
+
+def _raw_step_artifact_indices(stem: str) -> tuple[int, int] | None:
+    if "_" not in stem:
+        return None
+    left, right = stem.split("_", 1)
+    try:
+        return int(left), int(right)
+    except ValueError:
+        return None
+
+
+def step_filenames_are_one_based(steps_dir: Path) -> bool:
+    """True when ``steps_dir`` uses 1-based names (no ``0`` component on disk).
+
+    Legacy runs always wrote a ``0`` in the first transcript and/or script index.
+    New runs never do. Empty directories default to the new 1-based scheme.
+    """
+    if not steps_dir.is_dir():
+        return True
+    for path in steps_dir.iterdir():
+        if path.suffix not in (".json", ".log"):
+            continue
+        raw = _raw_step_artifact_indices(path.stem)
+        if raw is None:
+            continue
+        left, right = raw
+        if left == 0 or right == 0:
+            return False
+    return True
+
+
+def parse_step_artifact_stem(
+    stem: str,
+    *,
+    one_based: bool | None = None,
+    steps_dir: Path | None = None,
+) -> tuple[int, int] | None:
+    """Parse a ``steps/`` stem into 0-based ``(transcript_counter, script_step_index)``."""
+    raw = _raw_step_artifact_indices(stem)
+    if raw is None:
+        return None
+    left, right = raw
+    if one_based is None:
+        if steps_dir is not None:
+            one_based = step_filenames_are_one_based(steps_dir)
+        else:
+            # Per-file fallback: a zero component means legacy 0-based encoding.
+            one_based = left != 0 and right != 0
+    if one_based:
+        if left < 1 or right < 1:
+            return None
+        return left - 1, right - 1
+    if left < 0 or right < 0:
+        return None
+    return left, right
+
+
+def parse_step_artifact_path(
+    path: Path,
+    *,
+    one_based: bool | None = None,
+) -> tuple[int, int] | None:
+    """Parse a ``steps/`` path into 0-based ``(transcript_counter, script_step_index)``."""
+    return parse_step_artifact_stem(
+        path.stem,
+        one_based=one_based,
+        steps_dir=None if one_based is not None else path.parent,
+    )
+
+
 _B64_BODY_CHARS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/= \t\r\n"
 )
@@ -186,7 +272,11 @@ class RunStateManager:
         return self.paths
 
     def set_step_log_context(self, transcript_counter: int, script_step_index: int) -> None:
-        """Also append subsequent ``log_info`` / ``log_error`` lines to ``steps/<tc>_<si>.log`` beside ``run.log``."""
+        """Also append subsequent ``log_info`` / ``log_error`` lines to ``steps/<tc>_<si>.log`` beside ``run.log``.
+
+        ``transcript_counter`` / ``script_step_index`` are 0-based in memory; the log
+        filename on disk is 1-based (``1_1.log`` for the first step).
+        """
         self._step_log = (transcript_counter, script_step_index)
 
     def clear_step_log_context(self) -> None:
@@ -216,7 +306,7 @@ class RunStateManager:
         append_text(paths.info_log, line + "\n")
         if self._step_log is not None:
             tc, si = self._step_log
-            step_log = paths.root / "steps" / f"{tc}_{si}.log"
+            step_log = paths.root / "steps" / step_artifact_name(tc, si, suffix=".log")
             append_text(step_log, line + "\n")
 
     def log_info(self, text: str) -> None:

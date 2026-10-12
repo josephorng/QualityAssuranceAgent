@@ -6,7 +6,7 @@ import pytest
 
 from cua_mcp import tools as cua_tools
 
-# Mirrors tool_calls in a windows_chrome_enter run step (e.g. steps/0_0.json).
+# Mirrors tool_calls in a windows_chrome_enter run step (e.g. steps/1_1.json).
 WINDOWS_CHROME_ENTER_TOOL_CALLS: list[dict[str, Any]] = [
     {
         "function": {

@@ -4,6 +4,7 @@ import csv
 import json
 from pathlib import Path
 
+from src.common.run_state import step_artifact_name
 from src.common.session_report import (
     build_session_report,
     should_write_session_report,
@@ -38,7 +39,7 @@ def _write_step(
         payload["step_timing"]["expected_outcome"] = expected_outcome
     if verify is not None:
         payload["step_timing"]["verify"] = verify
-    (steps_dir / f"{transcript_counter}_{script_step_index}.json").write_text(
+    (steps_dir / step_artifact_name(transcript_counter, script_step_index)).write_text(
         json.dumps(payload),
         encoding="utf-8",
     )
@@ -111,7 +112,7 @@ def test_build_session_report_aggregates_steps_tools_and_profile(tmp_path: Path)
         messages=[],
         status="completed",
     )
-    step_one_path = steps_dir / "1_0.json"
+    step_one_path = steps_dir / step_artifact_name(1, 0)
     step_one_payload = json.loads(step_one_path.read_text(encoding="utf-8"))
     step_one_payload["step_timing"].update(
         {
@@ -240,7 +241,7 @@ def test_build_session_report_splits_verify_llm_from_verification(tmp_path: Path
             },
         },
     }
-    (steps_dir / "0_0.json").write_text(json.dumps(payload), encoding="utf-8")
+    (steps_dir / step_artifact_name(0, 0)).write_text(json.dumps(payload), encoding="utf-8")
 
     report = build_session_report(run_root, session_end_reason="completed")
     step = report["steps"][0]
@@ -618,7 +619,7 @@ def test_timing_summary_attributes_settle_after_as_waiting(tmp_path: Path) -> No
             "settle_after_seconds": 3.0,
         },
     }
-    (steps_dir / "0_0.json").write_text(json.dumps(payload), encoding="utf-8")
+    (steps_dir / step_artifact_name(0, 0)).write_text(json.dumps(payload), encoding="utf-8")
 
     report = build_session_report(run_root, session_end_reason="completed")
     summary = report["steps"][0]["timing_summary"]
@@ -690,7 +691,7 @@ def test_timing_summary_attributes_deferred_settle_at_execution_point(
             "deferred_settle_waited_seconds": 6.0,
         },
     }
-    (steps_dir / "1_1.json").write_text(json.dumps(payload), encoding="utf-8")
+    (steps_dir / step_artifact_name(1, 1)).write_text(json.dumps(payload), encoding="utf-8")
 
     report = build_session_report(run_root, session_end_reason="completed")
     step = report["steps"][0]

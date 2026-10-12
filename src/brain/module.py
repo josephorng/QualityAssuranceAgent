@@ -40,7 +40,12 @@ from src.common.llm_text import strip_llm_quote_wrappers
 from src.common.nearby_side import enrich_tool_arguments_from_goal
 from src.common.prompting import get_prompt
 from src.common.run_control import notify_active_step, publish_script_steps
-from src.common.run_state import get_run_state_manager
+from src.common.run_state import (
+    get_run_state_manager,
+    parse_step_artifact_stem,
+    step_artifact_name,
+    step_filenames_are_one_based,
+)
 from src.common.runtime_context import (
     SCRIPT_BASELINE_AFTER_ENV,
     SCRIPT_LINES_ENV,
@@ -187,17 +192,15 @@ class BrainModule:
         steps_dir = self.manager.require_paths().root / "steps"
         if not steps_dir.is_dir():
             return 0
+        one_based = step_filenames_are_one_based(steps_dir)
         max_tc = -1
         for path in steps_dir.iterdir():
             if path.suffix not in (".json", ".log"):
                 continue
-            stem = path.stem
-            if "_" not in stem:
+            parsed = parse_step_artifact_stem(path.stem, one_based=one_based)
+            if parsed is None:
                 continue
-            try:
-                max_tc = max(max_tc, int(stem.split("_", 1)[0]))
-            except ValueError:
-                continue
+            max_tc = max(max_tc, parsed[0])
         return max_tc + 1
 
     def _script_step_attempt_number(self, script_step_index: int) -> int:
@@ -205,8 +208,14 @@ class BrainModule:
         steps_dir = self.manager.require_paths().root / "steps"
         if not steps_dir.is_dir():
             return 1
-        suffix = f"_{script_step_index}.json"
-        count = sum(1 for path in steps_dir.iterdir() if path.name.endswith(suffix))
+        one_based = step_filenames_are_one_based(steps_dir)
+        count = 0
+        for path in steps_dir.iterdir():
+            if path.suffix != ".json":
+                continue
+            parsed = parse_step_artifact_stem(path.stem, one_based=one_based)
+            if parsed is not None and parsed[1] == script_step_index:
+                count += 1
         return count + 1
 
     def _script_step_smart_recovery_count(self, script_step_index: int) -> int:
@@ -214,10 +223,13 @@ class BrainModule:
         steps_dir = self.manager.require_paths().root / "steps"
         if not steps_dir.is_dir():
             return 0
-        suffix = f"_{script_step_index}.json"
+        one_based = step_filenames_are_one_based(steps_dir)
         count = 0
         for path in steps_dir.iterdir():
-            if not path.name.endswith(suffix):
+            if path.suffix != ".json":
+                continue
+            parsed = parse_step_artifact_stem(path.stem, one_based=one_based)
+            if parsed is None or parsed[1] != script_step_index:
                 continue
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
@@ -240,10 +252,12 @@ class BrainModule:
         return self._script_step_attempt_number(script_step_index) >= max_attempts
 
     def _save_step_messages(self, messages: list[dict[str, Any]]) -> None:
-        """Save or update the decide-loop transcript under `steps/<n>.json`."""        
+        """Save or update the decide-loop transcript under `steps/<tc>_<si>.json` (1-based names)."""
         steps_dir = self.manager.require_paths().root / "steps"
         steps_dir.mkdir(parents=True, exist_ok=True)
-        out_path = steps_dir / f"{self._step_transcript_counter}_{self._script_step_index}.json"
+        out_path = steps_dir / step_artifact_name(
+            self._step_transcript_counter, self._script_step_index
+        )
         payload: dict[str, Any] = {}
         if out_path.exists():
             try:
@@ -264,7 +278,7 @@ class BrainModule:
         """Upsert `step_timing` metadata for one step transcript file."""
         steps_dir = self.manager.require_paths().root / "steps"
         steps_dir.mkdir(parents=True, exist_ok=True)
-        out_path = steps_dir / f"{transcript_counter}_{script_step_index}.json"
+        out_path = steps_dir / step_artifact_name(transcript_counter, script_step_index)
 
         payload: dict[str, Any] = {}
         existing_metadata: dict[str, Any] = {}
@@ -333,7 +347,7 @@ class BrainModule:
         """Append messages under `attribute_name` in a step transcript file."""
         steps_dir = self.manager.require_paths().root / "steps"
         steps_dir.mkdir(parents=True, exist_ok=True)
-        out_path = steps_dir / f"{transcript_counter}_{script_step_index}.json"
+        out_path = steps_dir / step_artifact_name(transcript_counter, script_step_index)
 
         merged_messages: list[dict[str, Any]] = []
         payload: dict[str, Any] = {}
@@ -365,7 +379,7 @@ class BrainModule:
         """Append a failed tool name to `failed_tool_calls` in a step transcript file."""
         steps_dir = self.manager.require_paths().root / "steps"
         steps_dir.mkdir(parents=True, exist_ok=True)
-        out_path = steps_dir / f"{transcript_counter}_{script_step_index}.json"
+        out_path = steps_dir / step_artifact_name(transcript_counter, script_step_index)
 
         payload: dict[str, Any] = {}
         failed_tool_calls: list[str] = []
@@ -777,7 +791,7 @@ class BrainModule:
         si = 0
         steps_dir = self.manager.require_paths().root / "steps"
         for ext in (".json", ".log"):
-            path = steps_dir / f"{tc}_{si}{ext}"
+            path = steps_dir / step_artifact_name(tc, si, suffix=ext)
             if path.exists():
                 path.unlink()
         self._step_transcript_counter = tc

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from src.common.io_utils import write_json
+from src.common.run_state import parse_step_artifact_stem, step_filenames_are_one_based
 from src.common.runtime_context import SCRIPT_PATH_ENV, SMART_GOAL_ENV, SMART_MODE_ENV
 
 _REPORT_VERSION = 1
@@ -49,17 +50,6 @@ def _duration_seconds(start: datetime | None, end: datetime | None) -> float | N
     return round(max(0.0, delta), 3)
 
 
-def _parse_step_filename(path: Path) -> tuple[int, int] | None:
-    stem = path.stem
-    if "_" not in stem:
-        return None
-    left, right = stem.split("_", 1)
-    try:
-        return int(left), int(right)
-    except ValueError:
-        return None
-
-
 def _load_runtime_goals(run_root: Path) -> list[str]:
     path = run_root / _RUNTIME_COMMANDS_NAME
     if not path.is_file():
@@ -71,9 +61,10 @@ def _load_step_files(run_root: Path) -> list[tuple[int, int, dict[str, Any]]]:
     steps_dir = run_root / "steps"
     if not steps_dir.is_dir():
         return []
+    one_based = step_filenames_are_one_based(steps_dir)
     loaded: list[tuple[int, int, dict[str, Any]]] = []
     for path in sorted(steps_dir.glob("*.json")):
-        key = _parse_step_filename(path)
+        key = parse_step_artifact_stem(path.stem, one_based=one_based)
         if key is None:
             continue
         try:

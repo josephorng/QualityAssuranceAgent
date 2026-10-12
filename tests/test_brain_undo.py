@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from src.brain.module import BrainModule, stamp_message
-from src.common.run_state import RunStateManager
+from src.common.run_state import RunStateManager, step_artifact_name
 
 
 def test_undo_last_runtime_step_removes_files_and_decrements_counter(tmp_path: Path) -> None:
@@ -18,14 +18,14 @@ def test_undo_last_runtime_step_removes_files_and_decrements_counter(tmp_path: P
 
     steps_dir = paths.root / "steps"
     steps_dir.mkdir(parents=True, exist_ok=True)
-    (steps_dir / "1_0.json").write_text("{}", encoding="utf-8")
-    (steps_dir / "1_0.log").write_text("log\n", encoding="utf-8")
+    (steps_dir / step_artifact_name(1, 0)).write_text("{}", encoding="utf-8")
+    (steps_dir / step_artifact_name(1, 0, suffix=".log")).write_text("log\n", encoding="utf-8")
 
     assert brain.undo_last_runtime_step() is True
     assert brain._step_transcript_counter == 1
     assert brain._script_step_index == 0
-    assert not (steps_dir / "1_0.json").exists()
-    assert not (steps_dir / "1_0.log").exists()
+    assert not (steps_dir / step_artifact_name(1, 0)).exists()
+    assert not (steps_dir / step_artifact_name(1, 0, suffix=".log")).exists()
 
 
 def test_resume_step_transcript_counter_continues_after_script_steps(tmp_path: Path) -> None:
@@ -33,9 +33,9 @@ def test_resume_step_transcript_counter_continues_after_script_steps(tmp_path: P
     paths = mgr.init_run("test", "test_run")
     steps_dir = paths.root / "steps"
     steps_dir.mkdir(parents=True, exist_ok=True)
-    (steps_dir / "0_0.json").write_text("{}", encoding="utf-8")
-    (steps_dir / "1_1.json").write_text("{}", encoding="utf-8")
-    (steps_dir / "2_2.json").write_text("{}", encoding="utf-8")
+    (steps_dir / step_artifact_name(0, 0)).write_text("{}", encoding="utf-8")
+    (steps_dir / step_artifact_name(1, 1)).write_text("{}", encoding="utf-8")
+    (steps_dir / step_artifact_name(2, 2)).write_text("{}", encoding="utf-8")
 
     brain = BrainModule.__new__(BrainModule)
     brain.manager = mgr
@@ -48,7 +48,7 @@ def test_append_failed_tool_call_records_tool_name(tmp_path: Path) -> None:
     paths = mgr.init_run("test", "test_run")
     steps_dir = paths.root / "steps"
     steps_dir.mkdir(parents=True, exist_ok=True)
-    step_path = steps_dir / "1_1.json"
+    step_path = steps_dir / step_artifact_name(1, 1)
     step_path.write_text(json.dumps({"messages": []}), encoding="utf-8")
 
     brain = BrainModule.__new__(BrainModule)
@@ -84,7 +84,7 @@ def test_append_step_messages_stamps_each_message(tmp_path: Path) -> None:
         script_step_index=0,
     )
 
-    payload = json.loads((steps_dir / "0_0.json").read_text(encoding="utf-8"))
+    payload = json.loads((steps_dir / step_artifact_name(0, 0)).read_text(encoding="utf-8"))
     assert "timestamp_utc" in payload["messages"][0]
 
 

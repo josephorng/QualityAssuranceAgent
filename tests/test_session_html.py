@@ -10,6 +10,7 @@ from PIL import Image
 
 from src.common import settings as settings_module
 from src.common.io_utils import imread_bgr
+from src.common.run_state import step_artifact_name
 from src.common.session_html import (
     _typed_text_candidates,
     recording_html_path,
@@ -128,7 +129,7 @@ def _write_step(
             "goal": goal,
         },
     }
-    (steps_dir / f"{transcript_counter}_{script_step_index}.json").write_text(
+    (steps_dir / step_artifact_name(transcript_counter, script_step_index)).write_text(
         json.dumps(payload),
         encoding="utf-8",
     )
@@ -376,7 +377,7 @@ def test_write_session_html_includes_verification_result(tmp_path: Path) -> None
         started_at="2026-06-11T06:00:00+00:00",
         finished_at="2026-06-11T06:00:10+00:00",
     )
-    step_path = run_root / "steps" / "0_0.json"
+    step_path = run_root / "steps" / step_artifact_name(0, 0)
     payload = json.loads(step_path.read_text(encoding="utf-8"))
     payload["step_timing"].update(
         {
@@ -445,7 +446,7 @@ def test_write_session_html_shows_baseline_and_live_verify_shots(tmp_path: Path)
         started_at="2026-06-11T06:00:00+00:00",
         finished_at="2026-06-11T06:00:10+00:00",
     )
-    step_path = run_root / "steps" / "0_0.json"
+    step_path = run_root / "steps" / step_artifact_name(0, 0)
     payload = json.loads(step_path.read_text(encoding="utf-8"))
     payload["verification"] = [
         {
@@ -909,7 +910,7 @@ def test_write_session_html_highlights_mismatched_verify_condition(tmp_path: Pat
             started_at=timestamp,
             finished_at=timestamp,
         )
-        step_path = run_root / "steps" / f"{index}_{index}.json"
+        step_path = run_root / "steps" / step_artifact_name(index, index)
         payload = json.loads(step_path.read_text(encoding="utf-8"))
         payload["step_timing"].update(
             {
@@ -1628,7 +1629,7 @@ def test_write_session_html_bakes_live_focus_rect_after_from_hand_csv(
         encoding="utf-8",
     )
     (run_root / "steps").mkdir()
-    (run_root / "steps" / "0_0.json").write_text(
+    (run_root / "steps" / step_artifact_name(0, 0)).write_text(
         json.dumps(
             {
                 "messages": [],
@@ -1767,7 +1768,7 @@ def test_write_session_html_bakes_focus_rect_on_matched_recording_shots(
         encoding="utf-8",
     )
     (run_root / "steps").mkdir()
-    (run_root / "steps" / "0_0.json").write_text(
+    (run_root / "steps" / step_artifact_name(0, 0)).write_text(
         json.dumps(
             {
                 "messages": [],
@@ -3292,7 +3293,7 @@ def test_write_session_html_includes_time_profile_tab(tmp_path: Path) -> None:
     run_root.mkdir()
     steps_dir = run_root / "steps"
     steps_dir.mkdir()
-    (steps_dir / "0_0.json").write_text(
+    (steps_dir / step_artifact_name(0, 0)).write_text(
         json.dumps(
             {
                 "messages": [
@@ -3368,7 +3369,7 @@ def test_write_session_html_renders_move_mouse_timing_details(tmp_path: Path) ->
     run_root.mkdir()
     steps_dir = run_root / "steps"
     steps_dir.mkdir()
-    (steps_dir / "0_0.json").write_text(
+    (steps_dir / step_artifact_name(0, 0)).write_text(
         json.dumps(
             {
                 "messages": [
@@ -3455,7 +3456,7 @@ def test_write_session_html_renders_drag_timing_details(tmp_path: Path) -> None:
     run_root.mkdir()
     steps_dir = run_root / "steps"
     steps_dir.mkdir()
-    (steps_dir / "0_0.json").write_text(
+    (steps_dir / step_artifact_name(0, 0)).write_text(
         json.dumps(
             {
                 "messages": [

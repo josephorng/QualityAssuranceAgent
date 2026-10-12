@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from src.common.run_state import parse_step_artifact_stem, step_filenames_are_one_based
 from src.common.script_helper import script_display_name
 from src.common.session_report import _resolve_script_metadata, _resolve_started_at_utc
 
@@ -4052,15 +4053,11 @@ def _load_step_verify_meta(run_root: Path) -> dict[tuple[int, int], dict[str, An
     steps_dir = run_root / "steps"
     if not steps_dir.is_dir():
         return {}
+    one_based = step_filenames_are_one_based(steps_dir)
     loaded: dict[tuple[int, int], dict[str, Any]] = {}
     for path in sorted(steps_dir.glob("*.json")):
-        stem = path.stem
-        if "_" not in stem:
-            continue
-        left, right = stem.split("_", 1)
-        try:
-            key = (int(left), int(right))
-        except ValueError:
+        key = parse_step_artifact_stem(path.stem, one_based=one_based)
+        if key is None:
             continue
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))

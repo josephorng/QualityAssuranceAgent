@@ -154,6 +154,10 @@ Word 另存對話裡點「向下 V 箭頭」時，Office 會同時開出兩個 `
 
 `abf5688` 拿掉每次貼上後的還原。`run_coordinator_sync` 在執行開始時 `backup_clipboard`，整次腳本／佇列項目／智能模式跑完（含失敗與使用者停止）再於 `finally` 裡 `restore_clipboard`。貼上期間剪貼簿維持剛輸入的文字，Word 晚讀也不會讀到上一份內容。非文字剪貼簿仍無法透過 pyperclip 還原，與先前相同。
 
+## 10 月 12 日：步驟檔改為 1-based 檔名
+
+`runs/.../steps/` 先前用 0-based 檔名（`0_0.json`、`14_14.json`），與錄製的 `event_001`／`analysis/event_001` 差一，除錯時要心算。現在磁碟檔名改為 1-based（第一步 `1_1.json`），記憶體內的 `transcript_counter`／`script_step_index` 仍是 0-based，只在讀寫邊界轉換。若資料夾裡仍看得到含 `0` 的舊檔名，讀取端會依整夾偵測並以舊規則解析，既有 run 不必改名。
+
 ## 10 月 12 日：拿掉截圖／LLM 視覺驗證
 
 9 月留下的重播驗證路徑有兩條會看螢幕：先把即時畫面與錄製事後基準圖交給模型做 baseline match，再依預期結果跑一輪復原（`goto`／`retry`／`skip`／`abort`／`smart`）。實際重播裡這條路徑不夠穩——時鐘、游標、焦點與主題噪音常被判成 mismatch，高信心假陰性又會拖進復原輪詢。

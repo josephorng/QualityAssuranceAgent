@@ -11,6 +11,7 @@ from src.brain.module import (
 )
 from src.common.models import ScriptStepVerifyResult
 from src.common.prompting import get_prompt
+from src.common.run_state import step_artifact_name
 from src.common.runtime_context import SKIP_VERIFICATION_ENV
 from src.recorder.window_snapshot import WindowInfo
 
@@ -690,8 +691,8 @@ async def test_process_step_stops_when_script_retry_limit_reached(
     brain = _brain_for_process_step(max_step_attempts=3)
     steps_dir = tmp_path / "steps"
     steps_dir.mkdir()
-    (steps_dir / "0_1.json").write_text("{}", encoding="utf-8")
-    (steps_dir / "1_1.json").write_text("{}", encoding="utf-8")
+    (steps_dir / step_artifact_name(0, 1)).write_text("{}", encoding="utf-8")
+    (steps_dir / step_artifact_name(1, 1)).write_text("{}", encoding="utf-8")
     brain.manager.require_paths.return_value.root = tmp_path
     flyout_gone = {
         "disappeared": [
@@ -727,7 +728,7 @@ async def test_process_step_allows_retry_below_script_limit(
     brain = _brain_for_process_step(max_step_attempts=3)
     steps_dir = tmp_path / "steps"
     steps_dir.mkdir()
-    (steps_dir / "0_1.json").write_text("{}", encoding="utf-8")
+    (steps_dir / step_artifact_name(0, 1)).write_text("{}", encoding="utf-8")
     brain.manager.require_paths.return_value.root = tmp_path
     flyout_gone = {
         "disappeared": [

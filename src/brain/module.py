@@ -16,7 +16,6 @@ from cua_mcp.select_mouse_target import (
 )
 from cua_mcp.tools import (
     TOOL_FUNCTIONS,
-    VERIFICATION_TOOLS,
     get_mode_tool_functions,
     mcp_server,
 )
@@ -70,46 +69,7 @@ from src.recorder.window_snapshot import (
     window_verify_satisfied,
 )
 
-SCRIPT_STEP_VERIFY_JSON_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "accomplished": {"type": "boolean"},
-        "branch": {
-            "type": "string",
-            "enum": ["advance", "retry", "skip", "goto", "abort", "smart"],
-        },
-        "target_step": {"type": ["integer", "null"]},
-        "clearly_unmet": {"type": "boolean"},
-        "reason": {"type": "string"},
-    },
-    "required": ["accomplished", "branch", "clearly_unmet", "reason"],
-}
-
-BASELINE_MATCH_JSON_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "match": {"type": "boolean"},
-        "confidence": {"type": "string", "enum": ["high", "low"]},
-        "reason": {"type": "string"},
-    },
-    "required": ["match", "confidence", "reason"],
-}
-
-
-@dataclass(frozen=True)
-class BaselineMatchDecision:
-    """Round-1 live vs recorded after-frame comparison."""
-
-    match: bool
-    confidence: Literal["high", "low"] = "low"
-    reason: str = ""
-
-    def treats_as_match(self) -> bool:
-        """Advance without recovery unless mismatch is high-confidence."""
-        return self.match or self.confidence != "high"
-
-
-# After actor success with a settle gap and baseline: verify at these multiples of the gap.
+# Window-verify settle polls at these multiples of the gap.
 # Gaps under ``_SETTLE_POLL_MULTI_MIN_SECONDS`` only poll once at 1.0x.
 _SETTLE_BASELINE_POLL_MULTIPLIERS: tuple[float, ...] = (1.0, 1.5, 2.0)
 _SETTLE_POLL_MULTI_MIN_SECONDS = 2.0
@@ -166,7 +126,7 @@ class BrainStepResult:
 
 
 class BrainModule:
-    """Orchestrates scripted tasks: vision + LLM tool loop, then vision verification and script branching."""
+    """Orchestrates scripted tasks: vision + LLM tool loop, then window/signal verification and script branching."""
 
     def __init__(
         self,
@@ -210,8 +170,8 @@ class BrainModule:
         self._script_event_indices: list[int | None] = []
         self._hand = hand
         self._eye = eye
-        # When vision verify is skipped, settle is deferred until the next step's
-        # first tool so prep work can overlap the recording settle window.
+        # When post-step verify does not own settle (no window-verify poll), settle is
+        # deferred until the next step's first tool so prep can overlap the gap.
         self._pending_settle_deadline_perf: float | None = None
         self._step_deferred_settle_waited_seconds: float = 0.0
         self._replay_press_point_window: dict[str, Any] | None = None
@@ -739,20 +699,6 @@ class BrainModule:
         self._record_step_deferred_settle_wait(waited)
         return waited
 
-    def _format_numbered_script(self) -> str:
-        """Numbered script lines with each step's recorded expected outcome."""
-        lines: list[str] = []
-        for index, line in enumerate(self.script_lines, start=1):
-            outcome: str | None = None
-            if index - 1 < len(self.script_expected_outcomes):
-                outcome = self.script_expected_outcomes[index - 1]
-            if isinstance(outcome, str) and outcome.strip():
-                outcome_text = outcome.strip()
-            else:
-                outcome_text = "(none)"
-            lines.append(f"{index}. {line}  | expected: {outcome_text}")
-        return "\n".join(lines)
-
     def prepare_runtime_step(self, command: str) -> None:
         """Set a single script line for the next `process_step()` (runtime command mode)."""
         cleaned = command.strip()
@@ -973,129 +919,6 @@ class BrainModule:
         return {"status": status_match.group(1), "reason": reason}
 
     @staticmethod
-    def _recover_verify_result_payload(content: str) -> dict[str, Any] | None:
-        """Best-effort extract of verify fields when model JSON is malformed."""
-        text = repair_json_object_text(content) or extract_json_object_string(content)
-        accomplished_match = re.search(r'"accomplished"\s*:\s*(true|false)', text, re.IGNORECASE)
-        branch_match = re.search(
-            r'"branch"\s*:\s*"(advance|retry|skip|goto|abort|smart)"',
-            text,
-            re.IGNORECASE,
-        )
-        if not accomplished_match or not branch_match:
-            return None
-        clearly_match = re.search(r'"clearly_unmet"\s*:\s*(true|false)', text, re.IGNORECASE)
-        target_match = re.search(r'"target_step"\s*:\s*(null|\d+)', text, re.IGNORECASE)
-        reason = ""
-        reason_match = re.search(r'"reason"\s*:\s*"(.*)"\s*[,}\]]\s*$', text, re.DOTALL)
-        if reason_match:
-            reason = reason_match.group(1)
-        else:
-            reason_match = re.search(r'"reason"\s*:\s*"(.*)', text, re.DOTALL)
-            if reason_match:
-                reason = reason_match.group(1).rstrip().rstrip('"}]')
-        target_raw = target_match.group(1) if target_match else None
-        target_step = None if target_raw is None or target_raw.lower() == "null" else int(target_raw)
-        return {
-            "accomplished": accomplished_match.group(1).lower() == "true",
-            "branch": branch_match.group(1).lower(),
-            "clearly_unmet": (
-                clearly_match.group(1).lower() == "true" if clearly_match else False
-            ),
-            "target_step": target_step,
-            "reason": reason,
-        }
-
-    @staticmethod
-    def _recover_baseline_match_payload(content: str) -> dict[str, Any] | None:
-        """Best-effort extract of baseline match fields when model JSON is malformed."""
-        text = repair_json_object_text(content) or extract_json_object_string(content)
-        match_match = re.search(r'"match"\s*:\s*(true|false)', text, re.IGNORECASE)
-        if not match_match:
-            return None
-        confidence_match = re.search(
-            r'"confidence"\s*:\s*"(high|low)"',
-            text,
-            re.IGNORECASE,
-        )
-        reason = ""
-        reason_match = re.search(r'"reason"\s*:\s*"(.*)"\s*[,}\]]\s*$', text, re.DOTALL)
-        if reason_match:
-            reason = reason_match.group(1)
-        else:
-            reason_match = re.search(r'"reason"\s*:\s*"(.*)', text, re.DOTALL)
-            if reason_match:
-                reason = reason_match.group(1).rstrip().rstrip('"}]')
-        # Missing confidence on mismatch defaults to low so caret/focus nits do not force recovery.
-        confidence = (
-            confidence_match.group(1).lower() if confidence_match else "low"
-        )
-        return {
-            "match": match_match.group(1).lower() == "true",
-            "confidence": confidence,
-            "reason": reason,
-        }
-
-    def _parse_verify_result_from_content(self, content: str) -> ScriptStepVerifyResult | None:
-        """Parse verify JSON, falling back to schema scrape on malformed output."""
-        try:
-            payload = self._parse_json_object_from_model_content(content)
-            return ScriptStepVerifyResult.model_validate(payload)
-        except (json.JSONDecodeError, ValueError, ValidationError, TypeError) as e:
-            recovered = self._recover_verify_result_payload(content)
-            if recovered is not None:
-                try:
-                    result = ScriptStepVerifyResult.model_validate(recovered)
-                    self.manager.log_info(
-                        "Verify JSON was malformed; recovered fields via fallback parser"
-                    )
-                    return result
-                except (ValidationError, TypeError, ValueError):
-                    pass
-            self.manager.log_error(f"Verify step JSON parse/validation failed: {e}")
-            return None
-
-    def _parse_baseline_match_from_content(self, content: str) -> BaselineMatchDecision | None:
-        """Parse baseline-match JSON, falling back to schema scrape on malformed output."""
-        try:
-            payload = self._parse_json_object_from_model_content(content)
-            if not isinstance(payload, dict) or "match" not in payload:
-                raise ValueError("baseline match reply missing match")
-            match_value = payload.get("match")
-            if not isinstance(match_value, bool):
-                raise ValueError("baseline match must be bool")
-            confidence_raw = payload.get("confidence", "low")
-            if isinstance(confidence_raw, str):
-                confidence_norm = confidence_raw.strip().lower()
-            else:
-                confidence_norm = "low"
-            if confidence_norm not in ("high", "low"):
-                confidence_norm = "low"
-            reason_value = payload.get("reason", "")
-            reason = reason_value.strip() if isinstance(reason_value, str) else ""
-            return BaselineMatchDecision(
-                match=match_value,
-                confidence=confidence_norm,  # type: ignore[arg-type]
-                reason=reason,
-            )
-        except (json.JSONDecodeError, ValueError, ValidationError, TypeError) as e:
-            recovered = self._recover_baseline_match_payload(content)
-            if recovered is not None:
-                self.manager.log_info(
-                    "Baseline match JSON was malformed; recovered fields via fallback parser"
-                )
-                confidence = str(recovered.get("confidence") or "low").lower()
-                if confidence not in ("high", "low"):
-                    confidence = "low"
-                return BaselineMatchDecision(
-                    match=bool(recovered["match"]),
-                    confidence=confidence,  # type: ignore[arg-type]
-                    reason=str(recovered.get("reason") or ""),
-                )
-            self.manager.log_error(f"Baseline match JSON parse/validation failed: {e}")
-            return None
-
-    @staticmethod
     def _is_pseudo_end_tool_name(tool_name: str | None) -> bool:
         """True for invented end-of-step tool names (not registered MCP tools)."""
         if not tool_name:
@@ -1216,402 +1039,6 @@ class BrainModule:
             f"reason={result.reason}"
         )
         return run_complete
-
-    def _coerce_verify_result_for_actor_success(
-        self,
-        result: ScriptStepVerifyResult,
-        *,
-        actor_succeeded: bool,
-    ) -> ScriptStepVerifyResult:
-        """Prefer advance after actor success unless the outcome is clearly unmet.
-
-        Flaky ``retry`` answers (uncertain / not clearly_unmet) become advance so a
-        successful tool loop is not undone by a weak vision false negative. ``goto`` /
-        ``skip`` and clearly unmet retries are left unchanged. ``abort`` / ``smart`` after
-        actor success are coerced to advance unless clearly unmet (then left unchanged).
-        """
-        if not actor_succeeded:
-            return result
-        if result.branch in ("abort", "smart"):
-            if result.clearly_unmet:
-                return result
-            self.manager.log_info(
-                f"Verify: actor succeeded; coercing {result.branch} to advance "
-                f"(clearly_unmet=false). {result.reason}"
-            )
-            return ScriptStepVerifyResult(
-                accomplished=True,
-                branch="advance",
-                target_step=None,
-                clearly_unmet=False,
-                reason=(
-                    "Actor succeeded; outcome not clearly unmet. "
-                    f"Original {result.branch}: {result.reason}"
-                ),
-            )
-        if result.accomplished:
-            if result.branch != "advance":
-                return result.model_copy(update={"branch": "advance", "target_step": None})
-            return result
-        if result.branch == "retry" and not result.clearly_unmet:
-            self.manager.log_info(
-                "Verify: actor succeeded; coercing ambiguous retry to advance "
-                f"(clearly_unmet=false). {result.reason}"
-            )
-            return ScriptStepVerifyResult(
-                accomplished=True,
-                branch="advance",
-                target_step=None,
-                clearly_unmet=False,
-                reason=(
-                    "Actor succeeded; outcome not clearly unmet. "
-                    f"Original: {result.reason}"
-                ),
-            )
-        return result
-
-    async def _verify_script_step(
-        self,
-        transcript_counter: int,
-        script_step_index: int,
-        *,
-        actor_succeeded: bool,
-        settle_after: float | None = None,
-    ) -> ScriptStepVerifyResult | None:
-        """Capture a fresh screenshot and verify via a two-round LLM flow when a baseline exists.
-
-        Round 1 (baseline attached): compare live vs recorded after-frame only. Advance on
-        match, or on mismatch with confidence low. Only high-confidence mismatches continue
-        to recovery. Without a baseline: single recovery/outcome verify call (existing path).
-
-        When ``settle_after`` is set with a baseline and actor success, poll baseline match
-        at 1.0x / 1.5x / 2.0x of that gap (1.0x only when the gap is under 2s). Recovery
-        runs only after the final poll still mismatches.
-        """
-        if self._eye is None:
-            raise RuntimeError("BrainModule requires eye=EyeModule(...) for step verification")
-
-        baseline_path = self._current_baseline_after_path()
-        transcript_messages: list[dict[str, Any]] = []
-        baseline_precheck = "(none)"
-        verification_image_paths: list[str] = []
-
-        poll_settle = (
-            bool(baseline_path)
-            and actor_succeeded
-            and settle_after is not None
-            and settle_after > 0
-        )
-
-        if baseline_path:
-            match_decision: BaselineMatchDecision | None = None
-            if poll_settle:
-                assert settle_after is not None
-                multipliers = (
-                    _SETTLE_BASELINE_POLL_MULTIPLIERS
-                    if settle_after >= _SETTLE_POLL_MULTI_MIN_SECONDS
-                    else (1.0,)
-                )
-                elapsed = 0.0
-                for attempt_index, mult in enumerate(multipliers):
-                    target = settle_after * mult
-                    delay = max(0.0, target - elapsed)
-                    if delay > 0:
-                        self.manager.log_info(
-                            f"Script step {script_step_index + 1} settling "
-                            f"{delay:.3f}s to {mult:.1f}x gap ({target:.3f}s) "
-                            f"before baseline verify "
-                            f"({attempt_index + 1}/{len(multipliers)})"
-                        )
-                        await asyncio.sleep(delay)
-                        elapsed = target
-                    live_image_paths = list(await self._eye.capture_separated_images())
-                    verification_image_paths = [
-                        *live_image_paths[:1],
-                        baseline_path,
-                    ]
-                    match_decision, match_messages = await self._verify_baseline_match_round(
-                        verification_image_paths
-                    )
-                    transcript_messages.extend(match_messages)
-                    if match_decision is not None and match_decision.treats_as_match():
-                        return self._baseline_match_advance_result(
-                            match_decision,
-                            transcript_messages,
-                            transcript_counter,
-                            script_step_index,
-                        )
-                    is_last = attempt_index + 1 >= len(multipliers)
-                    if not is_last:
-                        if match_decision is None:
-                            self.manager.log_info(
-                                f"Verify baseline match unparseable at {mult:.1f}x; "
-                                "waiting for next settle poll"
-                            )
-                        else:
-                            mismatch_reason = (
-                                match_decision.reason.strip()
-                                or "Live UI differs from recorded after-frame."
-                            )
-                            self.manager.log_info(
-                                "Verify baseline match: false confidence="
-                                f"{match_decision.confidence} at {mult:.1f}x; "
-                                f"waiting for next settle poll. {mismatch_reason}"
-                            )
-            else:
-                live_image_paths = list(await self._eye.capture_separated_images())
-                verification_image_paths = [
-                    *live_image_paths[:1],
-                    baseline_path,
-                ]
-                match_decision, match_messages = await self._verify_baseline_match_round(
-                    verification_image_paths
-                )
-                transcript_messages.extend(match_messages)
-                if match_decision is not None and match_decision.treats_as_match():
-                    return self._baseline_match_advance_result(
-                        match_decision,
-                        transcript_messages,
-                        transcript_counter,
-                        script_step_index,
-                    )
-
-            if match_decision is None:
-                baseline_precheck = (
-                    "mismatch: baseline match round returned no parseable result; "
-                    "treat as not matching and decide recovery"
-                )
-                self.manager.log_info(
-                    "Verify baseline match unparseable; proceeding to recovery round"
-                )
-            else:
-                mismatch_reason = (
-                    match_decision.reason.strip() or "Live UI differs from recorded after-frame."
-                )
-                baseline_precheck = (
-                    f"mismatch (confidence={match_decision.confidence}): {mismatch_reason}"
-                )
-                self.manager.log_info(
-                    "Verify baseline match: false confidence="
-                    f"{match_decision.confidence}; proceeding to recovery. {mismatch_reason}"
-                )
-            if not verification_image_paths:
-                live_image_paths = list(await self._eye.capture_separated_images())
-                verification_image_paths = [
-                    *live_image_paths[:1],
-                    baseline_path,
-                ]
-        else:
-            live_image_paths = list(await self._eye.capture_separated_images())
-            verification_image_paths = list(live_image_paths)
-
-        recovery_result, recovery_messages = await self._verify_script_recovery_round(
-            verification_image_paths,
-            actor_succeeded=actor_succeeded,
-            baseline_attached=bool(baseline_path),
-            baseline_precheck=baseline_precheck,
-        )
-        transcript_messages.extend(recovery_messages)
-        self._append_step_messages(
-            transcript_messages,
-            transcript_counter,
-            script_step_index,
-            attribute_name="verification",
-        )
-        return recovery_result
-
-    def _baseline_match_advance_result(
-        self,
-        match_decision: BaselineMatchDecision,
-        transcript_messages: list[dict[str, Any]],
-        transcript_counter: int,
-        script_step_index: int,
-    ) -> ScriptStepVerifyResult:
-        """Persist baseline-match transcript and return an advance verify result."""
-        self._append_step_messages(
-            transcript_messages,
-            transcript_counter,
-            script_step_index,
-            attribute_name="verification",
-        )
-        if match_decision.match:
-            reason = (
-                match_decision.reason.strip()
-                or "Live UI matches recorded after-frame."
-            )
-            self.manager.log_info(f"Verify baseline match: true; advancing. {reason}")
-        else:
-            reason = (
-                match_decision.reason.strip()
-                or "Baseline mismatch not high-confidence; treating as match."
-            )
-            self.manager.log_info(
-                "Verify baseline match: false with confidence="
-                f"{match_decision.confidence}; advancing without recovery. {reason}"
-            )
-        return ScriptStepVerifyResult(
-            accomplished=True,
-            branch="advance",
-            target_step=None,
-            clearly_unmet=False,
-            reason=reason,
-        )
-
-    async def _verify_baseline_match_round(
-        self,
-        image_paths: list[str],
-    ) -> tuple[BaselineMatchDecision | None, list[dict[str, Any]]]:
-        """Round 1: ask whether live matches the recorded after-frame."""
-        body = (
-            f"{get_prompt('brain_verify_baseline_match')}\n\n"
-            "Two images are attached in order:\n"
-            "1) Live current UI (after the actor finished this step).\n"
-            "2) Recorded success after-frame for this step from the original recording.\n"
-            "Respond with JSON only."
-        )
-        messages: list[dict[str, Any]] = [
-            stamp_message(
-                {
-                    "role": ROLE_USER,
-                    "content": body,
-                    "images": image_paths,
-                }
-            )
-        ]
-        response_message = await self.ollama.chat_messages(
-            self.settings.brain_lm,
-            messages=messages,
-            tools=[],
-            response_format=BASELINE_MATCH_JSON_SCHEMA,
-        )
-        if response_message:
-            messages.append(stamp_message(response_message.model_dump()))
-        if not response_message or not response_message.content:
-            self.manager.log_error("LLM baseline match returned empty content")
-            return None, messages
-
-        parsed = self._parse_baseline_match_from_content(response_message.content)
-        if parsed is not None:
-            return parsed, messages
-
-        self.manager.log_info(
-            "Baseline match JSON unparseable after local repair; requesting one rewrite"
-        )
-        repair_user = stamp_message(
-            {
-                "role": ROLE_USER,
-                "content": (
-                    "Your previous reply was not valid JSON. "
-                    "Reply with ONLY one valid JSON object (no markdown) with keys: "
-                    'match (bool), confidence ("high"|"low"), reason (string). '
-                    "Keep the same judgment; only fix the JSON syntax."
-                ),
-            }
-        )
-        messages.append(repair_user)
-        repair_message = await self.ollama.chat_messages(
-            self.settings.brain_lm,
-            messages=messages,
-            tools=[],
-            response_format=BASELINE_MATCH_JSON_SCHEMA,
-        )
-        if repair_message:
-            messages.append(stamp_message(repair_message.model_dump()))
-        if not repair_message or not repair_message.content:
-            self.manager.log_error("Baseline match JSON repair rewrite returned empty content")
-            return None, messages
-        return self._parse_baseline_match_from_content(repair_message.content), messages
-
-    async def _verify_script_recovery_round(
-        self,
-        image_paths: list[str],
-        *,
-        actor_succeeded: bool,
-        baseline_attached: bool,
-        baseline_precheck: str,
-    ) -> tuple[ScriptStepVerifyResult | None, list[dict[str, Any]]]:
-        """Round 2 (or sole round without baseline): outcome / recovery decision."""
-        prompt = get_prompt("brain_verify_script_step").format(
-            expected_outcome=self._current_expected_outcome() or "(none)",
-            actor_succeeded="true" if actor_succeeded else "false",
-            baseline_attached="true" if baseline_attached else "false",
-            baseline_precheck=baseline_precheck,
-        )
-        numbered = self._format_numbered_script()
-        current_1based = min(self._script_step_index + 1, len(self.script_lines))
-        goal = self._current_goal()
-        if baseline_attached:
-            image_guide = (
-                "Two images are attached in order:\n"
-                "1) Live current UI (after the actor finished this step).\n"
-                "2) Recorded success after-frame for this step from the original recording.\n"
-                "Use them as context for recovery; BaselinePrecheck already compared them.\n"
-            )
-        else:
-            image_guide = (
-                "All the monitor screenshot(s) are captured and will be provided to you.\n"
-            )
-        body = (
-            f"{prompt}\n\n"
-            f"NumberedScript:\n{numbered}\n\n"
-            f"CurrentStepNumber (1-based): {current_1based}\n"
-            f"CurrentStepGoal:\n{goal}\n\n"
-            f"{image_guide}"
-            "Respond with JSON only."
-        )
-        messages: list[dict[str, Any]] = [
-            stamp_message(
-                {
-                    "role": ROLE_USER,
-                    "content": body,
-                    "images": image_paths,
-                }
-            )
-        ]
-        response_message = await self.ollama.chat_messages(
-            self.settings.brain_lm,
-            messages=messages,
-            tools=VERIFICATION_TOOLS,
-            response_format=SCRIPT_STEP_VERIFY_JSON_SCHEMA,
-        )
-        if response_message:
-            messages.append(stamp_message(response_message.model_dump()))
-        if not response_message or not response_message.content:
-            self.manager.log_error("LLM verify step returned empty content")
-            return None, messages
-
-        parsed = self._parse_verify_result_from_content(response_message.content)
-        if parsed is not None:
-            return parsed, messages
-
-        self.manager.log_info(
-            "Verify JSON unparseable after local repair; requesting one rewrite"
-        )
-        repair_user = stamp_message(
-            {
-                "role": ROLE_USER,
-                "content": (
-                    "Your previous reply was not valid JSON. "
-                    "Reply with ONLY one valid JSON object (no markdown) with keys: "
-                    "accomplished (bool), branch (advance|retry|skip|goto|abort|smart), "
-                    "target_step (number|null), clearly_unmet (bool), reason (string). "
-                    "Keep the same judgment; only fix the JSON syntax."
-                ),
-            }
-        )
-        messages.append(repair_user)
-        repair_message = await self.ollama.chat_messages(
-            self.settings.brain_lm,
-            messages=messages,
-            tools=[],
-            response_format=SCRIPT_STEP_VERIFY_JSON_SCHEMA,
-        )
-        if repair_message:
-            messages.append(stamp_message(repair_message.model_dump()))
-        if not repair_message or not repair_message.content:
-            self.manager.log_error("Verify JSON repair rewrite returned empty content")
-            return None, messages
-        return self._parse_verify_result_from_content(repair_message.content), messages
 
     @staticmethod
     def _is_recorded_anchor_miss(result: ExecutionResult) -> bool:
@@ -1951,26 +1378,13 @@ class BrainModule:
 
         return step_succeeded
 
-    def _should_skip_vision_verify(self, step_succeeded: bool) -> bool:
-        """True when the actor succeeded and there is no recorded visual success criterion.
-
-        `step_succeeded` already means the model marked completed and every tool
-        that failed was later retried successfully (no unresolved `ok=false`).
-        A recording after-baseline counts as a visual criterion, so verify still runs.
-        """
-        return (
-            bool(step_succeeded)
-            and not self._current_expected_outcome()
-            and self._current_baseline_after_path() is None
-        )
-
     @staticmethod
     def _auto_advance_verify_result() -> ScriptStepVerifyResult:
         return ScriptStepVerifyResult(
             accomplished=True,
             branch="advance",
             target_step=None,
-            reason="Actor completed the step with all tools ok; no recorded expected outcome.",
+            reason="Actor completed the step with all tools ok; no window verify required.",
         )
 
     def _remember_replay_press_point(self, result: ExecutionResult) -> None:
@@ -2133,30 +1547,22 @@ class BrainModule:
         }
 
     async def process_step(self) -> BrainStepResult:
-        """Run one script step: tool loop, then verification and index branching.
+        """Run one script step: tool loop, then window/signal verification and branching.
 
-        Happy path: empty expected outcome, no recording after-baseline, no window
-        diff, and actor success (all tools ok) auto-advances without a screenshot or
-        verifier LLM. In that case any recording ``settle_after`` is deferred until
-        the next step's first tool so next-step prep can overlap the settle window.
-        A recorded window diff polls at 1.0x/1.5x/2.0x of settle (fail only at
-        2.0x; ``appeared`` floors settle so the final poll is at least 10s); a
-        miss retries with ``clearly_unmet`` and does not run vision.
+        Happy path: no recorded window/signal assert and actor success (all tools ok)
+        auto-advances without a screenshot or verifier LLM. Any recording
+        ``settle_after`` is deferred until the next step's first tool so next-step
+        prep can overlap the settle window. A recorded window diff polls at
+        1.0x/1.5x/2.0x of settle (fail only at 2.0x; ``appeared`` floors settle so
+        the final poll is at least 10s); a miss retries with ``clearly_unmet``.
 
-        Recovery path: actor failure, a recorded expected outcome, or a recording
-        after-baseline still uses screenshot verification for `goto`/`retry`/`skip`/
-        `abort`/`smart`. Single-script and queue runs can skip every check
-        (`CUA_SKIP_VERIFICATION`):
-        a successful actor advances, and a failed actor stops the step without a
-        verifier call. Expected-outcome verify (no baseline) sleeps settle first;
-        with a baseline, verify polls at 1.0x/1.5x/2.0x of settle. Branch `smart` runs
-        a bounded nested Plan→Act→Verify recovery, then retries the same script line on
-        success (or stops the run on failure). After actor success, ambiguous verifier
-        retries (`clearly_unmet=false`) are coerced to advance to reduce flaky false
-        negatives. If verification JSON is still unparseable after local repair and one
-        rewrite, actor success soft-fails to advance instead of aborting the run. Verify
-        `branch=abort` stops the scripted run (`step_finished=False`).
-        Sets `run_complete` when the script is exhausted.
+        Screenshot/LLM vision verification is not used. Actor failure without a
+        window miss fails the step with no image-based recovery. Single-script and
+        queue runs can skip every check (``CUA_SKIP_VERIFICATION``): a successful
+        actor advances, and a failed actor stops the step. Branch ``smart`` (if
+        produced) still runs bounded nested Plan→Act→Verify recovery. Verify
+        ``branch=abort`` stops the scripted run (``step_finished=False``).
+        Sets ``run_complete`` when the script is exhausted.
         """
         # await self._validate_tool_functions_match_mcp()
 
@@ -2204,46 +1610,21 @@ class BrainModule:
             settle_after = None
             if step_succeeded:
                 settle_after = self._current_settle_after_seconds()
-            # With a baseline, settle sleeps happen inside verify polls (1.0x/1.5x/2.0x).
-            # With an expected outcome (no baseline), sleep the full gap before verify.
-            # When vision verify is skipped, defer settle until the next step's first tool.
-            # A recorded window diff polls settle inside window verify (same multiples).
-            poll_settle = (
-                step_succeeded
-                and settle_after is not None
-                and settle_after > 0
-                and self._current_baseline_after_path() is not None
-            )
-            if skip_verification:
-                # No verifier polls, so the recording gap is deferred like a step
-                # that has nothing to check.
-                poll_settle = False
-            skip_vision = self._should_skip_vision_verify(step_succeeded) or (
-                skip_verification and step_succeeded
-            )
+            # Window verify polls settle at 1.0x/1.5x/2.0x when present; otherwise
+            # defer the recording gap until the next step's first tool.
             run_window_verify = step_succeeded and bool(window_verify)
             window_poll_settle = (
                 self._window_verify_poll_settle(settle_after, window_verify)
                 if run_window_verify
                 else None
             )
-            if run_window_verify and window_poll_settle is not None:
-                # Window verify owns the settle sleeps (poll loop below).
-                poll_settle = False
-            elif (
+            if (
                 step_succeeded
                 and settle_after is not None
                 and settle_after > 0
-                and not poll_settle
+                and window_poll_settle is None
             ):
-                if skip_vision:
-                    self._schedule_deferred_settle(settle_after)
-                else:
-                    self.manager.log_info(
-                        f"Script step {script_step_index + 1} settling "
-                        f"{settle_after:.3f}s before verify"
-                    )
-                    await asyncio.sleep(settle_after)
+                self._schedule_deferred_settle(settle_after)
             window_miss: ScriptStepVerifyResult | None = None
             if run_window_verify:
                 if window_poll_settle is not None:
@@ -2259,7 +1640,7 @@ class BrainModule:
                     )
             if window_miss is not None:
                 verify_result = window_miss
-            elif skip_vision:
+            elif step_succeeded:
                 if skip_verification:
                     self.manager.log_info(
                         f"Script step {script_step_index + 1} skipping verification"
@@ -2272,47 +1653,22 @@ class BrainModule:
                     )
                 else:
                     self.manager.log_info(
-                        f"Script step {script_step_index + 1} skipping vision verification "
-                        "(empty expected outcome; no recording baseline; actor tools succeeded)"
+                        f"Script step {script_step_index + 1} auto-advancing "
+                        "(actor tools succeeded; no window verify miss)"
                     )
                     verify_result = self._auto_advance_verify_result()
-            elif skip_verification:
-                self.manager.log_info(
-                    f"Script step {script_step_index + 1} skipping verification; actor failed"
-                )
-                verify_result = None
             else:
-                if not step_succeeded:
+                if skip_verification:
+                    self.manager.log_info(
+                        f"Script step {script_step_index + 1} skipping verification; "
+                        "actor failed"
+                    )
+                else:
                     self.manager.log_info(
                         f"Script step {script_step_index + 1} actor failed; "
-                        "running verification for recovery"
+                        "no screenshot verification recovery"
                     )
-                verify_result = await self._verify_script_step(
-                    transcript_counter,
-                    script_step_index,
-                    actor_succeeded=step_succeeded,
-                    settle_after=settle_after if poll_settle else None,
-                )
-                if verify_result is None and step_succeeded:
-                    self.manager.log_info(
-                        "Verify unavailable after actor success; soft-fail advancing "
-                        "(parse/empty response)"
-                    )
-                    verify_result = ScriptStepVerifyResult(
-                        accomplished=True,
-                        branch="advance",
-                        target_step=None,
-                        clearly_unmet=False,
-                        reason=(
-                            "Actor succeeded; verification JSON unparseable. "
-                            "Soft-fail advance."
-                        ),
-                    )
-                if verify_result is not None:
-                    verify_result = self._coerce_verify_result_for_actor_success(
-                        verify_result,
-                        actor_succeeded=step_succeeded,
-                    )
+                verify_result = None
             finished_iso = datetime.now(timezone.utc).isoformat()
             duration_seconds = round(perf_counter() - started_at, 3)
             self._step_transcript_counter += 1

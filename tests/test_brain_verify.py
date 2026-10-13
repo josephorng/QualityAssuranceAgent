@@ -7,6 +7,7 @@ import pytest
 from src.brain.module import (
     BrainModule,
     _APPEARED_POLL_MIN_SECONDS,
+    _DISAPPEARED_POLL_MIN_SECONDS,
     _WINDOW_VERIFY_POLL_INTERVAL_SECONDS,
 )
 from src.common.models import ScriptStepVerifyResult
@@ -287,6 +288,18 @@ def _appeared_word_verify() -> dict:
     }
 
 
+def _disappeared_flyout_verify() -> dict:
+    return {
+        "disappeared": [
+            {
+                "class_name": "Microsoft.UI.Content.PopupWindowSiteBridge",
+                "title": "快顯主機",
+                "process_name": "explorer.exe",
+            }
+        ]
+    }
+
+
 @pytest.mark.asyncio
 async def test_process_step_empty_window_verify_still_auto_advances(monkeypatch) -> None:
     brain = _brain_for_process_step()
@@ -312,21 +325,14 @@ async def test_process_step_window_verify_miss_retries_clearly_unmet(monkeypatch
     brain = _brain_for_process_step()
     brain.script_expected_outcomes = [None, None, None]
     brain.script_baseline_after_paths = [None, None, None]
-    flyout_gone = {
-        "disappeared": [
-            {
-                "class_name": "Microsoft.UI.Content.PopupWindowSiteBridge",
-                "title": "快顯主機",
-                "process_name": "explorer.exe",
-            }
-        ]
-    }
-    brain.script_window_verifies = [{}, flyout_gone, {}]
+    brain.script_window_verifies = [{}, _disappeared_flyout_verify(), {}]
     brain.loop = AsyncMock(return_value=True)
     monkeypatch.setattr(
         "src.brain.module.snapshot_top_level_windows",
         lambda: [_flyout_window()],
     )
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
 
     def _signals_must_not_run(*_args: object, **_kwargs: object) -> dict[str, object]:
         raise AssertionError("signal snapshot is not used for a window-list predicate")
@@ -340,6 +346,8 @@ async def test_process_step_window_verify_miss_retries_clearly_unmet(monkeypatch
 
     assert result.step_finished is True
     assert brain._script_step_index == 1
+    expected_sleeps = _expected_poll_sleeps(_disappeared_poll_deadline_seconds())
+    assert sleep_mock.await_count == len(expected_sleeps)
     metadata = brain._update_step_metadata.call_args.args[2]
     assert metadata["status"] == "verify_failed"
     assert metadata["verify"]["branch"] == "retry"
@@ -413,6 +421,11 @@ async def test_process_step_clipboard_miss_retries_clearly_unmet(monkeypatch) ->
 def _appeared_poll_deadline_seconds() -> float:
     """Appeared floor (5s) uses the 2.0x continuous-poll deadline (10s)."""
     return float(_APPEARED_POLL_MIN_SECONDS) * 2.0
+
+
+def _disappeared_poll_deadline_seconds() -> float:
+    """Disappeared floor (1s) is under the 2s multi threshold → 1.0x deadline."""
+    return float(_DISAPPEARED_POLL_MIN_SECONDS)
 
 
 def _expected_poll_sleeps(deadline: float) -> list[float]:
@@ -535,6 +548,83 @@ async def test_process_step_appeared_without_settle_uses_poll_floor(
     metadata = brain._update_step_metadata.call_args.args[2]
     assert metadata["verify"]["branch"] == "retry"
     assert "appeared" in metadata["verify"]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_process_step_disappeared_without_settle_uses_poll_floor(
+    monkeypatch,
+) -> None:
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = [None, None, None]
+    brain.script_baseline_after_paths = [None, None, None]
+    brain.script_settle_after_seconds = [None, None, None]
+    brain.script_window_verifies = [{}, _disappeared_flyout_verify(), {}]
+    brain.loop = AsyncMock(return_value=True)
+
+    snapshots = [
+        [_flyout_window()],  # before
+        [_flyout_window()],  # first poll miss (still present)
+        [],  # second poll pass (gone)
+    ]
+
+    def _next_snapshot() -> list[WindowInfo]:
+        assert snapshots
+        return snapshots.pop(0)
+
+    monkeypatch.setattr(
+        "src.brain.module.snapshot_top_level_windows",
+        _next_snapshot,
+    )
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 2
+    # Early exit after one 0.1s interval — not the full 1s budget.
+    assert sleep_mock.await_count == 1
+    assert sleep_mock.await_args_list[0].args[0] == pytest.approx(
+        _WINDOW_VERIFY_POLL_INTERVAL_SECONDS
+    )
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "completed"
+    assert metadata["verify"]["branch"] == "advance"
+
+
+@pytest.mark.asyncio
+async def test_process_step_disappeared_without_settle_fails_at_poll_deadline(
+    monkeypatch,
+) -> None:
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = [None, None, None]
+    brain.script_baseline_after_paths = [None, None, None]
+    brain.script_settle_after_seconds = [None, None, None]
+    brain.script_window_verifies = [{}, _disappeared_flyout_verify(), {}]
+    brain.loop = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "src.brain.module.snapshot_top_level_windows",
+        lambda: [_flyout_window()],
+    )
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 1
+    # Floor is 1.0s → continuous polls until 1.0s deadline (1.0x under multi min).
+    expected_sleeps = _expected_poll_sleeps(_disappeared_poll_deadline_seconds())
+    assert sleep_mock.await_count == len(expected_sleeps)
+    assert [call.args[0] for call in sleep_mock.await_args_list] == pytest.approx(
+        expected_sleeps
+    )
+    assert sum(expected_sleeps) == pytest.approx(_disappeared_poll_deadline_seconds())
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "verify_failed"
+    assert metadata["verify"]["branch"] == "retry"
+    assert metadata["verify"]["clearly_unmet"] is True
+    assert "disappeared" in metadata["verify"]["reason"]
 
 
 @pytest.mark.asyncio
@@ -791,27 +881,22 @@ async def test_process_step_stops_when_script_retry_limit_reached(
     (steps_dir / step_artifact_name(0, 1)).write_text("{}", encoding="utf-8")
     (steps_dir / step_artifact_name(1, 1)).write_text("{}", encoding="utf-8")
     brain.manager.require_paths.return_value.root = tmp_path
-    flyout_gone = {
-        "disappeared": [
-            {
-                "class_name": "Microsoft.UI.Content.PopupWindowSiteBridge",
-                "title": "快顯主機",
-                "process_name": "explorer.exe",
-            }
-        ]
-    }
-    brain.script_window_verifies = [{}, flyout_gone, {}]
+    brain.script_window_verifies = [{}, _disappeared_flyout_verify(), {}]
     brain.loop = AsyncMock(return_value=True)
     monkeypatch.setattr(
         "src.brain.module.snapshot_top_level_windows",
         lambda: [_flyout_window()],
     )
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
 
     result = await brain.process_step()
 
     assert result.step_finished is False
     assert brain._script_step_index == 1
     assert "3/3 attempt(s)" in result.reason
+    expected_sleeps = _expected_poll_sleeps(_disappeared_poll_deadline_seconds())
+    assert sleep_mock.await_count == len(expected_sleeps)
     metadata = brain._update_step_metadata.call_args.args[2]
     assert metadata["attempt_number"] == 3
     assert metadata["max_attempts"] == 3
@@ -827,26 +912,21 @@ async def test_process_step_allows_retry_below_script_limit(
     steps_dir.mkdir()
     (steps_dir / step_artifact_name(0, 1)).write_text("{}", encoding="utf-8")
     brain.manager.require_paths.return_value.root = tmp_path
-    flyout_gone = {
-        "disappeared": [
-            {
-                "class_name": "Microsoft.UI.Content.PopupWindowSiteBridge",
-                "title": "快顯主機",
-                "process_name": "explorer.exe",
-            }
-        ]
-    }
-    brain.script_window_verifies = [{}, flyout_gone, {}]
+    brain.script_window_verifies = [{}, _disappeared_flyout_verify(), {}]
     brain.loop = AsyncMock(return_value=True)
     monkeypatch.setattr(
         "src.brain.module.snapshot_top_level_windows",
         lambda: [_flyout_window()],
     )
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
 
     result = await brain.process_step()
 
     assert result.step_finished is True
     assert brain._script_step_index == 1
+    expected_sleeps = _expected_poll_sleeps(_disappeared_poll_deadline_seconds())
+    assert sleep_mock.await_count == len(expected_sleeps)
     metadata = brain._update_step_metadata.call_args.args[2]
     assert metadata["verify"]["branch"] == "retry"
 

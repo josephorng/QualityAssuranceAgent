@@ -80,6 +80,9 @@ _SETTLE_POLL_MULTI_MIN_SECONDS = 2.0
 _WINDOW_VERIFY_POLL_INTERVAL_SECONDS = 0.1
 # Appeared asserts floor the poll settle so 2.0x lands at least at 10s (slow launches).
 _APPEARED_POLL_MIN_SECONDS = 5.0
+# Disappeared asserts floor a short poll so async closes (e.g. Chrome WM_CLOSE)
+# are not judged on a single immediate after-snapshot when settle is 0/None.
+_DISAPPEARED_POLL_MIN_SECONDS = 1.0
 
 
 ROLE_USER = "user"
@@ -1454,17 +1457,27 @@ class BrainModule:
         Prefer the recording ``settle_after``. When the step expects a new window
         (``appeared``), floor the budget at ``_APPEARED_POLL_MIN_SECONDS`` so a
         slow launch keeps a long enough deadline (2.0x of this base is at least
-        10s). Polling starts immediately after actions and early-exits on match.
+        10s). When it expects a window to leave (``disappeared``), floor at
+        ``_DISAPPEARED_POLL_MIN_SECONDS`` so async closes are not judged on a
+        single immediate after-snapshot. Polling starts immediately after
+        actions and early-exits on match.
         """
         appeared = recorded.get("appeared")
+        disappeared = recorded.get("disappeared")
         has_appeared = isinstance(appeared, list) and bool(appeared)
+        has_disappeared = isinstance(disappeared, list) and bool(disappeared)
+        floor = 0.0
+        if has_appeared:
+            floor = max(floor, float(_APPEARED_POLL_MIN_SECONDS))
+        if has_disappeared:
+            floor = max(floor, float(_DISAPPEARED_POLL_MIN_SECONDS))
         if settle_after is not None and float(settle_after) > 0:
             base = float(settle_after)
-            if has_appeared:
-                return max(base, float(_APPEARED_POLL_MIN_SECONDS))
+            if floor > 0:
+                return max(base, floor)
             return base
-        if has_appeared:
-            return float(_APPEARED_POLL_MIN_SECONDS)
+        if floor > 0:
+            return floor
         return None
 
     async def _window_verify_miss(

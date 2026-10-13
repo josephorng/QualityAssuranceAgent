@@ -78,9 +78,9 @@ _PRE_KEY_SETTLE_S = 0.3
 # Samples: the first shot is immediate, then every 1s. Each sample grabs the
 # full virtual desktop so a window appearing on another monitor is still seen.
 # The probe only measures observed_settle; it does not publish the next step's
-# before-shot. A separate before-shot loop grabs for the whole recording and
-# publishes every finished frame, so a click pins the latest screenshot even
-# when the previous action's probe has not sampled yet.
+# before-shot. A separate before-shot loop round-robins each physical monitor
+# and keeps the latest finished frame per monitor, so a click pins that
+# monitor's recent screenshot even when the pointer was just on another screen.
 _SETTLE_PROBE_INTERVAL_S = 1.0
 _SETTLE_PROBE_MAX_WINDOW_S = 55.0
 # Retain every settle-probe capture under screenshots/settle_debug/ for MAD tuning.
@@ -999,10 +999,15 @@ class RecordingSession:
         self._after_seals: dict[
             int, tuple[tuple[WindowInfo, ...] | None, dict[str, Any] | None]
         ] = {}
-        # Latest finished before-shot (path, monitor_index, monitor_offset).
-        # The path is a unique ``_settle_pub_*.jpeg`` so a hook can pin it while the
-        # next sample writes a new file. The settle probe does not write this.
+        # Latest finished before-shot per physical monitor
+        # (path, monitor_index, monitor_offset). Paths are unique
+        # ``_settle_pub_*.jpeg`` so a hook can pin one while the next sample
+        # writes a new file. ``_last_settle_frame`` is the most recently
+        # published entry (any monitor) for durable debug / legacy readers.
+        # The settle probe does not write these.
+        self._last_settle_frames: dict[int, tuple[str, int, tuple[int, int]]] = {}
         self._last_settle_frame: tuple[str, int, tuple[int, int]] | None = None
+        self._before_shot_rr_index: int = 0
         self._settle_pins: dict[str, int] = {}
         self._settle_pub_seq: int = 0
         # Monitor rectangles so a click can match a settle sample without grabbing.
@@ -1141,7 +1146,9 @@ class RecordingSession:
             self._before_shot_stop.clear()
             self._before_shot_thread = None
             self._window_step_threads = []
+            self._last_settle_frames = {}
             self._last_settle_frame = None
+            self._before_shot_rr_index = 0
             self._settle_pins = {}
             self._settle_pub_seq = 0
             self._last_settle_windows = None
@@ -1708,7 +1715,7 @@ class RecordingSession:
                 press_seq=seq,
                 text_event_index=text_event_index,
                 flush_meta=text_meta,
-                settle_frame=self._latch_settle_frame(),
+                settle_frame=self._latch_settle_frame(x, y),
             )
         )
         # Other monitors, captured now so a later cross-monitor drop is pre-drag.
@@ -1736,7 +1743,7 @@ class RecordingSession:
                 action="pending_right_press",
                 cursor_xy=(x, y),
                 press_seq=seq,
-                settle_frame=self._latch_settle_frame(),
+                settle_frame=self._latch_settle_frame(x, y),
             )
         )
 
@@ -1837,11 +1844,13 @@ class RecordingSession:
         """Copy ``source`` into a unique file the next hook can pin.
 
         A single shared file would be overwritten by the next sample before
-        the worker copies the frame latched at the click.
+        the worker copies the frame latched at the click. Frames are stored
+        per monitor so a click on monitor N pins that monitor's latest file
+        even when the loop later samples another screen.
 
         When ``event_index`` is set, install the pointer only if that event is
         still the active probe (a replaced tick must not overwrite a newer frame).
-        Returns whether the frame was installed as ``_last_settle_frame``.
+        Returns whether the frame was installed for ``mon_index``.
         """
         with self._lock:
             run_dir = self._run_dir
@@ -1878,8 +1887,10 @@ class RecordingSession:
                 except OSError:
                     pass
                 return False
-            previous = self._last_settle_frame
-            info = (str(dest), int(mon_index), (int(mon_offset[0]), int(mon_offset[1])))
+            mon_key = int(mon_index)
+            previous = self._last_settle_frames.get(mon_key)
+            info = (str(dest), mon_key, (int(mon_offset[0]), int(mon_offset[1])))
+            self._last_settle_frames[mon_key] = info
             self._last_settle_frame = info
             stale: str | None = None
             if previous is not None and previous[0] != info[0]:
@@ -1894,8 +1905,10 @@ class RecordingSession:
 
     def _publish_settle_frame(self, info: tuple[str, int, tuple[int, int]]) -> None:
         """Publish a finished settle sample. Leave pinned files for in-flight clicks."""
+        mon_key = int(info[1])
         with self._lock:
-            previous = self._last_settle_frame
+            previous = self._last_settle_frames.get(mon_key)
+            self._last_settle_frames[mon_key] = info
             self._last_settle_frame = info
             stale: str | None = None
             if previous is not None and previous[0] != info[0]:
@@ -1907,10 +1920,40 @@ class RecordingSession:
             except OSError:
                 pass
 
-    def _latch_settle_frame(self) -> tuple[str, int, tuple[int, int]] | None:
-        """Pin the newest finished before-shot. Hook-safe: no capture and no file copy."""
+    def _latest_settle_frame_for_monitor(
+        self,
+        monitor_index: int,
+    ) -> tuple[str, int, tuple[int, int]] | None:
+        """Return the newest published before-shot for ``monitor_index``."""
+        mon_key = int(monitor_index)
         with self._lock:
-            published = self._last_settle_frame
+            published = self._last_settle_frames.get(mon_key)
+            if published is not None:
+                return published
+            # Legacy / test paths that only set the most-recent pointer.
+            last = self._last_settle_frame
+            if last is not None and int(last[1]) == mon_key:
+                return last
+        return None
+
+    def _latch_settle_frame(
+        self,
+        x: int,
+        y: int,
+    ) -> tuple[str, int, tuple[int, int]] | None:
+        """Pin the newest finished before-shot for the click's monitor.
+
+        Hook-safe: no capture and no file copy.
+        """
+        click_mon = self._monitor_index_for_point(x, y)
+        if click_mon is None:
+            return None
+        with self._lock:
+            published = self._last_settle_frames.get(int(click_mon))
+            if published is None:
+                last = self._last_settle_frame
+                if last is not None and int(last[1]) == int(click_mon):
+                    published = last
             if published is None:
                 return None
             path = published[0]
@@ -1931,7 +1974,8 @@ class RecordingSession:
                 self._settle_pins[path] = count
                 return
             self._settle_pins.pop(path, None)
-            current = self._last_settle_frame
+            current = self._last_settle_frames.get(int(info[1]))
+            # Keep the file while it is still this monitor's published frame.
             if current is None or current[0] != path:
                 delete_path = path
         if delete_path is not None:
@@ -1970,6 +2014,28 @@ class RecordingSession:
         finally:
             self._unpin_settle_frame(latched)
 
+    def _copy_published_settle_frame(
+        self,
+        published: tuple[str, int, tuple[int, int]],
+        dest: Path,
+    ) -> tuple[str, int, tuple[int, int]] | None:
+        src = Path(published[0])
+        if not src.is_file():
+            return None
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if dest.is_file():
+                dest.unlink()
+        except OSError:
+            pass
+        try:
+            import shutil
+
+            shutil.copy2(src, dest)
+            return str(dest), int(published[1]), (int(published[2][0]), int(published[2][1]))
+        except OSError:
+            return None
+
     def _pending_screenshot_from_settle_or_capture(
         self,
         run_dir: Path,
@@ -1980,34 +2046,27 @@ class RecordingSession:
     ) -> tuple[str, int, tuple[int, int]]:
         """Copy the before-shot frame pinned at the hook.
 
-        That file is the newest before-shot loop sample finished before this
-        click. With no pinned sample, use the current published frame only when
-        the hook found none. Otherwise grab live.
+        That file is the newest before-shot loop sample for this click's
+        monitor finished before mouse-down. If the pin is missing or the wrong
+        monitor, reuse the latest published frame for the click monitor.
+        Otherwise grab live.
         """
+        _ = run_dir
         taken = self._take_latched_settle_frame(settle_frame, x, y, dest)
         if taken is not None:
             return taken
-        if settle_frame is None:
-            click_mon, _, _, _, _ = _monitor_at_point(x, y)
-            with self._lock:
-                last = self._last_settle_frame
+        click_mon = self._monitor_index_for_point(x, y)
+        if click_mon is None:
+            try:
+                click_mon, _, _, _, _ = _monitor_at_point(x, y)
+            except Exception:
+                click_mon = None
+        if click_mon is not None:
+            last = self._latest_settle_frame_for_monitor(int(click_mon))
             if last is not None:
-                last_path, last_mon, last_offset = last
-                src = Path(last_path)
-                if src.is_file() and int(last_mon) == int(click_mon):
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    try:
-                        if dest.is_file():
-                            dest.unlink()
-                    except OSError:
-                        pass
-                    try:
-                        import shutil
-
-                        shutil.copy2(src, dest)
-                        return str(dest), int(last_mon), tuple(last_offset)  # type: ignore[return-value]
-                    except OSError:
-                        pass
+                copied = self._copy_published_settle_frame(last, dest)
+                if copied is not None:
+                    return copied
         return _capture_screenshot_at_point(x, y, dest)
 
     def _queue_event(self, item: _QueuedEvent) -> None:
@@ -2075,7 +2134,10 @@ class RecordingSession:
                 click_window=click_window,
                 signals_before=signals_before,
                 refresh_pre_type=True,
-                settle_frame=self._latch_settle_frame(),
+                settle_frame=self._latch_settle_frame(
+                    int(cursor_xy[0]),
+                    int(cursor_xy[1]),
+                ),
                 action_monotonic=time.monotonic(),
             )
         )
@@ -3437,12 +3499,25 @@ class RecordingSession:
         self,
         cursor: tuple[int, int] | None,
         dest: Path,
+        *,
+        monitor_index: int | None = None,
     ) -> tuple[int, tuple[int, int]]:
         """Capture one frame. One grab at a time across before-shot and settle."""
         lock = getattr(self, "_screenshot_grab_lock", None)
         if lock is not None:
             lock.acquire()
         try:
+            if monitor_index is not None:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with mss.mss() as sct:
+                    mon_idx = resolve_monitor_index(sct, int(monitor_index))
+                    monitor = sct.monitors[mon_idx]
+                    shot = sct.grab(monitor)
+                    from PIL import Image
+
+                    img = Image.frombytes("RGB", shot.size, shot.rgb)
+                    img.save(dest, format="JPEG")
+                    return int(mon_idx), (int(monitor["left"]), int(monitor["top"]))
             if cursor is not None:
                 _, mon_idx, mon_offset = _capture_screenshot_at_point(
                     int(cursor[0]), int(cursor[1]), dest
@@ -3455,11 +3530,12 @@ class RecordingSession:
                 lock.release()
 
     def _start_before_shot_loop(self) -> None:
-        """Publish a fresh screenshot for the whole recording.
+        """Publish fresh per-monitor screenshots for the whole recording.
 
-        Mouse-down pins the last frame this loop finished. The loop does not
-        wait for a settle probe, so the next action still gets a frame when the
-        previous probe has not sampled yet.
+        Round-robins each physical monitor. Mouse-down pins that monitor's
+        latest finished frame. The loop does not wait for a settle probe, so
+        the next action still gets a frame when the previous probe has not
+        sampled yet.
         """
         self._before_shot_stop.clear()
         thread = threading.Thread(
@@ -3488,6 +3564,29 @@ class RecordingSession:
         ):
             thread.join(timeout=2.0)
 
+    def _before_shot_monitor_targets(
+        self,
+    ) -> tuple[tuple[int, int, int, int, int], ...]:
+        """Physical monitors to round-robin (mss index 1..N)."""
+        with self._lock:
+            monitors = self._pre_click_monitors
+        if monitors:
+            return monitors
+        self._refresh_pre_click_monitors()
+        with self._lock:
+            return self._pre_click_monitors
+
+    def _next_before_shot_monitor(
+        self,
+        monitors: tuple[tuple[int, int, int, int, int], ...],
+    ) -> int | None:
+        if not monitors:
+            return None
+        with self._lock:
+            rr = self._before_shot_rr_index % len(monitors)
+            self._before_shot_rr_index = rr + 1
+        return int(monitors[rr][0])
+
     def _before_shot_loop(self) -> None:
         while not self._before_shot_stop.is_set():
             published = self._capture_and_publish_before_shot()
@@ -3497,15 +3596,25 @@ class RecordingSession:
                 return
 
     def _capture_and_publish_before_shot(self) -> bool:
-        """Grab once and install it as the latest before-shot."""
+        """Grab the next round-robin monitor and install it as that monitor's before-shot."""
         with self._lock:
             run_dir = self._run_dir
         if run_dir is None or self._before_shot_stop.is_set():
             return False
-        cursor = self._pointer_cursor_for_capture()
+        monitors = self._before_shot_monitor_targets()
+        mon_target = self._next_before_shot_monitor(monitors)
         staging = run_dir / "screenshots" / "_before_shot_staging.jpeg"
         try:
-            mon_idx, mon_offset = self._grab_screenshot(cursor, staging)
+            if mon_target is not None:
+                mon_idx, mon_offset = self._grab_screenshot(
+                    None,
+                    staging,
+                    monitor_index=mon_target,
+                )
+            else:
+                # No monitor list yet; fall back to the pointer's screen.
+                cursor = self._pointer_cursor_for_capture()
+                mon_idx, mon_offset = self._grab_screenshot(cursor, staging)
         except Exception as exc:
             self._log(run_dir, f"before-shot capture failed: {exc}")
             return False
@@ -3844,7 +3953,7 @@ class RecordingSession:
         if new_kept is not None:
             official = self._promote_settle_staging(Path(new_kept), official)
         # Settle samples stay on the probe. The before-shot loop is the only
-        # writer of ``_last_settle_frame``.
+        # writer of ``_last_settle_frames``.
         with self._lock:
             if self._settle_probe is None or self._settle_probe.event_index != event_index:
                 return

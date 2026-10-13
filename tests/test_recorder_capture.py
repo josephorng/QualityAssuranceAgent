@@ -2462,7 +2462,7 @@ def test_settle_probe_grabs_while_context_refresh_blocks(tmp_path) -> None:
         assert release.wait(3.0)
         return {}
 
-    def _shot(_x, _y, dest):
+    def _grab(_self, _cursor, dest, *, monitor_index=None):
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(b"fake")
         name = dest.name
@@ -2473,14 +2473,19 @@ def test_settle_probe_grabs_while_context_refresh_blocks(tmp_path) -> None:
         ):
             probe_grabs.append(name)
         assert not name.startswith("_pre_click_")
-        return str(dest), 1, (0, 0)
+        if monitor_index is not None:
+            return int(monitor_index), (0, 0)
+        if _cursor is not None:
+            return 1, (0, 0)
+        return 0, (0, 0)
 
     with _default_capture_window_patches(), patch(
         "src.recorder.capture.pyautogui.position",
         return_value=type("P", (), {"x": 10, "y": 10})(),
-    ), patch(
-        "src.recorder.capture._capture_screenshot_at_point",
-        side_effect=_shot,
+    ), patch.object(
+        RecordingSession,
+        "_grab_screenshot",
+        _grab,
     ), patch(
         "src.recorder.capture.capture_slow_signals",
         side_effect=_slow,

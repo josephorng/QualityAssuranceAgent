@@ -478,6 +478,7 @@ def test_superseded_tick_does_not_publish_over_newer_frame(
     session._run_dir = run_dir
     session._settle_pub_seq = 0
     session._settle_pins = {}
+    session._last_settle_frames = {}
     session._last_settle_frame = None
     session._settle_probe = _SettleProbeState(
         event_index=4,
@@ -489,6 +490,7 @@ def test_superseded_tick_does_not_publish_over_newer_frame(
     )
     published = session._last_settle_frame
     assert published is not None
+    assert session._last_settle_frames.get(1) == published
     assert Path(published[0]).is_file()
 
     # Simulate event-3 tick finishing after replace to event 4.
@@ -496,6 +498,7 @@ def test_superseded_tick_does_not_publish_over_newer_frame(
         old_src, 1, (0, 0), event_index=3
     )
     assert session._last_settle_frame == published
+    assert session._last_settle_frames.get(1) == published
     r, _g, b = Image.open(published[0]).convert("RGB").getpixel((0, 0))
     assert b > 150
     assert r < 50
@@ -628,22 +631,13 @@ def test_pending_screenshot_reuses_last_settle_on_same_monitor(tmp_path: Path) -
 
     session = RecordingSession.__new__(RecordingSession)
     session._lock = __import__("threading").Lock()
+    session._pre_click_monitors = ((1, 0, 0, 1920, 1080),)
+    session._last_settle_frames = {1: (str(stable), 1, (0, 0))}
     session._last_settle_frame = (str(stable), 1, (0, 0))
     session._run_dir = run_dir
 
     dest = run_dir / "screenshots" / "_pending_capture.jpeg"
-
-    def _fake_monitor_at_point(x: int, y: int):
-        return 1, 0, 0, 1920, 1080
-
-    import src.recorder.capture as capture_mod
-
-    original = capture_mod._monitor_at_point
-    capture_mod._monitor_at_point = _fake_monitor_at_point  # type: ignore[assignment]
-    try:
-        info = session._pending_screenshot_from_settle_or_capture(run_dir, 10, 10, dest)
-    finally:
-        capture_mod._monitor_at_point = original  # type: ignore[assignment]
+    info = session._pending_screenshot_from_settle_or_capture(run_dir, 10, 10, dest)
 
     assert info[0] == str(dest)
     assert info[1] == 1
@@ -668,10 +662,11 @@ def test_before_shot_keeps_settle_sample_latched_at_click(tmp_path: Path) -> Non
     session._settle_pins = {}
     session._settle_pub_seq = 1
     session._pre_click_monitors = ((1, 0, 0, 1920, 1080),)
+    session._last_settle_frames = {1: (str(latched_settle), 1, (0, 0))}
     session._last_settle_frame = (str(latched_settle), 1, (0, 0))
     session._run_dir = run_dir
 
-    settle_latched = session._latch_settle_frame()
+    settle_latched = session._latch_settle_frame(10, 10)
     newer = run_dir / "screenshots" / "_settle_pub_00002.jpeg"
     Image.new("RGB", (40, 30), color=(0, 200, 0)).save(newer, format="JPEG")
     session._publish_settle_frame((str(newer), 1, (0, 0)))
@@ -704,6 +699,12 @@ def test_pending_screenshot_live_captures_when_monitor_mismatches(
 
     session = RecordingSession.__new__(RecordingSession)
     session._lock = __import__("threading").Lock()
+    session._pre_click_monitors = (
+        (1, 0, 0, 1920, 1080),
+        (2, 1920, 0, 1920, 1080),
+    )
+    # Only monitor 1 has a published frame; click is on monitor 2.
+    session._last_settle_frames = {1: (str(stable), 1, (0, 0))}
     session._last_settle_frame = (str(stable), 1, (0, 0))
     session._run_dir = run_dir
 
@@ -712,12 +713,6 @@ def test_pending_screenshot_live_captures_when_monitor_mismatches(
     Image.new("RGB", (40, 30), color=(200, 0, 0)).save(live, format="JPEG")
 
     import src.recorder.capture as capture_mod
-
-    monkeypatch.setattr(
-        capture_mod,
-        "_monitor_at_point",
-        lambda x, y: (2, 1920, 0, 1920, 1080),
-    )
 
     def _fake_capture(x, y, target):
         import shutil
@@ -730,7 +725,7 @@ def test_pending_screenshot_live_captures_when_monitor_mismatches(
     info = session._pending_screenshot_from_settle_or_capture(run_dir, 2000, 10, dest)
     assert info[1] == 2
     assert dest.is_file()
-    # Live capture path used (monitor mismatch).
+    # Live capture path used (no published frame for the click monitor).
     r, _g, _b = Image.open(dest).convert("RGB").getpixel((0, 0))
     assert r > 150
 
@@ -753,28 +748,120 @@ def test_before_shot_capture_publishes_without_settle_probe(tmp_path: Path, monk
     session._run_dir = run_dir
     session._settle_pub_seq = 0
     session._settle_pins = {}
+    session._last_settle_frames = {}
     session._last_settle_frame = None
+    session._before_shot_rr_index = 0
+    session._pre_click_monitors = ((2, 0, 0, 1920, 1080),)
     session._settle_probe = None
     session._log = lambda *_a, **_k: None  # type: ignore[method-assign]
     session._last_pointer_cursor_xy = (4, 4)
 
-    def _fake_capture(x, y, target):
+    def _fake_grab(cursor, dest, *, monitor_index=None):
         import shutil
 
-        shutil.copy2(shot, target)
-        return str(target), 2, (0, 0)
+        shutil.copy2(shot, dest)
+        assert monitor_index == 2
+        return 2, (0, 0)
 
-    import src.recorder.capture as capture_mod
-
-    monkeypatch.setattr(capture_mod, "_capture_screenshot_at_point", _fake_capture)
+    monkeypatch.setattr(session, "_grab_screenshot", _fake_grab)
 
     assert session._capture_and_publish_before_shot()
     published = session._last_settle_frame
     assert published is not None
+    assert session._last_settle_frames.get(2) == published
     assert Path(published[0]).name.startswith("_settle_pub_")
     assert published[1:] == (2, (0, 0))
     _r, g, _b = Image.open(published[0]).convert("RGB").getpixel((0, 0))
     assert g > 150
+
+
+def test_before_shot_round_robin_keeps_per_monitor_frames(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Each monitor keeps its own latest frame while the loop samples the other."""
+    import threading
+
+    from src.recorder.capture import RecordingSession
+
+    run_dir = tmp_path / "rec"
+    (run_dir / "screenshots").mkdir(parents=True)
+    mon1 = run_dir / "screenshots" / "mon1.jpeg"
+    mon2 = run_dir / "screenshots" / "mon2.jpeg"
+    Image.new("RGB", (16, 12), color=(200, 0, 0)).save(mon1, format="JPEG")
+    Image.new("RGB", (16, 12), color=(0, 0, 200)).save(mon2, format="JPEG")
+
+    session = RecordingSession.__new__(RecordingSession)
+    session._lock = threading.Lock()
+    session._screenshot_grab_lock = threading.Lock()
+    session._before_shot_stop = threading.Event()
+    session._run_dir = run_dir
+    session._settle_pub_seq = 0
+    session._settle_pins = {}
+    session._last_settle_frames = {}
+    session._last_settle_frame = None
+    session._before_shot_rr_index = 0
+    session._pre_click_monitors = (
+        (1, 0, 0, 1920, 1080),
+        (2, 1920, 0, 1920, 1080),
+    )
+    session._log = lambda *_a, **_k: None  # type: ignore[method-assign]
+
+    def _fake_grab(cursor, dest, *, monitor_index=None):
+        import shutil
+
+        src = mon1 if int(monitor_index) == 1 else mon2
+        shutil.copy2(src, dest)
+        offset = (0, 0) if int(monitor_index) == 1 else (1920, 0)
+        return int(monitor_index), offset
+
+    monkeypatch.setattr(session, "_grab_screenshot", _fake_grab)
+
+    assert session._capture_and_publish_before_shot()
+    assert session._capture_and_publish_before_shot()
+    assert set(session._last_settle_frames) == {1, 2}
+
+    # Later sample replaces only monitor 1; monitor 2 stays pin-able.
+    Image.new("RGB", (16, 12), color=(0, 200, 0)).save(mon1, format="JPEG")
+    assert session._capture_and_publish_before_shot()
+    latched = session._latch_settle_frame(2000, 10)
+    assert latched is not None
+    assert latched[1] == 2
+    _r, _g, b = Image.open(latched[0]).convert("RGB").getpixel((0, 0))
+    assert b > 150
+
+
+def test_latch_prefers_click_monitor_over_most_recent_other_monitor(
+    tmp_path: Path,
+) -> None:
+    from src.recorder.capture import RecordingSession
+
+    run_dir = tmp_path / "rec"
+    (run_dir / "screenshots").mkdir(parents=True)
+    older_click_mon = run_dir / "screenshots" / "_settle_pub_00001.jpeg"
+    newer_other_mon = run_dir / "screenshots" / "_settle_pub_00002.jpeg"
+    Image.new("RGB", (16, 12), color=(200, 0, 0)).save(older_click_mon, format="JPEG")
+    Image.new("RGB", (16, 12), color=(0, 0, 200)).save(newer_other_mon, format="JPEG")
+
+    session = RecordingSession.__new__(RecordingSession)
+    session._lock = __import__("threading").Lock()
+    session._settle_pins = {}
+    session._pre_click_monitors = (
+        (1, 0, 0, 1920, 1080),
+        (2, 1920, 0, 1920, 1080),
+    )
+    session._last_settle_frames = {
+        1: (str(older_click_mon), 1, (0, 0)),
+        2: (str(newer_other_mon), 2, (1920, 0)),
+    }
+    # Most recent overall publish was the other monitor.
+    session._last_settle_frame = (str(newer_other_mon), 2, (1920, 0))
+    session._run_dir = run_dir
+
+    latched = session._latch_settle_frame(10, 10)
+    assert latched is not None
+    assert latched[1] == 1
+    r, _g, _b = Image.open(latched[0]).convert("RGB").getpixel((0, 0))
+    assert r > 150
 
 
 def test_settle_tick_does_not_replace_before_shot(tmp_path: Path, monkeypatch) -> None:
@@ -800,6 +887,7 @@ def test_settle_tick_does_not_replace_before_shot(tmp_path: Path, monkeypatch) -
     session._events = []
     session._settle_pub_seq = 0
     session._settle_pins = {}
+    session._last_settle_frames = {}
     session._last_settle_frame = None
     session._settle_probe_timer = None
     session._log = lambda *_a, **_k: None  # type: ignore[method-assign]
@@ -812,6 +900,7 @@ def test_settle_tick_does_not_replace_before_shot(tmp_path: Path, monkeypatch) -
     assert session._publish_last_settle_frame(before, 1, (0, 0))
     pinned = session._last_settle_frame
     assert pinned is not None
+    assert session._last_settle_frames.get(1) == pinned
 
     def _fake_all_screens(target):
         import shutil
@@ -825,6 +914,7 @@ def test_settle_tick_does_not_replace_before_shot(tmp_path: Path, monkeypatch) -
 
     session._run_settle_probe_tick(4)
     assert session._last_settle_frame == pinned
+    assert session._last_settle_frames.get(1) == pinned
     r, _g, b = Image.open(pinned[0]).convert("RGB").getpixel((0, 0))
     assert r > 150
     assert b < 50
@@ -848,6 +938,7 @@ def test_publish_last_settle_frame_copies_durable_candidate(tmp_path: Path) -> N
     session._settle_pins = {}
     session._settle_pub_seq = 0
     session._run_dir = run_dir
+    session._last_settle_frames = {}
     session._last_settle_frame = None
     session._publish_last_settle_frame(source, 1, (0, 0))
 
@@ -855,6 +946,7 @@ def test_publish_last_settle_frame_copies_durable_candidate(tmp_path: Path) -> N
     assert dest.is_file()
     published = session._last_settle_frame
     assert published is not None
+    assert session._last_settle_frames.get(1) == published
     assert Path(published[0]).is_file()
     assert Path(published[0]).name.startswith("_settle_pub_")
     assert published[1:] == (1, (0, 0))

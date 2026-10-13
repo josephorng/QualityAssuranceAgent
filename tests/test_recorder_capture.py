@@ -291,6 +291,69 @@ def test_os_reconcile_missed_left_up_emits_click_not_drag(tmp_path) -> None:
     assert second["cursor_xy"] == [82, 374]
 
 
+def test_os_reconcile_missed_left_up_never_becomes_hold(tmp_path) -> None:
+    """Synthesized ups measure sticky duration, not a real hold — always click."""
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture._os_mouse_button_down",
+        return_value=False,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.mouse import Button
+
+            session._on_mouse_click(120, 240, Button.left, True)
+            time.sleep(_HOLD_THRESHOLD_S + 0.05)
+            session._on_mouse_move(120, 241)
+            time.sleep(_DOUBLE_CLICK_INTERVAL_S + 0.05)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "click"
+    assert raw.get("duration_seconds") is None
+
+
+def test_key_reconciles_sticky_left_press_as_click_before_text(tmp_path) -> None:
+    """Missed up + typing: OS-up reconcile on first key emits click, then text."""
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture._os_mouse_button_down",
+        return_value=False,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import KeyCode
+            from pynput.mouse import Button
+
+            session._on_mouse_click(120, 240, Button.left, True)
+            time.sleep(_HOLD_THRESHOLD_S + 0.05)
+            # No mouse-up delivered; first key recovers the sticky press.
+            session._on_key_press(KeyCode.from_char("n"))
+            session._on_key_press(KeyCode.from_char("b"))
+            session._on_key_press(KeyCode.from_char("a"))
+        finally:
+            session.stop()
+
+    assert session.event_count() == 2
+    gesture = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    text = json.loads((run_dir / "events" / "event_002.json").read_text(encoding="utf-8"))
+    assert gesture["kind"] == "click"
+    assert gesture["index"] == 1
+    assert text["kind"] == "text_input"
+    assert text["index"] == 2
+    assert text["text"] == "nba"
+
+
 def test_os_reconcile_keeps_real_drag_when_button_still_down(tmp_path) -> None:
     """OS still down + far move + far release → drag (unchanged)."""
     session = RecordingSession(runs_root=tmp_path)
@@ -2727,6 +2790,38 @@ def test_left_hold_records_hold_event(tmp_path) -> None:
     assert raw["kind"] == "hold"
     assert raw["button"] == "left"
     assert raw["duration_seconds"] >= _HOLD_THRESHOLD_S
+
+
+def test_type_during_left_press_keeps_gesture_index_before_text(tmp_path) -> None:
+    """Index reserved at mouse-down so typing during the press sorts after it."""
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import KeyCode
+            from pynput.mouse import Button
+
+            session._on_mouse_click(120, 240, Button.left, True)
+            session._on_key_press(KeyCode.from_char("n"))
+            session._on_key_press(KeyCode.from_char("b"))
+            session._on_key_press(KeyCode.from_char("a"))
+            time.sleep(_HOLD_THRESHOLD_S + 0.05)
+            session._on_mouse_click(120, 240, Button.left, False)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 2
+    gesture = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    text = json.loads((run_dir / "events" / "event_002.json").read_text(encoding="utf-8"))
+    assert gesture["kind"] == "hold"
+    assert gesture["index"] == 1
+    assert text["kind"] == "text_input"
+    assert text["index"] == 2
+    assert text["text"] == "nba"
 
 
 def test_short_left_press_still_records_click(tmp_path) -> None:

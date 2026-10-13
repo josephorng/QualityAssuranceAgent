@@ -940,6 +940,9 @@ class RecordingSession:
         self._pending_click_down_at: float | None = None
         self._pending_click_timestamp_utc: str | None = None
         self._pending_click_modifiers: list[str] | None = None
+        # Reserved at mouse-down so keyboard events during the press sort after
+        # the eventual click/hold/drag (index assigned at up used to invert order).
+        self._pending_click_event_index: int | None = None
         self._left_button_down = False
         self._left_press_dragging = False
         self._last_move_xy: tuple[int, int] | None = None
@@ -1105,6 +1108,7 @@ class RecordingSession:
             self._pending_click_down_at = None
             self._pending_click_timestamp_utc = None
             self._pending_click_modifiers = None
+            self._pending_click_event_index = None
             self._left_button_down = False
             self._left_press_dragging = False
             self._last_move_xy = None
@@ -1294,6 +1298,7 @@ class RecordingSession:
             self._pending_windows_before = None
             self._pending_signals_before = None
             self._pending_click_window = None
+            self._pending_click_event_index = None
             leftover_pre_type = self._pending_pre_type_screenshot
             self._pending_pre_type_screenshot = None
             leftover_pre_key = self._pending_pre_key_screenshot
@@ -2021,15 +2026,23 @@ class RecordingSession:
         scroll_delta: int | None = None,
         modifiers: list[str] | None = None,
         timestamp_utc: str | None = None,
+        event_index: int | None = None,
     ) -> None:
-        """Reserve an index and enqueue screenshot/UIA work off the mouse hook thread."""
+        """Reserve an index and enqueue screenshot/UIA work off the mouse hook thread.
+
+        Pass ``event_index`` to reuse an index reserved earlier (e.g. first press
+        of a double-click).
+        """
         action_timestamp_utc = timestamp_utc or utc_now_iso()
         with self._lock:
             run_dir = self._run_dir
             if run_dir is None:
                 return
-            index = self._next_index
-            self._next_index += 1
+            if event_index is None:
+                index = self._next_index
+                self._next_index += 1
+            else:
+                index = event_index
         # One settle-cache copy feeds the flushed text, this event's before-sample,
         # and the previous event's after-cache.
         windows_before = self._cached_windows_before()
@@ -2775,6 +2788,16 @@ class RecordingSession:
             )
         )
 
+    def _take_pending_left_event_index_locked(self) -> int:
+        """Consume the mouse-down reserved index, or allocate if missing."""
+        reserved = self._pending_click_event_index
+        self._pending_click_event_index = None
+        if reserved is not None:
+            return int(reserved)
+        index = self._next_index
+        self._next_index += 1
+        return index
+
     def _clear_pending_left_gesture(self) -> None:
         self._discard_pending_drag_end_captures()
         with self._lock:
@@ -2786,6 +2809,7 @@ class RecordingSession:
             self._pending_click_down_at = None
             self._pending_click_timestamp_utc = None
             self._pending_click_modifiers = None
+            self._pending_click_event_index = None
             self._left_button_down = False
             self._left_press_dragging = False
             self._last_move_xy = None
@@ -2861,8 +2885,7 @@ class RecordingSession:
                 return
             if self._pending_click_coords != (x, y, button):
                 return
-            click_index = self._next_index
-            self._next_index += 1
+            click_index = self._take_pending_left_event_index_locked()
             press_seq = self._left_press_seq
             timestamp_utc = self._pending_click_timestamp_utc or utc_now_iso()
             modifiers = self._pending_click_modifiers
@@ -2915,8 +2938,7 @@ class RecordingSession:
                 return
             if self._pending_click_coords != (x, y, button):
                 return
-            hold_index = self._next_index
-            self._next_index += 1
+            hold_index = self._take_pending_left_event_index_locked()
             press_seq = self._left_press_seq
             timestamp_utc = self._pending_click_timestamp_utc or utc_now_iso()
             modifiers = self._pending_click_modifiers
@@ -3022,8 +3044,7 @@ class RecordingSession:
                 return
             if self._pending_click_coords != (x1, y1, button):
                 return
-            drag_index = self._next_index
-            self._next_index += 1
+            drag_index = self._take_pending_left_event_index_locked()
             press_seq = self._left_press_seq
             pending_drag_end = self._pending_drag_end_captures
             self._pending_drag_end_captures = None
@@ -4670,6 +4691,23 @@ class RecordingSession:
     def _emit_pending_click(self, x: int, y: int, button: str) -> None:
         self._flush_pending_click(x, y, button)
 
+    def _reconcile_sticky_left_press_from_os(self) -> bool:
+        """Close a tracked left press when the OS already reports the button up.
+
+        Missed pynput mouse-ups leave ``_left_button_down`` stuck. Recover by
+        synthesizing release at the press point. Returns True when a press was
+        closed.
+        """
+        with self._lock:
+            if not self._left_button_down or self._pending_click_coords is None:
+                return False
+            sx, sy, _btn = self._pending_click_coords
+        os_down = _os_mouse_button_down(_VK_LBUTTON)
+        if os_down is not False:
+            return False
+        self._on_left_mouse_up(sx, sy, synthesized=True)
+        return True
+
     def _on_mouse_move(self, x: int, y: int) -> None:
         ix, iy = int(x), int(y)
         with self._lock:
@@ -4682,9 +4720,7 @@ class RecordingSession:
         # Missed mouse-up: OS says released but we still track a press. Synthesize
         # up at the press point so a later far move cannot become a false drag
         # (toolbar click → flyout pick).
-        os_down = _os_mouse_button_down(_VK_LBUTTON)
-        if os_down is False:
-            self._on_left_mouse_up(sx, sy)
+        if self._reconcile_sticky_left_press_from_os():
             return
         if dragging:
             return
@@ -4720,15 +4756,18 @@ class RecordingSession:
             ):
                 if pending_timer is not None:
                     pending_timer.cancel()
-                self._clear_pending_left_gesture()
                 with self._lock:
+                    # Reuse the first-press reserved index for the double-click.
+                    double_index = self._take_pending_left_event_index_locked()
                     self._pending_click_timer = None
+                self._clear_pending_left_gesture()
                 self._queue_pointer_event_immediate(
                     kind="double_click",
                     cursor_xy=(ix, iy),
                     button=btn,
                     modifiers=self._snapshot_pressed_modifiers(),
                     timestamp_utc=action_timestamp_utc,
+                    event_index=double_index,
                 )
                 return
 
@@ -4746,6 +4785,8 @@ class RecordingSession:
             self._pending_click_down_at = now
             self._pending_click_timestamp_utc = action_timestamp_utc
             self._pending_click_modifiers = _ordered_modifiers(self._pressed_modifiers)
+            self._pending_click_event_index = self._next_index
+            self._next_index += 1
             self._left_button_down = True
             self._left_press_dragging = False
             self._last_move_xy = (ix, iy)
@@ -4764,7 +4805,13 @@ class RecordingSession:
         elif run_dir is not None:
             self._capture_pending_left_press(run_dir, ix, iy)
 
-    def _on_left_mouse_up(self, ix: int, iy: int) -> None:
+    def _on_left_mouse_up(
+        self,
+        ix: int,
+        iy: int,
+        *,
+        synthesized: bool = False,
+    ) -> None:
         with self._lock:
             pending_coords = self._pending_click_coords
             down_at = self._pending_click_down_at
@@ -4785,6 +4832,13 @@ class RecordingSession:
                 return
             with self._lock:
                 self._left_press_dragging = False
+        # OS/key recovery for a missed up: wall-clock since down is "how long we
+        # were stuck", not how long the user held — never promote to hold.
+        # Flush immediately (no double-click deferral): a recovered press is not
+        # awaiting a second click, and deferral can race with stop into a hold.
+        if synthesized:
+            self._flush_pending_click(sx, sy, button)
+            return
         hold_duration = time.monotonic() - down_at if down_at is not None else 0.0
         if hold_duration >= _HOLD_THRESHOLD_S:
             self._flush_pending_hold(sx, sy, button, hold_duration)
@@ -4928,6 +4982,9 @@ class RecordingSession:
             hardware = self._pop_hardware_key_sample_locked()
         if not active:
             return
+        # Close a sticky left press before typing/hotkeys so a missed mouse-up
+        # cannot invert gesture vs text order or inflate into a false hold.
+        self._reconcile_sticky_left_press_from_os()
         if suppress and key in _HOTKEY_SUPPRESS_KEYS:
             mod = _modifier_name(key)
             if mod:

@@ -1077,6 +1077,207 @@ def test_delete_recording_events_bulk_removes_files_and_rebuilds(tmp_path: Path)
     assert 'class="bulk-delete-steps"' in html
 
 
+def _set_analysis_verification(
+    run_root: Path,
+    event_index: int,
+    *,
+    expected_outcome: str | None,
+    use_expected_outcome: bool,
+    window_verify: dict,
+    window_verify_disabled: list[str] | None = None,
+    settle_after_seconds: float | None = None,
+) -> None:
+    path = run_root / "analysis" / f"event_{event_index:03d}.json"
+    analysis = json.loads(path.read_text(encoding="utf-8"))
+    if expected_outcome is None:
+        analysis.pop("expected_outcome", None)
+    else:
+        analysis["expected_outcome"] = expected_outcome
+    analysis["use_expected_outcome"] = use_expected_outcome
+    analysis["window_verify"] = window_verify
+    if window_verify_disabled:
+        analysis["window_verify_disabled"] = window_verify_disabled
+    else:
+        analysis.pop("window_verify_disabled", None)
+    if settle_after_seconds is None:
+        analysis.pop("settle_after_seconds", None)
+    else:
+        analysis["settle_after_seconds"] = settle_after_seconds
+    path.write_text(json.dumps(analysis, ensure_ascii=False), encoding="utf-8")
+
+
+def test_delete_recording_event_handoffs_verification_to_previous(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_three_event_run(runs_root, "recording_delete_handoff")
+    _set_analysis_verification(
+        run_root,
+        1,
+        expected_outcome="舊結果",
+        use_expected_outcome=True,
+        window_verify={"clipboard": "old"},
+        settle_after_seconds=0.1,
+    )
+    _set_analysis_verification(
+        run_root,
+        2,
+        expected_outcome="對話框已關閉",
+        use_expected_outcome=True,
+        window_verify={
+            "disappeared": [{"title": "Dialog", "class_name": "#32770"}],
+            "clipboard": "copied",
+        },
+        window_verify_disabled=["clipboard"],
+        settle_after_seconds=1.5,
+    )
+
+    delete_recording_event(runs_root, "recording_delete_handoff", 2)
+
+    previous = json.loads(
+        (run_root / "analysis" / "event_001.json").read_text(encoding="utf-8")
+    )
+    assert previous["instruction"] == "點擊「搜尋」按鈕"
+    assert previous["expected_outcome"] == "對話框已關閉"
+    assert previous["use_expected_outcome"] is True
+    assert previous["window_verify"] == {
+        "disappeared": [{"title": "Dialog", "class_name": "#32770"}],
+        "clipboard": "copied",
+    }
+    assert previous["window_verify_disabled"] == ["clipboard"]
+    assert previous["settle_after_seconds"] == 1.5
+    assert not (run_root / "analysis" / "event_002.json").exists()
+
+
+def test_delete_recording_events_consecutive_handoff_uses_last_deleted(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_three_event_run(
+        runs_root, "recording_delete_consecutive_handoff"
+    )
+    _set_analysis_verification(
+        run_root,
+        1,
+        expected_outcome="step1",
+        use_expected_outcome=True,
+        window_verify={"clipboard": "one"},
+    )
+    _set_analysis_verification(
+        run_root,
+        2,
+        expected_outcome="step2",
+        use_expected_outcome=True,
+        window_verify={"clipboard": "two"},
+    )
+    _set_analysis_verification(
+        run_root,
+        3,
+        expected_outcome="step3 final",
+        use_expected_outcome=False,
+        window_verify={"appeared": [{"title": "Done"}]},
+        settle_after_seconds=2.0,
+    )
+
+    delete_recording_events(
+        runs_root, "recording_delete_consecutive_handoff", [2, 3]
+    )
+
+    previous = json.loads(
+        (run_root / "analysis" / "event_001.json").read_text(encoding="utf-8")
+    )
+    assert previous["expected_outcome"] == "step3 final"
+    assert previous["use_expected_outcome"] is False
+    assert previous["window_verify"] == {"appeared": [{"title": "Done"}]}
+    assert "window_verify_disabled" not in previous
+    assert previous["settle_after_seconds"] == 2.0
+
+
+def test_delete_recording_events_nonconsecutive_handoffs_each_run(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_three_event_run(
+        runs_root, "recording_delete_split_handoff"
+    )
+    shot4 = run_root / "screenshots" / "event_004.jpeg"
+    shot4.write_bytes(b"\xff\xd8\xff\xd9")
+    (run_root / "events" / "event_004.json").write_text(
+        json.dumps(
+            {
+                "index": 4,
+                "timestamp_utc": "2026-07-21T04:00:04+00:00",
+                "kind": "click",
+                "cursor_xy": [40, 50],
+                "screenshot_path": str(shot4),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "analysis" / "event_004.json").write_text(
+        json.dumps(
+            {"event_index": 4, "instruction": "點擊「完成」按鈕"},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    session = json.loads((run_root / "session.json").read_text(encoding="utf-8"))
+    session["event_count"] = 4
+    session["events"] = [
+        "events/event_001.json",
+        "events/event_002.json",
+        "events/event_003.json",
+        "events/event_004.json",
+    ]
+    (run_root / "session.json").write_text(
+        json.dumps(session, ensure_ascii=False), encoding="utf-8"
+    )
+    report = json.loads((run_root / "report.json").read_text(encoding="utf-8"))
+    report["recorded"] = 4
+    report["processed"] = 4
+    report["cached"] = 4
+    report["instructions"] = [
+        "點擊「搜尋」按鈕",
+        "點擊「確定」按鈕",
+        "點擊「取消」按鈕",
+        "點擊「完成」按鈕",
+    ]
+    (run_root / "report.json").write_text(
+        json.dumps(report, ensure_ascii=False), encoding="utf-8"
+    )
+
+    _set_analysis_verification(
+        run_root,
+        2,
+        expected_outcome="from-2",
+        use_expected_outcome=True,
+        window_verify={"clipboard": "two"},
+    )
+    _set_analysis_verification(
+        run_root,
+        4,
+        expected_outcome="from-4",
+        use_expected_outcome=True,
+        window_verify={"clipboard": "four"},
+        window_verify_disabled=["clipboard"],
+    )
+
+    delete_recording_events(runs_root, "recording_delete_split_handoff", [2, 4])
+
+    step1 = json.loads(
+        (run_root / "analysis" / "event_001.json").read_text(encoding="utf-8")
+    )
+    step3 = json.loads(
+        (run_root / "analysis" / "event_003.json").read_text(encoding="utf-8")
+    )
+    assert step1["expected_outcome"] == "from-2"
+    assert step1["window_verify"] == {"clipboard": "two"}
+    assert step3["expected_outcome"] == "from-4"
+    assert step3["window_verify"] == {"clipboard": "four"}
+    assert step3["window_verify_disabled"] == ["clipboard"]
+
+
 def test_runs_report_server_events_bulk_delete_endpoint(tmp_path: Path) -> None:
     runs_root = tmp_path / "runs"
     run_root = _make_recording_three_event_run(runs_root, "recording_http_bulk_delete")

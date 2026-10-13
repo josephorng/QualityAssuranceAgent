@@ -23,6 +23,7 @@ Recording folder rename POST to ``/api/runs/<id>/rename``.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import re
@@ -546,6 +547,105 @@ def _rewrite_session_event_list(
     return remaining
 
 
+def _session_ordered_event_indices(run_dir: Path) -> list[int]:
+    """Return event indexes in ``session.json`` / filename order."""
+    ordered: list[int] = []
+    for path in recording_event_json_paths(run_dir):
+        raw = read_json(path, None)
+        if not isinstance(raw, dict):
+            continue
+        index = raw.get("index")
+        if isinstance(index, int) and not isinstance(index, bool) and index >= 1:
+            ordered.append(index)
+    return ordered
+
+
+def _copy_verification_between_analyses(
+    run_dir: Path,
+    *,
+    donor_index: int,
+    recipient_index: int,
+) -> None:
+    """Replace ``recipient`` verification with ``donor``'s (after-state handoff).
+
+    A step's verification describes its after frame, which is the next step's
+    before shot. When the next step is deleted, the survivor that now ends at
+    that after frame inherits the deleted step's verification.
+    """
+    if donor_index == recipient_index:
+        return
+    donor_path = run_dir / "analysis" / f"event_{donor_index:03d}.json"
+    recipient_path = run_dir / "analysis" / f"event_{recipient_index:03d}.json"
+    donor = read_json(donor_path, None)
+    recipient = read_json(recipient_path, None)
+    if not isinstance(donor, dict) or not isinstance(recipient, dict):
+        return
+
+    if "expected_outcome" in donor:
+        recipient["expected_outcome"] = donor["expected_outcome"]
+    else:
+        recipient.pop("expected_outcome", None)
+
+    if "use_expected_outcome" in donor:
+        recipient["use_expected_outcome"] = bool(donor.get("use_expected_outcome"))
+    else:
+        recipient["use_expected_outcome"] = use_expected_outcome_enabled(donor)
+
+    if isinstance(donor.get("window_verify"), dict):
+        recipient["window_verify"] = copy.deepcopy(donor["window_verify"])
+    else:
+        recipient["window_verify"] = {}
+
+    disabled = donor.get("window_verify_disabled")
+    if isinstance(disabled, list) and disabled:
+        recipient["window_verify_disabled"] = list(disabled)
+    else:
+        recipient.pop("window_verify_disabled", None)
+
+    if "settle_after_seconds" in donor:
+        recipient["settle_after_seconds"] = donor["settle_after_seconds"]
+    else:
+        recipient.pop("settle_after_seconds", None)
+
+    write_json(recipient_path, recipient)
+
+
+def _handoff_verification_before_delete(
+    run_dir: Path,
+    delete_indices: list[int],
+) -> None:
+    """Move each deleted run's last-step verification onto the previous survivor.
+
+    Consecutive deletes in session order hand off once from the last deleted
+    event in that run (the after state the previous survivor now reaches).
+    Deleting the first event(s) has no recipient and skips handoff.
+    """
+    delete_set = {index for index in delete_indices}
+    if not delete_set:
+        return
+    ordered = _session_ordered_event_indices(run_dir)
+    if not ordered:
+        return
+
+    index = 0
+    while index < len(ordered):
+        if ordered[index] not in delete_set:
+            index += 1
+            continue
+        run_start = index
+        while index < len(ordered) and ordered[index] in delete_set:
+            index += 1
+        if run_start == 0:
+            continue
+        donor_index = ordered[index - 1]
+        recipient_index = ordered[run_start - 1]
+        _copy_verification_between_analyses(
+            run_dir,
+            donor_index=donor_index,
+            recipient_index=recipient_index,
+        )
+
+
 def purge_recording_events_from_session(
     run_dir: Path,
     event_indices: list[int],
@@ -659,6 +759,11 @@ def delete_recording_events(
 ) -> dict[str, Any]:
     """Delete one or more recorded events and rebuild report/HTML once.
 
+    Before removing files, each deleted step's verification (expected outcome,
+    window checks, settle) is copied onto the previous surviving step, because
+    that survivor now ends at the deleted step's after frame. Consecutive
+    deletes hand off from the last deleted step in the run.
+
     Returns ``{"event_indices": [...], "deleted": n, "remaining": ...}``.
     Raises ``ValueError`` for invalid input / missing events.
     """
@@ -672,6 +777,7 @@ def delete_recording_events(
             continue
         seen.add(raw)
         unique.append(raw)
+    _handoff_verification_before_delete(run_dir, unique)
     remaining = purge_recording_events_from_session(run_dir, unique)
     _rebuild_recording_after_event_purge(run_dir, remaining)
     return {

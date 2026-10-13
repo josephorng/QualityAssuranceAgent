@@ -3077,3 +3077,110 @@ def test_capture_final_after_screenshot_uses_all_screens(tmp_path: Path) -> None
     assert Path(path).read_bytes() == b"all-monitors"
     assert captured == [run_dir / "screenshots" / "final_after.jpeg"]
 
+
+def test_resolve_window_change_records_failure_reasons() -> None:
+    from src.recorder.capture import RecordingSession, _QueuedEvent
+
+    session = RecordingSession(runs_root=Path("."))
+    empty = _QueuedEvent(
+        kind="click",
+        cursor_xy=(1, 1),
+        event_index=1,
+        timestamp_utc="t",
+    )
+    change, title, debug = session._resolve_window_change(empty)
+    assert change is None and title is None
+    assert debug == {"resolve_failed": "missing_before_cache"}
+    assert window_verify_from_debug(debug) == {}
+
+    before = (
+        WindowInfo(
+            hwnd=1,
+            title="Editor",
+            pid=1,
+            left=0,
+            top=0,
+            width=100,
+            height=100,
+            is_minimized=False,
+            is_maximized=False,
+        ),
+    )
+    item = _QueuedEvent(
+        kind="click",
+        cursor_xy=(1, 1),
+        event_index=1,
+        timestamp_utc="t",
+        windows_before=before,
+        signals_before={"foreground": {"class_name": "XLMAIN"}},
+    )
+    with patch(
+        "src.recorder.capture.snapshot_top_level_windows",
+        side_effect=RuntimeError("enum failed"),
+    ), patch(
+        "src.recorder.capture.settle_delay_for_click",
+        return_value=0.0,
+    ):
+        change, title, debug = session._resolve_window_change(item)
+    assert change is None and title is None
+    assert debug is not None
+    assert debug["resolve_failed"] == "snapshot_error"
+    assert "RuntimeError" in debug["resolve_failed_detail"]
+    assert window_verify_from_debug(debug) == {}
+
+    def _timed_out_reader():
+        timed_out = {"value": True}
+
+        def reader(_kind, _xy):
+            return {}
+
+        return reader, timed_out
+
+    with patch(
+        "src.recorder.capture.snapshot_top_level_windows",
+        return_value=list(before),
+    ), patch(
+        "src.recorder.capture.settle_delay_for_click",
+        return_value=0.0,
+    ), patch.object(
+        session,
+        "_uia_reader_or_timeout",
+        side_effect=_timed_out_reader,
+    ):
+        change, title, debug = session._resolve_window_change(item)
+    assert change is None and title is None
+    assert debug == {"resolve_failed": "uia_timeout"}
+    assert window_verify_from_debug(debug) == {}
+
+
+def test_window_step_persists_resolve_failed_when_before_cache_missing(tmp_path) -> None:
+    from src.recorder.capture import RecordingSession, _QueuedEvent
+
+    session = RecordingSession(runs_root=tmp_path)
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            session._persist_queued_event(
+                _QueuedEvent(
+                    kind="click",
+                    cursor_xy=(10, 10),
+                    event_index=1,
+                    timestamp_utc="2026-01-01T00:00:00+00:00",
+                    screenshot_path=str(run_dir / "screenshots" / "event_001.jpeg"),
+                    monitor_index=1,
+                    monitor_offset=(0, 0),
+                    windows_before=None,
+                    signals_before=None,
+                )
+            )
+            session._join_window_step_threads()
+        finally:
+            session.stop()
+
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["window_snapshot_debug"] == {"resolve_failed": "missing_before_cache"}
+    assert window_verify_from_debug(raw["window_snapshot_debug"]) == {}
+

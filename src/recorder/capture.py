@@ -88,7 +88,8 @@ _SETTLE_PROBE_KEEP_DEBUG_SAMPLES = False
 # Window list and UI Automation. Kept off the settle-probe timer.
 _PRE_CLICK_CONTEXT_INTERVAL_S = 0.25
 # UI Automation on a closing window can stall. The per-step thread gives up
-# and leaves window_change empty rather than blocking the next click.
+# and records ``resolve_failed`` on ``window_snapshot_debug`` rather than
+# blocking the next click.
 _WINDOW_UIA_TIMEOUT_S = 1.0
 # Stop waits this long for in-flight window-step threads to patch event JSON.
 _WINDOW_STEP_JOIN_TIMEOUT_S = 2.0
@@ -891,6 +892,18 @@ def _wait_for_input_listeners(
         if issue:
             issues.append(issue)
     return issues
+
+
+def _window_resolve_failure_debug(
+    reason: str,
+    *,
+    detail: str | None = None,
+) -> dict[str, Any]:
+    """Minimal ``window_snapshot_debug`` when the window-step cannot finish."""
+    payload: dict[str, Any] = {"resolve_failed": str(reason)}
+    if detail:
+        payload["resolve_failed_detail"] = str(detail)[:500]
+    return payload
 
 
 def _apply_next_before_to_debug(
@@ -4588,7 +4601,7 @@ class RecordingSession:
         item: _QueuedEvent,
     ) -> tuple[dict[str, Any] | None, str | None, dict[str, Any] | None]:
         if not item.windows_before and not item.signals_before:
-            return None, None, None
+            return None, None, _window_resolve_failure_debug("missing_before_cache")
         signals_before = dict(item.signals_before or {})
         point_before = identity_from_click_window(item.click_window)
         if point_before is not None:
@@ -4604,8 +4617,11 @@ class RecordingSession:
             if item.windows_before:
                 try:
                     windows_after = snapshot_top_level_windows()
-                except Exception:
-                    return None, None, None
+                except Exception as exc:
+                    return None, None, _window_resolve_failure_debug(
+                        "snapshot_error",
+                        detail=f"{type(exc).__name__}: {exc}",
+                    )
             uia_reader, uia_timed_out = self._uia_reader_or_timeout()
             try:
                 signals_after = capture_step_signals(
@@ -4616,7 +4632,7 @@ class RecordingSession:
             except Exception:
                 signals_after = {}
             if uia_timed_out["value"]:
-                return None, None, None
+                return None, None, _window_resolve_failure_debug("uia_timeout")
         change: dict[str, Any] | None = None
         title: str | None = None
         debug: dict[str, Any] = {}
@@ -4732,6 +4748,8 @@ class RecordingSession:
         else:
             self._sleep_remaining_window_settle(item)
             focus_rect = self._sample_debug_focus_rect_for_item(item)
+            # Same outcome as ``_resolve_window_change`` with an empty before-cache.
+            debug = _window_resolve_failure_debug("missing_before_cache")
         if change is None and title is None and debug is None and focus_rect is None:
             return
         self._patch_window_change(

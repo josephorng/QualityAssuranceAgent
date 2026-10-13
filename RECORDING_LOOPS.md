@@ -14,13 +14,14 @@ flowchart LR
   end
 
   subgraph shared [Shared state]
-    Frame["_last_settle_frame"]
+    Frame["_last_settle_frames raw RGB"]
     Windows["_last_settle_windows / _last_settle_signals"]
     Queue[Worker queue]
   end
 
   subgraph loops [Loops]
     Probe[Settle-probe timer]
+    BeforeShot[Before-shot grab loop]
     Context[Pre-click context loop]
     Worker[screen-recorder-worker]
     WindowStep[Per-step window thread]
@@ -30,7 +31,8 @@ flowchart LR
     Vision[Vision prefetch pool]
   end
 
-  Mouse -->|pin frame, copy window cache| Frame
+  BeforeShot -->|grab RGB per monitor| Frame
+  Mouse -->|pin raw frame, copy window cache| Frame
   Mouse -->|copy| Windows
   Mouse -->|pending press| Queue
   Mouse -->|mouse-up| ClickTimer
@@ -40,13 +42,11 @@ flowchart LR
   KeyTimer -->|before-shot for Tab or Enter| Queue
 
   Context -->|every 0.25s| Windows
-  Probe -->|every 0.25s, on publish| Frame
-  Worker -->|read press-time copies| Queue
+  Worker -->|JPEG-encode pinned frame| Queue
   Worker -->|write event JSON, then start probe| Probe
   Worker -->|hand off window diff| WindowStep
   WindowStep -->|patch window_change| Worker
   Worker -->|notify| Vision
-  Probe -->|next click pins this| Frame
 ```
 
 ## Shared state
@@ -60,13 +60,15 @@ flowchart LR
 
 ## Loops
 
+### Before-shot grab loop
+
+Thread `screen-recorder-before-shot`. Round-robins each physical monitor with a long-lived `mss` instance and stores raw RGB in `_last_settle_frames` (no JPEG in this loop). Mouse-down pins that monitor's latest raw frame. The worker JPEG-encodes the pinned frame when adopting it into `_pending_capture_*.jpeg` / `event_N.jpeg`, and refreshes durable `_last_settle_frame.jpeg` only then.
+
 ### Settle-probe timer
 
-One slot. Recording starts it as event 0 so the first click has a frame to pin. After each recorded click, drag, hold, text input, or key press, the worker replaces that slot without waiting for an in-flight tick: the timer is cancelled, the new probe starts, and a superseded tick no-ops before it publishes.
+One slot. After each recorded click, drag, hold, text input, or key press, the worker replaces that slot without waiting for an in-flight tick: the timer is cancelled, the new probe starts, and a superseded tick no-ops before it publishes.
 
-The first sample is immediate. Later samples wait 0.25 seconds (`_SETTLE_PROBE_INTERVAL_S`), up to 55 seconds. The first similar pair records `observed_settle_seconds` but does not stop the probe; sampling continues until the next event replaces the slot (or the max window). Each published sample is copied to `screenshots/_settle_pub_NNNNN.jpeg` and stored as `_last_settle_frame`. The probe timer does not enumerate windows. The context loop owns that cache.
-
-The frame pinned by the next click is this step's after shot and the next step's before shot.
+The first sample is immediate. Later samples wait `_SETTLE_PROBE_INTERVAL_S` (1.0s), up to 55 seconds. The first similar pair records `observed_settle_seconds` but does not stop the probe; sampling continues until the next event replaces the slot (or the max window). Settle samples measure stability only; they do not publish before-shots. The probe timer does not enumerate windows. The context loop owns that cache.
 
 ### Pre-click context loop
 
@@ -78,7 +80,7 @@ The mouse hook copies this cache at press time. It does not enumerate windows it
 
 Thread `screen-recorder-worker`. One queue, one job at a time. The first job seeds the window list so the context loop can start.
 
-For a click the queue holds two jobs: `pending_left_press` (copy the pinned frame into `_pending_capture_{press_seq}.jpeg`, then into the before shot) and, after mouse-up, the emitted click. Persisting that click writes the event JSON, notifies the hub, and starts the settle probe. It does not sleep and it does not call UI Automation.
+For a click the queue holds two jobs: `pending_left_press` (JPEG-encode the pinned raw before-shot into `_pending_capture_{press_seq}.jpeg`) and, after mouse-up, the emitted click. Persisting that click writes the event JSON, notifies the hub, and starts the settle probe. It does not sleep and it does not call UI Automation.
 
 Each press has its own pending file so two presses cannot share `_pending_capture.jpeg`.
 
@@ -119,15 +121,15 @@ sequenceDiagram
   participant Vision as Vision prefetch
 
   Context->>Context: Refresh window cache every 0.25s
-  Mouse->>Mouse: Pin _last_settle_frame and copy window cache
+  Note over Mouse: Before-shot loop keeps raw RGB per monitor
+  Mouse->>Mouse: Pin raw before-shot and copy window cache
   Mouse->>Queue: pending_left_press
   Mouse->>Queue: Emitted click, after the double-click wait
-  Worker->>Worker: Copy pinned frame to event_N.jpeg
+  Worker->>Worker: JPEG-encode pinned frame to event_N.jpeg
   Worker->>Vision: Event JSON is saved
   Worker->>Probe: Start probe for this click when its index is newer
   Worker->>WindowStep: Sleep the remaining 0.25s or 0.45s, then window list and UI Automation
-  Probe->>Probe: Sample immediately, then every 0.25s (no early stop)
-  Probe->>Mouse: Publish _last_settle_frame for the next click
+  Probe->>Probe: Sample immediately, then every 1s (settle only, no before-shot publish)
   WindowStep->>WindowStep: Patch window_change onto the event file
 ```
 

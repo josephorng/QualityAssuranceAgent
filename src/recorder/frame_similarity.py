@@ -75,7 +75,7 @@ def settle_probe_kept_path(run_dir: Path, event_index: int) -> Path:
 
 
 def last_settle_frame_path(run_dir: Path) -> Path:
-    """Durable frame reused as the next action's before-shot when available."""
+    """Durable debug JPEG written when a before-shot is adopted (encoded)."""
     return Path(run_dir) / "screenshots" / "_last_settle_frame.jpeg"
 
 

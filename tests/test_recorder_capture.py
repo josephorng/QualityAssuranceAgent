@@ -2450,42 +2450,38 @@ def test_pointer_click_persists_window_change(tmp_path) -> None:
     assert raw["window_snapshot_debug"]["windows_after"][0]["is_minimized"] is True
 
 
-def test_settle_probe_grabs_while_context_refresh_blocks(tmp_path) -> None:
-    """A stalled window or UI Automation refresh must not block the probe grab."""
+def test_before_shot_grabs_while_context_refresh_blocks(tmp_path) -> None:
+    """A stalled window or UI Automation refresh must not block before-shot grabs."""
+    from src.recorder.capture import _RawBeforeShot
+
     session = RecordingSession(runs_root=tmp_path)
     blocked = threading.Event()
     release = threading.Event()
-    probe_grabs: list[str] = []
+    before_shot_grabs: list[int] = []
 
     def _slow(*_args, **_kwargs):
         blocked.set()
         assert release.wait(3.0)
         return {}
 
-    def _grab(_self, _cursor, dest, *, monitor_index=None):
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"fake")
-        name = dest.name
-        if (
-            name.startswith("_settle_")
-            or name.startswith("_last_settle")
-            or name.startswith("_before_shot_")
-        ):
-            probe_grabs.append(name)
-        assert not name.startswith("_pre_click_")
-        if monitor_index is not None:
-            return int(monitor_index), (0, 0)
-        if _cursor is not None:
-            return 1, (0, 0)
-        return 0, (0, 0)
+    def _grab_raw(_self, _sct, monitor_index):
+        mon = int(monitor_index)
+        before_shot_grabs.append(mon)
+        return _RawBeforeShot(
+            frame_id=_self._alloc_before_shot_frame_id(),
+            rgb=bytes([0, 180, 0]) * (16 * 12),
+            size=(16, 12),
+            monitor_index=mon,
+            monitor_offset=(0, 0),
+        )
 
     with _default_capture_window_patches(), patch(
         "src.recorder.capture.pyautogui.position",
         return_value=type("P", (), {"x": 10, "y": 10})(),
     ), patch.object(
         RecordingSession,
-        "_grab_screenshot",
-        _grab,
+        "_grab_raw_before_shot",
+        _grab_raw,
     ), patch(
         "src.recorder.capture.capture_slow_signals",
         side_effect=_slow,
@@ -2494,9 +2490,9 @@ def test_settle_probe_grabs_while_context_refresh_blocks(tmp_path) -> None:
         try:
             assert blocked.wait(2.0)
             deadline = time.monotonic() + 1.5
-            while time.monotonic() < deadline and not probe_grabs:
+            while time.monotonic() < deadline and not before_shot_grabs:
                 time.sleep(0.05)
-            assert probe_grabs
+            assert before_shot_grabs
         finally:
             release.set()
             session.stop()

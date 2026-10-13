@@ -997,10 +997,6 @@ class RecordingSession:
         self._settle_probe_timer: threading.Timer | None = None
         # Serialize settle ticks (timer thread) vs cancel/start (capture worker).
         self._settle_tick_lock = threading.Lock()
-        # One desktop grab at a time. The before-shot loop and the settle probe
-        # both call mss; sharing an instance across threads is not safe, and
-        # overlapping grabs stall the latest-frame publish.
-        self._screenshot_grab_lock = threading.Lock()
         self._before_shot_stop = threading.Event()
         self._before_shot_thread: threading.Thread | None = None
         # Event JSON is patched by the probe timer and by per-step window threads.
@@ -3515,32 +3511,25 @@ class RecordingSession:
         *,
         monitor_index: int | None = None,
     ) -> tuple[int, tuple[int, int]]:
-        """Capture one frame. One grab at a time across before-shot and settle."""
-        lock = getattr(self, "_screenshot_grab_lock", None)
-        if lock is not None:
-            lock.acquire()
-        try:
-            if monitor_index is not None:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                with mss.mss() as sct:
-                    mon_idx = resolve_monitor_index(sct, int(monitor_index))
-                    monitor = sct.monitors[mon_idx]
-                    shot = sct.grab(monitor)
-                    from PIL import Image
+        """Capture one frame for before-shot or settle (separate mss contexts)."""
+        if monitor_index is not None:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with mss.mss() as sct:
+                mon_idx = resolve_monitor_index(sct, int(monitor_index))
+                monitor = sct.monitors[mon_idx]
+                shot = sct.grab(monitor)
+                from PIL import Image
 
-                    img = Image.frombytes("RGB", shot.size, shot.rgb)
-                    img.save(dest, format="JPEG")
-                    return int(mon_idx), (int(monitor["left"]), int(monitor["top"]))
-            if cursor is not None:
-                _, mon_idx, mon_offset = _capture_screenshot_at_point(
-                    int(cursor[0]), int(cursor[1]), dest
-                )
-                return int(mon_idx), (int(mon_offset[0]), int(mon_offset[1]))
-            capture_all_screens_to_file(dest)
-            return 0, (0, 0)
-        finally:
-            if lock is not None:
-                lock.release()
+                img = Image.frombytes("RGB", shot.size, shot.rgb)
+                img.save(dest, format="JPEG")
+                return int(mon_idx), (int(monitor["left"]), int(monitor["top"]))
+        if cursor is not None:
+            _, mon_idx, mon_offset = _capture_screenshot_at_point(
+                int(cursor[0]), int(cursor[1]), dest
+            )
+            return int(mon_idx), (int(mon_offset[0]), int(mon_offset[1]))
+        capture_all_screens_to_file(dest)
+        return 0, (0, 0)
 
     def _start_before_shot_loop(self) -> None:
         """Publish fresh per-monitor screenshots for the whole recording.

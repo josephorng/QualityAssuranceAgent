@@ -743,7 +743,6 @@ def test_before_shot_capture_publishes_without_settle_probe(tmp_path: Path, monk
 
     session = RecordingSession.__new__(RecordingSession)
     session._lock = threading.Lock()
-    session._screenshot_grab_lock = threading.Lock()
     session._before_shot_stop = threading.Event()
     session._run_dir = run_dir
     session._settle_pub_seq = 0
@@ -792,7 +791,6 @@ def test_before_shot_round_robin_keeps_per_monitor_frames(
 
     session = RecordingSession.__new__(RecordingSession)
     session._lock = threading.Lock()
-    session._screenshot_grab_lock = threading.Lock()
     session._before_shot_stop = threading.Event()
     session._run_dir = run_dir
     session._settle_pub_seq = 0
@@ -881,7 +879,6 @@ def test_settle_tick_does_not_replace_before_shot(tmp_path: Path, monkeypatch) -
     session = RecordingSession.__new__(RecordingSession)
     session._lock = threading.Lock()
     session._settle_tick_lock = threading.Lock()
-    session._screenshot_grab_lock = threading.Lock()
     session._event_file_lock = threading.Lock()
     session._run_dir = run_dir
     session._events = []

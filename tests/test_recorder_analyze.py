@@ -2697,10 +2697,7 @@ def test_instruction_for_click_scrollbar_with_adjacent_text() -> None:
             },
         ],
     }
-    assert (
-        instruction_for_click(event, vision)
-        == "將滑鼠移到「資產總覽」文字區域的滾動條"
-    )
+    assert instruction_for_click(event, vision) == "將滑鼠移到滾動條"
 
 
 def test_instruction_for_click_empty_scrollbar() -> None:
@@ -2795,10 +2792,7 @@ def test_instruction_for_click_scrollbar_track_percent_with_adjacent() -> None:
             },
         ],
     }
-    assert (
-        instruction_for_click(event, vision)
-        == "將滑鼠移到「資產總覽」文字區域的滾動條的45%處"
-    )
+    assert instruction_for_click(event, vision) == "將滑鼠移到滾動條的45%處"
 
 
 def test_instruction_for_drag_scrollbar_track_percent() -> None:
@@ -2838,8 +2832,98 @@ def test_instruction_for_drag_scrollbar_track_percent() -> None:
     }
     assert (
         instruction_for_drag(vision, destination)
-        == "從滾動條的20%處拖到滾動條的80%處"
+        == "從滾動條的20%處拖到80%處"
     )
+
+
+def test_append_drag_nearby_scrollbar_track_percent_merges_trailing() -> None:
+    vision = {
+        "used_vision": True,
+        "local_cursor": (100, 20),
+        "scrollbar_track": {
+            "bbox": [90, 0, 20, 100],
+            "axis": "vertical",
+            "percent": 5,
+            "anchor_class": "scrollbar",
+        },
+        "candidates": [
+            {
+                "bbox": [90, 0, 20, 100],
+                "center": [100, 50],
+                "class_name": "scrollbar",
+                "text": None,
+            },
+            {
+                "bbox": [40, 30, 40, 16],
+                "center": [60, 38],
+                "class_name": "text",
+                "text": "登入",
+            },
+            {
+                "bbox": [10, 80, 50, 14],
+                "center": [35, 87],
+                "class_name": "text",
+                "text": "訪客",
+            },
+        ],
+    }
+    destination = {
+        "used_vision": True,
+        "local_cursor": (100, 85),
+        "scrollbar_track": {
+            "bbox": [90, 0, 20, 100],
+            "axis": "vertical",
+            "percent": 85,
+            "anchor_class": "scrollbar",
+        },
+        "candidates": [
+            {
+                "bbox": [90, 0, 20, 100],
+                "center": [100, 50],
+                "class_name": "scrollbar",
+                "text": None,
+            },
+            {
+                "bbox": [40, 30, 40, 16],
+                "center": [60, 38],
+                "class_name": "text",
+                "text": "登入",
+            },
+        ],
+    }
+    instruction = instruction_for_drag(vision, destination)
+    assert instruction == "從滾動條的5%處拖到85%處"
+    result = append_drag_nearby_context_comments(instruction, vision, destination)
+    assert "起點" not in result and "終點" not in result
+    assert result.startswith("從滾動條的5%處拖到85%處（")
+    assert "在「登入」文字的右邊" in result
+
+
+def test_collect_nearby_hints_forces_scrollbar_adjacent_content() -> None:
+    from src.recorder.vision_context import collect_nearby_hints
+
+    vision = {
+        "local_cursor": (3611, 358),
+        "candidates": [
+            {
+                "bbox": [3600, 272, 21, 172],
+                "center": [3611, 358],
+                "class_name": "scrollbar",
+                "text": None,
+            },
+            {
+                "bbox": [3500, 320, 60, 14],
+                "center": [3530, 327],
+                "class_name": "text",
+                "text": "資產總覽",
+            },
+        ],
+    }
+    hints = collect_nearby_hints(vision, instruction="將滑鼠移到滾動條的45%處")
+    labels = [h.label for h in hints]
+    assert "「資產總覽」文字" in labels
+    content = next(h for h in hints if h.label == "「資產總覽」文字")
+    assert content.side is not None
 
 
 def test_instruction_for_scroll_on_scrollbar() -> None:

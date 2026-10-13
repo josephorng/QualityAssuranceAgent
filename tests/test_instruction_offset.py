@@ -236,6 +236,21 @@ def test_parse_mouse_target_regex_scrollbar_drag_end_percent() -> None:
     assert dy == 0
 
 
+def test_parse_mouse_target_regex_scrollbar_drag_bare_end_percent() -> None:
+    from cua_mcp.instruction_offset import extract_track_percent
+
+    anchor, dx, dy, char, char_occurrence, track_percent = _parse_mouse_target_regex(
+        "從滾動條的5%處拖到85%處"
+    )
+    assert track_percent == 85
+    assert "5%處" not in anchor
+    assert "85%處" not in anchor
+    assert dx == 0
+    assert dy == 0
+    assert extract_track_percent("85%處") == 85
+    assert extract_track_percent("滾動條的5%處") == 5
+
+
 @pytest.mark.asyncio
 async def test_parse_mouse_target_instruction_char_target_llm() -> None:
     with patch(

@@ -203,7 +203,34 @@ def test_compile_drag() -> None:
             "arguments": {
                 "start_instruction": "「A」圖示",
                 "destination_instruction": "「B」文字",
+                "start_nearby_objects": ["「C」文字"],
                 "destination_nearby_objects": ["「C」文字"],
+            },
+        }
+    ]
+
+
+def test_compile_drag_scrollbar_track_percent_trailing_nearby() -> None:
+    event = _event(kind="drag")
+    instruction = (
+        "從滾動條的5%處拖到85%處（在「烏他總是跟家里X說」文字的右邊、"
+        "在「登入」文字的右邊）"
+    )
+    calls = compile_tool_calls(event, instruction)
+    assert calls == [
+        {
+            "name": "drag",
+            "arguments": {
+                "start_instruction": "滾動條的5%處",
+                "destination_instruction": "85%處",
+                "start_nearby_objects": [
+                    "在「烏他總是跟家里X說」文字的右邊",
+                    "在「登入」文字的右邊",
+                ],
+                "destination_nearby_objects": [
+                    "在「烏他總是跟家里X說」文字的右邊",
+                    "在「登入」文字的右邊",
+                ],
             },
         }
     ]

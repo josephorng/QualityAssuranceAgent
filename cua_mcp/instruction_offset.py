@@ -18,7 +18,8 @@ from src.common.prompting import get_prompt
 from src.common.run_state import get_run_state_manager
 
 _OFFSET_TOKEN_RE = re.compile(r"(右方|左方|上方|下方)(\d+)個像素")
-_TRACK_PERCENT_RE = re.compile(r"的(\d+)%處")
+# ``的N%處`` (start) and bare ``N%處`` (drag destination shorthand).
+_TRACK_PERCENT_RE = re.compile(r"(?:的)?(\d+)%處")
 _TRAILING_CONTEXT_COMMENT_RE = re.compile(r"(?:（[^）]*）)+$")
 _INLINE_START_CONTEXT_COMMENT_RE = re.compile(r"（起點(?:附近|在)[^）]*）")
 
@@ -297,6 +298,6 @@ async def parse_mouse_target_instruction(
 
 
 def extract_track_percent(instruction: str) -> int | None:
-    """Return 0–100 when ``instruction`` contains ``的N%處`` (e.g. 滾動條的60%處)."""
+    """Return 0–100 when ``instruction`` contains ``的N%處`` or bare ``N%處``."""
     _, track_percent = _extract_track_percent_regex((instruction or "").strip())
     return track_percent

@@ -53,9 +53,11 @@ from src.common.nearby_side import (
     anchor_satisfies_side,
     format_nearby_context_comment,
     landmark_cell_from_anchor_bbox,
+    merge_nearby_hints,
     side_from_anchor_bbox,
     side_to_schema_value,
     side_to_zh,
+    strip_nearby_context_comments,
 )
 from src.recorder.models import (
     POINTER_EVENT_KINDS,
@@ -1731,6 +1733,59 @@ def list_prioritized_nearby_hints(
     return [*forced, *ranked]
 
 
+def _collect_scrollbar_adjacent_content_hints(
+    candidates: list[Any],
+    *,
+    primary: dict[str, Any],
+    primary_bbox: tuple[int, int, int, int] | None,
+    click_xy: tuple[int, int] | None,
+    instruction: str,
+    reserved_labels: set[str],
+) -> list[NearbyHint]:
+    """Force-include scrollable content beside a primary scrollbar as a landmark.
+
+    Content used to be baked into ``「X」文字區域的滾動條``; it now lives in the
+    nearby parenthetical so the anchor stays bare ``滾動條``.
+    """
+    if primary.get("class_name") != "scrollbar" or primary_bbox is None:
+        return []
+    adjacent = _scrollbar_adjacent_content_labels(
+        [c for c in candidates if isinstance(c, dict)],
+        primary_bbox,
+    )
+    if not adjacent:
+        return []
+    target_raw = adjacent[0]
+    for candidate in candidates[1:]:
+        if not isinstance(candidate, dict):
+            continue
+        if _candidate_meaningful_content_label(candidate) != target_raw:
+            continue
+        label = _candidate_label_for_hint(candidate)
+        if not label or label in reserved_labels:
+            continue
+        if _is_unknown_nearby_landmark(label, candidate):
+            continue
+        if instruction and _label_already_in_instruction(label, instruction):
+            continue
+        side = _neighbor_side_for_candidate(
+            candidate,
+            primary_bbox=primary_bbox,
+            click_xy=click_xy,
+        )
+        return [NearbyHint(label=label, side=side)]
+    # Fallback: synthesize a text label when OCR sits in the content strip but
+    # was not kept as a separate neighbor candidate.
+    synth = f"「{target_raw}」文字"
+    if synth in reserved_labels:
+        return []
+    if instruction and _label_already_in_instruction(synth, instruction):
+        return []
+    _x, _y, w, h = primary_bbox
+    default_side = Side.RIGHT if h >= w else Side.BELOW
+    return [NearbyHint(label=synth, side=default_side)]
+
+
 def collect_nearby_hints(
     vision: dict[str, Any],
     *,
@@ -1739,7 +1794,8 @@ def collect_nearby_hints(
     """Collect directed landmarks near the click.
 
     Forced containing ``input`` / ``scrollbar`` landmarks (``side=inside``) come
-    first. Then the closest unique multi-character text on each of the eight
+    first. When the primary target is a scrollbar, adjacent content is forced
+    next. Then the closest unique multi-character text on each of the eight
     directed sides, falling back to the closest known icon when a side has no
     unique text. A spare unique multi-character text is appended when one remains
     unused.
@@ -1755,14 +1811,23 @@ def collect_nearby_hints(
         instruction=instruction,
         click_xy=click_xy,
     )
+    content_hints = _collect_scrollbar_adjacent_content_hints(
+        candidates,
+        primary=primary,
+        primary_bbox=primary_bbox,
+        click_xy=click_xy,
+        instruction=instruction,
+        reserved_labels={hint.label for hint in forced},
+    )
+    reserved = {hint.label for hint in forced} | {hint.label for hint in content_hints}
     locating = _pick_minimal_locating_hints(
         candidates,
         instruction=instruction,
-        reserved_labels={hint.label for hint in forced},
+        reserved_labels=reserved,
         primary_bbox=primary_bbox,
         click_xy=click_xy,
     )
-    return [*forced, *locating]
+    return [*forced, *content_hints, *locating]
 
 
 def collect_nearby_hint_labels(
@@ -2176,6 +2241,20 @@ def append_nearby_context_comment(
     return instruction + comment
 
 
+def _is_scrollbar_track_percent_drag(
+    instruction: str,
+    vision: dict[str, Any],
+    destination: dict[str, Any],
+) -> bool:
+    """True for ``從滾動條的N%處拖到M%處`` style track drags."""
+    if not scrollbar_track_percent_phrase(vision):
+        return False
+    if not scrollbar_track_percent_phrase(destination):
+        return False
+    cleaned = strip_nearby_context_comments(instruction)
+    return "滾動條" in cleaned and "拖到" in cleaned
+
+
 def append_drag_nearby_context_comments(
     instruction: str,
     vision: dict[str, Any],
@@ -2183,13 +2262,27 @@ def append_drag_nearby_context_comments(
     start_hints: list[NearbyHint] | None = None,
     end_hints: list[NearbyHint] | None = None,
 ) -> str:
-    """Insert start nearby comment before 拖到; append destination comment at end."""
+    """Insert start nearby comment before 拖到; append destination comment at end.
+
+    Scrollbar track-percent drags use a single trailing ``（在…）`` comment
+    (merged start+end landmarks) instead of split 起點/終點 parentheticals.
+    """
     if not vision.get("used_vision"):
         return instruction
 
-    result = instruction
     if start_hints is None:
         start_hints = collect_nearby_hints(vision, instruction=instruction)
+    if end_hints is None:
+        end_hints = collect_nearby_hints(destination, instruction=instruction)
+
+    if _is_scrollbar_track_percent_drag(instruction, vision, destination):
+        merged = merge_nearby_hints(start_hints, end_hints)
+        comment = format_nearby_context_comment(merged, location="附近")
+        if comment is None:
+            return instruction
+        return instruction + comment
+
+    result = instruction
     start_comment = format_nearby_context_comment(
         start_hints,
         location="起點",
@@ -2198,8 +2291,6 @@ def append_drag_nearby_context_comments(
         drag_at = result.index("拖到")
         result = result[:drag_at] + start_comment + result[drag_at:]
 
-    if end_hints is None:
-        end_hints = collect_nearby_hints(destination, instruction=instruction)
     dest_comment = format_nearby_context_comment(
         end_hints,
         location="終點",

@@ -280,6 +280,10 @@ def _compile_drag(event: RecordedEvent, instruction: str) -> list[dict[str, Any]
         return None
     buckets = extract_nearby_hints_by_location(instruction)
     start_nearby = nearby_hints_to_phrases(buckets.get("起點") or [])
+    # Trailing （在…） comments land in 附近; use them for start when 起點 is empty
+    # so scrollbar track drags still disambiguate the start resolve.
+    if not start_nearby:
+        start_nearby = nearby_hints_to_phrases(buckets.get("附近") or [])
     dest_nearby = nearby_hints_to_phrases(
         merge_nearby_hints(buckets.get("終點"), buckets.get("附近"))
     )

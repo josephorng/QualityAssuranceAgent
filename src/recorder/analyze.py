@@ -20,7 +20,6 @@ from src.recorder.vision_context import (
     format_drag_destination_offset_hints,
     format_field_context_hint,
     format_input_context_hint,
-    format_scrollbar_context_hint,
     primary_candidate_char_target,
     primary_candidate_offset,
     scrollbar_track_percent_phrase,
@@ -339,15 +338,6 @@ def _visible_input_field_text(vision: dict[str, Any]) -> str | None:
     return None
 
 
-def _visible_scrollbar_content_label(vision: dict[str, Any]) -> str | None:
-    """Return scrollable content beside the nearest scrollbar, when available."""
-    hint = format_scrollbar_context_hint(vision)
-    prefix = "滾動條旁可見內容: 「"
-    if hint and hint.startswith(prefix) and hint.endswith("」"):
-        return hint[len(prefix) : -1] or None
-    return None
-
-
 def _click_target_anchor(vision: dict[str, Any]) -> str | None:
     """Return a named click target from the nearest candidate, or None if too generic."""
     candidates = vision.get("candidates") or []
@@ -362,9 +352,8 @@ def _click_target_anchor(vision: dict[str, Any]) -> str | None:
         return "輸入欄"
 
     if primary.get("class_name") == "scrollbar":
-        visible = _visible_scrollbar_content_label(vision)
-        if visible:
-            return f"「{visible}」文字區域的滾動條"
+        # Adjacent content (e.g. 「登入」) is forced into nearby landmarks instead
+        # of a 「X」文字區域的滾動條 prefix, so replay matches class 滾動條.
         return "滾動條"
 
     anchor = format_drag_candidate_anchor(primary)
@@ -542,13 +531,9 @@ def instruction_for_drag(
     start_track = scrollbar_track_percent_phrase(vision)
     end_track = scrollbar_track_percent_phrase(destination)
     if start_track and end_track:
-        source_anchor = _click_target_anchor(vision)
-        if not source_anchor:
-            source_candidates = vision.get("candidates") or []
-            if source_candidates:
-                source_anchor = format_drag_candidate_anchor(source_candidates[0])
-        if source_anchor:
-            return f"從{source_anchor}{start_track}拖到{source_anchor}{end_track}"
+        # Bare 滾動條 + 的N%處 → M%處; content labels go in nearby (...).
+        end_percent = end_track[1:] if end_track.startswith("的") else end_track
+        return f"從滾動條{start_track}拖到{end_percent}"
 
     source_candidates = vision.get("candidates") or []
     dest_candidates = destination.get("candidates") or []

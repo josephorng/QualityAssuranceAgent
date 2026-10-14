@@ -2240,6 +2240,122 @@ def _hint_covered_by_neighbors(
     return False
 
 
+# Overlay landmark matching is stricter than mouse prefilter so 「100%」does not
+# claim a bare 「10」detection (SequenceMatcher ≈ 0.67 at the 0.5 prefilter bar).
+_LIVE_OVERLAY_LABEL_SIMILARITY = 0.9
+
+
+def _overlay_label_similarity(det: UiDetection, query: str) -> float:
+    """Similarity for HTML landmark binding; short labels require an exact fold."""
+    query = (query or "").strip()
+    if not query:
+        return 0.0
+    sim = _detection_similarity_to_query(det, query)
+    if sim <= 0.0:
+        return 0.0
+    normalized = _normalize_similarity_label(query)
+    # "10" must not bind via partial ratio to "100%" / "10o%" noise.
+    if len(normalized) <= 3 and sim < 1.0:
+        return 0.0
+    return sim
+
+
+def _live_html_overlay_fields(
+    chosen: UiDetection,
+    detections: list[UiDetection],
+    nearby_matches: list[UiDetection],
+    nearby_hints: list[NearbyHint] | None,
+    *,
+    threshold: float = _LIVE_OVERLAY_LABEL_SIMILARITY,
+) -> dict[str, Any]:
+    """Peer / landmark geometry for session HTML (screen xywh / LTRB).
+
+    Landmarks include every nearby hint that matches a live detection by label.
+    Directed ``side`` is stored for the arrow overlay; assignment prefers a
+    side-compatible detection but still keeps the hint when only off-side hits
+    exist. Detections are claimed exclusively so 「100%」cannot steal 「10」.
+    """
+    peer_bboxes: list[dict[str, int]] = []
+    if chosen.class_name in ("input", "scrollbar"):
+        for det in detections:
+            if det.class_name != chosen.class_name:
+                continue
+            if det.bbox == chosen.bbox:
+                continue
+            x, y, w, h = det.bbox
+            peer_bboxes.append({"x": int(x), "y": int(y), "w": int(w), "h": int(h)})
+
+    # Prefer filter nearby hits, then fall back to the full detection list so a
+    # label OCR'd on screen still overlays even when side prefilter dropped it.
+    landmark_pool: list[UiDetection] = []
+    seen_ids: set[int] = set()
+    for det in [*nearby_matches, *detections]:
+        det_id = id(det)
+        if det_id in seen_ids:
+            continue
+        seen_ids.add(det_id)
+        landmark_pool.append(det)
+
+    # (hint_index, det, sim, side_miss, short_x, short_y, dist_sq)
+    # short_x/y prefer leftmost exact short labels (row-header 「10」over mid-grid OCR).
+    candidates: list[
+        tuple[int, UiDetection, float, int, int, int, float]
+    ] = []
+    hints = list(nearby_hints or [])
+    for hi, hint in enumerate(hints):
+        label = (hint.label or "").strip()
+        if not label:
+            continue
+        normalized = _normalize_similarity_label(label)
+        short_exact = len(normalized) <= 3
+        for det in landmark_pool:
+            sim = _overlay_label_similarity(det, label)
+            if sim < threshold:
+                continue
+            side_miss = 0
+            if hint.side is not None and not anchor_satisfies_side(
+                chosen.bbox,
+                det.cx,
+                det.cy,
+                hint.side,
+                landmark_bbox=det.bbox,
+            ):
+                side_miss = 1
+            dist = float((det.cx - chosen.cx) ** 2 + (det.cy - chosen.cy) ** 2)
+            short_x = int(det.cx) if short_exact and sim >= 1.0 else 0
+            short_y = int(det.cy) if short_exact and sim >= 1.0 else 0
+            candidates.append((hi, det, sim, side_miss, short_x, short_y, dist))
+
+    # Best label match; side-compatible; leftmost short exact; then closer.
+    candidates.sort(key=lambda row: (-row[2], row[3], row[4], row[5], row[6], row[0]))
+    claimed_dets: set[int] = set()
+    chosen_for_hint: dict[int, UiDetection] = {}
+    for hi, det, _sim, _side_miss, _sx, _sy, _dist in candidates:
+        if hi in chosen_for_hint:
+            continue
+        det_id = id(det)
+        if det_id in claimed_dets:
+            continue
+        claimed_dets.add(det_id)
+        chosen_for_hint[hi] = det
+
+    landmarks: list[dict[str, Any]] = []
+    for hi, hint in enumerate(hints):
+        label = (hint.label or "").strip()
+        det = chosen_for_hint.get(hi)
+        if not label or det is None:
+            continue
+        x, y, w, h = det.bbox
+        landmarks.append(
+            {
+                "label": label,
+                "side": hint.side.value if hint.side is not None else None,
+                "rect": [int(x), int(y), int(x + w), int(y + h)],
+            }
+        )
+    return {"peer_bboxes": peer_bboxes, "landmarks": landmarks}
+
+
 def _prefilter_anchors_by_nearby(
     anchors: list[UiDetection],
     nearby_matches: list[UiDetection],
@@ -3236,6 +3352,12 @@ async def find_mouse_point(
         )
 
     image_path = image_paths[0] if image_paths else ""
+    overlay = _live_html_overlay_fields(
+        chosen,
+        detections,
+        nearby_matches,
+        nearby_hints,
+    )
     meta: dict[str, Any] = {
         "selected_index": idx,
         "class_name": chosen.class_name,
@@ -3258,6 +3380,8 @@ async def find_mouse_point(
             "w": chosen.bbox[2],
             "h": chosen.bbox[3],
         },
+        "peer_bboxes": overlay["peer_bboxes"],
+        "landmarks": overlay["landmarks"],
         "timing": _timing_meta(select_s=select_s, select_phase=select_phase),
     }
     if selected_text is not None:

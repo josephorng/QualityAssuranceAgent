@@ -3376,6 +3376,62 @@ def test_prefilter_anchors_by_nearby_respects_inside_side() -> None:
     assert kept == [inside_anchor]
 
 
+def test_live_html_overlay_fields_keeps_landmarks_that_fail_side() -> None:
+    """HTML overlays include every label-matched nearby landmark, side or not."""
+    from src.common.nearby_side import NearbyHint, Side
+
+    from cua_mcp.select_mouse_target import _live_html_overlay_fields
+
+    chosen = _detection_from_bbox((900, 10, 40, 20), YOLO_CLASS_INPUT)
+    above_flag = _detection_from_bbox(
+        (920, 100, 16, 16),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "國旗"}],
+    )
+    # Chosen is above 字型, so "below 字型" fails the directed side check.
+    font = _detection_from_bbox((880, 180, 30, 14), YOLO_CLASS_TEXT, text="字型")
+    a1 = _detection_from_bbox((40, 220, 18, 14), YOLO_CLASS_TEXT, text="A1")
+    overlay = _live_html_overlay_fields(
+        chosen,
+        [chosen, above_flag, font, a1],
+        [above_flag, font],
+        [
+            NearbyHint("「國旗」圖示", Side.ABOVE),
+            NearbyHint("「字型」文字", Side.BELOW),
+            NearbyHint("「A1」文字", Side.RIGHT),
+        ],
+    )
+    labels = {item["label"] for item in overlay["landmarks"]}
+    assert labels == {"「國旗」圖示", "「字型」文字", "「A1」文字"}
+
+
+def test_live_html_overlay_fields_ten_keeps_upper_right_not_hundred_percent() -> None:
+    """「10」must not inherit 「100%」's upper_left arrow on the row-header digit."""
+    from src.common.nearby_side import NearbyHint, Side
+
+    from cua_mcp.select_mouse_target import _live_html_overlay_fields
+
+    chosen = _detection_from_bbox((900, 10, 40, 20), YOLO_CLASS_INPUT)
+    row_ten = _detection_from_bbox((20, 500, 14, 12), YOLO_CLASS_TEXT, text="10")
+    mid_ten = _detection_from_bbox((700, 300, 12, 12), YOLO_CLASS_TEXT, text="10")
+    hundred = _detection_from_bbox((880, 900, 36, 12), YOLO_CLASS_TEXT, text="100%")
+    overlay = _live_html_overlay_fields(
+        chosen,
+        [chosen, row_ten, mid_ten, hundred],
+        [row_ten, mid_ten, hundred],
+        [
+            NearbyHint("「100%」文字", Side.UPPER_LEFT),
+            NearbyHint("「10」文字", Side.UPPER_RIGHT),
+        ],
+    )
+    by_label = {item["label"]: item for item in overlay["landmarks"]}
+    assert by_label["「100%」文字"]["side"] == "upper_left"
+    assert by_label["「100%」文字"]["rect"] == [880, 900, 916, 912]
+    assert by_label["「10」文字"]["side"] == "upper_right"
+    # Leftmost exact 「10」(row header), not the closer mid-grid OCR hit.
+    assert by_label["「10」文字"]["rect"] == [20, 500, 34, 512]
+
+
 def test_unique_target_from_landmarks_text_anchor_accepts_same_place_icon() -> None:
     """A 「…文字」anchor still clicks the co-located icon when OCR text is gone."""
     from src.common.nearby_side import NearbyHint, Side

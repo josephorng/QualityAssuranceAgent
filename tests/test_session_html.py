@@ -1778,6 +1778,14 @@ def test_write_session_html_bakes_target_bbox_from_move_mouse_args(
         "instruction": "輸入欄",
         "nearby_objects": ["在「A1」文字的右邊"],
         "target_bbox": {"x": 40, "y": 20, "w": 50, "h": 24},
+        "peer_bboxes": [{"x": 100, "y": 20, "w": 40, "h": 24}],
+        "landmarks": [
+            {
+                "label": "「A1」文字",
+                "side": "right",
+                "rect": [10, 22, 30, 38],
+            }
+        ],
         "x": 65,
         "y": 32,
     }
@@ -1856,15 +1864,30 @@ def test_write_session_html_bakes_target_bbox_from_move_mouse_args(
     annotated = list((run_root / "focus_rect_debug").glob("*.png"))
     assert annotated
     saw_green = False
+    saw_peer_cyan = False
+    saw_landmark_orange = False
+    saw_cursor_magenta = False
     for path in annotated:
         pixels = imread_bgr(path)
         assert pixels is not None
         if tuple(int(v) for v in pixels[20, 40]) == (0, 220, 0):
             saw_green = True
+        # Peer overlay BGR (0, 215, 255).
+        if tuple(int(v) for v in pixels[20, 100]) == (0, 215, 255):
+            saw_peer_cyan = True
+        # Landmark overlay BGR (0, 140, 255).
+        if tuple(int(v) for v in pixels[22, 10]) == (0, 140, 255):
+            saw_landmark_orange = True
+        # Cursor marker uses focus magenta when drawn without focus rect.
+        if tuple(int(v) for v in pixels[32, 65]) == (255, 0, 255):
+            saw_cursor_magenta = True
     assert saw_green
+    assert saw_peer_cyan
+    assert saw_landmark_orange
+    assert saw_cursor_magenta
 
 
-def test_write_session_html_bakes_focus_rect_on_matched_recording_shots(
+def test_write_session_html_does_not_bake_recording_overlays_onto_live_shots(
     tmp_path: Path,
 ) -> None:
     recordings = tmp_path / "recordings"
@@ -1880,13 +1903,12 @@ def test_write_session_html_bakes_focus_rect_on_matched_recording_shots(
             {
                 "index": 1,
                 "timestamp_utc": "2026-07-21T04:00:00+00:00",
-                "kind": "text_input",
+                "kind": "click",
                 "cursor_xy": [20, 18],
                 "monitor_offset": [0, 0],
                 "focus_rect": [8, 6, 40, 28],
                 "screenshot_path": str(baseline),
                 "end_screenshot_path": str(baseline),
-                "text": "office",
             },
             ensure_ascii=False,
         ),
@@ -1896,8 +1918,13 @@ def test_write_session_html_bakes_focus_rect_on_matched_recording_shots(
         json.dumps(
             {
                 "event_index": 1,
-                "instruction": "輸入「office」",
+                "instruction": "將滑鼠移到輸入欄，並點擊滑鼠一下。",
                 "use_expected_outcome": False,
+                "vision": {
+                    "candidate_text": (
+                        "[index 0] class=輸入欄(Input) center=[32,24] w=40 h=20"
+                    )
+                },
             },
             ensure_ascii=False,
         ),
@@ -1916,9 +1943,9 @@ def test_write_session_html_bakes_focus_rect_on_matched_recording_shots(
     )
 
     run_root = tmp_path / "runs" / "script_focus_20260721_040000_000001"
-    run_root.mkdir(parents=True)
-    eye = _make_png(run_root / "eye" / "live.png")
-    # Full-desktop-style width so session path uses screen coords.
+    (run_root / "eye").mkdir(parents=True)
+    eye = run_root / "eye" / "live.png"
+    # Full-desktop-style width so a wrong recording bake would use screen coords.
     Image.new("RGB", (128, 48), color=(40, 50, 60)).save(eye)
     with (run_root / "hand.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
@@ -1931,18 +1958,23 @@ def test_write_session_html_bakes_focus_rect_on_matched_recording_shots(
                 "message",
                 "screenshot_before_path",
                 "screenshot_after_path",
+                "focus_rect_after",
+                "foreground_rect_after",
             ],
         )
         writer.writeheader()
         writer.writerow(
             {
                 "timestamp": "2026-07-21T04:00:01+00:00",
-                "action": "type_text",
-                "args": json.dumps({"text": "office"}),
+                "action": "move_mouse",
+                # No live target_bbox: previously fell back to recording geometry.
+                "args": repr({"instruction": "輸入欄", "x": 105, "y": 20}),
                 "ok": "true",
                 "message": "executed",
                 "screenshot_before_path": str(eye),
                 "screenshot_after_path": str(eye),
+                "focus_rect_after": "",
+                "foreground_rect_after": "",
             }
         )
     (run_root / "report.json").write_text(
@@ -1961,7 +1993,7 @@ def test_write_session_html_bakes_focus_rect_on_matched_recording_shots(
                     {
                         "transcript_counter": 0,
                         "script_step_index": 0,
-                        "goal": "輸入「office」",
+                        "goal": "將滑鼠移到輸入欄，並點擊滑鼠一下。",
                         "status": "ok",
                     }
                 ],
@@ -1976,7 +2008,7 @@ def test_write_session_html_bakes_focus_rect_on_matched_recording_shots(
             {
                 "messages": [],
                 "step_timing": {
-                    "goal": "輸入「office」",
+                    "goal": "將滑鼠移到輸入欄，並點擊滑鼠一下。",
                     "status": "ok",
                     "step_index": 0,
                 },
@@ -1987,10 +2019,17 @@ def test_write_session_html_bakes_focus_rect_on_matched_recording_shots(
     )
 
     html = write_session_html_from_run(run_root).read_text(encoding="utf-8")
-    assert "focus_rect_debug/" in html
-    assert "focus-rect-overlay" not in html
+    assert "eye/live.png" in html or "live.png" in html
     annotated = list((run_root / "focus_rect_debug").glob("*.png"))
-    assert annotated
+    # Without live overlay metadata, live shots must stay plain (no recording bake).
+    assert not annotated
+    for path in (run_root / "eye").glob("*.png"):
+        pixels = imread_bgr(path)
+        assert pixels is not None
+        # Recording focus_rect corner must not appear on the live eye shot.
+        assert tuple(int(v) for v in pixels[6, 8]) != (255, 0, 255)
+        # Recording input candidate bbox must not be painted green on live shots.
+        assert tuple(int(v) for v in pixels[14, 12]) != (0, 220, 0)
 
 
 def test_write_recording_html_renders_events_and_instructions(tmp_path: Path) -> None:

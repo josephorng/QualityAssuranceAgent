@@ -3788,6 +3788,128 @@ def _nearby_objects_from_args(args: Any) -> list[Any] | None:
     return None
 
 
+def _cursor_xy_from_args(args: Any) -> tuple[int, int] | None:
+    """Live cursor / click point from hand tool args (``x`` / ``y``)."""
+    if not isinstance(args, dict):
+        return None
+    try:
+        x = args.get("x")
+        y = args.get("y")
+        if x is None or y is None:
+            return None
+        return int(x), int(y)
+    except (TypeError, ValueError):
+        return None
+
+
+def _peer_bboxes_xywh_from_args(args: Any) -> list[tuple[int, int, int, int]]:
+    if not isinstance(args, dict):
+        return []
+    raw = args.get("peer_bboxes")
+    if not isinstance(raw, list):
+        return []
+    out: list[tuple[int, int, int, int]] = []
+    for item in raw:
+        if isinstance(item, dict):
+            try:
+                out.append(
+                    (
+                        int(item["x"]),
+                        int(item["y"]),
+                        int(item["w"]),
+                        int(item["h"]),
+                    )
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+        elif isinstance(item, (list, tuple)) and len(item) == 4:
+            try:
+                out.append((int(item[0]), int(item[1]), int(item[2]), int(item[3])))
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def _landmarks_from_args(args: Any) -> list[dict[str, Any]]:
+    """Live landmark overlays: ``{"label", "side", "rect": LTRB}``."""
+    if not isinstance(args, dict):
+        return []
+    raw = args.get("landmarks")
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        rect = item.get("rect")
+        if not (isinstance(rect, (list, tuple)) and len(rect) == 4):
+            continue
+        try:
+            ltrb = (int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3]))
+        except (TypeError, ValueError):
+            continue
+        label = item.get("label")
+        side = item.get("side")
+        out.append(
+            {
+                "label": label if isinstance(label, str) else "",
+                "side": side if isinstance(side, str) else None,
+                "rect": list(ltrb),
+            }
+        )
+    return out
+
+
+_LIVE_MOVE_OVERLAY_ACTIONS = frozenset(
+    {
+        "move_mouse",
+        "move_mouse_visual",
+        "drag",
+        "drag_to",
+    }
+)
+_LIVE_POINTER_OVERLAY_ACTIONS = frozenset(
+    {
+        *_LIVE_MOVE_OVERLAY_ACTIONS,
+        "click",
+        "double_click",
+        "right_click",
+        "hold",
+    }
+)
+_LIVE_OVERLAY_ARG_KEYS = ("target_bbox", "peer_bboxes", "landmarks")
+
+
+def _with_prior_live_overlay_args(operations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Carry move_mouse overlay geometry onto later click rows in the same step."""
+    enriched: list[dict[str, Any]] = []
+    prior: dict[str, Any] = {}
+    for operation in operations:
+        if not isinstance(operation, dict):
+            enriched.append(operation)
+            continue
+        action = str(operation.get("action") or "")
+        args = operation.get("args")
+        args_dict = args if isinstance(args, dict) else {}
+        if action in _LIVE_MOVE_OVERLAY_ACTIONS and _target_bbox_xywh_from_args(args_dict):
+            prior = {
+                key: args_dict[key]
+                for key in _LIVE_OVERLAY_ARG_KEYS
+                if key in args_dict
+            }
+            enriched.append(operation)
+            continue
+        if action in _LIVE_POINTER_OVERLAY_ACTIONS and prior:
+            merged = dict(args_dict)
+            for key, value in prior.items():
+                if key not in merged:
+                    merged[key] = value
+            enriched.append({**operation, "args": merged})
+            continue
+        enriched.append(operation)
+    return enriched
+
+
 def _overlay_rects_for_screenshot(
     event: dict[str, Any] | None,
     screenshot: Path | None,
@@ -4110,6 +4232,30 @@ def _last_after_shot(operations: list[dict[str, Any]]) -> Path | None:
     return None
 
 
+def _last_live_focus_foreground(
+    operations: list[dict[str, Any]] | None,
+) -> tuple[
+    tuple[int, int, int, int] | None,
+    tuple[int, int, int, int] | None,
+]:
+    """Latest live focus / foreground rects captured after a hand action."""
+    if not operations:
+        return None, None
+    for operation in reversed(operations):
+        if not isinstance(operation, dict):
+            continue
+        focus = operation.get("focus_rect_after")
+        foreground = operation.get("foreground_rect_after")
+        focus_ok = isinstance(focus, tuple) and len(focus) == 4
+        foreground_ok = isinstance(foreground, tuple) and len(foreground) == 4
+        if focus_ok or foreground_ok:
+            return (
+                focus if focus_ok else None,
+                foreground if foreground_ok else None,
+            )
+    return None, None
+
+
 def _resolve_run_recording_dir(run_root: Path, report: dict[str, Any] | None) -> Path | None:
     """Find the recording folder the run replayed, tolerating relocated absolute paths."""
     from src.common.script_helper import is_recording_dir, recording_run_dir
@@ -4405,46 +4551,24 @@ def _load_instruction_groups(run_root: Path) -> list[dict[str, Any]]:
 def _session_click_overlays_for_operation(
     *,
     operation: dict[str, Any],
-    screenshot: Path | None,
-    recording_target: dict[str, Any] | None,
 ) -> tuple[
     tuple[int, int, int, int] | None,
     list[dict[str, Any]],
     list[tuple[int, int, int, int]],
 ]:
-    """Resolve target/peer/landmark overlays for a live hand operation screenshot."""
+    """Resolve target / landmark / peer overlays from live hand-operation args."""
     from src.recorder.vision_context import bbox_xywh_to_ltrb
 
     args = operation.get("args")
-    # Prefer the resolved click target from move_mouse / drag metadata.
     target: tuple[int, int, int, int] | None = None
     bbox = _target_bbox_xywh_from_args(args)
     if bbox is not None:
         target = bbox_xywh_to_ltrb(bbox)
-
-    landmarks: list[dict[str, Any]] = []
-    peers: list[tuple[int, int, int, int]] = []
-    if isinstance(recording_target, dict):
-        recording_root = recording_target.get("recording")
-        event = recording_target.get("event")
-        analysis = recording_target.get("analysis")
-        if isinstance(recording_root, Path) and isinstance(event, dict):
-            analysis_payload = analysis if isinstance(analysis, dict) else None
-            if analysis_payload is None and isinstance(args, dict):
-                instruction = args.get("instruction")
-                if isinstance(instruction, str) and instruction.strip():
-                    analysis_payload = {"instruction": instruction}
-            vision_target, landmarks, peers = _resolve_recording_click_overlays(
-                recording_root=recording_root,
-                event=event,
-                analysis=analysis_payload,
-                screenshot=screenshot,
-                use_end=False,
-                as_screen=True,
-                nearby_objects=_nearby_objects_from_args(args),
-            )
-            if target is None:
-                target = vision_target
+    landmarks = _landmarks_from_args(args)
+    peers = [
+        bbox_xywh_to_ltrb(peer)
+        for peer in _peer_bboxes_xywh_from_args(args)
+    ]
     return target, landmarks, peers
 
 
@@ -4452,8 +4576,6 @@ def _render_hand_operation_html(
     *,
     run_root: Path,
     operation: dict[str, Any],
-    recording_event: dict[str, Any] | None = None,
-    recording_target: dict[str, Any] | None = None,
 ) -> str:
     action = operation["action"]
     args = operation["args"]
@@ -4477,32 +4599,8 @@ def _render_hand_operation_html(
     live_after_foreground = operation.get("foreground_rect_after")
     if not (isinstance(live_after_foreground, tuple) and len(live_after_foreground) == 4):
         live_after_foreground = None
-    before_focus = _focus_rect_for_screenshot(recording_event, before, use_end=False)
-    after_focus = live_after_focus or _focus_rect_for_screenshot(
-        recording_event, after, use_end=False
-    )
-    before_foreground = _foreground_rect_for_screenshot(
-        recording_event, before, after=False, use_end=False
-    )
-    after_foreground = live_after_foreground or _foreground_rect_for_screenshot(
-        recording_event, after, after=True, use_end=False
-    )
-    before_cursor = _local_cursor_for_screenshot(recording_event, before, use_end=False)
-    after_cursor = (
-        None
-        if live_after_focus is not None
-        else _local_cursor_for_screenshot(recording_event, after, use_end=False)
-    )
-    show_click_overlay = action in {
-        "move_mouse",
-        "move_mouse_visual",
-        "click",
-        "double_click",
-        "right_click",
-        "drag",
-        "drag_to",
-        "hold",
-    }
+    live_cursor = _cursor_xy_from_args(args)
+    show_click_overlay = action in _LIVE_POINTER_OVERLAY_ACTIONS
     before_target = after_target = None
     before_landmarks: list[dict[str, Any]] = []
     after_landmarks: list[dict[str, Any]] = []
@@ -4510,11 +4608,7 @@ def _render_hand_operation_html(
     after_peers: list[tuple[int, int, int, int]] = []
     if show_click_overlay:
         before_target, before_landmarks, before_peers = (
-            _session_click_overlays_for_operation(
-                operation=operation,
-                screenshot=before,
-                recording_target=recording_target,
-            )
+            _session_click_overlays_for_operation(operation=operation)
         )
         # Keep the same geometric overlay on the after frame for context.
         after_target, after_landmarks, after_peers = (
@@ -4522,16 +4616,11 @@ def _render_hand_operation_html(
             before_landmarks,
             before_peers,
         )
-        if before_target is None and isinstance(args, dict):
-            # click rows often omit target_bbox; reuse prior move metadata only when present.
-            pass
     shots = _render_shot_html(
         "動作前截圖",
         before,
         run_root,
-        focus_rect_local=before_focus,
-        cursor_xy=before_cursor,
-        foreground_rect_local=before_foreground,
+        cursor_xy=live_cursor,
         target_rect_local=before_target,
         peer_rects_local=before_peers,
         landmarks=before_landmarks,
@@ -4539,9 +4628,9 @@ def _render_hand_operation_html(
         "動作後截圖",
         after,
         run_root,
-        focus_rect_local=after_focus,
-        cursor_xy=after_cursor,
-        foreground_rect_local=after_foreground,
+        focus_rect_local=live_after_focus,
+        cursor_xy=None if live_after_focus is not None else live_cursor,
+        foreground_rect_local=live_after_foreground,
         target_rect_local=after_target,
         peer_rects_local=after_peers,
         landmarks=after_landmarks,
@@ -4602,6 +4691,8 @@ def _render_verify_panel_html(
     verify_live_path: str | None = None,
     baseline_after_path: str | None = None,
     live_fallback_shot: Path | None = None,
+    live_focus_rect: tuple[int, int, int, int] | None = None,
+    live_foreground_rect: tuple[int, int, int, int] | None = None,
     recording_event: dict[str, Any] | None = None,
 ) -> str:
     """Render verifier decision for a scripted instruction group."""
@@ -4656,23 +4747,13 @@ def _render_verify_panel_html(
     if has_shots:
         shot_parts: list[str] = []
         if live_shot is not None or verify_live_path:
-            live_focus = _focus_rect_for_screenshot(
-                recording_event, live_shot, use_end=False
-            )
-            live_foreground = _foreground_rect_for_screenshot(
-                recording_event, live_shot, after=True, use_end=False
-            )
-            live_cursor = _local_cursor_for_screenshot(
-                recording_event, live_shot, use_end=False
-            )
             shot_parts.append(
                 _render_shot_html(
                     live_label,
                     live_shot,
                     run_root,
-                    focus_rect_local=live_focus,
-                    cursor_xy=live_cursor,
-                    foreground_rect_local=live_foreground,
+                    focus_rect_local=live_focus_rect,
+                    foreground_rect_local=live_foreground_rect,
                 )
             )
         if baseline_shot is not None or baseline_after_path:
@@ -4764,16 +4845,13 @@ def _render_instruction_group_html(
         else None
     )
     if operations:
+        live_ops = _with_prior_live_overlay_args(operations)
         items = "".join(
             _render_hand_operation_html(
                 run_root=run_root,
                 operation=operation,
-                recording_event=recording_event,
-                recording_target=(
-                    recording_target if isinstance(recording_target, dict) else None
-                ),
             )
-            for operation in operations
+            for operation in live_ops
         )
         body = f'<ul class="hand-ops">{items}</ul>'
     else:
@@ -4784,6 +4862,7 @@ def _render_instruction_group_html(
         if isinstance(raw_baseline, str) and raw_baseline.strip():
             baseline_after_path = raw_baseline.strip()
 
+    live_verify_focus, live_verify_foreground = _last_live_focus_foreground(operations)
     verify_panel = _render_verify_panel_html(
         run_root=run_root,
         verify=verify,
@@ -4791,6 +4870,8 @@ def _render_instruction_group_html(
         verify_live_path=verify_live_path,
         baseline_after_path=baseline_after_path,
         live_fallback_shot=_last_after_shot(operations),
+        live_focus_rect=live_verify_focus,
+        live_foreground_rect=live_verify_foreground,
         recording_event=recording_event,
     )
     editor = (
@@ -7458,9 +7539,10 @@ def _render_smart_cycles_html(
                 )
                 operation_count = len(operations)
                 if operations:
+                    live_ops = _with_prior_live_overlay_args(operations)
                     items = "".join(
                         _render_hand_operation_html(run_root=run_root, operation=operation)
-                        for operation in operations
+                        for operation in live_ops
                     )
                     operations_html = f'<ul class="hand-ops">{items}</ul>'
                 else:
@@ -8125,7 +8207,6 @@ def write_session_html_from_run(run_root: Path, *, update_index: bool = True) ->
             instruction_groups=instruction_groups,
             smart_cycles=smart_cycles,
             smart_actor_count=smart_actor_count,
-            edit_targets=edit_targets,
         )
     )
     body = (
@@ -8346,13 +8427,12 @@ def _extend_operation_playback_frames(
     label: str,
     anchor: str,
     step: int,
-    recording_event: dict[str, Any] | None = None,
-    recording_target: dict[str, Any] | None = None,
 ) -> None:
     """Append one frame per action, using that action's after screenshot."""
-    for operation in operations:
-        if not isinstance(operation, dict):
-            continue
+    live_ops = _with_prior_live_overlay_args(
+        [op for op in operations if isinstance(op, dict)]
+    )
+    for operation in live_ops:
         shot = _operation_playback_shot(operation)
         if not isinstance(shot, Path):
             continue
@@ -8362,43 +8442,22 @@ def _extend_operation_playback_frames(
         live_foreground = operation.get("foreground_rect_after")
         if not (isinstance(live_foreground, tuple) and len(live_foreground) == 4):
             live_foreground = None
-        # Playback prefers the after shot; live after-focus matches that frame.
-        focus = live_focus or _focus_rect_for_screenshot(
-            recording_event, shot, use_end=False
-        )
-        foreground = live_foreground or _foreground_rect_for_screenshot(
-            recording_event, shot, after=True, use_end=False
-        )
-        cursor = (
-            None
-            if live_focus is not None
-            else _local_cursor_for_screenshot(recording_event, shot, use_end=False)
-        )
+        args = operation.get("args")
+        live_cursor = _cursor_xy_from_args(args)
         target = None
         landmarks: list[dict[str, Any]] = []
         peers: list[tuple[int, int, int, int]] = []
         action = str(operation.get("action") or "")
-        if action in {
-            "move_mouse",
-            "move_mouse_visual",
-            "click",
-            "double_click",
-            "right_click",
-            "drag",
-            "drag_to",
-            "hold",
-        }:
+        if action in _LIVE_POINTER_OVERLAY_ACTIONS:
             target, landmarks, peers = _session_click_overlays_for_operation(
-                operation=operation,
-                screenshot=shot,
-                recording_target=recording_target,
+                operation=operation
             )
         display = _display_screenshot_with_focus_rect(
             shot,
             run_root,
-            focus_rect=focus,
-            cursor_xy=cursor,
-            foreground_rect=foreground,
+            focus_rect=live_focus,
+            cursor_xy=None if live_focus is not None else live_cursor,
+            foreground_rect=live_foreground,
             target_rect=target,
             peer_rects=peers,
             landmarks=landmarks,
@@ -8422,13 +8481,11 @@ def _session_playback_frames(
     instruction_groups: list[dict[str, Any]],
     smart_cycles: Any,
     smart_actor_count: int,
-    edit_targets: dict[int, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """One frame per hand action, in the same order as the steps tab."""
     frames: list[dict[str, Any]] = []
     actor_group_index = 0
     shown = 0
-    targets = edit_targets or {}
     if isinstance(smart_cycles, list):
         for cycle in smart_cycles:
             if not isinstance(cycle, dict):
@@ -8465,12 +8522,6 @@ def _session_playback_frames(
         goal = group.get("goal")
         label = goal.strip() if isinstance(goal, str) and goal.strip() else _FALLBACK_GOAL
         operations = group.get("operations") if isinstance(group.get("operations"), list) else []
-        target = _recording_target_for_group(group, targets)
-        recording_event = (
-            target.get("event")
-            if isinstance(target, dict) and isinstance(target.get("event"), dict)
-            else None
-        )
         _extend_operation_playback_frames(
             frames,
             run_root=run_root,
@@ -8478,8 +8529,6 @@ def _session_playback_frames(
             label=label,
             anchor=f"step-{step_number}",
             step=step_number,
-            recording_event=recording_event,
-            recording_target=target if isinstance(target, dict) else None,
         )
     return frames
 

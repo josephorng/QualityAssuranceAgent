@@ -1765,7 +1765,12 @@ def _pick_minimal_locating_hints(
     click_xy: tuple[int, int] | None,
     prefix_hints: list[NearbyHint] | None = None,
 ) -> list[NearbyHint]:
-    """Closest unique multi-char text per side (else icon), plus a spare text.
+    """Closest unique multi-char text per side (else icon), plus spare neighbors.
+
+    Spare budget starts at 1 and grows by one for each directed side that has
+    neither a unique multi-char text nor a known icon. Spares prefer unused
+    multi-char text (closest first); when none remain, unused known icons fill
+    the rest.
 
     When the primary has ambiguous peers (same-value text/icon, or multiple
     inputs/scrollbars), grow the seed with more eligible landmarks until replay's
@@ -1787,13 +1792,24 @@ def _pick_minimal_locating_hints(
         click_xy=click_xy,
         reserved_labels=reserved_labels,
     )
-    picked = [item.hint for item in _closest_directed_landmarks(pool)]
+    directed = _closest_directed_landmarks(pool)
+    picked = [item.hint for item in directed]
+    filled_sides = {item.hint.side for item in directed if item.hint.side is not None}
+    empty_side_count = sum(
+        1 for side in _DIRECTED_SIDE_ORDER if side not in filled_sides
+    )
+    spare_count = 1 + empty_side_count
     used_labels = {hint.label for hint in picked}
+    # Pool is text-before-icon, closest-first; take unused texts then icons.
     for item in pool:
-        if not item.is_text or item.hint.label in used_labels:
+        if spare_count <= 0:
+            break
+        label = item.hint.label
+        if not label or label in used_labels:
             continue
-        picked = [*picked, item.hint]
-        break
+        picked.append(item.hint)
+        used_labels.add(label)
+        spare_count -= 1
 
     detections = _candidates_to_detections(candidates)
     # Re-bind primary to the detection instance from ``detections`` so peer
@@ -1970,10 +1986,11 @@ def collect_nearby_hints(
     first. When the primary target is a scrollbar, adjacent content is forced
     next. Then the closest unique multi-character text on each of the eight
     directed sides, falling back to the closest known icon when a side has no
-    unique text. A spare unique multi-character text is appended when one remains
-    unused. When the primary is ambiguous among same-value text/icon peers or
-    multiple inputs/scrollbars, locating hints grow until replay's nearby
-    prefilter keeps only the primary (best-effort if still tied).
+    unique text. Spare budget starts at one and grows by one per empty directed
+    side (no text and no icon); spares prefer unused multi-character text, then
+    unused known icons. When the primary is ambiguous among same-value text/icon
+    peers or multiple inputs/scrollbars, locating hints grow until replay's
+    nearby prefilter keeps only the primary (best-effort if still tied).
     """
     candidates = vision.get("candidates") or []
     if len(candidates) < 2 or not isinstance(candidates[0], dict):

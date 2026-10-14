@@ -233,6 +233,37 @@ def test_collect_nearby_hints_minimal_set_plus_spare_text() -> None:
     assert len(text_hints) >= 2
 
 
+def test_collect_nearby_hints_empty_sides_grow_spare_then_icons() -> None:
+    """Empty directed sides raise spare budget; icons fill when no unused text."""
+    from src.recorder.vision_context import collect_nearby_hints
+
+    # Primary at center. Four cardinal texts fill four sides; four diagonals empty
+    # → spare budget 1+4=5. Only one unused text remains, so four icon spares.
+    vision = {
+        "used_vision": True,
+        "candidates": [
+            _text_candidate([200, 100, 20, 16], "搜尋"),
+            _text_candidate([80, 100, 40, 16], "晴時多雲"),  # left
+            _text_candidate([320, 100, 60, 16], "2026/10/14"),  # right
+            _text_candidate([200, 60, 50, 14], "上午十點"),  # above
+            _text_candidate([200, 140, 40, 14], "日期列"),  # below
+            _text_candidate([40, 100, 30, 16], "備用字"),  # farther left → spare text
+            _icon_candidate([250, 100, 16, 16], "Edge"),
+            _icon_candidate([160, 100, 16, 16], "Windows"),
+            _icon_candidate([280, 100, 16, 16], "Chrome"),
+            _icon_candidate([140, 100, 16, 16], "Copilot"),
+            _icon_candidate([300, 80, 16, 16], "Outlook"),
+        ],
+    }
+    hints = collect_nearby_hints(vision, instruction="點擊「搜尋」文字")
+    text_labels = [h.label for h in hints if h.label.endswith("文字")]
+    icon_labels = [h.label for h in hints if h.label.endswith("圖示")]
+    assert "「備用字」文字" in text_labels
+    assert len(icon_labels) >= 4
+    # Four directed texts + one spare text + four spare icons (empty diagonals).
+    assert len(hints) >= 9
+
+
 def test_collect_nearby_hints_adds_icon_when_text_cannot_locate() -> None:
     """Known icons fill directed sides when no unique multi-char text is available."""
     from src.recorder.vision_context import collect_nearby_hints

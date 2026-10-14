@@ -2040,6 +2040,47 @@ def primary_target_rect_ltrb(vision: dict[str, Any] | None) -> tuple[int, int, i
     return bbox_xywh_to_ltrb(bbox)
 
 
+def same_class_peer_rects_ltrb(
+    vision: dict[str, Any] | None,
+    *,
+    class_name: str | None = None,
+) -> list[tuple[int, int, int, int]]:
+    """Return LTRB boxes for every other ``input`` / ``scrollbar`` peer.
+
+    When the primary (or ``class_name``) is ``input`` or ``scrollbar``, every
+    other candidate of that class is returned so HTML overlays can show the
+    full ambiguous set. The primary itself is omitted (drawn separately).
+    """
+    if not isinstance(vision, dict):
+        return []
+    candidates = vision.get("candidates") or []
+    if not candidates or not isinstance(candidates[0], dict):
+        return []
+    primary = candidates[0]
+    kind = (class_name or str(primary.get("class_name") or "")).strip()
+    if kind not in _CONTAINER_LANDMARK_CLASSES:
+        return []
+    primary_bbox = _as_bbox_xywh(primary.get("bbox"))
+    peers: list[tuple[int, int, int, int]] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        if str(candidate.get("class_name") or "").strip() != kind:
+            continue
+        bbox = _as_bbox_xywh(candidate.get("bbox"))
+        if bbox is None:
+            continue
+        if primary_bbox is not None and bbox == primary_bbox:
+            continue
+        ltrb = bbox_xywh_to_ltrb(bbox)
+        if ltrb in seen:
+            continue
+        seen.add(ltrb)
+        peers.append(ltrb)
+    return peers
+
+
 def _hints_for_overlay(
     instruction: str,
     *,
@@ -2162,8 +2203,16 @@ def resolve_click_overlay_geometry(
     *,
     location: str = "附近",
     nearby_objects: list[Any] | None = None,
-) -> tuple[tuple[int, int, int, int] | None, list[dict[str, Any]]]:
-    """Return ``(target_ltrb, landmark_overlays)`` for HTML screenshot baking."""
+) -> tuple[
+    tuple[int, int, int, int] | None,
+    list[dict[str, Any]],
+    list[tuple[int, int, int, int]],
+]:
+    """Return ``(target_ltrb, landmark_overlays, same_class_peers)`` for HTML baking.
+
+    ``same_class_peers`` lists every other ``input`` / ``scrollbar`` when the
+    primary target is one of those classes.
+    """
     target = primary_target_rect_ltrb(vision)
     landmarks = match_nearby_landmark_overlays(
         vision,
@@ -2171,7 +2220,8 @@ def resolve_click_overlay_geometry(
         location=location,
         nearby_objects=nearby_objects,
     )
-    return target, landmarks
+    peers = same_class_peer_rects_ltrb(vision)
+    return target, landmarks, peers
 
 
 def list_nearby_landmark_options(

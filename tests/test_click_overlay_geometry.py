@@ -4,6 +4,7 @@ from src.recorder.vision_context import (
     match_nearby_landmark_overlays,
     primary_target_rect_ltrb,
     resolve_click_overlay_geometry,
+    same_class_peer_rects_ltrb,
 )
 
 
@@ -32,12 +33,36 @@ def _vision() -> dict:
                 "text": "字型",
                 "icons": None,
             },
+            {
+                "bbox": [90, 30, 40, 20],
+                "center": [110, 40],
+                "class_name": "input",
+                "text": None,
+                "icons": None,
+            },
         ],
     }
 
 
 def test_primary_target_rect_ltrb() -> None:
     assert primary_target_rect_ltrb(_vision()) == (30, 30, 70, 50)
+
+
+def test_same_class_peer_rects_ltrb_lists_other_inputs() -> None:
+    peers = same_class_peer_rects_ltrb(_vision())
+    assert peers == [(90, 30, 130, 50)]
+
+
+def test_same_class_peer_rects_ltrb_empty_for_text_target() -> None:
+    vision = _vision()
+    vision["candidates"][0] = {
+        "bbox": [5, 30, 18, 16],
+        "center": [14, 38],
+        "class_name": "text",
+        "text": "A1",
+        "icons": None,
+    }
+    assert same_class_peer_rects_ltrb(vision) == []
 
 
 def test_match_nearby_landmark_overlays_uses_instruction_side() -> None:
@@ -54,9 +79,10 @@ def test_match_nearby_landmark_overlays_uses_instruction_side() -> None:
 
 
 def test_resolve_click_overlay_geometry_pairs_target_and_landmarks() -> None:
-    target, landmarks = resolve_click_overlay_geometry(
+    target, landmarks, peers = resolve_click_overlay_geometry(
         _vision(),
         "點擊輸入欄（在「A1」文字的右邊）",
     )
     assert target == (30, 30, 70, 50)
     assert landmarks and landmarks[0]["label"] == "「A1」文字"
+    assert peers == [(90, 30, 130, 50)]

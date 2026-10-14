@@ -1622,8 +1622,15 @@ def test_write_recording_html_bakes_target_and_landmark_overlays(
                         "text": "A1",
                         "icons": None,
                     },
+                    {
+                        "bbox": [80, 30, 30, 18],
+                        "center": [95, 39],
+                        "class_name": "input",
+                        "text": None,
+                        "icons": None,
+                    },
                 ],
-                "detection_count": 2,
+                "detection_count": 3,
             },
             ensure_ascii=False,
         ),
@@ -1644,20 +1651,25 @@ def test_write_recording_html_bakes_target_and_landmark_overlays(
     html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
     assert "focus_rect_debug/" in html
     assert "Target rect" in html
+    assert "Same-class peers" in html
     assert "Landmarks" in html
     assert "「A1」文字" in html
     annotated = list((run_root / "focus_rect_debug").glob("*.png"))
     assert annotated
     saw_green = False
+    saw_yellow = False
     saw_orange = False
     for path in annotated:
         pixels = imread_bgr(path)
         assert pixels is not None
         if tuple(int(v) for v in pixels[30, 30]) == (0, 220, 0):
             saw_green = True
+        if tuple(int(v) for v in pixels[30, 80]) == (0, 215, 255):
+            saw_yellow = True
         if tuple(int(v) for v in pixels[30, 5]) == (0, 140, 255):
             saw_orange = True
     assert saw_green
+    assert saw_yellow
     assert saw_orange
 
 

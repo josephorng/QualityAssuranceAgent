@@ -88,8 +88,10 @@ def _expand_thin_rect_for_debug(
 # Magenta focus / caret; cyan foreground window. Both stand out on light and dark UI.
 _FOCUS_RECT_BGR = (255, 0, 255)
 _FOREGROUND_RECT_BGR = (0, 255, 255)
-# Lime click target; orange nearby landmarks with small directional arrows.
+# Lime click target; yellow same-class peers (other inputs/scrollbars);
+# orange nearby landmarks with small directional arrows.
 _TARGET_RECT_BGR = (0, 220, 0)
+_PEER_RECT_BGR = (0, 215, 255)
 _LANDMARK_RECT_BGR = (0, 140, 255)
 # Fixed shaft length (px) for landmark direction arrows; same size for every side.
 _LANDMARK_ARROW_LENGTH_PX = 18
@@ -220,9 +222,10 @@ def draw_focus_rect_bgr(
     cursor_local: tuple[int, int] | None = None,
     foreground_rect_local: tuple[int, int, int, int] | None = None,
     target_rect_local: tuple[int, int, int, int] | None = None,
+    peer_rects_local: list[tuple[int, int, int, int]] | None = None,
     landmarks: list[dict[str, Any]] | None = None,
 ) -> Any:
-    """Draw focus / foreground / click-target / landmark overlays for debug HTML."""
+    """Draw focus / foreground / click-target / peer / landmark overlays for HTML."""
     import cv2
     import numpy as np
 
@@ -260,6 +263,13 @@ def draw_focus_rect_bgr(
                 markerSize=16,
                 thickness=2,
             )
+    for peer_rect in peer_rects_local or []:
+        _draw_rect_bgr(
+            canvas,
+            peer_rect,
+            _PEER_RECT_BGR,
+            expand_thin=False,
+        )
     if target_rect_local is not None:
         _draw_rect_bgr(
             canvas,
@@ -307,6 +317,7 @@ def write_focus_rect_debug_image(
     cursor_local: tuple[int, int] | None = None,
     foreground_rect_local: tuple[int, int, int, int] | None = None,
     target_rect_local: tuple[int, int, int, int] | None = None,
+    peer_rects_local: list[tuple[int, int, int, int]] | None = None,
     landmarks: list[dict[str, Any]] | None = None,
 ) -> Path | None:
     """Persist magenta focus / cyan foreground overlays next to YOLO/OCR debug artifacts."""
@@ -318,6 +329,7 @@ def write_focus_rect_debug_image(
         cursor_local=cursor_local,
         foreground_rect_local=foreground_rect_local,
         target_rect_local=target_rect_local,
+        peer_rects_local=peer_rects_local,
         landmarks=landmarks,
     )
     if not imwrite_bgr(dest, annotated):

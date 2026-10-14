@@ -55,6 +55,7 @@ def test_draw_focus_rect_bgr_paints_target_and_landmark_arrow() -> None:
         bgr,
         None,
         target_rect_local=(70, 30, 100, 55),
+        peer_rects_local=[(50, 10, 65, 25)],
         landmarks=[
             {
                 "label": "「A1」文字",
@@ -63,8 +64,9 @@ def test_draw_focus_rect_bgr_paints_target_and_landmark_arrow() -> None:
             }
         ],
     )
-    # Lime target corner and orange landmark corner.
+    # Lime target corner, yellow peer corner, orange landmark corner.
     assert tuple(int(v) for v in out[30, 70]) == (0, 220, 0)
+    assert tuple(int(v) for v in out[10, 50]) == (0, 215, 255)
     assert tuple(int(v) for v in out[30, 10]) == (0, 140, 255)
     # Small fixed right-pointing arrow just outside the landmark's right edge.
     arrow = out[40, 40]

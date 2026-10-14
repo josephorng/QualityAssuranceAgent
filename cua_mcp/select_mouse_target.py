@@ -95,7 +95,7 @@ from src.common.run_state import RunStateManager, get_run_state_manager, ts_name
 from src.eye.capture import active_monitor_offset, grab_monitor_bgr, monitor_details
 
 
-DEFAULT_OCR_ROI_PAD = 4
+DEFAULT_OCR_ROI_PAD = 0
 # YOLO boxes must overlap at least this much before identical screen pixels
 # can reuse the previous frame's OCR string.
 OCR_REUSE_MIN_IOU = 0.85

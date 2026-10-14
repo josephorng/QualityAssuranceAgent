@@ -3557,6 +3557,20 @@ def _foreground_rect_for_screenshot(
     )
 
 
+def _landmark_overlay_cache_key(landmarks: list[dict[str, Any]] | None) -> str:
+    if not landmarks:
+        return ""
+    parts: list[str] = []
+    for item in landmarks:
+        if not isinstance(item, dict):
+            continue
+        rect = item.get("rect")
+        parts.append(
+            f"{item.get('label')}|{item.get('side')}|{rect}"
+        )
+    return ";".join(parts)
+
+
 def _ensure_focus_rect_annotated_image(
     screenshot: Path,
     focus_rect: tuple[int, int, int, int] | None = None,
@@ -3564,14 +3578,21 @@ def _ensure_focus_rect_annotated_image(
     run_root: Path,
     cursor_xy: tuple[int, int] | None = None,
     foreground_rect: tuple[int, int, int, int] | None = None,
+    target_rect: tuple[int, int, int, int] | None = None,
+    landmarks: list[dict[str, Any]] | None = None,
 ) -> Path | None:
-    """Bake focus / foreground rects into a cached copy under ``run_root/focus_rect_debug``."""
+    """Bake focus / foreground / target / landmark overlays under ``focus_rect_debug``."""
     import hashlib
 
     from src.common.io_utils import imread_bgr, imwrite_bgr
     from src.recorder.text_resolve import draw_focus_rect_bgr
 
-    if focus_rect is None and foreground_rect is None:
+    if (
+        focus_rect is None
+        and foreground_rect is None
+        and target_rect is None
+        and not landmarks
+    ):
         return None
     try:
         mtime_ns = screenshot.stat().st_mtime_ns
@@ -3580,10 +3601,12 @@ def _ensure_focus_rect_annotated_image(
     cursor_key = ""
     if cursor_xy is not None:
         cursor_key = f"|{int(cursor_xy[0])},{int(cursor_xy[1])}"
+    landmark_key = _landmark_overlay_cache_key(landmarks)
+    # v2: fixed-size directional landmark arrows (not long target-pointing lines).
     digest = hashlib.sha1(
         (
             f"{screenshot.resolve()}|{mtime_ns}|{focus_rect}|{foreground_rect}"
-            f"{cursor_key}"
+            f"|{target_rect}|{landmark_key}{cursor_key}|overlay_v2"
         ).encode("utf-8")
     ).hexdigest()[:16]
     dest = Path(run_root) / "focus_rect_debug" / f"{screenshot.stem}_{digest}.png"
@@ -3597,6 +3620,8 @@ def _ensure_focus_rect_annotated_image(
         focus_rect,
         cursor_local=cursor_xy,
         foreground_rect_local=foreground_rect,
+        target_rect_local=target_rect,
+        landmarks=landmarks,
     )
     if not imwrite_bgr(dest, annotated):
         return None
@@ -3610,10 +3635,17 @@ def _display_screenshot_with_focus_rect(
     focus_rect: tuple[int, int, int, int] | None = None,
     cursor_xy: tuple[int, int] | None = None,
     foreground_rect: tuple[int, int, int, int] | None = None,
+    target_rect: tuple[int, int, int, int] | None = None,
+    landmarks: list[dict[str, Any]] | None = None,
 ) -> Path | None:
     if screenshot is None:
         return None
-    if focus_rect is None and foreground_rect is None:
+    if (
+        focus_rect is None
+        and foreground_rect is None
+        and target_rect is None
+        and not landmarks
+    ):
         return screenshot
     annotated = _ensure_focus_rect_annotated_image(
         screenshot,
@@ -3621,6 +3653,8 @@ def _display_screenshot_with_focus_rect(
         run_root=run_root,
         cursor_xy=cursor_xy,
         foreground_rect=foreground_rect,
+        target_rect=target_rect,
+        landmarks=landmarks,
     )
     return annotated if annotated is not None else screenshot
 
@@ -3635,6 +3669,176 @@ def _cursor_xy_from_event(event: dict[str, Any] | None) -> tuple[int, int] | Non
         return int(cursor[0]), int(cursor[1])
     except (TypeError, ValueError):
         return None
+
+
+def _monitor_offset_xy(
+    event: dict[str, Any] | None,
+    *,
+    use_end: bool = False,
+) -> tuple[int, int]:
+    if event is None:
+        return 0, 0
+    offset = event.get("end_monitor_offset") if use_end else event.get("monitor_offset")
+    if use_end and not (isinstance(offset, (list, tuple)) and len(offset) == 2):
+        offset = event.get("monitor_offset")
+    if isinstance(offset, (list, tuple)) and len(offset) == 2:
+        try:
+            return int(offset[0]), int(offset[1])
+        except (TypeError, ValueError):
+            return 0, 0
+    return 0, 0
+
+
+def _shift_rect_ltrb(
+    rect: tuple[int, int, int, int],
+    dx: int,
+    dy: int,
+) -> tuple[int, int, int, int]:
+    left, top, right, bottom = rect
+    return left + dx, top + dy, right + dx, bottom + dy
+
+
+def _shift_landmark_overlays(
+    landmarks: list[dict[str, Any]],
+    dx: int,
+    dy: int,
+) -> list[dict[str, Any]]:
+    if dx == 0 and dy == 0:
+        return landmarks
+    shifted: list[dict[str, Any]] = []
+    for item in landmarks:
+        if not isinstance(item, dict):
+            continue
+        rect = item.get("rect")
+        if not (isinstance(rect, (list, tuple)) and len(rect) == 4):
+            continue
+        try:
+            ltrb = (
+                int(rect[0]),
+                int(rect[1]),
+                int(rect[2]),
+                int(rect[3]),
+            )
+        except (TypeError, ValueError):
+            continue
+        shifted.append(
+            {
+                "label": item.get("label"),
+                "side": item.get("side"),
+                "rect": _shift_rect_ltrb(ltrb, dx, dy),
+            }
+        )
+    return shifted
+
+
+def _target_bbox_xywh_from_args(args: Any) -> tuple[int, int, int, int] | None:
+    if not isinstance(args, dict):
+        return None
+    raw = args.get("target_bbox")
+    if isinstance(raw, dict):
+        try:
+            return (
+                int(raw["x"]),
+                int(raw["y"]),
+                int(raw["w"]),
+                int(raw["h"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+    if isinstance(raw, (list, tuple)) and len(raw) == 4:
+        try:
+            return int(raw[0]), int(raw[1]), int(raw[2]), int(raw[3])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _nearby_objects_from_args(args: Any) -> list[Any] | None:
+    if not isinstance(args, dict):
+        return None
+    for key in ("nearby_objects_arg", "nearby_objects"):
+        raw = args.get(key)
+        if isinstance(raw, list) and raw:
+            return raw
+    return None
+
+
+def _overlay_rects_for_screenshot(
+    event: dict[str, Any] | None,
+    screenshot: Path | None,
+    target_local: tuple[int, int, int, int] | None,
+    landmarks_local: list[dict[str, Any]],
+    *,
+    use_end: bool = False,
+    as_screen: bool = False,
+) -> tuple[tuple[int, int, int, int] | None, list[dict[str, Any]]]:
+    """Map vision-local overlay geometry into the screenshot pixel space.
+
+    YOLO candidate boxes are monitor-local. Recording ``screenshots/`` frames use
+    those local coords as-is. Live eye / full-desktop frames need screen coords
+    (``local + monitor_offset``), also used when ``as_screen=True``.
+    """
+    use_screen = as_screen
+    if not use_screen and screenshot is not None:
+        use_screen = "screenshots" not in {part.lower() for part in screenshot.parts}
+    if not use_screen:
+        return target_local, list(landmarks_local)
+    ox, oy = _monitor_offset_xy(event, use_end=use_end)
+    target = (
+        _shift_rect_ltrb(target_local, ox, oy) if target_local is not None else None
+    )
+    return target, _shift_landmark_overlays(landmarks_local, ox, oy)
+
+
+def _resolve_recording_click_overlays(
+    *,
+    recording_root: Path,
+    event: dict[str, Any],
+    analysis: dict[str, Any] | None,
+    screenshot: Path | None,
+    use_end: bool = False,
+    as_screen: bool = False,
+    nearby_objects: list[Any] | None = None,
+) -> tuple[tuple[int, int, int, int] | None, list[dict[str, Any]]]:
+    """Resolve click-target + landmark overlays for a recording pointer event."""
+    from src.recorder.models import POINTER_EVENT_KINDS
+    from src.recorder.vision_context import (
+        drag_end_vision,
+        resolve_click_overlay_geometry,
+        vision_from_yolo_ocr,
+    )
+
+    kind = str(event.get("kind") or "")
+    if kind not in POINTER_EVENT_KINDS:
+        return None, []
+    raw_index = event.get("index")
+    if not isinstance(raw_index, int) or raw_index <= 0:
+        return None, []
+    instruction = ""
+    if isinstance(analysis, dict):
+        raw_instruction = analysis.get("instruction")
+        if isinstance(raw_instruction, str):
+            instruction = raw_instruction
+    if use_end and kind == "drag":
+        vision = drag_end_vision(recording_root, raw_index)
+        location = "終點"
+    else:
+        vision = vision_from_yolo_ocr(recording_root, raw_index, suffix="")
+        location = "起點" if kind == "drag" else "附近"
+    target_local, landmarks_local = resolve_click_overlay_geometry(
+        vision,
+        instruction,
+        location=location,
+        nearby_objects=nearby_objects,
+    )
+    return _overlay_rects_for_screenshot(
+        event,
+        screenshot,
+        target_local,
+        landmarks_local,
+        use_end=use_end,
+        as_screen=as_screen,
+    )
 
 
 def _local_cursor_for_screenshot(
@@ -3670,6 +3874,8 @@ def _render_shot_html(
     focus_rect_local: tuple[int, int, int, int] | None = None,
     cursor_xy: tuple[int, int] | None = None,
     foreground_rect_local: tuple[int, int, int, int] | None = None,
+    target_rect_local: tuple[int, int, int, int] | None = None,
+    landmarks: list[dict[str, Any]] | None = None,
 ) -> str:
     display = _display_screenshot_with_focus_rect(
         screenshot,
@@ -3677,6 +3883,8 @@ def _render_shot_html(
         focus_rect=focus_rect_local,
         cursor_xy=cursor_xy,
         foreground_rect=foreground_rect_local,
+        target_rect=target_rect_local,
+        landmarks=landmarks,
     )
     src = _relative_img_src(display, run_root)
     if src is None:
@@ -4152,11 +4360,53 @@ def _load_instruction_groups(run_root: Path) -> list[dict[str, Any]]:
     return grouped
 
 
+def _session_click_overlays_for_operation(
+    *,
+    operation: dict[str, Any],
+    screenshot: Path | None,
+    recording_target: dict[str, Any] | None,
+) -> tuple[tuple[int, int, int, int] | None, list[dict[str, Any]]]:
+    """Resolve target/landmark overlays for a live hand operation screenshot."""
+    from src.recorder.vision_context import bbox_xywh_to_ltrb
+
+    args = operation.get("args")
+    # Prefer the resolved click target from move_mouse / drag metadata.
+    target: tuple[int, int, int, int] | None = None
+    bbox = _target_bbox_xywh_from_args(args)
+    if bbox is not None:
+        target = bbox_xywh_to_ltrb(bbox)
+
+    landmarks: list[dict[str, Any]] = []
+    if isinstance(recording_target, dict):
+        recording_root = recording_target.get("recording")
+        event = recording_target.get("event")
+        analysis = recording_target.get("analysis")
+        if isinstance(recording_root, Path) and isinstance(event, dict):
+            analysis_payload = analysis if isinstance(analysis, dict) else None
+            if analysis_payload is None and isinstance(args, dict):
+                instruction = args.get("instruction")
+                if isinstance(instruction, str) and instruction.strip():
+                    analysis_payload = {"instruction": instruction}
+            vision_target, landmarks = _resolve_recording_click_overlays(
+                recording_root=recording_root,
+                event=event,
+                analysis=analysis_payload,
+                screenshot=screenshot,
+                use_end=False,
+                as_screen=True,
+                nearby_objects=_nearby_objects_from_args(args),
+            )
+            if target is None:
+                target = vision_target
+    return target, landmarks
+
+
 def _render_hand_operation_html(
     *,
     run_root: Path,
     operation: dict[str, Any],
     recording_event: dict[str, Any] | None = None,
+    recording_target: dict[str, Any] | None = None,
 ) -> str:
     action = operation["action"]
     args = operation["args"]
@@ -4196,6 +4446,30 @@ def _render_hand_operation_html(
         if live_after_focus is not None
         else _local_cursor_for_screenshot(recording_event, after, use_end=False)
     )
+    show_click_overlay = action in {
+        "move_mouse",
+        "move_mouse_visual",
+        "click",
+        "double_click",
+        "right_click",
+        "drag",
+        "drag_to",
+        "hold",
+    }
+    before_target = after_target = None
+    before_landmarks: list[dict[str, Any]] = []
+    after_landmarks: list[dict[str, Any]] = []
+    if show_click_overlay:
+        before_target, before_landmarks = _session_click_overlays_for_operation(
+            operation=operation,
+            screenshot=before,
+            recording_target=recording_target,
+        )
+        # Keep the same geometric overlay on the after frame for context.
+        after_target, after_landmarks = before_target, before_landmarks
+        if before_target is None and isinstance(args, dict):
+            # click rows often omit target_bbox; reuse prior move metadata only when present.
+            pass
     shots = _render_shot_html(
         "動作前截圖",
         before,
@@ -4203,6 +4477,8 @@ def _render_hand_operation_html(
         focus_rect_local=before_focus,
         cursor_xy=before_cursor,
         foreground_rect_local=before_foreground,
+        target_rect_local=before_target,
+        landmarks=before_landmarks,
     ) + _render_shot_html(
         "動作後截圖",
         after,
@@ -4210,6 +4486,8 @@ def _render_hand_operation_html(
         focus_rect_local=after_focus,
         cursor_xy=after_cursor,
         foreground_rect_local=after_foreground,
+        target_rect_local=after_target,
+        landmarks=after_landmarks,
     )
 
     return (
@@ -4434,6 +4712,9 @@ def _render_instruction_group_html(
                 run_root=run_root,
                 operation=operation,
                 recording_event=recording_event,
+                recording_target=(
+                    recording_target if isinstance(recording_target, dict) else None
+                ),
             )
             for operation in operations
         )
@@ -6523,6 +6804,31 @@ def _render_recording_event_html(
                 ),
             )
         )
+    preview_target, preview_landmarks = _resolve_recording_click_overlays(
+        recording_root=run_root,
+        event=event,
+        analysis=analysis if isinstance(analysis, dict) else None,
+        screenshot=None,
+        use_end=False,
+    )
+    if preview_target is not None:
+        meta_rows.append(
+            (
+                "Target rect",
+                escape(
+                    f"({preview_target[0]}, {preview_target[1]})–"
+                    f"({preview_target[2]}, {preview_target[3]})"
+                ),
+            )
+        )
+    if preview_landmarks:
+        landmark_text = "、".join(
+            str(item.get("label") or "")
+            for item in preview_landmarks
+            if isinstance(item, dict) and item.get("label")
+        )
+        if landmark_text:
+            meta_rows.append(("Landmarks", escape(landmark_text)))
     text = event.get("text")
     if kind == "condition":
         presence = event.get("presence")
@@ -6625,6 +6931,24 @@ def _render_recording_event_html(
         if after_is_own_shot
         else None
     )
+    analysis_dict = analysis if isinstance(analysis, dict) else None
+    before_target, before_landmarks = _resolve_recording_click_overlays(
+        recording_root=run_root,
+        event=event,
+        analysis=analysis_dict,
+        screenshot=before,
+        use_end=False,
+    )
+    after_target: tuple[int, int, int, int] | None = None
+    after_landmarks: list[dict[str, Any]] = []
+    if after_is_own_shot and str(event.get("kind") or "") == "drag":
+        after_target, after_landmarks = _resolve_recording_click_overlays(
+            recording_root=run_root,
+            event=event,
+            analysis=analysis_dict,
+            screenshot=after,
+            use_end=True,
+        )
     shots = _render_shot_html(
         "動作前截圖",
         before,
@@ -6632,6 +6956,8 @@ def _render_recording_event_html(
         focus_rect_local=before_focus,
         cursor_xy=before_cursor,
         foreground_rect_local=before_foreground,
+        target_rect_local=before_target,
+        landmarks=before_landmarks,
     ) + _render_shot_html(
         "動作後截圖",
         after,
@@ -6639,13 +6965,15 @@ def _render_recording_event_html(
         focus_rect_local=after_focus,
         cursor_xy=after_cursor,
         foreground_rect_local=after_foreground,
+        target_rect_local=after_target,
+        landmarks=after_landmarks,
     )
 
     editor = _render_recording_step_editor_html(
         run_root=run_root,
         event=event,
         next_event=next_event,
-        analysis=analysis if isinstance(analysis, dict) else None,
+        analysis=analysis_dict,
         instruction=instruction,
         title=title,
         expected_outcome=expected_outcome,
@@ -7868,17 +8196,31 @@ def _recording_playback_frames(
             event, shot, after=False, use_end=False
         )
         cursor = _local_cursor_for_screenshot(event, shot, use_end=False)
+        raw_index = event.get("index")
+        analysis = (
+            _load_recording_analysis(run_root, raw_index)
+            if isinstance(raw_index, int)
+            else None
+        )
+        target, landmarks = _resolve_recording_click_overlays(
+            recording_root=run_root,
+            event=event,
+            analysis=analysis if isinstance(analysis, dict) else None,
+            screenshot=shot,
+            use_end=False,
+        )
         display = _display_screenshot_with_focus_rect(
             shot,
             run_root,
             focus_rect=focus,
             cursor_xy=cursor,
             foreground_rect=foreground,
+            target_rect=target,
+            landmarks=landmarks,
         )
         src = _relative_img_src(display, run_root)
         if shot is None or src is None:
             continue
-        raw_index = event.get("index")
         index = raw_index if isinstance(raw_index, int) else 0
         frames.append(
             {
@@ -7938,6 +8280,7 @@ def _extend_operation_playback_frames(
     anchor: str,
     step: int,
     recording_event: dict[str, Any] | None = None,
+    recording_target: dict[str, Any] | None = None,
 ) -> None:
     """Append one frame per action, using that action's after screenshot."""
     for operation in operations:
@@ -7964,12 +8307,32 @@ def _extend_operation_playback_frames(
             if live_focus is not None
             else _local_cursor_for_screenshot(recording_event, shot, use_end=False)
         )
+        target = None
+        landmarks: list[dict[str, Any]] = []
+        action = str(operation.get("action") or "")
+        if action in {
+            "move_mouse",
+            "move_mouse_visual",
+            "click",
+            "double_click",
+            "right_click",
+            "drag",
+            "drag_to",
+            "hold",
+        }:
+            target, landmarks = _session_click_overlays_for_operation(
+                operation=operation,
+                screenshot=shot,
+                recording_target=recording_target,
+            )
         display = _display_screenshot_with_focus_rect(
             shot,
             run_root,
             focus_rect=focus,
             cursor_xy=cursor,
             foreground_rect=foreground,
+            target_rect=target,
+            landmarks=landmarks,
         )
         src = _relative_img_src(display, run_root)
         if src is None:
@@ -8047,6 +8410,7 @@ def _session_playback_frames(
             anchor=f"step-{step_number}",
             step=step_number,
             recording_event=recording_event,
+            recording_target=target if isinstance(target, dict) else None,
         )
     return frames
 

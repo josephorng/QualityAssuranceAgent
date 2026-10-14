@@ -1567,6 +1567,100 @@ def test_write_recording_html_bakes_focus_rect_into_screenshot(tmp_path: Path) -
     assert saw_cyan
 
 
+def test_write_recording_html_bakes_target_and_landmark_overlays(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "recording_target_landmarks"
+    run_root.mkdir(parents=True)
+    (run_root / "events").mkdir()
+    (run_root / "screenshots").mkdir()
+    (run_root / "analysis").mkdir()
+    (run_root / "yolo_ocr").mkdir()
+    shot = run_root / "screenshots" / "event_001.jpeg"
+    Image.new("RGB", (120, 80), color=(10, 20, 30)).save(shot, format="JPEG")
+    (run_root / "events" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "index": 1,
+                "timestamp_utc": "2026-07-21T04:00:00+00:00",
+                "kind": "click",
+                "cursor_xy": [40, 40],
+                "monitor_offset": [0, 0],
+                "screenshot_path": str(shot),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": "將滑鼠移到輸入欄（在「A1」文字的右邊），並點擊滑鼠一下。",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "yolo_ocr" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "local_cursor": [40, 40],
+                "candidates": [
+                    {
+                        "bbox": [30, 30, 40, 20],
+                        "center": [50, 40],
+                        "class_name": "input",
+                        "text": None,
+                        "icons": None,
+                    },
+                    {
+                        "bbox": [5, 30, 18, 16],
+                        "center": [14, 38],
+                        "class_name": "text",
+                        "text": "A1",
+                        "icons": None,
+                    },
+                ],
+                "detection_count": 2,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "session.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_root.name,
+                "started_at_utc": "2026-07-21T04:00:00+00:00",
+                "event_count": 1,
+                "events": ["events/event_001.json"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+    assert "focus_rect_debug/" in html
+    assert "Target rect" in html
+    assert "Landmarks" in html
+    assert "「A1」文字" in html
+    annotated = list((run_root / "focus_rect_debug").glob("*.png"))
+    assert annotated
+    saw_green = False
+    saw_orange = False
+    for path in annotated:
+        pixels = imread_bgr(path)
+        assert pixels is not None
+        if tuple(int(v) for v in pixels[30, 30]) == (0, 220, 0):
+            saw_green = True
+        if tuple(int(v) for v in pixels[30, 5]) == (0, 140, 255):
+            saw_orange = True
+    assert saw_green
+    assert saw_orange
+
+
 def test_write_session_html_bakes_live_focus_rect_after_from_hand_csv(
     tmp_path: Path,
 ) -> None:
@@ -1659,6 +1753,103 @@ def test_write_session_html_bakes_live_focus_rect_after_from_hand_csv(
             saw_cyan = True
     assert saw_magenta
     assert saw_cyan
+
+
+def test_write_session_html_bakes_target_bbox_from_move_mouse_args(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "runs" / "live_target_20260721_040000_000001"
+    (run_root / "eye").mkdir(parents=True)
+    eye = run_root / "eye" / "before.png"
+    Image.new("RGB", (160, 90), color=(30, 40, 50)).save(eye)
+    args = {
+        "instruction": "輸入欄",
+        "nearby_objects": ["在「A1」文字的右邊"],
+        "target_bbox": {"x": 40, "y": 20, "w": 50, "h": 24},
+        "x": 65,
+        "y": 32,
+    }
+    with (run_root / "hand.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "timestamp",
+                "action",
+                "args",
+                "ok",
+                "screenshot_name",
+                "screenshot_before_path",
+                "screenshot_after_path",
+                "message",
+                "focus_rect_after",
+                "foreground_rect_after",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "timestamp": "2026-07-21T04:00:01+00:00",
+                "action": "move_mouse",
+                "args": repr(args),
+                "ok": "true",
+                "screenshot_name": str(eye),
+                "screenshot_before_path": str(eye),
+                "screenshot_after_path": str(eye),
+                "message": "executed",
+                "focus_rect_after": "",
+                "foreground_rect_after": "",
+            }
+        )
+    (run_root / "report.json").write_text(
+        json.dumps(
+            {
+                "tool_results": [
+                    {
+                        "timestamp_utc": "2026-07-21T04:00:01+00:00",
+                        "transcript_counter": 0,
+                        "script_step_index": 0,
+                    }
+                ],
+                "steps": [
+                    {
+                        "transcript_counter": 0,
+                        "script_step_index": 0,
+                        "goal": "點擊輸入欄",
+                        "status": "ok",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "steps").mkdir()
+    (run_root / "steps" / step_artifact_name(0, 0)).write_text(
+        json.dumps(
+            {
+                "messages": [],
+                "step_timing": {
+                    "goal": "點擊輸入欄",
+                    "status": "ok",
+                    "step_index": 0,
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_session_html_from_run(run_root).read_text(encoding="utf-8")
+    assert "focus_rect_debug/" in html
+    annotated = list((run_root / "focus_rect_debug").glob("*.png"))
+    assert annotated
+    saw_green = False
+    for path in annotated:
+        pixels = imread_bgr(path)
+        assert pixels is not None
+        if tuple(int(v) for v in pixels[20, 40]) == (0, 220, 0):
+            saw_green = True
+    assert saw_green
 
 
 def test_write_session_html_bakes_focus_rect_on_matched_recording_shots(

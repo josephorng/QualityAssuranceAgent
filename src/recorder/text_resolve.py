@@ -88,6 +88,23 @@ def _expand_thin_rect_for_debug(
 # Magenta focus / caret; cyan foreground window. Both stand out on light and dark UI.
 _FOCUS_RECT_BGR = (255, 0, 255)
 _FOREGROUND_RECT_BGR = (0, 255, 255)
+# Lime click target; orange nearby landmarks with small directional arrows.
+_TARGET_RECT_BGR = (0, 220, 0)
+_LANDMARK_RECT_BGR = (0, 140, 255)
+# Fixed shaft length (px) for landmark direction arrows; same size for every side.
+_LANDMARK_ARROW_LENGTH_PX = 18
+_LANDMARK_ARROW_GAP_PX = 4
+# Schema side → unit vector pointing toward where the click target sits.
+_LANDMARK_SIDE_DIRECTION: dict[str, tuple[float, float]] = {
+    "left": (-1.0, 0.0),
+    "right": (1.0, 0.0),
+    "above": (0.0, -1.0),
+    "below": (0.0, 1.0),
+    "upper_left": (-1.0, -1.0),
+    "upper_right": (1.0, -1.0),
+    "lower_left": (-1.0, 1.0),
+    "lower_right": (1.0, 1.0),
+}
 
 
 def _draw_rect_bgr(
@@ -112,14 +129,100 @@ def _draw_rect_bgr(
     cv2.rectangle(canvas, (left, top), (right, bottom), color, 2)
 
 
+def _rect_center_xy(rect: tuple[int, int, int, int]) -> tuple[int, int]:
+    left, top, right, bottom = _normalize_ltrb(rect)
+    return (left + right) // 2, (top + bottom) // 2
+
+
+def _clamp_point(
+    x: int,
+    y: int,
+    *,
+    width: int,
+    height: int,
+) -> tuple[int, int]:
+    return max(0, min(int(x), width - 1)), max(0, min(int(y), height - 1))
+
+
+def _unit_direction(dx: float, dy: float) -> tuple[float, float] | None:
+    length = (dx * dx + dy * dy) ** 0.5
+    if length <= 0.0:
+        return None
+    return dx / length, dy / length
+
+
+def _landmark_edge_anchor(
+    rect: tuple[int, int, int, int],
+    dx: float,
+    dy: float,
+) -> tuple[int, int]:
+    """Point on the landmark box edge in direction ``(dx, dy)``."""
+    left, top, right, bottom = _normalize_ltrb(rect)
+    cx, cy = _rect_center_xy(rect)
+    if dx > 0:
+        x = right
+    elif dx < 0:
+        x = left
+    else:
+        x = cx
+    if dy > 0:
+        y = bottom
+    elif dy < 0:
+        y = top
+    else:
+        y = cy
+    return int(x), int(y)
+
+
+def _draw_landmark_arrow_bgr(
+    canvas: Any,
+    landmark_rect: tuple[int, int, int, int],
+    side: str | None,
+    color: tuple[int, int, int],
+) -> None:
+    """Draw a small fixed-size arrow pointing by landmark ``side`` (not to target)."""
+    import cv2
+
+    if not side:
+        return
+    direction = _LANDMARK_SIDE_DIRECTION.get(str(side))
+    if direction is None:
+        return
+    unit = _unit_direction(direction[0], direction[1])
+    if unit is None:
+        return
+    ux, uy = unit
+    height, width = canvas.shape[:2]
+    edge_x, edge_y = _landmark_edge_anchor(landmark_rect, direction[0], direction[1])
+    start_x = edge_x + int(round(ux * _LANDMARK_ARROW_GAP_PX))
+    start_y = edge_y + int(round(uy * _LANDMARK_ARROW_GAP_PX))
+    end_x = start_x + int(round(ux * _LANDMARK_ARROW_LENGTH_PX))
+    end_y = start_y + int(round(uy * _LANDMARK_ARROW_LENGTH_PX))
+    x1, y1 = _clamp_point(start_x, start_y, width=width, height=height)
+    x2, y2 = _clamp_point(end_x, end_y, width=width, height=height)
+    if abs(x2 - x1) < 2 and abs(y2 - y1) < 2:
+        return
+    cv2.arrowedLine(
+        canvas,
+        (x1, y1),
+        (x2, y2),
+        color,
+        thickness=2,
+        tipLength=0.35,
+        line_type=cv2.LINE_AA,
+    )
+
+
 def draw_focus_rect_bgr(
     bgr: Any,
     focus_rect_local: tuple[int, int, int, int] | None = None,
     *,
     cursor_local: tuple[int, int] | None = None,
     foreground_rect_local: tuple[int, int, int, int] | None = None,
+    target_rect_local: tuple[int, int, int, int] | None = None,
+    landmarks: list[dict[str, Any]] | None = None,
 ) -> Any:
-    """Draw focus and/or foreground window rects (and optional cursor) for debug."""
+    """Draw focus / foreground / click-target / landmark overlays for debug HTML."""
     import cv2
     import numpy as np
 
@@ -157,6 +260,42 @@ def draw_focus_rect_bgr(
                 markerSize=16,
                 thickness=2,
             )
+    if target_rect_local is not None:
+        _draw_rect_bgr(
+            canvas,
+            target_rect_local,
+            _TARGET_RECT_BGR,
+            expand_thin=False,
+        )
+    for landmark in landmarks or []:
+        if not isinstance(landmark, dict):
+            continue
+        rect = landmark.get("rect")
+        if not (isinstance(rect, (list, tuple)) and len(rect) == 4):
+            continue
+        try:
+            landmark_rect = (
+                int(rect[0]),
+                int(rect[1]),
+                int(rect[2]),
+                int(rect[3]),
+            )
+        except (TypeError, ValueError):
+            continue
+        _draw_rect_bgr(
+            canvas,
+            landmark_rect,
+            _LANDMARK_RECT_BGR,
+            expand_thin=False,
+        )
+        side = landmark.get("side")
+        side_key = str(side).strip() if side is not None else ""
+        _draw_landmark_arrow_bgr(
+            canvas,
+            landmark_rect,
+            side_key or None,
+            _LANDMARK_RECT_BGR,
+        )
     return canvas
 
 
@@ -167,6 +306,8 @@ def write_focus_rect_debug_image(
     dest: Path,
     cursor_local: tuple[int, int] | None = None,
     foreground_rect_local: tuple[int, int, int, int] | None = None,
+    target_rect_local: tuple[int, int, int, int] | None = None,
+    landmarks: list[dict[str, Any]] | None = None,
 ) -> Path | None:
     """Persist magenta focus / cyan foreground overlays next to YOLO/OCR debug artifacts."""
     from src.common.io_utils import imwrite_bgr
@@ -176,6 +317,8 @@ def write_focus_rect_debug_image(
         focus_rect_local,
         cursor_local=cursor_local,
         foreground_rect_local=foreground_rect_local,
+        target_rect_local=target_rect_local,
+        landmarks=landmarks,
     )
     if not imwrite_bgr(dest, annotated):
         return None

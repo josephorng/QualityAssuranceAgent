@@ -49,6 +49,30 @@ def test_draw_focus_rect_bgr_paints_cyan_foreground_window() -> None:
     assert tuple(int(v) for v in out[10, 12]) == (255, 0, 255)
 
 
+def test_draw_focus_rect_bgr_paints_target_and_landmark_arrow() -> None:
+    bgr = np.zeros((80, 120, 3), dtype=np.uint8)
+    out = draw_focus_rect_bgr(
+        bgr,
+        None,
+        target_rect_local=(70, 30, 100, 55),
+        landmarks=[
+            {
+                "label": "「A1」文字",
+                "side": "right",
+                "rect": (10, 30, 30, 50),
+            }
+        ],
+    )
+    # Lime target corner and orange landmark corner.
+    assert tuple(int(v) for v in out[30, 70]) == (0, 220, 0)
+    assert tuple(int(v) for v in out[30, 10]) == (0, 140, 255)
+    # Small fixed right-pointing arrow just outside the landmark's right edge.
+    arrow = out[40, 40]
+    assert int(arrow[2]) >= 100  # orange has strong red channel in BGR
+    # Must not draw a long line all the way toward the distant target.
+    assert int(out[40, 60][2]) < 50
+
+
 def test_extract_nearest_text_prefers_nearest_with_text() -> None:
     bgr = np.zeros((100, 100, 3), dtype=np.uint8)
     detections = [

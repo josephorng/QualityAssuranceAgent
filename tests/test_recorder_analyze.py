@@ -317,6 +317,197 @@ def test_collect_nearby_hints_includes_closest_icon_on_its_side() -> None:
     assert any(h.label == "「新聊天」文字" for h in hints)
 
 
+def _input_candidate(bbox: list[int]) -> dict:
+    x, y, w, h = bbox
+    return {
+        "bbox": bbox,
+        "center": [x + w // 2, y + h // 2],
+        "class_name": "input",
+        "text": None,
+    }
+
+
+def _scrollbar_candidate(bbox: list[int]) -> dict:
+    x, y, w, h = bbox
+    return {
+        "bbox": bbox,
+        "center": [x + w // 2, y + h // 2],
+        "class_name": "scrollbar",
+        "text": None,
+    }
+
+
+def _assert_prefilter_unique_primary(
+    vision: dict,
+    hints: list,
+    *,
+    instruction: str,
+) -> None:
+    """Replay nearby prefilter must keep only candidates[0] among ambiguous peers."""
+    from cua_mcp.select_mouse_target import (
+        _detections_same_place,
+        _prefilter_anchors_by_nearby,
+    )
+    from src.recorder.vision_context import (
+        _ambiguous_primary_peers,
+        _candidates_to_detections,
+        _hints_uniquely_prefilter_primary,
+        _nearby_matches_for_hints,
+    )
+
+    detections = _candidates_to_detections(vision["candidates"])
+    primary = detections[0]
+    peers = _ambiguous_primary_peers(primary, detections)
+    assert peers, f"expected ambiguous peers for {instruction!r}"
+    assert _hints_uniquely_prefilter_primary(primary, peers, detections, hints)
+    kept = _prefilter_anchors_by_nearby(
+        [primary, *peers],
+        _nearby_matches_for_hints(detections, hints),
+        hints,
+    )
+    assert len(kept) == 1
+    assert _detections_same_place(kept[0], primary)
+
+
+def test_collect_nearby_hints_grows_until_unique_among_multiple_inputs() -> None:
+    """Excel-style: multiple 輸入欄; grow landmarks until prefilter keeps name box."""
+    from src.recorder.vision_context import collect_nearby_hints
+
+    # Name box (primary) at formula-bar row; title-bar search/upgrade are peers.
+    name_box = _input_candidate([100, 200, 80, 24])
+    search = _input_candidate([300, 20, 120, 30])
+    upgrade = _input_candidate([500, 20, 80, 30])
+    # Discriminators that only the name box satisfies (right of A1, below 字型).
+    a1 = _text_candidate([50, 200, 20, 14], "A1")
+    font = _text_candidate([100, 160, 30, 14], "字型")
+    # Shared landmark both title-bar inputs can claim (above 國旗 under search).
+    flag = _icon_candidate([340, 100, 20, 20], "國旗")
+    vision = {
+        "used_vision": True,
+        "local_cursor": [140, 212],
+        "candidates": [name_box, search, upgrade, a1, font, flag],
+    }
+    hints = collect_nearby_hints(vision, instruction="將滑鼠移到輸入欄")
+    assert hints
+    labels = {h.label for h in hints}
+    assert "「A1」文字" in labels
+    assert "「字型」文字" in labels
+    _assert_prefilter_unique_primary(
+        vision, hints, instruction="將滑鼠移到輸入欄"
+    )
+
+
+def test_collect_nearby_hints_grows_until_unique_among_duplicate_text() -> None:
+    """Two identical 「確定」文字; directed landmarks isolate the clicked one."""
+    from src.recorder.vision_context import collect_nearby_hints
+
+    primary = _text_candidate([100, 100, 40, 16], "確定")
+    peer = _text_candidate([400, 100, 40, 16], "確定")
+    cancel = _text_candidate([160, 100, 40, 16], "取消")  # right of primary
+    title = _text_candidate([100, 60, 40, 16], "標題")  # above primary
+    vision = {
+        "used_vision": True,
+        "local_cursor": [120, 108],
+        "candidates": [primary, peer, cancel, title],
+    }
+    hints = collect_nearby_hints(vision, instruction="點擊「確定」文字")
+    assert hints
+    _assert_prefilter_unique_primary(
+        vision, hints, instruction="點擊「確定」文字"
+    )
+
+
+def test_collect_nearby_hints_grows_until_unique_among_duplicate_icons() -> None:
+    """Two identical V-arrows; unique neighbor texts isolate the clicked icon."""
+    from src.recorder.vision_context import collect_nearby_hints
+
+    primary = _icon_candidate([200, 200, 14, 14], "向下V箭頭")
+    peer = _icon_candidate([400, 200, 14, 14], "向下V箭頭")
+    left = _text_candidate([140, 200, 40, 16], "開始")
+    below = _text_candidate([200, 240, 40, 16], "結束")
+    vision = {
+        "used_vision": True,
+        "local_cursor": [207, 207],
+        "candidates": [primary, peer, left, below],
+    }
+    hints = collect_nearby_hints(vision, instruction="點擊「向下V箭頭」圖示")
+    assert hints
+    _assert_prefilter_unique_primary(
+        vision, hints, instruction="點擊「向下V箭頭」圖示"
+    )
+
+
+def test_collect_nearby_hints_grows_until_unique_among_multiple_scrollbars() -> None:
+    """Two scrollbars; adjacent content landmark isolates the primary."""
+    from src.recorder.vision_context import collect_nearby_hints
+
+    primary = _scrollbar_candidate([380, 100, 16, 200])
+    peer = _scrollbar_candidate([780, 100, 16, 200])
+    content = _text_candidate([300, 180, 40, 16], "登入")
+    other = _text_candidate([700, 180, 40, 16], "設定")
+    vision = {
+        "used_vision": True,
+        "local_cursor": [388, 200],
+        "candidates": [primary, peer, content, other],
+    }
+    hints = collect_nearby_hints(vision, instruction="將滑鼠移到滾動條")
+    assert hints
+    assert any(h.label == "「登入」文字" for h in hints)
+    _assert_prefilter_unique_primary(
+        vision, hints, instruction="將滑鼠移到滾動條"
+    )
+
+
+def test_collect_nearby_hints_unique_text_skips_uniqueness_grow() -> None:
+    """Already-unique text has no peers; seed closest-per-side hints are unchanged."""
+    from src.recorder.vision_context import (
+        _ambiguous_primary_peers,
+        _candidates_to_detections,
+        collect_nearby_hints,
+    )
+
+    primary = _text_candidate([200, 96, 40, 16], "唯一")
+    left = _text_candidate([120, 96, 40, 16], "左側")
+    right = _text_candidate([280, 96, 40, 16], "右側")
+    vision = {
+        "used_vision": True,
+        "candidates": [primary, left, right],
+    }
+    detections = _candidates_to_detections(vision["candidates"])
+    assert _ambiguous_primary_peers(detections[0], detections) == []
+    hints = collect_nearby_hints(vision, instruction="點擊「唯一」文字")
+    labels = {h.label for h in hints}
+    assert "「左側」文字" in labels
+    assert "「右側」文字" in labels
+
+
+def test_collect_nearby_hints_unprovable_keeps_best_effort() -> None:
+    """When peers cannot be separated, still emit non-empty best-effort landmarks."""
+    from src.recorder.vision_context import (
+        _hints_uniquely_prefilter_primary,
+        _ambiguous_primary_peers,
+        _candidates_to_detections,
+        collect_nearby_hints,
+    )
+
+    # Two inputs sharing the only landmark geometry equally (both above 標籤).
+    primary = _input_candidate([100, 40, 80, 24])
+    peer = _input_candidate([220, 40, 80, 24])
+    tag = _text_candidate([150, 100, 40, 16], "標籤")
+    vision = {
+        "used_vision": True,
+        "local_cursor": [140, 52],
+        "candidates": [primary, peer, tag],
+    }
+    hints = collect_nearby_hints(vision, instruction="將滑鼠移到輸入欄")
+    assert hints
+    detections = _candidates_to_detections(vision["candidates"])
+    peers = _ambiguous_primary_peers(detections[0], detections)
+    assert peers
+    # May still be tied; must not blank out landmarks.
+    _ = _hints_uniquely_prefilter_primary(detections[0], peers, detections, hints)
+
+
 def test_collect_nearby_hint_labels_skips_single_char_text() -> None:
     """Single-character text (often an icon miss) does not count as a text landmark."""
     vision = {

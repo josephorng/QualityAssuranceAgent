@@ -34,9 +34,13 @@ from cua_mcp.scrollbar_arrows import (
     scrollbar_orientation,
 )
 from cua_mcp.select_mouse_target import (
+    _MOUSE_FILTER_SIMILARITY_THRESHOLD,
     _box_edge_gap,
     _detect_mouse_targets_from_bgr,
+    _detection_similarity_to_query,
+    _detections_label_similar,
     _detections_same_place,
+    _prefilter_anchors_by_nearby,
 )
 from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text
 from cua_mcp.yolo_onnx import (
@@ -51,9 +55,12 @@ from src.common.nearby_side import (
     NearbyHint,
     Side,
     anchor_satisfies_side,
+    extract_nearby_hints_by_location,
+    extract_nearby_hints_from_instruction,
     format_nearby_context_comment,
     landmark_cell_from_anchor_bbox,
     merge_nearby_hints,
+    normalize_nearby_hints,
     side_from_anchor_bbox,
     side_to_schema_value,
     side_to_zh,
@@ -98,6 +105,8 @@ _MAX_PRIMARY_TARGET_OPTIONS = 10
 _MAX_PICK_TARGET_OPTIONS = 80
 # Recording HTML「附近地標」: max options per directed side (closest to click).
 _MAX_NEARBY_LANDMARK_OPTIONS_PER_SIDE = 10
+# Max extra landmarks tried when growing seed until replay prefilter is unique.
+_MAX_UNIQUENESS_GROW_ADDITIONS = 8
 # Prefer at least this many multi-char text neighbors in each directional cell.
 _MIN_MULTI_CHAR_TEXT_PER_SIDE = 2
 _DRAG_OFFSET_THRESHOLD_PX = 5
@@ -1610,6 +1619,143 @@ def _closest_directed_landmarks(
     return [best[side] for side in _DIRECTED_SIDE_ORDER if side in best]
 
 
+def _candidates_to_detections(candidates: list[Any]) -> list[UiDetection]:
+    """Convert persisted candidate dicts to ``UiDetection`` rows (skip invalid)."""
+    out: list[UiDetection] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        det = _dict_to_detection(candidate)
+        if det is not None:
+            out.append(det)
+    return out
+
+
+def _ambiguous_primary_peers(
+    primary: UiDetection,
+    detections: list[UiDetection],
+) -> list[UiDetection]:
+    """Same-class inputs/scrollbars or same-value text/icon peers of ``primary``."""
+    peers: list[UiDetection] = []
+    for det in detections:
+        if det is primary or _detections_same_place(primary, det):
+            continue
+        if primary.class_name in ("input", "scrollbar"):
+            if det.class_name == primary.class_name:
+                peers.append(det)
+            continue
+        if _detections_label_similar(primary, det):
+            peers.append(det)
+    return peers
+
+
+def _nearby_matches_for_hints(
+    detections: list[UiDetection],
+    hints: list[NearbyHint],
+    *,
+    threshold: float = _MOUSE_FILTER_SIMILARITY_THRESHOLD,
+) -> list[UiDetection]:
+    """Detections whose labels match any hint (replay nearby pool)."""
+    if not detections or not hints:
+        return []
+    matches: list[UiDetection] = []
+    seen: set[int] = set()
+    for det in detections:
+        if id(det) in seen:
+            continue
+        if any(
+            _detection_similarity_to_query(det, hint.label) >= threshold for hint in hints
+        ):
+            seen.add(id(det))
+            matches.append(det)
+    return matches
+
+
+def _prefilter_kept_among_peers(
+    primary: UiDetection,
+    peers: list[UiDetection],
+    detections: list[UiDetection],
+    hints: list[NearbyHint],
+) -> tuple[int, bool]:
+    """Return ``(kept_count, uniquely_primary)`` from replay nearby prefilter."""
+    anchors = [primary, *peers]
+    if not hints:
+        return len(anchors), False
+    nearby_matches = _nearby_matches_for_hints(detections, hints)
+    kept = _prefilter_anchors_by_nearby(anchors, nearby_matches, hints)
+    if not kept:
+        return 0, False
+    unique = len(kept) == 1 and (
+        kept[0] is primary or _detections_same_place(kept[0], primary)
+    )
+    return len(kept), unique
+
+
+def _hints_uniquely_prefilter_primary(
+    primary: UiDetection,
+    peers: list[UiDetection],
+    detections: list[UiDetection],
+    hints: list[NearbyHint],
+) -> bool:
+    """True when replay ``_prefilter_anchors_by_nearby`` keeps only ``primary``."""
+    _kept, unique = _prefilter_kept_among_peers(primary, peers, detections, hints)
+    return unique
+
+
+def _grow_locating_hints_for_prefilter_uniqueness(
+    *,
+    primary: UiDetection,
+    peers: list[UiDetection],
+    detections: list[UiDetection],
+    prefix_hints: list[NearbyHint],
+    seed: list[NearbyHint],
+    pool: list[_LocateLandmark],
+) -> list[NearbyHint]:
+    """Greedily add pool landmarks until prefilter keeps only ``primary``.
+
+    Returns the locating portion (not ``prefix_hints``). On failure, returns the
+    best-effort locating set with the smallest kept peer set (seed if none improve).
+    """
+    used_labels = {hint.label for hint in prefix_hints} | {hint.label for hint in seed}
+    current = list(seed)
+    best = list(seed)
+    best_kept, unique = _prefilter_kept_among_peers(
+        primary, peers, detections, [*prefix_hints, *current]
+    )
+    if unique:
+        return current
+    if best_kept <= 0:
+        best_kept = len(peers) + 1
+
+    tried = 0
+    for item in pool:
+        if tried >= _MAX_UNIQUENESS_GROW_ADDITIONS:
+            break
+        label = item.hint.label
+        if not label or label in used_labels:
+            continue
+        tried += 1
+        trial = [*current, item.hint]
+        kept, trial_unique = _prefilter_kept_among_peers(
+            primary, peers, detections, [*prefix_hints, *trial]
+        )
+        if trial_unique:
+            return trial
+        current_kept, _ = _prefilter_kept_among_peers(
+            primary, peers, detections, [*prefix_hints, *current]
+        )
+        if current_kept <= 0:
+            current_kept = len(peers) + 1
+        if kept <= 0 or kept >= current_kept:
+            continue
+        current = trial
+        used_labels.add(label)
+        if kept < best_kept:
+            best = list(trial)
+            best_kept = kept
+    return best
+
+
 def _pick_minimal_locating_hints(
     candidates: list[Any],
     *,
@@ -1617,11 +1763,16 @@ def _pick_minimal_locating_hints(
     reserved_labels: set[str],
     primary_bbox: tuple[int, int, int, int] | None,
     click_xy: tuple[int, int] | None,
+    prefix_hints: list[NearbyHint] | None = None,
 ) -> list[NearbyHint]:
     """Closest unique multi-char text per side (else icon), plus a spare text.
 
-    Does not prove replay uniqueness against every detection; that check was too
-    expensive for dense OCR screens and often returned no hints after long work.
+    When the primary has ambiguous peers (same-value text/icon, or multiple
+    inputs/scrollbars), grow the seed with more eligible landmarks until replay's
+    ``_prefilter_anchors_by_nearby`` keeps only the primary. ``prefix_hints``
+    (forced container / scrollbar-content) count toward that check but are not
+    returned. If uniqueness cannot be proven within a small budget, keep the
+    best-effort set (smallest kept peer set, else the original seed).
     """
     if len(candidates) < 2 or not isinstance(candidates[0], dict):
         return []
@@ -1637,15 +1788,37 @@ def _pick_minimal_locating_hints(
         reserved_labels=reserved_labels,
     )
     picked = [item.hint for item in _closest_directed_landmarks(pool)]
-    if not picked:
-        return []
-
     used_labels = {hint.label for hint in picked}
     for item in pool:
         if not item.is_text or item.hint.label in used_labels:
             continue
-        return [*picked, item.hint]
-    return picked
+        picked = [*picked, item.hint]
+        break
+
+    detections = _candidates_to_detections(candidates)
+    # Re-bind primary to the detection instance from ``detections`` so peer
+    # identity checks share object identity with the prefilter anchor list.
+    primary_det = next(
+        (
+            det
+            for det in detections
+            if _detections_same_place(primary, det)
+        ),
+        primary,
+    )
+    peers = _ambiguous_primary_peers(primary_det, detections)
+    if not peers:
+        return picked
+
+    prefix = list(prefix_hints or ())
+    return _grow_locating_hints_for_prefilter_uniqueness(
+        primary=primary_det,
+        peers=peers,
+        detections=detections,
+        prefix_hints=prefix,
+        seed=picked,
+        pool=pool,
+    )
 
 
 def _ranked_eligible_nearby_hints(
@@ -1798,7 +1971,9 @@ def collect_nearby_hints(
     next. Then the closest unique multi-character text on each of the eight
     directed sides, falling back to the closest known icon when a side has no
     unique text. A spare unique multi-character text is appended when one remains
-    unused.
+    unused. When the primary is ambiguous among same-value text/icon peers or
+    multiple inputs/scrollbars, locating hints grow until replay's nearby
+    prefilter keeps only the primary (best-effort if still tied).
     """
     candidates = vision.get("candidates") or []
     if len(candidates) < 2 or not isinstance(candidates[0], dict):
@@ -1820,14 +1995,16 @@ def collect_nearby_hints(
         reserved_labels={hint.label for hint in forced},
     )
     reserved = {hint.label for hint in forced} | {hint.label for hint in content_hints}
+    prefix_hints = [*forced, *content_hints]
     locating = _pick_minimal_locating_hints(
         candidates,
         instruction=instruction,
         reserved_labels=reserved,
         primary_bbox=primary_bbox,
         click_xy=click_xy,
+        prefix_hints=prefix_hints,
     )
-    return [*forced, *content_hints, *locating]
+    return [*prefix_hints, *locating]
 
 
 def collect_nearby_hint_labels(
@@ -1840,6 +2017,161 @@ def collect_nearby_hint_labels(
         hint.label
         for hint in collect_nearby_hints(vision, instruction=instruction)
     ]
+
+
+def bbox_xywh_to_ltrb(
+    bbox: tuple[int, int, int, int] | list[int],
+) -> tuple[int, int, int, int]:
+    """Convert ``(x, y, w, h)`` to ``(left, top, right, bottom)``."""
+    x, y, w, h = (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
+    return x, y, x + w, y + h
+
+
+def primary_target_rect_ltrb(vision: dict[str, Any] | None) -> tuple[int, int, int, int] | None:
+    """Return the primary click-target bbox as LTRB, or None when unavailable."""
+    if not isinstance(vision, dict):
+        return None
+    candidates = vision.get("candidates") or []
+    if not candidates or not isinstance(candidates[0], dict):
+        return None
+    bbox = _as_bbox_xywh(candidates[0].get("bbox"))
+    if bbox is None:
+        return None
+    return bbox_xywh_to_ltrb(bbox)
+
+
+def _hints_for_overlay(
+    instruction: str,
+    *,
+    location: str = "附近",
+    nearby_objects: list[Any] | None = None,
+) -> list[NearbyHint]:
+    """Hints from the instruction (by location) plus optional tool nearby_objects."""
+    buckets = extract_nearby_hints_by_location(instruction or "")
+    hints = list(buckets.get(location) or [])
+    if location == "附近" and not hints:
+        hints = extract_nearby_hints_from_instruction(instruction or "")
+    if nearby_objects:
+        hints = merge_nearby_hints(hints, normalize_nearby_hints(nearby_objects))
+    return hints
+
+
+def _labels_match_for_overlay(candidate_label: str, hint_label: str) -> bool:
+    if candidate_label == hint_label:
+        return True
+    # Allow bare quoted names to match typed labels: 「A1」 ↔ 「A1」文字.
+    bare = hint_label if hint_label.startswith("「") and hint_label.endswith("」") else None
+    if bare and candidate_label.startswith(bare):
+        return True
+    bare_c = (
+        candidate_label
+        if candidate_label.startswith("「") and candidate_label.endswith("」")
+        else None
+    )
+    return bool(bare_c and hint_label.startswith(bare_c))
+
+
+def match_nearby_landmark_overlays(
+    vision: dict[str, Any] | None,
+    instruction: str,
+    *,
+    location: str = "附近",
+    nearby_objects: list[Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Resolve instruction landmarks to screenshot-local LTRB overlays.
+
+    Each item is ``{"label", "side", "rect"}`` where ``rect`` is LTRB and
+    ``side`` is the schema string (or None). Matching prefers candidates whose
+    directed side relative to the primary matches the hint.
+    """
+    if not isinstance(vision, dict):
+        return []
+    candidates = vision.get("candidates") or []
+    if len(candidates) < 2 or not isinstance(candidates[0], dict):
+        return []
+    primary = candidates[0]
+    primary_bbox = _as_bbox_xywh(primary.get("bbox"))
+    click_xy = _click_xy_from_vision(vision, primary=primary)
+    hints = _hints_for_overlay(
+        instruction,
+        location=location,
+        nearby_objects=nearby_objects,
+    )
+    if not hints:
+        return []
+
+    overlays: list[dict[str, Any]] = []
+    seen_labels: set[str] = set()
+    for hint in hints:
+        if not hint.label or hint.label in seen_labels:
+            continue
+        best: tuple[float, int, dict[str, Any]] | None = None
+        for order, candidate in enumerate(candidates[1:]):
+            if not isinstance(candidate, dict):
+                continue
+            label = _candidate_label_for_hint(candidate)
+            if not label or not _labels_match_for_overlay(label, hint.label):
+                continue
+            bbox = _as_bbox_xywh(candidate.get("bbox"))
+            if bbox is None:
+                continue
+            center = _candidate_center(candidate)
+            if center is None:
+                continue
+            if hint.side is not None:
+                if primary_bbox is None:
+                    continue
+                if not anchor_satisfies_side(
+                    primary_bbox,
+                    center[0],
+                    center[1],
+                    hint.side,
+                    landmark_bbox=bbox,
+                ):
+                    continue
+            if click_xy is not None:
+                dist_sq = _point_to_bbox_distance_sq(click_xy[0], click_xy[1], bbox)
+            elif primary_bbox is not None:
+                pcx = primary_bbox[0] + primary_bbox[2] // 2
+                pcy = primary_bbox[1] + primary_bbox[3] // 2
+                dist_sq = _point_to_bbox_distance_sq(pcx, pcy, bbox)
+            else:
+                dist_sq = float(order)
+            row = (
+                dist_sq,
+                order,
+                {
+                    "label": hint.label,
+                    "side": side_to_schema_value(hint.side),
+                    "rect": bbox_xywh_to_ltrb(bbox),
+                },
+            )
+            if best is None or row[0] < best[0] or (
+                row[0] == best[0] and row[1] < best[1]
+            ):
+                best = row
+        if best is not None:
+            seen_labels.add(hint.label)
+            overlays.append(best[2])
+    return overlays
+
+
+def resolve_click_overlay_geometry(
+    vision: dict[str, Any] | None,
+    instruction: str,
+    *,
+    location: str = "附近",
+    nearby_objects: list[Any] | None = None,
+) -> tuple[tuple[int, int, int, int] | None, list[dict[str, Any]]]:
+    """Return ``(target_ltrb, landmark_overlays)`` for HTML screenshot baking."""
+    target = primary_target_rect_ltrb(vision)
+    landmarks = match_nearby_landmark_overlays(
+        vision,
+        instruction,
+        location=location,
+        nearby_objects=nearby_objects,
+    )
+    return target, landmarks
 
 
 def list_nearby_landmark_options(

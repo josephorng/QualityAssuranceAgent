@@ -189,7 +189,12 @@ def test_write_session_html_renders_all_steps(tmp_path: Path) -> None:
     assert "動作 2：type_text" in html
     assert 'id="add-step-dialog"' not in html
     assert "data-event-index" not in html
-    assert '<a href="../index.html">← 報告列表</a>' in html
+    assert '<a href="../index.html#runs">← 報告列表</a>' in html
+    assert 'class="delete-page"' in html
+    assert 'data-kind-label="報告"' in html
+    assert 'data-index-href="../index.html#runs"' in html
+    assert "/api/runs/" in html
+    assert 'button.delete-page' in html
     assert html.count('class="instruction-group"') == 1
     assert '<span class="instruction-number">1.</span>' in html
     assert "手部動作" in html
@@ -1127,6 +1132,9 @@ def test_write_session_html_merges_smart_cycle_with_executed_tools(tmp_path: Pat
     assert "Telegram is open" in html
     assert "動作 1：double_click" in html
     assert 'href="../index.html#smart"' in html
+    assert 'class="delete-page"' in html
+    assert 'data-kind-label="報告"' in html
+    assert 'data-index-href="../index.html#smart"' in html
     first_cycle_end = html.index("</details>", html.index("Open Telegram first"))
     assert html.index("動作 1：double_click") < first_cycle_end
     assert html.index("The goal is complete") > first_cycle_end
@@ -2084,6 +2092,10 @@ def test_write_recording_html_renders_events_and_instructions(tmp_path: Path) ->
     assert "動作前截圖" in html
     assert "動作後截圖" in html
     assert 'href="../index.html#recordings"' in html
+    assert 'class="delete-page"' in html
+    assert 'data-kind-label="錄製"' in html
+    assert 'data-index-href="../index.html#recordings"' in html
+    assert "button.delete-page" in html
     assert "游標" in html
 
 

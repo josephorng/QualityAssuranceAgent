@@ -70,9 +70,20 @@ body {
 }
 h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 .intro { color: #57606a; margin: 0 0 1.5rem; }
-.nav { margin: 0 0 1rem; }
+.nav {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .75rem;
+  margin: 0 0 1rem;
+}
 .nav a { color: #0969da; text-decoration: none; font-weight: 600; }
 .nav a:hover { text-decoration: underline; }
+.delete-page {
+  appearance: none; border: 1px solid #ff8182; background: #ffebe9;
+  cursor: pointer; border-radius: 6px; padding: .25rem .65rem;
+  font-size: .8rem; line-height: 1.2; font-family: inherit;
+  font-weight: 600; color: #cf222e; margin-left: auto;
+}
+.delete-page:hover:not(:disabled) { background: #ffd7d5; }
+.delete-page:disabled { opacity: .45; cursor: wait; }
 .instruction-group {
   background: #fff; border: 1px solid #d0d7de; border-radius: 10px;
   padding: 0; margin: 0 0 1.25rem;
@@ -806,6 +817,51 @@ _PAGE_TABS_SCRIPT = """
     activate((window.location.hash || "#steps").replace(/^#/, ""));
   });
   activate((window.location.hash || "#steps").replace(/^#/, ""));
+})();
+""".strip()
+
+_DELETE_PAGE_SCRIPT = """
+(function () {
+  var btn = document.querySelector("button.delete-page");
+  if (!btn) return;
+  btn.addEventListener("click", function () {
+    if (window.location.protocol === "file:") {
+      window.alert("無法刪除：請從主程式的「報告列表」開啟此頁（需本機服務）。");
+      return;
+    }
+    var runId = btn.getAttribute("data-run-id") || "";
+    if (!runId) {
+      window.alert("缺少資料夾資訊。");
+      return;
+    }
+    var kind = btn.getAttribute("data-kind-label") || "報告";
+    var label = btn.getAttribute("data-run-label") || runId;
+    if (!window.confirm("確定刪除" + kind + "「" + label + "」？\\n將刪除整個資料夾，且無法復原。")) {
+      return;
+    }
+    btn.disabled = true;
+    fetch("/api/runs/" + encodeURIComponent(runId) + "/delete", { method: "POST" })
+      .then(function (response) {
+        return response.json().then(function (payload) {
+          return { ok: response.ok && payload && payload.ok, payload: payload || {} };
+        }).catch(function () {
+          return { ok: false, payload: {} };
+        });
+      })
+      .then(function (result) {
+        if (!result.ok) {
+          btn.disabled = false;
+          window.alert((result.payload && result.payload.error) || "刪除失敗");
+          return;
+        }
+        var href = btn.getAttribute("data-index-href") || "../index.html";
+        window.location.href = href;
+      })
+      .catch(function () {
+        btn.disabled = false;
+        window.alert("無法連線主程式，請確認主程式正在執行。");
+      });
+  });
 })();
 """.strip()
 
@@ -7679,6 +7735,34 @@ def _load_yolo_ocr_timings(run_root: Path) -> dict[str, Any]:
     }
 
 
+def _render_report_page_nav(
+    *,
+    nav_href: str,
+    run_id: str,
+    kind_label: str,
+    run_label: str | None = None,
+) -> str:
+    """Back link plus delete-this-folder control for session/recording pages."""
+    label = run_label if run_label is not None else run_id
+    run_id_attr = escape(run_id, quote=True)
+    label_attr = escape(label, quote=True)
+    kind_attr = escape(kind_label, quote=True)
+    href_attr = escape(nav_href, quote=True)
+    return (
+        '<p class="nav">'
+        f'<a href="{nav_href}">← 報告列表</a>'
+        f'<button type="button" class="delete-page" '
+        f'data-run-id="{run_id_attr}" '
+        f'data-run-label="{label_attr}" '
+        f'data-kind-label="{kind_attr}" '
+        f'data-index-href="{href_attr}" '
+        f'title="刪除{escape(kind_label)}" '
+        f'aria-label="刪除{escape(kind_label)} {escape(label)}">'
+        f"🗑 刪除{escape(kind_label)}</button>"
+        "</p>\n"
+    )
+
+
 def _render_page_tabs_nav(*, active: str = "steps", include_playback: bool = False) -> str:
     steps_active = " active" if active == "steps" else ""
     profile_active = " active" if active == "profile" else ""
@@ -8225,15 +8309,25 @@ def write_session_html_from_run(run_root: Path, *, update_index: bool = True) ->
 
     title = escape(_resolve_session_title(run_root))
     nav_href = _reports_index_href(
-        run_root, fragment="#smart" if _is_smart_run_dir(run_root) else ""
+        run_root,
+        fragment="#smart" if _is_smart_run_dir(run_root) else "#runs",
     )
     intro = "依使用者指令分組的手部動作紀錄。點選指令可展開底下的動作列表。"
-    page_script = f"{_PAGE_TABS_SCRIPT}\n{_RECORDING_PLAYBACK_SCRIPT}"
+    page_script = f"{_PAGE_TABS_SCRIPT}\n{_DELETE_PAGE_SCRIPT}\n{_RECORDING_PLAYBACK_SCRIPT}"
     add_dialog = ""
     if recording_dir is not None:
         intro += " 此執行來自錄製，可在此直接修改對應的錄製步驟。"
-        page_script = f"{_PAGE_TABS_SCRIPT}\n{_RECORDING_SCRIPT}\n{_RECORDING_PLAYBACK_SCRIPT}"
+        page_script = (
+            f"{_PAGE_TABS_SCRIPT}\n{_DELETE_PAGE_SCRIPT}\n"
+            f"{_RECORDING_SCRIPT}\n{_RECORDING_PLAYBACK_SCRIPT}"
+        )
         add_dialog = _recording_add_dialog_html()
+    nav = _render_report_page_nav(
+        nav_href=nav_href,
+        run_id=run_root.name,
+        kind_label="報告",
+        run_label=_resolve_session_title(run_root),
+    )
     html = (
         "<!DOCTYPE html>\n"
         '<html lang="zh-Hant">\n<head>\n'
@@ -8242,7 +8336,7 @@ def write_session_html_from_run(run_root: Path, *, update_index: bool = True) ->
         f"<title>{title}</title>\n"
         f"<style>\n{_STYLE}\n</style>\n"
         "</head>\n<body>\n"
-        f'<p class="nav"><a href="{nav_href}">← 報告列表</a></p>\n'
+        f"{nav}"
         f"<h1>{title}</h1>\n"
         f'<p class="intro">{intro}</p>\n'
         f"{body}\n"
@@ -8604,6 +8698,12 @@ def write_recording_html_from_run(run_root: Path, *, update_index: bool = True) 
     )
     tabs = _render_page_tabs_nav(include_playback=True)
     nav_href = _reports_index_href(run_root, fragment="#recordings")
+    nav = _render_report_page_nav(
+        nav_href=nav_href,
+        run_id=run_root.name,
+        kind_label="錄製",
+        run_label=_resolve_recording_title(run_root),
+    )
     profile_body = _render_recording_time_profile_html(run_root, events, manifest)
     playback_body = _render_recording_playback_html(
         _recording_playback_frames(run_root, events, final_after_screenshot)
@@ -8629,12 +8729,13 @@ def write_recording_html_from_run(run_root: Path, *, update_index: bool = True) 
         f"<title>{title}</title>\n"
         f"<style>\n{_STYLE}\n.empty {{ color: #8c959f; font-style: italic; }}\n</style>\n"
         "</head>\n<body>\n"
-        f'<p class="nav"><a href="{nav_href}">← 報告列表</a></p>\n'
+        f"{nav}"
         f"<h1>{title}</h1>\n"
         '<p class="intro">依錄製事件排列的操作紀錄。點選事件可展開細節與截圖。</p>\n'
         f"{body}\n"
         f"{_recording_add_dialog_html()}\n"
-        f"<script>\n{_PAGE_TABS_SCRIPT}\n{_RECORDING_SCRIPT}\n{_RECORDING_PLAYBACK_SCRIPT}\n</script>\n"
+        f"<script>\n{_PAGE_TABS_SCRIPT}\n{_DELETE_PAGE_SCRIPT}\n"
+        f"{_RECORDING_SCRIPT}\n{_RECORDING_PLAYBACK_SCRIPT}\n</script>\n"
         "</body>\n</html>\n"
     )
 

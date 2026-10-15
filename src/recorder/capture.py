@@ -58,6 +58,7 @@ from src.recorder.window_snapshot import (
     snapshot_top_level_windows,
 )
 from src.recorder.hotkey import is_recording_toggle_hotkey
+from src.recorder.ime_state import ImeInputState, read_ime_input_state
 
 _DOUBLE_CLICK_INTERVAL_S = 0.35
 _DOUBLE_CLICK_MAX_DIST_PX = 8
@@ -997,6 +998,9 @@ class RecordingSession:
         self._pending_text_chars: list[str] = []
         self._pending_text_caret: int = 0
         self._pending_text_meta: dict[str, Any] | None = None
+        # Last known IME 中/英 mode for the foreground thread (None = unknown).
+        self._last_ime_chinese: bool | None = None
+        self._last_ime_lang_id: int | None = None
         self._paste_seq: int = 0
         # Empty-field frame captured after focus settles (click/Tab/etc.), consumed
         # as the text_input before-shot so we do not race the first typed glyph.
@@ -1013,6 +1017,8 @@ class RecordingSession:
         # Event JSON is patched by the probe timer and by per-step window threads.
         self._event_file_lock = threading.Lock()
         self._window_step_threads: list[threading.Thread] = []
+        # text_input vision notify waits until the window step writes signals_after.
+        self._pending_text_notify: set[int] = set()
         # Latest event whose after-cache is still the 0.25s sample. The next
         # gesture replaces it with the settle cache copied as that gesture's before.
         self._after_owner_index: int | None = None
@@ -1154,7 +1160,10 @@ class RecordingSession:
             self._pending_right_windows_before = None
             self._pending_right_click_window = None
             self._pending_text_chars = []
+            self._pending_text_caret = 0
             self._pending_text_meta = None
+            self._last_ime_chinese = None
+            self._last_ime_lang_id = None
             self._paste_seq = 0
             self._pending_pre_type_screenshot = None
             self._pending_pre_key_screenshot = None
@@ -1164,6 +1173,7 @@ class RecordingSession:
             self._before_shot_stop.clear()
             self._before_shot_thread = None
             self._window_step_threads = []
+            self._pending_text_notify = set()
             self._last_settle_frames = {}
             self._last_settle_frame = None
             self._before_shot_rr_index = 0
@@ -1385,6 +1395,7 @@ class RecordingSession:
         if worker is not None and worker.is_alive():
             worker.join(timeout=15)
         self._join_window_step_threads()
+        self._flush_pending_text_notifies()
 
         with self._lock:
             events = list(self._events)
@@ -1455,12 +1466,126 @@ class RecordingSession:
     def _log(self, run_dir: Path, text: str) -> None:
         append_text(run_dir / "record.log", f"{utc_now_iso()} {text}\n")
 
+    def _log_key_press(
+        self,
+        *,
+        action: str,
+        token: str | None = None,
+        typed: str | None = None,
+        mods: list[str] | None = None,
+        key: keyboard.Key | keyboard.KeyCode | None = None,
+        ime: ImeInputState | None = None,
+    ) -> None:
+        """Append one key-down line to ``record.log`` for typing/debug traces.
+
+        Safe to call from the keyboard hook: failures never raise. Logs the
+        pending text buffer after the press was applied so Backspace/edits are
+        visible next to the key that changed them.
+        """
+        try:
+            with self._lock:
+                run_dir = self._run_dir
+                if run_dir is None:
+                    return
+                if self._pending_text_meta is not None:
+                    pending = "".join(self._pending_text_chars)
+                    caret = self._pending_text_caret
+                    raw_index = self._pending_text_meta.get("index")
+                    text_event = raw_index if isinstance(raw_index, int) else None
+                else:
+                    pending = None
+                    caret = None
+                    text_event = None
+                lang_id = self._last_ime_lang_id
+                chinese = self._last_ime_chinese
+            if ime is not None:
+                lang_label = ime.lang_label
+                mode_label = ime.mode_label
+            else:
+                lang_label = f"0x{lang_id:04x}" if lang_id is not None else "?"
+                mode_label = (
+                    "zh" if chinese is True else "en" if chinese is False else "?"
+                )
+            mods_s = "+".join(mods) if mods else "-"
+            key_s = str(key) if key is not None else "-"
+            pending_s = repr(pending) if pending is not None else "-"
+            caret_s = str(caret) if caret is not None else "-"
+            event_s = str(text_event) if text_event is not None else "-"
+            self._log(
+                run_dir,
+                "key "
+                f"action={action} token={token!r} typed={typed!r} mods={mods_s} "
+                f"key={key_s} ime={mode_label} lang={lang_label} "
+                f"pending_text={pending_s} caret={caret_s} text_event={event_s}",
+            )
+        except Exception:
+            pass
+
+    def _sync_ime_state(self) -> ImeInputState:
+        """Sample IME 中/英 mode; wipe the pending text buffer on zh→en switches."""
+        state = read_ime_input_state()
+        wiped: str | None = None
+        with self._lock:
+            prev = self._last_ime_chinese
+            if state.lang_id is not None:
+                self._last_ime_lang_id = state.lang_id
+            if state.chinese_mode is not None:
+                self._last_ime_chinese = state.chinese_mode
+            if prev is True and state.chinese_mode is False:
+                if self._pending_text_chars:
+                    wiped = "".join(self._pending_text_chars)
+                self._pending_text_chars = []
+                self._pending_text_caret = 0
+            run_dir = self._run_dir
+        if wiped is not None and run_dir is not None:
+            try:
+                self._log(
+                    run_dir,
+                    "key "
+                    f"action=ime_zh_to_en_wipe wiped={wiped!r} "
+                    f"ime={state.mode_label} lang={state.lang_label}",
+                )
+            except Exception:
+                pass
+        return state
+
+    def _flush_text_without_key_step(self) -> None:
+        """Flush pending typed text without emitting a following key_press step.
+
+        Do not seal ``signals_after`` from the pre-flush settle cache: Chinese
+        IME Enter has no next gesture, and that cache still holds the open
+        composition (e.g. zhuyin). The window step must live-sample after settle
+        so ``focused.value`` reflects the committed string.
+        """
+        self._flush_pending_text_input(seal_after_to_cache=False)
+
     def _notify_event(self, event: RecordedEvent) -> None:
         if self._on_event is not None:
             try:
                 self._on_event(event)
             except Exception:
                 pass
+
+    def _notify_pending_text_input(self, event_index: int) -> None:
+        """Fire deferred vision notify once the window step has patched (or failed)."""
+        with self._lock:
+            if event_index not in self._pending_text_notify:
+                return
+            self._pending_text_notify.discard(event_index)
+            event: RecordedEvent | None = None
+            for candidate in self._events:
+                if candidate.index == event_index:
+                    event = candidate
+                    break
+        if event is not None:
+            self._notify_event(event)
+
+    def _flush_pending_text_notifies(self) -> None:
+        """Notify any text_input still waiting after window-step threads join."""
+        with self._lock:
+            pending = sorted(self._pending_text_notify)
+        for event_index in pending:
+            self._notify_pending_text_input(event_index)
 
     def _current_ignore_rects(self) -> list[IgnoreRect]:
         provider = self._ignore_rect_provider
@@ -4685,7 +4810,11 @@ class RecordingSession:
             if self._run_dir is None:
                 return
             self._events.append(event)
-        self._notify_event(event)
+            if event.kind == "text_input":
+                # Resolve must see signals_after.focused.value; notify after patch.
+                self._pending_text_notify.add(event.index)
+        if event.kind != "text_input":
+            self._notify_event(event)
         if event.kind in _SETTLE_PROBE_KINDS:
             self._start_settle_probe(event)
         else:
@@ -4738,6 +4867,8 @@ class RecordingSession:
             # Same outcome as ``_resolve_window_change`` with an empty before-cache.
             debug = _window_resolve_failure_debug("missing_before_cache")
         if change is None and title is None and debug is None and focus_rect is None:
+            # Still release deferred text_input vision notify.
+            self._notify_pending_text_input(item.event_index)
             return
         self._patch_window_change(
             item.event_index,
@@ -4759,6 +4890,7 @@ class RecordingSession:
         with self._lock:
             run_dir = self._run_dir
         if run_dir is None:
+            self._notify_pending_text_input(event_index)
             return
         path = event_json_path(run_dir, event_index)
         with self._event_json_lock():
@@ -4771,26 +4903,28 @@ class RecordingSession:
                 if seal is not None:
                     with self._lock:
                         self._after_seals.setdefault(event_index, seal)
-                return
-            if change is not None or title is not None or debug is not None:
-                raw["window_change"] = change
-                raw["target_window_title"] = title
-                raw["window_snapshot_debug"] = debug
-            # Keep typing-time focus_rect when already set; fill clicks/keys here.
-            if focus_rect is not None and raw.get("focus_rect") is None:
-                raw["focus_rect"] = [
-                    int(focus_rect[0]),
-                    int(focus_rect[1]),
-                    int(focus_rect[2]),
-                    int(focus_rect[3]),
-                ]
-            write_json(path, raw)
-            with self._lock:
-                events = self._events
-                for index, event in enumerate(events):
-                    if event.index == event_index:
-                        events[index] = RecordedEvent.from_dict(raw)
-                        break
+            else:
+                if change is not None or title is not None or debug is not None:
+                    raw["window_change"] = change
+                    raw["target_window_title"] = title
+                    raw["window_snapshot_debug"] = debug
+                # Keep typing-time focus_rect when already set; fill clicks/keys here.
+                if focus_rect is not None and raw.get("focus_rect") is None:
+                    raw["focus_rect"] = [
+                        int(focus_rect[0]),
+                        int(focus_rect[1]),
+                        int(focus_rect[2]),
+                        int(focus_rect[3]),
+                    ]
+                write_json(path, raw)
+                with self._lock:
+                    events = self._events
+                    for index, event in enumerate(events):
+                        if event.index == event_index:
+                            events[index] = RecordedEvent.from_dict(raw)
+                            break
+        # Outside the JSON lock so vision prefetch cannot deadlock on event I/O.
+        self._notify_pending_text_input(event_index)
 
     def _join_window_step_threads(self) -> None:
         with self._lock:
@@ -5099,17 +5233,24 @@ class RecordingSession:
         # Close a sticky left press before typing/hotkeys so a missed mouse-up
         # cannot invert gesture vs text order or inflate into a false hold.
         self._reconcile_sticky_left_press_from_os()
+        # Sample before applying the key so a prior 中→英 switch (e.g. Shift
+        # release, or language-bar click) clears composition Latin keys first.
+        ime = self._sync_ime_state()
         if suppress and key in _HOTKEY_SUPPRESS_KEYS:
             mod = _modifier_name(key)
             if mod:
                 with self._lock:
                     self._pressed_modifiers.add(mod)
+            self._log_key_press(
+                action="suppress", token=_key_token(key), key=key, ime=ime
+            )
             return
 
         mod = _modifier_name(key)
         if mod:
             with self._lock:
                 self._pressed_modifiers.add(mod)
+            self._log_key_press(action="mod_down", token=mod, key=key, ime=ime)
             return
 
         try:
@@ -5124,6 +5265,9 @@ class RecordingSession:
         hardware_char = _numpad_char_from_hardware(hardware)
         token = hardware_char or _key_token(key)
         if token is None:
+            self._log_key_press(
+                action="ignored_no_token", mods=mods, key=key, ime=ime
+            )
             return
 
         typed = hardware_char or _key_char(key)
@@ -5132,14 +5276,38 @@ class RecordingSession:
         if mods == ["shift"]:
             if typed and typed.isprintable():
                 self._append_text_input_char(typed, cursor_xy, timestamp_utc=timestamp_utc)
+                self._log_key_press(
+                    action="type",
+                    token=token,
+                    typed=typed,
+                    mods=mods,
+                    key=key,
+                    ime=ime,
+                )
                 return
             if key == keyboard.Key.space:
                 self._append_text_input_char(" ", cursor_xy, timestamp_utc=timestamp_utc)
+                self._log_key_press(
+                    action="type",
+                    token=token,
+                    typed=" ",
+                    mods=mods,
+                    key=key,
+                    ime=ime,
+                )
                 return
 
         if mods:
             if is_recording_toggle_hotkey(mods + [token]):
                 # Global recording toggle (Ctrl+Shift+R) — never record as a step.
+                self._log_key_press(
+                    action="recording_toggle",
+                    token=token,
+                    typed=typed,
+                    mods=mods,
+                    key=key,
+                    ime=ime,
+                )
                 return
             if _is_paste_hotkey(mods, token):
                 # Clipboard owners can block pyperclip.paste for a long time.
@@ -5149,6 +5317,14 @@ class RecordingSession:
                     timestamp_utc=timestamp_utc,
                     hotkey_keys=mods + [token],
                 )
+                self._log_key_press(
+                    action="paste",
+                    token=token,
+                    typed=typed,
+                    mods=mods,
+                    key=key,
+                    ime=ime,
+                )
                 return
             self._queue_keyboard_event_immediate(
                 kind="hotkey",
@@ -5156,17 +5332,63 @@ class RecordingSession:
                 keys=mods + [token],
                 timestamp_utc=timestamp_utc,
             )
+            self._log_key_press(
+                action="hotkey",
+                token=token,
+                typed=typed,
+                mods=mods,
+                key=key,
+                ime=ime,
+            )
             return
 
         if typed and typed.isprintable():
             self._append_text_input_char(typed, cursor_xy, timestamp_utc=timestamp_utc)
+            self._log_key_press(
+                action="type",
+                token=token,
+                typed=typed,
+                mods=mods,
+                key=key,
+                ime=ime,
+            )
             return
 
         if key == keyboard.Key.space:
             self._append_text_input_char(" ", cursor_xy, timestamp_utc=timestamp_utc)
+            self._log_key_press(
+                action="type",
+                token=token,
+                typed=" ",
+                mods=mods,
+                key=key,
+                ime=ime,
+            )
             return
 
         if not mods and self._edit_pending_text_input(key):
+            self._log_key_press(
+                action=f"edit_{token}",
+                token=token,
+                typed=typed,
+                mods=mods,
+                key=key,
+                ime=ime,
+            )
+            return
+
+        # Chinese IME: Enter commits the composition / candidate — keep the
+        # flushed text_input step, but do not record Enter as its own step.
+        if key == keyboard.Key.enter and ime.chinese_mode is True:
+            self._flush_text_without_key_step()
+            self._log_key_press(
+                action="ime_commit_enter",
+                token=token,
+                typed=typed,
+                mods=mods,
+                key=key,
+                ime=ime,
+            )
             return
 
         if key in _SPECIAL_KEYS or isinstance(key, keyboard.Key):
@@ -5176,10 +5398,29 @@ class RecordingSession:
                 key=token,
                 timestamp_utc=timestamp_utc,
             )
+            self._log_key_press(
+                action="key_press",
+                token=token,
+                typed=typed,
+                mods=mods,
+                key=key,
+                ime=ime,
+            )
             return
+
+        self._log_key_press(
+            action="dropped", token=token, typed=typed, mods=mods, key=key, ime=ime
+        )
 
     def _on_key_release(self, key: keyboard.Key | keyboard.KeyCode) -> None:
         mod = _modifier_name(key)
         if mod:
             with self._lock:
                 self._pressed_modifiers.discard(mod)
+            # Shift toggles 中/英 on many Chinese IMEs at key-up; wipe here so
+            # composition Latin keys do not stick around for the English burst.
+            if mod == "shift":
+                with self._lock:
+                    active = self._accepting_input
+                if active:
+                    self._sync_ime_state()

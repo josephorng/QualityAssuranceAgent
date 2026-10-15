@@ -1,4 +1,4 @@
-"""Choose recorded vs OCR typed text (text-only LLM, disagreement-only)."""
+"""Choose recorded vs OCR typed text (hard rules first; LLM disagreement-only)."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import Any
 
 from cua_mcp.selection_engine import request_json_with_retry
 from src.common.prompting import get_prompt
+from src.recorder.coalesce import text_contains_cjk
 from src.recorder.text_resolve import _strip_ocr_caret
 
 _MASK_CHARS = frozenset("*●•∗＊‧∙·⬤✖✕")
@@ -44,6 +45,11 @@ def is_masked_ocr_text(text: str) -> bool:
     return has_mask and maskish >= max(1, int(round(len(cleaned) * 0.8)))
 
 
+def normalize_uia_text(text: Any) -> str:
+    """Normalize a UIA focused-value string; empty when missing/whitespace-only."""
+    return _strip_ocr_caret(str(text or "")).strip()
+
+
 def collect_ocr_candidates(text_resolution: dict[str, Any]) -> list[str]:
     """Unique OCR strings from ``ocr_text`` / ``ocr_options`` (order preserved)."""
     options: list[str] = []
@@ -65,13 +71,17 @@ def collect_ocr_candidates(text_resolution: dict[str, Any]) -> list[str]:
 
 
 def build_choice_candidates(text_resolution: dict[str, Any]) -> list[str]:
-    """Candidate list for LLM choice: recorded first, then non-masked OCR."""
+    """Candidate list for review/LLM: recorded, then UIA, then non-masked OCR."""
     recorded = _strip_ocr_caret(str(text_resolution.get("recorded_text") or "")).strip()
+    uia = normalize_uia_text(text_resolution.get("uia_text"))
     candidates: list[str] = []
     seen: set[str] = set()
     if recorded:
         candidates.append(recorded)
         seen.add(recorded)
+    if uia and uia not in seen:
+        candidates.append(uia)
+        seen.add(uia)
     for ocr in collect_ocr_candidates(text_resolution):
         if is_masked_ocr_text(ocr):
             continue
@@ -83,23 +93,30 @@ def build_choice_candidates(text_resolution: dict[str, Any]) -> list[str]:
 
 
 def needs_llm_text_choice(text_resolution: dict[str, Any]) -> bool:
-    """True when recorded and OCR disagree and hard rules do not decide."""
+    """True only when hard rules leave a real multi-candidate ambiguity.
+
+    UIA, Chinese (CJK OCR), and English (recorded) paths are decided without LLM.
+    """
     source = str(text_resolution.get("source") or "").strip().lower()
-    if source in {"user", "llm"}:
+    if source in {"user", "llm", "uia"}:
         return False
 
-    recorded = _strip_ocr_caret(str(text_resolution.get("recorded_text") or "")).strip()
-    if not recorded:
+    if normalize_uia_text(text_resolution.get("uia_text")):
         return False
 
     ocr_candidates = collect_ocr_candidates(text_resolution)
+    if any(text_contains_cjk(text) for text in ocr_candidates):
+        return False
+
+    recorded = _strip_ocr_caret(str(text_resolution.get("recorded_text") or "")).strip()
+    if recorded:
+        # English typing hard rule always prefers recorded.
+        return False
+
     if not ocr_candidates:
         return False
 
     if all(is_masked_ocr_text(text) for text in ocr_candidates):
-        return False
-
-    if any(texts_equivalent(recorded, text) for text in ocr_candidates):
         return False
 
     usable = build_choice_candidates(text_resolution)
@@ -107,36 +124,74 @@ def needs_llm_text_choice(text_resolution: dict[str, Any]) -> bool:
 
 
 def apply_text_choice_hard_rules(text_resolution: dict[str, Any]) -> dict[str, Any]:
-    """Apply password/mask and agreement rules; return possibly updated resolution."""
+    """Prefer UIA, then Chinese OCR / English recorded; skip LLM for those paths."""
     source = str(text_resolution.get("source") or "").strip().lower()
     if source in {"user", "llm"}:
         return text_resolution
 
     recorded = _strip_ocr_caret(str(text_resolution.get("recorded_text") or "")).strip()
-    if not recorded:
-        return text_resolution
-
+    uia = normalize_uia_text(text_resolution.get("uia_text"))
     ocr_candidates = collect_ocr_candidates(text_resolution)
-    if not ocr_candidates:
-        return text_resolution
+    primary_ocr = ocr_candidates[0] if ocr_candidates else ""
 
-    if all(is_masked_ocr_text(text) for text in ocr_candidates):
-        updated = dict(text_resolution)
-        updated["resolved_text"] = recorded
-        updated["source"] = "recorded"
-        updated["reason"] = "masked OCR; prefer recorded"
+    updated = dict(text_resolution)
+    if uia:
+        updated["uia_text"] = uia
+    elif "uia_text" not in updated:
+        updated["uia_text"] = None
+
+    # 1. Non-empty UIA focused value wins.
+    if uia:
+        updated["resolved_text"] = uia
+        updated["source"] = "uia"
+        updated["reason"] = "prefer UIA focused value"
         return updated
 
-    if any(texts_equivalent(recorded, text) for text in ocr_candidates):
-        # Prefer recorded when OCR is only a normalized variant.
-        updated = dict(text_resolution)
-        if str(updated.get("resolved_text") or "") != recorded:
+    # 2. Masked OCR → recorded (passwords).
+    if ocr_candidates and all(is_masked_ocr_text(text) for text in ocr_candidates):
+        if recorded:
             updated["resolved_text"] = recorded
             updated["source"] = "recorded"
-            updated["reason"] = "recorded matches OCR alternate; prefer recorded"
+            updated["reason"] = "masked OCR; prefer recorded"
+            return updated
+
+    # 3. Chinese typing (CJK in OCR) → OCR.
+    cjk_ocr = next((text for text in ocr_candidates if text_contains_cjk(text)), None)
+    if cjk_ocr:
+        updated["resolved_text"] = cjk_ocr
+        updated["source"] = "ocr"
+        updated["reason"] = "Chinese typing; prefer OCR"
         return updated
 
-    return text_resolution
+    # 4. Recorded agrees with an OCR alternate → recorded.
+    if recorded and any(texts_equivalent(recorded, text) for text in ocr_candidates):
+        updated["resolved_text"] = recorded
+        updated["source"] = "recorded"
+        updated["reason"] = "recorded matches OCR alternate; prefer recorded"
+        return updated
+
+    # 5. English typing → recorded when present.
+    if recorded:
+        updated["resolved_text"] = recorded
+        updated["source"] = "recorded"
+        updated["reason"] = (
+            "English typing; prefer recorded"
+            if ocr_candidates
+            else "prefer recorded text; vision produced no OCR alternate"
+        )
+        return updated
+
+    # 6. Fallbacks.
+    if primary_ocr:
+        updated["resolved_text"] = primary_ocr
+        updated["source"] = "ocr"
+        updated["reason"] = "recorded text empty; used OCR"
+        return updated
+
+    updated["resolved_text"] = recorded
+    updated["source"] = "recorded"
+    updated["reason"] = "vision produced no text; kept recorded text"
+    return updated
 
 
 def _parse_text_choice_reply(raw: str, *, candidate_count: int) -> dict[str, Any]:

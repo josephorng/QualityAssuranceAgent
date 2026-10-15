@@ -47,6 +47,13 @@ def _default_capture_window_patches():
 
         return TypingFocus(point=last_click_xy or mouse_xy, rect=None)
 
+    from src.recorder.ime_state import ImeInputState
+
+    # Keep capture tests independent of the host IME 中/英 mode.
+    _ime_en = ImeInputState(
+        lang_id=0x0409, chinese_mode=False, conversion=0, opened=False
+    )
+
     with patch("src.recorder.capture.mouse.Listener", DummyListener), patch(
         "src.recorder.capture.keyboard.Listener",
         DummyListener,
@@ -77,6 +84,9 @@ def _default_capture_window_patches():
         # unless a test explicitly patches a missed-up (False).
         "src.recorder.capture._os_mouse_button_down",
         return_value=True,
+    ), patch(
+        "src.recorder.capture.read_ime_input_state",
+        return_value=_ime_en,
     ):
         yield
 
@@ -1302,6 +1312,168 @@ def test_backspace_edits_pending_text_input(tmp_path) -> None:
     raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
     assert raw["kind"] == "text_input"
     assert raw["text"] == "a"
+
+
+def test_key_presses_are_logged_to_record_log(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            session._on_key_press(KeyCode.from_char("o"))
+            session._on_key_press(KeyCode.from_char("f"))
+            session._on_key_press(Key.backspace)
+            session._on_key_press(KeyCode.from_char("f"))
+        finally:
+            session.stop()
+
+    log_text = (run_dir / "record.log").read_text(encoding="utf-8")
+    assert "action=type" in log_text
+    assert "typed='o'" in log_text
+    assert "pending_text='of'" in log_text
+    assert "ime=en" in log_text
+    backspace_lines = [
+        line for line in log_text.splitlines() if "action=edit_backspace" in line
+    ]
+    assert backspace_lines
+    assert "pending_text='o'" in backspace_lines[0]
+
+
+def test_ime_zh_to_en_wipes_pending_text(tmp_path) -> None:
+    from src.recorder.ime_state import ImeInputState
+
+    zh = ImeInputState(lang_id=0x0804, chinese_mode=True, conversion=1, opened=True)
+    en = ImeInputState(lang_id=0x0804, chinese_mode=False, conversion=0, opened=True)
+    calls = {"n": 0}
+
+    def fake_ime() -> ImeInputState:
+        calls["n"] += 1
+        # First three Latin keys while composing in 中; then switch to 英.
+        return zh if calls["n"] <= 3 else en
+
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.read_ime_input_state",
+        side_effect=fake_ime,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import KeyCode
+
+            session._on_key_press(KeyCode.from_char("o"))
+            session._on_key_press(KeyCode.from_char("f"))
+            session._on_key_press(KeyCode.from_char("f"))
+            # 中→英: wipe composition Latin keys, then type English "office".
+            for ch in "office":
+                session._on_key_press(KeyCode.from_char(ch))
+        finally:
+            session.stop()
+
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "text_input"
+    assert raw["text"] == "office"
+    log_text = (run_dir / "record.log").read_text(encoding="utf-8")
+    assert "action=ime_zh_to_en_wipe" in log_text
+    assert "wiped='off'" in log_text
+
+
+def test_chinese_ime_enter_flushes_text_without_key_step(tmp_path) -> None:
+    from src.recorder.ime_state import ImeInputState
+
+    zh = ImeInputState(lang_id=0x0804, chinese_mode=True, conversion=1, opened=True)
+
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.read_ime_input_state",
+        return_value=zh,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            for ch in "nihao":
+                session._on_key_press(KeyCode.from_char(ch))
+            session._on_key_press(Key.enter)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "text_input"
+    assert raw["text"] == "nihao"
+    assert not (run_dir / "events" / "event_002.json").is_file()
+    log_text = (run_dir / "record.log").read_text(encoding="utf-8")
+    assert "action=ime_commit_enter" in log_text
+    assert "ime=zh" in log_text
+
+
+def test_chinese_ime_enter_live_samples_signals_after_not_settle_cache(
+    tmp_path,
+) -> None:
+    """Chinese Enter must not seal mid-composition UIA as signals_after."""
+    from src.recorder.ime_state import ImeInputState
+
+    zh = ImeInputState(lang_id=0x0804, chinese_mode=True, conversion=1, opened=True)
+    composition = {"focused": {"name": "搜尋方塊", "value": "金ㄊㄧㄢ"}}
+    committed = {"focused": {"name": "搜尋方塊", "value": "今天"}}
+
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.read_ime_input_state",
+        return_value=zh,
+    ), patch(
+        "src.recorder.capture.capture_step_signals",
+        return_value=committed,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            with session._lock:
+                session._last_settle_signals = dict(composition)
+            for ch in "rupwu0":
+                session._on_key_press(KeyCode.from_char(ch))
+            # Let begin_text_input copy the composition settle cache into meta.
+            time.sleep(0.05)
+            session._on_key_press(Key.enter)
+            session._join_window_step_threads()
+        finally:
+            session.stop()
+
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "text_input"
+    debug = raw["window_snapshot_debug"]
+    assert debug["signals_before"]["focused"]["value"] == "金ㄊㄧㄢ"
+    assert debug["signals_after"]["focused"]["value"] == "今天"
 
 
 def test_left_arrow_and_delete_edit_pending_text_input(tmp_path) -> None:
@@ -3179,4 +3351,80 @@ def test_window_step_persists_resolve_failed_when_before_cache_missing(tmp_path)
     raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
     assert raw["window_snapshot_debug"] == {"resolve_failed": "missing_before_cache"}
     assert window_verify_from_debug(raw["window_snapshot_debug"]) == {}
+
+
+def test_text_input_defers_on_event_until_window_step_patches_uia(tmp_path) -> None:
+    """Vision prefetch must see signals_after.focused.value, so notify after patch."""
+    from src.recorder.capture import RecordingSession, _QueuedEvent
+
+    notified: list = []
+    session = RecordingSession(runs_root=tmp_path)
+    session.set_on_event(lambda event: notified.append(event))
+    signals_after = {"focused": {"name": "搜尋方塊", "value": "今天"}}
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            session._persist_queued_event(
+                _QueuedEvent(
+                    kind="text_input",
+                    cursor_xy=(10, 10),
+                    event_index=1,
+                    timestamp_utc="2026-01-01T00:00:00+00:00",
+                    text="jt",
+                    screenshot_path=str(run_dir / "screenshots" / "event_001.jpeg"),
+                    monitor_index=1,
+                    monitor_offset=(0, 0),
+                    signals_before={"focused": {"name": "搜尋方塊", "value": ""}},
+                    window_after_sealed=True,
+                    signals_after=signals_after,
+                )
+            )
+            assert notified == [], "text_input must not notify before window-step patch"
+            session._join_window_step_threads()
+            session._flush_pending_text_notifies()
+        finally:
+            session.stop()
+
+    assert len(notified) == 1
+    debug = notified[0].window_snapshot_debug
+    assert isinstance(debug, dict)
+    assert debug["signals_after"]["focused"]["value"] == "今天"
+
+
+def test_click_notifies_on_event_before_window_step_joins(tmp_path) -> None:
+    """Non-typing events keep the fast vision path (notify at persist)."""
+    from src.recorder.capture import RecordingSession, _QueuedEvent
+
+    notified: list = []
+    session = RecordingSession(runs_root=tmp_path)
+    session.set_on_event(lambda event: notified.append(event))
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            session._persist_queued_event(
+                _QueuedEvent(
+                    kind="click",
+                    cursor_xy=(10, 10),
+                    event_index=1,
+                    timestamp_utc="2026-01-01T00:00:00+00:00",
+                    screenshot_path=str(run_dir / "screenshots" / "event_001.jpeg"),
+                    monitor_index=1,
+                    monitor_offset=(0, 0),
+                    windows_before=None,
+                    signals_before=None,
+                )
+            )
+            assert len(notified) == 1
+            assert notified[0].kind == "click"
+            session._join_window_step_threads()
+        finally:
+            session.stop()
 

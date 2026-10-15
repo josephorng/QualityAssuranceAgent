@@ -14,6 +14,7 @@ from src.recorder.text_resolve import (
     draw_focus_rect_bgr,
     event_with_resolved_text,
     focus_rect_debug_image_path,
+    focused_uia_text_from_event,
     resolve_text_input_text,
 )
 from src.common.io_utils import imread_bgr
@@ -26,6 +27,135 @@ def test_strip_ocr_caret_removes_trailing_pipe() -> None:
     assert _strip_ocr_caret("office") == "office"
     assert _strip_ocr_caret("|") == ""
     assert _strip_ocr_caret("a|b") == "a|b"
+
+
+def test_focused_uia_text_from_event_reads_signals_after() -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="text_input",
+        text="offioffice",
+        window_snapshot_debug={
+            "signals_after": {"focused": {"name": "搜尋方塊", "value": "office"}},
+        },
+    )
+    assert focused_uia_text_from_event(event) == "office"
+    empty = RecordedEvent(
+        index=2,
+        timestamp_utc="t",
+        kind="text_input",
+        text="x",
+        window_snapshot_debug={
+            "signals_after": {"focused": {"name": "搜尋方塊", "value": ""}},
+        },
+    )
+    assert focused_uia_text_from_event(empty) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_text_input_prefers_uia_focused_value(tmp_path) -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="text_input",
+        text="offioffice",
+        cursor_xy=(10, 10),
+        screenshot_path="",
+        window_snapshot_debug={
+            "signals_after": {"focused": {"name": "搜尋方塊", "value": "office"}},
+        },
+    )
+    fake_vision = {
+        "used_vision": True,
+        "candidate_text": "candidate",
+        "local_cursor": (10, 10),
+        "candidates": [],
+        "detection_count": 1,
+        "bgr": np.zeros((100, 100, 3), dtype=np.uint8),
+        "all_detections": [
+            _detection_from_bbox((8, 8, 10, 10), YOLO_CLASS_TEXT, text="office"),
+        ],
+    }
+    with patch(
+        "src.recorder.text_resolve.build_vision_context_at_point",
+        return_value=fake_vision,
+    ):
+        resolved = await resolve_text_input_text(event, run_dir=tmp_path)
+
+    assert resolved["text"] == "office"
+    assert resolved["source"] == "uia"
+    assert resolved["uia_text"] == "office"
+    assert resolved["recorded_text"] == "offioffice"
+    assert resolved["ocr_text"] == "office"
+
+
+@pytest.mark.asyncio
+async def test_resolve_text_input_skips_empty_uia_and_uses_english_recorded(
+    tmp_path,
+) -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="text_input",
+        text="offioffice",
+        cursor_xy=(10, 10),
+        screenshot_path="",
+        window_snapshot_debug={
+            "signals_after": {"focused": {"name": "搜尋方塊", "value": ""}},
+        },
+    )
+    fake_vision = {
+        "used_vision": True,
+        "candidate_text": "candidate",
+        "local_cursor": (10, 10),
+        "candidates": [],
+        "detection_count": 1,
+        "bgr": np.zeros((100, 100, 3), dtype=np.uint8),
+        "all_detections": [
+            _detection_from_bbox((8, 8, 10, 10), YOLO_CLASS_TEXT, text="office"),
+        ],
+    }
+    with patch(
+        "src.recorder.text_resolve.build_vision_context_at_point",
+        return_value=fake_vision,
+    ):
+        resolved = await resolve_text_input_text(event, run_dir=tmp_path)
+
+    assert resolved["text"] == "offioffice"
+    assert resolved["source"] == "recorded"
+    assert "English" in resolved["reason"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_text_input_prefers_ocr_for_chinese(tmp_path) -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="text_input",
+        text="nihao",
+        cursor_xy=(10, 10),
+        screenshot_path="",
+    )
+    fake_vision = {
+        "used_vision": True,
+        "candidate_text": "candidate",
+        "local_cursor": (10, 10),
+        "candidates": [],
+        "detection_count": 1,
+        "bgr": np.zeros((100, 100, 3), dtype=np.uint8),
+        "all_detections": [
+            _detection_from_bbox((8, 8, 10, 10), YOLO_CLASS_TEXT, text="你好"),
+        ],
+    }
+    with patch(
+        "src.recorder.text_resolve.build_vision_context_at_point",
+        return_value=fake_vision,
+    ):
+        resolved = await resolve_text_input_text(event, run_dir=tmp_path)
+
+    assert resolved["text"] == "你好"
+    assert resolved["source"] == "ocr"
+    assert "Chinese" in resolved["reason"]
 
 
 def test_draw_focus_rect_bgr_paints_magenta_box() -> None:
@@ -217,7 +347,7 @@ async def test_resolve_text_input_uses_after_screenshot_for_ocr(tmp_path) -> Non
     assert resolved["text"] == "ooffice"
     assert resolved["source"] == "recorded"
     assert resolved["ocr_text"] == "office"
-    assert "after-screenshot OCR" in resolved["reason"]
+    assert "English" in resolved["reason"]
     build_mock.assert_called_once()
     assert build_mock.call_args.kwargs["debug_name"] == "_end"
 
@@ -297,9 +427,10 @@ async def test_resolve_text_input_keeps_ocr_alternate_with_anchor(
     ):
         resolved = await resolve_text_input_text(event, run_dir=tmp_path)
 
-    assert resolved["text"] == "nihao"
-    assert resolved["source"] == "recorded"
+    assert resolved["text"] == "你好"
+    assert resolved["source"] == "ocr"
     assert resolved["ocr_text"] == "你好"
+    assert resolved["recorded_text"] == "nihao"
     assert resolved["meaningful"] is None
 
 
@@ -388,7 +519,9 @@ async def test_resolve_text_input_lists_ocr_options_inside_focus_rect(tmp_path) 
     ):
         resolved = await resolve_text_input_text(event, run_dir=tmp_path)
 
-    assert resolved["source"] == "recorded"
+    # Chinese OCR hard rule picks CJK over IME Latin keystrokes.
+    assert resolved["source"] == "ocr"
+    assert resolved["text"] == "什麼是套利?"
     assert resolved["ocr_options"] == ["Google", "什麼是套利?", "搜尋"]
     # Nearest in-rect text to caret (960,540) is the omnibox query, not taskbar 搜尋.
     assert resolved["ocr_text"] == "什麼是套利?"
@@ -484,7 +617,9 @@ async def test_resolve_text_input_caret_thin_uses_input_bbox_clip(tmp_path) -> N
         resolved = await resolve_text_input_text(event, run_dir=tmp_path)
 
     nearest_mock.assert_not_called()
-    assert resolved["source"] == "recorded"
+    # CJK OCR hard rule selects Chinese filename text over IME Latin keystrokes.
+    assert resolved["source"] == "ocr"
+    assert resolved["text"] == "桃園明天的天"
     assert resolved["ocr_text"] == "桃園明天的天"
     assert "桃園明天的天" in resolved["ocr_options"]
     assert "搜尋" not in resolved["ocr_options"]

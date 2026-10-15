@@ -4,6 +4,7 @@ from src.recorder.coalesce import (
     coalesce_chinese_ime_candidate_keys,
     coalesce_consecutive_same_location_clicks,
     coalesce_consecutive_text_inputs,
+    coalesce_text_inputs_bridged_by_edit_keys,
     reclassify_flyout_pick_drags_as_clicks,
     reclassify_negligible_drags_as_clicks,
     retarget_ime_candidate_end_screenshots,
@@ -120,6 +121,96 @@ def _click_event(
     )
 
 
+def test_coalesce_text_inputs_bridged_by_backspace() -> None:
+    first_debug = {
+        "signals_after": {"focused": {"name": "搜尋方塊", "value": "今天"}},
+    }
+    last_debug = {
+        "signals_after": {"focused": {"name": "搜尋方塊", "value": "你好嗎"}},
+    }
+    events = [
+        RecordedEvent(
+            index=2,
+            timestamp_utc="t0",
+            kind="text_input",
+            text="rup wu0 ",
+            cursor_xy=(10, 20),
+            screenshot_path="first.jpeg",
+            monitor_index=1,
+            end_screenshot_path="first_end.jpeg",
+            focus_rect=(1, 2, 3, 4),
+            window_snapshot_debug=first_debug,
+        ),
+        _key_press_event(3, "backspace"),
+        _key_press_event(4, "backspace"),
+        RecordedEvent(
+            index=5,
+            timestamp_utc="t1",
+            kind="text_input",
+            text="su3cl387",
+            cursor_xy=(99, 99),
+            screenshot_path="last.jpeg",
+            monitor_index=2,
+            end_screenshot_path="last_end.jpeg",
+            end_monitor_index=2,
+            window_snapshot_debug=last_debug,
+        ),
+    ]
+    merged = coalesce_text_inputs_bridged_by_edit_keys(events)
+    assert len(merged) == 1
+    assert merged[0].index == 2
+    assert merged[0].timestamp_utc == "t0"
+    assert merged[0].text == "su3cl387"
+    assert merged[0].screenshot_path == "first.jpeg"
+    assert merged[0].cursor_xy == (10, 20)
+    assert merged[0].focus_rect == (1, 2, 3, 4)
+    assert merged[0].end_screenshot_path == "last_end.jpeg"
+    assert merged[0].end_monitor_index == 2
+    assert merged[0].window_snapshot_debug == last_debug
+
+
+def test_coalesce_text_inputs_bridged_by_delete() -> None:
+    events = [
+        _text_event(1, "aaa"),
+        _key_press_event(2, "delete"),
+        _text_event(3, "bbb"),
+    ]
+    merged = coalesce_text_inputs_bridged_by_edit_keys(events)
+    assert len(merged) == 1
+    assert merged[0].index == 1
+    assert merged[0].text == "bbb"
+
+
+def test_coalesce_text_inputs_bridged_keeps_lone_and_trailing_backspace() -> None:
+    events = [
+        _key_press_event(1, "backspace"),
+        _text_event(2, "hello"),
+        _key_press_event(3, "backspace"),
+        _key_press_event(4, "backspace"),
+        RecordedEvent(index=5, timestamp_utc="t", kind="click", button="left"),
+    ]
+    merged = coalesce_text_inputs_bridged_by_edit_keys(events)
+    assert [e.kind for e in merged] == [
+        "key_press",
+        "text_input",
+        "key_press",
+        "key_press",
+        "click",
+    ]
+    assert merged[1].text == "hello"
+
+
+def test_coalesce_text_inputs_bridged_keeps_modified_backspace() -> None:
+    events = [
+        _text_event(1, "a"),
+        _key_press_event(2, "backspace", modifiers=["ctrl"]),
+        _text_event(3, "b"),
+    ]
+    merged = coalesce_text_inputs_bridged_by_edit_keys(events)
+    assert len(merged) == 3
+    assert merged[1].key == "backspace"
+
+
 def test_coalesce_consecutive_text_inputs_merges_chars() -> None:
     events = [
         _text_event(1, "c"),
@@ -151,6 +242,12 @@ def test_coalesce_consecutive_text_inputs_keeps_breaks() -> None:
 
 
 def test_coalesce_consecutive_text_inputs_keeps_first_before_and_last_after() -> None:
+    first_debug = {
+        "signals_after": {"focused": {"name": "搜尋方塊", "value": "今天"}},
+    }
+    last_debug = {
+        "signals_after": {"focused": {"name": "搜尋方塊", "value": "你好嗎"}},
+    }
     events = [
         RecordedEvent(
             index=1,
@@ -164,6 +261,8 @@ def test_coalesce_consecutive_text_inputs_keeps_first_before_and_last_after() ->
             end_screenshot_path="first_end.jpeg",
             end_monitor_index=1,
             end_monitor_offset=(0, 0),
+            window_snapshot_debug=first_debug,
+            target_window_title="first",
         ),
         RecordedEvent(
             index=2,
@@ -177,6 +276,8 @@ def test_coalesce_consecutive_text_inputs_keeps_first_before_and_last_after() ->
             end_screenshot_path="last_end.jpeg",
             end_monitor_index=2,
             end_monitor_offset=(100, 0),
+            window_snapshot_debug=last_debug,
+            target_window_title="last",
         ),
     ]
     merged = coalesce_consecutive_text_inputs(events)
@@ -189,6 +290,94 @@ def test_coalesce_consecutive_text_inputs_keeps_first_before_and_last_after() ->
     assert merged[0].end_screenshot_path == "last_end.jpeg"
     assert merged[0].end_monitor_index == 2
     assert merged[0].end_monitor_offset == (100, 0)
+    assert merged[0].window_snapshot_debug == last_debug
+    assert merged[0].target_window_title == "last"
+
+
+def test_coalesce_consecutive_keeps_prev_debug_when_later_missing() -> None:
+    prev_debug = {
+        "signals_after": {"focused": {"name": "搜尋方塊", "value": "你好嗎"}},
+    }
+    events = [
+        RecordedEvent(
+            index=1,
+            timestamp_utc="t",
+            kind="text_input",
+            text="su3cl3a87",
+            window_snapshot_debug=prev_debug,
+        ),
+        RecordedEvent(
+            index=2,
+            timestamp_utc="t2",
+            kind="text_input",
+            text="?",
+            window_snapshot_debug=None,
+        ),
+    ]
+    merged = coalesce_consecutive_text_inputs(events)
+    assert len(merged) == 1
+    assert merged[0].text == "su3cl3a87?"
+    assert merged[0].window_snapshot_debug == prev_debug
+
+
+def test_coalesce_consecutive_keeps_prev_uia_when_later_after_empty() -> None:
+    """Stop-flushed trailing burst often has empty after-UIA; keep earlier value."""
+    prev_debug = {
+        "signals_after": {"focused": {"name": "搜尋方塊", "value": "你好嗎"}},
+    }
+    later_debug = {
+        "signals_after": {"focused": {"name": "搜尋方塊", "value": ""}},
+        "signals_before": {"focused": {"name": "搜尋方塊", "value": "你好嗎"}},
+    }
+    events = [
+        RecordedEvent(
+            index=1,
+            timestamp_utc="t",
+            kind="text_input",
+            text="su3cl3a87",
+            window_snapshot_debug=prev_debug,
+        ),
+        RecordedEvent(
+            index=2,
+            timestamp_utc="t2",
+            kind="text_input",
+            text="?",
+            window_snapshot_debug=later_debug,
+        ),
+    ]
+    merged = coalesce_consecutive_text_inputs(events)
+    assert len(merged) == 1
+    assert merged[0].text == "su3cl3a87?"
+    assert merged[0].window_snapshot_debug == prev_debug
+
+
+def test_coalesce_bridged_keeps_prev_uia_when_later_after_empty() -> None:
+    prev_debug = {
+        "signals_after": {"focused": {"name": "搜尋方塊", "value": "你好嗎"}},
+    }
+    later_debug = {
+        "signals_after": {"focused": {"name": "搜尋方塊", "value": ""}},
+    }
+    events = [
+        RecordedEvent(
+            index=1,
+            timestamp_utc="t",
+            kind="text_input",
+            text="aaa",
+            window_snapshot_debug=prev_debug,
+        ),
+        _key_press_event(2, "backspace"),
+        RecordedEvent(
+            index=3,
+            timestamp_utc="t2",
+            kind="text_input",
+            text="?",
+            window_snapshot_debug=later_debug,
+        ),
+    ]
+    merged = coalesce_text_inputs_bridged_by_edit_keys(events)
+    assert len(merged) == 1
+    assert merged[0].window_snapshot_debug == prev_debug
 
 
 def test_text_contains_cjk() -> None:

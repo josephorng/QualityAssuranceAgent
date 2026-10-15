@@ -27,6 +27,7 @@ from src.recorder.coalesce import (
     coalesce_chinese_ime_candidate_keys,
     coalesce_consecutive_same_location_clicks,
     coalesce_consecutive_text_inputs,
+    coalesce_text_inputs_bridged_by_edit_keys,
     reclassify_flyout_pick_drags_as_clicks,
     reclassify_negligible_drags_as_clicks,
     retarget_ime_candidate_end_screenshots,
@@ -36,9 +37,14 @@ from src.recorder.text_choose import (
     apply_text_choice_hard_rules,
     choose_text_input_with_llm,
     needs_llm_text_choice,
+    normalize_uia_text,
 )
-from src.recorder.text_resolve import event_with_resolved_text, resolve_text_input_text
-from src.recorder.models import RecordedEvent, final_after_screenshot_path
+from src.recorder.text_resolve import (
+    event_with_resolved_text,
+    focused_uia_text_from_event,
+    resolve_text_input_text,
+)
+from src.recorder.models import RecordedEvent, event_json_path, final_after_screenshot_path
 from src.recorder.window_snapshot import (
     foreground_identities_from_debug,
     is_agent_app_restore,
@@ -356,6 +362,7 @@ async def prepare_event_vision(
         )
         text_resolution = {
             "recorded_text": resolved.get("recorded_text"),
+            "uia_text": resolved.get("uia_text"),
             "ocr_text": resolved.get("ocr_text"),
             "ocr_options": list(resolved.get("ocr_options") or []),
             "resolved_text": resolved.get("text"),
@@ -524,6 +531,36 @@ async def _prepare_all_event_visions(
     return results, cancelled
 
 
+def _hydrate_uia_text_from_event(
+    text_resolution: dict[str, Any],
+    event: RecordedEvent,
+) -> dict[str, Any]:
+    """Fill empty ``uia_text`` from ``signals_after.focused.value`` when present."""
+    if normalize_uia_text(text_resolution.get("uia_text")):
+        return text_resolution
+    uia = focused_uia_text_from_event(event)
+    if not uia:
+        return text_resolution
+    updated = dict(text_resolution)
+    updated["uia_text"] = uia
+    return updated
+
+
+def _reload_event_for_text_refine(
+    event: RecordedEvent,
+    *,
+    run_dir: Path,
+) -> RecordedEvent:
+    """Prefer on-disk event JSON so late window-step UIA patches are visible."""
+    raw = read_json(event_json_path(run_dir, event.index), None)
+    if not isinstance(raw, dict):
+        return event
+    try:
+        return RecordedEvent.from_dict(raw)
+    except Exception:
+        return event
+
+
 async def _refine_all_text_resolutions(
     prepared_list: list[_PreparedEvent | None],
     *,
@@ -547,6 +584,7 @@ async def _refine_all_text_resolutions(
             refined.get("resolved_text") == previous.get("resolved_text")
             and refined.get("source") == previous.get("source")
             and refined.get("reason") == previous.get("reason")
+            and refined.get("uia_text") == previous.get("uia_text")
         ):
             return
         prepared.text_resolution = refined
@@ -565,6 +603,10 @@ async def _refine_all_text_resolutions(
         if prepared.event.kind != "text_input" or text_resolution is None:
             return
 
+        event = _reload_event_for_text_refine(prepared.event, run_dir=run_dir)
+        prepared.event = event
+        text_resolution = _hydrate_uia_text_from_event(text_resolution, event)
+
         if not needs_llm_text_choice(text_resolution):
             _apply_refined(prepared, apply_text_choice_hard_rules(text_resolution))
             return
@@ -573,7 +615,6 @@ async def _refine_all_text_resolutions(
             if should_cancel is not None and should_cancel():
                 cancelled = True
                 return
-            event = prepared.event
             log_info(
                 f"text choice LLM event={event.index} "
                 f"recorded={text_resolution.get('recorded_text')!r} "
@@ -1056,8 +1097,10 @@ async def analyze_recording_session(
         events = coalesce_consecutive_same_location_clicks(
             retarget_ime_candidate_end_screenshots(
                 coalesce_consecutive_text_inputs(
-                    reclassify_flyout_pick_drags_as_clicks(
-                        reclassify_negligible_drags_as_clicks(_load_events(run_dir))
+                    coalesce_text_inputs_bridged_by_edit_keys(
+                        reclassify_flyout_pick_drags_as_clicks(
+                            reclassify_negligible_drags_as_clicks(_load_events(run_dir))
+                        )
                     )
                 )
             )

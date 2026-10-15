@@ -14,6 +14,7 @@ _NEGLIGIBLE_DRAG_DIST_PX = 8
 _FLYOUT_PICK_MAX_DIST_PX = 16
 _COALESCABLE_CLICK_KINDS = frozenset({"click", "double_click", "triple_click"})
 _IME_CANDIDATE_KEYS = frozenset({"up", "down", "left", "right", "enter"})
+_TEXT_EDIT_BRIDGE_KEYS = frozenset({"backspace", "delete"})
 
 
 def text_contains_cjk(text: str | None) -> bool:
@@ -29,6 +30,144 @@ def text_contains_cjk(text: str | None) -> bool:
         ):
             return True
     return False
+
+
+def _is_unmodified_edit_key_press(event: RecordedEvent) -> bool:
+    """True for unmodified Backspace/Delete key_press events."""
+    if event.kind != "key_press":
+        return False
+    if event.modifiers:
+        return False
+    key = str(event.key or "").strip().lower()
+    return key in _TEXT_EDIT_BRIDGE_KEYS
+
+
+def _focused_after_value(debug: dict[str, Any] | None) -> str:
+    """Non-empty ``signals_after.focused.value`` from a window debug blob."""
+    if not isinstance(debug, dict):
+        return ""
+    after = debug.get("signals_after")
+    if not isinstance(after, dict):
+        return ""
+    focused = after.get("focused")
+    if not isinstance(focused, dict):
+        return ""
+    return str(focused.get("value") or "").strip()
+
+
+def _prefer_window_snapshot_debug(
+    earlier: dict[str, Any] | None,
+    later: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Prefer later debug when its after-UIA is non-empty; else keep earlier.
+
+    Trailing bursts flushed at stop (e.g. ``?``) often have empty
+    ``signals_after.focused.value`` while an earlier Chinese commit still has
+    a usable UIA string.
+    """
+    if later is None:
+        return earlier
+    if _focused_after_value(later):
+        return later
+    if earlier is not None and _focused_after_value(earlier):
+        return earlier
+    return later if later is not None else earlier
+
+
+def _merge_bridged_text_inputs(first: RecordedEvent, last: RecordedEvent) -> RecordedEvent:
+    """Keep first before-frame; last committed text / after-frame / window debug."""
+    return RecordedEvent(
+        index=first.index,
+        timestamp_utc=first.timestamp_utc,
+        kind="text_input",
+        cursor_xy=first.cursor_xy,
+        text=last.text if last.text is not None else first.text,
+        screenshot_path=first.screenshot_path or last.screenshot_path,
+        monitor_index=(
+            first.monitor_index if first.monitor_index is not None else last.monitor_index
+        ),
+        monitor_offset=(
+            first.monitor_offset if first.monitor_offset is not None else last.monitor_offset
+        ),
+        end_screenshot_path=last.end_screenshot_path or first.end_screenshot_path,
+        end_monitor_index=(
+            last.end_monitor_index
+            if last.end_monitor_index is not None
+            else first.end_monitor_index
+        ),
+        end_monitor_offset=(
+            last.end_monitor_offset
+            if last.end_monitor_offset is not None
+            else first.end_monitor_offset
+        ),
+        anchor_click_xy=first.anchor_click_xy or last.anchor_click_xy,
+        focus_rect=first.focus_rect or last.focus_rect,
+        window_change=last.window_change
+        if last.window_change is not None
+        else first.window_change,
+        target_window_title=(
+            last.target_window_title
+            if last.target_window_title is not None
+            else first.target_window_title
+        ),
+        window_snapshot_debug=_prefer_window_snapshot_debug(
+            first.window_snapshot_debug
+            if isinstance(first.window_snapshot_debug, dict)
+            else None,
+            last.window_snapshot_debug
+            if isinstance(last.window_snapshot_debug, dict)
+            else None,
+        ),
+    )
+
+
+def coalesce_text_inputs_bridged_by_edit_keys(
+    events: list[RecordedEvent],
+) -> list[RecordedEvent]:
+    """Merge ``text_input`` bursts separated only by Backspace/Delete key_presses.
+
+    Post–Chinese-Enter Backspaces cannot edit ``pending_text``, so they become
+    ``key_press`` steps between typing bursts. Fold those into one typing step:
+    first before-screenshot, last text / end-screenshot / window debug. Trailing
+    edit keys after the last ``text_input`` (no following type) are kept.
+    """
+    if not events:
+        return []
+
+    merged: list[RecordedEvent] = []
+    i = 0
+    while i < len(events):
+        event = events[i]
+        if event.kind != "text_input":
+            merged.append(event)
+            i += 1
+            continue
+
+        first = event
+        last = event
+        j = i + 1
+        while j < len(events):
+            nxt = events[j]
+            if _is_unmodified_edit_key_press(nxt):
+                # Peek past a bridge; only consume if a later text_input closes it.
+                k = j + 1
+                while k < len(events) and _is_unmodified_edit_key_press(events[k]):
+                    k += 1
+                if k < len(events) and events[k].kind == "text_input":
+                    last = events[k]
+                    j = k + 1
+                    continue
+                break
+            if nxt.kind == "text_input":
+                # Adjacent text_input without an edit bridge — leave for
+                # coalesce_consecutive_text_inputs.
+                break
+            break
+
+        merged.append(_merge_bridged_text_inputs(first, last) if last is not first else first)
+        i = j if last is not first else i + 1
+
+    return merged
 
 
 def coalesce_consecutive_text_inputs(events: list[RecordedEvent]) -> list[RecordedEvent]:
@@ -74,6 +213,25 @@ def coalesce_consecutive_text_inputs(events: list[RecordedEvent]) -> list[Record
                 ),
                 anchor_click_xy=prev.anchor_click_xy or event.anchor_click_xy,
                 focus_rect=prev.focus_rect or event.focus_rect,
+                # Prefer later after-UIA when non-empty; else keep earlier.
+                window_change=(
+                    event.window_change
+                    if event.window_change is not None
+                    else prev.window_change
+                ),
+                target_window_title=(
+                    event.target_window_title
+                    if event.target_window_title is not None
+                    else prev.target_window_title
+                ),
+                window_snapshot_debug=_prefer_window_snapshot_debug(
+                    prev.window_snapshot_debug
+                    if isinstance(prev.window_snapshot_debug, dict)
+                    else None,
+                    event.window_snapshot_debug
+                    if isinstance(event.window_snapshot_debug, dict)
+                    else None,
+                ),
             )
             continue
         merged.append(event)

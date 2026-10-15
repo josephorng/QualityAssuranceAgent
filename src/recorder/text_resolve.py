@@ -45,6 +45,21 @@ def _strip_ocr_caret(text: str) -> str:
     return cleaned
 
 
+def focused_uia_text_from_event(event: RecordedEvent) -> str | None:
+    """Return non-empty ``signals_after.focused.value`` captured at record time."""
+    debug = event.window_snapshot_debug
+    if not isinstance(debug, dict):
+        return None
+    after = debug.get("signals_after")
+    if not isinstance(after, dict):
+        return None
+    focused = after.get("focused")
+    if not isinstance(focused, dict):
+        return None
+    value = _strip_ocr_caret(str(focused.get("value") or "")).strip()
+    return value or None
+
+
 def _is_ocr_option_text(text: str) -> bool:
     """Skip empty / icon-only OCR strings when listing focus-rect options."""
     if not text:
@@ -550,21 +565,39 @@ async def resolve_text_input_text(
     run_dir: Path,
     log_info: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """Resolve typing text, preferring recorded keystrokes; OCR kept as alternate.
+    """Resolve typing text: UIA focused value, then Chinese OCR / English recorded.
 
-    Analyze later may refine disagreements via ``text_choose`` (text-only LLM).
+    OCR remains available as an alternate. Disagreement refine uses the same
+    hard rules in ``text_choose`` (LLM only as a rare leftover).
     """
+    # Lazy import: text_choose imports ``_strip_ocr_caret`` from this module.
+    from src.recorder.text_choose import apply_text_choice_hard_rules
+
     recorded_text = event.text or ""
+    uia_text = focused_uia_text_from_event(event)
     anchor = event.cursor_xy or event.anchor_click_xy
     if anchor is None:
+        finalized = apply_text_choice_hard_rules(
+            {
+                "recorded_text": recorded_text,
+                "uia_text": uia_text,
+                "ocr_text": None,
+                "ocr_options": [],
+                "resolved_text": recorded_text,
+                "source": "recorded",
+                "reason": "vision unavailable: no cursor or anchor coordinates",
+            }
+        )
         return {
-            "text": recorded_text,
+            "text": finalized.get("resolved_text") or "",
             "recorded_text": recorded_text,
+            "uia_text": finalized.get("uia_text"),
             "ocr_text": None,
             "ocr_options": [],
-            "source": "recorded",
+            "source": finalized.get("source") or "recorded",
             "meaningful": None,
-            "reason": "vision unavailable: no cursor or anchor coordinates",
+            "reason": finalized.get("reason")
+            or "vision unavailable: no cursor or anchor coordinates",
             "vision": None,
         }
 
@@ -575,7 +608,6 @@ async def resolve_text_input_text(
     if typing_end.is_file():
         local = _global_to_local(event, anchor)
         debug_name = "_end"
-        ocr_reason = "after-screenshot OCR"
         ocr_image_path = str(typing_end)
         use_end = True
     else:
@@ -583,7 +615,6 @@ async def resolve_text_input_text(
         if use_after:
             local = _global_to_local_end(event, anchor)
             debug_name = "_end"
-            ocr_reason = "after-screenshot OCR"
             ocr_image_path = None
             use_end = True
             if event.end_monitor_offset is not None:
@@ -591,7 +622,6 @@ async def resolve_text_input_text(
         else:
             local = _global_to_local(event, anchor)
             debug_name = None
-            ocr_reason = "vision-first OCR"
             ocr_image_path = None
             use_end = False
 
@@ -639,55 +669,37 @@ async def resolve_text_input_text(
 
     vision_for_llm = _vision_for_llm(vision)
     used_after = debug_name == "_end"
-    if recorded_text:
-        if log_info is not None:
-            shot_label = "after" if used_after else "before"
-            log_info(
-                f"resolve_text_input_text event={event.index} "
-                f"shot={shot_label} recorded={recorded_text!r} ocr={ocr_text!r} "
-                f"ocr_options={len(ocr_options)} resolved={recorded_text!r} source=recorded"
-            )
-        return {
-            "text": recorded_text,
+    finalized = apply_text_choice_hard_rules(
+        {
             "recorded_text": recorded_text,
+            "uia_text": uia_text,
             "ocr_text": ocr_text,
             "ocr_options": ocr_options,
+            "resolved_text": recorded_text,
             "source": "recorded",
-            "meaningful": None,
-            "reason": (
-                f"prefer recorded text; {ocr_reason} available as alternate"
-                if ocr_text or ocr_options
-                else "prefer recorded text; vision produced no OCR alternate"
-            ),
-            "vision": vision_for_llm,
+            "reason": "",
         }
-
-    if ocr_text:
-        if log_info is not None:
-            shot_label = "after" if used_after else "before"
-            log_info(
-                f"resolve_text_input_text event={event.index} "
-                f"shot={shot_label} recorded={recorded_text!r} resolved={ocr_text!r}"
-            )
-        return {
-            "text": ocr_text,
-            "recorded_text": recorded_text,
-            "ocr_text": ocr_text,
-            "ocr_options": ocr_options or [ocr_text],
-            "source": "ocr",
-            "meaningful": None,
-            "reason": f"recorded text empty; used {ocr_reason}",
-            "vision": vision_for_llm,
-        }
-
+    )
+    resolved_text = str(finalized.get("resolved_text") or "")
+    source = str(finalized.get("source") or "recorded")
+    reason = str(finalized.get("reason") or "")
+    if log_info is not None:
+        shot_label = "after" if used_after else "before"
+        log_info(
+            f"resolve_text_input_text event={event.index} "
+            f"shot={shot_label} recorded={recorded_text!r} uia={uia_text!r} "
+            f"ocr={ocr_text!r} ocr_options={len(ocr_options)} "
+            f"resolved={resolved_text!r} source={source}"
+        )
     return {
-        "text": recorded_text,
+        "text": resolved_text,
         "recorded_text": recorded_text,
-        "ocr_text": None,
+        "uia_text": finalized.get("uia_text"),
+        "ocr_text": ocr_text,
         "ocr_options": ocr_options,
-        "source": "recorded",
+        "source": source,
         "meaningful": None,
-        "reason": "vision produced no text; kept recorded text",
+        "reason": reason,
         "vision": vision_for_llm,
     }
 

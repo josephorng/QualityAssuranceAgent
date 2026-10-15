@@ -199,8 +199,8 @@ class HandModule:
         action = cmd.action
         args = cmd.args
         screenshot_before_path = self._resolve_screenshot_path(cmd.screenshot_before_path)
-        # After-shots are deferred to Brain (last tool after verify / deferred settle).
-        # Keep only an explicitly provided after path from the command.
+        # After-shots are sealed by Brain: next step's before path, or a final capture
+        # at run end. Keep only an explicitly provided after path from the command.
         screenshot_after_path = self._resolve_screenshot_path(cmd.screenshot_after_path)
         screenshot_path = screenshot_before_path or self._resolve_screenshot_path(cmd.screenshot_name)
 
@@ -279,32 +279,49 @@ class HandModule:
             },
         )
 
-    async def capture_after_for_last_action(self) -> dict[str, Any] | None:
-        """Capture after-screenshot + focus overlays for the last hand.csv row.
+    async def assign_after_for_last_action(
+        self,
+        screenshot_after_path: str | None,
+    ) -> dict[str, Any] | None:
+        """Reuse an existing screenshot as the last hand.csv row's after frame.
 
-        Called by Brain after verify / deferred settle so report frames show settled UI
-        without a fixed per-tool after-action sleep during tool execution.
+        Replay matches recording: the next step's before shot is this step's after.
+        Focus / foreground rects are sampled at assignment time so overlays match
+        that shared frame.
         """
         async with self._lock:
-            screenshot_after_path = await self._capture_report_screenshot("after-action")
+            resolved = self._resolve_screenshot_path(screenshot_after_path)
+            if resolved is None and screenshot_after_path:
+                # Fresh captures / absolute paths the caller already trusts.
+                resolved = str(screenshot_after_path)
             focus_rect_after = _sample_debug_focus_rect_after()
             foreground_rect_after = _sample_debug_foreground_rect_after()
             updates = {
-                "screenshot_after_path": screenshot_after_path or "",
+                "screenshot_after_path": resolved or "",
                 "focus_rect_after": _focus_rect_after_csv(focus_rect_after),
                 "foreground_rect_after": _focus_rect_after_csv(foreground_rect_after),
             }
             paths = self.manager.require_paths()
             if not update_csv_last_row(paths.hand_csv, updates):
                 self.manager.log_error(
-                    "capture_after_for_last_action: no hand.csv row to update"
+                    "assign_after_for_last_action: no hand.csv row to update"
                 )
                 return None
             return {
-                "screenshot_after_path": screenshot_after_path,
+                "screenshot_after_path": resolved,
                 "focus_rect_after": focus_rect_after,
                 "foreground_rect_after": foreground_rect_after,
             }
+
+    async def capture_after_for_last_action(self) -> dict[str, Any] | None:
+        """Capture a dedicated after-screenshot for the last hand.csv row.
+
+        Used only when no next-step before will arrive (final step / run end /
+        failed step). Mid-run steps reuse the next before via
+        ``assign_after_for_last_action``.
+        """
+        screenshot_after_path = await self._capture_report_screenshot("after-action")
+        return await self.assign_after_for_last_action(screenshot_after_path)
 
     async def execute_tool_command(self, cmd: ToolCommand) -> ExecutionResult:
         async with self._lock:

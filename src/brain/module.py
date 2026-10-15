@@ -182,7 +182,8 @@ class BrainModule:
         # deferred until the next step's first tool so prep can overlap the gap.
         self._pending_settle_deadline_perf: float | None = None
         self._step_deferred_settle_waited_seconds: float = 0.0
-        # Last-tool after-screenshot deferred until verify / deferred settle completes.
+        # Last-tool after-screenshot pending until the next step's before seals it
+        # (or a final capture at run end / failure).
         self._pending_after_capture: bool = False
         self._replay_press_point_window: dict[str, Any] | None = None
         self._step_transcript_counter = (
@@ -665,7 +666,7 @@ class BrainModule:
         self._step_deferred_settle_waited_seconds = prior + seconds
 
     async def _flush_pending_after_capture(self) -> None:
-        """Capture the deferred last-tool after-screenshot when one is pending."""
+        """Capture a dedicated after-screenshot when no next-step before will seal it."""
         if not getattr(self, "_pending_after_capture", False):
             return
         self._pending_after_capture = False
@@ -677,6 +678,24 @@ class BrainModule:
         except Exception as exc:
             self.manager.log_error(
                 f"Failed to capture deferred after-action screenshot: {exc}"
+            )
+
+    async def _seal_pending_after_with_before(
+        self,
+        before_screenshot: str | None,
+    ) -> None:
+        """Reuse this step's before shot as the previous last-tool after frame."""
+        if not getattr(self, "_pending_after_capture", False):
+            return
+        self._pending_after_capture = False
+        hand = getattr(self, "_hand", None)
+        if hand is None or not before_screenshot:
+            return
+        try:
+            await hand.assign_after_for_last_action(before_screenshot)
+        except Exception as exc:
+            self.manager.log_error(
+                f"Failed to assign next-before as previous after-screenshot: {exc}"
             )
 
     def _mark_pending_after_capture(self) -> None:
@@ -691,12 +710,11 @@ class BrainModule:
         When ``messages`` is provided and a wait occurs, append transcript markers so
         session timing/HTML can show the wait at the execution point (before tools).
         Returns the seconds actually slept (0 when already satisfied or no deadline).
-        Flushes a pending last-tool after-screenshot after the settle window (or
-        immediately when no deadline remains) so report frames show settled UI.
+        After-screenshots are not flushed here: the next step's before seals the
+        previous after (or a final capture runs at run end).
         """
         deadline = getattr(self, "_pending_settle_deadline_perf", None)
         if deadline is None:
-            await self._flush_pending_after_capture()
             return 0.0
         remaining = deadline - perf_counter()
         self._pending_settle_deadline_perf = None
@@ -705,7 +723,6 @@ class BrainModule:
                 "Deferred settle: already satisfied "
                 f"({abs(remaining):.3f}s past deadline) before next tool"
             )
-            await self._flush_pending_after_capture()
             return 0.0
 
         waited = round(float(remaining), 3)
@@ -738,7 +755,6 @@ class BrainModule:
                 )
             )
         self._record_step_deferred_settle_wait(waited)
-        await self._flush_pending_after_capture()
         return waited
 
     def prepare_runtime_step(self, command: str) -> None:
@@ -1101,6 +1117,8 @@ class BrainModule:
         """
         all_image_paths = await self._eye.capture_separated_images()
         before_screenshot = self._primary_decision_screenshot(all_image_paths)
+        # Matching recording: this step's before is the previous step's after.
+        await self._seal_pending_after_with_before(before_screenshot)
         messages: list[dict[str, Any]] = [
             stamp_message(
                 {
@@ -1245,6 +1263,8 @@ class BrainModule:
                 llm_path_used = True
                 all_image_paths = await self._eye.capture_separated_images()
                 before_screenshot = self._primary_decision_screenshot(all_image_paths)
+                # Matching recording: this decide-frame seals the previous last-tool after.
+                await self._seal_pending_after_with_before(before_screenshot)
                 user_content = first_prompt if not messages else second_prompt
                 messages.append(
                     stamp_message(
@@ -1625,6 +1645,10 @@ class BrainModule:
         settle, or 1.0x when settle is under 2s; ``appeared`` floors settle so
         the deadline is at least 10s); a miss retries with ``clearly_unmet``.
 
+        Report after-frames match recording: the next step's before shot seals this
+        step's last-tool after. The final step (or a failed stop) captures a
+        dedicated after instead.
+
         Screenshot/LLM vision verification is not used. Actor failure without a
         window miss fails the step with no image-based recovery. Single-script and
         queue runs can skip every check (``CUA_SKIP_VERIFICATION``): a successful
@@ -1666,8 +1690,8 @@ class BrainModule:
         )
         started_iso = datetime.now(timezone.utc).isoformat()
         started_at = perf_counter()
-        # When True, leave last-tool after-shot pending until deferred settle completes
-        # (next tool gate or run_complete flush below).
+        # When True, leave last-tool after pending for the next step's before shot.
+        # Otherwise finally captures a dedicated after (last step / failure).
         defer_after_capture = False
         try:
             self._step_deferred_settle_waited_seconds = 0.0
@@ -1741,12 +1765,6 @@ class BrainModule:
                         "no screenshot verification recovery"
                     )
                 verify_result = None
-            if (
-                verify_result is not None
-                and verify_result.accomplished
-                and self._pending_settle_deadline_perf is not None
-            ):
-                defer_after_capture = True
             finished_iso = datetime.now(timezone.utc).isoformat()
             duration_seconds = round(perf_counter() - started_at, 3)
             self._step_transcript_counter += 1
@@ -1952,8 +1970,14 @@ class BrainModule:
                     step_index=script_step_index,
                 )
             run_complete = self._apply_verify_branch(verify_result)
-            if run_complete and defer_after_capture:
+            if run_complete:
+                # Last step: finish settle, then finally captures a dedicated after.
                 await self._await_pending_settle_before_tool()
+                defer_after_capture = False
+            elif verify_result.accomplished:
+                # Next step's before seals this step's after (no extra capture).
+                defer_after_capture = True
+            else:
                 defer_after_capture = False
             if verify_result.accomplished:
                 status = "completed"

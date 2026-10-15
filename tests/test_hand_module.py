@@ -129,29 +129,63 @@ async def test_exec_action_skips_after_screenshot(monkeypatch, tmp_path: Path) -
     assert capture.await_args.args[0] == "before-action"
 
 
+def _write_hand_csv_row(path: Path, **overrides: str) -> None:
+    row = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "action": "click",
+        "args": "{}",
+        "ok": "True",
+        "screenshot_name": "",
+        "screenshot_before_path": "before.png",
+        "screenshot_after_path": "",
+        "message": "executed",
+        "focus_rect_after": "",
+        "foreground_rect_after": "",
+    }
+    row.update(overrides)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=HAND_CSV_FIELDNAMES)
+        writer.writeheader()
+        writer.writerow(row)
+
+
+@pytest.mark.asyncio
+async def test_assign_after_for_last_action_reuses_path(
+    monkeypatch, tmp_path: Path
+) -> None:
+    hand = _hand_for_unit(tmp_path)
+    hand_csv = tmp_path / "hand.csv"
+    next_before = tmp_path / "next_before.png"
+    next_before.write_bytes(b"png")
+    _write_hand_csv_row(hand_csv)
+
+    monkeypatch.setattr(
+        "src.hand.module._sample_debug_focus_rect_after",
+        lambda: [8, 6, 40, 28],
+    )
+    monkeypatch.setattr(
+        "src.hand.module._sample_debug_foreground_rect_after",
+        lambda: [4, 4, 120, 56],
+    )
+
+    updated = await hand.assign_after_for_last_action(str(next_before))
+
+    assert updated is not None
+    assert updated["screenshot_after_path"] == str(next_before)
+    with hand_csv.open(encoding="utf-8", newline="") as handle:
+        row = list(csv.DictReader(handle))[-1]
+    assert row["screenshot_after_path"] == str(next_before)
+    assert row["focus_rect_after"] == "[8,6,40,28]"
+    assert row["foreground_rect_after"] == "[4,4,120,56]"
+
+
 @pytest.mark.asyncio
 async def test_capture_after_for_last_action_patches_hand_csv(
     monkeypatch, tmp_path: Path
 ) -> None:
     hand = _hand_for_unit(tmp_path)
     hand_csv = tmp_path / "hand.csv"
-    with hand_csv.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=HAND_CSV_FIELDNAMES)
-        writer.writeheader()
-        writer.writerow(
-            {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "action": "click",
-                "args": "{}",
-                "ok": "True",
-                "screenshot_name": "",
-                "screenshot_before_path": "before.png",
-                "screenshot_after_path": "",
-                "message": "executed",
-                "focus_rect_after": "",
-                "foreground_rect_after": "",
-            }
-        )
+    _write_hand_csv_row(hand_csv)
 
     hand._capture_report_screenshot = AsyncMock(return_value=str(tmp_path / "after.png"))
     monkeypatch.setattr(

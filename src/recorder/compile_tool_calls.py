@@ -16,6 +16,7 @@ from src.common.nearby_side import (
     strip_nearby_context_comments,
 )
 from src.recorder.analyze import typed_text_from_instruction
+from src.recorder.landmark_geometry import build_landmark_geometry
 from src.recorder.models import RecordedEvent, event_json_path
 from src.recorder.to_cache import validate_tool_calls
 from src.recorder.window_snapshot import should_ignore_window_change
@@ -192,6 +193,7 @@ def _move_mouse_call(
     *,
     target: str | None = None,
     click_window: dict[str, Any] | None = None,
+    vision: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build move_mouse with a short target + optional nearby_objects / click_window."""
     resolved = (target if target is not None else _short_move_target(instruction)).strip()
@@ -201,20 +203,65 @@ def _move_mouse_call(
     nearby = _nearby_object_phrases(instruction)
     if nearby:
         args["nearby_objects"] = nearby
+        # Constellation for non-text targets (e.g. empty 輸入欄) and for
+        # empty-space clicks that currently encode raw pixel offsets.
+        # On-object 「…」文字 clicks still omit geometry (must match OCR).
+        offset_click = _is_relative_offset_position(resolved)
+        if (not _move_target_is_text(resolved)) or offset_click:
+            hints = extract_nearby_hints_from_instruction(instruction)
+            if offset_click:
+                from cua_mcp.instruction_offset import (
+                    _parse_relative_pixel_offset_regex,
+                )
+                from src.common.nearby_side import NearbyHint
+
+                ref_anchor, _dx, _dy = _parse_relative_pixel_offset_regex(resolved)
+                ref = (ref_anchor or "").strip()
+                if ref:
+                    hints = [NearbyHint(label=ref, side=None), *hints]
+            geometry = build_landmark_geometry(
+                vision,
+                hints,
+                target_label=resolved,
+            )
+            if geometry is not None:
+                args["landmark_geometry"] = geometry
     if click_window is not None:
         args["click_window"] = click_window
     return _call("move_mouse", **args)
 
 
+def _move_target_is_text(target: str) -> bool:
+    """True when the move_mouse primary is a ``…文字`` anchor (not icon/input/…)."""
+    text = target or ""
+    for suffix in ("圖示", "輸入欄", "滾動條", "按鈕", "未知", "元素"):
+        if suffix in text:
+            return False
+    return "文字" in text
+
+
+def _is_relative_offset_position(target: str) -> bool:
+    """True for empty-space clicks like ``「字型」文字右方12個像素、下方49個像素的位置``."""
+    text = target or ""
+    return "個像素" in text and "的位置" in text
+
+
 def _compile_click_family(
-    event: RecordedEvent, instruction: str
+    event: RecordedEvent,
+    instruction: str,
+    *,
+    vision: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]] | None:
     if event.kind not in _CLICK_POINTER_KINDS:
         return None
     if not _short_move_target(instruction) and not instruction.strip():
         return None
     calls: list[dict[str, Any]] = [
-        _move_mouse_call(instruction, click_window=event.click_window)
+        _move_mouse_call(
+            instruction,
+            click_window=event.click_window,
+            vision=vision,
+        )
     ]
     modifiers = _modifier_list(event.modifiers)
     if event.kind == "hold":
@@ -302,7 +349,12 @@ def _compile_drag(event: RecordedEvent, instruction: str) -> list[dict[str, Any]
     return [_call("drag", **args)]
 
 
-def _compile_scroll(event: RecordedEvent, instruction: str) -> list[dict[str, Any]] | None:
+def _compile_scroll(
+    event: RecordedEvent,
+    instruction: str,
+    *,
+    vision: dict[str, Any] | None = None,
+) -> list[dict[str, Any]] | None:
     if event.kind != "scroll":
         return None
     delta = event.scroll_delta
@@ -318,22 +370,60 @@ def _compile_scroll(event: RecordedEvent, instruction: str) -> list[dict[str, An
                 instruction,
                 target=hover.group(1).strip(),
                 click_window=event.click_window,
+                vision=vision,
             )
         )
     calls.append(_call("scroll", clicks=clicks, instruction=instruction))
     return calls
 
 
+def _vision_for_compile(
+    analysis: dict[str, Any] | None,
+    *,
+    run_dir: Path | None,
+    event: RecordedEvent,
+    vision: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Prefer an explicit vision payload, else analysis candidates, else yolo_ocr."""
+    if isinstance(vision, dict) and isinstance(vision.get("candidates"), list):
+        return vision
+    if isinstance(analysis, dict):
+        analysis_vision = analysis.get("vision")
+        if (
+            isinstance(analysis_vision, dict)
+            and isinstance(analysis_vision.get("candidates"), list)
+            and analysis_vision.get("candidates")
+        ):
+            return analysis_vision
+    if run_dir is None:
+        return None
+    from src.recorder.vision_context import vision_from_yolo_ocr
+
+    loaded = vision_from_yolo_ocr(Path(run_dir), int(event.index), suffix="")
+    if isinstance(loaded.get("candidates"), list) and loaded["candidates"]:
+        return loaded
+    return None
+
+
 def compile_tool_calls(
     event: RecordedEvent,
     instruction: str,
     analysis: dict[str, Any] | None = None,
+    *,
+    vision: dict[str, Any] | None = None,
+    run_dir: Path | None = None,
 ) -> list[dict[str, Any]] | None:
     """Compile MCP tool calls for one recording step, or None when unsupported."""
-    del analysis  # Reserved for future landmark-aware compilation.
     goal = instruction.strip()
     if not goal:
         return None
+
+    resolved_vision = _vision_for_compile(
+        analysis,
+        run_dir=run_dir,
+        event=event,
+        vision=vision,
+    )
 
     # Confident window chrome actions take priority over the underlying pointer kind.
     # Shell flyouts (快顯主機, …) are ignored here: dismissals stay in window_verify
@@ -363,13 +453,15 @@ def compile_tool_calls(
     elif kind == "drag":
         compiled = _compile_drag(event, goal)
     elif kind == "scroll":
-        compiled = _compile_scroll(event, goal)
+        compiled = _compile_scroll(event, goal, vision=resolved_vision)
     elif kind in _CLICK_POINTER_KINDS:
         # Instruction-shaped window actions (manual edits / added events).
         if _WINDOW_INSTRUCTION_RE.match(goal):
             compiled = _compile_window_change(event, goal)
         else:
-            compiled = _compile_click_family(event, goal)
+            compiled = _compile_click_family(
+                event, goal, vision=resolved_vision
+            )
     elif _WINDOW_INSTRUCTION_RE.match(goal):
         compiled = _compile_window_change(event, goal)
     elif _WAIT_INSTRUCTION_RE.match(goal):
@@ -384,13 +476,22 @@ def set_analysis_tool_calls(
     analysis: dict[str, Any],
     event: RecordedEvent,
     instruction: str | None = None,
+    *,
+    run_dir: Path | None = None,
+    vision: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]] | None:
     """Set or clear ``tool_calls`` on an analysis dict from the current instruction."""
     goal = instruction if isinstance(instruction, str) else analysis.get("instruction")
     if not isinstance(goal, str) or not goal.strip():
         analysis.pop("tool_calls", None)
         return None
-    calls = compile_tool_calls(event, goal, analysis)
+    calls = compile_tool_calls(
+        event,
+        goal,
+        analysis,
+        vision=vision,
+        run_dir=run_dir,
+    )
     if calls is None:
         analysis.pop("tool_calls", None)
         return None
@@ -457,7 +558,12 @@ def ensure_recording_tool_cache(run_dir: Path) -> None:
             continue
         event = RecordedEvent.from_dict(event_payload)
         previous = analysis.get("tool_calls")
-        compiled = set_analysis_tool_calls(analysis, event, instruction)
+        compiled = set_analysis_tool_calls(
+            analysis,
+            event,
+            instruction,
+            run_dir=root,
+        )
         if compiled is None:
             continue
         if previous != compiled:

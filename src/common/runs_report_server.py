@@ -108,7 +108,7 @@ def _persist_analysis_with_tool_calls(
             if isinstance(payload, dict):
                 resolved_event = RecordedEvent.from_dict(payload)
     if resolved_event is not None:
-        set_analysis_tool_calls(analysis, resolved_event)
+        set_analysis_tool_calls(analysis, resolved_event, run_dir=run_dir)
     else:
         analysis.pop("tool_calls", None)
     write_json(analysis_path, analysis)

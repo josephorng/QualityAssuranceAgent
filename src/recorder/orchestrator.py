@@ -732,7 +732,7 @@ def _write_event_analysis(
 ) -> None:
     from src.recorder.compile_tool_calls import compile_tool_calls
 
-    tool_calls = compile_tool_calls(event, instruction)
+    tool_calls = compile_tool_calls(event, instruction, vision=vision)
     window_verify = window_verify_from_debug(
         event.window_snapshot_debug,
         typed_text=event.text if event.kind == "text_input" else None,
@@ -881,7 +881,12 @@ def _persist_retried_pointer_instruction(
         analysis["use_char_target"] = use_char_target
     else:
         analysis.pop("use_char_target", None)
-    set_analysis_tool_calls(analysis, event)
+    set_analysis_tool_calls(
+        analysis,
+        event,
+        run_dir=run_dir,
+        vision=vision,
+    )
     write_json(analysis_path, analysis)
     log_info(f"retry yolo/ocr event {event.index} rebuilt: {rebuilt}")
     return previous != rebuilt

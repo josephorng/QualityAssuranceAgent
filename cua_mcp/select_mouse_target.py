@@ -2475,6 +2475,17 @@ def _anchor_type_suffix(anchor: str) -> str | None:
     return None
 
 
+def _anchor_is_text(anchor: str) -> bool:
+    """True when the move_mouse anchor names a text target (``…文字``)."""
+    return _anchor_type_suffix(anchor) == "文字"
+
+
+def _is_relative_offset_position(instruction: str) -> bool:
+    """True for empty-space clicks encoded with relative pixel offsets."""
+    text = instruction or ""
+    return "個像素" in text and "的位置" in text
+
+
 def _matches_landmark_fallback_type(det: UiDetection, anchor: str) -> bool:
     """True when ``det`` is the kind of control ``anchor`` names.
 
@@ -2694,6 +2705,206 @@ def _unique_target_from_landmarks(
     if len(places) != 1:
         return None
     return places[0]
+
+
+def _match_geometry_landmark_centers(
+    detections: list[UiDetection],
+    recorded: dict[str, Any],
+    *,
+    threshold: float = _MOUSE_FILTER_SIMILARITY_THRESHOLD,
+) -> dict[str, tuple[float, float]]:
+    """Greedy label→center map that preserves recorded inter-landmark vectors."""
+    # Lazy import: ``src.recorder`` package init pulls tools → this module.
+    from src.recorder.landmark_geometry import normalize_vector, vectors_agree
+
+    labels = [
+        str(item.get("label") or "").strip()
+        for item in recorded.get("landmarks") or []
+        if isinstance(item, dict) and str(item.get("label") or "").strip()
+    ]
+    edge_map: dict[tuple[str, str], tuple[float, float]] = {}
+    for item in recorded.get("landmark_to_landmark") or []:
+        if not isinstance(item, dict):
+            continue
+        frm = str(item.get("from") or "").strip()
+        to = str(item.get("to") or "").strip()
+        if not frm or not to:
+            continue
+        try:
+            edge_map[(frm, to)] = (float(item["dx"]), float(item["dy"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    matched: dict[str, tuple[float, float]] = {}
+    for label in labels:
+        candidates = [
+            det
+            for det in detections
+            if _detection_similarity_to_query(det, label) >= threshold
+        ]
+        if not candidates:
+            continue
+        if len(candidates) == 1 or not matched:
+            best = max(candidates, key=_detection_preference_score)
+            matched[label] = (float(best.cx), float(best.cy))
+            continue
+
+        try:
+            recorded_scale = max(float(recorded.get("scale", 1.0)), 1.0)
+        except (TypeError, ValueError):
+            recorded_scale = 1.0
+
+        def _score(det: UiDetection) -> tuple[int, float]:
+            agree = 0
+            err = 0.0
+            center = (float(det.cx), float(det.cy))
+            for other, other_xy in matched.items():
+                recorded_vec = edge_map.get((label, other))
+                if recorded_vec is None:
+                    continue
+                live_vec = normalize_vector(center, other_xy, recorded_scale)
+                if vectors_agree(recorded_vec, live_vec):
+                    agree += 1
+                err += abs(live_vec[0] - recorded_vec[0]) + abs(
+                    live_vec[1] - recorded_vec[1]
+                )
+            return (-agree, err)
+
+        best = min(candidates, key=_score)
+        matched[label] = (float(best.cx), float(best.cy))
+    return matched
+
+
+def _kept_nearby_hints_for_labels(
+    nearby_hints: list[NearbyHint] | list[str] | None,
+    kept_labels: set[str],
+) -> list[NearbyHint]:
+    """Restrict nearby hints to constellation-kept landmark labels."""
+    hints = normalize_nearby_hints(nearby_hints)
+    return [hint for hint in hints if hint.label in kept_labels]
+
+
+def _resolve_with_landmark_geometry(
+    detections: list[UiDetection],
+    landmark_geometry: dict[str, Any] | None,
+    *,
+    anchor: str,
+    nearby_hints: list[NearbyHint] | list[str] | None,
+    synth_only: bool = False,
+    candidate_pool: list[UiDetection] | None = None,
+) -> tuple[UiDetection | None, tuple[int, int], str] | None:
+    """Resolve a click via recorded constellation; ``None`` when geometry cannot help.
+
+    Returns ``(detection_or_None, point, selection_method)``.
+
+    When ``synth_only`` is True (empty-space / relative-offset clicks), skip
+    detection picking and always return the synthesized point.
+
+    When ``candidate_pool`` is set (e.g. similarity-matched inputs), pick only
+    among that pool near the synthesized point; otherwise synthesize.
+    """
+    # Lazy import: ``src.recorder`` package init pulls tools → this module.
+    from src.recorder.landmark_geometry import (
+        filter_landmarks_by_constellation,
+        parse_landmark_geometry,
+        pick_detection_near_synthesized,
+        replay_scale,
+        synthesize_target_point,
+        target_far_from_synthesized,
+    )
+
+    recorded = parse_landmark_geometry(landmark_geometry)
+    if recorded is None or not detections:
+        return None
+    matched = _match_geometry_landmark_centers(detections, recorded)
+    if len(matched) < 1:
+        return None
+    kept_labels = filter_landmarks_by_constellation(recorded, matched)
+    kept_centers = {
+        label: matched[label] for label in kept_labels if label in matched
+    }
+    if len(kept_centers) < 1:
+        return None
+
+    synth = synthesize_target_point(recorded, kept_centers)
+    if synth is None:
+        return None
+    if synth_only:
+        return None, synth, "landmark_geometry_synth"
+
+    scale = replay_scale(recorded, kept_centers)
+
+    if candidate_pool is not None:
+        near = pick_detection_near_synthesized(candidate_pool, synth, scale)
+        if near is not None:
+            return near, (int(near.cx), int(near.cy)), "landmark_geometry_pick"
+        return None, synth, "landmark_geometry_synth"
+
+    kept_hints = _kept_nearby_hints_for_labels(nearby_hints, set(kept_centers))
+    unique = _unique_target_from_landmarks(
+        detections,
+        kept_hints or nearby_hints,
+        anchor=anchor,
+    )
+    if unique is not None and not target_far_from_synthesized(
+        (float(unique.cx), float(unique.cy)),
+        synth,
+        scale,
+    ):
+        return unique, (int(unique.cx), int(unique.cy)), "landmark_geometry_pick"
+
+    type_compatible = [
+        det
+        for det in detections
+        if _matches_landmark_fallback_type(det, anchor)
+    ]
+    near = pick_detection_near_synthesized(type_compatible, synth, scale)
+    if near is not None:
+        return near, (int(near.cx), int(near.cy)), "landmark_geometry_pick"
+
+    return None, synth, "landmark_geometry_synth"
+
+
+def _landmark_geometry_synth_meta(
+    *,
+    point: tuple[int, int],
+    offset_dx: int,
+    offset_dy: int,
+    track_percent: float | None,
+    char_target: str | None,
+    char_occurrence: int,
+    instruction_text: str,
+    nearby_phrases: list[str],
+    image_paths: list[str],
+    selection_method: str,
+    timing: dict[str, Any],
+) -> tuple[int, int, dict[str, Any]]:
+    """Build ``(gx, gy, meta)`` for a constellation-synthesized click."""
+    gx = int(point[0]) + int(offset_dx)
+    gy = int(point[1]) + int(offset_dy)
+    meta: dict[str, Any] = {
+        "selected_index": -1,
+        "class_name": "",
+        "image_center": {"x": int(point[0]), "y": int(point[1])},
+        "resolved_center": {"x": gx, "y": gy},
+        "relative_offset": {"dx": offset_dx, "dy": offset_dy},
+        "track_percent": track_percent,
+        "char_target": char_target,
+        "char_occurrence": char_occurrence,
+        "anchor_instruction": instruction_text,
+        "nearby_objects": nearby_phrases,
+        "screenshot_path": image_paths[0] if image_paths else "",
+        "screenshot_paths": image_paths,
+        "target_kind": "landmark_geometry",
+        "target_text": "",
+        "target_icons": [],
+        "target_bbox": None,
+        "peer_bboxes": [],
+        "landmarks": [],
+        "selection_method": selection_method,
+        "timing": timing,
+    }
+    return gx, gy, meta
 
 
 def _landmark_hints_locate(
@@ -3010,6 +3221,7 @@ async def find_mouse_point(
     nearby_objects: list[str] | None = None,
     yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
     click_window: dict[str, Any] | None = None,
+    landmark_geometry: dict[str, Any] | None = None,
 ) -> tuple[int, int, dict[str, Any]] | None:
     """
     Capture selected monitor(s), build YOLO+OCR candidates, filter and pick via LLM.
@@ -3018,6 +3230,13 @@ async def find_mouse_point(
 
     ``nearby_objects`` are optional landmark labels for spatial disambiguation.
     They are merged with any （附近有…） labels parsed from ``instruction``.
+
+    ``landmark_geometry`` is an optional recorded constellation used during cache
+    replay (``require_similarity_match``) for non-text anchors (e.g. empty
+    ``輸入欄``) and for empty-space clicks with relative pixel offsets
+    (``…個像素…的位置``), where constellation replaces raw pixel offsets.
+    On-object text anchors (``…文字`` with no offset) never use constellation;
+    a similarity miss fails the step.
 
     Returns ``(global_x, global_y, metadata)`` in virtual-desktop pixel space,
     or ``None`` when no YOLO candidates / no anchor match (soft miss).
@@ -3031,7 +3250,8 @@ async def find_mouse_point(
 
     While ``require_similarity_match()`` is active (cache replay), a similarity
     miss returns ``None`` without the visual one-pass or Gemma ROI fallbacks,
-    unless the directed nearby landmarks describe exactly one nearby place.
+    unless the directed nearby landmarks describe exactly one nearby place or
+    recorded ``landmark_geometry`` can synthesize / pick a point.
 
     Successful metadata includes ``timing`` with capture / YOLO / OCR / parse /
     select phase seconds for session time profiles.
@@ -3191,13 +3411,108 @@ async def find_mouse_point(
     selected_text: str | None = None
     select_phase = "select"
     select_started = time.perf_counter()
+    is_offset_click = bool(offset_dx or offset_dy) or _is_relative_offset_position(
+        instruction_text
+    )
+
+    # Empty-space / relative-offset clicks: prefer constellation over raw pixels.
+    if (
+        similarity_match_required()
+        and landmark_geometry is not None
+        and is_offset_click
+    ):
+        geom_hit = _resolve_with_landmark_geometry(
+            detections,
+            landmark_geometry,
+            anchor=anchor,
+            nearby_hints=nearby_hints,
+            synth_only=True,
+        )
+        if geom_hit is not None:
+            _geom_det, geom_point, geom_method = geom_hit
+            select_s = time.perf_counter() - select_started
+            _log_info(
+                "move_mouse: landmark geometry synth for offset click "
+                f"point=[{geom_point[0]},{geom_point[1]}] "
+                f"(ignoring raw pixel offset dx={offset_dx} dy={offset_dy})"
+            )
+            return _landmark_geometry_synth_meta(
+                point=geom_point,
+                offset_dx=0,
+                offset_dy=0,
+                track_percent=track_percent,
+                char_target=char_target,
+                char_occurrence=char_occurrence,
+                instruction_text=instruction_text,
+                nearby_phrases=nearby_phrases,
+                image_paths=image_paths,
+                selection_method=geom_method,
+                timing=_timing_meta(select_s=select_s, select_phase=geom_method),
+            )
+
     if not anchor_matches:
+        # On-object text anchors must match by OCR/similarity. Constellation /
+        # landmark-unique fallbacks are for non-text targets (e.g. empty 輸入欄)
+        # and for offset empty-space clicks (handled above).
+        if (
+            similarity_match_required()
+            and _anchor_is_text(anchor)
+            and not is_offset_click
+        ):
+            _log_info(
+                "move_mouse: no similarity match for text anchor; "
+                "failing step (no constellation fallback for 文字)"
+            )
+            return None
+        if (
+            similarity_match_required()
+            and landmark_geometry is not None
+            and not _anchor_is_text(anchor)
+        ):
+            geom_hit = _resolve_with_landmark_geometry(
+                detections,
+                landmark_geometry,
+                anchor=anchor,
+                nearby_hints=nearby_hints,
+            )
+            if geom_hit is not None:
+                geom_det, geom_point, geom_method = geom_hit
+                if geom_det is not None:
+                    chosen = geom_det
+                    idx = detections.index(geom_det)
+                    selection_method = geom_method
+                    select_phase = geom_method
+                    _log_info(
+                        "move_mouse: landmark geometry pick "
+                        f"center=[{chosen.cx},{chosen.cy}] method={geom_method}"
+                    )
+                else:
+                    select_s = time.perf_counter() - select_started
+                    _log_info(
+                        "move_mouse: landmark geometry synth "
+                        f"point=[{geom_point[0]},{geom_point[1]}]"
+                    )
+                    return _landmark_geometry_synth_meta(
+                        point=geom_point,
+                        offset_dx=offset_dx,
+                        offset_dy=offset_dy,
+                        track_percent=track_percent,
+                        char_target=char_target,
+                        char_occurrence=char_occurrence,
+                        instruction_text=instruction_text,
+                        nearby_phrases=nearby_phrases,
+                        image_paths=image_paths,
+                        selection_method=geom_method,
+                        timing=_timing_meta(
+                            select_s=select_s, select_phase=geom_method
+                        ),
+                    )
         unique = _unique_target_from_landmarks(
             detections,
             nearby_hints,
             anchor=anchor,
         )
-        if unique is not None:
+        if unique is not None and selection_method is None:
             chosen = unique
             idx = detections.index(unique)
             selection_method = "landmark_unique"
@@ -3207,6 +3522,8 @@ async def find_mouse_point(
                 f"center=[{chosen.cx},{chosen.cy}] "
                 f"nearby_labels={nearby_phrases!r}"
             )
+        elif selection_method is not None:
+            pass
         elif similarity_match_required():
             _log_info(
                 "move_mouse: no similarity anchor matches; similarity match required, "
@@ -3270,7 +3587,61 @@ async def find_mouse_point(
                 f"{len(anchor_matches)} nearby_labels={nearby_phrases!r}"
             )
 
-        if len(anchor_matches) == 1:
+        # Cache replay with recorded constellation: prefer geometry over LLM pick
+        # (e.g. multiple 輸入欄 class matches). On-object text still uses unique/LLM.
+        used_geometry = False
+        if (
+            similarity_match_required()
+            and landmark_geometry is not None
+            and not _anchor_is_text(anchor)
+            and not is_offset_click
+        ):
+            geom_hit = _resolve_with_landmark_geometry(
+                detections,
+                landmark_geometry,
+                anchor=anchor,
+                nearby_hints=nearby_hints,
+                candidate_pool=anchor_matches,
+            )
+            if geom_hit is not None:
+                geom_det, geom_point, geom_method = geom_hit
+                if geom_det is not None:
+                    chosen = geom_det
+                    idx = detections.index(geom_det)
+                    selection_method = geom_method
+                    select_phase = geom_method
+                    used_geometry = True
+                    _log_info(
+                        "move_mouse: landmark geometry pick among anchors "
+                        f"center=[{chosen.cx},{chosen.cy}] method={geom_method} "
+                        f"pool={len(anchor_matches)}"
+                    )
+                else:
+                    select_s = time.perf_counter() - select_started
+                    _log_info(
+                        "move_mouse: landmark geometry synth among anchors "
+                        f"point=[{geom_point[0]},{geom_point[1]}] "
+                        f"pool={len(anchor_matches)}"
+                    )
+                    return _landmark_geometry_synth_meta(
+                        point=geom_point,
+                        offset_dx=offset_dx,
+                        offset_dy=offset_dy,
+                        track_percent=track_percent,
+                        char_target=char_target,
+                        char_occurrence=char_occurrence,
+                        instruction_text=instruction_text,
+                        nearby_phrases=nearby_phrases,
+                        image_paths=image_paths,
+                        selection_method=geom_method,
+                        timing=_timing_meta(
+                            select_s=select_s, select_phase=geom_method
+                        ),
+                    )
+
+        if used_geometry:
+            pass
+        elif len(anchor_matches) == 1:
             idx = 0
             chosen = anchor_matches[0]
             select_phase = "select_unique"
@@ -3399,6 +3770,7 @@ async def resolve_mouse_point(
     nearby_objects: list[str] | None = None,
     yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
     click_window: dict[str, Any] | None = None,
+    landmark_geometry: dict[str, Any] | None = None,
 ) -> tuple[int, int, dict[str, Any]]:
     """
     Capture selected monitor(s), build YOLO+OCR candidates, filter and pick via LLM.
@@ -3416,6 +3788,7 @@ async def resolve_mouse_point(
         nearby_objects=nearby_objects,
         yolo_conf_threshold=yolo_conf_threshold,
         click_window=click_window,
+        landmark_geometry=landmark_geometry,
     )
     if found is None:
         raise ValueError(RECORDED_ANCHOR_MISS_MESSAGE)

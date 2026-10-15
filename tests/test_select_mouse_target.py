@@ -4603,3 +4603,329 @@ async def test_find_mouse_point_live_miss_still_uses_visual_fallback(
     assert found is not None
     assert found[2]["selection_method"] == "visual_one_pass_fallback"
     assert (found[0], found[1]) == called["center"]
+
+
+def _geometry_landmark_scene(*, include_target: bool) -> list[UiDetection]:
+    """Landmarks at (10,10)/(110,10)/(10,110); optional input near (60,60)."""
+    dets = [
+        _detection_from_bbox((0, 0, 20, 20), YOLO_CLASS_TEXT, text="eee"),
+        _detection_from_bbox((100, 0, 20, 20), YOLO_CLASS_TEXT, text="晴時多雲"),
+        _detection_from_bbox((0, 100, 20, 20), YOLO_CLASS_TEXT, text="Ln1"),
+    ]
+    if include_target:
+        dets.insert(
+            0,
+            _detection_from_bbox((50, 50, 20, 20), YOLO_CLASS_INPUT, text=""),
+        )
+    return dets
+
+
+def _recorded_input_geometry() -> dict:
+    from src.recorder.landmark_geometry import build_landmark_geometry
+    from src.common.nearby_side import NearbyHint, Side
+
+    vision = {
+        "used_vision": True,
+        "local_cursor": [60, 60],
+        "candidates": [
+            {
+                "bbox": [50, 50, 20, 20],
+                "class_name": "input",
+                "text": "",
+                "icons": [],
+            },
+            {
+                "bbox": [0, 0, 20, 20],
+                "class_name": "text",
+                "text": "eee",
+                "icons": [],
+            },
+            {
+                "bbox": [100, 0, 20, 20],
+                "class_name": "text",
+                "text": "晴時多雲",
+                "icons": [],
+            },
+            {
+                "bbox": [0, 100, 20, 20],
+                "class_name": "text",
+                "text": "Ln1",
+                "icons": [],
+            },
+        ],
+    }
+    geom = build_landmark_geometry(
+        vision,
+        [
+            NearbyHint("「eee」文字", Side.LEFT),
+            NearbyHint("「晴時多雲」文字", Side.RIGHT),
+            NearbyHint("「Ln1」文字", Side.BELOW),
+        ],
+        target_label="輸入欄",
+    )
+    assert geom is not None
+    return geom
+
+
+_GEOMETRY_NEARBY = [
+    "在「eee」文字的左邊",
+    "在「晴時多雲」文字的右邊",
+    "在「Ln1」文字的上面",
+]
+
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_replay_geometry_synth_when_target_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cua_mcp import select_mouse_target as smt
+
+    async def fake_pick(*_a, **_k):
+        raise AssertionError("visual one-pass must not run during replay")
+
+    async def fake_parse(instruction: str):
+        return ("輸入欄", 0, 0, [], None, 0, None)
+
+    detections = _geometry_landmark_scene(include_target=False)
+    _install_find_mouse_point_fakes(monkeypatch, detections, pick=fake_pick)
+    monkeypatch.setattr(smt, "parse_mouse_target_instruction", fake_parse)
+
+    with smt.require_similarity_match():
+        found = await smt.find_mouse_point(
+            "輸入欄",
+            nearby_objects=_GEOMETRY_NEARBY,
+            landmark_geometry=_recorded_input_geometry(),
+        )
+    assert found is not None
+    assert found[2]["selection_method"] == "landmark_geometry_synth"
+    assert abs(found[0] - 60) <= 1
+    assert abs(found[1] - 60) <= 1
+
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_replay_geometry_picks_near_synth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cua_mcp import select_mouse_target as smt
+
+    async def fake_pick(*_a, **_k):
+        raise AssertionError("visual one-pass must not run during replay")
+
+    async def fake_parse(instruction: str):
+        return ("輸入欄", 0, 0, [], None, 0, None)
+
+    detections = _geometry_landmark_scene(include_target=False)
+    near = _detection_from_bbox((52, 52, 16, 16), YOLO_CLASS_INPUT, text="")
+    far = _detection_from_bbox((400, 400, 16, 16), YOLO_CLASS_INPUT, text="")
+    detections.extend([near, far])
+    _install_find_mouse_point_fakes(monkeypatch, detections, pick=fake_pick)
+    monkeypatch.setattr(smt, "parse_mouse_target_instruction", fake_parse)
+    # Class-only 「輸入欄」 normally matches every input via similarity; force a
+    # soft miss so constellation pick can choose the near box.
+    monkeypatch.setattr(
+        smt,
+        "_filter_mouse_candidates",
+        lambda dets, _anchor, _nearby: (
+            [],
+            [d for d in dets if d.class_name == "text"],
+        ),
+    )
+
+    with smt.require_similarity_match():
+        found = await smt.find_mouse_point(
+            "輸入欄",
+            nearby_objects=_GEOMETRY_NEARBY,
+            landmark_geometry=_recorded_input_geometry(),
+        )
+    assert found is not None
+    assert found[2]["selection_method"] == "landmark_geometry_pick"
+    assert (found[0], found[1]) == (near.cx, near.cy)
+
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_replay_geometry_synth_when_peers_far(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cua_mcp import select_mouse_target as smt
+
+    async def fake_pick(*_a, **_k):
+        raise AssertionError("visual one-pass must not run during replay")
+
+    async def fake_parse(instruction: str):
+        return ("輸入欄", 0, 0, [], None, 0, None)
+
+    detections = _geometry_landmark_scene(include_target=False)
+    detections.append(
+        _detection_from_bbox((400, 400, 20, 20), YOLO_CLASS_INPUT, text="")
+    )
+    _install_find_mouse_point_fakes(monkeypatch, detections, pick=fake_pick)
+    monkeypatch.setattr(smt, "parse_mouse_target_instruction", fake_parse)
+    monkeypatch.setattr(
+        smt,
+        "_filter_mouse_candidates",
+        lambda dets, _anchor, _nearby: (
+            [],
+            [d for d in dets if d.class_name == "text"],
+        ),
+    )
+
+    with smt.require_similarity_match():
+        found = await smt.find_mouse_point(
+            "輸入欄",
+            nearby_objects=_GEOMETRY_NEARBY,
+            landmark_geometry=_recorded_input_geometry(),
+        )
+    assert found is not None
+    assert found[2]["selection_method"] == "landmark_geometry_synth"
+    assert abs(found[0] - 60) <= 1
+    assert abs(found[1] - 60) <= 1
+
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_replay_text_miss_fails_without_constellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cua_mcp import select_mouse_target as smt
+
+    async def fake_pick(*_a, **_k):
+        raise AssertionError("visual one-pass must not run during replay")
+
+    async def fake_parse(instruction: str):
+        return ("「搜尋」文字", 0, 0, [], None, 0, None)
+
+    detections = _geometry_landmark_scene(include_target=False)
+    _install_find_mouse_point_fakes(monkeypatch, detections, pick=fake_pick)
+    monkeypatch.setattr(smt, "parse_mouse_target_instruction", fake_parse)
+
+    with smt.require_similarity_match():
+        found = await smt.find_mouse_point(
+            "「搜尋」文字",
+            nearby_objects=_GEOMETRY_NEARBY,
+            landmark_geometry=_recorded_input_geometry(),
+        )
+    assert found is None
+
+
+def _recorded_offset_geometry() -> dict:
+    """Constellation for empty-space click near (60,60) with 「字型」 as a landmark."""
+    from src.recorder.landmark_geometry import build_landmark_geometry
+    from src.common.nearby_side import NearbyHint, Side
+
+    vision = {
+        "used_vision": True,
+        "local_cursor": [60, 60],
+        "candidates": [
+            {
+                "bbox": [40, 40, 20, 20],
+                "class_name": "text",
+                "text": "字型",
+                "icons": [],
+            },
+            {
+                "bbox": [0, 0, 20, 20],
+                "class_name": "text",
+                "text": "eee",
+                "icons": [],
+            },
+            {
+                "bbox": [100, 0, 20, 20],
+                "class_name": "text",
+                "text": "晴時多雲",
+                "icons": [],
+            },
+            {
+                "bbox": [0, 100, 20, 20],
+                "class_name": "text",
+                "text": "Ln1",
+                "icons": [],
+            },
+        ],
+    }
+    geom = build_landmark_geometry(
+        vision,
+        [
+            NearbyHint("「字型」文字", None),
+            NearbyHint("「eee」文字", Side.LEFT),
+            NearbyHint("「晴時多雲」文字", Side.RIGHT),
+            NearbyHint("「Ln1」文字", Side.BELOW),
+        ],
+        target_label="「字型」文字右方12個像素、下方49個像素的位置",
+    )
+    assert geom is not None
+    return geom
+
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_replay_replaces_llm_pick_with_constellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Multiple 輸入欄 class matches: constellation picks near synth, not LLM."""
+    from cua_mcp import select_mouse_target as smt
+
+    async def fake_pick(*_a, **_k):
+        raise AssertionError("visual one-pass must not run during replay")
+
+    async def fake_llm(*_a, **_k):
+        raise AssertionError("LLM pick must be replaced by constellation")
+
+    async def fake_parse(instruction: str):
+        return ("輸入欄", 0, 0, [], None, 0, None)
+
+    wrong = _detection_from_bbox((400, 10, 40, 20), YOLO_CLASS_INPUT, text="")
+    right = _detection_from_bbox((52, 52, 20, 20), YOLO_CLASS_INPUT, text="")
+    detections = _geometry_landmark_scene(include_target=False) + [wrong, right]
+    _install_find_mouse_point_fakes(monkeypatch, detections, pick=fake_pick)
+    monkeypatch.setattr(smt, "parse_mouse_target_instruction", fake_parse)
+    monkeypatch.setattr(smt, "_select_center_with_llm", fake_llm)
+    # Keep both class-matched inputs so constellation chooses among them.
+    monkeypatch.setattr(
+        smt,
+        "_prefilter_anchors_by_nearby",
+        lambda anchors, *_a, **_k: list(anchors),
+    )
+
+    with smt.require_similarity_match():
+        found = await smt.find_mouse_point(
+            "輸入欄",
+            nearby_objects=_GEOMETRY_NEARBY,
+            landmark_geometry=_recorded_input_geometry(),
+        )
+    assert found is not None
+    assert found[2]["selection_method"] == "landmark_geometry_pick"
+    assert (found[0], found[1]) == (right.cx, right.cy)
+
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_replay_offset_uses_constellation_not_pixels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cua_mcp import select_mouse_target as smt
+
+    async def fake_pick(*_a, **_k):
+        raise AssertionError("visual one-pass must not run during replay")
+
+    async def fake_parse(instruction: str):
+        # Raw pixel offsets present; constellation must ignore them.
+        return ("「字型」文字", 12, 49, [], None, 0, None)
+
+    detections = [
+        _detection_from_bbox((40, 40, 20, 20), YOLO_CLASS_TEXT, text="字型"),
+        _detection_from_bbox((0, 0, 20, 20), YOLO_CLASS_TEXT, text="eee"),
+        _detection_from_bbox((100, 0, 20, 20), YOLO_CLASS_TEXT, text="晴時多雲"),
+        _detection_from_bbox((0, 100, 20, 20), YOLO_CLASS_TEXT, text="Ln1"),
+    ]
+    _install_find_mouse_point_fakes(monkeypatch, detections, pick=fake_pick)
+    monkeypatch.setattr(smt, "parse_mouse_target_instruction", fake_parse)
+
+    with smt.require_similarity_match():
+        found = await smt.find_mouse_point(
+            "「字型」文字右方12個像素、下方49個像素的位置",
+            nearby_objects=_GEOMETRY_NEARBY,
+            landmark_geometry=_recorded_offset_geometry(),
+        )
+    assert found is not None
+    assert found[2]["selection_method"] == "landmark_geometry_synth"
+    # Synthesized click (~60,60), not text center + raw pixels (50+12, 50+49).
+    assert abs(found[0] - 60) <= 2
+    assert abs(found[1] - 60) <= 2
+    assert found[2]["relative_offset"] == {"dx": 0, "dy": 0}

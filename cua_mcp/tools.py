@@ -192,6 +192,7 @@ async def move_mouse(
     instruction: str,
     nearby_objects: list[str] | None = None,
     click_window: dict | None = None,
+    landmark_geometry: dict | None = None,
 ):
     '''
     Take a screenshot, detect UI targets (text, element, input, scrollbar), and move
@@ -211,6 +212,8 @@ async def move_mouse(
     （附近有…） comments inside instruction.
     click_window: optional press-time window payload from recording (local rect) used
     to gate OCR/enhance to that window during replay.
+    landmark_geometry: optional recorded scale-normalized constellation (landmark↔landmark
+    and landmark→target vectors) used during cache replay when the anchor is missing.
     '''
     duration: float = 0.0
     result = await _move_mouse(
@@ -218,6 +221,7 @@ async def move_mouse(
         nearby_objects=nearby_objects,
         duration=duration,
         click_window=click_window,
+        landmark_geometry=landmark_geometry,
     )
     result["instruction"] = instruction
     return result

@@ -261,7 +261,7 @@ async def test_find_mouse_point_stage_a_on_similarity_miss(
         text="設定",
     )
 
-    async def fake_parse(instruction: str):
+    def fake_parse(instruction: str):
         return ("面板詢定", 0, 0, [], None, 0, None)
 
     async def fake_pick(instruction, candidates, image_paths):
@@ -328,7 +328,7 @@ async def test_find_mouse_point_replay_skips_visual_fallback_on_similarity_miss(
         text="view",
     )
 
-    async def fake_parse(instruction: str):
+    def fake_parse(instruction: str):
         return ("「檢視」文字", 0, 0, [], None, 0, None)
 
     async def fake_pick(*_a, **_k):
@@ -371,7 +371,7 @@ async def test_find_mouse_point_stage_b_when_no_detections(
 ) -> None:
     from cua_mcp import select_mouse_target as smt
 
-    async def fake_parse(instruction: str):
+    def fake_parse(instruction: str):
         return ("保管人", 2, 3, [], None, 0, None)
 
     async def fake_roi(*_a, **_k):

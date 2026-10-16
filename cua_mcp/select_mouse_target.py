@@ -742,7 +742,7 @@ def _build_move_mouse_timing(
         yolo_phase,
         {"name": "line_refine", "seconds": line_s},
         ocr_phase,
-        {"name": "parse_instruction", "seconds": parse_s, "overlapped": True},
+        {"name": "parse_instruction", "seconds": parse_s, "overlapped": False},
         {"name": select_phase, "seconds": select_s},
     ]
     result: dict[str, Any] = {
@@ -3460,29 +3460,7 @@ async def find_mouse_point(
     vision_plan = _mouse_vision_plan(instruction_text, nearby_objects)
     _log_info(f"move_mouse vision plan {vision_plan.describe()}")
 
-    async def _timed_parse():
-        started = time.perf_counter()
-        result = await parse_mouse_target_instruction(instruction_text)
-        return result, time.perf_counter() - started
-
-    async def _timed_vision():
-        started = time.perf_counter()
-        result = await asyncio.to_thread(
-            _capture_and_detect_mouse_candidates,
-            yolo_conf_threshold,
-            ocr_class_ids=vision_plan.ocr_class_ids,
-            refine_inputs=vision_plan.refine_inputs,
-            click_window=click_window,
-            caption_roi_screen=caption_roi_screen,
-            landmark_geometry=landmark_geometry,
-        )
-        return result, time.perf_counter() - started
-
-    # Parse and vision are independent until filter; overlap LLM wait with capture/YOLO/OCR.
-    (parsed, parse_s), (vision, _vision_wall_s) = await asyncio.gather(
-        _timed_parse(),
-        _timed_vision(),
-    )
+    parse_started = time.perf_counter()
     (
         anchor,
         offset_dx,
@@ -3491,7 +3469,18 @@ async def find_mouse_point(
         char_target,
         char_occurrence,
         track_percent,
-    ) = parsed
+    ) = parse_mouse_target_instruction(instruction_text)
+    parse_s = time.perf_counter() - parse_started
+
+    vision = await asyncio.to_thread(
+        _capture_and_detect_mouse_candidates,
+        yolo_conf_threshold,
+        ocr_class_ids=vision_plan.ocr_class_ids,
+        refine_inputs=vision_plan.refine_inputs,
+        click_window=click_window,
+        caption_roi_screen=caption_roi_screen,
+        landmark_geometry=landmark_geometry,
+    )
     nearby_hints = merge_nearby_hints(nearby_objects, nearby_from_instruction)
     nearby_labels = nearby_hints_to_labels(nearby_hints)
     nearby_phrases = nearby_hints_to_phrases(nearby_hints)

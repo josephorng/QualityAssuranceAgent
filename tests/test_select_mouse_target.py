@@ -809,7 +809,7 @@ async def test_resolve_mouse_point_merges_nearby_objects(monkeypatch: pytest.Mon
 
     captured_nearby: dict[str, list[str]] = {}
 
-    async def fake_parse(instruction: str):
+    def fake_parse(instruction: str):
         assert "資料夾" in instruction
         return "「資料夾」圖示", 0, 0, ["「Chrome」圖示"], None, 0, None
 
@@ -876,25 +876,22 @@ async def test_resolve_mouse_point_merges_nearby_objects(monkeypatch: pytest.Mon
 
 
 @pytest.mark.asyncio
-async def test_find_mouse_point_overlaps_parse_with_capture_detect(
+async def test_find_mouse_point_parses_sync_before_vision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Parse and capture+detect must run concurrently, then merge before filter."""
-    import asyncio
-    import time
-
+    """Regex parse runs sync before vision; timing still records parse_instruction."""
     import numpy as np
 
     from cua_mcp.select_mouse_target import find_mouse_point
 
-    branch_delay_s = 0.08
+    order: list[str] = []
 
-    async def fake_parse(instruction: str):
-        await asyncio.sleep(branch_delay_s)
+    def fake_parse(instruction: str):
+        order.append("parse")
         return "目標", 0, 0, [], None, 0, None
 
     def fake_capture_detect(yolo_conf_threshold: float = 0.25, **_kwargs):
-        time.sleep(branch_delay_s)
+        order.append("vision")
         det = _detection_from_bbox(
             (0, 0, 20, 20),
             YOLO_CLASS_TEXT,
@@ -940,22 +937,20 @@ async def test_find_mouse_point_overlaps_parse_with_capture_detect(
         )(),
     )
 
-    t0 = time.perf_counter()
     found = await find_mouse_point("移到目標")
-    elapsed = time.perf_counter() - t0
 
     assert found is not None
     assert found[0:2] == (10, 10)
-    # Sequential would be ~2 * branch_delay; overlap should finish near one delay.
-    assert elapsed < branch_delay_s * 1.6
+    assert order == ["parse", "vision"]
     timing = found[2].get("timing")
     assert isinstance(timing, dict)
     assert timing["yolo_s"] == 0.02
     assert timing["ocr_s"] == 0.03
     assert timing["capture_s"] == 0.01
     assert isinstance(timing.get("phases"), list)
+    parse_phase = next(p for p in timing["phases"] if p.get("name") == "parse_instruction")
+    assert parse_phase.get("overlapped") is False
     assert any(p.get("name") == "yolo" for p in timing["phases"])
-    assert timing["total_s"] >= timing["capture_s"]
 
 
 @pytest.mark.asyncio
@@ -1013,7 +1008,7 @@ async def test_find_mouse_point_uses_vision_when_caption_hit_misses(
 
     called = {"vision": 0}
 
-    async def fake_parse(_instruction: str):
+    def fake_parse(_instruction: str):
         return "「關閉視窗」圖示", 0, 0, [], None, 0, None
 
     def fake_capture_detect(*_args, **_kwargs):
@@ -3732,7 +3727,7 @@ async def test_resolve_mouse_point_nearby_prefilter_skips_ollama(
     )
     landmark_img = _detection_from_bbox((55, 334, 28, 14), YOLO_CLASS_TEXT, text="圖片")
 
-    async def fake_parse(instruction: str):
+    def fake_parse(instruction: str):
         return "文件", 0, 0, [], None, 0, None
 
     def fake_filter(detections, anchor, nearby):
@@ -3820,7 +3815,7 @@ async def test_resolve_mouse_point_does_not_run_function_describe(
     taskbar = _detection_from_bbox((2550, 1040, 30, 16), YOLO_CLASS_TEXT, text="搜尋")
     other = _detection_from_bbox((100, 100, 30, 16), YOLO_CLASS_TEXT, text="關閉")
 
-    async def fake_parse(instruction: str):
+    def fake_parse(instruction: str):
         return "搜尋欄位", 0, 0, [], None, 0, None
 
     def fake_filter(detections, anchor, nearby):
@@ -3907,7 +3902,7 @@ async def test_resolve_mouse_point_skips_describe_when_unique(
     only = _detection_from_bbox((100, 100, 30, 16), YOLO_CLASS_TEXT, text="唯一按鈕")
     other = _detection_from_bbox((200, 200, 30, 16), YOLO_CLASS_TEXT, text="關閉")
 
-    async def fake_parse(instruction: str):
+    def fake_parse(instruction: str):
         return "唯一按鈕", 0, 0, [], None, 0, None
 
     def fake_filter(detections, anchor, nearby):
@@ -4505,7 +4500,7 @@ async def test_resolve_mouse_point_char_target_uses_span_center(
 
     det = _detection_from_bbox((10, 20, 40, 10), YOLO_CLASS_TEXT, text="搜尋")
 
-    async def fake_parse(instruction: str):
+    def fake_parse(instruction: str):
         assert "搜" in instruction
         return "「搜尋」文字", 0, 0, [], "搜", 0, None
 
@@ -4582,7 +4577,7 @@ async def test_resolve_mouse_point_scrollbar_track_percent(
 
     det = _detection_from_bbox((100, 0, 20, 100), YOLO_CLASS_SCROLLBAR)
 
-    async def fake_parse(instruction: str):
+    def fake_parse(instruction: str):
         assert "60%" in instruction
         return "滾動條", 0, 0, [], None, 0, 60
 
@@ -4644,7 +4639,7 @@ def _install_find_mouse_point_fakes(
 
     from cua_mcp import select_mouse_target as smt
 
-    async def fake_parse(instruction: str):
+    def fake_parse(instruction: str):
         return ("「網格檢視」圖示", 0, 0, [], None, 0, None)
 
     monkeypatch.setattr(smt, "parse_mouse_target_instruction", fake_parse)
@@ -4880,7 +4875,7 @@ async def test_find_mouse_point_replay_geometry_synth_when_target_missing(
     async def fake_pick(*_a, **_k):
         raise AssertionError("visual one-pass must not run during replay")
 
-    async def fake_parse(instruction: str):
+    def fake_parse(instruction: str):
         return ("輸入欄", 0, 0, [], None, 0, None)
 
     detections = _geometry_landmark_scene(include_target=False)
@@ -4908,7 +4903,7 @@ async def test_find_mouse_point_replay_geometry_picks_near_synth(
     async def fake_pick(*_a, **_k):
         raise AssertionError("visual one-pass must not run during replay")
 
-    async def fake_parse(instruction: str):
+    def fake_parse(instruction: str):
         return ("輸入欄", 0, 0, [], None, 0, None)
 
     detections = _geometry_landmark_scene(include_target=False)
@@ -4948,7 +4943,7 @@ async def test_find_mouse_point_replay_geometry_synth_when_peers_far(
     async def fake_pick(*_a, **_k):
         raise AssertionError("visual one-pass must not run during replay")
 
-    async def fake_parse(instruction: str):
+    def fake_parse(instruction: str):
         return ("輸入欄", 0, 0, [], None, 0, None)
 
     detections = _geometry_landmark_scene(include_target=False)
@@ -4987,7 +4982,7 @@ async def test_find_mouse_point_replay_text_miss_fails_without_constellation(
     async def fake_pick(*_a, **_k):
         raise AssertionError("visual one-pass must not run during replay")
 
-    async def fake_parse(instruction: str):
+    def fake_parse(instruction: str):
         return ("「搜尋」文字", 0, 0, [], None, 0, None)
 
     detections = _geometry_landmark_scene(include_target=False)
@@ -5065,7 +5060,7 @@ async def test_find_mouse_point_replay_replaces_llm_pick_with_constellation(
     async def fake_llm(*_a, **_k):
         raise AssertionError("LLM pick must be replaced by constellation")
 
-    async def fake_parse(instruction: str):
+    def fake_parse(instruction: str):
         return ("輸入欄", 0, 0, [], None, 0, None)
 
     wrong = _detection_from_bbox((400, 10, 40, 20), YOLO_CLASS_INPUT, text="")
@@ -5101,7 +5096,7 @@ async def test_find_mouse_point_replay_offset_uses_constellation_not_pixels(
     async def fake_pick(*_a, **_k):
         raise AssertionError("visual one-pass must not run during replay")
 
-    async def fake_parse(instruction: str):
+    def fake_parse(instruction: str):
         # Raw pixel offsets present; constellation must ignore them.
         return ("「字型」文字", 12, 49, [], None, 0, None)
 

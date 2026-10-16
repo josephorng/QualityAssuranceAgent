@@ -201,7 +201,14 @@ def build_landmark_geometry(
     scale = _median_pairwise_scale(centers)
 
     landmarks = [
-        {"label": label, "side": side} for label, side, _center in resolved
+        {
+            "label": label,
+            "side": side,
+            # Absolute image-local centers for replay YOLO crop decisions
+            # (crop only when every landmark sits inside the recorded window).
+            "xy": [float(center[0]), float(center[1])],
+        }
+        for label, side, center in resolved
     ]
     landmark_to_landmark: list[dict[str, Any]] = []
     for i, (from_label, _fs, from_xy) in enumerate(resolved):
@@ -228,6 +235,20 @@ def build_landmark_geometry(
     if cleaned_target:
         payload["target_label"] = cleaned_target
     return payload
+
+
+def landmark_geometry_centers(raw: Any) -> list[tuple[float, float]]:
+    """Return absolute image-local landmark centers stored on a geometry payload."""
+    if not isinstance(raw, dict):
+        return []
+    centers: list[tuple[float, float]] = []
+    for item in raw.get("landmarks") or []:
+        if not isinstance(item, dict):
+            continue
+        xy = _as_xy(item.get("xy"))
+        if xy is not None:
+            centers.append(xy)
+    return centers
 
 
 def parse_landmark_geometry(raw: Any) -> dict[str, Any] | None:
@@ -257,12 +278,14 @@ def parse_landmark_geometry(raw: Any) -> dict[str, Any] | None:
         if not label:
             continue
         side = item.get("side")
-        landmarks.append(
-            {
-                "label": label,
-                "side": None if side in (None, "") else str(side),
-            }
-        )
+        row: dict[str, Any] = {
+            "label": label,
+            "side": None if side in (None, "") else str(side),
+        }
+        xy = _as_xy(item.get("xy"))
+        if xy is not None:
+            row["xy"] = [float(xy[0]), float(xy[1])]
+        landmarks.append(row)
     if len(landmarks) < MIN_LANDMARKS_FOR_SYNTH:
         return None
 

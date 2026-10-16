@@ -773,6 +773,37 @@ def _bbox_center_in_ocr_roi(
     return point_in_rect_xywh(x + w * 0.5, y + h * 0.5, ocr_roi, pad=pad)
 
 
+def _point_outside_roi_xywh(
+    x: float,
+    y: float,
+    roi: tuple[int, int, int, int],
+) -> bool:
+    """True when ``(x, y)`` is outside ``roi`` xywh (no pad)."""
+    return not point_in_rect_xywh(x, y, roi, pad=0)
+
+
+def _landmarks_clearly_outside_window(
+    roi: tuple[int, int, int, int] | None,
+    centers: list[tuple[float, float]] | None,
+) -> bool:
+    """True when any recorded landmark center falls outside the window ROI."""
+    if roi is None or not centers:
+        return False
+    return any(_point_outside_roi_xywh(cx, cy, roi) for cx, cy in centers)
+
+
+def _offset_xyxy_rows(xyxy: np.ndarray, ox: int, oy: int) -> np.ndarray:
+    """Translate ``xyxy`` rows by ``(ox, oy)``."""
+    if xyxy.size == 0:
+        return xyxy
+    out = np.asarray(xyxy, dtype=np.float32).copy()
+    out[:, 0] += float(ox)
+    out[:, 1] += float(oy)
+    out[:, 2] += float(ox)
+    out[:, 3] += float(oy)
+    return out
+
+
 @dataclass(frozen=True)
 class _OcrFrameEntry:
     """One OCR box kept until its pixels change or a new read replaces it."""
@@ -1049,6 +1080,7 @@ def _detect_mouse_targets_from_bgr(
     ocr_roi: tuple[int, int, int, int] | None = None,
     ocr_roi_pad: int = DEFAULT_OCR_ROI_PAD,
     ocr_cache_key: int | None = None,
+    yolo_crop_roi: tuple[int, int, int, int] | None = None,
 ) -> list[UiDetection]:
     """Detect mouse-target UI elements on ``bgr`` via YOLO + OCR.
 
@@ -1077,9 +1109,14 @@ def _detect_mouse_targets_from_bgr(
     ``ocr_class_ids`` limits which YOLO classes are OCR'd (default: text +
     element). ``refine_inputs=False`` skips input line-rectangle merge.
 
-    When ``ocr_roi`` is set (same geometry as YOLO ``enhance_roi``), Stage 3/4
-    enhance, input refine, OCR, and candidate admission are limited to boxes
-    whose centers fall in the padded ROI. First YOLO stays full-frame.
+    When ``yolo_crop_roi`` is set, Stage 1–4 YOLO runs on that image crop (no
+    pad) and boxes are translated back to full-image coordinates. When unset,
+    first YOLO stays full-frame and ``ocr_roi`` is passed as ``enhance_roi`` for
+    Stage 3/4 only.
+
+    When ``ocr_roi`` is set, Stage 3/4 enhance (full-frame path), input refine,
+    OCR, and candidate admission are limited to boxes whose centers fall in the
+    padded ROI.
 
     ``ocr_cache_key`` opts this capture into the per-monitor OCR frame cache
     (live ``move_mouse`` only). Entries from outside this capture's ROI stay
@@ -1094,17 +1131,45 @@ def _detect_mouse_targets_from_bgr(
     h, w = bgr.shape[:2]
     vision_started = time.perf_counter()
     yolo_started = time.perf_counter()
+    yolo_crop_origin = (0, 0)
+    yolo_input = bgr
+    enhance_roi = ocr_roi
+    enhance_pad = ocr_roi_pad
+    if yolo_crop_roi is not None:
+        rx, ry, rw, rh = (int(v) for v in yolo_crop_roi)
+        rx2 = max(rx, min(w, rx + max(0, rw)))
+        ry2 = max(ry, min(h, ry + max(0, rh)))
+        rx = max(0, min(rx, w))
+        ry = max(0, min(ry, h))
+        if rx2 > rx and ry2 > ry:
+            yolo_input = bgr[ry:ry2, rx:rx2]
+            yolo_crop_origin = (rx, ry)
+            # Crop is already the window; Stage 3/4 refine the whole crop.
+            enhance_roi = None
+            enhance_pad = 0
+            _log_info(
+                "move_mouse yolo crop "
+                f"roi=({rx}, {ry}, {rx2 - rx}, {ry2 - ry}) "
+                f"full={w}x{h}"
+            )
+        else:
+            _log_info(
+                "move_mouse yolo crop empty; falling back to full-frame "
+                f"roi={tuple(int(v) for v in yolo_crop_roi)}"
+            )
     try:
         xyxy, _scores, class_ids = run_yolo_onnx_end2end(
-            bgr,
+            yolo_input,
             class_ids=set(MOUSE_TARGET_CLASS_IDS),
             conf_threshold=yolo_conf_threshold,
-            enhance_roi=ocr_roi,
-            enhance_roi_pad=ocr_roi_pad,
+            enhance_roi=enhance_roi,
+            enhance_roi_pad=enhance_pad,
         )
     except Exception as exc:
         _log_info(f"move_mouse YOLO failed: {type(exc).__name__}: {exc}")
         raise RuntimeError(f"move_mouse YOLO predict failed: {exc}") from exc
+    if yolo_crop_origin != (0, 0) and xyxy.size != 0:
+        xyxy = _offset_xyxy_rows(xyxy, yolo_crop_origin[0], yolo_crop_origin[1])
     yolo_elapsed = time.perf_counter() - yolo_started
 
     # Keep text vs element separate so dual-stream decode modes stay correct
@@ -1975,6 +2040,7 @@ def _detections_for_captured_monitor(
     refine_inputs: bool = True,
     ocr_roi: tuple[int, int, int, int] | None = None,
     ocr_roi_pad: int = DEFAULT_OCR_ROI_PAD,
+    yolo_crop_roi: tuple[int, int, int, int] | None = None,
 ) -> list[UiDetection]:
     """YOLO+OCR on one monitor image, then map boxes into virtual-desktop coords."""
     left, top = active_monitor_offset(monitor_index)
@@ -1988,6 +2054,7 @@ def _detections_for_captured_monitor(
         ocr_roi=ocr_roi,
         ocr_roi_pad=ocr_roi_pad,
         ocr_cache_key=monitor_index,
+        yolo_crop_roi=yolo_crop_roi,
     )
     return [_offset_detection(d, left, top) for d in local_candidates]
 
@@ -2070,6 +2137,7 @@ def _collect_monitor_detections(
     click_window: dict[str, Any] | None = None,
     ocr_roi_pad: int = DEFAULT_OCR_ROI_PAD,
     caption_roi_screen: tuple[int, int, int, int] | None = None,
+    landmark_centers_image: list[tuple[float, float]] | None = None,
 ) -> list[UiDetection]:
     """
     Run YOLO+OCR on captured monitors.
@@ -2081,8 +2149,13 @@ def _collect_monitor_detections(
     ``ocr_s`` / ``total_s`` (sums across monitors) and records ``ocr_roi`` /
     ``ocr_rois`` when ROI gating was applied.
 
-    When ``click_window`` is set, each monitor resolves its own ``ocr_roi`` via
-    :func:`resolve_ocr_roi_local`, including maximized and near-full-screen windows.
+    When ``click_window`` is set, each monitor resolves an OCR/gate ROI via
+    :func:`resolve_ocr_roi_local` (live match, else recorded rect). Stage 1 YOLO
+    crops only when a **live** match exists
+    (:func:`resolve_live_ocr_roi_local`) and recorded landmark centers (if any)
+    all lie inside the recorded window. Otherwise YOLO stays full-frame with
+    the gate ROI for Stage 3/4 + OCR admission.
+
     ``caption_roi_screen`` replaces that window rect with one caption-button cell
     (screen ``left, top, right, bottom``). Monitors that miss the cell are skipped.
     If the cell misses every image, detection falls back to the window ROI.
@@ -2099,9 +2172,15 @@ def _collect_monitor_detections(
         return []
 
     # Lazy import: avoid cua_mcp ↔ recorder circular import at module load.
-    from src.recorder.window_snapshot import resolve_ocr_roi_local
+    from src.recorder.window_snapshot import (
+        resolve_live_ocr_roi_local,
+        resolve_ocr_roi_local,
+        resolve_recorded_ocr_roi_local,
+    )
 
-    def _window_roi(
+    landmark_centers = list(landmark_centers_image or [])
+
+    def _gate_roi(
         monitor_index: int,
         bgr: np.ndarray,
     ) -> tuple[int, int, int, int] | None:
@@ -2115,7 +2194,37 @@ def _collect_monitor_detections(
             monitor_offset=active_monitor_offset(monitor_index),
         )
 
-    planned: list[tuple[int, np.ndarray, tuple[int, int, int, int] | None]] = []
+    def _yolo_crop_for_window(
+        monitor_index: int,
+        bgr: np.ndarray,
+    ) -> tuple[int, int, int, int] | None:
+        """Live-window crop for Stage 1 YOLO, or None for full-frame."""
+        if click_window is None:
+            return None
+        img_h, img_w = bgr.shape[:2]
+        live_roi = resolve_live_ocr_roi_local(
+            click_window,
+            image_w=img_w,
+            image_h=img_h,
+            monitor_offset=active_monitor_offset(monitor_index),
+        )
+        if live_roi is None:
+            _log_info(
+                "move_mouse yolo full-frame: no live click_window match "
+                f"monitor={monitor_index}"
+            )
+            return None
+        return live_roi
+
+    # (monitor_index, bgr, gate_roi, yolo_crop_roi)
+    planned: list[
+        tuple[
+            int,
+            np.ndarray,
+            tuple[int, int, int, int] | None,
+            tuple[int, int, int, int] | None,
+        ]
+    ] = []
     if caption_roi_screen is not None:
         for monitor_index, bgr in captured:
             img_h, img_w = bgr.shape[:2]
@@ -2125,8 +2234,9 @@ def _collect_monitor_detections(
                 image_h=img_h,
                 monitor_offset=active_monitor_offset(monitor_index),
             )
-            planned.append((monitor_index, bgr, roi))
-        if any(roi is not None for _idx, _bgr, roi in planned):
+            # Caption cell is a live screen ROI — crop YOLO to it.
+            planned.append((monitor_index, bgr, roi, roi))
+        if any(gate is not None for _idx, _bgr, gate, _crop in planned):
             _log_info(
                 "move_mouse caption button roi "
                 f"screen={tuple(int(v) for v in caption_roi_screen)}"
@@ -2139,20 +2249,51 @@ def _collect_monitor_detections(
             planned = []
 
     if not planned:
+        landmarks_outside = False
         for monitor_index, bgr in captured:
-            planned.append((monitor_index, bgr, _window_roi(monitor_index, bgr)))
+            if click_window is None or not landmark_centers:
+                break
+            img_h, img_w = bgr.shape[:2]
+            recorded_roi = resolve_recorded_ocr_roi_local(
+                click_window,
+                image_w=img_w,
+                image_h=img_h,
+                monitor_offset=active_monitor_offset(monitor_index),
+            )
+            if _landmarks_clearly_outside_window(recorded_roi, landmark_centers):
+                landmarks_outside = True
+                _log_info(
+                    "move_mouse yolo full-frame: landmarks outside recorded window "
+                    f"monitor={monitor_index} roi={recorded_roi} "
+                    f"landmarks={len(landmark_centers)}"
+                )
+                break
+        if landmarks_outside:
+            # Need desktop-wide detections; do not gate OCR to the window.
+            planned = [
+                (monitor_index, bgr, None, None) for monitor_index, bgr in captured
+            ]
+        else:
+            for monitor_index, bgr in captured:
+                gate = _gate_roi(monitor_index, bgr)
+                crop = (
+                    _yolo_crop_for_window(monitor_index, bgr)
+                    if gate is not None
+                    else None
+                )
+                planned.append((monitor_index, bgr, gate, crop))
 
-    if any(roi is not None for _idx, _bgr, roi in planned):
-        skipped = [idx for idx, _bgr, roi in planned if roi is None]
+    if any(gate is not None for _idx, _bgr, gate, _crop in planned):
+        skipped = [idx for idx, _bgr, gate, _crop in planned if gate is None]
         planned = [item for item in planned if item[2] is not None]
         if skipped:
             _log_info(
                 "move_mouse skip monitors without ocr_roi "
-                f"skipped={skipped} kept={[idx for idx, _bgr, _roi in planned]}"
+                f"skipped={skipped} kept={[idx for idx, _bgr, _gate, _crop in planned]}"
             )
 
     if len(planned) == 1:
-        monitor_index, bgr, roi = planned[0]
+        monitor_index, bgr, gate, crop = planned[0]
         return _detections_for_captured_monitor(
             monitor_index,
             bgr,
@@ -2160,8 +2301,9 @@ def _collect_monitor_detections(
             timing_out=timing_out,
             ocr_class_ids=ocr_class_ids,
             refine_inputs=refine_inputs,
-            ocr_roi=roi,
+            ocr_roi=gate,
             ocr_roi_pad=ocr_roi_pad,
+            yolo_crop_roi=crop,
         )
 
     all_detections: list[UiDetection] = []
@@ -2171,6 +2313,7 @@ def _collect_monitor_detections(
         monitor_index: int,
         bgr: np.ndarray,
         ocr_roi: tuple[int, int, int, int] | None,
+        yolo_crop_roi: tuple[int, int, int, int] | None,
     ) -> tuple[list[UiDetection], dict[str, Any]]:
         local_timing: dict[str, Any] = {}
         dets = _detections_for_captured_monitor(
@@ -2182,13 +2325,14 @@ def _collect_monitor_detections(
             refine_inputs=refine_inputs,
             ocr_roi=ocr_roi,
             ocr_roi_pad=ocr_roi_pad,
+            yolo_crop_roi=yolo_crop_roi,
         )
         return dets, local_timing
 
     with ThreadPoolExecutor(max_workers=len(planned)) as pool:
         futures = [
-            pool.submit(_detect_one, monitor_index, bgr, roi)
-            for monitor_index, bgr, roi in planned
+            pool.submit(_detect_one, monitor_index, bgr, gate, crop)
+            for monitor_index, bgr, gate, crop in planned
         ]
         for future in futures:
             dets, local_timing = future.result()
@@ -3115,6 +3259,7 @@ def _capture_and_detect_mouse_candidates(
     refine_inputs: bool = True,
     click_window: dict[str, Any] | None = None,
     caption_roi_screen: tuple[int, int, int, int] | None = None,
+    landmark_geometry: dict[str, Any] | None = None,
 ) -> tuple[
     list[int],
     list[str],
@@ -3160,6 +3305,8 @@ def _capture_and_detect_mouse_candidates(
         captured.append((monitor_index, bgr))
     capture_s = time.perf_counter() - capture_started
 
+    from src.recorder.landmark_geometry import landmark_geometry_centers
+
     vision_timing: dict[str, Any] = {}
     all_detections = _collect_monitor_detections(
         captured,
@@ -3169,6 +3316,7 @@ def _capture_and_detect_mouse_candidates(
         refine_inputs=refine_inputs,
         click_window=click_window,
         caption_roi_screen=caption_roi_screen,
+        landmark_centers_image=landmark_geometry_centers(landmark_geometry),
     )
     detections = _sort_detections_reading_order(all_detections)
     _log_info(f"move_mouse yolo_candidates={len(detections)}")
@@ -3326,6 +3474,7 @@ async def find_mouse_point(
             refine_inputs=vision_plan.refine_inputs,
             click_window=click_window,
             caption_roi_screen=caption_roi_screen,
+            landmark_geometry=landmark_geometry,
         )
         return result, time.perf_counter() - started
 

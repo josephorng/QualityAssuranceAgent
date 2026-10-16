@@ -2406,6 +2406,92 @@ def _clip_xywh_to_image(
     return (x, y, w, h)
 
 
+def _click_window_info(
+    click_window: ClickWindowInfo | dict[str, Any] | None,
+) -> ClickWindowInfo | None:
+    if click_window is None:
+        return None
+    if isinstance(click_window, ClickWindowInfo):
+        return click_window
+    if isinstance(click_window, dict):
+        return ClickWindowInfo.from_dict(click_window)
+    return None
+
+
+def _recorded_click_window_local_xywh(
+    click_window: ClickWindowInfo | dict[str, Any],
+    info: ClickWindowInfo,
+    *,
+    monitor_offset: tuple[int, int],
+) -> RectXywh:
+    """Image-local xywh from the recorded payload only (no live geometry)."""
+    ox, oy = int(monitor_offset[0]), int(monitor_offset[1])
+    # Recorded payload may already be image-local (``rect``) with offset (0,0),
+    # or screen-space left/top when rebuilt without going through to_local_payload.
+    if isinstance(click_window, dict) and isinstance(click_window.get("rect"), (list, tuple)):
+        return info.screen_rect()
+    return (
+        int(info.left) - ox,
+        int(info.top) - oy,
+        int(info.width),
+        int(info.height),
+    )
+
+
+def resolve_recorded_ocr_roi_local(
+    click_window: ClickWindowInfo | dict[str, Any] | None,
+    *,
+    image_w: int,
+    image_h: int,
+    monitor_offset: tuple[int, int] = (0, 0),
+) -> RectXywh | None:
+    """Image-local xywh from the recorded ``click_window`` only (never live).
+
+    Used to decide whether recorded landmark centers sit outside the window
+    before cropping live YOLO. Returns ``None`` when missing or no image overlap.
+    """
+    if click_window is None or image_w <= 0 or image_h <= 0:
+        return None
+    info = _click_window_info(click_window)
+    if info is None:
+        return None
+    local = _recorded_click_window_local_xywh(
+        click_window, info, monitor_offset=monitor_offset
+    )
+    return _clip_xywh_to_image(local, image_w=image_w, image_h=image_h)
+
+
+def resolve_live_ocr_roi_local(
+    click_window: ClickWindowInfo | dict[str, Any] | None,
+    *,
+    image_w: int,
+    image_h: int,
+    monitor_offset: tuple[int, int] = (0, 0),
+) -> RectXywh | None:
+    """Image-local xywh from a live window match only (never the recorded rect).
+
+    Returns ``None`` when ``click_window`` is missing, no live match exists, or
+    the live window does not intersect the image. Callers that must not YOLO a
+    stale recorded rect should use this instead of :func:`resolve_ocr_roi_local`.
+    """
+    if click_window is None or image_w <= 0 or image_h <= 0:
+        return None
+    info = _click_window_info(click_window)
+    if info is None:
+        return None
+    live = find_matching_click_window(info)
+    if live is None:
+        return None
+    ox, oy = int(monitor_offset[0]), int(monitor_offset[1])
+    local = (
+        int(live.left) - ox,
+        int(live.top) - oy,
+        int(live.width),
+        int(live.height),
+    )
+    return _clip_xywh_to_image(local, image_w=image_w, image_h=image_h)
+
+
 def resolve_ocr_roi_local(
     click_window: ClickWindowInfo | dict[str, Any] | None,
     *,
@@ -2423,11 +2509,7 @@ def resolve_ocr_roi_local(
     if click_window is None or image_w <= 0 or image_h <= 0:
         return None
 
-    info = (
-        click_window
-        if isinstance(click_window, ClickWindowInfo)
-        else ClickWindowInfo.from_dict(click_window)
-    )
+    info = _click_window_info(click_window)
     if info is None:
         return None
 
@@ -2441,16 +2523,8 @@ def resolve_ocr_roi_local(
             int(live.height),
         )
     else:
-        # Recorded payload may already be image-local (``rect``) with offset (0,0),
-        # or screen-space left/top when rebuilt without going through to_local_payload.
-        if isinstance(click_window, dict) and isinstance(click_window.get("rect"), (list, tuple)):
-            local = info.screen_rect()
-        else:
-            local = (
-                int(info.left) - ox,
-                int(info.top) - oy,
-                int(info.width),
-                int(info.height),
-            )
+        local = _recorded_click_window_local_xywh(
+            click_window, info, monitor_offset=monitor_offset
+        )
 
     return _clip_xywh_to_image(local, image_w=image_w, image_h=image_h)

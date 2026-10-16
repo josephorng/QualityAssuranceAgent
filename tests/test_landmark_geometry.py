@@ -49,6 +49,8 @@ def test_build_full_graph_pair_count_and_scale() -> None:
     assert geom is not None
     assert geom["version"] == 1
     assert len(geom["landmarks"]) == 3
+    by_label = {row["label"]: row for row in geom["landmarks"]}
+    assert by_label["「eee」文字"]["xy"] == [10.0, 10.0]
     # Full directed graph: N*(N-1)
     assert len(geom["landmark_to_landmark"]) == 3 * 2
     assert len(geom["landmark_to_target"]) == 3

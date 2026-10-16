@@ -1342,6 +1342,55 @@ def test_resolve_ocr_roi_local_none_on_other_monitor_offset() -> None:
         )
 
 
+def test_resolve_live_ocr_roi_local_requires_live_match() -> None:
+    from src.recorder.window_snapshot import (
+        ClickWindowInfo,
+        resolve_live_ocr_roi_local,
+        resolve_recorded_ocr_roi_local,
+    )
+
+    payload = {
+        "hwnd": 1,
+        "title": "App",
+        "rect": [10, 20, 200, 150],
+        "is_maximized": False,
+    }
+    with patch(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        return_value=None,
+    ):
+        assert (
+            resolve_live_ocr_roi_local(payload, image_w=1000, image_h=800) is None
+        )
+        assert resolve_recorded_ocr_roi_local(payload, image_w=1000, image_h=800) == (
+            10,
+            20,
+            200,
+            150,
+        )
+
+    live = ClickWindowInfo(
+        hwnd=1,
+        title="App",
+        process_name="app.exe",
+        left=100,
+        top=50,
+        width=300,
+        height=200,
+        is_maximized=False,
+    )
+    with patch(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        return_value=live,
+    ):
+        assert resolve_live_ocr_roi_local(payload, image_w=1000, image_h=800) == (
+            100,
+            50,
+            300,
+            200,
+        )
+
+
 def test_click_window_to_local_payload_subtracts_monitor_offset() -> None:
     from src.recorder.window_snapshot import ClickWindowInfo
 

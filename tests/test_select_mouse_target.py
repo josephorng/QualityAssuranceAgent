@@ -4297,6 +4297,203 @@ def test_collect_runs_every_monitor_when_no_roi(
     assert len(detections) == 2
 
 
+def test_collect_crops_yolo_only_with_live_roi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    from cua_mcp.select_mouse_target import _collect_monitor_detections
+    from cua_mcp.select_ui_element import UiDetection
+
+    seen: list[tuple[tuple[int, int, int, int] | None, tuple[int, int, int, int] | None]] = []
+
+    def fake_build(
+        bgr,
+        *,
+        yolo_conf_threshold: float = 0.05,
+        ocr_roi=None,
+        yolo_crop_roi=None,
+        **_kwargs,
+    ):
+        seen.append((ocr_roi, yolo_crop_roi))
+        return [
+            UiDetection(
+                bbox=(0, 0, 1, 1),
+                cx=0,
+                cy=0,
+                class_id=YOLO_CLASS_TEXT,
+                class_name="text",
+                text="t",
+                icons=None,
+            )
+        ]
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._detect_mouse_targets_from_bgr",
+        fake_build,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.active_monitor_offset",
+        lambda _idx: (0, 0),
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.resolve_ocr_roi_local",
+        lambda *_a, **_k: (10, 20, 100, 80),
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.resolve_live_ocr_roi_local",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.resolve_recorded_ocr_roi_local",
+        lambda *_a, **_k: (10, 20, 100, 80),
+    )
+
+    img = np.full((200, 200, 3), 1, dtype=np.uint8)
+    _collect_monitor_detections(
+        [(1, img)],
+        yolo_conf_threshold=0.05,
+        click_window={"hwnd": 7, "rect": [10, 20, 100, 80]},
+    )
+    assert seen == [((10, 20, 100, 80), None)]
+
+    seen.clear()
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.resolve_live_ocr_roi_local",
+        lambda *_a, **_k: (12, 24, 90, 70),
+    )
+    _collect_monitor_detections(
+        [(1, img)],
+        yolo_conf_threshold=0.05,
+        click_window={"hwnd": 7, "rect": [10, 20, 100, 80]},
+    )
+    assert seen == [((10, 20, 100, 80), (12, 24, 90, 70))]
+
+
+def test_collect_full_frame_when_landmarks_outside_recorded_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    from cua_mcp.select_mouse_target import _collect_monitor_detections
+    from cua_mcp.select_ui_element import UiDetection
+
+    seen: list[tuple[tuple[int, int, int, int] | None, tuple[int, int, int, int] | None]] = []
+
+    def fake_build(
+        bgr,
+        *,
+        yolo_conf_threshold: float = 0.05,
+        ocr_roi=None,
+        yolo_crop_roi=None,
+        **_kwargs,
+    ):
+        seen.append((ocr_roi, yolo_crop_roi))
+        return [
+            UiDetection(
+                bbox=(0, 0, 1, 1),
+                cx=0,
+                cy=0,
+                class_id=YOLO_CLASS_TEXT,
+                class_name="text",
+                text="t",
+                icons=None,
+            )
+        ]
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._detect_mouse_targets_from_bgr",
+        fake_build,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.active_monitor_offset",
+        lambda _idx: (0, 0),
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.resolve_ocr_roi_local",
+        lambda *_a, **_k: (10, 20, 100, 80),
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.resolve_live_ocr_roi_local",
+        lambda *_a, **_k: (10, 20, 100, 80),
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.resolve_recorded_ocr_roi_local",
+        lambda *_a, **_k: (10, 20, 100, 80),
+    )
+
+    img = np.full((200, 200, 3), 1, dtype=np.uint8)
+    _collect_monitor_detections(
+        [(1, img)],
+        yolo_conf_threshold=0.05,
+        click_window={"hwnd": 7, "rect": [10, 20, 100, 80]},
+        # Center (150, 150) is outside recorded window.
+        landmark_centers_image=[(150.0, 150.0)],
+    )
+    assert seen == [(None, None)]
+
+
+def test_detect_yolo_crop_roi_runs_on_crop_and_offsets_boxes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    from cua_mcp.select_mouse_target import _detect_mouse_targets_from_bgr
+
+    bgr = np.zeros((100, 200, 3), dtype=np.uint8)
+    yolo_shapes: list[tuple[int, ...]] = []
+
+    def fake_yolo(img, **_kwargs):
+        yolo_shapes.append(img.shape)
+        # Box local to the crop.
+        xyxy = np.asarray([[5, 5, 15, 15]], dtype=np.float32)
+        scores = np.asarray([0.9], dtype=np.float32)
+        class_ids = np.asarray([YOLO_CLASS_TEXT], dtype=np.int32)
+        return xyxy, scores, class_ids
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.run_yolo_onnx_end2end",
+        fake_yolo,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._ocr_boxes_on_bgr",
+        lambda _bgr, boxes, **_k: [["x"] for _ in boxes],
+    )
+    for name in (
+        "merge_yolo_inputs_with_line_rectangles",
+        "_retry_empty_unknown_icon_ocr",
+        "fit_scrollbar_bboxes_to_arrow_controls",
+        "create_scrollbars_from_arrow_pairs",
+        "drop_scrollbars_without_arrow_ends",
+        "merge_overlapping_scrollbars",
+        "relabel_caption_button_detections",
+    ):
+        if name == "merge_yolo_inputs_with_line_rectangles":
+            monkeypatch.setattr(
+                f"cua_mcp.select_mouse_target.{name}",
+                lambda *a, **k: a[1] if len(a) > 1 else [],
+            )
+        elif name == "_retry_empty_unknown_icon_ocr":
+            monkeypatch.setattr(
+                f"cua_mcp.select_mouse_target.{name}",
+                lambda _b, cands: cands,
+            )
+        else:
+            monkeypatch.setattr(
+                f"cua_mcp.select_mouse_target.{name}",
+                lambda cands, **_k: cands,
+            )
+
+    dets = _detect_mouse_targets_from_bgr(
+        bgr,
+        refine_inputs=False,
+        ocr_roi=(50, 10, 40, 30),
+        ocr_roi_pad=0,
+        yolo_crop_roi=(50, 10, 40, 30),
+    )
+    assert yolo_shapes == [(30, 40, 3)]
+    assert len(dets) == 1
+    assert dets[0].bbox[0] >= 50
+    assert dets[0].bbox[1] >= 10
+
+
 @pytest.mark.asyncio
 async def test_resolve_mouse_point_char_target_uses_span_center(
     monkeypatch: pytest.MonkeyPatch,

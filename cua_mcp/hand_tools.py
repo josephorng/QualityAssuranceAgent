@@ -384,13 +384,67 @@ def hold_mouse(
             pyautogui.keyUp(key)
 
 
-def _list_windows_with_titles() -> list[tuple[Any, str]]:
-    out: list[tuple[Any, str]] = []
+# (window_obj, title, process_name)
+WindowCandidate = tuple[Any, str, str | None]
+
+
+def _hwnd_for_window(w: Any) -> int | None:
+    for attr in ("_hWnd", "hWnd", "hwnd"):
+        val = getattr(w, attr, None)
+        if val is None:
+            continue
+        try:
+            hwnd = int(val)
+        except (TypeError, ValueError):
+            continue
+        if hwnd:
+            return hwnd
+    return None
+
+
+def _process_name_for_window(w: Any) -> str | None:
+    from src.recorder.window_snapshot import _pid_for_hwnd, _process_name_for_pid
+
+    hwnd = _hwnd_for_window(w)
+    if hwnd is None:
+        return None
+    name = _process_name_for_pid(_pid_for_hwnd(hwnd))
+    cleaned = (name or "").strip()
+    return cleaned or None
+
+
+def _process_matches(process_name: str | None, needle: str) -> bool:
+    if not needle:
+        return True
+    if not process_name:
+        return False
+    return process_name.strip().lower() == needle.strip().lower()
+
+
+def _filter_by_process(
+    candidates: list[WindowCandidate], process_needle: str
+) -> list[WindowCandidate]:
+    return [row for row in candidates if _process_matches(row[2], process_needle)]
+
+
+def _as_title_pairs(candidates: list[WindowCandidate]) -> list[tuple[Any, str]]:
+    return [(w, title) for w, title, _proc in candidates]
+
+
+def _list_window_candidates() -> list[WindowCandidate]:
+    out: list[WindowCandidate] = []
     for w in gw.getAllWindows():
         title = (w.title or "").strip()
-        if title:
-            out.append((w, title))
+        if not title:
+            continue
+        out.append((w, title, _process_name_for_window(w)))
     return out
+
+
+def _candidate_label(title: str, process_name: str | None) -> str:
+    if process_name:
+        return f"{title} [{process_name}]"
+    return title
 
 
 def _parse_json_object_from_llm(content: str) -> dict[str, Any]:
@@ -407,13 +461,16 @@ def _parse_json_object_from_llm(content: str) -> dict[str, Any]:
 
 async def _llm_pick_window_indices(
     user_query: str,
-    candidates: list[tuple[Any, str]],
+    candidates: list[WindowCandidate],
     instruction: str,
     action: str = "maximize",
 ) -> list[int]:
     if not candidates:
         raise ValueError("no candidate windows to choose from")
-    lines = [f"{i}: {title}" for i, (_, title) in enumerate(candidates)]
+    lines = [
+        f"{i}: {_candidate_label(title, process_name)}"
+        for i, (_w, title, process_name) in enumerate(candidates)
+    ]
     prompt = get_prompt("window_select").format(
         action=action,
         user_query=repr(user_query),
@@ -446,77 +503,157 @@ async def _llm_pick_window_indices(
 
 def _targets_or_no_match(
     needle: str,
-    candidates: list[tuple[Any, str]],
+    candidates: list[WindowCandidate],
     idxs: list[int],
     selection_mode: str,
 ) -> tuple[list[tuple[Any, str]], str]:
     if not idxs:
         raise ValueError(f"no window matched {needle!r}")
-    return [candidates[i] for i in idxs], selection_mode
+    return _as_title_pairs([candidates[i] for i in idxs]), selection_mode
+
+
+async def _select_by_process_fallback(
+    needle: str,
+    process_needle: str,
+    instruction: str,
+    action: str,
+) -> tuple[list[tuple[Any, str]], str]:
+    process_matches = _filter_by_process(_list_window_candidates(), process_needle)
+    if len(process_matches) == 1:
+        return _as_title_pairs(process_matches), "process_unique"
+    if len(process_matches) == 0:
+        raise ValueError(f"no window matched {needle!r}")
+    idxs = await _llm_pick_window_indices(
+        needle,
+        process_matches,
+        instruction=instruction,
+        action=action,
+    )
+    return _targets_or_no_match(
+        needle, process_matches, idxs, "ollama_process_disambiguate"
+    )
 
 
 async def _select_target_windows(
     window_title_contains: str,
     instruction: str,
     action: str,
+    process_name: str = "",
 ) -> tuple[list[tuple[Any, str]], str]:
     """
     Return windows to act on and how they were chosen.
 
-    Single substring match -> no LLM. Zero or multiple substring matches ->
-    LLM returns indices into the relevant candidate list. An empty selection
-    fails the tool instead of acting on a guessed window.
+    Title substring first. Optional process_name narrows many title matches or
+    falls back when title matches none. Unique match skips the LLM; empty LLM
+    pick fails instead of acting on a guessed window.
     """
     needle = (window_title_contains or "").strip()
     if not needle:
         raise ValueError("window_title_contains must be a non-empty string")
+    process_needle = (process_name or "").strip()
 
     nlow = needle.lower()
-    substring_matches: list[tuple[Any, str]] = []
+    substring_matches: list[WindowCandidate] = []
     for w in gw.getAllWindows():
         title = (w.title or "").strip()
         if (not title or nlow not in title.lower()) and nlow != "all":
             continue
-        substring_matches.append((w, title))
+        substring_matches.append((w, title, _process_name_for_window(w)))
 
     if len(substring_matches) == 1:
-        return [substring_matches[0]], "substring_unique"
-    if len(substring_matches) == 0:
-        candidates = _list_windows_with_titles()
-        if not candidates:
-            raise ValueError("no windows with non-empty titles found")
+        return _as_title_pairs(substring_matches), "substring_unique"
+
+    if len(substring_matches) > 1:
+        if process_needle:
+            narrowed = _filter_by_process(substring_matches, process_needle)
+            if len(narrowed) == 1:
+                return _as_title_pairs(narrowed), "substring_process_unique"
+            if len(narrowed) > 1:
+                idxs = await _llm_pick_window_indices(
+                    needle,
+                    narrowed,
+                    instruction=instruction,
+                    action=action,
+                )
+                return _targets_or_no_match(
+                    needle, narrowed, idxs, "ollama_disambiguate"
+                )
+            # Title matches existed but none shared process_name → process-only.
+            return await _select_by_process_fallback(
+                needle, process_needle, instruction, action
+            )
         idxs = await _llm_pick_window_indices(
             needle,
-            candidates,
+            substring_matches,
             instruction=instruction,
             action=action,
         )
         return _targets_or_no_match(
-            needle, candidates, idxs, "ollama_no_substring_match"
+            needle, substring_matches, idxs, "ollama_disambiguate"
         )
+
+    # Zero title matches.
+    if process_needle:
+        return await _select_by_process_fallback(
+            needle, process_needle, instruction, action
+        )
+    candidates = _list_window_candidates()
+    if not candidates:
+        raise ValueError("no windows with non-empty titles found")
     idxs = await _llm_pick_window_indices(
         needle,
-        substring_matches,
+        candidates,
         instruction=instruction,
         action=action,
     )
     return _targets_or_no_match(
-        needle, substring_matches, idxs, "ollama_disambiguate"
+        needle, candidates, idxs, "ollama_no_substring_match"
     )
+
+
+def _window_tool_result_base(
+    *,
+    needle: str,
+    selection_mode: str,
+    targets: list[tuple[Any, str]],
+    target_rows: list[dict[str, Any]],
+    succeeded: int,
+    failed: int,
+    instruction: str,
+    process_name: str,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "window_title_contains": needle,
+        "selection_mode": selection_mode,
+        "matched_count": len(targets),
+        "succeeded_count": succeeded,
+        "failed_count": failed,
+        "targets": target_rows,
+        "status": "success" if failed == 0 else "partial_success",
+    }
+    if extra:
+        out.update(extra)
+    proc = (process_name or "").strip()
+    if proc:
+        out["process_name"] = proc
+    if (instruction or "").strip():
+        out["instruction"] = instruction.strip()
+    return out
 
 
 async def maximize_windows(
     window_title_contains: str,
     instruction: str = "",
+    process_name: str = "",
 ) -> dict[str, Any]:
     """
     Bring one or more top-level windows to the foreground and maximize them.
 
     First tries case-insensitive substring match on window titles. If exactly one
-    window matches, it is used. If none or several match, asks the LLM (brain_lm)
-    to pick indices from the relevant candidate list. An empty selection raises
-    instead of acting on a guessed window. For those LLM calls, ``instruction``
-    (if non-empty) is included in the prompt as extra disambiguation context.
+    window matches, it is used. If none or several match, optional ``process_name``
+    narrows or falls back; otherwise asks the LLM (brain_lm) to pick indices.
+    An empty selection raises instead of acting on a guessed window.
     """
     needle = (window_title_contains or "").strip()
     if not needle:
@@ -526,6 +663,7 @@ async def maximize_windows(
         window_title_contains,
         instruction,
         action="maximize",
+        process_name=process_name,
     )
 
     target_rows: list[dict[str, Any]] = []
@@ -552,31 +690,30 @@ async def maximize_windows(
                 }
             )
 
-    out: dict[str, Any] = {
-        "window_title_contains": needle,
-        "selection_mode": selection_mode,
-        "matched_count": len(targets),
-        "succeeded_count": succeeded,
-        "failed_count": failed,
-        "targets": target_rows,
-        "status": "success" if failed == 0 else "partial_success",
-    }
-    if (instruction or "").strip():
-        out["instruction"] = instruction.strip()
-    return out
+    return _window_tool_result_base(
+        needle=needle,
+        selection_mode=selection_mode,
+        targets=targets,
+        target_rows=target_rows,
+        succeeded=succeeded,
+        failed=failed,
+        instruction=instruction,
+        process_name=process_name,
+    )
 
 
 async def close_windows(
     window_title_contains: str,
     instruction: str = "",
+    process_name: str = "",
 ) -> dict[str, Any]:
     """
     Close one or more top-level windows whose titles best match the query.
 
     First tries case-insensitive substring match on window titles. If exactly one
-    window matches, it is used. If none or several match, asks the LLM (brain_lm)
-    to pick indices from the relevant candidate list. An empty selection raises
-    instead of closing a guessed window.
+    window matches, it is used. If none or several match, optional ``process_name``
+    narrows or falls back; otherwise asks the LLM (brain_lm) to pick indices.
+    An empty selection raises instead of closing a guessed window.
     """
     needle = (window_title_contains or "").strip()
     if not needle:
@@ -586,6 +723,7 @@ async def close_windows(
         window_title_contains,
         instruction,
         action="close",
+        process_name=process_name,
     )
 
     target_rows: list[dict[str, Any]] = []
@@ -612,23 +750,22 @@ async def close_windows(
                 }
             )
 
-    out: dict[str, Any] = {
-        "window_title_contains": needle,
-        "selection_mode": selection_mode,
-        "matched_count": len(targets),
-        "succeeded_count": succeeded,
-        "failed_count": failed,
-        "targets": target_rows,
-        "status": "success" if failed == 0 else "partial_success",
-    }
-    if (instruction or "").strip():
-        out["instruction"] = instruction.strip()
-    return out
+    return _window_tool_result_base(
+        needle=needle,
+        selection_mode=selection_mode,
+        targets=targets,
+        target_rows=target_rows,
+        succeeded=succeeded,
+        failed=failed,
+        instruction=instruction,
+        process_name=process_name,
+    )
 
 
 async def minimize_windows(
     window_title_contains: str,
     instruction: str = "",
+    process_name: str = "",
 ) -> dict[str, Any]:
     """
     Minimize one or more top-level windows selected like maximize/close.
@@ -643,6 +780,7 @@ async def minimize_windows(
         window_title_contains,
         instruction,
         action="minimize",
+        process_name=process_name,
     )
 
     target_rows: list[dict[str, Any]] = []
@@ -672,19 +810,17 @@ async def minimize_windows(
                 }
             )
 
-    out: dict[str, Any] = {
-        "window_title_contains": needle,
-        "selection_mode": selection_mode,
-        "matched_count": len(targets),
-        "succeeded_count": succeeded,
-        "failed_count": failed,
-        "already_minimized_count": already_minimized,
-        "targets": target_rows,
-        "status": "success" if failed == 0 else "partial_success",
-    }
-    if (instruction or "").strip():
-        out["instruction"] = instruction.strip()
-    return out
+    return _window_tool_result_base(
+        needle=needle,
+        selection_mode=selection_mode,
+        targets=targets,
+        target_rows=target_rows,
+        succeeded=succeeded,
+        failed=failed,
+        instruction=instruction,
+        process_name=process_name,
+        extra={"already_minimized_count": already_minimized},
+    )
 
 
 def zoom_scroll(scroll_clicks: int, x: int | None = None, y: int | None = None) -> dict[str, Any]:

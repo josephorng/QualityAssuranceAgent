@@ -370,6 +370,52 @@ def test_collect_recording_window_verifies_skips_unchecked(tmp_path: Path) -> No
     ]
 
 
+def test_collect_recording_window_verifies_drops_click_window_for_chrome_tools(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "rec"
+    events = run_dir / "events"
+    analysis = run_dir / "analysis"
+    events.mkdir(parents=True)
+    analysis.mkdir(parents=True)
+    (events / "event_001.json").write_text(
+        json.dumps({"index": 1, "timestamp_utc": "t", "kind": "click"}),
+        encoding="utf-8",
+    )
+    (analysis / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": "最大化「記事本」視窗",
+                "window_change": {
+                    "action": "maximize",
+                    "title": "記事本",
+                    "confidence": "high",
+                },
+                "tool_calls": [
+                    {
+                        "name": "maximize_windows",
+                        "arguments": {
+                            "window_title_contains": "記事本",
+                            "process_name": "Notepad.exe",
+                        },
+                    }
+                ],
+                "window_verify": {
+                    "click_window": {
+                        "class_name": "Notepad",
+                        "title": "記事本",
+                        "process_name": "Notepad.exe",
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    assert collect_recording_window_verifies(run_dir) == [{}]
+
+
 def test_collect_recording_window_verifies_drops_unrelated_focused_value(tmp_path: Path) -> None:
     run_dir = tmp_path / "rec_focus"
     (run_dir / "events").mkdir(parents=True)

@@ -130,8 +130,75 @@ def _compile_wait(event: RecordedEvent, instruction: str) -> list[dict[str, Any]
     return [_call("wait", seconds=seconds, instruction=instruction)]
 
 
+def _title_matches_process_lookup(entry_title: str, target_title: str) -> bool:
+    left = (entry_title or "").strip()
+    right = (target_title or "").strip()
+    if not left or not right:
+        return False
+    return left == right or left in right or right in left
+
+
+def _process_name_from_window_rows(
+    rows: Any, title: str
+) -> str | None:
+    if not isinstance(rows, list):
+        return None
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        if not _title_matches_process_lookup(str(item.get("title") or ""), title):
+            continue
+        process = str(item.get("process_name") or "").strip()
+        if process:
+            return process
+    return None
+
+
+def _resolve_process_name_for_window_change(
+    event: RecordedEvent,
+    title: str,
+    change: dict[str, Any],
+    analysis: dict[str, Any] | None = None,
+) -> str | None:
+    """Prefer window_change.process_name; else click_window / verify / snapshot."""
+    direct = str(change.get("process_name") or "").strip()
+    if direct:
+        return direct
+
+    click_window = event.click_window if isinstance(event.click_window, dict) else None
+    if click_window is not None:
+        click_title = str(click_window.get("title") or "").strip()
+        click_process = str(click_window.get("process_name") or "").strip()
+        if click_process and (
+            not click_title or _title_matches_process_lookup(click_title, title)
+        ):
+            return click_process
+
+    if isinstance(analysis, dict):
+        verify = analysis.get("window_verify")
+        if isinstance(verify, dict):
+            for key in ("disappeared", "state", "appeared"):
+                found = _process_name_from_window_rows(verify.get(key), title)
+                if found:
+                    return found
+
+    debug = (
+        event.window_snapshot_debug
+        if isinstance(event.window_snapshot_debug, dict)
+        else None
+    )
+    if debug is not None:
+        for key in ("windows_before", "windows_after"):
+            found = _process_name_from_window_rows(debug.get(key), title)
+            if found:
+                return found
+    return None
+
+
 def _compile_window_change(
-    event: RecordedEvent, instruction: str
+    event: RecordedEvent,
+    instruction: str,
+    analysis: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]] | None:
     change = event.window_change if isinstance(event.window_change, dict) else {}
     action = str(change.get("action") or "").strip()
@@ -153,13 +220,16 @@ def _compile_window_change(
     tool = tool_by_action.get(action)
     if tool is None:
         return None
-    return [
-        _call(
-            tool,
-            window_title_contains=title,
-            instruction=instruction,
-        )
-    ]
+    args: dict[str, Any] = {
+        "window_title_contains": title,
+        "instruction": instruction,
+    }
+    process_name = _resolve_process_name_for_window_change(
+        event, title, change, analysis
+    )
+    if process_name:
+        args["process_name"] = process_name
+    return [_call(tool, **args)]
 
 
 def _effective_left_click_count(kind: str, click_count: int | None) -> int | None:
@@ -437,7 +507,7 @@ def compile_tool_calls(
             and not should_ignore_window_change(event.window_change)
         ):
             if action != "close" or event.window_change.get("from_title_bar_close"):
-                compiled = _compile_window_change(event, goal)
+                compiled = _compile_window_change(event, goal, analysis)
                 if compiled is not None:
                     return _validated(compiled)
 
@@ -457,13 +527,13 @@ def compile_tool_calls(
     elif kind in _CLICK_POINTER_KINDS:
         # Instruction-shaped window actions (manual edits / added events).
         if _WINDOW_INSTRUCTION_RE.match(goal):
-            compiled = _compile_window_change(event, goal)
+            compiled = _compile_window_change(event, goal, analysis)
         else:
             compiled = _compile_click_family(
                 event, goal, vision=resolved_vision
             )
     elif _WINDOW_INSTRUCTION_RE.match(goal):
-        compiled = _compile_window_change(event, goal)
+        compiled = _compile_window_change(event, goal, analysis)
     elif _WAIT_INSTRUCTION_RE.match(goal):
         compiled = _compile_wait(event, goal)
     else:

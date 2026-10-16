@@ -584,6 +584,57 @@ def test_diff_global_restore_skips_when_ambiguous() -> None:
     assert result.debug["detection_path"] is None
 
 
+def test_window_state_change_to_dict_includes_process_name() -> None:
+    change = WindowStateChange(
+        action="maximize",
+        title="記事本",
+        confidence="high",
+        process_name="Notepad.exe",
+    )
+    assert change.to_dict() == {
+        "action": "maximize",
+        "title": "記事本",
+        "confidence": "high",
+        "process_name": "Notepad.exe",
+    }
+    assert "process_name" not in WindowStateChange(
+        action="maximize", title="記事本", confidence="high"
+    ).to_dict()
+
+
+def test_diff_maximize_carries_process_name_from_window() -> None:
+    before = [
+        _win(
+            1,
+            "記事本",
+            left=100,
+            top=100,
+            width=400,
+            height=300,
+            process_name="Notepad.exe",
+        )
+    ]
+    after = [
+        _win(
+            1,
+            "記事本",
+            left=-8,
+            top=-8,
+            width=1936,
+            height=1048,
+            is_maximized=True,
+            process_name="Notepad.exe",
+        )
+    ]
+    change = diff_snapshots(before, after, click_xy=(200, 120))
+    assert change == WindowStateChange(
+        action="maximize",
+        title="記事本",
+        confidence="high",
+        process_name="Notepad.exe",
+    )
+
+
 def test_instruction_for_high_confidence_window_change() -> None:
     change = WindowStateChange(action="minimize", title="Google Chrome", confidence="high")
     assert instruction_for_window_change(change) == "最小化「Google Chrome」視窗"
@@ -2438,6 +2489,64 @@ def test_window_verify_ignores_legacy_click_window_matching_disappeared() -> Non
     )
     assert ok is True
     assert reason == ""
+
+
+def test_window_verify_omits_click_window_when_it_matches_state() -> None:
+    """Maximize/minimize: press-time window is the one that changed state."""
+    from src.recorder.window_snapshot import omit_foreground_when_structural
+
+    notepad_id = {
+        "class_name": "Notepad",
+        "title": "記事本",
+        "process_name": "Notepad.exe",
+    }
+    predicate = omit_foreground_when_structural(
+        {
+            "state": [{**notepad_id, "change": "maximized"}],
+            "click_window": notepad_id,
+        }
+    )
+    assert "click_window" not in predicate
+    assert predicate["state"][0]["change"] == "maximized"
+
+
+def test_omit_click_window_for_chrome_tools() -> None:
+    from src.recorder.window_snapshot import (
+        analysis_uses_chrome_window_tool,
+        omit_click_window_for_chrome_tools,
+    )
+
+    assert analysis_uses_chrome_window_tool(
+        {
+            "tool_calls": [
+                {
+                    "name": "maximize_windows",
+                    "arguments": {"window_title_contains": "記事本"},
+                }
+            ]
+        }
+    )
+    assert analysis_uses_chrome_window_tool(
+        {
+            "window_change": {
+                "action": "close",
+                "title": "記事本",
+                "from_title_bar_close": True,
+            }
+        }
+    )
+    assert not analysis_uses_chrome_window_tool(
+        {"window_change": {"action": "close", "title": "記事本"}}
+    )
+    assert omit_click_window_for_chrome_tools(
+        {
+            "click_window": {
+                "class_name": "Notepad",
+                "title": "記事本",
+                "process_name": "Notepad.exe",
+            }
+        }
+    ) == {}
 
 
 def test_replay_click_window_uses_press_time_window_not_the_settled_cursor(

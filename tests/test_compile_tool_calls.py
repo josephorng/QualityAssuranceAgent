@@ -135,6 +135,7 @@ def test_compile_window_maximize() -> None:
             "action": "maximize",
             "title": "記事本",
             "confidence": "high",
+            "process_name": "Notepad.exe",
         },
     )
     instruction = "最大化「記事本」視窗"
@@ -145,9 +146,81 @@ def test_compile_window_maximize() -> None:
             "arguments": {
                 "window_title_contains": "記事本",
                 "instruction": instruction,
+                "process_name": "Notepad.exe",
             },
         }
     ]
+
+
+def test_compile_window_close_emits_process_name_from_window_change() -> None:
+    event = _event(
+        kind="click",
+        window_change={
+            "action": "close",
+            "title": "未命名 - 記事本",
+            "confidence": "high",
+            "from_title_bar_close": True,
+            "process_name": "Notepad.exe",
+        },
+    )
+    instruction = "關閉「未命名 - 記事本」視窗"
+    calls = compile_tool_calls(event, instruction)
+    assert calls == [
+        {
+            "name": "close_windows",
+            "arguments": {
+                "window_title_contains": "未命名 - 記事本",
+                "instruction": instruction,
+                "process_name": "Notepad.exe",
+            },
+        }
+    ]
+
+
+def test_compile_window_maximize_legacy_process_from_snapshot() -> None:
+    """Older analyses omit window_change.process_name; use windows_before."""
+    event = _event(
+        kind="click",
+        window_change={
+            "action": "maximize",
+            "title": "資料日期_20260821.json - 記事本",
+            "confidence": "high",
+        },
+        window_snapshot_debug={
+            "windows_before": [
+                {
+                    "title": "資料日期_20260821.json - 記事本",
+                    "process_name": "Notepad.exe",
+                    "class_name": "Notepad",
+                }
+            ]
+        },
+    )
+    instruction = "最大化「資料日期_20260821.json - 記事本」視窗"
+    calls = compile_tool_calls(event, instruction)
+    assert calls is not None
+    assert calls[0]["name"] == "maximize_windows"
+    assert calls[0]["arguments"]["process_name"] == "Notepad.exe"
+
+
+def test_compile_window_maximize_legacy_process_from_click_window() -> None:
+    event = _event(
+        kind="click",
+        window_change={
+            "action": "maximize",
+            "title": "記事本",
+            "confidence": "high",
+        },
+        click_window={
+            "title": "記事本",
+            "process_name": "Notepad.exe",
+            "class_name": "Notepad",
+        },
+    )
+    instruction = "最大化「記事本」視窗"
+    calls = compile_tool_calls(event, instruction)
+    assert calls is not None
+    assert calls[0]["arguments"]["process_name"] == "Notepad.exe"
 
 
 def test_compile_flyout_close_falls_through_to_click() -> None:

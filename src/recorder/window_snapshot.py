@@ -215,6 +215,7 @@ class WindowStateChange:
     confidence: str
     # Only set for close: True when click hit the title-bar caption button strip.
     from_title_bar_close: bool | None = None
+    process_name: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -224,7 +225,28 @@ class WindowStateChange:
         }
         if self.from_title_bar_close is not None:
             data["from_title_bar_close"] = self.from_title_bar_close
+        if self.process_name:
+            data["process_name"] = self.process_name
         return data
+
+
+def _state_change(
+    action: str,
+    win: WindowInfo,
+    *,
+    confidence: str,
+    title: str | None = None,
+    from_title_bar_close: bool | None = None,
+) -> WindowStateChange:
+    resolved_title = title if title is not None else (win.title or f"hwnd:{win.hwnd}")
+    process = (win.process_name or "").strip() or None
+    return WindowStateChange(
+        action=action,
+        title=resolved_title,
+        confidence=confidence,
+        from_title_bar_close=from_title_bar_close,
+        process_name=process,
+    )
 
 
 @dataclass(frozen=True)
@@ -859,11 +881,10 @@ def _looks_maximized(before: WindowInfo, after: WindowInfo) -> bool:
 
 
 def _minimize_change(before_win: WindowInfo, after_win: WindowInfo) -> WindowStateChange | None:
-    title = before_win.title or f"hwnd:{before_win.hwnd}"
     if not before_win.is_minimized and after_win.is_minimized:
-        return WindowStateChange(action="minimize", title=title, confidence="high")
+        return _state_change("minimize", before_win, confidence="high")
     if not _has_minimized_rect(before_win) and _has_minimized_rect(after_win):
-        return WindowStateChange(action="minimize", title=title, confidence="medium")
+        return _state_change("minimize", before_win, confidence="medium")
     before_area = before_win.area()
     after_area = after_win.area()
     if (
@@ -871,20 +892,19 @@ def _minimize_change(before_win: WindowInfo, after_win: WindowInfo) -> WindowSta
         and after_area > 0
         and after_area < before_area * _MINIMIZE_AREA_SHRINK_RATIO
     ):
-        return WindowStateChange(action="minimize", title=title, confidence="medium")
+        return _state_change("minimize", before_win, confidence="medium")
     return None
 
 
 def _restore_change(before_win: WindowInfo, after_win: WindowInfo) -> WindowStateChange | None:
     """Detect unminimize (including taskbar restore) or restore-from-maximize."""
-    title = before_win.title or f"hwnd:{before_win.hwnd}"
     if after_win.is_minimized or _has_minimized_rect(after_win):
         return None
 
     was_minimized = before_win.is_minimized or _has_minimized_rect(before_win)
     if was_minimized and before_win.area() < after_win.area():
         confidence = "high" if before_win.is_minimized else "medium"
-        return WindowStateChange(action="restored", title=title, confidence=confidence)
+        return _state_change("restored", before_win, confidence=confidence)
 
     # Maximized → normal (same growth check as the previous target-path logic).
     if (
@@ -892,7 +912,7 @@ def _restore_change(before_win: WindowInfo, after_win: WindowInfo) -> WindowStat
         and not after_win.is_maximized
         and before_win.area() < after_win.area()
     ):
-        return WindowStateChange(action="restored", title=title, confidence="medium")
+        return _state_change("restored", before_win, confidence="medium")
 
     return None
 
@@ -920,10 +940,11 @@ def _classify_target_change(
             title=before_win.title or "",
         ):
             return None
-        return WindowStateChange(
-            action="close",
-            title=title,
+        return _state_change(
+            "close",
+            before_win,
             confidence="high",
+            title=title,
             from_title_bar_close=_from_title_bar_close(click_xy, before_win),
         )
 
@@ -932,7 +953,7 @@ def _classify_target_change(
         return minimize
 
     if _looks_maximized(before_win, after_win):
-        return WindowStateChange(action="maximize", title=title, confidence="high")
+        return _state_change("maximize", before_win, confidence="high", title=title)
 
     restore = _restore_change(before_win, after_win)
     if restore is not None:
@@ -996,9 +1017,9 @@ def _pick_sibling_close(
     before_hwnds = {item.hwnd for item in before}
     if any(item.title.strip() and item.hwnd not in before_hwnds for item in after):
         return None
-    return WindowStateChange(
-        action="close",
-        title=win.title,
+    return _state_change(
+        "close",
+        win,
         confidence="medium",
         from_title_bar_close=_from_title_bar_close(click_xy, win),
     )
@@ -1015,8 +1036,8 @@ def _pick_global_minimize(before: list[WindowInfo], after: list[WindowInfo]) -> 
         if _minimize_change(before_win, after_win) is not None:
             transitions.append(before_win)
     if len(transitions) == 1:
-        title = transitions[0].title or f"hwnd:{transitions[0].hwnd}"
-        return WindowStateChange(action="minimize", title=title, confidence="medium")
+        win = transitions[0]
+        return _state_change("minimize", win, confidence="medium")
     return None
 
 
@@ -1032,8 +1053,8 @@ def _pick_global_restore(before: list[WindowInfo], after: list[WindowInfo]) -> W
         if _restore_change(before_win, after_win) is not None:
             transitions.append(after_win)
     if len(transitions) == 1:
-        title = transitions[0].title or f"hwnd:{transitions[0].hwnd}"
-        return WindowStateChange(action="restored", title=title, confidence="medium")
+        win = transitions[0]
+        return _state_change("restored", win, confidence="medium")
     return None
 
 
@@ -1048,7 +1069,7 @@ def _pick_opened_at_click(
     after_candidates = [w for w in after if w.contains_point(x, y) and w.title]
     for win in after_candidates:
         if _find_match(win, before) is None:
-            return WindowStateChange(action="opened", title=win.title, confidence="medium")
+            return _state_change("opened", win, confidence="medium")
     return None
 
 
@@ -1177,9 +1198,9 @@ def diff_snapshots_with_debug(
                         break
                     debug["detection_path"] = "identity_close"
                     return WindowDiffResult(
-                        change=WindowStateChange(
-                            action="close",
-                            title=win.title,
+                        change=_state_change(
+                            "close",
+                            win,
                             confidence="medium",
                             from_title_bar_close=_from_title_bar_close(click_xy, win),
                         ),
@@ -1193,9 +1214,7 @@ def diff_snapshots_with_debug(
                 if _find_match(win, before) is None:
                     debug["detection_path"] = "identity_opened"
                     return WindowDiffResult(
-                        change=WindowStateChange(
-                            action="opened", title=win.title, confidence="medium"
-                        ),
+                        change=_state_change("opened", win, confidence="medium"),
                         debug=debug,
                     )
                 break
@@ -1394,14 +1413,48 @@ def predicate_has_structural_window_assertions(predicate: dict[str, Any] | None)
     return False
 
 
+_CHROME_WINDOW_TOOLS = frozenset(
+    {"maximize_windows", "minimize_windows", "close_windows"}
+)
+
+
+def analysis_uses_chrome_window_tool(analysis: dict[str, Any] | None) -> bool:
+    """True when the step replays via maximize/minimize/close_windows."""
+    if not isinstance(analysis, dict):
+        return False
+    calls = analysis.get("tool_calls")
+    if isinstance(calls, list):
+        for call in calls:
+            if isinstance(call, dict) and call.get("name") in _CHROME_WINDOW_TOOLS:
+                return True
+    change = analysis.get("window_change")
+    if not isinstance(change, dict):
+        return False
+    action = str(change.get("action") or "").strip()
+    if action in {"maximize", "minimize"}:
+        return True
+    # Title-bar close compiles to close_windows; other closes stay click paths.
+    return action == "close" and bool(change.get("from_title_bar_close"))
+
+
+def omit_click_window_for_chrome_tools(predicate: dict[str, Any]) -> dict[str, Any]:
+    """Drop ``click_window`` — chrome tools have no press-point to compare."""
+    if not isinstance(predicate, dict) or "click_window" not in predicate:
+        return predicate
+    trimmed = dict(predicate)
+    trimmed.pop("click_window", None)
+    return trimmed
+
+
 def omit_foreground_when_structural(predicate: dict[str, Any]) -> dict[str, Any]:
     """Drop incidental signals when appear/disappear/state assert the UI change.
 
     Next-focus after close/open/maximize is session noise. A ``click_window`` that
-    identity-matches a ``disappeared`` entry is also redundant: the close itself
-    is the success signal, and chrome tools (``close_windows``) never produce a
-    press-point window for replay. Older recordings may still store both; replay
-    strips them the same way.
+    identity-matches a ``disappeared`` or chrome ``state`` entry is also
+    redundant: the structural change is the success signal, and chrome tools
+    (``close_windows`` / ``maximize_windows`` / ``minimize_windows``) never
+    produce a press-point window for replay. Older recordings may still store
+    both; replay strips them the same way.
     """
     if not isinstance(predicate, dict):
         return predicate
@@ -1411,14 +1464,21 @@ def omit_foreground_when_structural(predicate: dict[str, Any]) -> dict[str, Any]
         trimmed.pop("foreground", None)
         changed = True
     click = trimmed.get("click_window")
-    disappeared = trimmed.get("disappeared")
-    if isinstance(click, dict) and click and isinstance(disappeared, list):
-        for item in disappeared:
-            # Match with disappeared as recorded so blank class/process on the
-            # structural entry still pairs with a fuller click_window identity.
-            if isinstance(item, dict) and _entries_match(item, click, match_change=False):
-                trimmed.pop("click_window", None)
-                changed = True
+    if isinstance(click, dict) and click:
+        for key in ("disappeared", "state"):
+            rows = trimmed.get(key)
+            if not isinstance(rows, list):
+                continue
+            for item in rows:
+                # Match with structural entry as recorded so blank class/process
+                # still pairs with a fuller click_window identity.
+                if isinstance(item, dict) and _entries_match(
+                    item, click, match_change=False
+                ):
+                    trimmed.pop("click_window", None)
+                    changed = True
+                    break
+            if "click_window" not in trimmed:
                 break
     return trimmed if changed else predicate
 

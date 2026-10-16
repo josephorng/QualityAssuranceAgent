@@ -441,15 +441,18 @@ def zoom(
 async def maximize_windows(
     window_title_contains: str,
     instruction: str = "",
+    process_name: str = "",
 ):
     '''
     Maximize windows matching the title text. Set the window_title_contains
-    to "all" to maximize all windows.
+    to "all" to maximize all windows. Optional process_name (e.g. Notepad.exe)
+    narrows many title matches or falls back when the title is not found.
     '''
     return _with_instruction(
         await _maximize_windows(
             window_title_contains=window_title_contains,
             instruction=instruction,
+            process_name=process_name,
         ),
         instruction,
     )
@@ -459,14 +462,18 @@ async def maximize_windows(
 async def close_windows(
     window_title_contains: str,
     instruction: str = "",
+    process_name: str = "",
 ):
     '''
-    Close windows matching the title text. Set the window_title_contains to "all" to close all windows.
+    Close windows matching the title text. Set the window_title_contains to
+    "all" to close all windows. Optional process_name (e.g. Notepad.exe)
+    narrows many title matches or falls back when the title is not found.
     '''
     return _with_instruction(
         await _close_windows(
             window_title_contains=window_title_contains,
             instruction=instruction,
+            process_name=process_name,
         ),
         instruction,
     )
@@ -476,15 +483,18 @@ async def close_windows(
 async def minimize_windows(
     window_title_contains: str,
     instruction: str = "",
+    process_name: str = "",
 ):
     '''
     Minimize windows matching the title text. Set the window_title_contains
-    to "all" to minimize all windows.
+    to "all" to minimize all windows. Optional process_name (e.g. Notepad.exe)
+    narrows many title matches or falls back when the title is not found.
     '''
     return _with_instruction(
         await _minimize_windows(
             window_title_contains=window_title_contains,
             instruction=instruction,
+            process_name=process_name,
         ),
         instruction,
     )

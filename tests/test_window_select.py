@@ -9,11 +9,13 @@ from cua_mcp import hand_tools
 
 
 class _Window:
-    def __init__(self, title: str) -> None:
+    def __init__(self, title: str, process_name: str | None = None) -> None:
         self.title = title
+        self.process_name = process_name
         self.isMinimized = False
         self.closed = False
         self.minimized = False
+        self.maximized = False
 
     def activate(self) -> None:
         return None
@@ -28,6 +30,9 @@ class _Window:
         self.minimized = True
         self.isMinimized = True
 
+    def maximize(self) -> None:
+        self.maximized = True
+
 
 def _llm(content: str) -> MagicMock:
     client = MagicMock()
@@ -39,6 +44,11 @@ def _install_windows(monkeypatch: pytest.MonkeyPatch, windows: list[_Window]) ->
     monkeypatch.setattr(hand_tools.gw, "getAllWindows", lambda: windows)
     monkeypatch.setattr(
         hand_tools, "load_settings", lambda: SimpleNamespace(brain_lm="test-model")
+    )
+    monkeypatch.setattr(
+        hand_tools,
+        "_process_name_for_window",
+        lambda w: getattr(w, "process_name", None),
     )
 
 
@@ -118,3 +128,91 @@ async def test_close_windows_fails_when_disambiguation_returns_no_match(
 
     assert first.minimized is False
     assert second.minimized is False
+
+
+@pytest.mark.asyncio
+async def test_unique_title_ignores_process_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = _Window("資料日期_20260821.json - 記事本", "Notepad.exe")
+    other = _Window("Git - 檔案總管", "explorer.exe")
+    _install_windows(monkeypatch, [other, target])
+    client = _llm('{"indices": [0]}')
+    monkeypatch.setattr(hand_tools, "get_llm_client", lambda: client)
+
+    result = await hand_tools.maximize_windows(
+        "資料日期_20260821.json - 記事本",
+        process_name="chrome.exe",
+    )
+
+    assert result["status"] == "success"
+    assert result["selection_mode"] == "substring_unique"
+    assert result["process_name"] == "chrome.exe"
+    assert target.maximized is True
+    client.chat_messages.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_process_unique_when_title_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    notepad = _Window("Untitled - Notepad", "Notepad.exe")
+    chrome = _Window("Google Chrome", "chrome.exe")
+    _install_windows(monkeypatch, [chrome, notepad])
+    client = _llm('{"indices": [0]}')
+    monkeypatch.setattr(hand_tools, "get_llm_client", lambda: client)
+
+    result = await hand_tools.close_windows(
+        "資料日期_20260821.json - 記事本",
+        process_name="Notepad.exe",
+    )
+
+    assert result["status"] == "success"
+    assert result["selection_mode"] == "process_unique"
+    assert notepad.closed is True
+    assert chrome.closed is False
+    client.chat_messages.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_substring_process_unique_narrows_many_titles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _Window("Report - Notepad", "Notepad.exe")
+    notes = _Window("Notes - Notepad", "WINWORD.EXE")
+    _install_windows(monkeypatch, [report, notes])
+    client = _llm('{"indices": [1]}')
+    monkeypatch.setattr(hand_tools, "get_llm_client", lambda: client)
+
+    result = await hand_tools.minimize_windows(
+        "Notepad",
+        process_name="notepad.exe",
+    )
+
+    assert result["status"] == "success"
+    assert result["selection_mode"] == "substring_process_unique"
+    assert report.minimized is True
+    assert notes.minimized is False
+    client.chat_messages.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_process_many_empty_llm_pick_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _Window("Report - Notepad", "Notepad.exe")
+    second = _Window("Notes - Notepad", "Notepad.exe")
+    _install_windows(monkeypatch, [first, second])
+    client = _llm('{"indices": []}')
+    monkeypatch.setattr(hand_tools, "get_llm_client", lambda: client)
+
+    with pytest.raises(ValueError, match="no window matched 'missing title'"):
+        await hand_tools.close_windows(
+            "missing title",
+            process_name="Notepad.exe",
+        )
+
+    assert first.closed is False
+    assert second.closed is False
+    prompt = client.chat_messages.await_args.kwargs["messages"][0]["content"]
+    assert "Notepad.exe" in prompt

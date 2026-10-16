@@ -373,24 +373,39 @@ def _zoom(scroll_clicks: int) -> dict[str, Any]:
     return hand_tools.zoom_scroll(scroll_clicks)
 
 
-async def _maximize_windows(window_title_contains: str, instruction: str = "") -> dict[str, Any]:
+async def _maximize_windows(
+    window_title_contains: str,
+    instruction: str = "",
+    process_name: str = "",
+) -> dict[str, Any]:
     return await hand_tools.maximize_windows(
         window_title_contains=window_title_contains,
         instruction=instruction,
+        process_name=process_name,
     )
 
 
-async def _close_windows(window_title_contains: str, instruction: str = "") -> dict[str, Any]:
+async def _close_windows(
+    window_title_contains: str,
+    instruction: str = "",
+    process_name: str = "",
+) -> dict[str, Any]:
     return await hand_tools.close_windows(
         window_title_contains=window_title_contains,
         instruction=instruction,
+        process_name=process_name,
     )
 
 
-async def _minimize_windows(window_title_contains: str, instruction: str = "") -> dict[str, Any]:
+async def _minimize_windows(
+    window_title_contains: str,
+    instruction: str = "",
+    process_name: str = "",
+) -> dict[str, Any]:
     return await hand_tools.minimize_windows(
         window_title_contains=window_title_contains,
         instruction=instruction,
+        process_name=process_name,
     )
 
 

@@ -14,7 +14,9 @@ from src.recorder.analyze import (
 from src.recorder.models import RecordedEvent
 from src.recorder.verify_signals import omit_focused_value_unrelated_to_typed_text
 from src.recorder.window_snapshot import (
+    analysis_uses_chrome_window_tool,
     filter_disabled_window_verify,
+    omit_click_window_for_chrome_tools,
     omit_foreground_when_structural,
 )
 
@@ -437,8 +439,11 @@ def collect_recording_window_verifies(run_dir: Path) -> list[dict[str, Any]]:
             active = filter_disabled_window_verify(
                 raw, analysis.get("window_verify_disabled")
             )
+            active = omit_foreground_when_structural(active)
+            if analysis_uses_chrome_window_tool(analysis):
+                active = omit_click_window_for_chrome_tools(active)
             active = omit_focused_value_unrelated_to_typed_text(
-                omit_foreground_when_structural(active),
+                active,
                 _replay_typed_text(analysis),
             )
             verifies.append(active)

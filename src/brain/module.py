@@ -83,6 +83,12 @@ _APPEARED_POLL_MIN_SECONDS = 5.0
 # Disappeared asserts floor a short poll so async closes (e.g. Chrome WM_CLOSE)
 # are not judged on a single immediate after-snapshot when settle is 0/None.
 _DISAPPEARED_POLL_MIN_SECONDS = 1.0
+# Signal asserts (foreground, click_window, clipboard, caret, focused, scroll)
+# share the same short floor: Start/SearchHost and similar focus changes often
+# lag the click by tens–hundreds of ms, and a tiny recording settle must not
+# collapse to a single immediate sample. Kept under ``_SETTLE_POLL_MULTI_MIN_SECONDS``
+# so the deadline stays 1.0x (1s), not 2.0x (4s).
+_SIGNAL_POLL_MIN_SECONDS = 1.0
 
 
 ROLE_USER = "user"
@@ -1479,18 +1485,24 @@ class BrainModule:
         slow launch keeps a long enough deadline (2.0x of this base is at least
         10s). When it expects a window to leave (``disappeared``), floor at
         ``_DISAPPEARED_POLL_MIN_SECONDS`` so async closes are not judged on a
-        single immediate after-snapshot. Polling starts immediately after
-        actions and early-exits on match.
+        single immediate after-snapshot. When it expects signal end-state
+        (``foreground``, ``click_window``, clipboard, caret, focused, scroll),
+        floor at ``_SIGNAL_POLL_MIN_SECONDS`` for the same reason. Floors
+        combine with ``max``. Polling starts immediately after actions and
+        early-exits on match.
         """
         appeared = recorded.get("appeared")
         disappeared = recorded.get("disappeared")
         has_appeared = isinstance(appeared, list) and bool(appeared)
         has_disappeared = isinstance(disappeared, list) and bool(disappeared)
+        has_signals = predicate_has_signal_assertions(recorded)
         floor = 0.0
         if has_appeared:
             floor = max(floor, float(_APPEARED_POLL_MIN_SECONDS))
         if has_disappeared:
             floor = max(floor, float(_DISAPPEARED_POLL_MIN_SECONDS))
+        if has_signals:
+            floor = max(floor, float(_SIGNAL_POLL_MIN_SECONDS))
         if settle_after is not None and float(settle_after) > 0:
             base = float(settle_after)
             if floor > 0:
@@ -1642,8 +1654,9 @@ class BrainModule:
         ``settle_after`` is deferred until the next step's first tool so next-step
         prep can overlap the settle window. A recorded window diff polls
         continuously after actions (early-exit on match; fail only at 2.0x of
-        settle, or 1.0x when settle is under 2s; ``appeared`` floors settle so
-        the deadline is at least 10s); a miss retries with ``clearly_unmet``.
+        settle, or 1.0x when settle is under 2s; ``appeared`` / ``disappeared`` /
+        signal asserts floor settle so small recording gaps still poll); a miss
+        retries with ``clearly_unmet``.
 
         Report after-frames match recording: the next step's before shot seals this
         step's last-tool after. The final step (or a failed stop) captures a

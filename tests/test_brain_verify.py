@@ -8,6 +8,7 @@ from src.brain.module import (
     BrainModule,
     _APPEARED_POLL_MIN_SECONDS,
     _DISAPPEARED_POLL_MIN_SECONDS,
+    _SIGNAL_POLL_MIN_SECONDS,
     _WINDOW_VERIFY_POLL_INTERVAL_SECONDS,
 )
 from src.common.models import ScriptStepVerifyResult
@@ -382,11 +383,15 @@ async def test_process_step_foreground_miss_retries_clearly_unmet(monkeypatch) -
             }
         },
     )
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
 
     result = await brain.process_step()
 
     assert result.step_finished is True
     assert brain._script_step_index == 1
+    expected_sleeps = _expected_poll_sleeps(_signal_poll_deadline_seconds())
+    assert sleep_mock.await_count == len(expected_sleeps)
     metadata = brain._update_step_metadata.call_args.args[2]
     assert metadata["verify"]["branch"] == "retry"
     assert metadata["verify"]["clearly_unmet"] is True
@@ -408,11 +413,15 @@ async def test_process_step_clipboard_miss_retries_clearly_unmet(monkeypatch) ->
         "src.brain.module.capture_replay_after_signals",
         lambda _recorded, _press_point=None: {"clipboard": "something else"},
     )
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
 
     result = await brain.process_step()
 
     assert result.step_finished is True
     assert brain._script_step_index == 1
+    expected_sleeps = _expected_poll_sleeps(_signal_poll_deadline_seconds())
+    assert sleep_mock.await_count == len(expected_sleeps)
     metadata = brain._update_step_metadata.call_args.args[2]
     assert metadata["verify"]["branch"] == "retry"
     assert metadata["verify"]["clearly_unmet"] is True
@@ -427,6 +436,11 @@ def _appeared_poll_deadline_seconds() -> float:
 def _disappeared_poll_deadline_seconds() -> float:
     """Disappeared floor (1s) is under the 2s multi threshold → 1.0x deadline."""
     return float(_DISAPPEARED_POLL_MIN_SECONDS)
+
+
+def _signal_poll_deadline_seconds() -> float:
+    """Signal floor (1s) is under the 2s multi threshold → 1.0x deadline."""
+    return float(_SIGNAL_POLL_MIN_SECONDS)
 
 
 def _expected_poll_sleeps(deadline: float) -> list[float]:
@@ -658,6 +672,107 @@ async def test_process_step_appeared_tiny_settle_uses_poll_floor(
     metadata = brain._update_step_metadata.call_args.args[2]
     assert metadata["verify"]["branch"] == "retry"
     assert "appeared" in metadata["verify"]["reason"]
+
+
+def _search_foreground() -> dict[str, str]:
+    return {
+        "class_name": "Windows.UI.Core.CoreWindow",
+        "title": "搜尋",
+        "process_name": "SearchHost.exe",
+    }
+
+
+@pytest.mark.asyncio
+async def test_process_step_foreground_tiny_settle_uses_poll_floor(
+    monkeypatch,
+) -> None:
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = [None, None, None]
+    brain.script_baseline_after_paths = [None, None, None]
+    brain.script_settle_after_seconds = [None, 0.016, None]
+    brain.script_window_verifies = [{}, {"foreground": _search_foreground()}, {}]
+    brain.loop = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "src.brain.module.snapshot_top_level_windows",
+        lambda: [_flyout_window()],
+    )
+    monkeypatch.setattr(
+        "src.brain.module.capture_replay_after_signals",
+        lambda _recorded, _press_point=None: {
+            "foreground": {
+                "class_name": "Progman",
+                "title": "Program Manager",
+                "process_name": "explorer.exe",
+            }
+        },
+    )
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 1
+    # Tiny positive settle is floored to 1.0s → deadline 1.0s.
+    expected_sleeps = _expected_poll_sleeps(_signal_poll_deadline_seconds())
+    assert sleep_mock.await_count == len(expected_sleeps)
+    assert [call.args[0] for call in sleep_mock.await_args_list] == pytest.approx(
+        expected_sleeps
+    )
+    assert sum(expected_sleeps) == pytest.approx(_signal_poll_deadline_seconds())
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["verify"]["branch"] == "retry"
+    assert "foreground" in metadata["verify"]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_process_step_window_verify_polls_until_foreground(
+    monkeypatch,
+) -> None:
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = [None, None, None]
+    brain.script_baseline_after_paths = [None, None, None]
+    brain.script_settle_after_seconds = [None, 0.016, None]
+    search = _search_foreground()
+    brain.script_window_verifies = [{}, {"foreground": search}, {}]
+    brain.loop = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "src.brain.module.snapshot_top_level_windows",
+        lambda: [_flyout_window()],
+    )
+    signal_samples = [
+        {
+            "foreground": {
+                "class_name": "Progman",
+                "title": "Program Manager",
+                "process_name": "explorer.exe",
+            }
+        },
+        {"foreground": search},
+    ]
+
+    def _next_signals(_recorded: object, _press_point: object = None) -> dict:
+        assert signal_samples
+        return signal_samples.pop(0)
+
+    monkeypatch.setattr(
+        "src.brain.module.capture_replay_after_signals",
+        _next_signals,
+    )
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 2
+    assert sleep_mock.await_count == 1
+    assert sleep_mock.await_args_list[0].args[0] == pytest.approx(
+        _WINDOW_VERIFY_POLL_INTERVAL_SECONDS
+    )
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "completed"
+    assert metadata["verify"]["branch"] == "advance"
 
 
 @pytest.mark.asyncio

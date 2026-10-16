@@ -51,7 +51,7 @@ TILE_OVERLAP_FRAC_DEFAULT: float = 0.15
 TILE_MERGE_IOU_DEFAULT: float = 0.20
 
 # Overlap / dense-text refine (crop hard clusters and re-predict).
-OVERLAP_REFINE_DEFAULT: bool = True
+OVERLAP_REFINE_DEFAULT: bool = False
 OVERLAP_REFINE_TEXT_CLASS_ID: int = 0
 # Link two text boxes into a refine cluster when pairwise IoU exceeds this.
 OVERLAP_REFINE_LINK_IOU: float = 0.08

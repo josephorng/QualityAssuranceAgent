@@ -499,6 +499,82 @@ def click_hits_caption_buttons(
     )
 
 
+def _caption_role_from_hit_code(code: int, *, is_maximized: bool) -> str | None:
+    """Map WM_NCHITTEST caption codes to chrome labels used in hub scripts."""
+    if int(code) == HTMINBUTTON:
+        return "最小化視窗"
+    if int(code) == HTMAXBUTTON:
+        return "縮小視窗" if is_maximized else "最大化視窗"
+    if int(code) == HTCLOSE:
+        return "關閉視窗"
+    return None
+
+
+def _caption_role_from_strip_cell(
+    click_xy: tuple[int, int],
+    bounds: CaptionBounds,
+    *,
+    is_maximized: bool,
+) -> str | None:
+    """Infer min/max/close from x position inside the DWM caption strip.
+
+    Windows paints minimize, maximize/restore, then close left to right. Used
+    when WM_NCHITTEST returns HTCLIENT (common on some Win11 chrome).
+    """
+    x = int(click_xy[0])
+    left, _top, right, _bottom = (int(v) for v in bounds)
+    width = right - left
+    if width <= 0:
+        return None
+    cell_w = width // 3
+    if cell_w <= 0:
+        return None
+    if x < left:
+        x = left
+    if x >= right:
+        x = right - 1
+    offset = x - left
+    if offset < cell_w:
+        return "最小化視窗"
+    if offset < 2 * cell_w:
+        return "縮小視窗" if is_maximized else "最大化視窗"
+    return "關閉視窗"
+
+
+def caption_button_role_at_point(
+    click_xy: tuple[int, int] | None,
+    win: WindowInfo,
+) -> str | None:
+    """Return 最小化/最大化/縮小/關閉視窗 when ``click_xy`` hits that caption button.
+
+    Prefers a live WM_NCHITTEST on ``win.hwnd``. When the window does not answer
+    or reports HTCLIENT, falls back to the DWM strip cell under the click.
+    Flyouts always return None.
+    """
+    if click_xy is None:
+        return None
+    if _is_flyout_window(class_name=win.class_name or "", title=win.title or ""):
+        return None
+    if not click_hits_caption_buttons(click_xy, win):
+        return None
+    x, y = int(click_xy[0]), int(click_xy[1])
+    send = _nchittest_sender()
+    if send is not None and int(win.hwnd or 0) != 0:
+        code = _send_wm_nchittest(send, int(win.hwnd), x, y)
+        if code is not None:
+            role = _caption_role_from_hit_code(
+                code, is_maximized=bool(win.is_maximized)
+            )
+            if role is not None:
+                return role
+    bounds = caption_button_bounds_for_window(win)
+    if bounds is None:
+        return None
+    return _caption_role_from_strip_cell(
+        (x, y), bounds, is_maximized=bool(win.is_maximized)
+    )
+
+
 def _from_title_bar_close(
     click_xy: tuple[int, int] | None,
     win: WindowInfo,
@@ -1037,6 +1113,9 @@ def diff_snapshots_with_debug(
     target = _pick_target_from_click(before, click_xy)
     if target is not None:
         debug["target_hwnd"] = target.hwnd
+        caption_role = caption_button_role_at_point(click_xy, target)
+        if caption_role is not None:
+            debug["caption_button_role"] = caption_role
         after_match = _find_successor(target, before, after)
         change = _classify_target_change(target, after_match, click_xy)
         if change is not None:
@@ -1051,6 +1130,10 @@ def diff_snapshots_with_debug(
         change = _classify_target_change(vanished, None, click_xy)
         if change is not None:
             debug["target_hwnd"] = vanished.hwnd
+            if "caption_button_role" not in debug:
+                caption_role = caption_button_role_at_point(click_xy, vanished)
+                if caption_role is not None:
+                    debug["caption_button_role"] = caption_role
             debug["detection_path"] = "closed_at_click"
             return WindowDiffResult(change=change, debug=debug)
 

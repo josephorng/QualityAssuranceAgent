@@ -13,7 +13,7 @@ from src.common.io_utils import append_text, read_json, write_json
 from src.common.run_state import get_run_state_manager, reset_run_state_manager
 from src.common.runtime_context import set_runtime_env
 from src.common.settings import load_settings
-from src.recorder.analyze import analyze_event_to_cache
+from src.recorder.analyze import analyze_event_to_cache, caption_role_from_recorded_event
 from src.recorder.vision_context import (
     build_vision_context,
     primary_candidate_char_target,
@@ -378,6 +378,26 @@ async def prepare_event_vision(
             log_info=log_info,
         )
     else:
+        caption_role = caption_role_from_recorded_event(event)
+        if caption_role is not None:
+            log_info(
+                f"caption button skip vision event={event.index} role={caption_role}"
+            )
+            return _PreparedEvent(
+                event=event,
+                event_for_llm=event,
+                vision={
+                    "used_vision": False,
+                    "candidate_text": "",
+                    "candidates": [],
+                    "local_cursor": list(event.cursor_xy)
+                    if event.cursor_xy is not None
+                    else None,
+                    "selection_method": "caption_button",
+                    "caption_role": caption_role,
+                },
+                text_resolution=None,
+            )
         cached_vision = try_rebuild_vision_from_cache(event, run_dir)
         if cached_vision is not None:
             log_info(f"vision cache hit event={event.index} kind={event.kind}")

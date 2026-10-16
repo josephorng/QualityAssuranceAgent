@@ -10,11 +10,13 @@ from src.recorder.analyze import (
     after_screenshot_for_outcome,
     analyze_event_to_cache,
     before_screenshot_for_outcome,
+    caption_role_from_recorded_event,
     enrich_click_instruction_offset,
     enrich_drag_instruction,
     enrich_drag_instruction_offset,
     enrich_drag_instruction_source,
     infer_expected_outcome,
+    instruction_for_caption_button_click,
     instruction_for_click,
     instruction_for_drag,
     instruction_for_key,
@@ -30,6 +32,7 @@ from src.recorder.orchestrator import (
     _vision_max_workers,
     _write_final_after_from_source,
     analyze_recording_session,
+    prepare_event_vision,
 )
 from src.recorder.vision_context import (
     append_drag_nearby_context_comments,
@@ -1324,6 +1327,126 @@ async def test_analyze_event_to_cache_medium_close_is_deterministic(tmp_path: Pa
 
     assert result == {"instruction": "關閉「連線資訊.txt - 記事本」視窗"}
     llm_mock.assert_not_called()
+
+
+def test_caption_role_from_recorded_event_prefers_stored_debug() -> None:
+    event = RecordedEvent(
+        index=5,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(2351, 289),
+        button="left",
+        screenshot_path="",
+        window_snapshot_debug={"caption_button_role": "關閉視窗"},
+    )
+    assert caption_role_from_recorded_event(event) == "關閉視窗"
+    assert (
+        instruction_for_caption_button_click(event, "關閉視窗")
+        == "將滑鼠移到「關閉視窗」圖示，並點擊滑鼠一下。"
+    )
+
+
+def test_caption_role_from_recorded_event_ignores_right_click() -> None:
+    event = RecordedEvent(
+        index=5,
+        timestamp_utc="t",
+        kind="right_click",
+        cursor_xy=(2351, 289),
+        button="right",
+        screenshot_path="",
+        window_snapshot_debug={"caption_button_role": "關閉視窗"},
+    )
+    assert caption_role_from_recorded_event(event) is None
+
+
+@pytest.mark.asyncio
+async def test_analyze_event_to_cache_caption_role_skips_vision(tmp_path: Path) -> None:
+    event = RecordedEvent(
+        index=5,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(2351, 289),
+        button="left",
+        screenshot_path="",
+        window_snapshot_debug={
+            "caption_button_role": "關閉視窗",
+            "title_bar_click": True,
+        },
+    )
+
+    with patch(
+        "src.recorder.analyze.build_vision_context",
+        new=AsyncMock(side_effect=AssertionError("vision must be skipped")),
+    ), patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(event, run_dir=tmp_path, vision=None)
+
+    assert result == {
+        "instruction": "將滑鼠移到「關閉視窗」圖示，並點擊滑鼠一下。"
+    }
+    llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_analyze_event_to_cache_window_change_beats_caption_role(
+    tmp_path: Path,
+) -> None:
+    event = RecordedEvent(
+        index=3,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(640, 70),
+        button="left",
+        screenshot_path="",
+        window_change={
+            "action": "close",
+            "title": "連線資訊.txt - 記事本",
+            "confidence": "medium",
+            "from_title_bar_close": True,
+        },
+        window_snapshot_debug={"caption_button_role": "關閉視窗"},
+    )
+
+    result = await analyze_event_to_cache(
+        event,
+        run_dir=tmp_path,
+        vision={"used_vision": False, "candidate_text": "", "local_cursor": None},
+    )
+    assert result == {"instruction": "關閉「連線資訊.txt - 記事本」視窗"}
+
+
+@pytest.mark.asyncio
+async def test_prepare_event_vision_skips_yolo_for_caption_role(tmp_path: Path) -> None:
+    event = RecordedEvent(
+        index=5,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(2351, 289),
+        button="left",
+        screenshot_path="",
+        window_snapshot_debug={"caption_button_role": "關閉視窗"},
+    )
+    logs: list[str] = []
+
+    with patch(
+        "src.recorder.orchestrator.build_vision_context",
+        new=AsyncMock(side_effect=AssertionError("YOLO must be skipped")),
+    ), patch(
+        "src.recorder.orchestrator.try_rebuild_vision_from_cache",
+        return_value={"used_vision": True},
+    ):
+        prepared = await prepare_event_vision(
+            event,
+            run_dir=tmp_path,
+            log_info=logs.append,
+        )
+
+    assert prepared.vision["selection_method"] == "caption_button"
+    assert prepared.vision["caption_role"] == "關閉視窗"
+    assert prepared.vision["used_vision"] is False
+    assert any("caption button skip vision" in line for line in logs)
 
 
 @pytest.mark.asyncio

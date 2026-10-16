@@ -989,6 +989,151 @@ def test_from_title_bar_close_never_true_for_flyout() -> None:
     assert _from_title_bar_close((800, 120), normal) is True
 
 
+def test_caption_button_role_at_point_maps_nchittest_codes() -> None:
+    from src.recorder.window_snapshot import (
+        HTCLOSE,
+        HTMAXBUTTON,
+        HTMINBUTTON,
+        caption_button_role_at_point,
+    )
+
+    bounds = (700, 100, 900, 140)
+    win = _win(
+        1,
+        "Notepad",
+        left=100,
+        top=100,
+        width=800,
+        height=600,
+        caption_button_bounds=bounds,
+    )
+    with patch(
+        "src.recorder.window_snapshot._nchittest_sender",
+        return_value=object(),
+    ), patch(
+        "src.recorder.window_snapshot._send_wm_nchittest",
+        side_effect=lambda _send, _hwnd, x, _y: {
+            720: HTMINBUTTON,
+            780: HTMAXBUTTON,
+            860: HTCLOSE,
+        }.get(x),
+    ):
+        assert caption_button_role_at_point((720, 120), win) == "最小化視窗"
+        assert caption_button_role_at_point((780, 120), win) == "最大化視窗"
+        assert caption_button_role_at_point((860, 120), win) == "關閉視窗"
+
+    maximized = _win(
+        1,
+        "Notepad",
+        left=100,
+        top=100,
+        width=800,
+        height=600,
+        is_maximized=True,
+        caption_button_bounds=bounds,
+    )
+    with patch(
+        "src.recorder.window_snapshot._nchittest_sender",
+        return_value=object(),
+    ), patch(
+        "src.recorder.window_snapshot._send_wm_nchittest",
+        return_value=HTMAXBUTTON,
+    ):
+        assert caption_button_role_at_point((780, 120), maximized) == "縮小視窗"
+
+
+def test_caption_button_role_at_point_falls_back_to_strip_cell() -> None:
+    from src.recorder.window_snapshot import caption_button_role_at_point
+
+    # Three equal cells: [700,766), [766,832), [832,900)
+    bounds = (700, 100, 900, 140)
+    win = _win(
+        1,
+        "App",
+        left=100,
+        top=100,
+        width=800,
+        height=600,
+        caption_button_bounds=bounds,
+    )
+    with patch(
+        "src.recorder.window_snapshot._nchittest_sender",
+        return_value=object(),
+    ), patch(
+        "src.recorder.window_snapshot._send_wm_nchittest",
+        return_value=1,  # HTCLIENT — force geometric fallback
+    ):
+        assert caption_button_role_at_point((720, 120), win) == "最小化視窗"
+        assert caption_button_role_at_point((790, 120), win) == "最大化視窗"
+        assert caption_button_role_at_point((870, 120), win) == "關閉視窗"
+
+    maximized = _win(
+        1,
+        "App",
+        left=100,
+        top=100,
+        width=800,
+        height=600,
+        is_maximized=True,
+        caption_button_bounds=bounds,
+    )
+    with patch(
+        "src.recorder.window_snapshot._nchittest_sender",
+        return_value=None,
+    ):
+        assert caption_button_role_at_point((790, 120), maximized) == "縮小視窗"
+
+
+def test_caption_button_role_at_point_rejects_flyout() -> None:
+    from src.recorder.window_snapshot import caption_button_role_at_point
+
+    flyout = _win(
+        9,
+        "快顯主機",
+        class_name="Microsoft.UI.Content.PopupWindowSiteBridge",
+        left=100,
+        top=100,
+        width=200,
+        height=200,
+        caption_button_bounds=(150, 100, 300, 140),
+    )
+    with patch(
+        "src.recorder.window_snapshot._nchittest_sender",
+        return_value=object(),
+    ), patch(
+        "src.recorder.window_snapshot._send_wm_nchittest",
+        return_value=20,
+    ):
+        assert caption_button_role_at_point((200, 120), flyout) is None
+
+
+def test_diff_snapshots_stores_caption_button_role() -> None:
+    from src.recorder.window_snapshot import HTCLOSE
+
+    before = [
+        _win(
+            1,
+            "Notepad",
+            left=100,
+            top=100,
+            width=800,
+            height=600,
+            caption_button_bounds=(700, 100, 900, 140),
+        )
+    ]
+    after = list(before)
+    with patch(
+        "src.recorder.window_snapshot._nchittest_sender",
+        return_value=object(),
+    ), patch(
+        "src.recorder.window_snapshot._send_wm_nchittest",
+        return_value=HTCLOSE,
+    ):
+        result = diff_snapshots_with_debug(before, after, click_xy=(860, 120))
+    assert result.debug.get("caption_button_role") == "關閉視窗"
+    assert result.debug.get("target_hwnd") == 1
+
+
 def test_settle_delay_is_longer_for_title_bar_clicks() -> None:
     from src.recorder.window_snapshot import (
         WINDOW_SETTLE_DELAY_S,

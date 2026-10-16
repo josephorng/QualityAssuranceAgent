@@ -26,7 +26,12 @@ from src.recorder.vision_context import (
     _visible_text,
 )
 from cua_mcp.char_target import format_char_target_anchor, parse_char_target_instruction
-from src.recorder.window_snapshot import format_window_change_hint, instruction_for_window_change
+from src.recorder.window_snapshot import (
+    WindowInfo,
+    caption_button_role_at_point,
+    format_window_change_hint,
+    instruction_for_window_change,
+)
 
 _INSTRUCTION_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -60,6 +65,9 @@ _DRAG_OFFSET_PHRASE_RE = re.compile(
 _CLICK_POINTER_KINDS = frozenset(
     {"click", "double_click", "triple_click", "right_click", "middle_click", "hold"}
 )
+# Caption chrome clicks are left-button only (right-click opens the system menu).
+_CAPTION_CLICK_KINDS = frozenset({"click", "double_click", "triple_click", "hold"})
+_CAPTION_ROLES = frozenset({"最小化視窗", "最大化視窗", "縮小視窗", "關閉視窗"})
 _CLICK_MOVE_PREFIX = "將滑鼠移到"
 _POINTER_CLICK_ACTION_SUFFIX_BY_KIND = {
     "click": "，並點擊滑鼠一下。",
@@ -398,6 +406,83 @@ def use_char_target_enabled(
         raw = analysis.get("instruction") if isinstance(analysis, dict) else None
         text = raw if isinstance(raw, str) else ""
     return parse_char_target_instruction(text) is not None
+
+
+def _is_left_caption_click(event: RecordedEvent) -> bool:
+    if event.kind not in _CAPTION_CLICK_KINDS:
+        return False
+    if event.kind == "hold" and event.button not in (None, "left"):
+        return False
+    return True
+
+
+def _normalize_caption_role(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    role = value.strip()
+    return role if role in _CAPTION_ROLES else None
+
+
+def _live_caption_role_from_event(event: RecordedEvent) -> str | None:
+    """WM_NCHITTEST / strip-cell role using windows_before from the event debug."""
+    click_xy = event.cursor_xy or event.anchor_click_xy
+    if click_xy is None:
+        return None
+    debug = event.window_snapshot_debug
+    if not isinstance(debug, dict):
+        return None
+    windows_raw = debug.get("windows_before")
+    if not isinstance(windows_raw, list):
+        return None
+    windows: list[WindowInfo] = []
+    for raw in windows_raw:
+        if isinstance(raw, dict) and raw.get("hwnd") is not None:
+            try:
+                windows.append(WindowInfo.from_dict(raw))
+            except (TypeError, ValueError, KeyError):
+                continue
+    if not windows:
+        return None
+    target_hwnd = debug.get("target_hwnd")
+    if target_hwnd is not None:
+        for win in windows:
+            if int(win.hwnd) == int(target_hwnd):
+                return caption_button_role_at_point(click_xy, win)
+    x, y = int(click_xy[0]), int(click_xy[1])
+    containing = [w for w in windows if w.contains_point(x, y)]
+    if not containing:
+        return None
+    win = min(containing, key=lambda w: w.area())
+    return caption_button_role_at_point(click_xy, win)
+
+
+def caption_role_from_recorded_event(event: RecordedEvent) -> str | None:
+    """Caption chrome role for a left-button click, or None to keep the vision path.
+
+    Prefers ``window_snapshot_debug["caption_button_role"]`` stored at capture.
+    Falls back to a live hit-test against ``windows_before`` for older recordings.
+    """
+    if not _is_left_caption_click(event):
+        return None
+    debug = event.window_snapshot_debug
+    if isinstance(debug, dict):
+        stored = _normalize_caption_role(debug.get("caption_button_role"))
+        if stored is not None:
+            return stored
+    return _live_caption_role_from_event(event)
+
+
+def instruction_for_caption_button_click(event: RecordedEvent, role: str) -> str:
+    """Build ``將滑鼠移到「關閉視窗」圖示，並點擊滑鼠一下。`` (no nearby landmarks)."""
+    base = f"{_CLICK_MOVE_PREFIX}「{role}」圖示"
+    suffix = _pointer_click_action_suffix(
+        event.kind,
+        event.modifiers,
+        button=event.button,
+        duration_seconds=event.duration_seconds,
+        click_count=event.click_count,
+    )
+    return base + suffix if suffix else base
 
 
 def instruction_for_click(
@@ -766,6 +851,12 @@ async def analyze_event_to_cache(
         deterministic = instruction_for_window_change(event.window_change)
         if deterministic is not None:
             return {"instruction": deterministic}
+
+    caption_role = caption_role_from_recorded_event(event)
+    if caption_role is not None:
+        return {
+            "instruction": instruction_for_caption_button_click(event, caption_role)
+        }
 
     if vision is None:
         vision = await build_vision_context(event, run_dir=run_dir, log_info=log_info)

@@ -112,6 +112,7 @@ _MOVE_MOUSE_PHASE_LABELS = {
     "yolo": "YOLO detect",
     "line_refine": "Input line refine",
     "ocr": "OCR",
+    "icon_ocr_retry": "Unknown-icon OCR retry",
     "parse_instruction": "Parse instruction (overlapped)",
     "select": "Target select",
     "select_unique": "Unique target (skip LLM)",
@@ -191,6 +192,7 @@ def _details_from_move_mouse_timing(timing: dict[str, Any]) -> list[dict[str, An
         ("yolo_s", "YOLO detect"),
         ("line_s", "Input line refine"),
         ("ocr_s", "OCR"),
+        ("icon_ocr_retry_s", "Unknown-icon OCR retry"),
         ("parse_s", "Parse instruction (overlapped)"),
         ("select_s", "Target select"),
         ("hand_move_s", "Cursor move"),
@@ -953,13 +955,30 @@ def _load_tool_results(
     return results
 
 
+def _session_wall_clock_seconds(step_records: list[dict[str, Any]]) -> float | None:
+    """Earliest step start → latest step finish (wall clock), if both are present."""
+    earliest: datetime | None = None
+    latest: datetime | None = None
+    for record in step_records:
+        timing = record.get("timing")
+        if not isinstance(timing, dict):
+            continue
+        started = _parse_iso(timing.get("started_at_utc"))
+        finished = _parse_iso(timing.get("finished_at_utc"))
+        if started is not None and (earliest is None or started < earliest):
+            earliest = started
+        if finished is not None and (latest is None or finished > latest):
+            latest = finished
+    return _duration_seconds(earliest, latest)
+
+
 def _build_summary(
     step_records: list[dict[str, Any]],
     tool_results: list[dict[str, Any]],
 ) -> dict[str, Any]:
     failed_steps = 0
-    total_duration = 0.0
-    has_duration = False
+    summed_step_duration = 0.0
+    has_step_duration = False
     category_totals = {
         "execution_llm_seconds": 0.0,
         "verify_llm_seconds": 0.0,
@@ -976,8 +995,8 @@ def _build_summary(
                 failed_steps += 1
             duration = timing.get("duration_seconds")
             if isinstance(duration, (int, float)):
-                total_duration += float(duration)
-                has_duration = True
+                summed_step_duration += float(duration)
+                has_step_duration = True
         timing_summary = record.get("timing_summary")
         if isinstance(timing_summary, dict):
             for key in category_totals:
@@ -993,8 +1012,13 @@ def _build_summary(
         "failed_step_count": failed_steps,
         "failed_tool_count": failed_tools,
     }
-    if has_duration:
-        summary["total_duration_seconds"] = round(total_duration, 3)
+    # Prefer wall-clock span (last finish − first start) so gaps between steps
+    # count; fall back to summed per-step durations when timestamps are missing.
+    total_duration = _session_wall_clock_seconds(step_records)
+    if total_duration is None and has_step_duration:
+        total_duration = round(summed_step_duration, 3)
+    if total_duration is not None:
+        summary["total_duration_seconds"] = total_duration
         if step_records:
             summary["avg_step_seconds"] = round(total_duration / len(step_records), 3)
     if has_category:

@@ -154,7 +154,8 @@ def test_build_session_report_aggregates_steps_tools_and_profile(tmp_path: Path)
     assert report["summary"]["step_count"] == 2
     assert report["summary"]["tool_call_count"] == 2
     assert report["summary"]["failed_tool_count"] == 1
-    assert report["summary"]["total_duration_seconds"] == 20.0
+    # Wall clock: first start 06:00:00 → last finish 06:00:25 (includes inter-step gap).
+    assert report["summary"]["total_duration_seconds"] == 25.0
 
     assert report["steps"][0]["goal"] == "Open File Explorer"
     assert report["steps"][1]["goal"] == "Type hello"
@@ -183,7 +184,7 @@ def test_build_session_report_aggregates_steps_tools_and_profile(tmp_path: Path)
     assert timing_summary["waiting_seconds"] == 5.0
     assert timing_summary["other_seconds"] == 0.0
     assert timing_summary["total_seconds"] == 10.0
-    assert report["summary"]["avg_step_seconds"] == 10.0
+    assert report["summary"]["avg_step_seconds"] == 12.5
     assert report["summary"]["execution_llm_seconds"] == 2.0
     assert report["summary"]["waiting_seconds"] == 5.0
 
@@ -384,6 +385,7 @@ def test_time_profile_includes_move_mouse_internal_timing_details(tmp_path: Path
         "yolo_s": 1.0,
         "line_s": 0.1,
         "ocr_s": 2.5,
+        "icon_ocr_retry_s": 1.1,
         "parse_s": 0.3,
         "select_s": 0.4,
         "hand_move_s": 0.01,
@@ -406,6 +408,7 @@ def test_time_profile_includes_move_mouse_internal_timing_details(tmp_path: Path
                 "ocr_reused": 12,
                 "ocr_fresh": 3,
             },
+            {"name": "icon_ocr_retry", "seconds": 1.1},
             {"name": "parse_instruction", "seconds": 0.3, "overlapped": True},
             {"name": "llm_pick", "seconds": 0.4},
             {"name": "hand_move", "seconds": 0.01},
@@ -472,6 +475,9 @@ def test_time_profile_includes_move_mouse_internal_timing_details(tmp_path: Path
     assert details[3]["roi"] == [10, 20, 300, 200]
     assert details[3]["ocr_reused"] == 12
     assert details[3]["ocr_fresh"] == 3
+    assert details[4]["kind"] == "move_mouse_icon_ocr_retry"
+    assert details[4]["label"] == "Unknown-icon OCR retry"
+    assert details[4]["duration_seconds"] == 1.1
     assert "ocr_reused" not in details[1]
     assert any(d["kind"] == "move_mouse_llm_pick" for d in details)
     assert any(d["kind"] == "move_mouse_hand_move" for d in details)

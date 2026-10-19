@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import mss
 import pyautogui
@@ -111,30 +111,39 @@ def grab_monitor_bgr(
     return idx, bgr
 
 
-def capture_all_screens_to_file(dest: Path) -> None:
-    """Capture the full virtual desktop (all monitors) into one image with the mouse cursor."""
+def _log_eye_capture_saved(dest: Path, monitor_index: int) -> None:
+    try:
+        get_run_state_manager().log_info(
+            f"eye capture saved path={dest} monitor_index={monitor_index}"
+        )
+    except RuntimeError:
+        pass
+
+
+def save_image_png(img: Image.Image, dest: Path, *, monitor_index: int) -> None:
+    """Encode and write ``img`` as PNG, then log the save."""
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
+    img.save(dest)
+    _log_eye_capture_saved(dest, monitor_index)
+
+
+def grab_all_screens_image() -> Image.Image:
+    """Grab the full virtual desktop (mss monitor 0) with the mouse cursor overlaid."""
     with mss.mss() as sct:
         monitor = sct.monitors[0]
         shot = sct.grab(monitor)
         img = Image.frombytes("RGB", shot.size, shot.rgb)
         overlay_mouse_cursor(img, int(monitor["left"]), int(monitor["top"]))
-    img.save(dest)
-    try:
-        get_run_state_manager().log_info(f"eye capture saved path={dest} monitor_index=0")
-    except RuntimeError:
-        pass
+        return img
 
 
-def capture_monitor_to_file(
-    dest: Path,
+def grab_monitor_image_to_save(
     monitor_index: int,
     *,
     include_cursor: bool = False,
-) -> int:
-    dest = Path(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
+) -> tuple[int, Image.Image]:
+    """Grab one monitor as RGB, optionally with cursor. Returns ``(resolved_index, img)``."""
     with mss.mss() as sct:
         idx = resolve_monitor_index(sct, monitor_index)
         monitor = sct.monitors[idx]
@@ -142,14 +151,60 @@ def capture_monitor_to_file(
         img = Image.frombytes("RGB", shot.size, shot.rgb)
         if include_cursor:
             overlay_mouse_cursor(img, int(monitor["left"]), int(monitor["top"]))
-    img.save(dest)
-    try:
-        get_run_state_manager().log_info(f"eye capture saved path={dest} monitor_index={idx}")
-    except RuntimeError:
-        pass
-    return idx
+        return idx, img
+
+
+def capture_all_screens_to_file(
+    dest: Path,
+    *,
+    wait_for_save: bool = True,
+) -> Callable[[], None] | None:
+    """Capture the full virtual desktop into one image with the mouse cursor.
+
+    When ``wait_for_save`` is True (default), writes PNG synchronously and returns
+    None. When False, returns a zero-arg callable that performs the PNG save so
+    callers can run it in the background.
+    """
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    img = grab_all_screens_image()
+    if wait_for_save:
+        save_image_png(img, dest, monitor_index=0)
+        return None
+
+    def _save() -> None:
+        save_image_png(img, dest, monitor_index=0)
+
+    return _save
+
+
+def capture_monitor_to_file(
+    dest: Path,
+    monitor_index: int,
+    *,
+    include_cursor: bool = False,
+    wait_for_save: bool = True,
+) -> int | tuple[int, Callable[[], None]]:
+    """Capture one monitor to ``dest``.
+
+    When ``wait_for_save`` is True (default), writes PNG synchronously and returns
+    the resolved monitor index. When False, returns ``(resolved_index, save_fn)``.
+    """
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    idx, img = grab_monitor_image_to_save(monitor_index, include_cursor=include_cursor)
+    if wait_for_save:
+        save_image_png(img, dest, monitor_index=idx)
+        return idx
+
+    def _save() -> None:
+        save_image_png(img, dest, monitor_index=idx)
+
+    return idx, _save
 
 
 def capture_active_monitor_to_file(dest: Path, default_monitor_index: int = 1) -> int:
     requested = active_monitor_index(default_monitor_index)
-    return capture_monitor_to_file(dest=dest, monitor_index=requested)
+    result = capture_monitor_to_file(dest=dest, monitor_index=requested)
+    assert isinstance(result, int)
+    return result

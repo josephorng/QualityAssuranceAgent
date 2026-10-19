@@ -569,10 +569,28 @@ def set_analysis_tool_calls(
     return calls
 
 
+def _recording_cache_entry(
+    instruction: str,
+    tool_calls: list[dict[str, Any]],
+    *,
+    source_run_id: str,
+) -> tuple[str, dict[str, Any]] | None:
+    if validate_tool_calls(tool_calls) is not None:
+        return None
+    key = normalize_instruction(instruction)
+    return key, {
+        "instruction": key,
+        "tool_calls": tool_calls,
+        "updated_at_utc": "",
+        "source_run_id": source_run_id,
+    }
+
+
 def rebuild_recording_instruction_tool_cache(run_dir: Path) -> Path:
     """Rewrite ``instruction_tool_cache.json`` from analysis files that have tool_calls."""
     target = recording_tool_cache_path(run_dir)
     entries: dict[str, Any] = {}
+    source_run_id = Path(run_dir).name
     analysis_dir = Path(run_dir) / "analysis"
     if analysis_dir.is_dir():
         for analysis_path in sorted(analysis_dir.glob("event_*.json")):
@@ -585,15 +603,12 @@ def rebuild_recording_instruction_tool_cache(run_dir: Path) -> Path:
                 continue
             if not isinstance(tool_calls, list) or not tool_calls:
                 continue
-            if validate_tool_calls(tool_calls) is not None:
-                continue
-            key = normalize_instruction(instruction)
-            entries[key] = {
-                "instruction": key,
-                "tool_calls": tool_calls,
-                "updated_at_utc": "",
-                "source_run_id": Path(run_dir).name,
-            }
+            entry = _recording_cache_entry(
+                instruction, tool_calls, source_run_id=source_run_id
+            )
+            if entry is not None:
+                key, payload = entry
+                entries[key] = payload
     write_json(target, {"version": _CACHE_VERSION, "entries": entries})
     return target
 
@@ -604,11 +619,16 @@ def ensure_recording_tool_cache(run_dir: Path) -> None:
     Deterministic compiles overwrite stale full hub-script move_mouse args.
     When compile returns None, existing on-disk tool_calls (e.g. LLM-mirrored)
     are left unchanged.
+
+    Builds the instruction cache from the same analysis pass (no second full
+    re-read of every event_*.json).
     """
     root = Path(run_dir)
     analysis_dir = root / "analysis"
     if not analysis_dir.is_dir():
         return
+    source_run_id = root.name
+    entries: dict[str, Any] = {}
     for analysis_path in sorted(analysis_dir.glob("event_*.json")):
         analysis = read_json(analysis_path, None)
         if not isinstance(analysis, dict):
@@ -616,29 +636,44 @@ def ensure_recording_tool_cache(run_dir: Path) -> None:
         instruction = analysis.get("instruction")
         if not isinstance(instruction, str) or not instruction.strip():
             continue
+        tool_calls_for_cache = analysis.get("tool_calls")
         event_index = analysis.get("event_index")
         if not isinstance(event_index, int):
             match = re.search(r"event_(\d+)\.json$", analysis_path.name)
-            if not match:
-                continue
-            event_index = int(match.group(1))
-        event_path = event_json_path(root, event_index)
-        event_payload = read_json(event_path, None)
-        if not isinstance(event_payload, dict):
+            if match:
+                event_index = int(match.group(1))
+        if isinstance(event_index, int):
+            event_path = event_json_path(root, event_index)
+            event_payload = read_json(event_path, None)
+            if isinstance(event_payload, dict):
+                event = RecordedEvent.from_dict(event_payload)
+                previous = analysis.get("tool_calls")
+                compiled = set_analysis_tool_calls(
+                    analysis,
+                    event,
+                    instruction,
+                    run_dir=root,
+                )
+                if compiled is not None:
+                    if previous != compiled:
+                        write_json(analysis_path, analysis)
+                    tool_calls_for_cache = compiled
+                else:
+                    # set_analysis_tool_calls pops tool_calls from the in-memory
+                    # dict when compile fails; keep prior LLM-mirrored calls.
+                    tool_calls_for_cache = previous
+        if not isinstance(tool_calls_for_cache, list) or not tool_calls_for_cache:
             continue
-        event = RecordedEvent.from_dict(event_payload)
-        previous = analysis.get("tool_calls")
-        compiled = set_analysis_tool_calls(
-            analysis,
-            event,
-            instruction,
-            run_dir=root,
+        entry = _recording_cache_entry(
+            instruction, tool_calls_for_cache, source_run_id=source_run_id
         )
-        if compiled is None:
-            continue
-        if previous != compiled:
-            write_json(analysis_path, analysis)
-    rebuild_recording_instruction_tool_cache(root)
+        if entry is not None:
+            key, payload = entry
+            entries[key] = payload
+    write_json(
+        recording_tool_cache_path(root),
+        {"version": _CACHE_VERSION, "entries": entries},
+    )
 
 
 def mirror_tool_calls_into_recording(

@@ -6,10 +6,19 @@ from pathlib import Path
 import pytest
 
 from cua_mcp import hand_tools
-from src.common.run_state import RunStateManager
+from src.common.run_state import RunStateManager, reset_run_state_manager
 from src.common.runtime_context import set_runtime_env
 from src.eye import capture
 from src.eye.module import EyeModule
+
+
+def _prepare_eye_run(tmp_path: Path, folder: str, run_id: str):
+    """Init a temp run and reset the process-wide manager so EyeModule uses it."""
+    manager = RunStateManager(runs_root=tmp_path)
+    paths = manager.init_run(folder, run_id)
+    set_runtime_env(paths.root, paths.root.name)
+    reset_run_state_manager()
+    return paths
 
 
 def test_hand_tools_screenshot_uses_eye_capture(monkeypatch, tmp_path: Path) -> None:
@@ -197,28 +206,42 @@ def test_capture_once_writes_combined_screenshot_when_multiple_monitors_selected
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    manager = RunStateManager(runs_root=tmp_path)
-    paths = manager.init_run("combined-after-action-test", "test_combined_after_action")
-    set_runtime_env(paths.root, paths.root.name)
+    paths = _prepare_eye_run(
+        tmp_path, "combined-after-action-test", "test_combined_after_action"
+    )
 
     captured: list[Path] = []
     single_monitor_calls: list[int] = []
 
-    def _fake_capture_all_screens(dest: Path) -> None:
+    def _fake_capture_all_screens(dest: Path, *, wait_for_save: bool = True):
         captured.append(dest)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"combined")
+
+        def _save() -> None:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"combined")
+
+        if wait_for_save:
+            _save()
+            return None
+        return _save
 
     def _fake_capture_monitor(
         *,
         dest: Path,
         monitor_index: int,
         include_cursor: bool = False,
-    ) -> int:
+        wait_for_save: bool = True,
+    ):
         single_monitor_calls.append(monitor_index)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"single")
-        return monitor_index
+
+        def _save() -> None:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"single")
+
+        if wait_for_save:
+            _save()
+            return monitor_index
+        return monitor_index, _save
 
     import src.eye.module as eye_module
 
@@ -227,7 +250,13 @@ def test_capture_once_writes_combined_screenshot_when_multiple_monitors_selected
     monkeypatch.setenv("EYE_MONITOR_INDICES", "1,2")
 
     eye = EyeModule()
-    event = asyncio.run(eye.capture_once())
+
+    async def _run() -> object:
+        event = await eye.capture_once()
+        await eye.flush_pending_saves()
+        return event
+
+    event = asyncio.run(_run())
 
     assert len(captured) == 1
     assert single_monitor_calls == []
@@ -239,26 +268,36 @@ def test_capture_once_writes_single_monitor_when_only_one_selected(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    manager = RunStateManager(runs_root=tmp_path)
-    paths = manager.init_run("single-after-action-test", "test_single_after_action")
-    set_runtime_env(paths.root, paths.root.name)
+    paths = _prepare_eye_run(
+        tmp_path, "single-after-action-test", "test_single_after_action"
+    )
 
     captured: list[Path] = []
     single_monitor_calls: list[int] = []
 
-    def _fake_capture_all_screens(dest: Path) -> None:
+    def _fake_capture_all_screens(dest: Path, *, wait_for_save: bool = True):
         captured.append(dest)
+        if wait_for_save:
+            return None
+        return lambda: None
 
     def _fake_capture_monitor(
         *,
         dest: Path,
         monitor_index: int,
         include_cursor: bool = False,
-    ) -> int:
+        wait_for_save: bool = True,
+    ):
         single_monitor_calls.append(monitor_index)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"single")
-        return monitor_index
+
+        def _save() -> None:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"single")
+
+        if wait_for_save:
+            _save()
+            return monitor_index
+        return monitor_index, _save
 
     import src.eye.module as eye_module
 
@@ -268,7 +307,13 @@ def test_capture_once_writes_single_monitor_when_only_one_selected(
     monkeypatch.delenv("EYE_MONITOR_INDICES", raising=False)
 
     eye = EyeModule()
-    event = asyncio.run(eye.capture_once())
+
+    async def _run() -> object:
+        event = await eye.capture_once()
+        await eye.flush_pending_saves()
+        return event
+
+    event = asyncio.run(_run())
 
     assert captured == []
     assert single_monitor_calls == [2]
@@ -279,26 +324,34 @@ def test_capture_separated_images_writes_single_monitor_when_only_one_selected(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    manager = RunStateManager(runs_root=tmp_path)
-    paths = manager.init_run("single-brain-test", "test_single_brain")
-    set_runtime_env(paths.root, paths.root.name)
+    paths = _prepare_eye_run(tmp_path, "single-brain-test", "test_single_brain")
 
     captured: list[Path] = []
     single_monitor_calls: list[int] = []
 
-    def _fake_capture_all_screens(dest: Path) -> None:
+    def _fake_capture_all_screens(dest: Path, *, wait_for_save: bool = True):
         captured.append(dest)
+        if wait_for_save:
+            return None
+        return lambda: None
 
     def _fake_capture_monitor(
         *,
         dest: Path,
         monitor_index: int,
         include_cursor: bool = False,
-    ) -> int:
+        wait_for_save: bool = True,
+    ):
         single_monitor_calls.append(monitor_index)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"single")
-        return monitor_index
+
+        def _save() -> None:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"single")
+
+        if wait_for_save:
+            _save()
+            return monitor_index
+        return monitor_index, _save
 
     import src.eye.module as eye_module
 
@@ -308,7 +361,13 @@ def test_capture_separated_images_writes_single_monitor_when_only_one_selected(
     monkeypatch.delenv("EYE_MONITOR_INDICES", raising=False)
 
     eye = EyeModule()
-    image_paths = asyncio.run(eye.capture_separated_images())
+
+    async def _run() -> list[str]:
+        image_paths = await eye.capture_separated_images()
+        await eye.flush_pending_saves()
+        return image_paths
+
+    image_paths = asyncio.run(_run())
 
     assert len(image_paths) == 1
     assert captured == []
@@ -320,16 +379,21 @@ def test_capture_separated_images_writes_one_combined_eye_screenshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    manager = RunStateManager(runs_root=tmp_path)
-    paths = manager.init_run("combined-eye-test", "test_combined_eye")
-    set_runtime_env(paths.root, paths.root.name)
+    paths = _prepare_eye_run(tmp_path, "combined-eye-test", "test_combined_eye")
 
     captured: list[Path] = []
 
-    def _fake_capture_all_screens(dest: Path) -> None:
+    def _fake_capture_all_screens(dest: Path, *, wait_for_save: bool = True):
         captured.append(dest)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"combined")
+
+        def _save() -> None:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"combined")
+
+        if wait_for_save:
+            _save()
+            return None
+        return _save
 
     import src.eye.module as eye_module
 
@@ -337,9 +401,101 @@ def test_capture_separated_images_writes_one_combined_eye_screenshot(
     monkeypatch.setenv("EYE_MONITOR_INDICES", "1,2")
 
     eye = EyeModule()
-    image_paths = asyncio.run(eye.capture_separated_images())
+
+    async def _run() -> list[str]:
+        image_paths = await eye.capture_separated_images()
+        await eye.flush_pending_saves()
+        return image_paths
+
+    image_paths = asyncio.run(_run())
 
     assert len(image_paths) == 1
     assert len(captured) == 1
     assert captured[0].parent == paths.eye_dir
     assert image_paths[0] == str(captured[0])
+
+
+def test_capture_monitor_to_file_wait_for_save_false_returns_callable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PIL import Image
+
+    fake = Image.new("RGB", (4, 4), color=(1, 2, 3))
+    monkeypatch.setattr(
+        capture,
+        "grab_monitor_image_to_save",
+        lambda monitor_index, include_cursor=False: (monitor_index, fake),
+    )
+    dest = tmp_path / "out.png"
+    result = capture.capture_monitor_to_file(
+        dest, 1, include_cursor=True, wait_for_save=False
+    )
+    assert isinstance(result, tuple)
+    idx, save_fn = result
+    assert idx == 1
+    assert not dest.exists()
+    save_fn()
+    assert dest.is_file()
+    assert Image.open(dest).size == (4, 4)
+
+
+def test_capture_separated_images_returns_before_png_exists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """PNG encode is deferred; path is returned before flush writes the file."""
+    import threading
+    import time
+
+    from PIL import Image
+
+    paths = _prepare_eye_run(tmp_path, "async-eye-png", "test_async_eye_png")
+
+    fake = Image.new("RGB", (8, 8), color=(9, 8, 7))
+    release_save = threading.Event()
+    save_started = threading.Event()
+
+    def _slow_save(dest: Path) -> None:
+        save_started.set()
+        while not release_save.is_set():
+            time.sleep(0.01)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        fake.save(dest)
+
+    def _fake_capture_monitor(
+        *,
+        dest: Path,
+        monitor_index: int,
+        include_cursor: bool = False,
+        wait_for_save: bool = True,
+    ):
+        if wait_for_save:
+            _slow_save(dest)
+            return monitor_index
+        return monitor_index, lambda: _slow_save(dest)
+
+    import src.eye.module as eye_module
+
+    monkeypatch.setattr(eye_module, "capture_monitor_to_file", _fake_capture_monitor)
+    monkeypatch.setenv("EYE_MONITOR_INDEX", "1")
+    monkeypatch.delenv("EYE_MONITOR_INDICES", raising=False)
+
+    eye = EyeModule()
+
+    async def _run() -> None:
+        image_paths = await eye.capture_separated_images()
+        assert len(image_paths) == 1
+        dest = Path(image_paths[0])
+        # Yield so the scheduled to_thread save can start (do not block the loop).
+        for _ in range(200):
+            if save_started.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert save_started.is_set()
+        assert not dest.exists()
+        release_save.set()
+        await eye.flush_pending_saves()
+        assert dest.is_file()
+        assert Image.open(dest).size == (8, 8)
+
+    asyncio.run(_run())
+    assert paths.eye_dir.is_dir()

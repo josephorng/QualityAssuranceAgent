@@ -173,7 +173,7 @@ def test_build_session_report_aggregates_steps_tools_and_profile(tmp_path: Path)
     assert profile[0]["duration_seconds"] == 2.0
     assert profile[1]["kind"] == "tool_execution"
     assert profile[1]["actions"] == ["click"]
-    assert profile[2]["kind"] == "step_wrap_up"
+    assert profile[2]["kind"] == "step_verification"
     assert profile[2]["action"] == "click"
     assert profile[2]["ok"] is True
 
@@ -252,7 +252,7 @@ def test_build_session_report_splits_verify_llm_from_verification(tmp_path: Path
 
     actor_llm = next(entry for entry in profile if entry["kind"] == "llm_inference")
     assert actor_llm["duration_seconds"] == 3.0
-    # Actor wrap-up ends at verify start (06:00:03 -> 06:00:05)
+    # Actor post-tool verification ends at verify start (06:00:03 -> 06:00:05)
     actor_done = next(entry for entry in profile if entry["kind"] == "step_completion")
     assert actor_done["duration_seconds"] == 2.0
 
@@ -368,7 +368,7 @@ def test_time_profile_labels_tool_to_tool_gap_as_next_tool_execution(
     assert profile[2]["actions"] == ["click"]
     assert profile[2]["action"] == "click"
     assert profile[2]["duration_seconds"] == 2.0
-    assert profile[3]["kind"] == "step_wrap_up"
+    assert profile[3]["kind"] == "step_verification"
     assert profile[3]["action"] == "click"
     assert report["steps"][0]["timing_summary"]["screenshot_seconds"] == 0.0
     assert report["steps"][0]["timing_summary"]["tool_execution_seconds"] == 5.0

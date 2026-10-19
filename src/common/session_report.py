@@ -514,8 +514,10 @@ def _describe_tool_interval(
 
     entry.update(
         {
-            "kind": "step_wrap_up",
-            "label": "Step wrap-up after final tool (settle / verify prep)",
+            "kind": "step_verification",
+            "label": (
+                "Post-tool verification (window/signal poll) and step advance"
+            ),
         }
     )
     return entry
@@ -551,9 +553,9 @@ def _describe_time_profile_entry(
     the next message (or step end):
     - user: screenshots were sent; duration is LLM inference.
     - assistant with tool_calls: LLM chose tools; duration is hand execution.
-    - assistant without tool_calls: LLM declared step done; duration is wrap-up.
+    - assistant without tool_calls: LLM declared step done; duration is completion.
     - tool: interval after a tool result—labeled by what follows (next decide
-      screenshot, execution of the next batched tool, or step wrap-up).
+      screenshot, execution of the next batched tool, or post-tool verification).
     - deferred settle markers: wait before tools, then hand execution after the wait.
 
     When ``for_verify`` is True, user-role intervals are labeled ``verify_llm_inference``.
@@ -715,9 +717,9 @@ _KNOWN_TIMING_KINDS = frozenset(
         "deferred_settle",
     }
 )
-# After the last tool, the interval until the next stamped message is often settle /
-# verify prep (hand after-action sleep or script settle before verify).
-_WAITING_PROFILE_KINDS = frozenset({"step_wrap_up"})
+# After the last tool, the interval until step end is usually window/signal verify
+# polling (and a tiny advance). That span can overlap recorded settle_after.
+_WAITING_PROFILE_KINDS = frozenset({"step_verification"})
 _DEFERRED_SETTLE_PROFILE_KINDS = frozenset({"deferred_settle"})
 
 
@@ -767,18 +769,18 @@ def _build_timing_summary(
     settle = _coerce_positive_seconds(settle_after_seconds)
     if settle is None:
         settle = _coerce_positive_seconds(timing.get("settle_after_seconds"))
-    wrap_up = _sum_profile_durations(time_profile, _WAITING_PROFILE_KINDS)
+    verification = _sum_profile_durations(time_profile, _WAITING_PROFILE_KINDS)
     # Explicit deferred-settle waits (executed before tools) count as waiting first.
     # Outbound settle_after on this step is scheduled for a later step when deferred,
-    # so only peel settle_after / wrap-up from the leftover when there was no inbound
-    # deferred wait (blocking settle-before-verify / wrap-up case).
+    # so only peel settle_after / post-tool verification from the leftover when there
+    # was no inbound deferred wait (blocking settle-before-verify case).
     remainder_after_deferred = max(0.0, raw_other - deferred_settle)
     if deferred_settle > 0:
-        extra_waiting = min(float(wrap_up or 0.0), remainder_after_deferred)
+        extra_waiting = min(float(verification or 0.0), remainder_after_deferred)
     elif settle is not None:
         extra_waiting = min(float(settle), remainder_after_deferred)
     else:
-        extra_waiting = min(float(wrap_up or 0.0), remainder_after_deferred)
+        extra_waiting = min(float(verification or 0.0), remainder_after_deferred)
     waiting = round(deferred_settle + extra_waiting, 3)
     other = round(max(0.0, raw_other - waiting), 3)
 

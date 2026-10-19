@@ -863,6 +863,20 @@ class BrainModule:
             return None
         return image_paths[0]
 
+    async def _flush_eye_pending_saves(self) -> None:
+        """Await background eye PNG encodes so transcript paths exist on disk."""
+        import inspect
+
+        eye = getattr(self, "_eye", None)
+        if eye is None:
+            return
+        flush = getattr(eye, "flush_pending_saves", None)
+        if not callable(flush):
+            return
+        result = flush()
+        if inspect.isawaitable(result):
+            await result
+
     @staticmethod
     def _normalize_tool_arguments(arguments: dict[str, Any] | None) -> dict[str, Any]:
         """Copy tool args and strip model quote-wrapper tokens like ``<|"|>``."""
@@ -1151,50 +1165,59 @@ class BrainModule:
             ),
         ]
 
-        await self._await_pending_settle_before_tool(messages)
-        with require_similarity_match():
-            for call in cached_calls:
-                arguments = self._normalize_tool_arguments(call.get("arguments"))
-                try:
-                    normalized_name = await self._normalize_tool_name(call["name"], arguments)
-                except Exception as e:
-                    self.manager.log_error(f"Cache replay: error normalizing tool name: {e}")
-                    self._save_step_messages(messages)
-                    return "fallback"
-                arguments = self._enrich_tool_arguments(normalized_name, arguments, goal)
-                result = await self._hand.execute_tool_command(
-                    ToolCommand(
-                        action=normalized_name,
-                        args=arguments,
-                        screenshot_before_path=before_screenshot,
+        try:
+            await self._await_pending_settle_before_tool(messages)
+            with require_similarity_match():
+                for call in cached_calls:
+                    arguments = self._normalize_tool_arguments(call.get("arguments"))
+                    try:
+                        normalized_name = await self._normalize_tool_name(
+                            call["name"], arguments
+                        )
+                    except Exception as e:
+                        self.manager.log_error(
+                            f"Cache replay: error normalizing tool name: {e}"
+                        )
+                        self._save_step_messages(messages)
+                        return "fallback"
+                    arguments = self._enrich_tool_arguments(
+                        normalized_name, arguments, goal
                     )
-                )
-                self._mark_pending_after_capture()
-                self._remember_replay_press_point(result)
-                messages.append(
-                    stamp_message(
-                        {
-                            "role": ROLE_TOOL,
-                            "content": json.dumps(
-                                self.sanitize_execution_result(result),
-                                ensure_ascii=False,
-                            ),
-                        }
+                    result = await self._hand.execute_tool_command(
+                        ToolCommand(
+                            action=normalized_name,
+                            args=arguments,
+                            screenshot_before_path=before_screenshot,
+                        )
                     )
-                )
-                if not result.ok:
-                    self._append_failed_tool_call(
-                        result.action,
-                        self._step_transcript_counter,
-                        self._script_step_index,
+                    self._mark_pending_after_capture()
+                    self._remember_replay_press_point(result)
+                    messages.append(
+                        stamp_message(
+                            {
+                                "role": ROLE_TOOL,
+                                "content": json.dumps(
+                                    self.sanitize_execution_result(result),
+                                    ensure_ascii=False,
+                                ),
+                            }
+                        )
                     )
-                    self._save_step_messages(messages)
-                    if self._is_recorded_anchor_miss(result):
-                        return "anchor_miss"
-                    return "fallback"
+                    if not result.ok:
+                        self._append_failed_tool_call(
+                            result.action,
+                            self._step_transcript_counter,
+                            self._script_step_index,
+                        )
+                        self._save_step_messages(messages)
+                        if self._is_recorded_anchor_miss(result):
+                            return "anchor_miss"
+                        return "fallback"
 
-        self._save_step_messages(messages)
-        return "ok"
+            self._save_step_messages(messages)
+            return "ok"
+        finally:
+            await self._flush_eye_pending_saves()
 
     async def loop(self) -> bool:
         """Run the capture → LLM (with tools) → execute tools loop until the model returns no tool calls or cap is hit."""
@@ -1225,18 +1248,17 @@ class BrainModule:
 
         # Recording runs always prefer compiled tool calls from the recording folder.
         # The hub "use tool cache" flag only gates the global runs/instruction cache.
+        # Do not call ensure_recording_tool_cache here: main.py ensures once at run
+        # start, and hub edits rebuild the cache on save. Re-ensuring every step
+        # re-parses huge analysis JSON (window_snapshot_debug) for no benefit.
         cached_calls = None
         script_path_raw = (os.environ.get(SCRIPT_PATH_ENV) or "").strip()
         if script_path_raw:
             from src.common.script_helper import recording_run_dir
-            from src.recorder.compile_tool_calls import (
-                ensure_recording_tool_cache,
-                recording_tool_cache_path,
-            )
+            from src.recorder.compile_tool_calls import recording_tool_cache_path
 
             recording_dir = recording_run_dir(Path(script_path_raw))
             if recording_dir is not None:
-                ensure_recording_tool_cache(recording_dir)
                 cached_calls = lookup_tool_calls(
                     goal, path=recording_tool_cache_path(recording_dir)
                 )
@@ -1446,6 +1468,7 @@ class BrainModule:
                             f"({len(tool_calls)} tool call(s))"
                         )
 
+        await self._flush_eye_pending_saves()
         return step_succeeded
 
     @staticmethod
@@ -2045,6 +2068,10 @@ class BrainModule:
                 step_index=script_step_index,
             )
         finally:
+            try:
+                await self._flush_eye_pending_saves()
+            except Exception as exc:
+                self.manager.log_error(f"Eye pending PNG flush failed: {exc}")
             if not defer_after_capture:
                 await self._flush_pending_after_capture()
             self.manager.clear_step_log_context()

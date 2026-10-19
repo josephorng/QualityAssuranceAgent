@@ -31,7 +31,10 @@ from cua_mcp.geometry import (
     merge_same_line_boxes,
     point_in_rect_xywh,
 )
-from cua_mcp.input_box_rectangles import merge_yolo_inputs_with_line_rectangles
+from cua_mcp.input_box_rectangles import (
+    _drop_xywh_boxes_overlapping_horizontal_scrollbars,
+    merge_yolo_inputs_with_line_rectangles,
+)
 from cua_mcp.instruction_offset import parse_mouse_target_instruction
 from cua_mcp.scrollbar_arrows import point_from_scrollbar_percent
 from cua_mcp.icon_map import (
@@ -670,11 +673,13 @@ def _timing_payload_with_roi(
     ocr_reused: int | None = None,
     ocr_fresh: int | None = None,
     icon_ocr_retry_s: float = 0.0,
+    uia_input_s: float = 0.0,
 ) -> dict[str, Any]:
     """Build a per-monitor vision timing dict, optionally including the OCR ROI."""
     payload: dict[str, Any] = {
         "yolo_s": yolo_s,
         "line_s": line_s,
+        "uia_input_s": uia_input_s,
         "ocr_s": ocr_s,
         "icon_ocr_retry_s": icon_ocr_retry_s,
         "total_s": total_s,
@@ -693,7 +698,7 @@ def _timing_payload_with_roi(
 
 def _add_vision_phase_timing(dst: dict[str, Any], src: dict[str, Any]) -> None:
     """Accumulate YOLO/line/OCR phase seconds (and ROIs) from one monitor into ``dst``."""
-    for key in ("yolo_s", "line_s", "ocr_s", "icon_ocr_retry_s", "total_s"):
+    for key in ("yolo_s", "line_s", "uia_input_s", "ocr_s", "icon_ocr_retry_s", "total_s"):
         raw = src.get(key)
         if isinstance(raw, (int, float)) and not isinstance(raw, bool):
             dst[key] = float(dst.get(key, 0.0)) + float(raw)
@@ -730,6 +735,7 @@ def _build_move_mouse_timing(
     """Structured timing for move_mouse / check_object_exists tool results."""
     yolo_s = _round_timing_s(float(vision.get("yolo_s", 0.0)))
     line_s = _round_timing_s(float(vision.get("line_s", 0.0)))
+    uia_input_s = _round_timing_s(float(vision.get("uia_input_s", 0.0)))
     ocr_s = _round_timing_s(float(vision.get("ocr_s", 0.0)))
     icon_ocr_retry_s = _round_timing_s(float(vision.get("icon_ocr_retry_s", 0.0)))
     capture_s = _round_timing_s(capture_s)
@@ -743,7 +749,8 @@ def _build_move_mouse_timing(
     phases: list[dict[str, Any]] = [
         {"name": "capture", "seconds": capture_s},
         yolo_phase,
-        {"name": "line_refine", "seconds": line_s},
+        {"name": "line_refine", "seconds": line_s, **roi_fields},
+        {"name": "uia_input", "seconds": uia_input_s, **roi_fields},
         ocr_phase,
         {"name": "icon_ocr_retry", "seconds": icon_ocr_retry_s},
         {"name": "parse_instruction", "seconds": parse_s, "overlapped": False},
@@ -754,6 +761,7 @@ def _build_move_mouse_timing(
         "capture_s": capture_s,
         "yolo_s": yolo_s,
         "line_s": line_s,
+        "uia_input_s": uia_input_s,
         "ocr_s": ocr_s,
         "icon_ocr_retry_s": icon_ocr_retry_s,
         "parse_s": parse_s,
@@ -1086,6 +1094,9 @@ def _detect_mouse_targets_from_bgr(
     ocr_roi_pad: int = DEFAULT_OCR_ROI_PAD,
     ocr_cache_key: int | None = None,
     yolo_crop_roi: tuple[int, int, int, int] | None = None,
+    live_input_hwnd: int | None = None,
+    live_input_monitor_offset: tuple[int, int] | None = None,
+    live_input_window_screen_xywh: tuple[int, int, int, int] | None = None,
 ) -> list[UiDetection]:
     """Detect mouse-target UI elements on ``bgr`` via YOLO + OCR.
 
@@ -1096,9 +1107,10 @@ def _detect_mouse_targets_from_bgr(
     overlap by a pixel stay separate; results are sorted in reading order. PUA-only element OCR with 2+ icons is split into one
     single-icon detection per glyph (via character spans).
 
-    After YOLO, horizontal line-pair rectangles are detected and added as
-    ``input`` boxes; each is merged with a YOLO input when IoU exceeds the
-    line-refine threshold (union bbox).
+    After YOLO, when a live ``live_input_hwnd`` is provided, a non-empty UIA
+    Edit/Document set replaces YOLO inputs and skips Hough line-refine.
+    Otherwise horizontal line-pair rectangles refine YOLO ``input`` boxes
+    (IoU merge).
 
     When ``original_scrollbar_bboxes_out`` is provided, appends each pre-fit
     scrollbar bbox that differs from the post-fit box (for debug overlays).
@@ -1106,13 +1118,13 @@ def _detect_mouse_targets_from_bgr(
     When ``original_input_bboxes_out`` is provided, appends each pre-merge
     YOLO ``input`` bbox that is absent from the post-merge input list.
 
-    When ``timing_out`` is provided, writes ``yolo_s`` / ``line_s`` / ``ocr_s`` /
-    ``icon_ocr_retry_s`` / ``total_s`` for this image (replacing prior values in
-    that dict). When ``ocr_roi`` is set, also records ``ocr_roi`` (image-local
-    xywh) and ``ocr_roi_pad``.
+    When ``timing_out`` is provided, writes ``yolo_s`` / ``line_s`` /
+    ``uia_input_s`` / ``ocr_s`` / ``icon_ocr_retry_s`` / ``total_s`` for this
+    image (replacing prior values in that dict). When ``ocr_roi`` is set, also
+    records ``ocr_roi`` (image-local xywh) and ``ocr_roi_pad``.
 
     ``ocr_class_ids`` limits which YOLO classes are OCR'd (default: text +
-    element). ``refine_inputs=False`` skips input line-rectangle merge.
+    element). ``refine_inputs=False`` skips UIA and input line-rectangle merge.
 
     When ``yolo_crop_roi`` is set, Stage 1–4 YOLO runs on that image crop (no
     pad) and boxes are translated back to full-image coordinates. When unset,
@@ -1229,8 +1241,8 @@ def _detect_mouse_targets_from_bgr(
             f"boxes_dropped={skipped_boxes}"
         )
 
-    line_started = time.perf_counter()
     line_elapsed = 0.0
+    uia_input_elapsed = 0.0
     if refine_inputs:
         horizontal_scrollbar_boxes = [
             bbox
@@ -1241,18 +1253,65 @@ def _detect_mouse_targets_from_bgr(
         pre_merge_inputs = (
             list(input_boxes) if original_input_bboxes_out is not None else []
         )
-        try:
-            input_boxes = merge_yolo_inputs_with_line_rectangles(
-                bgr,
-                input_boxes,
-                img_w=w,
-                img_h=h,
-                horizontal_scrollbar_boxes=horizontal_scrollbar_boxes,
-            )
-        except Exception as exc:
+        used_uia = False
+        if live_input_hwnd is not None:
+            from src.recorder.uia_input_boxes import try_uia_replace_yolo_inputs
+
+            uia_started = time.perf_counter()
+            mon_off = live_input_monitor_offset or (0, 0)
+            try:
+                uia_boxes, uia_meta = try_uia_replace_yolo_inputs(
+                    input_boxes,
+                    hwnd=int(live_input_hwnd),
+                    monitor_offset=(int(mon_off[0]), int(mon_off[1])),
+                    image_w=w,
+                    image_h=h,
+                    ocr_roi=ocr_roi,
+                    ocr_roi_pad=roi_pad,
+                    window_screen_xywh=live_input_window_screen_xywh,
+                )
+            except Exception as exc:
+                uia_boxes, uia_meta = None, {
+                    "uia_inputs": 0,
+                    "yolo_inputs": len(input_boxes),
+                    "covered": False,
+                    "used": "hough",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+                _log_info(
+                    "move_mouse uia input refine failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            uia_input_elapsed = time.perf_counter() - uia_started
             _log_info(
-                f"move_mouse input-box line refine failed: {type(exc).__name__}: {exc}"
+                "move_mouse uia input refine "
+                f"uia_inputs={uia_meta.get('uia_inputs')} "
+                f"yolo_inputs={uia_meta.get('yolo_inputs')} "
+                f"covered={uia_meta.get('covered')} "
+                f"yolo_covered={uia_meta.get('yolo_covered')} "
+                f"used={uia_meta.get('used')}"
             )
+            if uia_boxes is not None:
+                input_boxes = _drop_xywh_boxes_overlapping_horizontal_scrollbars(
+                    list(uia_boxes),
+                    horizontal_scrollbar_boxes,
+                )
+                used_uia = True
+        if not used_uia:
+            line_started = time.perf_counter()
+            try:
+                input_boxes = merge_yolo_inputs_with_line_rectangles(
+                    bgr,
+                    input_boxes,
+                    img_w=w,
+                    img_h=h,
+                    horizontal_scrollbar_boxes=horizontal_scrollbar_boxes,
+                )
+            except Exception as exc:
+                _log_info(
+                    f"move_mouse input-box line refine failed: {type(exc).__name__}: {exc}"
+                )
+            line_elapsed = time.perf_counter() - line_started
         if original_input_bboxes_out is not None:
             merged_inputs = set(input_boxes)
             for bbox in pre_merge_inputs:
@@ -1265,9 +1324,6 @@ def _detect_mouse_targets_from_bgr(
                 for b in input_boxes
                 if _bbox_center_in_ocr_roi(b, ocr_roi, pad=roi_pad)
             ]
-        line_elapsed = time.perf_counter() - line_started
-    else:
-        line_elapsed = time.perf_counter() - line_started
     non_ocr: list[tuple[tuple[int, int, int, int], int]] = [
         (bbox, YOLO_CLASS_INPUT) for bbox in input_boxes
     ]
@@ -1279,7 +1335,8 @@ def _detect_mouse_targets_from_bgr(
         total_elapsed = time.perf_counter() - vision_started
         _log_info(
             f"move_mouse vision profile yolo_s={yolo_elapsed:.3f} "
-            f"line_s={line_elapsed:.3f} ocr_s=0.000 "
+            f"line_s={line_elapsed:.3f} "
+            f"uia_input_s={uia_input_elapsed:.3f} ocr_s=0.000 "
             f"icon_ocr_retry_s=0.000 "
             f"ocr_reused=0 ocr_fresh=0 "
             f"total_s={total_elapsed:.3f} detections=0"
@@ -1297,6 +1354,7 @@ def _detect_mouse_targets_from_bgr(
                     ocr_reused=0,
                     ocr_fresh=0,
                     icon_ocr_retry_s=0.0,
+                    uia_input_s=uia_input_elapsed,
                 )
             )
         return []
@@ -1390,6 +1448,7 @@ def _detect_mouse_targets_from_bgr(
     _log_info(
         "move_mouse vision profile "
         f"yolo_s={yolo_elapsed:.3f} line_s={line_elapsed:.3f} "
+        f"uia_input_s={uia_input_elapsed:.3f} "
         f"ocr_s={ocr_elapsed:.3f} "
         f"icon_ocr_retry_s={icon_ocr_retry_elapsed:.3f} "
         f"ocr_reused={ocr_reused} ocr_fresh={ocr_fresh} "
@@ -1412,6 +1471,7 @@ def _detect_mouse_targets_from_bgr(
                 ocr_reused=ocr_reused,
                 ocr_fresh=ocr_fresh,
                 icon_ocr_retry_s=icon_ocr_retry_elapsed,
+                uia_input_s=uia_input_elapsed,
             )
         )
     return candidates
@@ -2053,6 +2113,8 @@ def _detections_for_captured_monitor(
     ocr_roi: tuple[int, int, int, int] | None = None,
     ocr_roi_pad: int = DEFAULT_OCR_ROI_PAD,
     yolo_crop_roi: tuple[int, int, int, int] | None = None,
+    live_input_hwnd: int | None = None,
+    live_input_window_screen_xywh: tuple[int, int, int, int] | None = None,
 ) -> list[UiDetection]:
     """YOLO+OCR on one monitor image, then map boxes into virtual-desktop coords."""
     left, top = active_monitor_offset(monitor_index)
@@ -2067,6 +2129,9 @@ def _detections_for_captured_monitor(
         ocr_roi_pad=ocr_roi_pad,
         ocr_cache_key=monitor_index,
         yolo_crop_roi=yolo_crop_roi,
+        live_input_hwnd=live_input_hwnd,
+        live_input_monitor_offset=(left, top),
+        live_input_window_screen_xywh=live_input_window_screen_xywh,
     )
     return [_offset_detection(d, left, top) for d in local_candidates]
 
@@ -2182,6 +2247,7 @@ def _collect_monitor_detections(
                 {
                     "yolo_s": 0.0,
                     "line_s": 0.0,
+                    "uia_input_s": 0.0,
                     "ocr_s": 0.0,
                     "icon_ocr_retry_s": 0.0,
                     "total_s": 0.0,
@@ -2191,12 +2257,22 @@ def _collect_monitor_detections(
 
     # Lazy import: avoid cua_mcp ↔ recorder circular import at module load.
     from src.recorder.window_snapshot import (
+        find_matching_click_window,
         resolve_live_ocr_roi_local,
         resolve_ocr_roi_local,
         resolve_recorded_ocr_roi_local,
     )
 
     landmark_centers = list(landmark_centers_image or [])
+    live_click_window = (
+        find_matching_click_window(click_window) if click_window is not None else None
+    )
+    live_input_hwnd = (
+        int(live_click_window.hwnd) if live_click_window is not None else None
+    )
+    live_input_window_screen_xywh = (
+        live_click_window.screen_rect() if live_click_window is not None else None
+    )
 
     def _gate_roi(
         monitor_index: int,
@@ -2233,6 +2309,24 @@ def _collect_monitor_detections(
             )
             return None
         return live_roi
+
+    def _live_hwnd_for_monitor(
+        monitor_index: int,
+        bgr: np.ndarray,
+    ) -> tuple[int | None, tuple[int, int, int, int] | None]:
+        """Pass live hwnd only when ``resolve_live_ocr_roi_local`` hits this monitor."""
+        if live_input_hwnd is None or click_window is None:
+            return None, None
+        img_h, img_w = bgr.shape[:2]
+        live_roi = resolve_live_ocr_roi_local(
+            click_window,
+            image_w=img_w,
+            image_h=img_h,
+            monitor_offset=active_monitor_offset(monitor_index),
+        )
+        if live_roi is None:
+            return None, None
+        return live_input_hwnd, live_input_window_screen_xywh
 
     # (monitor_index, bgr, gate_roi, yolo_crop_roi)
     planned: list[
@@ -2312,6 +2406,7 @@ def _collect_monitor_detections(
 
     if len(planned) == 1:
         monitor_index, bgr, gate, crop = planned[0]
+        live_hwnd, live_win = _live_hwnd_for_monitor(monitor_index, bgr)
         return _detections_for_captured_monitor(
             monitor_index,
             bgr,
@@ -2322,6 +2417,8 @@ def _collect_monitor_detections(
             ocr_roi=gate,
             ocr_roi_pad=ocr_roi_pad,
             yolo_crop_roi=crop,
+            live_input_hwnd=live_hwnd,
+            live_input_window_screen_xywh=live_win,
         )
 
     all_detections: list[UiDetection] = []
@@ -2334,6 +2431,7 @@ def _collect_monitor_detections(
         yolo_crop_roi: tuple[int, int, int, int] | None,
     ) -> tuple[list[UiDetection], dict[str, Any]]:
         local_timing: dict[str, Any] = {}
+        live_hwnd, live_win = _live_hwnd_for_monitor(monitor_index, bgr)
         dets = _detections_for_captured_monitor(
             monitor_index,
             bgr,
@@ -2344,6 +2442,8 @@ def _collect_monitor_detections(
             ocr_roi=ocr_roi,
             ocr_roi_pad=ocr_roi_pad,
             yolo_crop_roi=yolo_crop_roi,
+            live_input_hwnd=live_hwnd,
+            live_input_window_screen_xywh=live_win,
         )
         return dets, local_timing
 
@@ -2363,6 +2463,7 @@ def _collect_monitor_detections(
             {
                 "yolo_s": 0.0,
                 "line_s": 0.0,
+                "uia_input_s": 0.0,
                 "ocr_s": 0.0,
                 "icon_ocr_retry_s": 0.0,
                 "total_s": 0.0,

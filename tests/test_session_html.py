@@ -3736,6 +3736,12 @@ def test_write_session_html_renders_move_mouse_timing_details(tmp_path: Path) ->
                                                 "ocr_roi_pad": 16,
                                             },
                                             {
+                                                "name": "line_refine",
+                                                "seconds": 0.15,
+                                                "ocr_roi": [20, 30, 400, 300],
+                                                "ocr_roi_pad": 16,
+                                            },
+                                            {
                                                 "name": "ocr",
                                                 "seconds": 2.0,
                                                 "ocr_roi": [20, 30, 400, 300],
@@ -3766,14 +3772,17 @@ def test_write_session_html_renders_move_mouse_timing_details(tmp_path: Path) ->
 
     html = write_session_html_from_run(run_root).read_text(encoding="utf-8")
     assert "move_mouse_yolo" in html
+    assert "move_mouse_line_refine" in html
     assert "move_mouse_ocr" in html
     assert "YOLO detect" in html
+    assert "Input line refine" in html
     assert "time-profile-detail" in html
     assert "ROI xywh=(20, 30, 400, 300)" in html
     assert "roi-meta" in html
     assert "pad=16" in html
     assert "skipped 12" in html
     assert "read 3" in html
+    assert "Input line refine" in html and "ROI xywh=(20, 30, 400, 300)" in html
 
 
 def test_write_session_html_renders_drag_timing_details(tmp_path: Path) -> None:

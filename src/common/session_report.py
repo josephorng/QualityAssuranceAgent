@@ -111,6 +111,7 @@ _MOVE_MOUSE_PHASE_LABELS = {
     "capture": "Screenshot capture",
     "yolo": "YOLO detect",
     "line_refine": "Input line refine",
+    "uia_input": "UIA input refine",
     "ocr": "OCR",
     "icon_ocr_retry": "Unknown-icon OCR retry",
     "parse_instruction": "Parse instruction (overlapped)",
@@ -175,7 +176,7 @@ def _details_from_move_mouse_timing(timing: dict[str, Any]) -> list[dict[str, An
                 "label": label,
                 "duration_seconds": round(float(seconds), 3),
             }
-            if name in {"yolo", "ocr"}:
+            if name in {"yolo", "line_refine", "uia_input", "ocr"}:
                 _attach_roi_fields(
                     detail,
                     phase,
@@ -191,6 +192,7 @@ def _details_from_move_mouse_timing(timing: dict[str, Any]) -> list[dict[str, An
         ("capture_s", "Screenshot capture"),
         ("yolo_s", "YOLO detect"),
         ("line_s", "Input line refine"),
+        ("uia_input_s", "UIA input refine"),
         ("ocr_s", "OCR"),
         ("icon_ocr_retry_s", "Unknown-icon OCR retry"),
         ("parse_s", "Parse instruction (overlapped)"),
@@ -205,7 +207,7 @@ def _details_from_move_mouse_timing(timing: dict[str, Any]) -> list[dict[str, An
                 "duration_seconds": round(float(raw), 3),
             }
             phase_name = key.removesuffix("_s")
-            if phase_name in {"yolo", "ocr"}:
+            if phase_name in {"yolo", "line", "uia_input", "ocr"}:
                 _attach_roi_fields(
                     detail,
                     timing,

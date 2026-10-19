@@ -404,7 +404,12 @@ def test_time_profile_includes_move_mouse_internal_timing_details(tmp_path: Path
                 "ocr_roi": [10, 20, 300, 200],
                 "ocr_roi_pad": 16,
             },
-            {"name": "line_refine", "seconds": 0.1},
+            {
+                "name": "line_refine",
+                "seconds": 0.1,
+                "ocr_roi": [10, 20, 300, 200],
+                "ocr_roi_pad": 16,
+            },
             {
                 "name": "ocr",
                 "seconds": 2.5,
@@ -475,6 +480,11 @@ def test_time_profile_includes_move_mouse_internal_timing_details(tmp_path: Path
     assert details[1]["duration_seconds"] == 1.0
     assert details[1]["roi"] == [10, 20, 300, 200]
     assert details[1]["roi_pad"] == 16
+    assert details[2]["kind"] == "move_mouse_line_refine"
+    assert details[2]["label"] == "Input line refine"
+    assert details[2]["duration_seconds"] == 0.1
+    assert details[2]["roi"] == [10, 20, 300, 200]
+    assert details[2]["roi_pad"] == 16
     assert details[3]["kind"] == "move_mouse_ocr"
     assert details[3]["duration_seconds"] == 2.5
     assert details[3]["roi"] == [10, 20, 300, 200]
@@ -484,6 +494,7 @@ def test_time_profile_includes_move_mouse_internal_timing_details(tmp_path: Path
     assert details[4]["label"] == "Unknown-icon OCR retry"
     assert details[4]["duration_seconds"] == 1.1
     assert "ocr_reused" not in details[1]
+    assert "ocr_reused" not in details[2]
     assert any(d["kind"] == "move_mouse_llm_pick" for d in details)
     assert any(d["kind"] == "move_mouse_hand_move" for d in details)
 

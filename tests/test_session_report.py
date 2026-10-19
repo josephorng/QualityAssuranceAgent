@@ -731,3 +731,35 @@ def test_write_session_report_creates_report_json(tmp_path: Path) -> None:
     payload = json.loads(report_path.read_text(encoding="utf-8"))
     assert payload["session_end_reason"] == "user_ended"
     assert payload["steps"][0]["goal"] == "do thing"
+    assert (run_root / "session_steps.html").is_file()
+    assert (tmp_path / "index.html").is_file()
+
+
+def test_write_session_report_skips_recording_backfill(tmp_path: Path) -> None:
+    from src.common.session_html import recording_html_path
+
+    recording = tmp_path / "recording_20260721_120000_000020"
+    recording.mkdir()
+    (recording / "events").mkdir()
+    (recording / "session.json").write_text("{}", encoding="utf-8")
+    (recording / "events" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "index": 1,
+                "timestamp_utc": "2026-07-21T04:00:00+00:00",
+                "kind": "click",
+                "screenshot_path": "",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    run_root = tmp_path / "task_write_no_backfill"
+    run_root.mkdir()
+    _write_step(run_root / "steps", 0, 0, goal="do thing", messages=[])
+
+    write_session_report(run_root, session_end_reason="completed")
+
+    assert not recording_html_path(recording).is_file()
+    assert (run_root / "session_steps.html").is_file()
+    assert (tmp_path / "index.html").is_file()

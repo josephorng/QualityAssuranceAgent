@@ -3424,6 +3424,44 @@ def test_write_runs_index_skips_recording_backfill_when_disabled(tmp_path: Path)
     assert "recording_20260721_120000_000011" not in html
 
 
+def test_write_session_html_from_run_skips_recording_backfill(tmp_path: Path) -> None:
+    """Post-run session HTML must refresh the index without repairing recordings."""
+    recording = tmp_path / "recording_20260721_120000_000014"
+    _write_recording_fixture(recording, with_html=False)
+    assert not (recording / "recording_steps.html").is_file()
+
+    run_root = tmp_path / "task_20260721_130000_000001"
+    before = _make_png(run_root / "eye" / "before.png")
+    after = _make_png(run_root / "eye" / "after.png")
+    _write_hand_csv(
+        run_root,
+        [
+            {
+                "timestamp": "2026-07-21T05:00:00+00:00",
+                "action": "click",
+                "args": {"button": "left"},
+                "ok": True,
+                "screenshot_name": str(before),
+                "screenshot_before_path": str(before),
+                "screenshot_after_path": str(after),
+                "message": "executed",
+            },
+        ],
+    )
+    (run_root / "report.json").write_text(
+        json.dumps({"script_name": "task.txt", "session_end_reason": "completed"}),
+        encoding="utf-8",
+    )
+
+    path = write_session_html_from_run(run_root)
+
+    assert path.is_file()
+    assert not (recording / "recording_steps.html").is_file()
+    index_html = runs_index_html_path(tmp_path).read_text(encoding="utf-8")
+    assert 'href="task_20260721_130000_000001/session_steps.html"' in index_html
+    assert "recording_20260721_120000_000014" not in index_html
+
+
 def test_write_runs_index_backfills_missing_recording_html(tmp_path: Path) -> None:
     recording = tmp_path / "recording_20260721_120000_000010"
     _write_recording_fixture(recording, with_html=False)

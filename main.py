@@ -255,15 +255,12 @@ def run_coordinator_sync(*, smart_mode: bool = False) -> None:
     """Run one coordinator lifecycle; caller must set env and ``prepare_run_session`` first."""
     from src.common.llm_factory import reset_llm_client
     from src.common.run_state import reset_run_state_manager
-    from src.common.runtime_context import get_runtime_env
     from src.runtime.coordinator import RuntimeCoordinator
 
     reset_run_state_manager()
     # ``asyncio.run`` closes its loop when the run ends; drop LLM clients so the next
     # run builds fresh async transports instead of reusing ones bound to a closed loop.
     reset_llm_client()
-
-    run_root, _ = get_runtime_env()
 
     async def _main() -> None:
         global _coordinator_loop, _coordinator_main_task
@@ -292,13 +289,6 @@ def run_coordinator_sync(*, smart_mode: bool = False) -> None:
         asyncio.run(_main())
     finally:
         hand_tools.restore_clipboard()
-        if os.environ.get("CUA_WRITE_SESSION_REPORT") == "1":
-            from src.common.run_state import get_run_state_manager
-            from src.common.session_report import write_session_report
-
-            manager = get_run_state_manager()
-            reason = manager.session_end_reason or "completed"
-            write_session_report(run_root, session_end_reason=reason)
 
 
 def dismiss_nuitka_onefile_splash() -> None:

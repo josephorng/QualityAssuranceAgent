@@ -8435,7 +8435,10 @@ def write_session_html_from_run(run_root: Path, *, update_index: bool = True) ->
     path = session_html_path(run_root)
     path.write_text(html, encoding="utf-8")
     if update_index:
-        write_runs_index_html(run_root.parent)
+        # Post-run / session writes only need the listing refreshed; skip scanning
+        # every recording folder to repair recording_steps.html (that is for
+        # intentional full index rebuilds with backfill=True).
+        write_runs_index_html(run_root.parent, backfill=False)
     return path
 
 

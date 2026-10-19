@@ -290,6 +290,7 @@ class MainHub(ctk.CTk):
         self._last_run_was_script_mode = False
         self._last_script_run_folder: str | None = None
         self._active_run_root: Path | None = None
+        self._report_write_threads: list[threading.Thread] = []
         self._smart_baseline = "\n"
 
         self._recording_session = RecordingSession()
@@ -2345,6 +2346,7 @@ class MainHub(ctk.CTk):
             self._vision_prefetch.drain_and_stop(timeout=5.0)
         self._recording_hotkey.unregister()
         stop_runs_report_server()
+        self._join_report_write_threads()
         self.destroy()
 
     def _hub_ignore_rect(self) -> tuple[int, int, int, int] | None:
@@ -3850,6 +3852,70 @@ class MainHub(ctk.CTk):
             pass
         return "completed"
 
+    def _join_report_write_threads(self, timeout: float = 30.0) -> None:
+        """Wait briefly for in-flight session report writers before hub teardown."""
+        for thread in list(self._report_write_threads):
+            if thread.is_alive():
+                thread.join(timeout=timeout)
+        self._report_write_threads = [
+            thread for thread in self._report_write_threads if thread.is_alive()
+        ]
+
+    def _write_session_report_async(
+        self,
+        run_root: Path,
+        *,
+        session_end_reason: str,
+        refresh_queue: bool = False,
+    ) -> None:
+        """Write report.json / session HTML off the UI and worker critical paths."""
+
+        def work() -> None:
+            report_path: Path | None = None
+            error: BaseException | None = None
+            try:
+                report_path = write_session_report(
+                    run_root, session_end_reason=session_end_reason
+                )
+            except BaseException as exc:  # noqa: BLE001 - surface on UI thread
+                error = exc
+
+            def on_done() -> None:
+                if error is not None:
+                    try:
+                        get_run_state_manager().log_error(
+                            f"Report write failed for {run_root.name}: {error}"
+                        )
+                    except RuntimeError:
+                        pass
+                    return
+                if report_path is not None:
+                    try:
+                        get_run_state_manager().log_info(f"Report written to {report_path}")
+                    except RuntimeError:
+                        pass
+                html_path = run_root / "session_steps.html"
+                if html_path.is_file():
+                    self._show_report_button(html_path)
+                if refresh_queue:
+                    self._refresh_queue_list()
+
+            try:
+                self.after(0, on_done)
+            except Exception:
+                pass
+
+        thread = threading.Thread(
+            target=work,
+            name=f"session-report-{run_root.name}",
+            daemon=True,
+        )
+        self._report_write_threads = [
+            t for t in self._report_write_threads if t.is_alive()
+        ]
+        self._report_write_threads.append(thread)
+        thread.start()
+
     def _maybe_write_session_report(
         self,
         *,
@@ -3865,15 +3931,10 @@ class MainHub(ctk.CTk):
         run_root = self._active_run_root
         if run_root is None:
             return
-        report_path = write_session_report(run_root, session_end_reason=session_end_reason)
-        try:
-            get_run_state_manager().log_info(f"Report written to {report_path}")
-        except RuntimeError:
-            pass
-        html_path = run_root / "session_steps.html"
-        if html_path.is_file():
-            self._show_report_button(html_path)
         self._active_run_root = None
+        self._write_session_report_async(
+            run_root, session_end_reason=session_end_reason
+        )
 
     def _set_queue_status(self, text: str) -> None:
         self.after(0, lambda: self._status.configure(text=text, text_color=("gray20", "gray65")))
@@ -3885,7 +3946,6 @@ class MainHub(ctk.CTk):
         results: list[tuple[str, str]] = []
         settings = load_settings()
         runs_root = Path(settings.runs_dir)
-        os.environ["CUA_WRITE_SESSION_REPORT"] = "1"
         try:
             for i, script_path in enumerate(paths, start=1):
                 if self._user_requested_stop:
@@ -3948,16 +4008,25 @@ class MainHub(ctk.CTk):
                     except RuntimeError:
                         end_reason = None
                     if end_reason is None and run_root_for_row is not None:
-                        report = read_json(run_root_for_row / "report.json", {})
-                        if isinstance(report, dict):
-                            raw = report.get("session_end_reason")
-                            end_reason = raw if isinstance(raw, str) else None
+                        report_path = run_root_for_row / "report.json"
+                        if report_path.is_file():
+                            report = read_json(report_path, {})
+                            if isinstance(report, dict):
+                                raw_reason = report.get("session_end_reason")
+                                end_reason = (
+                                    raw_reason if isinstance(raw_reason, str) else None
+                                )
                     manager.log_info(
                         f"Queue script stopped (session_end_reason={end_reason!r})."
                     )
                     status = self._queue_status_from_session_end_reason(end_reason)
                     results.append((name, status))
                     self._mark_queue_result(ui_index, status, run_root_for_row)
+                    self._write_session_report_async(
+                        run_root_for_row,
+                        session_end_reason=end_reason or "completed",
+                        refresh_queue=True,
+                    )
                     if status == "fail":
                         self._set_queue_status(
                             f"佇列執行 ({i}/{total})：{name} 失敗（步驟未完成）"
@@ -3965,13 +4034,24 @@ class MainHub(ctk.CTk):
                 except asyncio.CancelledError:
                     results.append((name, "stopped"))
                     self._mark_queue_result(ui_index, "stopped", run_root_for_row)
+                    if run_root_for_row is not None:
+                        self._write_session_report_async(
+                            run_root_for_row,
+                            session_end_reason="user_stopped",
+                            refresh_queue=True,
+                        )
                     break
                 except BaseException as e:  # noqa: BLE001 - continue queue on any script failure
                     results.append((name, "fail"))
                     self._mark_queue_result(ui_index, "fail", run_root_for_row)
+                    if run_root_for_row is not None:
+                        self._write_session_report_async(
+                            run_root_for_row,
+                            session_end_reason="error",
+                            refresh_queue=True,
+                        )
                     self._set_queue_status(f"佇列執行 ({i}/{total})：{name} 失敗（{e}）")
         finally:
-            os.environ.pop("CUA_WRITE_SESSION_REPORT", None)
             self._active_run_root = None
         self._queue_results = results
         ok = sum(1 for _, s in results if s == "ok")
@@ -4173,12 +4253,12 @@ class MainHub(ctk.CTk):
             )
             return
         if kind == "err":
+            show_ctk_message(self, "電腦使用代理", msg, kind="error")
             self._maybe_write_session_report(
                 script_finished=script_finished,
                 user_continues_runtime=False,
                 session_end_reason=session_end_reason,
             )
-            show_ctk_message(self, "電腦使用代理", msg, kind="error")
             return
         if script_finished:
             if prompt_script_continue_or_end(self, msg):
@@ -4202,13 +4282,13 @@ class MainHub(ctk.CTk):
                 self._last_script_run_folder = None
                 self._status.configure(text=msg.strip() or "就緒")
             return
+        if kind == "ok":
+            show_ctk_message(self, "電腦使用代理", msg, kind="info")
         self._maybe_write_session_report(
             script_finished=False,
             user_continues_runtime=False,
             session_end_reason=session_end_reason,
         )
-        if kind == "ok":
-            show_ctk_message(self, "電腦使用代理", msg, kind="info")
 
 
 def run_main_hub() -> None:

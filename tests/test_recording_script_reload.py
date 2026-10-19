@@ -144,11 +144,9 @@ def test_jump_to_script_step_clamps_and_moves_the_cursor() -> None:
     brain.manager = type("Manager", (), {"log_info": lambda self, message: logs.append(message)})()
     brain.script_lines = ["one", "two", "three"]
     brain._script_step_index = 2
-    brain._pending_settle_deadline_perf = 1.0
 
     brain.jump_to_script_step(-4)
     assert brain._script_step_index == 0
-    assert brain._pending_settle_deadline_perf is None
 
     brain.jump_to_script_step(99)
     assert brain._script_step_index == 2

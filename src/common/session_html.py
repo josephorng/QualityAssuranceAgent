@@ -8042,8 +8042,8 @@ def _render_session_time_profile_html(run_root: Path, report: dict[str, Any]) ->
     note = (
         '<p class="time-profile-note">'
         "執行 / 驗證 LLM、工具與截圖時間來自步驟訊息時間戳；"
-        "「等待」含本步實際執行的 deferred settle（上一步延後到本步第一個工具前的剩餘等待，"
-        "time_profile 的 deferred_settle），以及 settle_after / step_verification 從牆鐘剩餘拆出的部分；"
+        "「等待」含本步 end-of-step settle_after（無 window-verify 輪詢時在本步結束前睡眠）"
+        "與 step_verification 從牆鐘剩餘拆出的部分；舊 run 若仍有 deferred_settle 標記亦計入；"
         "不與「其他」重複計算；"
         "move_mouse 與 drag 工具列會展開 YOLO / OCR / 選取等內部階段"
         "（drag 分起點與終點，來自工具結果的 timing）；"

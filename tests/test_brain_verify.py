@@ -49,7 +49,6 @@ def _brain_for_process_step(*, max_step_attempts: int = 0) -> BrainModule:
     brain._script_step_index = 1
     brain._script_event_indices = []
     brain._step_transcript_counter = 3
-    brain._pending_settle_deadline_perf = None
     brain._pending_after_capture = False
     brain._hand = MagicMock()
     brain._hand.capture_after_for_last_action = AsyncMock(return_value=None)
@@ -152,8 +151,7 @@ async def test_process_step_skip_verification_advances_without_checks(monkeypatc
 
     assert result.step_finished is True
     assert brain._script_step_index == 2
-    sleep_mock.assert_not_awaited()
-    assert brain._pending_settle_deadline_perf is not None
+    sleep_mock.assert_awaited_once_with(2.5)
     metadata = brain._update_step_metadata.call_args.args[2]
     assert metadata["status"] == "completed"
     assert metadata["verify"]["branch"] == "advance"
@@ -776,7 +774,7 @@ async def test_process_step_window_verify_polls_until_foreground(
 
 
 @pytest.mark.asyncio
-async def test_process_step_defers_settle_when_no_window_verify(monkeypatch) -> None:
+async def test_process_step_sleeps_settle_when_no_window_verify(monkeypatch) -> None:
     brain = _brain_for_process_step()
     brain.script_expected_outcomes = [None, None, None]
     brain.script_baseline_after_paths = [None, "C:/fake/baseline.jpeg", None]
@@ -788,14 +786,13 @@ async def test_process_step_defers_settle_when_no_window_verify(monkeypatch) -> 
     result = await brain.process_step()
 
     assert result.step_finished is True
-    sleep_mock.assert_not_awaited()
-    assert brain._pending_settle_deadline_perf is not None
+    sleep_mock.assert_awaited_once_with(2.5)
     metadata = brain._update_step_metadata.call_args.args[2]
     assert metadata["settle_after_seconds"] == 2.5
 
 
 @pytest.mark.asyncio
-async def test_process_step_defers_settle_with_expected_outcome_no_baseline(
+async def test_process_step_sleeps_settle_with_expected_outcome_no_baseline(
     monkeypatch,
 ) -> None:
     brain = _brain_for_process_step()
@@ -809,69 +806,9 @@ async def test_process_step_defers_settle_with_expected_outcome_no_baseline(
     result = await brain.process_step()
 
     assert result.step_finished is True
-    sleep_mock.assert_not_awaited()
-    assert brain._pending_settle_deadline_perf is not None
+    sleep_mock.assert_awaited_once_with(3.0)
     metadata = brain._update_step_metadata.call_args.args[2]
     assert metadata["settle_after_seconds"] == 3.0
-
-
-@pytest.mark.asyncio
-async def test_await_pending_settle_before_tool_waits_remainder(monkeypatch) -> None:
-    brain = BrainModule.__new__(BrainModule)
-    brain.manager = MagicMock()
-    brain.manager.log_info = MagicMock()
-    brain._pending_settle_deadline_perf = 100.0
-    brain._step_deferred_settle_waited_seconds = 0.0
-    brain._pending_after_capture = True
-    brain._hand = MagicMock()
-    brain._hand.capture_after_for_last_action = AsyncMock(return_value=None)
-    sleep_mock = AsyncMock()
-    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
-    monkeypatch.setattr("src.brain.module.perf_counter", lambda: 97.5)
-    messages: list[dict] = []
-
-    waited = await brain._await_pending_settle_before_tool(messages)
-
-    assert waited == 2.5
-    sleep_mock.assert_awaited_once_with(2.5)
-    assert brain._pending_settle_deadline_perf is None
-    assert brain._step_deferred_settle_waited_seconds == 2.5
-    assert len(messages) == 2
-    assert messages[0]["deferred_settle_wait_seconds"] == 2.5
-    assert messages[0]["role"] == "system"
-    assert messages[1]["deferred_settle_done"] is True
-    assert "waited 2.500s" in messages[1]["content"]
-    # Settle no longer captures after; next before seals it.
-    brain._hand.capture_after_for_last_action.assert_not_awaited()
-    assert brain._pending_after_capture is True
-
-
-@pytest.mark.asyncio
-async def test_await_pending_settle_before_tool_skips_when_already_satisfied(
-    monkeypatch,
-) -> None:
-    brain = BrainModule.__new__(BrainModule)
-    brain.manager = MagicMock()
-    brain.manager.log_info = MagicMock()
-    brain._pending_settle_deadline_perf = 100.0
-    brain._step_deferred_settle_waited_seconds = 0.0
-    brain._pending_after_capture = True
-    brain._hand = MagicMock()
-    brain._hand.capture_after_for_last_action = AsyncMock(return_value=None)
-    sleep_mock = AsyncMock()
-    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
-    monkeypatch.setattr("src.brain.module.perf_counter", lambda: 101.25)
-    messages: list[dict] = [{"role": "user", "content": "x"}]
-
-    waited = await brain._await_pending_settle_before_tool(messages)
-
-    assert waited == 0.0
-    sleep_mock.assert_not_awaited()
-    assert brain._pending_settle_deadline_perf is None
-    assert messages == [{"role": "user", "content": "x"}]
-    assert brain._step_deferred_settle_waited_seconds == 0.0
-    brain._hand.capture_after_for_last_action.assert_not_awaited()
-    assert brain._pending_after_capture is True
 
 
 @pytest.mark.asyncio
@@ -906,8 +843,7 @@ async def test_process_step_defers_after_to_next_before(monkeypatch) -> None:
     result = await brain.process_step()
 
     assert result.step_finished is True
-    sleep_mock.assert_not_awaited()
-    assert brain._pending_settle_deadline_perf is not None
+    sleep_mock.assert_awaited_once_with(2.5)
     assert brain._pending_after_capture is True
     brain._hand.capture_after_for_last_action.assert_not_awaited()
 
@@ -992,21 +928,9 @@ async def test_process_step_window_verify_success_defers_after_to_next_before(
     assert result.step_finished is True
     brain._hand.capture_after_for_last_action.assert_not_awaited()
     assert brain._pending_after_capture is True
-    # Window verify owns settle; do not leave a deferred settle deadline.
-    assert brain._pending_settle_deadline_perf is None
-
-
-def test_messages_for_llm_drops_deferred_settle_markers() -> None:
-    messages = [
-        {"role": "user", "content": "goal"},
-        {"role": "system", "deferred_settle_wait_seconds": 1.5, "content": "waiting"},
-        {"role": "system", "deferred_settle_done": True, "content": "done"},
-        {"role": "assistant", "content": "ok"},
-    ]
-    assert BrainModule._messages_for_llm(messages) == [
-        {"role": "user", "content": "goal"},
-        {"role": "assistant", "content": "ok"},
-    ]
+    # Window verify owns settle; do not also sleep settle_after on this step.
+    # Appeared floor is 5s with 2.0x deadline → poll sleeps until match (first try).
+    sleep_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1023,7 +947,6 @@ async def test_process_step_skips_settle_when_settle_none(monkeypatch) -> None:
 
     assert result.step_finished is True
     sleep_mock.assert_not_awaited()
-    assert brain._pending_settle_deadline_perf is None
 
 
 @pytest.mark.asyncio

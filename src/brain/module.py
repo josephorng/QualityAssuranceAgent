@@ -93,7 +93,6 @@ _SIGNAL_POLL_MIN_SECONDS = 1.0
 
 ROLE_USER = "user"
 ROLE_TOOL = "tool"
-ROLE_SYSTEM = "system"
 ROLE_ASSISTANT = "assistant"
 ROLE_THINKING = "thinking"
 
@@ -184,10 +183,6 @@ class BrainModule:
         self._script_event_indices: list[int | None] = []
         self._hand = hand
         self._eye = eye
-        # When post-step verify does not own settle (no window-verify poll), settle is
-        # deferred until the next step's first tool so prep can overlap the gap.
-        self._pending_settle_deadline_perf: float | None = None
-        self._step_deferred_settle_waited_seconds: float = 0.0
         # Last-tool after-screenshot pending until the next step's before seals it
         # (or a final capture at run end / failure).
         self._pending_after_capture: bool = False
@@ -307,9 +302,6 @@ class BrainModule:
                 existing_metadata = {}
 
         existing_metadata.update(metadata)
-        waited = float(getattr(self, "_step_deferred_settle_waited_seconds", 0.0) or 0.0)
-        if waited > 0 and "deferred_settle_waited_seconds" not in existing_metadata:
-            existing_metadata["deferred_settle_waited_seconds"] = round(waited, 3)
         payload["step_timing"] = existing_metadata
         write_json(out_path, payload)
 
@@ -492,7 +484,6 @@ class BrainModule:
             f"Replay jump: step {self._script_step_index + 1} -> {target + 1}"
         )
         self._script_step_index = target
-        self._clear_pending_settle_deadline()
 
     def _script_seed_steps(self) -> list[str]:
         """Load non-empty script lines from `SCRIPT_LINES_ENV` (JSON array of strings)."""
@@ -633,43 +624,14 @@ class BrainModule:
             return value
         return {}
 
-    def _clear_pending_settle_deadline(self) -> None:
-        self._pending_settle_deadline_perf = None
-
-    def _schedule_deferred_settle(self, settle_after: float) -> None:
-        """Record a settle deadline without sleeping (overlaps next-step prep)."""
+    async def _sleep_settle_after(self, settle_after: float) -> None:
+        """Block on this step's recording settle gap (when window-verify does not own it)."""
         seconds = float(settle_after)
-        self._pending_settle_deadline_perf = perf_counter() + seconds
-        self.manager.log_info(
-            f"Deferred settle: {seconds:.3f}s deadline set; continuing without blocking sleep"
-        )
-
-    @staticmethod
-    def _is_deferred_settle_transcript_message(message: dict[str, Any]) -> bool:
-        """True for system markers that must not be sent back to the decide LLM."""
-        return (
-            message.get("deferred_settle_wait_seconds") is not None
-            or message.get("deferred_settle_done") is True
-        )
-
-    @classmethod
-    def _messages_for_llm(cls, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Drop deferred-settle transcript markers from the LLM context."""
-        return [
-            message
-            for message in messages
-            if not (
-                isinstance(message, dict) and cls._is_deferred_settle_transcript_message(message)
-            )
-        ]
-
-    def _record_step_deferred_settle_wait(self, waited_seconds: float) -> None:
-        """Accumulate waited deferred-settle seconds on the current step."""
-        seconds = float(waited_seconds)
         if seconds <= 0:
             return
-        prior = float(getattr(self, "_step_deferred_settle_waited_seconds", 0.0) or 0.0)
-        self._step_deferred_settle_waited_seconds = prior + seconds
+        waited = round(seconds, 3)
+        self.manager.log_info(f"Settle after step: waiting {waited:.3f}s")
+        await asyncio.sleep(seconds)
 
     async def _flush_pending_after_capture(self) -> None:
         """Capture a dedicated after-screenshot when no next-step before will seal it."""
@@ -707,62 +669,6 @@ class BrainModule:
     def _mark_pending_after_capture(self) -> None:
         self._pending_after_capture = True
 
-    async def _await_pending_settle_before_tool(
-        self,
-        messages: list[dict[str, Any]] | None = None,
-    ) -> float:
-        """Sleep only the remainder of a deferred settle before the next tool runs.
-
-        When ``messages`` is provided and a wait occurs, append transcript markers so
-        session timing/HTML can show the wait at the execution point (before tools).
-        Returns the seconds actually slept (0 when already satisfied or no deadline).
-        After-screenshots are not flushed here: the next step's before seals the
-        previous after (or a final capture runs at run end).
-        """
-        deadline = getattr(self, "_pending_settle_deadline_perf", None)
-        if deadline is None:
-            return 0.0
-        remaining = deadline - perf_counter()
-        self._pending_settle_deadline_perf = None
-        if remaining <= 0:
-            self.manager.log_info(
-                "Deferred settle: already satisfied "
-                f"({abs(remaining):.3f}s past deadline) before next tool"
-            )
-            return 0.0
-
-        waited = round(float(remaining), 3)
-        self.manager.log_info(
-            f"Deferred settle: waiting remaining {waited:.3f}s before next tool"
-        )
-        if messages is not None:
-            messages.append(
-                stamp_message(
-                    {
-                        "role": ROLE_SYSTEM,
-                        "content": (
-                            f"Deferred settle: waiting {waited:.3f}s before next tool"
-                        ),
-                        "deferred_settle_wait_seconds": waited,
-                    }
-                )
-            )
-        await asyncio.sleep(remaining)
-        if messages is not None:
-            messages.append(
-                stamp_message(
-                    {
-                        "role": ROLE_SYSTEM,
-                        "content": (
-                            f"Deferred settle: waited {waited:.3f}s before next tool"
-                        ),
-                        "deferred_settle_done": True,
-                    }
-                )
-            )
-        self._record_step_deferred_settle_wait(waited)
-        return waited
-
     def prepare_runtime_step(self, command: str) -> None:
         """Set a single script line for the next `process_step()` (runtime command mode)."""
         cleaned = command.strip()
@@ -774,7 +680,6 @@ class BrainModule:
         self.script_settle_after_seconds = [None]
         self.script_window_verifies = [{}]
         self._script_step_index = 0
-        self._clear_pending_settle_deadline()
 
     async def execute_instruction(self, instruction: str) -> bool:
         """
@@ -801,11 +706,9 @@ class BrainModule:
         self.script_settle_after_seconds = [None]
         self.script_window_verifies = [{}]
         self._script_step_index = 0
-        self._clear_pending_settle_deadline()
         self.manager.set_step_log_context(transcript_counter, script_step_index)
         started_iso = datetime.now(timezone.utc).isoformat()
         started_at = perf_counter()
-        self._step_deferred_settle_waited_seconds = 0.0
         try:
             step_succeeded = await self.loop()
             finished_iso = datetime.now(timezone.utc).isoformat()
@@ -846,7 +749,6 @@ class BrainModule:
                 path.unlink()
         self._step_transcript_counter = tc
         self._script_step_index = 0
-        self._clear_pending_settle_deadline()
         return True
 
     def _current_goal(self) -> str:
@@ -1078,12 +980,10 @@ class BrainModule:
         idx = self._script_step_index
 
         if result.branch == "abort":
-            self._clear_pending_settle_deadline()
             self.manager.log_info(
                 f"Verify: branch=abort; holding step and stopping run. {result.reason}"
             )
         elif result.branch == "smart":
-            self._clear_pending_settle_deadline()
             # Primary handling is in process_step (nested recovery); hold index like retry.
             self.manager.log_info(
                 f"Verify: branch=smart; holding step for nested recovery. {result.reason}"
@@ -1095,11 +995,10 @@ class BrainModule:
                 )
             self._script_step_index = idx + 1
         elif result.branch == "retry":
-            self._clear_pending_settle_deadline()
+            pass
         elif result.branch == "skip":
             self._script_step_index = idx + 1
         elif result.branch == "goto":
-            self._clear_pending_settle_deadline()
             assert result.target_step is not None
             target_0 = result.target_step - 1
             self._script_step_index = max(0, min(target_0, n - 1))
@@ -1109,8 +1008,6 @@ class BrainModule:
             )
 
         run_complete = self._script_step_index >= n
-        if run_complete:
-            self._clear_pending_settle_deadline()
         self.manager.log_info(
             f"Verify branch applied: index={self._script_step_index}/{n} "
             f"accomplished={result.accomplished} branch={result.branch} run_complete={run_complete} "
@@ -1166,7 +1063,6 @@ class BrainModule:
         ]
 
         try:
-            await self._await_pending_settle_before_tool(messages)
             with require_similarity_match():
                 for call in cached_calls:
                     arguments = self._normalize_tool_arguments(call.get("arguments"))
@@ -1284,7 +1180,6 @@ class BrainModule:
         llm_path_used = False
         # Actions that returned ok=false and have not succeeded on a later retry.
         unresolved_tool_failures: set[str] = set()
-        settle_gated_for_tools = False
 
         for _ in range(_MAX_INNER_DECIDE_STEPS):
             try:
@@ -1305,7 +1200,7 @@ class BrainModule:
                 )
                 response_message = await self.ollama.chat_messages(
                     self.settings.brain_lm,
-                    messages=self._messages_for_llm(messages),
+                    messages=messages,
                     tools=tool_functions,
                 )
                 if not response_message:
@@ -1381,9 +1276,6 @@ class BrainModule:
 
                 abort_step = False
                 for tool_call in real_tool_calls:
-                    if not settle_gated_for_tools:
-                        await self._await_pending_settle_before_tool(messages)
-                        settle_gated_for_tools = True
                     arguments = self._normalize_tool_arguments(
                         tool_call.function.arguments
                     )
@@ -1674,12 +1566,11 @@ class BrainModule:
 
         Happy path: no recorded window/signal assert and actor success (all tools ok)
         auto-advances without a screenshot or verifier LLM. Any recording
-        ``settle_after`` is deferred until the next step's first tool so next-step
-        prep can overlap the settle window. A recorded window diff polls
-        continuously after actions (early-exit on match; fail only at 2.0x of
-        settle, or 1.0x when settle is under 2s; ``appeared`` / ``disappeared`` /
-        signal asserts floor settle so small recording gaps still poll); a miss
-        retries with ``clearly_unmet``.
+        ``settle_after`` sleeps on this step when window-verify does not own settle.
+        A recorded window diff polls continuously after actions (early-exit on match;
+        fail only at 2.0x of settle, or 1.0x when settle is under 2s; ``appeared`` /
+        ``disappeared`` / signal asserts floor settle so small recording gaps still
+        poll); a miss retries with ``clearly_unmet``.
 
         Report after-frames match recording: the next step's before shot seals this
         step's last-tool after. The final step (or a failed stop) captures a
@@ -1730,7 +1621,6 @@ class BrainModule:
         # Otherwise finally captures a dedicated after (last step / failure).
         defer_after_capture = False
         try:
-            self._step_deferred_settle_waited_seconds = 0.0
             self._replay_press_point_window = None
             skip_verification = skip_verification_enabled()
             window_verify = {} if skip_verification else self._current_window_verify()
@@ -1742,21 +1632,14 @@ class BrainModule:
             settle_after = None
             if step_succeeded:
                 settle_after = self._current_settle_after_seconds()
-            # Window verify polls continuously when present; otherwise defer the
-            # recording gap until the next step's first tool.
+            # Window verify polls continuously when present; otherwise sleep the
+            # recording gap on this step before finished_at is stamped.
             run_window_verify = step_succeeded and bool(window_verify)
             window_poll_settle = (
                 self._window_verify_poll_settle(settle_after, window_verify)
                 if run_window_verify
                 else None
             )
-            if (
-                step_succeeded
-                and settle_after is not None
-                and settle_after > 0
-                and window_poll_settle is None
-            ):
-                self._schedule_deferred_settle(settle_after)
             window_miss: ScriptStepVerifyResult | None = None
             if run_window_verify:
                 if window_poll_settle is not None:
@@ -1770,6 +1653,12 @@ class BrainModule:
                     window_miss = await self._window_verify_miss(
                         windows_before, window_verify
                     )
+            elif (
+                step_succeeded
+                and settle_after is not None
+                and settle_after > 0
+            ):
+                await self._sleep_settle_after(settle_after)
             if window_miss is not None:
                 verify_result = window_miss
             elif step_succeeded:
@@ -2007,8 +1896,7 @@ class BrainModule:
                 )
             run_complete = self._apply_verify_branch(verify_result)
             if run_complete:
-                # Last step: finish settle, then finally captures a dedicated after.
-                await self._await_pending_settle_before_tool()
+                # Last step: finally captures a dedicated after.
                 defer_after_capture = False
             elif verify_result.accomplished:
                 # Next step's before seals this step's after (no extra capture).

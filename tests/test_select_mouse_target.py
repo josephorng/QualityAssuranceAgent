@@ -634,6 +634,7 @@ def test_build_move_mouse_timing_includes_ocr_roi_on_yolo_and_ocr_phases() -> No
             "yolo_s": 0.5,
             "line_s": 0.0,
             "ocr_s": 0.4,
+            "icon_ocr_retry_s": 1.2,
             "ocr_roi": [12, 34, 100, 80],
             "ocr_roi_pad": 16,
             "ocr_reused": 12,
@@ -645,11 +646,13 @@ def test_build_move_mouse_timing_includes_ocr_roi_on_yolo_and_ocr_phases() -> No
     )
     assert timing["ocr_roi"] == [12, 34, 100, 80]
     assert timing["ocr_roi_pad"] == 16
+    assert timing["icon_ocr_retry_s"] == 1.2
     by_name = {p["name"]: p for p in timing["phases"]}
     assert by_name["yolo"]["ocr_roi"] == [12, 34, 100, 80]
     assert by_name["ocr"]["ocr_roi"] == [12, 34, 100, 80]
     assert by_name["ocr"]["ocr_reused"] == 12
     assert by_name["ocr"]["ocr_fresh"] == 3
+    assert by_name["icon_ocr_retry"]["seconds"] == 1.2
     assert timing["ocr_reused"] == 12
     assert timing["ocr_fresh"] == 3
     assert "ocr_reused" not in by_name["yolo"]
@@ -723,12 +726,25 @@ def test_capture_and_detect_keeps_ocr_reuse_counts(
 def test_add_vision_phase_timing_sums_ocr_reuse_counts() -> None:
     from cua_mcp.select_mouse_target import _add_vision_phase_timing
 
-    total: dict = {"yolo_s": 0.0, "line_s": 0.0, "ocr_s": 0.0, "total_s": 0.0}
-    _add_vision_phase_timing(total, {"ocr_s": 0.2, "ocr_reused": 4, "ocr_fresh": 1})
-    _add_vision_phase_timing(total, {"ocr_s": 0.1, "ocr_reused": 2, "ocr_fresh": 3})
+    total: dict = {
+        "yolo_s": 0.0,
+        "line_s": 0.0,
+        "ocr_s": 0.0,
+        "icon_ocr_retry_s": 0.0,
+        "total_s": 0.0,
+    }
+    _add_vision_phase_timing(
+        total,
+        {"ocr_s": 0.2, "icon_ocr_retry_s": 0.5, "ocr_reused": 4, "ocr_fresh": 1},
+    )
+    _add_vision_phase_timing(
+        total,
+        {"ocr_s": 0.1, "icon_ocr_retry_s": 0.3, "ocr_reused": 2, "ocr_fresh": 3},
+    )
     assert total["ocr_reused"] == 6
     assert total["ocr_fresh"] == 4
     assert round(total["ocr_s"], 3) == 0.3
+    assert round(total["icon_ocr_retry_s"], 3) == 0.8
 
 
 def test_detect_refine_inputs_only_inside_ocr_roi(

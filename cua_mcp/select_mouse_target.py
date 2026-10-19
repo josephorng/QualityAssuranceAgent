@@ -669,12 +669,14 @@ def _timing_payload_with_roi(
     ocr_roi_pad: int | None = None,
     ocr_reused: int | None = None,
     ocr_fresh: int | None = None,
+    icon_ocr_retry_s: float = 0.0,
 ) -> dict[str, Any]:
     """Build a per-monitor vision timing dict, optionally including the OCR ROI."""
     payload: dict[str, Any] = {
         "yolo_s": yolo_s,
         "line_s": line_s,
         "ocr_s": ocr_s,
+        "icon_ocr_retry_s": icon_ocr_retry_s,
         "total_s": total_s,
     }
     roi = _normalize_ocr_roi_xywh(ocr_roi)
@@ -691,7 +693,7 @@ def _timing_payload_with_roi(
 
 def _add_vision_phase_timing(dst: dict[str, Any], src: dict[str, Any]) -> None:
     """Accumulate YOLO/line/OCR phase seconds (and ROIs) from one monitor into ``dst``."""
-    for key in ("yolo_s", "line_s", "ocr_s", "total_s"):
+    for key in ("yolo_s", "line_s", "ocr_s", "icon_ocr_retry_s", "total_s"):
         raw = src.get(key)
         if isinstance(raw, (int, float)) and not isinstance(raw, bool):
             dst[key] = float(dst.get(key, 0.0)) + float(raw)
@@ -729,6 +731,7 @@ def _build_move_mouse_timing(
     yolo_s = _round_timing_s(float(vision.get("yolo_s", 0.0)))
     line_s = _round_timing_s(float(vision.get("line_s", 0.0)))
     ocr_s = _round_timing_s(float(vision.get("ocr_s", 0.0)))
+    icon_ocr_retry_s = _round_timing_s(float(vision.get("icon_ocr_retry_s", 0.0)))
     capture_s = _round_timing_s(capture_s)
     parse_s = _round_timing_s(parse_s)
     select_s = _round_timing_s(select_s)
@@ -742,6 +745,7 @@ def _build_move_mouse_timing(
         yolo_phase,
         {"name": "line_refine", "seconds": line_s},
         ocr_phase,
+        {"name": "icon_ocr_retry", "seconds": icon_ocr_retry_s},
         {"name": "parse_instruction", "seconds": parse_s, "overlapped": False},
         {"name": select_phase, "seconds": select_s},
     ]
@@ -751,6 +755,7 @@ def _build_move_mouse_timing(
         "yolo_s": yolo_s,
         "line_s": line_s,
         "ocr_s": ocr_s,
+        "icon_ocr_retry_s": icon_ocr_retry_s,
         "parse_s": parse_s,
         "select_s": select_s,
         "phases": phases,
@@ -1102,9 +1107,9 @@ def _detect_mouse_targets_from_bgr(
     YOLO ``input`` bbox that is absent from the post-merge input list.
 
     When ``timing_out`` is provided, writes ``yolo_s`` / ``line_s`` / ``ocr_s`` /
-    ``total_s`` for this image (replacing prior values in that dict). When
-    ``ocr_roi`` is set, also records ``ocr_roi`` (image-local xywh) and
-    ``ocr_roi_pad``.
+    ``icon_ocr_retry_s`` / ``total_s`` for this image (replacing prior values in
+    that dict). When ``ocr_roi`` is set, also records ``ocr_roi`` (image-local
+    xywh) and ``ocr_roi_pad``.
 
     ``ocr_class_ids`` limits which YOLO classes are OCR'd (default: text +
     element). ``refine_inputs=False`` skips input line-rectangle merge.
@@ -1275,6 +1280,7 @@ def _detect_mouse_targets_from_bgr(
         _log_info(
             f"move_mouse vision profile yolo_s={yolo_elapsed:.3f} "
             f"line_s={line_elapsed:.3f} ocr_s=0.000 "
+            f"icon_ocr_retry_s=0.000 "
             f"ocr_reused=0 ocr_fresh=0 "
             f"total_s={total_elapsed:.3f} detections=0"
         )
@@ -1290,6 +1296,7 @@ def _detect_mouse_targets_from_bgr(
                     ocr_roi_pad=roi_pad,
                     ocr_reused=0,
                     ocr_fresh=0,
+                    icon_ocr_retry_s=0.0,
                 )
             )
         return []
@@ -1343,8 +1350,11 @@ def _detect_mouse_targets_from_bgr(
             _detection_from_bbox(bbox, resolved_cls, text=text_value or None)
         )
 
+    icon_ocr_retry_elapsed = 0.0
     if YOLO_CLASS_ELEMENT in ocr_wanted:
+        icon_retry_started = time.perf_counter()
         candidates = _retry_empty_unknown_icon_ocr(bgr, candidates)
+        icon_ocr_retry_elapsed = time.perf_counter() - icon_retry_started
 
     candidates = _sort_detections_reading_order(candidates)
     pre_fit_scrollbars: list[tuple[int, tuple[int, int, int, int]]] = []
@@ -1381,6 +1391,7 @@ def _detect_mouse_targets_from_bgr(
         "move_mouse vision profile "
         f"yolo_s={yolo_elapsed:.3f} line_s={line_elapsed:.3f} "
         f"ocr_s={ocr_elapsed:.3f} "
+        f"icon_ocr_retry_s={icon_ocr_retry_elapsed:.3f} "
         f"ocr_reused={ocr_reused} ocr_fresh={ocr_fresh} "
         f"total_s={total_elapsed:.3f} "
         f"yolo_boxes={0 if xyxy.size == 0 else len(xyxy)} "
@@ -1400,6 +1411,7 @@ def _detect_mouse_targets_from_bgr(
                 ocr_roi_pad=roi_pad,
                 ocr_reused=ocr_reused,
                 ocr_fresh=ocr_fresh,
+                icon_ocr_retry_s=icon_ocr_retry_elapsed,
             )
         )
     return candidates
@@ -2146,8 +2158,8 @@ def _collect_monitor_detections(
     than one monitor so Triton/ORT work can overlap.
 
     When ``timing_out`` is set, accumulates per-monitor ``yolo_s`` / ``line_s`` /
-    ``ocr_s`` / ``total_s`` (sums across monitors) and records ``ocr_roi`` /
-    ``ocr_rois`` when ROI gating was applied.
+    ``ocr_s`` / ``icon_ocr_retry_s`` / ``total_s`` (sums across monitors) and
+    records ``ocr_roi`` / ``ocr_rois`` when ROI gating was applied.
 
     When ``click_window`` is set, each monitor resolves an OCR/gate ROI via
     :func:`resolve_ocr_roi_local` (live match, else recorded rect). Stage 1 YOLO
@@ -2167,7 +2179,13 @@ def _collect_monitor_detections(
         if timing_out is not None:
             timing_out.clear()
             timing_out.update(
-                {"yolo_s": 0.0, "line_s": 0.0, "ocr_s": 0.0, "total_s": 0.0}
+                {
+                    "yolo_s": 0.0,
+                    "line_s": 0.0,
+                    "ocr_s": 0.0,
+                    "icon_ocr_retry_s": 0.0,
+                    "total_s": 0.0,
+                }
             )
         return []
 
@@ -2342,7 +2360,13 @@ def _collect_monitor_detections(
     if timing_out is not None:
         timing_out.clear()
         timing_out.update(
-            {"yolo_s": 0.0, "line_s": 0.0, "ocr_s": 0.0, "total_s": 0.0}
+            {
+                "yolo_s": 0.0,
+                "line_s": 0.0,
+                "ocr_s": 0.0,
+                "icon_ocr_retry_s": 0.0,
+                "total_s": 0.0,
+            }
         )
         for local_timing in per_monitor_timings:
             _add_vision_phase_timing(timing_out, local_timing)
@@ -3330,6 +3354,7 @@ def _capture_and_detect_mouse_candidates(
         "yolo_s": float(vision_timing.get("yolo_s", 0.0)),
         "line_s": float(vision_timing.get("line_s", 0.0)),
         "ocr_s": float(vision_timing.get("ocr_s", 0.0)),
+        "icon_ocr_retry_s": float(vision_timing.get("icon_ocr_retry_s", 0.0)),
         "total_s": capture_s + float(vision_timing.get("total_s", 0.0)),
     }
     timing.update(_vision_roi_fields(vision_timing))

@@ -113,6 +113,7 @@ _MOVE_MOUSE_PHASE_LABELS = {
     "line_refine": "Input line refine",
     "uia_input": "UIA input refine",
     "uia_scrollbar": "UIA scrollbar refine",
+    "uia_text": "UIA text assist",
     "ocr": "OCR",
     "icon_ocr_retry": "Unknown-icon OCR retry",
     "parse_instruction": "Parse instruction (overlapped)",
@@ -177,7 +178,14 @@ def _details_from_move_mouse_timing(timing: dict[str, Any]) -> list[dict[str, An
                 "label": label,
                 "duration_seconds": round(float(seconds), 3),
             }
-            if name in {"yolo", "line_refine", "uia_input", "uia_scrollbar", "ocr"}:
+            if name in {
+                "yolo",
+                "line_refine",
+                "uia_input",
+                "uia_scrollbar",
+                "uia_text",
+                "ocr",
+            }:
                 _attach_roi_fields(
                     detail,
                     phase,
@@ -195,6 +203,7 @@ def _details_from_move_mouse_timing(timing: dict[str, Any]) -> list[dict[str, An
         ("line_s", "Input line refine"),
         ("uia_input_s", "UIA input refine"),
         ("uia_scrollbar_s", "UIA scrollbar refine"),
+        ("uia_text_s", "UIA text assist"),
         ("ocr_s", "OCR"),
         ("icon_ocr_retry_s", "Unknown-icon OCR retry"),
         ("parse_s", "Parse instruction (overlapped)"),
@@ -209,7 +218,14 @@ def _details_from_move_mouse_timing(timing: dict[str, Any]) -> list[dict[str, An
                 "duration_seconds": round(float(raw), 3),
             }
             phase_name = key.removesuffix("_s")
-            if phase_name in {"yolo", "line", "uia_input", "uia_scrollbar", "ocr"}:
+            if phase_name in {
+                "yolo",
+                "line",
+                "uia_input",
+                "uia_scrollbar",
+                "uia_text",
+                "ocr",
+            }:
                 _attach_roi_fields(
                     detail,
                     timing,

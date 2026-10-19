@@ -1,13 +1,15 @@
-"""Unit tests for UIA input/scrollbar refine geometry and prefer-UIA policy."""
+"""Unit tests for UIA input/scrollbar/text refine geometry and prefer-UIA policy."""
 
 from __future__ import annotations
 
 from src.recorder.uia_input_boxes import (
+    associate_uia_labels_with_yolo_text,
     filter_uia_input_rects,
     is_oversized_uia_rect,
     try_uia_refine_inputs_and_scrollbars,
     try_uia_replace_yolo_inputs,
     uia_covers_yolo_inputs,
+    uia_label_prefer_value,
 )
 
 
@@ -102,13 +104,15 @@ def test_try_uia_replace_empty_falls_back_to_hough() -> None:
 def test_try_uia_refine_inputs_and_scrollbars_independent_prefer() -> None:
     # Input screen (110,60)-(210,100) → local (10,10,100,40)
     # Scrollbar screen (480,50)-(500,350) → local (380,0,20,300)
+    # Text screen (150,100)-(200,120) → local (50,50,50,20)
     def fake_combined(_hwnd: int):
         return (
             [(110, 60, 210, 100)],
             [(480, 50, 500, 350)],
+            [((150, 100, 200, 120), "Item A")],
         )
 
-    inputs, scrollbars, meta = try_uia_refine_inputs_and_scrollbars(
+    inputs, scrollbars, texts, meta = try_uia_refine_inputs_and_scrollbars(
         [(12, 12, 90, 30)],
         [(370, 10, 18, 280)],
         hwnd=1,
@@ -120,34 +124,37 @@ def test_try_uia_refine_inputs_and_scrollbars_independent_prefer() -> None:
     )
     assert inputs == [(10, 10, 100, 40)]
     assert scrollbars == [(380, 0, 20, 300)]
+    assert texts == [((50, 50, 50, 20), "Item A")]
     assert meta["used"] == "uia"
     assert meta["scrollbar_used"] == "uia"
     assert meta["uia_inputs"] == 1
     assert meta["uia_scrollbars"] == 1
+    assert meta["uia_texts"] == 1
 
 
 def test_try_uia_refine_empty_both_falls_back() -> None:
-    inputs, scrollbars, meta = try_uia_refine_inputs_and_scrollbars(
+    inputs, scrollbars, texts, meta = try_uia_refine_inputs_and_scrollbars(
         [(12, 12, 90, 30)],
         [(370, 10, 18, 280)],
         hwnd=1,
         monitor_offset=(100, 50),
         image_w=400,
         image_h=300,
-        enumerate_fn=lambda _hwnd: ([], []),
+        enumerate_fn=lambda _hwnd: ([], [], []),
         window_screen_xywh=(100, 50, 400, 300),
     )
     assert inputs is None
     assert scrollbars is None
+    assert texts == []
     assert meta["used"] == "hough"
     assert meta["scrollbar_used"] == "yolo"
 
 
 def test_try_uia_refine_scrollbar_only() -> None:
     def fake_combined(_hwnd: int):
-        return ([], [(480, 50, 500, 350)])
+        return ([], [(480, 50, 500, 350)], [])
 
-    inputs, scrollbars, meta = try_uia_refine_inputs_and_scrollbars(
+    inputs, scrollbars, texts, meta = try_uia_refine_inputs_and_scrollbars(
         [(12, 12, 90, 30)],
         [],
         hwnd=1,
@@ -159,6 +166,7 @@ def test_try_uia_refine_scrollbar_only() -> None:
     )
     assert inputs is None
     assert scrollbars == [(380, 0, 20, 300)]
+    assert texts == []
     assert meta["used"] == "hough"
     assert meta["scrollbar_used"] == "uia"
 
@@ -173,3 +181,65 @@ def test_hough_path_still_drops_inputs_overlapping_h_scrollbar() -> None:
     h_scrollbars = [(0, 80, 200, 15)]
     kept = _drop_xywh_boxes_overlapping_horizontal_scrollbars(inputs, h_scrollbars)
     assert kept == [(10, 10, 80, 30)]
+
+
+def test_uia_label_prefer_value_over_name() -> None:
+    assert uia_label_prefer_value("  val  ", "name") == "val"
+    assert uia_label_prefer_value("", "  name  ") == "name"
+    assert uia_label_prefer_value("   ", "name") == "name"
+    assert uia_label_prefer_value("", "") == ""
+
+
+def test_labeled_text_control_types_include_interactive_items() -> None:
+    from src.recorder import uia_input_boxes as uia
+
+    assert uia._UIA_BUTTON_CONTROL_TYPE_ID in uia._LABELED_TEXT_CONTROL_TYPES
+    assert uia._UIA_MENUITEM_CONTROL_TYPE_ID in uia._LABELED_TEXT_CONTROL_TYPES
+    assert uia._UIA_TREEITEM_CONTROL_TYPE_ID in uia._LABELED_TEXT_CONTROL_TYPES
+    assert uia._UIA_DATAITEM_CONTROL_TYPE_ID in uia._LABELED_TEXT_CONTROL_TYPES
+    assert uia._UIA_LISTITEM_CONTROL_TYPE_ID in uia._LABELED_TEXT_CONTROL_TYPES
+    assert uia._UIA_TEXT_CONTROL_TYPE_ID in uia._LABELED_TEXT_CONTROL_TYPES
+    assert uia._UIA_HYPERLINK_CONTROL_TYPE_ID in uia._LABELED_TEXT_CONTROL_TYPES
+
+
+def test_associate_split_blob_emits_uia_children() -> None:
+    blob = (0, 0, 100, 90)
+    uia = [
+        ((10, 5, 80, 20), "One"),
+        ((10, 35, 80, 20), "Two"),
+        ((10, 65, 80, 20), "Three"),
+    ]
+    sourced, for_ocr, meta = associate_uia_labels_with_yolo_text([blob], uia)
+    assert for_ocr == []
+    assert meta["split_blobs"] == 1
+    assert {label for _box, label in sourced} == {"One", "Two", "Three"}
+    assert len(sourced) == 3
+
+
+def test_associate_iou_fill_keeps_yolo_bbox() -> None:
+    yolo = (10, 10, 80, 20)
+    uia = [((12, 12, 70, 16), "Label")]
+    sourced, for_ocr, meta = associate_uia_labels_with_yolo_text([yolo], uia)
+    assert for_ocr == []
+    assert meta["iou_filled"] == 1
+    assert sourced == [(yolo, "Label")]
+
+
+def test_associate_orphan_in_roi() -> None:
+    sourced, for_ocr, meta = associate_uia_labels_with_yolo_text(
+        [],
+        [((50, 50, 40, 15), "Orphan")],
+        ocr_roi=(0, 0, 200, 200),
+        ocr_roi_pad=0,
+    )
+    assert for_ocr == []
+    assert meta["orphans"] == 1
+    assert sourced == [((50, 50, 40, 15), "Orphan")]
+
+
+def test_associate_unmatched_yolo_goes_to_ocr() -> None:
+    yolo = (10, 10, 80, 20)
+    sourced, for_ocr, meta = associate_uia_labels_with_yolo_text([yolo], [])
+    assert sourced == []
+    assert for_ocr == [yolo]
+    assert meta["yolo_text_for_ocr"] == 1

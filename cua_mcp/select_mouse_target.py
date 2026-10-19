@@ -672,6 +672,7 @@ def _timing_payload_with_roi(
     icon_ocr_retry_s: float = 0.0,
     uia_input_s: float = 0.0,
     uia_scrollbar_s: float = 0.0,
+    uia_text_s: float = 0.0,
 ) -> dict[str, Any]:
     """Build a per-monitor vision timing dict, optionally including the OCR ROI."""
     payload: dict[str, Any] = {
@@ -679,6 +680,7 @@ def _timing_payload_with_roi(
         "line_s": line_s,
         "uia_input_s": uia_input_s,
         "uia_scrollbar_s": uia_scrollbar_s,
+        "uia_text_s": uia_text_s,
         "ocr_s": ocr_s,
         "icon_ocr_retry_s": icon_ocr_retry_s,
         "total_s": total_s,
@@ -702,6 +704,7 @@ def _add_vision_phase_timing(dst: dict[str, Any], src: dict[str, Any]) -> None:
         "line_s",
         "uia_input_s",
         "uia_scrollbar_s",
+        "uia_text_s",
         "ocr_s",
         "icon_ocr_retry_s",
         "total_s",
@@ -744,6 +747,7 @@ def _build_move_mouse_timing(
     line_s = _round_timing_s(float(vision.get("line_s", 0.0)))
     uia_input_s = _round_timing_s(float(vision.get("uia_input_s", 0.0)))
     uia_scrollbar_s = _round_timing_s(float(vision.get("uia_scrollbar_s", 0.0)))
+    uia_text_s = _round_timing_s(float(vision.get("uia_text_s", 0.0)))
     ocr_s = _round_timing_s(float(vision.get("ocr_s", 0.0)))
     icon_ocr_retry_s = _round_timing_s(float(vision.get("icon_ocr_retry_s", 0.0)))
     capture_s = _round_timing_s(capture_s)
@@ -760,6 +764,7 @@ def _build_move_mouse_timing(
         {"name": "line_refine", "seconds": line_s, **roi_fields},
         {"name": "uia_input", "seconds": uia_input_s, **roi_fields},
         {"name": "uia_scrollbar", "seconds": uia_scrollbar_s, **roi_fields},
+        {"name": "uia_text", "seconds": uia_text_s, **roi_fields},
         ocr_phase,
         {"name": "icon_ocr_retry", "seconds": icon_ocr_retry_s},
         {"name": "parse_instruction", "seconds": parse_s, "overlapped": False},
@@ -772,6 +777,7 @@ def _build_move_mouse_timing(
         "line_s": line_s,
         "uia_input_s": uia_input_s,
         "uia_scrollbar_s": uia_scrollbar_s,
+        "uia_text_s": uia_text_s,
         "ocr_s": ocr_s,
         "icon_ocr_retry_s": icon_ocr_retry_s,
         "parse_s": parse_s,
@@ -1118,9 +1124,12 @@ def _detect_mouse_targets_from_bgr(
     single-icon detection per glyph (via character spans).
 
     After YOLO, when a live ``live_input_hwnd`` is provided, one UIA FindAll
-    (Edit|Document|ScrollBar) prefer-replaces YOLO inputs and scrollbars
-    independently. Non-empty UIA inputs skip Hough line-refine (no H-scrollbar
-    overlap drop). Non-empty UIA scrollbars skip arrow-pair create/drop.
+    (Edit|Document|ScrollBar|Text|Hyperlink|ListItem|Button|MenuItem|TreeItem|
+    DataItem) prefer-replaces YOLO inputs and scrollbars independently, and uses
+    labeled controls as OCR assist (split glued YOLO text blobs, IoU fill,
+    ROI/blob orphans).
+    Non-empty UIA inputs skip Hough line-refine (no H-scrollbar overlap drop).
+    Non-empty UIA scrollbars skip arrow-pair create/drop.
     Otherwise horizontal line-pair rectangles refine YOLO ``input`` boxes
     (IoU merge; still drops boxes overlapping horizontal scrollbars).
 
@@ -1131,10 +1140,10 @@ def _detect_mouse_targets_from_bgr(
     YOLO ``input`` bbox that is absent from the post-merge input list.
 
     When ``timing_out`` is provided, writes ``yolo_s`` / ``line_s`` /
-    ``uia_input_s`` / ``uia_scrollbar_s`` / ``ocr_s`` / ``icon_ocr_retry_s`` /
-    ``total_s`` for this image (replacing prior values in that dict). When
-    ``ocr_roi`` is set, also records ``ocr_roi`` (image-local xywh) and
-    ``ocr_roi_pad``.
+    ``uia_input_s`` / ``uia_scrollbar_s`` / ``uia_text_s`` / ``ocr_s`` /
+    ``icon_ocr_retry_s`` / ``total_s`` for this image (replacing prior values
+    in that dict). When ``ocr_roi`` is set, also records ``ocr_roi``
+    (image-local xywh) and ``ocr_roi_pad``.
 
     ``ocr_class_ids`` limits which YOLO classes are OCR'd (default: text +
     element). ``refine_inputs=False`` skips UIA and input line-rectangle merge.
@@ -1257,7 +1266,9 @@ def _detect_mouse_targets_from_bgr(
     line_elapsed = 0.0
     uia_input_elapsed = 0.0
     uia_scrollbar_elapsed = 0.0
+    uia_text_elapsed = 0.0
     used_uia_scrollbar = False
+    uia_labeled_texts: list[tuple[tuple[int, int, int, int], str]] = []
     if refine_inputs:
         pre_merge_inputs = (
             list(input_boxes) if original_input_bboxes_out is not None else []
@@ -1274,7 +1285,7 @@ def _detect_mouse_targets_from_bgr(
                 if cls_id == YOLO_CLASS_SCROLLBAR
             ]
             try:
-                uia_inputs, uia_scrollbars, uia_meta = (
+                uia_inputs, uia_scrollbars, uia_labeled_texts, uia_meta = (
                     try_uia_refine_inputs_and_scrollbars(
                         input_boxes,
                         yolo_scrollbars,
@@ -1288,25 +1299,32 @@ def _detect_mouse_targets_from_bgr(
                     )
                 )
             except Exception as exc:
-                uia_inputs, uia_scrollbars, uia_meta = None, None, {
-                    "uia_inputs": 0,
-                    "yolo_inputs": len(input_boxes),
-                    "covered": False,
-                    "used": "hough",
-                    "uia_scrollbars": 0,
-                    "yolo_scrollbars": len(yolo_scrollbars),
-                    "scrollbar_covered": False,
-                    "scrollbar_used": "yolo",
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
+                uia_inputs, uia_scrollbars, uia_labeled_texts, uia_meta = (
+                    None,
+                    None,
+                    [],
+                    {
+                        "uia_inputs": 0,
+                        "yolo_inputs": len(input_boxes),
+                        "covered": False,
+                        "used": "hough",
+                        "uia_scrollbars": 0,
+                        "yolo_scrollbars": len(yolo_scrollbars),
+                        "scrollbar_covered": False,
+                        "scrollbar_used": "yolo",
+                        "uia_texts": 0,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                )
                 _log_info(
                     "move_mouse uia refine failed: "
                     f"{type(exc).__name__}: {exc}"
                 )
             uia_elapsed = time.perf_counter() - uia_started
-            # One FindAll: attribute the same wall time to both phase keys.
+            # One FindAll: attribute the same wall time to all UIA phase keys.
             uia_input_elapsed = uia_elapsed
             uia_scrollbar_elapsed = uia_elapsed
+            uia_text_elapsed = uia_elapsed
             _log_info(
                 "move_mouse uia refine "
                 f"uia_inputs={uia_meta.get('uia_inputs')} "
@@ -1317,7 +1335,8 @@ def _detect_mouse_targets_from_bgr(
                 f"uia_scrollbars={uia_meta.get('uia_scrollbars')} "
                 f"yolo_scrollbars={uia_meta.get('yolo_scrollbars')} "
                 f"scrollbar_covered={uia_meta.get('scrollbar_covered')} "
-                f"scrollbar_used={uia_meta.get('scrollbar_used')}"
+                f"scrollbar_used={uia_meta.get('scrollbar_used')} "
+                f"uia_texts={uia_meta.get('uia_texts')}"
             )
             if uia_scrollbars is not None:
                 other_non_ocr = [
@@ -1371,7 +1390,40 @@ def _detect_mouse_targets_from_bgr(
     ]
     non_ocr.extend(other_non_ocr)
 
-    if not text_boxes and not element_boxes and not non_ocr:
+    # Merge same-line YOLO text before UIA association / OCR.
+    merged_text_boxes = (
+        merge_same_line_boxes(text_boxes) if text_boxes else []
+    )
+    uia_text_detections: list[tuple[tuple[int, int, int, int], str]] = []
+    yolo_text_for_ocr = list(merged_text_boxes)
+    if uia_labeled_texts and YOLO_CLASS_TEXT in ocr_wanted:
+        from src.recorder.uia_input_boxes import associate_uia_labels_with_yolo_text
+
+        uia_text_detections, yolo_text_for_ocr, text_assoc_meta = (
+            associate_uia_labels_with_yolo_text(
+                merged_text_boxes,
+                uia_labeled_texts,
+                ocr_roi=ocr_roi,
+                ocr_roi_pad=roi_pad,
+            )
+        )
+        _log_info(
+            "move_mouse uia text assist "
+            f"uia_texts={text_assoc_meta.get('uia_texts')} "
+            f"split_blobs={text_assoc_meta.get('split_blobs')} "
+            f"iou_filled={text_assoc_meta.get('iou_filled')} "
+            f"orphans={text_assoc_meta.get('orphans')} "
+            f"text_ocr_skipped={text_assoc_meta.get('text_ocr_skipped')} "
+            f"yolo_text_for_ocr={text_assoc_meta.get('yolo_text_for_ocr')} "
+            f"uia_sourced={text_assoc_meta.get('uia_sourced')}"
+        )
+
+    if (
+        not yolo_text_for_ocr
+        and not element_boxes
+        and not non_ocr
+        and not uia_text_detections
+    ):
         if ocr_cache_key is not None:
             _recognize_ocr_boxes(bgr, [], [], cache_key=ocr_cache_key)
         total_elapsed = time.perf_counter() - vision_started
@@ -1379,7 +1431,8 @@ def _detect_mouse_targets_from_bgr(
             f"move_mouse vision profile yolo_s={yolo_elapsed:.3f} "
             f"line_s={line_elapsed:.3f} "
             f"uia_input_s={uia_input_elapsed:.3f} "
-            f"uia_scrollbar_s={uia_scrollbar_elapsed:.3f} ocr_s=0.000 "
+            f"uia_scrollbar_s={uia_scrollbar_elapsed:.3f} "
+            f"uia_text_s={uia_text_elapsed:.3f} ocr_s=0.000 "
             f"icon_ocr_retry_s=0.000 "
             f"ocr_reused=0 ocr_fresh=0 "
             f"total_s={total_elapsed:.3f} detections=0"
@@ -1399,28 +1452,21 @@ def _detect_mouse_targets_from_bgr(
                     icon_ocr_retry_s=0.0,
                     uia_input_s=uia_input_elapsed,
                     uia_scrollbar_s=uia_scrollbar_elapsed,
+                    uia_text_s=uia_text_elapsed,
                 )
             )
         return []
 
     ocr_boxes: list[tuple[int, int, int, int]] = []
     ocr_class_id_list: list[int] = []
-    for boxes, cls_id in (
-        (text_boxes, YOLO_CLASS_TEXT),
-        (element_boxes, YOLO_CLASS_ELEMENT),
-    ):
-        if cls_id not in ocr_wanted:
-            continue
-        # Text merges only within a line; stacked list items overlap by a pixel or two
-        # and must not chain into one multi-line box.
-        merge = (
-            merge_same_line_boxes
-            if cls_id == YOLO_CLASS_TEXT
-            else merge_overlapping_boxes
-        )
-        for bbox in merge(boxes):
+    if YOLO_CLASS_TEXT in ocr_wanted:
+        for bbox in yolo_text_for_ocr:
             ocr_boxes.append(bbox)
-            ocr_class_id_list.append(cls_id)
+            ocr_class_id_list.append(YOLO_CLASS_TEXT)
+    if YOLO_CLASS_ELEMENT in ocr_wanted:
+        for bbox in merge_overlapping_boxes(element_boxes):
+            ocr_boxes.append(bbox)
+            ocr_class_id_list.append(YOLO_CLASS_ELEMENT)
 
     ocr_started = time.perf_counter()
     ocr_modes = [ocr_mode_for_yolo_class(cls_id) for cls_id in ocr_class_id_list]
@@ -1435,6 +1481,11 @@ def _detect_mouse_targets_from_bgr(
     candidates: list[UiDetection] = []
     for bbox, cls_id in non_ocr:
         candidates.append(_detection_from_bbox(bbox, cls_id))
+
+    for bbox, label in uia_text_detections:
+        candidates.append(
+            _detection_from_bbox(bbox, YOLO_CLASS_TEXT, text=label)
+        )
 
     for bbox, cls_id, preds in zip(
         ocr_boxes, ocr_class_id_list, ocr_preds, strict=True
@@ -1500,6 +1551,7 @@ def _detect_mouse_targets_from_bgr(
         f"yolo_s={yolo_elapsed:.3f} line_s={line_elapsed:.3f} "
         f"uia_input_s={uia_input_elapsed:.3f} "
         f"uia_scrollbar_s={uia_scrollbar_elapsed:.3f} "
+        f"uia_text_s={uia_text_elapsed:.3f} "
         f"ocr_s={ocr_elapsed:.3f} "
         f"icon_ocr_retry_s={icon_ocr_retry_elapsed:.3f} "
         f"ocr_reused={ocr_reused} ocr_fresh={ocr_fresh} "
@@ -1524,6 +1576,7 @@ def _detect_mouse_targets_from_bgr(
                 icon_ocr_retry_s=icon_ocr_retry_elapsed,
                 uia_input_s=uia_input_elapsed,
                 uia_scrollbar_s=uia_scrollbar_elapsed,
+                uia_text_s=uia_text_elapsed,
             )
         )
     return candidates
@@ -2301,6 +2354,7 @@ def _collect_monitor_detections(
                     "line_s": 0.0,
                     "uia_input_s": 0.0,
                     "uia_scrollbar_s": 0.0,
+                    "uia_text_s": 0.0,
                     "ocr_s": 0.0,
                     "icon_ocr_retry_s": 0.0,
                     "total_s": 0.0,
@@ -2518,6 +2572,7 @@ def _collect_monitor_detections(
                 "line_s": 0.0,
                 "uia_input_s": 0.0,
                 "uia_scrollbar_s": 0.0,
+                "uia_text_s": 0.0,
                 "ocr_s": 0.0,
                 "icon_ocr_retry_s": 0.0,
                 "total_s": 0.0,
@@ -3510,6 +3565,7 @@ def _capture_and_detect_mouse_candidates(
         "line_s": float(vision_timing.get("line_s", 0.0)),
         "uia_input_s": float(vision_timing.get("uia_input_s", 0.0)),
         "uia_scrollbar_s": float(vision_timing.get("uia_scrollbar_s", 0.0)),
+        "uia_text_s": float(vision_timing.get("uia_text_s", 0.0)),
         "ocr_s": float(vision_timing.get("ocr_s", 0.0)),
         "icon_ocr_retry_s": float(vision_timing.get("icon_ocr_retry_s", 0.0)),
         "total_s": capture_s + float(vision_timing.get("total_s", 0.0)),

@@ -775,6 +775,16 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
   display: block; margin-top: .15rem; color: #8c959f;
   font-weight: 500; font-variant-numeric: tabular-nums; font-size: 0.92em;
 }
+.time-profile-gap {
+  display: flex; align-items: center; justify-content: space-between; gap: .75rem;
+  flex-wrap: wrap; margin: -.35rem 0 .75rem; padding: .45rem .9rem;
+  border: 1px dashed #d0d7de; border-radius: 8px; background: #f6f8fa;
+  color: #57606a; font-size: .85rem; font-weight: 600;
+}
+.time-profile-gap .gap-meta {
+  font-weight: 500; font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
 .time-profile .empty { color: #8c959f; font-style: italic; }
 @media (max-width: 720px) { .shots { grid-template-columns: 1fr; } }
 """.strip()
@@ -7661,6 +7671,29 @@ def _format_seconds_precise(value: Any) -> str:
     return f"{seconds:.2f}s"
 
 
+def _step_gap_after_seconds(step: dict[str, Any], next_step: dict[str, Any] | None) -> float | None:
+    """Idle wall time after ``step`` until ``next_step`` starts, if known."""
+    raw = step.get("gap_after_seconds")
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return max(0.0, float(raw))
+    if next_step is None:
+        return None
+    timing = step.get("timing") if isinstance(step.get("timing"), dict) else {}
+    next_timing = (
+        next_step.get("timing") if isinstance(next_step.get("timing"), dict) else {}
+    )
+    finished = timing.get("finished_at_utc")
+    started = next_timing.get("started_at_utc")
+    if not isinstance(finished, str) or not isinstance(started, str):
+        return None
+    try:
+        finished_dt = datetime.fromisoformat(finished.replace("Z", "+00:00"))
+        started_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return round(max(0.0, (started_dt - finished_dt).total_seconds()), 3)
+
+
 def _format_roi_xywh(raw: Any) -> str | None:
     """Format an image-local ``[x, y, w, h]`` ROI for time-profile labels."""
     if not isinstance(raw, (list, tuple)) or len(raw) != 4:
@@ -7883,11 +7916,35 @@ def _render_session_time_profile_html(run_root: Path, report: dict[str, Any]) ->
     if not isinstance(failed_steps, int):
         failed_steps = 0
 
+    gap_seconds = summary.get("inter_step_gap_seconds")
+    if not isinstance(gap_seconds, (int, float)):
+        gap_rolled = 0.0
+        gap_found = False
+        for index, step in enumerate(steps):
+            next_step = steps[index + 1] if index + 1 < len(steps) else None
+            gap = _step_gap_after_seconds(step, next_step)
+            if gap is None:
+                continue
+            gap_rolled += gap
+            gap_found = True
+        gap_seconds = round(gap_rolled, 3) if gap_found else None
+    avg_gap_seconds = summary.get("avg_inter_step_gap_seconds")
+    if (
+        not isinstance(avg_gap_seconds, (int, float))
+        and isinstance(gap_seconds, (int, float))
+        and len(steps) > 1
+    ):
+        avg_gap_seconds = round(float(gap_seconds) / (len(steps) - 1), 3)
+
     cards: list[tuple[str, str]] = [
         ("總時間", _format_seconds_precise(total_seconds) if total_seconds is not None else "—"),
         ("步驟數", str(step_count)),
         ("平均每步", _format_seconds_precise(avg_seconds) if isinstance(avg_seconds, (int, float)) else "—"),
     ]
+    if isinstance(gap_seconds, (int, float)):
+        cards.append(("步驟間隙合計", _format_seconds_precise(gap_seconds)))
+    if isinstance(avg_gap_seconds, (int, float)):
+        cards.append(("平均間隙", _format_seconds_precise(avg_gap_seconds)))
     if failed_steps:
         cards.append(("失敗步驟", str(failed_steps)))
     if vision["has_data"]:
@@ -7919,6 +7976,9 @@ def _render_session_time_profile_html(run_root: Path, report: dict[str, Any]) ->
                     found = True
             if found:
                 category_rows.append((label, round(rolled, 3)))
+
+    if isinstance(gap_seconds, (int, float)):
+        category_rows.append(("步驟間隙", float(gap_seconds)))
 
     if vision["has_data"]:
         category_rows.append(("YOLO（yolo_ocr）", float(vision["yolo_seconds"])))
@@ -8055,6 +8115,15 @@ def _render_session_time_profile_html(run_root: Path, report: dict[str, Any]) ->
             f"{phase_rows}"
             f"</details>"
         )
+        next_step = steps[index] if index < len(steps) else None
+        gap_after = _step_gap_after_seconds(step, next_step)
+        if gap_after is not None and next_step is not None:
+            per_step_parts.append(
+                f'<div class="time-profile-gap">'
+                f"<span>步驟間隙 {index} → {index + 1}</span>"
+                f'<span class="gap-meta">{escape(_format_seconds_precise(gap_after))}</span>'
+                f"</div>"
+            )
 
     note = (
         '<p class="time-profile-note">'
@@ -8062,6 +8131,7 @@ def _render_session_time_profile_html(run_root: Path, report: dict[str, Any]) ->
         "「等待」含本步 end-of-step settle_after（無 window-verify 輪詢時在本步結束前睡眠）"
         "與 step_verification 從牆鐘剩餘拆出的部分；舊 run 若仍有 deferred_settle 標記亦計入；"
         "不與「其他」重複計算；"
+        "「步驟間隙」是上一步 finished_at 到下一步 started_at 的牆鐘空檔（不計入任一步的 duration）；"
         "move_mouse 與 drag 工具列會展開 YOLO / OCR / 選取等內部階段"
         "（drag 分起點與終點，來自工具結果的 timing）；"
         "YOLO / OCR 列會附帶影像座標 ROI xywh（視窗閘控區域，若有）；"

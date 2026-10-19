@@ -3588,6 +3588,34 @@ def test_write_session_html_includes_time_profile_tab(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
+    (steps_dir / step_artifact_name(1, 1)).write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "timestamp_utc": "2026-06-11T06:00:14+00:00",
+                        "content": "observe",
+                    },
+                    {
+                        "role": "assistant",
+                        "timestamp_utc": "2026-06-11T06:00:16+00:00",
+                        "content": "done",
+                    },
+                ],
+                "step_timing": {
+                    "started_at_utc": "2026-06-11T06:00:14+00:00",
+                    "finished_at_utc": "2026-06-11T06:00:18+00:00",
+                    "duration_seconds": 4.0,
+                    "status": "completed",
+                    "step_index": 1,
+                    "goal": "輸入文字",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     yolo_dir = run_root / "yolo_ocr"
     yolo_dir.mkdir()
     (yolo_dir / "shot.json").write_text(
@@ -3611,11 +3639,16 @@ def test_write_session_html_includes_time_profile_tab(tmp_path: Path) -> None:
     assert "驗證 LLM" in html
     assert "等待" in html
     assert "settle_after" in html
+    assert "步驟間隙" in html
+    assert "步驟間隙合計" in html
+    assert "步驟間隙 1 → 2" in html
+    assert "4.00s" in html  # finished 06:00:10 → started 06:00:14
     assert "YOLO（yolo_ocr）" in html
     assert "OCR（yolo_ocr）" in html
     assert "verify_llm_inference" in html
     assert "id=\"tab-profile\"" in html
     assert "move_mouse 與 drag 工具列會展開" in html
+    assert "步驟間隙" in html and "finished_at" in html
 
 
 def test_write_session_html_renders_move_mouse_timing_details(tmp_path: Path) -> None:

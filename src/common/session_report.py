@@ -972,6 +972,40 @@ def _session_wall_clock_seconds(step_records: list[dict[str, Any]]) -> float | N
     return _duration_seconds(earliest, latest)
 
 
+def _inter_step_gap_seconds(
+    finished_at_utc: Any,
+    next_started_at_utc: Any,
+) -> float | None:
+    """Wall-clock idle time from one step's finish to the next step's start."""
+    return _duration_seconds(
+        _parse_iso(finished_at_utc if isinstance(finished_at_utc, str) else None),
+        _parse_iso(next_started_at_utc if isinstance(next_started_at_utc, str) else None),
+    )
+
+
+def _annotate_inter_step_gaps(step_records: list[dict[str, Any]]) -> float:
+    """Set ``gap_after_seconds`` on each step (except the last) and return the sum."""
+    total = 0.0
+    found = False
+    for index, record in enumerate(step_records[:-1]):
+        timing = record.get("timing") if isinstance(record.get("timing"), dict) else {}
+        next_timing = (
+            step_records[index + 1].get("timing")
+            if isinstance(step_records[index + 1].get("timing"), dict)
+            else {}
+        )
+        gap = _inter_step_gap_seconds(
+            timing.get("finished_at_utc"),
+            next_timing.get("started_at_utc"),
+        )
+        if gap is None:
+            continue
+        record["gap_after_seconds"] = gap
+        total += gap
+        found = True
+    return round(total, 3) if found else 0.0
+
+
 def _build_summary(
     step_records: list[dict[str, Any]],
     tool_results: list[dict[str, Any]],
@@ -988,6 +1022,8 @@ def _build_summary(
         "other_seconds": 0.0,
     }
     has_category = False
+    gap_total = 0.0
+    gap_count = 0
     for record in step_records:
         timing = record.get("timing")
         if isinstance(timing, dict):
@@ -1004,6 +1040,10 @@ def _build_summary(
                 if isinstance(value, (int, float)):
                     category_totals[key] += float(value)
                     has_category = True
+        gap_after = record.get("gap_after_seconds")
+        if isinstance(gap_after, (int, float)):
+            gap_total += float(gap_after)
+            gap_count += 1
 
     failed_tools = sum(1 for item in tool_results if not item.get("ok", False))
     summary: dict[str, Any] = {
@@ -1024,6 +1064,9 @@ def _build_summary(
     if has_category:
         for key, value in category_totals.items():
             summary[key] = round(value, 3)
+    if gap_count:
+        summary["inter_step_gap_seconds"] = round(gap_total, 3)
+        summary["avg_inter_step_gap_seconds"] = round(gap_total / gap_count, 3)
     return summary
 
 
@@ -1164,6 +1207,7 @@ def build_session_report(run_root: Path, *, session_end_reason: str) -> dict[str
     step_files = _load_step_files(run_root)
     runtime_goals = _load_runtime_goals(run_root)
     step_records = _build_step_records(step_files, runtime_goals)
+    _annotate_inter_step_gaps(step_records)
     tool_results = _load_tool_results(run_root, step_records)
     script_meta = _resolve_script_metadata(run_root)
     started_at_utc = _resolve_started_at_utc(run_root, step_records)

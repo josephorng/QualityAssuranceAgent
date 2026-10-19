@@ -156,6 +156,11 @@ def test_build_session_report_aggregates_steps_tools_and_profile(tmp_path: Path)
     assert report["summary"]["failed_tool_count"] == 1
     # Wall clock: first start 06:00:00 → last finish 06:00:25 (includes inter-step gap).
     assert report["summary"]["total_duration_seconds"] == 25.0
+    # Step 0 finishes 06:00:10; step 1 starts 06:00:15.
+    assert report["steps"][0]["gap_after_seconds"] == 5.0
+    assert "gap_after_seconds" not in report["steps"][1]
+    assert report["summary"]["inter_step_gap_seconds"] == 5.0
+    assert report["summary"]["avg_inter_step_gap_seconds"] == 5.0
 
     assert report["steps"][0]["goal"] == "Open File Explorer"
     assert report["steps"][1]["goal"] == "Type hello"

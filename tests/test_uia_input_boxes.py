@@ -1,10 +1,11 @@
-"""Unit tests for UIA input refine geometry and prefer-UIA policy."""
+"""Unit tests for UIA input/scrollbar refine geometry and prefer-UIA policy."""
 
 from __future__ import annotations
 
 from src.recorder.uia_input_boxes import (
     filter_uia_input_rects,
     is_oversized_uia_rect,
+    try_uia_refine_inputs_and_scrollbars,
     try_uia_replace_yolo_inputs,
     uia_covers_yolo_inputs,
 )
@@ -96,3 +97,79 @@ def test_try_uia_replace_empty_falls_back_to_hough() -> None:
     assert replaced is None
     assert meta["covered"] is False
     assert meta["used"] == "hough"
+
+
+def test_try_uia_refine_inputs_and_scrollbars_independent_prefer() -> None:
+    # Input screen (110,60)-(210,100) → local (10,10,100,40)
+    # Scrollbar screen (480,50)-(500,350) → local (380,0,20,300)
+    def fake_combined(_hwnd: int):
+        return (
+            [(110, 60, 210, 100)],
+            [(480, 50, 500, 350)],
+        )
+
+    inputs, scrollbars, meta = try_uia_refine_inputs_and_scrollbars(
+        [(12, 12, 90, 30)],
+        [(370, 10, 18, 280)],
+        hwnd=1,
+        monitor_offset=(100, 50),
+        image_w=400,
+        image_h=300,
+        enumerate_fn=fake_combined,
+        window_screen_xywh=(100, 50, 400, 300),
+    )
+    assert inputs == [(10, 10, 100, 40)]
+    assert scrollbars == [(380, 0, 20, 300)]
+    assert meta["used"] == "uia"
+    assert meta["scrollbar_used"] == "uia"
+    assert meta["uia_inputs"] == 1
+    assert meta["uia_scrollbars"] == 1
+
+
+def test_try_uia_refine_empty_both_falls_back() -> None:
+    inputs, scrollbars, meta = try_uia_refine_inputs_and_scrollbars(
+        [(12, 12, 90, 30)],
+        [(370, 10, 18, 280)],
+        hwnd=1,
+        monitor_offset=(100, 50),
+        image_w=400,
+        image_h=300,
+        enumerate_fn=lambda _hwnd: ([], []),
+        window_screen_xywh=(100, 50, 400, 300),
+    )
+    assert inputs is None
+    assert scrollbars is None
+    assert meta["used"] == "hough"
+    assert meta["scrollbar_used"] == "yolo"
+
+
+def test_try_uia_refine_scrollbar_only() -> None:
+    def fake_combined(_hwnd: int):
+        return ([], [(480, 50, 500, 350)])
+
+    inputs, scrollbars, meta = try_uia_refine_inputs_and_scrollbars(
+        [(12, 12, 90, 30)],
+        [],
+        hwnd=1,
+        monitor_offset=(100, 50),
+        image_w=400,
+        image_h=300,
+        enumerate_fn=fake_combined,
+        window_screen_xywh=(100, 50, 400, 300),
+    )
+    assert inputs is None
+    assert scrollbars == [(380, 0, 20, 300)]
+    assert meta["used"] == "hough"
+    assert meta["scrollbar_used"] == "uia"
+
+
+def test_hough_path_still_drops_inputs_overlapping_h_scrollbar() -> None:
+    """Hough/YOLO merge still drops boxes that overlap horizontal scrollbars."""
+    from cua_mcp.input_box_rectangles import (
+        _drop_xywh_boxes_overlapping_horizontal_scrollbars,
+    )
+
+    inputs = [(10, 70, 180, 25), (10, 10, 80, 30)]
+    h_scrollbars = [(0, 80, 200, 15)]
+    kept = _drop_xywh_boxes_overlapping_horizontal_scrollbars(inputs, h_scrollbars)
+    assert kept == [(10, 10, 80, 30)]

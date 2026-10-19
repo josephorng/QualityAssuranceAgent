@@ -1,8 +1,8 @@
-"""Live UIA Edit/Document bounds for input refine (skip Hough when non-empty).
+"""Live UIA Edit/Document/ScrollBar bounds for input + scrollbar refine.
 
-Enumerates ControlType Edit and Document under a live hwnd, converts to
-image-local xywh, drops oversized (near-window) rects, and prefers a non-empty
-UIA set over YOLO+Hough (YOLO often over-detects false inputs).
+One FindAll under a live hwnd (Edit | Document | ScrollBar), split by control
+type, convert to image-local xywh, drop oversized (near-window) rects, and
+prefer non-empty UIA sets over YOLO (+ Hough for inputs).
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ _UIA_CREATE_OR_CONDITION = 28
 
 # IUIAutomationElement
 _UIA_FIND_ALL = 6
+_UIA_GET_CURRENT_CONTROL_TYPE = 21
 
 # IUIAutomationElementArray
 _UIA_ARRAY_GET_LENGTH = 3
@@ -45,6 +46,7 @@ _UIA_ARRAY_GET_ELEMENT = 4
 _UIA_CONTROL_TYPE_PROPERTY_ID = 30003
 _UIA_EDIT_CONTROL_TYPE_ID = 50004
 _UIA_DOCUMENT_CONTROL_TYPE_ID = 50030
+_UIA_SCROLLBAR_CONTROL_TYPE_ID = 50028
 _TREE_SCOPE_DESCENDANTS = 0x4
 _VT_I4 = 3
 
@@ -52,6 +54,10 @@ RectXywh = tuple[int, int, int, int]
 ScreenXyxy = tuple[int, int, int, int]
 
 UiaScreenEnumerator = Callable[[int], list[ScreenXyxy]]
+# (input_screen_xyxy, scrollbar_screen_xyxy)
+UiaCombinedScreenEnumerator = Callable[
+    [int], tuple[list[ScreenXyxy], list[ScreenXyxy]]
+]
 
 
 class _VARIANT_UNION(ctypes.Union):
@@ -148,6 +154,10 @@ def filter_uia_input_rects(
     return out
 
 
+# Same geometry filter for scrollbars (alias keeps call sites readable).
+filter_uia_scrollbar_rects = filter_uia_input_rects
+
+
 def uia_covers_yolo_inputs(
     uia_boxes: list[RectXywh],
     yolo_input_boxes: list[RectXywh],
@@ -173,6 +183,9 @@ def uia_covers_yolo_inputs(
         if best <= threshold:
             return False
     return True
+
+
+uia_covers_yolo_scrollbars = uia_covers_yolo_inputs
 
 
 def _window_screen_xywh(hwnd: int) -> RectXywh | None:
@@ -207,10 +220,74 @@ def _element_bounding_xyxy(element: ctypes.c_void_p) -> ScreenXyxy | None:
     return (int(rect.left), int(rect.top), int(rect.right), int(rect.bottom))
 
 
-def enumerate_edit_document_screen_xyxy(hwnd: int) -> list[ScreenXyxy]:
-    """FindAll Edit|Document under ``hwnd``; return screen ``(l,t,r,b)`` boxes."""
+def _element_control_type(element: ctypes.c_void_p) -> int | None:
+    get_ct = ctypes.WINFUNCTYPE(
+        ctypes.HRESULT,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_int),
+    )(
+        _com_vtable(element, _UIA_GET_CURRENT_CONTROL_TYPE + 1)[
+            _UIA_GET_CURRENT_CONTROL_TYPE
+        ]
+    )
+    control_type = ctypes.c_int(0)
+    hr = get_ct(element, ctypes.byref(control_type))
+    if hr != _S_OK:
+        return None
+    return int(control_type.value)
+
+
+def _create_control_type_condition(
+    automation: ctypes.c_void_p, control_type_id: int
+) -> ctypes.c_void_p | None:
+    create_prop = ctypes.WINFUNCTYPE(
+        ctypes.HRESULT,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        VARIANT,
+        ctypes.POINTER(ctypes.c_void_p),
+    )(
+        _com_vtable(automation, _UIA_CREATE_PROPERTY_CONDITION + 1)[
+            _UIA_CREATE_PROPERTY_CONDITION
+        ]
+    )
+    cond_ptr = ctypes.c_void_p()
+    hr = create_prop(
+        automation,
+        _UIA_CONTROL_TYPE_PROPERTY_ID,
+        _variant_i4(control_type_id),
+        ctypes.byref(cond_ptr),
+    )
+    if hr != _S_OK or not cond_ptr:
+        return None
+    return cond_ptr
+
+
+def _create_or_condition(
+    automation: ctypes.c_void_p,
+    left: ctypes.c_void_p,
+    right: ctypes.c_void_p,
+) -> ctypes.c_void_p | None:
+    create_or = ctypes.WINFUNCTYPE(
+        ctypes.HRESULT,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    )(_com_vtable(automation, _UIA_CREATE_OR_CONDITION + 1)[_UIA_CREATE_OR_CONDITION])
+    or_ptr = ctypes.c_void_p()
+    hr = create_or(automation, left, right, ctypes.byref(or_ptr))
+    if hr != _S_OK or not or_ptr:
+        return None
+    return or_ptr
+
+
+def enumerate_edit_document_scrollbar_screen(
+    hwnd: int,
+) -> tuple[list[ScreenXyxy], list[ScreenXyxy]]:
+    """One FindAll Edit|Document|ScrollBar; return ``(inputs, scrollbars)`` screen xyxy."""
     if os.name != "nt" or not hwnd:
-        return []
+        return [], []
 
     ole32 = ctypes.windll.ole32
     initialized_here = False
@@ -218,15 +295,18 @@ def enumerate_edit_document_screen_xyxy(hwnd: int) -> list[ScreenXyxy]:
     if hr == _S_OK:
         initialized_here = True
     elif hr not in (_S_OK, _S_FALSE) and (hr & 0xFFFFFFFF) != 0x80010106:
-        return []
+        return [], []
 
     automation: ctypes.c_void_p | None = None
     root: ctypes.c_void_p | None = None
     edit_cond: ctypes.c_void_p | None = None
     doc_cond: ctypes.c_void_p | None = None
+    sb_cond: ctypes.c_void_p | None = None
+    edit_doc_or: ctypes.c_void_p | None = None
     or_cond: ctypes.c_void_p | None = None
     found: ctypes.c_void_p | None = None
-    out: list[ScreenXyxy] = []
+    inputs: list[ScreenXyxy] = []
+    scrollbars: list[ScreenXyxy] = []
     try:
         clsid = _guid_from_string(_CLSID_CUIAutomation)
         iid = _guid_from_string(_IID_IUIAutomation)
@@ -239,7 +319,7 @@ def enumerate_edit_document_screen_xyxy(hwnd: int) -> list[ScreenXyxy]:
             ctypes.byref(automation_ptr),
         )
         if hr != _S_OK or not automation_ptr:
-            return []
+            return [], []
         automation = automation_ptr
 
         element_from_handle = ctypes.WINFUNCTYPE(
@@ -255,54 +335,25 @@ def enumerate_edit_document_screen_xyxy(hwnd: int) -> list[ScreenXyxy]:
             ctypes.byref(root_ptr),
         )
         if hr != _S_OK or not root_ptr:
-            return []
+            return [], []
         root = root_ptr
 
-        create_prop = ctypes.WINFUNCTYPE(
-            ctypes.HRESULT,
-            ctypes.c_void_p,
-            ctypes.c_int,
-            VARIANT,
-            ctypes.POINTER(ctypes.c_void_p),
-        )(
-            _com_vtable(automation, _UIA_CREATE_PROPERTY_CONDITION + 1)[
-                _UIA_CREATE_PROPERTY_CONDITION
-            ]
+        edit_cond = _create_control_type_condition(automation, _UIA_EDIT_CONTROL_TYPE_ID)
+        doc_cond = _create_control_type_condition(
+            automation, _UIA_DOCUMENT_CONTROL_TYPE_ID
         )
-        edit_ptr = ctypes.c_void_p()
-        hr = create_prop(
-            automation,
-            _UIA_CONTROL_TYPE_PROPERTY_ID,
-            _variant_i4(_UIA_EDIT_CONTROL_TYPE_ID),
-            ctypes.byref(edit_ptr),
+        sb_cond = _create_control_type_condition(
+            automation, _UIA_SCROLLBAR_CONTROL_TYPE_ID
         )
-        if hr != _S_OK or not edit_ptr:
-            return []
-        edit_cond = edit_ptr
+        if edit_cond is None or doc_cond is None or sb_cond is None:
+            return [], []
 
-        doc_ptr = ctypes.c_void_p()
-        hr = create_prop(
-            automation,
-            _UIA_CONTROL_TYPE_PROPERTY_ID,
-            _variant_i4(_UIA_DOCUMENT_CONTROL_TYPE_ID),
-            ctypes.byref(doc_ptr),
-        )
-        if hr != _S_OK or not doc_ptr:
-            return []
-        doc_cond = doc_ptr
-
-        create_or = ctypes.WINFUNCTYPE(
-            ctypes.HRESULT,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_void_p),
-        )(_com_vtable(automation, _UIA_CREATE_OR_CONDITION + 1)[_UIA_CREATE_OR_CONDITION])
-        or_ptr = ctypes.c_void_p()
-        hr = create_or(automation, edit_cond, doc_cond, ctypes.byref(or_ptr))
-        if hr != _S_OK or not or_ptr:
-            return []
-        or_cond = or_ptr
+        edit_doc_or = _create_or_condition(automation, edit_cond, doc_cond)
+        if edit_doc_or is None:
+            return [], []
+        or_cond = _create_or_condition(automation, edit_doc_or, sb_cond)
+        if or_cond is None:
+            return [], []
 
         find_all = ctypes.WINFUNCTYPE(
             ctypes.HRESULT,
@@ -319,7 +370,7 @@ def enumerate_edit_document_screen_xyxy(hwnd: int) -> list[ScreenXyxy]:
             ctypes.byref(found_ptr),
         )
         if hr != _S_OK or not found_ptr:
-            return []
+            return [], []
         found = found_ptr
 
         get_length = ctypes.WINFUNCTYPE(
@@ -336,7 +387,7 @@ def enumerate_edit_document_screen_xyxy(hwnd: int) -> list[ScreenXyxy]:
         length = ctypes.c_int(0)
         hr = get_length(found, ctypes.byref(length))
         if hr != _S_OK or length.value <= 0:
-            return []
+            return [], []
 
         for index in range(int(length.value)):
             elem_ptr = ctypes.c_void_p()
@@ -346,16 +397,26 @@ def enumerate_edit_document_screen_xyxy(hwnd: int) -> list[ScreenXyxy]:
             element = elem_ptr
             try:
                 box = _element_bounding_xyxy(element)
-                if box is not None:
-                    out.append(box)
+                if box is None:
+                    continue
+                control_type = _element_control_type(element)
+                if control_type == _UIA_SCROLLBAR_CONTROL_TYPE_ID:
+                    scrollbars.append(box)
+                elif control_type in (
+                    _UIA_EDIT_CONTROL_TYPE_ID,
+                    _UIA_DOCUMENT_CONTROL_TYPE_ID,
+                ):
+                    inputs.append(box)
             finally:
                 _com_release(element)
-        return out
+        return inputs, scrollbars
     except Exception:
-        return []
+        return [], []
     finally:
         _com_release(found)
         _com_release(or_cond)
+        _com_release(edit_doc_or)
+        _com_release(sb_cond)
         _com_release(doc_cond)
         _com_release(edit_cond)
         _com_release(root)
@@ -365,6 +426,48 @@ def enumerate_edit_document_screen_xyxy(hwnd: int) -> list[ScreenXyxy]:
                 ole32.CoUninitialize()
             except Exception:
                 pass
+
+
+def enumerate_edit_document_screen_xyxy(hwnd: int) -> list[ScreenXyxy]:
+    """FindAll Edit|Document under ``hwnd`` (via combined walk); screen xyxy boxes."""
+    inputs, _scrollbars = enumerate_edit_document_scrollbar_screen(int(hwnd))
+    return inputs
+
+
+def list_uia_input_and_scrollbar_boxes_image_local(
+    hwnd: int,
+    *,
+    monitor_offset: tuple[int, int],
+    image_w: int,
+    image_h: int,
+    ocr_roi: RectXywh | None = None,
+    ocr_roi_pad: int = 0,
+    max_area_frac: float = DEFAULT_UIA_OVERSIZE_AREA_FRAC,
+    enumerate_fn: UiaCombinedScreenEnumerator | None = None,
+    window_screen_xywh: RectXywh | None = None,
+) -> tuple[list[RectXywh], list[RectXywh]]:
+    """Live input + scrollbar boxes in image-local xywh (one FindAll)."""
+    window = window_screen_xywh or _window_screen_xywh(int(hwnd))
+    if window is None:
+        return [], []
+    enumerator = enumerate_fn or enumerate_edit_document_scrollbar_screen
+    try:
+        input_screen, scrollbar_screen = enumerator(int(hwnd))
+    except Exception:
+        return [], []
+    filter_kwargs = dict(
+        window_screen_xywh=window,
+        monitor_offset=monitor_offset,
+        image_w=image_w,
+        image_h=image_h,
+        ocr_roi=ocr_roi,
+        ocr_roi_pad=ocr_roi_pad,
+        max_area_frac=max_area_frac,
+    )
+    return (
+        filter_uia_input_rects(input_screen or [], **filter_kwargs),
+        filter_uia_scrollbar_rects(scrollbar_screen or [], **filter_kwargs),
+    )
 
 
 def list_uia_input_boxes_image_local(
@@ -383,23 +486,34 @@ def list_uia_input_boxes_image_local(
     window = window_screen_xywh or _window_screen_xywh(int(hwnd))
     if window is None:
         return []
-    enumerator = enumerate_fn or enumerate_edit_document_screen_xyxy
-    try:
-        screen_boxes = enumerator(int(hwnd))
-    except Exception:
-        return []
-    if not screen_boxes:
-        return []
-    return filter_uia_input_rects(
-        screen_boxes,
-        window_screen_xywh=window,
+    if enumerate_fn is not None:
+        try:
+            screen_boxes = enumerate_fn(int(hwnd))
+        except Exception:
+            return []
+        if not screen_boxes:
+            return []
+        return filter_uia_input_rects(
+            screen_boxes,
+            window_screen_xywh=window,
+            monitor_offset=monitor_offset,
+            image_w=image_w,
+            image_h=image_h,
+            ocr_roi=ocr_roi,
+            ocr_roi_pad=ocr_roi_pad,
+            max_area_frac=max_area_frac,
+        )
+    inputs, _scrollbars = list_uia_input_and_scrollbar_boxes_image_local(
+        int(hwnd),
         monitor_offset=monitor_offset,
         image_w=image_w,
         image_h=image_h,
         ocr_roi=ocr_roi,
         ocr_roi_pad=ocr_roi_pad,
         max_area_frac=max_area_frac,
+        window_screen_xywh=window,
     )
+    return inputs
 
 
 def try_uia_replace_yolo_inputs(
@@ -447,3 +561,61 @@ def try_uia_replace_yolo_inputs(
     if prefer_uia:
         return uia_boxes, meta
     return None, meta
+
+
+def try_uia_refine_inputs_and_scrollbars(
+    yolo_input_boxes: list[RectXywh],
+    yolo_scrollbar_boxes: list[RectXywh],
+    *,
+    hwnd: int,
+    monitor_offset: tuple[int, int],
+    image_w: int,
+    image_h: int,
+    ocr_roi: RectXywh | None = None,
+    ocr_roi_pad: int = 0,
+    iou_threshold: float = DEFAULT_INPUT_RECT_IOU_THRESHOLD,
+    enumerate_fn: UiaCombinedScreenEnumerator | None = None,
+    window_screen_xywh: RectXywh | None = None,
+) -> tuple[list[RectXywh] | None, list[RectXywh] | None, dict[str, object]]:
+    """One FindAll; prefer-replace inputs and scrollbars independently.
+
+    Returns ``(uia_inputs|None, uia_scrollbars|None, meta)``. ``None`` means keep
+    YOLO (+ Hough for inputs) for that class.
+    """
+    uia_inputs, uia_scrollbars = list_uia_input_and_scrollbar_boxes_image_local(
+        int(hwnd),
+        monitor_offset=monitor_offset,
+        image_w=image_w,
+        image_h=image_h,
+        ocr_roi=ocr_roi,
+        ocr_roi_pad=ocr_roi_pad,
+        enumerate_fn=enumerate_fn,
+        window_screen_xywh=window_screen_xywh,
+    )
+    prefer_inputs = bool(uia_inputs)
+    prefer_scrollbars = bool(uia_scrollbars)
+    meta: dict[str, object] = {
+        "uia_inputs": len(uia_inputs),
+        "yolo_inputs": len(yolo_input_boxes),
+        "covered": prefer_inputs,
+        "yolo_covered": uia_covers_yolo_inputs(
+            uia_inputs,
+            yolo_input_boxes,
+            iou_threshold=iou_threshold,
+        ),
+        "used": "uia" if prefer_inputs else "hough",
+        "uia_scrollbars": len(uia_scrollbars),
+        "yolo_scrollbars": len(yolo_scrollbar_boxes),
+        "scrollbar_covered": prefer_scrollbars,
+        "scrollbar_yolo_covered": uia_covers_yolo_scrollbars(
+            uia_scrollbars,
+            yolo_scrollbar_boxes,
+            iou_threshold=iou_threshold,
+        ),
+        "scrollbar_used": "uia" if prefer_scrollbars else "yolo",
+    }
+    return (
+        uia_inputs if prefer_inputs else None,
+        uia_scrollbars if prefer_scrollbars else None,
+        meta,
+    )

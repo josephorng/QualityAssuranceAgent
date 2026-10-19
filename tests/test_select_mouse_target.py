@@ -651,6 +651,7 @@ def test_build_move_mouse_timing_includes_ocr_roi_on_yolo_and_ocr_phases() -> No
     assert by_name["yolo"]["ocr_roi"] == [12, 34, 100, 80]
     assert by_name["line_refine"]["ocr_roi"] == [12, 34, 100, 80]
     assert by_name["uia_input"]["ocr_roi"] == [12, 34, 100, 80]
+    assert by_name["uia_scrollbar"]["ocr_roi"] == [12, 34, 100, 80]
     assert by_name["ocr"]["ocr_roi"] == [12, 34, 100, 80]
     assert by_name["ocr"]["ocr_reused"] == 12
     assert by_name["ocr"]["ocr_fresh"] == 3
@@ -818,6 +819,32 @@ def _patch_detect_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
         )
 
 
+def _fake_uia_refine(
+    uia_inputs: list[tuple[int, int, int, int]] | None,
+    uia_scrollbars: list[tuple[int, int, int, int]] | None = None,
+):
+    def _fn(yolo_inputs, yolo_scrollbars, **_kwargs):
+        inputs = uia_inputs
+        scrollbars = uia_scrollbars
+        return (
+            inputs,
+            scrollbars,
+            {
+                "uia_inputs": 0 if inputs is None else len(inputs),
+                "yolo_inputs": len(yolo_inputs),
+                "covered": inputs is not None,
+                "yolo_covered": inputs is not None,
+                "used": "uia" if inputs is not None else "hough",
+                "uia_scrollbars": 0 if scrollbars is None else len(scrollbars),
+                "yolo_scrollbars": len(yolo_scrollbars),
+                "scrollbar_covered": scrollbars is not None,
+                "scrollbar_used": "uia" if scrollbars is not None else "yolo",
+            },
+        )
+
+    return _fn
+
+
 def test_detect_uia_covered_skips_hough_merge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -840,17 +867,9 @@ def test_detect_uia_covered_skips_hough_merge(
     )
     _patch_detect_passthrough(monkeypatch)
 
-    def fake_try(yolo_inputs, **_kwargs):
-        return ([(8, 8, 36, 26)], {
-            "uia_inputs": 1,
-            "yolo_inputs": len(yolo_inputs),
-            "covered": True,
-            "used": "uia",
-        })
-
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.try_uia_replace_yolo_inputs",
-        fake_try,
+        "src.recorder.uia_input_boxes.try_uia_refine_inputs_and_scrollbars",
+        _fake_uia_refine([(8, 8, 36, 26)]),
     )
 
     timing: dict = {}
@@ -867,6 +886,7 @@ def test_detect_uia_covered_skips_hough_merge(
     assert len(dets) == 1
     assert dets[0].bbox == (8, 8, 36, 26)
     assert timing.get("uia_input_s", 0) >= 0.0
+    assert timing.get("uia_scrollbar_s", 0) >= 0.0
     assert timing.get("line_s", -1) == 0.0
 
 
@@ -895,17 +915,8 @@ def test_detect_uia_prefers_nonempty_over_extra_yolo_inputs(
     )
     _patch_detect_passthrough(monkeypatch)
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.try_uia_replace_yolo_inputs",
-        lambda yolo_inputs, **_k: (
-            [(8, 8, 36, 26)],
-            {
-                "uia_inputs": 1,
-                "yolo_inputs": len(yolo_inputs),
-                "covered": True,
-                "yolo_covered": False,
-                "used": "uia",
-            },
-        ),
+        "src.recorder.uia_input_boxes.try_uia_refine_inputs_and_scrollbars",
+        _fake_uia_refine([(8, 8, 36, 26)]),
     )
 
     dets = _detect_mouse_targets_from_bgr(
@@ -947,7 +958,7 @@ def test_detect_no_live_hwnd_uses_hough(
         raise AssertionError("UIA should not run without live hwnd")
 
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.try_uia_replace_yolo_inputs",
+        "src.recorder.uia_input_boxes.try_uia_refine_inputs_and_scrollbars",
         boom,
     )
 
@@ -981,7 +992,7 @@ def test_detect_refine_inputs_false_skips_uia_and_hough(
     )
     _patch_detect_passthrough(monkeypatch)
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.try_uia_replace_yolo_inputs",
+        "src.recorder.uia_input_boxes.try_uia_refine_inputs_and_scrollbars",
         lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("uia")),
     )
 
@@ -994,6 +1005,175 @@ def test_detect_refine_inputs_false_skips_uia_and_hough(
     )
     assert len(dets) == 1
     assert dets[0].bbox == (10, 10, 30, 20)
+
+
+def test_detect_uia_inputs_kept_despite_overlapping_h_scrollbar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UIA inputs must not be dropped for H-scrollbar overlap (Hough-only rule)."""
+    import numpy as np
+    from cua_mcp.select_mouse_target import _detect_mouse_targets_from_bgr
+    from cua_mcp.yolo_onnx import YOLO_CLASS_INPUT, YOLO_CLASS_SCROLLBAR
+
+    bgr = np.zeros((100, 200, 3), dtype=np.uint8)
+    # YOLO H-scrollbar along bottom; UIA input overlaps it.
+    xyxy = np.asarray(
+        [[10, 10, 100, 40], [0, 80, 200, 95]],
+        dtype=np.float32,
+    )
+    scores = np.asarray([0.9, 0.9], dtype=np.float32)
+    class_ids = np.asarray([YOLO_CLASS_INPUT, YOLO_CLASS_SCROLLBAR], dtype=np.int32)
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.run_yolo_onnx_end2end",
+        lambda *_a, **_k: (xyxy, scores, class_ids),
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.merge_yolo_inputs_with_line_rectangles",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("hough")),
+    )
+    _patch_detect_passthrough(monkeypatch)
+    # UIA input overlaps the YOLO H-scrollbar band.
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.try_uia_refine_inputs_and_scrollbars",
+        _fake_uia_refine([(5, 70, 180, 25)]),
+    )
+
+    dets = _detect_mouse_targets_from_bgr(
+        bgr,
+        refine_inputs=True,
+        ocr_class_ids=frozenset(),
+        live_input_hwnd=42,
+        live_input_monitor_offset=(0, 0),
+        live_input_window_screen_xywh=(0, 0, 200, 100),
+    )
+    inputs = [d for d in dets if d.class_id == YOLO_CLASS_INPUT]
+    assert len(inputs) == 1
+    assert inputs[0].bbox == (5, 70, 180, 25)
+
+
+def test_detect_uia_scrollbars_skip_create_and_drop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    from cua_mcp.select_mouse_target import _detect_mouse_targets_from_bgr
+    from cua_mcp.yolo_onnx import YOLO_CLASS_SCROLLBAR
+
+    bgr = np.zeros((100, 200, 3), dtype=np.uint8)
+    xyxy = np.asarray([[180, 10, 195, 90]], dtype=np.float32)
+    scores = np.asarray([0.9], dtype=np.float32)
+    class_ids = np.asarray([YOLO_CLASS_SCROLLBAR], dtype=np.int32)
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.run_yolo_onnx_end2end",
+        lambda *_a, **_k: (xyxy, scores, class_ids),
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.merge_yolo_inputs_with_line_rectangles",
+        lambda *_a, **_k: [],
+    )
+    create_calls: list[object] = []
+    drop_calls: list[object] = []
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.fit_scrollbar_bboxes_to_arrow_controls",
+        lambda cands, **_k: cands,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.create_scrollbars_from_arrow_pairs",
+        lambda cands, **_k: create_calls.append("create") or cands,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.drop_scrollbars_without_arrow_ends",
+        lambda cands, **_k: drop_calls.append("drop") or cands,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.merge_overlapping_scrollbars",
+        lambda cands, **_k: cands,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.relabel_caption_button_detections",
+        lambda cands, **_k: cands,
+    )
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.try_uia_refine_inputs_and_scrollbars",
+        _fake_uia_refine(None, [(182, 5, 16, 90)]),
+    )
+
+    timing: dict = {}
+    dets = _detect_mouse_targets_from_bgr(
+        bgr,
+        refine_inputs=True,
+        ocr_class_ids=frozenset(),
+        live_input_hwnd=42,
+        live_input_monitor_offset=(0, 0),
+        live_input_window_screen_xywh=(0, 0, 200, 100),
+        timing_out=timing,
+    )
+    assert create_calls == []
+    assert drop_calls == []
+    scrollbars = [d for d in dets if d.class_id == YOLO_CLASS_SCROLLBAR]
+    assert len(scrollbars) == 1
+    assert scrollbars[0].bbox == (182, 5, 16, 90)
+    assert timing.get("uia_scrollbar_s", 0) >= 0.0
+
+
+def test_detect_empty_uia_scrollbars_keeps_yolo_arrow_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    from cua_mcp.select_mouse_target import _detect_mouse_targets_from_bgr
+    from cua_mcp.yolo_onnx import YOLO_CLASS_SCROLLBAR
+
+    bgr = np.zeros((100, 200, 3), dtype=np.uint8)
+    xyxy = np.asarray([[180, 10, 195, 90]], dtype=np.float32)
+    scores = np.asarray([0.9], dtype=np.float32)
+    class_ids = np.asarray([YOLO_CLASS_SCROLLBAR], dtype=np.int32)
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.run_yolo_onnx_end2end",
+        lambda *_a, **_k: (xyxy, scores, class_ids),
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.merge_yolo_inputs_with_line_rectangles",
+        lambda *_a, **_k: [],
+    )
+    create_calls: list[object] = []
+    drop_calls: list[object] = []
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.fit_scrollbar_bboxes_to_arrow_controls",
+        lambda cands, **_k: cands,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.create_scrollbars_from_arrow_pairs",
+        lambda cands, **_k: create_calls.append("create") or cands,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.drop_scrollbars_without_arrow_ends",
+        lambda cands, **_k: drop_calls.append("drop") or cands,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.merge_overlapping_scrollbars",
+        lambda cands, **_k: cands,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.relabel_caption_button_detections",
+        lambda cands, **_k: cands,
+    )
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.try_uia_refine_inputs_and_scrollbars",
+        _fake_uia_refine(None, None),
+    )
+
+    dets = _detect_mouse_targets_from_bgr(
+        bgr,
+        refine_inputs=True,
+        ocr_class_ids=frozenset(),
+        live_input_hwnd=42,
+        live_input_monitor_offset=(0, 0),
+        live_input_window_screen_xywh=(0, 0, 200, 100),
+    )
+    assert create_calls == ["create"]
+    assert drop_calls == ["drop"]
+    scrollbars = [d for d in dets if d.class_id == YOLO_CLASS_SCROLLBAR]
+    assert len(scrollbars) == 1
+    assert scrollbars[0].bbox == (180, 10, 15, 80)
 
 
 def test_normalize_nearby_labels_strips_and_dedupes() -> None:

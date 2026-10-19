@@ -23,6 +23,20 @@ from src.recorder.window_snapshot import (
 _EXPECTED_OUTCOME_PREFIX = "# expected_outcome:"
 _LEGACY_RECORDING_SCRIPT_FILENAME = "script.txt"
 
+_ReplaySteps = tuple[
+    list[str],
+    list[str | None],
+    list[str | None],
+    list[float | None],
+    list[dict[str, Any]],
+    list[int | None],
+]
+_InstructionRows = list[tuple[RecordedEvent, dict[str, Any]]]
+
+# ``run_dir.resolve()`` → ``(fingerprint, payload)``
+_replay_steps_cache: dict[str, tuple[tuple[float, int], _ReplaySteps]] = {}
+_instruction_rows_cache: dict[str, tuple[tuple[float, int], _InstructionRows]] = {}
+
 
 def _safe_is_dir(path: Path) -> bool:
     """Like ``Path.is_dir`` but treat permission / IO failures as missing."""
@@ -210,6 +224,83 @@ def _recorded_event_with_resolved_shots(
     return event
 
 
+def _recording_replay_cache_key(run_dir: Path) -> str:
+    try:
+        return str(Path(run_dir).resolve())
+    except OSError:
+        return str(Path(run_dir))
+
+
+def _recording_replay_fingerprint(run_dir: Path) -> tuple[float, int]:
+    """Max mtime + file count for session/events/analysis JSON (cache invalidation)."""
+    run_dir = Path(run_dir)
+    paths: list[Path] = [run_dir / "session.json"]
+    events_dir = run_dir / "events"
+    if events_dir.is_dir():
+        paths.extend(path for path in events_dir.glob("event_*.json") if path.is_file())
+    analysis_dir = run_dir / "analysis"
+    if analysis_dir.is_dir():
+        paths.extend(path for path in analysis_dir.glob("event_*.json") if path.is_file())
+    mtimes: list[float] = []
+    count = 0
+    for path in paths:
+        try:
+            mtimes.append(path.stat().st_mtime)
+            count += 1
+        except OSError:
+            continue
+    return (max(mtimes) if mtimes else 0.0, count)
+
+
+def invalidate_recording_replay_cache(run_dir: Path | None = None) -> None:
+    """Drop cached replay steps/rows for ``run_dir``, or all recordings when omitted."""
+    if run_dir is None:
+        _replay_steps_cache.clear()
+        _instruction_rows_cache.clear()
+        return
+    key = _recording_replay_cache_key(run_dir)
+    _replay_steps_cache.pop(key, None)
+    _instruction_rows_cache.pop(key, None)
+
+
+def _load_instruction_event_rows_uncached(run_dir: Path) -> _InstructionRows:
+    """Single pass: instruction events as ``(RecordedEvent, analysis)`` pairs."""
+    run_dir = Path(run_dir)
+    analysis_dir = run_dir / "analysis"
+    rows: _InstructionRows = []
+    for event_path in _recording_event_json_paths(run_dir):
+        raw = _load_json_dict(event_path)
+        if raw is None:
+            continue
+        raw_index = raw.get("index")
+        if not isinstance(raw_index, int):
+            continue
+        analysis = _load_json_dict(analysis_dir / f"event_{raw_index:03d}.json")
+        if analysis is None:
+            continue
+        instruction = analysis.get("instruction")
+        if not (isinstance(instruction, str) and instruction.strip()):
+            continue
+        event = _recorded_event_with_resolved_shots(run_dir, raw)
+        if event is None:
+            continue
+        rows.append((event, analysis))
+    return rows
+
+
+def _load_instruction_event_rows(run_dir: Path) -> _InstructionRows:
+    """Cached instruction-event rows (shared by collectors and full replay load)."""
+    run_dir = Path(run_dir)
+    key = _recording_replay_cache_key(run_dir)
+    fingerprint = _recording_replay_fingerprint(run_dir)
+    cached = _instruction_rows_cache.get(key)
+    if cached is not None and cached[0] == fingerprint:
+        return cached[1]
+    rows = _load_instruction_event_rows_uncached(run_dir)
+    _instruction_rows_cache[key] = (fingerprint, rows)
+    return rows
+
+
 def _iter_recording_instructions(
     run_dir: Path,
 ) -> list[tuple[int, str, dict[str, Any]]]:
@@ -219,21 +310,11 @@ def _iter_recording_instructions(
     still appear via their own analysis ``instruction``. Events with no analysis
     or a blank instruction are skipped.
     """
-    analysis_dir = Path(run_dir) / "analysis"
     found: list[tuple[int, str, dict[str, Any]]] = []
-    for event_path in _recording_event_json_paths(run_dir):
-        event = _load_json_dict(event_path)
-        if event is None:
-            continue
-        raw_index = event.get("index")
-        if not isinstance(raw_index, int):
-            continue
-        analysis = _load_json_dict(analysis_dir / f"event_{raw_index:03d}.json")
-        if analysis is None:
-            continue
+    for event, analysis in _load_instruction_event_rows(run_dir):
         instruction = analysis.get("instruction")
         if isinstance(instruction, str) and instruction.strip():
-            found.append((raw_index, instruction.strip(), analysis))
+            found.append((event.index, instruction.strip(), analysis))
     return found
 
 
@@ -242,7 +323,7 @@ def collect_recording_instruction_event_indices(run_dir: Path) -> list[int]:
 
     These are the ``id="event-N"`` anchors in ``recording_steps.html``.
     """
-    return [index for index, _instruction, _analysis in _iter_recording_instructions(run_dir)]
+    return [event.index for event, _analysis in _load_instruction_event_rows(run_dir)]
 
 
 def collect_recording_instructions(run_dir: Path) -> tuple[list[str], list[str | None]]:
@@ -253,8 +334,11 @@ def collect_recording_instructions(run_dir: Path) -> tuple[list[str], list[str |
     """
     instructions: list[str] = []
     expected_outcomes: list[str | None] = []
-    for _index, instruction, analysis in _iter_recording_instructions(run_dir):
-        instructions.append(instruction)
+    for _event, analysis in _load_instruction_event_rows(run_dir):
+        instruction = analysis.get("instruction")
+        instructions.append(
+            instruction.strip() if isinstance(instruction, str) else ""
+        )
         if use_expected_outcome_enabled(analysis):
             outcome = analysis.get("expected_outcome")
             if isinstance(outcome, str) and outcome.strip():
@@ -264,6 +348,41 @@ def collect_recording_instructions(run_dir: Path) -> tuple[list[str], list[str |
         else:
             expected_outcomes.append(None)
     return instructions, expected_outcomes
+
+
+def _final_after_screenshot_path(run_dir: Path) -> str | None:
+    session = _load_json_dict(Path(run_dir) / "session.json") or {}
+    final_after = _resolve_recording_media_path(
+        run_dir, session.get("final_after_screenshot") if isinstance(session, dict) else None
+    )
+    if final_after is None:
+        final_after = _resolve_recording_media_path(
+            run_dir, str(Path(run_dir) / "screenshots" / "final_after.jpeg")
+        )
+    return final_after
+
+
+def _baselines_from_rows(
+    run_dir: Path,
+    rows: _InstructionRows,
+    *,
+    include_disabled: bool,
+) -> list[str | None]:
+    final_after = _final_after_screenshot_path(run_dir)
+    baselines: list[str | None] = []
+    for index, (event, analysis) in enumerate(rows):
+        if not include_disabled and not use_expected_outcome_enabled(analysis):
+            baselines.append(None)
+            continue
+        next_event = rows[index + 1][0] if index + 1 < len(rows) else None
+        baselines.append(
+            after_screenshot_for_outcome(
+                event,
+                next_event,
+                final_after_screenshot=final_after,
+            )
+        )
+    return baselines
 
 
 def collect_recording_baseline_after_paths(
@@ -278,52 +397,45 @@ def collect_recording_baseline_after_paths(
     ``include_disabled`` keeps baselines for steps whose verification checkbox is off,
     so reports can show the recorded screen without turning verification on.
     """
-    run_dir = Path(run_dir)
-    analysis_dir = run_dir / "analysis"
-    session = _load_json_dict(run_dir / "session.json") or {}
-    final_after = _resolve_recording_media_path(
-        run_dir, session.get("final_after_screenshot") if isinstance(session, dict) else None
+    return _baselines_from_rows(
+        Path(run_dir),
+        _load_instruction_event_rows(run_dir),
+        include_disabled=include_disabled,
     )
-    if final_after is None:
-        final_after = _resolve_recording_media_path(
-            run_dir, str(run_dir / "screenshots" / "final_after.jpeg")
-        )
 
-    event_paths = _recording_event_json_paths(run_dir)
-    loaded: list[tuple[RecordedEvent, dict[str, Any]]] = []
-    for event_path in event_paths:
-        raw = _load_json_dict(event_path)
-        if raw is None:
-            continue
-        raw_index = raw.get("index")
-        if not isinstance(raw_index, int):
-            continue
-        analysis = _load_json_dict(analysis_dir / f"event_{raw_index:03d}.json")
-        if analysis is None:
-            continue
-        event = _recorded_event_with_resolved_shots(run_dir, raw)
-        if event is None:
-            continue
-        instruction = analysis.get("instruction")
-        if not (isinstance(instruction, str) and instruction.strip()):
-            continue
-        loaded.append((event, analysis))
 
-    baselines: list[str | None] = []
-    for index, (event, analysis) in enumerate(loaded):
-        if not include_disabled and not use_expected_outcome_enabled(analysis):
-            # Opt-in verification: no baseline when the step's checkbox is off.
-            baselines.append(None)
+def _settles_from_rows(rows: _InstructionRows) -> list[float | None]:
+    settles: list[float | None] = []
+    for index, (event, analysis) in enumerate(rows):
+        if event.kind == "wait":
+            settles.append(None)
             continue
-        next_event = loaded[index + 1][0] if index + 1 < len(loaded) else None
-        baselines.append(
-            after_screenshot_for_outcome(
-                event,
-                next_event,
-                final_after_screenshot=final_after,
-            )
-        )
-    return baselines
+        analysis_settle = analysis.get("settle_after_seconds")
+        if (
+            isinstance(analysis_settle, (int, float))
+            and not isinstance(analysis_settle, bool)
+            and float(analysis_settle) >= 0
+        ):
+            settles.append(float(analysis_settle))
+            continue
+        observed = event.observed_settle_seconds
+        if (
+            isinstance(observed, (int, float))
+            and not isinstance(observed, bool)
+            and float(observed) >= 0
+        ):
+            settles.append(float(observed))
+            continue
+        if index + 1 >= len(rows):
+            settles.append(None)
+            continue
+        end_ts = rows[index + 1][0].timestamp_utc
+        settle = _elapsed_seconds_between(event.timestamp_utc, end_ts)
+        if settle is not None and settle >= 1.0:
+            settles.append(settle)
+        else:
+            settles.append(None)
+    return settles
 
 
 def collect_recording_settle_after_seconds(run_dir: Path) -> list[float | None]:
@@ -337,59 +449,7 @@ def collect_recording_settle_after_seconds(run_dir: Path) -> list[float | None]:
     The last event does not fall back to session ``stopped_at`` (stop-UI latency).
     Gaps under 1s (legacy path) and ``kind=wait`` events yield ``None``.
     """
-    run_dir = Path(run_dir)
-    analysis_dir = run_dir / "analysis"
-    loaded: list[tuple[RecordedEvent, dict[str, Any] | None]] = []
-    for event_path in _recording_event_json_paths(run_dir):
-        raw = _load_json_dict(event_path)
-        if raw is None:
-            continue
-        raw_index = raw.get("index")
-        if not isinstance(raw_index, int):
-            continue
-        analysis = _load_json_dict(analysis_dir / f"event_{raw_index:03d}.json")
-        if analysis is None:
-            continue
-        instruction = analysis.get("instruction")
-        if not (isinstance(instruction, str) and instruction.strip()):
-            continue
-        event = _recorded_event_with_resolved_shots(run_dir, raw)
-        if event is None:
-            continue
-        loaded.append((event, analysis if isinstance(analysis, dict) else None))
-
-    settles: list[float | None] = []
-    for index, (event, analysis) in enumerate(loaded):
-        if event.kind == "wait":
-            settles.append(None)
-            continue
-        if isinstance(analysis, dict):
-            analysis_settle = analysis.get("settle_after_seconds")
-            if (
-                isinstance(analysis_settle, (int, float))
-                and not isinstance(analysis_settle, bool)
-                and float(analysis_settle) >= 0
-            ):
-                settles.append(float(analysis_settle))
-                continue
-        observed = event.observed_settle_seconds
-        if (
-            isinstance(observed, (int, float))
-            and not isinstance(observed, bool)
-            and float(observed) >= 0
-        ):
-            settles.append(float(observed))
-            continue
-        if index + 1 >= len(loaded):
-            settles.append(None)
-            continue
-        end_ts = loaded[index + 1][0].timestamp_utc
-        settle = _elapsed_seconds_between(event.timestamp_utc, end_ts)
-        if settle is not None and settle >= 1.0:
-            settles.append(settle)
-        else:
-            settles.append(None)
-    return settles
+    return _settles_from_rows(_load_instruction_event_rows(run_dir))
 
 
 def _replay_typed_text(analysis: dict[str, Any]) -> str | None:
@@ -414,42 +474,31 @@ def _replay_typed_text(analysis: dict[str, Any]) -> str | None:
     return None
 
 
+def _window_verify_from_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
+    raw = analysis.get("window_verify")
+    if not isinstance(raw, dict):
+        return {}
+    active = filter_disabled_window_verify(
+        raw, analysis.get("window_verify_disabled")
+    )
+    active = omit_foreground_when_structural(active)
+    if analysis_uses_chrome_window_tool(analysis):
+        active = omit_click_window_for_chrome_tools(active)
+    return omit_focused_value_unrelated_to_typed_text(
+        active,
+        _replay_typed_text(analysis),
+    )
+
+
 def collect_recording_window_verifies(run_dir: Path) -> list[dict[str, Any]]:
     """Collect window-diff predicates aligned with ``collect_recording_instructions``.
 
     An empty dict means the step has no window assertion.
     """
-    analysis_dir = Path(run_dir) / "analysis"
-    verifies: list[dict[str, Any]] = []
-    for event_path in _recording_event_json_paths(run_dir):
-        event = _load_json_dict(event_path)
-        if event is None:
-            continue
-        raw_index = event.get("index")
-        if not isinstance(raw_index, int):
-            continue
-        analysis = _load_json_dict(analysis_dir / f"event_{raw_index:03d}.json")
-        if analysis is None:
-            continue
-        instruction = analysis.get("instruction")
-        if not (isinstance(instruction, str) and instruction.strip()):
-            continue
-        raw = analysis.get("window_verify")
-        if isinstance(raw, dict):
-            active = filter_disabled_window_verify(
-                raw, analysis.get("window_verify_disabled")
-            )
-            active = omit_foreground_when_structural(active)
-            if analysis_uses_chrome_window_tool(analysis):
-                active = omit_click_window_for_chrome_tools(active)
-            active = omit_focused_value_unrelated_to_typed_text(
-                active,
-                _replay_typed_text(analysis),
-            )
-            verifies.append(active)
-        else:
-            verifies.append({})
-    return verifies
+    return [
+        _window_verify_from_analysis(analysis)
+        for _event, analysis in _load_instruction_event_rows(run_dir)
+    ]
 
 
 def recording_replay_steps(
@@ -500,6 +549,39 @@ def recording_replay_steps(
     )
 
 
+def _build_recording_replay_steps_from_rows(
+    run_dir: Path,
+    rows: _InstructionRows,
+) -> _ReplaySteps:
+    instructions: list[str] = []
+    outcomes: list[str | None] = []
+    event_indices: list[int | None] = []
+    verifies: list[dict[str, Any]] = []
+    for event, analysis in rows:
+        instruction = analysis.get("instruction")
+        instructions.append(
+            instruction.strip() if isinstance(instruction, str) else ""
+        )
+        if use_expected_outcome_enabled(analysis):
+            outcome = analysis.get("expected_outcome")
+            if isinstance(outcome, str) and outcome.strip():
+                outcomes.append(outcome.strip())
+            else:
+                outcomes.append(None)
+        else:
+            outcomes.append(None)
+        event_indices.append(event.index)
+        verifies.append(_window_verify_from_analysis(analysis))
+    return recording_replay_steps(
+        instructions,
+        outcomes,
+        _baselines_from_rows(run_dir, rows, include_disabled=False),
+        _settles_from_rows(rows),
+        verifies,
+        event_indices,
+    )
+
+
 def load_recording_replay_steps(
     run_dir: Path,
 ) -> tuple[
@@ -510,16 +592,17 @@ def load_recording_replay_steps(
     list[dict[str, Any]],
     list[int | None],
 ]:
-    """Read the recording's current replay steps from disk."""
-    instructions, outcomes = collect_recording_instructions(run_dir)
-    return recording_replay_steps(
-        instructions,
-        outcomes,
-        collect_recording_baseline_after_paths(run_dir),
-        collect_recording_settle_after_seconds(run_dir),
-        collect_recording_window_verifies(run_dir),
-        collect_recording_instruction_event_indices(run_dir),
-    )
+    """Read the recording's current replay steps from disk (single-pass, mtime-cached)."""
+    run_dir = Path(run_dir)
+    key = _recording_replay_cache_key(run_dir)
+    fingerprint = _recording_replay_fingerprint(run_dir)
+    cached = _replay_steps_cache.get(key)
+    if cached is not None and cached[0] == fingerprint:
+        return cached[1]
+    rows = _load_instruction_event_rows(run_dir)
+    steps = _build_recording_replay_steps_from_rows(run_dir, rows)
+    _replay_steps_cache[key] = (fingerprint, steps)
+    return steps
 
 
 def merge_unstarted_recording_steps(

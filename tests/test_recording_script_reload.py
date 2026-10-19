@@ -4,8 +4,61 @@ import json
 from pathlib import Path
 
 from src.brain.module import BrainModule
+from src.common.run_control import (
+    mark_recording_replay_dirty,
+    take_recording_replay_dirty,
+)
 from src.common.runtime_context import SCRIPT_PATH_ENV
-from src.common.script_helper import merge_unstarted_recording_steps
+from src.common.script_helper import (
+    invalidate_recording_replay_cache,
+    load_recording_replay_steps,
+    merge_unstarted_recording_steps,
+)
+
+
+def _write_recording(run_dir: Path, instructions: tuple[str, ...]) -> None:
+    (run_dir / "events").mkdir(parents=True, exist_ok=True)
+    (run_dir / "analysis").mkdir(exist_ok=True)
+    (run_dir / "screenshots").mkdir(exist_ok=True)
+    events = []
+    for index, instruction in enumerate(instructions):
+        rel = f"events/event_{index:03d}.json"
+        events.append(rel)
+        (run_dir / rel).write_text(
+            json.dumps(
+                {
+                    "index": index,
+                    "timestamp_utc": "2026-09-07T00:00:00+00:00",
+                    "kind": "click",
+                    "screenshot_path": "",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (run_dir / "analysis" / f"event_{index:03d}.json").write_text(
+            json.dumps({"instruction": instruction, "use_expected_outcome": False}),
+            encoding="utf-8",
+        )
+    (run_dir / "session.json").write_text(
+        json.dumps({"run_id": "rec", "events": events}),
+        encoding="utf-8",
+    )
+
+
+def _brain_for_reload(run_dir: Path, monkeypatch) -> BrainModule:
+    monkeypatch.setenv(SCRIPT_PATH_ENV, str(run_dir))
+    monkeypatch.delenv("CUA_RUNTIME_COMMAND_MODE", raising=False)
+    monkeypatch.delenv("CUA_SMART_MODE", raising=False)
+    brain = BrainModule.__new__(BrainModule)
+    brain.manager = type("Manager", (), {"log_info": lambda self, message: None})()
+    brain._script_step_index = 1
+    brain.script_lines = ["open", "click save"]
+    brain.script_expected_outcomes = [None, None]
+    brain.script_baseline_after_paths = [None, None]
+    brain.script_settle_after_seconds = [None, None]
+    brain.script_window_verifies = [{}, {}]
+    brain._script_event_indices = [0, 1]
+    return brain
 
 
 def _merge(
@@ -77,36 +130,7 @@ def test_merge_runs_an_inserted_unstarted_step_next() -> None:
 
 def test_reload_pending_recording_steps_reads_disk(tmp_path: Path, monkeypatch) -> None:
     run_dir = tmp_path / "rec"
-    (run_dir / "events").mkdir(parents=True)
-    (run_dir / "analysis").mkdir()
-    (run_dir / "screenshots").mkdir()
-    events = []
-    for index, instruction in enumerate(("open", "click save")):
-        rel = f"events/event_{index:03d}.json"
-        events.append(rel)
-        (run_dir / rel).write_text(
-            json.dumps(
-                {
-                    "index": index,
-                    "timestamp_utc": "2026-09-07T00:00:00+00:00",
-                    "kind": "click",
-                    "screenshot_path": "",
-                }
-            ),
-            encoding="utf-8",
-        )
-        (run_dir / "analysis" / f"event_{index:03d}.json").write_text(
-            json.dumps({"instruction": instruction, "use_expected_outcome": False}),
-            encoding="utf-8",
-        )
-    (run_dir / "session.json").write_text(
-        json.dumps({"run_id": "rec", "events": events}),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv(SCRIPT_PATH_ENV, str(run_dir))
-    monkeypatch.delenv("CUA_RUNTIME_COMMAND_MODE", raising=False)
-    monkeypatch.delenv("CUA_SMART_MODE", raising=False)
-
+    _write_recording(run_dir, ("open", "click save"))
     (run_dir / "analysis" / "event_001.json").write_text(
         json.dumps(
             {
@@ -119,15 +143,10 @@ def test_reload_pending_recording_steps_reads_disk(tmp_path: Path, monkeypatch) 
     )
 
     logs: list[str] = []
-    brain = BrainModule.__new__(BrainModule)
+    brain = _brain_for_reload(run_dir, monkeypatch)
     brain.manager = type("Manager", (), {"log_info": lambda self, message: logs.append(message)})()
-    brain._script_step_index = 1
-    brain.script_lines = ["open", "click save"]
-    brain.script_expected_outcomes = [None, None]
-    brain.script_baseline_after_paths = [None, None]
-    brain.script_settle_after_seconds = [None, None]
-    brain.script_window_verifies = [{}, {}]
-    brain._script_event_indices = [0, 1]
+    mark_recording_replay_dirty()
+    invalidate_recording_replay_cache(run_dir)
 
     brain.reload_pending_recording_steps()
 
@@ -136,6 +155,69 @@ def test_reload_pending_recording_steps_reads_disk(tmp_path: Path, monkeypatch) 
     assert brain.script_expected_outcomes[1] == "dialog closed"
     assert brain._script_event_indices == [0, 1]
     assert any("Applied recording edits" in message for message in logs)
+
+
+def test_reload_pending_skips_disk_when_clean(tmp_path: Path, monkeypatch) -> None:
+    run_dir = tmp_path / "rec"
+    _write_recording(run_dir, ("open", "click save"))
+    brain = _brain_for_reload(run_dir, monkeypatch)
+    mark_recording_replay_dirty()
+    invalidate_recording_replay_cache(run_dir)
+    brain.reload_pending_recording_steps()
+    assert brain.script_lines == ["open", "click save"]
+
+    (run_dir / "analysis" / "event_001.json").write_text(
+        json.dumps({"instruction": "edited while clean", "use_expected_outcome": False}),
+        encoding="utf-8",
+    )
+    invalidate_recording_replay_cache(run_dir)
+    brain.reload_pending_recording_steps()
+    assert brain.script_lines == ["open", "click save"]
+
+    mark_recording_replay_dirty()
+    brain.reload_pending_recording_steps()
+    assert brain.script_lines == ["open", "edited while clean"]
+
+
+def test_take_recording_replay_dirty_clears_on_read() -> None:
+    mark_recording_replay_dirty()
+    assert take_recording_replay_dirty() is True
+    assert take_recording_replay_dirty() is False
+    mark_recording_replay_dirty()
+    assert take_recording_replay_dirty() is True
+
+
+def test_load_recording_replay_steps_mtime_cache(tmp_path: Path, monkeypatch) -> None:
+    run_dir = tmp_path / "rec"
+    _write_recording(run_dir, ("open", "click save"))
+    invalidate_recording_replay_cache()
+    calls = {"n": 0}
+    import src.common.script_helper as script_helper
+
+    real = script_helper._load_instruction_event_rows_uncached
+
+    def counting(path: Path):
+        calls["n"] += 1
+        return real(path)
+
+    monkeypatch.setattr(script_helper, "_load_instruction_event_rows_uncached", counting)
+    first = load_recording_replay_steps(run_dir)
+    second = load_recording_replay_steps(run_dir)
+    assert calls["n"] == 1
+    assert first[0] == second[0] == ["open", "click save"]
+
+    analysis = run_dir / "analysis" / "event_001.json"
+    payload = json.loads(analysis.read_text(encoding="utf-8"))
+    payload["instruction"] = "click save now"
+    analysis.write_text(json.dumps(payload), encoding="utf-8")
+    # Bump mtime past fingerprint resolution on coarse filesystems.
+    stamp = analysis.stat().st_mtime + 2.0
+    import os
+
+    os.utime(analysis, (stamp, stamp))
+    third = load_recording_replay_steps(run_dir)
+    assert calls["n"] == 2
+    assert third[0] == ["open", "click save now"]
 
 
 def test_jump_to_script_step_clamps_and_moves_the_cursor() -> None:

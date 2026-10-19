@@ -3585,6 +3585,7 @@ def _foreground_rect_from_event_signals(
     event: dict[str, Any] | None,
     *,
     after: bool,
+    run_root: Path | None = None,
 ) -> tuple[int, int, int, int] | None:
     """Display-only foreground window LTRB from ``window_snapshot_debug`` signals."""
     if event is None:
@@ -3592,6 +3593,14 @@ def _foreground_rect_from_event_signals(
     debug = event.get("window_snapshot_debug")
     if not isinstance(debug, dict):
         return None
+    if run_root is not None:
+        from src.recorder.models import hydrate_window_snapshot_debug
+
+        raw_index = event.get("index")
+        if isinstance(raw_index, int):
+            hydrated = hydrate_window_snapshot_debug(run_root, raw_index, debug)
+            if isinstance(hydrated, dict):
+                debug = hydrated
     signals = debug.get("signals_after" if after else "signals_before")
     if not isinstance(signals, dict):
         return None
@@ -3604,11 +3613,12 @@ def _foreground_rect_for_screenshot(
     *,
     after: bool,
     use_end: bool = False,
+    run_root: Path | None = None,
 ) -> tuple[int, int, int, int] | None:
     return _rect_for_screenshot(
         event,
         screenshot,
-        _foreground_rect_from_event_signals(event, after=after),
+        _foreground_rect_from_event_signals(event, after=after, run_root=run_root),
         use_end=use_end,
     )
 
@@ -4817,7 +4827,11 @@ def _render_verify_panel_html(
                 recording_event, baseline_shot, use_end=True
             )
             baseline_foreground = _foreground_rect_for_screenshot(
-                recording_event, baseline_shot, after=True, use_end=True
+                recording_event,
+                baseline_shot,
+                after=True,
+                use_end=True,
+                run_root=run_root,
             )
             baseline_cursor = _local_cursor_for_screenshot(
                 recording_event, baseline_shot, use_end=True
@@ -6985,8 +6999,10 @@ def _render_recording_event_html(
         except (TypeError, ValueError):
             focus_text = str(list(focus_rect))
         meta_rows.append(("Focus rect", escape(focus_text)))
-    foreground_rect = _foreground_rect_from_event_signals(event, after=True) or (
-        _foreground_rect_from_event_signals(event, after=False)
+    foreground_rect = _foreground_rect_from_event_signals(
+        event, after=True, run_root=run_root
+    ) or (
+        _foreground_rect_from_event_signals(event, after=False, run_root=run_root)
     )
     if foreground_rect is not None:
         meta_rows.append(
@@ -7113,7 +7129,7 @@ def _render_recording_event_html(
         else None
     )
     before_foreground = _foreground_rect_for_screenshot(
-        event, before, after=False, use_end=False
+        event, before, after=False, use_end=False, run_root=run_root
     )
     # signals_after is sealed from the next gesture's before-cache when that is
     # the after image, so the after-foreground rect still matches that frame.
@@ -7122,6 +7138,7 @@ def _render_recording_event_html(
         after,
         after=True,
         use_end=after_is_own_shot,
+        run_root=run_root,
     )
     before_cursor = _local_cursor_for_screenshot(event, before, use_end=False)
     after_cursor = (
@@ -8434,7 +8451,7 @@ def _recording_playback_frames(
         shot = _resolve_recording_screenshot(str(event.get("screenshot_path") or ""), run_root)
         focus = _focus_rect_for_screenshot(event, shot, use_end=False)
         foreground = _foreground_rect_for_screenshot(
-            event, shot, after=False, use_end=False
+            event, shot, after=False, use_end=False, run_root=run_root
         )
         cursor = _local_cursor_for_screenshot(event, shot, use_end=False)
         raw_index = event.get("index")

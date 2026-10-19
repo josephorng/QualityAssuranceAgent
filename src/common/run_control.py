@@ -33,6 +33,26 @@ _ScriptStepsCallback = Callable[[list[str], list[int | None]], None]
 _script_steps_callback: _ScriptStepsCallback | None = None
 _active_step_lock = threading.Lock()
 
+# Recording replay script on disk may have changed (hub edits). Cleared when brain reloads.
+_recording_replay_dirty = True
+_recording_replay_dirty_lock = threading.Lock()
+
+
+def mark_recording_replay_dirty() -> None:
+    """Signal that ``reload_pending_recording_steps`` should re-read the recording."""
+    global _recording_replay_dirty
+    with _recording_replay_dirty_lock:
+        _recording_replay_dirty = True
+
+
+def take_recording_replay_dirty() -> bool:
+    """Return and clear the recording-replay dirty flag (clear-on-read)."""
+    global _recording_replay_dirty
+    with _recording_replay_dirty_lock:
+        dirty = _recording_replay_dirty
+        _recording_replay_dirty = False
+        return dirty
+
 
 def pause_run() -> None:
     global _logged_pause
@@ -240,6 +260,8 @@ def reset_run_control() -> None:
     clear_step_status_callback()
     clear_active_step()
     set_step_busy(False)
+    # Next recording replay must load steps once before the dirty-skip path applies.
+    mark_recording_replay_dirty()
 
 
 def is_paused() -> bool:

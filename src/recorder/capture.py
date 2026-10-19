@@ -35,11 +35,13 @@ from src.recorder.models import (
     SessionManifest,
     event_json_path,
     final_after_screenshot_path,
+    hydrate_window_snapshot_debug,
     next_recording_event_index,
     recording_event_paths,
     screenshot_path_for_event,
     screenshot_path_for_event_end,
     utc_now_iso,
+    write_event_json,
 )
 from src.recorder.verify_signals import (
     capture_fast_signals,
@@ -1769,9 +1771,13 @@ class RecordingSession:
         debug = raw.get("window_snapshot_debug")
         if not isinstance(debug, dict):
             return False
+        # Sidecar peels leave signals_* as paths; hydrate so point_window survives.
+        hydrated = hydrate_window_snapshot_debug(run_dir, event_index, debug)
+        if isinstance(hydrated, dict):
+            debug = hydrated
         _apply_next_before_to_debug(debug, seal[0], seal[1])
         raw["window_snapshot_debug"] = debug
-        write_json(path, raw)
+        write_event_json(run_dir, raw)
         with self._lock:
             events = self._events
             for index, event in enumerate(events):
@@ -3858,7 +3864,7 @@ class RecordingSession:
                 return
             seconds = round(float(observed_settle_seconds), 3)
             raw["observed_settle_seconds"] = seconds
-            write_json(path, raw)
+            write_event_json(run_dir, raw)
         with self._lock:
             for index, event in enumerate(events):
                 if event.index == event_index:
@@ -4805,7 +4811,7 @@ class RecordingSession:
             end_click_window=end_click_window_payload,
         )
         with self._event_json_lock():
-            write_json(event_json_path(run_dir, event.index), event.to_dict())
+            write_event_json(run_dir, event.to_dict())
         with self._lock:
             if self._run_dir is None:
                 return
@@ -4916,7 +4922,7 @@ class RecordingSession:
                         int(focus_rect[2]),
                         int(focus_rect[3]),
                     ]
-                write_json(path, raw)
+                write_event_json(run_dir, raw)
                 with self._lock:
                     events = self._events
                     for index, event in enumerate(events):

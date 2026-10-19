@@ -14,7 +14,20 @@ from src.recorder.capture import (
     _finalize_drag_end_screenshot,
 )
 from src.recorder.focus_point import TypingFocus
+from src.recorder.models import hydrate_window_snapshot_debug
 from src.recorder.window_snapshot import ClickWindowInfo, WindowInfo, window_verify_from_debug
+
+
+def _hydrated_event_debug(run_dir: Path, event_index: int) -> tuple[dict, dict]:
+    """Load event JSON and reattach peeled ``signals_*`` sidecars for assertions."""
+    path = run_dir / "events" / f"event_{event_index:03d}.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    debug = hydrate_window_snapshot_debug(
+        run_dir,
+        int(raw["index"]),
+        raw.get("window_snapshot_debug"),
+    )
+    return raw, debug if isinstance(debug, dict) else {}
 
 
 @contextmanager
@@ -1469,9 +1482,9 @@ def test_chinese_ime_enter_live_samples_signals_after_not_settle_cache(
         finally:
             session.stop()
 
-    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    raw, debug = _hydrated_event_debug(run_dir, 1)
     assert raw["kind"] == "text_input"
-    debug = raw["window_snapshot_debug"]
+    assert isinstance(raw["window_snapshot_debug"]["signals_after"], str)
     assert debug["signals_before"]["focused"]["value"] == "金ㄊㄧㄢ"
     assert debug["signals_after"]["focused"]["value"] == "今天"
 
@@ -1839,22 +1852,22 @@ def test_text_flushed_by_click_does_not_inherit_click_windows(tmp_path) -> None:
                 session._window_refresh_lock.release()
             session.stop()
 
-    text_raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
-    click_raw = json.loads((run_dir / "events" / "event_002.json").read_text(encoding="utf-8"))
+    text_raw, text_debug = _hydrated_event_debug(run_dir, 1)
+    click_raw, click_debug = _hydrated_event_debug(run_dir, 2)
     assert text_raw["kind"] == "text_input"
     assert click_raw["kind"] == "click"
-    text_after = text_raw["window_snapshot_debug"]["windows_after"]
-    click_after = click_raw["window_snapshot_debug"]["windows_after"]
+    text_after = text_debug["windows_after"]
+    click_after = click_debug["windows_after"]
     assert text_after[0]["title"] == "登入系統"
     assert click_after[0]["title"] == "wmcLogo"
-    assert text_raw["window_snapshot_debug"]["signals_after"]["focused"]["name"] == (
+    assert text_debug["signals_after"]["focused"]["name"] == (
         "密碼|Textbox|txt_Password"
     )
-    text_verify = window_verify_from_debug(text_raw["window_snapshot_debug"])
+    text_verify = window_verify_from_debug(text_debug)
     assert "appeared" not in text_verify
     assert "disappeared" not in text_verify
     assert "focused" not in text_verify
-    click_verify = window_verify_from_debug(click_raw["window_snapshot_debug"])
+    click_verify = window_verify_from_debug(click_debug)
     assert "disappeared" not in click_verify
     assert "appeared" not in click_verify
 
@@ -1971,12 +1984,10 @@ def test_text_after_cache_matches_click_press_when_cache_refreshes(tmp_path) -> 
                 session._window_refresh_lock.release()
             session.stop()
 
-    text_raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
-    click_raw = json.loads((run_dir / "events" / "event_002.json").read_text(encoding="utf-8"))
+    text_raw, text_debug = _hydrated_event_debug(run_dir, 1)
+    click_raw, click_debug = _hydrated_event_debug(run_dir, 2)
     assert text_raw["kind"] == "text_input"
     assert click_raw["kind"] == "click"
-    text_debug = text_raw["window_snapshot_debug"]
-    click_debug = click_raw["window_snapshot_debug"]
     assert text_debug["windows_after"][0]["title"] == "Transient Shell"
     assert click_debug["windows_before"][0]["title"] == "Transient Shell"
     assert text_debug["signals_after"]["foreground"] == click_debug["signals_before"]["foreground"]
@@ -2125,24 +2136,24 @@ def test_click_after_cache_comes_from_next_gesture_before_cache(tmp_path) -> Non
                 session._window_refresh_lock.release()
             session.stop()
 
-    first = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
-    second = json.loads((run_dir / "events" / "event_002.json").read_text(encoding="utf-8"))
+    first, first_debug = _hydrated_event_debug(run_dir, 1)
+    second, second_debug = _hydrated_event_debug(run_dir, 2)
     assert first["window_change"]["action"] == "opened"
     assert first["window_change"]["title"] == "Transient Shell"
-    assert first["window_snapshot_debug"]["windows_after"][0]["title"] == "Microsoft 365 Copilot"
-    assert first["window_snapshot_debug"]["signals_after"]["foreground"] == {
+    assert first_debug["windows_after"][0]["title"] == "Microsoft 365 Copilot"
+    assert first_debug["signals_after"]["foreground"] == {
         "class_name": copilot.class_name,
         "title": copilot.title,
         "process_name": copilot.process_name,
     }
-    assert first["window_snapshot_debug"]["signals_after"]["point_window"]["title"] == "搜尋"
-    verify = window_verify_from_debug(first["window_snapshot_debug"])
+    assert first_debug["signals_after"]["point_window"]["title"] == "搜尋"
+    verify = window_verify_from_debug(first_debug)
     verify_text = json.dumps(verify)
     assert "M365Copilot.exe" in verify_text
     assert "explorer.exe" not in verify_text
     assert "ApplicationManager_DesktopShellWindow" not in verify_text
-    assert second["window_snapshot_debug"]["windows_after"][0]["title"] == "Final Live"
-    assert second["window_snapshot_debug"]["signals_after"]["foreground"]["title"] == "Transient Shell"
+    assert second_debug["windows_after"][0]["title"] == "Final Live"
+    assert second_debug["signals_after"]["foreground"]["title"] == "Transient Shell"
 
 
 def test_text_flushed_by_enter_does_not_inherit_key_windows(tmp_path) -> None:

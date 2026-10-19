@@ -85,6 +85,39 @@ def test_build_recovery_goal_mentions_script_step() -> None:
 
 
 @pytest.mark.asyncio
+async def test_process_step_reloads_after_started_at(monkeypatch) -> None:
+    """Dirty recording reload is inside the step timer, after notify/start stamp."""
+    from src.common import run_control
+
+    brain = _brain_for_process_step()
+    brain.loop = AsyncMock(return_value=True)
+    order: list[str] = []
+
+    def track_notify(*_args, **_kwargs) -> None:
+        order.append("notify")
+
+    def track_reload() -> None:
+        order.append("reload")
+
+    def track_publish(*_args, **_kwargs) -> None:
+        order.append("publish")
+
+    monkeypatch.setattr(run_control, "notify_active_step", track_notify)
+    monkeypatch.setattr(run_control, "publish_script_steps", track_publish)
+    # process_step imports these names on the brain module.
+    monkeypatch.setattr("src.brain.module.notify_active_step", track_notify)
+    monkeypatch.setattr("src.brain.module.publish_script_steps", track_publish)
+    brain.reload_pending_recording_steps = track_reload
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert order == ["notify", "reload", "publish"]
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["started_at_utc"]
+
+
+@pytest.mark.asyncio
 async def test_process_step_saves_record_when_actor_raises() -> None:
     brain = _brain_for_process_step()
     brain.loop = AsyncMock(side_effect=ConnectionError("All connection attempts failed"))

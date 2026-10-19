@@ -847,11 +847,8 @@ def _write_event_analysis(
                 if event.window_change is not None
                 else {}
             ),
-            **(
-                {"window_snapshot_debug": event.window_snapshot_debug}
-                if event.window_snapshot_debug is not None
-                else {}
-            ),
+            # Intentionally omit window_snapshot_debug (esp. fat signals_*);
+            # event JSON + signals/ sidecars own that data for HTML/debug.
             "window_verify": window_verify,
             **(
                 {"window_verify_disabled": disabled}

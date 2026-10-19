@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.common.io_utils import read_json
+from src.common.io_utils import read_json, write_json
 
 
 POINTER_EVENT_KINDS = frozenset(
@@ -171,6 +171,87 @@ def utc_now_iso() -> str:
 
 def event_json_path(run_dir: Path, index: int) -> Path:
     return run_dir / "events" / f"event_{index:03d}.json"
+
+
+def signals_sidecar_path(run_dir: Path, index: int, which: str) -> Path:
+    """Path for peeled ``signals_before`` / ``signals_after`` JSON sidecars."""
+    label = "before" if which == "before" else "after"
+    return Path(run_dir) / "signals" / f"event_{int(index):03d}_{label}.json"
+
+
+def peel_signals_to_sidecars(
+    run_dir: Path,
+    event_index: int,
+    debug: dict[str, Any],
+) -> dict[str, Any]:
+    """Return a slim debug dict; fat ``signals_*`` live under ``signals/``.
+
+    Does not mutate ``debug``. Inline signal dicts are written to sidecars and
+    replaced with relative path refs. Legacy / already-peeled values are kept.
+    """
+    slim = dict(debug)
+    for key, which in (
+        ("signals_before", "before"),
+        ("signals_after", "after"),
+    ):
+        value = slim.get(key)
+        if not isinstance(value, dict):
+            continue
+        sidecar = signals_sidecar_path(run_dir, event_index, which)
+        write_json(sidecar, value)
+        try:
+            slim[key] = str(sidecar.relative_to(Path(run_dir))).replace("\\", "/")
+        except ValueError:
+            slim[key] = str(sidecar)
+    return slim
+
+
+def hydrate_window_snapshot_debug(
+    run_dir: Path,
+    event_index: int,
+    debug: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Reload ``signals_*`` from sidecars when the debug dict only stores paths."""
+    if not isinstance(debug, dict):
+        return debug
+    hydrated = dict(debug)
+    for key, which in (
+        ("signals_before", "before"),
+        ("signals_after", "after"),
+    ):
+        value = hydrated.get(key)
+        if isinstance(value, dict):
+            continue
+        sidecar = signals_sidecar_path(run_dir, event_index, which)
+        if isinstance(value, str) and value.strip():
+            candidate = Path(value.strip())
+            if not candidate.is_absolute():
+                candidate = Path(run_dir) / candidate
+            if candidate.is_file():
+                sidecar = candidate
+        if not sidecar.is_file():
+            continue
+        payload = read_json(sidecar, None)
+        if isinstance(payload, dict):
+            hydrated[key] = payload
+    return hydrated
+
+
+def write_event_json(run_dir: Path, raw: dict[str, Any]) -> None:
+    """Persist an event JSON, peeling ``signals_*`` blobs to sidecars.
+
+    Caller's ``raw`` is not mutated; in-memory events can keep full signal dicts.
+    """
+    payload = dict(raw)
+    raw_index = payload.get("index")
+    if not isinstance(raw_index, int):
+        raise ValueError("event JSON requires integer index")
+    debug = payload.get("window_snapshot_debug")
+    if isinstance(debug, dict):
+        payload["window_snapshot_debug"] = peel_signals_to_sidecars(
+            run_dir, raw_index, debug
+        )
+    write_json(event_json_path(run_dir, raw_index), payload)
 
 
 def screenshot_path_for_event(run_dir: Path, index: int) -> Path:

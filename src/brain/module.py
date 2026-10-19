@@ -39,7 +39,11 @@ from src.common.llm_factory import get_llm_client
 from src.common.llm_text import strip_llm_quote_wrappers
 from src.common.nearby_side import enrich_tool_arguments_from_goal
 from src.common.prompting import get_prompt
-from src.common.run_control import notify_active_step, publish_script_steps
+from src.common.run_control import (
+    notify_active_step,
+    publish_script_steps,
+    take_recording_replay_dirty,
+)
 from src.common.run_state import (
     get_run_state_manager,
     parse_step_artifact_stem,
@@ -410,9 +414,12 @@ class BrainModule:
 
         The step already inside ``process_step`` keeps the copy it started with.
         Pause is checked between steps, so edits made while paused apply to the
-        next step and every step after it.
+        next step and every step after it. Skips disk when the recording is not
+        marked dirty (hub edit / run start).
         """
         if is_runtime_command_mode() or is_smart_mode():
+            return
+        if not take_recording_replay_dirty():
             return
         script_path_raw = (os.environ.get(SCRIPT_PATH_ENV) or "").strip()
         if not script_path_raw:
@@ -1586,15 +1593,6 @@ class BrainModule:
         """
         # await self._validate_tool_functions_match_mcp()
 
-        self.reload_pending_recording_steps()
-        publish_script_steps(list(self.script_lines), list(self._script_event_indices))
-        if self._script_step_index >= len(self.script_lines):
-            return BrainStepResult(
-                reason="All script steps complete",
-                step_finished=True,
-                run_complete=True,
-            )
-
         transcript_counter = self._step_transcript_counter
         script_step_index = self._script_step_index
         self.manager.set_step_log_context(transcript_counter, script_step_index)
@@ -1617,6 +1615,16 @@ class BrainModule:
         )
         started_iso = datetime.now(timezone.utc).isoformat()
         started_at = perf_counter()
+        # Attribute rare dirty reloads to this step's duration (not the inter-step gap).
+        self.reload_pending_recording_steps()
+        publish_script_steps(list(self.script_lines), list(self._script_event_indices))
+        if self._script_step_index >= len(self.script_lines):
+            return BrainStepResult(
+                reason="All script steps complete",
+                step_finished=True,
+                run_complete=True,
+            )
+
         # When True, leave last-tool after pending for the next step's before shot.
         # Otherwise finally captures a dedicated after (last step / failure).
         defer_after_capture = False

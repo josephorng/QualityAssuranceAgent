@@ -45,7 +45,11 @@ from src.common.nearby_side import (
     extract_nearby_hints_from_instruction,
     normalize_nearby_hints,
 )
-from src.common.script_helper import collect_recording_instructions
+from src.common.run_control import mark_recording_replay_dirty
+from src.common.script_helper import (
+    collect_recording_instructions,
+    invalidate_recording_replay_cache,
+)
 from src.common.session_html import (
     recording_event_json_paths,
     refresh_session_html_if_stale,
@@ -112,6 +116,8 @@ def _persist_analysis_with_tool_calls(
     else:
         analysis.pop("tool_calls", None)
     write_json(analysis_path, analysis)
+    mark_recording_replay_dirty()
+    invalidate_recording_replay_cache(run_dir)
     rebuild_recording_instruction_tool_cache(run_dir)
 
 
@@ -731,6 +737,8 @@ def sync_recording_events(run_dir: Path, events: list[RecordedEvent]) -> dict[st
 def _rebuild_recording_after_event_purge(run_dir: Path, remaining: int) -> None:
     from src.recorder.compile_tool_calls import rebuild_recording_instruction_tool_cache
 
+    mark_recording_replay_dirty()
+    invalidate_recording_replay_cache(run_dir)
     report_path = run_dir / "report.json"
     report = read_json(report_path, {})
     if not isinstance(report, dict):
@@ -956,6 +964,8 @@ def _clear_analysis_wait_instruction(run_dir: Path, event_index: int) -> None:
         return
     analysis.pop("wait_instruction", None)
     write_json(analysis_path, analysis)
+    mark_recording_replay_dirty()
+    invalidate_recording_replay_cache(run_dir)
 
 
 def _instruction_for_added_event(
@@ -1539,6 +1549,8 @@ def apply_recording_event_expected_outcome(
     analysis["expected_outcome"] = cleaned
     analysis["use_expected_outcome"] = enabled
     write_json(analysis_path, analysis)
+    mark_recording_replay_dirty()
+    invalidate_recording_replay_cache(run_dir)
 
     report_path = run_dir / "report.json"
     report = read_json(report_path, {})
@@ -1589,6 +1601,8 @@ def apply_recording_event_verify_conditions(
     else:
         analysis.pop("window_verify_disabled", None)
     write_json(analysis_path, analysis)
+    mark_recording_replay_dirty()
+    invalidate_recording_replay_cache(run_dir)
     write_recording_html_from_run(run_dir, update_index=False)
     return {"disabled": normalized}
 
@@ -1646,6 +1660,8 @@ def apply_recording_verifications(
         updated += 1
 
     if updated:
+        mark_recording_replay_dirty()
+        invalidate_recording_replay_cache(run_dir)
         report_path = run_dir / "report.json"
         report = read_json(report_path, {})
         if not isinstance(report, dict):

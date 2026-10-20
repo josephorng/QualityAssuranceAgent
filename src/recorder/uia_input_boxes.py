@@ -40,6 +40,9 @@ DEFAULT_UIA_OVERSIZE_AREA_FRAC = 0.8
 DEFAULT_TEXT_ELEMENT_CLUSTER_IOU_THRESHOLD = 0.5
 # YOLO mostly inside UIA when intersection covers at least this fraction of YOLO area.
 DEFAULT_UIA_CONTAINMENT_FRAC = 0.5
+# Drop a smaller element when this fraction of its area lies inside a larger one
+# (duplicate YOLO crops of the same icon).
+DEFAULT_NESTED_ELEMENT_CONTAINMENT_FRAC = 0.7
 
 # IUIAutomation vtable (after IUnknown 0..2).
 _UIA_ELEMENT_FROM_HANDLE = 6
@@ -307,6 +310,33 @@ def _yolo_mostly_inside_uia(
     return intersection_area_xywh(yolo, uia) / area >= float(frac)
 
 
+def merge_nested_element_boxes(
+    boxes: list[RectXywh],
+    *,
+    frac: float = DEFAULT_NESTED_ELEMENT_CONTAINMENT_FRAC,
+) -> list[RectXywh]:
+    """Drop element boxes that are mostly contained in a larger element.
+
+    YOLO often emits a tight crop and a loose crop for the same icon. Keeping
+    both blocks UIA 1-text+1-icon sibling association. Prefer the larger box.
+    """
+    if len(boxes) < 2:
+        return list(boxes)
+    contain_frac = float(frac)
+    # Largest first so a kept box is never nested inside a later candidate.
+    ordered = sorted(boxes, key=_box_area_xywh, reverse=True)
+    kept: list[RectXywh] = []
+    for box in ordered:
+        if any(
+            _yolo_mostly_inside_uia(box, outer, frac=contain_frac) for outer in kept
+        ):
+            continue
+        kept.append(box)
+    # Restore roughly top-to-bottom / left-to-right reading order.
+    kept.sort(key=lambda b: (int(b[1]), int(b[0])))
+    return kept
+
+
 def _partition_occupant_groups(
     occupants: list[tuple[int, str, int, RectXywh]],
     *,
@@ -359,6 +389,92 @@ def _text_element_sibling_occupants(
     return occupants
 
 
+def _box_area_xywh(box: RectXywh) -> int:
+    return max(0, int(box[2])) * max(0, int(box[3]))
+
+
+def _uia_safe_to_emit_as_candidate(
+    uia_box: RectXywh,
+    *,
+    text_boxes: list[RectXywh],
+    element_boxes: list[RectXywh],
+    containment_frac: float,
+    cluster_iou_threshold: float,
+) -> bool:
+    """False when emitting this UIA would be an ambiguous click target.
+
+    Replay clicks the UIA center. If several distinct YOLO texts/icons sit
+    inside the control, that center can land on the wrong child. Allow only:
+
+    - no YOLO inside, or at most one text and at most one element; or
+    - all inside YOLO boxes form a single high-overlap cluster (dual identity).
+    """
+    occupants: list[tuple[int, str, int, RectXywh]] = []
+    for i, box in enumerate(text_boxes):
+        if _yolo_mostly_inside_uia(box, uia_box, frac=containment_frac):
+            occupants.append((i, "text", i, box))
+    for i, box in enumerate(element_boxes):
+        if _yolo_mostly_inside_uia(box, uia_box, frac=containment_frac):
+            occupants.append((i, "element", i, box))
+    if not occupants:
+        return True
+    n_text = sum(1 for _ri, kind, _li, _b in occupants if kind == "text")
+    n_elem = sum(1 for _ri, kind, _li, _b in occupants if kind == "element")
+    if n_text <= 1 and n_elem <= 1:
+        return True
+    groups = _partition_occupant_groups(
+        occupants, cluster_iou_threshold=cluster_iou_threshold
+    )
+    return len(groups) == 1
+
+
+def _dedupe_overlapping_uia_labels(
+    uia_texts: list[LabeledRectXywh],
+    *,
+    iou_threshold: float,
+) -> list[LabeledRectXywh]:
+    """Collapse near-duplicate UIA Names (short vs long) to one box.
+
+    Search/list rows often expose both ``Name`` and ``Name, …`` with nearly the
+    same rect. Keeping both falsely triggers YOLO blob splits and blocks
+    icon+label sibling claims. Prefer the shorter label, then smaller area.
+    """
+    thresh = float(iou_threshold)
+    indexed = list(enumerate(uia_texts))
+    indexed.sort(
+        key=lambda item: (
+            len(str(item[1][1] or "")),
+            _box_area_xywh(item[1][0]),
+            item[0],
+        )
+    )
+    kept: list[LabeledRectXywh] = []
+    kept_boxes: list[RectXywh] = []
+    for _i, (box, label) in indexed:
+        if any(iou_xywh(box, prev) > thresh for prev in kept_boxes):
+            continue
+        kept.append((box, str(label or "")))
+        kept_boxes.append(box)
+    return kept
+
+
+def _spatially_distinct_uia_indices(
+    indices: list[int],
+    uia_list: list[LabeledRectXywh],
+    *,
+    iou_threshold: float,
+) -> list[int]:
+    """Keep UIA indices whose boxes do not heavily overlap already-kept ones."""
+    thresh = float(iou_threshold)
+    kept: list[int] = []
+    for i in indices:
+        box = uia_list[i][0]
+        if any(iou_xywh(box, uia_list[j][0]) > thresh for j in kept):
+            continue
+        kept.append(i)
+    return kept
+
+
 def associate_uia_labels_with_yolo_text(
     yolo_text_boxes: list[RectXywh],
     uia_texts: list[LabeledRectXywh],
@@ -375,19 +491,30 @@ def associate_uia_labels_with_yolo_text(
     Returns
     ``(uia_sourced_detections, yolo_text_for_ocr, yolo_element_for_ocr, meta)``.
 
+    Sourced detections always use the **UIA control rect** (not the YOLO crop)
+    so recording hit-tests and replay clicks cover the real control. Claimed
+    YOLO boxes are dropped from OCR remainders only.
+
     Highly overlapped text+element pairs claimed by UIA collapse to one sourced
     text detection; both boxes are dropped from OCR remainders.
 
     A single UIA may also claim at most one text and one element when both are
     mostly inside it (list-row icon + label), even if those YOLO boxes do not
     overlap each other.
+
+    UIA boxes that contain more than one distinct text or more than one
+    distinct element (and are not a single overlap cluster) are never emitted
+    as candidates — including as orphans — so replay center-clicks cannot land
+    on the wrong nested control.
     """
     threshold = float(iou_threshold)
     cluster_thresh = float(cluster_iou_threshold)
     contain_frac = float(containment_frac)
     text_boxes = list(yolo_text_boxes)
-    element_boxes = list(yolo_element_boxes or [])
-    uia_list = list(uia_texts)
+    element_boxes = merge_nested_element_boxes(list(yolo_element_boxes or []))
+    uia_list = _dedupe_overlapping_uia_labels(
+        list(uia_texts), iou_threshold=cluster_thresh
+    )
     used_uia: set[int] = set()
     sourced: list[LabeledRectXywh] = []
     sourced_boxes: set[RectXywh] = set()
@@ -402,7 +529,17 @@ def associate_uia_labels_with_yolo_text(
     containment_filled_element = 0
     sibling_filled = 0
     orphans = 0
+    ambiguous_skipped = 0
     cluster_collapsed = 0
+
+    def _safe_to_emit(uia_box: RectXywh) -> bool:
+        return _uia_safe_to_emit_as_candidate(
+            uia_box,
+            text_boxes=text_boxes,
+            element_boxes=element_boxes,
+            containment_frac=contain_frac,
+            cluster_iou_threshold=cluster_thresh,
+        )
 
     # Union blobs: (kind, local_index, box)
     all_blobs: list[tuple[str, int, RectXywh]] = [
@@ -424,9 +561,6 @@ def associate_uia_labels_with_yolo_text(
     def _record_uia_kind(ui: int, kind: str) -> None:
         uia_claim_kinds.setdefault(ui, set()).add(kind)
 
-    def _box_area(box: RectXywh) -> int:
-        return max(0, int(box[2])) * max(0, int(box[3]))
-
     def _occupants_inside(
         uia_box: RectXywh,
     ) -> list[tuple[int, str, int, RectXywh]]:
@@ -442,13 +576,13 @@ def associate_uia_labels_with_yolo_text(
         label: str,
         group: list[tuple[int, str, int, RectXywh]],
         *,
+        uia_box: RectXywh,
         count_containment: bool,
         count_sibling: bool = False,
     ) -> None:
         nonlocal containment_filled, containment_filled_element, sibling_filled
         if not group:
             return
-        primary = max(group, key=lambda item: _box_area(item[3]))
         used_uia.add(ui)
         if count_containment:
             containment_filled += 1
@@ -456,7 +590,7 @@ def associate_uia_labels_with_yolo_text(
             sibling_filled += 1
             # Label already emitted by IoU/containment; only skip OCR here.
         else:
-            _emit(primary[3], label)
+            _emit(uia_box, label)
         for ri, kind, local_idx, _yolo in group:
             used_remaining.add(ri)
             _claim_blob(kind, local_idx)
@@ -472,10 +606,15 @@ def associate_uia_labels_with_yolo_text(
             if i not in used_uia
             and _uia_rect_inside_blob(uia_box, blob, iou_threshold=threshold)
         ]
-        if len(contained) >= 2:
+        # Duplicate Name/Name+suffix UIAs share one rect; only spatially
+        # distinct children should split a YOLO blob.
+        distinct = _spatially_distinct_uia_indices(
+            contained, uia_list, iou_threshold=cluster_thresh
+        )
+        if len(distinct) >= 2:
             split_blobs += 1
             _claim_blob(kind, local_idx)
-            for i in contained:
+            for i in distinct:
                 uia_box, label = uia_list[i]
                 used_uia.add(i)
                 _emit(uia_box, label)
@@ -496,21 +635,30 @@ def associate_uia_labels_with_yolo_text(
     for _score, ri, ui in pairs:
         if ri in used_remaining or ui in used_uia:
             continue
+        uia_box, label = uia_list[ui]
+        if not _safe_to_emit(uia_box):
+            ambiguous_skipped += 1
+            used_uia.add(ui)
+            continue
         used_remaining.add(ri)
         used_uia.add(ui)
-        kind, local_idx, yolo = remaining[ri]
+        kind, local_idx, _yolo = remaining[ri]
         _claim_blob(kind, local_idx)
         _record_uia_kind(ui, kind)
         iou_filled += 1
         if kind == "element":
             iou_filled_element += 1
-        _emit(yolo, uia_list[ui][1])
+        _emit(uia_box, label)
 
     # Containment fill: small YOLO mostly inside an exclusive unused UIA.
     # Accept a single overlap cluster, or exactly one text + one element (list
     # row icon beside label) even when those two do not overlap each other.
     for ui, (uia_box, label) in enumerate(uia_list):
         if ui in used_uia:
+            continue
+        if not _safe_to_emit(uia_box):
+            ambiguous_skipped += 1
+            used_uia.add(ui)
             continue
         occupants = _occupants_inside(uia_box)
         groups = _partition_occupant_groups(
@@ -523,7 +671,9 @@ def associate_uia_labels_with_yolo_text(
             group = sibling
         else:
             continue
-        _claim_occupant_group(ui, label, group, count_containment=True)
+        _claim_occupant_group(
+            ui, label, group, uia_box=uia_box, count_containment=True
+        )
 
     # Sibling completion: UIA that already claimed text (or element) via IoU /
     # containment may also claim exactly one remaining opposite-kind blob
@@ -542,19 +692,33 @@ def associate_uia_labels_with_yolo_text(
             if len(extras) != 1 or any(occ[1] == "text" for occ in occupants):
                 continue
             _claim_occupant_group(
-                ui, label, extras, count_containment=False, count_sibling=True
+                ui,
+                label,
+                extras,
+                uia_box=uia_box,
+                count_containment=False,
+                count_sibling=True,
             )
         elif "element" in kinds and "text" not in kinds:
             extras = [occ for occ in occupants if occ[1] == "text"]
             if len(extras) != 1 or any(occ[1] == "element" for occ in occupants):
                 continue
             _claim_occupant_group(
-                ui, label, extras, count_containment=False, count_sibling=True
+                ui,
+                label,
+                extras,
+                uia_box=uia_box,
+                count_containment=False,
+                count_sibling=True,
             )
 
     all_yolo_for_orphan = text_boxes + element_boxes
     for ui, (uia_box, label) in enumerate(uia_list):
         if ui in used_uia:
+            continue
+        if not _safe_to_emit(uia_box):
+            ambiguous_skipped += 1
+            used_uia.add(ui)
             continue
         ux, uy, uw, uh = (int(v) for v in uia_box)
         cx, cy = ux + uw * 0.5, uy + uh * 0.5
@@ -636,6 +800,7 @@ def associate_uia_labels_with_yolo_text(
         "containment_filled_element": containment_filled_element,
         "sibling_filled": sibling_filled,
         "orphans": orphans,
+        "ambiguous_skipped": ambiguous_skipped,
         "text_ocr_skipped": text_ocr_skipped,
         "element_claimed": element_claimed,
         "cluster_collapsed": cluster_collapsed,

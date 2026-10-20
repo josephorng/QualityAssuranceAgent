@@ -201,16 +201,22 @@ def test_load_recorded_yolo_uia_lines(tmp_path: Path) -> None:
     json_path.write_text(
         json.dumps(
             {
-                "candidates": [{"bbox": [0, 0, 1, 1], "class_name": "text", "text": "merged"}],
+                "candidates": [
+                    {
+                        "bbox": [10, 20, 30, 12],
+                        "class_name": "text",
+                        "text": "Start",
+                    },
+                    {
+                        "bbox": [40, 20, 16, 16],
+                        "class_name": "element",
+                        "text": "",
+                        "icons": [{"chinese_id": "放大鏡"}],
+                    },
+                ],
                 "debug_layers": {
-                    "yolo": [{"bbox": [10, 20, 30, 12], "class_name": "text"}],
-                    "uia": [
-                        {
-                            "bbox": [11, 21, 28, 10],
-                            "class_name": "uia_text",
-                            "text": "Start",
-                        }
-                    ],
+                    "yolo": [{"bbox": [1, 1, 2, 2], "class_name": "text"}],
+                    "uia": [{"bbox": [3, 3, 2, 2], "class_name": "uia_text", "text": "raw"}],
                 },
             }
         ),
@@ -219,17 +225,22 @@ def test_load_recorded_yolo_uia_lines(tmp_path: Path) -> None:
     lines, status = load_recorded_yolo_uia_lines(json_path)
     assert len(lines) == 2
     assert lines[0].class_name == "text"
-    assert lines[1].class_name == "uia_text"
-    assert lines[1].text == "Start"
-    assert "yolo=1" in status and "uia=1" in status
+    assert lines[0].text == "Start"
+    assert lines[1].class_name == "element"
+    assert lines[1].chinese_ids == ("放大鏡",)
+    assert "Recorded candidates" in status
+    assert "2" in status
 
 
-def test_load_recorded_yolo_uia_lines_missing_layers(tmp_path: Path) -> None:
+def test_load_recorded_yolo_uia_lines_missing_candidates(tmp_path: Path) -> None:
     json_path = tmp_path / "old.json"
-    json_path.write_text(json.dumps({"candidates": []}), encoding="utf-8")
+    json_path.write_text(
+        json.dumps({"debug_layers": {"yolo": [], "uia": []}}),
+        encoding="utf-8",
+    )
     lines, status = load_recorded_yolo_uia_lines(json_path)
     assert lines == []
-    assert "no debug_layers" in status
+    assert "no candidates" in status
 
 
 def test_load_recorded_yolo_uia_lines_missing_file(tmp_path: Path) -> None:

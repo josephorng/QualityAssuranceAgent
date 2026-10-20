@@ -650,53 +650,10 @@ def load_ocr_lines(json_path: Path) -> tuple[list[OcrLine], str]:
     return lines, f"Loaded {len(lines)} OCR lines"
 
 
-def _lines_from_debug_layer_items(
-    items: Any,
-    *,
-    default_class_name: str,
-) -> list[OcrLine]:
-    if not isinstance(items, list):
-        return []
-    lines: list[OcrLine] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        bbox = item.get("bbox")
-        if not isinstance(bbox, list) or len(bbox) != 4:
-            continue
-        try:
-            x, y, w, h = (int(v) for v in bbox)
-        except (TypeError, ValueError):
-            continue
-        class_name = str(item.get("class_name") or default_class_name).strip() or default_class_name
-        text = str(item.get("text") or "").strip()
-        if class_name.startswith("uia_"):
-            label = f"UIA: {text}" if text else class_name
-            lines.append(
-                OcrLine(
-                    box=(x, y, w, h),
-                    text=text,
-                    line_type="element",
-                    class_name=class_name,
-                    chinese_ids=(label,),
-                )
-            )
-        else:
-            lines.append(
-                OcrLine(
-                    box=(x, y, w, h),
-                    text=text,
-                    line_type="ocr" if class_name == "text" else "element",
-                    class_name=class_name,
-                )
-            )
-    return lines
-
-
 def load_recorded_yolo_uia_lines(
     json_path: Path,
 ) -> tuple[list[OcrLine], str]:
-    """Load persisted ``debug_layers`` (raw YOLO + UIA) from a run/recording sidecar."""
+    """Load final accepted vision ``candidates`` from a run/recording sidecar."""
     if not json_path.is_file():
         return [], (
             f"Missing sidecar JSON: {json_path.name}. "
@@ -709,25 +666,18 @@ def load_recorded_yolo_uia_lines(
         return [], f"JSON parse error: {exc}"
     if not isinstance(data, dict):
         return [], "Invalid JSON root"
-    layers = data.get("debug_layers")
-    if not isinstance(layers, dict):
+    candidates = data.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
         return [], (
-            f"{json_path.name} has no debug_layers "
-            "(re-run recording analyze / move_mouse to persist YOLO+UIA)"
+            f"{json_path.name} has no candidates "
+            "(re-run move_mouse / recording analyze to persist vision output)"
         )
-    yolo_lines = _lines_from_debug_layer_items(
-        layers.get("yolo"), default_class_name="unknown"
-    )
-    uia_lines = _lines_from_debug_layer_items(
-        layers.get("uia"), default_class_name="uia_text"
-    )
-    combined = yolo_lines + uia_lines
-    if not combined:
-        return [], f"{json_path.name} debug_layers empty"
+    lines = _load_candidate_lines(candidates)
+    if not lines:
+        return [], f"{json_path.name} candidates empty"
     return (
-        combined,
-        f"Recorded layers from {json_path.name}: "
-        f"yolo={len(yolo_lines)} uia={len(uia_lines)}",
+        lines,
+        f"Recorded candidates from {json_path.name}: {len(lines)}",
     )
 
 
@@ -909,94 +859,6 @@ def _yolo_class_key(line: OcrLine) -> str:
 
 def _is_uia_debug_line(line: OcrLine) -> bool:
     return _yolo_class_key(line) in _UIA_DEBUG_CLASS_NAMES
-
-
-def _strip_uia_debug_lines(lines: list[OcrLine]) -> list[OcrLine]:
-    return [line for line in lines if not _is_uia_debug_line(line)]
-
-
-def _infer_monitor_offset_for_image(image_w: int, image_h: int) -> tuple[int, int]:
-    """Match image size to an MSS monitor; default to (0, 0)."""
-    try:
-        import mss
-
-        with mss.mss() as sct:
-            for mon in sct.monitors[1:]:
-                if int(mon["width"]) == int(image_w) and int(mon["height"]) == int(image_h):
-                    return int(mon["left"]), int(mon["top"])
-    except Exception:
-        pass
-    return (0, 0)
-
-
-def _foreground_hwnd() -> int | None:
-    if os.name != "nt":
-        return None
-    import ctypes
-
-    hwnd = int(ctypes.windll.user32.GetForegroundWindow() or 0)
-    return hwnd or None
-
-
-def _load_live_uia_debug_lines(
-    *,
-    hwnd: int,
-    image_w: int,
-    image_h: int,
-    monitor_offset: tuple[int, int],
-) -> tuple[list[OcrLine], str]:
-    """Enumerate live UIA boxes for ``hwnd`` as debug overlay lines (no OCR ROI gate)."""
-    from src.recorder.uia_input_boxes import list_uia_input_and_scrollbar_boxes_image_local
-
-    try:
-        inputs, scrollbars, labeled = list_uia_input_and_scrollbar_boxes_image_local(
-            int(hwnd),
-            monitor_offset=monitor_offset,
-            image_w=int(image_w),
-            image_h=int(image_h),
-            ocr_roi=None,
-        )
-    except Exception as exc:
-        return [], f"UIA enumerate failed: {type(exc).__name__}: {exc}"
-
-    lines: list[OcrLine] = []
-    for box, label in labeled:
-        text = str(label or "").strip()
-        lines.append(
-            OcrLine(
-                box=box,
-                text=text,
-                line_type="element",
-                class_name="uia_text",
-                chinese_ids=(f"UIA text: {text}",) if text else ("UIA text",),
-            )
-        )
-    for box in inputs:
-        lines.append(
-            OcrLine(
-                box=box,
-                text="",
-                line_type="element",
-                class_name="uia_input",
-                chinese_ids=("UIA input",),
-            )
-        )
-    for box in scrollbars:
-        lines.append(
-            OcrLine(
-                box=box,
-                text="",
-                line_type="element",
-                class_name="uia_scrollbar",
-                chinese_ids=("UIA scrollbar",),
-            )
-        )
-    status = (
-        f"UIA overlay hwnd={int(hwnd)} texts={len(labeled)} "
-        f"inputs={len(inputs)} scrollbars={len(scrollbars)} "
-        f"monitor_offset={monitor_offset}"
-    )
-    return lines, status
 
 
 def _box_outline_for_line(line: OcrLine, *, is_selected: bool) -> str:
@@ -1914,14 +1776,9 @@ class OcrViewerApp:
         )
         ttk.Button(
             controls,
-            text="Overlay live UIA + YOLO (2s)",
-            command=self._overlay_live_uia_yolo_debug,
-        ).grid(row=9, column=0, columnspan=4, sticky="ew", pady=(6, 0))
-        ttk.Button(
-            controls,
-            text="Show recorded YOLO + UIA",
+            text="Show recorded candidates",
             command=self._show_recorded_yolo_uia_layers,
-        ).grid(row=10, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        ).grid(row=9, column=0, columnspan=4, sticky="ew", pady=(6, 0))
 
         canvas_wrap = ttk.Frame(self.parent, padding=8)
         canvas_wrap.grid(row=0, column=1, sticky="nsew")
@@ -2773,82 +2630,11 @@ class OcrViewerApp:
             f"{status} in {elapsed_ms:.0f} ms{self._spatial_segment_status_suffix()}"
         )
 
-    def _overlay_live_uia_yolo_debug(self) -> None:
-        """Reload YOLO on the image, then overlay live UIA from the foreground window.
-
-        Focus the target app within 2s (not this viewer). Pink/magenta = UIA;
-        green/blue = YOLO text/element. Use this to see orphan UIA Names vs YOLO.
-        """
-        src = self._current_image_path()
-        if src is None or not src.is_file():
-            self.status_var.set("No image selected for UIA+YOLO overlay")
-            return
-        if self.current_image is None:
-            self.status_var.set("No image loaded")
-            return
-        conf, err = _parse_conf_0_to_1(self.yolo_conf_var.get())
-        if conf is None:
-            self.status_var.set(f"Invalid confidence: {err}")
-            return
-
-        for remaining in (2, 1):
-            self.status_var.set(
-                f"Focus the target window… capturing UIA in {remaining}s"
-            )
-            self.root.update()
-            time.sleep(1.0)
-
-        hwnd = _foreground_hwnd()
-        if hwnd is None:
-            self.status_var.set("No foreground hwnd (Windows only)")
-            return
-
-        model_name = _apply_yolo_triton_model(self.yolo_model_var.get())
-        self.status_var.set("Running YOLO + live UIA overlay…")
-        self.root.update_idletasks()
-        t0 = time.perf_counter()
-        try:
-            yolo_lines, yolo_status = resolve_image_lines(
-                src,
-                yolo_conf_threshold=conf,
-                allow_yolo=True,
-                yolo_cache=self._yolo_lines_cache,
-                force_yolo=True,
-                run_dir=self._selected_run(),
-                yolo_model=model_name,
-            )
-        except Exception as exc:
-            self.status_var.set(f"YOLO detections failed: {type(exc).__name__}: {exc}")
-            return
-
-        image_w, image_h = self.current_image.size
-        monitor_offset = _infer_monitor_offset_for_image(image_w, image_h)
-        uia_lines, uia_status = _load_live_uia_debug_lines(
-            hwnd=hwnd,
-            image_w=image_w,
-            image_h=image_h,
-            monitor_offset=monitor_offset,
-        )
-        combined = _strip_uia_debug_lines(yolo_lines) + uia_lines
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        self._set_current_lines(combined)
-        self.selected_line_idx = None
-        self.selected_region_id = None
-        self.show_boxes.set(True)
-        self._refresh_spatial_segmentation()
-        self._populate_item_list()
-        self._detect_input_box_rectangles()
-        self._refresh_image()
-        self.status_var.set(
-            f"{yolo_status}; {uia_status} in {elapsed_ms:.0f} ms"
-            f"{self._spatial_segment_status_suffix()}"
-        )
-
     def _show_recorded_yolo_uia_layers(self) -> None:
-        """Draw persisted YOLO + UIA debug_layers from the run/recording sidecar."""
+        """Draw final accepted vision candidates from the run/recording sidecar."""
         src = self._current_image_path()
         if src is None or not src.is_file():
-            self.status_var.set("No image selected for recorded layers")
+            self.status_var.set("No image selected for recorded candidates")
             return
         json_path = _sidecar_json_path(src, self._selected_run())
         lines, status = load_recorded_yolo_uia_lines(json_path)
@@ -3131,14 +2917,9 @@ class TestImagesViewerApp:
         )
         ttk.Button(
             controls,
-            text="Overlay live UIA + YOLO (2s)",
-            command=self._overlay_live_uia_yolo_debug,
-        ).grid(row=7, column=0, columnspan=4, sticky="ew", pady=(6, 0))
-        ttk.Button(
-            controls,
-            text="Show recorded YOLO + UIA",
+            text="Show recorded candidates",
             command=self._show_recorded_yolo_uia_layers,
-        ).grid(row=8, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        ).grid(row=7, column=0, columnspan=4, sticky="ew", pady=(6, 0))
 
         canvas_wrap = ttk.Frame(self.parent, padding=8)
         canvas_wrap.grid(row=0, column=1, sticky="nsew")
@@ -3543,64 +3324,10 @@ class TestImagesViewerApp:
             f"YOLO model: {model_name} — re-run YOLO text regions to apply"
         )
 
-    def _overlay_live_uia_yolo_debug(self) -> None:
-        """Reload full YOLO detections, then overlay live UIA from the foreground window."""
-        src = self._current_image_path()
-        if src is None or not src.is_file():
-            self.status_var.set("No image selected for UIA+YOLO overlay")
-            return
-        if self.current_image is None:
-            self.status_var.set("No image loaded")
-            return
-        conf, err = _parse_conf_0_to_1(self.yolo_conf_var.get())
-        if conf is None:
-            self.status_var.set(f"Invalid confidence: {err}")
-            return
-
-        for remaining in (2, 1):
-            self.status_var.set(
-                f"Focus the target window… capturing UIA in {remaining}s"
-            )
-            self.root.update()
-            time.sleep(1.0)
-
-        hwnd = _foreground_hwnd()
-        if hwnd is None:
-            self.status_var.set("No foreground hwnd (Windows only)")
-            return
-
-        model_name = _apply_yolo_triton_model(self.yolo_model_var.get())
-        self.status_var.set("Running YOLO + live UIA overlay…")
-        self.root.update_idletasks()
-        t0 = time.perf_counter()
-        try:
-            yolo_lines, yolo_status = load_yolo_lines(
-                src, yolo_conf_threshold=conf
-            )
-        except Exception as exc:
-            self.status_var.set(f"YOLO detections failed: {type(exc).__name__}: {exc}")
-            return
-
-        image_w, image_h = self.current_image.size
-        monitor_offset = _infer_monitor_offset_for_image(image_w, image_h)
-        uia_lines, uia_status = _load_live_uia_debug_lines(
-            hwnd=hwnd,
-            image_w=image_w,
-            image_h=image_h,
-            monitor_offset=monitor_offset,
-        )
-        combined = _strip_uia_debug_lines(yolo_lines) + uia_lines
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        self.show_boxes.set(True)
-        self._set_lines(
-            combined,
-            f"[{model_name}] {yolo_status}; {uia_status} in {elapsed_ms:.0f} ms",
-        )
-
     def _show_recorded_yolo_uia_layers(self) -> None:
         src = self._current_image_path()
         if src is None or not src.is_file():
-            self.status_var.set("No image selected for recorded layers")
+            self.status_var.set("No image selected for recorded candidates")
             return
         json_path = _sidecar_json_path(src, None)
         lines, status = load_recorded_yolo_uia_lines(json_path)

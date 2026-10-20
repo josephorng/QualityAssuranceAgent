@@ -1313,6 +1313,16 @@ def _detect_mouse_targets_from_bgr(
             f"boxes_dropped={skipped_boxes}"
         )
 
+    from src.recorder.uia_input_boxes import merge_nested_element_boxes
+
+    element_before_nest = len(element_boxes)
+    element_boxes = merge_nested_element_boxes(element_boxes)
+    if len(element_boxes) < element_before_nest:
+        _log_info(
+            "move_mouse nested element merge "
+            f"before={element_before_nest} after={len(element_boxes)}"
+        )
+
     # Image-local YOLO boxes after ROI gate, before UIA prefer-replace / OCR.
     debug_yolo_boxes: list[dict[str, Any]] = [
         {"bbox": [int(v) for v in bbox], "class_name": "text"} for bbox in text_boxes

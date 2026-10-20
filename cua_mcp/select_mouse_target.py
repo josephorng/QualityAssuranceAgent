@@ -649,9 +649,14 @@ def _vision_roi_fields(vision: dict[str, Any]) -> dict[str, Any]:
 
 
 def _ocr_reuse_count_fields(source: dict[str, Any]) -> dict[str, int]:
-    """Copy ``ocr_reused`` / ``ocr_fresh`` when they are present as integers."""
+    """Copy OCR box reuse / UIA text-assist counts when present as integers."""
     out: dict[str, int] = {}
-    for key in ("ocr_reused", "ocr_fresh"):
+    for key in (
+        "ocr_reused",
+        "ocr_fresh",
+        "uia_text_orphans",
+        "uia_text_ocr_skipped",
+    ):
         raw = source.get(key)
         if isinstance(raw, bool) or not isinstance(raw, int):
             continue
@@ -669,6 +674,8 @@ def _timing_payload_with_roi(
     ocr_roi_pad: int | None = None,
     ocr_reused: int | None = None,
     ocr_fresh: int | None = None,
+    uia_text_orphans: int | None = None,
+    uia_text_ocr_skipped: int | None = None,
     icon_ocr_retry_s: float = 0.0,
     uia_input_s: float = 0.0,
     uia_scrollbar_s: float = 0.0,
@@ -694,6 +701,10 @@ def _timing_payload_with_roi(
         payload["ocr_reused"] = int(ocr_reused)
     if ocr_fresh is not None:
         payload["ocr_fresh"] = int(ocr_fresh)
+    if uia_text_orphans is not None:
+        payload["uia_text_orphans"] = int(uia_text_orphans)
+    if uia_text_ocr_skipped is not None:
+        payload["uia_text_ocr_skipped"] = int(uia_text_ocr_skipped)
     return payload
 
 
@@ -712,7 +723,12 @@ def _add_vision_phase_timing(dst: dict[str, Any], src: dict[str, Any]) -> None:
         raw = src.get(key)
         if isinstance(raw, (int, float)) and not isinstance(raw, bool):
             dst[key] = float(dst.get(key, 0.0)) + float(raw)
-    for key in ("ocr_reused", "ocr_fresh"):
+    for key in (
+        "ocr_reused",
+        "ocr_fresh",
+        "uia_text_orphans",
+        "uia_text_ocr_skipped",
+    ):
         raw = src.get(key)
         if isinstance(raw, bool) or not isinstance(raw, int):
             continue
@@ -1396,6 +1412,8 @@ def _detect_mouse_targets_from_bgr(
     )
     uia_text_detections: list[tuple[tuple[int, int, int, int], str]] = []
     yolo_text_for_ocr = list(merged_text_boxes)
+    uia_text_orphans = 0
+    uia_text_ocr_skipped = 0
     if uia_labeled_texts and YOLO_CLASS_TEXT in ocr_wanted:
         from src.recorder.uia_input_boxes import associate_uia_labels_with_yolo_text
 
@@ -1407,13 +1425,15 @@ def _detect_mouse_targets_from_bgr(
                 ocr_roi_pad=roi_pad,
             )
         )
+        uia_text_orphans = int(text_assoc_meta.get("orphans", 0) or 0)
+        uia_text_ocr_skipped = int(text_assoc_meta.get("text_ocr_skipped", 0) or 0)
         _log_info(
             "move_mouse uia text assist "
             f"uia_texts={text_assoc_meta.get('uia_texts')} "
             f"split_blobs={text_assoc_meta.get('split_blobs')} "
             f"iou_filled={text_assoc_meta.get('iou_filled')} "
-            f"orphans={text_assoc_meta.get('orphans')} "
-            f"text_ocr_skipped={text_assoc_meta.get('text_ocr_skipped')} "
+            f"orphans={uia_text_orphans} "
+            f"text_ocr_skipped={uia_text_ocr_skipped} "
             f"yolo_text_for_ocr={text_assoc_meta.get('yolo_text_for_ocr')} "
             f"uia_sourced={text_assoc_meta.get('uia_sourced')}"
         )
@@ -1449,6 +1469,8 @@ def _detect_mouse_targets_from_bgr(
                     ocr_roi_pad=roi_pad,
                     ocr_reused=0,
                     ocr_fresh=0,
+                    uia_text_orphans=uia_text_orphans,
+                    uia_text_ocr_skipped=uia_text_ocr_skipped,
                     icon_ocr_retry_s=0.0,
                     uia_input_s=uia_input_elapsed,
                     uia_scrollbar_s=uia_scrollbar_elapsed,
@@ -1573,6 +1595,8 @@ def _detect_mouse_targets_from_bgr(
                 ocr_roi_pad=roi_pad,
                 ocr_reused=ocr_reused,
                 ocr_fresh=ocr_fresh,
+                uia_text_orphans=uia_text_orphans,
+                uia_text_ocr_skipped=uia_text_ocr_skipped,
                 icon_ocr_retry_s=icon_ocr_retry_elapsed,
                 uia_input_s=uia_input_elapsed,
                 uia_scrollbar_s=uia_scrollbar_elapsed,

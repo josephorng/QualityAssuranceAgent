@@ -639,6 +639,8 @@ def test_build_move_mouse_timing_includes_ocr_roi_on_yolo_and_ocr_phases() -> No
             "ocr_roi_pad": 16,
             "ocr_reused": 12,
             "ocr_fresh": 3,
+            "uia_text_orphans": 2,
+            "uia_text_ocr_skipped": 4,
         },
         parse_s=0.2,
         select_s=0.3,
@@ -656,9 +658,13 @@ def test_build_move_mouse_timing_includes_ocr_roi_on_yolo_and_ocr_phases() -> No
     assert by_name["ocr"]["ocr_roi"] == [12, 34, 100, 80]
     assert by_name["ocr"]["ocr_reused"] == 12
     assert by_name["ocr"]["ocr_fresh"] == 3
+    assert by_name["ocr"]["uia_text_orphans"] == 2
+    assert by_name["ocr"]["uia_text_ocr_skipped"] == 4
     assert by_name["icon_ocr_retry"]["seconds"] == 1.2
     assert timing["ocr_reused"] == 12
     assert timing["ocr_fresh"] == 3
+    assert timing["uia_text_orphans"] == 2
+    assert timing["uia_text_ocr_skipped"] == 4
     assert "ocr_reused" not in by_name["yolo"]
     assert "ocr_reused" not in by_name["line_refine"]
     assert "ocr_roi" not in by_name["capture"]

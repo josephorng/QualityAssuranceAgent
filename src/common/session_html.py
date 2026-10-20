@@ -7706,14 +7706,22 @@ def _format_roi_xywh(raw: Any) -> str | None:
 
 
 def _format_detail_ocr_reuse_meta(detail: dict[str, Any]) -> str:
-    """HTML snippet for how many OCR boxes were reused versus read again."""
+    """HTML snippet for OCR reuse and UIA text-assist counts on an OCR row."""
+    parts: list[str] = []
     reused = detail.get("ocr_reused")
     fresh = detail.get("ocr_fresh")
-    if isinstance(reused, bool) or not isinstance(reused, int):
+    if isinstance(reused, int) and not isinstance(reused, bool):
+        parts.append(f"skipped {int(reused)}")
+        if isinstance(fresh, int) and not isinstance(fresh, bool):
+            parts.append(f"read {int(fresh)}")
+    orphans = detail.get("uia_text_orphans")
+    uia_skipped = detail.get("uia_text_ocr_skipped")
+    if isinstance(orphans, int) and not isinstance(orphans, bool):
+        parts.append(f"UIA orphans +{int(orphans)}")
+    if isinstance(uia_skipped, int) and not isinstance(uia_skipped, bool):
+        parts.append(f"UIA text skipped OCR {int(uia_skipped)}")
+    if not parts:
         return ""
-    parts = [f"skipped {int(reused)}"]
-    if isinstance(fresh, int) and not isinstance(fresh, bool):
-        parts.append(f"read {int(fresh)}")
     return f'<span class="roi-meta">{escape(" · ".join(parts))}</span>'
 
 
@@ -8136,7 +8144,9 @@ def _render_session_time_profile_html(run_root: Path, report: dict[str, Any]) ->
         "（drag 分起點與終點，來自工具結果的 timing）；"
         "YOLO / Input line refine / UIA input refine / OCR 列會附帶影像座標 ROI xywh"
         "（視窗閘控區域，若有）；"
-        "OCR 列另附 skipped / read 物件數（略過的與新讀的，若有）；"
+        "OCR 列另附 skipped / read 物件數（略過的與新讀的，若有），"
+        "以及 UIA orphans（多出的 UIA 文字）與 UIA text skipped OCR"
+        "（已有 UIA 標籤而略過 OCR 的 YOLO 文字框數，若有）；"
         "YOLO / OCR（yolo_ocr）合計來自本 run 的 <code>yolo_ocr/</code> sidecar（若有），"
         "為整次執行合計，未對應到單一指令。"
         "</p>"

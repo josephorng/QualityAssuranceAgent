@@ -417,6 +417,8 @@ def test_time_profile_includes_move_mouse_internal_timing_details(tmp_path: Path
                 "ocr_roi_pad": 16,
                 "ocr_reused": 12,
                 "ocr_fresh": 3,
+                "uia_text_orphans": 2,
+                "uia_text_ocr_skipped": 5,
             },
             {"name": "icon_ocr_retry", "seconds": 1.1},
             {"name": "parse_instruction", "seconds": 0.3, "overlapped": True},
@@ -490,6 +492,8 @@ def test_time_profile_includes_move_mouse_internal_timing_details(tmp_path: Path
     assert details[3]["roi"] == [10, 20, 300, 200]
     assert details[3]["ocr_reused"] == 12
     assert details[3]["ocr_fresh"] == 3
+    assert details[3]["uia_text_orphans"] == 2
+    assert details[3]["uia_text_ocr_skipped"] == 5
     assert details[4]["kind"] == "move_mouse_icon_ocr_retry"
     assert details[4]["label"] == "Unknown-icon OCR retry"
     assert details[4]["duration_seconds"] == 1.1

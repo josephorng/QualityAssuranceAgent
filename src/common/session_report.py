@@ -281,8 +281,13 @@ def _attach_roi_fields(
 
 
 def _attach_ocr_reuse_counts(detail: dict[str, Any], source: dict[str, Any]) -> None:
-    """Copy skipped and newly read OCR box counts onto an OCR detail row."""
-    for key in ("ocr_reused", "ocr_fresh"):
+    """Copy OCR reuse / UIA text-assist counts onto an OCR detail row."""
+    for key in (
+        "ocr_reused",
+        "ocr_fresh",
+        "uia_text_orphans",
+        "uia_text_ocr_skipped",
+    ):
         raw = source.get(key)
         if isinstance(raw, bool) or not isinstance(raw, int):
             continue

@@ -137,6 +137,7 @@ def test_build_vision_passes_click_window_as_ocr_roi(tmp_path: Path) -> None:
 
     def fake_detect(_bgr, **kwargs):
         seen["ocr_roi"] = kwargs.get("ocr_roi")
+        seen["live_input_hwnd"] = kwargs.get("live_input_hwnd")
         return [_detection_from_bbox((25, 35, 20, 20), YOLO_CLASS_TEXT, text="A")]
 
     with patch(
@@ -157,7 +158,161 @@ def test_build_vision_passes_click_window_as_ocr_roi(tmp_path: Path) -> None:
             persist_debug=False,
         )
     assert seen["ocr_roi"] == (20, 30, 100, 80)
+    assert seen["live_input_hwnd"] is None
     assert vision["used_vision"] is True
+
+
+def test_build_vision_passes_live_hwnd_when_click_window_matches(tmp_path: Path) -> None:
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    run_dir = tmp_path / "uia_live"
+    (run_dir / "screenshots").mkdir(parents=True)
+    (run_dir / "screenshots" / "event_001.jpeg").write_bytes(b"x")
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(10, 20),
+        screenshot_path=str(run_dir / "screenshots" / "event_001.jpeg"),
+        monitor_offset=(100, 50),
+        click_window={
+            "hwnd": 42,
+            "title": "App",
+            "rect": [20, 30, 100, 80],
+            "is_maximized": False,
+        },
+    )
+    seen: dict = {}
+    live = ClickWindowInfo(
+        hwnd=99,
+        title="App",
+        process_name="app.exe",
+        left=120,
+        top=80,
+        width=100,
+        height=80,
+        is_maximized=False,
+    )
+
+    def fake_detect(_bgr, **kwargs):
+        seen.update(kwargs)
+        return [_detection_from_bbox((25, 35, 20, 20), YOLO_CLASS_TEXT, text="A")]
+
+    with patch(
+        "src.recorder.vision_context.imread_bgr",
+        return_value=np.zeros((400, 600, 3), dtype=np.uint8),
+    ), patch(
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
+        side_effect=fake_detect,
+    ), patch(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        return_value=live,
+    ):
+        vision = build_vision_context_at_point(
+            event,
+            local_x=30,
+            local_y=40,
+            run_dir=run_dir,
+            persist_debug=False,
+        )
+    assert seen.get("live_input_hwnd") == 99
+    assert seen.get("live_input_window_screen_xywh") == (120, 80, 100, 80)
+    assert seen.get("live_input_monitor_offset") == (100, 50)
+    assert vision["used_vision"] is True
+
+
+def test_build_vision_live_hwnd_none_when_match_fails(tmp_path: Path) -> None:
+    run_dir = tmp_path / "uia_miss"
+    (run_dir / "screenshots").mkdir(parents=True)
+    (run_dir / "screenshots" / "event_001.jpeg").write_bytes(b"x")
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(10, 20),
+        screenshot_path=str(run_dir / "screenshots" / "event_001.jpeg"),
+        click_window={
+            "hwnd": 42,
+            "title": "Gone",
+            "rect": [20, 30, 100, 80],
+            "is_maximized": False,
+        },
+    )
+    seen: dict = {}
+
+    def fake_detect(_bgr, **kwargs):
+        seen["live_input_hwnd"] = kwargs.get("live_input_hwnd")
+        seen["live_input_window_screen_xywh"] = kwargs.get(
+            "live_input_window_screen_xywh"
+        )
+        return []
+
+    with patch(
+        "src.recorder.vision_context.imread_bgr",
+        return_value=np.zeros((400, 600, 3), dtype=np.uint8),
+    ), patch(
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
+        side_effect=fake_detect,
+    ), patch(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        return_value=None,
+    ):
+        build_vision_context_at_point(
+            event,
+            local_x=30,
+            local_y=40,
+            run_dir=run_dir,
+            persist_debug=False,
+        )
+    assert seen["live_input_hwnd"] is None
+    assert seen["live_input_window_screen_xywh"] is None
+
+
+def test_build_vision_persists_debug_layers(tmp_path: Path) -> None:
+    run_dir = tmp_path / "debug_layers"
+    (run_dir / "screenshots").mkdir(parents=True)
+    (run_dir / "screenshots" / "event_001.jpeg").write_bytes(b"x")
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(10, 20),
+        screenshot_path=str(run_dir / "screenshots" / "event_001.jpeg"),
+    )
+
+    def fake_detect(_bgr, **kwargs):
+        timing_out = kwargs.get("timing_out")
+        if isinstance(timing_out, dict):
+            timing_out.clear()
+            timing_out["debug_layers"] = {
+                "yolo": [{"bbox": [1, 2, 3, 4], "class_name": "text"}],
+                "uia": [
+                    {
+                        "bbox": [5, 6, 7, 8],
+                        "class_name": "uia_text",
+                        "text": "Start",
+                    }
+                ],
+            }
+        return [_detection_from_bbox((1, 2, 3, 4), YOLO_CLASS_TEXT, text="x")]
+
+    with patch(
+        "src.recorder.vision_context.imread_bgr",
+        return_value=np.zeros((100, 100, 3), dtype=np.uint8),
+    ), patch(
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
+        side_effect=fake_detect,
+    ):
+        build_vision_context_at_point(
+            event,
+            local_x=10,
+            local_y=10,
+            run_dir=run_dir,
+            persist_debug=True,
+        )
+    payload = json.loads((run_dir / "yolo_ocr" / "event_001.json").read_text(encoding="utf-8"))
+    assert payload["debug_layers"]["yolo"][0]["class_name"] == "text"
+    assert payload["debug_layers"]["uia"][0]["text"] == "Start"
 
 
 def test_build_vision_passes_ocr_roi_when_click_window_maximized(tmp_path: Path) -> None:

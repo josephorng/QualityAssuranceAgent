@@ -209,8 +209,11 @@ def test_associate_split_blob_emits_uia_children() -> None:
         ((10, 35, 80, 20), "Two"),
         ((10, 65, 80, 20), "Three"),
     ]
-    sourced, for_ocr, meta = associate_uia_labels_with_yolo_text([blob], uia)
+    sourced, for_ocr, element_ocr, meta = associate_uia_labels_with_yolo_text(
+        [blob], uia
+    )
     assert for_ocr == []
+    assert element_ocr == []
     assert meta["split_blobs"] == 1
     assert {label for _box, label in sourced} == {"One", "Two", "Three"}
     assert len(sourced) == 3
@@ -219,27 +222,197 @@ def test_associate_split_blob_emits_uia_children() -> None:
 def test_associate_iou_fill_keeps_yolo_bbox() -> None:
     yolo = (10, 10, 80, 20)
     uia = [((12, 12, 70, 16), "Label")]
-    sourced, for_ocr, meta = associate_uia_labels_with_yolo_text([yolo], uia)
+    sourced, for_ocr, element_ocr, meta = associate_uia_labels_with_yolo_text(
+        [yolo], uia
+    )
     assert for_ocr == []
+    assert element_ocr == []
     assert meta["iou_filled"] == 1
     assert sourced == [(yolo, "Label")]
 
 
 def test_associate_orphan_in_roi() -> None:
-    sourced, for_ocr, meta = associate_uia_labels_with_yolo_text(
+    sourced, for_ocr, element_ocr, meta = associate_uia_labels_with_yolo_text(
         [],
         [((50, 50, 40, 15), "Orphan")],
         ocr_roi=(0, 0, 200, 200),
         ocr_roi_pad=0,
     )
     assert for_ocr == []
+    assert element_ocr == []
     assert meta["orphans"] == 1
     assert sourced == [((50, 50, 40, 15), "Orphan")]
 
 
 def test_associate_unmatched_yolo_goes_to_ocr() -> None:
     yolo = (10, 10, 80, 20)
-    sourced, for_ocr, meta = associate_uia_labels_with_yolo_text([yolo], [])
+    sourced, for_ocr, element_ocr, meta = associate_uia_labels_with_yolo_text(
+        [yolo], []
+    )
     assert sourced == []
     assert for_ocr == [yolo]
+    assert element_ocr == []
     assert meta["yolo_text_for_ocr"] == 1
+
+
+def test_associate_element_iou_fill_skips_element_ocr() -> None:
+    element = (10, 10, 80, 20)
+    uia = [((12, 12, 70, 16), "Save")]
+    sourced, text_ocr, element_ocr, meta = associate_uia_labels_with_yolo_text(
+        [],
+        uia,
+        yolo_element_boxes=[element],
+    )
+    assert sourced == [(element, "Save")]
+    assert text_ocr == []
+    assert element_ocr == []
+    assert meta["iou_filled_element"] == 1
+    assert meta["element_claimed"] == 1
+
+
+def test_associate_overlapped_text_element_uia_collapses_both() -> None:
+    text = (10, 10, 80, 24)
+    element = (12, 12, 76, 20)  # high IoU with text
+    uia = [((14, 14, 70, 16), "Favorites")]
+    sourced, text_ocr, element_ocr, meta = associate_uia_labels_with_yolo_text(
+        [text],
+        uia,
+        yolo_element_boxes=[element],
+    )
+    assert text_ocr == []
+    assert element_ocr == []
+    # Cluster collapse and/or IoU+sibling / containment may claim the pair.
+    assert meta["element_claimed"] == 1
+    assert meta["text_ocr_skipped"] == 1
+    assert (
+        meta["cluster_collapsed"] >= 1
+        or meta["sibling_filled"] >= 1
+        or meta["containment_filled"] >= 1
+    )
+    assert len(sourced) == 1
+    assert sourced[0][1] == "Favorites"
+
+
+def test_associate_overlapped_text_element_without_uia_keeps_both_for_ocr() -> None:
+    text = (10, 10, 80, 24)
+    element = (12, 12, 76, 20)
+    sourced, text_ocr, element_ocr, meta = associate_uia_labels_with_yolo_text(
+        [text],
+        [],
+        yolo_element_boxes=[element],
+    )
+    assert sourced == []
+    assert text_ocr == [text]
+    assert element_ocr == [element]
+    assert meta["cluster_collapsed"] == 0
+    assert meta["element_claimed"] == 0
+
+
+def test_associate_containment_small_yolo_inside_large_uia() -> None:
+    # Small YOLO fully inside large UIA; IoU = 400/10000 = 0.04 < 0.3.
+    yolo = (40, 40, 20, 20)
+    uia = [((0, 0, 100, 100), "Start")]
+    sourced, text_ocr, element_ocr, meta = associate_uia_labels_with_yolo_text(
+        [yolo], uia
+    )
+    assert sourced == [(yolo, "Start")]
+    assert text_ocr == []
+    assert element_ocr == []
+    assert meta["iou_filled"] == 0
+    assert meta["containment_filled"] == 1
+    assert meta["orphans"] == 0
+
+
+def test_associate_containment_rejects_two_nonoverlapping_text_occupants() -> None:
+    left = (10, 10, 20, 20)
+    right = (70, 10, 20, 20)
+    uia = [((0, 0, 100, 100), "Busy")]
+    sourced, text_ocr, element_ocr, meta = associate_uia_labels_with_yolo_text(
+        [left, right],
+        uia,
+        ocr_roi=(0, 0, 100, 100),
+    )
+    assert meta["containment_filled"] == 0
+    # Orphan still emits the UIA box; YOLO boxes remain for OCR.
+    assert meta["orphans"] == 1
+    assert (uia[0][0], "Busy") in sourced
+    assert left in text_ocr and right in text_ocr
+    assert element_ocr == []
+
+
+def test_associate_containment_side_by_side_text_element_pair() -> None:
+    """List-row icon + label: one UIA may claim both even without mutual IoU."""
+    element = (10, 10, 24, 24)
+    text = (50, 12, 40, 20)
+    uia = [((0, 0, 100, 40), "Notepad")]
+    sourced, text_ocr, element_ocr, meta = associate_uia_labels_with_yolo_text(
+        [text],
+        uia,
+        yolo_element_boxes=[element],
+    )
+    assert text_ocr == []
+    assert element_ocr == []
+    assert meta["containment_filled"] == 1
+    assert meta["containment_filled_element"] == 1
+    assert meta["element_claimed"] == 1
+    assert meta["text_ocr_skipped"] == 1
+    assert len(sourced) == 1
+    assert sourced[0][1] == "Notepad"
+    # Primary emit is the larger YOLO box (text).
+    assert sourced[0][0] == text
+
+
+def test_associate_containment_rejects_text_plus_two_elements() -> None:
+    text = (40, 10, 40, 20)
+    icon_a = (5, 10, 16, 16)
+    icon_b = (24, 10, 16, 16)
+    uia = [((0, 0, 100, 40), "Ambiguous")]
+    sourced, text_ocr, element_ocr, meta = associate_uia_labels_with_yolo_text(
+        [text],
+        uia,
+        yolo_element_boxes=[icon_a, icon_b],
+        ocr_roi=(0, 0, 100, 40),
+    )
+    assert meta["containment_filled"] == 0
+    assert meta["sibling_filled"] == 0
+    assert text in text_ocr
+    assert icon_a in element_ocr and icon_b in element_ocr
+
+
+def test_associate_iou_text_completes_sibling_element() -> None:
+    """IoU claims the text; one remaining icon inside the same UIA is claimed too."""
+    text = (30, 10, 60, 20)
+    element = (8, 12, 16, 16)
+    # List-item UIA: high IoU with text only; icon still mostly inside.
+    uia = [((5, 5, 90, 30), "Notepad")]
+    sourced, text_ocr, element_ocr, meta = associate_uia_labels_with_yolo_text(
+        [text],
+        uia,
+        yolo_element_boxes=[element],
+    )
+    assert text_ocr == []
+    assert element_ocr == []
+    assert meta["iou_filled"] == 1
+    assert meta["sibling_filled"] == 1
+    assert meta["element_claimed"] == 1
+    assert len(sourced) == 1
+    assert sourced[0] == (text, "Notepad")
+
+
+def test_associate_containment_overlapped_text_element_pair() -> None:
+    text = (40, 40, 24, 24)
+    element = (42, 42, 20, 20)  # high IoU with text; both inside large UIA
+    uia = [((0, 0, 100, 100), "Favorites")]
+    sourced, text_ocr, element_ocr, meta = associate_uia_labels_with_yolo_text(
+        [text],
+        uia,
+        yolo_element_boxes=[element],
+    )
+    assert text_ocr == []
+    assert element_ocr == []
+    assert meta["containment_filled"] == 1
+    assert meta["containment_filled_element"] == 1
+    assert len(sourced) == 1
+    assert sourced[0][1] == "Favorites"
+    # Primary emit is the larger YOLO box (text).
+    assert sourced[0][0] == text

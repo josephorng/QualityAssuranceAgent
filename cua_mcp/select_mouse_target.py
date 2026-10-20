@@ -69,7 +69,7 @@ from cua_mcp.select_ui_element import (
     _select_center_with_llm,
     _sort_detections_reading_order,
 )
-from src.common.io_utils import imread_bgr, imwrite_bgr
+from src.common.io_utils import imread_bgr, imwrite_bgr, write_json
 from src.common.nearby_side import (
     NearbyHint,
     anchor_satisfies_side,
@@ -119,7 +119,7 @@ class _MouseVisionPlan:
     """Instruction-guided shortcuts for capture-time YOLO/OCR work."""
 
     ocr_class_ids: frozenset[int]
-    refine_inputs: bool
+    refine_with_uia: bool
 
     def describe(self) -> str:
         if not self.ocr_class_ids:
@@ -129,19 +129,19 @@ class _MouseVisionPlan:
             for cls_id in sorted(self.ocr_class_ids):
                 names.append(YOLO_CLASS_NAMES.get(cls_id, str(cls_id)))
             ocr = ",".join(names)
-        return f"ocr_classes={ocr} refine_inputs={self.refine_inputs}"
+        return f"ocr_classes={ocr} refine_with_uia={self.refine_with_uia}"
 
 
 def _mouse_vision_plan(
     instruction: str,
     nearby_objects: list[str] | None = None,
 ) -> _MouseVisionPlan:
-    """Derive OCR/line-refine plan from raw instruction text (no LLM wait).
+    """Derive OCR plan from raw instruction text (no LLM wait).
 
     Hub scripts mark targets as ``…文字`` / ``…圖示`` / ``輸入欄`` / ``滾動條``.
     Ambiguous phrases (no class cue) keep both OCR streams. Class-only input /
-    scrollbar targets skip OCR. Line refine runs only when an input or
-    scrollbar is referenced.
+    scrollbar targets skip OCR. UIA refine (inputs/scrollbars/text assist) is
+    always on when a live hwnd is available.
 
     Directed nearby landmarks force both text and element OCR even when every
     phrase says only ``文字`` or only ``圖示``: the real control may be the
@@ -165,11 +165,8 @@ def _mouse_vision_plan(
 
     need_text = False
     need_icon = False
-    need_refine = False
     ambiguous = False
     for phrase in phrases:
-        if "輸入欄" in phrase or "滾動條" in phrase:
-            need_refine = True
         if "文字" in phrase:
             need_text = True
         elif "圖示" in phrase or "元素" in phrase:
@@ -196,7 +193,7 @@ def _mouse_vision_plan(
     ):
         ocr_ids = frozenset({YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT})
 
-    return _MouseVisionPlan(ocr_class_ids=ocr_ids, refine_inputs=need_refine)
+    return _MouseVisionPlan(ocr_class_ids=ocr_ids, refine_with_uia=True)
 
 
 def _xyxy_row_to_bbox(row: np.ndarray, img_w: int, img_h: int) -> tuple[int, int, int, int]:
@@ -1112,6 +1109,43 @@ def _recognize_ocr_boxes(
     return preds, len(boxes) - len(fresh_indices), len(fresh_indices)
 
 
+def _vision_debug_layers(
+    yolo_boxes: list[dict[str, Any]],
+    uia_labeled_texts: list[tuple[tuple[int, int, int, int], str]],
+    uia_inputs: list[tuple[int, int, int, int]],
+    uia_scrollbars: list[tuple[int, int, int, int]],
+) -> dict[str, Any]:
+    """Image-local YOLO + UIA boxes for run/recording overlay debug."""
+    uia_boxes: list[dict[str, Any]] = [
+        {
+            "bbox": [int(v) for v in bbox],
+            "class_name": "uia_text",
+            "text": str(label or ""),
+        }
+        for bbox, label in uia_labeled_texts
+    ]
+    uia_boxes.extend(
+        {"bbox": [int(v) for v in bbox], "class_name": "uia_input", "text": ""}
+        for bbox in uia_inputs
+    )
+    uia_boxes.extend(
+        {"bbox": [int(v) for v in bbox], "class_name": "uia_scrollbar", "text": ""}
+        for bbox in uia_scrollbars
+    )
+    return {"yolo": list(yolo_boxes), "uia": uia_boxes}
+
+
+def _ui_detection_candidate_dict(det: UiDetection) -> dict[str, Any]:
+    return {
+        "bbox": [int(v) for v in det.bbox],
+        "center": [int(det.cx), int(det.cy)],
+        "class_id": det.class_id,
+        "class_name": det.class_name,
+        "text": det.text,
+        "icons": det.icons,
+    }
+
+
 def _detect_mouse_targets_from_bgr(
     bgr: np.ndarray,
     *,
@@ -1121,7 +1155,7 @@ def _detect_mouse_targets_from_bgr(
     coord_offset: tuple[int, int] = (0, 0),
     timing_out: dict[str, Any] | None = None,
     ocr_class_ids: frozenset[int] | set[int] | None = None,
-    refine_inputs: bool = True,
+    refine_with_uia: bool = True,
     ocr_roi: tuple[int, int, int, int] | None = None,
     ocr_roi_pad: int = DEFAULT_OCR_ROI_PAD,
     ocr_cache_key: int | None = None,
@@ -1162,7 +1196,7 @@ def _detect_mouse_targets_from_bgr(
     (image-local xywh) and ``ocr_roi_pad``.
 
     ``ocr_class_ids`` limits which YOLO classes are OCR'd (default: text +
-    element). ``refine_inputs=False`` skips UIA and input line-rectangle merge.
+    element). ``refine_with_uia=False`` skips UIA and input line-rectangle merge.
 
     When ``yolo_crop_roi`` is set, Stage 1–4 YOLO runs on that image crop (no
     pad) and boxes are translated back to full-image coordinates. When unset,
@@ -1279,13 +1313,34 @@ def _detect_mouse_targets_from_bgr(
             f"boxes_dropped={skipped_boxes}"
         )
 
+    # Image-local YOLO boxes after ROI gate, before UIA prefer-replace / OCR.
+    debug_yolo_boxes: list[dict[str, Any]] = [
+        {"bbox": [int(v) for v in bbox], "class_name": "text"} for bbox in text_boxes
+    ]
+    debug_yolo_boxes.extend(
+        {"bbox": [int(v) for v in bbox], "class_name": "element"}
+        for bbox in element_boxes
+    )
+    debug_yolo_boxes.extend(
+        {"bbox": [int(v) for v in bbox], "class_name": "input"} for bbox in input_boxes
+    )
+    debug_yolo_boxes.extend(
+        {
+            "bbox": [int(v) for v in bbox],
+            "class_name": YOLO_CLASS_NAMES.get(int(cls_id), str(int(cls_id))),
+        }
+        for bbox, cls_id in other_non_ocr
+    )
+
     line_elapsed = 0.0
     uia_input_elapsed = 0.0
     uia_scrollbar_elapsed = 0.0
     uia_text_elapsed = 0.0
     used_uia_scrollbar = False
     uia_labeled_texts: list[tuple[tuple[int, int, int, int], str]] = []
-    if refine_inputs:
+    debug_uia_inputs: list[tuple[int, int, int, int]] = []
+    debug_uia_scrollbars: list[tuple[int, int, int, int]] = []
+    if refine_with_uia:
         pre_merge_inputs = (
             list(input_boxes) if original_input_bboxes_out is not None else []
         )
@@ -1355,6 +1410,7 @@ def _detect_mouse_targets_from_bgr(
                 f"uia_texts={uia_meta.get('uia_texts')}"
             )
             if uia_scrollbars is not None:
+                debug_uia_scrollbars = list(uia_scrollbars)
                 other_non_ocr = [
                     (bbox, cls_id)
                     for bbox, cls_id in other_non_ocr
@@ -1365,6 +1421,7 @@ def _detect_mouse_targets_from_bgr(
                 )
                 used_uia_scrollbar = True
             if uia_inputs is not None:
+                debug_uia_inputs = list(uia_inputs)
                 # UIA Edit/Document are authoritative; do not drop on H-scrollbar overlap.
                 input_boxes = list(uia_inputs)
                 used_uia = True
@@ -1412,18 +1469,26 @@ def _detect_mouse_targets_from_bgr(
     )
     uia_text_detections: list[tuple[tuple[int, int, int, int], str]] = []
     yolo_text_for_ocr = list(merged_text_boxes)
+    yolo_element_for_ocr = list(element_boxes)
     uia_text_orphans = 0
     uia_text_ocr_skipped = 0
-    if uia_labeled_texts and YOLO_CLASS_TEXT in ocr_wanted:
+    if uia_labeled_texts and (
+        YOLO_CLASS_TEXT in ocr_wanted or YOLO_CLASS_ELEMENT in ocr_wanted
+    ):
         from src.recorder.uia_input_boxes import associate_uia_labels_with_yolo_text
 
-        uia_text_detections, yolo_text_for_ocr, text_assoc_meta = (
-            associate_uia_labels_with_yolo_text(
-                merged_text_boxes,
-                uia_labeled_texts,
-                ocr_roi=ocr_roi,
-                ocr_roi_pad=roi_pad,
-            )
+        (
+            uia_text_detections,
+            yolo_text_for_ocr,
+            yolo_element_for_ocr,
+            text_assoc_meta,
+        ) = associate_uia_labels_with_yolo_text(
+            merged_text_boxes,
+            uia_labeled_texts,
+            yolo_element_boxes=element_boxes,
+            ocr_roi=ocr_roi,
+            ocr_roi_pad=roi_pad,
+            cluster_iou_threshold=DEFAULT_DEDUPE_OVERLAP_IOU_THRESHOLD,
         )
         uia_text_orphans = int(text_assoc_meta.get("orphans", 0) or 0)
         uia_text_ocr_skipped = int(text_assoc_meta.get("text_ocr_skipped", 0) or 0)
@@ -1432,15 +1497,20 @@ def _detect_mouse_targets_from_bgr(
             f"uia_texts={text_assoc_meta.get('uia_texts')} "
             f"split_blobs={text_assoc_meta.get('split_blobs')} "
             f"iou_filled={text_assoc_meta.get('iou_filled')} "
+            f"containment_filled={text_assoc_meta.get('containment_filled')} "
+            f"sibling_filled={text_assoc_meta.get('sibling_filled')} "
             f"orphans={uia_text_orphans} "
             f"text_ocr_skipped={uia_text_ocr_skipped} "
+            f"element_claimed={text_assoc_meta.get('element_claimed')} "
+            f"cluster_collapsed={text_assoc_meta.get('cluster_collapsed')} "
             f"yolo_text_for_ocr={text_assoc_meta.get('yolo_text_for_ocr')} "
+            f"yolo_element_for_ocr={text_assoc_meta.get('yolo_element_for_ocr')} "
             f"uia_sourced={text_assoc_meta.get('uia_sourced')}"
         )
 
     if (
         not yolo_text_for_ocr
-        and not element_boxes
+        and not yolo_element_for_ocr
         and not non_ocr
         and not uia_text_detections
     ):
@@ -1477,6 +1547,12 @@ def _detect_mouse_targets_from_bgr(
                     uia_text_s=uia_text_elapsed,
                 )
             )
+            timing_out["debug_layers"] = _vision_debug_layers(
+                debug_yolo_boxes,
+                uia_labeled_texts,
+                debug_uia_inputs,
+                debug_uia_scrollbars,
+            )
         return []
 
     ocr_boxes: list[tuple[int, int, int, int]] = []
@@ -1486,7 +1562,7 @@ def _detect_mouse_targets_from_bgr(
             ocr_boxes.append(bbox)
             ocr_class_id_list.append(YOLO_CLASS_TEXT)
     if YOLO_CLASS_ELEMENT in ocr_wanted:
-        for bbox in merge_overlapping_boxes(element_boxes):
+        for bbox in merge_overlapping_boxes(yolo_element_for_ocr):
             ocr_boxes.append(bbox)
             ocr_class_id_list.append(YOLO_CLASS_ELEMENT)
 
@@ -1580,7 +1656,7 @@ def _detect_mouse_targets_from_bgr(
         f"total_s={total_elapsed:.3f} "
         f"yolo_boxes={0 if xyxy.size == 0 else len(xyxy)} "
         f"input_boxes={len(input_boxes)} ocr_boxes={len(ocr_boxes)} "
-        f"candidates={len(candidates)} refine_inputs={refine_inputs}"
+        f"candidates={len(candidates)} refine_with_uia={refine_with_uia}"
         + (f" ocr_roi={tuple(int(v) for v in ocr_roi)}" if ocr_roi is not None else "")
     )
     if timing_out is not None:
@@ -1602,6 +1678,12 @@ def _detect_mouse_targets_from_bgr(
                 uia_scrollbar_s=uia_scrollbar_elapsed,
                 uia_text_s=uia_text_elapsed,
             )
+        )
+        timing_out["debug_layers"] = _vision_debug_layers(
+            debug_yolo_boxes,
+            uia_labeled_texts,
+            debug_uia_inputs,
+            debug_uia_scrollbars,
         )
     return candidates
 
@@ -2238,7 +2320,7 @@ def _detections_for_captured_monitor(
     yolo_conf_threshold: float,
     timing_out: dict[str, Any] | None = None,
     ocr_class_ids: frozenset[int] | set[int] | None = None,
-    refine_inputs: bool = True,
+    refine_with_uia: bool = True,
     ocr_roi: tuple[int, int, int, int] | None = None,
     ocr_roi_pad: int = DEFAULT_OCR_ROI_PAD,
     yolo_crop_roi: tuple[int, int, int, int] | None = None,
@@ -2253,7 +2335,7 @@ def _detections_for_captured_monitor(
         coord_offset=(left, top),
         timing_out=timing_out,
         ocr_class_ids=ocr_class_ids,
-        refine_inputs=refine_inputs,
+        refine_with_uia=refine_with_uia,
         ocr_roi=ocr_roi,
         ocr_roi_pad=ocr_roi_pad,
         ocr_cache_key=monitor_index,
@@ -2339,7 +2421,7 @@ def _collect_monitor_detections(
     yolo_conf_threshold: float,
     timing_out: dict[str, Any] | None = None,
     ocr_class_ids: frozenset[int] | set[int] | None = None,
-    refine_inputs: bool = True,
+    refine_with_uia: bool = True,
     click_window: dict[str, Any] | None = None,
     ocr_roi_pad: int = DEFAULT_OCR_ROI_PAD,
     caption_roi_screen: tuple[int, int, int, int] | None = None,
@@ -2538,29 +2620,34 @@ def _collect_monitor_detections(
     if len(planned) == 1:
         monitor_index, bgr, gate, crop = planned[0]
         live_hwnd, live_win = _live_hwnd_for_monitor(monitor_index, bgr)
-        return _detections_for_captured_monitor(
+        dets = _detections_for_captured_monitor(
             monitor_index,
             bgr,
             yolo_conf_threshold=yolo_conf_threshold,
             timing_out=timing_out,
             ocr_class_ids=ocr_class_ids,
-            refine_inputs=refine_inputs,
+            refine_with_uia=refine_with_uia,
             ocr_roi=gate,
             ocr_roi_pad=ocr_roi_pad,
             yolo_crop_roi=crop,
             live_input_hwnd=live_hwnd,
             live_input_window_screen_xywh=live_win,
         )
+        if timing_out is not None:
+            layers = timing_out.get("debug_layers")
+            if isinstance(layers, dict):
+                timing_out["debug_layers_by_monitor"] = {int(monitor_index): layers}
+        return dets
 
     all_detections: list[UiDetection] = []
-    per_monitor_timings: list[dict[str, Any]] = []
+    per_monitor_timings: list[tuple[int, dict[str, Any]]] = []
 
     def _detect_one(
         monitor_index: int,
         bgr: np.ndarray,
         ocr_roi: tuple[int, int, int, int] | None,
         yolo_crop_roi: tuple[int, int, int, int] | None,
-    ) -> tuple[list[UiDetection], dict[str, Any]]:
+    ) -> tuple[int, list[UiDetection], dict[str, Any]]:
         local_timing: dict[str, Any] = {}
         live_hwnd, live_win = _live_hwnd_for_monitor(monitor_index, bgr)
         dets = _detections_for_captured_monitor(
@@ -2569,14 +2656,14 @@ def _collect_monitor_detections(
             yolo_conf_threshold=yolo_conf_threshold,
             timing_out=local_timing,
             ocr_class_ids=ocr_class_ids,
-            refine_inputs=refine_inputs,
+            refine_with_uia=refine_with_uia,
             ocr_roi=ocr_roi,
             ocr_roi_pad=ocr_roi_pad,
             yolo_crop_roi=yolo_crop_roi,
             live_input_hwnd=live_hwnd,
             live_input_window_screen_xywh=live_win,
         )
-        return dets, local_timing
+        return int(monitor_index), dets, local_timing
 
     with ThreadPoolExecutor(max_workers=len(planned)) as pool:
         futures = [
@@ -2584,9 +2671,9 @@ def _collect_monitor_detections(
             for monitor_index, bgr, gate, crop in planned
         ]
         for future in futures:
-            dets, local_timing = future.result()
+            monitor_index, dets, local_timing = future.result()
             all_detections.extend(dets)
-            per_monitor_timings.append(local_timing)
+            per_monitor_timings.append((monitor_index, local_timing))
 
     if timing_out is not None:
         timing_out.clear()
@@ -2602,8 +2689,16 @@ def _collect_monitor_detections(
                 "total_s": 0.0,
             }
         )
-        for local_timing in per_monitor_timings:
+        layers_by_monitor: dict[int, Any] = {}
+        for monitor_index, local_timing in per_monitor_timings:
             _add_vision_phase_timing(timing_out, local_timing)
+            layers = local_timing.get("debug_layers")
+            if isinstance(layers, dict):
+                layers_by_monitor[int(monitor_index)] = layers
+        if layers_by_monitor:
+            timing_out["debug_layers_by_monitor"] = layers_by_monitor
+            # Keep a representative copy for callers that only read debug_layers.
+            timing_out["debug_layers"] = next(iter(layers_by_monitor.values()))
     return all_detections
 
 
@@ -3514,7 +3609,7 @@ def _capture_and_detect_mouse_candidates(
     yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
     *,
     ocr_class_ids: frozenset[int] | set[int] | None = None,
-    refine_inputs: bool = True,
+    refine_with_uia: bool = True,
     click_window: dict[str, Any] | None = None,
     caption_roi_screen: tuple[int, int, int, int] | None = None,
     landmark_geometry: dict[str, Any] | None = None,
@@ -3571,7 +3666,7 @@ def _capture_and_detect_mouse_candidates(
         yolo_conf_threshold=yolo_conf_threshold,
         timing_out=vision_timing,
         ocr_class_ids=ocr_class_ids,
-        refine_inputs=refine_inputs,
+        refine_with_uia=refine_with_uia,
         click_window=click_window,
         caption_roi_screen=caption_roi_screen,
         landmark_centers_image=landmark_geometry_centers(landmark_geometry),
@@ -3583,6 +3678,40 @@ def _capture_and_detect_mouse_candidates(
             "move_mouse all_ocr_candidates:\n"
             + _format_ui_candidates_text(detections, include_geometry=True)
         )
+    # Persist image-local YOLO/UIA debug layers next to each detected capture PNG.
+    layers_by_monitor = vision_timing.get("debug_layers_by_monitor")
+    if not isinstance(layers_by_monitor, dict):
+        layers_by_monitor = {}
+        single = vision_timing.get("debug_layers")
+        if isinstance(single, dict) and len(captured) == 1:
+            layers_by_monitor = {int(captured[0][0]): single}
+    for (monitor_index, bgr), image_path in zip(captured, image_paths, strict=False):
+        layers = layers_by_monitor.get(int(monitor_index))
+        if not isinstance(layers, dict):
+            continue
+        left, top = active_monitor_offset(monitor_index)
+        img_h, img_w = bgr.shape[:2]
+        local_dets = [
+            _offset_detection(det, -left, -top)
+            for det in detections
+            if left <= int(det.cx) < left + img_w and top <= int(det.cy) < top + img_h
+        ]
+        sidecar = {
+            "image_path": image_path,
+            "monitor_index": int(monitor_index),
+            "monitor_offset": [int(left), int(top)],
+            "candidates": [_ui_detection_candidate_dict(det) for det in local_dets],
+            "detection_count": len(local_dets),
+            "debug_layers": layers,
+            "source": "move_mouse_capture",
+        }
+        try:
+            write_json(Path(image_path).with_suffix(".json"), sidecar)
+        except Exception as exc:
+            _log_info(
+                f"move_mouse debug_layers write failed path={image_path} "
+                f"{type(exc).__name__}: {exc}"
+            )
     timing: dict[str, Any] = {
         "capture_s": capture_s,
         "yolo_s": float(vision_timing.get("yolo_s", 0.0)),
@@ -3738,7 +3867,7 @@ async def find_mouse_point(
         _capture_and_detect_mouse_candidates,
         yolo_conf_threshold,
         ocr_class_ids=vision_plan.ocr_class_ids,
-        refine_inputs=vision_plan.refine_inputs,
+        refine_with_uia=vision_plan.refine_with_uia,
         click_window=click_window,
         caption_roi_screen=caption_roi_screen,
         landmark_geometry=landmark_geometry,

@@ -3166,13 +3166,19 @@ def build_vision_context_at_point(
     else:
         screenshot_offset = offset
     yolo_error: str | None = None
-    # Live match uses the window's current screen rect. Stored ``rect`` stays
-    # image-local when that match is missing.
+    # Live match uses the window's current screen rect for OCR ROI geometry and,
+    # when the hwnd is still matchable, for UIA input/scrollbar/text refine.
+    # Stored ``rect`` stays image-local when that match is missing.
     stored_window = click_window if click_window is not None else event.click_window
     click_window_payload = stored_window if isinstance(stored_window, dict) else None
     enhance_roi = None
+    live_input_hwnd: int | None = None
+    live_input_window_screen_xywh: tuple[int, int, int, int] | None = None
     if click_window_payload is not None:
-        from src.recorder.window_snapshot import resolve_ocr_roi_local
+        from src.recorder.window_snapshot import (
+            find_matching_click_window,
+            resolve_ocr_roi_local,
+        )
 
         img_h, img_w = bgr.shape[:2]
         enhance_roi = resolve_ocr_roi_local(
@@ -3181,9 +3187,20 @@ def build_vision_context_at_point(
             image_h=img_h,
             monitor_offset=screenshot_offset,
         )
+        live = find_matching_click_window(click_window_payload)
+        if live is not None:
+            live_input_hwnd = int(live.hwnd)
+            live_input_window_screen_xywh = live.screen_rect()
+    vision_timing: dict = {}
     try:
         all_detections = _detect_mouse_targets_from_bgr(
-            bgr, coord_offset=offset, ocr_roi=enhance_roi
+            bgr,
+            coord_offset=offset,
+            ocr_roi=enhance_roi,
+            live_input_hwnd=live_input_hwnd,
+            live_input_monitor_offset=screenshot_offset,
+            live_input_window_screen_xywh=live_input_window_screen_xywh,
+            timing_out=vision_timing,
         )
     except RuntimeError as exc:
         all_detections = []
@@ -3243,6 +3260,9 @@ def build_vision_context_at_point(
         "detection_count": len(all_detections),
         "source_fingerprint": fingerprint,
     }
+    debug_layers = vision_timing.get("debug_layers")
+    if isinstance(debug_layers, dict):
+        payload["debug_layers"] = debug_layers
     if segment_result is not None:
         landmark_box_for_segment: tuple[int, int, int, int] | None = None
         if nearest:

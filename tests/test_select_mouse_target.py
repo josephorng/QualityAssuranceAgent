@@ -46,11 +46,11 @@ def test_mouse_target_class_ids() -> None:
     })
 
 
-def test_mouse_vision_plan_text_only_skips_icon_ocr_and_line_refine() -> None:
-    """Undirected text neighbors stay text-OCR-only."""
+def test_mouse_vision_plan_text_only_skips_icon_ocr() -> None:
+    """Undirected text neighbors stay text-OCR-only; UIA refine stays on."""
     plan = _mouse_vision_plan("「類型」文字", nearby_objects=["「修改日期」文字"])
     assert plan.ocr_class_ids == frozenset({YOLO_CLASS_TEXT})
-    assert plan.refine_inputs is False
+    assert plan.refine_with_uia is True
 
 
 def test_mouse_vision_plan_directed_text_landmarks_ocr_both_classes() -> None:
@@ -60,19 +60,19 @@ def test_mouse_vision_plan_directed_text_landmarks_ocr_both_classes() -> None:
         nearby_objects=["在「修改日期」文字的下面"],
     )
     assert plan.ocr_class_ids == frozenset({YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT})
-    assert plan.refine_inputs is False
+    assert plan.refine_with_uia is True
 
 
 def test_mouse_vision_plan_icon_only() -> None:
     plan = _mouse_vision_plan("「資料夾」圖示", nearby_objects=["「Edge」圖示"])
     assert plan.ocr_class_ids == frozenset({YOLO_CLASS_ELEMENT})
-    assert plan.refine_inputs is False
+    assert plan.refine_with_uia is True
 
 
-def test_mouse_vision_plan_input_keeps_line_refine_skips_ocr() -> None:
+def test_mouse_vision_plan_input_keeps_uia_refine_skips_ocr() -> None:
     plan = _mouse_vision_plan("輸入欄")
     assert plan.ocr_class_ids == frozenset()
-    assert plan.refine_inputs is True
+    assert plan.refine_with_uia is True
 
 
 def test_mouse_vision_plan_text_near_input_ocr_text_and_refine() -> None:
@@ -80,9 +80,9 @@ def test_mouse_vision_plan_text_near_input_ocr_text_and_refine() -> None:
         "「搜尋」文字",
         nearby_objects=["在輸入欄的裡面"],
     )
-    # Directed landmark → both OCR streams; input still triggers line refine.
+    # Directed landmark → both OCR streams; UIA refine always on.
     assert plan.ocr_class_ids == frozenset({YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT})
-    assert plan.refine_inputs is True
+    assert plan.refine_with_uia is True
 
 
 def test_mouse_vision_plan_mixed_text_and_icon() -> None:
@@ -91,12 +91,13 @@ def test_mouse_vision_plan_mixed_text_and_icon() -> None:
         nearby_objects=["「B」文字"],
     )
     assert plan.ocr_class_ids == frozenset({YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT})
+    assert plan.refine_with_uia is True
 
 
 def test_mouse_vision_plan_ambiguous_keeps_both_ocr() -> None:
     plan = _mouse_vision_plan("移到目標")
     assert plan.ocr_class_ids == frozenset({YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT})
-    assert plan.refine_inputs is False
+    assert plan.refine_with_uia is True
 
 
 def test_detect_skips_element_ocr_when_plan_is_text_only(
@@ -159,7 +160,7 @@ def test_detect_skips_element_ocr_when_plan_is_text_only(
     dets = _detect_mouse_targets_from_bgr(
         bgr,
         ocr_class_ids=frozenset({YOLO_CLASS_TEXT}),
-        refine_inputs=False,
+        refine_with_uia=False,
     )
     assert len(ocr_calls) == 1
     assert len(ocr_calls[0]) == 1
@@ -308,7 +309,7 @@ def test_detect_reuses_ocr_when_box_shifts_one_pixel(
 
     kwargs = {
         "ocr_class_ids": frozenset({YOLO_CLASS_TEXT}),
-        "refine_inputs": False,
+        "refine_with_uia": False,
         "ocr_cache_key": 1,
     }
     first_timing: dict = {}
@@ -344,7 +345,7 @@ def test_detect_without_cache_key_always_runs_ocr(
     _install_cached_detect_fakes(monkeypatch, [xyxy, xyxy, xyxy], ocr_calls, labels)
     common = {
         "ocr_class_ids": frozenset({YOLO_CLASS_TEXT}),
-        "refine_inputs": False,
+        "refine_with_uia": False,
     }
 
     seeded = _detect_mouse_targets_from_bgr(image, ocr_cache_key=3, **common)
@@ -495,7 +496,7 @@ def test_detect_roi_capture_keeps_ocr_cache_outside_roi(
     monkeypatch.setattr("cua_mcp.select_mouse_target._ocr_boxes_on_bgr", fake_ocr)
     common = {
         "ocr_class_ids": frozenset({YOLO_CLASS_TEXT}),
-        "refine_inputs": False,
+        "refine_with_uia": False,
         "ocr_cache_key": 4,
     }
     _detect_mouse_targets_from_bgr(image, **common)
@@ -541,7 +542,7 @@ def test_detect_empty_frame_keeps_ocr_cache(
     monkeypatch.setattr("cua_mcp.select_mouse_target._ocr_boxes_on_bgr", fake_ocr)
     common = {
         "ocr_class_ids": frozenset({YOLO_CLASS_TEXT}),
-        "refine_inputs": False,
+        "refine_with_uia": False,
         "ocr_cache_key": 5,
     }
     _detect_mouse_targets_from_bgr(image, **common)
@@ -609,7 +610,7 @@ def test_detect_ocr_roi_passes_enhance_roi_and_drops_outside_text(
     timing_out: dict = {}
     dets = _detect_mouse_targets_from_bgr(
         bgr,
-        refine_inputs=False,
+        refine_with_uia=False,
         ocr_roi=roi,
         ocr_roi_pad=0,
         timing_out=timing_out,
@@ -800,7 +801,7 @@ def test_detect_refine_inputs_only_inside_ocr_roi(
 
     dets = _detect_mouse_targets_from_bgr(
         bgr,
-        refine_inputs=True,
+        refine_with_uia=True,
         ocr_roi=(0, 0, 80, 80),
         ocr_roi_pad=0,
         ocr_class_ids=frozenset(),
@@ -886,7 +887,7 @@ def test_detect_uia_covered_skips_hough_merge(
     timing: dict = {}
     dets = _detect_mouse_targets_from_bgr(
         bgr,
-        refine_inputs=True,
+        refine_with_uia=True,
         ocr_class_ids=frozenset(),
         live_input_hwnd=42,
         live_input_monitor_offset=(0, 0),
@@ -933,7 +934,7 @@ def test_detect_uia_prefers_nonempty_over_extra_yolo_inputs(
 
     dets = _detect_mouse_targets_from_bgr(
         bgr,
-        refine_inputs=True,
+        refine_with_uia=True,
         ocr_class_ids=frozenset(),
         live_input_hwnd=42,
         live_input_monitor_offset=(0, 0),
@@ -976,7 +977,7 @@ def test_detect_no_live_hwnd_uses_hough(
 
     dets = _detect_mouse_targets_from_bgr(
         bgr,
-        refine_inputs=True,
+        refine_with_uia=True,
         ocr_class_ids=frozenset(),
     )
     assert len(merge_calls) == 1
@@ -1010,7 +1011,7 @@ def test_detect_refine_inputs_false_skips_uia_and_hough(
 
     dets = _detect_mouse_targets_from_bgr(
         bgr,
-        refine_inputs=False,
+        refine_with_uia=False,
         ocr_class_ids=frozenset(),
         live_input_hwnd=42,
         live_input_monitor_offset=(0, 0),
@@ -1052,7 +1053,7 @@ def test_detect_uia_inputs_kept_despite_overlapping_h_scrollbar(
 
     dets = _detect_mouse_targets_from_bgr(
         bgr,
-        refine_inputs=True,
+        refine_with_uia=True,
         ocr_class_ids=frozenset(),
         live_input_hwnd=42,
         live_input_monitor_offset=(0, 0),
@@ -1112,7 +1113,7 @@ def test_detect_uia_scrollbars_skip_create_and_drop(
     timing: dict = {}
     dets = _detect_mouse_targets_from_bgr(
         bgr,
-        refine_inputs=True,
+        refine_with_uia=True,
         ocr_class_ids=frozenset(),
         live_input_hwnd=42,
         live_input_monitor_offset=(0, 0),
@@ -1175,7 +1176,7 @@ def test_detect_empty_uia_scrollbars_keeps_yolo_arrow_pipeline(
 
     dets = _detect_mouse_targets_from_bgr(
         bgr,
-        refine_inputs=True,
+        refine_with_uia=True,
         ocr_class_ids=frozenset(),
         live_input_hwnd=42,
         live_input_monitor_offset=(0, 0),
@@ -1225,7 +1226,7 @@ def test_detect_uia_text_iou_fill_skips_ocr(
 
     dets = _detect_mouse_targets_from_bgr(
         bgr,
-        refine_inputs=True,
+        refine_with_uia=True,
         live_input_hwnd=42,
         live_input_monitor_offset=(0, 0),
         live_input_window_screen_xywh=(0, 0, 200, 100),
@@ -1279,7 +1280,7 @@ def test_detect_uia_text_split_blob_skips_ocr(
 
     dets = _detect_mouse_targets_from_bgr(
         bgr,
-        refine_inputs=True,
+        refine_with_uia=True,
         live_input_hwnd=42,
         live_input_monitor_offset=(0, 0),
         live_input_window_screen_xywh=(0, 0, 120, 120),
@@ -1321,7 +1322,7 @@ def test_detect_uia_text_orphan_in_roi(
 
     dets = _detect_mouse_targets_from_bgr(
         bgr,
-        refine_inputs=True,
+        refine_with_uia=True,
         ocr_roi=(0, 0, 200, 100),
         ocr_roi_pad=0,
         live_input_hwnd=42,
@@ -1331,6 +1332,109 @@ def test_detect_uia_text_orphan_in_roi(
     texts = {d.text for d in dets if d.class_id == YOLO_CLASS_TEXT}
     assert "Orphan" in texts
     assert "OCR" in texts
+
+
+def test_detect_persists_debug_layers_yolo_and_uia(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    from cua_mcp.select_mouse_target import _detect_mouse_targets_from_bgr
+    from cua_mcp.yolo_onnx import YOLO_CLASS_TEXT
+
+    bgr = np.zeros((100, 200, 3), dtype=np.uint8)
+    xyxy = np.asarray([[10, 10, 90, 30]], dtype=np.float32)
+    scores = np.asarray([0.9], dtype=np.float32)
+    class_ids = np.asarray([YOLO_CLASS_TEXT], dtype=np.int32)
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.run_yolo_onnx_end2end",
+        lambda *_a, **_k: (xyxy, scores, class_ids),
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.merge_yolo_inputs_with_line_rectangles",
+        lambda *_a, **_k: [],
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._recognize_ocr_boxes",
+        lambda _b, boxes, modes, **_k: ([""] * len(boxes), 0, len(boxes)),
+    )
+    _patch_detect_passthrough(monkeypatch)
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.try_uia_refine_inputs_and_scrollbars",
+        _fake_uia_refine(None, None, [((12, 12, 70, 16), "UIA Label")]),
+    )
+
+    timing: dict = {}
+    _detect_mouse_targets_from_bgr(
+        bgr,
+        refine_with_uia=True,
+        live_input_hwnd=42,
+        live_input_monitor_offset=(0, 0),
+        live_input_window_screen_xywh=(0, 0, 200, 100),
+        timing_out=timing,
+    )
+    layers = timing.get("debug_layers")
+    assert isinstance(layers, dict)
+    yolo = layers.get("yolo") or []
+    uia = layers.get("uia") or []
+    assert any(item.get("class_name") == "text" for item in yolo)
+    assert any(
+        item.get("class_name") == "uia_text" and item.get("text") == "UIA Label"
+        for item in uia
+    )
+
+
+def test_detect_uia_collapses_overlapped_text_and_element(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    from cua_mcp.select_mouse_target import _detect_mouse_targets_from_bgr
+    from cua_mcp.yolo_onnx import YOLO_CLASS_ELEMENT, YOLO_CLASS_TEXT
+
+    bgr = np.zeros((100, 200, 3), dtype=np.uint8)
+    # Highly overlapped text + element boxes.
+    xyxy = np.asarray(
+        [[10, 10, 90, 34], [12, 12, 88, 32]],
+        dtype=np.float32,
+    )
+    scores = np.asarray([0.9, 0.9], dtype=np.float32)
+    class_ids = np.asarray([YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT], dtype=np.int32)
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.run_yolo_onnx_end2end",
+        lambda *_a, **_k: (xyxy, scores, class_ids),
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.merge_yolo_inputs_with_line_rectangles",
+        lambda *_a, **_k: [],
+    )
+    ocr_calls: list[list[tuple[int, int, int, int]]] = []
+
+    def fake_ocr(_bgr, boxes, modes, **_k):
+        ocr_calls.append(list(boxes))
+        return [""] * len(boxes), 0, len(boxes)
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._recognize_ocr_boxes",
+        fake_ocr,
+    )
+    _patch_detect_passthrough(monkeypatch)
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.try_uia_refine_inputs_and_scrollbars",
+        _fake_uia_refine(None, None, [((14, 14, 70, 16), "Favorites")]),
+    )
+
+    dets = _detect_mouse_targets_from_bgr(
+        bgr,
+        refine_with_uia=True,
+        live_input_hwnd=42,
+        live_input_monitor_offset=(0, 0),
+        live_input_window_screen_xywh=(0, 0, 200, 100),
+    )
+    assert ocr_calls == [[]]
+    texts = [d for d in dets if d.class_id == YOLO_CLASS_TEXT]
+    elements = [d for d in dets if d.class_id == YOLO_CLASS_ELEMENT]
+    assert len(texts) == 1
+    assert texts[0].text == "Favorites"
+    assert elements == []
 
 
 def test_normalize_nearby_labels_strips_and_dedupes() -> None:
@@ -5026,7 +5130,7 @@ def test_detect_yolo_crop_roi_runs_on_crop_and_offsets_boxes(
 
     dets = _detect_mouse_targets_from_bgr(
         bgr,
-        refine_inputs=False,
+        refine_with_uia=False,
         ocr_roi=(50, 10, 40, 30),
         ocr_roi_pad=0,
         yolo_crop_roi=(50, 10, 40, 30),

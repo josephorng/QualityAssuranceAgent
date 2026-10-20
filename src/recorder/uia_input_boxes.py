@@ -3,7 +3,8 @@
 One FindAll under a live hwnd, split by control type, convert to image-local
 xywh, drop oversized (near-window) rects, prefer non-empty UIA inputs/scrollbars
 over YOLO (+ Hough for inputs), and use labeled Text/Hyperlink/ListItem/Button/
-MenuItem/TreeItem/DataItem as OCR assist (split blobs, IoU fill, orphans).
+MenuItem/TreeItem/DataItem as OCR assist for YOLO text and element boxes
+(split blobs, IoU fill, orphans; collapse high-overlap text+icon clusters).
 """
 
 from __future__ import annotations
@@ -13,7 +14,12 @@ import os
 from ctypes import wintypes
 from typing import Callable
 
-from cua_mcp.geometry import clip_box, iou_xywh, point_in_rect_xywh
+from cua_mcp.geometry import (
+    clip_box,
+    intersection_area_xywh,
+    iou_xywh,
+    point_in_rect_xywh,
+)
 from cua_mcp.input_box_rectangles import DEFAULT_INPUT_RECT_IOU_THRESHOLD
 from src.recorder.focus_point import (
     _CLSID_CUIAutomation,
@@ -30,6 +36,10 @@ from src.recorder.focus_point import (
 
 # Fraction of window area at/above which a UIA rect is treated as window-sized.
 DEFAULT_UIA_OVERSIZE_AREA_FRAC = 0.8
+# Match ``DEFAULT_DEDUPE_OVERLAP_IOU_THRESHOLD`` in select_mouse_target (avoid cycle).
+DEFAULT_TEXT_ELEMENT_CLUSTER_IOU_THRESHOLD = 0.5
+# YOLO mostly inside UIA when intersection covers at least this fraction of YOLO area.
+DEFAULT_UIA_CONTAINMENT_FRAC = 0.5
 
 # IUIAutomation vtable (after IUnknown 0..2).
 _UIA_ELEMENT_FROM_HANDLE = 6
@@ -283,27 +293,121 @@ def _uia_rect_inside_blob(
     return iou_xywh(uia_box, blob) > float(iou_threshold)
 
 
+def _yolo_mostly_inside_uia(
+    yolo: RectXywh,
+    uia: RectXywh,
+    *,
+    frac: float = DEFAULT_UIA_CONTAINMENT_FRAC,
+) -> bool:
+    """True when intersection covers at least ``frac`` of the YOLO box area."""
+    _x, _y, w, h = (int(v) for v in yolo)
+    area = float(max(0, w) * max(0, h))
+    if area <= 0.0:
+        return False
+    return intersection_area_xywh(yolo, uia) / area >= float(frac)
+
+
+def _partition_occupant_groups(
+    occupants: list[tuple[int, str, int, RectXywh]],
+    *,
+    cluster_iou_threshold: float,
+) -> list[list[tuple[int, str, int, RectXywh]]]:
+    """Group remaining blobs that highly overlap; others stay singleton groups.
+
+    ``occupants`` entries are ``(remaining_index, kind, local_idx, box)``.
+    """
+    if not occupants:
+        return []
+    thresh = float(cluster_iou_threshold)
+    n = len(occupants)
+    parent = list(range(n))
+
+    def _find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def _union(a: int, b: int) -> None:
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if iou_xywh(occupants[i][3], occupants[j][3]) > thresh:
+                _union(i, j)
+
+    groups_map: dict[int, list[tuple[int, str, int, RectXywh]]] = {}
+    for i, occ in enumerate(occupants):
+        groups_map.setdefault(_find(i), []).append(occ)
+    return list(groups_map.values())
+
+
+def _text_element_sibling_occupants(
+    occupants: list[tuple[int, str, int, RectXywh]],
+) -> list[tuple[int, str, int, RectXywh]] | None:
+    """Return occupants when they are exactly one text + one element; else None.
+
+    Side-by-side icon+label rows share one UIA Name without high mutual IoU.
+    """
+    if len(occupants) != 2:
+        return None
+    kinds = {occ[1] for occ in occupants}
+    if kinds != {"text", "element"}:
+        return None
+    return occupants
+
+
 def associate_uia_labels_with_yolo_text(
     yolo_text_boxes: list[RectXywh],
     uia_texts: list[LabeledRectXywh],
     *,
+    yolo_element_boxes: list[RectXywh] | None = None,
     ocr_roi: RectXywh | None = None,
     ocr_roi_pad: int = 0,
     iou_threshold: float = DEFAULT_INPUT_RECT_IOU_THRESHOLD,
-) -> tuple[list[LabeledRectXywh], list[RectXywh], dict[str, object]]:
-    """Split/fill/orphan UIA labels against YOLO text boxes.
+    cluster_iou_threshold: float = DEFAULT_TEXT_ELEMENT_CLUSTER_IOU_THRESHOLD,
+    containment_frac: float = DEFAULT_UIA_CONTAINMENT_FRAC,
+) -> tuple[list[LabeledRectXywh], list[RectXywh], list[RectXywh], dict[str, object]]:
+    """Split/fill/orphan UIA labels against YOLO text and element boxes.
 
-    Returns ``(uia_sourced_detections, yolo_boxes_for_ocr, meta)``.
+    Returns
+    ``(uia_sourced_detections, yolo_text_for_ocr, yolo_element_for_ocr, meta)``.
+
+    Highly overlapped text+element pairs claimed by UIA collapse to one sourced
+    text detection; both boxes are dropped from OCR remainders.
+
+    A single UIA may also claim at most one text and one element when both are
+    mostly inside it (list-row icon + label), even if those YOLO boxes do not
+    overlap each other.
     """
     threshold = float(iou_threshold)
+    cluster_thresh = float(cluster_iou_threshold)
+    contain_frac = float(containment_frac)
+    text_boxes = list(yolo_text_boxes)
+    element_boxes = list(yolo_element_boxes or [])
     uia_list = list(uia_texts)
     used_uia: set[int] = set()
     sourced: list[LabeledRectXywh] = []
     sourced_boxes: set[RectXywh] = set()
-    yolo_for_ocr: list[RectXywh] = []
+    claimed_text: set[int] = set()
+    claimed_element: set[int] = set()
+    # Per-UIA kinds already claimed (for icon+label sibling completion).
+    uia_claim_kinds: dict[int, set[str]] = {}
     split_blobs = 0
     iou_filled = 0
+    iou_filled_element = 0
+    containment_filled = 0
+    containment_filled_element = 0
+    sibling_filled = 0
     orphans = 0
+    cluster_collapsed = 0
+
+    # Union blobs: (kind, local_index, box)
+    all_blobs: list[tuple[str, int, RectXywh]] = [
+        ("text", i, box) for i, box in enumerate(text_boxes)
+    ] + [("element", i, box) for i, box in enumerate(element_boxes)]
 
     def _emit(box: RectXywh, label: str) -> None:
         if box in sourced_boxes:
@@ -311,8 +415,57 @@ def associate_uia_labels_with_yolo_text(
         sourced_boxes.add(box)
         sourced.append((box, label))
 
-    remaining_yolo: list[RectXywh] = []
-    for blob in yolo_text_boxes:
+    def _claim_blob(kind: str, local_idx: int) -> None:
+        if kind == "text":
+            claimed_text.add(local_idx)
+        else:
+            claimed_element.add(local_idx)
+
+    def _record_uia_kind(ui: int, kind: str) -> None:
+        uia_claim_kinds.setdefault(ui, set()).add(kind)
+
+    def _box_area(box: RectXywh) -> int:
+        return max(0, int(box[2])) * max(0, int(box[3]))
+
+    def _occupants_inside(
+        uia_box: RectXywh,
+    ) -> list[tuple[int, str, int, RectXywh]]:
+        return [
+            (ri, kind, local_idx, yolo)
+            for ri, (kind, local_idx, yolo) in enumerate(remaining)
+            if ri not in used_remaining
+            and _yolo_mostly_inside_uia(yolo, uia_box, frac=contain_frac)
+        ]
+
+    def _claim_occupant_group(
+        ui: int,
+        label: str,
+        group: list[tuple[int, str, int, RectXywh]],
+        *,
+        count_containment: bool,
+        count_sibling: bool = False,
+    ) -> None:
+        nonlocal containment_filled, containment_filled_element, sibling_filled
+        if not group:
+            return
+        primary = max(group, key=lambda item: _box_area(item[3]))
+        used_uia.add(ui)
+        if count_containment:
+            containment_filled += 1
+        if count_sibling:
+            sibling_filled += 1
+            # Label already emitted by IoU/containment; only skip OCR here.
+        else:
+            _emit(primary[3], label)
+        for ri, kind, local_idx, _yolo in group:
+            used_remaining.add(ri)
+            _claim_blob(kind, local_idx)
+            _record_uia_kind(ui, kind)
+            if kind == "element" and count_containment:
+                containment_filled_element += 1
+
+    remaining: list[tuple[str, int, RectXywh]] = []
+    for kind, local_idx, blob in all_blobs:
         contained = [
             i
             for i, (uia_box, _label) in enumerate(uia_list)
@@ -321,43 +474,92 @@ def associate_uia_labels_with_yolo_text(
         ]
         if len(contained) >= 2:
             split_blobs += 1
+            _claim_blob(kind, local_idx)
             for i in contained:
                 uia_box, label = uia_list[i]
                 used_uia.add(i)
                 _emit(uia_box, label)
             continue
-        remaining_yolo.append(blob)
+        remaining.append((kind, local_idx, blob))
 
-    # Greedy 1:1 IoU fill on remaining YOLO text vs unused UIA.
+    # Greedy 1:1 IoU fill on remaining YOLO blobs vs unused UIA.
     pairs: list[tuple[float, int, int]] = []
-    for yi, yolo in enumerate(remaining_yolo):
+    for ri, (_kind, _local_idx, yolo) in enumerate(remaining):
         for ui, (uia_box, _label) in enumerate(uia_list):
             if ui in used_uia:
                 continue
             score = iou_xywh(yolo, uia_box)
             if score > threshold:
-                pairs.append((score, yi, ui))
+                pairs.append((score, ri, ui))
     pairs.sort(reverse=True)
-    used_yolo: set[int] = set()
-    for _score, yi, ui in pairs:
-        if yi in used_yolo or ui in used_uia:
+    used_remaining: set[int] = set()
+    for _score, ri, ui in pairs:
+        if ri in used_remaining or ui in used_uia:
             continue
-        used_yolo.add(yi)
+        used_remaining.add(ri)
         used_uia.add(ui)
+        kind, local_idx, yolo = remaining[ri]
+        _claim_blob(kind, local_idx)
+        _record_uia_kind(ui, kind)
         iou_filled += 1
-        _emit(remaining_yolo[yi], uia_list[ui][1])
+        if kind == "element":
+            iou_filled_element += 1
+        _emit(yolo, uia_list[ui][1])
 
-    for yi, yolo in enumerate(remaining_yolo):
-        if yi not in used_yolo:
-            yolo_for_ocr.append(yolo)
+    # Containment fill: small YOLO mostly inside an exclusive unused UIA.
+    # Accept a single overlap cluster, or exactly one text + one element (list
+    # row icon beside label) even when those two do not overlap each other.
+    for ui, (uia_box, label) in enumerate(uia_list):
+        if ui in used_uia:
+            continue
+        occupants = _occupants_inside(uia_box)
+        groups = _partition_occupant_groups(
+            occupants, cluster_iou_threshold=cluster_thresh
+        )
+        sibling = _text_element_sibling_occupants(occupants)
+        if len(groups) == 1:
+            group = groups[0]
+        elif sibling is not None:
+            group = sibling
+        else:
+            continue
+        _claim_occupant_group(ui, label, group, count_containment=True)
 
+    # Sibling completion: UIA that already claimed text (or element) via IoU /
+    # containment may also claim exactly one remaining opposite-kind blob
+    # mostly inside it — at most one text and one element per UIA.
+    for ui, (uia_box, label) in enumerate(uia_list):
+        if ui not in used_uia:
+            continue
+        kinds = uia_claim_kinds.get(ui, set())
+        if kinds >= {"text", "element"}:
+            continue
+        occupants = _occupants_inside(uia_box)
+        if not occupants:
+            continue
+        if "text" in kinds and "element" not in kinds:
+            extras = [occ for occ in occupants if occ[1] == "element"]
+            if len(extras) != 1 or any(occ[1] == "text" for occ in occupants):
+                continue
+            _claim_occupant_group(
+                ui, label, extras, count_containment=False, count_sibling=True
+            )
+        elif "element" in kinds and "text" not in kinds:
+            extras = [occ for occ in occupants if occ[1] == "text"]
+            if len(extras) != 1 or any(occ[1] == "element" for occ in occupants):
+                continue
+            _claim_occupant_group(
+                ui, label, extras, count_containment=False, count_sibling=True
+            )
+
+    all_yolo_for_orphan = text_boxes + element_boxes
     for ui, (uia_box, label) in enumerate(uia_list):
         if ui in used_uia:
             continue
         ux, uy, uw, uh = (int(v) for v in uia_box)
         cx, cy = ux + uw * 0.5, uy + uh * 0.5
         in_blob = any(
-            point_in_rect_xywh(cx, cy, blob, pad=0) for blob in yolo_text_boxes
+            point_in_rect_xywh(cx, cy, blob, pad=0) for blob in all_yolo_for_orphan
         )
         in_roi = ocr_roi is not None and point_in_rect_xywh(
             cx, cy, ocr_roi, pad=int(ocr_roi_pad)
@@ -367,16 +569,81 @@ def associate_uia_labels_with_yolo_text(
             used_uia.add(ui)
             _emit(uia_box, label)
 
+    text_ocr_idx = {i for i in range(len(text_boxes)) if i not in claimed_text}
+    element_ocr_idx = {
+        i for i in range(len(element_boxes)) if i not in claimed_element
+    }
+
+    def _uia_claims_cluster(
+        tbox: RectXywh, ebox: RectXywh, ti: int, ei: int
+    ) -> tuple[bool, str | None, RectXywh | None]:
+        """Return (claims, label, emit_box) for a high-overlap text+element pair."""
+        if ti in claimed_text or ei in claimed_element:
+            for sbox, slabel in sourced:
+                if (
+                    iou_xywh(sbox, tbox) > cluster_thresh
+                    or iou_xywh(sbox, ebox) > cluster_thresh
+                    or _uia_rect_inside_blob(sbox, tbox, iou_threshold=cluster_thresh)
+                    or _uia_rect_inside_blob(sbox, ebox, iou_threshold=cluster_thresh)
+                ):
+                    return True, slabel, None
+            return True, None, None
+        for _ui, (ubox, ulabel) in enumerate(uia_list):
+            if (
+                iou_xywh(ubox, tbox) > cluster_thresh
+                or iou_xywh(ubox, ebox) > cluster_thresh
+                or _uia_rect_inside_blob(ubox, tbox, iou_threshold=cluster_thresh)
+                or _uia_rect_inside_blob(ubox, ebox, iou_threshold=cluster_thresh)
+            ):
+                return True, ulabel, ubox
+        return False, None, None
+
+    for ti, tbox in enumerate(text_boxes):
+        for ei, ebox in enumerate(element_boxes):
+            if iou_xywh(tbox, ebox) <= cluster_thresh:
+                continue
+            claims, label, emit_box = _uia_claims_cluster(tbox, ebox, ti, ei)
+            if not claims:
+                continue
+            removed = False
+            if ti in text_ocr_idx:
+                text_ocr_idx.discard(ti)
+                claimed_text.add(ti)
+                removed = True
+            if ei in element_ocr_idx:
+                element_ocr_idx.discard(ei)
+                claimed_element.add(ei)
+                removed = True
+            if emit_box is not None and label:
+                before = len(sourced)
+                _emit(emit_box, label)
+                if len(sourced) > before:
+                    removed = True
+            if removed:
+                cluster_collapsed += 1
+
+    yolo_text_for_ocr = [text_boxes[i] for i in sorted(text_ocr_idx)]
+    yolo_element_for_ocr = [element_boxes[i] for i in sorted(element_ocr_idx)]
+    element_claimed = len(element_boxes) - len(yolo_element_for_ocr)
+    text_ocr_skipped = len(text_boxes) - len(yolo_text_for_ocr)
+
     meta: dict[str, object] = {
         "uia_texts": len(uia_list),
         "split_blobs": split_blobs,
         "iou_filled": iou_filled,
+        "iou_filled_element": iou_filled_element,
+        "containment_filled": containment_filled,
+        "containment_filled_element": containment_filled_element,
+        "sibling_filled": sibling_filled,
         "orphans": orphans,
-        "text_ocr_skipped": split_blobs + iou_filled,  # YOLO blobs not OCR'd via UIA
-        "yolo_text_for_ocr": len(yolo_for_ocr),
+        "text_ocr_skipped": text_ocr_skipped,
+        "element_claimed": element_claimed,
+        "cluster_collapsed": cluster_collapsed,
+        "yolo_text_for_ocr": len(yolo_text_for_ocr),
+        "yolo_element_for_ocr": len(yolo_element_for_ocr),
         "uia_sourced": len(sourced),
     }
-    return sourced, yolo_for_ocr, meta
+    return sourced, yolo_text_for_ocr, yolo_element_for_ocr, meta
 
 
 def _window_screen_xywh(hwnd: int) -> RectXywh | None:

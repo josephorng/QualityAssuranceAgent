@@ -762,6 +762,36 @@ async def close_windows(
     )
 
 
+def close_hwnd(hwnd: int) -> dict[str, Any]:
+    """Close one top-level window already identified by hwnd.
+
+    Same activate / restore / close sequence as ``close_windows``, without a
+    title search or model disambiguation. Raises ``ValueError`` when that hwnd
+    is not in the current top-level list.
+    """
+    needle = int(hwnd)
+    if needle <= 0:
+        raise ValueError(f"no window with hwnd {hwnd}")
+    target: Any = None
+    title = ""
+    for window in gw.getAllWindows():
+        if _hwnd_for_window(window) != needle:
+            continue
+        target = window
+        title = (window.title or "").strip()
+        break
+    if target is None:
+        raise ValueError(f"no window with hwnd {hwnd}")
+    try:
+        target.activate()
+    except Exception:
+        pass
+    if target.isMinimized:
+        target.restore()
+    target.close()
+    return {"hwnd": needle, "matched_title": title, "status": "closed"}
+
+
 async def minimize_windows(
     window_title_contains: str,
     instruction: str = "",

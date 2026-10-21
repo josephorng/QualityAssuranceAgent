@@ -10,6 +10,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Literal
 
+from cua_mcp.hand_tools import close_hwnd
 from cua_mcp.select_mouse_target import (
     RECORDED_ANCHOR_MISS_MESSAGE,
     require_similarity_match,
@@ -72,6 +73,7 @@ from src.recorder.verify_signals import (
 from src.recorder.window_snapshot import (
     WindowInfo,
     build_window_verify_predicate,
+    disappeared_windows_still_present,
     omit_foreground_when_structural,
     snapshot_top_level_windows,
     window_verify_has_assertions,
@@ -87,6 +89,32 @@ _APPEARED_POLL_MIN_SECONDS = 5.0
 # Disappeared asserts floor a short poll so async closes (e.g. Chrome WM_CLOSE)
 # are not judged on a single immediate after-snapshot when settle is 0/None.
 _DISAPPEARED_POLL_MIN_SECONDS = 1.0
+# After a successful close_windows, a disappeared miss re-closes the matching
+# window until the check passes. The wait is at least this long, and stays the
+# settle poll deadline when that deadline is already longer.
+_DISAPPEARED_CLOSE_RETRY_MIN_SECONDS = 10.0
+# Minimum gap between those close attempts, measured in poll sleep time.
+_DISAPPEARED_CLOSE_RETRY_INTERVAL_SECONDS = 0.5
+
+
+def _reason_is_disappeared_miss(reason: str) -> bool:
+    return reason.startswith("window verify missed disappeared")
+
+
+def _predicate_has_disappeared(recorded: dict[str, Any]) -> bool:
+    disappeared = recorded.get("disappeared")
+    return isinstance(disappeared, list) and bool(disappeared)
+
+
+def _close_retry_due(
+    elapsed: float,
+    last_close_elapsed: float | None,
+    interval: float,
+) -> bool:
+    """True when no close has been tried, or the last try was ``interval`` ago."""
+    if last_close_elapsed is None:
+        return True
+    return (elapsed - last_close_elapsed) + 1e-9 >= interval
 # Signal asserts (foreground, click_window, clipboard, caret, focused, scroll)
 # share the same short floor: Start/SearchHost and similar focus changes often
 # lag the click by tens–hundreds of ms, and a tiny recording settle must not
@@ -191,6 +219,9 @@ class BrainModule:
         # (or a final capture at run end / failure).
         self._pending_after_capture: bool = False
         self._replay_press_point_window: dict[str, Any] | None = None
+        # Set when this step's close_windows succeeded, so a disappeared miss
+        # can re-close that window during verify.
+        self._step_close_windows_ok = False
         self._step_transcript_counter = (
             self._resume_step_transcript_counter()
             if is_runtime_command_mode() or is_smart_mode()
@@ -1095,6 +1126,7 @@ class BrainModule:
                     )
                     self._mark_pending_after_capture()
                     self._remember_replay_press_point(result)
+                    self._remember_close_windows_success(result)
                     messages.append(
                         stamp_message(
                             {
@@ -1307,6 +1339,7 @@ class BrainModule:
                     )
                     self._mark_pending_after_capture()
                     self._remember_replay_press_point(result)
+                    self._remember_close_windows_success(result)
                     messages.append(
                         stamp_message(
                             {
@@ -1386,6 +1419,11 @@ class BrainModule:
         point = result.args.get("point_window") if isinstance(result.args, dict) else None
         self._replay_press_point_window = point if isinstance(point, dict) and point else None
 
+    def _remember_close_windows_success(self, result: ExecutionResult) -> None:
+        """Remember a successful close so verify can re-close a window that stays up."""
+        if result.ok and result.action == "close_windows":
+            self._step_close_windows_ok = True
+
     async def _snapshot_top_level_windows(self) -> list[WindowInfo] | None:
         """Enumerate top-level windows off the event loop. None when the snapshot fails."""
         try:
@@ -1442,22 +1480,47 @@ class BrainModule:
         log_result: bool = True,
     ) -> ScriptStepVerifyResult | None:
         """Return a clearly-unmet retry when the live delta misses the recorded one."""
+        miss, _windows_after = await self._window_verify_observation(
+            windows_before,
+            recorded,
+            log_result=log_result,
+        )
+        return miss
+
+    async def _window_verify_observation(
+        self,
+        windows_before: list[WindowInfo] | None,
+        recorded: dict[str, Any],
+        *,
+        log_result: bool = True,
+    ) -> tuple[ScriptStepVerifyResult | None, list[WindowInfo] | None]:
+        """Verify once. ``None`` miss means the recorded end state holds.
+
+        The after-window list is returned with the miss so a disappeared close
+        retry can target the same sample that failed the check.
+        """
         if windows_before is None:
-            return ScriptStepVerifyResult(
-                accomplished=False,
-                branch="retry",
-                target_step=None,
-                clearly_unmet=True,
-                reason="Window snapshot before the step failed.",
+            return (
+                ScriptStepVerifyResult(
+                    accomplished=False,
+                    branch="retry",
+                    target_step=None,
+                    clearly_unmet=True,
+                    reason="Window snapshot before the step failed.",
+                ),
+                None,
             )
         windows_after = await self._snapshot_top_level_windows()
         if windows_after is None:
-            return ScriptStepVerifyResult(
-                accomplished=False,
-                branch="retry",
-                target_step=None,
-                clearly_unmet=True,
-                reason="Window snapshot after the step failed.",
+            return (
+                ScriptStepVerifyResult(
+                    accomplished=False,
+                    branch="retry",
+                    target_step=None,
+                    clearly_unmet=True,
+                    reason="Window snapshot after the step failed.",
+                ),
+                None,
             )
         live = build_window_verify_predicate(windows_before, windows_after)
         live_after: dict[str, Any] | None = None
@@ -1471,12 +1534,15 @@ class BrainModule:
                 )
             except Exception as exc:
                 self.manager.log_info(f"signal snapshot failed: {exc}")
-                return ScriptStepVerifyResult(
-                    accomplished=False,
-                    branch="retry",
-                    target_step=None,
-                    clearly_unmet=True,
-                    reason="Signal snapshot after the step failed.",
+                return (
+                    ScriptStepVerifyResult(
+                        accomplished=False,
+                        branch="retry",
+                        target_step=None,
+                        clearly_unmet=True,
+                        reason="Signal snapshot after the step failed.",
+                    ),
+                    windows_after,
                 )
         ok, reason = window_verify_satisfied(
             recorded,
@@ -1487,16 +1553,92 @@ class BrainModule:
         if ok:
             if log_result:
                 self.manager.log_info("Window verify matched recorded end state")
-            return None
+            return None, windows_after
         if log_result:
             self.manager.log_info(f"Window verify failed: {reason}")
-        return ScriptStepVerifyResult(
-            accomplished=False,
-            branch="retry",
-            target_step=None,
-            clearly_unmet=True,
-            reason=reason,
+        return (
+            ScriptStepVerifyResult(
+                accomplished=False,
+                branch="retry",
+                target_step=None,
+                clearly_unmet=True,
+                reason=reason,
+            ),
+            windows_after,
         )
+
+    def _record_disappeared_close_retry(self, rows: list[dict[str, Any]]) -> None:
+        """Write one re-close attempt into the step transcript, not the tool cache."""
+        if not rows:
+            return
+        try:
+            self._append_step_messages(
+                [
+                    {
+                        "role": ROLE_ASSISTANT,
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "close_windows",
+                                    "arguments": {
+                                        "hwnd": row.get("hwnd"),
+                                        "matched_title": row.get("matched_title"),
+                                        "disappeared_close_retry": True,
+                                    },
+                                }
+                            }
+                            for row in rows
+                        ],
+                        "disappeared_close_retry": True,
+                    },
+                    {
+                        "role": ROLE_TOOL,
+                        "content": json.dumps(
+                            {
+                                "ok": all(row.get("status") == "closed" for row in rows),
+                                "action": "close_windows",
+                                "disappeared_close_retry": True,
+                                "targets": rows,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                ],
+                self._step_transcript_counter,
+                self._script_step_index,
+            )
+        except Exception as exc:
+            self.manager.log_info(
+                f"disappeared close retry transcript append failed: {exc}"
+            )
+
+    async def _retry_close_disappeared_windows(
+        self,
+        windows: list[WindowInfo],
+    ) -> None:
+        """Close hwnds that still match the unmet disappeared entries."""
+        rows: list[dict[str, Any]] = []
+        for win in windows:
+            try:
+                row = await asyncio.to_thread(close_hwnd, int(win.hwnd))
+            except Exception as exc:
+                self.manager.log_info(
+                    f"disappeared close retry failed hwnd={win.hwnd} "
+                    f"title={win.title!r}: {exc}"
+                )
+                row = {
+                    "hwnd": int(win.hwnd),
+                    "matched_title": win.title,
+                    "status": "error",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            else:
+                self.manager.log_info(
+                    f"disappeared close retry closed hwnd={win.hwnd} "
+                    f"title={win.title!r}"
+                )
+            rows.append(row)
+        self._record_disappeared_close_retry(rows)
 
     async def _poll_window_verify(
         self,
@@ -1513,21 +1655,48 @@ class BrainModule:
         immediately after step actions and repeat every
         ``_WINDOW_VERIFY_POLL_INTERVAL_SECONDS``. Returns ``None`` on the first
         pass; failure is only returned after the deadline.
+
+        When this step's ``close_windows`` succeeded and the miss is a
+        disappeared window, re-close the windows that still match that entry.
+        That retry uses the same deadline, extended to
+        ``_DISAPPEARED_CLOSE_RETRY_MIN_SECONDS`` when the settle deadline is
+        shorter. Other misses keep the settle deadline and do not close again.
         """
-        deadline = (
+        base_deadline = (
             settle_after * 2.0
             if settle_after >= _SETTLE_POLL_MULTI_MIN_SECONDS
             else settle_after
         )
-        interval = float(_WINDOW_VERIFY_POLL_INTERVAL_SECONDS)
-        self.manager.log_info(
-            f"Script step {script_step_index + 1} window verify polling "
-            f"every {interval:.1f}s up to {deadline:.3f}s"
+        close_retry = bool(self._step_close_windows_ok) and _predicate_has_disappeared(
+            recorded
         )
+        extended_deadline = max(
+            base_deadline, float(_DISAPPEARED_CLOSE_RETRY_MIN_SECONDS)
+        )
+        interval = float(_WINDOW_VERIFY_POLL_INTERVAL_SECONDS)
+        close_interval = float(_DISAPPEARED_CLOSE_RETRY_INTERVAL_SECONDS)
+        if close_retry and extended_deadline > base_deadline:
+            self.manager.log_info(
+                f"Script step {script_step_index + 1} window verify polling "
+                f"every {interval:.1f}s up to {base_deadline:.3f}s; "
+                f"disappeared close retry extends that to {extended_deadline:.3f}s"
+            )
+        elif close_retry:
+            self.manager.log_info(
+                f"Script step {script_step_index + 1} window verify polling "
+                f"every {interval:.1f}s up to {base_deadline:.3f}s "
+                "with disappeared close retry"
+            )
+        else:
+            self.manager.log_info(
+                f"Script step {script_step_index + 1} window verify polling "
+                f"every {interval:.1f}s up to {base_deadline:.3f}s"
+            )
         elapsed = 0.0
+        last_close_elapsed: float | None = None
         last_miss: ScriptStepVerifyResult | None = None
         while True:
-            miss = await self._window_verify_miss(
+            miss, windows_after = await self._window_verify_observation(
                 windows_before,
                 recorded,
                 log_result=False,
@@ -1539,6 +1708,8 @@ class BrainModule:
                 )
                 return None
             last_miss = miss
+            disappeared_miss = close_retry and _reason_is_disappeared_miss(miss.reason)
+            deadline = extended_deadline if disappeared_miss else base_deadline
             if elapsed >= deadline:
                 self.manager.log_info(
                     f"Script step {script_step_index + 1} window verify "
@@ -1546,6 +1717,15 @@ class BrainModule:
                     f"(deadline {deadline:.3f}s); {miss.reason}"
                 )
                 return last_miss
+            if (
+                disappeared_miss
+                and windows_after is not None
+                and _close_retry_due(elapsed, last_close_elapsed, close_interval)
+            ):
+                targets = disappeared_windows_still_present(recorded, windows_after)
+                if targets:
+                    await self._retry_close_disappeared_windows(targets)
+                    last_close_elapsed = elapsed
             delay = min(interval, max(0.0, deadline - elapsed))
             if delay > 0:
                 await asyncio.sleep(delay)
@@ -1577,7 +1757,9 @@ class BrainModule:
         A recorded window diff polls continuously after actions (early-exit on match;
         fail only at 2.0x of settle, or 1.0x when settle is under 2s; ``appeared`` /
         ``disappeared`` / signal asserts floor settle so small recording gaps still
-        poll); a miss retries with ``clearly_unmet``.
+        poll). When ``close_windows`` succeeded and a disappeared window is still
+        present, that wait re-closes the matching window until the check passes
+        or ``max(deadline, 10s)``. A miss retries with ``clearly_unmet``.
 
         Report after-frames match recording: the next step's before shot seals this
         step's last-tool after. The final step (or a failed stop) captures a
@@ -1630,6 +1812,7 @@ class BrainModule:
         defer_after_capture = False
         try:
             self._replay_press_point_window = None
+            self._step_close_windows_ok = False
             skip_verification = skip_verification_enabled()
             window_verify = {} if skip_verification else self._current_window_verify()
             windows_before: list[WindowInfo] | None = None

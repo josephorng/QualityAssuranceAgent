@@ -216,3 +216,32 @@ async def test_process_many_empty_llm_pick_fails(
     assert second.closed is False
     prompt = client.chat_messages.await_args.kwargs["messages"][0]["content"]
     assert "Notepad.exe" in prompt
+
+
+def test_close_hwnd_closes_only_the_matching_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = _Window("Word", "WINWORD.EXE")
+    target._hWnd = 42
+    splash = _Window("正在開啟 - Word", "WINWORD.EXE")
+    splash._hWnd = 7
+    _install_windows(monkeypatch, [splash, target])
+
+    result = hand_tools.close_hwnd(42)
+
+    assert result == {"hwnd": 42, "matched_title": "Word", "status": "closed"}
+    assert target.closed is True
+    assert splash.closed is False
+
+
+def test_close_hwnd_raises_when_hwnd_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    other = _Window("Google Chrome", "chrome.exe")
+    other._hWnd = 1
+    _install_windows(monkeypatch, [other])
+
+    with pytest.raises(ValueError, match="no window with hwnd 42"):
+        hand_tools.close_hwnd(42)
+
+    assert other.closed is False

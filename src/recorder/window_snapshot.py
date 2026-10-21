@@ -1836,6 +1836,44 @@ def _disappeared_matches_by_title(item: dict[str, Any]) -> bool:
     return bool(class_name or process)
 
 
+def disappeared_windows_still_present(
+    recorded: dict[str, Any],
+    live_windows: list[WindowInfo],
+) -> list[WindowInfo]:
+    """Live windows that still match a recorded disappeared entry.
+
+    Uses the same identity rules as ``window_verify_satisfied``: exact title when
+    the entry has one, otherwise class and process. A splash title that merely
+    contains the recorded title is not a match.
+    """
+    needed = recorded.get("disappeared")
+    if not isinstance(needed, list) or not needed:
+        return []
+    after = [
+        win
+        for win in live_windows
+        if not _is_agent_hub_window(win) and not _is_window_verify_noise(win)
+    ]
+    matched: list[WindowInfo] = []
+    seen: set[int] = set()
+    for item in needed:
+        if not isinstance(item, dict) or _is_window_verify_noise(item):
+            continue
+        match_title = _disappeared_matches_by_title(item)
+        for win in after:
+            if win.hwnd in seen:
+                continue
+            if _entries_match(
+                item,
+                _verify_entry(win),
+                match_change=False,
+                match_title=match_title,
+            ):
+                matched.append(win)
+                seen.add(win.hwnd)
+    return matched
+
+
 def _after_state_matches(win: WindowInfo, change: str) -> bool:
     """True when ``win`` already holds the absolute end state for a recorded change."""
     label = str(change or "").strip()

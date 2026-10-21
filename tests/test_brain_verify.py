@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -7,9 +8,12 @@ import pytest
 from src.brain.module import (
     BrainModule,
     _APPEARED_POLL_MIN_SECONDS,
+    _DISAPPEARED_CLOSE_RETRY_INTERVAL_SECONDS,
+    _DISAPPEARED_CLOSE_RETRY_MIN_SECONDS,
     _DISAPPEARED_POLL_MIN_SECONDS,
     _SIGNAL_POLL_MIN_SECONDS,
     _WINDOW_VERIFY_POLL_INTERVAL_SECONDS,
+    _close_retry_due,
 )
 from src.common.models import ScriptStepVerifyResult
 from src.common.prompting import get_prompt
@@ -1040,6 +1044,352 @@ async def test_process_step_allows_retry_below_script_limit(
     assert sleep_mock.await_count == len(expected_sleeps)
     metadata = brain._update_step_metadata.call_args.args[2]
     assert metadata["verify"]["branch"] == "retry"
+
+
+def _word_disappeared_verify() -> dict:
+    return {
+        "disappeared": [
+            {
+                "class_name": "OpusApp",
+                "title": "Word",
+                "process_name": "WINWORD.EXE",
+            }
+        ]
+    }
+
+
+def _word_splash_window() -> WindowInfo:
+    return WindowInfo(
+        hwnd=7,
+        title="正在開啟 - Word",
+        pid=2,
+        left=700,
+        top=300,
+        width=200,
+        height=160,
+        is_minimized=False,
+        is_maximized=False,
+        class_name="OpusApp",
+        process_name="WINWORD.EXE",
+    )
+
+
+def _loop_marks_close_windows(brain: BrainModule) -> None:
+    async def _loop() -> bool:
+        brain._step_close_windows_ok = True
+        return True
+
+    brain.loop = _loop  # type: ignore[method-assign]
+
+
+def _expected_close_attempts(deadline: float) -> int:
+    """Close attempts while a disappeared window stays up until ``deadline``."""
+    interval = float(_WINDOW_VERIFY_POLL_INTERVAL_SECONDS)
+    close_interval = float(_DISAPPEARED_CLOSE_RETRY_INTERVAL_SECONDS)
+    elapsed = 0.0
+    last: float | None = None
+    count = 0
+    while elapsed < deadline:
+        if _close_retry_due(elapsed, last, close_interval):
+            count += 1
+            last = elapsed
+        delay = min(interval, deadline - elapsed)
+        if delay <= 0:
+            break
+        elapsed += delay
+    return count
+
+
+def _record_close_hwnds(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    closed: list[int] = []
+
+    def _close(hwnd: int) -> dict[str, object]:
+        closed.append(int(hwnd))
+        return {"hwnd": int(hwnd), "matched_title": "Word", "status": "closed"}
+
+    monkeypatch.setattr("src.brain.module.close_hwnd", _close)
+    return closed
+
+
+@pytest.mark.asyncio
+async def test_disappeared_close_retry_closes_window_and_advances(
+    monkeypatch,
+) -> None:
+    brain = _brain_for_process_step()
+    brain.script_window_verifies = [{}, _word_disappeared_verify(), {}]
+    _loop_marks_close_windows(brain)
+    snapshots = [
+        [_word_window()],
+        [_word_window()],
+        [],
+    ]
+
+    def _next_snapshot() -> list[WindowInfo]:
+        assert snapshots
+        return snapshots.pop(0)
+
+    monkeypatch.setattr("src.brain.module.snapshot_top_level_windows", _next_snapshot)
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+    closed = _record_close_hwnds(monkeypatch)
+    transcript: list[dict] = []
+
+    def _capture(messages: list[dict], *_args: object, **_kwargs: object) -> None:
+        transcript.extend(messages)
+
+    brain._append_step_messages = _capture
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 2
+    assert closed == [42]
+    assert sleep_mock.await_count == 1
+    assert sleep_mock.await_args_list[0].args[0] == pytest.approx(
+        _WINDOW_VERIFY_POLL_INTERVAL_SECONDS
+    )
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "completed"
+    assert metadata["verify"]["branch"] == "advance"
+    assert transcript[0]["disappeared_close_retry"] is True
+    assert transcript[0]["tool_calls"][0]["function"]["arguments"]["hwnd"] == 42
+
+
+@pytest.mark.asyncio
+async def test_disappeared_close_retry_stops_at_extended_deadline(
+    monkeypatch,
+) -> None:
+    brain = _brain_for_process_step()
+    brain.script_window_verifies = [{}, _word_disappeared_verify(), {}]
+    _loop_marks_close_windows(brain)
+    monkeypatch.setattr(
+        "src.brain.module.snapshot_top_level_windows",
+        lambda: [_word_window()],
+    )
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+    closed = _record_close_hwnds(monkeypatch)
+
+    result = await brain.process_step()
+
+    deadline = float(_DISAPPEARED_CLOSE_RETRY_MIN_SECONDS)
+    assert result.step_finished is True
+    assert brain._script_step_index == 1
+    expected_sleeps = _expected_poll_sleeps(deadline)
+    assert sleep_mock.await_count == len(expected_sleeps)
+    assert sum(expected_sleeps) == pytest.approx(deadline)
+    assert len(closed) == _expected_close_attempts(deadline)
+    assert set(closed) == {42}
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "verify_failed"
+    assert metadata["verify"]["branch"] == "retry"
+    assert metadata["verify"]["clearly_unmet"] is True
+    assert metadata["verify"]["reason"] == "window verify missed disappeared: Word"
+
+
+@pytest.mark.asyncio
+async def test_disappeared_close_retry_keeps_longer_settle_deadline(
+    monkeypatch,
+) -> None:
+    brain = _brain_for_process_step()
+    brain.script_settle_after_seconds = [None, 6.0, None]
+    brain.script_window_verifies = [{}, _word_disappeared_verify(), {}]
+    _loop_marks_close_windows(brain)
+    monkeypatch.setattr(
+        "src.brain.module.snapshot_top_level_windows",
+        lambda: [_word_window()],
+    )
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+    closed = _record_close_hwnds(monkeypatch)
+
+    await brain.process_step()
+
+    deadline = 12.0
+    expected_sleeps = _expected_poll_sleeps(deadline)
+    assert sleep_mock.await_count == len(expected_sleeps)
+    assert sum(expected_sleeps) == pytest.approx(deadline)
+    assert len(closed) == _expected_close_attempts(deadline)
+
+
+@pytest.mark.asyncio
+async def test_disappeared_close_retry_skips_splash_title(
+    monkeypatch,
+) -> None:
+    brain = _brain_for_process_step()
+    brain.script_window_verifies = [{}, _word_disappeared_verify(), {}]
+    _loop_marks_close_windows(brain)
+    snapshots = [
+        [_word_splash_window(), _word_window()],
+        [_word_splash_window(), _word_window()],
+        [_word_splash_window()],
+    ]
+
+    def _next_snapshot() -> list[WindowInfo]:
+        assert snapshots
+        return snapshots.pop(0)
+
+    monkeypatch.setattr("src.brain.module.snapshot_top_level_windows", _next_snapshot)
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+    closed = _record_close_hwnds(monkeypatch)
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 2
+    assert closed == [42]
+    assert sleep_mock.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_disappeared_close_retry_skips_when_window_already_gone(
+    monkeypatch,
+) -> None:
+    brain = _brain_for_process_step()
+    brain.script_window_verifies = [{}, _word_disappeared_verify(), {}]
+    _loop_marks_close_windows(brain)
+    snapshots = [[_word_window()], []]
+
+    def _next_snapshot() -> list[WindowInfo]:
+        assert snapshots
+        return snapshots.pop(0)
+
+    monkeypatch.setattr("src.brain.module.snapshot_top_level_windows", _next_snapshot)
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+    closed = _record_close_hwnds(monkeypatch)
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 2
+    assert closed == []
+    assert sleep_mock.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_disappeared_close_retry_ignores_close_error_and_continues(
+    monkeypatch,
+) -> None:
+    brain = _brain_for_process_step()
+    brain.script_window_verifies = [{}, _word_disappeared_verify(), {}]
+    _loop_marks_close_windows(brain)
+    snapshots = [[_word_window()], [_word_window()], []]
+
+    def _next_snapshot() -> list[WindowInfo]:
+        assert snapshots
+        return snapshots.pop(0)
+
+    monkeypatch.setattr("src.brain.module.snapshot_top_level_windows", _next_snapshot)
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", AsyncMock())
+
+    def _close(_hwnd: int) -> dict[str, object]:
+        raise ValueError("no window with hwnd 42")
+
+    monkeypatch.setattr("src.brain.module.close_hwnd", _close)
+    transcript: list[dict] = []
+
+    def _capture(messages: list[dict], *_args: object, **_kwargs: object) -> None:
+        transcript.extend(messages)
+
+    brain._append_step_messages = _capture
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 2
+    payload = json.loads(transcript[1]["content"])
+    assert payload["targets"][0]["status"] == "error"
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_foreground_miss_does_not_retry_close(monkeypatch) -> None:
+    brain = _brain_for_process_step()
+    brain.script_window_verifies = [
+        {},
+        {
+            "foreground": {
+                "class_name": "Chrome_WidgetWin_1",
+                "title": "Google Chrome",
+                "process_name": "chrome.exe",
+            }
+        },
+        {},
+    ]
+    _loop_marks_close_windows(brain)
+    monkeypatch.setattr(
+        "src.brain.module.snapshot_top_level_windows",
+        lambda: [_flyout_window()],
+    )
+    monkeypatch.setattr(
+        "src.brain.module.capture_replay_after_signals",
+        lambda _recorded, _press_point=None: {
+            "foreground": {
+                "class_name": "CabinetWClass",
+                "title": "檔案總管",
+                "process_name": "explorer.exe",
+            }
+        },
+    )
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+    closed = _record_close_hwnds(monkeypatch)
+
+    await brain.process_step()
+
+    expected_sleeps = _expected_poll_sleeps(_signal_poll_deadline_seconds())
+    assert sleep_mock.await_count == len(expected_sleeps)
+    assert closed == []
+
+
+@pytest.mark.asyncio
+async def test_appeared_miss_does_not_retry_close(monkeypatch) -> None:
+    brain = _brain_for_process_step()
+    brain.script_settle_after_seconds = [None, 2.0, None]
+    brain.script_window_verifies = [{}, _appeared_word_verify(), {}]
+    _loop_marks_close_windows(brain)
+    monkeypatch.setattr(
+        "src.brain.module.snapshot_top_level_windows",
+        lambda: [],
+    )
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+    closed = _record_close_hwnds(monkeypatch)
+
+    await brain.process_step()
+
+    expected_sleeps = _expected_poll_sleeps(_appeared_poll_deadline_seconds())
+    assert sleep_mock.await_count == len(expected_sleeps)
+    assert closed == []
+
+
+@pytest.mark.asyncio
+async def test_disappeared_miss_without_close_windows_only_polls(
+    monkeypatch,
+) -> None:
+    brain = _brain_for_process_step()
+    brain.script_window_verifies = [{}, _word_disappeared_verify(), {}]
+    brain.loop = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "src.brain.module.snapshot_top_level_windows",
+        lambda: [_word_window()],
+    )
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+    closed = _record_close_hwnds(monkeypatch)
+
+    result = await brain.process_step()
+
+    expected_sleeps = _expected_poll_sleeps(_disappeared_poll_deadline_seconds())
+    assert sleep_mock.await_count == len(expected_sleeps)
+    assert closed == []
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "verify_failed"
+    assert metadata["verify"]["clearly_unmet"] is True
+    assert result.step_finished is True
 
 
 def test_parse_json_object_uses_last_json_object() -> None:

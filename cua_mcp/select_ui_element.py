@@ -94,6 +94,8 @@ class UiDetection:
     class_name: str
     text: str | None = None
     icons: list[dict[str, Any]] | None = None
+    # Provenance for debug/metrics: "uia" | "ocr" | "yolo" (class-only boxes).
+    source: str | None = None
 
 
 def _text_is_pua_only(text: str) -> bool:

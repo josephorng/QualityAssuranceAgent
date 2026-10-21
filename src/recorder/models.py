@@ -54,6 +54,10 @@ class RecordedEvent:
     click_window: dict[str, Any] | None = None
     # Release-time window under a drag drop point (local rect). Same ROI role as click_window.
     end_click_window: dict[str, Any] | None = None
+    # Press-time UIA tree (screen xyxy) captured on the recording worker.
+    uia_snapshot: dict[str, Any] | None = None
+    # Drag-release UIA tree. Same shape as ``uia_snapshot``.
+    end_uia_snapshot: dict[str, Any] | None = None
     # UI settle measured by consecutive screenshot stability during recording.
     observed_settle_seconds: float | None = None
 
@@ -75,6 +79,10 @@ class RecordedEvent:
             data.pop("click_window", None)
         if self.end_click_window is None:
             data.pop("end_click_window", None)
+        if self.uia_snapshot is None:
+            data.pop("uia_snapshot", None)
+        if self.end_uia_snapshot is None:
+            data.pop("end_uia_snapshot", None)
         if self.observed_settle_seconds is None:
             data.pop("observed_settle_seconds", None)
         return data
@@ -141,6 +149,16 @@ class RecordedEvent:
             end_click_window=(
                 raw.get("end_click_window")
                 if isinstance(raw.get("end_click_window"), dict)
+                else None
+            ),
+            uia_snapshot=(
+                raw.get("uia_snapshot")
+                if isinstance(raw.get("uia_snapshot"), dict)
+                else None
+            ),
+            end_uia_snapshot=(
+                raw.get("end_uia_snapshot")
+                if isinstance(raw.get("end_uia_snapshot"), dict)
                 else None
             ),
             observed_settle_seconds=(

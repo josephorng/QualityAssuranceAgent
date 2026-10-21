@@ -1332,3 +1332,97 @@ def try_uia_refine_inputs_and_scrollbars(
         uia_texts,
         meta,
     )
+
+
+def snapshot_uia_screen(hwnd: int) -> dict[str, object] | None:
+    """FindAll under ``hwnd`` and return screen-space boxes for later analysis.
+
+    Called on the capture worker at press/release time, while the window's
+    accessibility tree is still populated. Returns ``None`` when the hwnd
+    cannot be queried. An empty tree is still a snapshot (analysis must not
+    FindAll again).
+    """
+    if os.name != "nt" or not int(hwnd or 0):
+        return None
+    try:
+        inputs, scrollbars, labeled = enumerate_edit_document_scrollbar_screen(int(hwnd))
+    except Exception:
+        return None
+    window = _window_screen_xywh(int(hwnd))
+    texts: list[dict[str, object]] = []
+    for box, label in labeled:
+        text = str(label or "").strip()
+        if not text:
+            continue
+        texts.append({"bbox": [int(v) for v in box], "text": text})
+    return {
+        "window": [int(v) for v in window] if window is not None else None,
+        "inputs": [[int(v) for v in box] for box in inputs],
+        "scrollbars": [[int(v) for v in box] for box in scrollbars],
+        "texts": texts,
+    }
+
+
+def _snapshot_xyxy_list(raw: object) -> list[ScreenXyxy]:
+    if not isinstance(raw, list):
+        return []
+    out: list[ScreenXyxy] = []
+    for item in raw:
+        if isinstance(item, (list, tuple)) and len(item) == 4:
+            out.append((int(item[0]), int(item[1]), int(item[2]), int(item[3])))
+    return out
+
+
+def uia_snapshot_image_local(
+    snapshot: dict[str, object],
+    *,
+    monitor_offset: tuple[int, int],
+    image_w: int,
+    image_h: int,
+    ocr_roi: RectXywh | None = None,
+    ocr_roi_pad: int = 0,
+    window_screen_xywh: RectXywh | None = None,
+) -> tuple[list[RectXywh] | None, list[RectXywh] | None, list[LabeledRectXywh]]:
+    """Convert a click-time snapshot to image-local boxes. Does not call FindAll.
+
+    Empty input/scrollbar lists become ``None`` so YOLO/Hough refine still runs.
+    Labeled texts stay a list (possibly empty).
+    """
+    window_raw = snapshot.get("window")
+    window = window_screen_xywh
+    if isinstance(window_raw, (list, tuple)) and len(window_raw) == 4:
+        window = (
+            int(window_raw[0]),
+            int(window_raw[1]),
+            int(window_raw[2]),
+            int(window_raw[3]),
+        )
+    if window is None:
+        return None, None, []
+    filter_kwargs = dict(
+        window_screen_xywh=window,
+        monitor_offset=monitor_offset,
+        image_w=image_w,
+        image_h=image_h,
+        ocr_roi=ocr_roi,
+        ocr_roi_pad=ocr_roi_pad,
+    )
+    texts_raw = snapshot.get("texts")
+    labeled: list[LabeledScreenXyxy] = []
+    if isinstance(texts_raw, list):
+        for item in texts_raw:
+            if not isinstance(item, dict):
+                continue
+            box = item.get("bbox")
+            text = str(item.get("text") or "").strip()
+            if not text or not isinstance(box, (list, tuple)) or len(box) != 4:
+                continue
+            labeled.append(
+                ((int(box[0]), int(box[1]), int(box[2]), int(box[3])), text)
+            )
+    inputs = filter_uia_input_rects(_snapshot_xyxy_list(snapshot.get("inputs")), **filter_kwargs)
+    scrollbars = filter_uia_scrollbar_rects(
+        _snapshot_xyxy_list(snapshot.get("scrollbars")), **filter_kwargs
+    )
+    texts = filter_uia_labeled_text_rects(labeled, **filter_kwargs)
+    return (inputs or None, scrollbars or None, texts)

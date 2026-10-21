@@ -1235,7 +1235,9 @@ def test_detect_uia_text_iou_fill_skips_ocr(
     texts = [d for d in dets if d.class_id == YOLO_CLASS_TEXT]
     assert len(texts) == 1
     assert texts[0].text == "UIA Label"
-    assert texts[0].bbox == (10, 10, 80, 20)
+    # Association emits the UIA control rect for sourced detections.
+    assert texts[0].bbox == (12, 12, 70, 16)
+    assert texts[0].source == "uia"
 
 
 def test_detect_uia_text_split_blob_skips_ocr(
@@ -5773,3 +5775,413 @@ async def test_find_mouse_point_replay_offset_uses_constellation_not_pixels(
     assert abs(found[0] - 60) <= 2
     assert abs(found[1] - 60) <= 2
     assert found[2]["relative_offset"] == {"dx": 0, "dy": 0}
+
+
+def test_detect_defer_ocr_skips_recognize_until_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """defer_ocr=True returns UIA/class partials without calling leftover OCR."""
+    import numpy as np
+
+    from cua_mcp.select_mouse_target import (
+        _detect_mouse_targets_from_bgr,
+        _finish_mouse_ocr_pending,
+    )
+
+    bgr = np.zeros((100, 200, 3), dtype=np.uint8)
+    # One UIA-claimed text + one leftover text box for OCR.
+    xyxy = np.asarray(
+        [[10, 10, 50, 30], [100, 10, 160, 30]],
+        dtype=np.float32,
+    )
+    scores = np.asarray([0.9, 0.9], dtype=np.float32)
+    class_ids = np.asarray([YOLO_CLASS_TEXT, YOLO_CLASS_TEXT], dtype=np.int32)
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.run_yolo_onnx_end2end",
+        lambda *_a, **_k: (xyxy, scores, class_ids),
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.merge_yolo_inputs_with_line_rectangles",
+        lambda *_a, **_k: [],
+    )
+    ocr_calls: list[list[tuple[int, int, int, int]]] = []
+
+    def fake_ocr(_bgr, boxes, modes, **_k):
+        ocr_calls.append(list(boxes))
+        return [["剩"], ["餘"]][: len(boxes)], 0, len(boxes)
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._recognize_ocr_boxes",
+        fake_ocr,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._retry_empty_unknown_icon_ocr",
+        lambda _bgr, cands: cands,
+    )
+    _patch_detect_passthrough(monkeypatch)
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.try_uia_refine_inputs_and_scrollbars",
+        _fake_uia_refine(None, None, [((12, 12, 36, 16), "記事本")]),
+    )
+
+    pending: list = []
+    timing: dict = {}
+    partial = _detect_mouse_targets_from_bgr(
+        bgr,
+        refine_with_uia=True,
+        live_input_hwnd=42,
+        live_input_monitor_offset=(0, 0),
+        live_input_window_screen_xywh=(0, 0, 200, 100),
+        defer_ocr=True,
+        pending_out=pending,
+        timing_out=timing,
+        ocr_class_ids=frozenset({YOLO_CLASS_TEXT}),
+    )
+    assert ocr_calls == []
+    assert len(pending) == 1
+    assert timing.get("ocr_s") == 0.0
+    assert timing.get("uia_first_pending") is True
+    uia_texts = [d for d in partial if d.source == "uia"]
+    assert len(uia_texts) == 1
+    assert uia_texts[0].text == "記事本"
+    leftover_boxes = set(pending[0].ocr_boxes)
+    assert leftover_boxes <= {(100, 10, 60, 20), (10, 10, 40, 20)}
+    assert (100, 10, 60, 20) in leftover_boxes
+
+    finished = _finish_mouse_ocr_pending(pending[0], timing_out=timing)
+    assert len(ocr_calls) == 1
+    assert set(ocr_calls[0]) == leftover_boxes
+    assert timing.get("ocr_fresh", 0) >= 1
+    texts = {d.text for d in finished if d.text}
+    assert "記事本" in texts
+    assert "剩" in texts or any(d.source == "ocr" for d in finished)
+
+
+def test_try_uia_first_unique_select_hit_and_miss() -> None:
+    from cua_mcp.select_mouse_target import _try_uia_first_unique_select
+    from src.common.nearby_side import normalize_nearby_hints
+
+    unique = [
+        _detection_from_bbox(
+            (10, 10, 40, 20), YOLO_CLASS_TEXT, text="記事本", source="uia"
+        ),
+        _detection_from_bbox(
+            (100, 10, 40, 20), YOLO_CLASS_TEXT, text="Edge", source="uia"
+        ),
+    ]
+    hints = normalize_nearby_hints([])
+    chosen, reason = _try_uia_first_unique_select(
+        unique,
+        anchor="「記事本」文字",
+        nearby_hints=hints,
+        nearby_labels=[],
+        nearby_phrases=[],
+    )
+    assert reason == "hit"
+    assert chosen is not None
+    assert chosen.text == "記事本"
+
+    dupes = [
+        _detection_from_bbox(
+            (10, 10, 40, 20), YOLO_CLASS_TEXT, text="記事本", source="uia"
+        ),
+        _detection_from_bbox(
+            (10, 50, 40, 20), YOLO_CLASS_TEXT, text="記事本", source="uia"
+        ),
+    ]
+    chosen, reason = _try_uia_first_unique_select(
+        dupes,
+        anchor="「記事本」文字",
+        nearby_hints=normalize_nearby_hints(["在「Docker」文字的下面"]),
+        nearby_labels=["Docker"],
+        nearby_phrases=["在「Docker」文字的下面"],
+    )
+    assert chosen is None
+    assert reason == "not_unique"
+
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_uia_first_hit_skips_ocr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unique UIA partial → select_unique without finishing deferred OCR."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+
+    uia_det = _detection_from_bbox(
+        (20, 20, 40, 20), YOLO_CLASS_TEXT, text="記事本", source="uia"
+    )
+    pending = smt._MouseOcrPending(
+        bgr=np.zeros((80, 80, 3), dtype=np.uint8),
+        ocr_boxes=[(50, 50, 20, 10)],
+        ocr_class_id_list=[YOLO_CLASS_TEXT],
+        partial_candidates=[uia_det],
+        used_uia_scrollbar=False,
+        coord_offset=(0, 0),
+        ocr_cache_key=1,
+        ocr_wanted=frozenset({YOLO_CLASS_TEXT}),
+        yolo_s=0.1,
+        line_s=0.0,
+        uia_input_s=0.05,
+        uia_scrollbar_s=0.05,
+        uia_text_s=0.05,
+        vision_started=0.0,
+        uia_text_orphans=0,
+        uia_text_ocr_skipped=1,
+        ocr_roi=None,
+        ocr_roi_pad=0,
+        refine_with_uia=True,
+        yolo_box_count=2,
+        input_box_count=0,
+        debug_layers={"yolo": [], "uia": []},
+    )
+
+    finish_calls: list[object] = []
+
+    def fake_capture(*_a, **_k):
+        timing = {
+            "capture_s": 0.01,
+            "yolo_s": 0.1,
+            "line_s": 0.0,
+            "uia_input_s": 0.05,
+            "uia_scrollbar_s": 0.05,
+            "uia_text_s": 0.05,
+            "ocr_s": 0.0,
+            "icon_ocr_retry_s": 0.0,
+            "total_s": 0.16,
+            "uia_first_pending": True,
+            "_ocr_pending": [pending],
+        }
+        return (
+            [1],
+            ["shot.png"],
+            [(1, np.zeros((80, 80, 3), dtype=np.uint8))],
+            [uia_det],
+            timing,
+        )
+
+    def fake_finish(*_a, **_k):
+        finish_calls.append("finish")
+        raise AssertionError("soft UIA hit must not finish leftover OCR")
+
+    monkeypatch.setattr(smt, "_capture_and_detect_mouse_candidates", fake_capture)
+    monkeypatch.setattr(smt, "_finish_deferred_ocr_pendings", fake_finish)
+    monkeypatch.setattr(
+        smt,
+        "parse_mouse_target_instruction",
+        lambda _i: ("「記事本」文字", 0, 0, [], None, 0, None),
+    )
+    monkeypatch.setattr(
+        smt,
+        "_run_manager",
+        lambda: type(
+            "M",
+            (),
+            {
+                "require_paths": staticmethod(
+                    lambda: type("P", (), {"yolo_ocr_dir": Path(".")})()
+                ),
+                "log_info": staticmethod(lambda *_a, **_k: None),
+            },
+        )(),
+    )
+
+    found = await smt.find_mouse_point("將滑鼠移到「記事本」文字")
+    assert found is not None
+    gx, gy, meta = found
+    assert (gx, gy) == (uia_det.cx, uia_det.cy)
+    assert meta["selection_method"] == "uia_first_unique"
+    assert meta["timing"]["ocr_s"] == 0.0
+    assert meta["timing"].get("uia_first_hit") is True
+    assert finish_calls == []
+
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_uia_first_miss_runs_ocr_then_select(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ambiguous UIA partial → finish OCR, then full select (no Gemma skip)."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+
+    uia_a = _detection_from_bbox(
+        (10, 10, 40, 20), YOLO_CLASS_TEXT, text="記事本", source="uia"
+    )
+    uia_b = _detection_from_bbox(
+        (10, 60, 40, 20), YOLO_CLASS_TEXT, text="記事本", source="uia"
+    )
+    ocr_det = _detection_from_bbox(
+        (100, 10, 40, 20), YOLO_CLASS_TEXT, text="Docker", source="ocr"
+    )
+    pending = smt._MouseOcrPending(
+        bgr=np.zeros((100, 160, 3), dtype=np.uint8),
+        ocr_boxes=[(100, 10, 40, 20)],
+        ocr_class_id_list=[YOLO_CLASS_TEXT],
+        partial_candidates=[uia_a, uia_b],
+        used_uia_scrollbar=False,
+        coord_offset=(0, 0),
+        ocr_cache_key=1,
+        ocr_wanted=frozenset({YOLO_CLASS_TEXT}),
+        yolo_s=0.1,
+        line_s=0.0,
+        uia_input_s=0.05,
+        uia_scrollbar_s=0.05,
+        uia_text_s=0.05,
+        vision_started=0.0,
+        uia_text_orphans=0,
+        uia_text_ocr_skipped=0,
+        ocr_roi=None,
+        ocr_roi_pad=0,
+        refine_with_uia=True,
+        yolo_box_count=3,
+        input_box_count=0,
+        debug_layers={"yolo": [], "uia": []},
+    )
+
+    def fake_capture(*_a, **_k):
+        return (
+            [1],
+            ["shot.png"],
+            [(1, np.zeros((100, 160, 3), dtype=np.uint8))],
+            [uia_a, uia_b],
+            {
+                "capture_s": 0.01,
+                "yolo_s": 0.1,
+                "line_s": 0.0,
+                "uia_input_s": 0.05,
+                "uia_scrollbar_s": 0.05,
+                "uia_text_s": 0.05,
+                "ocr_s": 0.0,
+                "icon_ocr_retry_s": 0.0,
+                "total_s": 0.16,
+                "uia_first_pending": True,
+                "_ocr_pending": [pending],
+            },
+        )
+
+    def fake_finish(pendings, *, timing_base):
+        assert pendings == [pending]
+        timing = dict(timing_base)
+        timing["ocr_s"] = 0.5
+        timing["ocr_fresh"] = 1
+        timing["uia_first_hit"] = False
+        timing.pop("_ocr_pending", None)
+        timing.pop("uia_first_pending", None)
+        return [uia_a, uia_b, ocr_det], timing
+
+    gemma_calls: list[str] = []
+
+    async def fake_gemma(*_a, **_k):
+        gemma_calls.append("gemma")
+        raise AssertionError("must not jump to Gemma before OCR fallthrough select")
+
+    monkeypatch.setattr(smt, "_capture_and_detect_mouse_candidates", fake_capture)
+    monkeypatch.setattr(smt, "_finish_deferred_ocr_pendings", fake_finish)
+    monkeypatch.setattr(
+        "cua_mcp.gemma_roi_refine.pick_candidate_with_gemma",
+        fake_gemma,
+    )
+    monkeypatch.setattr(
+        smt,
+        "parse_mouse_target_instruction",
+        lambda _i: (
+            "「記事本」文字",
+            0,
+            0,
+            ["在「Docker」文字的下面"],
+            None,
+            0,
+            None,
+        ),
+    )
+
+    async def fake_llm(*_a, **_k):
+        return 0, "記事本"
+
+    monkeypatch.setattr(smt, "_select_center_with_llm", fake_llm)
+    monkeypatch.setattr(
+        smt,
+        "_run_manager",
+        lambda: type(
+            "M",
+            (),
+            {
+                "require_paths": staticmethod(
+                    lambda: type("P", (), {"yolo_ocr_dir": Path(".")})()
+                ),
+                "log_info": staticmethod(lambda *_a, **_k: None),
+            },
+        )(),
+    )
+    monkeypatch.setattr(smt, "_write_yolo_ocr_sidecars", lambda *_a, **_k: None)
+
+    found = await smt.find_mouse_point(
+        "將滑鼠移到「記事本」文字（在「Docker」文字的下面）",
+        nearby_objects=["在「Docker」文字的下面"],
+    )
+    assert found is not None
+    assert gemma_calls == []
+    assert found[2]["timing"]["ocr_s"] == 0.5
+    assert found[2]["timing"].get("uia_first_hit") is False
+
+
+def test_detect_defer_ocr_icon_retry_only_on_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Icon OCR retry runs on finish, not during deferred UIA-first partial."""
+    import numpy as np
+
+    from cua_mcp.select_mouse_target import (
+        _detect_mouse_targets_from_bgr,
+        _finish_mouse_ocr_pending,
+    )
+
+    bgr = np.zeros((80, 80, 3), dtype=np.uint8)
+    xyxy = np.asarray([[10, 10, 30, 30]], dtype=np.float32)
+    scores = np.asarray([0.9], dtype=np.float32)
+    class_ids = np.asarray([YOLO_CLASS_ELEMENT], dtype=np.int32)
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.run_yolo_onnx_end2end",
+        lambda *_a, **_k: (xyxy, scores, class_ids),
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.merge_yolo_inputs_with_line_rectangles",
+        lambda *_a, **_k: [],
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._recognize_ocr_boxes",
+        lambda _b, boxes, modes, **_k: ([""] * len(boxes), 0, len(boxes)),
+    )
+    retry_calls: list[str] = []
+
+    def fake_retry(_bgr, cands):
+        retry_calls.append("retry")
+        return cands
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._retry_empty_unknown_icon_ocr",
+        fake_retry,
+    )
+    _patch_detect_passthrough(monkeypatch)
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.try_uia_refine_inputs_and_scrollbars",
+        _fake_uia_refine(None, None, []),
+    )
+
+    pending: list = []
+    _detect_mouse_targets_from_bgr(
+        bgr,
+        refine_with_uia=True,
+        live_input_hwnd=42,
+        live_input_monitor_offset=(0, 0),
+        live_input_window_screen_xywh=(0, 0, 80, 80),
+        defer_ocr=True,
+        pending_out=pending,
+        ocr_class_ids=frozenset({YOLO_CLASS_ELEMENT}),
+    )
+    assert retry_calls == []
+    assert len(pending) == 1
+    _finish_mouse_ocr_pending(pending[0])
+    assert retry_calls == ["retry"]

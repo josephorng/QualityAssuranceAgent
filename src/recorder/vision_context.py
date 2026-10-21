@@ -35,11 +35,13 @@ from cua_mcp.scrollbar_arrows import (
 )
 from cua_mcp.select_mouse_target import (
     _MOUSE_FILTER_SIMILARITY_THRESHOLD,
+    _MouseOcrPending,
     _box_edge_gap,
     _detect_mouse_targets_from_bgr,
     _detection_similarity_to_query,
     _detections_label_similar,
     _detections_same_place,
+    _finish_mouse_ocr_pending,
     _prefilter_anchors_by_nearby,
 )
 from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text
@@ -128,9 +130,23 @@ _CONTROL_CHROME_ICON_IDS = frozenset(
         "已勾選方框",
         "向上雙V箭頭",
         "向下雙V箭頭",
-        "加號"
+        "加號",
+        "網格檢視",
     }
 )
+# Decorative / branding icons lose to any visible OCR text (including 1-char).
+_DECORATIVE_ICON_IDS = frozenset(
+    {
+        "頭像、使用者頭像",
+        "Chrome",
+    }
+)
+# UIA Name/AutomationId strings longer than this (or URL-like) do not count
+# toward recording landmark sufficiency; OCR may still fill them in later.
+_MAX_USABLE_UIA_LABEL_LEN = 48
+# Sentinel: build_vision_context_at_point uses the event press snapshot unless
+# the caller passes a snapshot (including None to force a live FindAll).
+_UIA_SNAPSHOT_UNSET = object()
 # All eight directed sides used for recording HTML landmark side groups.
 _DIRECTIONAL_LANDMARK_CELLS = frozenset(
     {
@@ -173,6 +189,10 @@ def vision_source_fingerprint(event: RecordedEvent) -> str:
     }
     if event.end_click_window is not None:
         payload["end_click_window"] = event.end_click_window
+    if event.uia_snapshot is not None:
+        payload["uia_snapshot"] = event.uia_snapshot
+    if event.end_uia_snapshot is not None:
+        payload["end_uia_snapshot"] = event.end_uia_snapshot
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -542,25 +562,105 @@ def _icons_include_control_chrome(icons: Any) -> bool:
     return False
 
 
+def _icons_are_decorative_only(icons: Any) -> bool:
+    """True when every known icon id is decorative/branding (no control chrome)."""
+    if not isinstance(icons, list) or not icons:
+        return False
+    saw_known = False
+    for icon in icons:
+        if not isinstance(icon, dict):
+            continue
+        label = str(icon.get("chinese_id") or icon.get("id") or "").strip()
+        if not label:
+            continue
+        saw_known = True
+        if label in _CONTROL_CHROME_ICON_IDS:
+            return False
+        if label not in _DECORATIVE_ICON_IDS:
+            return False
+    return saw_known
+
+
+def _usable_uia_landmark_label(text: str | None) -> bool:
+    """True when a UIA string is short/stable enough to seed recording landmarks.
+
+    Rejects URL-like names and ultra-long AutomationIds that replay soft-match
+    poorly and should not count toward the UIA-sufficiency gate.
+    """
+    visible = _visible_text(text)
+    if len(visible) < 2:
+        return False
+    if len(visible) > _MAX_USABLE_UIA_LABEL_LEN:
+        return False
+    lowered = visible.casefold()
+    if "://" in visible or lowered.startswith("www."):
+        return False
+    if visible.count("/") >= 3 and ("." in visible or "%" in visible):
+        return False
+    return True
+
+
+def _detection_source(det: UiDetection) -> str:
+    """Normalize detection provenance for ranking (uia < ocr < other)."""
+    return str(getattr(det, "source", None) or "").strip().lower()
+
+
+def _source_rank_for_label(source: str | None) -> int:
+    """Lower is better: prefer UIA labels over OCR over unlabeled YOLO boxes."""
+    key = str(source or "").strip().lower()
+    if key == "uia":
+        return 0
+    if key == "ocr":
+        return 1
+    return 2
+
+
+def _is_usable_uia_text_detection(det: UiDetection) -> bool:
+    """True for UIA-sourced text with a usable landmark label."""
+    return (
+        _detection_source(det) == "uia"
+        and det.class_id == YOLO_CLASS_TEXT
+        and _usable_uia_landmark_label(det.text)
+    )
+
+
+def _detection_contains_click(
+    det: UiDetection,
+    local_x: int,
+    local_y: int,
+) -> bool:
+    """True when ``(local_x, local_y)`` lies in ``det.bbox`` with OCR hit padding."""
+    pad = _BBOX_HIT_TOLERANCE_PX
+    bx, by, bw, bh = det.bbox
+    return _point_inside_bbox(
+        local_x,
+        local_y,
+        (bx - pad, by - pad, bw + 2 * pad, bh + 2 * pad),
+    )
+
+
 def _hit_content_priority(det: UiDetection) -> int:
     """Lower is better when several boxes share the same click distance.
 
     Priority:
     1. text with visible length > 1
-    2. control-chrome icon (checkbox, radio, tree toggle, chevron, …)
-    3. any other text (including single-char)
-    4. other icons
-    5. others (scrollbar, input, empty element, …)
+    2. control-chrome icon (checkbox, radio, tree toggle, chevron, 網格檢視, …)
+    3. other non-decorative icons (beat single-char OCR hallucinations)
+    4. any other text (including single-char)
+    5. decorative icons
+    6. others (scrollbar, input, empty element, …)
     """
     if _is_multi_char_text_detection(det):
         return 0
     if _icons_include_control_chrome(det.icons):
         return 1
-    if _is_single_char_text_detection(det):
+    if _is_icon_detection(det) and not _icons_are_decorative_only(det.icons):
         return 2
-    if _is_icon_detection(det):
+    if _is_single_char_text_detection(det):
         return 3
-    return 4
+    if _is_icon_detection(det):
+        return 4
+    return 5
 
 
 def _candidate_hit_content_priority(candidate: dict[str, Any]) -> int:
@@ -572,11 +672,13 @@ def _candidate_hit_content_priority(candidate: dict[str, Any]) -> int:
         return 0
     if _icons_include_control_chrome(icons):
         return 1
-    if class_name == "text" and visible:
+    if icons and not _icons_are_decorative_only(icons):
         return 2
-    if icons:
+    if class_name == "text" and visible:
         return 3
-    return 4
+    if icons:
+        return 4
+    return 5
 
 
 def _nearest_candidate_rank_key(
@@ -584,12 +686,14 @@ def _nearest_candidate_rank_key(
     local_x: int,
     local_y: int,
     *,
-    content_priority: int = 4,
-) -> tuple[float, int, int]:
-    """Sort key: distance, then content priority, then smallest area."""
+    content_priority: int = 5,
+    source_rank: int = 2,
+) -> tuple[float, int, int, int]:
+    """Sort key: distance, content priority, source (UIA first), then area."""
     return (
         _point_to_bbox_distance_sq(local_x, local_y, bbox),
         content_priority,
+        source_rank,
         _bbox_area(bbox),
     )
 
@@ -598,13 +702,14 @@ def _nearest_detection_rank_key(
     det: UiDetection,
     local_x: int,
     local_y: int,
-) -> tuple[float, int, int]:
+) -> tuple[float, int, int, int]:
     """Sort key for a detection at a click/drop point."""
     return _nearest_candidate_rank_key(
         det.bbox,
         local_x,
         local_y,
         content_priority=_hit_content_priority(det),
+        source_rank=_source_rank_for_label(_detection_source(det)),
     )
 
 
@@ -826,7 +931,14 @@ def _destination_target_at_point(
     ]
     if not hits:
         return None
-    return min(hits, key=lambda det: (_hit_content_priority(det), _bbox_area(det.bbox)))
+    return min(
+        hits,
+        key=lambda det: (
+            _hit_content_priority(det),
+            _source_rank_for_label(_detection_source(det)),
+            _bbox_area(det.bbox),
+        ),
+    )
 
 
 def _candidate_containing_click(
@@ -836,10 +948,10 @@ def _candidate_containing_click(
 ) -> dict[str, Any] | None:
     """Return the best candidate whose padded bbox contains the click, if any.
 
-    Prefers multi-char text, then control-chrome icons, then other text, then
-    other icons, then others; smallest area breaks ties. Includes
-    inputs/scrollbars so an on-field click keeps that container as the primary
-    anchor.
+    Prefers multi-char text, then control-chrome icons, then other non-decorative
+    icons, then other text, then decorative icons, then others; UIA before OCR;
+    smallest area breaks ties. Includes inputs/scrollbars so an on-field click
+    keeps that container as the primary anchor.
     """
     hits = [
         candidate
@@ -850,10 +962,16 @@ def _candidate_containing_click(
     if not hits:
         return None
 
-    def _hit_key(candidate: dict[str, Any]) -> tuple[int, int]:
+    def _hit_key(candidate: dict[str, Any]) -> tuple[int, int, int]:
         bbox = _as_bbox_xywh(candidate.get("bbox"))
         area = _bbox_area(bbox) if bbox is not None else 0
-        return _candidate_hit_content_priority(candidate), area
+        return (
+            _candidate_hit_content_priority(candidate),
+            _source_rank_for_label(
+                str(candidate.get("source") or "").strip().lower() or None
+            ),
+            area,
+        )
 
     return min(hits, key=_hit_key)
 
@@ -2558,6 +2676,8 @@ def _dict_to_detection(candidate: dict[str, Any]) -> UiDetection | None:
         cx, cy = x + w // 2, y + h // 2
     class_id = candidate.get("class_id")
     icons = candidate.get("icons")
+    source_raw = candidate.get("source")
+    source = str(source_raw).strip() if source_raw is not None else None
     return UiDetection(
         bbox=(x, y, w, h),
         cx=cx,
@@ -2566,6 +2686,7 @@ def _dict_to_detection(candidate: dict[str, Any]) -> UiDetection | None:
         class_name=str(candidate.get("class_name") or "element"),
         text=candidate.get("text") if candidate.get("text") is not None else None,
         icons=list(icons) if isinstance(icons, list) else None,
+        source=source or None,
     )
 
 
@@ -2925,7 +3046,7 @@ def _detection_to_dict(
     spatial_region_rank: int = 0,
 ) -> dict[str, Any]:
     """Serialize a ``UiDetection`` into a JSON-friendly candidate dict."""
-    return {
+    payload: dict[str, Any] = {
         "bbox": list(det.bbox),
         "center": [det.cx, det.cy],
         "class_id": det.class_id,
@@ -2934,6 +3055,126 @@ def _detection_to_dict(
         "icons": det.icons,
         "spatial_region_rank": int(spatial_region_rank),
     }
+    source = _detection_source(det)
+    if source:
+        payload["source"] = source
+    return payload
+
+
+def recording_uia_detections_sufficient(
+    detections: list[UiDetection],
+    *,
+    local_x: int | None = None,
+    local_y: int | None = None,
+    min_multi_char_text: int = _MIN_NEARBY_TEXT_CANDIDATES,
+) -> bool:
+    """True when deferred UIA-only candidates are enough to name the click.
+
+    Requires usable UIA text for nearby landmarks (at least
+    ``min_multi_char_text``). When a click point is given, also requires a
+    usable UIA text detection covering that click. URL-like / ultra-long UIA
+    names do not count.
+    """
+    usable = [det for det in detections if _is_usable_uia_text_detection(det)]
+    if len(usable) < max(int(min_multi_char_text), 0):
+        return False
+    if local_x is None or local_y is None:
+        return True
+    return any(
+        _detection_contains_click(det, int(local_x), int(local_y)) for det in usable
+    )
+
+
+def _prefetched_uia_from_snapshot(
+    snapshot: dict[str, Any] | None,
+    *,
+    monitor_offset: tuple[int, int],
+    image_w: int,
+    image_h: int,
+    ocr_roi: tuple[int, int, int, int] | None,
+    window_screen_xywh: tuple[int, int, int, int] | None,
+) -> tuple[
+    list[tuple[int, int, int, int]] | None,
+    list[tuple[int, int, int, int]] | None,
+    list[tuple[tuple[int, int, int, int], str]],
+] | None:
+    """Image-local UIA boxes from a click-time snapshot. ``None`` means query live."""
+    if not isinstance(snapshot, dict):
+        return None
+    from src.recorder.uia_input_boxes import uia_snapshot_image_local
+
+    return uia_snapshot_image_local(
+        snapshot,
+        monitor_offset=monitor_offset,
+        image_w=image_w,
+        image_h=image_h,
+        ocr_roi=ocr_roi,
+        window_screen_xywh=window_screen_xywh,
+    )
+
+
+def _detect_recording_mouse_targets(
+    bgr: np.ndarray,
+    *,
+    coord_offset: tuple[int, int] = (0, 0),
+    ocr_roi: tuple[int, int, int, int] | None = None,
+    live_input_hwnd: int | None = None,
+    live_input_monitor_offset: tuple[int, int] | None = None,
+    live_input_window_screen_xywh: tuple[int, int, int, int] | None = None,
+    timing_out: dict[str, Any] | None = None,
+    local_x: int | None = None,
+    local_y: int | None = None,
+    uia_prefetched: tuple[
+        list[tuple[int, int, int, int]] | None,
+        list[tuple[int, int, int, int]] | None,
+        list[tuple[tuple[int, int, int, int], str]],
+    ]
+    | None = None,
+) -> tuple[list[UiDetection], dict[str, Any]]:
+    """YOLO + UIA first; finish leftover OCR only when UIA is insufficient.
+
+    Mirrors replay soft UIA-first deferral for recording label stability: prefer
+    ``source=uia`` partials, then ``_finish_mouse_ocr_pending`` when there is no
+    usable UIA cover at the click or fewer usable UIA texts than the nearby
+    landmark threshold.
+    """
+    pending: list[_MouseOcrPending] = []
+    vision_timing: dict[str, Any] = timing_out if timing_out is not None else {}
+    detections = _detect_mouse_targets_from_bgr(
+        bgr,
+        coord_offset=coord_offset,
+        ocr_roi=ocr_roi,
+        live_input_hwnd=live_input_hwnd,
+        live_input_monitor_offset=live_input_monitor_offset,
+        live_input_window_screen_xywh=live_input_window_screen_xywh,
+        timing_out=vision_timing,
+        defer_ocr=True,
+        pending_out=pending,
+        uia_prefetched=uia_prefetched,
+    )
+    if not pending:
+        vision_timing["recording_ocr_deferred"] = False
+        vision_timing["recording_uia_sufficient"] = True
+        return detections, vision_timing
+
+    sufficient = recording_uia_detections_sufficient(
+        detections,
+        local_x=local_x,
+        local_y=local_y,
+    )
+    vision_timing["recording_uia_sufficient"] = sufficient
+    if sufficient:
+        vision_timing["recording_ocr_deferred"] = True
+        return detections, vision_timing
+
+    finish_timing: dict[str, Any] = {}
+    finished: list[UiDetection] = []
+    for item in pending:
+        finished.extend(_finish_mouse_ocr_pending(item, timing_out=finish_timing))
+    vision_timing.update(finish_timing)
+    vision_timing["recording_ocr_deferred"] = False
+    vision_timing.pop("uia_first_pending", None)
+    return finished, vision_timing
 
 
 def _ocr_input_bbox_text(bgr: np.ndarray, bbox: tuple[int, int, int, int]) -> str:
@@ -3051,8 +3292,22 @@ def build_vision_context_full_image(
     assert bgr is not None
     offset = event.monitor_offset if event.monitor_offset is not None else (0, 0)
     yolo_error: str | None = None
+    vision_timing: dict[str, Any] = {}
+    img_h, img_w = bgr.shape[:2]
+    uia_prefetched = _prefetched_uia_from_snapshot(
+        event.uia_snapshot if isinstance(event.uia_snapshot, dict) else None,
+        monitor_offset=offset,
+        image_w=img_w,
+        image_h=img_h,
+        ocr_roi=None,
+        window_screen_xywh=None,
+    )
     try:
-        all_detections = _detect_mouse_targets_from_bgr(bgr, coord_offset=offset)
+        all_detections, vision_timing = _detect_recording_mouse_targets(
+            bgr,
+            coord_offset=offset,
+            uia_prefetched=uia_prefetched,
+        )
     except RuntimeError as exc:
         all_detections = []
         yolo_error = str(exc)
@@ -3071,6 +3326,13 @@ def build_vision_context_full_image(
     }
     if yolo_error:
         payload["yolo_error"] = yolo_error
+    if vision_timing.get("recording_ocr_deferred") is not None:
+        payload["recording_ocr_deferred"] = bool(
+            vision_timing.get("recording_ocr_deferred")
+        )
+        payload["recording_uia_sufficient"] = bool(
+            vision_timing.get("recording_uia_sufficient")
+        )
 
     if persist_debug:
         suffix = debug_name or ""
@@ -3087,6 +3349,8 @@ def build_vision_context_full_image(
         "all_detections": all_detections,
         "yolo_error": yolo_error,
         "field_context": "(none)",
+        "recording_ocr_deferred": vision_timing.get("recording_ocr_deferred"),
+        "recording_uia_sufficient": vision_timing.get("recording_uia_sufficient"),
     }
     return result
 
@@ -3104,6 +3368,7 @@ def build_vision_context_at_point(
     source_fingerprint: str | None = None,
     click_window: dict[str, Any] | None = None,
     monitor_offset: tuple[int, int] | None = None,
+    uia_snapshot: dict[str, Any] | None | object = _UIA_SNAPSHOT_UNSET,
 ) -> dict[str, Any]:
     """Run YOLO+OCR and rank candidates nearest to explicit screenshot-local coords.
 
@@ -3191,16 +3456,33 @@ def build_vision_context_at_point(
         if live is not None:
             live_input_hwnd = int(live.hwnd)
             live_input_window_screen_xywh = live.screen_rect()
+    chosen_snapshot = (
+        event.uia_snapshot if uia_snapshot is _UIA_SNAPSHOT_UNSET else uia_snapshot
+    )
+    uia_prefetched = None
+    if isinstance(chosen_snapshot, dict):
+        img_h, img_w = bgr.shape[:2]
+        uia_prefetched = _prefetched_uia_from_snapshot(
+            chosen_snapshot,
+            monitor_offset=screenshot_offset,
+            image_w=img_w,
+            image_h=img_h,
+            ocr_roi=enhance_roi,
+            window_screen_xywh=live_input_window_screen_xywh,
+        )
     vision_timing: dict = {}
     try:
-        all_detections = _detect_mouse_targets_from_bgr(
+        all_detections, vision_timing = _detect_recording_mouse_targets(
             bgr,
             coord_offset=offset,
             ocr_roi=enhance_roi,
-            live_input_hwnd=live_input_hwnd,
+            live_input_hwnd=None if uia_prefetched is not None else live_input_hwnd,
             live_input_monitor_offset=screenshot_offset,
             live_input_window_screen_xywh=live_input_window_screen_xywh,
             timing_out=vision_timing,
+            local_x=local_x,
+            local_y=local_y,
+            uia_prefetched=uia_prefetched,
         )
     except RuntimeError as exc:
         all_detections = []
@@ -3260,6 +3542,13 @@ def build_vision_context_at_point(
         "detection_count": len(all_detections),
         "source_fingerprint": fingerprint,
     }
+    if vision_timing.get("recording_ocr_deferred") is not None:
+        payload["recording_ocr_deferred"] = bool(
+            vision_timing.get("recording_ocr_deferred")
+        )
+        payload["recording_uia_sufficient"] = bool(
+            vision_timing.get("recording_uia_sufficient")
+        )
     debug_layers = vision_timing.get("debug_layers")
     if isinstance(debug_layers, dict):
         payload["debug_layers"] = debug_layers
@@ -3536,6 +3825,7 @@ def run_pointer_event_yolo_ocr(
                 image_path=event.screenshot_path,
                 debug_name="",
                 source_fingerprint=fingerprint,
+                uia_snapshot=event.uia_snapshot,
             )
             end_future = pool.submit(
                 build_vision_context_at_point,
@@ -3548,6 +3838,7 @@ def run_pointer_event_yolo_ocr(
                 image_path=end_image,
                 debug_name="_end",
                 source_fingerprint=fingerprint,
+                uia_snapshot=event.end_uia_snapshot,
                 click_window=event.end_click_window,
                 monitor_offset=(
                     event.end_monitor_offset

@@ -3,6 +3,28 @@ from __future__ import annotations
 from src.recorder.models import RecordedEvent
 
 
+def test_recorded_event_round_trip_uia_snapshot() -> None:
+    snapshot = {
+        "window": [0, 0, 200, 100],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [{"bbox": [10, 10, 40, 30], "text": "應用程式及其他"}],
+    }
+    event = RecordedEvent(
+        index=4,
+        timestamp_utc="2026-10-21T00:40:00+00:00",
+        kind="click",
+        uia_snapshot=snapshot,
+        end_uia_snapshot={"texts": [], "inputs": [], "scrollbars": []},
+    )
+    restored = RecordedEvent.from_dict(event.to_dict())
+    assert restored.uia_snapshot is not None
+    assert restored.uia_snapshot["texts"][0]["text"] == "應用程式及其他"
+    assert restored.end_uia_snapshot == {"texts": [], "inputs": [], "scrollbars": []}
+    bare = RecordedEvent(index=1, timestamp_utc="t", kind="click")
+    assert "uia_snapshot" not in bare.to_dict()
+
+
 def test_recorded_event_round_trip() -> None:
     event = RecordedEvent(
         index=1,

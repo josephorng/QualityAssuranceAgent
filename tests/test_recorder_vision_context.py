@@ -12,9 +12,12 @@ from cua_mcp.yolo_onnx import YOLO_CLASS_ELEMENT, YOLO_CLASS_SCROLLBAR, YOLO_CLA
 from src.recorder.models import RecordedEvent
 from src.recorder.vision_context import (
     _BBOX_HIT_TOLERANCE_PX,
+    _MIN_NEARBY_TEXT_CANDIDATES,
+    _detect_recording_mouse_targets,
     _drop_point_inside_candidate,
     _local_cursor,
     _nearest_candidates,
+    _usable_uia_landmark_label,
     annotate_scrollbar_track,
     build_vision_context,
     build_vision_context_at_point,
@@ -28,6 +31,7 @@ from src.recorder.vision_context import (
     format_scrollbar_context_hint,
     primary_candidate_offset,
     promote_click_primary_candidates,
+    recording_uia_detections_sufficient,
     resolve_event_screenshot_path,
     scrollbar_track_percent_phrase,
     select_click_primary_candidate,
@@ -1016,6 +1020,239 @@ def test_select_click_primary_prefers_checkbox_icon_over_single_char() -> None:
     assert primary is not None
     assert primary.get("icons")
     assert primary["icons"][0]["chinese_id"] == "方框、矩形框線"
+
+
+def test_usable_uia_landmark_label_rejects_urls_and_short() -> None:
+    assert _usable_uia_landmark_label("側邊欄") is True
+    assert _usable_uia_landmark_label("摺疊側邊欄") is True
+    assert _usable_uia_landmark_label("此") is False
+    assert (
+        _usable_uia_landmark_label(
+            "https://m365.cloud.microsoft/hwav2/chat?version=1"
+        )
+        is False
+    )
+    assert _usable_uia_landmark_label("www.example.com/path") is False
+    assert _usable_uia_landmark_label("a" * 60) is False
+
+
+def test_recording_uia_detections_sufficient_requires_cover_and_count() -> None:
+    click = (100, 100)
+    rich = [
+        _detection_from_bbox(
+            (90 + i * 30, 90, 24, 16),
+            YOLO_CLASS_TEXT,
+            text=f"標籤{i}",
+            source="uia",
+        )
+        for i in range(_MIN_NEARBY_TEXT_CANDIDATES)
+    ]
+    # First box covers the click.
+    rich[0] = _detection_from_bbox(
+        (95, 95, 20, 20), YOLO_CLASS_TEXT, text="主按鈕", source="uia"
+    )
+    assert recording_uia_detections_sufficient(
+        rich, local_x=click[0], local_y=click[1]
+    )
+
+    url_only = [
+        _detection_from_bbox(
+            (95, 95, 20, 20),
+            YOLO_CLASS_TEXT,
+            text="https://m365.cloud.microsoft/chat",
+            source="uia",
+        ),
+        *[
+            _detection_from_bbox(
+                (10, 10 + i * 20, 40, 16),
+                YOLO_CLASS_TEXT,
+                text=f"附近{i}",
+                source="uia",
+            )
+            for i in range(_MIN_NEARBY_TEXT_CANDIDATES)
+        ],
+    ]
+    # Click covered only by URL-like UIA → insufficient for primary.
+    assert (
+        recording_uia_detections_sufficient(
+            url_only, local_x=click[0], local_y=click[1]
+        )
+        is False
+    )
+
+    thin = rich[:3]
+    assert (
+        recording_uia_detections_sufficient(
+            thin, local_x=click[0], local_y=click[1]
+        )
+        is False
+    )
+
+
+def test_select_click_primary_prefers_grid_icon_over_ocr_ci() -> None:
+    """OCR「此」 must lose to overlapping 網格檢視 control icon."""
+    click_xy = [262, 30]
+    candidates = [
+        {
+            "bbox": [251, 19, 22, 22],
+            "center": click_xy,
+            "class_name": "text",
+            "text": "此",
+            "source": "ocr",
+        },
+        {
+            "bbox": [251, 19, 22, 22],
+            "center": click_xy,
+            "class_name": "element",
+            "icons": [{"chinese_id": "網格檢視"}],
+            "source": "ocr",
+        },
+    ]
+    primary = select_click_primary_candidate(candidates, click_xy[0], click_xy[1])
+    assert primary is not None
+    assert primary.get("icons")
+    assert primary["icons"][0]["chinese_id"] == "網格檢視"
+
+
+def test_select_click_primary_prefers_uia_text_over_ocr_at_same_place() -> None:
+    click_xy = [100, 100]
+    candidates = [
+        {
+            "bbox": [90, 90, 40, 20],
+            "center": click_xy,
+            "class_name": "text",
+            "text": "誤讀",
+            "source": "ocr",
+        },
+        {
+            "bbox": [90, 90, 40, 20],
+            "center": click_xy,
+            "class_name": "text",
+            "text": "應用程式及其他",
+            "source": "uia",
+        },
+    ]
+    primary = select_click_primary_candidate(candidates, click_xy[0], click_xy[1])
+    assert primary is not None
+    assert primary["text"] == "應用程式及其他"
+    assert primary["source"] == "uia"
+
+
+def test_detect_recording_mouse_targets_skips_ocr_when_uia_rich(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bgr = np.zeros((200, 400, 3), dtype=np.uint8)
+    partial = [
+        _detection_from_bbox(
+            (95, 95, 20, 20), YOLO_CLASS_TEXT, text="主按鈕", source="uia"
+        ),
+        *[
+            _detection_from_bbox(
+                (10, 10 + i * 18, 50, 14),
+                YOLO_CLASS_TEXT,
+                text=f"附近{i:02d}",
+                source="uia",
+            )
+            for i in range(_MIN_NEARBY_TEXT_CANDIDATES)
+        ],
+    ]
+    finish_calls: list[object] = []
+
+    def fake_detect(*_a, defer_ocr=False, pending_out=None, timing_out=None, **_k):
+        if timing_out is not None:
+            timing_out["ocr_s"] = 0.0
+            if defer_ocr:
+                timing_out["uia_first_pending"] = True
+        if defer_ocr and pending_out is not None:
+            pending_out.append(object())  # sentinel pending
+        return list(partial)
+
+    def fake_finish(pending, *, timing_out=None):
+        finish_calls.append(pending)
+        if timing_out is not None:
+            timing_out["ocr_s"] = 1.0
+        return list(partial) + [
+            _detection_from_bbox((200, 200, 10, 10), YOLO_CLASS_TEXT, text="OCR", source="ocr")
+        ]
+
+    monkeypatch.setattr(
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
+        fake_detect,
+    )
+    monkeypatch.setattr(
+        "src.recorder.vision_context._finish_mouse_ocr_pending",
+        fake_finish,
+    )
+    timing: dict = {}
+    detections, timing = _detect_recording_mouse_targets(
+        bgr,
+        timing_out=timing,
+        local_x=100,
+        local_y=100,
+    )
+    assert finish_calls == []
+    assert timing.get("recording_ocr_deferred") is True
+    assert timing.get("recording_uia_sufficient") is True
+    assert all(d.source == "uia" for d in detections if d.text)
+    assert not any(d.text == "OCR" for d in detections)
+
+
+def test_detect_recording_mouse_targets_finishes_ocr_when_uia_thin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bgr = np.zeros((200, 400, 3), dtype=np.uint8)
+    partial = [
+        _detection_from_bbox(
+            (95, 95, 20, 20), YOLO_CLASS_TEXT, text="僅有", source="uia"
+        ),
+    ]
+    finish_calls: list[object] = []
+
+    def fake_detect(*_a, defer_ocr=False, pending_out=None, timing_out=None, **_k):
+        if timing_out is not None:
+            timing_out["ocr_s"] = 0.0
+            if defer_ocr:
+                timing_out["uia_first_pending"] = True
+        if defer_ocr and pending_out is not None:
+            pending_out.append(object())
+        return list(partial)
+
+    def fake_finish(pending, *, timing_out=None):
+        finish_calls.append(pending)
+        if timing_out is not None:
+            timing_out.clear()
+            timing_out["ocr_s"] = 0.5
+        return [
+            *partial,
+            _detection_from_bbox(
+                (95, 95, 20, 20), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "網格檢視"}], source="ocr"
+            ),
+            _detection_from_bbox(
+                (10, 40, 40, 14), YOLO_CLASS_TEXT, text="側邊欄", source="ocr"
+            ),
+        ]
+
+    monkeypatch.setattr(
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
+        fake_detect,
+    )
+    monkeypatch.setattr(
+        "src.recorder.vision_context._finish_mouse_ocr_pending",
+        fake_finish,
+    )
+    timing: dict = {}
+    detections, timing = _detect_recording_mouse_targets(
+        bgr,
+        timing_out=timing,
+        local_x=100,
+        local_y=100,
+    )
+    assert len(finish_calls) == 1
+    assert timing.get("recording_ocr_deferred") is False
+    assert timing.get("recording_uia_sufficient") is False
+    assert any(
+        d.icons and d.icons[0].get("chinese_id") == "網格檢視" for d in detections
+    )
 
 
 @pytest.mark.asyncio

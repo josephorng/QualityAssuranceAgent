@@ -3,6 +3,10 @@
 One FindAll under a window hwnd. Recording and replay use the snapshot as its
 own candidate list, or YOLO+OCR when that list is not enough. The two lists
 are not merged.
+
+A control-type ScrollBar is a scrollbar. A Thumb whose AutomationId is
+``ScrollbarThumb`` is one too. ``UpButton`` / ``DownButton`` buttons on that
+thumb's line are included in the same scrollbar rectangle.
 """
 
 from __future__ import annotations
@@ -50,6 +54,8 @@ _UIA_FIND_ALL = 6
 _UIA_GET_CURRENT_PATTERN = 16
 _UIA_GET_CURRENT_CONTROL_TYPE = 21
 _UIA_GET_CURRENT_NAME = 23
+# IUIAutomationElement::get_CurrentAutomationId. Bounding rect is slot 43.
+_UIA_GET_CURRENT_AUTOMATION_ID = 29
 
 # IUIAutomationElementArray
 _UIA_ARRAY_GET_LENGTH = 3
@@ -63,6 +69,7 @@ _UIA_LISTITEM_CONTROL_TYPE_ID = 50007
 _UIA_MENUITEM_CONTROL_TYPE_ID = 50011
 _UIA_TEXT_CONTROL_TYPE_ID = 50020
 _UIA_TREEITEM_CONTROL_TYPE_ID = 50025
+_UIA_THUMB_CONTROL_TYPE_ID = 50027
 _UIA_SCROLLBAR_CONTROL_TYPE_ID = 50028
 _UIA_DATAITEM_CONTROL_TYPE_ID = 50029
 _UIA_DOCUMENT_CONTROL_TYPE_ID = 50030
@@ -70,6 +77,14 @@ _UIA_VALUE_PATTERN = 10002
 _UIA_VALUE_GET_CURRENT = 4
 _TREE_SCOPE_DESCENDANTS = 0x4
 _VT_I4 = 3
+
+_SCROLLBAR_THUMB_AUTOMATION_ID = "ScrollbarThumb"
+_SCROLLBAR_LINE_BUTTON_AUTOMATION_IDS = frozenset({"UpButton", "DownButton"})
+# Same-line when the shared span covers this fraction of the shorter cross-axis side.
+_SCROLLBAR_LINE_OVERLAP_FRAC = 0.5
+# A thumb-built rect inside a ScrollBar control is a duplicate when the control
+# is at most this many times larger than the thumb rect.
+_SCROLLBAR_CONTROL_CONTAIN_AREA_RATIO = 4.0
 
 _LABELED_TEXT_CONTROL_TYPES = frozenset(
     {
@@ -386,6 +401,25 @@ def _element_control_type(element: ctypes.c_void_p) -> int | None:
     return int(control_type.value)
 
 
+def _element_automation_id(element: ctypes.c_void_p) -> str:
+    try:
+        getter = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(
+            _com_vtable(element, _UIA_GET_CURRENT_AUTOMATION_ID + 1)[
+                _UIA_GET_CURRENT_AUTOMATION_ID
+            ]
+        )
+        bstr = ctypes.c_void_p()
+        if getter(element, ctypes.byref(bstr)) == _S_OK:
+            return _bstr_to_str(bstr).strip()
+    except Exception:
+        pass
+    return ""
+
+
 def _element_current_name(element: ctypes.c_void_p) -> str:
     try:
         getter = ctypes.WINFUNCTYPE(
@@ -499,10 +533,129 @@ def _fold_or_conditions(
     return current, created
 
 
+def _xyxy_area(box: ScreenXyxy) -> int:
+    return max(0, int(box[2]) - int(box[0])) * max(0, int(box[3]) - int(box[1]))
+
+
+def _xyxy_intersection_area(left: ScreenXyxy, right: ScreenXyxy) -> int:
+    width = min(int(left[2]), int(right[2])) - max(int(left[0]), int(right[0]))
+    height = min(int(left[3]), int(right[3])) - max(int(left[1]), int(right[1]))
+    if width <= 0 or height <= 0:
+        return 0
+    return width * height
+
+
+def _union_xyxy(boxes: list[ScreenXyxy]) -> ScreenXyxy:
+    return (
+        min(int(box[0]) for box in boxes),
+        min(int(box[1]) for box in boxes),
+        max(int(box[2]) for box in boxes),
+        max(int(box[3]) for box in boxes),
+    )
+
+
+def _thumb_is_vertical(thumb: ScreenXyxy) -> bool:
+    return (int(thumb[3]) - int(thumb[1])) >= (int(thumb[2]) - int(thumb[0]))
+
+
+def _cross_axis_overlap_frac(thumb: ScreenXyxy, button: ScreenXyxy) -> float:
+    """Overlap of the thumb and button on the scrollbar's cross axis, over the shorter side."""
+    if _thumb_is_vertical(thumb):
+        overlap = min(int(thumb[2]), int(button[2])) - max(int(thumb[0]), int(button[0]))
+        shorter = min(int(thumb[2]) - int(thumb[0]), int(button[2]) - int(button[0]))
+    else:
+        overlap = min(int(thumb[3]), int(button[3])) - max(int(thumb[1]), int(button[1]))
+        shorter = min(int(thumb[3]) - int(thumb[1]), int(button[3]) - int(button[1]))
+    if overlap <= 0 or shorter <= 0:
+        return 0.0
+    return float(overlap) / float(shorter)
+
+
+def _main_axis_gap(thumb: ScreenXyxy, button: ScreenXyxy) -> int:
+    """Zero when the boxes meet on the scrollbar axis; otherwise the gap in pixels."""
+    if _thumb_is_vertical(thumb):
+        if int(button[3]) < int(thumb[1]):
+            return int(thumb[1]) - int(button[3])
+        if int(thumb[3]) < int(button[1]):
+            return int(button[1]) - int(thumb[3])
+        return 0
+    if int(button[2]) < int(thumb[0]):
+        return int(thumb[0]) - int(button[2])
+    if int(thumb[2]) < int(button[0]):
+        return int(button[0]) - int(thumb[2])
+    return 0
+
+
+def _on_same_scrollbar_line(thumb: ScreenXyxy, button: ScreenXyxy) -> bool:
+    """True when ``button`` lies on the thumb's scrollbar line.
+
+    A vertical thumb shares its column (x overlap). A horizontal thumb shares
+    its row (y overlap). The shared span must cover at least half of the
+    shorter cross-axis side, so a neighbor that only clips the edge does not join.
+    """
+    return _cross_axis_overlap_frac(thumb, button) >= _SCROLLBAR_LINE_OVERLAP_FRAC
+
+
+def _scrollbar_control_already_covers(control: ScreenXyxy, part: ScreenXyxy) -> bool:
+    """True when ``part`` is the thumb inside an already-found ScrollBar control."""
+    part_area = _xyxy_area(part)
+    if part_area <= 0:
+        return True
+    if _xyxy_intersection_area(control, part) / part_area < 0.8:
+        return False
+    control_area = _xyxy_area(control)
+    return control_area <= part_area * _SCROLLBAR_CONTROL_CONTAIN_AREA_RATIO
+
+
+def compose_scrollbar_screen_rects(
+    scrollbar_controls: list[ScreenXyxy],
+    thumbs: list[ScreenXyxy],
+    line_buttons: list[ScreenXyxy],
+) -> tuple[list[ScreenXyxy], list[int]]:
+    """ScrollBar controls plus one rect per ``ScrollbarThumb`` and its line buttons.
+
+    Each thumb is a scrollbar. ``UpButton`` / ``DownButton`` boxes on that
+    thumb's line are unioned into the same rectangle. A thumb already covered
+    by a similar-sized ScrollBar control is not added again.
+
+    The second list is the indexes of ``line_buttons`` absorbed into a thumb.
+    """
+    grouped: list[list[ScreenXyxy]] = [[thumb] for thumb in thumbs]
+    used: list[int] = []
+    for index, button in enumerate(line_buttons):
+        best_thumb: int | None = None
+        best_key: tuple[float, int] | None = None
+        for thumb_index, thumb in enumerate(thumbs):
+            if not _on_same_scrollbar_line(thumb, button):
+                continue
+            key = (
+                _cross_axis_overlap_frac(thumb, button),
+                -_main_axis_gap(thumb, button),
+            )
+            if best_key is None or key > best_key:
+                best_key = key
+                best_thumb = thumb_index
+        if best_thumb is None:
+            continue
+        grouped[best_thumb].append(button)
+        used.append(index)
+
+    composed: list[ScreenXyxy] = []
+    for parts in grouped:
+        rect = _union_xyxy(parts)
+        if any(
+            _scrollbar_control_already_covers(control, rect)
+            for control in scrollbar_controls
+        ):
+            continue
+        composed.append(rect)
+    return list(scrollbar_controls) + composed, used
+
+
 def enumerate_edit_document_scrollbar_screen(
     hwnd: int,
 ) -> tuple[list[ScreenXyxy], list[ScreenXyxy], list[LabeledScreenXyxy]]:
-    """One FindAll Edit|Document|ScrollBar plus labeled text-like controls."""
+    """One FindAll Edit|Document|ScrollBar|Thumb plus labeled text-like controls."""
     if os.name != "nt" or not hwnd:
         return [], [], []
 
@@ -522,6 +675,8 @@ def enumerate_edit_document_scrollbar_screen(
     found: ctypes.c_void_p | None = None
     inputs: list[ScreenXyxy] = []
     scrollbars: list[ScreenXyxy] = []
+    scrollbar_thumbs: list[ScreenXyxy] = []
+    scrollbar_line_buttons: list[tuple[ScreenXyxy, str]] = []
     labeled: list[LabeledScreenXyxy] = []
     try:
         clsid = _guid_from_string(_CLSID_CUIAutomation)
@@ -558,6 +713,7 @@ def enumerate_edit_document_scrollbar_screen(
             _UIA_EDIT_CONTROL_TYPE_ID,
             _UIA_DOCUMENT_CONTROL_TYPE_ID,
             _UIA_SCROLLBAR_CONTROL_TYPE_ID,
+            _UIA_THUMB_CONTROL_TYPE_ID,
             _UIA_BUTTON_CONTROL_TYPE_ID,
             _UIA_HYPERLINK_CONTROL_TYPE_ID,
             _UIA_LISTITEM_CONTROL_TYPE_ID,
@@ -621,8 +777,24 @@ def enumerate_edit_document_scrollbar_screen(
                 if box is None:
                     continue
                 control_type = _element_control_type(element)
+                automation_id = ""
+                if control_type in (
+                    _UIA_THUMB_CONTROL_TYPE_ID,
+                    _UIA_BUTTON_CONTROL_TYPE_ID,
+                ):
+                    automation_id = _element_automation_id(element)
                 if control_type == _UIA_SCROLLBAR_CONTROL_TYPE_ID:
                     scrollbars.append(box)
+                elif (
+                    control_type == _UIA_THUMB_CONTROL_TYPE_ID
+                    and automation_id == _SCROLLBAR_THUMB_AUTOMATION_ID
+                ):
+                    scrollbar_thumbs.append(box)
+                elif (
+                    control_type == _UIA_BUTTON_CONTROL_TYPE_ID
+                    and automation_id in _SCROLLBAR_LINE_BUTTON_AUTOMATION_IDS
+                ):
+                    scrollbar_line_buttons.append((box, _element_label(element)))
                 elif control_type in (
                     _UIA_EDIT_CONTROL_TYPE_ID,
                     _UIA_DOCUMENT_CONTROL_TYPE_ID,
@@ -634,6 +806,15 @@ def enumerate_edit_document_scrollbar_screen(
                         labeled.append((box, label))
             finally:
                 _com_release(element)
+        scrollbars, used_line_buttons = compose_scrollbar_screen_rects(
+            scrollbars,
+            scrollbar_thumbs,
+            [box for box, _label in scrollbar_line_buttons],
+        )
+        for index, (box, label) in enumerate(scrollbar_line_buttons):
+            if index in used_line_buttons or not label:
+                continue
+            labeled.append((box, label))
         return inputs, scrollbars, labeled
     except Exception:
         return [], [], []

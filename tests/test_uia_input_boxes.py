@@ -67,6 +67,75 @@ def test_uia_label_prefer_value_over_name() -> None:
     assert uia_label_prefer_value("", "") == ""
 
 
+def test_scrollbar_thumb_unions_same_line_arrow_buttons() -> None:
+    from src.recorder.uia_input_boxes import compose_scrollbar_screen_rects
+
+    thumb = (900, 400, 916, 520)
+    up = (900, 160, 916, 176)
+    down = (898, 980, 918, 996)
+    other_column = (200, 160, 216, 176)
+    rects, used = compose_scrollbar_screen_rects([], [thumb], [up, down, other_column])
+    assert rects == [(898, 160, 918, 996)]
+    assert used == [0, 1]
+
+
+def test_scrollbar_thumb_alone_is_a_scrollbar() -> None:
+    from src.recorder.uia_input_boxes import compose_scrollbar_screen_rects
+
+    thumb = (900, 400, 916, 520)
+    rects, used = compose_scrollbar_screen_rects([], [thumb], [])
+    assert rects == [thumb]
+    assert used == []
+
+
+def test_scrollbar_thumb_ignores_button_that_only_clips_the_edge() -> None:
+    from src.recorder.uia_input_boxes import compose_scrollbar_screen_rects
+
+    thumb = (900, 400, 916, 520)
+    clipped = (910, 160, 940, 176)
+    rects, used = compose_scrollbar_screen_rects([], [thumb], [clipped])
+    assert rects == [thumb]
+    assert used == []
+
+
+def test_scrollbar_thumbs_keep_separate_columns() -> None:
+    from src.recorder.uia_input_boxes import compose_scrollbar_screen_rects
+
+    left_thumb = (100, 400, 116, 520)
+    right_thumb = (400, 400, 416, 520)
+    left_up = (100, 160, 116, 176)
+    right_down = (400, 800, 416, 816)
+    rects, used = compose_scrollbar_screen_rects(
+        [],
+        [left_thumb, right_thumb],
+        [left_up, right_down],
+    )
+    assert rects == [(100, 160, 116, 520), (400, 400, 416, 816)]
+    assert used == [0, 1]
+
+
+def test_scrollbar_thumb_inside_control_is_not_added_again() -> None:
+    from src.recorder.uia_input_boxes import compose_scrollbar_screen_rects
+
+    control = (890, 150, 920, 1000)
+    thumb = (900, 400, 916, 520)
+    up = (900, 160, 916, 176)
+    down = (900, 980, 916, 996)
+    rects, used = compose_scrollbar_screen_rects([control], [thumb], [up, down])
+    assert rects == [control]
+    assert used == [0, 1]
+
+
+def test_scrollbar_thumb_inside_huge_control_is_kept() -> None:
+    from src.recorder.uia_input_boxes import compose_scrollbar_screen_rects
+
+    window_sized = (0, 0, 800, 900)
+    thumb = (780, 400, 796, 520)
+    rects, used = compose_scrollbar_screen_rects([window_sized], [thumb], [])
+    assert rects == [window_sized, thumb]
+    assert used == []
+
+
 def test_labeled_text_control_types_include_interactive_items() -> None:
     from src.recorder import uia_input_boxes as uia
 

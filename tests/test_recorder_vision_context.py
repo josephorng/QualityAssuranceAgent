@@ -219,10 +219,11 @@ def test_build_vision_passes_live_hwnd_when_click_window_matches(tmp_path: Path)
             run_dir=run_dir,
             persist_debug=False,
         )
-    assert seen.get("live_input_hwnd") == 99
-    assert seen.get("live_input_window_screen_xywh") == (120, 80, 100, 80)
-    assert seen.get("live_input_monitor_offset") == (100, 50)
+    assert seen.get("live_input_hwnd") is None
+    assert seen.get("uia_prefetched") is None
+    assert seen.get("refine_with_uia") is True
     assert vision["used_vision"] is True
+    assert vision.get("vision_path") == "yolo_ocr"
 
 
 def test_build_vision_live_hwnd_none_when_match_fails(tmp_path: Path) -> None:
@@ -1142,103 +1143,51 @@ def test_detect_recording_mouse_targets_skips_ocr_when_uia_rich(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bgr = np.zeros((200, 400, 3), dtype=np.uint8)
-    partial = [
-        _detection_from_bbox(
-            (95, 95, 20, 20), YOLO_CLASS_TEXT, text="主按鈕", source="uia"
-        ),
-        *[
-            _detection_from_bbox(
-                (10, 10 + i * 18, 50, 14),
-                YOLO_CLASS_TEXT,
-                text=f"附近{i:02d}",
-                source="uia",
-            )
-            for i in range(_MIN_NEARBY_TEXT_CANDIDATES)
-        ],
-    ]
-    finish_calls: list[object] = []
+    yolo_calls: list[object] = []
 
-    def fake_detect(*_a, defer_ocr=False, pending_out=None, timing_out=None, **_k):
-        if timing_out is not None:
-            timing_out["ocr_s"] = 0.0
-            if defer_ocr:
-                timing_out["uia_first_pending"] = True
-        if defer_ocr and pending_out is not None:
-            pending_out.append(object())  # sentinel pending
-        return list(partial)
-
-    def fake_finish(pending, *, timing_out=None):
-        finish_calls.append(pending)
-        if timing_out is not None:
-            timing_out["ocr_s"] = 1.0
-        return list(partial) + [
-            _detection_from_bbox((200, 200, 10, 10), YOLO_CLASS_TEXT, text="OCR", source="ocr")
-        ]
+    def fake_detect(*_a, **_k):
+        yolo_calls.append("yolo")
+        return []
 
     monkeypatch.setattr(
         "src.recorder.vision_context._detect_mouse_targets_from_bgr",
         fake_detect,
     )
-    monkeypatch.setattr(
-        "src.recorder.vision_context._finish_mouse_ocr_pending",
-        fake_finish,
-    )
+    labeled = [((95, 95, 20, 20), "主按鈕")] + [
+        ((10, 10 + i * 18, 50, 14), f"附近{i:02d}")
+        for i in range(_MIN_NEARBY_TEXT_CANDIDATES)
+    ]
     timing: dict = {}
     detections, timing = _detect_recording_mouse_targets(
         bgr,
         timing_out=timing,
         local_x=100,
         local_y=100,
+        uia_prefetched=(None, None, labeled),
     )
-    assert finish_calls == []
+    assert yolo_calls == []
+    assert timing.get("vision_path") == "uia"
     assert timing.get("recording_ocr_deferred") is True
     assert timing.get("recording_uia_sufficient") is True
-    assert all(d.source == "uia" for d in detections if d.text)
-    assert not any(d.text == "OCR" for d in detections)
+    assert any(d.text == "主按鈕" and d.source == "uia" for d in detections)
+    assert all(d.source == "uia" for d in detections)
 
 
 def test_detect_recording_mouse_targets_finishes_ocr_when_uia_thin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bgr = np.zeros((200, 400, 3), dtype=np.uint8)
-    partial = [
-        _detection_from_bbox(
-            (95, 95, 20, 20), YOLO_CLASS_TEXT, text="僅有", source="uia"
-        ),
-    ]
-    finish_calls: list[object] = []
+    ocr = _detection_from_bbox(
+        (95, 95, 20, 20), YOLO_CLASS_TEXT, text="搜尋", source="ocr"
+    )
 
-    def fake_detect(*_a, defer_ocr=False, pending_out=None, timing_out=None, **_k):
-        if timing_out is not None:
-            timing_out["ocr_s"] = 0.0
-            if defer_ocr:
-                timing_out["uia_first_pending"] = True
-        if defer_ocr and pending_out is not None:
-            pending_out.append(object())
-        return list(partial)
-
-    def fake_finish(pending, *, timing_out=None):
-        finish_calls.append(pending)
-        if timing_out is not None:
-            timing_out.clear()
-            timing_out["ocr_s"] = 0.5
-        return [
-            *partial,
-            _detection_from_bbox(
-                (95, 95, 20, 20), YOLO_CLASS_ELEMENT, icons=[{"chinese_id": "網格檢視"}], source="ocr"
-            ),
-            _detection_from_bbox(
-                (10, 40, 40, 14), YOLO_CLASS_TEXT, text="側邊欄", source="ocr"
-            ),
-        ]
+    def fake_detect(*_a, **kwargs):
+        assert kwargs.get("uia_prefetched") is None
+        return [ocr]
 
     monkeypatch.setattr(
         "src.recorder.vision_context._detect_mouse_targets_from_bgr",
         fake_detect,
-    )
-    monkeypatch.setattr(
-        "src.recorder.vision_context._finish_mouse_ocr_pending",
-        fake_finish,
     )
     timing: dict = {}
     detections, timing = _detect_recording_mouse_targets(
@@ -1246,13 +1195,48 @@ def test_detect_recording_mouse_targets_finishes_ocr_when_uia_thin(
         timing_out=timing,
         local_x=100,
         local_y=100,
+        uia_prefetched=(
+            None,
+            None,
+            [((95, 95, 80, 24), "https://m365.cloud.microsoft/hwav2/a/b")],
+        ),
     )
-    assert len(finish_calls) == 1
+    assert timing.get("vision_path") == "yolo_ocr"
     assert timing.get("recording_ocr_deferred") is False
     assert timing.get("recording_uia_sufficient") is False
-    assert any(
-        d.icons and d.icons[0].get("chinese_id") == "網格檢視" for d in detections
+    assert [d.text for d in detections] == ["搜尋"]
+    assert all(d.source != "uia" for d in detections)
+
+
+def test_detect_recording_empty_click_uses_yolo_neighbor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bgr = np.zeros((200, 400, 3), dtype=np.uint8)
+    neighbor = _detection_from_bbox(
+        (10, 10, 40, 14), YOLO_CLASS_TEXT, text="搜尋", source="ocr"
     )
+
+    def fake_detect(*_a, **kwargs):
+        assert kwargs.get("uia_prefetched") is None
+        return [neighbor]
+
+    monkeypatch.setattr(
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
+        fake_detect,
+    )
+    labeled = [
+        ((10, 10 + i * 16, 40, 12), f"列{i:02d}")
+        for i in range(_MIN_NEARBY_TEXT_CANDIDATES)
+    ]
+    detections, timing = _detect_recording_mouse_targets(
+        bgr,
+        local_x=300,
+        local_y=150,
+        uia_prefetched=(None, None, labeled),
+    )
+    assert timing.get("vision_path") == "yolo_ocr"
+    assert [d.text for d in detections] == ["搜尋"]
+    assert all(d.source != "uia" for d in detections)
 
 
 @pytest.mark.asyncio

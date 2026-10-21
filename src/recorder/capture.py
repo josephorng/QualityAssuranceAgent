@@ -27,6 +27,7 @@ from src.recorder.frame_similarity import (
     apply_settle_sample,
     archive_settle_probe_sample,
     compare_frames,
+    rgb_frames_similar,
     last_settle_frame_path,
     settle_probe_kept_path,
     settle_probe_staging_path,
@@ -169,6 +170,17 @@ class _RawBeforeShot:
     size: tuple[int, int]
     monitor_index: int
     monitor_offset: tuple[int, int]
+
+
+@dataclass
+class _PreclickUiaCache:
+    """One FindAll finished before the next click, tied to a before-shot frame."""
+
+    hwnd: int
+    generation: int
+    frame_id: int
+    snapshot: dict[str, Any] | None = None
+    stale: bool = False
 
 
 @dataclass
@@ -1001,6 +1013,12 @@ class RecordingSession:
         self._drag_end_uia_futures: dict[int, Future[dict[str, Any] | None]] = {}
         self._uia_inflight: set[Future[dict[str, Any] | None]] = set()
         self._uia_notify_wait: dict[int, int] = {}
+        self._preclick_uia: _PreclickUiaCache | None = None
+        self._preclick_uia_generation: int = 0
+        self._preclick_startup_queued: bool = False
+        self._preclick_startup_compare: bool = False
+        self._preclick_compare_mono: float = 0.0
+        self._preclick_reference: tuple[bytes, tuple[int, int], int] | None = None
         self._drag_end_captures: dict[int, dict[int, tuple[str, int, tuple[int, int]]]] = {}
         self._pending_right_coords: tuple[int, int] | None = None
         self._pending_right_down_at: float | None = None
@@ -1170,6 +1188,12 @@ class RecordingSession:
             self._drag_end_uia_futures = {}
             self._uia_inflight = set()
             self._uia_notify_wait = {}
+            self._preclick_uia = None
+            self._preclick_uia_generation = 0
+            self._preclick_startup_queued = False
+            self._preclick_startup_compare = False
+            self._preclick_compare_mono = 0.0
+            self._preclick_reference = None
             self._drag_end_captures = {}
             self._pending_right_coords = None
             self._pending_right_down_at = None
@@ -1876,7 +1900,7 @@ class RecordingSession:
             self._left_press_captures[seq] = (None, windows_before or None)
             self._left_press_signals[seq] = signals_before
             self._left_press_click_windows[seq] = click_window
-        self._begin_click_uia(seq, click_window, side="left")
+        self._latch_press_uia(seq, click_window, side="left")
         self._enqueue(
             _DeferredCaptureJob(
                 action="pending_left_press",
@@ -1907,7 +1931,7 @@ class RecordingSession:
             self._right_press_captures[seq] = (None, windows_before or None)
             self._right_press_signals[seq] = signals_before
             self._right_press_click_windows[seq] = click_window
-        self._begin_click_uia(seq, click_window, side="right")
+        self._latch_press_uia(seq, click_window, side="right")
         self._enqueue(
             _DeferredCaptureJob(
                 action="pending_right_press",
@@ -2014,6 +2038,7 @@ class RecordingSession:
         with self._lock:
             self._last_settle_frames[mon_key] = frame
             self._last_settle_frame = frame
+        self._note_preclick_before_shot(frame)
         return True
 
     def _publish_last_settle_frame(
@@ -3262,6 +3287,7 @@ class RecordingSession:
             press_signals = self._pending_signals_before
         self._claim_after_owner(drag_index)
         end_click_window = self._click_window_payload_at(x2, y2)
+        self._mark_preclick_uia_stale()
         self._begin_click_uia(press_seq, end_click_window, side="drag_end")
         self._flush_pending_text_input(
             shared_end_index=drag_index,
@@ -3900,6 +3926,21 @@ class RecordingSession:
             f"settle probe first plateau event={event_index} "
             f"observed_settle_seconds={seconds}",
         )
+        click_window = raw.get("click_window")
+        hwnd = 0
+        if isinstance(click_window, dict):
+            try:
+                hwnd = int(click_window.get("hwnd") or 0)
+            except (TypeError, ValueError):
+                hwnd = 0
+        with self._lock:
+            frame = self._last_settle_frame
+            frame_id = int(frame.frame_id) if frame is not None else 0
+            self._preclick_startup_compare = False
+        if hwnd > 0:
+            self._queue_preclick_uia(hwnd, frame_id)
+        else:
+            self._mark_preclick_uia_stale()
 
     def _run_settle_probe_tick(self, event_index: int) -> None:
         """Capture/compare one settle sample. Safe to call from the timer thread."""
@@ -4069,6 +4110,17 @@ class RecordingSession:
                 f"mad={mad_text} threshold={DEFAULT_SIMILARITY_THRESHOLD} "
                 f"similar={similar}",
             )
+            if similar is False:
+                already_plateau = False
+                with self._lock:
+                    probe = self._settle_probe
+                    already_plateau = (
+                        probe is not None
+                        and probe.event_index == event_index
+                        and probe.observed_recorded
+                    )
+                if already_plateau:
+                    self._mark_preclick_uia_stale()
 
         if not self._settle_probe_is_current(event_index):
             try:
@@ -4163,6 +4215,157 @@ class RecordingSession:
         if executor is None:
             return
         executor.shutdown(wait=False, cancel_futures=True)
+
+    def _foreground_hwnd(self) -> int:
+        if os.name != "nt":
+            return 0
+        try:
+            return int(ctypes.windll.user32.GetForegroundWindow() or 0)
+        except Exception:
+            return 0
+
+    def _note_preclick_before_shot(self, frame: _RawBeforeShot) -> None:
+        """Queue FindAll on the first before-shot, then watch that frame for change."""
+        with self._lock:
+            if not self._preclick_startup_queued:
+                self._preclick_startup_queued = True
+                self._preclick_startup_compare = True
+                self._preclick_reference = (
+                    bytes(frame.rgb),
+                    frame.size,
+                    int(frame.monitor_index),
+                )
+                self._preclick_compare_mono = time.monotonic()
+                frame_id = int(frame.frame_id)
+                start = True
+                due = False
+                ref_rgb = b""
+                ref_size = (0, 0)
+                sample_rgb = b""
+                sample_size = (0, 0)
+            else:
+                start = False
+                due = False
+                ref_rgb = b""
+                ref_size = (0, 0)
+                sample_rgb = b""
+                sample_size = (0, 0)
+                frame_id = 0
+                ref = self._preclick_reference
+                if (
+                    self._preclick_startup_compare
+                    and ref is not None
+                    and int(frame.monitor_index) == int(ref[2])
+                    and (time.monotonic() - self._preclick_compare_mono)
+                    >= _SETTLE_PROBE_INTERVAL_S
+                ):
+                    self._preclick_compare_mono = time.monotonic()
+                    due = True
+                    ref_rgb, ref_size, _mon = ref
+                    sample_rgb = bytes(frame.rgb)
+                    sample_size = frame.size
+        if start:
+            self._queue_preclick_uia(self._foreground_hwnd(), frame_id)
+            return
+        if due and not rgb_frames_similar(ref_rgb, ref_size, sample_rgb, sample_size):
+            self._mark_preclick_uia_stale()
+
+    def _queue_preclick_uia(self, hwnd: int, frame_id: int) -> None:
+        """Start one FindAll on the snapshot thread. A newer queue drops the old one."""
+        hwnd = int(hwnd or 0)
+        if hwnd <= 0:
+            return
+        executor = self._uia_executor
+        if executor is None:
+            return
+        with self._lock:
+            self._preclick_uia_generation += 1
+            generation = self._preclick_uia_generation
+            self._preclick_uia = _PreclickUiaCache(
+                hwnd=hwnd,
+                generation=generation,
+                frame_id=int(frame_id),
+            )
+        try:
+            future = executor.submit(self._uia_snapshot_for_hwnd, hwnd)
+        except RuntimeError:
+            return
+
+        def _store(done: Future[dict[str, Any] | None]) -> None:
+            snapshot = self._snapshot_from_future(done)
+            with self._lock:
+                slot = self._preclick_uia
+                if (
+                    slot is None
+                    or slot.generation != generation
+                    or slot.stale
+                    or int(slot.hwnd) != hwnd
+                ):
+                    return
+                if snapshot is None:
+                    slot.stale = True
+                    return
+                slot.snapshot = snapshot
+
+        future.add_done_callback(_store)
+
+    def _uia_snapshot_for_hwnd(self, hwnd: int) -> dict[str, Any] | None:
+        from src.recorder.uia_input_boxes import snapshot_uia_screen
+
+        try:
+            value = snapshot_uia_screen(int(hwnd))
+        except Exception:
+            return None
+        return value if isinstance(value, dict) else None
+
+    def _mark_preclick_uia_stale(self) -> None:
+        """Drop the slot and any walk that is still running."""
+        with self._lock:
+            self._preclick_uia_generation += 1
+            slot = self._preclick_uia
+            if slot is None:
+                return
+            slot.stale = True
+            slot.snapshot = None
+            slot.generation = self._preclick_uia_generation
+
+    def _latch_press_uia(
+        self,
+        press_seq: int,
+        click_window: ClickWindowInfo | None,
+        *,
+        side: str,
+    ) -> None:
+        """Use a finished pre-click walk when it still matches this window."""
+        hwnd = int(click_window.hwnd or 0) if click_window is not None else 0
+        snapshot: dict[str, Any] | None = None
+        with self._lock:
+            slot = self._preclick_uia
+            if (
+                hwnd
+                and slot is not None
+                and not slot.stale
+                and isinstance(slot.snapshot, dict)
+                and int(slot.hwnd) == hwnd
+                and slot.generation == self._preclick_uia_generation
+            ):
+                snapshot = {
+                    key: list(value) if isinstance(value, list) else value
+                    for key, value in slot.snapshot.items()
+                }
+                self._preclick_uia_generation += 1
+                slot.generation = self._preclick_uia_generation
+        if snapshot is not None:
+            future: Future[dict[str, Any] | None] = Future()
+            future.set_result(snapshot)
+            with self._lock:
+                if side == "right":
+                    self._right_press_uia_futures[press_seq] = future
+                else:
+                    self._left_press_uia_futures[press_seq] = future
+            return
+        self._mark_preclick_uia_stale()
+        self._begin_click_uia(press_seq, click_window, side=side)
 
     def _begin_click_uia(
         self,

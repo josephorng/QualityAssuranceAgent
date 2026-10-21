@@ -42,53 +42,34 @@ def test_uia_snapshot_image_local_does_not_query_hwnd(monkeypatch: pytest.Monkey
 def test_detect_uses_prefetched_snapshot_and_skips_findall(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from cua_mcp.select_mouse_target import _detect_mouse_targets_from_bgr
+    from src.recorder.vision_context import _detect_recording_mouse_targets
 
     bgr = np.zeros((80, 120, 3), dtype=np.uint8)
-    xyxy = np.asarray([[10, 10, 40, 30]], dtype=np.float32)
-    scores = np.asarray([0.9], dtype=np.float32)
-    class_ids = np.asarray([YOLO_CLASS_TEXT], dtype=np.int32)
-    monkeypatch.setattr(
-        "cua_mcp.select_mouse_target.run_yolo_onnx_end2end",
-        lambda *_a, **_k: (xyxy, scores, class_ids),
-    )
-    monkeypatch.setattr(
-        "cua_mcp.select_mouse_target.merge_yolo_inputs_with_line_rectangles",
-        lambda *_a, **_k: [],
-    )
-    monkeypatch.setattr(
-        "cua_mcp.select_mouse_target._recognize_ocr_boxes",
-        lambda _bgr, boxes, _modes, **_k: ([[""] for _ in boxes], 0, len(boxes)),
-    )
-    monkeypatch.setattr(
-        "cua_mcp.select_mouse_target._retry_empty_unknown_icon_ocr",
-        lambda _bgr, cands: cands,
-    )
+    yolo_calls: list[str] = []
 
     def _boom(*_a, **_k):
-        raise AssertionError("analysis-time FindAll must not run")
+        yolo_calls.append("yolo")
+        raise AssertionError("YOLO must not run when usable UIA covers the click")
 
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.try_uia_refine_inputs_and_scrollbars",
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
         _boom,
     )
-    found = _detect_mouse_targets_from_bgr(
+    labeled = [((10, 10, 30, 20), "應用程式及其他")] + [
+        ((0, 40 + i * 4, 20, 3), f"列{i:02d}") for i in range(8)
+    ]
+    found, timing = _detect_recording_mouse_targets(
         bgr,
-        refine_with_uia=True,
-        live_input_hwnd=99,
-        live_input_monitor_offset=(0, 0),
-        live_input_window_screen_xywh=(0, 0, 120, 80),
-        uia_prefetched=(
-            None,
-            None,
-            [((10, 10, 30, 20), "應用程式及其他")],
-        ),
-        ocr_class_ids=frozenset({YOLO_CLASS_TEXT}),
+        local_x=20,
+        local_y=16,
+        uia_prefetched=(None, None, labeled),
     )
+    assert yolo_calls == []
+    assert timing["vision_path"] == "uia"
     assert any(det.text == "應用程式及其他" and det.source == "uia" for det in found)
 
 
-def test_detect_without_snapshot_still_calls_live_enumerator(
+def test_detect_without_snapshot_returns_only_yolo_ocr(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from cua_mcp.select_mouse_target import _detect_mouse_targets_from_bgr
@@ -113,20 +94,7 @@ def test_detect_without_snapshot_still_calls_live_enumerator(
         "cua_mcp.select_mouse_target._retry_empty_unknown_icon_ocr",
         lambda _bgr, cands: cands,
     )
-    calls: list[int] = []
-
-    def _fake_refine(*_a, **_k):
-        calls.append(1)
-        return None, None, [], {"uia_inputs": 0, "uia_texts": 0, "yolo_inputs": 0,
-                                 "covered": False, "yolo_covered": False, "used": "hough",
-                                 "uia_scrollbars": 0, "yolo_scrollbars": 0,
-                                 "scrollbar_covered": False, "scrollbar_used": "yolo"}
-
-    monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.try_uia_refine_inputs_and_scrollbars",
-        _fake_refine,
-    )
-    _detect_mouse_targets_from_bgr(
+    found = _detect_mouse_targets_from_bgr(
         bgr,
         refine_with_uia=True,
         live_input_hwnd=99,
@@ -134,7 +102,7 @@ def test_detect_without_snapshot_still_calls_live_enumerator(
         live_input_window_screen_xywh=(0, 0, 120, 80),
         ocr_class_ids=frozenset({YOLO_CLASS_TEXT}),
     )
-    assert calls == [1]
+    assert any(det.text == "舊" and det.source != "uia" for det in found)
 
 
 def test_analysis_prefers_click_snapshot_over_live_hwnd(tmp_path: Path) -> None:
@@ -199,10 +167,8 @@ def test_analysis_prefers_click_snapshot_over_live_hwnd(tmp_path: Path) -> None:
             persist_debug=False,
         )
     assert seen.get("live_input_hwnd") is None
-    prefetched = seen.get("uia_prefetched")
-    assert prefetched is not None
-    assert prefetched[2][0][1] == "應用程式及其他"
-    assert prefetched[2][0][0] == (240, 8, 44, 44)
+    assert seen.get("uia_prefetched") is None
+    assert seen.get("refine_with_uia") is True
 
 
 def test_click_starts_findall_off_the_capture_worker(tmp_path: Path) -> None:
@@ -394,3 +360,341 @@ def test_drag_emit_stores_release_snapshot(tmp_path: Path) -> None:
         )
     assert queued[0].uia_snapshot["texts"][0]["text"] == "按下"
     assert queued[0].end_uia_snapshot["texts"][0]["text"] == "放開"
+
+
+def _copilot_window(hwnd: int = 132566) -> object:
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    return ClickWindowInfo(
+        hwnd=hwnd,
+        title="Microsoft 365 Copilot",
+        process_name="M365Copilot.exe",
+        left=0,
+        top=0,
+        width=120,
+        height=80,
+        is_maximized=False,
+    )
+
+
+def _wait_preclick(session: object) -> dict:
+    import time
+
+    for _ in range(100):
+        slot = session._preclick_uia  # type: ignore[attr-defined]
+        if slot is not None and isinstance(slot.snapshot, dict):
+            return slot.snapshot
+        time.sleep(0.02)
+    raise AssertionError("pre-click FindAll did not finish")
+
+
+def test_preclick_cache_hit_skips_second_findall(tmp_path: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from src.recorder.capture import RecordingSession
+
+    calls: list[int] = []
+
+    def _snap(hwnd: int) -> dict:
+        calls.append(int(hwnd))
+        return {
+            "window": [0, 0, 10, 10],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [0, 0, 4, 4], "text": "搜尋"}],
+        }
+
+    session = RecordingSession(runs_root=tmp_path)
+    session._uia_executor = ThreadPoolExecutor(max_workers=1)
+    window = _copilot_window()
+    try:
+        with patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            side_effect=_snap,
+        ):
+            session._queue_preclick_uia(window.hwnd, frame_id=3)
+            _wait_preclick(session)
+            session._latch_press_uia(1, window, side="left")
+            session._latch_press_uia(2, window, side="left")
+    finally:
+        session._uia_executor.shutdown(wait=True)
+    assert calls == [window.hwnd]
+    assert session._left_press_uia_futures[1].result()["texts"][0]["text"] == "搜尋"
+    assert session._left_press_uia_futures[2].result()["texts"][0]["text"] == "搜尋"
+
+
+def test_preclick_hwnd_miss_uses_click_time_findall(tmp_path: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from src.recorder.capture import RecordingSession
+
+    calls: list[int] = []
+
+    def _snap(hwnd: int) -> dict:
+        calls.append(int(hwnd))
+        return {"window": None, "inputs": [], "scrollbars": [], "texts": []}
+
+    session = RecordingSession(runs_root=tmp_path)
+    session._uia_executor = ThreadPoolExecutor(max_workers=1)
+    cached = _copilot_window(10)
+    other = _copilot_window(20)
+    try:
+        with patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            side_effect=_snap,
+        ):
+            session._queue_preclick_uia(cached.hwnd, frame_id=1)
+            _wait_preclick(session)
+            session._latch_press_uia(1, other, side="right")
+            session._right_press_uia_futures[1].result(timeout=2)
+    finally:
+        session._uia_executor.shutdown(wait=True)
+    assert calls == [10, 20]
+
+
+def test_preclick_late_completion_does_not_fill_the_slot(tmp_path: Path) -> None:
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from src.recorder.capture import RecordingSession
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def _snap(_hwnd: int) -> dict:
+        started.set()
+        release.wait(2)
+        return {"window": None, "inputs": [], "scrollbars": [], "texts": [{"bbox": [0, 0, 1, 1], "text": "晚到"}]}
+
+    session = RecordingSession(runs_root=tmp_path)
+    session._uia_executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        with patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            side_effect=_snap,
+        ):
+            session._queue_preclick_uia(5, frame_id=1)
+            assert started.wait(2)
+            session._mark_preclick_uia_stale()
+            release.set()
+            session._uia_executor.shutdown(wait=True)
+            session._uia_executor = None
+    finally:
+        release.set()
+    slot = session._preclick_uia
+    assert slot is not None
+    assert slot.stale is True
+    assert slot.snapshot is None
+
+
+def test_preclick_queues_on_first_before_shot_only(tmp_path: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from src.recorder.capture import RecordingSession, _RawBeforeShot
+
+    calls: list[int] = []
+
+    def _snap(hwnd: int) -> dict:
+        calls.append(int(hwnd))
+        return {"window": None, "inputs": [], "scrollbars": [], "texts": []}
+
+    session = RecordingSession(runs_root=tmp_path)
+    session._uia_executor = ThreadPoolExecutor(max_workers=1)
+    session._foreground_hwnd = lambda: 42  # type: ignore[method-assign]
+    frame = _RawBeforeShot(
+        frame_id=1,
+        rgb=b"\x00\x00\x00",
+        size=(1, 1),
+        monitor_index=1,
+        monitor_offset=(0, 0),
+    )
+    later = _RawBeforeShot(
+        frame_id=2,
+        rgb=b"\x00\x00\x00",
+        size=(1, 1),
+        monitor_index=1,
+        monitor_offset=(0, 0),
+    )
+    try:
+        with patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            side_effect=_snap,
+        ):
+            assert session._install_raw_before_shot(frame) is True
+            assert session._install_raw_before_shot(later) is True
+            _wait_preclick(session)
+    finally:
+        session._uia_executor.shutdown(wait=True)
+    assert calls == [42]
+
+
+def test_startup_before_shot_change_marks_preclick_stale(tmp_path: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from src.recorder.capture import RecordingSession, _RawBeforeShot
+
+    def _snap(_hwnd: int) -> dict:
+        return {"window": None, "inputs": [], "scrollbars": [], "texts": []}
+
+    session = RecordingSession(runs_root=tmp_path)
+    session._uia_executor = ThreadPoolExecutor(max_workers=1)
+    session._foreground_hwnd = lambda: 42  # type: ignore[method-assign]
+    first = _RawBeforeShot(
+        frame_id=1,
+        rgb=b"\x00\x00\x00",
+        size=(1, 1),
+        monitor_index=1,
+        monitor_offset=(0, 0),
+    )
+    changed = _RawBeforeShot(
+        frame_id=2,
+        rgb=b"\xff\xff\xff",
+        size=(1, 1),
+        monitor_index=1,
+        monitor_offset=(0, 0),
+    )
+    try:
+        with patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            side_effect=_snap,
+        ):
+            session._install_raw_before_shot(first)
+            _wait_preclick(session)
+            session._preclick_compare_mono = 0.0
+            session._install_raw_before_shot(changed)
+    finally:
+        session._uia_executor.shutdown(wait=False, cancel_futures=True)
+    slot = session._preclick_uia
+    assert slot is not None
+    assert slot.stale is True
+    assert slot.snapshot is None
+
+
+def test_preclick_queues_on_first_plateau_only(tmp_path: Path) -> None:
+    import json
+    from concurrent.futures import ThreadPoolExecutor
+
+    from src.recorder.capture import RecordingSession
+
+    calls: list[int] = []
+
+    def _snap(hwnd: int) -> dict:
+        calls.append(int(hwnd))
+        return {"window": None, "inputs": [], "scrollbars": [], "texts": []}
+
+    session = RecordingSession(runs_root=tmp_path)
+    session._run_dir = tmp_path
+    session._uia_executor = ThreadPoolExecutor(max_workers=1)
+    events = tmp_path / "events"
+    events.mkdir()
+    (events / "event_001.json").write_text(
+        json.dumps(
+            {
+                "index": 1,
+                "timestamp_utc": "t",
+                "kind": "click",
+                "click_window": {"hwnd": 77},
+            }
+        ),
+        encoding="utf-8",
+    )
+    try:
+        with patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            side_effect=_snap,
+        ):
+            session._persist_observed_settle(1, 0.03)
+            session._persist_observed_settle(1, 1.5)
+            _wait_preclick(session)
+    finally:
+        session._uia_executor.shutdown(wait=True)
+    assert calls == [77]
+    assert session._preclick_startup_compare is False
+
+
+@pytest.mark.asyncio
+async def test_replay_uia_path_skips_yolo_and_miss_drops_uia_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from cua_mcp.select_mouse_target import _detection_from_bbox
+    from cua_mcp.yolo_onnx import YOLO_CLASS_TEXT
+    from src.recorder.uia_input_boxes import MIN_USABLE_UIA_LANDMARKS
+
+    uia = [
+        _detection_from_bbox((20, 20, 40, 16), YOLO_CLASS_TEXT, text="記事本", source="uia")
+    ] + [
+        _detection_from_bbox(
+            (10, 40 + i * 12, 40, 10),
+            YOLO_CLASS_TEXT,
+            text=f"旁{i:02d}",
+            source="uia",
+        )
+        for i in range(MIN_USABLE_UIA_LANDMARKS)
+    ]
+    yolo_calls: list[str] = []
+    ocr = _detection_from_bbox((80, 80, 30, 16), YOLO_CLASS_TEXT, text="搜尋", source="ocr")
+
+    def fake_grab():
+        frame = np.zeros((20, 20, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def fake_uia(_captured, _window):
+        return list(uia)
+
+    def fake_finish(*_a, **_k):
+        yolo_calls.append("yolo")
+        return (
+            [1],
+            ["shot.png"],
+            [(1, np.zeros((20, 20, 3), dtype=np.uint8))],
+            [ocr],
+            {
+                "capture_s": 0.01,
+                "yolo_s": 0.1,
+                "line_s": 0.0,
+                "uia_input_s": 0.0,
+                "uia_scrollbar_s": 0.0,
+                "uia_text_s": 0.0,
+                "ocr_s": 0.2,
+                "icon_ocr_retry_s": 0.0,
+                "total_s": 0.31,
+            },
+        )
+
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(smt, "_uia_only_detections_for_click_window", fake_uia)
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
+    monkeypatch.setattr(
+        smt,
+        "parse_mouse_target_instruction",
+        lambda _i: ("「記事本」文字", 0, 0, [], None, 0, None),
+    )
+    window = {"hwnd": 7, "left": 0, "top": 0}
+    found = await smt.find_mouse_point("將滑鼠移到「記事本」文字", click_window=window)
+    assert yolo_calls == []
+    assert found is not None
+    assert found[2]["timing"]["vision_path"] == "uia"
+    assert found[2]["selection_method"] == "uia_first_unique"
+    assert (found[0], found[1]) == (uia[0].cx, uia[0].cy)
+
+    def fake_uia_miss(_captured, _window):
+        return [
+            _detection_from_bbox((10, 10, 40, 16), YOLO_CLASS_TEXT, text="其他", source="uia")
+            for _ in range(MIN_USABLE_UIA_LANDMARKS)
+        ]
+
+    monkeypatch.setattr(smt, "_uia_only_detections_for_click_window", fake_uia_miss)
+    monkeypatch.setattr(
+        smt,
+        "parse_mouse_target_instruction",
+        lambda _i: ("「搜尋」文字", 0, 0, [], None, 0, None),
+    )
+    found = await smt.find_mouse_point("將滑鼠移到「搜尋」文字", click_window=window)
+    assert yolo_calls == ["yolo"]
+    assert found is not None
+    assert found[2]["timing"]["vision_path"] == "yolo_ocr"
+    assert found[2]["target_text"] == "搜尋"
+    assert "https://" not in found[2]["target_text"]

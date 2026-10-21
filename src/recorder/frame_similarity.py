@@ -39,6 +39,34 @@ def mean_abs_diff(
     return float(np.mean(np.abs(arr_a - arr_b)) / 255.0)
 
 
+def rgb_frames_similar(
+    rgb_a: bytes,
+    size_a: tuple[int, int],
+    rgb_b: bytes,
+    size_b: tuple[int, int],
+    *,
+    threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+    size: tuple[int, int] = _COMPARE_SIZE,
+) -> bool:
+    """True when two in-memory RGB frames match within the settle threshold."""
+    from PIL import Image
+    import numpy as np
+
+    def _gray(rgb: bytes, wh: tuple[int, int]) -> Any:
+        image = Image.frombytes("RGB", wh, rgb).convert("L")
+        return np.asarray(image.resize(size, Image.Resampling.BILINEAR), dtype=np.float32)
+
+    try:
+        arr_a = _gray(rgb_a, size_a)
+        arr_b = _gray(rgb_b, size_b)
+    except Exception:
+        return False
+    if arr_a.shape != arr_b.shape:
+        return False
+    diff = float(np.mean(np.abs(arr_a - arr_b)) / 255.0)
+    return diff <= float(threshold)
+
+
 def compare_frames(
     path_a: str | Path,
     path_b: str | Path,

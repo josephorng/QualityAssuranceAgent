@@ -35,13 +35,12 @@ from cua_mcp.scrollbar_arrows import (
 )
 from cua_mcp.select_mouse_target import (
     _MOUSE_FILTER_SIMILARITY_THRESHOLD,
-    _MouseOcrPending,
     _box_edge_gap,
     _detect_mouse_targets_from_bgr,
     _detection_similarity_to_query,
+    _detections_from_uia_prefetched,
     _detections_label_similar,
     _detections_same_place,
-    _finish_mouse_ocr_pending,
     _prefilter_anchors_by_nearby,
 )
 from cua_mcp.select_ui_element import UiDetection, _format_ui_candidates_text
@@ -142,8 +141,7 @@ _DECORATIVE_ICON_IDS = frozenset(
     }
 )
 # UIA Name/AutomationId strings longer than this (or URL-like) do not count
-# toward recording landmark sufficiency; OCR may still fill them in later.
-_MAX_USABLE_UIA_LABEL_LEN = 48
+# toward recording landmark sufficiency. The check lives in uia_input_boxes.
 # Sentinel: build_vision_context_at_point uses the event press snapshot unless
 # the caller passes a snapshot (including None to force a live FindAll).
 _UIA_SNAPSHOT_UNSET = object()
@@ -587,17 +585,9 @@ def _usable_uia_landmark_label(text: str | None) -> bool:
     Rejects URL-like names and ultra-long AutomationIds that replay soft-match
     poorly and should not count toward the UIA-sufficiency gate.
     """
-    visible = _visible_text(text)
-    if len(visible) < 2:
-        return False
-    if len(visible) > _MAX_USABLE_UIA_LABEL_LEN:
-        return False
-    lowered = visible.casefold()
-    if "://" in visible or lowered.startswith("www."):
-        return False
-    if visible.count("/") >= 3 and ("." in visible or "%" in visible):
-        return False
-    return True
+    from src.recorder.uia_input_boxes import is_usable_uia_landmark_label
+
+    return is_usable_uia_landmark_label(_visible_text(text))
 
 
 def _detection_source(det: UiDetection) -> str:
@@ -3113,6 +3103,41 @@ def _prefetched_uia_from_snapshot(
     )
 
 
+def _attach_unused_uia_debug(
+    vision_timing: dict[str, Any],
+    uia_prefetched: tuple[
+        list[tuple[int, int, int, int]] | None,
+        list[tuple[int, int, int, int]] | None,
+        list[tuple[tuple[int, int, int, int], str]],
+    ]
+    | None,
+) -> None:
+    """Keep the unused snapshot beside YOLO boxes in the debug overlay."""
+    if uia_prefetched is None:
+        return
+    layers = vision_timing.get("debug_layers")
+    if not isinstance(layers, dict):
+        return
+    inputs, scrollbars, labeled = uia_prefetched
+    uia_boxes: list[dict[str, Any]] = [
+        {
+            "bbox": [int(v) for v in bbox],
+            "class_name": "uia_text",
+            "text": str(label or ""),
+        }
+        for bbox, label in (labeled or [])
+    ]
+    uia_boxes.extend(
+        {"bbox": [int(v) for v in bbox], "class_name": "uia_input", "text": ""}
+        for bbox in (inputs or [])
+    )
+    uia_boxes.extend(
+        {"bbox": [int(v) for v in bbox], "class_name": "uia_scrollbar", "text": ""}
+        for bbox in (scrollbars or [])
+    )
+    layers["uia"] = uia_boxes
+
+
 def _detect_recording_mouse_targets(
     bgr: np.ndarray,
     *,
@@ -3131,50 +3156,34 @@ def _detect_recording_mouse_targets(
     ]
     | None = None,
 ) -> tuple[list[UiDetection], dict[str, Any]]:
-    """YOLO + UIA first; finish leftover OCR only when UIA is insufficient.
-
-    Mirrors replay soft UIA-first deferral for recording label stability: prefer
-    ``source=uia`` partials, then ``_finish_mouse_ocr_pending`` when there is no
-    usable UIA cover at the click or fewer usable UIA texts than the nearby
-    landmark threshold.
-    """
-    pending: list[_MouseOcrPending] = []
+    """UIA candidates when the usable-label gate passes; otherwise YOLO+OCR only."""
+    _ = live_input_hwnd, live_input_monitor_offset, live_input_window_screen_xywh
     vision_timing: dict[str, Any] = timing_out if timing_out is not None else {}
+    uia_detections = _detections_from_uia_prefetched(uia_prefetched)
+    if uia_prefetched is not None and recording_uia_detections_sufficient(
+        uia_detections,
+        local_x=local_x,
+        local_y=local_y,
+    ):
+        vision_timing["vision_path"] = "uia"
+        vision_timing["recording_ocr_deferred"] = True
+        vision_timing["recording_uia_sufficient"] = True
+        return uia_detections, vision_timing
+
     detections = _detect_mouse_targets_from_bgr(
         bgr,
         coord_offset=coord_offset,
         ocr_roi=ocr_roi,
-        live_input_hwnd=live_input_hwnd,
-        live_input_monitor_offset=live_input_monitor_offset,
-        live_input_window_screen_xywh=live_input_window_screen_xywh,
         timing_out=vision_timing,
-        defer_ocr=True,
-        pending_out=pending,
-        uia_prefetched=uia_prefetched,
+        defer_ocr=False,
+        refine_with_uia=True,
+        uia_prefetched=None,
     )
-    if not pending:
-        vision_timing["recording_ocr_deferred"] = False
-        vision_timing["recording_uia_sufficient"] = True
-        return detections, vision_timing
-
-    sufficient = recording_uia_detections_sufficient(
-        detections,
-        local_x=local_x,
-        local_y=local_y,
-    )
-    vision_timing["recording_uia_sufficient"] = sufficient
-    if sufficient:
-        vision_timing["recording_ocr_deferred"] = True
-        return detections, vision_timing
-
-    finish_timing: dict[str, Any] = {}
-    finished: list[UiDetection] = []
-    for item in pending:
-        finished.extend(_finish_mouse_ocr_pending(item, timing_out=finish_timing))
-    vision_timing.update(finish_timing)
+    _attach_unused_uia_debug(vision_timing, uia_prefetched)
+    vision_timing["vision_path"] = "yolo_ocr"
     vision_timing["recording_ocr_deferred"] = False
-    vision_timing.pop("uia_first_pending", None)
-    return finished, vision_timing
+    vision_timing["recording_uia_sufficient"] = False
+    return detections, vision_timing
 
 
 def _ocr_input_bbox_text(bgr: np.ndarray, bbox: tuple[int, int, int, int]) -> str:
@@ -3333,6 +3342,8 @@ def build_vision_context_full_image(
         payload["recording_uia_sufficient"] = bool(
             vision_timing.get("recording_uia_sufficient")
         )
+    if vision_timing.get("vision_path"):
+        payload["vision_path"] = vision_timing.get("vision_path")
 
     if persist_debug:
         suffix = debug_name or ""
@@ -3351,6 +3362,7 @@ def build_vision_context_full_image(
         "field_context": "(none)",
         "recording_ocr_deferred": vision_timing.get("recording_ocr_deferred"),
         "recording_uia_sufficient": vision_timing.get("recording_uia_sufficient"),
+        "vision_path": vision_timing.get("vision_path"),
     }
     return result
 
@@ -3549,6 +3561,8 @@ def build_vision_context_at_point(
         payload["recording_uia_sufficient"] = bool(
             vision_timing.get("recording_uia_sufficient")
         )
+    if vision_timing.get("vision_path"):
+        payload["vision_path"] = vision_timing.get("vision_path")
     debug_layers = vision_timing.get("debug_layers")
     if isinstance(debug_layers, dict):
         payload["debug_layers"] = debug_layers
@@ -3604,6 +3618,7 @@ def build_vision_context_at_point(
                 "local_cursor": (local_x, local_y),
             }
         ),
+        "vision_path": vision_timing.get("vision_path"),
     }
     if track is not None:
         result["scrollbar_track"] = track

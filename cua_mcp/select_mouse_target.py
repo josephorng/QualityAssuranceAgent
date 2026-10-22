@@ -4414,6 +4414,9 @@ async def find_mouse_point(
     instruction_text = (instruction or "").strip()
     if not instruction_text:
         raise ValueError("instruction must be non-empty")
+    from src.recorder.uia_replay_repair import take_yolo_ocr_fallback
+
+    ocr_fallback = take_yolo_ocr_fallback()
 
     total_started = time.perf_counter()
     caption_role = caption_role_from_instruction(instruction_text)
@@ -4529,37 +4532,76 @@ async def find_mouse_point(
             _grab_selected_monitors
         )
         grabbed_frames = True
-        uia_dets = await asyncio.to_thread(
-            _uia_only_detections_for_click_window, captured, click_window
-        )
-        if _uia_path_text_count(uia_dets) >= MIN_USABLE_UIA_LANDMARKS:
-            uia_first_chosen, uia_first_reason = _try_uia_first_unique_select(
-                uia_dets,
+
+        def _select_uia_snapshot(
+            dets: list[UiDetection],
+        ) -> tuple[UiDetection | None, str]:
+            if _uia_path_text_count(dets) < MIN_USABLE_UIA_LANDMARKS:
+                return None, "few_landmarks"
+            return _try_uia_first_unique_select(
+                dets,
                 anchor=anchor,
                 nearby_hints=nearby_hints,
                 nearby_labels=nearby_labels,
                 nearby_phrases=nearby_phrases,
                 filter_by_control_type=filter_by_control_type,
             )
+
+        uia_dets = await asyncio.to_thread(
+            _uia_only_detections_for_click_window, captured, click_window
+        )
+        uia_first_chosen, uia_first_reason = _select_uia_snapshot(uia_dets)
+        if uia_first_chosen is None:
+            _log_info(f"move_mouse uia_first miss reason={uia_first_reason}")
+            uia_dets = await asyncio.to_thread(
+                _uia_only_detections_for_click_window, captured, click_window
+            )
+            uia_first_chosen, uia_first_reason = _select_uia_snapshot(uia_dets)
             if uia_first_chosen is None:
-                _log_info(f"move_mouse uia_first miss reason={uia_first_reason}")
-            else:
-                detections = _sort_detections_reading_order(uia_dets)
-                vision_timing = {
-                    "capture_s": capture_s,
-                    "yolo_s": 0.0,
-                    "line_s": 0.0,
-                    "uia_input_s": 0.0,
-                    "uia_scrollbar_s": 0.0,
-                    "uia_text_s": 0.0,
-                    "ocr_s": 0.0,
-                    "icon_ocr_retry_s": 0.0,
-                    "total_s": capture_s,
-                    "vision_path": "uia",
-                    "uia_first_hit": True,
-                }
-                ocr_pendings = []
-                _log_info("move_mouse uia_first=hit; skipping YOLO")
+                _log_info(f"move_mouse uia_first retry miss reason={uia_first_reason}")
+                if ocr_fallback is not None:
+                    _log_info(
+                        "move_mouse uia retry miss; YOLO+OCR fallback "
+                        f"instruction={ocr_fallback.instruction!r}"
+                    )
+                    instruction_text = ocr_fallback.instruction
+                    nearby_objects = list(ocr_fallback.nearby_objects) or None
+                    landmark_geometry = ocr_fallback.landmark_geometry
+                    vision_mode, _instruction_body = split_vision_mode(instruction_text)
+                    vision_plan = _mouse_vision_plan(instruction_text, nearby_objects)
+                    allow_uia_select = vision_mode != "yolo_ocr"
+                    filter_by_control_type = vision_mode == "uia"
+                    (
+                        anchor,
+                        offset_dx,
+                        offset_dy,
+                        nearby_from_instruction,
+                        char_target,
+                        char_occurrence,
+                        track_percent,
+                    ) = parse_mouse_target_instruction(instruction_text)
+                    nearby_hints = merge_nearby_hints(
+                        nearby_objects, nearby_from_instruction
+                    )
+                    nearby_labels = nearby_hints_to_labels(nearby_hints)
+                    nearby_phrases = nearby_hints_to_phrases(nearby_hints)
+        if uia_first_chosen is not None:
+            detections = _sort_detections_reading_order(uia_dets)
+            vision_timing = {
+                "capture_s": capture_s,
+                "yolo_s": 0.0,
+                "line_s": 0.0,
+                "uia_input_s": 0.0,
+                "uia_scrollbar_s": 0.0,
+                "uia_text_s": 0.0,
+                "ocr_s": 0.0,
+                "icon_ocr_retry_s": 0.0,
+                "total_s": capture_s,
+                "vision_path": "uia",
+                "uia_first_hit": True,
+            }
+            ocr_pendings = []
+            _log_info("move_mouse uia_first=hit; skipping YOLO")
 
     if uia_first_chosen is None:
         if grabbed_frames:

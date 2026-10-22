@@ -657,6 +657,9 @@ def ensure_recording_tool_cache(run_dir: Path) -> None:
     analysis_dir = root / "analysis"
     if not analysis_dir.is_dir():
         return
+    from src.recorder.uia_replay_repair import backfill_yolo_ocr_fallbacks
+
+    backfill_yolo_ocr_fallbacks(root)
     source_run_id = root.name
     entries: dict[str, Any] = {}
     for analysis_path in sorted(analysis_dir.glob("event_*.json")):

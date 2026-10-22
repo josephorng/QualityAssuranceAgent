@@ -4718,6 +4718,12 @@ def _render_hand_operation_html(
     time_text = escape(_timestamp_text(timestamp)) or "—"
     message_text = escape(message or "（無）")
     instruction_meta = _render_instruction_meta_html(_instruction_meta_pairs(args))
+    replay_paths = _replay_paths_for_operation(operation)
+    path_meta = (
+        f"<dt>路徑</dt><dd>{escape('、'.join(replay_paths))}</dd>"
+        if replay_paths
+        else ""
+    )
 
     live_after_focus = operation.get("focus_rect_after")
     if not (isinstance(live_after_focus, tuple) and len(live_after_focus) == 4):
@@ -4770,6 +4776,7 @@ def _render_hand_operation_html(
         f"</div>"
         f'<div class="meta"><dl>'
         f"{instruction_meta}"
+        f"{path_meta}"
         f"<dt>狀態</dt><dd><span class=\"badge {status_class}\">{status_label}</span></dd>"
         f"<dt>時間</dt><dd>{time_text}</dd>"
         f"<dt>訊息</dt><dd>{message_text}</dd>"
@@ -4914,6 +4921,50 @@ def _render_verify_panel_html(
         f"{meta_html}"
         f"{shots_html}"
         f"</div>"
+    )
+
+
+_REPLAY_VISION_LABELS = {"uia": "UIA", "yolo_ocr": "YOLO+OCR"}
+
+
+def _replay_vision_label(timing: Any) -> str | None:
+    """Label for a live pointer resolve. ``None`` when the tool did not record one."""
+    if not isinstance(timing, dict):
+        return None
+    return _REPLAY_VISION_LABELS.get(timing.get("vision_path"))
+
+
+def _replay_paths_for_operation(operation: dict[str, Any]) -> list[str]:
+    """Vision path that actually resolved a successful move or drag."""
+    if not operation.get("ok"):
+        return []
+    args = operation.get("args")
+    if not isinstance(args, dict):
+        return []
+    direct = _replay_vision_label(args.get("timing"))
+    if direct:
+        return [direct]
+    labels: list[str] = []
+    for key, prefix in (("start_target", "起點 "), ("destination_target", "終點 ")):
+        target = args.get(key)
+        if not isinstance(target, dict):
+            continue
+        label = _replay_vision_label(target.get("timing"))
+        if label:
+            labels.append(f"{prefix}{label}")
+    return labels
+
+
+def _replay_vision_summary_badges(operations: list[dict[str, Any]]) -> str:
+    """Step-summary badges for the path that succeeded during replay."""
+    seen: list[str] = []
+    for operation in operations:
+        for label in _replay_paths_for_operation(operation):
+            text = f"回放 {label}"
+            if text not in seen:
+                seen.append(text)
+    return "".join(
+        f'<span class="badge neutral">{escape(text)}</span>' for text in seen
     )
 
 
@@ -5108,6 +5159,7 @@ def _render_instruction_group_html(
         )
 
     vision_badges = _vision_mode_summary_badges(recording_target)
+    vision_badges += _replay_vision_summary_badges(operations)
 
     return (
         f'<details class="instruction-group" id="step-{step_number}"{edit_attrs}>'

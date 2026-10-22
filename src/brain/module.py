@@ -1122,13 +1122,16 @@ class BrainModule:
         ]
 
         repair_binding = nullcontext()
+        fallback_binding = nullcontext()
         script_path_raw = (os.environ.get(SCRIPT_PATH_ENV) or "").strip()
         if script_path_raw:
             try:
                 from src.common.script_helper import recording_run_dir
                 from src.recorder.uia_replay_repair import (
                     bind_uia_replay_repairs,
+                    bind_yolo_ocr_fallbacks,
                     replay_repair_slots,
+                    yolo_ocr_fallback_slots,
                 )
 
                 recording_dir = recording_run_dir(Path(script_path_raw))
@@ -1146,11 +1149,16 @@ class BrainModule:
                     )
                     if slots:
                         repair_binding = bind_uia_replay_repairs(slots)
+                    fallback_slots = yolo_ocr_fallback_slots(
+                        recording_dir, int(event_index), cached_calls
+                    )
+                    if fallback_slots:
+                        fallback_binding = bind_yolo_ocr_fallbacks(fallback_slots)
             except Exception as exc:
                 self.manager.log_info(f"UIA replay repair setup skipped: {exc}")
 
         try:
-            with repair_binding:
+            with repair_binding, fallback_binding:
                 with require_similarity_match():
                     for call in cached_calls:
                         arguments = self._normalize_tool_arguments(call.get("arguments"))

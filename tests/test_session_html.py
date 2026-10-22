@@ -3909,6 +3909,58 @@ def test_write_recording_html_includes_time_profile_tab(tmp_path: Path) -> None:
     assert "<dt>Settle</dt>" in first_group
 
 
+def test_replay_step_records_the_path_that_succeeded(tmp_path: Path) -> None:
+    from src.common.session_html import _render_instruction_group_html
+
+    ocr_html = _render_instruction_group_html(
+        run_root=tmp_path,
+        goal="（UIA）將滑鼠移到「文件 (已釘選)」文字",
+        operations=[
+            {
+                "operation_number": 1,
+                "action": "move_mouse",
+                "ok": True,
+                "message": "executed",
+                "timestamp": None,
+                "before": None,
+                "after": None,
+                "args": {
+                    "instruction": "（UIA）「文件 (已釘選)」文字",
+                    "anchor_instruction": "（YOLO+OCR）「文件」文字",
+                    "timing": {"vision_path": "yolo_ocr"},
+                },
+            }
+        ],
+        step_number=2,
+    )
+    assert "回放 YOLO+OCR" in ocr_html
+    assert "<dt>路徑</dt><dd>YOLO+OCR</dd>" in ocr_html
+
+    uia_html = _render_instruction_group_html(
+        run_root=tmp_path,
+        goal="（UIA）將滑鼠移到「檔案總管 - 已釘選」按鈕",
+        operations=[
+            {
+                "operation_number": 1,
+                "action": "move_mouse",
+                "ok": True,
+                "message": "executed",
+                "timestamp": None,
+                "before": None,
+                "after": None,
+                "args": {
+                    "instruction": "（UIA）「檔案總管 - 已釘選」按鈕",
+                    "timing": {"vision_path": "uia", "uia_first_hit": True},
+                },
+            }
+        ],
+        step_number=1,
+    )
+    assert "回放 UIA" in uia_html
+    assert "回放 YOLO+OCR" not in uia_html
+    assert "<dt>路徑</dt><dd>UIA</dd>" in uia_html
+
+
 def test_replay_step_summary_shows_vision_path_reason(tmp_path: Path) -> None:
     from src.common.session_html import _render_instruction_group_html
 

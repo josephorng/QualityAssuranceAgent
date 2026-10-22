@@ -41,8 +41,21 @@ class UiaReplayRepairHit:
     cy: int
 
 
+@dataclass(frozen=True)
+class YoloOcrMoveFallback:
+    """One OCR pointer resolve kept after the step instruction is repaired to UIA."""
+
+    instruction: str
+    nearby_objects: tuple[str, ...] = ()
+    landmark_geometry: dict[str, Any] | None = None
+
+
 _repair_slots: ContextVar[list[UiaReplayRepairRequest | None] | None] = ContextVar(
     "uia_replay_repair_slots",
+    default=None,
+)
+_yolo_ocr_fallback_slots: ContextVar[list[YoloOcrMoveFallback | None] | None] = ContextVar(
+    "yolo_ocr_fallback_slots",
     default=None,
 )
 
@@ -65,6 +78,216 @@ def take_uia_replay_repair() -> UiaReplayRepairRequest | None:
     if not slots:
         return None
     return slots.pop(0)
+
+
+@contextmanager
+def bind_yolo_ocr_fallbacks(
+    slots: list[YoloOcrMoveFallback | None],
+) -> Iterator[None]:
+    """Queue one OCR fallback per upcoming ``find_mouse_point`` call."""
+    token = _yolo_ocr_fallback_slots.set(list(slots))
+    try:
+        yield
+    finally:
+        _yolo_ocr_fallback_slots.reset(token)
+
+
+def take_yolo_ocr_fallback() -> YoloOcrMoveFallback | None:
+    """Pop the OCR arguments for this pointer resolve. ``None`` when unset."""
+    slots = _yolo_ocr_fallback_slots.get()
+    if not slots:
+        return None
+    return slots.pop(0)
+
+
+def _yolo_ocr_mode(text: str) -> bool:
+    from cua_mcp.instruction_offset import split_vision_mode
+
+    return split_vision_mode(text.strip())[0] == "yolo_ocr"
+
+
+def yolo_ocr_fallback_payload(value: Any) -> dict[str, Any] | None:
+    """Return a stored OCR fallback when it still has a YOLO+OCR sentence and calls."""
+    if not isinstance(value, dict):
+        return None
+    instruction = value.get("instruction")
+    calls = value.get("tool_calls")
+    if not isinstance(instruction, str) or not _yolo_ocr_mode(instruction):
+        return None
+    if not isinstance(calls, list) or not calls:
+        return None
+    return value
+
+
+def _phrase_tuple(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(
+        item.strip() for item in value if isinstance(item, str) and item.strip()
+    )
+
+
+def _move_fallback_from_args(
+    args: dict[str, Any],
+    *,
+    instruction_key: str,
+    nearby_key: str,
+) -> YoloOcrMoveFallback | None:
+    instruction = str(args.get(instruction_key) or "").strip()
+    if not instruction:
+        return None
+    geometry = args.get("landmark_geometry")
+    return YoloOcrMoveFallback(
+        instruction=instruction,
+        nearby_objects=_phrase_tuple(args.get(nearby_key)),
+        landmark_geometry=geometry if isinstance(geometry, dict) else None,
+    )
+
+
+def remember_yolo_ocr_fallback(
+    analysis: dict[str, Any],
+    event: RecordedEvent,
+    run_dir: Path,
+) -> None:
+    """Keep the current YOLO+OCR sentence when a later repair replaces it.
+
+    An existing fallback stays. Saving again would store the UIA sentence.
+    """
+    if yolo_ocr_fallback_payload(analysis.get("yolo_ocr_fallback")) is not None:
+        return
+    instruction = str(analysis.get("instruction") or "").strip()
+    if not _yolo_ocr_mode(instruction):
+        return
+    from src.recorder.compile_tool_calls import compile_tool_calls
+
+    calls = compile_tool_calls(event, instruction, analysis, run_dir=Path(run_dir))
+    if not calls:
+        existing = analysis.get("tool_calls")
+        calls = existing if isinstance(existing, list) and existing else None
+    if not calls:
+        return
+    analysis["yolo_ocr_fallback"] = {
+        "instruction": instruction,
+        "tool_calls": calls,
+    }
+
+
+def backfill_yolo_ocr_fallbacks(run_dir: Path) -> int:
+    """Store a report.json YOLO+OCR line onto a repaired analysis that lost it.
+
+    Report lines follow instruction-event order. Replay reads the analysis field.
+    """
+    root = Path(run_dir)
+    report = read_json(root / "report.json", {})
+    lines = report.get("instructions") if isinstance(report, dict) else None
+    if not isinstance(lines, list):
+        return 0
+    from src.common.script_helper import _recording_event_json_paths
+    from src.recorder.compile_tool_calls import compile_tool_calls
+
+    updated = 0
+    step = 0
+    for event_path in _recording_event_json_paths(root):
+        raw_event = read_json(event_path, None)
+        if not isinstance(raw_event, dict) or not isinstance(raw_event.get("index"), int):
+            continue
+        event_index = int(raw_event["index"])
+        analysis_path = root / "analysis" / f"event_{event_index:03d}.json"
+        analysis = read_json(analysis_path, None)
+        if not isinstance(analysis, dict):
+            continue
+        instruction = analysis.get("instruction")
+        if not isinstance(instruction, str) or not instruction.strip():
+            continue
+        report_line = lines[step] if step < len(lines) else None
+        step += 1
+        if yolo_ocr_fallback_payload(analysis.get("yolo_ocr_fallback")) is not None:
+            continue
+        if not isinstance(analysis.get("uia_replay_repair"), dict):
+            continue
+        if not isinstance(report_line, str) or not _yolo_ocr_mode(report_line):
+            continue
+        try:
+            event = RecordedEvent.from_dict(raw_event)
+        except (KeyError, TypeError, ValueError):
+            continue
+        calls = compile_tool_calls(event, report_line.strip(), analysis, run_dir=root)
+        if not calls:
+            continue
+        analysis["yolo_ocr_fallback"] = {
+            "instruction": report_line.strip(),
+            "tool_calls": calls,
+        }
+        write_json(analysis_path, analysis)
+        updated += 1
+    return updated
+
+
+def yolo_ocr_fallback_slots(
+    recording_dir: Path,
+    event_index: int,
+    calls: list[dict[str, Any]],
+) -> list[YoloOcrMoveFallback | None]:
+    """Slots aligned with ``find_mouse_point`` calls for this step's OCR fallback."""
+    analysis = read_json(
+        Path(recording_dir) / "analysis" / f"event_{int(event_index):03d}.json",
+        None,
+    )
+    payload = yolo_ocr_fallback_payload(
+        analysis.get("yolo_ocr_fallback") if isinstance(analysis, dict) else None
+    )
+    if payload is None:
+        return []
+    stored = [item for item in payload["tool_calls"] if isinstance(item, dict)]
+    cursor = 0
+
+    def take_named(name: str) -> dict[str, Any] | None:
+        nonlocal cursor
+        while cursor < len(stored):
+            item = stored[cursor]
+            cursor += 1
+            if str(item.get("name") or "") == name:
+                return item
+        return None
+
+    slots: list[YoloOcrMoveFallback | None] = []
+    for call in calls:
+        if not isinstance(call, dict):
+            continue
+        name = str(call.get("name") or "")
+        if name == "move_mouse":
+            found = take_named("move_mouse")
+            args = found.get("arguments") if isinstance(found, dict) else None
+            slots.append(
+                _move_fallback_from_args(
+                    args, instruction_key="instruction", nearby_key="nearby_objects"
+                )
+                if isinstance(args, dict)
+                else None
+            )
+        elif name == "drag":
+            found = take_named("drag")
+            args = found.get("arguments") if isinstance(found, dict) else None
+            if not isinstance(args, dict):
+                slots.extend([None, None])
+                continue
+            slots.append(
+                _move_fallback_from_args(
+                    args,
+                    instruction_key="start_instruction",
+                    nearby_key="start_nearby_objects",
+                )
+            )
+            slots.append(
+                _move_fallback_from_args(
+                    args,
+                    instruction_key="destination_instruction",
+                    nearby_key="destination_nearby_objects",
+                )
+            )
+    if not any(slot is not None for slot in slots):
+        return []
+    return slots
 
 
 def snapshot_has_usable_text(snapshot: dict[str, Any] | None) -> bool:
@@ -282,6 +505,7 @@ def write_uia_replay_repair(
     instruction = _instruction_from_hit(event, request, label, bbox, others, analysis)
     if not instruction:
         return None
+    remember_yolo_ocr_fallback(analysis, event, run_dir)
     from src.recorder.vision_context import mark_recorded_side_repaired_to_uia
 
     mark_recorded_side_repaired_to_uia(run_dir, request.event_index, request.side)

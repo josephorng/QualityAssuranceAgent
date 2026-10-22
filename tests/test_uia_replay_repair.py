@@ -364,3 +364,133 @@ def test_replay_repair_slots_only_for_yolo_ocr(tmp_path: Path) -> None:
     payload["vision_path"] = "uia"
     yolo_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     assert replay_repair_slots(run, 2, calls) == []
+
+
+def test_repair_keeps_yolo_ocr_instruction_and_tool_calls(tmp_path: Path) -> None:
+    run = tmp_path / "recording"
+    (run / "events").mkdir(parents=True)
+    (run / "analysis").mkdir()
+    (run / "yolo_ocr").mkdir()
+    event = {
+        "index": 6,
+        "timestamp_utc": "2026-10-21T00:00:00+00:00",
+        "kind": "click",
+        "button": "left",
+        "click_window": {
+            "hwnd": 5,
+            "title": "Word",
+            "process_name": "WINWORD.EXE",
+            "rect": [0, 0, 200, 200],
+            "is_maximized": True,
+            "class_name": "OpusApp",
+        },
+        "uia_snapshot": {"window": [0, 0, 200, 200], "inputs": [], "scrollbars": [], "texts": []},
+    }
+    (run / "events" / "event_006.json").write_text(json.dumps(event), encoding="utf-8")
+    yolo_instruction = (
+        "（YOLO+OCR）將滑鼠移到「文件」文字（在「新增」文字的下面），並點擊滑鼠一下。"
+    )
+    (run / "analysis" / "event_006.json").write_text(
+        json.dumps(
+            {"event_index": 6, "instruction": yolo_instruction},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run / "yolo_ocr" / "event_006.json").write_text(
+        json.dumps(
+            {
+                "vision_path": "yolo_ocr",
+                "candidates": [
+                    {"bbox": [10, 20, 40, 16], "center": [30, 28], "class_name": "text", "text": "文件"}
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    request = UiaReplayRepairRequest(
+        recording_dir=run,
+        event_index=6,
+        side="click",
+        recorded_bbox=_RECORDED_BBOX,
+        recorded_text="文件",
+        recorded_window_xywh=_RECORDED_WINDOW,
+    )
+    first = write_uia_replay_repair(
+        request,
+        label="文件 (已釘選)",
+        source="element_from_point",
+        bbox=_UIA_BOX,
+        others=[],
+    )
+    assert first is not None and first.startswith("（UIA）")
+    saved = json.loads((run / "analysis" / "event_006.json").read_text(encoding="utf-8"))
+    fallback = saved["yolo_ocr_fallback"]
+    assert fallback["instruction"] == yolo_instruction
+    move = next(call for call in fallback["tool_calls"] if call["name"] == "move_mouse")
+    assert "文件" in move["arguments"]["instruction"]
+    assert "已釘選" not in move["arguments"]["instruction"]
+    assert any("新增" in item for item in move["arguments"]["nearby_objects"])
+
+    again = write_uia_replay_repair(
+        request,
+        label="文件 (已釘選)",
+        source="findall",
+        bbox=_UIA_BOX,
+        others=[],
+    )
+    assert again is not None and again.startswith("（UIA）")
+    saved_again = json.loads((run / "analysis" / "event_006.json").read_text(encoding="utf-8"))
+    assert saved_again["yolo_ocr_fallback"]["instruction"] == yolo_instruction
+
+
+def test_backfill_restores_report_yolo_line(tmp_path: Path) -> None:
+    from src.recorder.uia_replay_repair import backfill_yolo_ocr_fallbacks
+
+    run = tmp_path / "recording"
+    (run / "events").mkdir(parents=True)
+    (run / "analysis").mkdir()
+    yolo_instruction = "（YOLO+OCR）將滑鼠移到「文件」文字，並點擊滑鼠一下。"
+    event = {
+        "index": 2,
+        "timestamp_utc": "t",
+        "kind": "click",
+        "button": "left",
+        "click_window": {
+            "hwnd": 5,
+            "title": "Explorer",
+            "process_name": "explorer.exe",
+            "rect": [0, 0, 200, 200],
+            "class_name": "CabinetWClass",
+        },
+    }
+    (run / "events" / "event_001.json").write_text(
+        json.dumps({"index": 1, "timestamp_utc": "t", "kind": "click", "button": "left"}),
+        encoding="utf-8",
+    )
+    (run / "analysis" / "event_001.json").write_text(
+        json.dumps({"event_index": 1, "instruction": "（UIA）第一步"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (run / "events" / "event_002.json").write_text(json.dumps(event), encoding="utf-8")
+    (run / "analysis" / "event_002.json").write_text(
+        json.dumps(
+            {
+                "event_index": 2,
+                "instruction": "（UIA）將滑鼠移到「文件 (已釘選)」文字，並點擊滑鼠一下。",
+                "uia_replay_repair": {"label": "文件 (已釘選)", "source": "element_from_point"},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run / "report.json").write_text(
+        json.dumps({"instructions": ["（UIA）第一步", yolo_instruction]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    assert backfill_yolo_ocr_fallbacks(run) == 1
+    saved = json.loads((run / "analysis" / "event_002.json").read_text(encoding="utf-8"))
+    assert saved["yolo_ocr_fallback"]["instruction"] == yolo_instruction
+    assert saved["yolo_ocr_fallback"]["tool_calls"][0]["name"] == "move_mouse"
+    assert backfill_yolo_ocr_fallbacks(run) == 0

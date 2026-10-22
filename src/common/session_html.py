@@ -3007,12 +3007,12 @@ _INDEX_SCRIPT = """
 
     function introHelpText(count) {
       if (kind === "recordings") {
-        return "共 " + count + " 筆錄製。勾選多筆後可批次回報或刪除；點選錄製名稱開啟事件紀錄；點選欄位標題可排序；🐛 可回報 bug；垃圾桶可刪除整份錄製資料夾。";
+        return "共 " + count + " 筆錄製。勾選多筆後可批次回報或刪除（按住 Shift 可連續選取）；點選錄製名稱開啟事件紀錄；點選欄位標題可排序；🐛 可回報 bug；垃圾桶可刪除整份錄製資料夾。";
       }
       if (kind === "smart") {
-        return "共 " + count + " 筆智能模式報告。勾選多筆後可批次回報或刪除；點選目標開啟步驟紀錄；點選欄位標題可排序；🐛 可回報 bug；垃圾桶可刪除整份報告資料夾。";
+        return "共 " + count + " 筆智能模式報告。勾選多筆後可批次回報或刪除（按住 Shift 可連續選取）；點選目標開啟步驟紀錄；點選欄位標題可排序；🐛 可回報 bug；垃圾桶可刪除整份報告資料夾。";
       }
-      return "共 " + count + " 筆報告。勾選多筆後可批次回報或刪除；點選執行名稱開啟步驟紀錄；點選欄位標題可排序；🐛 可回報 bug；垃圾桶可刪除整份報告資料夾。";
+      return "共 " + count + " 筆報告。勾選多筆後可批次回報或刪除（按住 Shift 可連續選取）；點選執行名稱開啟步驟紀錄；點選欄位標題可排序；🐛 可回報 bug；垃圾桶可刪除整份報告資料夾。";
     }
 
     function updateIntroCount() {
@@ -3064,6 +3064,34 @@ _INDEX_SCRIPT = """
       }).filter(function (item) { return !!item.runId; });
     }
 
+    var rangeAnchor = null;
+
+    function runCheckboxes() {
+      return Array.prototype.slice.call(tbody.querySelectorAll("input.select-run"));
+    }
+
+    function setRunChecked(checkbox, checked) {
+      if (!checkbox || checkbox.disabled) return;
+      checkbox.checked = checked;
+      syncRowSelected(checkbox);
+    }
+
+    function selectRunRange(fromCheckbox, toCheckbox, checked) {
+      var boxes = runCheckboxes();
+      var start = boxes.indexOf(fromCheckbox);
+      var end = boxes.indexOf(toCheckbox);
+      if (start < 0 || end < 0) return false;
+      var lo = Math.min(start, end);
+      var hi = Math.max(start, end);
+      for (var i = lo; i <= hi; i++) setRunChecked(boxes[i], checked);
+      updateBulkBar();
+      return true;
+    }
+
+    table.addEventListener("selectstart", function (event) {
+      if (event.shiftKey) event.preventDefault();
+    });
+
     Array.prototype.slice.call(tbody.querySelectorAll("input.select-run")).forEach(function (cb) {
       syncRowSelected(cb);
       cb.addEventListener("change", function () {
@@ -3072,7 +3100,29 @@ _INDEX_SCRIPT = """
       });
       cb.addEventListener("click", function (event) {
         event.stopPropagation();
+        if (bulkBusy || cb.disabled) return;
+        if (event.shiftKey && rangeAnchor && rangeAnchor !== cb && rangeAnchor.isConnected) {
+          selectRunRange(rangeAnchor, cb, cb.checked);
+        }
+        rangeAnchor = cb;
       });
+    });
+
+    tbody.addEventListener("click", function (event) {
+      if (!event.shiftKey || bulkBusy) return;
+      if (event.target.closest("button, input")) return;
+      var row = event.target.closest("tr");
+      if (!row || !tbody.contains(row)) return;
+      var checkbox = row.querySelector("input.select-run");
+      if (!checkbox || checkbox.disabled) return;
+      event.preventDefault();
+      setRunChecked(checkbox, true);
+      if (rangeAnchor && rangeAnchor !== checkbox && rangeAnchor.isConnected) {
+        selectRunRange(rangeAnchor, checkbox, true);
+      } else {
+        updateBulkBar();
+      }
+      rangeAnchor = checkbox;
     });
 
     if (selectAll) {
@@ -7354,7 +7404,7 @@ def _render_runs_tab_panel(
     if run_dirs:
         rows = "".join(_render_index_row(run_dir) for run_dir in run_dirs)
         intro = (
-            f"共 {len(run_dirs)} 筆{noun}。勾選多筆後可批次回報或刪除；"
+            f"共 {len(run_dirs)} 筆{noun}。勾選多筆後可批次回報或刪除（按住 Shift 可連續選取）；"
             f"{open_hint}；"
             "點選欄位標題可排序；🐛 可回報 bug；"
             "垃圾桶可刪除整份報告資料夾。"
@@ -7403,7 +7453,7 @@ def _render_recordings_tab_panel(
             for run_dir in recording_dirs
         )
         intro = (
-            f"共 {len(recording_dirs)} 筆錄製。勾選多筆後可批次回報或刪除；"
+            f"共 {len(recording_dirs)} 筆錄製。勾選多筆後可批次回報或刪除（按住 Shift 可連續選取）；"
             "點選錄製名稱開啟事件紀錄；"
             "點選欄位標題可排序；🐛 可回報 bug；"
             "垃圾桶可刪除整份錄製資料夾。"

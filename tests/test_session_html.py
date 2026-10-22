@@ -1452,6 +1452,8 @@ def test_write_runs_index_includes_report_json_summary(tmp_path: Path) -> None:
     assert 'class="bulk-bug"' in html
     assert 'class="bulk-delete"' in html
     assert "勾選多筆後可批次回報或刪除" in html
+    assert "按住 Shift 可連續選取" in html
+    assert "selectRunRange" in html
     assert 'data-run-id="task_20260721_130000_000010"' in html
     assert "/api/runs/" in html
     assert 'postRunAction(runId, "bug")' in html

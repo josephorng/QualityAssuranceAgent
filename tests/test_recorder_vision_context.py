@@ -8,12 +8,18 @@ import numpy as np
 import pytest
 
 from cua_mcp.select_mouse_target import _detection_from_bbox
-from cua_mcp.yolo_onnx import YOLO_CLASS_ELEMENT, YOLO_CLASS_SCROLLBAR, YOLO_CLASS_TEXT
+from cua_mcp.yolo_onnx import (
+    YOLO_CLASS_ELEMENT,
+    YOLO_CLASS_INPUT,
+    YOLO_CLASS_SCROLLBAR,
+    YOLO_CLASS_TEXT,
+)
 from src.recorder.models import RecordedEvent
 from src.recorder.vision_context import (
     _BBOX_HIT_TOLERANCE_PX,
     _MIN_NEARBY_TEXT_CANDIDATES,
     _detect_recording_mouse_targets,
+    _drag_ends_share_monitor,
     _drop_point_inside_candidate,
     _local_cursor,
     _nearest_candidates,
@@ -31,6 +37,7 @@ from src.recorder.vision_context import (
     format_scrollbar_context_hint,
     primary_candidate_offset,
     promote_click_primary_candidates,
+    press_scrollbar_screen_xyxy,
     recording_uia_detections_sufficient,
     resolve_event_screenshot_path,
     scrollbar_track_percent_phrase,
@@ -1088,6 +1095,134 @@ def test_recording_uia_detections_sufficient_requires_cover_and_count() -> None:
         )
         is False
     )
+
+
+def _uia_landmark_texts(count: int) -> list:
+    """Usable UIA text boxes that do not cover ``(100, 100)``."""
+    return [
+        _detection_from_bbox(
+            (10, 10 + i * 18, 40, 14),
+            YOLO_CLASS_TEXT,
+            text=f"附近{i:02d}",
+            source="uia",
+        )
+        for i in range(count)
+    ]
+
+
+def test_recording_uia_accepts_textless_scrollbar_or_input() -> None:
+    click = (100, 100)
+    landmarks = _uia_landmark_texts(_MIN_NEARBY_TEXT_CANDIDATES)
+    scrollbar = _detection_from_bbox(
+        (90, 40, 16, 160), YOLO_CLASS_SCROLLBAR, source="uia"
+    )
+    field = _detection_from_bbox(
+        (80, 90, 40, 24), YOLO_CLASS_INPUT, source="uia"
+    )
+    assert recording_uia_detections_sufficient(
+        [*landmarks, scrollbar], local_x=click[0], local_y=click[1]
+    )
+    assert recording_uia_detections_sufficient(
+        [*landmarks, field], local_x=click[0], local_y=click[1]
+    )
+    assert (
+        recording_uia_detections_sufficient(
+            [*landmarks[:3], scrollbar], local_x=click[0], local_y=click[1]
+        )
+        is False
+    )
+    ocr_bar = _detection_from_bbox(
+        (90, 40, 16, 160), YOLO_CLASS_SCROLLBAR, source="ocr"
+    )
+    assert (
+        recording_uia_detections_sufficient(
+            [*landmarks, ocr_bar], local_x=click[0], local_y=click[1]
+        )
+        is False
+    )
+
+
+def test_recording_uia_text_on_click_still_passes_with_scrollbar() -> None:
+    click = (100, 100)
+    labeled = _detection_from_bbox(
+        (90, 90, 24, 16), YOLO_CLASS_TEXT, text="主按鈕", source="uia"
+    )
+    scrollbar = _detection_from_bbox(
+        (80, 40, 40, 160), YOLO_CLASS_SCROLLBAR, source="uia"
+    )
+    assert recording_uia_detections_sufficient(
+        [labeled, *_uia_landmark_texts(_MIN_NEARBY_TEXT_CANDIDATES - 1), scrollbar],
+        local_x=click[0],
+        local_y=click[1],
+    )
+
+
+def test_recording_uia_release_past_track_counts_as_press_scrollbar() -> None:
+    bar = (100, 100, 20, 200)
+    landmarks = _uia_landmark_texts(_MIN_NEARBY_TEXT_CANDIDATES)
+    # Left of the bar and above the track.
+    assert (
+        recording_uia_detections_sufficient(
+            landmarks, local_x=90, local_y=40
+        )
+        is False
+    )
+    assert recording_uia_detections_sufficient(
+        landmarks,
+        local_x=90,
+        local_y=40,
+        forced_scrollbar_bbox=bar,
+    )
+    assert (
+        recording_uia_detections_sufficient(
+            landmarks[:3],
+            local_x=90,
+            local_y=40,
+            forced_scrollbar_bbox=bar,
+        )
+        is False
+    )
+
+
+def test_press_scrollbar_screen_xyxy_skips_text_hit() -> None:
+    bar = [1423, 128, 1440, 1004]
+    texts = [
+        {"bbox": [10, 10 + i * 20, 80, 24 + i * 20], "text": f"列{i:02d}"}
+        for i in range(8)
+    ]
+    on_bar = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="drag",
+        cursor_xy=(1432, 372),
+        monitor_index=2,
+        end_monitor_index=2,
+        uia_snapshot={"scrollbars": [bar], "texts": texts},
+    )
+    assert press_scrollbar_screen_xyxy(on_bar) == tuple(bar)
+
+    on_text = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="drag",
+        cursor_xy=(40, 18),
+        monitor_index=2,
+        end_monitor_index=2,
+        uia_snapshot={"scrollbars": [bar], "texts": texts},
+    )
+    assert press_scrollbar_screen_xyxy(on_text) is None
+    other_monitor = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="drag",
+        cursor_xy=(1432, 372),
+        monitor_index=2,
+        end_monitor_index=1,
+        uia_snapshot={"scrollbars": [bar], "texts": texts},
+    )
+    assert press_scrollbar_screen_xyxy(other_monitor) == tuple(bar)
+    assert _drag_ends_share_monitor(on_bar) is True
+    assert _drag_ends_share_monitor(other_monitor) is False
 
 
 def test_select_click_primary_prefers_grid_icon_over_ocr_ci() -> None:

@@ -2086,6 +2086,22 @@ def test_fit_horizontal_scrollbar_extends_to_left_right_arrows() -> None:
     assert by_bbox[right.bbox].icons[0]["chinese_id"] == "向右滾動箭頭"
 
 
+def test_project_point_onto_scrollbar_snaps_cross_axis_only() -> None:
+    from cua_mcp.scrollbar_arrows import project_point_onto_scrollbar
+
+    vertical = (100, 100, 20, 200)
+    assert project_point_onto_scrollbar(90, 180, vertical) == (100, 180)
+    assert project_point_onto_scrollbar(140, 180, vertical) == (119, 180)
+    assert project_point_onto_scrollbar(110, 180, vertical) == (110, 180)
+    # Along-axis past the track stays past the track.
+    assert project_point_onto_scrollbar(0, 40, vertical) == (100, 40)
+
+    horizontal = (10, 100, 200, 16)
+    assert project_point_onto_scrollbar(50, 40, horizontal) == (50, 100)
+    assert project_point_onto_scrollbar(50, 130, horizontal) == (50, 115)
+    assert project_point_onto_scrollbar(50, 108, horizontal) == (50, 108)
+
+
 def test_fit_scrollbar_skips_when_end_arrows_missing() -> None:
     from cua_mcp.scrollbar_arrows import fit_scrollbar_bboxes_to_arrow_controls
 

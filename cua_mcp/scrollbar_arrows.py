@@ -1040,6 +1040,36 @@ def point_in_bbox(
     return bx <= int(x) < bx + bw and by <= int(y) < by + bh
 
 
+def project_point_onto_scrollbar(
+    x: int,
+    y: int,
+    bbox: tuple[int, int, int, int] | list[int],
+) -> tuple[int, int]:
+    """Snap the cross-axis coordinate onto the scrollbar. Leave the main axis.
+
+    Vertical bars snap ``x`` into the bar's x span. Horizontal bars snap ``y``
+    into the bar's y span. A point already inside that span is unchanged.
+    There is no limit on how far the cross-axis may sit from the bar. The
+    along-axis coordinate is not clamped, so a release past the track stays
+    past the track.
+    """
+    bx, by, bw, bh = (int(v) for v in bbox[:4])
+    px, py = int(x), int(y)
+    if bw <= 0 or bh <= 0:
+        return px, py
+    if scrollbar_orientation((bx, by, bw, bh)) == "vertical":
+        if px < bx:
+            px = bx
+        elif px >= bx + bw:
+            px = bx + bw - 1
+        return px, py
+    if py < by:
+        py = by
+    elif py >= by + bh:
+        py = by + bh - 1
+    return px, py
+
+
 def scrollbar_axis_percent(
     x: int,
     y: int,

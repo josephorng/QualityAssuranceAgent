@@ -30,6 +30,7 @@ from cua_mcp.read_screen_text.ocr_image import _ocr_boxes_on_bgr
 from cua_mcp.scrollbar_arrows import (
     is_scrollbar_end_arrow_candidate,
     point_in_bbox,
+    project_point_onto_scrollbar,
     scrollbar_axis_percent,
     scrollbar_orientation,
 )
@@ -615,6 +616,14 @@ def _is_usable_uia_text_detection(det: UiDetection) -> bool:
         _detection_source(det) == "uia"
         and det.class_id == YOLO_CLASS_TEXT
         and _usable_uia_landmark_label(det.text)
+    )
+
+
+def _is_uia_textless_control(det: UiDetection) -> bool:
+    """True for a UIA input or scrollbar. These controls need no label."""
+    return _detection_source(det) == "uia" and det.class_id in (
+        YOLO_CLASS_INPUT,
+        YOLO_CLASS_SCROLLBAR,
     )
 
 
@@ -3099,17 +3108,136 @@ def _attach_vision_path_fields(payload: dict[str, Any], vision_timing: dict[str,
         payload.pop("vision_path_reason", None)
 
 
+def _screen_xyxy_contains_point(
+    x: int,
+    y: int,
+    xyxy: tuple[int, int, int, int] | list[int],
+    *,
+    pad: int = _BBOX_HIT_TOLERANCE_PX,
+) -> bool:
+    """True when ``(x, y)`` lies in a screen ``(left, top, right, bottom)`` box."""
+    left, top, right, bottom = (int(v) for v in xyxy[:4])
+    width = right - left
+    height = bottom - top
+    if width <= 0 or height <= 0:
+        return False
+    return _point_inside_bbox(
+        int(x),
+        int(y),
+        (left - pad, top - pad, width + 2 * pad, height + 2 * pad),
+    )
+
+
+def _drag_ends_share_monitor(event: RecordedEvent) -> bool:
+    """True when the drag release screenshot is on the press monitor."""
+    if event.monitor_index is None or event.end_monitor_index is None:
+        return True
+    return int(event.monitor_index) == int(event.end_monitor_index)
+
+
+def _usable_snapshot_text_contains_point(
+    snapshot: dict[str, Any],
+    x: int,
+    y: int,
+) -> bool:
+    """True when a usable UIA text in a screen-xyxy snapshot covers ``(x, y)``."""
+    texts = snapshot.get("texts")
+    if not isinstance(texts, list):
+        return False
+    for item in texts:
+        if not isinstance(item, dict):
+            continue
+        if not _usable_uia_landmark_label(str(item.get("text") or "")):
+            continue
+        box = item.get("bbox")
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            continue
+        if _screen_xyxy_contains_point(x, y, box):
+            return True
+    return False
+
+
+def press_scrollbar_screen_xyxy(
+    event: RecordedEvent,
+) -> tuple[int, int, int, int] | None:
+    """Screen xyxy of the scrollbar under the press, when no usable text is there.
+
+    A press on usable text stays a text target, so the release is not forced
+    onto a bar. The smallest containing scrollbar wins.
+    """
+    if event.cursor_xy is None:
+        return None
+    snapshot = event.uia_snapshot
+    if not isinstance(snapshot, dict):
+        return None
+    x, y = int(event.cursor_xy[0]), int(event.cursor_xy[1])
+    if _usable_snapshot_text_contains_point(snapshot, x, y):
+        return None
+    bars = snapshot.get("scrollbars")
+    if not isinstance(bars, list):
+        return None
+    best: tuple[int, tuple[int, int, int, int]] | None = None
+    for item in bars:
+        if not isinstance(item, (list, tuple)) or len(item) != 4:
+            continue
+        box = (int(item[0]), int(item[1]), int(item[2]), int(item[3]))
+        if not _screen_xyxy_contains_point(x, y, box):
+            continue
+        area = (box[2] - box[0]) * (box[3] - box[1])
+        if best is None or area < best[0]:
+            best = (area, box)
+    if best is None:
+        return None
+    return best[1]
+
+
+def _screen_xyxy_to_local_xywh(
+    xyxy: tuple[int, int, int, int],
+    monitor_offset: tuple[int, int],
+) -> tuple[int, int, int, int]:
+    """Convert a screen ``(left, top, right, bottom)`` box to image-local xywh."""
+    left, top, right, bottom = xyxy
+    origin_x, origin_y = int(monitor_offset[0]), int(monitor_offset[1])
+    return (left - origin_x, top - origin_y, right - left, bottom - top)
+
+
+def _forced_scrollbar_covers_release(
+    local_x: int,
+    local_y: int,
+    bbox: tuple[int, int, int, int],
+) -> bool:
+    """True when a drag release is assigned to the press scrollbar.
+
+    The cross-axis is snapped onto the bar. The along-axis may fall outside
+    the track and the release still counts as that bar.
+    """
+    bx, by, bw, bh = (int(v) for v in bbox[:4])
+    if bw <= 0 or bh <= 0:
+        return False
+    snapped_x, snapped_y = project_point_onto_scrollbar(local_x, local_y, bbox)
+    if scrollbar_orientation((bx, by, bw, bh)) == "vertical":
+        return bx <= snapped_x < bx + bw
+    return by <= snapped_y < by + bh
+
+
 def recording_uia_skip_reason(
     detections: list[UiDetection],
     *,
     local_x: int | None = None,
     local_y: int | None = None,
     min_multi_char_text: int = _MIN_NEARBY_TEXT_CANDIDATES,
+    forced_scrollbar_bbox: tuple[int, int, int, int] | None = None,
 ) -> str | None:
     """Why a UIA snapshot cannot name the click, or ``None`` when it can.
 
     ``None`` means the labeled list is enough. Callers that have no snapshot
     use ``沒有 UIA 快照`` themselves.
+
+    A usable text box under the pointer wins. Otherwise a UIA input or
+    scrollbar under the pointer is enough; those controls have no label.
+    ``forced_scrollbar_bbox`` is the press scrollbar for a drag release: the
+    release counts as that bar after the cross-axis snap, even past the track.
+    The snapshot still needs ``min_multi_char_text`` usable text landmarks.
     """
     usable = [det for det in detections if _is_usable_uia_text_detection(det)]
     need = max(int(min_multi_char_text), 0)
@@ -3117,8 +3245,19 @@ def recording_uia_skip_reason(
         return f"可用 UIA 文字不足（{len(usable)}/{need}）"
     if local_x is None or local_y is None:
         return None
+    point_x, point_y = int(local_x), int(local_y)
+    if any(_detection_contains_click(det, point_x, point_y) for det in usable):
+        return None
+    if forced_scrollbar_bbox is not None and _forced_scrollbar_covers_release(
+        point_x,
+        point_y,
+        forced_scrollbar_bbox,
+    ):
+        return None
     if any(
-        _detection_contains_click(det, int(local_x), int(local_y)) for det in usable
+        _detection_contains_click(det, point_x, point_y)
+        for det in detections
+        if _is_uia_textless_control(det)
     ):
         return None
     return "點擊處沒有可用的 UIA 文字"
@@ -3130,13 +3269,15 @@ def recording_uia_detections_sufficient(
     local_x: int | None = None,
     local_y: int | None = None,
     min_multi_char_text: int = _MIN_NEARBY_TEXT_CANDIDATES,
+    forced_scrollbar_bbox: tuple[int, int, int, int] | None = None,
 ) -> bool:
     """True when deferred UIA-only candidates are enough to name the click.
 
     Requires usable UIA text for nearby landmarks (at least
-    ``min_multi_char_text``). When a click point is given, also requires a
-    usable UIA text detection covering that click. URL-like / ultra-long UIA
-    names do not count.
+    ``min_multi_char_text``). When a click point is given, a usable UIA text
+    box, a UIA input, or a UIA scrollbar must cover that click. A drag release
+    assigned to ``forced_scrollbar_bbox`` counts as on that bar. URL-like /
+    ultra-long UIA names do not count.
     """
     return (
         recording_uia_skip_reason(
@@ -3144,6 +3285,7 @@ def recording_uia_detections_sufficient(
             local_x=local_x,
             local_y=local_y,
             min_multi_char_text=min_multi_char_text,
+            forced_scrollbar_bbox=forced_scrollbar_bbox,
         )
         is None
     )
@@ -3254,6 +3396,7 @@ def _detect_recording_mouse_targets(
         list[tuple[tuple[int, int, int, int], str]],
     ]
     | None = None,
+    forced_scrollbar_bbox: tuple[int, int, int, int] | None = None,
 ) -> tuple[list[UiDetection], dict[str, Any]]:
     """UIA candidates when the usable-label gate passes; otherwise YOLO+OCR only."""
     _ = live_input_hwnd, live_input_monitor_offset, live_input_window_screen_xywh
@@ -3266,6 +3409,7 @@ def _detect_recording_mouse_targets(
             uia_detections,
             local_x=local_x,
             local_y=local_y,
+            forced_scrollbar_bbox=forced_scrollbar_bbox,
         )
     if skip_reason is None:
         vision_timing["vision_path"] = "uia"
@@ -3488,6 +3632,7 @@ def build_vision_context_at_point(
     click_window: dict[str, Any] | None = None,
     monitor_offset: tuple[int, int] | None = None,
     uia_snapshot: dict[str, Any] | None | object = _UIA_SNAPSHOT_UNSET,
+    press_scrollbar_screen_xyxy: tuple[int, int, int, int] | None = None,
 ) -> dict[str, Any]:
     """Run YOLO+OCR and rank candidates nearest to explicit screenshot-local coords.
 
@@ -3498,6 +3643,10 @@ def build_vision_context_at_point(
     match is in screen coordinates and is shifted by this origin. The stored
     ``rect`` is already image-local and is not shifted again. Defaults to the
     event press-time monitor.
+
+    ``press_scrollbar_screen_xyxy`` is the press scrollbar in screen coordinates.
+    A drag release counts as that bar after the cross-axis snap. ``local_cursor``
+    stays the raw release point.
     """
     empty: dict[str, Any] = {
         "used_vision": False,
@@ -3589,6 +3738,12 @@ def build_vision_context_at_point(
             ocr_roi=enhance_roi,
             window_screen_xywh=live_input_window_screen_xywh,
         )
+    forced_scrollbar_bbox: tuple[int, int, int, int] | None = None
+    if press_scrollbar_screen_xyxy is not None:
+        forced_scrollbar_bbox = _screen_xyxy_to_local_xywh(
+            press_scrollbar_screen_xyxy,
+            screenshot_offset,
+        )
     vision_timing: dict = {}
     try:
         all_detections, vision_timing = _detect_recording_mouse_targets(
@@ -3602,6 +3757,7 @@ def build_vision_context_at_point(
             local_x=local_x,
             local_y=local_y,
             uia_prefetched=uia_prefetched,
+            forced_scrollbar_bbox=forced_scrollbar_bbox,
         )
     except RuntimeError as exc:
         all_detections = []
@@ -3935,6 +4091,13 @@ def run_pointer_event_yolo_ocr(
             return empty
 
         end_image = event.end_screenshot_path or event.screenshot_path
+        # A release off the bar still belongs to the press scrollbar when both
+        # shots share a monitor. A cross-monitor drop keeps the raw end point.
+        press_scrollbar = (
+            press_scrollbar_screen_xyxy(event)
+            if _drag_ends_share_monitor(event)
+            else None
+        )
         # Same-monitor drops store the mouse-down frame in both paths. A
         # cross-monitor drop uses that other monitor's mouse-down frame.
         # Run YOLO+OCR concurrently either way.
@@ -3970,6 +4133,7 @@ def run_pointer_event_yolo_ocr(
                     if event.end_monitor_offset is not None
                     else event.monitor_offset
                 ),
+                press_scrollbar_screen_xyxy=press_scrollbar,
             )
             start_result = start_future.result()
             end_result = end_future.result()

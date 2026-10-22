@@ -44,7 +44,12 @@ from src.recorder.text_resolve import (
     focused_uia_text_from_event,
     resolve_text_input_text,
 )
-from src.recorder.models import RecordedEvent, event_json_path, final_after_screenshot_path
+from src.recorder.models import (
+    RecordedEvent,
+    event_json_path,
+    final_after_screenshot_path,
+    hydrate_window_snapshot_debug,
+)
 from src.recorder.window_snapshot import (
     foreground_identities_from_debug,
     is_agent_app_restore,
@@ -721,23 +726,42 @@ async def _analyze_all_event_instructions(
     return results, cancelled
 
 
+def _foregrounds_from_event_debug(
+    event: RecordedEvent,
+    run_dir: Path,
+    *,
+    include_before: bool = True,
+) -> list[dict[str, Any]]:
+    """Foreground samples for one event, loading signal sidecars when peeled."""
+    debug = hydrate_window_snapshot_debug(
+        run_dir,
+        event.index,
+        event.window_snapshot_debug,
+    )
+    return foreground_identities_from_debug(debug, include_before=include_before)
+
+
 def _foregrounds_after_appeared(
     events: list[RecordedEvent],
     event_pos: int,
+    *,
+    run_dir: Path,
 ) -> list[dict[str, Any]]:
     """Foregrounds that can justify an appeared window on this step.
 
     Includes this step's after-foreground, because the new window often becomes
     foreground before the next step, and every later step's foreground.
+    On disk those samples are sidecar paths, not inline dicts.
     """
     if event_pos < 0 or event_pos >= len(events):
         return []
-    found = foreground_identities_from_debug(
-        events[event_pos].window_snapshot_debug,
+    found = _foregrounds_from_event_debug(
+        events[event_pos],
+        run_dir,
         include_before=False,
     )
     for later in events[event_pos + 1 :]:
-        found.extend(foreground_identities_from_debug(later.window_snapshot_debug))
+        found.extend(_foregrounds_from_event_debug(later, run_dir))
     return found
 
 
@@ -1249,7 +1273,9 @@ async def analyze_recording_session(
                 elapsed_since_previous=elapsed_since_previous,
                 settle_after_seconds=settle_after_seconds,
                 text_resolution=text_resolution,
-                later_foregrounds=_foregrounds_after_appeared(events, event_pos),
+                later_foregrounds=_foregrounds_after_appeared(
+                    events, event_pos, run_dir=run_dir
+                ),
                 next_windows_before=_next_step_windows_before(events, event_pos),
             )
             log_info(f"cached event {event.index}: {instruction}")

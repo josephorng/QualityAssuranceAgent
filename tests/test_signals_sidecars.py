@@ -54,6 +54,57 @@ def test_hydrate_keeps_inline_signals_for_legacy_recordings(tmp_path: Path) -> N
     assert hydrated["signals_after"]["focused"]["value"] == "inline"
 
 
+def test_appeared_foreground_reads_signal_sidecar(tmp_path: Path) -> None:
+    """A new window stays in appeared when its foreground lives only in a sidecar."""
+    from src.recorder.models import RecordedEvent
+    from src.recorder.orchestrator import _foregrounds_after_appeared
+    from src.recorder.window_snapshot import limit_appeared_to_later_foreground
+
+    run_dir = tmp_path / "rec"
+    (run_dir / "events").mkdir(parents=True)
+    dialog = {
+        "class_name": "#32770",
+        "title": "另存新檔",
+        "process_name": "Notepad.exe",
+    }
+    write_event_json(
+        run_dir,
+        {
+            "index": 7,
+            "timestamp_utc": "2026-01-01T00:00:00+00:00",
+            "kind": "click",
+            "window_snapshot_debug": {
+                "signals_after": {"foreground": dialog},
+            },
+        },
+    )
+    raw = json.loads(
+        (run_dir / "events" / "event_007.json").read_text(encoding="utf-8")
+    )
+    event = RecordedEvent.from_dict(raw)
+    debug = event.window_snapshot_debug
+    assert isinstance(debug, dict)
+    assert isinstance(debug["signals_after"], str)
+
+    found = _foregrounds_after_appeared([event], 0, run_dir=run_dir)
+    assert found == [dialog]
+    limited = limit_appeared_to_later_foreground(
+        {
+            "appeared": [dialog],
+            "disappeared": [
+                {
+                    "class_name": "Microsoft.UI.Content.PopupWindowSiteBridge",
+                    "title": "快顯主機",
+                    "process_name": "Notepad.exe",
+                }
+            ],
+        },
+        found,
+    )
+    assert limited["appeared"] == [dialog]
+    assert isinstance(debug["signals_after"], str)
+
+
 def test_peel_does_not_mutate_input(tmp_path: Path) -> None:
     run_dir = tmp_path / "rec"
     (run_dir / "signals").mkdir(parents=True)

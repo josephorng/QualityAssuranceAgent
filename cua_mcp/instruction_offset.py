@@ -11,6 +11,34 @@ from src.common.nearby_side import (
 )
 from src.common.run_state import get_run_state_manager
 
+_VISION_MODE_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("uia", "（UIA）"),
+    ("yolo_ocr", "（YOLO+OCR）"),
+)
+
+
+def split_vision_mode(text: str) -> tuple[str | None, str]:
+    """Split a leading ``（UIA）`` / ``（YOLO+OCR）`` token from ``text``.
+
+    Returns ``(mode, rest)``. ``mode`` is ``uia``, ``yolo_ocr``, or ``None``.
+    """
+    raw = text or ""
+    stripped = raw.lstrip()
+    indent = raw[: len(raw) - len(stripped)]
+    for mode, prefix in _VISION_MODE_PREFIXES:
+        if stripped.startswith(prefix):
+            return mode, indent + stripped[len(prefix) :].lstrip()
+    return None, raw
+
+
+def vision_mode_prefix(mode: str | None) -> str:
+    """Instruction prefix for a recording ``vision_path``, or empty."""
+    for known, prefix in _VISION_MODE_PREFIXES:
+        if mode == known:
+            return prefix
+    return ""
+
+
 _OFFSET_TOKEN_RE = re.compile(r"(右方|左方|上方|下方)(\d+)個像素")
 # ``的N%處`` (start) and bare ``N%處`` (drag destination shorthand).
 _TRACK_PERCENT_RE = re.compile(r"(?:的)?(\d+)%處")
@@ -118,7 +146,8 @@ def _parse_mouse_target_regex(
     instruction: str,
 ) -> tuple[str, int, int, str | None, int, int | None]:
     """Regex-only parse including char-target phrases and scrollbar track %."""
-    text = _strip_context_comments((instruction or "").strip())
+    _mode, text = split_vision_mode((instruction or "").strip())
+    text = _strip_context_comments(text.strip())
     if not text:
         return "", 0, 0, None, 0, None
 
@@ -154,6 +183,11 @@ def parse_mouse_target_instruction(
     destination after the last ``拖到``.
     """
     text = (instruction or "").strip()
+    if not text:
+        return "", 0, 0, [], None, 0, None
+
+    _mode, text = split_vision_mode(text)
+    text = text.strip()
     if not text:
         return "", 0, 0, [], None, 0, None
 

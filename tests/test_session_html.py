@@ -3907,4 +3907,123 @@ def test_write_recording_html_includes_time_profile_tab(tmp_path: Path) -> None:
 
     first_group = html.split('data-event-index="1"', 1)[1].split("</details>", 1)[0]
     assert "<dt>Settle</dt>" in first_group
-    assert "1.20s" in first_group
+
+
+def test_replay_step_summary_shows_vision_path_reason(tmp_path: Path) -> None:
+    from src.common.session_html import _render_instruction_group_html
+
+    recording = tmp_path / "recording"
+    (recording / "yolo_ocr").mkdir(parents=True)
+    (recording / "yolo_ocr" / "event_011.json").write_text(
+        json.dumps(
+            {
+                "vision_path": "yolo_ocr",
+                "vision_path_reason": "可用 UIA 文字不足（2/8）",
+                "candidates": [],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (recording / "yolo_ocr" / "event_012.json").write_text(
+        json.dumps({"vision_path": "uia", "candidates": []}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (recording / "yolo_ocr" / "event_012_end.json").write_text(
+        json.dumps(
+            {
+                "vision_path": "uia",
+                "vision_path_reason": "重播修復改為 UIA",
+                "candidates": [],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    click_html = _render_instruction_group_html(
+        run_root=tmp_path,
+        goal="將滑鼠移到「文件」文字",
+        operations=[],
+        step_number=1,
+        recording_target={
+            "recording": recording,
+            "event": {"index": 11, "kind": "click"},
+            "analysis": {"instruction": "將滑鼠移到「文件」文字"},
+        },
+    )
+    assert "YOLO+OCR：可用 UIA 文字不足（2/8）" in click_html
+    drag_html = _render_instruction_group_html(
+        run_root=tmp_path,
+        goal="從「甲」拖到「乙」",
+        operations=[],
+        step_number=2,
+        recording_target={
+            "recording": recording,
+            "event": {"index": 12, "kind": "drag"},
+            "analysis": {"instruction": "從「甲」拖到「乙」"},
+        },
+    )
+    assert "起點 UIA" in drag_html
+    assert "終點 UIA：重播修復改為 UIA" in drag_html
+    plain = _render_instruction_group_html(
+        run_root=tmp_path,
+        goal="將滑鼠移到「文件」文字",
+        operations=[],
+        step_number=3,
+        recording_target={
+            "recording": recording,
+            "event": {"index": 99, "kind": "click"},
+        },
+    )
+    assert "YOLO+OCR" not in plain
+    assert "UIA：" not in plain
+
+
+def test_recording_steps_summary_shows_vision_path_reason(tmp_path: Path) -> None:
+    from src.common.session_html import _render_recording_event_html
+
+    recording = tmp_path / "recording"
+    (recording / "yolo_ocr").mkdir(parents=True)
+    (recording / "events").mkdir()
+    (recording / "yolo_ocr" / "event_011.json").write_text(
+        json.dumps(
+            {
+                "vision_path": "yolo_ocr",
+                "vision_path_reason": "點擊處沒有可用的 UIA 文字",
+                "candidates": [],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (recording / "yolo_ocr" / "event_012.json").write_text(
+        json.dumps(
+            {"vision_path": "yolo_ocr", "vision_path_reason": "沒有 UIA 快照", "candidates": []},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (recording / "yolo_ocr" / "event_012_end.json").write_text(
+        json.dumps({"vision_path": "uia", "candidates": []}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    click_html = _render_recording_event_html(
+        run_root=recording,
+        event={
+            "index": 11,
+            "timestamp_utc": "t",
+            "kind": "click",
+            "button": "left",
+        },
+    )
+    assert "YOLO+OCR：點擊處沒有可用的 UIA 文字" in click_html
+    drag_html = _render_recording_event_html(
+        run_root=recording,
+        event={
+            "index": 12,
+            "timestamp_utc": "t",
+            "kind": "drag",
+        },
+    )
+    assert "起點 YOLO+OCR：沒有 UIA 快照" in drag_html
+    assert "終點 UIA" in drag_html

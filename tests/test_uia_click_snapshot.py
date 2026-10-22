@@ -37,6 +37,36 @@ def test_uia_snapshot_image_local_does_not_query_hwnd(monkeypatch: pytest.Monkey
     assert texts
     assert texts[0][1] == "應用程式及其他"
     assert texts[0][0] == (240, 8, 44, 44)
+    assert texts[0][2] == ""
+
+
+def test_uia_snapshot_image_local_keeps_control_type() -> None:
+    inputs, scrollbars, texts = uia_snapshot_image_local(
+        {
+            "window": [0, 0, 400, 300],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [
+                {
+                    "bbox": [240, 8, 284, 52],
+                    "text": "應用程式及其他",
+                    "control_type": "list_item",
+                },
+                {
+                    "bbox": [10, 10, 40, 30],
+                    "text": "舊標籤",
+                },
+            ],
+        },
+        monitor_offset=(0, 0),
+        image_w=400,
+        image_h=300,
+    )
+    assert inputs is None
+    assert scrollbars is None
+    by_text = {label: (box, control_type) for box, label, control_type in texts}
+    assert by_text["應用程式及其他"][1] == "list_item"
+    assert by_text["舊標籤"][1] == ""
 
 
 def test_detect_uses_prefetched_snapshot_and_skips_findall(
@@ -698,3 +728,177 @@ async def test_replay_uia_path_skips_yolo_and_miss_drops_uia_names(
     assert found[2]["timing"]["vision_path"] == "yolo_ocr"
     assert found[2]["target_text"] == "搜尋"
     assert "https://" not in found[2]["target_text"]
+
+
+@pytest.mark.asyncio
+async def test_yolo_mode_instruction_skips_findall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from cua_mcp.select_mouse_target import _detection_from_bbox
+    from cua_mcp.yolo_onnx import YOLO_CLASS_TEXT
+
+    ocr = _detection_from_bbox((20, 20, 40, 16), YOLO_CLASS_TEXT, text="空自文件", source="ocr")
+    uia_calls: list[str] = []
+
+    def fake_uia(*_a, **_k):
+        uia_calls.append("findall")
+        raise AssertionError("YOLO+OCR instructions must not FindAll")
+
+    def fake_capture(*_a, **_k):
+        frame = np.zeros((40, 80, 3), dtype=np.uint8)
+        return (
+            [1],
+            ["shot.png"],
+            [(1, frame)],
+            [ocr],
+            {
+                "capture_s": 0.01,
+                "yolo_s": 0.1,
+                "line_s": 0.0,
+                "uia_input_s": 0.0,
+                "uia_scrollbar_s": 0.0,
+                "uia_text_s": 0.0,
+                "ocr_s": 0.2,
+                "icon_ocr_retry_s": 0.0,
+                "total_s": 0.31,
+                "vision_path": "yolo_ocr",
+            },
+        )
+
+    monkeypatch.setattr(smt, "_uia_only_detections_for_click_window", fake_uia)
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_uia)
+    monkeypatch.setattr(smt, "_capture_and_detect_mouse_candidates", fake_capture)
+    window = {"hwnd": 7, "left": 0, "top": 0}
+    found = await smt.find_mouse_point(
+        "（YOLO+OCR）「空自文件」文字",
+        click_window=window,
+    )
+    assert uia_calls == []
+    assert found is not None
+    assert (found[0], found[1]) == (ocr.cx, ocr.cy)
+    assert found[2]["target_text"] == "空自文件"
+
+
+@pytest.mark.asyncio
+async def test_yolo_mode_finishes_deferred_ocr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from cua_mcp.select_mouse_target import _detection_from_bbox
+    from cua_mcp.yolo_onnx import YOLO_CLASS_ELEMENT, YOLO_CLASS_TEXT
+
+    partial = _detection_from_bbox((20, 20, 40, 16), YOLO_CLASS_ELEMENT, source="yolo")
+    finished = _detection_from_bbox(
+        (20, 20, 40, 16), YOLO_CLASS_TEXT, text="空自文件", source="ocr"
+    )
+    uia_calls: list[str] = []
+    finish_calls: list[object] = []
+
+    def fake_uia(*_a, **_k):
+        uia_calls.append("findall")
+        raise AssertionError("YOLO+OCR instructions must not FindAll")
+
+    def fake_capture(*_a, **_k):
+        frame = np.zeros((40, 80, 3), dtype=np.uint8)
+        return (
+            [1],
+            ["shot.png"],
+            [(1, frame)],
+            [partial],
+            {
+                "capture_s": 0.01,
+                "yolo_s": 0.1,
+                "line_s": 0.0,
+                "uia_input_s": 0.0,
+                "uia_scrollbar_s": 0.0,
+                "uia_text_s": 0.0,
+                "ocr_s": 0.0,
+                "icon_ocr_retry_s": 0.0,
+                "total_s": 0.11,
+                "vision_path": "yolo_ocr",
+                "_ocr_pending": ["pending"],
+            },
+        )
+
+    def fake_finish(pendings, *, timing_base):
+        finish_calls.append(pendings)
+        timing = dict(timing_base)
+        timing["ocr_s"] = 0.2
+        return [finished], timing
+
+    monkeypatch.setattr(smt, "_uia_only_detections_for_click_window", fake_uia)
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_uia)
+    monkeypatch.setattr(smt, "_capture_and_detect_mouse_candidates", fake_capture)
+    monkeypatch.setattr(smt, "_finish_deferred_ocr_pendings", fake_finish)
+    found = await smt.find_mouse_point("（YOLO+OCR）「空自文件」文字")
+    assert uia_calls == []
+    assert finish_calls == [["pending"]]
+    assert found is not None
+    assert (found[0], found[1]) == (finished.cx, finished.cy)
+    assert found[2]["target_text"] == "空自文件"
+
+
+@pytest.mark.asyncio
+async def test_uia_mode_typed_miss_falls_through_to_yolo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from cua_mcp.select_mouse_target import _detection_from_bbox
+    from cua_mcp.yolo_onnx import YOLO_CLASS_TEXT
+    from src.recorder.uia_input_boxes import MIN_USABLE_UIA_LANDMARKS
+
+    uia = [
+        _detection_from_bbox(
+            (10, 10 + i * 12, 40, 10),
+            YOLO_CLASS_TEXT,
+            text=f"旁{i:02d}",
+            source="uia",
+            uia_control_type="list_item",
+        )
+        for i in range(MIN_USABLE_UIA_LANDMARKS)
+    ]
+    ocr = _detection_from_bbox((80, 80, 30, 16), YOLO_CLASS_TEXT, text="記事本", source="ocr")
+    yolo_calls: list[str] = []
+
+    def fake_grab():
+        frame = np.zeros((20, 20, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def fake_uia(_captured, _window):
+        return list(uia)
+
+    def fake_finish(*_a, **_k):
+        yolo_calls.append("yolo")
+        return (
+            [1],
+            ["shot.png"],
+            [(1, np.zeros((20, 20, 3), dtype=np.uint8))],
+            [ocr],
+            {
+                "capture_s": 0.01,
+                "yolo_s": 0.1,
+                "line_s": 0.0,
+                "uia_input_s": 0.0,
+                "uia_scrollbar_s": 0.0,
+                "uia_text_s": 0.0,
+                "ocr_s": 0.2,
+                "icon_ocr_retry_s": 0.0,
+                "total_s": 0.31,
+            },
+        )
+
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(smt, "_uia_only_detections_for_click_window", fake_uia)
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
+    window = {"hwnd": 7, "left": 0, "top": 0}
+    found = await smt.find_mouse_point("（UIA）「記事本」按鈕", click_window=window)
+    assert yolo_calls == ["yolo"]
+    assert found is not None
+    assert found[2]["target_text"] == "記事本"

@@ -4,9 +4,23 @@ from cua_mcp.instruction_offset import (
     _parse_mouse_target_regex,
     _parse_relative_pixel_offset_regex,
     parse_mouse_target_instruction,
+    split_vision_mode,
 )
 from src.common.nearby_side import NearbyHint, Side
 from src.recorder.vision_context import format_drag_relative_offset_phrase
+
+
+def test_parse_strips_vision_mode_prefix() -> None:
+    mode, body = split_vision_mode("（UIA）將滑鼠移到「記事本」清單項目")
+    assert mode == "uia"
+    assert body == "將滑鼠移到「記事本」清單項目"
+    anchor, dx, dy, _nearby, _char, _occ, _track = parse_mouse_target_instruction(
+        "（YOLO+OCR）「空自文件」文字"
+    )
+    assert anchor == "「空自文件」文字"
+    assert (dx, dy) == (0, 0)
+    named, *_rest = parse_mouse_target_instruction("「清單項目」文字")
+    assert named == "「清單項目」文字"
 
 
 def test_parse_relative_pixel_offset_regex_right_and_up() -> None:

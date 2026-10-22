@@ -1167,6 +1167,7 @@ def test_detect_recording_mouse_targets_skips_ocr_when_uia_rich(
     )
     assert yolo_calls == []
     assert timing.get("vision_path") == "uia"
+    assert "vision_path_reason" not in timing
     assert timing.get("recording_ocr_deferred") is True
     assert timing.get("recording_uia_sufficient") is True
     assert any(d.text == "主按鈕" and d.source == "uia" for d in detections)
@@ -1202,6 +1203,7 @@ def test_detect_recording_mouse_targets_finishes_ocr_when_uia_thin(
         ),
     )
     assert timing.get("vision_path") == "yolo_ocr"
+    assert timing.get("vision_path_reason") == "可用 UIA 文字不足（0/8）"
     assert timing.get("recording_ocr_deferred") is False
     assert timing.get("recording_uia_sufficient") is False
     assert [d.text for d in detections] == ["搜尋"]
@@ -1235,6 +1237,7 @@ def test_detect_recording_empty_click_uses_yolo_neighbor(
         uia_prefetched=(None, None, labeled),
     )
     assert timing.get("vision_path") == "yolo_ocr"
+    assert timing.get("vision_path_reason") == "點擊處沒有可用的 UIA 文字"
     assert [d.text for d in detections] == ["搜尋"]
     assert all(d.source != "uia" for d in detections)
 
@@ -1755,6 +1758,25 @@ def test_format_drag_relative_offset_phrase_negligible() -> None:
 
 def test_format_drag_candidate_anchor_text() -> None:
     assert format_drag_candidate_anchor({"class_name": "text", "text": "Desktop"}) == "「Desktop」文字"
+
+
+def test_format_drag_candidate_anchor_uia_control_type() -> None:
+    assert format_drag_candidate_anchor(
+        {
+            "class_name": "text",
+            "text": "應用程式及其他",
+            "source": "uia",
+            "uia_control_type": "list_item",
+        }
+    ) == "「應用程式及其他」清單項目"
+    assert format_drag_candidate_anchor(
+        {
+            "class_name": "text",
+            "text": "確定",
+            "source": "uia",
+            "uia_control_type": "button",
+        }
+    ) == "「確定」按鈕"
 
 
 def test_format_drag_candidate_anchor_icon() -> None:

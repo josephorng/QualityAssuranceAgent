@@ -15,6 +15,7 @@ from src.common.nearby_side import (
     nearby_hints_to_phrases,
     strip_nearby_context_comments,
 )
+from cua_mcp.instruction_offset import split_vision_mode, vision_mode_prefix
 from src.recorder.analyze import typed_text_from_instruction
 from src.recorder.landmark_geometry import build_landmark_geometry
 from src.recorder.models import RecordedEvent, event_json_path
@@ -246,11 +247,13 @@ def _effective_left_click_count(kind: str, click_count: int | None) -> int | Non
 
 def _short_move_target(instruction: str) -> str:
     """Hub-script line → move_mouse primary target (no prefix/suffix/nearby)."""
-    text = strip_nearby_context_comments(instruction).strip()
+    mode, body = split_vision_mode(instruction)
+    text = strip_nearby_context_comments(body).strip()
     text = _CLICK_ACTION_SUFFIX_RE.sub("", text).strip().rstrip("，").strip()
     if text.startswith(_MOVE_PREFIX):
         text = text[len(_MOVE_PREFIX) :].strip()
-    return text
+    prefix = vision_mode_prefix(mode)
+    return f"{prefix}{text}" if prefix else text
 
 
 def _nearby_object_phrases(instruction: str) -> list[str] | None:
@@ -302,12 +305,29 @@ def _move_mouse_call(
 
 
 def _move_target_is_text(target: str) -> bool:
-    """True when the move_mouse primary is a ``…文字`` anchor (not icon/input/…)."""
+    """True when the move_mouse primary is an on-object named label.
+
+    UIA control suffixes (``清單項目``, ``按鈕``, …) match by name the same way
+    ``文字`` does. A bare ``按鈕`` with no quoted name stays a class anchor.
+    """
     text = target or ""
-    for suffix in ("圖示", "輸入欄", "滾動條", "按鈕", "未知", "元素"):
+    for suffix in ("圖示", "輸入欄", "滾動條", "未知", "元素"):
         if suffix in text:
             return False
-    return "文字" in text
+    if "按鈕" in text and "「" not in text:
+        return False
+    for suffix in (
+        "清單項目",
+        "功能表項目",
+        "樹狀項目",
+        "資料項目",
+        "超連結",
+        "按鈕",
+        "文字",
+    ):
+        if suffix in text:
+            return True
+    return False
 
 
 def _is_relative_offset_position(target: str) -> bool:
@@ -387,7 +407,8 @@ def _compile_click_family(
 def _compile_drag(event: RecordedEvent, instruction: str) -> list[dict[str, Any]] | None:
     if event.kind != "drag":
         return None
-    cleaned = strip_nearby_context_comments(instruction).strip()
+    mode, body = split_vision_mode(instruction.strip())
+    cleaned = strip_nearby_context_comments(body).strip()
     match = _DRAG_SPLIT_RE.match(cleaned)
     if not match:
         return None
@@ -395,6 +416,10 @@ def _compile_drag(event: RecordedEvent, instruction: str) -> list[dict[str, Any]
     destination = match.group(2).strip()
     if not start or not destination:
         return None
+    prefix = vision_mode_prefix(mode)
+    if prefix:
+        start = prefix + start
+        destination = prefix + destination
     buckets = extract_nearby_hints_by_location(instruction)
     start_nearby = nearby_hints_to_phrases(buckets.get("起點") or [])
     # Trailing （在…） comments land in 附近; use them for start when 起點 is empty
@@ -433,12 +458,17 @@ def _compile_scroll(
     # Recorded positive delta → 向上捲動 → scroll tool negative clicks.
     clicks = -int(delta)
     calls: list[dict[str, Any]] = []
-    hover = _SCROLL_HOVER_RE.match(instruction.strip())
+    mode, body = split_vision_mode(instruction.strip())
+    hover = _SCROLL_HOVER_RE.match(body)
     if hover:
+        target = hover.group(1).strip()
+        prefix = vision_mode_prefix(mode)
+        if prefix:
+            target = prefix + target
         calls.append(
             _move_mouse_call(
                 instruction,
-                target=hover.group(1).strip(),
+                target=target,
                 click_window=event.click_window,
                 vision=vision,
             )

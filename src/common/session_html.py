@@ -4917,6 +4917,41 @@ def _render_verify_panel_html(
     )
 
 
+def _vision_mode_summary_badges(recording_target: dict[str, Any] | None) -> str:
+    """Show the recording vision path, and why a side stayed YOLO+OCR."""
+    if not isinstance(recording_target, dict):
+        return ""
+    recording = recording_target.get("recording")
+    event = recording_target.get("event")
+    if not isinstance(recording, Path) or not isinstance(event, dict):
+        return ""
+    raw_index = event.get("index")
+    if not isinstance(raw_index, int):
+        return ""
+    from src.recorder.vision_context import load_yolo_ocr_payload
+
+    def one(suffix: str, prefix: str) -> str:
+        payload = load_yolo_ocr_payload(recording, raw_index, suffix=suffix)
+        if not isinstance(payload, dict):
+            return ""
+        path = payload.get("vision_path")
+        if path == "uia":
+            mode = "UIA"
+        elif path == "yolo_ocr":
+            mode = "YOLO+OCR"
+        else:
+            return ""
+        text = f"{prefix}{mode}"
+        reason = payload.get("vision_path_reason")
+        if isinstance(reason, str) and reason.strip():
+            text = f"{text}：{reason.strip()}"
+        return f'<span class="badge neutral">{escape(text)}</span>'
+
+    if event.get("kind") == "drag":
+        return one("", "起點 ") + one("_end", "終點 ")
+    return one("", "")
+
+
 def _render_instruction_group_html(
     *,
     run_root: Path,
@@ -5072,6 +5107,8 @@ def _render_instruction_group_html(
             "</div>"
         )
 
+    vision_badges = _vision_mode_summary_badges(recording_target)
+
     return (
         f'<details class="instruction-group" id="step-{step_number}"{edit_attrs}>'
         f"<summary>"
@@ -5084,6 +5121,7 @@ def _render_instruction_group_html(
         f"</span>"
         f"{badges}"
         f"{recording_badges}"
+        f"{vision_badges}"
         f"{summary_actions}"
         f"</summary>"
         f"{verify_panel}"
@@ -7292,6 +7330,7 @@ def _render_recording_event_html(
         f"{expected_summary}"
         f"</span>"
         f'<span class="badge neutral">{kind_badge}</span>'
+        f"{_vision_mode_summary_badges({'recording': run_root, 'event': event})}"
         f"{tool_cache_badge}"
         f"{copy_button_html}"
         f"{add_wait_html}"

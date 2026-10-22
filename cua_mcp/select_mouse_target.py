@@ -32,7 +32,7 @@ from cua_mcp.geometry import (
     point_in_rect_xywh,
 )
 from cua_mcp.input_box_rectangles import merge_yolo_inputs_with_line_rectangles
-from cua_mcp.instruction_offset import parse_mouse_target_instruction
+from cua_mcp.instruction_offset import parse_mouse_target_instruction, split_vision_mode
 from cua_mcp.scrollbar_arrows import point_from_scrollbar_percent
 from cua_mcp.icon_map import (
     describe_text_icons,
@@ -148,7 +148,8 @@ def _mouse_vision_plan(
     other class at the same place (e.g. 「此」文字 vs 網格檢視).
     """
     phrases: list[str] = []
-    raw = (instruction or "").strip()
+    _mode, raw = split_vision_mode((instruction or "").strip())
+    raw = raw.strip()
     if raw:
         phrases.append(raw)
     if nearby_objects:
@@ -249,6 +250,7 @@ def _detection_from_bbox(
     text: str | None = None,
     icons: list[dict[str, Any]] | None = None,
     source: str | None = None,
+    uia_control_type: str | None = None,
 ) -> UiDetection:
     x, y, w, h = bbox
     cx = x + w // 2
@@ -265,6 +267,7 @@ def _detection_from_bbox(
         text=text,
         icons=icons if icons else None,
         source=source,
+        uia_control_type=uia_control_type or None,
     )
 
 
@@ -279,6 +282,7 @@ def _offset_detection(det: UiDetection, left: int, top: int) -> UiDetection:
         text=det.text,
         icons=det.icons,
         source=det.source,
+        uia_control_type=det.uia_control_type,
     )
 
 
@@ -1123,14 +1127,19 @@ def _vision_debug_layers(
     uia_scrollbars: list[tuple[int, int, int, int]],
 ) -> dict[str, Any]:
     """Image-local YOLO + UIA boxes for run/recording overlay debug."""
-    uia_boxes: list[dict[str, Any]] = [
-        {
+    from src.recorder.uia_input_boxes import unpack_uia_labeled
+
+    uia_boxes: list[dict[str, Any]] = []
+    for item in uia_labeled_texts:
+        bbox, label, control_type = unpack_uia_labeled(item)
+        row: dict[str, Any] = {
             "bbox": [int(v) for v in bbox],
             "class_name": "uia_text",
             "text": str(label or ""),
         }
-        for bbox, label in uia_labeled_texts
-    ]
+        if control_type:
+            row["control_type"] = control_type
+        uia_boxes.append(row)
     uia_boxes.extend(
         {"bbox": [int(v) for v in bbox], "class_name": "uia_input", "text": ""}
         for bbox in uia_inputs
@@ -1153,6 +1162,8 @@ def _ui_detection_candidate_dict(det: UiDetection) -> dict[str, Any]:
     }
     if det.source:
         payload["source"] = det.source
+    if det.uia_control_type:
+        payload["uia_control_type"] = det.uia_control_type
     return payload
 
 
@@ -3155,9 +3166,35 @@ def _detections_same_place(a: UiDetection, b: UiDetection) -> bool:
     return point_in_rect_xywh(b.cx, b.cy, a.bbox)
 
 
+# Class words that exist only as a UIA control suffix after 「…」.
+_UIA_ONLY_ANCHOR_SUFFIXES = (
+    "清單項目",
+    "功能表項目",
+    "樹狀項目",
+    "資料項目",
+    "超連結",
+)
+# Named UIA controls are on-object labels. 按鈕 is included so 「X」按鈕 is
+# text-like for fallback policy, while the older scan still finds bare 按鈕.
+_UIA_LABELED_ANCHOR_SUFFIXES = frozenset(
+    _UIA_ONLY_ANCHOR_SUFFIXES + ("按鈕",)
+)
+
+
 def _anchor_type_suffix(anchor: str) -> str | None:
-    """Return the class suffix in ``anchor`` (圖示, 文字, …), if any."""
+    """Return the class suffix in ``anchor`` (圖示, 文字, …), if any.
+
+    UIA-only words are taken from the text after the closing quote so a name
+    that contains 清單項目 does not hide a trailing 文字. The older scan still
+    prefers 輸入欄 inside 「…」文字所在的輸入欄.
+    """
     text = anchor or ""
+    close = text.find("」")
+    if close >= 0:
+        tail = text[close + 1 :]
+        for suffix in _UIA_ONLY_ANCHOR_SUFFIXES:
+            if tail.startswith(suffix):
+                return suffix
     for suffix in ("圖示", "輸入欄", "滾動條", "按鈕", "文字", "未知", "元素"):
         if suffix in text:
             return suffix
@@ -3165,8 +3202,9 @@ def _anchor_type_suffix(anchor: str) -> str | None:
 
 
 def _anchor_is_text(anchor: str) -> bool:
-    """True when the move_mouse anchor names a text target (``…文字``)."""
-    return _anchor_type_suffix(anchor) == "文字"
+    """True when the anchor is an on-object named label (``…文字`` or a UIA type)."""
+    suffix = _anchor_type_suffix(anchor)
+    return suffix == "文字" or suffix in _UIA_LABELED_ANCHOR_SUFFIXES
 
 
 def _is_relative_offset_position(instruction: str) -> bool:
@@ -3187,11 +3225,13 @@ def _matches_landmark_fallback_type(det: UiDetection, anchor: str) -> bool:
     suffix = _anchor_type_suffix(anchor)
     if suffix is None:
         return True
-    if suffix in ("文字", "圖示", "元素"):
+    if suffix in ("文字", "圖示", "元素") or suffix in _UIA_LABELED_ANCHOR_SUFFIXES:
         if (
             det.class_name in ("text", "element")
             or det.class_id in (YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT)
         ):
+            return True
+        if suffix == "按鈕" and det.class_name == "button":
             return True
         if suffix in ("圖示", "元素"):
             if not _is_blank_unknown_icon_candidate(det):
@@ -3201,7 +3241,6 @@ def _matches_landmark_fallback_type(det: UiDetection, anchor: str) -> bool:
     expected = {
         "輸入欄": "input",
         "滾動條": "scrollbar",
-        "按鈕": "button",
         "未知": "unknown",
     }[suffix]
     if det.class_name == expected:
@@ -3907,6 +3946,39 @@ def _finish_deferred_ocr_pendings(
     return _sort_detections_reading_order(all_detections), timing
 
 
+def _phrase_match_pool(
+    detections: list[UiDetection],
+    phrase: str,
+) -> list[UiDetection]:
+    """Keep detections of ``phrase``'s UIA type. Empty typed set falls back to all."""
+    from src.recorder.uia_input_boxes import control_token_for_suffix
+
+    token = control_token_for_suffix(_anchor_type_suffix(phrase))
+    if not token:
+        return detections
+    typed = [det for det in detections if (det.uia_control_type or "") == token]
+    if typed:
+        return typed
+    _log_info(
+        "control_type_fallback "
+        f"phrase={phrase!r} token={token} detections={len(detections)}"
+    )
+    return detections
+
+
+def _matches_for_phrase(
+    detections: list[UiDetection],
+    phrase: str,
+) -> list[UiDetection]:
+    """Name matches for one phrase, inside its control-type pool when that pool exists."""
+    pool = _phrase_match_pool(detections, phrase)
+    indices = _anchor_indices_by_top_similarity(pool, phrase)
+    if not indices:
+        return []
+    expanded = _expand_keep_indices_with_similar(pool, indices)
+    return [pool[index] for index in expanded]
+
+
 def _try_uia_first_unique_select(
     detections: list[UiDetection],
     *,
@@ -3914,14 +3986,26 @@ def _try_uia_first_unique_select(
     nearby_hints: list[NearbyHint],
     nearby_labels: list[str],
     nearby_phrases: list[str],
+    filter_by_control_type: bool = False,
 ) -> tuple[UiDetection | None, str]:
     """Soft UIA-first commit: unique after filter + nearby prefilter, else miss reason."""
     if not detections:
         return None, "no_detections"
 
-    anchor_matches, nearby_matches = _filter_mouse_candidates(
-        detections, anchor, nearby_labels
-    )
+    if filter_by_control_type:
+        anchor_matches = _matches_for_phrase(detections, anchor)
+        nearby_matches: list[UiDetection] = []
+        seen = {id(det) for det in anchor_matches}
+        for phrase in nearby_labels:
+            for det in _matches_for_phrase(detections, phrase):
+                if id(det) in seen:
+                    continue
+                seen.add(id(det))
+                nearby_matches.append(det)
+    else:
+        anchor_matches, nearby_matches = _filter_mouse_candidates(
+            detections, anchor, nearby_labels
+        )
     _log_info(
         "move_mouse uia_first after_filter "
         f"anchor={len(anchor_matches)} nearby={len(nearby_matches)} "
@@ -3964,11 +4048,15 @@ def _detections_from_uia_prefetched(
     """Text, input, and scrollbar candidates from a snapshot. URL names are omitted."""
     if uia_prefetched is None:
         return []
-    from src.recorder.uia_input_boxes import is_usable_uia_landmark_label
+    from src.recorder.uia_input_boxes import (
+        is_usable_uia_landmark_label,
+        unpack_uia_labeled,
+    )
 
     inputs, scrollbars, labeled = uia_prefetched
     detections: list[UiDetection] = []
-    for box, label in labeled or []:
+    for item in labeled or []:
+        box, label, control_type = unpack_uia_labeled(item)
         text = str(label or "").strip()
         if not is_usable_uia_landmark_label(text):
             continue
@@ -3978,6 +4066,7 @@ def _detections_from_uia_prefetched(
                 YOLO_CLASS_TEXT,
                 text=text,
                 source="uia",
+                uia_control_type=control_type or None,
             )
         )
     for box in inputs or []:
@@ -4350,8 +4439,11 @@ async def find_mouse_point(
     else:
         caption_roi_screen = None
 
+    vision_mode, _instruction_body = split_vision_mode(instruction_text)
     vision_plan = _mouse_vision_plan(instruction_text, nearby_objects)
-    _log_info(f"move_mouse vision plan {vision_plan.describe()}")
+    _log_info(
+        f"move_mouse vision plan {vision_plan.describe()} vision_mode={vision_mode!r}"
+    )
 
     parse_started = time.perf_counter()
     (
@@ -4384,8 +4476,13 @@ async def find_mouse_point(
         repair_request = take_uia_replay_repair()
     # A repair slot still walks UIA when the recorded hwnd is missing: the live
     # match is by process and title inside ``_uia_only_detections_for_click_window``.
-    if vision_plan.refine_with_uia and isinstance(click_window, dict) and (
-        click_hwnd or repair_request is not None
+    allow_uia_select = vision_mode != "yolo_ocr"
+    filter_by_control_type = vision_mode == "uia"
+    if (
+        allow_uia_select
+        and vision_plan.refine_with_uia
+        and isinstance(click_window, dict)
+        and (click_hwnd or repair_request is not None)
     ):
         from src.recorder.uia_input_boxes import MIN_USABLE_UIA_LANDMARKS
 
@@ -4403,6 +4500,7 @@ async def find_mouse_point(
                 nearby_hints=nearby_hints,
                 nearby_labels=nearby_labels,
                 nearby_phrases=nearby_phrases,
+                filter_by_control_type=filter_by_control_type,
             )
             if uia_first_chosen is None:
                 _log_info(f"move_mouse uia_first miss reason={uia_first_reason}")
@@ -4477,7 +4575,8 @@ async def find_mouse_point(
     # No-window callers still finish a deferred OCR pass. A click-window UIA hit
     # already set ``uia_first_chosen`` and must not be replaced.
     if (
-        repair_request is None
+        allow_uia_select
+        and repair_request is None
         and uia_first_chosen is None
         and ocr_pendings
         and detections
@@ -4488,6 +4587,7 @@ async def find_mouse_point(
             nearby_hints=nearby_hints,
             nearby_labels=nearby_labels,
             nearby_phrases=nearby_phrases,
+            filter_by_control_type=filter_by_control_type,
         )
         if uia_first_chosen is None:
             _log_info(f"move_mouse uia_first miss reason={uia_first_reason}")
@@ -4519,8 +4619,18 @@ async def find_mouse_point(
         )
         capture_s = float(vision_timing.get("capture_s", 0.0))
         ocr_pendings = []
+    elif ocr_pendings and not allow_uia_select:
+        # YOLO+OCR instructions skip the UIA commit, so the deferred OCR pass
+        # still has to finish or the click has no text candidates.
+        detections, vision_timing = await asyncio.to_thread(
+            _finish_deferred_ocr_pendings,
+            ocr_pendings,
+            timing_base=vision_timing,
+        )
+        capture_s = float(vision_timing.get("capture_s", 0.0))
+        ocr_pendings = []
 
-    if repair_request is not None:
+    if repair_request is not None and allow_uia_select:
         from src.recorder.uia_replay_repair import attempt_uia_replay_repair
 
         if ocr_pendings:

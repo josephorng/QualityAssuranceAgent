@@ -109,6 +109,35 @@ def test_compile_click_keeps_pixel_offset_on_target() -> None:
     )
 
 
+def test_compile_click_keeps_vision_mode_on_short_target() -> None:
+    event = _event(kind="click", click_count=1)
+    instruction = (
+        "（UIA）將滑鼠移到「應用程式及其他」清單項目"
+        "（在「系統」按鈕的左邊），並點擊滑鼠一下。"
+    )
+    calls = compile_tool_calls(event, instruction)
+    assert calls is not None
+    assert calls[0]["arguments"]["instruction"] == "（UIA）「應用程式及其他」清單項目"
+    assert calls[0]["arguments"]["nearby_objects"] == ["在「系統」按鈕的左邊"]
+
+
+def test_compile_scroll_keeps_vision_mode() -> None:
+    event = _event(kind="scroll", scroll_delta=-3)
+    instruction = "（YOLO+OCR）在「清單」文字附近向下捲動"
+    calls = compile_tool_calls(event, instruction)
+    assert calls is not None
+    assert calls[0]["arguments"]["instruction"] == "（YOLO+OCR）「清單」文字"
+
+
+def test_compile_drag_keeps_vision_mode() -> None:
+    event = _event(kind="drag")
+    instruction = "（UIA）從「A」清單項目拖到「B」按鈕"
+    calls = compile_tool_calls(event, instruction)
+    assert calls is not None
+    assert calls[0]["arguments"]["start_instruction"] == "（UIA）「A」清單項目"
+    assert calls[0]["arguments"]["destination_instruction"] == "（UIA）「B」按鈕"
+
+
 def test_compile_right_click() -> None:
     event = _event(kind="right_click")
     instruction = "將滑鼠移到「檔案」文字，用右鍵點選。"

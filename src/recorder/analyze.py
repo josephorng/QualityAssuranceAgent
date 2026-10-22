@@ -49,16 +49,21 @@ _EXPECTED_OUTCOME_RESPONSE_SCHEMA: dict[str, Any] = {
     "required": ["expected_outcome"],
 }
 
+_UIA_CLASS_SUFFIX = "清單項目|功能表項目|樹狀項目|資料項目|超連結"
 _DRAG_ANCHOR_RE = re.compile(r"拖到「([^」]+)」")
 _DRAG_SOURCE_RE = re.compile(
-    r"^從「[^」]+」(?:文字|圖示|檔案|資料夾|按鈕|元素)*"
+    rf"^從「[^」]+」(?:{_UIA_CLASS_SUFFIX}|文字|圖示|檔案|資料夾|按鈕|元素)*"
     r"(?:(?:左方|右方|上方|下方)\d+個像素"
     r"(?:、(?:左方|右方|上方|下方)\d+個像素)*)?"
     r"(?:的位置)?"
     r"(?=拖到)"
 )
-_DRAG_DESTINATION_SUFFIX_RE = re.compile(r"(文字|圖示|檔案|資料夾|按鈕|元素)*")
-_CLICK_TARGET_SUFFIX_RE = re.compile(r"(文字|圖示|檔案|資料夾|按鈕|元素|未知|輸入欄)*")
+_DRAG_DESTINATION_SUFFIX_RE = re.compile(
+    rf"({_UIA_CLASS_SUFFIX}|文字|圖示|檔案|資料夾|按鈕|元素)*"
+)
+_CLICK_TARGET_SUFFIX_RE = re.compile(
+    rf"({_UIA_CLASS_SUFFIX}|文字|圖示|檔案|資料夾|按鈕|元素|未知|輸入欄)*"
+)
 _DRAG_OFFSET_PHRASE_RE = re.compile(
     r"(?:(?:左方|右方|上方|下方)\d+個像素)(?:、(?:(?:左方|右方|上方|下方)\d+個像素))*"
 )
@@ -728,6 +733,47 @@ def _pointer_click_action_suffix(
     return _POINTER_CLICK_ACTION_SUFFIX_BY_KIND.get(kind)
 
 
+def _recorded_vision_mode(
+    vision: dict[str, Any] | None,
+    destination: dict[str, Any] | None = None,
+    *,
+    drag: bool = False,
+) -> str | None:
+    """``uia`` or ``yolo_ocr`` for a pointer instruction, or ``None`` when unknown."""
+    start = vision.get("vision_path") if isinstance(vision, dict) else None
+    end = destination.get("vision_path") if isinstance(destination, dict) else None
+    if drag:
+        if start == "yolo_ocr" or end == "yolo_ocr":
+            return "yolo_ocr"
+        if start == "uia" and end == "uia":
+            return "uia"
+        return None
+    if start == "yolo_ocr":
+        return "yolo_ocr"
+    if start == "uia":
+        return "uia"
+    return None
+
+
+def _prefix_instruction_vision_mode(
+    instruction: str,
+    vision: dict[str, Any] | None,
+    destination: dict[str, Any] | None = None,
+    *,
+    drag: bool = False,
+) -> str:
+    """Prefix ``（UIA）`` or ``（YOLO+OCR）`` when the recording path is known."""
+    from cua_mcp.instruction_offset import split_vision_mode, vision_mode_prefix
+
+    prefix = vision_mode_prefix(
+        _recorded_vision_mode(vision, destination, drag=drag)
+    )
+    if not prefix:
+        return instruction
+    _existing, body = split_vision_mode(instruction)
+    return prefix + body.lstrip()
+
+
 def _finalize_instruction(
     instruction: str,
     event: RecordedEvent,
@@ -736,20 +782,24 @@ def _finalize_instruction(
 ) -> str:
     if event.kind not in POINTER_EVENT_KINDS or vision is None:
         return instruction
-    if event.kind == "drag":
+    drag = event.kind == "drag"
+    if drag:
         dest = destination if isinstance(destination, dict) else {}
-        return append_drag_nearby_context_comments(instruction, vision, dest)
-    instruction = append_nearby_context_comment(instruction, vision)
-    suffix = _pointer_click_action_suffix(
-        event.kind,
-        event.modifiers,
-        button=event.button,
-        duration_seconds=event.duration_seconds,
-        click_count=event.click_count,
+        built = append_drag_nearby_context_comments(instruction, vision, dest)
+    else:
+        built = append_nearby_context_comment(instruction, vision)
+        suffix = _pointer_click_action_suffix(
+            event.kind,
+            event.modifiers,
+            button=event.button,
+            duration_seconds=event.duration_seconds,
+            click_count=event.click_count,
+        )
+        if suffix:
+            built = built + suffix
+    return _prefix_instruction_vision_mode(
+        built, vision, destination, drag=drag
     )
-    if suffix:
-        return instruction + suffix
-    return instruction
 
 
 def rebuild_pointer_instruction(
@@ -777,8 +827,8 @@ def rebuild_pointer_instruction(
         if base is None:
             return None
         if include_nearby:
-            return append_drag_nearby_context_comments(base, vision, dest)
-        return base
+            base = append_drag_nearby_context_comments(base, vision, dest)
+        return _prefix_instruction_vision_mode(base, vision, dest, drag=True)
 
     if event.kind in _CLICK_POINTER_KINDS:
         base = instruction_for_click(
@@ -798,7 +848,9 @@ def rebuild_pointer_instruction(
             duration_seconds=event.duration_seconds,
             click_count=event.click_count,
         )
-        return base + suffix if suffix else base
+        if suffix:
+            base = base + suffix
+        return _prefix_instruction_vision_mode(base, vision, dest)
 
     if event.kind == "scroll":
         if promote_primary:
@@ -807,8 +859,8 @@ def rebuild_pointer_instruction(
         if base is None:
             return None
         if include_nearby:
-            return append_nearby_context_comment(base, vision)
-        return base
+            base = append_nearby_context_comment(base, vision)
+        return _prefix_instruction_vision_mode(base, vision, dest)
 
     return None
 

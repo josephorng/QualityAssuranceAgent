@@ -2764,6 +2764,89 @@ def test_instruction_for_click_omits_offset_when_within_bbox_tolerance() -> None
     assert instruction_for_click(event, vision) == "將滑鼠移到「下載」文字"
 
 
+def test_rebuild_pointer_instruction_marks_vision_mode() -> None:
+    event = RecordedEvent(
+        index=4,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(66, 271),
+        button="left",
+        screenshot_path="",
+    )
+    vision = {
+        "local_cursor": (66, 271),
+        "vision_path": "uia",
+        "candidates": [
+            {
+                "bbox": [57, 272, 27, 12],
+                "center": [70, 278],
+                "class_name": "text",
+                "text": "應用程式及其他",
+                "source": "uia",
+                "uia_control_type": "button",
+            },
+        ],
+    }
+    assert rebuild_pointer_instruction(event, vision, include_nearby=False) == (
+        "（UIA）將滑鼠移到「應用程式及其他」按鈕，並點擊滑鼠一下。"
+    )
+    vision["vision_path"] = "yolo_ocr"
+    vision["candidates"][0].pop("uia_control_type")
+    vision["candidates"][0]["text"] = "空自文件"
+    assert rebuild_pointer_instruction(event, vision, include_nearby=False) == (
+        "（YOLO+OCR）將滑鼠移到「空自文件」文字，並點擊滑鼠一下。"
+    )
+
+    drag = RecordedEvent(
+        index=5,
+        timestamp_utc="t",
+        kind="drag",
+        cursor_xy=(5, 5),
+        screenshot_path="",
+    )
+    start = {
+        "vision_path": "uia",
+        "candidates": [
+            {
+                "bbox": [0, 0, 10, 10],
+                "center": [5, 5],
+                "class_name": "text",
+                "text": "甲",
+                "uia_control_type": "list_item",
+            }
+        ],
+    }
+    end_uia = {
+        "vision_path": "uia",
+        "candidates": [
+            {
+                "bbox": [20, 0, 10, 10],
+                "center": [25, 5],
+                "class_name": "text",
+                "text": "乙",
+                "uia_control_type": "button",
+            }
+        ],
+    }
+    end_yolo = {
+        "vision_path": "yolo_ocr",
+        "candidates": [
+            {
+                "bbox": [20, 0, 10, 10],
+                "center": [25, 5],
+                "class_name": "text",
+                "text": "乙",
+            }
+        ],
+    }
+    assert rebuild_pointer_instruction(drag, start, end_uia, include_nearby=False) == (
+        "（UIA）從「甲」清單項目拖到「乙」按鈕"
+    )
+    assert rebuild_pointer_instruction(drag, start, end_yolo, include_nearby=False).startswith(
+        "（YOLO+OCR）"
+    )
+
+
 def test_instruction_for_click_double_click() -> None:
     event = RecordedEvent(
         index=5,

@@ -110,6 +110,30 @@ def test_write_replaces_ocr_instruction_and_leaves_event_snapshot(tmp_path: Path
     (run / "analysis" / "event_006.json").write_text(
         json.dumps(analysis, ensure_ascii=False), encoding="utf-8"
     )
+    from src.recorder.models import RecordedEvent
+    from src.recorder.vision_context import (
+        try_rebuild_vision_from_cache,
+        vision_source_fingerprint,
+    )
+
+    event_obj = RecordedEvent.from_dict(event)
+    yolo_payload = {
+        "source_fingerprint": vision_source_fingerprint(event_obj),
+        "candidates": [
+            {
+                "bbox": [10, 20, 40, 16],
+                "center": [30, 28],
+                "class_name": "text",
+                "text": "空自文件",
+            }
+        ],
+        "candidate_text": "空自文件",
+        "detection_count": 1,
+        "vision_path": "yolo_ocr",
+        "vision_path_reason": "沒有 UIA 快照",
+    }
+    yolo_path = run / "yolo_ocr" / "event_006.json"
+    yolo_path.write_text(json.dumps(yolo_payload, ensure_ascii=False), encoding="utf-8")
     request = UiaReplayRepairRequest(
         recording_dir=run,
         event_index=6,
@@ -126,6 +150,7 @@ def test_write_replaces_ocr_instruction_and_leaves_event_snapshot(tmp_path: Path
         others=[],
     )
     assert instruction is not None
+    assert instruction.startswith("（UIA）")
     assert "空白文件" in instruction
     assert "碟覽" not in instruction
     saved = json.loads((run / "analysis" / "event_006.json").read_text(encoding="utf-8"))
@@ -136,6 +161,113 @@ def test_write_replaces_ocr_instruction_and_leaves_event_snapshot(tmp_path: Path
     assert kept["uia_snapshot"]["texts"] == []
     cache = json.loads((run / "instruction_tool_cache.json").read_text(encoding="utf-8"))
     assert any("空白文件" in key for key in cache["entries"])
+    stored = json.loads(yolo_path.read_text(encoding="utf-8"))
+    assert stored["vision_path"] == "uia"
+    assert stored["vision_path_reason"] == "重播修復改為 UIA"
+    from src.recorder.analyze import rebuild_pointer_instruction
+
+    rebuilt = try_rebuild_vision_from_cache(event_obj, run)
+    assert rebuilt is not None
+    assert rebuilt["vision_path"] == "uia"
+    again = rebuild_pointer_instruction(event_obj, rebuilt, include_nearby=False)
+    assert again is not None
+    assert again.startswith("（UIA）")
+
+
+def test_drag_repair_prefixes_uia_only_when_both_sides_are_uia(tmp_path: Path) -> None:
+    run = tmp_path / "recording"
+    (run / "events").mkdir(parents=True)
+    (run / "analysis").mkdir()
+    (run / "yolo_ocr").mkdir()
+    window = {
+        "hwnd": 5,
+        "title": "Word",
+        "process_name": "WINWORD.EXE",
+        "rect": [0, 0, 200, 200],
+        "is_maximized": True,
+        "class_name": "OpusApp",
+    }
+    event = {
+        "index": 4,
+        "timestamp_utc": "t",
+        "kind": "drag",
+        "cursor_xy": [10, 20],
+        "end_xy": [80, 20],
+        "click_window": window,
+        "end_click_window": window,
+    }
+    (run / "events" / "event_004.json").write_text(
+        json.dumps(event), encoding="utf-8"
+    )
+    (run / "analysis" / "event_004.json").write_text(
+        json.dumps(
+            {"event_index": 4, "instruction": "從「甲」文字拖到「乙」文字"},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    from src.recorder.models import RecordedEvent
+    from src.recorder.vision_context import vision_source_fingerprint
+
+    fingerprint = vision_source_fingerprint(RecordedEvent.from_dict(event))
+
+    def payload(text: str) -> dict:
+        return {
+            "source_fingerprint": fingerprint,
+            "candidates": [
+                {
+                    "bbox": [0, 0, 10, 10],
+                    "center": [5, 5],
+                    "class_name": "text",
+                    "text": text,
+                }
+            ],
+            "candidate_text": text,
+            "detection_count": 1,
+            "vision_path": "yolo_ocr",
+            "vision_path_reason": "沒有 UIA 快照",
+        }
+
+    (run / "yolo_ocr" / "event_004.json").write_text(
+        json.dumps(payload("甲"), ensure_ascii=False), encoding="utf-8"
+    )
+    (run / "yolo_ocr" / "event_004_end.json").write_text(
+        json.dumps(payload("乙"), ensure_ascii=False), encoding="utf-8"
+    )
+    request = UiaReplayRepairRequest(
+        recording_dir=run,
+        event_index=4,
+        side="start",
+        recorded_bbox=(0, 0, 10, 10),
+        recorded_text="甲",
+        recorded_window_xywh=(0, 0, 200, 200),
+    )
+    one_side = write_uia_replay_repair(
+        request,
+        label="甲項",
+        source="findall",
+        bbox=(0, 0, 10, 10),
+        others=[],
+    )
+    assert one_side is not None
+    assert one_side.startswith("（YOLO+OCR）")
+    end_request = UiaReplayRepairRequest(
+        recording_dir=run,
+        event_index=4,
+        side="end",
+        recorded_bbox=(0, 0, 10, 10),
+        recorded_text="乙",
+        recorded_window_xywh=(0, 0, 200, 200),
+    )
+    both = write_uia_replay_repair(
+        end_request,
+        label="乙項",
+        source="findall",
+        bbox=(0, 0, 10, 10),
+        others=[],
+    )
+    assert both is not None
+    assert both.startswith("（UIA）")
 
 
 def test_uia_walk_uses_live_hwnd_when_recorded_hwnd_is_stale(monkeypatch) -> None:

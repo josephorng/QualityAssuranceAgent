@@ -90,9 +90,42 @@ async def test_try_rebuild_vision_from_cache_round_trip_skips_triton(tmp_path: P
 
     assert rebuilt is not None
     assert rebuilt["used_vision"] is True
+    assert rebuilt["vision_path"] == "yolo_ocr"
+    assert rebuilt["vision_path_reason"] == "沒有 UIA 快照"
     assert rebuilt["candidate_text"] == vision["candidate_text"]
     assert len(rebuilt["candidates"]) == len(vision["candidates"])
     assert rebuilt["field_context"] == vision["field_context"]
+
+
+@pytest.mark.asyncio
+async def test_cache_rebuild_keeps_stored_vision_prefix(tmp_path: Path) -> None:
+    (tmp_path / "yolo_ocr").mkdir()
+    event = _click_event(tmp_path)
+    with patch(
+        "src.recorder.vision_context.imread_bgr",
+        return_value=np.zeros((100, 100, 3), dtype=np.uint8),
+    ), patch(
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
+        return_value=[
+            _detection_from_bbox((8, 8, 10, 10), YOLO_CLASS_TEXT, text="儲存"),
+        ],
+    ):
+        await build_vision_context(event, run_dir=tmp_path, persist_debug=True)
+
+    payload_path = tmp_path / "yolo_ocr" / "event_001.json"
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    payload["vision_path"] = "uia"
+    payload.pop("vision_path_reason", None)
+    payload_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    from src.recorder.analyze import rebuild_pointer_instruction
+
+    rebuilt = try_rebuild_vision_from_cache(event, tmp_path)
+    assert rebuilt is not None
+    assert rebuilt["vision_path"] == "uia"
+    instruction = rebuild_pointer_instruction(event, rebuilt, include_nearby=False)
+    assert instruction is not None
+    assert instruction.startswith("（UIA）")
 
 
 @pytest.mark.asyncio
@@ -155,8 +188,27 @@ async def test_try_rebuild_drag_vision_from_cache(tmp_path: Path) -> None:
         rebuilt = try_rebuild_vision_from_cache(event, tmp_path)
 
     assert rebuilt is not None
+    assert rebuilt["vision_path"] == "yolo_ocr"
+    assert rebuilt["destination"]["vision_path"] == "yolo_ocr"
     assert rebuilt["candidate_text"] == original["candidate_text"]
     assert rebuilt["destination"]["candidate_text"] == original["destination"]["candidate_text"]
+
+    end_path = tmp_path / "yolo_ocr" / "event_003_end.json"
+    end_payload = json.loads(end_path.read_text(encoding="utf-8"))
+    end_payload["vision_path"] = "uia"
+    end_payload.pop("vision_path_reason", None)
+    end_path.write_text(json.dumps(end_payload), encoding="utf-8")
+    mixed = try_rebuild_vision_from_cache(event, tmp_path)
+    assert mixed is not None
+    assert mixed["vision_path"] == "yolo_ocr"
+    assert mixed["destination"]["vision_path"] == "uia"
+    from src.recorder.analyze import rebuild_pointer_instruction
+
+    instruction = rebuild_pointer_instruction(
+        event, mixed, mixed["destination"], include_nearby=False
+    )
+    assert instruction is not None
+    assert instruction.startswith("（YOLO+OCR）")
 
 
 @pytest.mark.asyncio
@@ -210,7 +262,7 @@ async def test_prepare_event_vision_recomputes_on_stale_cache(tmp_path: Path) ->
     stale = replace(event, kind="double_click", click_count=2)
     detect_calls = {"n": 0}
 
-    def _detect(_bgr):
+    def _detect(_bgr, **_kwargs):
         detect_calls["n"] += 1
         return [
             _detection_from_bbox((8, 8, 10, 10), YOLO_CLASS_TEXT, text="開啟"),

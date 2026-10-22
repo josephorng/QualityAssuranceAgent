@@ -279,6 +279,7 @@ def _vision_from_yolo_payload(payload: dict[str, Any]) -> dict[str, Any]:
     track = payload.get("scrollbar_track")
     if isinstance(track, dict):
         vision["scrollbar_track"] = track
+    _copy_recorded_vision_mode(payload, vision)
     return vision
 
 
@@ -347,6 +348,9 @@ def try_rebuild_vision_from_cache(
                 end_compact,
                 omit_when_inside=False,
             )
+            # The filtered file is a candidate subset. The mode lives on the
+            # full end payload, including a side later marked UIA by repair.
+            _copy_recorded_vision_mode(end_payload, end_compact)
         elif end_local is not None:
             end_result = _vision_from_yolo_payload(end_payload)
             end_compact = _build_filtered_destination_vision(
@@ -1319,8 +1323,16 @@ def format_drag_candidate_anchor(candidate: dict[str, Any]) -> str | None:
     rows keep the readable caption (e.g. 「速的網域 (3)」文字, not 「下載」圖示).
     """
     class_name = str(candidate.get("class_name") or "").strip()
+    from src.recorder.uia_input_boxes import UIA_CONTROL_TYPE_SUFFIX
+
+    uia_suffix = UIA_CONTROL_TYPE_SUFFIX.get(
+        str(candidate.get("uia_control_type") or "").strip(),
+        "",
+    )
 
     visible = _visible_text(candidate.get("text"))
+    if visible and uia_suffix:
+        return f"「{visible}」{uia_suffix}"
     if visible:
         if class_name == "text":
             return f"「{visible}」文字"
@@ -2668,6 +2680,7 @@ def _dict_to_detection(candidate: dict[str, Any]) -> UiDetection | None:
     icons = candidate.get("icons")
     source_raw = candidate.get("source")
     source = str(source_raw).strip() if source_raw is not None else None
+    control_type = str(candidate.get("uia_control_type") or "").strip()
     return UiDetection(
         bbox=(x, y, w, h),
         cx=cx,
@@ -2677,6 +2690,7 @@ def _dict_to_detection(candidate: dict[str, Any]) -> UiDetection | None:
         text=candidate.get("text") if candidate.get("text") is not None else None,
         icons=list(icons) if isinstance(icons, list) else None,
         source=source or None,
+        uia_control_type=control_type or None,
     )
 
 
@@ -2966,6 +2980,7 @@ def _candidate_dict_to_detection(candidate: dict[str, Any]) -> UiDetection:
     bbox = tuple(candidate["bbox"])
     x, y, w, h = bbox
     center = candidate.get("center") or [x + w // 2, y + h // 2]
+    control_type = str(candidate.get("uia_control_type") or "").strip()
     return UiDetection(
         bbox=bbox,
         cx=int(center[0]),
@@ -2974,6 +2989,8 @@ def _candidate_dict_to_detection(candidate: dict[str, Any]) -> UiDetection:
         class_name=str(candidate.get("class_name", "")),
         text=candidate.get("text"),
         icons=candidate.get("icons"),
+        source=str(candidate.get("source") or "").strip() or None,
+        uia_control_type=control_type or None,
     )
 
 
@@ -3018,6 +3035,7 @@ def _build_filtered_destination_vision(
         vision,
         omit_when_inside=False,
     )
+    _copy_recorded_vision_mode(end_result, vision)
     return vision
 
 
@@ -3048,7 +3066,62 @@ def _detection_to_dict(
     source = _detection_source(det)
     if source:
         payload["source"] = source
+    if det.uia_control_type:
+        payload["uia_control_type"] = det.uia_control_type
     return payload
+
+
+VISION_PATH_REPAIR_REASON = "重播修復改為 UIA"
+_VISION_PATHS = frozenset({"uia", "yolo_ocr"})
+
+
+def _copy_recorded_vision_mode(source: dict[str, Any] | None, dest: dict[str, Any]) -> None:
+    """Copy ``vision_path`` and its reason onto a compact vision dict."""
+    if not isinstance(source, dict):
+        return
+    path = source.get("vision_path")
+    if path in _VISION_PATHS:
+        dest["vision_path"] = path
+    reason = source.get("vision_path_reason")
+    if isinstance(reason, str) and reason.strip():
+        dest["vision_path_reason"] = reason.strip()
+
+
+def _attach_vision_path_fields(payload: dict[str, Any], vision_timing: dict[str, Any]) -> None:
+    """Persist the recording vision decision next to the YOLO/OCR payload."""
+    path = vision_timing.get("vision_path")
+    if path in _VISION_PATHS:
+        payload["vision_path"] = path
+    reason = vision_timing.get("vision_path_reason")
+    if isinstance(reason, str) and reason.strip():
+        payload["vision_path_reason"] = reason.strip()
+    else:
+        payload.pop("vision_path_reason", None)
+
+
+def recording_uia_skip_reason(
+    detections: list[UiDetection],
+    *,
+    local_x: int | None = None,
+    local_y: int | None = None,
+    min_multi_char_text: int = _MIN_NEARBY_TEXT_CANDIDATES,
+) -> str | None:
+    """Why a UIA snapshot cannot name the click, or ``None`` when it can.
+
+    ``None`` means the labeled list is enough. Callers that have no snapshot
+    use ``沒有 UIA 快照`` themselves.
+    """
+    usable = [det for det in detections if _is_usable_uia_text_detection(det)]
+    need = max(int(min_multi_char_text), 0)
+    if len(usable) < need:
+        return f"可用 UIA 文字不足（{len(usable)}/{need}）"
+    if local_x is None or local_y is None:
+        return None
+    if any(
+        _detection_contains_click(det, int(local_x), int(local_y)) for det in usable
+    ):
+        return None
+    return "點擊處沒有可用的 UIA 文字"
 
 
 def recording_uia_detections_sufficient(
@@ -3065,14 +3138,35 @@ def recording_uia_detections_sufficient(
     usable UIA text detection covering that click. URL-like / ultra-long UIA
     names do not count.
     """
-    usable = [det for det in detections if _is_usable_uia_text_detection(det)]
-    if len(usable) < max(int(min_multi_char_text), 0):
-        return False
-    if local_x is None or local_y is None:
-        return True
-    return any(
-        _detection_contains_click(det, int(local_x), int(local_y)) for det in usable
+    return (
+        recording_uia_skip_reason(
+            detections,
+            local_x=local_x,
+            local_y=local_y,
+            min_multi_char_text=min_multi_char_text,
+        )
+        is None
     )
+
+
+def mark_recorded_side_repaired_to_uia(
+    run_root: Path,
+    event_index: int,
+    side: str,
+) -> None:
+    """Remember that replay repair named this side from UIA.
+
+    The next cache re-analysis reads this payload, so the instruction stays
+    ``（UIA）`` for the repaired side instead of restoring ``（YOLO+OCR）``.
+    """
+    suffix = "_end" if side == "end" else ""
+    payload = load_yolo_ocr_payload(run_root, event_index, suffix=suffix)
+    if not isinstance(payload, dict):
+        return
+    payload["vision_path"] = "uia"
+    payload["vision_path_reason"] = VISION_PATH_REPAIR_REASON
+    path = Path(run_root) / "yolo_ocr" / f"event_{int(event_index):03d}{suffix}.json"
+    write_json(path, payload)
 
 
 def _prefetched_uia_from_snapshot(
@@ -3118,15 +3212,20 @@ def _attach_unused_uia_debug(
     layers = vision_timing.get("debug_layers")
     if not isinstance(layers, dict):
         return
+    from src.recorder.uia_input_boxes import unpack_uia_labeled
+
     inputs, scrollbars, labeled = uia_prefetched
-    uia_boxes: list[dict[str, Any]] = [
-        {
+    uia_boxes: list[dict[str, Any]] = []
+    for item in labeled or []:
+        bbox, label, control_type = unpack_uia_labeled(item)
+        row: dict[str, Any] = {
             "bbox": [int(v) for v in bbox],
             "class_name": "uia_text",
             "text": str(label or ""),
         }
-        for bbox, label in (labeled or [])
-    ]
+        if control_type:
+            row["control_type"] = control_type
+        uia_boxes.append(row)
     uia_boxes.extend(
         {"bbox": [int(v) for v in bbox], "class_name": "uia_input", "text": ""}
         for bbox in (inputs or [])
@@ -3160,12 +3259,17 @@ def _detect_recording_mouse_targets(
     _ = live_input_hwnd, live_input_monitor_offset, live_input_window_screen_xywh
     vision_timing: dict[str, Any] = timing_out if timing_out is not None else {}
     uia_detections = _detections_from_uia_prefetched(uia_prefetched)
-    if uia_prefetched is not None and recording_uia_detections_sufficient(
-        uia_detections,
-        local_x=local_x,
-        local_y=local_y,
-    ):
+    if uia_prefetched is None:
+        skip_reason: str | None = "沒有 UIA 快照"
+    else:
+        skip_reason = recording_uia_skip_reason(
+            uia_detections,
+            local_x=local_x,
+            local_y=local_y,
+        )
+    if skip_reason is None:
         vision_timing["vision_path"] = "uia"
+        vision_timing.pop("vision_path_reason", None)
         vision_timing["recording_ocr_deferred"] = True
         vision_timing["recording_uia_sufficient"] = True
         return uia_detections, vision_timing
@@ -3181,6 +3285,7 @@ def _detect_recording_mouse_targets(
     )
     _attach_unused_uia_debug(vision_timing, uia_prefetched)
     vision_timing["vision_path"] = "yolo_ocr"
+    vision_timing["vision_path_reason"] = skip_reason
     vision_timing["recording_ocr_deferred"] = False
     vision_timing["recording_uia_sufficient"] = False
     return detections, vision_timing
@@ -3342,8 +3447,7 @@ def build_vision_context_full_image(
         payload["recording_uia_sufficient"] = bool(
             vision_timing.get("recording_uia_sufficient")
         )
-    if vision_timing.get("vision_path"):
-        payload["vision_path"] = vision_timing.get("vision_path")
+    _attach_vision_path_fields(payload, vision_timing)
 
     if persist_debug:
         suffix = debug_name or ""
@@ -3364,6 +3468,9 @@ def build_vision_context_full_image(
         "recording_uia_sufficient": vision_timing.get("recording_uia_sufficient"),
         "vision_path": vision_timing.get("vision_path"),
     }
+    reason = vision_timing.get("vision_path_reason")
+    if isinstance(reason, str) and reason.strip():
+        result["vision_path_reason"] = reason.strip()
     return result
 
 
@@ -3561,8 +3668,7 @@ def build_vision_context_at_point(
         payload["recording_uia_sufficient"] = bool(
             vision_timing.get("recording_uia_sufficient")
         )
-    if vision_timing.get("vision_path"):
-        payload["vision_path"] = vision_timing.get("vision_path")
+    _attach_vision_path_fields(payload, vision_timing)
     debug_layers = vision_timing.get("debug_layers")
     if isinstance(debug_layers, dict):
         payload["debug_layers"] = debug_layers
@@ -3620,6 +3726,9 @@ def build_vision_context_at_point(
         ),
         "vision_path": vision_timing.get("vision_path"),
     }
+    reason = vision_timing.get("vision_path_reason")
+    if isinstance(reason, str) and reason.strip():
+        result["vision_path_reason"] = reason.strip()
     if track is not None:
         result["scrollbar_track"] = track
     return result
@@ -3640,6 +3749,7 @@ def _compact_vision_point(result: dict[str, Any]) -> dict[str, Any]:
     track = result.get("scrollbar_track")
     if isinstance(track, dict):
         compact["scrollbar_track"] = track
+    _copy_recorded_vision_mode(result, compact)
     return compact
 
 

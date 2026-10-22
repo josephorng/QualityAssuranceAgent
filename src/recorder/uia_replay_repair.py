@@ -282,6 +282,9 @@ def write_uia_replay_repair(
     instruction = _instruction_from_hit(event, request, label, bbox, others, analysis)
     if not instruction:
         return None
+    from src.recorder.vision_context import mark_recorded_side_repaired_to_uia
+
+    mark_recorded_side_repaired_to_uia(run_dir, request.event_index, request.side)
     analysis["instruction"] = instruction
     block = analysis.get("uia_replay_repair")
     if not isinstance(block, dict):
@@ -330,6 +333,10 @@ def _instruction_from_hit(
         if str(text or "").strip() and (text != label or box != bbox)
     ]
     repaired = _vision([primary, *extra], (bbox[0] + bbox[2] // 2, bbox[1] + bbox[3] // 2))
+    from src.recorder.vision_context import VISION_PATH_REPAIR_REASON
+
+    repaired["vision_path"] = "uia"
+    repaired["vision_path_reason"] = VISION_PATH_REPAIR_REASON
     if event.kind == "drag":
         other_text = _other_side_text(request)
         if not other_text:
@@ -339,6 +346,8 @@ def _instruction_from_hit(
         if not other_text:
             return _replace_anchor(str(analysis.get("instruction") or ""), request, label)
         other = _vision([_candidate(other_text, (0, 0, 8, 8))], (4, 4))
+        other_side = "start" if request.side == "end" else "end"
+        _copy_stored_vision_mode(request, other, other_side)
         if request.side == "end":
             rebuilt = rebuild_pointer_instruction(
                 event, other, repaired, promote_primary=False
@@ -503,6 +512,24 @@ def _candidate(text: str, bbox: RectXywh) -> dict[str, Any]:
         "class_name": "text",
         "text": text,
     }
+
+
+def _copy_stored_vision_mode(
+    request: UiaReplayRepairRequest,
+    vision: dict[str, Any],
+    side: str,
+) -> None:
+    """Keep the other drag side on the path already stored in its yolo_ocr file."""
+    from src.recorder.vision_context import (
+        _copy_recorded_vision_mode,
+        load_yolo_ocr_payload,
+    )
+
+    suffix = "_end" if side == "end" else ""
+    _copy_recorded_vision_mode(
+        load_yolo_ocr_payload(Path(request.recording_dir), request.event_index, suffix=suffix),
+        vision,
+    )
 
 
 def _vision(candidates: list[dict[str, Any]], cursor: tuple[int, int]) -> dict[str, Any]:

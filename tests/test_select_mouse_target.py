@@ -5425,6 +5425,88 @@ def test_detect_defer_ocr_skips_recognize_until_finish(
     assert "記事本" not in texts
 
 
+def test_anchor_suffix_and_uia_control_type_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cua_mcp import select_mouse_target as smt
+    from cua_mcp.select_mouse_target import (
+        _anchor_type_suffix,
+        _matches_landmark_fallback_type,
+        _try_uia_first_unique_select,
+    )
+
+    logs: list[str] = []
+    monkeypatch.setattr(smt, "_log_info", logs.append)
+    from cua_mcp.yolo_onnx import YOLO_CLASS_TEXT
+    from src.common.nearby_side import normalize_nearby_hints
+
+    assert _anchor_type_suffix("「清單項目」文字") == "文字"
+    assert _anchor_type_suffix("「應用程式及其他」清單項目") == "清單項目"
+    assert _anchor_type_suffix("「搜尋」文字所在的輸入欄") == "輸入欄"
+
+    text_box = _detection_from_bbox(
+        (0, 0, 10, 10), YOLO_CLASS_TEXT, text="開啟", source="ocr"
+    )
+    assert _matches_landmark_fallback_type(text_box, "「開啟」按鈕")
+    assert _matches_landmark_fallback_type(text_box, "「開啟」清單項目")
+
+    button = _detection_from_bbox(
+        (10, 10, 40, 16),
+        YOLO_CLASS_TEXT,
+        text="記事本",
+        source="uia",
+        uia_control_type="button",
+    )
+    text = _detection_from_bbox(
+        (100, 10, 40, 16),
+        YOLO_CLASS_TEXT,
+        text="記事本",
+        source="uia",
+        uia_control_type="text",
+    )
+    hints = normalize_nearby_hints([])
+    chosen, reason = _try_uia_first_unique_select(
+        [button, text],
+        anchor="「記事本」按鈕",
+        nearby_hints=hints,
+        nearby_labels=[],
+        nearby_phrases=[],
+        filter_by_control_type=True,
+    )
+    assert reason == "hit"
+    assert chosen is button
+
+    legacy, legacy_reason = _try_uia_first_unique_select(
+        [button],
+        anchor="「記事本」文字",
+        nearby_hints=hints,
+        nearby_labels=[],
+        nearby_phrases=[],
+        filter_by_control_type=False,
+    )
+    assert legacy_reason == "hit"
+    assert legacy is button
+
+    only_text = _detection_from_bbox(
+        (10, 40, 40, 16),
+        YOLO_CLASS_TEXT,
+        text="記事本",
+        source="uia",
+        uia_control_type="text",
+    )
+    fallback, fallback_reason = _try_uia_first_unique_select(
+        [only_text],
+        anchor="「記事本」按鈕",
+        nearby_hints=hints,
+        nearby_labels=[],
+        nearby_phrases=[],
+        filter_by_control_type=True,
+    )
+    assert fallback_reason == "hit"
+    assert fallback is only_text
+    assert any("control_type_fallback" in line for line in logs)
+
+
 def test_try_uia_first_unique_select_hit_and_miss() -> None:
     from cua_mcp.select_mouse_target import _try_uia_first_unique_select
     from src.common.nearby_side import normalize_nearby_hints

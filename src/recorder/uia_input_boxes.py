@@ -101,8 +101,20 @@ _LABELED_TEXT_CONTROL_TYPES = frozenset(
 
 RectXywh = tuple[int, int, int, int]
 ScreenXyxy = tuple[int, int, int, int]
-LabeledScreenXyxy = tuple[ScreenXyxy, str]
-LabeledRectXywh = tuple[RectXywh, str]
+# box, visible label, control-type token ("" when the snapshot did not record one).
+LabeledScreenXyxy = tuple[ScreenXyxy, str, str]
+LabeledRectXywh = tuple[RectXywh, str, str]
+
+# Tokens stored on snapshot texts. Chinese suffixes are the instruction words.
+UIA_CONTROL_TYPE_SUFFIX: dict[str, str] = {
+    "button": "按鈕",
+    "hyperlink": "超連結",
+    "list_item": "清單項目",
+    "menu_item": "功能表項目",
+    "text": "文字",
+    "tree_item": "樹狀項目",
+    "data_item": "資料項目",
+}
 
 UiaScreenEnumerator = Callable[[int], list[ScreenXyxy]]
 # (inputs, scrollbars, labeled_texts)
@@ -159,6 +171,55 @@ def is_oversized_uia_rect(
 
 MAX_USABLE_UIA_LABEL_LEN = 48
 MIN_USABLE_UIA_LANDMARKS = 8
+
+
+def control_type_token_from_id(control_type_id: int | None) -> str:
+    """Stable token for a labeled UIA control type, or ``""`` when unmapped."""
+    if control_type_id is None:
+        return ""
+    return {
+        _UIA_BUTTON_CONTROL_TYPE_ID: "button",
+        _UIA_HYPERLINK_CONTROL_TYPE_ID: "hyperlink",
+        _UIA_LISTITEM_CONTROL_TYPE_ID: "list_item",
+        _UIA_MENUITEM_CONTROL_TYPE_ID: "menu_item",
+        _UIA_TEXT_CONTROL_TYPE_ID: "text",
+        _UIA_TREEITEM_CONTROL_TYPE_ID: "tree_item",
+        _UIA_DATAITEM_CONTROL_TYPE_ID: "data_item",
+    }.get(int(control_type_id), "")
+
+
+def control_token_for_suffix(suffix: str | None) -> str | None:
+    """Replay filter token for a UIA class suffix.
+
+    ``文字`` is not Text-only: older instructions used that word for every
+    labeled control. Non-text suffixes map to their token.
+    """
+    word = str(suffix or "").strip()
+    if not word or word == "文字":
+        return None
+    for token, suffix_word in UIA_CONTROL_TYPE_SUFFIX.items():
+        if token != "text" and suffix_word == word:
+            return token
+    return None
+
+
+def unpack_uia_labeled(item: object) -> tuple[tuple[int, int, int, int], str, str]:
+    """Split a labeled UIA row. A missing control type stays ``""``."""
+    if not isinstance(item, (list, tuple)) or len(item) < 2:
+        return (0, 0, 0, 0), "", ""
+    box = item[0]
+    text = str(item[1] or "")
+    control_type = str(item[2] or "").strip() if len(item) >= 3 else ""
+    if control_type not in UIA_CONTROL_TYPE_SUFFIX:
+        control_type = ""
+    if isinstance(box, (list, tuple)) and len(box) == 4:
+        try:
+            rect = (int(box[0]), int(box[1]), int(box[2]), int(box[3]))
+        except (TypeError, ValueError):
+            rect = (0, 0, 0, 0)
+    else:
+        rect = (0, 0, 0, 0)
+    return rect, text, control_type
 
 
 def is_usable_uia_landmark_label(text: str | None) -> bool:
@@ -253,7 +314,7 @@ def filter_uia_labeled_text_rects(
     max_area_frac: float = DEFAULT_UIA_OVERSIZE_AREA_FRAC,
 ) -> list[LabeledRectXywh]:
     """Convert labeled screen xyxy → image-local xywh + label; drop empty labels."""
-    boxes_only = [xyxy for xyxy, _label in screen_labeled]
+    boxes_only = [unpack_uia_labeled(item)[0] for item in screen_labeled]
     filtered = filter_uia_input_rects(
         boxes_only,
         window_screen_xywh=window_screen_xywh,
@@ -266,8 +327,9 @@ def filter_uia_labeled_text_rects(
     )
     # Re-pair labels: filter drops/reorders by geometry; map via converted local box.
     ox, oy = int(monitor_offset[0]), int(monitor_offset[1])
-    label_by_box: dict[RectXywh, str] = {}
-    for (left, top, right, bottom), label in screen_labeled:
+    label_by_box: dict[RectXywh, tuple[str, str]] = {}
+    for item in screen_labeled:
+        (left, top, right, bottom), label, control_type = unpack_uia_labeled(item)
         text = str(label or "").strip()
         if not text:
             continue
@@ -282,15 +344,18 @@ def filter_uia_labeled_text_rects(
         x, y, w, h = clip_box(local[0], local[1], local[2], local[3], image_w, image_h)
         if w <= 0 or h <= 0:
             continue
-        label_by_box[(x, y, w, h)] = text
+        label_by_box[(x, y, w, h)] = (text, control_type)
     out: list[LabeledRectXywh] = []
     seen: set[RectXywh] = set()
     for box in filtered:
-        text = label_by_box.get(box)
-        if not text or box in seen:
+        paired = label_by_box.get(box)
+        if paired is None or box in seen:
+            continue
+        text, control_type = paired
+        if not text:
             continue
         seen.add(box)
-        out.append((box, text))
+        out.append((box, text, control_type))
     return out
 
 
@@ -880,7 +945,9 @@ def enumerate_edit_document_scrollbar_screen(
                 elif control_type in _LABELED_TEXT_CONTROL_TYPES:
                     label = _element_label(element)
                     if label:
-                        labeled.append((box, label))
+                        labeled.append(
+                            (box, label, control_type_token_from_id(control_type))
+                        )
             finally:
                 _com_release(element)
         scrollbars, used_line_buttons = compose_scrollbar_screen_rects(
@@ -891,7 +958,7 @@ def enumerate_edit_document_scrollbar_screen(
         for index, (box, label) in enumerate(scrollbar_line_buttons):
             if index in used_line_buttons or not label:
                 continue
-            labeled.append((box, label))
+            labeled.append((box, label, "button"))
         return inputs, scrollbars, labeled
     except Exception:
         return [], [], []
@@ -1016,11 +1083,15 @@ def snapshot_uia_screen(hwnd: int) -> dict[str, object] | None:
         return None
     window = _window_screen_xywh(int(hwnd))
     texts: list[dict[str, object]] = []
-    for box, label in labeled:
+    for item in labeled:
+        box, label, control_type = unpack_uia_labeled(item)
         text = str(label or "").strip()
         if not text:
             continue
-        texts.append({"bbox": [int(v) for v in box], "text": text})
+        entry: dict[str, object] = {"bbox": [int(v) for v in box], "text": text}
+        if control_type:
+            entry["control_type"] = control_type
+        texts.append(entry)
     return {
         "window": [int(v) for v in window] if window is not None else None,
         "inputs": [[int(v) for v in box] for box in inputs],
@@ -1081,10 +1152,17 @@ def uia_snapshot_image_local(
                 continue
             box = item.get("bbox")
             text = str(item.get("text") or "").strip()
+            control_type = str(item.get("control_type") or "").strip()
+            if control_type not in UIA_CONTROL_TYPE_SUFFIX:
+                control_type = ""
             if not text or not isinstance(box, (list, tuple)) or len(box) != 4:
                 continue
             labeled.append(
-                ((int(box[0]), int(box[1]), int(box[2]), int(box[3])), text)
+                (
+                    (int(box[0]), int(box[1]), int(box[2]), int(box[3])),
+                    text,
+                    control_type,
+                )
             )
     inputs = filter_uia_input_rects(_snapshot_xyxy_list(snapshot.get("inputs")), **filter_kwargs)
     scrollbars = filter_uia_scrollbar_rects(

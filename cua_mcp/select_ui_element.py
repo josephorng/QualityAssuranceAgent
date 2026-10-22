@@ -96,6 +96,8 @@ class UiDetection:
     icons: list[dict[str, Any]] | None = None
     # Provenance for debug/metrics: "uia" | "ocr" | "yolo" (class-only boxes).
     source: str | None = None
+    # Labeled UIA control token (button, list_item, …). Empty on OCR/YOLO boxes.
+    uia_control_type: str | None = None
 
 
 def _text_is_pua_only(text: str) -> bool:
@@ -327,6 +329,10 @@ def _detection_anchor_label(d: UiDetection) -> str:
     visible = _visible_anchor_text(d.text)
     if visible:
         suffix = _ANCHOR_SUFFIX_BY_CLASS.get(d.class_name)
+        if d.uia_control_type:
+            from src.recorder.uia_input_boxes import UIA_CONTROL_TYPE_SUFFIX
+
+            suffix = UIA_CONTROL_TYPE_SUFFIX.get(d.uia_control_type, suffix)
         if suffix:
             if d.class_name == "input":
                 return f"「{visible}」文字所在的輸入欄"

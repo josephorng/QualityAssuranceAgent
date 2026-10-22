@@ -281,6 +281,29 @@ async def test_process_step_actor_failure_fails_without_vision_recovery() -> Non
     assert metadata["verify"] is None
 
 
+@pytest.mark.asyncio
+async def test_process_step_move_mouse_failure_holds_for_overlay_retry() -> None:
+    brain = _brain_for_process_step()
+
+    async def _failed_move() -> bool:
+        brain._hold_step_retry_reason = "Recorded click_window is not on screen."
+        return False
+
+    brain.loop = _failed_move
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert result.run_complete is False
+    assert brain._script_step_index == 1
+    assert "click_window" in result.reason
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "failed"
+    assert metadata["verify"]["branch"] == "retry"
+    assert metadata["verify"]["clearly_unmet"] is True
+    assert brain._hold_step_retry_reason is None
+
+
 def _flyout_window() -> WindowInfo:
     return WindowInfo(
         hwnd=9,

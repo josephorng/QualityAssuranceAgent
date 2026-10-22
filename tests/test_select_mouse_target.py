@@ -4358,6 +4358,10 @@ def test_collect_skips_monitors_without_roi_when_another_has_one(
         "src.recorder.window_snapshot.resolve_ocr_roi_local",
         fake_roi,
     )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.resolve_live_ocr_roi_local",
+        fake_roi,
+    )
 
     img1 = np.full((4, 4, 3), 1, dtype=np.uint8)
     img2 = np.full((4, 4, 3), 2, dtype=np.uint8)
@@ -4459,6 +4463,10 @@ def test_collect_falls_back_to_window_roi_when_caption_cell_misses(
         "src.recorder.window_snapshot.resolve_ocr_roi_local",
         lambda *_a, **_k: (0, 0, 80, 40),
     )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.resolve_live_ocr_roi_local",
+        lambda *_a, **_k: (0, 0, 80, 40),
+    )
 
     img = np.full((40, 80, 3), 1, dtype=np.uint8)
     _collect_monitor_detections(
@@ -4470,29 +4478,18 @@ def test_collect_falls_back_to_window_roi_when_caption_cell_misses(
     assert seen == [(0, 0, 80, 40)]
 
 
-def test_collect_runs_every_monitor_when_no_roi(
+def test_collect_fails_when_no_live_click_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import numpy as np
-    from cua_mcp.select_mouse_target import _collect_monitor_detections
-    from cua_mcp.select_ui_element import UiDetection
+    from cua_mcp.select_mouse_target import (
+        CLICK_WINDOW_MISS_MESSAGE,
+        RECORDED_ANCHOR_MISS_MESSAGE,
+        _collect_monitor_detections,
+    )
 
-    seen: list[int] = []
-
-    def fake_build(bgr, *, yolo_conf_threshold: float = 0.05, ocr_roi=None, **_kwargs):
-        assert ocr_roi is None
-        seen.append(int(bgr[0, 0, 0]))
-        return [
-            UiDetection(
-                bbox=(0, 0, 1, 1),
-                cx=0,
-                cy=0,
-                class_id=YOLO_CLASS_TEXT,
-                class_name="text",
-                text="t",
-                icons=None,
-            )
-        ]
+    def fake_build(*_args, **_kwargs):
+        raise AssertionError("missing live click_window must not search other windows")
 
     monkeypatch.setattr(
         "cua_mcp.select_mouse_target._detect_mouse_targets_from_bgr",
@@ -4504,19 +4501,22 @@ def test_collect_runs_every_monitor_when_no_roi(
     )
     monkeypatch.setattr(
         "src.recorder.window_snapshot.resolve_ocr_roi_local",
+        lambda *_a, **_k: (0, 0, 1920, 1080),
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.resolve_live_ocr_roi_local",
         lambda *_a, **_k: None,
     )
 
     img1 = np.full((4, 4, 3), 1, dtype=np.uint8)
     img2 = np.full((4, 4, 3), 2, dtype=np.uint8)
-    detections = _collect_monitor_detections(
-        [(1, img1), (2, img2)],
-        yolo_conf_threshold=0.05,
-        click_window={"hwnd": 1, "is_maximized": True, "rect": [0, 0, 1920, 1080]},
-    )
-
-    assert sorted(seen) == [1, 2]
-    assert len(detections) == 2
+    assert RECORDED_ANCHOR_MISS_MESSAGE in CLICK_WINDOW_MISS_MESSAGE
+    with pytest.raises(ValueError, match="Recorded click_window is not on screen"):
+        _collect_monitor_detections(
+            [(1, img1), (2, img2)],
+            yolo_conf_threshold=0.05,
+            click_window={"hwnd": 1, "is_maximized": True, "rect": [0, 0, 1920, 1080]},
+        )
 
 
 def test_collect_crops_yolo_only_with_live_roi(
@@ -4571,12 +4571,13 @@ def test_collect_crops_yolo_only_with_live_roi(
     )
 
     img = np.full((200, 200, 3), 1, dtype=np.uint8)
-    _collect_monitor_detections(
-        [(1, img)],
-        yolo_conf_threshold=0.05,
-        click_window={"hwnd": 7, "rect": [10, 20, 100, 80]},
-    )
-    assert seen == [((10, 20, 100, 80), None)]
+    with pytest.raises(ValueError, match="Recorded click_window is not on screen"):
+        _collect_monitor_detections(
+            [(1, img)],
+            yolo_conf_threshold=0.05,
+            click_window={"hwnd": 7, "rect": [10, 20, 100, 80]},
+        )
+    assert seen == []
 
     seen.clear()
     monkeypatch.setattr(

@@ -220,6 +220,9 @@ class BrainModule:
         # (or a final capture at run end / failure).
         self._pending_after_capture: bool = False
         self._replay_press_point_window: dict[str, Any] | None = None
+        # Set when cache-replay move_mouse fails. process_step holds the step
+        # so the overlay can count down and retry, instead of ending the run.
+        self._hold_step_retry_reason: str | None = None
         # Set when this step's close_windows succeeded, so a disappeared miss
         # can re-close that window during verify.
         self._step_close_windows_ok = False
@@ -1059,17 +1062,34 @@ class BrainModule:
         message = result.message or ""
         return RECORDED_ANCHOR_MISS_MESSAGE in message
 
+    def _consume_hold_step_retry(self) -> ScriptStepVerifyResult | None:
+        """Take a move_mouse replay failure that should pause and retry this step."""
+        reason = getattr(self, "_hold_step_retry_reason", None)
+        self._hold_step_retry_reason = None
+        if not isinstance(reason, str) or not reason.strip():
+            return None
+        return ScriptStepVerifyResult(
+            accomplished=False,
+            branch="retry",
+            target_step=None,
+            clearly_unmet=True,
+            reason=reason.strip(),
+        )
+
     async def _try_replay_cached_tools(
         self,
         goal: str,
         cached_calls: list[dict[str, Any]],
-    ) -> Literal["ok", "fallback", "anchor_miss"]:
+    ) -> Literal["ok", "fallback", "anchor_miss", "hold_retry"]:
         """Execute cached tool calls in order.
 
-        ``ok`` means every tool succeeded. ``anchor_miss`` means a recorded mouse
-        target had no similarity match; the caller must fail the step instead of
-        asking the model to re-pick visually. ``fallback`` is any other replay
-        failure, which still goes to the decide loop.
+        ``ok`` means every tool succeeded. ``hold_retry`` means ``move_mouse``
+        failed; the caller holds the step so the overlay counts down and the
+        same step runs again, without asking the model to pick another window.
+        ``anchor_miss`` means some other recorded target had no similarity
+        match; the caller must fail the step instead of asking the model to
+        re-pick visually. ``fallback`` is any other replay failure, which still
+        goes to the decide loop.
         """
         all_image_paths = await self._eye.capture_separated_images()
         before_screenshot = self._primary_decision_screenshot(all_image_paths)
@@ -1175,6 +1195,12 @@ class BrainModule:
                                 self._script_step_index,
                             )
                             self._save_step_messages(messages)
+                            if result.action == "move_mouse":
+                                message = (result.message or "").strip()
+                                self._hold_step_retry_reason = (
+                                    message or "move_mouse failed"
+                                )
+                                return "hold_retry"
                             if self._is_recorded_anchor_miss(result):
                                 return "anchor_miss"
                             return "fallback"
@@ -1191,6 +1217,7 @@ class BrainModule:
         if self._eye is None:
             raise RuntimeError("BrainModule requires eye=EyeModule(...) to capture screenshots for the decide loop")
 
+        self._hold_step_retry_reason = None
         goal = self._current_goal()
         first_prompt = get_prompt("brain_decide_action").format(task=goal)
         second_prompt = get_prompt("brain_decide_action_2").format(task=goal)
@@ -1236,6 +1263,11 @@ class BrainModule:
             replay = await self._try_replay_cached_tools(goal, cached_calls)
             if replay == "ok":
                 return True
+            if replay == "hold_retry":
+                self.manager.log_info(
+                    "Cache replay move_mouse failed; holding step for overlay retry"
+                )
+                return False
             if replay == "anchor_miss":
                 self.manager.log_info(
                     "Cache replay found no similarity match for the recorded target; "
@@ -1900,17 +1932,25 @@ class BrainModule:
                     )
                     verify_result = self._auto_advance_verify_result()
             else:
-                if skip_verification:
+                hold_retry = self._consume_hold_step_retry()
+                if hold_retry is not None:
                     self.manager.log_info(
-                        f"Script step {script_step_index + 1} skipping verification; "
-                        "actor failed"
+                        f"Script step {script_step_index + 1} move_mouse failed; "
+                        "holding step for overlay retry"
                     )
+                    verify_result = hold_retry
                 else:
-                    self.manager.log_info(
-                        f"Script step {script_step_index + 1} actor failed; "
-                        "no screenshot verification recovery"
-                    )
-                verify_result = None
+                    if skip_verification:
+                        self.manager.log_info(
+                            f"Script step {script_step_index + 1} skipping verification; "
+                            "actor failed"
+                        )
+                    else:
+                        self.manager.log_info(
+                            f"Script step {script_step_index + 1} actor failed; "
+                            "no screenshot verification recovery"
+                        )
+                    verify_result = None
             finished_iso = datetime.now(timezone.utc).isoformat()
             duration_seconds = round(perf_counter() - started_at, 3)
             self._step_transcript_counter += 1

@@ -2553,6 +2553,26 @@ def _screen_xyxy_to_image_roi(
     )
 
 
+def _any_monitor_has_live_click_window(
+    captured: list[tuple[int, np.ndarray]],
+    click_window: dict[str, Any],
+) -> bool:
+    """True when a live match of ``click_window`` intersects a captured image."""
+    from src.recorder.window_snapshot import resolve_live_ocr_roi_local
+
+    for monitor_index, bgr in captured:
+        img_h, img_w = bgr.shape[:2]
+        live_roi = resolve_live_ocr_roi_local(
+            click_window,
+            image_w=img_w,
+            image_h=img_h,
+            monitor_offset=active_monitor_offset(monitor_index),
+        )
+        if live_roi is not None:
+            return True
+    return False
+
+
 def _collect_monitor_detections(
     captured: list[tuple[int, np.ndarray]],
     *,
@@ -2583,15 +2603,18 @@ def _collect_monitor_detections(
     :func:`resolve_ocr_roi_local` (live match, else recorded rect). Stage 1 YOLO
     crops only when a **live** match exists
     (:func:`resolve_live_ocr_roi_local`) and recorded landmark centers (if any)
-    all lie inside the recorded window. Otherwise YOLO stays full-frame with
-    the gate ROI for Stage 3/4 + OCR admission.
+    all lie inside the recorded window. A monitor with no live window is not
+    searched. If no captured monitor intersects a live match, this raises
+    :exc:`ValueError` (:data:`CLICK_WINDOW_MISS_MESSAGE`) instead of scanning
+    other windows. Landmark centers that sit outside the recorded window still
+    use a full-frame search, but only after a live window was found.
 
     ``caption_roi_screen`` replaces that window rect with one caption-button cell
     (screen ``left, top, right, bottom``). Monitors that miss the cell are skipped.
     If the cell misses every image, detection falls back to the window ROI.
     If any monitor has an ROI, monitors that do not intersect it are skipped.
-    Full-frame detection runs only when no monitor has an ROI (missing
-    ``click_window``, or the window misses every captured image).
+    Full-frame detection runs when ``click_window`` is missing, or when a live
+    window exists but no monitor ROI intersects the captures.
     """
     if not captured:
         if timing_out is not None:
@@ -2659,7 +2682,7 @@ def _collect_monitor_detections(
         )
         if live_roi is None:
             _log_info(
-                "move_mouse yolo full-frame: no live click_window match "
+                "move_mouse: no live click_window match "
                 f"monitor={monitor_index}"
             )
             return None
@@ -2716,6 +2739,11 @@ def _collect_monitor_detections(
             planned = []
 
     if not planned:
+        if click_window is not None and not _any_monitor_has_live_click_window(
+            captured, click_window
+        ):
+            _log_info("move_mouse fail: no live click_window match")
+            raise ValueError(CLICK_WINDOW_MISS_MESSAGE)
         landmarks_outside = False
         for monitor_index, bgr in captured:
             if click_window is None or not landmark_centers:
@@ -2748,6 +2776,10 @@ def _collect_monitor_detections(
                     if gate is not None
                     else None
                 )
+                # A recorded rect must not pull in a monitor the live window
+                # does not intersect. Those monitors are dropped below.
+                if click_window is not None and crop is None:
+                    gate = None
                 planned.append((monitor_index, bgr, gate, crop))
 
     if any(gate is not None for _idx, _bgr, gate, _crop in planned):
@@ -4200,6 +4232,12 @@ _require_similarity_match: ContextVar[bool] = ContextVar(
 
 RECORDED_ANCHOR_MISS_MESSAGE = (
     "No mouse target matched the instruction on selected monitor(s)."
+)
+
+# The anchor-miss sentence stays in the text. move_mouse replay treats this
+# failure as a step retry (overlay countdown) instead of a visual re-pick.
+CLICK_WINDOW_MISS_MESSAGE = (
+    "Recorded click_window is not on screen. " + RECORDED_ANCHOR_MISS_MESSAGE
 )
 
 

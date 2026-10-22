@@ -211,7 +211,8 @@ async def move_mouse(
     (e.g. ["「Edge」圖示", "「Copilot」圖示"]). Prefer this over embedding
     （附近有…） comments inside instruction.
     click_window: optional press-time window payload from recording (local rect) used
-    to gate OCR/enhance to that window during replay.
+    to gate OCR/enhance to that window during replay. When it is set and no live
+    window matches, the move fails instead of searching other windows.
     landmark_geometry: optional recorded scale-normalized constellation (landmark↔landmark
     and landmark→target vectors) used during cache replay when the anchor is missing.
     '''

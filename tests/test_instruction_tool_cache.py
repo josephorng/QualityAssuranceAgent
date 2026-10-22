@@ -483,7 +483,7 @@ async def test_loop_falls_back_to_llm_when_cache_replay_fails(monkeypatch: pytes
 async def test_loop_fails_step_when_cache_replay_anchor_misses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A recorded target with no similarity match must not fall through to a visual re-pick."""
+    """A recorded move_mouse miss must not fall through to a visual re-pick."""
     monkeypatch.setenv(USE_TOOL_CACHE_ENV, "1")
     cached = [
         {
@@ -535,6 +535,7 @@ async def test_loop_fails_step_when_cache_replay_anchor_misses(
     assert await brain.loop() is False
     chat_messages.assert_not_called()
     brain._hand.execute_tool_command.assert_awaited_once()
+    assert brain._hold_step_retry_reason == RECORDED_ANCHOR_MISS_MESSAGE
 
 
 @pytest.mark.asyncio

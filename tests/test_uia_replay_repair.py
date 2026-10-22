@@ -310,3 +310,57 @@ def test_uia_walk_uses_live_hwnd_when_recorded_hwnd_is_stale(monkeypatch) -> Non
     )
     assert seen["hwnd"] == 99
     assert found == []
+
+
+def test_replay_repair_slots_only_for_yolo_ocr(tmp_path: Path) -> None:
+    from src.recorder.uia_replay_repair import replay_repair_slots
+
+    run = tmp_path / "recording"
+    (run / "events").mkdir(parents=True)
+    (run / "analysis").mkdir()
+    (run / "yolo_ocr").mkdir()
+    event = {
+        "index": 2,
+        "timestamp_utc": "t",
+        "kind": "click",
+        "button": "left",
+        "click_window": {
+            "hwnd": 5,
+            "title": "常用 - 檔案總管",
+            "process_name": "explorer.exe",
+            "rect": [0, 0, 200, 200],
+            "class_name": "CabinetWClass",
+        },
+        "uia_snapshot": {
+            "window": [0, 0, 200, 200],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [],
+        },
+    }
+    (run / "events" / "event_002.json").write_text(json.dumps(event), encoding="utf-8")
+    (run / "analysis" / "event_002.json").write_text(
+        json.dumps(
+            {
+                "event_index": 2,
+                "instruction": "（YOLO+OCR）將滑鼠移到「文件」文字，並點擊滑鼠一下。",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    payload = {
+        "vision_path": "yolo_ocr",
+        "candidates": [
+            {"bbox": [10, 20, 30, 14], "text": "文件", "class_name": "text"}
+        ],
+    }
+    yolo_path = run / "yolo_ocr" / "event_002.json"
+    yolo_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    calls = [{"name": "move_mouse", "arguments": {}}]
+    slots = replay_repair_slots(run, 2, calls)
+    assert len(slots) == 1 and slots[0] is not None
+    assert slots[0].recorded_text == "文件"
+    payload["vision_path"] = "uia"
+    yolo_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    assert replay_repair_slots(run, 2, calls) == []

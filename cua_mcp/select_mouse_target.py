@@ -4116,27 +4116,38 @@ def _uia_path_text_count(detections: list[UiDetection]) -> int:
     )
 
 
-def _uia_only_detections_for_click_window(
-    captured: list[tuple[int, np.ndarray]],
+def _live_uia_snapshot_for_click_window(
     click_window: dict[str, Any] | None,
-) -> list[UiDetection]:
-    """FindAll under the live click hwnd and return screen-space UIA candidates.
+) -> tuple[Any, dict[str, Any]] | None:
+    """FindAll for a repair walk. Does not grab the desktop, so it can overlap OCR.
 
     The recorded hwnd is often stale on a later replay. ``find_matching_click_window``
     keeps it when it still belongs to that window, and otherwise matches process and title.
     """
-    if not captured or not isinstance(click_window, dict):
-        return []
-    from src.recorder.uia_input_boxes import snapshot_uia_screen, uia_snapshot_image_local
+    if not isinstance(click_window, dict):
+        return None
+    from src.recorder.uia_input_boxes import snapshot_uia_screen
     from src.recorder.window_snapshot import find_matching_click_window
 
     live = find_matching_click_window(click_window)
     if live is None or not int(live.hwnd or 0):
-        return []
-    hwnd = int(live.hwnd)
-    snapshot = snapshot_uia_screen(hwnd)
+        return None
+    snapshot = snapshot_uia_screen(int(live.hwnd))
     if not isinstance(snapshot, dict):
+        return None
+    return live, snapshot
+
+
+def _detections_from_live_uia_snapshot(
+    captured: list[tuple[int, np.ndarray]],
+    live: Any,
+    snapshot: dict[str, Any],
+) -> list[UiDetection]:
+    """Map a finished FindAll onto the captured monitor. Screen-space boxes."""
+    if not captured:
         return []
+    from src.recorder.uia_input_boxes import uia_snapshot_image_local
+
     left, top = int(live.left), int(live.top)
     chosen: tuple[int, np.ndarray, tuple[int, int]] | None = None
     for monitor_index, bgr in captured:
@@ -4160,6 +4171,20 @@ def _uia_only_detections_for_click_window(
     )
     local = _detections_from_uia_prefetched(prefetched)
     return [_offset_detection(det, int(offset[0]), int(offset[1])) for det in local]
+
+
+def _uia_only_detections_for_click_window(
+    captured: list[tuple[int, np.ndarray]],
+    click_window: dict[str, Any] | None,
+) -> list[UiDetection]:
+    """FindAll under the live click hwnd and return screen-space UIA candidates."""
+    if not captured:
+        return []
+    found = _live_uia_snapshot_for_click_window(click_window)
+    if found is None:
+        return []
+    live, snapshot = found
+    return _detections_from_live_uia_snapshot(captured, live, snapshot)
 
 
 def _grab_selected_monitors() -> tuple[
@@ -4463,6 +4488,7 @@ async def find_mouse_point(
     uia_first_chosen: UiDetection | None = None
     grabbed_frames = False
     uia_dets: list[UiDetection] = []
+    captured: list[tuple[int, np.ndarray]] = []
     click_hwnd = 0
     if isinstance(click_window, dict):
         try:
@@ -4474,15 +4500,28 @@ async def find_mouse_point(
         from src.recorder.uia_replay_repair import take_uia_replay_repair
 
         repair_request = take_uia_replay_repair()
-    # A repair slot still walks UIA when the recorded hwnd is missing: the live
-    # match is by process and title inside ``_uia_only_detections_for_click_window``.
+    # （YOLO+OCR）is the only side a recording asks replay to repair. FindAll
+    # does not need the screenshot, so it overlaps capture and OCR. The click
+    # still uses YOLO+OCR unless that walk names the same recorded box.
+    repair_yolo = repair_request is not None and vision_mode == "yolo_ocr"
+    uia_repair_task: asyncio.Task[Any] | None = None
+    if repair_yolo and isinstance(click_window, dict):
+        uia_repair_task = asyncio.create_task(
+            asyncio.to_thread(_live_uia_snapshot_for_click_window, click_window)
+        )
+
+        def _retrieve_repair_task_error(task: asyncio.Task[Any]) -> None:
+            if not task.cancelled():
+                task.exception()
+
+        uia_repair_task.add_done_callback(_retrieve_repair_task_error)
     allow_uia_select = vision_mode != "yolo_ocr"
     filter_by_control_type = vision_mode == "uia"
     if (
         allow_uia_select
         and vision_plan.refine_with_uia
         and isinstance(click_window, dict)
-        and (click_hwnd or repair_request is not None)
+        and click_hwnd
     ):
         from src.recorder.uia_input_boxes import MIN_USABLE_UIA_LANDMARKS
 
@@ -4493,7 +4532,7 @@ async def find_mouse_point(
         uia_dets = await asyncio.to_thread(
             _uia_only_detections_for_click_window, captured, click_window
         )
-        if repair_request is None and _uia_path_text_count(uia_dets) >= MIN_USABLE_UIA_LANDMARKS:
+        if _uia_path_text_count(uia_dets) >= MIN_USABLE_UIA_LANDMARKS:
             uia_first_chosen, uia_first_reason = _try_uia_first_unique_select(
                 uia_dets,
                 anchor=anchor,
@@ -4576,7 +4615,6 @@ async def find_mouse_point(
     # already set ``uia_first_chosen`` and must not be replaced.
     if (
         allow_uia_select
-        and repair_request is None
         and uia_first_chosen is None
         and ocr_pendings
         and detections
@@ -4630,7 +4668,7 @@ async def find_mouse_point(
         capture_s = float(vision_timing.get("capture_s", 0.0))
         ocr_pendings = []
 
-    if repair_request is not None and allow_uia_select:
+    if repair_yolo:
         from src.recorder.uia_replay_repair import attempt_uia_replay_repair
 
         if ocr_pendings:
@@ -4641,6 +4679,21 @@ async def find_mouse_point(
             )
             capture_s = float(vision_timing.get("capture_s", 0.0))
             ocr_pendings = []
+        if uia_repair_task is not None:
+            walked: tuple[Any, dict[str, Any]] | None = None
+            try:
+                walked = await uia_repair_task
+            except Exception as exc:
+                _log_info(
+                    "uia replay repair walk failed "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            if walked is not None:
+                live, snapshot = walked
+                uia_dets = _detections_from_live_uia_snapshot(
+                    captured, live, snapshot
+                )
+        assert repair_request is not None
         repaired = attempt_uia_replay_repair(
             repair_request,
             click_window,

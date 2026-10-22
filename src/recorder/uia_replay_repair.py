@@ -1,8 +1,8 @@
-"""Repair a recorded pointer step from a live UIA element during cache replay.
+"""Repair a recorded （YOLO+OCR）pointer step from a live UIA element during cache replay.
 
-The recording walk can miss the control (empty ``FindAll`` on Word's start page).
-Replay already knows the window and the OCR box, so a settled live walk can name
-that same box and replace the OCR instruction.
+Only a side whose stored ``vision_path`` is ``yolo_ocr`` is repaired. The live
+FindAll runs beside YOLO+OCR. OCR must still show the recorded target, and one
+UIA label must cover that point, before the instruction is rewritten.
 """
 
 from __future__ import annotations
@@ -414,7 +414,10 @@ def _load_request(
     from src.recorder.vision_context import load_yolo_ocr_payload
 
     suffix = "_end" if side == "end" else ""
-    primary = _recorded_primary(load_yolo_ocr_payload(run_dir, event_index, suffix=suffix))
+    payload = load_yolo_ocr_payload(run_dir, event_index, suffix=suffix)
+    if not isinstance(payload, dict) or payload.get("vision_path") != "yolo_ocr":
+        return None
+    primary = _recorded_primary(payload)
     if primary is None:
         return None
     bbox, text = primary

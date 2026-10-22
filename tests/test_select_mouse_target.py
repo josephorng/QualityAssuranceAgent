@@ -5847,3 +5847,175 @@ def test_detect_defer_ocr_icon_retry_only_on_finish(
     assert len(pending) == 1
     _finish_mouse_ocr_pending(pending[0])
     assert retry_calls == ["retry"]
+
+
+def _quiet_run_manager() -> object:
+    return type(
+        "M",
+        (),
+        {
+            "require_paths": staticmethod(
+                lambda: type("P", (), {"yolo_ocr_dir": Path(".")})()
+            ),
+            "log_info": staticmethod(lambda *_a, **_k: None),
+        },
+    )()
+
+
+@pytest.mark.asyncio
+async def test_yolo_ocr_replay_overlaps_uia_walk_and_repairs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """（YOLO+OCR）replay starts FindAll before OCR returns, then may repair."""
+    import threading
+
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        UiaReplayRepairRequest,
+        bind_uia_replay_repairs,
+    )
+
+    snapshot_entered = threading.Event()
+    capture_entered = threading.Event()
+    calls = {"repair": 0}
+
+    def fake_snapshot(_click_window):
+        snapshot_entered.set()
+        assert capture_entered.wait(2)
+        return None
+
+    def fake_capture(*_a, **_k):
+        assert snapshot_entered.wait(2)
+        capture_entered.set()
+        ocr = _detection_from_bbox(
+            (10, 20, 30, 14), YOLO_CLASS_TEXT, text="文件", source="ocr"
+        )
+        timing = {
+            "capture_s": 0.01,
+            "yolo_s": 0.1,
+            "line_s": 0.0,
+            "uia_input_s": 0.0,
+            "uia_scrollbar_s": 0.0,
+            "uia_text_s": 0.0,
+            "ocr_s": 0.2,
+            "icon_ocr_retry_s": 0.0,
+            "total_s": 0.31,
+        }
+        frame = np.zeros((40, 40, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], [ocr], timing
+
+    def fake_attempt(_request, _click_window, uia_boxes, ocr_boxes):
+        calls["repair"] += 1
+        assert uia_boxes == []
+        assert ocr_boxes and ocr_boxes[0][1] == "文件"
+        return 11, 22, {"target_text": "文件"}
+
+    monkeypatch.setattr(smt, "_live_uia_snapshot_for_click_window", fake_snapshot)
+    monkeypatch.setattr(smt, "_capture_and_detect_mouse_candidates", fake_capture)
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+    monkeypatch.setattr(
+        "src.recorder.uia_replay_repair.attempt_uia_replay_repair",
+        fake_attempt,
+    )
+    request = UiaReplayRepairRequest(
+        recording_dir=Path("."),
+        event_index=2,
+        side="click",
+        recorded_bbox=(10, 20, 30, 14),
+        recorded_text="文件",
+        recorded_window_xywh=(0, 0, 200, 200),
+    )
+    with bind_uia_replay_repairs([request]):
+        with smt.require_similarity_match():
+            found = await smt.find_mouse_point(
+                "（YOLO+OCR）將滑鼠移到「文件」文字",
+                click_window={
+                    "hwnd": 5,
+                    "title": "常用 - 檔案總管",
+                    "process_name": "explorer.exe",
+                    "rect": [0, 0, 200, 200],
+                },
+            )
+    assert found is not None
+    assert found[0:2] == (11, 22)
+    assert calls["repair"] == 1
+    phases = found[2]["timing"]["phases"]
+    assert any(phase.get("name") == "uia_replay_repair" for phase in phases)
+
+
+@pytest.mark.asyncio
+async def test_uia_instruction_does_not_replay_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A （UIA）replay keeps UIA select and does not rewrite the step."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        UiaReplayRepairRequest,
+        bind_uia_replay_repairs,
+    )
+
+    target = _detection_from_bbox(
+        (20, 20, 40, 20), YOLO_CLASS_TEXT, text="記事本", source="uia"
+    )
+    extras = [
+        _detection_from_bbox(
+            (20, 40 + index * 12, 40, 10),
+            YOLO_CLASS_TEXT,
+            text=f"其他{index}",
+            source="uia",
+        )
+        for index in range(7)
+    ]
+    repair_calls: list[str] = []
+
+    def fake_grab():
+        frame = np.zeros((80, 80, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def fake_attempt(*_a, **_k):
+        repair_calls.append("repair")
+        return 1, 2, {"selection_method": "uia_replay_repair"}
+
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(
+        smt,
+        "_uia_only_detections_for_click_window",
+        lambda *_a, **_k: [target, *extras],
+    )
+    monkeypatch.setattr(
+        smt,
+        "_try_uia_first_unique_select",
+        lambda *_a, **_k: (target, None),
+    )
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+    monkeypatch.setattr(
+        "src.recorder.uia_replay_repair.attempt_uia_replay_repair",
+        fake_attempt,
+    )
+    request = UiaReplayRepairRequest(
+        recording_dir=Path("."),
+        event_index=1,
+        side="click",
+        recorded_bbox=(20, 20, 40, 20),
+        recorded_text="記事本",
+        recorded_window_xywh=(0, 0, 200, 200),
+    )
+    with bind_uia_replay_repairs([request]):
+        with smt.require_similarity_match():
+            found = await smt.find_mouse_point(
+                "（UIA）將滑鼠移到「記事本」文字",
+                click_window={
+                    "hwnd": 5,
+                    "title": "記事本",
+                    "process_name": "notepad.exe",
+                    "rect": [0, 0, 200, 200],
+                },
+            )
+    assert repair_calls == []
+    assert found is not None
+    assert found[0:2] == (target.cx, target.cy)
+    assert found[2]["selection_method"] == "uia_first_unique"

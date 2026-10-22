@@ -46,6 +46,7 @@ DEFAULT_NESTED_ELEMENT_CONTAINMENT_FRAC = 0.7
 
 # IUIAutomation vtable (after IUnknown 0..2).
 _UIA_ELEMENT_FROM_HANDLE = 6
+_UIA_ELEMENT_FROM_POINT = 7
 _UIA_CREATE_PROPERTY_CONDITION = 23
 _UIA_CREATE_OR_CONDITION = 28
 
@@ -469,6 +470,82 @@ def _element_label(element: ctypes.c_void_p) -> str:
         _element_value_pattern_current(element),
         _element_current_name(element),
     )
+
+
+def uia_text_element_at_point(x: int, y: int) -> tuple[str, RectXywh] | None:
+    """Name and screen xywh of the UIA element under a screen point.
+
+    ``ElementFromPoint`` can see a control that ``FindAll`` on the top-level
+    hwnd does not return (Word's start page is one of those).
+    """
+    if os.name != "nt":
+        return None
+    ole32 = ctypes.windll.ole32
+    initialized_here = False
+    hr = ole32.CoInitializeEx(None, _COINIT_MULTITHREADED)
+    if hr == _S_OK:
+        initialized_here = True
+    elif hr not in (_S_OK, _S_FALSE) and (hr & 0xFFFFFFFF) != 0x80010106:
+        return None
+
+    class _POINT(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    automation: ctypes.c_void_p | None = None
+    element: ctypes.c_void_p | None = None
+    try:
+        clsid = _guid_from_string(_CLSID_CUIAutomation)
+        iid = _guid_from_string(_IID_IUIAutomation)
+        automation_ptr = ctypes.c_void_p()
+        hr = ole32.CoCreateInstance(
+            ctypes.byref(clsid),
+            None,
+            _CLSCTX_INPROC_SERVER,
+            ctypes.byref(iid),
+            ctypes.byref(automation_ptr),
+        )
+        if hr != _S_OK or not automation_ptr:
+            return None
+        automation = automation_ptr
+        element_from_point = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            _POINT,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(
+            _com_vtable(automation, _UIA_ELEMENT_FROM_POINT + 1)[
+                _UIA_ELEMENT_FROM_POINT
+            ]
+        )
+        element_ptr = ctypes.c_void_p()
+        hr = element_from_point(
+            automation,
+            _POINT(int(x), int(y)),
+            ctypes.byref(element_ptr),
+        )
+        if hr != _S_OK or not element_ptr:
+            return None
+        element = element_ptr
+        label = _element_label(element).strip()
+        bounds = _element_bounding_xyxy(element)
+        if not label or bounds is None:
+            return None
+        left, top, right, bottom = bounds
+        width = int(right) - int(left)
+        height = int(bottom) - int(top)
+        if width <= 0 or height <= 0:
+            return None
+        return label, (int(left), int(top), width, height)
+    except Exception:
+        return None
+    finally:
+        _com_release(element)
+        _com_release(automation)
+        if initialized_here:
+            try:
+                ole32.CoUninitialize()
+            except Exception:
+                pass
 
 
 def _create_control_type_condition(

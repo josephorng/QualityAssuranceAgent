@@ -3967,6 +3967,26 @@ def _detections_from_uia_prefetched(
     return detections
 
 
+def _labeled_text_boxes(
+    detections: list[UiDetection],
+    *,
+    source: str,
+) -> list[tuple[tuple[int, int, int, int], str]]:
+    """Screen xywh and text for OCR or UIA text detections."""
+    boxes: list[tuple[tuple[int, int, int, int], str]] = []
+    for det in detections:
+        text = str(det.text or "").strip()
+        if not text or det.class_name != "text":
+            continue
+        det_source = str(det.source or "")
+        if source == "uia" and det_source != "uia":
+            continue
+        if source == "ocr" and det_source == "uia":
+            continue
+        boxes.append((det.bbox, text))
+    return boxes
+
+
 def _uia_path_text_count(detections: list[UiDetection]) -> int:
     return sum(
         1
@@ -3979,25 +3999,24 @@ def _uia_only_detections_for_click_window(
     captured: list[tuple[int, np.ndarray]],
     click_window: dict[str, Any] | None,
 ) -> list[UiDetection]:
-    """FindAll under the click hwnd and return image-offset UIA candidates only."""
+    """FindAll under the live click hwnd and return screen-space UIA candidates.
+
+    The recorded hwnd is often stale on a later replay. ``find_matching_click_window``
+    keeps it when it still belongs to that window, and otherwise matches process and title.
+    """
     if not captured or not isinstance(click_window, dict):
         return []
-    try:
-        hwnd = int(click_window.get("hwnd") or 0)
-    except (TypeError, ValueError):
-        return []
-    if hwnd <= 0:
-        return []
     from src.recorder.uia_input_boxes import snapshot_uia_screen, uia_snapshot_image_local
+    from src.recorder.window_snapshot import find_matching_click_window
 
+    live = find_matching_click_window(click_window)
+    if live is None or not int(live.hwnd or 0):
+        return []
+    hwnd = int(live.hwnd)
     snapshot = snapshot_uia_screen(hwnd)
     if not isinstance(snapshot, dict):
         return []
-    try:
-        left = int(click_window.get("left") or 0)
-        top = int(click_window.get("top") or 0)
-    except (TypeError, ValueError):
-        left, top = 0, 0
+    left, top = int(live.left), int(live.top)
     chosen: tuple[int, np.ndarray, tuple[int, int]] | None = None
     for monitor_index, bgr in captured:
         offset = active_monitor_offset(monitor_index)
@@ -4313,13 +4332,23 @@ async def find_mouse_point(
 
     uia_first_chosen: UiDetection | None = None
     grabbed_frames = False
+    uia_dets: list[UiDetection] = []
     click_hwnd = 0
     if isinstance(click_window, dict):
         try:
             click_hwnd = int(click_window.get("hwnd") or 0)
         except (TypeError, ValueError):
             click_hwnd = 0
-    if vision_plan.refine_with_uia and click_hwnd:
+    repair_request = None
+    if similarity_match_required():
+        from src.recorder.uia_replay_repair import take_uia_replay_repair
+
+        repair_request = take_uia_replay_repair()
+    # A repair slot still walks UIA when the recorded hwnd is missing: the live
+    # match is by process and title inside ``_uia_only_detections_for_click_window``.
+    if vision_plan.refine_with_uia and isinstance(click_window, dict) and (
+        click_hwnd or repair_request is not None
+    ):
         from src.recorder.uia_input_boxes import MIN_USABLE_UIA_LANDMARKS
 
         monitor_indices, image_paths, captured, capture_s = await asyncio.to_thread(
@@ -4329,7 +4358,7 @@ async def find_mouse_point(
         uia_dets = await asyncio.to_thread(
             _uia_only_detections_for_click_window, captured, click_window
         )
-        if _uia_path_text_count(uia_dets) >= MIN_USABLE_UIA_LANDMARKS:
+        if repair_request is None and _uia_path_text_count(uia_dets) >= MIN_USABLE_UIA_LANDMARKS:
             uia_first_chosen, uia_first_reason = _try_uia_first_unique_select(
                 uia_dets,
                 anchor=anchor,
@@ -4409,7 +4438,12 @@ async def find_mouse_point(
 
     # No-window callers still finish a deferred OCR pass. A click-window UIA hit
     # already set ``uia_first_chosen`` and must not be replaced.
-    if uia_first_chosen is None and ocr_pendings and detections:
+    if (
+        repair_request is None
+        and uia_first_chosen is None
+        and ocr_pendings
+        and detections
+    ):
         uia_first_chosen, uia_first_reason = _try_uia_first_unique_select(
             detections,
             anchor=anchor,
@@ -4447,6 +4481,35 @@ async def find_mouse_point(
         )
         capture_s = float(vision_timing.get("capture_s", 0.0))
         ocr_pendings = []
+
+    if repair_request is not None:
+        from src.recorder.uia_replay_repair import attempt_uia_replay_repair
+
+        if ocr_pendings:
+            detections, vision_timing = await asyncio.to_thread(
+                _finish_deferred_ocr_pendings,
+                ocr_pendings,
+                timing_base=vision_timing,
+            )
+            capture_s = float(vision_timing.get("capture_s", 0.0))
+            ocr_pendings = []
+        repaired = attempt_uia_replay_repair(
+            repair_request,
+            click_window,
+            _labeled_text_boxes(uia_dets, source="uia"),
+            _labeled_text_boxes(detections, source="ocr"),
+        )
+        if repaired is not None:
+            gx, gy, repair_meta = repaired
+            image_path = image_paths[0] if image_paths else ""
+            repair_meta["anchor_instruction"] = instruction_text
+            repair_meta["nearby_objects"] = nearby_phrases
+            repair_meta["screenshot_path"] = image_path
+            repair_meta["screenshot_paths"] = image_paths
+            repair_meta["timing"] = _timing_meta(
+                select_s=0.0, select_phase="uia_replay_repair"
+            )
+            return gx, gy, repair_meta
 
     selection_method: str | None = None
     if uia_first_chosen is not None:

@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1100,54 +1101,83 @@ class BrainModule:
             ),
         ]
 
+        repair_binding = nullcontext()
+        script_path_raw = (os.environ.get(SCRIPT_PATH_ENV) or "").strip()
+        if script_path_raw:
+            try:
+                from src.common.script_helper import recording_run_dir
+                from src.recorder.uia_replay_repair import (
+                    bind_uia_replay_repairs,
+                    replay_repair_slots,
+                )
+
+                recording_dir = recording_run_dir(Path(script_path_raw))
+                event_ids = self._script_event_indices
+                step_index = self._script_step_index
+                event_index = (
+                    event_ids[step_index]
+                    if 0 <= step_index < len(event_ids)
+                    and isinstance(event_ids[step_index], int)
+                    else None
+                )
+                if recording_dir is not None and event_index is not None:
+                    slots = replay_repair_slots(
+                        recording_dir, int(event_index), cached_calls
+                    )
+                    if slots:
+                        repair_binding = bind_uia_replay_repairs(slots)
+            except Exception as exc:
+                self.manager.log_info(f"UIA replay repair setup skipped: {exc}")
+
         try:
-            with require_similarity_match():
-                for call in cached_calls:
-                    arguments = self._normalize_tool_arguments(call.get("arguments"))
-                    try:
-                        normalized_name = await self._normalize_tool_name(
-                            call["name"], arguments
+            with repair_binding:
+                with require_similarity_match():
+                    for call in cached_calls:
+                        arguments = self._normalize_tool_arguments(call.get("arguments"))
+                        try:
+                            normalized_name = await self._normalize_tool_name(
+                                call["name"], arguments
+                            )
+                        except Exception as e:
+                            self.manager.log_error(
+                                f"Cache replay: error normalizing tool name: {e}"
+                            )
+                            self._save_step_messages(messages)
+                            return "fallback"
+                        arguments = self._enrich_tool_arguments(
+                            normalized_name, arguments, goal
                         )
-                    except Exception as e:
-                        self.manager.log_error(
-                            f"Cache replay: error normalizing tool name: {e}"
+                        result = await self._hand.execute_tool_command(
+                            ToolCommand(
+                                action=normalized_name,
+                                args=arguments,
+                                screenshot_before_path=before_screenshot,
+                            )
                         )
-                        self._save_step_messages(messages)
-                        return "fallback"
-                    arguments = self._enrich_tool_arguments(
-                        normalized_name, arguments, goal
-                    )
-                    result = await self._hand.execute_tool_command(
-                        ToolCommand(
-                            action=normalized_name,
-                            args=arguments,
-                            screenshot_before_path=before_screenshot,
+                        self._mark_pending_after_capture()
+                        self._remember_replay_press_point(result)
+                        self._remember_close_windows_success(result)
+                        messages.append(
+                            stamp_message(
+                                {
+                                    "role": ROLE_TOOL,
+                                    "content": json.dumps(
+                                        self.sanitize_execution_result(result),
+                                        ensure_ascii=False,
+                                    ),
+                                }
+                            )
                         )
-                    )
-                    self._mark_pending_after_capture()
-                    self._remember_replay_press_point(result)
-                    self._remember_close_windows_success(result)
-                    messages.append(
-                        stamp_message(
-                            {
-                                "role": ROLE_TOOL,
-                                "content": json.dumps(
-                                    self.sanitize_execution_result(result),
-                                    ensure_ascii=False,
-                                ),
-                            }
-                        )
-                    )
-                    if not result.ok:
-                        self._append_failed_tool_call(
-                            result.action,
-                            self._step_transcript_counter,
-                            self._script_step_index,
-                        )
-                        self._save_step_messages(messages)
-                        if self._is_recorded_anchor_miss(result):
-                            return "anchor_miss"
-                        return "fallback"
+                        if not result.ok:
+                            self._append_failed_tool_call(
+                                result.action,
+                                self._step_transcript_counter,
+                                self._script_step_index,
+                            )
+                            self._save_step_messages(messages)
+                            if self._is_recorded_anchor_miss(result):
+                                return "anchor_miss"
+                            return "fallback"
 
             self._save_step_messages(messages)
             return "ok"

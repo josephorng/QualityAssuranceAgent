@@ -108,8 +108,6 @@ _MAX_PRIMARY_TARGET_OPTIONS = 10
 _MAX_PICK_TARGET_OPTIONS = 80
 # Recording HTML「附近地標」: max options per directed side (closest to click).
 _MAX_NEARBY_LANDMARK_OPTIONS_PER_SIDE = 10
-# Max extra landmarks tried when growing seed until replay prefilter is unique.
-_MAX_UNIQUENESS_GROW_ADDITIONS = 8
 # Prefer at least this many multi-char text neighbors in each directional cell.
 _MIN_MULTI_CHAR_TEXT_PER_SIDE = 2
 _DRAG_OFFSET_THRESHOLD_PX = 5
@@ -1840,8 +1838,9 @@ def _grow_locating_hints_for_prefilter_uniqueness(
 ) -> list[NearbyHint]:
     """Greedily add pool landmarks until prefilter keeps only ``primary``.
 
-    Returns the locating portion (not ``prefix_hints``). On failure, returns the
-    best-effort locating set with the smallest kept peer set (seed if none improve).
+    Walks the full eligible ``pool`` (no addition cap). Returns the locating
+    portion (not ``prefix_hints``). On failure, returns the best-effort locating
+    set with the smallest kept peer set (seed if none improve).
     """
     used_labels = {hint.label for hint in prefix_hints} | {hint.label for hint in seed}
     current = list(seed)
@@ -1854,14 +1853,10 @@ def _grow_locating_hints_for_prefilter_uniqueness(
     if best_kept <= 0:
         best_kept = len(peers) + 1
 
-    tried = 0
     for item in pool:
-        if tried >= _MAX_UNIQUENESS_GROW_ADDITIONS:
-            break
         label = item.hint.label
         if not label or label in used_labels:
             continue
-        tried += 1
         trial = [*current, item.hint]
         kept, trial_unique = _prefilter_kept_among_peers(
             primary, peers, detections, [*prefix_hints, *trial]
@@ -1903,8 +1898,8 @@ def _pick_minimal_locating_hints(
     inputs/scrollbars), grow the seed with more eligible landmarks until replay's
     ``_prefilter_anchors_by_nearby`` keeps only the primary. ``prefix_hints``
     (forced container / scrollbar-content) count toward that check but are not
-    returned. If uniqueness cannot be proven within a small budget, keep the
-    best-effort set (smallest kept peer set, else the original seed).
+    returned. If uniqueness cannot be proven after exhausting the eligible pool,
+    keep the best-effort set (smallest kept peer set, else the original seed).
     """
     if len(candidates) < 2 or not isinstance(candidates[0], dict):
         return []

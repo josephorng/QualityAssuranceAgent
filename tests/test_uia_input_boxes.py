@@ -48,6 +48,38 @@ def test_filter_uia_input_rects_drops_oversized_and_out_of_roi() -> None:
     assert boxes == [(20, 30, 180, 40)]
 
 
+def test_filter_uia_input_rects_drops_edge_sliver_from_wrong_monitor() -> None:
+    """Off-monitor boxes that clip to a 1px primary edge must not become targets."""
+    window = (1912, -9, 1936, 1048)  # maximized on secondary, left overlaps primary
+    # Real control on secondary; clipping onto primary (0..1920) leaves a 1px strip.
+    screen_boxes = [
+        (2100, 300, 2250, 330),
+        (100, 200, 220, 240),  # fully on primary — keep
+    ]
+    boxes = filter_uia_input_rects(
+        screen_boxes,
+        window_screen_xywh=window,
+        monitor_offset=(0, 0),
+        image_w=1920,
+        image_h=1080,
+    )
+    assert boxes == [(100, 200, 120, 40)]
+
+
+def test_is_clipped_uia_sliver_keeps_uncropped_small_box() -> None:
+    from src.recorder.uia_input_boxes import _is_clipped_uia_sliver
+
+    assert (
+        _is_clipped_uia_sliver(orig_w=2, orig_h=16, clipped_w=2, clipped_h=16) is False
+    )
+    assert (
+        _is_clipped_uia_sliver(orig_w=100, orig_h=20, clipped_w=1, clipped_h=20) is True
+    )
+    assert (
+        _is_clipped_uia_sliver(orig_w=100, orig_h=20, clipped_w=40, clipped_h=20) is True
+    )
+
+
 def test_hough_path_still_drops_inputs_overlapping_h_scrollbar() -> None:
     """Hough/YOLO merge still drops boxes that overlap horizontal scrollbars."""
     from cua_mcp.input_box_rectangles import (

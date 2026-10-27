@@ -1995,6 +1995,85 @@ def _detection_similarity_to_query(det: UiDetection, query: str) -> float:
     )
 
 
+def _detection_exact_match_to_query(det: UiDetection, query: str) -> bool:
+    """True when a detection label equals ``query`` after similarity normalization.
+
+    Used on the UIA path where Name/Value strings are deterministic. Wrapper
+    forms such as ``「空白活頁簿」文字`` still match raw ``空白活頁簿``.
+    """
+    query_n = _normalize_similarity_label(query or "")
+    if not query_n:
+        return False
+    return any(
+        _normalize_similarity_label(label) == query_n
+        for label in _detection_match_labels(det)
+        if label
+    )
+
+
+def _anchor_indices_by_exact_match(
+    detections: list[UiDetection],
+    anchor: str,
+) -> list[int]:
+    """Indices whose labels exactly match ``anchor`` after normalization."""
+    if not detections or not (anchor or "").strip():
+        return []
+    return [
+        i
+        for i, det in enumerate(detections)
+        if _detection_exact_match_to_query(det, anchor)
+    ]
+
+
+def _prefilter_detections_by_exact_match(
+    detections: list[UiDetection],
+    anchor: str,
+    nearby: list[str],
+) -> tuple[list[int], list[int]]:
+    """Anchor/nearby index buckets using normalized exact label equality."""
+    anchor_indices = _anchor_indices_by_exact_match(detections, anchor)
+    anchor_set = set(anchor_indices)
+    nearby_indices: list[int] = []
+    nearby_seen: set[int] = set()
+    for query in nearby:
+        if not (query or "").strip():
+            continue
+        for i in _anchor_indices_by_exact_match(detections, query):
+            if i in anchor_set or i in nearby_seen:
+                continue
+            nearby_indices.append(i)
+            nearby_seen.add(i)
+    return anchor_indices, nearby_indices
+
+
+def _filter_mouse_candidates_exact(
+    detections: list[UiDetection],
+    anchor: str,
+    nearby: list[str],
+) -> tuple[list[UiDetection], list[UiDetection]]:
+    """Split detections into anchor vs nearby via normalized exact match."""
+    if not detections:
+        return [], []
+    anchor_indices, nearby_indices = _prefilter_detections_by_exact_match(
+        detections, anchor, nearby
+    )
+    _log_info(
+        "_filter_mouse_candidates: exact split "
+        f"detections={len(detections)} anchor={len(anchor_indices)} "
+        f"nearby={len(nearby_indices)}"
+    )
+    if not anchor_indices and not nearby_indices:
+        return [], []
+    anchor_expanded = _expand_keep_indices_with_similar(detections, anchor_indices)
+    nearby_expanded = _expand_keep_indices_with_similar(detections, nearby_indices)
+    anchor_set = set(anchor_expanded)
+    nearby_expanded = [i for i in nearby_expanded if i not in anchor_set]
+    return (
+        [detections[i] for i in anchor_expanded],
+        [detections[i] for i in nearby_expanded],
+    )
+
+
 # Minimum SequenceMatcher score to keep a candidate before the LLM filter.
 _MOUSE_FILTER_SIMILARITY_THRESHOLD = 0.5
 
@@ -3958,13 +4037,38 @@ def _matches_for_phrase(
     detections: list[UiDetection],
     phrase: str,
 ) -> list[UiDetection]:
-    """Name matches for one phrase, inside its control-type pool when that pool exists."""
+    """Exact name matches for one phrase, inside its control-type pool when present.
+
+    UIA Name/Value is deterministic, so this path never uses fuzzy similarity.
+    """
     pool = _phrase_match_pool(detections, phrase)
-    indices = _anchor_indices_by_top_similarity(pool, phrase)
+    indices = _anchor_indices_by_exact_match(pool, phrase)
     if not indices:
         return []
     expanded = _expand_keep_indices_with_similar(pool, indices)
     return [pool[index] for index in expanded]
+
+
+def _log_move_mouse_detections(label: str, detections: list[UiDetection]) -> None:
+    """Dump candidate geometries for run.log debugging (empty → still note count)."""
+    if not detections:
+        _log_info(f"move_mouse {label}: (none)")
+        return
+    _log_info(
+        f"move_mouse {label} ({len(detections)}):\n"
+        + _format_ui_candidates_text(detections, include_geometry=True)
+    )
+
+
+def _uia_snapshot_class_counts(detections: list[UiDetection]) -> str:
+    """Compact ``input=N text=M …`` summary for a UIA FindAll snapshot."""
+    counts: dict[str, int] = {}
+    for det in detections:
+        key = str(det.class_name or "unknown")
+        counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        return "empty"
+    return " ".join(f"{name}={counts[name]}" for name in sorted(counts))
 
 
 def _try_uia_first_unique_select(
@@ -3980,6 +4084,17 @@ def _try_uia_first_unique_select(
     if not detections:
         return None, "no_detections"
 
+    # Inputs/scrollbars only — full UIA text dumps are too large for every step.
+    _log_move_mouse_detections(
+        "uia_first inputs",
+        [
+            det
+            for det in detections
+            if det.class_id in (YOLO_CLASS_INPUT, YOLO_CLASS_SCROLLBAR)
+            or det.class_name in ("input", "scrollbar")
+        ],
+    )
+
     if filter_by_control_type:
         anchor_matches = _matches_for_phrase(detections, anchor)
         nearby_matches: list[UiDetection] = []
@@ -3991,7 +4106,9 @@ def _try_uia_first_unique_select(
                 seen.add(id(det))
                 nearby_matches.append(det)
     else:
-        anchor_matches, nearby_matches = _filter_mouse_candidates(
+        # UIA Name/Value is deterministic: exact normalized text only.
+        # Fuzzy similarity stays on the YOLO/OCR path via _filter_mouse_candidates.
+        anchor_matches, nearby_matches = _filter_mouse_candidates_exact(
             detections, anchor, nearby_labels
         )
     _log_info(
@@ -3999,6 +4116,8 @@ def _try_uia_first_unique_select(
         f"anchor={len(anchor_matches)} nearby={len(nearby_matches)} "
         f"anchor={anchor!r} nearby_labels={nearby_phrases!r}"
     )
+    _log_move_mouse_detections("uia_first anchor_matches", anchor_matches)
+    _log_move_mouse_detections("uia_first nearby_matches", nearby_matches)
     if not anchor_matches:
         return None, "no_anchor"
 
@@ -4013,6 +4132,7 @@ def _try_uia_first_unique_select(
             f"anchors {before_nearby} -> {len(anchor_matches)} "
             f"nearby_labels={nearby_phrases!r}"
         )
+    _log_move_mouse_detections("uia_first anchors_after_nearby", anchor_matches)
     if len(anchor_matches) != 1:
         return None, "not_unique"
 
@@ -4126,6 +4246,45 @@ def _live_uia_snapshot_for_click_window(
     return live, snapshot
 
 
+def _pick_captured_monitor_for_window(
+    captured: list[tuple[int, np.ndarray]],
+    live: Any,
+) -> tuple[int, np.ndarray, tuple[int, int]]:
+    """Choose the capture whose monitor best covers ``live``.
+
+    Prefer the monitor that contains the window center. If none does, pick the
+    monitor with the largest intersection area with the window. Fall back to the
+    first capture when nothing overlaps (e.g. empty size).
+    """
+    left = int(getattr(live, "left", 0) or 0)
+    top = int(getattr(live, "top", 0) or 0)
+    width = max(0, int(getattr(live, "width", 0) or 0))
+    height = max(0, int(getattr(live, "height", 0) or 0))
+    cx = left + width // 2
+    cy = top + height // 2
+
+    best_area = 0
+    best: tuple[int, np.ndarray, tuple[int, int]] | None = None
+    for monitor_index, bgr in captured:
+        offset = active_monitor_offset(monitor_index)
+        mon_h, mon_w = bgr.shape[:2]
+        ox, oy = int(offset[0]), int(offset[1])
+        if ox <= cx < ox + mon_w and oy <= cy < oy + mon_h:
+            return (monitor_index, bgr, offset)
+        ix0 = max(left, ox)
+        iy0 = max(top, oy)
+        ix1 = min(left + width, ox + mon_w)
+        iy1 = min(top + height, oy + mon_h)
+        area = max(0, ix1 - ix0) * max(0, iy1 - iy0)
+        if area > best_area:
+            best_area = area
+            best = (monitor_index, bgr, offset)
+    if best is not None and best_area > 0:
+        return best
+    monitor_index, bgr = captured[0]
+    return (monitor_index, bgr, active_monitor_offset(monitor_index))
+
+
 def _detections_from_live_uia_snapshot(
     captured: list[tuple[int, np.ndarray]],
     live: Any,
@@ -4136,18 +4295,7 @@ def _detections_from_live_uia_snapshot(
         return []
     from src.recorder.uia_input_boxes import uia_snapshot_image_local
 
-    left, top = int(live.left), int(live.top)
-    chosen: tuple[int, np.ndarray, tuple[int, int]] | None = None
-    for monitor_index, bgr in captured:
-        offset = active_monitor_offset(monitor_index)
-        height, width = bgr.shape[:2]
-        if offset[0] <= left < offset[0] + width and offset[1] <= top < offset[1] + height:
-            chosen = (monitor_index, bgr, offset)
-            break
-    if chosen is None:
-        monitor_index, bgr = captured[0]
-        chosen = (monitor_index, bgr, active_monitor_offset(monitor_index))
-    _monitor_index, bgr, offset = chosen
+    _monitor_index, bgr, offset = _pick_captured_monitor_for_window(captured, live)
     height, width = bgr.shape[:2]
     prefetched = uia_snapshot_image_local(
         snapshot,
@@ -4538,11 +4686,19 @@ async def find_mouse_point(
         uia_dets = await asyncio.to_thread(
             _uia_only_detections_for_click_window, captured, click_window
         )
+        _log_info(
+            "move_mouse uia_first snapshot "
+            f"total={len(uia_dets)} {_uia_snapshot_class_counts(uia_dets)}"
+        )
         uia_first_chosen, uia_first_reason = _select_uia_snapshot(uia_dets)
         if uia_first_chosen is None:
             _log_info(f"move_mouse uia_first miss reason={uia_first_reason}")
             uia_dets = await asyncio.to_thread(
                 _uia_only_detections_for_click_window, captured, click_window
+            )
+            _log_info(
+                "move_mouse uia_first retry snapshot "
+                f"total={len(uia_dets)} {_uia_snapshot_class_counts(uia_dets)}"
             )
             uia_first_chosen, uia_first_reason = _select_uia_snapshot(uia_dets)
             if uia_first_chosen is None:
@@ -4864,6 +5020,8 @@ async def find_mouse_point(
         f"nearby={len(nearby_matches)} "
         f"anchor={anchor!r} nearby_labels={nearby_phrases!r}"
     )
+    _log_move_mouse_detections("after_filter anchor_matches", anchor_matches)
+    _log_move_mouse_detections("after_filter nearby_matches", nearby_matches)
 
     selected_text: str | None = None
     select_phase = "select"
@@ -5043,6 +5201,7 @@ async def find_mouse_point(
                 f"anchors {before_nearby} -> {after_admit} admitted -> "
                 f"{len(anchor_matches)} nearby_labels={nearby_phrases!r}"
             )
+        _log_move_mouse_detections("anchors_after_nearby", anchor_matches)
 
         # Cache replay with recorded constellation: prefer geometry over LLM pick
         # (e.g. multiple 輸入欄 class matches). On-object text still uses unique/LLM.

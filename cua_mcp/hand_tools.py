@@ -96,6 +96,47 @@ def _press_time_point_window(x: int, y: int) -> dict[str, Any] | None:
         return None
 
 
+def _primary_screen_size() -> tuple[int, int]:
+    """Primary monitor size in pixels (PyAutoGUI fail-safe corners use this)."""
+    size = pyautogui.size()
+    return int(size[0]), int(size[1])
+
+
+def _is_pyautogui_failsafe_corner(x: int, y: int) -> bool:
+    """True when ``(x, y)`` is one of the four primary-monitor fail-safe corners."""
+    width, height = _primary_screen_size()
+    if width <= 0 or height <= 0:
+        return False
+    corners = {
+        (0, 0),
+        (width - 1, 0),
+        (0, height - 1),
+        (width - 1, height - 1),
+    }
+    return (int(x), int(y)) in corners
+
+
+def _nudge_cursor_off_failsafe_corner() -> bool:
+    """Move one pixel inward if the cursor is on a fail-safe corner. Return True if nudged."""
+    pos = pyautogui.position()
+    x, y = int(pos.x), int(pos.y)
+    if not _is_pyautogui_failsafe_corner(x, y):
+        return False
+    width, height = _primary_screen_size()
+    nx = 1 if x <= 0 else (width - 2 if x >= width - 1 else x)
+    ny = 1 if y <= 0 else (height - 2 if y >= height - 1 else y)
+    if (nx, ny) == (x, y):
+        return False
+    # Escaping the corner itself would also trip FAILSAFE; disable briefly.
+    previous = bool(pyautogui.FAILSAFE)
+    pyautogui.FAILSAFE = False
+    try:
+        pyautogui.moveTo(x=nx, y=ny, duration=0)
+    finally:
+        pyautogui.FAILSAFE = previous
+    return True
+
+
 def click(
     x: int | None = None,
     y: int | None = None,
@@ -114,6 +155,10 @@ def click(
     held = [_canonicalize_key(m) for m in (modifiers or []) if str(m).strip()]
     if x is not None and y is not None:
         rx, ry = int(x), int(y)
+        if _is_pyautogui_failsafe_corner(rx, ry):
+            raise ValueError(
+                f"Refusing to click PyAutoGUI fail-safe corner ({rx}, {ry})"
+            )
     else:
         pos = pyautogui.position()
         rx, ry = int(pos.x), int(pos.y)
@@ -121,7 +166,13 @@ def click(
     for key in held:
         pyautogui.keyDown(key)
     try:
-        pyautogui.click(x=rx, y=ry, button=button, clicks=clicks, interval=interval)
+        try:
+            pyautogui.click(x=rx, y=ry, button=button, clicks=clicks, interval=interval)
+        except pyautogui.FailSafeException:
+            _nudge_cursor_off_failsafe_corner()
+            if _is_pyautogui_failsafe_corner(rx, ry):
+                raise
+            pyautogui.click(x=rx, y=ry, button=button, clicks=clicks, interval=interval)
         result: dict[str, Any] = {
             "x": rx,
             "y": ry,
@@ -222,9 +273,22 @@ def hotkey(keys: list[str] | str) -> dict[str, Any]:
 
 
 def move(x: int, y: int, duration: float = 0.0) -> dict[str, Any]:
-    """Move the mouse to a screen coordinate."""
-    pyautogui.moveTo(x=x, y=y, duration=duration)
-    return {"x": x, "y": y, "duration": duration}
+    """Move the mouse to a screen coordinate.
+
+    Refuses primary-monitor fail-safe corners. If FAILSAFE trips because the
+    cursor was already in a corner, nudge inward and retry once.
+    """
+    tx, ty = int(x), int(y)
+    if _is_pyautogui_failsafe_corner(tx, ty):
+        raise ValueError(
+            f"Refusing to move mouse to PyAutoGUI fail-safe corner ({tx}, {ty})"
+        )
+    try:
+        pyautogui.moveTo(x=tx, y=ty, duration=duration)
+    except pyautogui.FailSafeException:
+        _nudge_cursor_off_failsafe_corner()
+        pyautogui.moveTo(x=tx, y=ty, duration=duration)
+    return {"x": tx, "y": ty, "duration": duration}
 
 
 def wait(seconds: float) -> dict[str, Any]:

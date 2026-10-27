@@ -21,6 +21,56 @@ def test_normalize_button(raw: str | int, expected: str | int) -> None:
     assert hand_tools._normalize_button(raw) == expected
 
 
+def test_move_refuses_failsafe_corner(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(hand_tools, "_primary_screen_size", lambda: (1920, 1080))
+    moved: list[tuple[int, int]] = []
+
+    def _fake_moveTo(*, x: int, y: int, duration: float = 0.0) -> None:
+        moved.append((int(x), int(y)))
+
+    monkeypatch.setattr(hand_tools.pyautogui, "moveTo", _fake_moveTo)
+
+    with pytest.raises(ValueError, match="fail-safe corner"):
+        hand_tools.move(1919, 1079)
+    assert moved == []
+
+    result = hand_tools.move(100, 200)
+    assert result == {"x": 100, "y": 200, "duration": 0.0}
+    assert moved == [(100, 200)]
+
+
+def test_move_recovers_from_failsafe_when_cursor_already_in_corner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(hand_tools, "_primary_screen_size", lambda: (1920, 1080))
+    moves: list[tuple[int, int]] = []
+    cursor = {"x": 1919, "y": 1079}
+
+    def _fake_moveTo(*, x: int, y: int, duration: float = 0.0) -> None:
+        if hand_tools.pyautogui.FAILSAFE and hand_tools._is_pyautogui_failsafe_corner(
+            cursor["x"], cursor["y"]
+        ):
+            raise hand_tools.pyautogui.FailSafeException(
+                "PyAutoGUI fail-safe triggered from mouse moving to a corner of the screen."
+            )
+        cursor["x"], cursor["y"] = int(x), int(y)
+        moves.append((int(x), int(y)))
+
+    monkeypatch.setattr(hand_tools.pyautogui, "moveTo", _fake_moveTo)
+    monkeypatch.setattr(
+        hand_tools.pyautogui,
+        "position",
+        lambda: type("P", (), {"x": cursor["x"], "y": cursor["y"]})(),
+    )
+    monkeypatch.setattr(hand_tools.pyautogui, "FAILSAFE", True)
+
+    result = hand_tools.move(500, 400)
+    assert result["x"] == 500
+    assert result["y"] == 400
+    # Nudge off corner, then the intended move.
+    assert moves == [(1918, 1078), (500, 400)]
+
+
 def test_click_strips_model_button_wrappers(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 

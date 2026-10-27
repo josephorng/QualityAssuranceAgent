@@ -5566,6 +5566,107 @@ def test_try_uia_first_unique_select_hit_and_miss() -> None:
     assert reason == "not_unique"
 
 
+def test_try_uia_first_unique_select_requires_exact_text() -> None:
+    """UIA path rejects fuzzy cousins (更多活頁簿 ≠ 空白活頁簿)."""
+    from cua_mcp.select_mouse_target import _try_uia_first_unique_select
+    from src.common.nearby_side import normalize_nearby_hints
+
+    dets = [
+        _detection_from_bbox(
+            (10, 10, 80, 20), YOLO_CLASS_TEXT, text="更多活頁簿", source="uia"
+        ),
+        _detection_from_bbox(
+            (10, 40, 40, 20), YOLO_CLASS_TEXT, text="更多範本", source="uia"
+        ),
+    ]
+    # Pad so MIN_USABLE_UIA_LANDMARKS is not relevant here (select only).
+    for i in range(8):
+        dets.append(
+            _detection_from_bbox(
+                (200, 10 + i * 20, 40, 16),
+                YOLO_CLASS_TEXT,
+                text=f"其他{i}",
+                source="uia",
+            )
+        )
+    hints = normalize_nearby_hints([])
+    chosen, reason = _try_uia_first_unique_select(
+        dets,
+        anchor="「空白活頁簿」文字",
+        nearby_hints=hints,
+        nearby_labels=[],
+        nearby_phrases=[],
+    )
+    assert chosen is None
+    assert reason == "no_anchor"
+
+    exact = [
+        _detection_from_bbox(
+            (10, 10, 80, 20), YOLO_CLASS_TEXT, text="空白活頁簿", source="uia"
+        ),
+    ]
+    for i in range(8):
+        exact.append(
+            _detection_from_bbox(
+                (200, 10 + i * 20, 40, 16),
+                YOLO_CLASS_TEXT,
+                text=f"地標{i}",
+                source="uia",
+            )
+        )
+    chosen, reason = _try_uia_first_unique_select(
+        exact,
+        anchor="「空白活頁簿」文字",
+        nearby_hints=hints,
+        nearby_labels=[],
+        nearby_phrases=[],
+    )
+    assert reason == "hit"
+    assert chosen is not None
+    assert chosen.text == "空白活頁簿"
+
+
+def test_pick_captured_monitor_for_window_prefers_center(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Maximized secondary window whose left overlaps primary uses secondary."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+
+    primary = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    secondary = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    captured = [(1, primary), (2, secondary)]
+
+    def _offset(monitor_index: int | None = None) -> tuple[int, int]:
+        return {1: (0, 0), 2: (1920, 0)}.get(int(monitor_index or 1), (0, 0))
+
+    monkeypatch.setattr(smt, "active_monitor_offset", _offset)
+
+    live = type(
+        "Live",
+        (),
+        {"left": 1912, "top": -9, "width": 1936, "height": 1048},
+    )()
+    monitor_index, bgr, offset = smt._pick_captured_monitor_for_window(captured, live)
+    assert monitor_index == 2
+    assert offset == (1920, 0)
+    assert bgr is secondary
+
+    # Center on primary → primary.
+    live_primary = type(
+        "Live",
+        (),
+        {"left": 100, "top": 100, "width": 800, "height": 600},
+    )()
+    monitor_index, bgr, offset = smt._pick_captured_monitor_for_window(
+        captured, live_primary
+    )
+    assert monitor_index == 1
+    assert offset == (0, 0)
+    assert bgr is primary
+
+
 @pytest.mark.asyncio
 async def test_find_mouse_point_uia_first_hit_skips_ocr(
     monkeypatch: pytest.MonkeyPatch,

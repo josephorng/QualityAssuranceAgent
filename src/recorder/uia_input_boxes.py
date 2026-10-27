@@ -45,6 +45,9 @@ DEFAULT_UIA_CONTAINMENT_FRAC = 0.5
 # Drop a smaller element when this fraction of its area lies inside a larger one
 # (duplicate YOLO crops of the same icon).
 DEFAULT_NESTED_ELEMENT_CONTAINMENT_FRAC = 0.7
+# After monitor clip, drop edge slivers (wrong-monitor projection ghosts).
+DEFAULT_UIA_CLIP_MIN_SIDE_PX = 2
+DEFAULT_UIA_CLIP_KEEP_AREA_FRAC = 0.5
 
 # IUIAutomation vtable (after IUnknown 0..2).
 _UIA_ELEMENT_FROM_HANDLE = 6
@@ -251,6 +254,33 @@ def uia_label_prefer_value(value: str, name: str) -> str:
     return str(name or "").strip()
 
 
+def _is_clipped_uia_sliver(
+    *,
+    orig_w: int,
+    orig_h: int,
+    clipped_w: int,
+    clipped_h: int,
+    min_side_px: int = DEFAULT_UIA_CLIP_MIN_SIDE_PX,
+    keep_area_frac: float = DEFAULT_UIA_CLIP_KEEP_AREA_FRAC,
+) -> bool:
+    """True when clip left a tiny edge remnant of a larger off-monitor box."""
+    ow, oh = int(orig_w), int(orig_h)
+    cw, ch = int(clipped_w), int(clipped_h)
+    if cw <= 0 or ch <= 0:
+        return True
+    min_side = int(min_side_px)
+    # Shrunk into a hairline on an edge of a larger control.
+    if (ow > min_side and cw <= min_side) or (oh > min_side and ch <= min_side):
+        return True
+    orig_area = float(max(0, ow) * max(0, oh))
+    if orig_area <= 0.0:
+        return True
+    clipped_area = float(cw * ch)
+    if cw == ow and ch == oh:
+        return False
+    return clipped_area / orig_area < float(keep_area_frac)
+
+
 def filter_uia_input_rects(
     screen_xyxy: list[ScreenXyxy],
     *,
@@ -277,6 +307,13 @@ def filter_uia_input_rects(
         )
         x, y, w, h = clip_box(local[0], local[1], local[2], local[3], image_w, image_h)
         if w <= 0 or h <= 0:
+            continue
+        if _is_clipped_uia_sliver(
+            orig_w=local[2],
+            orig_h=local[3],
+            clipped_w=w,
+            clipped_h=h,
+        ):
             continue
         box = (x, y, w, h)
         window_local = (

@@ -11,6 +11,7 @@ from src.recorder.capture import (
     RecordingSession,
     _DOUBLE_CLICK_INTERVAL_S,
     _HOLD_THRESHOLD_S,
+    _IME_COMMIT_SETTLE_S,
     _finalize_drag_end_screenshot,
 )
 from src.recorder.focus_point import TypingFocus
@@ -1400,6 +1401,7 @@ def test_ime_zh_to_en_wipes_pending_text(tmp_path) -> None:
     raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
     assert raw["kind"] == "text_input"
     assert raw["text"] == "office"
+    assert raw.get("ime") == {"chinese": False, "lang_id": 0x0804}
     log_text = (run_dir / "record.log").read_text(encoding="utf-8")
     assert "action=ime_zh_to_en_wipe" in log_text
     assert "wiped='off'" in log_text
@@ -1421,6 +1423,9 @@ def test_chinese_ime_enter_flushes_text_without_key_step(tmp_path) -> None:
     ), patch(
         "src.recorder.capture.read_ime_input_state",
         return_value=zh,
+    ), patch(
+        "src.recorder.capture.capture_step_signals",
+        return_value={"focused": {"name": "搜尋", "value": "你好"}},
     ):
         run_dir = session.start()
         try:
@@ -1429,6 +1434,9 @@ def test_chinese_ime_enter_flushes_text_without_key_step(tmp_path) -> None:
             for ch in "nihao":
                 session._on_key_press(KeyCode.from_char(ch))
             session._on_key_press(Key.enter)
+            time.sleep(_IME_COMMIT_SETTLE_S + 0.15)
+            session.wait_for_deferred_work()
+            session._join_window_step_threads()
         finally:
             session.stop()
 
@@ -1436,16 +1444,48 @@ def test_chinese_ime_enter_flushes_text_without_key_step(tmp_path) -> None:
     raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
     assert raw["kind"] == "text_input"
     assert raw["text"] == "nihao"
+    assert raw.get("ime") == {"chinese": True, "lang_id": 0x0804}
     assert not (run_dir / "events" / "event_002.json").is_file()
     log_text = (run_dir / "record.log").read_text(encoding="utf-8")
     assert "action=ime_commit_enter" in log_text
     assert "ime=zh" in log_text
 
 
+def test_english_ime_persists_chinese_false_on_text_input(tmp_path) -> None:
+    from src.recorder.ime_state import ImeInputState
+
+    en = ImeInputState(lang_id=0x0409, chinese_mode=False, conversion=None, opened=None)
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.read_ime_input_state",
+        return_value=en,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import KeyCode
+
+            for ch in "123456":
+                session._on_key_press(KeyCode.from_char(ch))
+        finally:
+            session.stop()
+
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "text_input"
+    assert raw["text"] == "123456"
+    assert raw.get("ime") == {"chinese": False, "lang_id": 0x0409}
+
+
 def test_chinese_ime_enter_live_samples_signals_after_not_settle_cache(
     tmp_path,
 ) -> None:
-    """Chinese Enter must not seal mid-composition UIA as signals_after."""
+    """Delayed IME Enter seals a timely live sample, not mid-composition cache."""
     from src.recorder.ime_state import ImeInputState
 
     zh = ImeInputState(lang_id=0x0804, chinese_mode=True, conversion=1, opened=True)
@@ -1466,7 +1506,7 @@ def test_chinese_ime_enter_live_samples_signals_after_not_settle_cache(
     ), patch(
         "src.recorder.capture.capture_step_signals",
         return_value=committed,
-    ):
+    ) as live_signals:
         run_dir = session.start()
         try:
             from pynput.keyboard import Key, KeyCode
@@ -1478,15 +1518,80 @@ def test_chinese_ime_enter_live_samples_signals_after_not_settle_cache(
             # Let begin_text_input copy the composition settle cache into meta.
             time.sleep(0.05)
             session._on_key_press(Key.enter)
+            time.sleep(_IME_COMMIT_SETTLE_S + 0.15)
+            session.wait_for_deferred_work()
+            session._join_window_step_threads()
+        finally:
+            session.stop()
+
+    live_signals.assert_called()
+    raw, debug = _hydrated_event_debug(run_dir, 1)
+    assert raw["kind"] == "text_input"
+    assert isinstance(raw["window_snapshot_debug"]["signals_after"], str)
+    assert debug["signals_before"]["focused"]["value"] == "金ㄊㄧㄢ"
+    assert debug["signals_after"]["focused"]["value"] == "今天"
+
+
+def test_chinese_ime_enter_click_cancels_delay_and_seals_click_before(
+    tmp_path,
+) -> None:
+    """A following click flushes typing with the click before-cache, not a late sample."""
+    from src.recorder.ime_state import ImeInputState
+
+    zh = ImeInputState(lang_id=0x0804, chinese_mode=True, conversion=1, opened=True)
+    click_before = {
+        "foreground": {"title": "Excel", "class_name": "XLMAIN", "process_name": "EXCEL.EXE"},
+        "focused": {"name": "資料編輯列", "value": "123456"},
+    }
+    late_save_as = {
+        "foreground": {"title": "另存新檔", "class_name": "#32770", "process_name": "EXCEL.EXE"},
+        "focused": {"name": "檔案名稱:", "value": "活頁簿1.xlsx"},
+    }
+
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.read_ime_input_state",
+        return_value=zh,
+    ), patch(
+        "src.recorder.capture.capture_step_signals",
+        return_value=late_save_as,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+            from pynput.mouse import Button
+
+            # Seed settle so begin_text / click press both have a before-cache.
+            with session._lock:
+                session._last_settle_signals = dict(click_before)
+                session._last_settle_windows = ()
+            for ch in "123456":
+                session._on_key_press(KeyCode.from_char(ch))
+            session._on_key_press(Key.enter)
+            # Before the IME commit timer fires, a click supplies the after-seal.
+            with session._lock:
+                session._last_settle_signals = dict(click_before)
+                session._last_settle_windows = ()
+            session._on_mouse_click(100, 100, Button.left, True)
+            session._on_mouse_click(100, 100, Button.left, False)
+            time.sleep(_DOUBLE_CLICK_INTERVAL_S + 0.05)
+            session.wait_for_deferred_work()
             session._join_window_step_threads()
         finally:
             session.stop()
 
     raw, debug = _hydrated_event_debug(run_dir, 1)
     assert raw["kind"] == "text_input"
-    assert isinstance(raw["window_snapshot_debug"]["signals_after"], str)
-    assert debug["signals_before"]["focused"]["value"] == "金ㄊㄧㄢ"
-    assert debug["signals_after"]["focused"]["value"] == "今天"
+    assert raw["text"] == "123456"
+    assert debug["signals_after"]["focused"]["value"] == "123456"
+    assert debug["signals_after"]["foreground"]["title"] == "Excel"
 
 
 def test_left_arrow_and_delete_edit_pending_text_input(tmp_path) -> None:

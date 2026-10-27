@@ -79,6 +79,9 @@ _PRE_TYPE_FOCUS_MAX_DIST_PX = 48
 # After typing pauses, capture a settled frame for the next key_press before-shot.
 # LL hooks cannot screenshot before Tab/Enter is delivered; reuse this frame instead.
 _PRE_KEY_SETTLE_S = 0.3
+# After Chinese IME Enter, wait for composition to commit before sealing
+# ``signals_after`` (avoid mid-zhuyin settle cache and late unsealed live samples).
+_IME_COMMIT_SETTLE_S = 0.3
 # Consecutive-screenshot settle probe (UI stability after an action).
 # Samples: the first shot is immediate, then every 1s. Each sample grabs the
 # full virtual desktop so a window appearing on another monitor is still seen.
@@ -410,6 +413,8 @@ class _QueuedEvent:
     window_after_sealed: bool = False
     windows_after: tuple[WindowInfo, ...] | None = None
     signals_after: dict[str, Any] | None = None
+    # Typing-burst IME summary persisted on text_input events.
+    ime: dict[str, Any] | None = None
 
 
 def _pending_capture_path(run_dir: Path, press_seq: int | None = None) -> Path:
@@ -1024,6 +1029,9 @@ class RecordingSession:
         self._pending_text_chars: list[str] = []
         self._pending_text_caret: int = 0
         self._pending_text_meta: dict[str, Any] | None = None
+        # Burst IME summary while buffering typed chars (None = not yet sampled).
+        self._pending_ime_saw_chinese: bool | None = None
+        self._pending_ime_lang_id: int | None = None
         # Last known IME 中/英 mode for the foreground thread (None = unknown).
         self._last_ime_chinese: bool | None = None
         self._last_ime_lang_id: int | None = None
@@ -1034,6 +1042,8 @@ class RecordingSession:
         # Settled frame for the next key_press before-shot (cannot capture on LL hook).
         self._pending_pre_key_screenshot: _PendingPreTypeShot | None = None
         self._pending_pre_key_timer: threading.Timer | None = None
+        # Chinese IME Enter: delay flush until composition commits, then seal.
+        self._pending_ime_commit_timer: threading.Timer | None = None
         self._settle_probe: _SettleProbeState | None = None
         self._settle_probe_timer: threading.Timer | None = None
         # Serialize settle ticks (timer thread) vs cancel/start (capture worker).
@@ -1199,12 +1209,15 @@ class RecordingSession:
             self._pending_text_chars = []
             self._pending_text_caret = 0
             self._pending_text_meta = None
+            self._pending_ime_saw_chinese = None
+            self._pending_ime_lang_id = None
             self._last_ime_chinese = None
             self._last_ime_lang_id = None
             self._paste_seq = 0
             self._pending_pre_type_screenshot = None
             self._pending_pre_key_screenshot = None
             self._cancel_pre_key_settle_timer_locked()
+            self._cancel_ime_commit_timer_locked()
             self._settle_probe = None
             self._settle_probe_timer = None
             self._before_shot_stop.clear()
@@ -1318,6 +1331,8 @@ class RecordingSession:
         # delivered. Seal the text after-sample from that press copy so a cache
         # refresh cannot give the typing step a different foreground.
         following_gesture = pending_coords is not None or pending_right_coords is not None
+        # Drop a pending Chinese-IME Enter delay; stop must not leave text hanging.
+        self._cancel_ime_commit_timer()
         self._flush_pending_text_input(
             seal_after_to_cache=following_gesture,
             sealed_windows=press_windows,
@@ -1377,6 +1392,7 @@ class RecordingSession:
             leftover_pre_key = self._pending_pre_key_screenshot
             self._pending_pre_key_screenshot = None
             self._cancel_pre_key_settle_timer_locked()
+            self._cancel_ime_commit_timer_locked()
         _discard_pending_drag_end_capture_files(leftover_drag_end)
         self._discard_press_capture_entry(stale_right)
         if pending_right_shot is not None:
@@ -1575,6 +1591,10 @@ class RecordingSession:
                     wiped = "".join(self._pending_text_chars)
                 self._pending_text_chars = []
                 self._pending_text_caret = 0
+                # Composition Latin keys are gone; restart IME summary for the
+                # English burst that follows.
+                self._pending_ime_saw_chinese = None
+                self._pending_ime_lang_id = None
             run_dir = self._run_dir
         if wiped is not None and run_dir is not None:
             try:
@@ -1589,14 +1609,14 @@ class RecordingSession:
         return state
 
     def _flush_text_without_key_step(self) -> None:
-        """Flush pending typed text without emitting a following key_press step.
+        """Schedule a delayed sealed flush after Chinese IME Enter (no key step).
 
-        Do not seal ``signals_after`` from the pre-flush settle cache: Chinese
-        IME Enter has no next gesture, and that cache still holds the open
-        composition (e.g. zhuyin). The window step must live-sample after settle
-        so ``focused.value`` reflects the committed string.
+        Wait briefly so composition commits to characters, then live-sample and
+        seal ``signals_after``. Do not seal the pre-Enter settle cache (still
+        mid-composition) and do not leave an unsealed after for a late window
+        step to race against later UI.
         """
-        self._flush_pending_text_input(seal_after_to_cache=False)
+        self._schedule_ime_commit_flush()
 
     def _notify_event(self, event: RecordedEvent) -> None:
         if self._on_event is not None:
@@ -2315,12 +2335,17 @@ class RecordingSession:
             # filled by an earlier queued clipboard read before this job runs.
             flush_chars = self._pending_text_chars
             flush_meta = self._pending_text_meta
+            ime_payload = self._pending_ime_payload_locked()
             self._pending_text_chars = []
             self._pending_text_caret = 0
             self._pending_text_meta = None
+            self._pending_ime_saw_chinese = None
+            self._pending_ime_lang_id = None
             self._cancel_pre_key_settle_timer_locked()
             pending_pre_key = self._pending_pre_key_screenshot
             self._pending_pre_key_screenshot = None
+        if flush_meta is not None and ime_payload is not None:
+            flush_meta["ime"] = ime_payload
         shared_index = index if cursor_xy is not None else None
         windows_before = self._cached_windows_before()
         signals_before = self._cached_signals_before()
@@ -2404,6 +2429,88 @@ class RecordingSession:
         self._pending_pre_key_timer = None
         if pending is not None:
             pending.cancel()
+
+    def _cancel_ime_commit_timer_locked(self) -> None:
+        pending = self._pending_ime_commit_timer
+        self._pending_ime_commit_timer = None
+        if pending is not None:
+            pending.cancel()
+
+    def _cancel_ime_commit_timer(self) -> None:
+        with self._lock:
+            self._cancel_ime_commit_timer_locked()
+
+    def _schedule_ime_commit_flush(self) -> None:
+        """After Chinese IME Enter, flush once composition has time to commit."""
+        with self._lock:
+            if (
+                self._run_dir is None
+                or not self._accepting_input
+                or self._finalizing
+                or self._pending_text_meta is None
+            ):
+                return
+            self._cancel_ime_commit_timer_locked()
+            timer = threading.Timer(
+                _IME_COMMIT_SETTLE_S, self._on_ime_commit_settle_timer
+            )
+            timer.daemon = True
+            self._pending_ime_commit_timer = timer
+            timer.start()
+
+    def _on_ime_commit_settle_timer(self) -> None:
+        with self._lock:
+            self._pending_ime_commit_timer = None
+            if (
+                self._run_dir is None
+                or self._finalizing
+                or self._pending_text_meta is None
+            ):
+                return
+            run_dir = self._run_dir
+        try:
+            self._log(
+                run_dir,
+                "key action=ime_commit_flush_scheduled "
+                f"delay_s={_IME_COMMIT_SETTLE_S}",
+            )
+        except Exception:
+            pass
+        self._enqueue(_DeferredCaptureJob(action="flush_ime_commit_text"))
+
+    def _flush_ime_commit_with_sealed_sample(self) -> None:
+        """Live-sample committed UIA and seal it onto the pending text_input.
+
+        Used by the delayed IME Enter worker job and by stop when no following
+        gesture already supplied an after-sample.
+        """
+        with self._lock:
+            if not self._pending_text_chars or self._pending_text_meta is None:
+                return
+            meta = self._pending_text_meta
+            cursor = meta.get("cursor_xy")
+        cursor_xy: tuple[int, int] | None = None
+        if isinstance(cursor, (tuple, list)) and len(cursor) == 2:
+            try:
+                cursor_xy = (int(cursor[0]), int(cursor[1]))
+            except (TypeError, ValueError):
+                cursor_xy = None
+        try:
+            signals = capture_step_signals(
+                cursor_xy=cursor_xy,
+                kind="text_input",
+            )
+        except Exception:
+            signals = {}
+        if not isinstance(signals, dict):
+            signals = {}
+        windows = self._cached_windows_before() or ()
+        self._flush_pending_text_input(
+            seal_after_to_cache=True,
+            sealed_windows=windows,
+            sealed_signals=signals,
+            seal_sample_supplied=True,
+        )
 
     def _schedule_pre_key_settle(self) -> None:
         """After typing pauses, capture a before-shot for the next Tab/Enter/etc."""
@@ -2609,6 +2716,31 @@ class RecordingSession:
         # Same settled UI is the best before-shot for a following Tab/Enter.
         self._mirror_shot_to_pre_key(shot, run_dir)
 
+    def _pending_ime_payload_locked(self) -> dict[str, Any] | None:
+        """Build ``ime`` dict from the current burst summary, or None."""
+        if (
+            self._pending_ime_saw_chinese is None
+            and self._pending_ime_lang_id is None
+        ):
+            return None
+        payload: dict[str, Any] = {}
+        if self._pending_ime_saw_chinese is not None:
+            payload["chinese"] = bool(self._pending_ime_saw_chinese)
+        if self._pending_ime_lang_id is not None:
+            payload["lang_id"] = int(self._pending_ime_lang_id)
+        return payload or None
+
+    def _note_pending_ime_locked(self) -> None:
+        """Fold the latest IME sample into the pending typing-burst summary."""
+        lang = self._last_ime_lang_id
+        chinese = self._last_ime_chinese
+        if lang is not None:
+            self._pending_ime_lang_id = int(lang)
+        if chinese is True:
+            self._pending_ime_saw_chinese = True
+        elif chinese is False and self._pending_ime_saw_chinese is None:
+            self._pending_ime_saw_chinese = False
+
     def _flush_pending_text_input(
         self,
         *,
@@ -2629,14 +2761,21 @@ class RecordingSession:
         off this sample; the gesture records its own click target.
         """
         with self._lock:
+            # A following gesture (or stop) wins over a delayed Chinese IME Enter.
+            self._cancel_ime_commit_timer_locked()
             chars = self._pending_text_chars
             meta = self._pending_text_meta
+            ime_payload = self._pending_ime_payload_locked()
             self._pending_text_chars = []
             self._pending_text_caret = 0
             self._pending_text_meta = None
+            self._pending_ime_saw_chinese = None
+            self._pending_ime_lang_id = None
             self._cancel_pre_key_settle_timer_locked()
         if not chars or meta is None:
             return
+        if ime_payload is not None:
+            meta["ime"] = ime_payload
         if seal_after_to_cache and not seal_sample_supplied:
             sealed_windows = self._cached_windows_before()
             sealed_signals = self._cached_signals_before()
@@ -2646,6 +2785,7 @@ class RecordingSession:
         if isinstance(sealed_signals, dict):
             sealed_signals = dict(sealed_signals)
             sealed_signals.pop("point_window", None)
+        sealed = sealed_windows is not None or sealed_signals is not None
         self._enqueue(
             _DeferredCaptureJob(
                 action="flush_text_input",
@@ -2654,9 +2794,9 @@ class RecordingSession:
                 shared_end_index=shared_end_index,
                 shared_end_monitor=shared_end_monitor,
                 shared_end_offset=shared_end_offset,
-                window_after_sealed=sealed_windows is not None,
-                sealed_windows_after=sealed_windows,
-                sealed_signals_after=sealed_signals,
+                window_after_sealed=sealed and seal_after_to_cache,
+                sealed_windows_after=sealed_windows if seal_after_to_cache else None,
+                sealed_signals_after=sealed_signals if seal_after_to_cache else None,
             )
         )
 
@@ -2688,6 +2828,8 @@ class RecordingSession:
             pending_pre_type = self._pending_pre_type_screenshot
             self._pending_pre_type_screenshot = None
             provisional_xy = mouse_xy or last_click_xy or cursor_xy
+            self._pending_ime_saw_chinese = None
+            self._pending_ime_lang_id = None
             meta: dict[str, Any] = {
                 "index": index,
                 "cursor_xy": provisional_xy,
@@ -2737,6 +2879,7 @@ class RecordingSession:
             caret = max(0, min(self._pending_text_caret, len(self._pending_text_chars)))
             self._pending_text_chars[caret:caret] = [char]
             self._pending_text_caret = caret + 1
+            self._note_pending_ime_locked()
         self._schedule_pre_key_settle()
 
     def _paste_slot_token(self, paste_id: int) -> str:
@@ -2832,12 +2975,16 @@ class RecordingSession:
             flush_chars: list[str] = []
             flush_meta = None
             orphan_index: int | None = None
+            ime_payload = None
             if not detached:
                 flush_chars = self._pending_text_chars
                 flush_meta = self._pending_text_meta
+                ime_payload = self._pending_ime_payload_locked()
                 self._pending_text_chars = []
                 self._pending_text_caret = 0
                 self._pending_text_meta = None
+                self._pending_ime_saw_chinese = None
+                self._pending_ime_lang_id = None
             chars_empty = chars is None or not chars
             if chars_empty:
                 raw_index = (job.meta or {}).get("text_index")
@@ -2846,12 +2993,15 @@ class RecordingSession:
                 if not detached:
                     flush_meta = None
                     flush_chars = []
+                    ime_payload = None
             if orphan_index is None:
                 orphan_index = self._next_index
                 self._next_index += 1
             self._cancel_pre_key_settle_timer_locked()
             pending_pre_key = self._pending_pre_key_screenshot
             self._pending_pre_key_screenshot = None
+        if flush_meta is not None and ime_payload is not None:
+            flush_meta["ime"] = ime_payload
         if flush_chars and flush_meta is not None:
             sealed_windows = self._cached_windows_before()
             self._worker_flush_text_input(
@@ -3338,6 +3488,8 @@ class RecordingSession:
             self._worker_begin_text_input(job)
         elif job.action == "flush_text_input":
             self._worker_flush_text_input(job)
+        elif job.action == "flush_ime_commit_text":
+            self._flush_ime_commit_with_sealed_sample()
         elif job.action == "keyboard_event":
             self._worker_keyboard_event(job)
         elif job.action == "settle_pre_key":
@@ -4985,6 +5137,8 @@ class RecordingSession:
             end_mon_idx = job.shared_end_monitor
             end_mon_offset = job.shared_end_offset
 
+        ime_raw = meta.get("ime")
+        ime_payload = ime_raw if isinstance(ime_raw, dict) else None
         self._persist_queued_event(
             _QueuedEvent(
                 kind="text_input",
@@ -5006,8 +5160,12 @@ class RecordingSession:
                 window_after_sealed=job.window_after_sealed,
                 windows_after=job.sealed_windows_after,
                 signals_after=job.sealed_signals_after,
+                ime=ime_payload,
             )
         )
+        # So a later gesture can stamp its before-cache as this typing after
+        # (or refine a sealed IME-commit sample) via ``_seal_open_after_cache``.
+        self._claim_after_owner(index)
 
     def _typing_focus_xy_for_ocr(self, text_meta: dict[str, Any]) -> tuple[int, int] | None:
         """Return focus coords for OCR, waiting for deferred begin-text work if needed."""
@@ -5125,6 +5283,13 @@ class RecordingSession:
         item: _QueuedEvent,
     ) -> tuple[dict[str, Any] | None, str | None, dict[str, Any] | None]:
         if not item.windows_before and not item.signals_before:
+            # Still keep a sealed after-sample (e.g. delayed IME Enter commit).
+            if item.window_after_sealed:
+                debug = _window_resolve_failure_debug("missing_before_cache")
+                debug["signals_before"] = {}
+                debug["signals_after"] = dict(item.signals_after or {})
+                debug["signal_kind"] = item.kind
+                return None, None, debug
             return None, None, _window_resolve_failure_debug("missing_before_cache")
         signals_before = dict(item.signals_before or {})
         point_before = identity_from_click_window(item.click_window)
@@ -5219,6 +5384,7 @@ class RecordingSession:
             end_uia_snapshot=(
                 item.end_uia_snapshot if isinstance(item.end_uia_snapshot, dict) else None
             ),
+            ime=item.ime if isinstance(item.ime, dict) else None,
         )
         with self._event_json_lock():
             write_event_json(run_dir, event.to_dict())
@@ -5271,7 +5437,9 @@ class RecordingSession:
         title: str | None = None
         debug: dict[str, Any] | None = None
         focus_rect: tuple[int, int, int, int] | None = None
-        need_window = bool(item.windows_before or item.signals_before)
+        need_window = bool(
+            item.windows_before or item.signals_before or item.window_after_sealed
+        )
         if need_window:
             change, title, debug = self._resolve_window_change(item)
             # Sealed after-cache means the next gesture already ran; sampling
@@ -5402,6 +5570,9 @@ class RecordingSession:
         *,
         timestamp_utc: str | None = None,
     ) -> None:
+        # A click will flush pending text after the double-click window; cancel
+        # a delayed Chinese IME Enter flush so it cannot race and seal first.
+        self._cancel_ime_commit_timer()
         now = time.monotonic()
         action_timestamp_utc = timestamp_utc or utc_now_iso()
         with self._lock:
@@ -5520,6 +5691,7 @@ class RecordingSession:
         *,
         timestamp_utc: str | None = None,
     ) -> None:
+        self._cancel_ime_commit_timer()
         action_timestamp_utc = timestamp_utc or utc_now_iso()
         self._clear_pending_right_gesture()
         with self._lock:

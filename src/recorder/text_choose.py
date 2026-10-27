@@ -50,6 +50,15 @@ def normalize_uia_text(text: Any) -> str:
     return _strip_ocr_caret(str(text or "")).strip()
 
 
+def ime_chinese_flag(text_resolution: dict[str, Any]) -> bool | None:
+    """Return recorded IME 中/英 flag, or None when missing (legacy / unknown)."""
+    raw = text_resolution.get("ime")
+    if not isinstance(raw, dict):
+        return None
+    chinese = raw.get("chinese")
+    return chinese if isinstance(chinese, bool) else None
+
+
 def collect_ocr_candidates(text_resolution: dict[str, Any]) -> list[str]:
     """Unique OCR strings from ``ocr_text`` / ``ocr_options`` (order preserved)."""
     options: list[str] = []
@@ -95,13 +104,18 @@ def build_choice_candidates(text_resolution: dict[str, Any]) -> list[str]:
 def needs_llm_text_choice(text_resolution: dict[str, Any]) -> bool:
     """True only when hard rules leave a real multi-candidate ambiguity.
 
-    UIA, Chinese (CJK OCR), and English (recorded) paths are decided without LLM.
+    UIA, IME-gated Chinese/English, and legacy CJK-OCR paths skip the LLM.
     """
     source = str(text_resolution.get("source") or "").strip().lower()
     if source in {"user", "llm", "uia"}:
         return False
 
     if normalize_uia_text(text_resolution.get("uia_text")):
+        return False
+
+    ime_chinese = ime_chinese_flag(text_resolution)
+    if ime_chinese is not None:
+        # Recorded IME mode decides Chinese vs English without LLM.
         return False
 
     ocr_candidates = collect_ocr_candidates(text_resolution)
@@ -124,7 +138,7 @@ def needs_llm_text_choice(text_resolution: dict[str, Any]) -> bool:
 
 
 def apply_text_choice_hard_rules(text_resolution: dict[str, Any]) -> dict[str, Any]:
-    """Prefer UIA, then Chinese OCR / English recorded; skip LLM for those paths."""
+    """Prefer UIA, then IME-gated Chinese OCR / English recorded; skip LLM."""
     source = str(text_resolution.get("source") or "").strip().lower()
     if source in {"user", "llm"}:
         return text_resolution
@@ -133,6 +147,8 @@ def apply_text_choice_hard_rules(text_resolution: dict[str, Any]) -> dict[str, A
     uia = normalize_uia_text(text_resolution.get("uia_text"))
     ocr_candidates = collect_ocr_candidates(text_resolution)
     primary_ocr = ocr_candidates[0] if ocr_candidates else ""
+    ime_chinese = ime_chinese_flag(text_resolution)
+    cjk_ocr = next((text for text in ocr_candidates if text_contains_cjk(text)), None)
 
     updated = dict(text_resolution)
     if uia:
@@ -155,22 +171,41 @@ def apply_text_choice_hard_rules(text_resolution: dict[str, Any]) -> dict[str, A
             updated["reason"] = "masked OCR; prefer recorded"
             return updated
 
-    # 3. Chinese typing (CJK in OCR) → OCR.
-    cjk_ocr = next((text for text in ocr_candidates if text_contains_cjk(text)), None)
-    if cjk_ocr:
+    # 3. English IME for the burst → recorded (ignore nearby CJK UI chrome).
+    if ime_chinese is False and recorded:
+        updated["resolved_text"] = recorded
+        updated["source"] = "recorded"
+        updated["reason"] = "English IME; prefer recorded"
+        return updated
+
+    # 4. Chinese IME → focus-local CJK OCR when present; else recorded (ASCII under 中).
+    if ime_chinese is True:
+        if cjk_ocr:
+            updated["resolved_text"] = cjk_ocr
+            updated["source"] = "ocr"
+            updated["reason"] = "Chinese IME; prefer OCR"
+            return updated
+        if recorded:
+            updated["resolved_text"] = recorded
+            updated["source"] = "recorded"
+            updated["reason"] = "Chinese IME; no CJK OCR, prefer recorded"
+            return updated
+
+    # 5. Legacy (no ime): Chinese typing inferred from CJK in OCR → OCR.
+    if ime_chinese is None and cjk_ocr:
         updated["resolved_text"] = cjk_ocr
         updated["source"] = "ocr"
         updated["reason"] = "Chinese typing; prefer OCR"
         return updated
 
-    # 4. Recorded agrees with an OCR alternate → recorded.
+    # 6. Recorded agrees with an OCR alternate → recorded.
     if recorded and any(texts_equivalent(recorded, text) for text in ocr_candidates):
         updated["resolved_text"] = recorded
         updated["source"] = "recorded"
         updated["reason"] = "recorded matches OCR alternate; prefer recorded"
         return updated
 
-    # 5. English typing → recorded when present.
+    # 7. English typing → recorded when present.
     if recorded:
         updated["resolved_text"] = recorded
         updated["source"] = "recorded"
@@ -181,7 +216,7 @@ def apply_text_choice_hard_rules(text_resolution: dict[str, Any]) -> dict[str, A
         )
         return updated
 
-    # 6. Fallbacks.
+    # 8. Fallbacks.
     if primary_ocr:
         updated["resolved_text"] = primary_ocr
         updated["source"] = "ocr"

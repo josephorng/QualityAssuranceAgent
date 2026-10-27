@@ -14,7 +14,6 @@ from src.recorder.vision_context import (
     _global_to_local,
     _global_to_local_end,
     _point_inside_bbox,
-    _point_to_bbox_distance_sq,
     build_vision_context_at_point,
     extract_nearest_text,
     resolve_event_screenshot_path,
@@ -401,22 +400,22 @@ def _union_ltrb(
     return (min(al, bl), min(at, bt), max(ar, br), max(ab, bb))
 
 
-def _select_input_for_caret(
+def _select_input_containing_caret(
     detections: list[UiDetection],
     local_x: int,
     local_y: int,
 ) -> UiDetection | None:
-    """Prefer the Input containing the caret; else the nearest Input bbox."""
+    """Return the smallest YOLO Input bbox that contains the caret, if any.
+
+    Distant nearest-Input fallback is intentionally omitted: unioning a far
+    Input with a caret-thin focus builds a giant AABB that imports UI chrome
+    into ``ocr_options``.
+    """
     inputs = [det for det in detections if det.class_id == YOLO_CLASS_INPUT]
-    if not inputs:
-        return None
     containing = [det for det in inputs if _point_inside_bbox(local_x, local_y, det.bbox)]
-    if containing:
-        return min(containing, key=lambda det: int(det.bbox[2]) * int(det.bbox[3]))
-    return min(
-        inputs,
-        key=lambda det: _point_to_bbox_distance_sq(local_x, local_y, det.bbox),
-    )
+    if not containing:
+        return None
+    return min(containing, key=lambda det: int(det.bbox[2]) * int(det.bbox[3]))
 
 
 def _ocr_clip_rect_for_focus(
@@ -429,13 +428,15 @@ def _ocr_clip_rect_for_focus(
     """Return the OCR clip rect for a focus rect.
 
     Wide UIA field bounds are used as-is. Caret-thin rects are not a usable
-    clip; expand via the nearest/containing YOLO Input (unioned with the caret)
-    so typed text left of the caret is included without importing taskbar OCR.
+    clip; expand only via a YOLO Input that contains the caret (unioned with
+    the caret) so typed text left of the caret is included. Without a
+    containing Input, return None and let the caller fall back to a single
+    nearest-text result (no wide ``ocr_options`` list).
     """
     if not _is_caret_thin_rect(local_focus_rect):
         return local_focus_rect
 
-    input_det = _select_input_for_caret(detections, local_x, local_y)
+    input_det = _select_input_containing_caret(detections, local_x, local_y)
     if input_det is None:
         return None
 
@@ -575,12 +576,14 @@ async def resolve_text_input_text(
 
     recorded_text = event.text or ""
     uia_text = focused_uia_text_from_event(event)
+    ime = event.ime if isinstance(event.ime, dict) else None
     anchor = event.cursor_xy or event.anchor_click_xy
     if anchor is None:
         finalized = apply_text_choice_hard_rules(
             {
                 "recorded_text": recorded_text,
                 "uia_text": uia_text,
+                "ime": ime,
                 "ocr_text": None,
                 "ocr_options": [],
                 "resolved_text": recorded_text,
@@ -592,6 +595,7 @@ async def resolve_text_input_text(
             "text": finalized.get("resolved_text") or "",
             "recorded_text": recorded_text,
             "uia_text": finalized.get("uia_text"),
+            "ime": finalized.get("ime") if isinstance(finalized.get("ime"), dict) else ime,
             "ocr_text": None,
             "ocr_options": [],
             "source": finalized.get("source") or "recorded",
@@ -673,6 +677,7 @@ async def resolve_text_input_text(
         {
             "recorded_text": recorded_text,
             "uia_text": uia_text,
+            "ime": ime,
             "ocr_text": ocr_text,
             "ocr_options": ocr_options,
             "resolved_text": recorded_text,
@@ -688,13 +693,14 @@ async def resolve_text_input_text(
         log_info(
             f"resolve_text_input_text event={event.index} "
             f"shot={shot_label} recorded={recorded_text!r} uia={uia_text!r} "
-            f"ocr={ocr_text!r} ocr_options={len(ocr_options)} "
+            f"ime={ime!r} ocr={ocr_text!r} ocr_options={len(ocr_options)} "
             f"resolved={resolved_text!r} source={source}"
         )
     return {
         "text": resolved_text,
         "recorded_text": recorded_text,
         "uia_text": finalized.get("uia_text"),
+        "ime": finalized.get("ime") if isinstance(finalized.get("ime"), dict) else ime,
         "ocr_text": ocr_text,
         "ocr_options": ocr_options,
         "source": source,

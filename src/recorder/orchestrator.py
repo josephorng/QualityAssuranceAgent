@@ -355,6 +355,7 @@ async def prepare_event_vision(
         text_resolution = {
             "recorded_text": resolved.get("recorded_text"),
             "uia_text": resolved.get("uia_text"),
+            "ime": resolved.get("ime") if isinstance(resolved.get("ime"), dict) else None,
             "ocr_text": resolved.get("ocr_text"),
             "ocr_options": list(resolved.get("ocr_options") or []),
             "resolved_text": resolved.get("text"),
@@ -547,15 +548,18 @@ def _hydrate_uia_text_from_event(
     text_resolution: dict[str, Any],
     event: RecordedEvent,
 ) -> dict[str, Any]:
-    """Fill empty ``uia_text`` from ``signals_after.focused.value`` when present."""
-    if normalize_uia_text(text_resolution.get("uia_text")):
-        return text_resolution
-    uia = focused_uia_text_from_event(event)
-    if not uia:
-        return text_resolution
+    """Fill empty ``uia_text`` / ``ime`` from the recorded event when present."""
     updated = dict(text_resolution)
-    updated["uia_text"] = uia
-    return updated
+    changed = False
+    if not normalize_uia_text(updated.get("uia_text")):
+        uia = focused_uia_text_from_event(event)
+        if uia:
+            updated["uia_text"] = uia
+            changed = True
+    if not isinstance(updated.get("ime"), dict) and isinstance(event.ime, dict):
+        updated["ime"] = dict(event.ime)
+        changed = True
+    return updated if changed else text_resolution
 
 
 def _reload_event_for_text_refine(

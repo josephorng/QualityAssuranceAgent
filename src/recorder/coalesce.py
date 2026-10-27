@@ -74,6 +74,38 @@ def _prefer_window_snapshot_debug(
     return later if later is not None else earlier
 
 
+def _merge_ime(
+    first: dict[str, Any] | None,
+    second: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Merge typing-burst IME summaries; ``chinese`` is true if either burst saw 中."""
+    a = first if isinstance(first, dict) else None
+    b = second if isinstance(second, dict) else None
+    if a is None and b is None:
+        return None
+    chinese: bool | None = None
+    for blob in (a, b):
+        if blob is None or "chinese" not in blob:
+            continue
+        raw = blob.get("chinese")
+        if isinstance(raw, bool):
+            chinese = True if raw else bool(chinese)
+    lang_id = None
+    for blob in (b, a):
+        if blob is None:
+            continue
+        raw_lang = blob.get("lang_id")
+        if isinstance(raw_lang, int) and not isinstance(raw_lang, bool):
+            lang_id = raw_lang
+            break
+    payload: dict[str, Any] = {}
+    if chinese is not None:
+        payload["chinese"] = chinese
+    if lang_id is not None:
+        payload["lang_id"] = lang_id
+    return payload or None
+
+
 def _merge_bridged_text_inputs(first: RecordedEvent, last: RecordedEvent) -> RecordedEvent:
     """Keep first before-frame; last committed text / after-frame / window debug."""
     return RecordedEvent(
@@ -117,6 +149,10 @@ def _merge_bridged_text_inputs(first: RecordedEvent, last: RecordedEvent) -> Rec
             last.window_snapshot_debug
             if isinstance(last.window_snapshot_debug, dict)
             else None,
+        ),
+        ime=_merge_ime(
+            first.ime if isinstance(first.ime, dict) else None,
+            last.ime if isinstance(last.ime, dict) else None,
         ),
     )
 
@@ -232,6 +268,10 @@ def coalesce_consecutive_text_inputs(events: list[RecordedEvent]) -> list[Record
                     if isinstance(event.window_snapshot_debug, dict)
                     else None,
                 ),
+                ime=_merge_ime(
+                    prev.ime if isinstance(prev.ime, dict) else None,
+                    event.ime if isinstance(event.ime, dict) else None,
+                ),
             )
             continue
         merged.append(event)
@@ -315,6 +355,7 @@ def retarget_ime_candidate_end_screenshots(
                         window_change=event.window_change,
                         target_window_title=event.target_window_title,
                         window_snapshot_debug=event.window_snapshot_debug,
+                        ime=event.ime if isinstance(event.ime, dict) else None,
                     )
                 )
             else:
@@ -375,6 +416,7 @@ def coalesce_chinese_ime_candidate_keys(
                     window_change=event.window_change,
                     target_window_title=event.target_window_title,
                     window_snapshot_debug=event.window_snapshot_debug,
+                    ime=event.ime if isinstance(event.ime, dict) else None,
                 )
             )
             i = run_end

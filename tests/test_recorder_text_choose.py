@@ -160,6 +160,82 @@ def test_apply_hard_rules_prefers_ocr_for_chinese() -> None:
     assert "Chinese" in updated["reason"]
 
 
+def test_apply_hard_rules_english_ime_keeps_recorded_despite_cjk_ocr() -> None:
+    """Event_004 case: English IME typing must not latch onto UI chrome OCR."""
+    updated = apply_text_choice_hard_rules(
+        {
+            "recorded_text": "123456",
+            "uia_text": None,
+            "ime": {"chinese": False, "lang_id": 0x0409},
+            "ocr_text": "3",
+            "ocr_options": ["公式", "導覽", "3"],
+            "resolved_text": "123456",
+            "source": "recorded",
+            "reason": "prefer recorded",
+        }
+    )
+    assert updated["resolved_text"] == "123456"
+    assert updated["source"] == "recorded"
+    assert "English IME" in updated["reason"]
+
+
+def test_apply_hard_rules_chinese_ime_prefers_cjk_ocr() -> None:
+    updated = apply_text_choice_hard_rules(
+        {
+            "recorded_text": "nihao",
+            "uia_text": None,
+            "ime": {"chinese": True, "lang_id": 0x0804},
+            "ocr_text": "你好",
+            "ocr_options": ["你好"],
+            "resolved_text": "nihao",
+            "source": "recorded",
+            "reason": "prefer recorded",
+        }
+    )
+    assert updated["resolved_text"] == "你好"
+    assert updated["source"] == "ocr"
+    assert "Chinese IME" in updated["reason"]
+
+
+def test_apply_hard_rules_chinese_ime_without_cjk_ocr_keeps_recorded() -> None:
+    updated = apply_text_choice_hard_rules(
+        {
+            "recorded_text": "123456",
+            "uia_text": None,
+            "ime": {"chinese": True, "lang_id": 0x0804},
+            "ocr_text": "123456",
+            "ocr_options": ["123456"],
+            "resolved_text": "123456",
+            "source": "recorded",
+            "reason": "prefer recorded",
+        }
+    )
+    assert updated["resolved_text"] == "123456"
+    assert updated["source"] == "recorded"
+    assert "no CJK OCR" in updated["reason"]
+
+
+def test_needs_llm_text_choice_skips_when_ime_present() -> None:
+    assert not needs_llm_text_choice(
+        {
+            "recorded_text": "123456",
+            "ime": {"chinese": False},
+            "ocr_text": "公式",
+            "ocr_options": ["公式"],
+            "source": "recorded",
+        }
+    )
+    assert not needs_llm_text_choice(
+        {
+            "recorded_text": "nihao",
+            "ime": {"chinese": True},
+            "ocr_text": "你好",
+            "ocr_options": ["你好"],
+            "source": "recorded",
+        }
+    )
+
+
 def test_apply_hard_rules_prefers_recorded_for_english_disagreement() -> None:
     updated = apply_text_choice_hard_rules(
         {

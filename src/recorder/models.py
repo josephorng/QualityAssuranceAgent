@@ -60,6 +60,9 @@ class RecordedEvent:
     end_uia_snapshot: dict[str, Any] | None = None
     # UI settle measured by consecutive screenshot stability during recording.
     observed_settle_seconds: float | None = None
+    # Typing-burst IME summary: ``{"chinese": bool, "lang_id": int}``. Omitted
+    # on legacy recordings / non-typing events.
+    ime: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -85,6 +88,8 @@ class RecordedEvent:
             data.pop("end_uia_snapshot", None)
         if self.observed_settle_seconds is None:
             data.pop("observed_settle_seconds", None)
+        if self.ime is None:
+            data.pop("ime", None)
         return data
 
     @classmethod
@@ -166,6 +171,7 @@ class RecordedEvent:
                 if isinstance(observed_settle, (int, float)) and not isinstance(observed_settle, bool)
                 else None
             ),
+            ime=raw.get("ime") if isinstance(raw.get("ime"), dict) else None,
         )
 
 

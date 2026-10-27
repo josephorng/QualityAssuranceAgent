@@ -579,9 +579,9 @@ def test_is_caret_thin_rect_detects_caret_strip() -> None:
 
 @pytest.mark.asyncio
 async def test_resolve_text_input_caret_thin_uses_input_bbox_clip(tmp_path) -> None:
-    """Caret-sized focus must expand via YOLO Input, not stay empty."""
-    # Mirrors Save As filename: caret 1×20px, typed text left of caret, type
-    # dropdown slightly below, taskbar search elsewhere.
+    """Caret-sized focus expands only via a YOLO Input that contains the caret."""
+    # Mirrors Save As filename: caret 1×20px inside the filename Input, typed
+    # text left of caret, type dropdown slightly below, taskbar search elsewhere.
     event = RecordedEvent(
         index=15,
         timestamp_utc="t",
@@ -591,6 +591,7 @@ async def test_resolve_text_input_caret_thin_uses_input_bbox_clip(tmp_path) -> N
         monitor_offset=(0, 0),
         focus_rect=(321, 383, 322, 403),
         screenshot_path="",
+        ime={"chinese": True, "lang_id": 0x0804},
     )
     fake_vision = {
         "used_vision": True,
@@ -600,10 +601,11 @@ async def test_resolve_text_input_caret_thin_uses_input_bbox_clip(tmp_path) -> N
         "detection_count": 5,
         "bgr": np.zeros((1080, 960, 3), dtype=np.uint8),
         "all_detections": [
-            _detection_from_bbox((43, 409, 904, 26), YOLO_CLASS_INPUT),
+            # Input must contain caret (321, 393); pad covers filename row.
+            _detection_from_bbox((43, 380, 904, 40), YOLO_CLASS_INPUT),
             _detection_from_bbox((139, 386, 93, 15), YOLO_CLASS_TEXT, text="桃園明天的天"),
             _detection_from_bbox((38, 387, 89, 16), YOLO_CLASS_TEXT, text="檔案名稱(N):"),
-            _detection_from_bbox((138, 416, 106, 18), YOLO_CLASS_TEXT, text="文字文件 (*.txt)"),
+            _detection_from_bbox((138, 430, 106, 18), YOLO_CLASS_TEXT, text="文字文件 (*.txt)"),
             _detection_from_bbox((490, 1049, 34, 16), YOLO_CLASS_TEXT, text="搜尋"),
         ],
     }
@@ -617,12 +619,61 @@ async def test_resolve_text_input_caret_thin_uses_input_bbox_clip(tmp_path) -> N
         resolved = await resolve_text_input_text(event, run_dir=tmp_path)
 
     nearest_mock.assert_not_called()
-    # CJK OCR hard rule selects Chinese filename text over IME Latin keystrokes.
+    # Chinese IME + focus-local CJK OCR selects filename text over Latin keys.
     assert resolved["source"] == "ocr"
     assert resolved["text"] == "桃園明天的天"
     assert resolved["ocr_text"] == "桃園明天的天"
     assert "桃園明天的天" in resolved["ocr_options"]
     assert "搜尋" not in resolved["ocr_options"]
+    assert "文字文件 (*.txt)" not in resolved["ocr_options"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_text_input_caret_thin_ignores_distant_input(
+    tmp_path,
+) -> None:
+    """Distant nearest Input must not AABB-expand caret into UI chrome OCR."""
+    event = RecordedEvent(
+        index=4,
+        timestamp_utc="t",
+        kind="text_input",
+        text="123456",
+        cursor_xy=(222, 236),
+        monitor_offset=(0, 0),
+        focus_rect=(222, 226, 223, 246),
+        screenshot_path="",
+        ime={"chinese": False, "lang_id": 0x0409},
+    )
+    fake_vision = {
+        "used_vision": True,
+        "candidate_text": "candidate",
+        "local_cursor": (222, 236),
+        "candidates": [],
+        "detection_count": 4,
+        "bgr": np.zeros((1080, 1920, 3), dtype=np.uint8),
+        "all_detections": [
+            # Excel search box — nearest but does not contain the formula-bar caret.
+            _detection_from_bbox((224, 410, 582, 39), YOLO_CLASS_INPUT),
+            _detection_from_bbox((505, 225, 32, 17), YOLO_CLASS_TEXT, text="導覽"),
+            _detection_from_bbox((743, 224, 32, 16), YOLO_CLASS_TEXT, text="公式"),
+            _detection_from_bbox((270, 231, 7, 10), YOLO_CLASS_TEXT, text="3"),
+        ],
+    }
+    with patch(
+        "src.recorder.text_resolve.build_vision_context_at_point",
+        return_value=fake_vision,
+    ), patch(
+        "src.recorder.text_resolve.extract_nearest_text",
+        return_value="3",
+    ) as nearest_mock:
+        resolved = await resolve_text_input_text(event, run_dir=tmp_path)
+
+    nearest_mock.assert_called_once()
+    assert "公式" not in resolved["ocr_options"]
+    assert "導覽" not in resolved["ocr_options"]
+    assert resolved["text"] == "123456"
+    assert resolved["source"] == "recorded"
+    assert resolved["ime"] == {"chinese": False, "lang_id": 0x0409}
 
 
 @pytest.mark.asyncio

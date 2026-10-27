@@ -107,32 +107,3 @@ These are not loops. They are how input reaches the worker.
 ### Stop
 
 `_finish_settle_against_final_after` replaces the probe timer. It captures the full desktop until the sample matches `final_after.jpeg` or 55 seconds pass.
-
-## One click
-
-```mermaid
-sequenceDiagram
-  participant Mouse
-  participant Queue as Worker queue
-  participant Worker
-  participant Probe as Settle probe
-  participant WindowStep as Window-step thread
-  participant Context as Context loop
-  participant Vision as Vision prefetch
-
-  Context->>Context: Refresh window cache every 0.25s
-  Note over Mouse: Before-shot loop keeps raw RGB per monitor
-  Mouse->>Mouse: Pin raw before-shot and copy window cache
-  Mouse->>Queue: pending_left_press
-  Mouse->>Queue: Emitted click, after the double-click wait
-  Worker->>Worker: JPEG-encode pinned frame to event_N.jpeg
-  Worker->>Vision: Event JSON is saved
-  Worker->>Probe: Start probe for this click when its index is newer
-  Worker->>WindowStep: Sleep the remaining 0.25s or 0.45s, then window list and UI Automation
-  Probe->>Probe: Sample immediately, then every 1s (settle only, no before-shot publish)
-  WindowStep->>WindowStep: Patch window_change onto the event file
-```
-
-## Why the probe used to miss the search panel
-
-Step 3 was a title-bar close. The worker used to sleep and call UI Automation before it was allowed to start the next probe. Step 5 clicked while that work was still running, and it pinned a frame from before the search panel opened. The window-step thread is what keeps that work off the probe.

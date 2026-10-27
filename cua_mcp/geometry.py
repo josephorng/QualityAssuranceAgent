@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable, TypeVar
+from typing import Callable, Sequence, TypeVar
 
 T = TypeVar("T")
 
@@ -147,6 +147,35 @@ def intersection_area_xywh(
     if iw <= 0 or ih <= 0:
         return 0.0
     return float(iw * ih)
+
+
+def iou_xyxy(a: Sequence[float], b: Sequence[float]) -> float:
+    """Intersection-over-union for axis-aligned ``(x1, y1, x2, y2)`` boxes."""
+    ax1, ay1, ax2, ay2 = (float(a[i]) for i in range(4))
+    bx1, by1, bx2, by2 = (float(b[i]) for i in range(4))
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = ix2 - ix1, iy2 - iy1
+    if iw <= 0.0 or ih <= 0.0:
+        return 0.0
+    inter = iw * ih
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - inter
+    if union <= 0.0:
+        return 0.0
+    return float(inter / union)
+
+
+def xyxy_center_in_xywh(
+    box: Sequence[float],
+    rect: tuple[int, int, int, int],
+    *,
+    pad: int = 0,
+) -> bool:
+    """True when the center of an ``xyxy`` box lies in a padded ``(x, y, w, h)`` rect."""
+    x0, y0, x1, y1 = (float(v) for v in box[:4])
+    return point_in_rect_xywh(0.5 * (x0 + x1), 0.5 * (y0 + y1), rect, pad=pad)
 
 
 def iou_xywh(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:

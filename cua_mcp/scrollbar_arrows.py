@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from functools import lru_cache
 from typing import Any
 
-from cua_mcp.geometry import boxes_overlap, iou_xywh, merge_two_boxes
+from cua_mcp.geometry import boxes_overlap, iou_xywh, merge_two_boxes, point_in_rect_xywh
 from cua_mcp.icon_map import (
+    icon_record,
     is_pua_char,
     is_unknown_icon_record,
-    load_icon_map,
     unknown_icon_record,
 )
 from cua_mcp.select_ui_element import UiDetection
@@ -133,24 +132,9 @@ def _pua_from_detection(det: UiDetection) -> str:
     return ""
 
 
-@lru_cache(maxsize=16)
-def _icon_description_for_chinese_id(chinese_id: str) -> str:
-    """Look up an icon_map description for ``chinese_id``, if present."""
-    for value in load_icon_map().values():
-        if not isinstance(value, dict):
-            continue
-        if str(value.get("chinese_id", "")).strip() == chinese_id:
-            return str(value.get("description", "")).strip()
-    return ""
-
-
 def _arrow_icon_record(chinese_id: str, *, pua: str = "") -> dict[str, Any]:
     """Build an icon metadata dict for a reclassified scrollbar end arrow."""
-    return {
-        "pua": pua,
-        "chinese_id": chinese_id,
-        "icon_description": _icon_description_for_chinese_id(chinese_id),
-    }
+    return icon_record(chinese_id, pua=pua)
 
 
 def _is_vertical_scrollbar_bbox(bbox: tuple[int, int, int, int]) -> bool:
@@ -1037,7 +1021,7 @@ def point_in_bbox(
 ) -> bool:
     """True when ``(x, y)`` lies inside an axis-aligned ``(x, y, w, h)`` bbox."""
     bx, by, bw, bh = (int(v) for v in bbox[:4])
-    return bx <= int(x) < bx + bw and by <= int(y) < by + bh
+    return point_in_rect_xywh(int(x), int(y), (bx, by, bw, bh))
 
 
 def project_point_onto_scrollbar(

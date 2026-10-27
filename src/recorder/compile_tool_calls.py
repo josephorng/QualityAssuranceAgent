@@ -16,7 +16,7 @@ from src.common.nearby_side import (
     strip_nearby_context_comments,
 )
 from cua_mcp.instruction_offset import split_vision_mode, vision_mode_prefix
-from src.recorder.analyze import typed_text_from_instruction
+from src.recorder.analyze import _effective_left_click_count, typed_text_from_instruction
 from src.recorder.landmark_geometry import build_landmark_geometry
 from src.recorder.models import RecordedEvent, event_json_path
 from src.recorder.to_cache import validate_tool_calls
@@ -231,18 +231,6 @@ def _compile_window_change(
     if process_name:
         args["process_name"] = process_name
     return [_call(tool, **args)]
-
-
-def _effective_left_click_count(kind: str, click_count: int | None) -> int | None:
-    if click_count is not None and int(click_count) > 0:
-        return int(click_count)
-    if kind == "click":
-        return 1
-    if kind == "double_click":
-        return 2
-    if kind == "triple_click":
-        return 3
-    return None
 
 
 def _short_move_target(instruction: str) -> str:

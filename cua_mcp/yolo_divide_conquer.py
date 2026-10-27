@@ -20,6 +20,7 @@ from typing import Any, Callable, Sequence, TypeVar
 import cv2
 import numpy as np
 
+from cua_mcp.geometry import iou_xyxy, xyxy_center_in_xywh
 from cua_mcp.text_line_cut import LINE_CUT_DEFAULT, cut_multiline_text_boxes
 
 _T = TypeVar("_T")
@@ -281,21 +282,7 @@ def _concat_parts(
 
 
 def _iou_xyxy(a: np.ndarray, b: np.ndarray) -> float:
-    ax1, ay1, ax2, ay2 = (float(v) for v in a)
-    bx1, by1, bx2, by2 = (float(v) for v in b)
-    ix1 = max(ax1, bx1)
-    iy1 = max(ay1, by1)
-    ix2 = min(ax2, bx2)
-    iy2 = min(ay2, by2)
-    iw = max(0.0, ix2 - ix1)
-    ih = max(0.0, iy2 - iy1)
-    inter = iw * ih
-    if inter <= 0.0:
-        return 0.0
-    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
-    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
-    union = area_a + area_b - inter
-    return float(inter / union) if union > 0.0 else 0.0
+    return iou_xyxy(a, b)
 
 
 def _boxes_cross_xyxy(a: np.ndarray, b: np.ndarray) -> bool:
@@ -745,14 +732,7 @@ def _xyxy_center_in_xywh(
     *,
     pad: int = 0,
 ) -> bool:
-    x0, y0, x1, y1 = (float(v) for v in box[:4])
-    cx = 0.5 * (x0 + x1)
-    cy = 0.5 * (y0 + y1)
-    rx, ry, rw, rh = (int(v) for v in rect)
-    if rw <= 0 or rh <= 0:
-        return False
-    p = max(0, int(pad))
-    return (rx - p) <= cx < (rx + rw + p) and (ry - p) <= cy < (ry + rh + p)
+    return xyxy_center_in_xywh(box, rect, pad=pad)
 
 
 def _cluster_intersects_enhance_roi(

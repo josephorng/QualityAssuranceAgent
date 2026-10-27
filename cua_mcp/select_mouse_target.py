@@ -39,6 +39,7 @@ from cua_mcp.icon_map import (
     is_pua_char,
     is_unknown_icon_record,
     text_has_pua,
+    text_is_pua_only as _text_is_pua_only,
 )
 from cua_mcp.read_screen_text.ocr_image import (
     _expand_box,
@@ -91,7 +92,12 @@ from cua_mcp.yolo_onnx import (
     run_yolo_onnx_end2end,
 )
 from src.common.monitor_prompt import selected_eye_monitor_indices
-from src.common.run_state import RunStateManager, get_run_state_manager, ts_name
+from src.common.run_state import (
+    RunStateManager,
+    get_run_state_manager,
+    log_info_if_ready as _log_info,
+    ts_name,
+)
 from src.eye.capture import active_monitor_offset, grab_monitor_bgr, monitor_details
 
 
@@ -104,14 +110,6 @@ OCR_REUSE_MIN_IOU = 0.85
 def _run_manager() -> RunStateManager:
     """Always resolve the current singleton (never cache): ``reset_run_state_manager`` replaces it."""
     return get_run_state_manager()
-
-
-def _log_info(text: str) -> None:
-    """Write to the run log when run state is initialized; no-op otherwise."""
-    try:
-        _run_manager().log_info(text)
-    except RuntimeError:
-        pass
 
 
 @dataclass(frozen=True)
@@ -210,16 +208,6 @@ def _known_icons_for_text(text: str) -> list[dict[str, Any]] | None:
     icons = describe_text_icons(text)
     known = [icon for icon in icons if not is_unknown_icon_record(icon)]
     return known if known else None
-
-
-def _text_is_pua_only(text: str) -> bool:
-    """True when ``text`` has PUA codepoints and no other visible characters."""
-    if not text:
-        return False
-    if not text_has_pua(text):
-        return False
-    non_pua = "".join(ch for ch in text if not is_pua_char(ch)).strip()
-    return not non_pua
 
 
 def _resolve_ocr_class_id(class_id: int, text_value: str) -> int:

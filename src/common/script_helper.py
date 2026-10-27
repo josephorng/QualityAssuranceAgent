@@ -154,7 +154,8 @@ def _load_json_dict(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _recording_event_json_paths(run_dir: Path) -> list[Path]:
+def recording_event_json_paths(run_dir: Path) -> list[Path]:
+    """Event JSON paths in ``session.json`` order, or filename order as fallback."""
     run_dir = Path(run_dir)
     manifest = _load_json_dict(run_dir / "session.json")
     if isinstance(manifest, dict) and isinstance(manifest.get("events"), list):
@@ -176,6 +177,9 @@ def _recording_event_json_paths(run_dir: Path) -> list[Path]:
     if events_dir.is_dir():
         return sorted(path for path in events_dir.glob("event_*.json") if path.is_file())
     return []
+
+
+_recording_event_json_paths = recording_event_json_paths
 
 
 def _resolve_recording_media_path(run_dir: Path, raw: str | None) -> str | None:

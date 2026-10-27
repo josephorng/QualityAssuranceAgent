@@ -13,14 +13,15 @@ valleys, and cuts land in the valleys. A full-width separator rule is uniform wi
 own row, so its row background equals the rule color and it reads as a valley too.
 
 Splits are all-or-nothing per box: when the resulting bands do not look like lines, the
-original box is kept, so the worst case equals no Stage 4 at all. See
-``OVERLAP_REFINE_LOGIC.md``.
+original box is kept, so the worst case equals no Stage 4 at all.
 """
 
 from __future__ import annotations
 
 import cv2
 import numpy as np
+
+from cua_mcp.geometry import xyxy_center_in_xywh
 
 # Stage 4 on by default (mirrors ``OVERLAP_REFINE_DEFAULT``).
 LINE_CUT_DEFAULT: bool = True
@@ -396,11 +397,4 @@ def _xyxy_center_in_enhance_roi(
     *,
     pad: int = 0,
 ) -> bool:
-    x0, y0, x1, y1 = (float(v) for v in box[:4])
-    cx = 0.5 * (x0 + x1)
-    cy = 0.5 * (y0 + y1)
-    rx, ry, rw, rh = (int(v) for v in rect)
-    if rw <= 0 or rh <= 0:
-        return False
-    p = max(0, int(pad))
-    return (rx - p) <= cx < (rx + rw + p) and (ry - p) <= cy < (ry + rh + p)
+    return xyxy_center_in_xywh(box, rect, pad=pad)

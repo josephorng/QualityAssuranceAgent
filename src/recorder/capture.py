@@ -13,10 +13,10 @@ from typing import Any, Callable
 
 import mss
 import pyautogui
-import pyperclip
 from pynput import keyboard, mouse
 
-from src.common.io_utils import append_text, read_json, write_json
+from src.common.io_utils import append_text, read_clipboard_text, read_json, write_json
+from cua_mcp.geometry import point_in_rect_xywh
 from src.common.run_state import unique_run_folder_name
 from src.common.settings import load_settings
 from src.eye.capture import capture_all_screens_to_file, resolve_monitor_index
@@ -782,10 +782,7 @@ def _ordered_modifiers(mods: set[str] | list[str]) -> list[str] | None:
 
 def _safe_clipboard_text() -> str | None:
     """Best-effort read of the current clipboard as text."""
-    try:
-        return pyperclip.paste()
-    except Exception:
-        return None
+    return read_clipboard_text()
 
 
 def _is_paste_hotkey(mods: list[str], token: str) -> bool:
@@ -795,10 +792,7 @@ def _is_paste_hotkey(mods: list[str], token: str) -> bool:
 def _point_in_rect(x: int, y: int, rect: tuple[int, int, int, int] | None) -> bool:
     if rect is None:
         return False
-    left, top, width, height = rect
-    if width <= 0 or height <= 0:
-        return False
-    return left <= x < left + width and top <= y < top + height
+    return point_in_rect_xywh(x, y, rect)
 
 
 def _normalize_ignore_rects(

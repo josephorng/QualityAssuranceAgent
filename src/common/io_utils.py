@@ -104,6 +104,16 @@ def append_csv_row(path: Path, fieldnames: list[str], row: dict[str, Any]) -> No
         writer.writerow(row)
 
 
+def read_clipboard_text() -> str | None:
+    """Best-effort read of the current clipboard as text. None when the read fails."""
+    try:
+        import pyperclip
+
+        return pyperclip.paste()
+    except Exception:
+        return None
+
+
 def update_csv_last_row(path: Path, updates: dict[str, Any]) -> bool:
     """Patch columns on the last data row of a CSV. Returns True when a row was updated."""
     if not path.exists() or path.stat().st_size == 0:

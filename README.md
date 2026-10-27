@@ -3,7 +3,7 @@
 Desktop automation agent with an in-process coordinator and three modules:
 
 - **Eye** — captures screenshots from the selected monitor(s)
-- **Brain** — plans script / smart steps and verifies outcomes via vLLM
+- **Brain** — plans script / smart steps and checks recorded window and signal predicates
 - **Hand** — executes desktop actions through MCP tools in `cua_mcp/`
 
 ## Requirements
@@ -35,7 +35,9 @@ GUI hub (primary):
 python main.py
 ```
 
-This opens `app_main_hub.py`, which starts `RuntimeCoordinator` for scripted, queue, smart, and recording flows. Each run lands under `runs/<task_slug>_<timestamp>/` with `eye/`, `thinking/`, `hand.csv`, `run.log`, and related artifacts.
+This opens `app_main_hub.py`. `RuntimeCoordinator` in `src/runtime/coordinator.py` runs scripted, queue, smart, and recording flows in-process: Brain plans a step, Hand runs the MCP tools, then the loop stops on completion, a failed step, or a user stop. Each run lands under `runs/<task_slug>_<timestamp>/` with `eye/`, `thinking/`, `storage/`, `hand.csv`, `long_term_memory.txt`, and `run.log`.
+
+YOLO and CRNN OCR go through Triton (`cua_mcp/vision_triton.py`). Prompts live in `src/common/prompts.py`. The settings field `ollama_host` is the vLLM base URL.
 
 Offline OCR tooling (not part of the packaged hub build):
 

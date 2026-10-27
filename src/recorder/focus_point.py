@@ -132,6 +132,31 @@ def _caret_screen_rect() -> ScreenRect | None:
     return (int(top_left.x), int(top_left.y), int(bottom_right.x), int(bottom_right.y))
 
 
+def _bstr_to_str(pointer: ctypes.c_void_p | None) -> str:
+    if not pointer:
+        return ""
+    try:
+        return str(ctypes.wstring_at(pointer) or "")
+    finally:
+        try:
+            ctypes.windll.oleaut32.SysFreeString(pointer)
+        except Exception:
+            pass
+
+
+def _uia_current_bstr(element: ctypes.c_void_p, vtable_index: int) -> str:
+    """Read one UI Automation BSTR property. Empty when the call does not succeed."""
+    getter = ctypes.WINFUNCTYPE(
+        ctypes.HRESULT,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    )(_com_vtable(element, vtable_index + 1)[vtable_index])
+    bstr = ctypes.c_void_p()
+    if getter(element, ctypes.byref(bstr)) == _S_OK:
+        return _bstr_to_str(bstr)
+    return ""
+
+
 def _com_vtable(ptr: ctypes.c_void_p, size: int) -> ctypes.Array[ctypes.c_void_p]:
     return ctypes.cast(
         ctypes.cast(ptr, ctypes.POINTER(ctypes.c_void_p))[0],

@@ -7,6 +7,8 @@ from enum import Enum
 import re
 from typing import Any
 
+from cua_mcp.geometry import point_in_rect_xywh
+
 
 class Side(str, Enum):
     """Script-side relation: where the click anchor sits relative to the landmark."""
@@ -174,8 +176,7 @@ def _point_inside_bbox_xywh(
     bbox: tuple[int, int, int, int],
 ) -> bool:
     """True when ``(x, y)`` lies inside an axis-aligned ``(x, y, w, h)`` bbox."""
-    bx, by, bw, bh = bbox
-    return bx <= x < bx + bw and by <= y < by + bh
+    return point_in_rect_xywh(x, y, bbox)
 
 
 def anchor_center_xy(bbox: tuple[int, int, int, int]) -> tuple[int, int]:

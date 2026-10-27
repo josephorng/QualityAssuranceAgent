@@ -29,9 +29,11 @@ from src.recorder.focus_point import (
     _S_FALSE,
     _S_OK,
     _UIA_GET_CURRENT_BOUNDING_RECTANGLE_INDEX,
+    _bstr_to_str,
     _com_release,
     _com_vtable,
     _guid_from_string,
+    _uia_current_bstr,
 )
 
 # Fraction of window area at/above which a UIA rect is treated as window-sized.
@@ -419,18 +421,6 @@ def _window_screen_xywh(hwnd: int) -> RectXywh | None:
     return (int(rect.left), int(rect.top), w, h)
 
 
-def _bstr_to_str(pointer: ctypes.c_void_p | None) -> str:
-    if not pointer:
-        return ""
-    try:
-        return str(ctypes.wstring_at(pointer) or "")
-    finally:
-        try:
-            ctypes.windll.oleaut32.SysFreeString(pointer)
-        except Exception:
-            pass
-
-
 def _element_bounding_xyxy(element: ctypes.c_void_p) -> ScreenXyxy | None:
     get_bounds = ctypes.WINFUNCTYPE(
         ctypes.HRESULT,
@@ -469,36 +459,16 @@ def _element_control_type(element: ctypes.c_void_p) -> int | None:
 
 def _element_automation_id(element: ctypes.c_void_p) -> str:
     try:
-        getter = ctypes.WINFUNCTYPE(
-            ctypes.HRESULT,
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_void_p),
-        )(
-            _com_vtable(element, _UIA_GET_CURRENT_AUTOMATION_ID + 1)[
-                _UIA_GET_CURRENT_AUTOMATION_ID
-            ]
-        )
-        bstr = ctypes.c_void_p()
-        if getter(element, ctypes.byref(bstr)) == _S_OK:
-            return _bstr_to_str(bstr).strip()
+        return _uia_current_bstr(element, _UIA_GET_CURRENT_AUTOMATION_ID).strip()
     except Exception:
-        pass
-    return ""
+        return ""
 
 
 def _element_current_name(element: ctypes.c_void_p) -> str:
     try:
-        getter = ctypes.WINFUNCTYPE(
-            ctypes.HRESULT,
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_void_p),
-        )(_com_vtable(element, _UIA_GET_CURRENT_NAME + 1)[_UIA_GET_CURRENT_NAME])
-        bstr = ctypes.c_void_p()
-        if getter(element, ctypes.byref(bstr)) == _S_OK:
-            return _bstr_to_str(bstr)
+        return _uia_current_bstr(element, _UIA_GET_CURRENT_NAME)
     except Exception:
-        pass
-    return ""
+        return ""
 
 
 def _element_value_pattern_current(element: ctypes.c_void_p) -> str:

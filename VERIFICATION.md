@@ -10,16 +10,16 @@ A missing field asserts nothing. Extra live window changes are ignored. A record
 flowchart TD
   Act[Actor finishes the step]
   Act --> Win{Recorded window_verify has any assertion?}
-  Win -->|yes, and tools succeeded| Settle[Sleep settle_after]
-  Settle --> Diff[Compare window list and signals]
-  Diff -->|miss| Retry[retry, clearly_unmet, no vision]
-  Diff -->|match| Next{Expected outcome or baseline?}
-  Win -->|no| Next
-  Next -->|neither, and tools succeeded| Advance[advance with no screenshot]
-  Next -->|either, or tools failed| Vision[Screenshot verifier]
+  Win -->|yes, and tools succeeded| Poll[Poll window list and signals]
+  Poll -->|match| Advance[advance]
+  Poll -->|miss at deadline| Retry[retry, clearly_unmet]
+  Win -->|no, and tools succeeded| Advance
+  Win -->|tools failed| Fail[fail the step]
 ```
 
-`settle_after` is the gap until the next recorded event when that gap is at least 1 second. Window verify polls at 1.0×, 1.5×, and 2.0× of the gap (1.0× only when the gap is under 2 seconds), failing only after the final poll. When the predicate includes `appeared`, the poll settle is floored to 5 seconds so the final check is at least 10 seconds (slow app launches). A baseline with no window predicate uses the same multiplier schedule.
+Replay does not send a screenshot to a verifier LLM. A successful actor with no recorded window or signal assertion advances without a screenshot.
+
+`settle_after` is the recording gap until the next event. Polling starts immediately after the actions and repeats every 0.1 seconds. The deadline is 2.0× that gap when the gap is at least 2 seconds, otherwise 1.0×. `appeared` floors the budget at 5 seconds. `disappeared` and signal assertions (`foreground`, `click_window`, clipboard, caret, focused, scroll) floor it at 1 second. When `close_windows` succeeded and a disappeared window is still present, verify re-closes it until the check passes or the deadline, which is at least 10 seconds.
 
 ## Where the recorded predicate comes from
 
@@ -60,11 +60,4 @@ Replay reads a signal only when the recorded predicate contains that field (`cap
 
 `control_state` may still appear in recorded `signals_before` / `signals_after` for debugging. It is not written into `window_verify` and is ignored if an older analysis still has it.
 
-## Screenshot
-
-These run only when window verify did not already fail. They are skipped when the tools succeeded and both are empty.
-
-| Point | Recorded when | Replay read |
-| --- | --- | --- |
-| Expected outcome | `analysis/event_NNN.json` has `use_expected_outcome` true and non-empty `expected_outcome` text. Older files with text and no flag stay on. | The verifier LLM sees a fresh screenshot and that sentence. `clearly_unmet` is true only when the sentence is visibly contradicted. After a successful actor, an uncertain retry is coerced to advance. |
-| Baseline after | The recording after-frame for that step: the next event's before shot, or the typing/drag end shot, or `screenshots/final_after.jpeg`. The path is kept even when the outcome checkbox is off, so the report can show it. Vision uses it when the checkbox is on. | The verifier LLM compares the live screenshot to that image. A match, or a low-confidence mismatch, advances. A high-confidence mismatch continues into recovery. |
+Recorded baseline frames and `expected_outcome` text stay on the report. Replay does not compare them to a live screenshot.

@@ -21,9 +21,11 @@ from src.recorder.focus_point import (
     _S_FALSE,
     _S_OK,
     _UIA_GET_FOCUSED_ELEMENT_INDEX,
+    _bstr_to_str,
     _com_release,
     _com_vtable,
     _guid_from_string,
+    _uia_current_bstr,
 )
 from src.recorder.window_snapshot import (
     ClickWindowInfo,
@@ -779,18 +781,6 @@ def signal_assertions_satisfied(
     return True, ""
 
 
-def _bstr_to_str(pointer: ctypes.c_void_p | None) -> str:
-    if not pointer:
-        return ""
-    try:
-        return str(ctypes.wstring_at(pointer) or "")
-    finally:
-        try:
-            ctypes.windll.oleaut32.SysFreeString(pointer)
-        except Exception:
-            pass
-
-
 def _uia_get_pattern(element: ctypes.c_void_p, pattern_id: int) -> ctypes.c_void_p | None:
     getter = ctypes.WINFUNCTYPE(
         ctypes.HRESULT,
@@ -851,16 +841,8 @@ def _uia_control_state(element: ctypes.c_void_p) -> str | None:
 
 
 def _uia_focused_value(element: ctypes.c_void_p) -> dict[str, str] | None:
-    name = ""
     try:
-        getter = ctypes.WINFUNCTYPE(
-            ctypes.HRESULT,
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_void_p),
-        )(_com_vtable(element, _UIA_GET_CURRENT_NAME + 1)[_UIA_GET_CURRENT_NAME])
-        bstr = ctypes.c_void_p()
-        if getter(element, ctypes.byref(bstr)) == _S_OK:
-            name = _bstr_to_str(bstr)
+        name = _uia_current_bstr(element, _UIA_GET_CURRENT_NAME)
     except Exception:
         name = ""
     value = ""

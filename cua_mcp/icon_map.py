@@ -36,6 +36,33 @@ def text_has_pua(text: str) -> bool:
     return any(is_pua_char(ch) for ch in text or "")
 
 
+def text_is_pua_only(text: str) -> bool:
+    """True when ``text`` has PUA codepoints and no other visible characters."""
+    if not text or not text_has_pua(text):
+        return False
+    non_pua = "".join(ch for ch in text if not is_pua_char(ch)).strip()
+    return not non_pua
+
+
+def description_for_chinese_id(chinese_id: str) -> str:
+    """Icon-map description for ``chinese_id``, or empty when it is missing."""
+    for value in load_icon_map().values():
+        if not isinstance(value, dict):
+            continue
+        if str(value.get("chinese_id", "")).strip() == chinese_id:
+            return str(value.get("description", "")).strip()
+    return ""
+
+
+def icon_record(chinese_id: str, *, pua: str = "") -> dict[str, Any]:
+    """Icon metadata dict used when a detection is reclassified to ``chinese_id``."""
+    return {
+        "pua": pua,
+        "chinese_id": chinese_id,
+        "icon_description": description_for_chinese_id(chinese_id),
+    }
+
+
 @lru_cache(maxsize=1)
 def _unknown_icon_map_entry() -> dict[str, str]:
     for key, value in load_icon_map().items():

@@ -5,7 +5,6 @@ import os
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +23,7 @@ from src.recorder.vision_context import (
     try_rebuild_vision_from_cache,
 )
 from src.recorder.coalesce import (
+    _elapsed_seconds,
     coalesce_chinese_ime_candidate_keys,
     coalesce_consecutive_same_location_clicks,
     coalesce_consecutive_text_inputs,
@@ -136,19 +136,6 @@ class _AnalysisProgress:
         with self._lock:
             self._done = self._total
             self._emit_unlocked()
-
-
-def _elapsed_seconds(previous_timestamp_utc: str, current_timestamp_utc: str) -> float | None:
-    """Return the non-negative elapsed time between two timezone-aware ISO timestamps."""
-    try:
-        previous = datetime.fromisoformat(previous_timestamp_utc.replace("Z", "+00:00"))
-        current = datetime.fromisoformat(current_timestamp_utc.replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    if previous.tzinfo is None or current.tzinfo is None:
-        return None
-    elapsed = (current - previous).total_seconds()
-    return elapsed if elapsed >= 0 else None
 
 
 def _is_trailing_agent_restore(event: RecordedEvent) -> bool:

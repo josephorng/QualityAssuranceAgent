@@ -12,7 +12,7 @@ import re
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from cua_mcp.icon_map import load_icon_map
+from cua_mcp.icon_map import icon_record
 from cua_mcp.select_ui_element import UiDetection
 from src.common.nearby_side import strip_nearby_context_comments
 
@@ -68,21 +68,8 @@ def _window_snapshot():
     return click_hits_caption_buttons, snapshot_top_level_windows
 
 
-def _icon_description_for_chinese_id(chinese_id: str) -> str:
-    for value in load_icon_map().values():
-        if not isinstance(value, dict):
-            continue
-        if str(value.get("chinese_id", "")).strip() == chinese_id:
-            return str(value.get("description", "")).strip()
-    return ""
-
-
 def _caption_icon_record(chinese_id: str, *, pua: str = "") -> dict[str, Any]:
-    return {
-        "pua": pua,
-        "chinese_id": chinese_id,
-        "icon_description": _icon_description_for_chinese_id(chinese_id),
-    }
+    return icon_record(chinese_id, pua=pua)
 
 
 def _pua_from_detection(det: UiDetection) -> str:

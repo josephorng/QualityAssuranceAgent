@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
-from cua_mcp.llm_json import parse_json_object
 from cua_mcp.screen_context import ScreenContext, capture_screen_context
 from cua_mcp.selection_engine import request_json_with_retry
 from cua_mcp.tools import get_mode_tool_names, mcp_server
@@ -21,6 +20,8 @@ from src.runtime.smart_coordinator import (
     SMART_VERIFIER_SCHEMA,
     _format_available_tools,
     _format_history,
+    _parse_planner as _parse_planner_role,
+    _parse_verifier as _parse_verifier_role,
 )
 
 if TYPE_CHECKING:
@@ -34,25 +35,11 @@ def _utc_now() -> str:
 
 
 def _parse_planner(content: str | None) -> SmartPlannerDecision:
-    if not (content or "").strip():
-        raise ValueError("Recovery planner returned empty content")
-    payload = parse_json_object(
-        content or "",
-        empty_error="Recovery planner returned empty content",
-        decode_error_prefix="Recovery planner JSON decode failed",
-    )
-    return SmartPlannerDecision.model_validate(payload)
+    return _parse_planner_role(content, role="Recovery planner")
 
 
 def _parse_verifier(content: str | None) -> SmartVerifierDecision:
-    if not (content or "").strip():
-        raise ValueError("Recovery verifier returned empty content")
-    payload = parse_json_object(
-        content or "",
-        empty_error="Recovery verifier returned empty content",
-        decode_error_prefix="Recovery verifier JSON decode failed",
-    )
-    return SmartVerifierDecision.model_validate(payload)
+    return _parse_verifier_role(content, role="Recovery verifier")
 
 
 def build_recovery_goal(*, script_goal: str, verify_reason: str) -> str:

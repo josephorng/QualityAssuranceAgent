@@ -332,6 +332,14 @@ def reset_run_state_manager() -> None:
     _manager = None
 
 
+def log_info_if_ready(text: str) -> None:
+    """Write to the run log when run state exists. No-op before it is initialized."""
+    try:
+        get_run_state_manager().log_info(text)
+    except RuntimeError:
+        pass
+
+
 def get_run_state_manager() -> RunStateManager:
     """
     Return the process-wide ``RunStateManager``, constructing it once from ``get_runtime_env``.

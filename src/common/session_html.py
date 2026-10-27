@@ -14,7 +14,11 @@ from typing import Any
 from urllib.parse import quote
 
 from src.common.run_state import parse_step_artifact_stem, step_filenames_are_one_based
-from src.common.script_helper import script_display_name
+from src.common.script_helper import (
+    _load_json_dict,
+    recording_event_json_paths,
+    script_display_name,
+)
 from src.common.session_report import _resolve_script_metadata, _resolve_started_at_utc
 
 _HTML_NAME = "session_steps.html"
@@ -5403,30 +5407,27 @@ def _render_index_row(run_root: Path) -> str:
     )
 
 
-def _iter_report_run_dirs(runs_root: Path) -> list[Path]:
+def _iter_html_run_dirs(runs_root: Path, *, smart: bool) -> list[Path]:
     if not runs_root.is_dir():
         return []
     found: list[Path] = []
     for child in runs_root.iterdir():
-        if not child.is_dir() or _is_recording_run_dir(child) or _is_smart_run_dir(child):
+        if not child.is_dir() or _is_recording_run_dir(child):
+            continue
+        if _is_smart_run_dir(child) != smart:
             continue
         if (child / _HTML_NAME).is_file():
             found.append(child)
     found.sort(key=lambda path: (path.name, path.stat().st_mtime), reverse=True)
     return found
+
+
+def _iter_report_run_dirs(runs_root: Path) -> list[Path]:
+    return _iter_html_run_dirs(runs_root, smart=False)
 
 
 def _iter_smart_report_run_dirs(runs_root: Path) -> list[Path]:
-    if not runs_root.is_dir():
-        return []
-    found: list[Path] = []
-    for child in runs_root.iterdir():
-        if not child.is_dir() or _is_recording_run_dir(child) or not _is_smart_run_dir(child):
-            continue
-        if (child / _HTML_NAME).is_file():
-            found.append(child)
-    found.sort(key=lambda path: (path.name, path.stat().st_mtime), reverse=True)
-    return found
+    return _iter_html_run_dirs(runs_root, smart=True)
 
 
 def _is_recording_run_dir(run_root: Path) -> bool:
@@ -5540,16 +5541,6 @@ def _href_relative_to_index(target: Path, index_dir: Path) -> str:
     return "/".join(parts)
 
 
-def _load_json_dict(path: Path) -> dict[str, Any] | None:
-    if not path.is_file():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
 def _load_session_manifest(run_root: Path) -> dict[str, Any] | None:
     return _load_json_dict(run_root / "session.json")
 
@@ -5613,32 +5604,6 @@ def _resolve_recording_datetime(run_root: Path, manifest: dict[str, Any] | None)
                 if formatted:
                     return formatted
     return _resolve_index_run_datetime(run_root, None)
-
-
-def recording_event_json_paths(run_root: Path) -> list[Path]:
-    """Event JSON paths in ``session.json`` order, or filename order as fallback."""
-    run_root = Path(run_root)
-    manifest = _load_session_manifest(run_root)
-    if isinstance(manifest, dict) and isinstance(manifest.get("events"), list):
-        event_paths: list[Path] = []
-        seen: set[str] = set()
-        for item in manifest["events"]:
-            if not isinstance(item, str) or not item.strip():
-                continue
-            path = run_root / item
-            if not path.is_file():
-                continue
-            key = str(path.resolve())
-            if key in seen:
-                continue
-            seen.add(key)
-            event_paths.append(path)
-        return event_paths
-
-    events_dir = run_root / "events"
-    if events_dir.is_dir():
-        return sorted(path for path in events_dir.glob("event_*.json") if path.is_file())
-    return []
 
 
 def _load_recording_events(run_root: Path) -> list[dict[str, Any]]:

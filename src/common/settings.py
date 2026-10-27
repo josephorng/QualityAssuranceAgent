@@ -131,42 +131,45 @@ def default_recordings_dir() -> Path:
     return application_root() / _DEFAULT_RECORDINGS_NAME
 
 
-def resolve_runs_dir(configured: str | Path | None = None) -> Path:
-    """Resolve ``runs_dir`` to an absolute path.
+def _resolve_named_dir(
+    configured: str | Path | None,
+    *,
+    settings_value,
+    default_name: str,
+    default_dir,
+) -> Path:
+    """Absolute path for a data directory setting.
 
-    Absolute configured paths are used as-is. Empty / ``runs`` uses
-    :func:`default_runs_dir`. Other relative paths resolve against
-    :func:`application_root`.
+    Absolute configured paths are used as-is. Empty or the default folder name
+    uses ``default_dir``. Other relative paths resolve against :func:`application_root`.
     """
-    if configured is None:
-        raw = str(Settings().runs_dir).strip()
-    else:
-        raw = str(configured).strip()
-    if not raw or raw in (".", _DEFAULT_RUNS_NAME):
-        return default_runs_dir().resolve()
+    raw = str(settings_value() if configured is None else configured).strip()
+    if not raw or raw in (".", default_name):
+        return default_dir().resolve()
     path = Path(raw).expanduser()
     if not path.is_absolute():
         path = application_root() / path
     return path.resolve()
+
+
+def resolve_runs_dir(configured: str | Path | None = None) -> Path:
+    """Resolve ``runs_dir`` to an absolute path."""
+    return _resolve_named_dir(
+        configured,
+        settings_value=lambda: Settings().runs_dir,
+        default_name=_DEFAULT_RUNS_NAME,
+        default_dir=default_runs_dir,
+    )
 
 
 def resolve_recordings_dir(configured: str | Path | None = None) -> Path:
-    """Resolve ``recordings_dir`` to an absolute path.
-
-    Absolute configured paths are used as-is. Empty / ``recordings`` uses
-    :func:`default_recordings_dir`. Other relative paths resolve against
-    :func:`application_root`.
-    """
-    if configured is None:
-        raw = str(Settings().recordings_dir).strip()
-    else:
-        raw = str(configured).strip()
-    if not raw or raw in (".", _DEFAULT_RECORDINGS_NAME):
-        return default_recordings_dir().resolve()
-    path = Path(raw).expanduser()
-    if not path.is_absolute():
-        path = application_root() / path
-    return path.resolve()
+    """Resolve ``recordings_dir`` to an absolute path."""
+    return _resolve_named_dir(
+        configured,
+        settings_value=lambda: Settings().recordings_dir,
+        default_name=_DEFAULT_RECORDINGS_NAME,
+        default_dir=default_recordings_dir,
+    )
 
 
 def reports_serve_root(

@@ -14,6 +14,8 @@ from typing import Any
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
+from src.common.canvas_zoom import CanvasZoomMixin
+
 from cua_mcp.color_spatial_segment import (
     ColorRegion,
     ColorSegmentParams,
@@ -25,8 +27,15 @@ from cua_mcp.color_spatial_segment import (
     save_color_segment_params,
     segment_image_by_color,
     spatial_region_rank_for_detections,
+    _sidecar_json_path,
 )
-from cua_mcp.icon_map import is_pua_char, lookup_pua_icon, text_has_pua, unknown_icon_record
+from cua_mcp.icon_map import (
+    is_pua_char,
+    lookup_pua_icon,
+    text_has_pua,
+    text_is_pua_only,
+    unknown_icon_record,
+)
 from cua_mcp.input_box_rectangles import (
     LineSegmentParams,
     detect_horizontal_rectangles,
@@ -402,15 +411,8 @@ def _is_icon_ocr_line(line: OcrLine) -> bool:
 
 
 def _is_pua_icon_identity_text(text: str) -> bool:
-    """True when ``text`` is PUA-only (one or more icons, no other characters).
-
-    Matches ``_detect_mouse_targets_from_bgr`` / ``_text_is_pua_only``: multi-icon
-    crops stay icon identity, not mixed text.
-    """
-    if not text or not text_has_pua(text):
-        return False
-    non_pua = "".join(ch for ch in text if not is_pua_char(ch)).strip()
-    return not non_pua
+    """True when ``text`` is PUA-only (one or more icons, no other characters)."""
+    return text_is_pua_only(text)
 
 
 def _export_dest_for_icon_identity(is_icon: bool) -> Path:
@@ -582,17 +584,6 @@ def _resolve_run_image_path(run_dir: Path, raw_path: str) -> Path | None:
     if from_root.is_file():
         return from_root
     return None
-
-
-def _sidecar_json_path(image_path: Path, run_dir: Path | None = None) -> Path:
-    sidecar = image_path.with_suffix(".json")
-    if sidecar.is_file():
-        return sidecar
-    if run_dir is not None:
-        yolo_json = run_dir / "yolo_ocr" / f"{image_path.stem}.json"
-        if yolo_json.is_file():
-            return yolo_json
-    return sidecar
 
 
 def _load_candidate_lines(candidates: Any) -> list[OcrLine]:
@@ -1436,7 +1427,7 @@ def _adjust_box_edge(
     return _clamp_box(x, y, w, h, img_w, img_h)
 
 
-class OcrViewerApp:
+class OcrViewerApp(CanvasZoomMixin):
     _MIN_ZOOM = 0.125
     _MAX_ZOOM = 32.0
     _ZOOM_STEP = 1.15
@@ -1981,40 +1972,6 @@ class OcrViewerApp:
             return
         self._rmb_last_x = int(event.x)
 
-    def _on_rmb_drag(self, event: tk.Event[tk.Canvas]) -> None:
-        if self._rmb_last_x is None or self.current_image is None:
-            return
-        x = int(event.x)
-        dx = x - self._rmb_last_x
-        self._rmb_last_x = x
-        # Horizontal only: drag right → zoom in, drag left → zoom out.
-        if dx == 0:
-            return
-        z = self._view_zoom * (self._RMB_ZOOM_PER_PIXEL**dx)
-        self._view_zoom = max(self._MIN_ZOOM, min(self._MAX_ZOOM, z))
-        self._refresh_image()
-
-    def _on_rmb_release(self, _event: tk.Event[tk.Canvas]) -> None:
-        self._rmb_last_x = None
-
-    def _on_lmb_press(self, event: tk.Event[tk.Canvas]) -> None:
-        if self.current_image is None:
-            return
-        self._lmb_press_xy = (int(event.x), int(event.y))
-        self._lmb_panning = False
-
-    def _on_lmb_motion(self, event: tk.Event[tk.Canvas]) -> None:
-        if self._lmb_press_xy is None:
-            return
-        x0, y0 = self._lmb_press_xy
-        x, y = int(event.x), int(event.y)
-        if not self._lmb_panning:
-            if (x - x0) ** 2 + (y - y0) ** 2 < self._PAN_CLICK_THRESHOLD_SQ:
-                return
-            self.canvas.scan_mark(x0, y0)
-            self._lmb_panning = True
-        self.canvas.scan_dragto(x, y, gain=1)
-
     def _on_lmb_release(self, event: tk.Event[tk.Canvas]) -> None:
         if self._lmb_press_xy is None:
             return
@@ -2050,52 +2007,6 @@ class OcrViewerApp:
         line = self._line_at_display_index(idx)
         if line is not None and _is_ui_object_line(line):
             self._open_ui_object_export_popup(idx)
-
-    def _on_mmb_press(self, event: tk.Event[tk.Canvas]) -> None:
-        self.canvas.scan_mark(int(event.x), int(event.y))
-
-    def _on_mmb_drag(self, event: tk.Event[tk.Canvas]) -> None:
-        self.canvas.scan_dragto(int(event.x), int(event.y), gain=1)
-
-    def _on_canvas_mousewheel(self, event: tk.Event[tk.Canvas]) -> None:
-        if event.state & 0x0004:
-            if event.delta > 0:
-                self._apply_zoom_factor(self._ZOOM_STEP)
-            elif event.delta < 0:
-                self._apply_zoom_factor(1.0 / self._ZOOM_STEP)
-            return
-        if event.state & 0x0001:
-            self.canvas.xview_scroll(int(-(event.delta / 120)), "units")
-        else:
-            self.canvas.yview_scroll(int(-(event.delta / 120)), "units")
-
-    def _set_zoom(self, zoom: float) -> None:
-        self._view_zoom = max(self._MIN_ZOOM, min(self._MAX_ZOOM, zoom))
-        self._refresh_image()
-
-    def _apply_zoom_factor(self, factor: float) -> None:
-        self._set_zoom(self._view_zoom * factor)
-
-    def _zoom_in(self) -> None:
-        self._apply_zoom_factor(self._ZOOM_STEP)
-
-    def _zoom_out(self) -> None:
-        self._apply_zoom_factor(1.0 / self._ZOOM_STEP)
-
-    def _reset_zoom(self) -> None:
-        self._set_zoom(1.0)
-
-    def _on_zoom_in_hotkey(self, _event: tk.Event[tk.Tk]) -> str:
-        self._zoom_in()
-        return "break"
-
-    def _on_zoom_out_hotkey(self, _event: tk.Event[tk.Tk]) -> str:
-        self._zoom_out()
-        return "break"
-
-    def _on_reset_zoom_hotkey(self, _event: tk.Event[tk.Tk]) -> str:
-        self._reset_zoom()
-        return "break"
 
     def _arrow_direction(self, keysym: str) -> str | None:
         return {"Up": "up", "Down": "down", "Left": "left", "Right": "right"}.get(keysym)
@@ -2709,7 +2620,7 @@ def run_app(
     root.mainloop()
 
 
-class TestImagesViewerApp:
+class TestImagesViewerApp(CanvasZoomMixin):
     _MIN_ZOOM = 0.125
     _MAX_ZOOM = 32.0
     _ZOOM_STEP = 1.15
@@ -3431,34 +3342,6 @@ class TestImagesViewerApp:
         self.image_list.see(nxt)
         self._on_image_select()
 
-    def _set_zoom(self, zoom: float) -> None:
-        self._view_zoom = max(self._MIN_ZOOM, min(self._MAX_ZOOM, zoom))
-        self._refresh_image()
-
-    def _apply_zoom_factor(self, factor: float) -> None:
-        self._set_zoom(self._view_zoom * factor)
-
-    def _zoom_in(self) -> None:
-        self._apply_zoom_factor(self._ZOOM_STEP)
-
-    def _zoom_out(self) -> None:
-        self._apply_zoom_factor(1.0 / self._ZOOM_STEP)
-
-    def _reset_zoom(self) -> None:
-        self._set_zoom(1.0)
-
-    def _on_zoom_in_hotkey(self, _event: tk.Event[tk.Tk]) -> str:
-        self._zoom_in()
-        return "break"
-
-    def _on_zoom_out_hotkey(self, _event: tk.Event[tk.Tk]) -> str:
-        self._zoom_out()
-        return "break"
-
-    def _on_reset_zoom_hotkey(self, _event: tk.Event[tk.Tk]) -> str:
-        self._reset_zoom()
-        return "break"
-
     def _arrow_direction(self, keysym: str) -> str | None:
         return {"Up": "up", "Down": "down", "Left": "left", "Right": "right"}.get(keysym)
 
@@ -3514,42 +3397,6 @@ class TestImagesViewerApp:
             return "break"
         return None
 
-    def _on_rmb_press(self, event: tk.Event[tk.Canvas]) -> None:
-        self._rmb_last_x = int(event.x) if self.current_image is not None else None
-
-    def _on_rmb_drag(self, event: tk.Event[tk.Canvas]) -> None:
-        if self._rmb_last_x is None or self.current_image is None:
-            return
-        x = int(event.x)
-        dx = x - self._rmb_last_x
-        self._rmb_last_x = x
-        if dx == 0:
-            return
-        z = self._view_zoom * (self._RMB_ZOOM_PER_PIXEL**dx)
-        self._view_zoom = max(self._MIN_ZOOM, min(self._MAX_ZOOM, z))
-        self._refresh_image()
-
-    def _on_rmb_release(self, _event: tk.Event[tk.Canvas]) -> None:
-        self._rmb_last_x = None
-
-    def _on_lmb_press(self, event: tk.Event[tk.Canvas]) -> None:
-        if self.current_image is None:
-            return
-        self._lmb_press_xy = (int(event.x), int(event.y))
-        self._lmb_panning = False
-
-    def _on_lmb_motion(self, event: tk.Event[tk.Canvas]) -> None:
-        if self._lmb_press_xy is None:
-            return
-        x0, y0 = self._lmb_press_xy
-        x, y = int(event.x), int(event.y)
-        if not self._lmb_panning:
-            if (x - x0) ** 2 + (y - y0) ** 2 < self._PAN_CLICK_THRESHOLD_SQ:
-                return
-            self.canvas.scan_mark(x0, y0)
-            self._lmb_panning = True
-        self.canvas.scan_dragto(x, y, gain=1)
-
     def _on_lmb_release(self, event: tk.Event[tk.Canvas]) -> None:
         if self._lmb_press_xy is None:
             return
@@ -3593,26 +3440,199 @@ class TestImagesViewerApp:
         self.item_list.see(selected_idx)
         self._refresh_image()
 
-    def _on_mmb_press(self, event: tk.Event[tk.Canvas]) -> None:
-        self.canvas.scan_mark(int(event.x), int(event.y))
 
-    def _on_mmb_drag(self, event: tk.Event[tk.Canvas]) -> None:
-        self.canvas.scan_dragto(int(event.x), int(event.y), gain=1)
+class _SegmentBrowser(CanvasZoomMixin):
+    """Folder and session browser shared by the segment viewers."""
 
-    def _on_canvas_mousewheel(self, event: tk.Event[tk.Canvas]) -> None:
-        if event.state & 0x0004:
-            if event.delta > 0:
-                self._apply_zoom_factor(self._ZOOM_STEP)
-            elif event.delta < 0:
-                self._apply_zoom_factor(1.0 / self._ZOOM_STEP)
+    def _apply_zoom_factor(self, factor: float) -> None:
+        self._view_zoom = max(self._MIN_ZOOM, min(self._MAX_ZOOM, self._view_zoom * factor))
+        self._refresh_image()
+
+    def _browse_folder(self) -> None:
+        chosen = filedialog.askdirectory(
+            initialdir=self.folder_var.get() or str(self.source_root)
+        )
+        if not chosen:
             return
-        if event.state & 0x0001:
-            self.canvas.xview_scroll(int(-(event.delta / 120)), "units")
+        self.source_root = Path(chosen)
+        self.folder_var.set(str(self.source_root))
+        self._reload_folder_images()
+
+    def _cancel_pending_detect(self) -> None:
+        if self._detect_after_id is not None:
+            try:
+                self.root.after_cancel(self._detect_after_id)
+            except tk.TclError:
+                pass
+            self._detect_after_id = None
+
+    def _current_image_path(self) -> Path | None:
+        idx = self._selected_image_index()
+        if idx is None or idx >= len(self.image_paths):
+            return None
+        return self.image_paths[idx]
+
+    def _on_reset_zoom_hotkey(self, _event: object | None = None) -> str:
+        self._reset_zoom()
+        return "break"
+
+    def _on_rmb_press(self, event: tk.Event[tk.Canvas]) -> None:
+        if self.current_image is None:
+            self._rmb_last_x = None
+            return
+        self._rmb_last_x = int(event.x)
+
+    def _on_session_select(self, _event: object | None = None) -> None:
+        selected = self.session_list.curselection()
+        if not selected:
+            return
+        session = self.session_dirs[selected[0]]
+        self.image_paths = _yolo_ocr_paired_images(session)
+        self.image_list.delete(0, tk.END)
+        for img in self.image_paths:
+            self.image_list.insert(tk.END, img.name)
+        if self.image_paths:
+            self.image_list.select_set(0)
+            self._on_image_select()
         else:
-            self.canvas.yview_scroll(int(-(event.delta / 120)), "units")
+            self._cancel_pending_detect()
+            self.current_image = None
+            self._clear_segment_state()
+            self.canvas.delete("all")
+            self.status_var.set(f"No images found for {session.name}")
 
+    def _on_zoom_in_hotkey(self, _event: object | None = None) -> str:
+        self._zoom_in()
+        return "break"
 
-class LineSegmentsViewerApp:
+    def _on_zoom_out_hotkey(self, _event: object | None = None) -> str:
+        self._zoom_out()
+        return "break"
+
+    def _populate_session_list(self) -> None:
+        self.session_dirs = _discover_runs(self.source_root)
+        self.session_list.delete(0, tk.END)
+        for session in self.session_dirs:
+            self.session_list.insert(tk.END, session.name)
+        if self.session_dirs:
+            self.session_list.select_set(0)
+            self._on_session_select()
+        else:
+            self.image_paths = []
+            self.image_list.delete(0, tk.END)
+            self.current_image = None
+            self._clear_segment_state()
+            self.canvas.delete("all")
+            label = self._session_list_label.lower()
+            self.status_var.set(f"No {label} found in {self.source_root}")
+
+    def _reload_folder_images(self) -> None:
+        self.image_paths = _discover_folder_images(self.source_root)
+        self.image_list.delete(0, tk.END)
+        for img in self.image_paths:
+            self.image_list.insert(tk.END, img.name)
+        if self.image_paths:
+            self.image_list.select_set(0)
+            self._on_image_select()
+        else:
+            self.current_image = None
+            self._clear_segment_state()
+            self.canvas.delete("all")
+            self.status_var.set(f"No images in {self.source_root}")
+
+    def _reset_zoom(self) -> None:
+        self._view_zoom = 1.0
+        self._refresh_image()
+
+    def _selected_image_index(self) -> int | None:
+        selected = self.image_list.curselection()
+        if not selected:
+            return None
+        return selected[0]
+
+    def activate_hotkeys(self) -> None:
+        if self._hotkeys_active:
+            return
+        self.root.bind("<Control-plus>", self._on_zoom_in_hotkey)
+        self.root.bind("<Control-equal>", self._on_zoom_in_hotkey)
+        self.root.bind("<Control-minus>", self._on_zoom_out_hotkey)
+        self.root.bind("<Control-0>", self._on_reset_zoom_hotkey)
+        self._hotkeys_active = True
+
+    def deactivate_hotkeys(self) -> None:
+        if not self._hotkeys_active:
+            return
+        for key in ("<Control-plus>", "<Control-equal>", "<Control-minus>", "<Control-0>"):
+            self.root.unbind(key)
+        self._hotkeys_active = False
+
+    def refresh_lists(self) -> None:
+        """Re-scan sessions/folder and refresh listboxes, keeping selection when possible."""
+        prev_image = self._current_image_path()
+        prev_image_name = prev_image.name if prev_image is not None else None
+        if self.mode == "folder":
+            self.source_root = Path(self.folder_var.get() or self.source_root)
+            self.image_paths = _discover_folder_images(self.source_root)
+            self.image_list.delete(0, tk.END)
+            for img in self.image_paths:
+                self.image_list.insert(tk.END, img.name)
+            if not self.image_paths:
+                self.current_image = None
+                self._clear_segment_state()
+                self.canvas.delete("all")
+                self.status_var.set(f"No images in {self.source_root}")
+                return
+            image_idx = 0
+            if prev_image_name is not None:
+                for idx, img in enumerate(self.image_paths):
+                    if img.name == prev_image_name:
+                        image_idx = idx
+                        break
+            self.image_list.select_clear(0, tk.END)
+            self.image_list.select_set(image_idx)
+            self.image_list.see(image_idx)
+            self._on_image_select()
+            return
+
+        prev_session = None
+        selected = self.session_list.curselection()
+        if selected:
+            prev_session = self.session_dirs[selected[0]].name
+        self.session_dirs = _discover_runs(self.source_root)
+        self.session_list.delete(0, tk.END)
+        for session in self.session_dirs:
+            self.session_list.insert(tk.END, session.name)
+        if not self.session_dirs:
+            self.image_paths = []
+            self.image_list.delete(0, tk.END)
+            self.current_image = None
+            self._clear_segment_state()
+            self.canvas.delete("all")
+            label = self._session_list_label.lower()
+            self.status_var.set(f"No {label} found in {self.source_root}")
+            return
+
+        session_idx = 0
+        if prev_session is not None:
+            for idx, session in enumerate(self.session_dirs):
+                if session.name == prev_session:
+                    session_idx = idx
+                    break
+        self.session_list.select_clear(0, tk.END)
+        self.session_list.select_set(session_idx)
+        self.session_list.see(session_idx)
+        self._on_session_select()
+        if prev_image_name is None:
+            return
+        for idx, img in enumerate(self.image_paths):
+            if img.name == prev_image_name:
+                self.image_list.select_clear(0, tk.END)
+                self.image_list.select_set(idx)
+                self.image_list.see(idx)
+                self._on_image_select()
+                break
+
+class LineSegmentsViewerApp(_SegmentBrowser):
     """Browse images and tune Canny / Hough line-segment detection.
 
     ``mode="folder"`` browses a flat image directory (Test images).
@@ -3895,160 +3915,6 @@ class LineSegmentsViewerApp:
         status.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 8))
         self.parent.bind("<Configure>", lambda _e: self._refresh_image())
 
-    def activate_hotkeys(self) -> None:
-        if self._hotkeys_active:
-            return
-        self.root.bind("<Control-plus>", self._on_zoom_in_hotkey)
-        self.root.bind("<Control-equal>", self._on_zoom_in_hotkey)
-        self.root.bind("<Control-minus>", self._on_zoom_out_hotkey)
-        self.root.bind("<Control-0>", self._on_reset_zoom_hotkey)
-        self._hotkeys_active = True
-
-    def deactivate_hotkeys(self) -> None:
-        if not self._hotkeys_active:
-            return
-        for key in ("<Control-plus>", "<Control-equal>", "<Control-minus>", "<Control-0>"):
-            self.root.unbind(key)
-        self._hotkeys_active = False
-
-    def _browse_folder(self) -> None:
-        chosen = filedialog.askdirectory(
-            initialdir=self.folder_var.get() or str(self.source_root)
-        )
-        if not chosen:
-            return
-        self.source_root = Path(chosen)
-        self.folder_var.set(str(self.source_root))
-        self._reload_folder_images()
-
-    def _populate_session_list(self) -> None:
-        self.session_dirs = _discover_runs(self.source_root)
-        self.session_list.delete(0, tk.END)
-        for session in self.session_dirs:
-            self.session_list.insert(tk.END, session.name)
-        if self.session_dirs:
-            self.session_list.select_set(0)
-            self._on_session_select()
-        else:
-            self.image_paths = []
-            self.image_list.delete(0, tk.END)
-            self.current_image = None
-            self._clear_segment_state()
-            self.canvas.delete("all")
-            label = self._session_list_label.lower()
-            self.status_var.set(f"No {label} found in {self.source_root}")
-
-    def _on_session_select(self, _event: object | None = None) -> None:
-        selected = self.session_list.curselection()
-        if not selected:
-            return
-        session = self.session_dirs[selected[0]]
-        self.image_paths = _yolo_ocr_paired_images(session)
-        self.image_list.delete(0, tk.END)
-        for img in self.image_paths:
-            self.image_list.insert(tk.END, img.name)
-        if self.image_paths:
-            self.image_list.select_set(0)
-            self._on_image_select()
-        else:
-            self._cancel_pending_detect()
-            self.current_image = None
-            self._clear_segment_state()
-            self.canvas.delete("all")
-            self.status_var.set(f"No images found for {session.name}")
-
-    def _reload_folder_images(self) -> None:
-        self.image_paths = _discover_folder_images(self.source_root)
-        self.image_list.delete(0, tk.END)
-        for img in self.image_paths:
-            self.image_list.insert(tk.END, img.name)
-        if self.image_paths:
-            self.image_list.select_set(0)
-            self._on_image_select()
-        else:
-            self.current_image = None
-            self._clear_segment_state()
-            self.canvas.delete("all")
-            self.status_var.set(f"No images in {self.source_root}")
-
-    def refresh_lists(self) -> None:
-        """Re-scan sessions/folder and refresh listboxes, keeping selection when possible."""
-        prev_image = self._current_image_path()
-        prev_image_name = prev_image.name if prev_image is not None else None
-        if self.mode == "folder":
-            self.source_root = Path(self.folder_var.get() or self.source_root)
-            self.image_paths = _discover_folder_images(self.source_root)
-            self.image_list.delete(0, tk.END)
-            for img in self.image_paths:
-                self.image_list.insert(tk.END, img.name)
-            if not self.image_paths:
-                self.current_image = None
-                self._clear_segment_state()
-                self.canvas.delete("all")
-                self.status_var.set(f"No images in {self.source_root}")
-                return
-            image_idx = 0
-            if prev_image_name is not None:
-                for idx, img in enumerate(self.image_paths):
-                    if img.name == prev_image_name:
-                        image_idx = idx
-                        break
-            self.image_list.select_clear(0, tk.END)
-            self.image_list.select_set(image_idx)
-            self.image_list.see(image_idx)
-            self._on_image_select()
-            return
-
-        prev_session = None
-        selected = self.session_list.curselection()
-        if selected:
-            prev_session = self.session_dirs[selected[0]].name
-        self.session_dirs = _discover_runs(self.source_root)
-        self.session_list.delete(0, tk.END)
-        for session in self.session_dirs:
-            self.session_list.insert(tk.END, session.name)
-        if not self.session_dirs:
-            self.image_paths = []
-            self.image_list.delete(0, tk.END)
-            self.current_image = None
-            self._clear_segment_state()
-            self.canvas.delete("all")
-            label = self._session_list_label.lower()
-            self.status_var.set(f"No {label} found in {self.source_root}")
-            return
-
-        session_idx = 0
-        if prev_session is not None:
-            for idx, session in enumerate(self.session_dirs):
-                if session.name == prev_session:
-                    session_idx = idx
-                    break
-        self.session_list.select_clear(0, tk.END)
-        self.session_list.select_set(session_idx)
-        self.session_list.see(session_idx)
-        self._on_session_select()
-        if prev_image_name is None:
-            return
-        for idx, img in enumerate(self.image_paths):
-            if img.name == prev_image_name:
-                self.image_list.select_clear(0, tk.END)
-                self.image_list.select_set(idx)
-                self.image_list.see(idx)
-                self._on_image_select()
-                break
-
-    def _selected_image_index(self) -> int | None:
-        selected = self.image_list.curselection()
-        if not selected:
-            return None
-        return selected[0]
-
-    def _current_image_path(self) -> Path | None:
-        idx = self._selected_image_index()
-        if idx is None or idx >= len(self.image_paths):
-            return None
-        return self.image_paths[idx]
-
     def _on_image_select(self, _event: object | None = None) -> None:
         image_path = self._current_image_path()
         if image_path is None:
@@ -4121,14 +3987,6 @@ class LineSegmentsViewerApp:
         self._update_param_value_label(key)
         if not self._suppress_param_events:
             self._schedule_detect()
-
-    def _cancel_pending_detect(self) -> None:
-        if self._detect_after_id is not None:
-            try:
-                self.root.after_cancel(self._detect_after_id)
-            except tk.TclError:
-                pass
-            self._detect_after_id = None
 
     def _schedule_detect(self) -> None:
         self._cancel_pending_detect()
@@ -4279,71 +4137,6 @@ class LineSegmentsViewerApp:
         self.image_list.see(nxt)
         self._on_image_select()
 
-    def _apply_zoom_factor(self, factor: float) -> None:
-        self._view_zoom = max(self._MIN_ZOOM, min(self._MAX_ZOOM, self._view_zoom * factor))
-        self._refresh_image()
-
-    def _zoom_in(self) -> None:
-        self._apply_zoom_factor(self._ZOOM_STEP)
-
-    def _zoom_out(self) -> None:
-        self._apply_zoom_factor(1.0 / self._ZOOM_STEP)
-
-    def _reset_zoom(self) -> None:
-        self._view_zoom = 1.0
-        self._refresh_image()
-
-    def _on_zoom_in_hotkey(self, _event: object | None = None) -> str:
-        self._zoom_in()
-        return "break"
-
-    def _on_zoom_out_hotkey(self, _event: object | None = None) -> str:
-        self._zoom_out()
-        return "break"
-
-    def _on_reset_zoom_hotkey(self, _event: object | None = None) -> str:
-        self._reset_zoom()
-        return "break"
-
-    def _on_rmb_press(self, event: tk.Event[tk.Canvas]) -> None:
-        if self.current_image is None:
-            self._rmb_last_x = None
-            return
-        self._rmb_last_x = int(event.x)
-
-    def _on_rmb_drag(self, event: tk.Event[tk.Canvas]) -> None:
-        if self._rmb_last_x is None or self.current_image is None:
-            return
-        x = int(event.x)
-        dx = x - self._rmb_last_x
-        self._rmb_last_x = x
-        if dx == 0:
-            return
-        z = self._view_zoom * (self._RMB_ZOOM_PER_PIXEL**dx)
-        self._view_zoom = max(self._MIN_ZOOM, min(self._MAX_ZOOM, z))
-        self._refresh_image()
-
-    def _on_rmb_release(self, _event: tk.Event[tk.Canvas]) -> None:
-        self._rmb_last_x = None
-
-    def _on_lmb_press(self, event: tk.Event[tk.Canvas]) -> None:
-        if self.current_image is None:
-            return
-        self._lmb_press_xy = (int(event.x), int(event.y))
-        self._lmb_panning = False
-
-    def _on_lmb_motion(self, event: tk.Event[tk.Canvas]) -> None:
-        if self._lmb_press_xy is None:
-            return
-        x0, y0 = self._lmb_press_xy
-        x, y = int(event.x), int(event.y)
-        if not self._lmb_panning:
-            if (x - x0) ** 2 + (y - y0) ** 2 < self._PAN_CLICK_THRESHOLD_SQ:
-                return
-            self.canvas.scan_mark(x0, y0)
-            self._lmb_panning = True
-        self.canvas.scan_dragto(x, y, gain=1)
-
     def _on_lmb_release(self, event: tk.Event[tk.Canvas]) -> None:
         if self._lmb_press_xy is None:
             return
@@ -4386,26 +4179,8 @@ class LineSegmentsViewerApp:
         )
         self.canvas.focus_set()
 
-    def _on_mmb_press(self, event: tk.Event[tk.Canvas]) -> None:
-        self.canvas.scan_mark(int(event.x), int(event.y))
 
-    def _on_mmb_drag(self, event: tk.Event[tk.Canvas]) -> None:
-        self.canvas.scan_dragto(int(event.x), int(event.y), gain=1)
-
-    def _on_canvas_mousewheel(self, event: tk.Event[tk.Canvas]) -> None:
-        if event.state & 0x0004:
-            if event.delta > 0:
-                self._apply_zoom_factor(self._ZOOM_STEP)
-            elif event.delta < 0:
-                self._apply_zoom_factor(1.0 / self._ZOOM_STEP)
-            return
-        if event.state & 0x0001:
-            self.canvas.xview_scroll(int(-(event.delta / 120)), "units")
-        else:
-            self.canvas.yview_scroll(int(-(event.delta / 120)), "units")
-
-
-class ColorSegmentViewerApp:
+class ColorSegmentViewerApp(_SegmentBrowser):
     """Browse images and segment them into large color-based regions."""
 
     _MIN_ZOOM = 0.125
@@ -4712,148 +4487,6 @@ class ColorSegmentViewerApp:
         status.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 8))
         self.parent.bind("<Configure>", lambda _e: self._refresh_image())
 
-    def activate_hotkeys(self) -> None:
-        if self._hotkeys_active:
-            return
-        self.root.bind("<Control-plus>", self._on_zoom_in_hotkey)
-        self.root.bind("<Control-equal>", self._on_zoom_in_hotkey)
-        self.root.bind("<Control-minus>", self._on_zoom_out_hotkey)
-        self.root.bind("<Control-0>", self._on_reset_zoom_hotkey)
-        self._hotkeys_active = True
-
-    def deactivate_hotkeys(self) -> None:
-        if not self._hotkeys_active:
-            return
-        for key in ("<Control-plus>", "<Control-equal>", "<Control-minus>", "<Control-0>"):
-            self.root.unbind(key)
-        self._hotkeys_active = False
-
-    def _browse_folder(self) -> None:
-        chosen = filedialog.askdirectory(
-            initialdir=self.folder_var.get() or str(self.source_root)
-        )
-        if not chosen:
-            return
-        self.source_root = Path(chosen)
-        self.folder_var.set(str(self.source_root))
-        self._reload_folder_images()
-
-    def _populate_session_list(self) -> None:
-        self.session_dirs = _discover_runs(self.source_root)
-        self.session_list.delete(0, tk.END)
-        for session in self.session_dirs:
-            self.session_list.insert(tk.END, session.name)
-        if self.session_dirs:
-            self.session_list.select_set(0)
-            self._on_session_select()
-        else:
-            self.image_paths = []
-            self.image_list.delete(0, tk.END)
-            self.current_image = None
-            self._clear_segment_state()
-            self.canvas.delete("all")
-            label = self._session_list_label.lower()
-            self.status_var.set(f"No {label} found in {self.source_root}")
-
-    def _on_session_select(self, _event: object | None = None) -> None:
-        selected = self.session_list.curselection()
-        if not selected:
-            return
-        session = self.session_dirs[selected[0]]
-        self.image_paths = _yolo_ocr_paired_images(session)
-        self.image_list.delete(0, tk.END)
-        for img in self.image_paths:
-            self.image_list.insert(tk.END, img.name)
-        if self.image_paths:
-            self.image_list.select_set(0)
-            self._on_image_select()
-        else:
-            self._cancel_pending_detect()
-            self.current_image = None
-            self._clear_segment_state()
-            self.canvas.delete("all")
-            self.status_var.set(f"No images found for {session.name}")
-
-    def _reload_folder_images(self) -> None:
-        self.image_paths = _discover_folder_images(self.source_root)
-        self.image_list.delete(0, tk.END)
-        for img in self.image_paths:
-            self.image_list.insert(tk.END, img.name)
-        if self.image_paths:
-            self.image_list.select_set(0)
-            self._on_image_select()
-        else:
-            self.current_image = None
-            self._clear_segment_state()
-            self.canvas.delete("all")
-            self.status_var.set(f"No images in {self.source_root}")
-
-    def refresh_lists(self) -> None:
-        """Re-scan sessions/folder and refresh listboxes, keeping selection when possible."""
-        prev_image = self._current_image_path()
-        prev_image_name = prev_image.name if prev_image is not None else None
-        if self.mode == "folder":
-            self.source_root = Path(self.folder_var.get() or self.source_root)
-            self.image_paths = _discover_folder_images(self.source_root)
-            self.image_list.delete(0, tk.END)
-            for img in self.image_paths:
-                self.image_list.insert(tk.END, img.name)
-            if not self.image_paths:
-                self.current_image = None
-                self._clear_segment_state()
-                self.canvas.delete("all")
-                self.status_var.set(f"No images in {self.source_root}")
-                return
-            image_idx = 0
-            if prev_image_name is not None:
-                for idx, img in enumerate(self.image_paths):
-                    if img.name == prev_image_name:
-                        image_idx = idx
-                        break
-            self.image_list.select_clear(0, tk.END)
-            self.image_list.select_set(image_idx)
-            self.image_list.see(image_idx)
-            self._on_image_select()
-            return
-
-        prev_session = None
-        selected = self.session_list.curselection()
-        if selected:
-            prev_session = self.session_dirs[selected[0]].name
-        self.session_dirs = _discover_runs(self.source_root)
-        self.session_list.delete(0, tk.END)
-        for session in self.session_dirs:
-            self.session_list.insert(tk.END, session.name)
-        if not self.session_dirs:
-            self.image_paths = []
-            self.image_list.delete(0, tk.END)
-            self.current_image = None
-            self._clear_segment_state()
-            self.canvas.delete("all")
-            label = self._session_list_label.lower()
-            self.status_var.set(f"No {label} found in {self.source_root}")
-            return
-
-        session_idx = 0
-        if prev_session is not None:
-            for idx, session in enumerate(self.session_dirs):
-                if session.name == prev_session:
-                    session_idx = idx
-                    break
-        self.session_list.select_clear(0, tk.END)
-        self.session_list.select_set(session_idx)
-        self.session_list.see(session_idx)
-        self._on_session_select()
-        if prev_image_name is None:
-            return
-        for idx, img in enumerate(self.image_paths):
-            if img.name == prev_image_name:
-                self.image_list.select_clear(0, tk.END)
-                self.image_list.select_set(idx)
-                self.image_list.see(idx)
-                self._on_image_select()
-                break
-
     def _selected_run(self) -> Path | None:
         if self.mode != "sessions":
             return None
@@ -4861,18 +4494,6 @@ class ColorSegmentViewerApp:
         if not selected:
             return None
         return self.session_dirs[selected[0]]
-
-    def _selected_image_index(self) -> int | None:
-        selected = self.image_list.curselection()
-        if not selected:
-            return None
-        return selected[0]
-
-    def _current_image_path(self) -> Path | None:
-        idx = self._selected_image_index()
-        if idx is None or idx >= len(self.image_paths):
-            return None
-        return self.image_paths[idx]
 
     def _on_image_select(self, _event: object | None = None) -> None:
         image_path = self._current_image_path()
@@ -4986,14 +4607,6 @@ class ColorSegmentViewerApp:
         self._update_param_value_label(key)
         if not self._suppress_param_events:
             self._schedule_detect()
-
-    def _cancel_pending_detect(self) -> None:
-        if self._detect_after_id is not None:
-            try:
-                self.root.after_cancel(self._detect_after_id)
-            except tk.TclError:
-                pass
-            self._detect_after_id = None
 
     def _schedule_detect(self) -> None:
         self._cancel_pending_detect()
@@ -5129,71 +4742,6 @@ class ColorSegmentViewerApp:
         self.canvas.create_image(0, 0, image=self.current_display, anchor="nw")
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
-    def _apply_zoom_factor(self, factor: float) -> None:
-        self._view_zoom = max(self._MIN_ZOOM, min(self._MAX_ZOOM, self._view_zoom * factor))
-        self._refresh_image()
-
-    def _zoom_in(self) -> None:
-        self._apply_zoom_factor(self._ZOOM_STEP)
-
-    def _zoom_out(self) -> None:
-        self._apply_zoom_factor(1.0 / self._ZOOM_STEP)
-
-    def _reset_zoom(self) -> None:
-        self._view_zoom = 1.0
-        self._refresh_image()
-
-    def _on_zoom_in_hotkey(self, _event: object | None = None) -> str:
-        self._zoom_in()
-        return "break"
-
-    def _on_zoom_out_hotkey(self, _event: object | None = None) -> str:
-        self._zoom_out()
-        return "break"
-
-    def _on_reset_zoom_hotkey(self, _event: object | None = None) -> str:
-        self._reset_zoom()
-        return "break"
-
-    def _on_rmb_press(self, event: tk.Event[tk.Canvas]) -> None:
-        if self.current_image is None:
-            self._rmb_last_x = None
-            return
-        self._rmb_last_x = int(event.x)
-
-    def _on_rmb_drag(self, event: tk.Event[tk.Canvas]) -> None:
-        if self._rmb_last_x is None or self.current_image is None:
-            return
-        x = int(event.x)
-        dx = x - self._rmb_last_x
-        self._rmb_last_x = x
-        if dx == 0:
-            return
-        z = self._view_zoom * (self._RMB_ZOOM_PER_PIXEL**dx)
-        self._view_zoom = max(self._MIN_ZOOM, min(self._MAX_ZOOM, z))
-        self._refresh_image()
-
-    def _on_rmb_release(self, _event: tk.Event[tk.Canvas]) -> None:
-        self._rmb_last_x = None
-
-    def _on_lmb_press(self, event: tk.Event[tk.Canvas]) -> None:
-        if self.current_image is None:
-            return
-        self._lmb_press_xy = (int(event.x), int(event.y))
-        self._lmb_panning = False
-
-    def _on_lmb_motion(self, event: tk.Event[tk.Canvas]) -> None:
-        if self._lmb_press_xy is None:
-            return
-        x0, y0 = self._lmb_press_xy
-        x, y = int(event.x), int(event.y)
-        if not self._lmb_panning:
-            if (x - x0) ** 2 + (y - y0) ** 2 < self._PAN_CLICK_THRESHOLD_SQ:
-                return
-            self.canvas.scan_mark(x0, y0)
-            self._lmb_panning = True
-        self.canvas.scan_dragto(x, y, gain=1)
-
     def _on_lmb_release(self, event: tk.Event[tk.Canvas]) -> None:
         if self._lmb_press_xy is None:
             return
@@ -5243,24 +4791,6 @@ class ColorSegmentViewerApp:
             f"area={region.area}px, rgb=({r},{g},{b})"
         )
         self.canvas.focus_set()
-
-    def _on_mmb_press(self, event: tk.Event[tk.Canvas]) -> None:
-        self.canvas.scan_mark(int(event.x), int(event.y))
-
-    def _on_mmb_drag(self, event: tk.Event[tk.Canvas]) -> None:
-        self.canvas.scan_dragto(int(event.x), int(event.y), gain=1)
-
-    def _on_canvas_mousewheel(self, event: tk.Event[tk.Canvas]) -> None:
-        if event.state & 0x0004:
-            if event.delta > 0:
-                self._apply_zoom_factor(self._ZOOM_STEP)
-            elif event.delta < 0:
-                self._apply_zoom_factor(1.0 / self._ZOOM_STEP)
-            return
-        if event.state & 0x0001:
-            self.canvas.xview_scroll(int(-(event.delta / 120)), "units")
-        else:
-            self.canvas.yview_scroll(int(-(event.delta / 120)), "units")
 
 
 class SourceTabShell:

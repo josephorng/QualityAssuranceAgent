@@ -9,7 +9,7 @@ from src.common.nearby_side import (
     NearbyHint,
     extract_nearby_hints_from_instruction,
 )
-from src.common.run_state import get_run_state_manager
+from src.common.run_state import log_info_if_ready as _log_info
 
 _VISION_MODE_PREFIXES: tuple[tuple[str, str], ...] = (
     ("uia", "（UIA）"),
@@ -44,13 +44,6 @@ _OFFSET_TOKEN_RE = re.compile(r"(右方|左方|上方|下方)(\d+)個像素")
 _TRACK_PERCENT_RE = re.compile(r"(?:的)?(\d+)%處")
 _TRAILING_CONTEXT_COMMENT_RE = re.compile(r"(?:（[^）]*）)+$")
 _INLINE_START_CONTEXT_COMMENT_RE = re.compile(r"（起點(?:附近|在)[^）]*）")
-
-
-def _log_info(text: str) -> None:
-    try:
-        get_run_state_manager().log_info(text)
-    except RuntimeError:
-        pass
 
 
 def _extract_track_percent_regex(text: str) -> tuple[str, int | None]:

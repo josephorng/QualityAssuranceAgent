@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     import numpy as np
 
 from cua_mcp.char_target import detect_clicked_char
+from cua_mcp.geometry import point_in_rect_xywh
 from cua_mcp.color_spatial_segment import (
     ColorSegmentResult,
     SegmentDetection,
@@ -881,16 +882,13 @@ def _bbox_center_inside(
     inner: tuple[int, int, int, int],
 ) -> bool:
     """True when the center of ``inner`` lies inside the ``outer`` bbox."""
-    ox, oy, ow, oh = outer
     ix, iy, iw, ih = inner
-    cx, cy = ix + iw // 2, iy + ih // 2
-    return ox <= cx < ox + ow and oy <= cy < oy + oh
+    return _point_inside_bbox(ix + iw // 2, iy + ih // 2, outer)
 
 
 def _point_inside_bbox(x: int, y: int, bbox: tuple[int, int, int, int]) -> bool:
     """True when ``(x, y)`` lies inside an axis-aligned ``(x, y, w, h)`` bbox."""
-    bx, by, bw, bh = bbox
-    return bx <= x < bx + bw and by <= y < by + bh
+    return point_in_rect_xywh(x, y, bbox)
 
 
 def _drop_point_inside_candidate(

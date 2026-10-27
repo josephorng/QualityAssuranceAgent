@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from cua_mcp.geometry import sort_by_reading_order
-from cua_mcp.icon_map import is_pua_char, text_has_pua
+from cua_mcp.icon_map import is_pua_char, text_is_pua_only as _text_is_pua_only
 from cua_mcp.llm_json import parse_json_object
 from cua_mcp.selection_engine import request_json_with_retry
 from src.common.llm_factory import get_llm_client
@@ -98,16 +98,6 @@ class UiDetection:
     source: str | None = None
     # Labeled UIA control token (button, list_item, …). Empty on OCR/YOLO boxes.
     uia_control_type: str | None = None
-
-
-def _text_is_pua_only(text: str) -> bool:
-    """True when ``text`` has PUA codepoints and no other visible characters."""
-    if not text:
-        return False
-    if not text_has_pua(text):
-        return False
-    non_pua = "".join(ch for ch in text if not is_pua_char(ch)).strip()
-    return not non_pua
 
 
 def _parse_index_from_llm(raw: str, num_candidates: int) -> tuple[int, str]:

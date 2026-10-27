@@ -17,7 +17,7 @@ from cua_mcp.yolo_onnx import DEFAULT_CONF_YOLOV26_END2END
 from src.common.io_utils import imread_bgr, imwrite_bgr
 from src.common.llm_factory import get_llm_client
 from src.common.prompting import get_prompt
-from src.common.run_state import get_run_state_manager, ts_name
+from src.common.run_state import get_run_state_manager, log_info_if_ready as _log_info, ts_name
 from src.common.settings import load_settings
 from src.eye.capture import active_monitor_offset
 
@@ -48,13 +48,6 @@ _ROI_SCHEMA: dict[str, Any] = {
     "required": ["found", "image_index", "nx1", "ny1", "nx2", "ny2"],
     "additionalProperties": False,
 }
-
-
-def _log_info(text: str) -> None:
-    try:
-        get_run_state_manager().log_info(text)
-    except RuntimeError:
-        pass
 
 
 def clamp_norm(value: float) -> int:

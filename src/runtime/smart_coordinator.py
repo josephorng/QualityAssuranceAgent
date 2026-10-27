@@ -110,26 +110,23 @@ def _format_available_tools(tools: list[Any]) -> str:
     return "\n".join(lines) if lines else "(no tools available)"
 
 
-def _parse_planner(content: str | None) -> SmartPlannerDecision:
+def _parse_role_json(content: str | None, role: str, model: type):
     if not (content or "").strip():
-        raise ValueError("Planner returned empty content")
+        raise ValueError(f"{role} returned empty content")
     payload = parse_json_object(
         content or "",
-        empty_error="Planner returned empty content",
-        decode_error_prefix="Planner JSON decode failed",
+        empty_error=f"{role} returned empty content",
+        decode_error_prefix=f"{role} JSON decode failed",
     )
-    return SmartPlannerDecision.model_validate(payload)
+    return model.model_validate(payload)
 
 
-def _parse_verifier(content: str | None) -> SmartVerifierDecision:
-    if not (content or "").strip():
-        raise ValueError("Verifier returned empty content")
-    payload = parse_json_object(
-        content or "",
-        empty_error="Verifier returned empty content",
-        decode_error_prefix="Verifier JSON decode failed",
-    )
-    return SmartVerifierDecision.model_validate(payload)
+def _parse_planner(content: str | None, *, role: str = "Planner") -> SmartPlannerDecision:
+    return _parse_role_json(content, role, SmartPlannerDecision)
+
+
+def _parse_verifier(content: str | None, *, role: str = "Verifier") -> SmartVerifierDecision:
+    return _parse_role_json(content, role, SmartVerifierDecision)
 
 
 class SmartCoordinator:

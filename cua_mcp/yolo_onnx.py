@@ -15,7 +15,7 @@ After the full-frame / quadtree pass, overlapping or tall ``text`` clusters can 
 crop-refined via :func:`cua_mcp.yolo_divide_conquer.refine_overlapping_text_with_crops`
 (Stage 3; on by default), and any ``text`` box still holding multiple lines is split at
 row-profile valleys by :func:`cua_mcp.text_line_cut.cut_multiline_text_boxes` (Stage 4;
-on by default). See ``OVERLAP_REFINE_LOGIC.md``.
+on by default).
 
 Classes: ``text`` (:data:`YOLO_CLASS_TEXT`), ``element`` (:data:`YOLO_CLASS_ELEMENT`),
 ``input`` (:data:`YOLO_CLASS_INPUT`), and ``scrollbar`` (:data:`YOLO_CLASS_SCROLLBAR`).
@@ -36,6 +36,7 @@ import time
 import cv2
 import numpy as np
 
+from cua_mcp.geometry import iou_xyxy
 from cua_mcp.text_line_cut import LINE_CUT_DEFAULT, cut_multiline_text_boxes
 from cua_mcp.yolo_divide_conquer import (
     OVERLAP_REFINE_DEFAULT,
@@ -265,31 +266,12 @@ def run_yolo_onnx_end2end(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Preprocess ``bgr``, run YOLOv26 end2end via Triton, and return
-    :func:`decode_yolov26_end2end` outputs ``(xyxy, scores, class_ids)`` filtered to
-    ``class_ids``.
+    ``(xyxy, scores, class_ids)`` filtered to ``class_ids``.
 
-    When raw end2end detections with ``score >= conf_threshold`` fill the model buffer
-    (:data:`YOLO_END2END_MAX_DET`), the image is recursively split into overlapping 2×2
-    tiles; the truncated full-image pass is discarded and tile results are merged.
-
-    Pass ``merge_touching_same_class=True`` to also fuse ``text`` and ``element`` boxes whose
-    pairwise IoU exceeds ``merge_same_class_iou_threshold``. ``input`` and ``scrollbar`` are
-    always merged at that threshold (see :data:`DEFAULT_MERGE_TOUCHING_CLASS_IDS`). Each
-    ``input`` box is then expanded to include every overlapping ``text`` box.
-
-    Tiny ``text`` boxes (both sides under :data:`DEFAULT_SMALL_TEXT_AS_ELEMENT_MAX_SIDE`)
-    are also duplicated as ``element`` at the same bbox when ``element`` is in ``class_ids``.
-
-    When ``overlap_refine`` is True and ``text`` is among ``class_ids``, hard text clusters
-    (overlap / crossing / tall multi-line) are crop-refined once on the full-image result
-    via :func:`~cua_mcp.yolo_divide_conquer.refine_overlapping_text_with_crops`. Crop
-    re-predict uses the same recursive detector with refine disabled to avoid recursion.
-    First YOLO (Stages 1–2) stays full-frame; Stage 3/4 may be limited to ``enhance_roi``.
-
-    When ``line_cut`` is True and ``text`` is among ``class_ids``, tall ``text`` boxes that
-    still hold multiple lines are split at row-profile valleys by
-    :func:`~cua_mcp.text_line_cut.cut_multiline_text_boxes` (Stage 4; model-free). This runs
-    whether or not Stage 3 changed anything.
+    A full detection buffer triggers the overlapping quadtree. Same-class merge,
+    input expansion, small-text-as-element, overlap refine, and line cut follow
+    the module defaults. ``enhance_roi`` limits Stage 3/4 to that xywh box
+    (padded by ``enhance_roi_pad``). The first YOLO pass stays full-frame.
     """
     xyxy, scores, cls_arr = _run_yolo_onnx_end2end_recursive(
         bgr,
@@ -593,24 +575,8 @@ def _boxes_overlap_xyxy(xy0: np.ndarray, xy1: np.ndarray) -> bool:
 
 
 def _iou_xyxy(xy0: np.ndarray, xy1: np.ndarray) -> float:
-    """Intersection-over-union for axis-aligned ``xyxy`` boxes (returns ``0.0`` if disjoint or degenerate union)."""
-    ax1, ay1, ax2, ay2 = (float(xy0[i]) for i in range(4))
-    bx1, by1, bx2, by2 = (float(xy1[i]) for i in range(4))
-    ix1 = max(ax1, bx1)
-    iy1 = max(ay1, by1)
-    ix2 = min(ax2, bx2)
-    iy2 = min(ay2, by2)
-    iw = ix2 - ix1
-    ih = iy2 - iy1
-    if iw <= 0 or ih <= 0:
-        return 0.0
-    inter = iw * ih
-    aw = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
-    bw = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
-    union = aw + bw - inter
-    if union <= 0:
-        return 0.0
-    return inter / union
+    """Intersection-over-union for axis-aligned ``xyxy`` boxes."""
+    return iou_xyxy(xy0, xy1)
 
 
 class _DisjointSet:

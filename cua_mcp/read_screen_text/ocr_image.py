@@ -19,7 +19,7 @@ from cua_mcp.geometry import clip_box
 from cua_mcp.yolo_onnx import YOLO_CLASS_ELEMENT
 from .constrained_decode import CharSpan, DecodeMode
 from .inference_onnx import TextPredictor
-from src.common.run_state import get_run_state_manager
+from src.common.run_state import log_info_if_ready as _log_info
 
 _DEFAULT_CRNN_BATCH_SIZE = 64
 # Within one zero-padded CRNN chunk, reject adding a wider row when
@@ -33,15 +33,6 @@ _T = TypeVar("_T")
 _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 _CRNN_PREDICTOR: TextPredictor | None = None
 _CRNN_PREDICTOR_LOCK = threading.Lock()
-
-
-def _log_info(text: str) -> None:
-    """Write an info log when run state is available."""
-    try:
-        get_run_state_manager().log_info(text)
-    except RuntimeError:
-        # OCR helpers can run in isolation before run state is initialized.
-        pass
 
 
 def _default_crnn_path() -> str:

@@ -11,7 +11,8 @@ import pyperclip
 
 import pyautogui
 import pygetwindow as gw
-from src.common.io_utils import imread_bgr
+from src.common.io_utils import imread_bgr, read_clipboard_text
+from cua_mcp.llm_json import parse_json_object
 from src.common.llm_factory import get_llm_client
 from src.common.llm_text import strip_llm_quote_wrappers
 from src.common.prompting import get_prompt
@@ -139,10 +140,7 @@ def click(
 
 def _safe_clipboard_text() -> str | None:
     """Best-effort read of the current clipboard as text. Returns None on failure."""
-    try:
-        return pyperclip.paste()
-    except Exception:
-        return None
+    return read_clipboard_text()
 
 
 # Text clipboard captured at run start; restored when the run ends.
@@ -448,15 +446,11 @@ def _candidate_label(title: str, process_name: str | None) -> str:
 
 
 def _parse_json_object_from_llm(content: str) -> dict[str, Any]:
-    text = content.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-    return json.loads(text)
+    return parse_json_object(
+        content,
+        empty_error="window picker returned empty content",
+        decode_error_prefix="window picker JSON decode failed",
+    )
 
 
 async def _llm_pick_window_indices(
@@ -642,18 +636,34 @@ def _window_tool_result_base(
     return out
 
 
-async def maximize_windows(
-    window_title_contains: str,
-    instruction: str = "",
-    process_name: str = "",
-) -> dict[str, Any]:
-    """
-    Bring one or more top-level windows to the foreground and maximize them.
+def _try_activate_window(window: Any) -> None:
+    try:
+        window.activate()
+    except Exception:
+        pass
 
-    First tries case-insensitive substring match on window titles. If exactly one
-    window matches, it is used. If none or several match, optional ``process_name``
-    narrows or falls back; otherwise asks the LLM (brain_lm) to pick indices.
-    An empty selection raises instead of acting on a guessed window.
+
+def _window_error_row(title: str, exc: BaseException) -> dict[str, Any]:
+    return {
+        "matched_title": title,
+        "status": "error",
+        "error": f"{type(exc).__name__}: {exc}",
+    }
+
+
+async def _mutate_selected_windows(
+    window_title_contains: str,
+    instruction: str,
+    process_name: str,
+    *,
+    action: str,
+    visit,
+    count_already_minimized: bool = False,
+) -> dict[str, Any]:
+    """Select windows, run ``visit`` on each, and build the tool result.
+
+    ``visit(window)`` returns a status string. ``already_minimized`` is counted
+    separately and is not a success or a failure.
     """
     needle = (window_title_contains or "").strip()
     if not needle:
@@ -662,34 +672,30 @@ async def maximize_windows(
     targets, selection_mode = await _select_target_windows(
         window_title_contains,
         instruction,
-        action="maximize",
+        action=action,
         process_name=process_name,
     )
-
     target_rows: list[dict[str, Any]] = []
     succeeded = 0
     failed = 0
-    for w, title in targets:
+    already_minimized = 0
+    for window, title in targets:
         try:
-            try:
-                w.activate()
-            except Exception:
-                pass
-            if w.isMinimized:
-                w.restore()
-            w.maximize()
-            target_rows.append({"matched_title": title, "status": "maximized"})
-            succeeded += 1
+            status = visit(window)
         except Exception as exc:
             failed += 1
-            target_rows.append(
-                {
-                    "matched_title": title,
-                    "status": "error",
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            )
-
+            target_rows.append(_window_error_row(title, exc))
+            continue
+        target_rows.append({"matched_title": title, "status": status})
+        if status == "already_minimized":
+            already_minimized += 1
+        else:
+            succeeded += 1
+    extra = (
+        {"already_minimized_count": already_minimized}
+        if count_already_minimized
+        else None
+    )
     return _window_tool_result_base(
         needle=needle,
         selection_mode=selection_mode,
@@ -699,6 +705,46 @@ async def maximize_windows(
         failed=failed,
         instruction=instruction,
         process_name=process_name,
+        extra=extra,
+    )
+
+
+def _maximize_one(window: Any) -> str:
+    _try_activate_window(window)
+    if window.isMinimized:
+        window.restore()
+    window.maximize()
+    return "maximized"
+
+
+def _close_one(window: Any) -> str:
+    _try_activate_window(window)
+    if window.isMinimized:
+        window.restore()
+    window.close()
+    return "closed"
+
+
+def _minimize_one(window: Any) -> str:
+    if window.isMinimized:
+        return "already_minimized"
+    _try_activate_window(window)
+    window.minimize()
+    return "minimized"
+
+
+async def maximize_windows(
+    window_title_contains: str,
+    instruction: str = "",
+    process_name: str = "",
+) -> dict[str, Any]:
+    """Bring matching top-level windows to the foreground and maximize them."""
+    return await _mutate_selected_windows(
+        window_title_contains,
+        instruction,
+        process_name,
+        action="maximize",
+        visit=_maximize_one,
     )
 
 
@@ -707,58 +753,13 @@ async def close_windows(
     instruction: str = "",
     process_name: str = "",
 ) -> dict[str, Any]:
-    """
-    Close one or more top-level windows whose titles best match the query.
-
-    First tries case-insensitive substring match on window titles. If exactly one
-    window matches, it is used. If none or several match, optional ``process_name``
-    narrows or falls back; otherwise asks the LLM (brain_lm) to pick indices.
-    An empty selection raises instead of closing a guessed window.
-    """
-    needle = (window_title_contains or "").strip()
-    if not needle:
-        raise ValueError("window_title_contains must be a non-empty string")
-
-    targets, selection_mode = await _select_target_windows(
+    """Close matching top-level windows. An empty selection raises."""
+    return await _mutate_selected_windows(
         window_title_contains,
         instruction,
+        process_name,
         action="close",
-        process_name=process_name,
-    )
-
-    target_rows: list[dict[str, Any]] = []
-    succeeded = 0
-    failed = 0
-    for w, title in targets:
-        try:
-            try:
-                w.activate()
-            except Exception:
-                pass
-            if w.isMinimized:
-                w.restore()
-            w.close()
-            target_rows.append({"matched_title": title, "status": "closed"})
-            succeeded += 1
-        except Exception as exc:
-            failed += 1
-            target_rows.append(
-                {
-                    "matched_title": title,
-                    "status": "error",
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            )
-
-    return _window_tool_result_base(
-        needle=needle,
-        selection_mode=selection_mode,
-        targets=targets,
-        target_rows=target_rows,
-        succeeded=succeeded,
-        failed=failed,
-        instruction=instruction,
-        process_name=process_name,
+        visit=_close_one,
     )
 
 
@@ -797,59 +798,14 @@ async def minimize_windows(
     instruction: str = "",
     process_name: str = "",
 ) -> dict[str, Any]:
-    """
-    Minimize one or more top-level windows selected like maximize/close.
-
-    Windows already minimized are skipped and reported separately.
-    """
-    needle = (window_title_contains or "").strip()
-    if not needle:
-        raise ValueError("window_title_contains must be a non-empty string")
-
-    targets, selection_mode = await _select_target_windows(
+    """Minimize matching top-level windows. Already-minimized windows are skipped."""
+    return await _mutate_selected_windows(
         window_title_contains,
         instruction,
+        process_name,
         action="minimize",
-        process_name=process_name,
-    )
-
-    target_rows: list[dict[str, Any]] = []
-    succeeded = 0
-    failed = 0
-    already_minimized = 0
-    for w, title in targets:
-        if w.isMinimized:
-            already_minimized += 1
-            target_rows.append({"matched_title": title, "status": "already_minimized"})
-            continue
-        try:
-            try:
-                w.activate()
-            except Exception:
-                pass
-            w.minimize()
-            target_rows.append({"matched_title": title, "status": "minimized"})
-            succeeded += 1
-        except Exception as exc:
-            failed += 1
-            target_rows.append(
-                {
-                    "matched_title": title,
-                    "status": "error",
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            )
-
-    return _window_tool_result_base(
-        needle=needle,
-        selection_mode=selection_mode,
-        targets=targets,
-        target_rows=target_rows,
-        succeeded=succeeded,
-        failed=failed,
-        instruction=instruction,
-        process_name=process_name,
-        extra={"already_minimized_count": already_minimized},
+        visit=_minimize_one,
+        count_already_minimized=True,
     )
 
 

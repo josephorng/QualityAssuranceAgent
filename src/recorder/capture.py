@@ -225,6 +225,8 @@ class _DeferredCaptureJob:
     text_event_index: int | None = None
     # Newest before-shot raw frame finished before this hook. Pinned until adopt.
     settle_frame: _RawBeforeShot | None = None
+    # Hook-safe latch diagnosis (no I/O); worker writes it to record.log on adopt.
+    settle_latch_note: str | None = None
     windows_before: tuple[WindowInfo, ...] | None = None
     click_window: ClickWindowInfo | None = None
     # Drag release window under end_xy (screen coords); localized at persist.
@@ -1915,6 +1917,7 @@ class RecordingSession:
             self._left_press_signals[seq] = signals_before
             self._left_press_click_windows[seq] = click_window
         self._latch_press_uia(seq, click_window, side="left")
+        settle_frame, settle_latch_note = self._latch_settle_frame(x, y)
         self._enqueue(
             _DeferredCaptureJob(
                 action="pending_left_press",
@@ -1922,7 +1925,8 @@ class RecordingSession:
                 press_seq=seq,
                 text_event_index=text_event_index,
                 flush_meta=text_meta,
-                settle_frame=self._latch_settle_frame(x, y),
+                settle_frame=settle_frame,
+                settle_latch_note=settle_latch_note,
             )
         )
         # Other monitors, captured now so a later cross-monitor drop is pre-drag.
@@ -1946,12 +1950,14 @@ class RecordingSession:
             self._right_press_signals[seq] = signals_before
             self._right_press_click_windows[seq] = click_window
         self._latch_press_uia(seq, click_window, side="right")
+        settle_frame, settle_latch_note = self._latch_settle_frame(x, y)
         self._enqueue(
             _DeferredCaptureJob(
                 action="pending_right_press",
                 cursor_xy=(x, y),
                 press_seq=seq,
-                settle_frame=self._latch_settle_frame(x, y),
+                settle_frame=settle_frame,
+                settle_latch_note=settle_latch_note,
             )
         )
 
@@ -2104,14 +2110,15 @@ class RecordingSession:
         self,
         x: int,
         y: int,
-    ) -> _RawBeforeShot | None:
+    ) -> tuple[_RawBeforeShot | None, str]:
         """Pin the newest finished before-shot for the click's monitor.
 
-        Hook-safe: no capture and no encode.
+        Hook-safe: no capture, no encode, no log I/O. The note string is logged
+        later on the worker when the frame is adopted (or when adopt falls back).
         """
         click_mon = self._monitor_index_for_point(x, y)
         if click_mon is None:
-            return None
+            return None, f"miss xy=({int(x)},{int(y)}) reason=no_click_monitor"
         with self._lock:
             published = self._last_settle_frames.get(int(click_mon))
             if published is None:
@@ -2119,10 +2126,67 @@ class RecordingSession:
                 if last is not None and int(last.monitor_index) == int(click_mon):
                     published = last
             if published is None:
-                return None
+                published_mons = sorted(int(k) for k in self._last_settle_frames.keys())
+                last = self._last_settle_frame
+                last_mon = int(last.monitor_index) if last is not None else None
+                return (
+                    None,
+                    f"miss xy=({int(x)},{int(y)}) reason=no_frame_for_mon "
+                    f"click_mon={int(click_mon)} published_mons={published_mons} "
+                    f"last_mon={last_mon}",
+                )
             frame_id = int(published.frame_id)
             self._settle_pins[frame_id] = self._settle_pins.get(frame_id, 0) + 1
-            return published
+            return (
+                published,
+                f"ok xy=({int(x)},{int(y)}) frame_id={frame_id} "
+                f"mon={int(published.monitor_index)} "
+                f"offset={tuple(published.monitor_offset)} "
+                f"size={tuple(published.size)}",
+            )
+
+    def _log_before_shot(self, run_dir: Path | None, text: str) -> None:
+        """Append a before-shot debug line; never raise (worker / tests)."""
+        if run_dir is None:
+            return
+        log_fn = getattr(self, "_log", None)
+        if not callable(log_fn):
+            return
+        try:
+            log_fn(run_dir, f"before-shot {text}")
+        except Exception:
+            pass
+
+    def _log_before_shot_finalize(
+        self,
+        run_dir: Path | None,
+        *,
+        event_index: int | None,
+        press_seq: int | None,
+        pending_shot: tuple[str, int, tuple[int, int]] | None,
+        side: str,
+    ) -> None:
+        """Log whether emit reused the press pending JPEG or live-captures."""
+        if pending_shot is None:
+            self._log_before_shot(
+                run_dir,
+                f"finalize side={side} event={event_index} press_seq={press_seq} "
+                f"pending=missing path=live_capture",
+            )
+            return
+        src = Path(pending_shot[0])
+        if src.is_file():
+            self._log_before_shot(
+                run_dir,
+                f"finalize side={side} event={event_index} press_seq={press_seq} "
+                f"pending=ok mon={pending_shot[1]} src={src.name}",
+            )
+            return
+        self._log_before_shot(
+            run_dir,
+            f"finalize side={side} event={event_index} press_seq={press_seq} "
+            f"pending=missing_file src={src.name} path=live_capture",
+        )
 
     def _unpin_settle_frame(
         self,
@@ -2144,7 +2208,7 @@ class RecordingSession:
         dest: Path,
         *,
         write_durable: bool = True,
-    ) -> tuple[str, int, tuple[int, int]] | None:
+    ) -> tuple[tuple[str, int, tuple[int, int]] | None, str]:
         """JPEG-encode a raw before-shot to ``dest`` (worker / adopt path)."""
         try:
             from PIL import Image
@@ -2170,12 +2234,15 @@ class RecordingSession:
                     except OSError:
                         pass
             return (
-                str(dest),
-                int(frame.monitor_index),
-                (int(frame.monitor_offset[0]), int(frame.monitor_offset[1])),
+                (
+                    str(dest),
+                    int(frame.monitor_index),
+                    (int(frame.monitor_offset[0]), int(frame.monitor_offset[1])),
+                ),
+                "encode_ok",
             )
-        except Exception:
-            return None
+        except Exception as exc:
+            return None, f"encode_fail {type(exc).__name__}: {exc}"
 
     def _take_latched_settle_frame(
         self,
@@ -2183,17 +2250,37 @@ class RecordingSession:
         x: int,
         y: int,
         dest: Path,
-    ) -> tuple[str, int, tuple[int, int]] | None:
+    ) -> tuple[tuple[str, int, tuple[int, int]] | None, str]:
         """Encode the raw frame pinned at the hook when it matches the click monitor."""
         if latched is None:
-            return None
+            return None, "adopt_skip reason=no_latched_frame"
         try:
             click_mon = self._monitor_index_for_point(x, y)
-            if click_mon is None or int(latched.monitor_index) != int(click_mon):
-                return None
-            return self._encode_raw_before_shot(latched, dest)
-        except Exception:
-            return None
+            if click_mon is None:
+                return None, (
+                    f"adopt_skip reason=no_click_monitor_at_adopt "
+                    f"latched_mon={int(latched.monitor_index)} "
+                    f"xy=({int(x)},{int(y)})"
+                )
+            if int(latched.monitor_index) != int(click_mon):
+                return None, (
+                    f"adopt_skip reason=monitor_mismatch "
+                    f"latched_mon={int(latched.monitor_index)} "
+                    f"click_mon={int(click_mon)} xy=({int(x)},{int(y)})"
+                )
+            encoded, encode_note = self._encode_raw_before_shot(latched, dest)
+            if encoded is None:
+                return None, (
+                    f"adopt_skip reason=encode_fail "
+                    f"frame_id={int(latched.frame_id)} mon={int(latched.monitor_index)} "
+                    f"{encode_note}"
+                )
+            return encoded, (
+                f"adopt_ok frame_id={int(latched.frame_id)} "
+                f"mon={int(latched.monitor_index)} dest={dest.name}"
+            )
+        except Exception as exc:
+            return None, f"adopt_skip reason=exception {type(exc).__name__}: {exc}"
         finally:
             self._unpin_settle_frame(latched)
 
@@ -2201,8 +2288,17 @@ class RecordingSession:
         self,
         published: _RawBeforeShot,
         dest: Path,
-    ) -> tuple[str, int, tuple[int, int]] | None:
-        return self._encode_raw_before_shot(published, dest)
+    ) -> tuple[tuple[str, int, tuple[int, int]] | None, str]:
+        encoded, encode_note = self._encode_raw_before_shot(published, dest)
+        if encoded is None:
+            return None, (
+                f"published_encode_fail frame_id={int(published.frame_id)} "
+                f"mon={int(published.monitor_index)} {encode_note}"
+            )
+        return encoded, (
+            f"published_ok frame_id={int(published.frame_id)} "
+            f"mon={int(published.monitor_index)} dest={dest.name}"
+        )
 
     def _pending_screenshot_from_settle_or_capture(
         self,
@@ -2211,6 +2307,9 @@ class RecordingSession:
         y: int,
         dest: Path,
         settle_frame: _RawBeforeShot | None = None,
+        *,
+        settle_latch_note: str | None = None,
+        press_seq: int | None = None,
     ) -> tuple[str, int, tuple[int, int]]:
         """Adopt the before-shot frame pinned at the hook (JPEG on the worker).
 
@@ -2219,10 +2318,14 @@ class RecordingSession:
         monitor, reuse the latest published frame for the click monitor.
         Otherwise grab live.
         """
-        _ = run_dir
-        taken = self._take_latched_settle_frame(settle_frame, x, y, dest)
+        prefix = f"press_seq={press_seq} " if press_seq is not None else ""
+        if settle_latch_note:
+            self._log_before_shot(run_dir, f"{prefix}latch {settle_latch_note}")
+        taken, adopt_note = self._take_latched_settle_frame(settle_frame, x, y, dest)
         if taken is not None:
+            self._log_before_shot(run_dir, f"{prefix}path=latched {adopt_note}")
             return taken
+        self._log_before_shot(run_dir, f"{prefix}{adopt_note}")
         click_mon = self._monitor_index_for_point(x, y)
         if click_mon is None:
             try:
@@ -2232,9 +2335,24 @@ class RecordingSession:
         if click_mon is not None:
             last = self._latest_settle_frame_for_monitor(int(click_mon))
             if last is not None:
-                copied = self._copy_published_settle_frame(last, dest)
+                copied, published_note = self._copy_published_settle_frame(last, dest)
                 if copied is not None:
+                    self._log_before_shot(
+                        run_dir,
+                        f"{prefix}path=published_fallback "
+                        f"click_mon={int(click_mon)} {published_note}",
+                    )
                     return copied
+                self._log_before_shot(
+                    run_dir,
+                    f"{prefix}published_fallback_failed "
+                    f"click_mon={int(click_mon)} {published_note}",
+                )
+        self._log_before_shot(
+            run_dir,
+            f"{prefix}path=live_fallback xy=({int(x)},{int(y)}) "
+            f"click_mon={click_mon} dest={dest.name}",
+        )
         return _capture_screenshot_at_point(x, y, dest)
 
     def _queue_event(self, item: _QueuedEvent) -> None:
@@ -2288,6 +2406,10 @@ class RecordingSession:
         self._seal_open_after_cache(windows_before, signals_before)
         self._claim_after_owner(index)
         click_window = self._click_window_payload_at(int(cursor_xy[0]), int(cursor_xy[1]))
+        settle_frame, settle_latch_note = self._latch_settle_frame(
+            int(cursor_xy[0]),
+            int(cursor_xy[1]),
+        )
         self._enqueue(
             _DeferredCaptureJob(
                 action="mouse_pointer_event",
@@ -2302,10 +2424,8 @@ class RecordingSession:
                 click_window=click_window,
                 signals_before=signals_before,
                 refresh_pre_type=True,
-                settle_frame=self._latch_settle_frame(
-                    int(cursor_xy[0]),
-                    int(cursor_xy[1]),
-                ),
+                settle_frame=settle_frame,
+                settle_latch_note=settle_latch_note,
                 action_monotonic=time.monotonic(),
             )
         )
@@ -4663,8 +4783,15 @@ class RecordingSession:
                 int(job.cursor_xy[1]),
                 pending_dest,
                 job.settle_frame,
+                settle_latch_note=job.settle_latch_note,
+                press_seq=job.press_seq,
             )
-        except Exception:
+        except Exception as exc:
+            self._log_before_shot(
+                run_dir,
+                f"press_seq={job.press_seq} adopt_exception "
+                f"{type(exc).__name__}: {exc}",
+            )
             info = None
         with self._lock:
             prev = self._left_press_captures.get(job.press_seq)
@@ -4692,8 +4819,15 @@ class RecordingSession:
                 int(job.cursor_xy[1]),
                 pending_dest,
                 job.settle_frame,
+                settle_latch_note=job.settle_latch_note,
+                press_seq=job.press_seq,
             )
-        except Exception:
+        except Exception as exc:
+            self._log_before_shot(
+                run_dir,
+                f"press_seq={job.press_seq} adopt_exception "
+                f"{type(exc).__name__}: {exc}",
+            )
             info = None
         with self._lock:
             prev = self._right_press_captures.get(job.press_seq)
@@ -4797,6 +4931,13 @@ class RecordingSession:
             pending_windows = self._start_windows_before()
         if not signals_before:
             signals_before = self._start_signals_before()
+        self._log_before_shot_finalize(
+            run_dir,
+            event_index=job.event_index,
+            press_seq=press_seq,
+            pending_shot=pending_shot,
+            side="left",
+        )
         shot_path, mon_idx, mon_offset = _finalize_screenshot(
             run_dir,
             job.event_index,
@@ -4927,6 +5068,13 @@ class RecordingSession:
             pending_windows = self._start_windows_before()
         if not signals_before:
             signals_before = self._start_signals_before()
+        self._log_before_shot_finalize(
+            run_dir,
+            event_index=job.event_index,
+            press_seq=press_seq,
+            pending_shot=pending_shot,
+            side="right",
+        )
         shot_path, mon_idx, mon_offset = _finalize_screenshot(
             run_dir,
             job.event_index,
@@ -4979,8 +5127,15 @@ class RecordingSession:
                 int(job.cursor_xy[1]),
                 dest,
                 job.settle_frame,
+                settle_latch_note=job.settle_latch_note,
+                press_seq=job.press_seq,
             )
-        except Exception:
+        except Exception as exc:
+            self._log_before_shot(
+                run_dir,
+                f"event={job.event_index} adopt_exception "
+                f"{type(exc).__name__}: {exc} path=live_capture",
+            )
             shot_path, mon_idx, mon_offset = self._capture_immediate_screenshot(
                 run_dir,
                 job.event_index,

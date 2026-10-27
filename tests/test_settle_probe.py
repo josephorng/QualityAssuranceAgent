@@ -665,11 +665,16 @@ def test_before_shot_keeps_raw_sample_latched_at_click(tmp_path: Path) -> None:
     session._last_settle_frames = {1: latched_frame}
     session._last_settle_frame = latched_frame
     session._run_dir = run_dir
+    session._preclick_startup_queued = True
+    session._preclick_startup_compare = False
+    session._preclick_reference = None
+    session._preclick_compare_mono = 0.0
 
-    settle_latched = session._latch_settle_frame(10, 10)
+    settle_latched, latch_note = session._latch_settle_frame(10, 10)
     newer = _raw_before_shot(2, (0, 200, 0), size=(40, 30))
     session._install_raw_before_shot(newer)
     assert settle_latched is latched_frame
+    assert latch_note.startswith("ok ")
 
     dest = run_dir / "screenshots" / "event_007.jpeg"
     info = session._pending_screenshot_from_settle_or_capture(
@@ -678,6 +683,7 @@ def test_before_shot_keeps_raw_sample_latched_at_click(tmp_path: Path) -> None:
         10,
         dest,
         settle_latched,
+        settle_latch_note=latch_note,
     )
     assert info[1] == 1
     r, _g, _b = Image.open(dest).convert("RGB").getpixel((0, 0))
@@ -827,9 +833,10 @@ def test_before_shot_round_robin_keeps_per_monitor_frames(
     # Later sample replaces only monitor 1; monitor 2 stays pin-able.
     colors[1] = (0, 200, 0)
     assert session._capture_and_publish_before_shot()
-    latched = session._latch_settle_frame(2000, 10)
+    latched, latch_note = session._latch_settle_frame(2000, 10)
     assert latched is not None
     assert latched.monitor_index == 2
+    assert latch_note.startswith("ok ")
     img = Image.frombytes("RGB", latched.size, latched.rgb)
     _r, _g, b = img.getpixel((0, 0))
     assert b > 150
@@ -862,9 +869,10 @@ def test_latch_prefers_click_monitor_over_most_recent_other_monitor(
     session._last_settle_frame = newer_other_mon
     session._run_dir = run_dir
 
-    latched = session._latch_settle_frame(10, 10)
+    latched, latch_note = session._latch_settle_frame(10, 10)
     assert latched is not None
     assert latched.monitor_index == 1
+    assert latch_note.startswith("ok ")
     img = Image.frombytes("RGB", latched.size, latched.rgb)
     r, _g, _b = img.getpixel((0, 0))
     assert r > 150
@@ -950,3 +958,85 @@ def test_adopt_writes_durable_last_settle_frame(tmp_path: Path) -> None:
     assert dest.is_file()
     assert durable.is_file()
     assert not list((run_dir / "screenshots").glob("_settle_pub_*.jpeg"))
+
+
+def test_before_shot_logs_latch_miss_and_published_fallback(tmp_path: Path) -> None:
+    """Adopt logs why the pin missed and which fallback path wrote the JPEG."""
+    from src.recorder.capture import RecordingSession
+
+    run_dir = tmp_path / "rec"
+    (run_dir / "screenshots").mkdir(parents=True)
+    newer = _raw_before_shot(2, (0, 200, 0), size=(40, 30))
+
+    logs: list[str] = []
+    session = RecordingSession.__new__(RecordingSession)
+    session._lock = __import__("threading").Lock()
+    session._settle_pins = {}
+    session._run_dir = run_dir
+    session._last_settle_frames = {1: newer}
+    session._last_settle_frame = newer
+    session._pre_click_monitors = ((1, 0, 0, 1920, 1080),)
+    session._log = lambda _run, text: logs.append(str(text))  # type: ignore[method-assign]
+
+    dest = run_dir / "screenshots" / "_pending_capture_9.jpeg"
+    info = session._pending_screenshot_from_settle_or_capture(
+        run_dir,
+        10,
+        10,
+        dest,
+        settle_frame=None,
+        settle_latch_note="miss xy=(10,10) reason=no_frame_for_mon click_mon=1",
+        press_seq=9,
+    )
+    assert info[1] == 1
+    assert dest.is_file()
+    joined = "\n".join(logs)
+    assert "before-shot press_seq=9 latch miss" in joined
+    assert "adopt_skip reason=no_latched_frame" in joined
+    assert "path=published_fallback" in joined
+
+
+def test_before_shot_logs_live_fallback_when_no_published_frame(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from src.recorder.capture import RecordingSession
+
+    run_dir = tmp_path / "rec"
+    (run_dir / "screenshots").mkdir(parents=True)
+    logs: list[str] = []
+
+    session = RecordingSession.__new__(RecordingSession)
+    session._lock = __import__("threading").Lock()
+    session._settle_pins = {}
+    session._run_dir = run_dir
+    session._last_settle_frames = {}
+    session._last_settle_frame = None
+    session._pre_click_monitors = ((1, 0, 0, 1920, 1080),)
+    session._log = lambda _run, text: logs.append(str(text))  # type: ignore[method-assign]
+
+    dest = run_dir / "screenshots" / "_pending_capture.jpeg"
+    live = run_dir / "screenshots" / "live.jpeg"
+    Image.new("RGB", (40, 30), color=(200, 0, 0)).save(live, format="JPEG")
+
+    import src.recorder.capture as capture_mod
+
+    def _fake_capture(x, y, target):
+        import shutil
+
+        shutil.copy2(live, target)
+        return str(target), 1, (0, 0)
+
+    monkeypatch.setattr(capture_mod, "_capture_screenshot_at_point", _fake_capture)
+
+    info = session._pending_screenshot_from_settle_or_capture(
+        run_dir,
+        10,
+        10,
+        dest,
+        settle_frame=None,
+        settle_latch_note="miss xy=(10,10) reason=no_frame_for_mon click_mon=1",
+        press_seq=3,
+    )
+    assert info[1] == 1
+    joined = "\n".join(logs)
+    assert "path=live_fallback" in joined

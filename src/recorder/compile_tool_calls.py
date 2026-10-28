@@ -15,7 +15,11 @@ from src.common.nearby_side import (
     nearby_hints_to_phrases,
     strip_nearby_context_comments,
 )
-from cua_mcp.instruction_offset import split_vision_mode, vision_mode_prefix
+from cua_mcp.instruction_offset import (
+    hub_match_fields,
+    split_vision_mode,
+    vision_mode_prefix,
+)
 from src.recorder.analyze import _effective_left_click_count, typed_text_from_instruction
 from src.recorder.landmark_geometry import build_landmark_geometry
 from src.recorder.models import RecordedEvent, event_json_path
@@ -261,6 +265,13 @@ def _move_mouse_call(
     if not resolved:
         resolved = instruction.strip()
     args: dict[str, Any] = {"instruction": resolved}
+    vision_mode, anchor_text, control_type = hub_match_fields(resolved)
+    if vision_mode:
+        args["vision_mode"] = vision_mode
+    if anchor_text:
+        args["anchor_text"] = anchor_text
+    if control_type:
+        args["control_type"] = control_type
     nearby = _nearby_object_phrases(instruction)
     if nearby:
         args["nearby_objects"] = nearby

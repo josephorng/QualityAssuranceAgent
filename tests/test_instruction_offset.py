@@ -3,6 +3,8 @@ from __future__ import annotations
 from cua_mcp.instruction_offset import (
     _parse_mouse_target_regex,
     _parse_relative_pixel_offset_regex,
+    hub_match_fields,
+    hub_phrase_from_match_fields,
     parse_mouse_target_instruction,
     split_vision_mode,
 )
@@ -21,6 +23,31 @@ def test_parse_strips_vision_mode_prefix() -> None:
     assert (dx, dy) == (0, 0)
     named, *_rest = parse_mouse_target_instruction("「清單項目」文字")
     assert named == "「清單項目」文字"
+
+
+def test_hub_match_fields_office_bracket_tab() -> None:
+    mode, anchor_text, control_type = hub_match_fields(
+        "（UIA）「[檔案] 索引標籤」按鈕"
+    )
+    assert mode == "uia"
+    assert anchor_text == "[檔案] 索引標籤"
+    assert control_type == "button"
+    assert (
+        hub_phrase_from_match_fields(
+            anchor_text, control_type, vision_mode=mode
+        )
+        == "（UIA）「[檔案] 索引標籤」按鈕"
+    )
+
+
+def test_hub_match_fields_yolo_icon_and_bare_input() -> None:
+    assert hub_match_fields("「資料夾」圖示") == (None, "資料夾", "icon")
+    assert hub_match_fields("輸入欄") == (None, None, "input")
+    assert hub_match_fields("（YOLO+OCR）「清單」文字") == (
+        "yolo_ocr",
+        "清單",
+        "text",
+    )
 
 
 def test_parse_relative_pixel_offset_regex_right_and_up() -> None:

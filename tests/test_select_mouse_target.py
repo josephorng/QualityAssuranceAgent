@@ -2915,6 +2915,11 @@ def test_normalize_similarity_label_strips_hub_wrappers() -> None:
     assert _normalize_similarity_label("") == ""
     assert _normalize_similarity_label("「」文字") == "「」文字"
     assert _normalize_similarity_label('""文字') == '""文字'
+    # Office UIA names keep [role] brackets; do not collapse to the short label.
+    assert _normalize_similarity_label("[檔案] 索引標籤") == "[檔案] 索引標籤"
+    assert _normalize_similarity_label("「[檔案] 索引標籤」按鈕") == "[檔案] 索引標籤"
+    # Spatial landmark phrases still unwrap the quoted control name.
+    assert _normalize_similarity_label("在「註解」按鈕的左邊") == "註解"
 
 
 def test_normalize_similarity_label_ocr_canonicalization() -> None:
@@ -2954,6 +2959,61 @@ def test_label_similarity_hub_query_matches_ocr_near_miss() -> None:
     assert _label_similarity("[擷取]文字", "擷取") == 1.0
     assert _label_similarity("「擷取」文字", "文字文件") == 0.0
     assert _label_similarity("「Edge」圖示", "Edge") == 1.0
+    # Hub query and raw Office UIA Name must exact-match after normalize.
+    assert _label_similarity("「[檔案] 索引標籤」按鈕", "[檔案] 索引標籤") == 1.0
+
+
+def test_detection_exact_match_office_bracket_tab_name() -> None:
+    from cua_mcp.select_mouse_target import _detection_exact_match_to_query
+    from cua_mcp.select_ui_element import UiDetection
+
+    det = UiDetection(
+        bbox=(0, 0, 10, 10),
+        cx=0,
+        cy=0,
+        class_id=0,
+        class_name="text",
+        text="[檔案] 索引標籤",
+        source="uia",
+        uia_control_type="button",
+    )
+    assert _detection_exact_match_to_query(det, "「[檔案] 索引標籤」按鈕")
+    assert _detection_exact_match_to_query(
+        det, "[檔案] 索引標籤", recorded_anchor=True
+    )
+
+
+def test_matches_for_phrase_recorded_anchor_skips_hub_unwrap() -> None:
+    from cua_mcp.select_mouse_target import _matches_for_phrase
+    from cua_mcp.select_ui_element import UiDetection
+
+    det = UiDetection(
+        bbox=(0, 0, 67, 37),
+        cx=37,
+        cy=78,
+        class_id=0,
+        class_name="text",
+        text="[檔案] 索引標籤",
+        source="uia",
+        uia_control_type="button",
+    )
+    peer = UiDetection(
+        bbox=(100, 20, 32, 33),
+        cx=116,
+        cy=36,
+        class_id=0,
+        class_name="text",
+        text="儲存檔案",
+        source="uia",
+        uia_control_type="button",
+    )
+    hits = _matches_for_phrase(
+        [det, peer],
+        "[檔案] 索引標籤",
+        control_type_token="button",
+        recorded_anchor=True,
+    )
+    assert [item.text for item in hits] == ["[檔案] 索引標籤"]
 
 
 def test_label_similarity_ocr_canonicalization_folds() -> None:

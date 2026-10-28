@@ -193,6 +193,9 @@ async def move_mouse(
     nearby_objects: list[str] | None = None,
     click_window: dict | None = None,
     landmark_geometry: dict | None = None,
+    anchor_text: str | None = None,
+    control_type: str | None = None,
+    vision_mode: str | None = None,
 ):
     '''
     Take a screenshot, detect UI targets (text, element, input, scrollbar), and move
@@ -215,6 +218,11 @@ async def move_mouse(
     window matches, the move fails instead of searching other windows.
     landmark_geometry: optional recorded scale-normalized constellation (landmark↔landmark
     and landmark→target vectors) used during cache replay when the anchor is missing.
+    anchor_text: optional recorded accessible name (e.g. "[檔案] 索引標籤"). When set,
+    matching uses this string directly instead of re-deriving a name from instruction.
+    control_type: optional recorded control token (button, list_item, icon, …) used with
+    anchor_text for typed UIA/YOLO matching.
+    vision_mode: optional "uia" or "yolo_ocr"; overrides a （UIA）/（YOLO+OCR） prefix.
     '''
     duration: float = 0.0
     result = await _move_mouse(
@@ -223,6 +231,9 @@ async def move_mouse(
         duration=duration,
         click_window=click_window,
         landmark_geometry=landmark_geometry,
+        anchor_text=anchor_text,
+        control_type=control_type,
+        vision_mode=vision_mode,
     )
     result["instruction"] = instruction
     return result

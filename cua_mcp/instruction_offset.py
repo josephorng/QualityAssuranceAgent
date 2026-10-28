@@ -39,6 +39,93 @@ def vision_mode_prefix(mode: str | None) -> str:
     return ""
 
 
+# Non-UIA class words that still appear as hub suffixes after 「…」.
+_YOLO_CLASS_CONTROL_TYPES: dict[str, str] = {
+    "圖示": "icon",
+    "輸入欄": "input",
+    "滾動條": "scrollbar",
+    "未知": "unknown",
+    "元素": "element",
+}
+
+_HUB_QUOTED_NAME_RE = re.compile(r"「([^」]*)」")
+
+
+def control_type_suffix_zh(control_type: str | None) -> str:
+    """Chinese hub suffix for a structured ``control_type`` token, or empty."""
+    token = str(control_type or "").strip()
+    if not token:
+        return ""
+    from src.recorder.uia_input_boxes import UIA_CONTROL_TYPE_SUFFIX
+
+    if token in UIA_CONTROL_TYPE_SUFFIX:
+        return UIA_CONTROL_TYPE_SUFFIX[token]
+    for zh, mapped in _YOLO_CLASS_CONTROL_TYPES.items():
+        if mapped == token:
+            return zh
+    return ""
+
+
+def hub_phrase_from_match_fields(
+    anchor_text: str | None,
+    control_type: str | None = None,
+    *,
+    vision_mode: str | None = None,
+) -> str:
+    """Rebuild a short hub target from structured match fields."""
+    name = str(anchor_text or "").strip()
+    suffix = control_type_suffix_zh(control_type)
+    if name and suffix:
+        body = f"「{name}」{suffix}"
+    elif name:
+        body = f"「{name}」"
+    elif suffix:
+        body = suffix
+    else:
+        body = ""
+    prefix = vision_mode_prefix(vision_mode)
+    return f"{prefix}{body}" if prefix and body else (prefix + body)
+
+
+def hub_match_fields(
+    instruction: str,
+) -> tuple[str | None, str | None, str | None]:
+    """Split a short hub target into ``(vision_mode, anchor_text, control_type)``.
+
+    Examples::
+
+        （UIA）「[檔案] 索引標籤」按鈕 → ("uia", "[檔案] 索引標籤", "button")
+        「資料夾」圖示 → (None, "資料夾", "icon")
+        輸入欄 → (None, None, "input")
+    """
+    mode, rest = split_vision_mode((instruction or "").strip())
+    rest = rest.strip()
+    if not rest:
+        return mode, None, None
+
+    from src.recorder.uia_input_boxes import UIA_CONTROL_TYPE_SUFFIX
+
+    quoted = _HUB_QUOTED_NAME_RE.search(rest)
+    if quoted is not None:
+        anchor_text = quoted.group(1)
+        after = rest[quoted.end() :]
+        for token, zh in UIA_CONTROL_TYPE_SUFFIX.items():
+            if after.startswith(zh):
+                return mode, anchor_text, token
+        for zh, token in _YOLO_CLASS_CONTROL_TYPES.items():
+            if after.startswith(zh):
+                return mode, anchor_text, token
+        return mode, anchor_text, None
+
+    for token, zh in UIA_CONTROL_TYPE_SUFFIX.items():
+        if rest == zh or rest.startswith(zh):
+            return mode, None, token
+    for zh, token in _YOLO_CLASS_CONTROL_TYPES.items():
+        if rest == zh or rest.startswith(zh):
+            return mode, None, token
+    return mode, None, None
+
+
 _OFFSET_TOKEN_RE = re.compile(r"(右方|左方|上方|下方)(\d+)個像素")
 # ``的N%處`` (start) and bare ``N%處`` (drag destination shorthand).
 _TRACK_PERCENT_RE = re.compile(r"(?:的)?(\d+)%處")

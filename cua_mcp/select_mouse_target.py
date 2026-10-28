@@ -32,7 +32,11 @@ from cua_mcp.geometry import (
     point_in_rect_xywh,
 )
 from cua_mcp.input_box_rectangles import merge_yolo_inputs_with_line_rectangles
-from cua_mcp.instruction_offset import parse_mouse_target_instruction, split_vision_mode
+from cua_mcp.instruction_offset import (
+    hub_phrase_from_match_fields,
+    parse_mouse_target_instruction,
+    split_vision_mode,
+)
 from cua_mcp.scrollbar_arrows import point_from_scrollbar_percent
 from cua_mcp.icon_map import (
     describe_text_icons,
@@ -1930,11 +1934,56 @@ def _canonicalize_similarity_text(text: str) -> str:
     return text.translate(_SIMILARITY_LOOKALIKE_FOLD)
 
 
+# Trailing words that mean the wrap is a hub class wrapper (``「X」文字``),
+# not part of the accessible name. Longer tokens first for startswith checks.
+_HUB_UNWRAP_TRAILING_SUFFIXES: tuple[str, ...] = (
+    "清單項目",
+    "功能表項目",
+    "樹狀項目",
+    "資料項目",
+    "超連結",
+    "輸入欄",
+    "滾動條",
+    "圖示",
+    "按鈕",
+    "文字",
+    "未知",
+    "元素",
+)
+
+
+def _hub_unwrap_trailing_ok(suffix: str) -> bool:
+    """True when text after a wrap is empty or a hub class suffix (plus junk)."""
+    trailing = _strip_similarity_edges(suffix or "", _SIMILARITY_WHITESPACE)
+    if not trailing:
+        return True
+    return any(
+        trailing == word or trailing.startswith(word)
+        for word in _HUB_UNWRAP_TRAILING_SUFFIXES
+    )
+
+
+def _normalize_recorded_anchor_label(label: str) -> str:
+    """Canonicalize a recorded/UIA name without hub-wrapper unwrap.
+
+    Structured ``anchor_text`` values such as ``[檔案] 索引標籤`` must compare
+    equal to the live Name string; treating ``[]`` as a hub wrapper would drop
+    the role suffix and break exact match.
+    """
+    text = _strip_similarity_edges(label or "", _SIMILARITY_WHITESPACE)
+    if not text:
+        return ""
+    return _canonicalize_similarity_text(text)
+
+
 def _normalize_similarity_label(label: str) -> str:
     """Normalize a label for similarity matching against OCR / hub queries.
 
     Unwrap hub wrappers so ``「擷取」文字`` compares as ``擷取`` against raw OCR
     (leftmost pair among ``""`` / ``「」`` / ``『』`` / ``【】`` / ``〔〕`` / ``[]``).
+    Unwrap only when the wrap sits inside a longer phrase (spatial landmarks) or
+    the trailing text is a hub class suffix — so Office names like
+    ``[檔案] 索引標籤`` keep their brackets instead of collapsing to ``檔案``.
     Then canonicalize: strip edge whitespace/``|``, fold ellipsis leaders, NFKC
     (then re-fold ASCII ``...``), space/dash/CJK punct folds, and lookalikes
     ``I``/``1``→``l``, ``O``→``0``. Class-only anchors such as ``輸入欄`` /
@@ -1957,11 +2006,17 @@ def _normalize_similarity_label(label: str) -> str:
             best_start, best_end = start, end
 
     if best_start is not None and best_end is not None:
-        inner = _strip_similarity_edges(
-            text[best_start + 1 : best_end], _SIMILARITY_WHITESPACE
-        )
-        if inner:
-            text = inner
+        prefix = text[:best_start]
+        suffix = text[best_end + 1 :]
+        # Embedded wraps (``在「註解」按鈕的左邊``) always unwrap. Edge-only wraps
+        # unwrap only when the trailing text is a hub class suffix — not when it
+        # is more of the accessible name (``[檔案] 索引標籤``).
+        if prefix.strip() or _hub_unwrap_trailing_ok(suffix):
+            inner = _strip_similarity_edges(
+                text[best_start + 1 : best_end], _SIMILARITY_WHITESPACE
+            )
+            if inner:
+                text = inner
     return _canonicalize_similarity_text(text)
 
 
@@ -1980,14 +2035,41 @@ def _label_similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, left_n.casefold(), right_n.casefold()).ratio()
 
 
-def _detection_similarity_to_query(det: UiDetection, query: str) -> float:
+def _recorded_anchor_label_similarity(query: str, label: str) -> float:
+    """Similarity for structured ``anchor_text`` (no hub-wrapper unwrap)."""
+    left = (query or "").strip()
+    right = (label or "").strip()
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+    left_n = _normalize_recorded_anchor_label(left)
+    right_n = _normalize_recorded_anchor_label(right)
+    if not left_n or not right_n:
+        return 0.0
+    if left_n == right_n:
+        return 1.0
+    return SequenceMatcher(None, left_n.casefold(), right_n.casefold()).ratio()
+
+
+def _detection_similarity_to_query(
+    det: UiDetection,
+    query: str,
+    *,
+    recorded_anchor: bool = False,
+) -> float:
     """Best similarity between ``query`` and a detection's OCR text / icon ids."""
     query = (query or "").strip()
     if not query:
         return 0.0
+    score_fn = (
+        _recorded_anchor_label_similarity
+        if recorded_anchor
+        else _label_similarity
+    )
     return max(
         (
-            _label_similarity(query, label)
+            score_fn(query, label)
             for label in _detection_match_labels(det)
             if label
         ),
@@ -1995,17 +2077,29 @@ def _detection_similarity_to_query(det: UiDetection, query: str) -> float:
     )
 
 
-def _detection_exact_match_to_query(det: UiDetection, query: str) -> bool:
+def _detection_exact_match_to_query(
+    det: UiDetection,
+    query: str,
+    *,
+    recorded_anchor: bool = False,
+) -> bool:
     """True when a detection label equals ``query`` after similarity normalization.
 
     Used on the UIA path where Name/Value strings are deterministic. Wrapper
     forms such as ``「空白活頁簿」文字`` still match raw ``空白活頁簿``.
+    When ``recorded_anchor`` is set, skip hub-wrapper unwrap so Office names
+    like ``[檔案] 索引標籤`` stay intact on both sides.
     """
-    query_n = _normalize_similarity_label(query or "")
+    normalize = (
+        _normalize_recorded_anchor_label
+        if recorded_anchor
+        else _normalize_similarity_label
+    )
+    query_n = normalize(query or "")
     if not query_n:
         return False
     return any(
-        _normalize_similarity_label(label) == query_n
+        normalize(label) == query_n
         for label in _detection_match_labels(det)
         if label
     )
@@ -2014,6 +2108,8 @@ def _detection_exact_match_to_query(det: UiDetection, query: str) -> bool:
 def _anchor_indices_by_exact_match(
     detections: list[UiDetection],
     anchor: str,
+    *,
+    recorded_anchor: bool = False,
 ) -> list[int]:
     """Indices whose labels exactly match ``anchor`` after normalization."""
     if not detections or not (anchor or "").strip():
@@ -2021,7 +2117,9 @@ def _anchor_indices_by_exact_match(
     return [
         i
         for i, det in enumerate(detections)
-        if _detection_exact_match_to_query(det, anchor)
+        if _detection_exact_match_to_query(
+            det, anchor, recorded_anchor=recorded_anchor
+        )
     ]
 
 
@@ -2029,9 +2127,13 @@ def _prefilter_detections_by_exact_match(
     detections: list[UiDetection],
     anchor: str,
     nearby: list[str],
+    *,
+    recorded_anchor: bool = False,
 ) -> tuple[list[int], list[int]]:
     """Anchor/nearby index buckets using normalized exact label equality."""
-    anchor_indices = _anchor_indices_by_exact_match(detections, anchor)
+    anchor_indices = _anchor_indices_by_exact_match(
+        detections, anchor, recorded_anchor=recorded_anchor
+    )
     anchor_set = set(anchor_indices)
     nearby_indices: list[int] = []
     nearby_seen: set[int] = set()
@@ -2050,12 +2152,14 @@ def _filter_mouse_candidates_exact(
     detections: list[UiDetection],
     anchor: str,
     nearby: list[str],
+    *,
+    recorded_anchor: bool = False,
 ) -> tuple[list[UiDetection], list[UiDetection]]:
     """Split detections into anchor vs nearby via normalized exact match."""
     if not detections:
         return [], []
     anchor_indices, nearby_indices = _prefilter_detections_by_exact_match(
-        detections, anchor, nearby
+        detections, anchor, nearby, recorded_anchor=recorded_anchor
     )
     _log_info(
         "_filter_mouse_candidates: exact split "
@@ -2292,6 +2396,7 @@ def _anchor_indices_by_top_similarity(
     anchor: str,
     *,
     threshold: float = _MOUSE_FILTER_SIMILARITY_THRESHOLD,
+    recorded_anchor: bool = False,
 ) -> list[int]:
     """Keep detections whose anchor similarity equals the best score (ties only).
 
@@ -2301,7 +2406,12 @@ def _anchor_indices_by_top_similarity(
         return []
 
     scored: list[tuple[int, float]] = [
-        (i, _detection_similarity_to_query(det, anchor))
+        (
+            i,
+            _detection_similarity_to_query(
+                det, anchor, recorded_anchor=recorded_anchor
+            ),
+        )
         for i, det in enumerate(detections)
     ]
     best = max(score for _, score in scored)
@@ -2316,6 +2426,7 @@ def _prefilter_detections_by_similarity(
     nearby: list[str],
     *,
     threshold: float = _MOUSE_FILTER_SIMILARITY_THRESHOLD,
+    recorded_anchor: bool = False,
 ) -> tuple[list[int], list[int]]:
     """Return anchor/nearby index buckets using string similarity per query.
 
@@ -2326,7 +2437,10 @@ def _prefilter_detections_by_similarity(
     nearby (anchor wins).
     """
     anchor_indices = _anchor_indices_by_top_similarity(
-        detections, anchor, threshold=threshold
+        detections,
+        anchor,
+        threshold=threshold,
+        recorded_anchor=recorded_anchor,
     )
     anchor_set = set(anchor_indices)
 
@@ -2352,13 +2466,15 @@ def _filter_mouse_candidates(
     detections: list[UiDetection],
     anchor: str,
     nearby: list[str],
+    *,
+    recorded_anchor: bool = False,
 ) -> tuple[list[UiDetection], list[UiDetection]]:
     """Split detections into anchor vs nearby buckets via string similarity."""
     if not detections:
         return [], []
 
     anchor_indices, nearby_indices = _prefilter_detections_by_similarity(
-        detections, anchor, nearby
+        detections, anchor, nearby, recorded_anchor=recorded_anchor
     )
     _log_info(
         "_filter_mouse_candidates: similarity split "
@@ -4016,11 +4132,21 @@ def _finish_deferred_ocr_pendings(
 def _phrase_match_pool(
     detections: list[UiDetection],
     phrase: str,
+    *,
+    control_type_token: str | None = None,
 ) -> list[UiDetection]:
     """Keep detections of ``phrase``'s UIA type. Empty typed set falls back to all."""
-    from src.recorder.uia_input_boxes import control_token_for_suffix
+    from src.recorder.uia_input_boxes import (
+        UIA_CONTROL_TYPE_SUFFIX,
+        control_token_for_suffix,
+    )
 
-    token = control_token_for_suffix(_anchor_type_suffix(phrase))
+    token = (control_type_token or "").strip() or None
+    if token and token not in UIA_CONTROL_TYPE_SUFFIX:
+        # YOLO-only tokens (icon/input/…) are not UIA control types.
+        token = None
+    if not token:
+        token = control_token_for_suffix(_anchor_type_suffix(phrase))
     if not token:
         return detections
     typed = [det for det in detections if (det.uia_control_type or "") == token]
@@ -4036,13 +4162,20 @@ def _phrase_match_pool(
 def _matches_for_phrase(
     detections: list[UiDetection],
     phrase: str,
+    *,
+    control_type_token: str | None = None,
+    recorded_anchor: bool = False,
 ) -> list[UiDetection]:
     """Exact name matches for one phrase, inside its control-type pool when present.
 
     UIA Name/Value is deterministic, so this path never uses fuzzy similarity.
     """
-    pool = _phrase_match_pool(detections, phrase)
-    indices = _anchor_indices_by_exact_match(pool, phrase)
+    pool = _phrase_match_pool(
+        detections, phrase, control_type_token=control_type_token
+    )
+    indices = _anchor_indices_by_exact_match(
+        pool, phrase, recorded_anchor=recorded_anchor
+    )
     if not indices:
         return []
     expanded = _expand_keep_indices_with_similar(pool, indices)
@@ -4079,6 +4212,8 @@ def _try_uia_first_unique_select(
     nearby_labels: list[str],
     nearby_phrases: list[str],
     filter_by_control_type: bool = False,
+    control_type_token: str | None = None,
+    recorded_anchor: bool = False,
 ) -> tuple[UiDetection | None, str]:
     """Soft UIA-first commit: unique after filter + nearby prefilter, else miss reason."""
     if not detections:
@@ -4096,7 +4231,12 @@ def _try_uia_first_unique_select(
     )
 
     if filter_by_control_type:
-        anchor_matches = _matches_for_phrase(detections, anchor)
+        anchor_matches = _matches_for_phrase(
+            detections,
+            anchor,
+            control_type_token=control_type_token,
+            recorded_anchor=recorded_anchor,
+        )
         nearby_matches: list[UiDetection] = []
         seen = {id(det) for det in anchor_matches}
         for phrase in nearby_labels:
@@ -4109,7 +4249,10 @@ def _try_uia_first_unique_select(
         # UIA Name/Value is deterministic: exact normalized text only.
         # Fuzzy similarity stays on the YOLO/OCR path via _filter_mouse_candidates.
         anchor_matches, nearby_matches = _filter_mouse_candidates_exact(
-            detections, anchor, nearby_labels
+            detections,
+            anchor,
+            nearby_labels,
+            recorded_anchor=recorded_anchor,
         )
     _log_info(
         "move_mouse uia_first after_filter "
@@ -4513,6 +4656,9 @@ async def find_mouse_point(
     yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
     click_window: dict[str, Any] | None = None,
     landmark_geometry: dict[str, Any] | None = None,
+    anchor_text: str | None = None,
+    control_type: str | None = None,
+    vision_mode: str | None = None,
 ) -> tuple[int, int, dict[str, Any]] | None:
     """
     Capture selected monitor(s), build YOLO+OCR candidates, filter and pick via LLM.
@@ -4528,6 +4674,11 @@ async def find_mouse_point(
     (``…個像素…的位置``), where constellation replaces raw pixel offsets.
     On-object text anchors (``…文字`` with no offset) never use constellation;
     a similarity miss fails the step.
+
+    ``anchor_text`` / ``control_type`` / ``vision_mode`` are optional structured
+    match fields from recording compile. When ``anchor_text`` is set, matching
+    uses that recorded name directly (no hub-wrapper unwrap) instead of
+    re-deriving the name from ``instruction``.
 
     Returns ``(global_x, global_y, metadata)`` in virtual-desktop pixel space,
     or ``None`` when no YOLO candidates / no anchor match (soft miss).
@@ -4550,6 +4701,18 @@ async def find_mouse_point(
     instruction_text = (instruction or "").strip()
     if not instruction_text:
         raise ValueError("instruction must be non-empty")
+    structured_anchor_text = (
+        str(anchor_text).strip() if isinstance(anchor_text, str) else ""
+    ) or None
+    structured_control_type = (
+        str(control_type).strip() if isinstance(control_type, str) else ""
+    ) or None
+    structured_vision_mode = (
+        str(vision_mode).strip() if isinstance(vision_mode, str) else ""
+    ) or None
+    if structured_vision_mode not in (None, "uia", "yolo_ocr"):
+        structured_vision_mode = None
+    recorded_anchor_match = structured_anchor_text is not None
     from src.recorder.uia_replay_repair import take_yolo_ocr_fallback
 
     ocr_fallback = take_yolo_ocr_fallback()
@@ -4603,7 +4766,8 @@ async def find_mouse_point(
     else:
         caption_roi_screen = None
 
-    vision_mode, _instruction_body = split_vision_mode(instruction_text)
+    parsed_vision_mode, _instruction_body = split_vision_mode(instruction_text)
+    vision_mode = structured_vision_mode or parsed_vision_mode
     vision_plan = _mouse_vision_plan(instruction_text, nearby_objects)
     _log_info(
         f"move_mouse vision plan {vision_plan.describe()} vision_mode={vision_mode!r}"
@@ -4620,6 +4784,25 @@ async def find_mouse_point(
         track_percent,
     ) = parse_mouse_target_instruction(instruction_text)
     parse_s = time.perf_counter() - parse_started
+    match_anchor = anchor
+    control_type_token = structured_control_type
+    if recorded_anchor_match:
+        # Match against the recorded name directly; keep a hub phrase for
+        # suffix/type heuristics (圖示 / 按鈕 / …).
+        match_anchor = structured_anchor_text or anchor
+        policy_phrase = hub_phrase_from_match_fields(
+            structured_anchor_text,
+            structured_control_type,
+            vision_mode=None,
+        )
+        if policy_phrase:
+            anchor = policy_phrase
+        _log_info(
+            "move_mouse structured match "
+            f"anchor_text={structured_anchor_text!r} "
+            f"control_type={structured_control_type!r} "
+            f"vision_mode={vision_mode!r}"
+        )
     nearby_hints = merge_nearby_hints(nearby_objects, nearby_from_instruction)
     nearby_labels = nearby_hints_to_labels(nearby_hints)
     nearby_phrases = nearby_hints_to_phrases(nearby_hints)
@@ -4676,11 +4859,13 @@ async def find_mouse_point(
                 return None, "few_landmarks"
             return _try_uia_first_unique_select(
                 dets,
-                anchor=anchor,
+                anchor=match_anchor,
                 nearby_hints=nearby_hints,
                 nearby_labels=nearby_labels,
                 nearby_phrases=nearby_phrases,
                 filter_by_control_type=filter_by_control_type,
+                control_type_token=control_type_token,
+                recorded_anchor=recorded_anchor_match,
             )
 
         uia_dets = await asyncio.to_thread(
@@ -4711,6 +4896,9 @@ async def find_mouse_point(
                     instruction_text = ocr_fallback.instruction
                     nearby_objects = list(ocr_fallback.nearby_objects) or None
                     landmark_geometry = ocr_fallback.landmark_geometry
+                    # Fallback instruction is its own target; drop structured fields.
+                    recorded_anchor_match = False
+                    control_type_token = None
                     vision_mode, _instruction_body = split_vision_mode(instruction_text)
                     vision_plan = _mouse_vision_plan(instruction_text, nearby_objects)
                     allow_uia_select = vision_mode != "yolo_ocr"
@@ -4724,6 +4912,7 @@ async def find_mouse_point(
                         char_occurrence,
                         track_percent,
                     ) = parse_mouse_target_instruction(instruction_text)
+                    match_anchor = anchor
                     nearby_hints = merge_nearby_hints(
                         nearby_objects, nearby_from_instruction
                     )
@@ -4807,11 +4996,13 @@ async def find_mouse_point(
     ):
         uia_first_chosen, uia_first_reason = _try_uia_first_unique_select(
             detections,
-            anchor=anchor,
+            anchor=match_anchor,
             nearby_hints=nearby_hints,
             nearby_labels=nearby_labels,
             nearby_phrases=nearby_phrases,
             filter_by_control_type=filter_by_control_type,
+            control_type_token=control_type_token,
+            recorded_anchor=recorded_anchor_match,
         )
         if uia_first_chosen is None:
             _log_info(f"move_mouse uia_first miss reason={uia_first_reason}")
@@ -5013,12 +5204,15 @@ async def find_mouse_point(
         return gx, gy, meta
 
     anchor_matches, nearby_matches = _filter_mouse_candidates(
-        detections, anchor, nearby_labels
+        detections,
+        match_anchor,
+        nearby_labels,
+        recorded_anchor=recorded_anchor_match,
     )
     _log_info(
         f"move_mouse after_filter anchor={len(anchor_matches)} "
         f"nearby={len(nearby_matches)} "
-        f"anchor={anchor!r} nearby_labels={nearby_phrases!r}"
+        f"anchor={match_anchor!r} nearby_labels={nearby_phrases!r}"
     )
     _log_move_mouse_detections("after_filter anchor_matches", anchor_matches)
     _log_move_mouse_detections("after_filter nearby_matches", nearby_matches)
@@ -5387,6 +5581,9 @@ async def resolve_mouse_point(
     yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
     click_window: dict[str, Any] | None = None,
     landmark_geometry: dict[str, Any] | None = None,
+    anchor_text: str | None = None,
+    control_type: str | None = None,
+    vision_mode: str | None = None,
 ) -> tuple[int, int, dict[str, Any]]:
     """
     Capture selected monitor(s), build YOLO+OCR candidates, filter and pick via LLM.
@@ -5405,6 +5602,9 @@ async def resolve_mouse_point(
         yolo_conf_threshold=yolo_conf_threshold,
         click_window=click_window,
         landmark_geometry=landmark_geometry,
+        anchor_text=anchor_text,
+        control_type=control_type,
+        vision_mode=vision_mode,
     )
     if found is None:
         raise ValueError(RECORDED_ANCHOR_MISS_MESSAGE)

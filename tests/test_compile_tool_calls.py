@@ -69,7 +69,11 @@ def test_compile_click_move_and_click() -> None:
     calls = compile_tool_calls(event, instruction)
     assert calls is not None
     assert [c["name"] for c in calls] == ["move_mouse", "click"]
-    assert calls[0]["arguments"] == {"instruction": "「影片」文字"}
+    assert calls[0]["arguments"] == {
+        "instruction": "「影片」文字",
+        "anchor_text": "影片",
+        "control_type": "text",
+    }
     assert calls[1]["arguments"]["clicks"] == 1
     assert calls[1]["arguments"]["instruction"] == instruction
 
@@ -86,6 +90,8 @@ def test_compile_click_with_directed_nearby() -> None:
         "name": "move_mouse",
         "arguments": {
             "instruction": "「搜尋」文字",
+            "anchor_text": "搜尋",
+            "control_type": "text",
             "nearby_objects": [
                 "在輸入欄的裡面",
                 "在「取消圓圈」圖示的右下方",
@@ -119,6 +125,23 @@ def test_compile_click_keeps_vision_mode_on_short_target() -> None:
     assert calls is not None
     assert calls[0]["arguments"]["instruction"] == "（UIA）「應用程式及其他」清單項目"
     assert calls[0]["arguments"]["nearby_objects"] == ["在「系統」按鈕的左邊"]
+    assert calls[0]["arguments"]["vision_mode"] == "uia"
+    assert calls[0]["arguments"]["anchor_text"] == "應用程式及其他"
+    assert calls[0]["arguments"]["control_type"] == "list_item"
+
+
+def test_compile_click_office_bracket_tab_structured_fields() -> None:
+    event = _event(kind="click", click_count=1)
+    instruction = (
+        "（UIA）將滑鼠移到「[檔案] 索引標籤」按鈕"
+        "（在「註解」按鈕的左邊），並點擊滑鼠一下。"
+    )
+    calls = compile_tool_calls(event, instruction)
+    assert calls is not None
+    assert calls[0]["arguments"]["instruction"] == "（UIA）「[檔案] 索引標籤」按鈕"
+    assert calls[0]["arguments"]["vision_mode"] == "uia"
+    assert calls[0]["arguments"]["anchor_text"] == "[檔案] 索引標籤"
+    assert calls[0]["arguments"]["control_type"] == "button"
 
 
 def test_compile_scroll_keeps_vision_mode() -> None:
@@ -424,6 +447,8 @@ def test_ensure_upgrades_full_hub_script_move_mouse(tmp_path: Path) -> None:
     )
     assert analysis["tool_calls"][0]["arguments"] == {
         "instruction": "「搜尋」文字",
+        "anchor_text": "搜尋",
+        "control_type": "text",
         "nearby_objects": ["在輸入欄的裡面"],
     }
 

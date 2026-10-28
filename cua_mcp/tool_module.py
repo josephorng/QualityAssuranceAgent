@@ -79,12 +79,18 @@ async def _move_mouse(
     duration: float = 0.0,
     click_window: dict | None = None,
     landmark_geometry: dict | None = None,
+    anchor_text: str | None = None,
+    control_type: str | None = None,
+    vision_mode: str | None = None,
 ) -> dict[str, Any]:
     gx, gy, meta = await resolve_mouse_point(
         instruction,
         nearby_objects=nearby_objects,
         click_window=click_window,
         landmark_geometry=landmark_geometry,
+        anchor_text=anchor_text,
+        control_type=control_type,
+        vision_mode=vision_mode,
     )
     move_started = time.perf_counter()
     result = hand_tools.move(x=gx, y=gy, duration=duration)
@@ -98,6 +104,12 @@ async def _move_mouse(
         merged["click_window"] = click_window
     if landmark_geometry is not None:
         merged["landmark_geometry"] = landmark_geometry
+    if anchor_text is not None:
+        merged["anchor_text"] = anchor_text
+    if control_type is not None:
+        merged["control_type"] = control_type
+    if vision_mode is not None:
+        merged["vision_mode"] = vision_mode
     return _with_unified_target_metadata(
         merged,
         target_kind=str(meta.get("target_kind", "mouse_target")),

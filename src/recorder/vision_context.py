@@ -3074,6 +3074,7 @@ def _detection_to_dict(
 
 
 VISION_PATH_REPAIR_REASON = "重播修復改為 UIA"
+VISION_PATH_UIA_NOT_UNIQUE_REASON = "UIA 地標無法唯一鎖定目標"
 _VISION_PATHS = frozenset({"uia", "yolo_ocr"})
 _VISION_SECONDS_KEYS = (
     "yolo_s",
@@ -3243,47 +3244,155 @@ def _forced_scrollbar_covers_release(
     return by <= snapped_y < by + bh
 
 
-def recording_uia_skip_reason(
+def _uia_forced_scrollbar_detection(
+    bbox: tuple[int, int, int, int],
+) -> UiDetection:
+    """Synthetic UIA scrollbar for a press-bar release that missed the track."""
+    bx, by, bw, bh = (int(v) for v in bbox[:4])
+    return UiDetection(
+        bbox=(bx, by, bw, bh),
+        cx=bx + max(bw, 0) // 2,
+        cy=by + max(bh, 0) // 2,
+        class_id=YOLO_CLASS_SCROLLBAR,
+        class_name="scrollbar",
+        source="uia",
+    )
+
+
+def _pick_uia_click_primary(
     detections: list[UiDetection],
     *,
-    local_x: int | None = None,
-    local_y: int | None = None,
-    min_multi_char_text: int = _MIN_NEARBY_TEXT_CANDIDATES,
+    point_x: int,
+    point_y: int,
     forced_scrollbar_bbox: tuple[int, int, int, int] | None = None,
-) -> str | None:
-    """Why a UIA snapshot cannot name the click, or ``None`` when it can.
-
-    ``None`` means the labeled list is enough. Callers that have no snapshot
-    use ``沒有 UIA 快照`` themselves.
-
-    A usable text box under the pointer wins. Otherwise a UIA input or
-    scrollbar under the pointer is enough; those controls have no label.
-    ``forced_scrollbar_bbox`` is the press scrollbar for a drag release: the
-    release counts as that bar after the cross-axis snap, even past the track.
-    The snapshot still needs ``min_multi_char_text`` usable text landmarks.
-    """
-    usable = [det for det in detections if _is_usable_uia_text_detection(det)]
-    need = max(int(min_multi_char_text), 0)
-    if len(usable) < need:
-        return f"可用 UIA 文字不足（{len(usable)}/{need}）"
-    if local_x is None or local_y is None:
-        return None
-    point_x, point_y = int(local_x), int(local_y)
-    if any(_detection_contains_click(det, point_x, point_y) for det in usable):
-        return None
-    if forced_scrollbar_bbox is not None and _forced_scrollbar_covers_release(
+) -> UiDetection | None:
+    """Best UIA detection covering the click, or the forced press scrollbar."""
+    covering = [
+        det
+        for det in detections
+        if (
+            _is_usable_uia_text_detection(det) or _is_uia_textless_control(det)
+        )
+        and _detection_contains_click(det, point_x, point_y)
+    ]
+    if covering:
+        return min(
+            covering,
+            key=lambda det: _nearest_detection_rank_key(det, point_x, point_y),
+        )
+    if forced_scrollbar_bbox is None or not _forced_scrollbar_covers_release(
         point_x,
         point_y,
         forced_scrollbar_bbox,
     ):
         return None
-    if any(
-        _detection_contains_click(det, point_x, point_y)
-        for det in detections
-        if _is_uia_textless_control(det)
+    forced = _uia_forced_scrollbar_detection(forced_scrollbar_bbox)
+    for det in detections:
+        if (
+            _is_uia_textless_control(det)
+            and det.class_id == YOLO_CLASS_SCROLLBAR
+            and _detections_same_place(det, forced)
+        ):
+            return det
+    return forced
+
+
+def _uia_landmarks_uniquely_select_primary(
+    primary: UiDetection,
+    detections: list[UiDetection],
+    *,
+    click_xy: tuple[int, int],
+) -> bool:
+    """True when UIA nearby landmarks uniquely prefilter ``primary`` among peers."""
+    working = list(detections)
+    if not any(
+        det is primary or _detections_same_place(primary, det) for det in working
+    ):
+        working = [primary, *working]
+    primary_det = next(
+        (
+            det
+            for det in working
+            if det is primary or _detections_same_place(primary, det)
+        ),
+        primary,
+    )
+    peers = _ambiguous_primary_peers(primary_det, working)
+    if not peers:
+        return True
+
+    candidates: list[dict[str, Any]] = [_detection_to_dict(primary_det)]
+    for det in working:
+        if det is primary_det or _detections_same_place(primary_det, det):
+            continue
+        candidates.append(_detection_to_dict(det))
+    pool = _eligible_locate_landmarks(
+        candidates,
+        instruction="",
+        primary=primary_det,
+        primary_bbox=primary_det.bbox,
+        click_xy=click_xy,
+        reserved_labels=set(),
+    )
+    seed = [item.hint for item in _closest_directed_landmarks(pool)]
+    if _hints_uniquely_prefilter_primary(primary_det, peers, working, seed):
+        return True
+    grown = _grow_locating_hints_for_prefilter_uniqueness(
+        primary=primary_det,
+        peers=peers,
+        detections=working,
+        prefix_hints=[],
+        seed=seed,
+        pool=pool,
+    )
+    return _hints_uniquely_prefilter_primary(primary_det, peers, working, grown)
+
+
+def recording_uia_skip_reason(
+    detections: list[UiDetection],
+    *,
+    local_x: int | None = None,
+    local_y: int | None = None,
+    forced_scrollbar_bbox: tuple[int, int, int, int] | None = None,
+) -> str | None:
+    """Why a UIA snapshot cannot name the click, or ``None`` when it can.
+
+    ``None`` means UIA alone can select the click target. Callers that have no
+    snapshot use ``沒有 UIA 快照`` themselves.
+
+    A usable text box under the pointer wins. Otherwise a UIA input or
+    scrollbar under the pointer is enough; those controls have no label.
+    ``forced_scrollbar_bbox`` is the press scrollbar for a drag release: the
+    release counts as that bar after the cross-axis snap, even past the track.
+
+    When the click has ambiguous peers (same-label text/icon, or multiple
+    inputs/scrollbars), nearby unique-label UIA landmarks must uniquely
+    prefilter the primary the same way replay nearby matching does.
+    """
+    if local_x is None or local_y is None:
+        if any(
+            _is_usable_uia_text_detection(det) or _is_uia_textless_control(det)
+            for det in detections
+        ):
+            return None
+        return "點擊處沒有可用的 UIA 文字"
+
+    point_x, point_y = int(local_x), int(local_y)
+    primary = _pick_uia_click_primary(
+        detections,
+        point_x=point_x,
+        point_y=point_y,
+        forced_scrollbar_bbox=forced_scrollbar_bbox,
+    )
+    if primary is None:
+        return "點擊處沒有可用的 UIA 文字"
+    if _uia_landmarks_uniquely_select_primary(
+        primary,
+        detections,
+        click_xy=(point_x, point_y),
     ):
         return None
-    return "點擊處沒有可用的 UIA 文字"
+    return VISION_PATH_UIA_NOT_UNIQUE_REASON
 
 
 def recording_uia_detections_sufficient(
@@ -3291,23 +3400,20 @@ def recording_uia_detections_sufficient(
     *,
     local_x: int | None = None,
     local_y: int | None = None,
-    min_multi_char_text: int = _MIN_NEARBY_TEXT_CANDIDATES,
     forced_scrollbar_bbox: tuple[int, int, int, int] | None = None,
 ) -> bool:
-    """True when deferred UIA-only candidates are enough to name the click.
+    """True when deferred UIA-only candidates uniquely select the click target.
 
-    Requires usable UIA text for nearby landmarks (at least
-    ``min_multi_char_text``). When a click point is given, a usable UIA text
-    box, a UIA input, or a UIA scrollbar must cover that click. A drag release
-    assigned to ``forced_scrollbar_bbox`` counts as on that bar. URL-like /
-    ultra-long UIA names do not count.
+    The click must land on usable UIA text, a UIA input, or a UIA scrollbar (or
+    a drag release assigned to ``forced_scrollbar_bbox``). When peers make that
+    target ambiguous, unique-label UIA landmarks must uniquely prefilter it.
+    URL-like / ultra-long UIA names do not count as usable text.
     """
     return (
         recording_uia_skip_reason(
             detections,
             local_x=local_x,
             local_y=local_y,
-            min_multi_char_text=min_multi_char_text,
             forced_scrollbar_bbox=forced_scrollbar_bbox,
         )
         is None

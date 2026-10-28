@@ -16,6 +16,7 @@ from cua_mcp.yolo_onnx import (
 )
 from src.recorder.models import RecordedEvent
 from src.recorder.vision_context import (
+    VISION_PATH_UIA_NOT_UNIQUE_REASON,
     _BBOX_HIT_TOLERANCE_PX,
     _MIN_NEARBY_TEXT_CANDIDATES,
     _detect_recording_mouse_targets,
@@ -39,6 +40,7 @@ from src.recorder.vision_context import (
     promote_click_primary_candidates,
     press_scrollbar_screen_xyxy,
     recording_uia_detections_sufficient,
+    recording_uia_skip_reason,
     resolve_event_screenshot_path,
     scrollbar_track_percent_phrase,
     select_click_primary_candidate,
@@ -1044,7 +1046,7 @@ def test_usable_uia_landmark_label_rejects_urls_and_short() -> None:
     assert _usable_uia_landmark_label("a" * 60) is False
 
 
-def test_recording_uia_detections_sufficient_requires_cover_and_count() -> None:
+def test_recording_uia_detections_sufficient_requires_cover_and_uniqueness() -> None:
     click = (100, 100)
     rich = [
         _detection_from_bbox(
@@ -1087,13 +1089,15 @@ def test_recording_uia_detections_sufficient_requires_cover_and_count() -> None:
         )
         is False
     )
-
-    thin = rich[:3]
     assert (
-        recording_uia_detections_sufficient(
-            thin, local_x=click[0], local_y=click[1]
-        )
-        is False
+        recording_uia_skip_reason(url_only, local_x=click[0], local_y=click[1])
+        == "點擊處沒有可用的 UIA 文字"
+    )
+
+    # Unique labeled cover needs no landmark quota — a few texts are enough.
+    thin = rich[:3]
+    assert recording_uia_detections_sufficient(
+        thin, local_x=click[0], local_y=click[1]
     )
 
 
@@ -1125,11 +1129,9 @@ def test_recording_uia_accepts_textless_scrollbar_or_input() -> None:
     assert recording_uia_detections_sufficient(
         [*landmarks, field], local_x=click[0], local_y=click[1]
     )
-    assert (
-        recording_uia_detections_sufficient(
-            [*landmarks[:3], scrollbar], local_x=click[0], local_y=click[1]
-        )
-        is False
+    # Single textless control has no ambiguous peers — sparse landmarks still pass.
+    assert recording_uia_detections_sufficient(
+        [*landmarks[:3], scrollbar], local_x=click[0], local_y=click[1]
     )
     ocr_bar = _detection_from_bbox(
         (90, 40, 16, 160), YOLO_CLASS_SCROLLBAR, source="ocr"
@@ -1142,6 +1144,34 @@ def test_recording_uia_accepts_textless_scrollbar_or_input() -> None:
     )
 
 
+def test_recording_uia_two_inputs_need_distinguishing_landmarks() -> None:
+    click = (100, 100)
+    account = _detection_from_bbox(
+        (80, 90, 40, 24), YOLO_CLASS_INPUT, source="uia"
+    )
+    password = _detection_from_bbox(
+        (80, 130, 40, 24), YOLO_CLASS_INPUT, source="uia"
+    )
+    assert (
+        recording_uia_skip_reason(
+            [account, password], local_x=click[0], local_y=click[1]
+        )
+        == VISION_PATH_UIA_NOT_UNIQUE_REASON
+    )
+
+    account_label = _detection_from_bbox(
+        (20, 92, 40, 14), YOLO_CLASS_TEXT, text="帳號", source="uia"
+    )
+    password_label = _detection_from_bbox(
+        (20, 132, 40, 14), YOLO_CLASS_TEXT, text="密碼", source="uia"
+    )
+    assert recording_uia_detections_sufficient(
+        [account, password, account_label, password_label],
+        local_x=click[0],
+        local_y=click[1],
+    )
+
+
 def test_recording_uia_text_on_click_still_passes_with_scrollbar() -> None:
     click = (100, 100)
     labeled = _detection_from_bbox(
@@ -1151,7 +1181,7 @@ def test_recording_uia_text_on_click_still_passes_with_scrollbar() -> None:
         (80, 40, 40, 160), YOLO_CLASS_SCROLLBAR, source="uia"
     )
     assert recording_uia_detections_sufficient(
-        [labeled, *_uia_landmark_texts(_MIN_NEARBY_TEXT_CANDIDATES - 1), scrollbar],
+        [labeled, *_uia_landmark_texts(2), scrollbar],
         local_x=click[0],
         local_y=click[1],
     )
@@ -1173,14 +1203,12 @@ def test_recording_uia_release_past_track_counts_as_press_scrollbar() -> None:
         local_y=40,
         forced_scrollbar_bbox=bar,
     )
-    assert (
-        recording_uia_detections_sufficient(
-            landmarks[:3],
-            local_x=90,
-            local_y=40,
-            forced_scrollbar_bbox=bar,
-        )
-        is False
+    # Forced bar with no peer scrollbars is uniquely selectable.
+    assert recording_uia_detections_sufficient(
+        landmarks[:3],
+        local_x=90,
+        local_y=40,
+        forced_scrollbar_bbox=bar,
     )
 
 
@@ -1340,7 +1368,7 @@ def test_detect_recording_mouse_targets_finishes_ocr_when_uia_thin(
         uia_prefetched=thin_prefetched,
     )
     assert timing.get("vision_path") == "yolo_ocr"
-    assert timing.get("vision_path_reason") == "可用 UIA 文字不足（0/8）"
+    assert timing.get("vision_path_reason") == "點擊處沒有可用的 UIA 文字"
     assert timing.get("recording_ocr_deferred") is False
     assert timing.get("recording_uia_sufficient") is False
     assert [d.text for d in detections] == ["搜尋"]
@@ -1383,7 +1411,7 @@ def test_detect_recording_empty_click_uses_yolo_neighbor(
 def test_detect_recording_yolo_fallback_merges_uia_scrollbar(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Sparse UIA text still prefer-replaces a UIA scrollbar into YOLO candidates."""
+    """Ambiguous UIA scrollbars fall back to YOLO but still merge the UIA bar."""
     from cua_mcp.yolo_onnx import YOLO_CLASS_SCROLLBAR
 
     bgr = np.zeros((200, 400, 3), dtype=np.uint8)
@@ -1391,7 +1419,9 @@ def test_detect_recording_yolo_fallback_merges_uia_scrollbar(
         (180, 10, 15, 80), YOLO_CLASS_SCROLLBAR, source="yolo"
     )
     uia_bar_bbox = (178, 8, 18, 100)
-    prefetched = (None, [uia_bar_bbox], [((10, 10, 40, 14), "名稱")])
+    peer_bar_bbox = (40, 8, 18, 100)
+    # Two scrollbars and no usable texts → cannot uniquely select → YOLO path.
+    prefetched = (None, [uia_bar_bbox, peer_bar_bbox], [])
 
     def fake_detect(*_a, **kwargs):
         assert kwargs.get("uia_prefetched") == prefetched
@@ -1413,6 +1443,7 @@ def test_detect_recording_yolo_fallback_merges_uia_scrollbar(
         uia_prefetched=prefetched,
     )
     assert timing.get("vision_path") == "yolo_ocr"
+    assert timing.get("vision_path_reason") == VISION_PATH_UIA_NOT_UNIQUE_REASON
     assert any(
         d.source == "uia" and d.class_id == YOLO_CLASS_SCROLLBAR for d in detections
     )

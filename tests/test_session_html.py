@@ -4033,7 +4033,7 @@ def test_replay_step_summary_shows_vision_path_reason(tmp_path: Path) -> None:
         json.dumps(
             {
                 "vision_path": "yolo_ocr",
-                "vision_path_reason": "可用 UIA 文字不足（2/8）",
+                "vision_path_reason": "UIA 地標無法唯一鎖定目標",
                 "candidates": [],
             },
             ensure_ascii=False,
@@ -4066,7 +4066,7 @@ def test_replay_step_summary_shows_vision_path_reason(tmp_path: Path) -> None:
             "analysis": {"instruction": "將滑鼠移到「文件」文字"},
         },
     )
-    assert "YOLO+OCR：可用 UIA 文字不足（2/8）" in click_html
+    assert "YOLO+OCR：UIA 地標無法唯一鎖定目標" in click_html
     drag_html = _render_instruction_group_html(
         run_root=tmp_path,
         goal="從「甲」拖到「乙」",

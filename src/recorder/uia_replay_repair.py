@@ -668,6 +668,27 @@ def _first_icon_chinese_id(cand: dict[str, Any]) -> str:
     return ""
 
 
+def _class_repair_label(class_name: str) -> str:
+    from cua_mcp.select_ui_element import _ANCHOR_SUFFIX_BY_CLASS
+
+    if class_name not in ("input", "scrollbar"):
+        return ""
+    return str(_ANCHOR_SUFFIX_BY_CLASS.get(class_name) or "").strip()
+
+
+def _parse_candidate_bbox(cand: dict[str, Any]) -> RectXywh | None:
+    bbox = cand.get("bbox")
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return None
+    try:
+        box = (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
+    except (TypeError, ValueError):
+        return None
+    if box[2] <= 0 or box[3] <= 0:
+        return None
+    return box
+
+
 def _recorded_primary(payload: dict[str, Any] | None) -> tuple[RectXywh, str] | None:
     if not isinstance(payload, dict):
         return None
@@ -679,15 +700,14 @@ def _recorded_primary(payload: dict[str, Any] | None) -> tuple[RectXywh, str] | 
     for cand in candidates:
         if not isinstance(cand, dict):
             continue
+        box = _parse_candidate_bbox(cand)
+        if box is None:
+            continue
+        class_label = _class_repair_label(str(cand.get("class_name") or "").strip())
+        if class_label:
+            return box, class_label
         text = str(cand.get("text") or "").strip()
-        bbox = cand.get("bbox")
-        if not text or not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
-            continue
-        try:
-            box = (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
-        except (TypeError, ValueError):
-            continue
-        if box[2] <= 0 or box[3] <= 0:
+        if not text:
             continue
         if text_is_pua_only(text):
             chinese_id = _first_icon_chinese_id(cand)
@@ -736,6 +756,9 @@ def _fallback_other_anchor(instruction: str, request: UiaReplayRepairRequest) ->
     return ""
 
 
+_CLASS_REPAIR_LABELS = frozenset({"輸入欄", "滾動條"})
+
+
 def _replace_anchor(
     instruction: str,
     request: UiaReplayRepairRequest,
@@ -744,10 +767,14 @@ def _replace_anchor(
     from src.common.nearby_side import strip_nearby_context_comments
 
     stripped = strip_nearby_context_comments(instruction or "").strip()
-    needle = f"「{request.recorded_text}」"
-    if needle not in stripped:
-        return None
-    return stripped.replace(needle, f"「{label}」", 1)
+    recorded = str(request.recorded_text or "").strip()
+    replacement = f"「{label}」"
+    needle = f"「{recorded}」"
+    if needle in stripped:
+        return stripped.replace(needle, replacement, 1)
+    if recorded in _CLASS_REPAIR_LABELS and recorded in stripped:
+        return stripped.replace(recorded, f"{replacement}文字", 1)
+    return None
 
 
 def _candidate(text: str, bbox: RectXywh) -> dict[str, Any]:

@@ -4493,13 +4493,18 @@ def _labeled_text_boxes(
 def _labeled_ocr_confirm_boxes(
     detections: list[UiDetection],
 ) -> list[tuple[tuple[int, int, int, int], str]]:
-    """OCR labels for UIA replay repair presence checks (text and icon ids)."""
+    """Labels for UIA replay repair presence checks (text, icons, input/scrollbar)."""
     boxes: list[tuple[tuple[int, int, int, int], str]] = []
     for det in detections:
+        class_name = str(det.class_name or "").strip()
+        if class_name in _CLASS_MATCH_LABELS:
+            class_label = _ANCHOR_SUFFIX_BY_CLASS.get(class_name, "").strip()
+            if class_label:
+                boxes.append((det.bbox, class_label))
         if str(det.source or "") == "uia":
             continue
         text = str(det.text or "").strip()
-        if det.class_name == "text" and text and not _text_is_pua_only(text):
+        if class_name == "text" and text and not _text_is_pua_only(text):
             boxes.append((det.bbox, text))
         for icon in det.icons or []:
             chinese_id = str(icon.get("chinese_id") or "").strip()

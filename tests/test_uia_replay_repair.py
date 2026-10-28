@@ -80,6 +80,26 @@ def test_choose_misses_when_icon_ocr_does_not_match() -> None:
     assert hit is None
 
 
+def test_choose_repairs_when_ocr_confirms_input_class() -> None:
+    hit = _choose(
+        recorded_text="輸入欄",
+        ocr_boxes=[(_OCR_BOX, "輸入欄")],
+        uia_boxes=[(_UIA_BOX, "公式列")],
+    )
+    assert hit is not None
+    assert hit.label == "公式列"
+    assert hit.source == "findall"
+
+
+def test_choose_misses_when_input_class_does_not_overlap() -> None:
+    hit = _choose(
+        recorded_text="輸入欄",
+        ocr_boxes=[((1200, 700, 40, 16), "輸入欄")],
+        uia_boxes=[(_UIA_BOX, "公式列")],
+    )
+    assert hit is None
+
+
 def test_element_from_point_when_findall_is_empty() -> None:
     probe_box = (1020, 510, 30, 20)
 
@@ -736,3 +756,139 @@ def test_replace_anchor_uses_chinese_id_not_pua() -> None:
         )
         is None
     )
+
+
+def test_labeled_ocr_confirm_boxes_includes_icon_ids() -> None:
+    from cua_mcp.select_mouse_target import _labeled_ocr_confirm_boxes, _labeled_text_boxes
+    from cua_mcp.select_ui_element import UiDetection
+    from cua_mcp.yolo_onnx import YOLO_CLASS_ELEMENT, YOLO_CLASS_TEXT
+
+    text_det = UiDetection(
+        bbox=(10, 20, 40, 16),
+        cx=30,
+        cy=28,
+        class_id=YOLO_CLASS_TEXT,
+        class_name="text",
+        text="搜尋",
+        source="ocr",
+    )
+    icon_det = UiDetection(
+        bbox=(820, 1035, 31, 40),
+        cx=835,
+        cy=1055,
+        class_id=YOLO_CLASS_ELEMENT,
+        class_name="element",
+        text="\ue059",
+        icons=[{"pua": "\ue059", "chinese_id": "向上雙V箭頭"}],
+        source="ocr",
+    )
+    uia_text = UiDetection(
+        bbox=(50, 50, 20, 10),
+        cx=60,
+        cy=55,
+        class_id=YOLO_CLASS_TEXT,
+        class_name="text",
+        text="Ignore",
+        source="uia",
+    )
+    boxes = _labeled_ocr_confirm_boxes([text_det, icon_det, uia_text])
+    assert ((10, 20, 40, 16), "搜尋") in boxes
+    assert ((820, 1035, 31, 40), "向上雙V箭頭") in boxes
+    assert all(label != "Ignore" for _box, label in boxes)
+    assert all(label != "\ue059" for _box, label in boxes)
+    text_only = _labeled_text_boxes([text_det, icon_det, uia_text], source="ocr")
+    assert text_only == [((10, 20, 40, 16), "搜尋")]
+
+
+def test_recorded_primary_prefers_input_over_neighbor_ocr() -> None:
+    from src.recorder.uia_replay_repair import _recorded_primary
+
+    box, text = _recorded_primary(
+        {
+            "candidates": [
+                {
+                    "bbox": [222, 242, 848, 45],
+                    "text": None,
+                    "class_name": "input",
+                },
+                {
+                    "bbox": [344, 296, 71, 15],
+                    "text": "料編輯列",
+                    "class_name": "text",
+                },
+            ]
+        }
+    )
+    assert box == (222, 242, 848, 45)
+    assert text == "輸入欄"
+
+
+def test_recorded_primary_prefers_scrollbar_class() -> None:
+    from src.recorder.uia_replay_repair import _recorded_primary
+
+    box, text = _recorded_primary(
+        {
+            "candidates": [
+                {
+                    "bbox": [1900, 100, 20, 800],
+                    "text": None,
+                    "class_name": "scrollbar",
+                },
+                {
+                    "bbox": [10, 20, 40, 16],
+                    "text": "內容",
+                    "class_name": "text",
+                },
+            ]
+        }
+    )
+    assert box == (1900, 100, 20, 800)
+    assert text == "滾動條"
+
+
+def test_replace_anchor_bare_input_class() -> None:
+    from src.recorder.uia_replay_repair import _replace_anchor
+
+    request = UiaReplayRepairRequest(
+        recording_dir=Path("."),
+        event_index=5,
+        side="click",
+        recorded_bbox=(222, 242, 848, 45),
+        recorded_text="輸入欄",
+        recorded_window_xywh=(0, 0, 1920, 1080),
+    )
+    rewritten = _replace_anchor(
+        "（YOLO+OCR）將滑鼠移到輸入欄（在「字型」文字的下面），並點擊滑鼠一下。",
+        request,
+        "公式列",
+    )
+    # Nearby parentheticals are stripped before the class-token rewrite.
+    assert rewritten == "（YOLO+OCR）將滑鼠移到「公式列」文字，並點擊滑鼠一下。"
+
+
+def test_labeled_ocr_confirm_boxes_includes_input_and_scrollbar() -> None:
+    from cua_mcp.select_mouse_target import _labeled_ocr_confirm_boxes
+    from cua_mcp.select_ui_element import UiDetection
+    from cua_mcp.yolo_onnx import YOLO_CLASS_INPUT, YOLO_CLASS_SCROLLBAR
+
+    uia_input = UiDetection(
+        bbox=(222, 242, 848, 45),
+        cx=646,
+        cy=264,
+        class_id=YOLO_CLASS_INPUT,
+        class_name="input",
+        text=None,
+        source="uia",
+    )
+    yolo_scrollbar = UiDetection(
+        bbox=(1900, 100, 20, 800),
+        cx=1910,
+        cy=500,
+        class_id=YOLO_CLASS_SCROLLBAR,
+        class_name="scrollbar",
+        text=None,
+        source="yolo",
+    )
+    boxes = _labeled_ocr_confirm_boxes([uia_input, yolo_scrollbar])
+    assert ((222, 242, 848, 45), "輸入欄") in boxes
+    assert ((1900, 100, 20, 800), "滾動條") in boxes

@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
-from collections.abc import Callable
-from dataclasses import dataclass
+import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -70,6 +73,75 @@ _DEFAULT_LLM_WORKERS = 4
 _UNSET: Any = object()
 # Each event contributes vision + instruction work units.
 _PROGRESS_UNITS_PER_EVENT = 2
+
+_ANALYSIS_PHASE_LABELS: dict[str, str] = {
+    "coalesce": "Event coalesce / prep",
+    "vision": "Vision (UIA / YOLO+OCR)",
+    "text_choice": "Text-choice LLM",
+    "instruction": "Instruction build",
+    "assemble": "Write analysis JSON",
+    "yolo_ocr_retry": "YOLO/OCR retry",
+    "tool_cache_rebuild": "Tool-cache rebuild",
+    "html_write": "Recording HTML write",
+}
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _round_seconds(value: float) -> float:
+    return round(float(value), 3)
+
+
+class _AnalysisPhaseTimer:
+    """Wall-clock phase timings for one ``analyze_recording_session`` run."""
+
+    def __init__(self) -> None:
+        self.started_at_utc = _utc_now_iso()
+        self._started_perf = time.perf_counter()
+        self.phases: list[dict[str, Any]] = []
+
+    @contextmanager
+    def phase(self, kind: str, **extra: Any) -> Iterator[dict[str, Any]]:
+        started_at = _utc_now_iso()
+        started_perf = time.perf_counter()
+        entry: dict[str, Any] = {
+            "kind": kind,
+            "label": _ANALYSIS_PHASE_LABELS.get(kind, kind),
+            "started_at_utc": started_at,
+        }
+        try:
+            yield entry
+        finally:
+            entry["duration_seconds"] = _round_seconds(time.perf_counter() - started_perf)
+            for key, value in extra.items():
+                if value is not None:
+                    entry[key] = value
+            self.phases.append(entry)
+
+    def finish(self) -> dict[str, Any]:
+        finished_at = _utc_now_iso()
+        total = _round_seconds(time.perf_counter() - self._started_perf)
+        summary: dict[str, Any] = {
+            "total_seconds": total,
+        }
+        for phase in self.phases:
+            kind = phase.get("kind")
+            duration = phase.get("duration_seconds")
+            if not isinstance(kind, str) or not isinstance(duration, (int, float)):
+                continue
+            summary[f"{kind}_seconds"] = float(duration)
+            event_cpu = phase.get("event_cpu_seconds")
+            if isinstance(event_cpu, (int, float)):
+                summary[f"{kind}_event_cpu_seconds"] = float(event_cpu)
+        return {
+            "started_at_utc": self.started_at_utc,
+            "finished_at_utc": finished_at,
+            "duration_seconds": total,
+            "phases": list(self.phases),
+            "summary": summary,
+        }
 
 
 def _env_max_workers(env_name: str, default: int) -> int:
@@ -318,6 +390,45 @@ class _PreparedEvent:
     event_for_llm: RecordedEvent
     vision: dict[str, Any]
     text_resolution: dict[str, Any] | None
+    vision_seconds: float | None = None
+    vision_cache_hit: bool = False
+    text_choice_seconds: float | None = None
+    instruction_seconds: float | None = None
+    time_profile: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _build_event_analysis_time_profile(prepared: _PreparedEvent) -> list[dict[str, Any]]:
+    """Per-event analysis phases for ``analysis/event_NNN.json``."""
+    profile: list[dict[str, Any]] = []
+    if prepared.vision_seconds is not None:
+        vision_entry: dict[str, Any] = {
+            "kind": "vision",
+            "label": "Vision prep (UIA / YOLO+OCR or cache)",
+            "duration_seconds": prepared.vision_seconds,
+        }
+        if prepared.vision_cache_hit:
+            vision_entry["cache_hit"] = True
+        path = prepared.vision.get("vision_path")
+        if isinstance(path, str) and path.strip():
+            vision_entry["vision_path"] = path.strip()
+        profile.append(vision_entry)
+    if prepared.text_choice_seconds is not None:
+        profile.append(
+            {
+                "kind": "text_choice_llm",
+                "label": "Text-choice LLM",
+                "duration_seconds": prepared.text_choice_seconds,
+            }
+        )
+    if prepared.instruction_seconds is not None:
+        profile.append(
+            {
+                "kind": "instruction",
+                "label": "Instruction build (deterministic or LLM)",
+                "duration_seconds": prepared.instruction_seconds,
+            }
+        )
+    return profile
 
 
 async def prepare_event_vision(
@@ -330,8 +441,10 @@ async def prepare_event_vision(
 
     Reuses fingerprinted ``yolo_ocr`` / text-resolution caches when present.
     """
+    started = time.perf_counter()
     text_resolution: dict[str, Any] | None = None
     event_for_llm = event
+    vision_cache_hit = False
     if event.kind == "text_input":
         cached_text = try_rebuild_text_input_from_cache(event, run_dir)
         if cached_text is not None:
@@ -346,6 +459,8 @@ async def prepare_event_vision(
                 event_for_llm=event_for_llm,
                 vision=vision,
                 text_resolution=text_resolution,
+                vision_seconds=_round_seconds(time.perf_counter() - started),
+                vision_cache_hit=True,
             )
         resolved = await resolve_text_input_text(
             event,
@@ -390,6 +505,8 @@ async def prepare_event_vision(
                     "caption_role": caption_role,
                 },
                 text_resolution=None,
+                vision_seconds=_round_seconds(time.perf_counter() - started),
+                vision_cache_hit=False,
             )
         cached_vision = try_rebuild_vision_from_cache(event, run_dir)
         if cached_vision is not None:
@@ -399,6 +516,8 @@ async def prepare_event_vision(
                 event_for_llm=event,
                 vision=cached_vision,
                 text_resolution=None,
+                vision_seconds=_round_seconds(time.perf_counter() - started),
+                vision_cache_hit=True,
             )
         vision = await build_vision_context(
             event,
@@ -410,6 +529,8 @@ async def prepare_event_vision(
         event_for_llm=event_for_llm,
         vision=vision,
         text_resolution=text_resolution,
+        vision_seconds=_round_seconds(time.perf_counter() - started),
+        vision_cache_hit=vision_cache_hit,
     )
 
 
@@ -624,7 +745,11 @@ async def _refine_all_text_resolutions(
         text_resolution = _hydrate_uia_text_from_event(text_resolution, event)
 
         if not needs_llm_text_choice(text_resolution):
+            started = time.perf_counter()
             _apply_refined(prepared, apply_text_choice_hard_rules(text_resolution))
+            prepared.text_choice_seconds = _round_seconds(
+                time.perf_counter() - started
+            )
             return
 
         async with sem:
@@ -636,9 +761,13 @@ async def _refine_all_text_resolutions(
                 f"recorded={text_resolution.get('recorded_text')!r} "
                 f"ocr={text_resolution.get('ocr_text')!r}"
             )
+            started = time.perf_counter()
             refined = await choose_text_input_with_llm(
                 text_resolution,
                 log_info=log_info,
+            )
+            prepared.text_choice_seconds = _round_seconds(
+                time.perf_counter() - started
             )
             _apply_refined(prepared, refined)
             log_info(
@@ -688,6 +817,7 @@ async def _analyze_all_event_instructions(
                 return
             event = prepared.event
             log_info(f"processing event {event.index} kind={event.kind}")
+            started = time.perf_counter()
             try:
                 results[pos] = await analyze_event_to_cache(
                     prepared.event_for_llm,
@@ -702,6 +832,9 @@ async def _analyze_all_event_instructions(
                     f"{type(exc).__name__}: {exc}"
                 )
                 results[pos] = None
+            prepared.instruction_seconds = _round_seconds(
+                time.perf_counter() - started
+            )
             if on_instruction_done is not None:
                 on_instruction_done()
 
@@ -805,6 +938,7 @@ def _write_event_analysis(
     text_resolution: dict[str, Any] | None,
     later_foregrounds: list[dict[str, Any]] | None = None,
     next_windows_before: list[Any] | None = None,
+    time_profile: list[dict[str, Any]] | None = None,
 ) -> None:
     from src.recorder.compile_tool_calls import compile_tool_calls
 
@@ -871,6 +1005,11 @@ def _write_event_analysis(
                 else {}
             ),
             **({"tool_calls": tool_calls} if tool_calls is not None else {}),
+            **(
+                {"time_profile": time_profile}
+                if time_profile
+                else {}
+            ),
         },
     )
 
@@ -1114,6 +1253,7 @@ async def analyze_recording_session(
             append_text(log_path, f"{text}\n")
 
     _bind_run_state_for_analysis(run_dir, run_id)
+    phase_timer = _AnalysisPhaseTimer()
     try:
         settings = load_settings()
         vision_workers = _vision_max_workers()
@@ -1126,27 +1266,32 @@ async def analyze_recording_session(
             f"analyze_recording_session vision_workers={vision_workers} "
             f"llm_workers={llm_workers}"
         )
-        events = coalesce_consecutive_same_location_clicks(
-            retarget_ime_candidate_end_screenshots(
-                coalesce_consecutive_text_inputs(
-                    coalesce_text_inputs_bridged_by_edit_keys(
-                        reclassify_flyout_pick_drags_as_clicks(
-                            reclassify_negligible_drags_as_clicks(_load_events(run_dir))
+        with phase_timer.phase("coalesce"):
+            events = coalesce_consecutive_same_location_clicks(
+                retarget_ime_candidate_end_screenshots(
+                    coalesce_consecutive_text_inputs(
+                        coalesce_text_inputs_bridged_by_edit_keys(
+                            reclassify_flyout_pick_drags_as_clicks(
+                                reclassify_negligible_drags_as_clicks(
+                                    _load_events(run_dir)
+                                )
+                            )
                         )
                     )
                 )
             )
-        )
-        events, trailing_settle_end_utc = _drop_trailing_agent_restore(
-            events,
-            run_dir=run_dir,
-            log_info=log_info,
-        )
-        _persist_coalesced_events(run_dir, events, log_info=log_info)
-        final_after_screenshot = _resolve_final_after_screenshot(run_dir)
-        if final_after_screenshot is not None:
-            log_info(f"final after screenshot ready path={final_after_screenshot}")
-        log_info(f"analyze_recording_session start events={len(events)} run_id={run_id}")
+            events, trailing_settle_end_utc = _drop_trailing_agent_restore(
+                events,
+                run_dir=run_dir,
+                log_info=log_info,
+            )
+            _persist_coalesced_events(run_dir, events, log_info=log_info)
+            final_after_screenshot = _resolve_final_after_screenshot(run_dir)
+            if final_after_screenshot is not None:
+                log_info(f"final after screenshot ready path={final_after_screenshot}")
+            log_info(
+                f"analyze_recording_session start events={len(events)} run_id={run_id}"
+            )
 
         cached = 0
         skipped = 0
@@ -1157,24 +1302,43 @@ async def analyze_recording_session(
         expected_outcomes: list[str | None] = []
         progress = _AnalysisProgress(len(events), on_progress)
 
-        prepared_list, vision_cancelled = await _prepare_all_event_visions(
-            events,
-            run_dir=run_dir,
-            log_info=log_info,
-            should_cancel=should_cancel,
-            max_workers=vision_workers,
-            on_vision_done=progress.bump,
-        )
+        with phase_timer.phase("vision") as vision_phase:
+            prepared_list, vision_cancelled = await _prepare_all_event_visions(
+                events,
+                run_dir=run_dir,
+                log_info=log_info,
+                should_cancel=should_cancel,
+                max_workers=vision_workers,
+                on_vision_done=progress.bump,
+            )
+            vision_cpu = sum(
+                float(prepared.vision_seconds)
+                for prepared in prepared_list
+                if prepared is not None and prepared.vision_seconds is not None
+            )
+            vision_phase["event_cpu_seconds"] = _round_seconds(vision_cpu)
+            vision_phase["cache_hits"] = sum(
+                1
+                for prepared in prepared_list
+                if prepared is not None and prepared.vision_cache_hit
+            )
         if vision_cancelled:
             cancelled = True
 
-        text_choice_cancelled = await _refine_all_text_resolutions(
-            prepared_list,
-            run_dir=run_dir,
-            log_info=log_info,
-            should_cancel=should_cancel,
-            max_workers=llm_workers,
-        )
+        with phase_timer.phase("text_choice") as text_phase:
+            text_choice_cancelled = await _refine_all_text_resolutions(
+                prepared_list,
+                run_dir=run_dir,
+                log_info=log_info,
+                should_cancel=should_cancel,
+                max_workers=llm_workers,
+            )
+            text_cpu = sum(
+                float(prepared.text_choice_seconds)
+                for prepared in prepared_list
+                if prepared is not None and prepared.text_choice_seconds is not None
+            )
+            text_phase["event_cpu_seconds"] = _round_seconds(text_cpu)
         if text_choice_cancelled:
             cancelled = True
 
@@ -1185,102 +1349,117 @@ async def analyze_recording_session(
         )
         _persist_coalesced_events(run_dir, events, log_info=log_info)
 
-        instruction_results, llm_cancelled = await _analyze_all_event_instructions(
-            prepared_list,
-            run_dir=run_dir,
-            log_info=log_info,
-            should_cancel=should_cancel,
-            max_workers=llm_workers,
-            on_instruction_done=progress.bump,
-        )
+        with phase_timer.phase("instruction") as instruction_phase:
+            instruction_results, llm_cancelled = await _analyze_all_event_instructions(
+                prepared_list,
+                run_dir=run_dir,
+                log_info=log_info,
+                should_cancel=should_cancel,
+                max_workers=llm_workers,
+                on_instruction_done=progress.bump,
+            )
+            instruction_cpu = sum(
+                float(prepared.instruction_seconds)
+                for prepared in prepared_list
+                if prepared is not None and prepared.instruction_seconds is not None
+            )
+            instruction_phase["event_cpu_seconds"] = _round_seconds(instruction_cpu)
         if llm_cancelled:
             cancelled = True
 
         # Ordered assemble: report lists, per-event analysis JSON.
         previous_instruction_event: RecordedEvent | None = None
-        for event_pos, event in enumerate(events):
-            if should_cancel is not None and should_cancel():
-                cancelled = True
-                log_info("analyze_recording_session cancelled by user")
-                break
+        with phase_timer.phase("assemble"):
+            for event_pos, event in enumerate(events):
+                if should_cancel is not None and should_cancel():
+                    cancelled = True
+                    log_info("analyze_recording_session cancelled by user")
+                    break
 
-            prepared = prepared_list[event_pos]
-            if prepared is None:
-                cancelled = True
-                log_info(
-                    f"skipping event {event.index}: vision not prepared (cancelled)"
-                )
-                break
+                prepared = prepared_list[event_pos]
+                if prepared is None:
+                    cancelled = True
+                    log_info(
+                        f"skipping event {event.index}: vision not prepared (cancelled)"
+                    )
+                    break
 
-            result = instruction_results[event_pos]
-            if result is _UNSET:
-                cancelled = True
-                log_info(
-                    f"skipping event {event.index}: instruction LLM not started (cancelled)"
-                )
-                break
+                result = instruction_results[event_pos]
+                if result is _UNSET:
+                    cancelled = True
+                    log_info(
+                        f"skipping event {event.index}: "
+                        "instruction LLM not started (cancelled)"
+                    )
+                    break
 
-            vision = prepared.vision
-            text_resolution = prepared.text_resolution
-            analysis_path = run_dir / "analysis" / f"event_{event.index:03d}.json"
-            analysis_path.parent.mkdir(parents=True, exist_ok=True)
+                vision = prepared.vision
+                text_resolution = prepared.text_resolution
+                analysis_path = run_dir / "analysis" / f"event_{event.index:03d}.json"
+                analysis_path.parent.mkdir(parents=True, exist_ok=True)
 
-            if result is None:
-                skipped += 1
+                if result is None:
+                    skipped += 1
+                    processed += 1
+                    errors.append(
+                        {"event_index": event.index, "error": "llm_analysis_failed"}
+                    )
+                    continue
+
+                instruction = result["instruction"]
+                cached += 1
                 processed += 1
-                errors.append({"event_index": event.index, "error": "llm_analysis_failed"})
-                continue
+                elapsed_since_previous: float | None = None
+                if previous_instruction_event is not None:
+                    elapsed_since_previous = _elapsed_seconds(
+                        previous_instruction_event.timestamp_utc,
+                        event.timestamp_utc,
+                    )
 
-            instruction = result["instruction"]
-            cached += 1
-            processed += 1
-            elapsed_since_previous: float | None = None
-            if previous_instruction_event is not None:
-                elapsed_since_previous = _elapsed_seconds(
-                    previous_instruction_event.timestamp_utc,
-                    event.timestamp_utc,
+                settle_after_seconds = _next_instruction_event_settle(
+                    events=events,
+                    event_pos=event_pos,
+                    event=event,
+                    prepared_list=prepared_list,
+                    instruction_results=instruction_results,
+                    trailing_settle_end_utc=trailing_settle_end_utc,
                 )
 
-            settle_after_seconds = _next_instruction_event_settle(
-                events=events,
-                event_pos=event_pos,
-                event=event,
-                prepared_list=prepared_list,
-                instruction_results=instruction_results,
-                trailing_settle_end_utc=trailing_settle_end_utc,
-            )
-
-            instructions.append(instruction)
-            expected_outcomes.append(None)
-            previous_instruction_event = event
-            _write_event_analysis(
-                analysis_path,
-                event=event,
-                result=result,
-                instruction=instruction,
-                vision=vision,
-                expected_outcome=None,
-                use_expected_outcome=False,
-                elapsed_since_previous=elapsed_since_previous,
-                settle_after_seconds=settle_after_seconds,
-                text_resolution=text_resolution,
-                later_foregrounds=_foregrounds_after_appeared(
-                    events, event_pos, run_dir=run_dir
-                ),
-                next_windows_before=_next_step_windows_before(events, event_pos),
-            )
-            log_info(f"cached event {event.index}: {instruction}")
+                instructions.append(instruction)
+                expected_outcomes.append(None)
+                previous_instruction_event = event
+                event_time_profile = _build_event_analysis_time_profile(prepared)
+                prepared.time_profile = event_time_profile
+                _write_event_analysis(
+                    analysis_path,
+                    event=event,
+                    result=result,
+                    instruction=instruction,
+                    vision=vision,
+                    expected_outcome=None,
+                    use_expected_outcome=False,
+                    elapsed_since_previous=elapsed_since_previous,
+                    settle_after_seconds=settle_after_seconds,
+                    text_resolution=text_resolution,
+                    later_foregrounds=_foregrounds_after_appeared(
+                        events, event_pos, run_dir=run_dir
+                    ),
+                    next_windows_before=_next_step_windows_before(events, event_pos),
+                    time_profile=event_time_profile,
+                )
+                log_info(f"cached event {event.index}: {instruction}")
 
         yolo_stats: dict[str, Any] | None = None
         if not cancelled:
-            yolo_stats = await _retry_failed_pointer_yolo_ocr(
-                events,
-                run_dir=run_dir,
-                log_info=log_info,
-                should_cancel=should_cancel,
-                on_reserve=progress.reserve,
-                on_done=progress.bump,
-            )
+            with phase_timer.phase("yolo_ocr_retry"):
+                yolo_stats = await _retry_failed_pointer_yolo_ocr(
+                    events,
+                    run_dir=run_dir,
+                    log_info=log_info,
+                    should_cancel=should_cancel,
+                    on_reserve=progress.reserve,
+                    on_done=progress.bump,
+                )
             if yolo_stats["cancelled"]:
                 cancelled = True
             elif yolo_stats["instructions_changed"]:
@@ -1306,15 +1485,21 @@ async def analyze_recording_session(
             report["yolo_ocr_failed"] = int(yolo_stats["failed"])
             report["yolo_ocr_retried"] = int(yolo_stats["retried"])
             report["yolo_ocr_recovered"] = int(yolo_stats["recovered"])
-        write_json(run_dir / "report.json", report)
         try:
             from src.recorder.compile_tool_calls import (
                 rebuild_recording_instruction_tool_cache,
             )
 
-            rebuild_recording_instruction_tool_cache(run_dir)
+            with phase_timer.phase("tool_cache_rebuild"):
+                rebuild_recording_instruction_tool_cache(run_dir)
         except Exception as exc:
             log_info(f"analyze_recording_session tool cache rebuild failed: {exc}")
+
+        analysis_timing = phase_timer.finish()
+        report["analysis_timing"] = analysis_timing
+        write_json(run_dir / "report.json", report)
+        # HTML is written after report.json so the profile tab can read
+        # analysis_timing. HTML generation itself is not a profiled phase.
         try:
             from src.common.session_html import write_recording_html_from_run
 
@@ -1328,9 +1513,15 @@ async def analyze_recording_session(
                 f" retried={report.get('yolo_ocr_retried', 0)}"
                 f" recovered={report.get('yolo_ocr_recovered', 0)}"
             )
+        timing_note = ""
+        summary = analysis_timing.get("summary")
+        if isinstance(summary, dict):
+            total = summary.get("total_seconds")
+            if isinstance(total, (int, float)):
+                timing_note = f" analysis_s={float(total):.3f}"
         log_info(
             f"analyze_recording_session done recorded={len(events)} "
-            f"cached={cached} skipped={skipped}{failed_note}"
+            f"cached={cached} skipped={skipped}{failed_note}{timing_note}"
         )
         return report
     finally:

@@ -7868,14 +7868,35 @@ def _render_percent_bar(pct: float) -> str:
     )
 
 
+def _yolo_ocr_seconds_from_payload(payload: dict[str, Any]) -> tuple[float | None, float | None]:
+    """Prefer ``*_s`` fields, then fall back to ``*_elapsed_ms``."""
+    yolo_s: float | None = None
+    ocr_s: float | None = None
+    yolo_raw = payload.get("yolo_s")
+    if isinstance(yolo_raw, (int, float)) and not isinstance(yolo_raw, bool):
+        yolo_s = float(yolo_raw)
+    else:
+        yolo_ms = payload.get("yolo_elapsed_ms")
+        if isinstance(yolo_ms, (int, float)) and not isinstance(yolo_ms, bool):
+            yolo_s = float(yolo_ms) / 1000.0
+    ocr_raw = payload.get("ocr_s")
+    if isinstance(ocr_raw, (int, float)) and not isinstance(ocr_raw, bool):
+        ocr_s = float(ocr_raw)
+    else:
+        ocr_ms = payload.get("ocr_elapsed_ms")
+        if isinstance(ocr_ms, (int, float)) and not isinstance(ocr_ms, bool):
+            ocr_s = float(ocr_ms) / 1000.0
+    return yolo_s, ocr_s
+
+
 def _load_yolo_ocr_timings(run_root: Path) -> dict[str, Any]:
-    """Sum YOLO/OCR elapsed ms from ``yolo_ocr/*.json`` when present."""
+    """Sum YOLO/OCR elapsed seconds from ``yolo_ocr/*.json`` when present."""
     folder = run_root / "yolo_ocr"
     if not folder.is_dir():
         return {"file_count": 0, "yolo_seconds": 0.0, "ocr_seconds": 0.0, "has_data": False}
 
-    yolo_ms = 0.0
-    ocr_ms = 0.0
+    yolo_seconds = 0.0
+    ocr_seconds = 0.0
     file_count = 0
     has_data = False
     for path in sorted(folder.glob("*.json")):
@@ -7883,18 +7904,17 @@ def _load_yolo_ocr_timings(run_root: Path) -> dict[str, Any]:
         if payload is None:
             continue
         file_count += 1
-        yolo_raw = payload.get("yolo_elapsed_ms")
-        ocr_raw = payload.get("ocr_elapsed_ms")
-        if isinstance(yolo_raw, (int, float)):
-            yolo_ms += float(yolo_raw)
+        yolo_s, ocr_s = _yolo_ocr_seconds_from_payload(payload)
+        if yolo_s is not None:
+            yolo_seconds += yolo_s
             has_data = True
-        if isinstance(ocr_raw, (int, float)):
-            ocr_ms += float(ocr_raw)
+        if ocr_s is not None:
+            ocr_seconds += ocr_s
             has_data = True
     return {
         "file_count": file_count,
-        "yolo_seconds": round(yolo_ms / 1000.0, 3),
-        "ocr_seconds": round(ocr_ms / 1000.0, 3),
+        "yolo_seconds": round(yolo_seconds, 3),
+        "ocr_seconds": round(ocr_seconds, 3),
         "has_data": has_data,
     }
 
@@ -8279,12 +8299,201 @@ def _recording_float_seconds(value: Any) -> float | None:
     return float(value)
 
 
+def _time_profile_duration_by_kind(
+    profile: list[Any] | None,
+    kind: str,
+) -> float | None:
+    if not isinstance(profile, list):
+        return None
+    total = 0.0
+    found = False
+    for entry in profile:
+        if not isinstance(entry, dict) or entry.get("kind") != kind:
+            continue
+        duration = _recording_float_seconds(entry.get("duration_seconds"))
+        if duration is None:
+            continue
+        total += duration
+        found = True
+    return round(total, 3) if found else None
+
+
+def _render_recording_analysis_timing_html(
+    run_root: Path,
+    events: list[dict[str, Any]],
+) -> str:
+    """Render wall-clock / per-event timings for the analyze pass."""
+    report = _load_run_report(run_root)
+    analysis_timing = (
+        report.get("analysis_timing") if isinstance(report, dict) else None
+    )
+    vision_files = _load_yolo_ocr_timings(run_root)
+
+    event_rows: list[dict[str, Any]] = []
+    vision_sum = 0.0
+    vision_count = 0
+    instruction_sum = 0.0
+    instruction_count = 0
+    text_choice_sum = 0.0
+    text_choice_count = 0
+    for index, event in enumerate(events):
+        event_index = event.get("index")
+        if not isinstance(event_index, int):
+            event_index = index + 1
+        analysis = _load_recording_analysis(run_root, event_index)
+        instruction = ""
+        profile = None
+        if isinstance(analysis, dict):
+            raw_instruction = analysis.get("instruction")
+            if isinstance(raw_instruction, str):
+                instruction = raw_instruction.strip()
+            profile = analysis.get("time_profile")
+        vision_s = _time_profile_duration_by_kind(profile, "vision")
+        text_s = _time_profile_duration_by_kind(profile, "text_choice_llm")
+        instruction_s = _time_profile_duration_by_kind(profile, "instruction")
+        if vision_s is not None:
+            vision_sum += vision_s
+            vision_count += 1
+        if text_s is not None:
+            text_choice_sum += text_s
+            text_choice_count += 1
+        if instruction_s is not None:
+            instruction_sum += instruction_s
+            instruction_count += 1
+        event_rows.append(
+            {
+                "index": event_index,
+                "instruction": instruction or "—",
+                "vision": vision_s,
+                "text_choice": text_s,
+                "instruction_s": instruction_s,
+            }
+        )
+
+    has_analysis_timing = isinstance(analysis_timing, dict) and bool(
+        analysis_timing.get("phases") or analysis_timing.get("duration_seconds") is not None
+    )
+    has_event_timing = any(
+        row["vision"] is not None
+        or row["text_choice"] is not None
+        or row["instruction_s"] is not None
+        for row in event_rows
+    )
+    if not has_analysis_timing and not has_event_timing and not vision_files["has_data"]:
+        return ""
+
+    cards: list[tuple[str, str]] = []
+    category_rows: list[tuple[str, float]] = []
+    total_seconds: float | None = None
+    if has_analysis_timing and isinstance(analysis_timing, dict):
+        total_raw = analysis_timing.get("duration_seconds")
+        if isinstance(total_raw, (int, float)):
+            total_seconds = float(total_raw)
+        cards.append(
+            (
+                "分析總長",
+                _format_seconds_precise(total_seconds)
+                if total_seconds is not None
+                else "—",
+            )
+        )
+        summary = analysis_timing.get("summary")
+        if isinstance(summary, dict):
+            for key, label in (
+                ("vision_seconds", "視覺階段"),
+                ("text_choice_seconds", "文字選擇"),
+                ("instruction_seconds", "指令生成"),
+                ("yolo_ocr_retry_seconds", "YOLO/OCR 重試"),
+                ("assemble_seconds", "寫入分析"),
+                ("coalesce_seconds", "事件合併"),
+                ("tool_cache_rebuild_seconds", "工具快取"),
+            ):
+                value = summary.get(key)
+                if isinstance(value, (int, float)):
+                    category_rows.append((label, float(value)))
+        phases = analysis_timing.get("phases")
+        if not category_rows and isinstance(phases, list):
+            for phase in phases:
+                if not isinstance(phase, dict):
+                    continue
+                label = phase.get("label") or phase.get("kind") or "phase"
+                duration = _recording_float_seconds(phase.get("duration_seconds"))
+                if duration is None:
+                    continue
+                category_rows.append((str(label), duration))
+
+    if vision_count:
+        cards.append(("視覺合計 (事件)", _format_seconds_precise(vision_sum)))
+    if instruction_count:
+        cards.append(("指令合計 (事件)", _format_seconds_precise(instruction_sum)))
+    if text_choice_count:
+        cards.append(("文字選擇合計", _format_seconds_precise(text_choice_sum)))
+    if vision_files["has_data"]:
+        cards.append(("YOLO 檔案數", str(vision_files["file_count"])))
+        category_rows.append(("YOLO（yolo_ocr）", float(vision_files["yolo_seconds"])))
+        category_rows.append(("OCR（yolo_ocr）", float(vision_files["ocr_seconds"])))
+
+    table_rows: list[str] = []
+    for row in event_rows:
+        instruction = row["instruction"]
+        if len(instruction) > 80:
+            instruction = instruction[:77] + "…"
+        table_rows.append(
+            "<tr>"
+            f'<td class="num">{row["index"]}</td>'
+            f"<td>{escape(instruction)}</td>"
+            f'<td class="num">{escape(_format_seconds_precise(row["vision"]))}</td>'
+            f'<td class="num">{escape(_format_seconds_precise(row["text_choice"]))}</td>'
+            f'<td class="num">{escape(_format_seconds_precise(row["instruction_s"]))}</td>'
+            "</tr>"
+        )
+
+    note = (
+        '<p class="time-profile-note">'
+        "以下是「錄製分析」過程的耗時：視覺階段（含 UIA / YOLO+OCR 或快取命中）、"
+        "文字選擇 LLM、以及指令生成（決定性規則或 LLM）。"
+        "階段時間是 wall-clock；各事件合計在平行執行時可能大於階段時間。"
+        "</p>"
+    )
+    parts = [
+        '<div class="time-profile analysis-time-profile">',
+        "<h2>分析過程時間</h2>",
+        note,
+    ]
+    if cards:
+        parts.append(_render_summary_cards(cards))
+    if category_rows:
+        parts.append(
+            _render_category_breakdown_table(
+                category_rows,
+                total_seconds=total_seconds,
+            )
+        )
+    if table_rows:
+        parts.append("<h3>各事件分析耗時</h3>")
+        parts.append(
+            '<table class="time-profile-table">'
+            "<thead><tr>"
+            '<th class="num">#</th><th>指令</th>'
+            '<th class="num">視覺</th><th class="num">文字選擇</th>'
+            '<th class="num">指令</th>'
+            "</tr></thead>"
+            f"<tbody>{''.join(table_rows)}</tbody>"
+            "</table>"
+        )
+    parts.append("</div>")
+    return "\n".join(parts)
+
+
 def _render_recording_time_profile_html(
     run_root: Path,
     events: list[dict[str, Any]],
     manifest: dict[str, Any] | None,
 ) -> str:
+    analysis_section = _render_recording_analysis_timing_html(run_root, events)
     if not events:
+        if analysis_section:
+            return analysis_section
         return (
             '<div class="time-profile">'
             '<p class="empty">尚無時間資料。</p>'
@@ -8389,16 +8598,17 @@ def _render_recording_time_profile_html(
         '<p class="time-profile-note">'
         "「等待」是與上一事件的間隔（可轉成腳本等待指令）；"
         "Settle 是動作後畫面穩定時間；Hold/Wait 來自長按或明確等待事件的 duration。"
-        "錄製分析沒有執行 LLM、驗證 LLM、YOLO 或 OCR 的細部耗時——"
-        "若要優化回放路徑的視覺 / LLM 成本，請改看執行報告（session_steps）的時間分析。"
+        "上方「分析過程時間」另列出視覺 / 文字選擇 / 指令生成的分析耗時；"
+        "回放路徑的細部 LLM / 工具耗時請看執行報告（session_steps）。"
         "</p>"
     )
-    return (
+    recorded_section = (
         '<div class="time-profile">'
+        "<h2>錄製時間軸</h2>\n"
         f"{note}"
         f"{_render_summary_cards(cards)}"
         f"{_render_category_breakdown_table(category_rows, total_seconds=span_seconds)}"
-        "<h2>各事件時間</h2>\n"
+        "<h3>各事件時間</h3>\n"
         '<table class="time-profile-table">'
         "<thead><tr>"
         '<th class="num">#</th><th>指令</th>'
@@ -8408,6 +8618,9 @@ def _render_recording_time_profile_html(
         "</table>"
         "</div>"
     )
+    if analysis_section:
+        return f"{analysis_section}\n{recorded_section}"
+    return recorded_section
 
 
 def write_session_html_from_run(run_root: Path, *, update_index: bool = True) -> Path:

@@ -1675,6 +1675,7 @@ async def test_analyze_recording_session_writes_instructions(tmp_path: Path) -> 
             return_value={
                 "text": "打電話的時候",
                 "recorded_text": "2832u04cj842k7g6c.4",
+                "ocr_text": "打電話的時候",
                 "source": "ocr",
                 "meaningful": False,
                 "reason": "ime",
@@ -1687,8 +1688,29 @@ async def test_analyze_recording_session_writes_instructions(tmp_path: Path) -> 
     assert report["cached"] == 1
     assert report["skipped"] == 0
     assert report["instructions"] == ["輸入「打電話的時候」"]
+    analysis_timing = report.get("analysis_timing")
+    assert isinstance(analysis_timing, dict)
+    assert isinstance(analysis_timing.get("duration_seconds"), (int, float))
+    assert analysis_timing["duration_seconds"] >= 0
+    phase_kinds = [
+        phase.get("kind")
+        for phase in analysis_timing.get("phases") or []
+        if isinstance(phase, dict)
+    ]
+    assert "coalesce" in phase_kinds
+    assert "vision" in phase_kinds
+    assert "instruction" in phase_kinds
+    assert "assemble" in phase_kinds
+    summary = analysis_timing.get("summary")
+    assert isinstance(summary, dict)
+    assert summary.get("total_seconds") == analysis_timing["duration_seconds"]
     analysis = json.loads((run_dir / "analysis" / "event_001.json").read_text(encoding="utf-8"))
     assert analysis["instruction"] == "輸入「打電話的時候」"
+    time_profile = analysis.get("time_profile")
+    assert isinstance(time_profile, list)
+    assert {entry.get("kind") for entry in time_profile} >= {"vision", "instruction"}
+    for entry in time_profile:
+        assert isinstance(entry.get("duration_seconds"), (int, float))
     assert analysis["tool_calls"] == [
         {
             "name": "type_text",
@@ -1705,7 +1727,10 @@ async def test_analyze_recording_session_writes_instructions(tmp_path: Path) -> 
     assert analysis["text_resolution"]["resolved_text"] == "打電話的時候"
     recording_html = run_dir / "recording_steps.html"
     assert recording_html.is_file()
-    assert "輸入「打電話的時候」" in recording_html.read_text(encoding="utf-8")
+    html = recording_html.read_text(encoding="utf-8")
+    assert "輸入「打電話的時候」" in html
+    assert "分析過程時間" in html
+    assert "錄製時間軸" in html
     assert not (run_dir / "script.txt").exists()
 
 

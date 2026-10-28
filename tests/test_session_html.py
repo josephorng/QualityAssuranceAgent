@@ -3884,9 +3884,65 @@ def test_write_recording_html_includes_time_profile_tab(tmp_path: Path) -> None:
                 "instruction": "點擊「搜尋」按鈕",
                 "elapsed_since_previous_seconds": 2.5,
                 "settle_after_seconds": 1.2,
+                "time_profile": [
+                    {
+                        "kind": "vision",
+                        "label": "Vision prep",
+                        "duration_seconds": 1.25,
+                        "vision_path": "yolo_ocr",
+                    },
+                    {
+                        "kind": "instruction",
+                        "label": "Instruction build",
+                        "duration_seconds": 0.8,
+                    },
+                ],
             },
             ensure_ascii=False,
         ),
+        encoding="utf-8",
+    )
+    (run_root / "report.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_root.name,
+                "recorded": 1,
+                "processed": 1,
+                "cached": 1,
+                "skipped": 0,
+                "cancelled": False,
+                "errors": [],
+                "instructions": ["點擊「搜尋」按鈕"],
+                "analysis_timing": {
+                    "started_at_utc": "2026-07-21T04:02:00+00:00",
+                    "finished_at_utc": "2026-07-21T04:02:05+00:00",
+                    "duration_seconds": 5.0,
+                    "phases": [
+                        {
+                            "kind": "vision",
+                            "label": "Vision (UIA / YOLO+OCR)",
+                            "duration_seconds": 3.0,
+                        },
+                        {
+                            "kind": "instruction",
+                            "label": "Instruction build",
+                            "duration_seconds": 1.5,
+                        },
+                    ],
+                    "summary": {
+                        "total_seconds": 5.0,
+                        "vision_seconds": 3.0,
+                        "instruction_seconds": 1.5,
+                    },
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "yolo_ocr").mkdir(exist_ok=True)
+    (run_root / "yolo_ocr" / "event_001.json").write_text(
+        json.dumps({"yolo_s": 0.4, "ocr_s": 0.9}, ensure_ascii=False),
         encoding="utf-8",
     )
 
@@ -3894,13 +3950,20 @@ def test_write_recording_html_includes_time_profile_tab(tmp_path: Path) -> None:
     assert 'data-tab="steps"' in html
     assert 'data-tab="profile"' in html
     assert "時間分析" in html
+    assert "分析過程時間" in html
+    assert "錄製時間軸" in html
     assert "各事件時間" in html
+    assert "各事件分析耗時" in html
     assert '<th class="num">等待</th>' in html
+    assert '<th class="num">視覺</th>' in html
     assert "平均等待" in html
     assert "等待合計" in html
     assert "Settle" in html
     assert "2.50s" in html
     assert "1.20s" in html
+    assert "1.25s" in html
+    assert "0.80s" in html
+    assert "分析總長" in html
     assert "與上一事件的間隔" in html
     assert "recording-toolbar" in html
     assert 'id="tab-steps"' in html

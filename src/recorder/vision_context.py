@@ -3075,6 +3075,17 @@ def _detection_to_dict(
 
 VISION_PATH_REPAIR_REASON = "重播修復改為 UIA"
 _VISION_PATHS = frozenset({"uia", "yolo_ocr"})
+_VISION_SECONDS_KEYS = (
+    "yolo_s",
+    "ocr_s",
+    "line_s",
+    "uia_input_s",
+    "uia_scrollbar_s",
+    "uia_text_s",
+    "icon_ocr_retry_s",
+    "total_s",
+    "capture_s",
+)
 
 
 def _copy_recorded_vision_mode(source: dict[str, Any] | None, dest: dict[str, Any]) -> None:
@@ -3099,6 +3110,25 @@ def _attach_vision_path_fields(payload: dict[str, Any], vision_timing: dict[str,
         payload["vision_path_reason"] = reason.strip()
     else:
         payload.pop("vision_path_reason", None)
+    _attach_vision_timing_fields(payload, vision_timing)
+
+
+def _attach_vision_timing_fields(
+    payload: dict[str, Any],
+    vision_timing: dict[str, Any],
+) -> None:
+    """Copy YOLO/OCR/UIA second timings onto the persisted yolo_ocr payload."""
+    for key in _VISION_SECONDS_KEYS:
+        raw = vision_timing.get(key)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            continue
+        payload[key] = round(float(raw), 3)
+    yolo_s = payload.get("yolo_s")
+    if isinstance(yolo_s, (int, float)):
+        payload["yolo_elapsed_ms"] = round(float(yolo_s) * 1000.0, 3)
+    ocr_s = payload.get("ocr_s")
+    if isinstance(ocr_s, (int, float)):
+        payload["ocr_elapsed_ms"] = round(float(ocr_s) * 1000.0, 3)
 
 
 def _screen_xyxy_contains_point(

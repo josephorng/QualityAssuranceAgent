@@ -7,7 +7,6 @@ import queue
 import threading
 import time
 from collections import deque
-from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -1005,14 +1004,9 @@ class RecordingSession:
         self._last_settle_uia_after_index: int | None = None
         self._left_press_uia: dict[int, dict[str, Any] | None] = {}
         self._right_press_uia: dict[int, dict[str, Any] | None] = {}
-        # Legacy press-time FindAll slots. New presses no longer start a live
-        # walk (it often finishes after the click mutates the tree). Kept so
-        # emit can still join an in-flight future from an older build/session.
-        self._uia_executor: ThreadPoolExecutor | None = None
-        self._left_press_uia_futures: dict[int, Future[dict[str, Any] | None]] = {}
-        self._right_press_uia_futures: dict[int, Future[dict[str, Any] | None]] = {}
-        self._uia_inflight: set[Future[dict[str, Any] | None]] = set()
-        # Emit waits for pending press fallback and/or drag end_uia before notify.
+        # Drag emit waits for window-step end_uia before notifying vision.
+        # Click/press UIA is settle-cache only; a miss leaves uia_snapshot empty
+        # (never a press-time or deferred FindAll write).
         self._uia_notify_wait: dict[int, int] = {}
         self._drag_end_captures: dict[int, dict[int, tuple[str, int, tuple[int, int]]]] = {}
         self._pending_right_coords: tuple[int, int] | None = None
@@ -1187,9 +1181,6 @@ class RecordingSession:
             self._last_settle_uia_after_index = None
             self._left_press_uia = {}
             self._right_press_uia = {}
-            self._left_press_uia_futures = {}
-            self._right_press_uia_futures = {}
-            self._uia_inflight = set()
             self._uia_notify_wait = {}
             self._drag_end_captures = {}
             self._pending_right_coords = None
@@ -1249,7 +1240,6 @@ class RecordingSession:
             daemon=True,
         )
         self._worker_thread.start()
-        self._start_uia_executor()
 
         # Snapshot stays the first worker job. Hooks do not wait for it.
         self._enqueue(_DeferredCaptureJob(action="seed_settle_windows"))
@@ -1443,7 +1433,6 @@ class RecordingSession:
 
         if worker is not None and worker.is_alive():
             worker.join(timeout=15)
-        self._shutdown_uia_executor()
         self._join_window_step_threads()
         self._flush_pending_text_notifies()
 
@@ -3296,7 +3285,6 @@ class RecordingSession:
             self._pending_click_window = None
             self._left_press_click_windows.pop(seq, None)
             self._left_press_uia.pop(seq, None)
-            self._left_press_uia_futures.pop(seq, None)
             self._left_press_signals.pop(seq, None)
         self._discard_press_capture_entry(stale)
         self._discard_drag_end_capture_entry(drag_stale)
@@ -3324,7 +3312,6 @@ class RecordingSession:
         self._pending_right_click_window = None
         self._right_press_click_windows.pop(seq, None)
         self._right_press_uia.pop(seq, None)
-        self._right_press_uia_futures.pop(seq, None)
         self._right_press_signals.pop(seq, None)
         return stale, pending_shot
 
@@ -4443,103 +4430,6 @@ class RecordingSession:
         except Exception:
             return 0
 
-    def _start_uia_executor(self) -> None:
-        """One worker for press-time fallback FindAll only (cache miss / hwnd mismatch)."""
-        previous = self._uia_executor
-        self._uia_executor = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="recording-uia-fallback",
-        )
-        if previous is not None:
-            previous.shutdown(wait=False, cancel_futures=True)
-
-    def _shutdown_uia_executor(self) -> None:
-        with self._lock:
-            executor = self._uia_executor
-            self._uia_executor = None
-            pending = list(self._uia_inflight)
-        if pending:
-            wait(pending, timeout=15)
-        if executor is None:
-            return
-        executor.shutdown(wait=False, cancel_futures=True)
-
-    def _begin_press_uia_fallback(
-        self,
-        press_seq: int,
-        click_window: ClickWindowInfo | None,
-        *,
-        side: str,
-    ) -> None:
-        """No-op: press-time live FindAll was removed (post-click tree race).
-
-        Kept as a stub so older tests that patch this name still import cleanly.
-        """
-        _ = (press_seq, click_window, side)
-
-    def _uia_snapshot_for_window(
-        self, click_window: ClickWindowInfo | None
-    ) -> dict[str, Any] | None:
-        if click_window is None or not int(click_window.hwnd or 0):
-            return None
-        from src.recorder.uia_input_boxes import snapshot_uia_screen
-
-        hwnd = int(click_window.hwnd)
-        try:
-            value = snapshot_uia_screen(hwnd)
-        except Exception:
-            return None
-        if not isinstance(value, dict):
-            return None
-        snapshot = dict(value)
-        snapshot["hwnd"] = hwnd
-        return snapshot
-
-    def _ready_uia_snapshot(
-        self, future: Future[dict[str, Any] | None] | None
-    ) -> tuple[dict[str, Any] | None, bool]:
-        """Return ``(snapshot, still_running)``."""
-        if future is None:
-            return None, False
-        if not future.done():
-            return None, True
-        with self._lock:
-            self._uia_inflight.discard(future)
-        return self._snapshot_from_future(future), False
-
-    def _snapshot_from_future(
-        self, future: Future[dict[str, Any] | None]
-    ) -> dict[str, Any] | None:
-        try:
-            value = future.result()
-        except Exception:
-            return None
-        return value if isinstance(value, dict) else None
-
-    def _arm_deferred_uia_snapshots(
-        self,
-        event_index: int,
-        pending: list[tuple[str, Future[dict[str, Any] | None]]],
-    ) -> None:
-        for field, future in pending:
-            future.add_done_callback(
-                lambda done, idx=event_index, name=field: self._apply_deferred_uia_snapshot(
-                    idx, name, done
-                )
-            )
-
-    def _apply_deferred_uia_snapshot(
-        self,
-        event_index: int,
-        field: str,
-        future: Future[dict[str, Any] | None],
-    ) -> None:
-        snapshot = self._snapshot_from_future(future)
-        self._patch_event_uia_field(event_index, field, snapshot)
-        with self._lock:
-            self._uia_inflight.discard(future)
-        self._release_uia_notify_slot(event_index)
-
     def _release_uia_notify_slot(self, event_index: int) -> None:
         """Decrement pending UIA wait; notify vision when the last slot clears."""
         with self._lock:
@@ -4722,8 +4612,12 @@ class RecordingSession:
         field: str,
         snapshot: dict[str, Any] | None,
     ) -> RecordedEvent | None:
-        """Write one snapshot onto a persisted event. Returns the patched event."""
-        if field not in {"uia_snapshot", "end_uia_snapshot"}:
+        """Write drag ``end_uia_snapshot`` onto a persisted event after settle.
+
+        Press ``uia_snapshot`` is settle-cache-only at persist time. Late FindAll
+        must never patch it (miss path used to race the click and write here).
+        """
+        if field != "end_uia_snapshot":
             return None
         with self._lock:
             run_dir = self._run_dir
@@ -4892,11 +4786,6 @@ class RecordingSession:
                 if press_seq is not None
                 else None
             )
-            uia_future = (
-                self._left_press_uia_futures.pop(press_seq, None)
-                if press_seq is not None
-                else None
-            )
             signals_before = (
                 self._left_press_signals.pop(press_seq, None)
                 if press_seq is not None
@@ -4979,20 +4868,10 @@ class RecordingSession:
         else:
             self._discard_drag_end_capture_entry(drag_end)
 
-        pending_uia: list[tuple[str, Future[dict[str, Any] | None]]] = []
-        if uia_snapshot is None and uia_future is not None:
-            ready, still_running = self._ready_uia_snapshot(uia_future)
-            if ready is not None:
-                uia_snapshot = ready
-            elif still_running:
-                pending_uia.append(("uia_snapshot", uia_future))
-        wait_slots = len(pending_uia)
         # Drag drop naming uses end_uia from this step's settled FindAll.
         if job.kind == "drag":
-            wait_slots += 1
-        if wait_slots:
             with self._lock:
-                self._uia_notify_wait[int(job.event_index)] = wait_slots
+                self._uia_notify_wait[int(job.event_index)] = 1
 
         self._persist_queued_event(
             _QueuedEvent(
@@ -5019,7 +4898,6 @@ class RecordingSession:
                 action_monotonic=job.action_monotonic,
             )
         )
-        self._arm_deferred_uia_snapshots(int(job.event_index), pending_uia)
         if job.refresh_pre_type:
             refresh_xy = job.end_xy if job.kind == "drag" and job.end_xy is not None else job.cursor_xy
             self._refresh_pending_pre_type(refresh_xy)
@@ -5042,11 +4920,6 @@ class RecordingSession:
             )
             uia_snapshot = (
                 self._right_press_uia.pop(press_seq, None)
-                if press_seq is not None
-                else None
-            )
-            uia_future = (
-                self._right_press_uia_futures.pop(press_seq, None)
                 if press_seq is not None
                 else None
             )
@@ -5086,15 +4959,6 @@ class RecordingSession:
             job.cursor_xy,
             pending_shot,
         )
-        pending_uia: list[tuple[str, Future[dict[str, Any] | None]]] = []
-        if uia_snapshot is None and uia_future is not None:
-            ready, still_running = self._ready_uia_snapshot(uia_future)
-            if ready is not None:
-                uia_snapshot = ready
-            elif still_running:
-                pending_uia.append(("uia_snapshot", uia_future))
-                with self._lock:
-                    self._uia_notify_wait[int(job.event_index)] = len(pending_uia)
         self._persist_queued_event(
             _QueuedEvent(
                 kind=job.kind,
@@ -5114,7 +4978,6 @@ class RecordingSession:
                 action_monotonic=job.action_monotonic,
             )
         )
-        self._arm_deferred_uia_snapshots(int(job.event_index), pending_uia)
         if job.refresh_pre_type:
             self._refresh_pending_pre_type(job.cursor_xy)
 

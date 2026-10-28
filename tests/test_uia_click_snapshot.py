@@ -414,9 +414,7 @@ def test_cross_window_press_skips_stale_settle_cache(tmp_path: Path) -> None:
 
 
 def test_cross_window_press_skips_live_fallback_findall(tmp_path: Path) -> None:
-    """Cache miss must not start a press-time FindAll (post-click tree race)."""
-    from concurrent.futures import ThreadPoolExecutor
-
+    """Cache miss must not FindAll or late-write uia_snapshot."""
     from src.recorder.capture import RecordingSession, _DeferredCaptureJob
 
     calls: list[int] = []
@@ -432,7 +430,6 @@ def test_cross_window_press_skips_live_fallback_findall(tmp_path: Path) -> None:
 
     session = RecordingSession(runs_root=tmp_path)
     session._run_dir = tmp_path
-    session._uia_executor = ThreadPoolExecutor(max_workers=1)
     session._last_settle_uia = {
         "hwnd": 10,
         "window": [0, 0, 100, 80],
@@ -445,34 +442,30 @@ def test_cross_window_press_skips_live_fallback_findall(tmp_path: Path) -> None:
     session._notify_event = lambda _event: None  # type: ignore[method-assign]
     session._start_settle_probe = lambda _event: None  # type: ignore[method-assign]
     other = _copilot_window(20)
-    try:
-        with patch(
-            "src.recorder.uia_input_boxes.snapshot_uia_screen",
-            side_effect=_snap,
-        ), patch(
-            "src.recorder.capture.resolve_click_window",
-            return_value=other,
-        ), patch(
-            "src.recorder.capture._finalize_screenshot",
-            return_value=("shot.jpeg", 1, (0, 0)),
-        ):
-            session._capture_pending_left_press(tmp_path, 5, 5)
-            assert session._left_press_uia[1] is None
-            assert session._left_press_uia_futures == {}
-            session._left_press_captures[1] = (("pending.jpeg", 1, (0, 0)), [])
-            session._worker_emit_left_gesture(
-                _DeferredCaptureJob(
-                    action="emit_left_gesture",
-                    kind="click",
-                    press_seq=1,
-                    cursor_xy=(5, 5),
-                    event_index=1,
-                    timestamp_utc="t",
-                    button="left",
-                )
+    with patch(
+        "src.recorder.uia_input_boxes.snapshot_uia_screen",
+        side_effect=_snap,
+    ), patch(
+        "src.recorder.capture.resolve_click_window",
+        return_value=other,
+    ), patch(
+        "src.recorder.capture._finalize_screenshot",
+        return_value=("shot.jpeg", 1, (0, 0)),
+    ):
+        session._capture_pending_left_press(tmp_path, 5, 5)
+        assert session._left_press_uia[1] is None
+        session._left_press_captures[1] = (("pending.jpeg", 1, (0, 0)), [])
+        session._worker_emit_left_gesture(
+            _DeferredCaptureJob(
+                action="emit_left_gesture",
+                kind="click",
+                press_seq=1,
+                cursor_xy=(5, 5),
+                event_index=1,
+                timestamp_utc="t",
+                button="left",
             )
-    finally:
-        session._uia_executor.shutdown(wait=True)
+        )
     assert calls == []
     raw = json.loads((tmp_path / "events" / "event_001.json").read_text(encoding="utf-8"))
     assert "uia_snapshot" not in raw
@@ -482,7 +475,6 @@ def test_matching_settle_cache_skips_live_fallback(tmp_path: Path) -> None:
     from src.recorder.capture import RecordingSession
 
     session = RecordingSession(runs_root=tmp_path)
-    session._uia_executor = object()  # type: ignore[assignment]
     session._last_settle_uia = {
         "hwnd": 132566,
         "window": [0, 0, 100, 80],
@@ -492,17 +484,15 @@ def test_matching_settle_cache_skips_live_fallback(tmp_path: Path) -> None:
     }
     session._last_settle_uia_after_index = 0
     window = _copilot_window(132566)
-    with patch.object(
-        session,
-        "_begin_press_uia_fallback",
-        side_effect=AssertionError("matched cache must not live FindAll"),
-    ), patch(
+    with patch(
         "src.recorder.capture.resolve_click_window",
         return_value=window,
+    ), patch(
+        "src.recorder.uia_input_boxes.snapshot_uia_screen",
+        side_effect=AssertionError("matched cache must not FindAll"),
     ):
         session._capture_pending_left_press(tmp_path, 20, 20)
     assert session._left_press_uia[1]["texts"][0]["text"] == "快取"
-    assert session._left_press_uia_futures == {}
 
 
 def test_stale_settle_generation_misses_before_next_settle(
@@ -553,7 +543,6 @@ def test_generation_miss_press_does_not_start_live_findall(tmp_path: Path) -> No
     from src.recorder.models import RecordedEvent
 
     session = RecordingSession(runs_root=tmp_path)
-    session._uia_executor = object()  # type: ignore[assignment]
     session._last_settle_uia = {
         "hwnd": 132566,
         "window": [0, 0, 100, 80],
@@ -574,11 +563,7 @@ def test_generation_miss_press_does_not_start_live_findall(tmp_path: Path) -> No
         ),
     ]
     window = _copilot_window(132566)
-    with patch.object(
-        session,
-        "_begin_press_uia_fallback",
-        side_effect=AssertionError("generation miss must not live FindAll"),
-    ), patch(
+    with patch(
         "src.recorder.capture.resolve_click_window",
         return_value=window,
     ), patch(
@@ -587,7 +572,35 @@ def test_generation_miss_press_does_not_start_live_findall(tmp_path: Path) -> No
     ):
         session._capture_pending_left_press(tmp_path, 20, 20)
     assert session._left_press_uia[1] is None
-    assert session._left_press_uia_futures == {}
+
+
+def test_patch_event_uia_rejects_press_uia_snapshot(tmp_path: Path) -> None:
+    """Miss-path late writes must not overwrite press uia_snapshot."""
+    from src.recorder.capture import RecordingSession
+    from src.recorder.models import RecordedEvent, write_event_json
+
+    session = RecordingSession(runs_root=tmp_path)
+    session._run_dir = tmp_path
+    event = RecordedEvent.from_dict(
+        {
+            "index": 1,
+            "timestamp_utc": "t",
+            "kind": "click",
+            "cursor_xy": [1, 1],
+        }
+    )
+    write_event_json(tmp_path, event.to_dict())
+    session._events = [event]
+    late = {
+        "hwnd": 1,
+        "window": [0, 0, 10, 10],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [{"bbox": [0, 0, 4, 4], "text": "刪除後"}],
+    }
+    assert session._patch_event_uia_field(1, "uia_snapshot", late) is None
+    raw = json.loads((tmp_path / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert "uia_snapshot" not in raw
 
 
 def test_settle_generation_reuses_after_previous_event(

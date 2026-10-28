@@ -4474,9 +4474,16 @@ def _labeled_text_boxes(
     detections: list[UiDetection],
     *,
     source: str,
-) -> list[tuple[tuple[int, int, int, int], str]]:
-    """Screen xywh and text for OCR or UIA text detections."""
-    boxes: list[tuple[tuple[int, int, int, int], str]] = []
+) -> list[tuple[tuple[int, int, int, int], str] | tuple[tuple[int, int, int, int], str, str]]:
+    """Screen xywh and text for OCR or UIA text detections.
+
+    UIA rows also carry ``uia_control_type`` when present so replay repair can
+    rebuild hub suffixes (``按鈕``, ``清單項目``, …).
+    """
+    boxes: list[
+        tuple[tuple[int, int, int, int], str]
+        | tuple[tuple[int, int, int, int], str, str]
+    ] = []
     for det in detections:
         text = str(det.text or "").strip()
         if not text or det.class_name != "text":
@@ -4486,7 +4493,11 @@ def _labeled_text_boxes(
             continue
         if source == "ocr" and det_source == "uia":
             continue
-        boxes.append((det.bbox, text))
+        control_type = str(det.uia_control_type or "").strip()
+        if source == "uia" and control_type:
+            boxes.append((det.bbox, text, control_type))
+        else:
+            boxes.append((det.bbox, text))
     return boxes
 
 

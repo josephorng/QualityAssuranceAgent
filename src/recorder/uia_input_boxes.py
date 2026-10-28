@@ -544,11 +544,14 @@ def _element_label(element: ctypes.c_void_p) -> str:
     )
 
 
-def uia_text_element_at_point(x: int, y: int) -> tuple[str, RectXywh] | None:
-    """Name and screen xywh of the UIA element under a screen point.
+def uia_text_element_at_point(
+    x: int, y: int
+) -> tuple[str, RectXywh, str] | None:
+    """Name, screen xywh, and control-type token under a screen point.
 
     ``ElementFromPoint`` can see a control that ``FindAll`` on the top-level
-    hwnd does not return (Word's start page is one of those).
+    hwnd does not return (Word's start page is one of those). The third value is
+    a ``UIA_CONTROL_TYPE_SUFFIX`` token (``button``, ``text``, …) or ``""``.
     """
     if os.name != "nt":
         return None
@@ -607,7 +610,8 @@ def uia_text_element_at_point(x: int, y: int) -> tuple[str, RectXywh] | None:
         height = int(bottom) - int(top)
         if width <= 0 or height <= 0:
             return None
-        return label, (int(left), int(top), width, height)
+        control_type = control_type_token_from_id(_element_control_type(element))
+        return label, (int(left), int(top), width, height), control_type
     except Exception:
         return None
     finally:

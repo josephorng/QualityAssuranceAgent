@@ -17,7 +17,15 @@ from src.common.io_utils import read_json, write_json
 from src.recorder.models import RecordedEvent, event_json_path
 
 RectXywh = tuple[int, int, int, int]
-LabeledBox = tuple[RectXywh, str]
+# (bbox, label) or (bbox, label, uia_control_type)
+LabeledBox = tuple[RectXywh, str] | tuple[RectXywh, str, str]
+
+
+def _labeled_parts(item: LabeledBox) -> tuple[RectXywh, str, str]:
+    box = item[0]
+    label = str(item[1] or "").strip()
+    control_type = str(item[2] or "").strip() if len(item) >= 3 else ""
+    return box, label, control_type
 
 
 @dataclass(frozen=True)
@@ -39,6 +47,7 @@ class UiaReplayRepairHit:
     source: str
     cx: int
     cy: int
+    control_type: str = ""
 
 
 @dataclass(frozen=True)
@@ -168,6 +177,63 @@ def remember_yolo_ocr_fallback(
         return
     analysis["yolo_ocr_fallback"] = {
         "instruction": instruction,
+        "tool_calls": calls,
+    }
+
+
+def build_yolo_ocr_fallback_from_vision(
+    event: RecordedEvent,
+    vision: dict[str, Any] | None,
+    *,
+    run_dir: Path | None = None,
+) -> dict[str, Any] | None:
+    """Compile a durable YOLO+OCR twin from ``vision["yolo_ocr_fallback_vision"]``."""
+    if not isinstance(vision, dict):
+        return None
+    twin = vision.get("yolo_ocr_fallback_vision")
+    if not isinstance(twin, dict):
+        return None
+    twin_candidates = twin.get("candidates")
+    if not isinstance(twin_candidates, list) or not twin_candidates:
+        return None
+    twin_vision = {**twin, "vision_path": "yolo_ocr"}
+    twin_vision.pop("vision_path_reason", None)
+    destination = vision.get("destination")
+    twin_destination: dict[str, Any] | None = None
+    if isinstance(destination, dict):
+        dest_twin = destination.get("yolo_ocr_fallback_vision")
+        if isinstance(dest_twin, dict) and isinstance(dest_twin.get("candidates"), list):
+            if dest_twin["candidates"]:
+                twin_destination = {**dest_twin, "vision_path": "yolo_ocr"}
+                twin_destination.pop("vision_path_reason", None)
+    from src.recorder.analyze import rebuild_pointer_instruction
+    from src.recorder.compile_tool_calls import compile_tool_calls
+
+    instruction = rebuild_pointer_instruction(
+        event,
+        twin_vision,
+        twin_destination,
+        include_nearby=True,
+    )
+    if not isinstance(instruction, str) or not instruction.strip():
+        return None
+    if not _yolo_ocr_mode(instruction):
+        from cua_mcp.instruction_offset import vision_mode_prefix
+
+        instruction = vision_mode_prefix("yolo_ocr") + instruction.lstrip()
+    compile_vision = twin_vision
+    if twin_destination is not None:
+        compile_vision = {**twin_vision, "destination": twin_destination}
+    calls = compile_tool_calls(
+        event,
+        instruction.strip(),
+        vision=compile_vision,
+        run_dir=Path(run_dir) if run_dir is not None else None,
+    )
+    if not calls:
+        return None
+    return {
+        "instruction": instruction.strip(),
         "tool_calls": calls,
     }
 
@@ -347,26 +413,31 @@ def choose_uia_replay_repair(
         return None
     from src.recorder.uia_input_boxes import is_usable_uia_landmark_label
 
-    containing = [
-        (box, label)
-        for box, label in uia_boxes
-        if is_usable_uia_landmark_label(label)
-        and _point_in_box(center[0], center[1], box)
-    ]
+    containing: list[tuple[RectXywh, str, str]] = []
+    for item in uia_boxes:
+        box, label, control_type = _labeled_parts(item)
+        if not is_usable_uia_landmark_label(label):
+            continue
+        if not _point_in_box(center[0], center[1], box):
+            continue
+        containing.append((box, label, control_type))
     if containing:
-        names = {label for _box, label in containing}
+        names = {label for _box, label, _control in containing}
         if len(names) != 1:
             return None
-        box, label = min(containing, key=lambda item: int(item[0][2]) * int(item[0][3]))
-        return _hit(label, box, "findall")
+        box, label, control_type = min(
+            containing, key=lambda item: int(item[0][2]) * int(item[0][3])
+        )
+        return _hit(label, box, "findall", control_type=control_type)
 
     if point_probe_fn is None:
         return None
     probed = point_probe_fn(int(center[0]), int(center[1]))
-    if not isinstance(probed, tuple) or len(probed) != 2:
+    if not isinstance(probed, tuple) or len(probed) not in (2, 3):
         return None
     label = str(probed[0] or "").strip()
     raw_box = probed[1]
+    control_type = str(probed[2] or "").strip() if len(probed) >= 3 else ""
     if not is_usable_uia_landmark_label(label):
         return None
     if not isinstance(raw_box, (list, tuple)) or len(raw_box) != 4:
@@ -377,7 +448,7 @@ def choose_uia_replay_repair(
         return None
     if not _point_in_box(center[0], center[1], box):
         return None
-    return _hit(label, box, "element_from_point")
+    return _hit(label, box, "element_from_point", control_type=control_type)
 
 
 def replay_repair_slots(
@@ -435,9 +506,9 @@ def attempt_uia_replay_repair(
         )
         return None
     others = [
-        (box, label)
-        for box, label in uia_boxes
-        if label != hit.label or box != hit.bbox
+        item
+        for item in uia_boxes
+        if _labeled_parts(item)[1] != hit.label or _labeled_parts(item)[0] != hit.bbox
     ]
     try:
         write_uia_replay_repair(
@@ -446,6 +517,7 @@ def attempt_uia_replay_repair(
             source=hit.source,
             bbox=hit.bbox,
             others=others,
+            control_type=hit.control_type,
         )
     except Exception as exc:
         _log(
@@ -490,6 +562,7 @@ def write_uia_replay_repair(
     source: str,
     bbox: RectXywh,
     others: list[LabeledBox],
+    control_type: str = "",
 ) -> str | None:
     """Rewrite the analysis instruction from UIA labels and refresh the tool cache."""
     run_dir = Path(request.recording_dir)
@@ -502,7 +575,15 @@ def write_uia_replay_repair(
     analysis = read_json(analysis_path, None)
     if not isinstance(analysis, dict):
         analysis = {"event_index": int(request.event_index)}
-    instruction = _instruction_from_hit(event, request, label, bbox, others, analysis)
+    instruction = _instruction_from_hit(
+        event,
+        request,
+        label,
+        bbox,
+        others,
+        analysis,
+        control_type=control_type,
+    )
     if not instruction:
         return None
     remember_yolo_ocr_fallback(analysis, event, run_dir)
@@ -513,9 +594,14 @@ def write_uia_replay_repair(
     block = analysis.get("uia_replay_repair")
     if not isinstance(block, dict):
         block = {}
-    block[request.side] = {"label": label, "source": source}
+    side_block: dict[str, Any] = {"label": label, "source": source}
+    if control_type:
+        side_block["control_type"] = control_type
+    block[request.side] = side_block
     block["label"] = label
     block["source"] = source
+    if control_type:
+        block["control_type"] = control_type
     analysis["uia_replay_repair"] = block
 
     from src.recorder.compile_tool_calls import (
@@ -528,7 +614,9 @@ def write_uia_replay_repair(
         event,
         instruction,
         run_dir=run_dir,
-        vision=_vision_for_side(request.side, label, bbox, others),
+        vision=_vision_for_side(
+            request.side, label, bbox, others, control_type=control_type
+        ),
     )
     write_json(analysis_path, analysis)
     rebuild_recording_instruction_tool_cache(run_dir)
@@ -547,15 +635,18 @@ def _instruction_from_hit(
     bbox: RectXywh,
     others: list[LabeledBox],
     analysis: dict[str, Any],
+    *,
+    control_type: str = "",
 ) -> str | None:
     from src.recorder.analyze import rebuild_pointer_instruction
 
-    primary = _candidate(label, bbox)
-    extra = [
-        _candidate(text, box)
-        for box, text in others
-        if str(text or "").strip() and (text != label or box != bbox)
-    ]
+    primary = _candidate(label, bbox, control_type=control_type)
+    extra = []
+    for item in others:
+        box, text, other_type = _labeled_parts(item)
+        if not text or (text == label and box == bbox):
+            continue
+        extra.append(_candidate(text, box, control_type=other_type))
     repaired = _vision([primary, *extra], (bbox[0] + bbox[2] // 2, bbox[1] + bbox[3] // 2))
     from src.recorder.vision_context import VISION_PATH_REPAIR_REASON
 
@@ -595,15 +686,24 @@ def _vision_for_side(
     label: str,
     bbox: RectXywh,
     others: list[LabeledBox],
+    *,
+    control_type: str = "",
 ) -> dict[str, Any]:
-    primary = _candidate(label, bbox)
-    extra = [_candidate(text, box) for box, text in others if str(text or "").strip()]
+    primary = _candidate(label, bbox, control_type=control_type)
+    extra = [
+        _candidate(text, box, control_type=other_type)
+        for box, text, other_type in (_labeled_parts(item) for item in others)
+        if text
+    ]
     vision = _vision(
         [primary, *extra],
         (bbox[0] + bbox[2] // 2, bbox[1] + bbox[3] // 2),
     )
     if side == "end":
-        return {"candidates": [_candidate(label, bbox)], "used_vision": True}
+        return {
+            "candidates": [_candidate(label, bbox, control_type=control_type)],
+            "used_vision": True,
+        }
     return vision
 
 
@@ -777,14 +877,26 @@ def _replace_anchor(
     return None
 
 
-def _candidate(text: str, bbox: RectXywh) -> dict[str, Any]:
+def _candidate(
+    text: str,
+    bbox: RectXywh,
+    *,
+    control_type: str = "",
+) -> dict[str, Any]:
     x, y, w, h = (int(v) for v in bbox)
-    return {
+    payload: dict[str, Any] = {
         "bbox": [x, y, w, h],
         "center": [x + w // 2, y + h // 2],
         "class_name": "text",
         "text": text,
     }
+    token = str(control_type or "").strip()
+    if token:
+        from src.recorder.uia_input_boxes import UIA_CONTROL_TYPE_SUFFIX
+
+        if token in UIA_CONTROL_TYPE_SUFFIX:
+            payload["uia_control_type"] = token
+    return payload
 
 
 def _copy_stored_vision_mode(
@@ -813,14 +925,27 @@ def _vision(candidates: list[dict[str, Any]], cursor: tuple[int, int]) -> dict[s
     }
 
 
-def _hit(label: str, box: RectXywh, source: str) -> UiaReplayRepairHit:
+def _hit(
+    label: str,
+    box: RectXywh,
+    source: str,
+    *,
+    control_type: str = "",
+) -> UiaReplayRepairHit:
     x, y, w, h = (int(v) for v in box)
+    token = str(control_type or "").strip()
+    if token:
+        from src.recorder.uia_input_boxes import UIA_CONTROL_TYPE_SUFFIX
+
+        if token not in UIA_CONTROL_TYPE_SUFFIX:
+            token = ""
     return UiaReplayRepairHit(
         label=label,
         bbox=(x, y, w, h),
         source=source,
         cx=x + w // 2,
         cy=y + h // 2,
+        control_type=token,
     )
 
 

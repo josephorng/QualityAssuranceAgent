@@ -112,6 +112,24 @@ def test_element_from_point_when_findall_is_empty() -> None:
     assert hit.label == "空白文件"
     assert hit.source == "element_from_point"
     assert (hit.cx, hit.cy) == (1035, 520)
+    assert hit.control_type == ""
+
+
+def test_element_from_point_keeps_live_control_type() -> None:
+    probe_box = (1020, 510, 30, 20)
+
+    def probe(x: int, y: int):
+        return "空白文件", probe_box, "button"
+
+    hit = _choose(uia_boxes=[], point_probe_fn=probe)
+    assert hit is not None
+    assert hit.control_type == "button"
+
+
+def test_choose_keeps_findall_control_type() -> None:
+    hit = _choose(uia_boxes=[(_UIA_BOX, "空白文件", "button")])
+    assert hit is not None
+    assert hit.control_type == "button"
 
 
 def test_write_replaces_ocr_instruction_and_leaves_event_snapshot(tmp_path: Path) -> None:
@@ -404,6 +422,79 @@ def test_replay_repair_slots_only_for_yolo_ocr(tmp_path: Path) -> None:
     payload["vision_path"] = "uia"
     yolo_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     assert replay_repair_slots(run, 2, calls) == []
+
+
+def test_write_repair_uses_live_uia_control_type(tmp_path: Path) -> None:
+    run = tmp_path / "recording"
+    (run / "events").mkdir(parents=True)
+    (run / "analysis").mkdir()
+    (run / "yolo_ocr").mkdir()
+    event = {
+        "index": 6,
+        "timestamp_utc": "2026-10-21T00:00:00+00:00",
+        "kind": "click",
+        "button": "left",
+        "click_window": {
+            "hwnd": 5,
+            "title": "Word",
+            "process_name": "WINWORD.EXE",
+            "rect": [0, 0, 200, 200],
+            "is_maximized": True,
+            "class_name": "OpusApp",
+        },
+        "uia_snapshot": {"window": [0, 0, 200, 200], "inputs": [], "scrollbars": [], "texts": []},
+    }
+    (run / "events" / "event_006.json").write_text(json.dumps(event), encoding="utf-8")
+    yolo_instruction = "（YOLO+OCR）將滑鼠移到「文件」文字，並點擊滑鼠一下。"
+    (run / "analysis" / "event_006.json").write_text(
+        json.dumps(
+            {"event_index": 6, "instruction": yolo_instruction},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run / "yolo_ocr" / "event_006.json").write_text(
+        json.dumps(
+            {
+                "vision_path": "yolo_ocr",
+                "candidates": [
+                    {
+                        "bbox": [10, 20, 40, 16],
+                        "center": [30, 28],
+                        "class_name": "text",
+                        "text": "文件",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    request = UiaReplayRepairRequest(
+        recording_dir=run,
+        event_index=6,
+        side="click",
+        recorded_bbox=_RECORDED_BBOX,
+        recorded_text="文件",
+        recorded_window_xywh=_RECORDED_WINDOW,
+    )
+    instruction = write_uia_replay_repair(
+        request,
+        label="文件",
+        source="findall",
+        bbox=_UIA_BOX,
+        others=[((20, 40, 30, 14), "新增", "button")],
+        control_type="button",
+    )
+    assert instruction is not None
+    assert instruction.startswith("（UIA）")
+    assert "「文件」按鈕" in instruction
+    saved = json.loads((run / "analysis" / "event_006.json").read_text(encoding="utf-8"))
+    assert saved["uia_replay_repair"]["control_type"] == "button"
+    move = next(call for call in saved["tool_calls"] if call["name"] == "move_mouse")
+    assert move["arguments"]["control_type"] == "button"
+    assert move["arguments"]["vision_mode"] == "uia"
+    assert saved["yolo_ocr_fallback"]["instruction"] == yolo_instruction
 
 
 def test_repair_keeps_yolo_ocr_instruction_and_tool_calls(tmp_path: Path) -> None:

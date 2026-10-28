@@ -939,8 +939,13 @@ def _write_event_analysis(
     later_foregrounds: list[dict[str, Any]] | None = None,
     next_windows_before: list[Any] | None = None,
     time_profile: list[dict[str, Any]] | None = None,
+    run_dir: Path | None = None,
 ) -> None:
     from src.recorder.compile_tool_calls import compile_tool_calls
+    from src.recorder.uia_replay_repair import (
+        build_yolo_ocr_fallback_from_vision,
+        yolo_ocr_fallback_payload,
+    )
 
     tool_calls = compile_tool_calls(event, instruction, vision=vision)
     window_verify = window_verify_from_debug(
@@ -956,6 +961,18 @@ def _write_event_analysis(
         next_windows_before,
     )
     disabled = _preserved_window_verify_disabled(analysis_path, window_verify)
+    fallback = build_yolo_ocr_fallback_from_vision(
+        event,
+        vision,
+        run_dir=run_dir or analysis_path.parent.parent,
+    )
+    if fallback is None:
+        try:
+            existing = read_json(analysis_path, None)
+        except (OSError, ValueError):
+            existing = None
+        if isinstance(existing, dict):
+            fallback = yolo_ocr_fallback_payload(existing.get("yolo_ocr_fallback"))
     write_json(
         analysis_path,
         {
@@ -1005,6 +1022,11 @@ def _write_event_analysis(
                 else {}
             ),
             **({"tool_calls": tool_calls} if tool_calls is not None else {}),
+            **(
+                {"yolo_ocr_fallback": fallback}
+                if fallback is not None
+                else {}
+            ),
             **(
                 {"time_profile": time_profile}
                 if time_profile
@@ -1099,6 +1121,18 @@ def _persist_retried_pointer_instruction(
         run_dir=run_dir,
         vision=vision,
     )
+    from src.recorder.uia_replay_repair import (
+        build_yolo_ocr_fallback_from_vision,
+        yolo_ocr_fallback_payload,
+    )
+
+    # Keep an existing OCR twin unless this vision pass rebuilt a new one.
+    preserved = yolo_ocr_fallback_payload(analysis.get("yolo_ocr_fallback"))
+    twin = build_yolo_ocr_fallback_from_vision(event, vision, run_dir=run_dir)
+    if twin is not None:
+        analysis["yolo_ocr_fallback"] = twin
+    elif preserved is not None:
+        analysis["yolo_ocr_fallback"] = preserved
     write_json(analysis_path, analysis)
     log_info(f"retry yolo/ocr event {event.index} rebuilt: {rebuilt}")
     return previous != rebuilt
@@ -1446,6 +1480,7 @@ async def analyze_recording_session(
                     ),
                     next_windows_before=_next_step_windows_before(events, event_pos),
                     time_profile=event_time_profile,
+                    run_dir=run_dir,
                 )
                 log_info(f"cached event {event.index}: {instruction}")
 

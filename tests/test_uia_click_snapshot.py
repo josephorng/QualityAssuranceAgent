@@ -69,7 +69,7 @@ def test_uia_snapshot_image_local_keeps_control_type() -> None:
     assert by_text["舊標籤"][1] == ""
 
 
-def test_detect_uses_prefetched_snapshot_and_skips_findall(
+def test_detect_uses_prefetched_snapshot_and_keeps_ocr_twin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.recorder.vision_context import _detect_recording_mouse_targets
@@ -77,13 +77,13 @@ def test_detect_uses_prefetched_snapshot_and_skips_findall(
     bgr = np.zeros((80, 120, 3), dtype=np.uint8)
     yolo_calls: list[str] = []
 
-    def _boom(*_a, **_k):
+    def _fake_yolo(*_a, **_k):
         yolo_calls.append("yolo")
-        raise AssertionError("YOLO must not run when usable UIA covers the click")
+        return []
 
     monkeypatch.setattr(
         "src.recorder.vision_context._detect_mouse_targets_from_bgr",
-        _boom,
+        _fake_yolo,
     )
     labeled = [((10, 10, 30, 20), "應用程式及其他")] + [
         ((0, 40 + i * 4, 20, 3), f"列{i:02d}") for i in range(8)
@@ -94,8 +94,10 @@ def test_detect_uses_prefetched_snapshot_and_skips_findall(
         local_y=16,
         uia_prefetched=(None, None, labeled),
     )
-    assert yolo_calls == []
+    assert yolo_calls == ["yolo"]
     assert timing["vision_path"] == "uia"
+    assert timing.get("recording_uia_sufficient") is True
+    assert "yolo_ocr_fallback_detections" in timing
     assert any(det.text == "應用程式及其他" and det.source == "uia" for det in found)
 
 

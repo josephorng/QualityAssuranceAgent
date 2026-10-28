@@ -1302,15 +1302,18 @@ def test_select_click_primary_prefers_uia_text_over_ocr_at_same_place() -> None:
     assert primary["source"] == "uia"
 
 
-def test_detect_recording_mouse_targets_skips_ocr_when_uia_rich(
+def test_detect_recording_mouse_targets_keeps_ocr_twin_when_uia_rich(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bgr = np.zeros((200, 400, 3), dtype=np.uint8)
     yolo_calls: list[object] = []
+    ocr = _detection_from_bbox(
+        (95, 95, 20, 20), YOLO_CLASS_TEXT, text="主按鈕OCR", source="ocr"
+    )
 
     def fake_detect(*_a, **_k):
         yolo_calls.append("yolo")
-        return []
+        return [ocr]
 
     monkeypatch.setattr(
         "src.recorder.vision_context._detect_mouse_targets_from_bgr",
@@ -1328,13 +1331,15 @@ def test_detect_recording_mouse_targets_skips_ocr_when_uia_rich(
         local_y=100,
         uia_prefetched=(None, None, labeled),
     )
-    assert yolo_calls == []
+    assert yolo_calls == ["yolo"]
     assert timing.get("vision_path") == "uia"
     assert "vision_path_reason" not in timing
-    assert timing.get("recording_ocr_deferred") is True
+    assert timing.get("recording_ocr_deferred") is False
     assert timing.get("recording_uia_sufficient") is True
     assert any(d.text == "主按鈕" and d.source == "uia" for d in detections)
     assert all(d.source == "uia" for d in detections)
+    twin = timing.get("yolo_ocr_fallback_detections")
+    assert isinstance(twin, list) and [d.text for d in twin] == ["主按鈕OCR"]
 
 
 def test_detect_recording_mouse_targets_finishes_ocr_when_uia_thin(

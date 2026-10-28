@@ -251,6 +251,64 @@ def _payload_worth_reusing(payload: dict[str, Any]) -> bool:
     return "candidates" in payload
 
 
+def _yolo_ocr_fallback_vision_from_payload(
+    block: dict[str, Any] | None,
+    *,
+    local_cursor: Any = None,
+) -> dict[str, Any] | None:
+    """Rebuild a compact YOLO+OCR twin vision from a persisted fallback block."""
+    if not isinstance(block, dict):
+        return None
+    candidates = block.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return None
+    local = block.get("local_cursor", local_cursor)
+    if isinstance(local, (list, tuple)) and len(local) == 2:
+        cursor: tuple[int, int] | list[Any] | None = (int(local[0]), int(local[1]))
+    else:
+        cursor = local
+    twin: dict[str, Any] = {
+        "used_vision": True,
+        "candidate_text": str(block.get("candidate_text") or ""),
+        "local_cursor": cursor,
+        "candidates": candidates,
+        "detection_count": block.get("detection_count", len(candidates)),
+        "field_context": format_field_context_hint(
+            {
+                "candidates": candidates,
+                "local_cursor": cursor,
+            }
+        ),
+        "vision_path": "yolo_ocr",
+    }
+    track = block.get("scrollbar_track")
+    if isinstance(track, dict):
+        twin["scrollbar_track"] = track
+    return twin
+
+
+def _persistable_yolo_ocr_fallback(vision: dict[str, Any] | None) -> dict[str, Any] | None:
+    """JSON block stored beside primary candidates for a durable OCR twin."""
+    if not isinstance(vision, dict):
+        return None
+    candidates = vision.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return None
+    block: dict[str, Any] = {
+        "candidates": candidates,
+        "candidate_text": str(vision.get("candidate_text") or ""),
+        "detection_count": vision.get("detection_count", len(candidates)),
+        "vision_path": "yolo_ocr",
+    }
+    local = vision.get("local_cursor")
+    if isinstance(local, (list, tuple)) and len(local) == 2:
+        block["local_cursor"] = [int(local[0]), int(local[1])]
+    track = vision.get("scrollbar_track")
+    if isinstance(track, dict):
+        block["scrollbar_track"] = track
+    return block
+
+
 def _vision_from_yolo_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Rebuild compact LLM-facing vision from a persisted yolo_ocr payload."""
     candidates = payload.get("candidates")
@@ -280,6 +338,14 @@ def _vision_from_yolo_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if isinstance(track, dict):
         vision["scrollbar_track"] = track
     _copy_recorded_vision_mode(payload, vision)
+    twin = _yolo_ocr_fallback_vision_from_payload(
+        payload.get("yolo_ocr_fallback")
+        if isinstance(payload.get("yolo_ocr_fallback"), dict)
+        else None,
+        local_cursor=local_cursor,
+    )
+    if twin is not None:
+        vision["yolo_ocr_fallback_vision"] = twin
     return vision
 
 
@@ -351,6 +417,18 @@ def try_rebuild_vision_from_cache(
             # The filtered file is a candidate subset. The mode lives on the
             # full end payload, including a side later marked UIA by repair.
             _copy_recorded_vision_mode(end_payload, end_compact)
+            twin = _yolo_ocr_fallback_vision_from_payload(
+                filtered_payload.get("yolo_ocr_fallback")
+                if isinstance(filtered_payload.get("yolo_ocr_fallback"), dict)
+                else (
+                    end_payload.get("yolo_ocr_fallback")
+                    if isinstance(end_payload.get("yolo_ocr_fallback"), dict)
+                    else None
+                ),
+                local_cursor=dest_local,
+            )
+            if twin is not None:
+                end_compact["yolo_ocr_fallback_vision"] = twin
         elif end_local is not None:
             end_result = _vision_from_yolo_payload(end_payload)
             end_compact = _build_filtered_destination_vision(
@@ -3038,6 +3116,32 @@ def _build_filtered_destination_vision(
         omit_when_inside=False,
     )
     _copy_recorded_vision_mode(end_result, vision)
+    fallback_detections = end_result.get("yolo_ocr_fallback_detections")
+    if isinstance(fallback_detections, list) and fallback_detections:
+        twin_filtered = _destination_candidates(fallback_detections, end_local)
+        if twin_filtered:
+            twin_dicts = [_detection_to_dict(d) for d in twin_filtered]
+            twin: dict[str, Any] = {
+                "used_vision": True,
+                "candidate_text": _format_ui_candidates_text(twin_filtered),
+                "local_cursor": end_local,
+                "candidates": twin_dicts,
+                "detection_count": len(fallback_detections),
+                "field_context": format_field_context_hint(
+                    {
+                        "candidates": twin_dicts,
+                        "local_cursor": end_local,
+                    }
+                ),
+                "vision_path": "yolo_ocr",
+            }
+            twin["destination_offset_hints"] = format_drag_destination_offset_hints(
+                twin,
+                omit_when_inside=False,
+            )
+            vision["yolo_ocr_fallback_vision"] = twin
+    elif isinstance(end_result.get("yolo_ocr_fallback_vision"), dict):
+        vision["yolo_ocr_fallback_vision"] = end_result["yolo_ocr_fallback_vision"]
     return vision
 
 
@@ -3529,9 +3633,12 @@ def _detect_recording_mouse_targets(
 ) -> tuple[list[UiDetection], dict[str, Any]]:
     """UIA candidates when the usable-label gate passes; otherwise YOLO+OCR.
 
-    On the YOLO fallback, ``uia_prefetched`` is still passed so UIA inputs and
-    scrollbars can prefer-replace overlapping YOLO boxes. UIA labeled text is
-    not mixed into OCR candidates.
+    When UIA wins, YOLO+OCR still runs and is stored on
+    ``vision_timing["yolo_ocr_fallback_detections"]`` so analysis can keep a
+    durable OCR twin under ``yolo_ocr_fallback``. On the YOLO primary path,
+    ``uia_prefetched`` is still passed so UIA inputs and scrollbars can
+    prefer-replace overlapping YOLO boxes. UIA labeled text is not mixed into
+    OCR candidates.
     """
     _ = live_input_hwnd, live_input_monitor_offset, live_input_window_screen_xywh
     vision_timing: dict[str, Any] = timing_out if timing_out is not None else {}
@@ -3545,29 +3652,36 @@ def _detect_recording_mouse_targets(
             local_y=local_y,
             forced_scrollbar_bbox=forced_scrollbar_bbox,
         )
-    if skip_reason is None:
-        vision_timing["vision_path"] = "uia"
-        vision_timing.pop("vision_path_reason", None)
-        vision_timing["recording_ocr_deferred"] = True
-        vision_timing["recording_uia_sufficient"] = True
-        return uia_detections, vision_timing
-
+    ocr_timing: dict[str, Any] = {}
     detections = _detect_mouse_targets_from_bgr(
         bgr,
         coord_offset=coord_offset,
         ocr_roi=ocr_roi,
-        timing_out=vision_timing,
+        timing_out=ocr_timing,
         defer_ocr=False,
         refine_with_uia=True,
         # Prefer-replace UIA inputs/scrollbars into YOLO+OCR candidates; texts stay debug-only.
         uia_prefetched=uia_prefetched,
     )
     # Detector already writes UIA input/scrollbar/text into debug_layers when prefetched.
-    if uia_prefetched is not None and "debug_layers" not in vision_timing:
-        _attach_unused_uia_debug(vision_timing, uia_prefetched)
+    if uia_prefetched is not None and "debug_layers" not in ocr_timing:
+        _attach_unused_uia_debug(ocr_timing, uia_prefetched)
+    # Copy detector timing/debug onto the shared timing dict (except path fields).
+    for key, value in ocr_timing.items():
+        if key in ("vision_path", "vision_path_reason"):
+            continue
+        vision_timing[key] = value
+    vision_timing["recording_ocr_deferred"] = False
+
+    if skip_reason is None:
+        vision_timing["vision_path"] = "uia"
+        vision_timing.pop("vision_path_reason", None)
+        vision_timing["recording_uia_sufficient"] = True
+        vision_timing["yolo_ocr_fallback_detections"] = detections
+        return uia_detections, vision_timing
+
     vision_timing["vision_path"] = "yolo_ocr"
     vision_timing["vision_path_reason"] = skip_reason
-    vision_timing["recording_ocr_deferred"] = False
     vision_timing["recording_uia_sufficient"] = False
     return detections, vision_timing
 
@@ -3997,6 +4111,19 @@ def build_vision_context_at_point(
         candidate_dicts = payload["candidates"]
         candidate_text = payload["candidate_text"]
 
+    fallback_detections = vision_timing.get("yolo_ocr_fallback_detections")
+    yolo_ocr_fallback_vision: dict[str, Any] | None = None
+    if isinstance(fallback_detections, list) and fallback_detections:
+        yolo_ocr_fallback_vision = _yolo_ocr_fallback_vision_from_detections(
+            bgr,
+            fallback_detections,
+            local_x,
+            local_y,
+        )
+        persistable = _persistable_yolo_ocr_fallback(yolo_ocr_fallback_vision)
+        if persistable is not None:
+            payload["yolo_ocr_fallback"] = persistable
+
     if persist_debug:
         suffix = debug_name or ""
         debug_path = run_dir / "yolo_ocr" / f"event_{event.index:03d}{suffix}.json"
@@ -4024,7 +4151,104 @@ def build_vision_context_at_point(
         result["vision_path_reason"] = reason.strip()
     if track is not None:
         result["scrollbar_track"] = track
+    if isinstance(fallback_detections, list) and fallback_detections:
+        result["yolo_ocr_fallback_detections"] = fallback_detections
+    if yolo_ocr_fallback_vision is not None:
+        result["yolo_ocr_fallback_vision"] = yolo_ocr_fallback_vision
     return result
+
+
+def _rank_detections_near_point(
+    bgr: np.ndarray,
+    all_detections: list[UiDetection],
+    local_x: int,
+    local_y: int,
+) -> tuple[list[dict[str, Any]], str]:
+    """Rank detections near a click and return candidate dicts + text."""
+    if not all_detections:
+        return [], ""
+    segment_result: ColorSegmentResult | None = None
+    try:
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        segment_result = segment_image_by_color(
+            Image.fromarray(rgb, mode="RGB"),
+            params=load_color_segment_params(),
+            detections=[_ui_detection_to_segment(det) for det in all_detections],
+        )
+    except Exception:
+        segment_result = None
+    nearest = _nearest_candidates(
+        all_detections,
+        local_x,
+        local_y,
+        segment_result=segment_result,
+    )
+    nearest = _promote_click_primary_detections(nearest, local_x, local_y)
+    candidate_text = _format_ui_candidates_text(nearest) if nearest else ""
+    spatial_ranks: dict[tuple[int, int, int, int], int] = {}
+    if segment_result is not None and nearest:
+        landmark_box = tuple(int(v) for v in nearest[0].bbox)
+        spatial_ranks = spatial_region_rank_for_detections(
+            landmark_box,
+            segment_result,
+            [_ui_detection_to_segment(det) for det in all_detections],
+            cursor_xy=(local_x, local_y),
+        )
+    candidate_dicts = [
+        _detection_to_dict(
+            det,
+            spatial_region_rank=spatial_ranks.get(tuple(int(v) for v in det.bbox), 0),
+        )
+        for det in nearest
+    ]
+    if candidate_dicts:
+        _annotate_clicked_char_target(bgr, candidate_dicts, local_x, local_y)
+    return candidate_dicts, candidate_text
+
+
+def _yolo_ocr_fallback_vision_from_detections(
+    bgr: np.ndarray,
+    detections: list[UiDetection],
+    local_x: int,
+    local_y: int,
+) -> dict[str, Any] | None:
+    """Build a compact YOLO+OCR twin vision ranked at the click point."""
+    if not detections:
+        return None
+    candidate_dicts, candidate_text = _rank_detections_near_point(
+        bgr, detections, local_x, local_y
+    )
+    if not candidate_dicts:
+        return None
+    twin: dict[str, Any] = {
+        "used_vision": True,
+        "candidate_text": candidate_text,
+        "local_cursor": (local_x, local_y),
+        "candidates": candidate_dicts,
+        "detection_count": len(detections),
+        "field_context": format_field_context_hint(
+            {
+                "candidates": candidate_dicts,
+                "local_cursor": (local_x, local_y),
+            }
+        ),
+        "vision_path": "yolo_ocr",
+    }
+    track = annotate_scrollbar_track(
+        {
+            "candidates": candidate_dicts,
+            "candidate_text": candidate_text,
+        },
+        local_x=local_x,
+        local_y=local_y,
+        all_detections=detections,
+        require_point_inside=True,
+    )
+    if track is not None:
+        twin["scrollbar_track"] = track
+        twin["candidates"] = candidate_dicts
+        twin["candidate_text"] = candidate_text
+    return twin
 
 
 def _compact_vision_point(result: dict[str, Any]) -> dict[str, Any]:
@@ -4043,6 +4267,9 @@ def _compact_vision_point(result: dict[str, Any]) -> dict[str, Any]:
     if isinstance(track, dict):
         compact["scrollbar_track"] = track
     _copy_recorded_vision_mode(result, compact)
+    twin = result.get("yolo_ocr_fallback_vision")
+    if isinstance(twin, dict) and isinstance(twin.get("candidates"), list) and twin["candidates"]:
+        compact["yolo_ocr_fallback_vision"] = twin
     return compact
 
 
@@ -4292,21 +4519,26 @@ def run_pointer_event_yolo_ocr(
                 scrollbar_bbox=start_track["bbox"],
             )
         if persist_debug:
+            filtered_payload: dict[str, Any] = {
+                "event_index": event.index,
+                "local_cursor": list(end_local),
+                "candidate_text": end_compact["candidate_text"],
+                "candidates": end_compact["candidates"],
+                "detection_count": end_compact.get("detection_count", 0),
+                "source_fingerprint": fingerprint,
+            }
+            if isinstance(end_compact.get("scrollbar_track"), dict):
+                filtered_payload["scrollbar_track"] = end_compact["scrollbar_track"]
+            twin_block = _persistable_yolo_ocr_fallback(
+                end_compact.get("yolo_ocr_fallback_vision")
+                if isinstance(end_compact.get("yolo_ocr_fallback_vision"), dict)
+                else None
+            )
+            if twin_block is not None:
+                filtered_payload["yolo_ocr_fallback"] = twin_block
             write_json(
                 run_dir / "yolo_ocr" / f"event_{event.index:03d}_end_filtered.json",
-                {
-                    "event_index": event.index,
-                    "local_cursor": list(end_local),
-                    "candidate_text": end_compact["candidate_text"],
-                    "candidates": end_compact["candidates"],
-                    "detection_count": end_compact.get("detection_count", 0),
-                    "source_fingerprint": fingerprint,
-                    **(
-                        {"scrollbar_track": end_compact["scrollbar_track"]}
-                        if isinstance(end_compact.get("scrollbar_track"), dict)
-                        else {}
-                    ),
-                },
+                filtered_payload,
             )
         combined_error = start_compact.get("yolo_error") or end_result.get("yolo_error")
         return {

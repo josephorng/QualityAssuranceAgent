@@ -230,6 +230,7 @@ def test_press_uses_settled_uia_without_findall(tmp_path: Path) -> None:
     session = RecordingSession(runs_root=tmp_path)
     session._run_dir = tmp_path
     session._last_settle_uia = snapshot
+    session._last_settle_uia_after_index = 0
     session._start_window_step = lambda _item: None  # type: ignore[method-assign]
     session._notify_event = lambda _event: None  # type: ignore[method-assign]
     session._start_settle_probe = lambda _event: None  # type: ignore[method-assign]
@@ -379,15 +380,16 @@ def test_settle_uia_publishes_for_next_press(tmp_path: Path) -> None:
         "src.recorder.uia_input_boxes.snapshot_uia_screen",
         side_effect=_snap,
     ):
-        session._collect_and_publish_settle_uia(10)
+        session._collect_and_publish_settle_uia(10, after_event_index=0)
         first = session._cached_uia_before(window_a, cursor_xy=(5, 5))  # type: ignore[arg-type]
-        session._collect_and_publish_settle_uia(20)
+        session._collect_and_publish_settle_uia(20, after_event_index=0)
         second = session._cached_uia_before(window_b, cursor_xy=(5, 5))  # type: ignore[arg-type]
     assert calls == [10, 20]
     assert first is not None and first["texts"][0]["text"] == "樹A"
     assert second is not None and second["texts"][0]["text"] == "樹B"
     assert first["hwnd"] == 10
     assert second["hwnd"] == 20
+    assert session._last_settle_uia_after_index == 0
 
 
 def test_cross_window_press_skips_stale_settle_cache(tmp_path: Path) -> None:
@@ -401,6 +403,7 @@ def test_cross_window_press_skips_stale_settle_cache(tmp_path: Path) -> None:
         "scrollbars": [],
         "texts": [{"bbox": [0, 0, 4, 4], "text": "舊窗"}],
     }
+    session._last_settle_uia_after_index = 0
     other = _copilot_window(20)
     assert session._cached_uia_before(other, cursor_xy=(5, 5)) is None  # type: ignore[arg-type]
 
@@ -431,6 +434,7 @@ def test_cross_window_press_starts_live_fallback_findall(tmp_path: Path) -> None
         "scrollbars": [],
         "texts": [{"bbox": [0, 0, 4, 4], "text": "舊窗"}],
     }
+    session._last_settle_uia_after_index = 0
     session._start_window_step = lambda _item: None  # type: ignore[method-assign]
     session._notify_event = lambda _event: None  # type: ignore[method-assign]
     session._start_settle_probe = lambda _event: None  # type: ignore[method-assign]
@@ -481,6 +485,7 @@ def test_matching_settle_cache_skips_live_fallback(tmp_path: Path) -> None:
         "scrollbars": [],
         "texts": [{"bbox": [0, 0, 4, 4], "text": "快取"}],
     }
+    session._last_settle_uia_after_index = 0
     window = _copilot_window(132566)
     with patch.object(
         session,
@@ -493,6 +498,84 @@ def test_matching_settle_cache_skips_live_fallback(tmp_path: Path) -> None:
         session._capture_pending_left_press(tmp_path, 20, 20)
     assert session._left_press_uia[1]["texts"][0]["text"] == "快取"
     assert session._left_press_uia_futures == {}
+
+
+def test_stale_settle_generation_misses_before_next_settle(
+    tmp_path: Path,
+) -> None:
+    """Settle after event 11 must not be reused once event 12 is already persisted."""
+    from src.recorder.capture import RecordingSession
+    from src.recorder.models import RecordedEvent
+
+    session = RecordingSession(runs_root=tmp_path)
+    window = _copilot_window(132566)
+    with patch(
+        "src.recorder.uia_input_boxes.snapshot_uia_screen",
+        return_value={
+            "window": [0, 0, 100, 80],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [0, 0, 4, 4], "text": "事件11後"}],
+        },
+    ):
+        session._collect_and_publish_settle_uia(132566, after_event_index=11)
+    session._events = [
+        RecordedEvent.from_dict(
+            {
+                "index": 11,
+                "timestamp_utc": "t11",
+                "kind": "click",
+                "cursor_xy": [1, 1],
+            }
+        ),
+        RecordedEvent.from_dict(
+            {
+                "index": 12,
+                "timestamp_utc": "t12",
+                "kind": "drag",
+                "cursor_xy": [2, 2],
+                "end_xy": [3, 3],
+            }
+        ),
+    ]
+    # Event 13 press while settle-after-12 has not published yet.
+    assert session._cached_uia_before(window, cursor_xy=(5, 5)) is None  # type: ignore[arg-type]
+
+
+def test_settle_generation_reuses_after_previous_event(
+    tmp_path: Path,
+) -> None:
+    """Settle published after event 12 is reused when that is still the last event."""
+    from src.recorder.capture import RecordingSession
+    from src.recorder.models import RecordedEvent
+
+    session = RecordingSession(runs_root=tmp_path)
+    window = _copilot_window(132566)
+    with patch(
+        "src.recorder.uia_input_boxes.snapshot_uia_screen",
+        return_value={
+            "window": [0, 0, 100, 80],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [0, 0, 4, 4], "text": "事件12後"}],
+        },
+    ):
+        session._collect_and_publish_settle_uia(132566, after_event_index=12)
+    session._events = [
+        RecordedEvent.from_dict(
+            {
+                "index": 12,
+                "timestamp_utc": "t12",
+                "kind": "drag",
+                "cursor_xy": [2, 2],
+                "end_xy": [3, 3],
+            }
+        ),
+    ]
+    hit = session._cached_uia_before(window, cursor_xy=(5, 5))  # type: ignore[arg-type]
+    assert hit is not None
+    assert hit["texts"][0]["text"] == "事件12後"
+    assert session._last_settle_uia_after_index == 12
 
 
 def test_window_step_findall_sets_drag_end_uia(tmp_path: Path) -> None:
@@ -554,6 +637,7 @@ def test_window_step_findall_sets_drag_end_uia(tmp_path: Path) -> None:
     assert raw["end_uia_snapshot"]["texts"][0]["text"] == "放開"
     assert session._last_settle_uia is not None
     assert session._last_settle_uia["hwnd"] == 77
+    assert session._last_settle_uia_after_index == 2
     assert notified
     assert notified[0].end_uia_snapshot["texts"][0]["text"] == "放開"
 

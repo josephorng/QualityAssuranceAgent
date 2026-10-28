@@ -998,8 +998,11 @@ class RecordingSession:
         self._left_press_click_windows: dict[int, ClickWindowInfo | None] = {}
         self._right_press_click_windows: dict[int, ClickWindowInfo | None] = {}
         # Settled FindAll from the previous window-step (or recording seed).
-        # Press copies this as uia_snapshot when hwnd matches.
+        # Press copies this as uia_snapshot when hwnd matches and the settle
+        # was published after that previous event (see after_index).
         self._last_settle_uia: dict[str, Any] | None = None
+        # Event index whose window-step published ``_last_settle_uia`` (0 = seed).
+        self._last_settle_uia_after_index: int | None = None
         self._left_press_uia: dict[int, dict[str, Any] | None] = {}
         self._right_press_uia: dict[int, dict[str, Any] | None] = {}
         # Fallback-only: live FindAll when settle cache misses / hwnd mismatches.
@@ -1179,6 +1182,7 @@ class RecordingSession:
             self._left_press_click_windows = {}
             self._right_press_click_windows = {}
             self._last_settle_uia = None
+            self._last_settle_uia_after_index = None
             self._left_press_uia = {}
             self._right_press_uia = {}
             self._left_press_uia_futures = {}
@@ -1219,6 +1223,7 @@ class RecordingSession:
             self._last_settle_windows = None
             self._last_settle_signals = None
             self._last_settle_uia = None
+            self._last_settle_uia_after_index = None
             self._start_windows = None
             self._start_signals = None
             self._settle_windows_ready.clear()
@@ -3625,7 +3630,10 @@ class RecordingSession:
                         dict(self._last_settle_signals) if self._last_settle_signals else None
                     )
                 # Seed naming tree so event 1 has a before FindAll without press-time walk.
-                self._collect_and_publish_settle_uia(self._foreground_hwnd())
+                self._collect_and_publish_settle_uia(
+                    self._foreground_hwnd(),
+                    after_event_index=0,
+                )
             finally:
                 self._settle_windows_ready.set()
                 done = (job.meta or {}).get("done")
@@ -4594,6 +4602,18 @@ class RecordingSession:
             )
         return False
 
+    def _previous_event_index_for_settle_cache(self) -> int:
+        """Event index the next press expects settle UIA to have been published after.
+
+        ``0`` means recording seed (no events yet). Otherwise the last persisted
+        event index — settle must be from that event's window-step, not an older
+        one still in flight for a later sibling.
+        """
+        with self._lock:
+            if not self._events:
+                return 0
+            return int(self._events[-1].index)
+
     def _cached_uia_before(
         self,
         click_window: ClickWindowInfo | None,
@@ -4604,17 +4624,35 @@ class RecordingSession:
 
         A ``None`` result triggers a press-time fallback FindAll under the click
         hwnd (async). Matching settle cache skips that live walk.
+
+        Reuse also requires the settle to have been published after the previous
+        event (or seed index 0). A same-hwnd cache from an older step is treated
+        as a miss so navigation/scroll between presses gets a fresh FindAll.
         """
+        previous_index = self._previous_event_index_for_settle_cache()
         with self._lock:
             cached = self._last_settle_uia
+            after_index = self._last_settle_uia_after_index
+        if after_index != previous_index:
+            return None
         if not self._uia_snapshot_matches_click(
             cached, click_window, cursor_xy=cursor_xy
         ):
             return None
         return self._copy_uia_snapshot(cached)
 
-    def _collect_and_publish_settle_uia(self, hwnd: int) -> dict[str, Any] | None:
-        """FindAll under one hwnd after settle; publish as next press before-cache."""
+    def _collect_and_publish_settle_uia(
+        self,
+        hwnd: int,
+        *,
+        after_event_index: int,
+    ) -> dict[str, Any] | None:
+        """FindAll under one hwnd after settle; publish as next press before-cache.
+
+        ``after_event_index`` is the event whose window-step produced this tree
+        (``0`` for recording seed). The next press reuses it only when that index
+        is still the previous event.
+        """
         hwnd = int(hwnd or 0)
         if hwnd <= 0:
             return None
@@ -4630,6 +4668,7 @@ class RecordingSession:
         snapshot["hwnd"] = hwnd
         with self._lock:
             self._last_settle_uia = snapshot
+            self._last_settle_uia_after_index = int(after_event_index)
         return self._copy_uia_snapshot(snapshot)
 
     def _opened_hwnd_from_change(
@@ -5583,7 +5622,10 @@ class RecordingSession:
         if not item.window_after_sealed:
             # One settled FindAll for the next press (and drag end_uia on this event).
             settle_hwnd = self._pick_settle_uia_hwnd(item, change, debug)
-            settle_snap = self._collect_and_publish_settle_uia(settle_hwnd)
+            settle_snap = self._collect_and_publish_settle_uia(
+                settle_hwnd,
+                after_event_index=int(item.event_index),
+            )
             if item.kind == "drag" and settle_snap is not None:
                 self._patch_event_uia_field(
                     item.event_index, "end_uia_snapshot", settle_snap

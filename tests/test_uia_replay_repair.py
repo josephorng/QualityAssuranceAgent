@@ -60,6 +60,26 @@ def test_ocr_far_from_recorded_text_does_not_repair() -> None:
     assert hit is None
 
 
+def test_choose_repairs_when_ocr_confirms_icon_chinese_id() -> None:
+    hit = _choose(
+        recorded_text="向上雙V箭頭",
+        ocr_boxes=[(_OCR_BOX, "向上雙V箭頭")],
+        uia_boxes=[(_UIA_BOX, "顯示桌面")],
+    )
+    assert hit is not None
+    assert hit.label == "顯示桌面"
+    assert hit.source == "findall"
+
+
+def test_choose_misses_when_icon_ocr_does_not_match() -> None:
+    hit = _choose(
+        recorded_text="向上雙V箭頭",
+        ocr_boxes=[(_OCR_BOX, "搜尋")],
+        uia_boxes=[(_UIA_BOX, "顯示桌面")],
+    )
+    assert hit is None
+
+
 def test_element_from_point_when_findall_is_empty() -> None:
     probe_box = (1020, 510, 30, 20)
 
@@ -494,3 +514,225 @@ def test_backfill_restores_report_yolo_line(tmp_path: Path) -> None:
     assert saved["yolo_ocr_fallback"]["instruction"] == yolo_instruction
     assert saved["yolo_ocr_fallback"]["tool_calls"][0]["name"] == "move_mouse"
     assert backfill_yolo_ocr_fallbacks(run) == 0
+
+
+def test_recorded_primary_resolves_pua_to_chinese_id() -> None:
+    from src.recorder.uia_replay_repair import _recorded_primary
+
+    box, text = _recorded_primary(
+        {
+            "candidates": [
+                {
+                    "bbox": [820, 1035, 31, 40],
+                    "text": "\ue059",
+                    "class_name": "element",
+                    "icons": [
+                        {
+                            "pua": "\ue059",
+                            "chinese_id": "向上雙V箭頭",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+    assert box == (820, 1035, 31, 40)
+    assert text == "向上雙V箭頭"
+
+
+def test_recorded_primary_keeps_unmapped_pua() -> None:
+    from src.recorder.uia_replay_repair import _recorded_primary
+
+    box, text = _recorded_primary(
+        {
+            "candidates": [
+                {
+                    "bbox": [10, 20, 16, 16],
+                    "text": "\ue059",
+                    "class_name": "element",
+                    "icons": None,
+                }
+            ]
+        }
+    )
+    assert box == (10, 20, 16, 16)
+    assert text == "\ue059"
+
+
+def test_replay_repair_slots_resolves_icon_pua_primary(tmp_path: Path) -> None:
+    from src.recorder.uia_replay_repair import replay_repair_slots
+
+    run = tmp_path / "recording"
+    (run / "events").mkdir(parents=True)
+    (run / "analysis").mkdir()
+    (run / "yolo_ocr").mkdir()
+    event = {
+        "index": 12,
+        "timestamp_utc": "t",
+        "kind": "click",
+        "button": "left",
+        "click_window": {
+            "hwnd": 5,
+            "title": "",
+            "process_name": "explorer.exe",
+            "rect": [0, 1032, 1920, 48],
+            "class_name": "Shell_TrayWnd",
+            "is_taskbar": True,
+        },
+        "uia_snapshot": {
+            "window": [0, 1032, 1920, 48],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [],
+        },
+    }
+    (run / "events" / "event_012.json").write_text(json.dumps(event), encoding="utf-8")
+    (run / "analysis" / "event_012.json").write_text(
+        json.dumps(
+            {
+                "event_index": 12,
+                "instruction": (
+                    "（YOLO+OCR）將滑鼠移到「向上雙V箭頭」圖示，並點擊滑鼠一下。"
+                ),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    payload = {
+        "vision_path": "yolo_ocr",
+        "candidates": [
+            {
+                "bbox": [820, 1035, 31, 40],
+                "text": "\ue059",
+                "class_name": "element",
+                "icons": [{"pua": "\ue059", "chinese_id": "向上雙V箭頭"}],
+            }
+        ],
+    }
+    (run / "yolo_ocr" / "event_012.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+    slots = replay_repair_slots(run, 12, [{"name": "move_mouse", "arguments": {}}])
+    assert len(slots) == 1 and slots[0] is not None
+    assert slots[0].recorded_text == "向上雙V箭頭"
+    assert slots[0].recorded_bbox == (820, 1035, 31, 40)
+
+
+def test_write_replaces_icon_instruction_anchor(tmp_path: Path) -> None:
+    run = tmp_path / "recording"
+    (run / "events").mkdir(parents=True)
+    (run / "analysis").mkdir()
+    (run / "yolo_ocr").mkdir()
+    event = {
+        "index": 12,
+        "timestamp_utc": "2026-10-21T00:00:00+00:00",
+        "kind": "click",
+        "button": "left",
+        "click_window": {
+            "hwnd": 5,
+            "title": "",
+            "process_name": "explorer.exe",
+            "rect": [0, 1032, 1920, 48],
+            "is_maximized": False,
+            "class_name": "Shell_TrayWnd",
+            "is_taskbar": True,
+        },
+        "uia_snapshot": {
+            "window": [0, 1032, 1920, 48],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [],
+        },
+    }
+    event_path = run / "events" / "event_012.json"
+    event_path.write_text(json.dumps(event), encoding="utf-8")
+    yolo_instruction = (
+        "（YOLO+OCR）將滑鼠移到「向上雙V箭頭」圖示（在「搜尋」文字的右邊），並點擊滑鼠一下。"
+    )
+    (run / "analysis" / "event_012.json").write_text(
+        json.dumps(
+            {"event_index": 12, "instruction": yolo_instruction},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    from src.recorder.models import RecordedEvent
+    from src.recorder.vision_context import vision_source_fingerprint
+
+    event_obj = RecordedEvent.from_dict(event)
+    yolo_payload = {
+        "source_fingerprint": vision_source_fingerprint(event_obj),
+        "candidates": [
+            {
+                "bbox": [820, 1035, 31, 40],
+                "center": [835, 1055],
+                "class_name": "element",
+                "text": "\ue059",
+                "icons": [{"pua": "\ue059", "chinese_id": "向上雙V箭頭"}],
+            }
+        ],
+        "candidate_text": "向上雙V箭頭",
+        "detection_count": 1,
+        "vision_path": "yolo_ocr",
+        "vision_path_reason": "沒有 UIA 快照",
+    }
+    yolo_path = run / "yolo_ocr" / "event_012.json"
+    yolo_path.write_text(json.dumps(yolo_payload, ensure_ascii=False), encoding="utf-8")
+    request = UiaReplayRepairRequest(
+        recording_dir=run,
+        event_index=12,
+        side="click",
+        recorded_bbox=(820, 1035, 31, 40),
+        recorded_text="向上雙V箭頭",
+        recorded_window_xywh=(0, 1032, 1920, 48),
+    )
+    instruction = write_uia_replay_repair(
+        request,
+        label="顯示桌面",
+        source="findall",
+        bbox=(800, 1040, 40, 30),
+        others=[],
+    )
+    assert instruction is not None
+    assert instruction.startswith("（UIA）")
+    assert "顯示桌面" in instruction
+    assert "向上雙V箭頭" not in instruction
+    saved = json.loads((run / "analysis" / "event_012.json").read_text(encoding="utf-8"))
+    assert saved["uia_replay_repair"]["label"] == "顯示桌面"
+    assert saved["yolo_ocr_fallback"]["instruction"] == yolo_instruction
+
+
+def test_replace_anchor_uses_chinese_id_not_pua() -> None:
+    from src.recorder.uia_replay_repair import _replace_anchor
+
+    request = UiaReplayRepairRequest(
+        recording_dir=Path("."),
+        event_index=12,
+        side="click",
+        recorded_bbox=(820, 1035, 31, 40),
+        recorded_text="向上雙V箭頭",
+        recorded_window_xywh=(0, 1032, 1920, 48),
+    )
+    rewritten = _replace_anchor(
+        "（YOLO+OCR）將滑鼠移到「向上雙V箭頭」圖示，並點擊滑鼠一下。",
+        request,
+        "顯示桌面",
+    )
+    assert rewritten == "（YOLO+OCR）將滑鼠移到「顯示桌面」圖示，並點擊滑鼠一下。"
+    pua_request = UiaReplayRepairRequest(
+        recording_dir=Path("."),
+        event_index=12,
+        side="click",
+        recorded_bbox=(820, 1035, 31, 40),
+        recorded_text="\ue059",
+        recorded_window_xywh=(0, 1032, 1920, 48),
+    )
+    assert (
+        _replace_anchor(
+            "（YOLO+OCR）將滑鼠移到「向上雙V箭頭」圖示，並點擊滑鼠一下。",
+            pua_request,
+            "顯示桌面",
+        )
+        is None
+    )

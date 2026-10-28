@@ -1906,9 +1906,10 @@ def _detect_mouse_targets_from_bgr(
         original_scrollbar_bboxes_out=original_scrollbar_bboxes_out,
     )
 
-    if defer_ocr and ocr_boxes:
-        if pending_out is not None:
-            pending_out.append(pending)
+    # Defer only when the caller can store finish state. Without ``pending_out``,
+    # returning early would drop leftover OCR entirely (no text candidates).
+    if defer_ocr and ocr_boxes and pending_out is not None:
+        pending_out.append(pending)
         candidates = _finalize_mouse_candidates(
             list(partial_candidates),
             used_uia_scrollbar=used_uia_scrollbar,
@@ -4489,6 +4490,24 @@ def _labeled_text_boxes(
     return boxes
 
 
+def _labeled_ocr_confirm_boxes(
+    detections: list[UiDetection],
+) -> list[tuple[tuple[int, int, int, int], str]]:
+    """OCR labels for UIA replay repair presence checks (text and icon ids)."""
+    boxes: list[tuple[tuple[int, int, int, int], str]] = []
+    for det in detections:
+        if str(det.source or "") == "uia":
+            continue
+        text = str(det.text or "").strip()
+        if det.class_name == "text" and text and not _text_is_pua_only(text):
+            boxes.append((det.bbox, text))
+        for icon in det.icons or []:
+            chinese_id = str(icon.get("chinese_id") or "").strip()
+            if chinese_id:
+                boxes.append((det.bbox, chinese_id))
+    return boxes
+
+
 def _uia_path_text_count(detections: list[UiDetection]) -> int:
     return sum(
         1
@@ -5072,6 +5091,10 @@ async def find_mouse_point(
             _log_info("move_mouse uia_first=hit; skipping YOLO")
 
     if uia_first_chosen is None:
+        # Defer leftover OCR only when a UIA soft-select might skip it.
+        # （YOLO+OCR）never commits via UIA, so OCR must run during capture
+        # (and overlaps the parallel UIA replay-repair walk when present).
+        defer_ocr = bool(allow_uia_select)
         if grabbed_frames:
             vision = await asyncio.to_thread(
                 _finish_captured_mouse_candidates,
@@ -5096,7 +5119,7 @@ async def find_mouse_point(
                 click_window=click_window,
                 caption_roi_screen=caption_roi_screen,
                 landmark_geometry=landmark_geometry,
-                defer_ocr=True,
+                defer_ocr=defer_ocr,
             )
         monitor_indices, image_paths, captured, detections, vision_timing = vision
         capture_s = float(vision_timing.get("capture_s", 0.0))
@@ -5110,6 +5133,14 @@ async def find_mouse_point(
                 if isinstance(ocr_pending_raw, list) and ocr_pending_raw
                 else []
             )
+            if (
+                vision_timing.get("uia_first_pending")
+                and not ocr_pendings
+            ):
+                _log_info(
+                    "move_mouse ocr deferred flag set but _ocr_pending missing; "
+                    "text OCR will not run"
+                )
 
     def _timing_meta(*, select_s: float, select_phase: str) -> dict[str, Any]:
         return _build_move_mouse_timing(
@@ -5170,8 +5201,8 @@ async def find_mouse_point(
         capture_s = float(vision_timing.get("capture_s", 0.0))
         ocr_pendings = []
     elif ocr_pendings and not allow_uia_select:
-        # YOLO+OCR instructions skip the UIA commit, so the deferred OCR pass
-        # still has to finish or the click has no text candidates.
+        # Safety net: （YOLO+OCR）normally runs OCR during capture (defer_ocr=
+        # False). If a pending still arrives, finish it before select/repair.
         detections, vision_timing = await asyncio.to_thread(
             _finish_deferred_ocr_pendings,
             ocr_pendings,
@@ -5179,6 +5210,14 @@ async def find_mouse_point(
         )
         capture_s = float(vision_timing.get("capture_s", 0.0))
         ocr_pendings = []
+        _write_yolo_ocr_sidecars(
+            captured, image_paths, detections, vision_timing
+        )
+        if detections:
+            _log_info(
+                "move_mouse all_ocr_candidates (after deferred OCR):\n"
+                + _format_ui_candidates_text(detections, include_geometry=True)
+            )
 
     if repair_yolo:
         from src.recorder.uia_replay_repair import attempt_uia_replay_repair
@@ -5210,7 +5249,7 @@ async def find_mouse_point(
             repair_request,
             click_window,
             _labeled_text_boxes(uia_dets, source="uia"),
-            _labeled_text_boxes(detections, source="ocr"),
+            _labeled_ocr_confirm_boxes(detections),
         )
         if repaired is not None:
             gx, gy, repair_meta = repaired

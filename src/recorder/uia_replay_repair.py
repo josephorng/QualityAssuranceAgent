@@ -655,12 +655,27 @@ def _load_request(
     )
 
 
+def _first_icon_chinese_id(cand: dict[str, Any]) -> str:
+    icons = cand.get("icons")
+    if not isinstance(icons, list):
+        return ""
+    for icon in icons:
+        if not isinstance(icon, dict):
+            continue
+        chinese_id = str(icon.get("chinese_id") or "").strip()
+        if chinese_id:
+            return chinese_id
+    return ""
+
+
 def _recorded_primary(payload: dict[str, Any] | None) -> tuple[RectXywh, str] | None:
     if not isinstance(payload, dict):
         return None
     candidates = payload.get("candidates")
     if not isinstance(candidates, list):
         return None
+    from cua_mcp.icon_map import text_is_pua_only
+
     for cand in candidates:
         if not isinstance(cand, dict):
             continue
@@ -674,6 +689,10 @@ def _recorded_primary(payload: dict[str, Any] | None) -> tuple[RectXywh, str] | 
             continue
         if box[2] <= 0 or box[3] <= 0:
             continue
+        if text_is_pua_only(text):
+            chinese_id = _first_icon_chinese_id(cand)
+            if chinese_id:
+                return box, chinese_id
         return box, text
     return None
 

@@ -5664,6 +5664,55 @@ def test_detect_defer_ocr_skips_recognize_until_finish(
     assert "記事本" not in texts
 
 
+def test_detect_defer_ocr_without_pending_out_still_recognizes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """defer_ocr without pending_out must not drop leftover OCR."""
+    import numpy as np
+
+    from cua_mcp.select_mouse_target import _detect_mouse_targets_from_bgr
+
+    bgr = np.zeros((100, 200, 3), dtype=np.uint8)
+    xyxy = np.asarray([[100, 10, 160, 30]], dtype=np.float32)
+    scores = np.asarray([0.9], dtype=np.float32)
+    class_ids = np.asarray([YOLO_CLASS_TEXT], dtype=np.int32)
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.run_yolo_onnx_end2end",
+        lambda *_a, **_k: (xyxy, scores, class_ids),
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.merge_yolo_inputs_with_line_rectangles",
+        lambda *_a, **_k: [],
+    )
+    ocr_calls: list[list[tuple[int, int, int, int]]] = []
+
+    def fake_ocr(_bgr, boxes, modes, **_k):
+        ocr_calls.append(list(boxes))
+        return [["Console"]][: len(boxes)], 0, len(boxes)
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._recognize_ocr_boxes",
+        fake_ocr,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._retry_empty_unknown_icon_ocr",
+        lambda _bgr, cands: cands,
+    )
+    _patch_detect_passthrough(monkeypatch)
+
+    timing: dict = {}
+    dets = _detect_mouse_targets_from_bgr(
+        bgr,
+        defer_ocr=True,
+        pending_out=None,
+        timing_out=timing,
+        ocr_class_ids=frozenset({YOLO_CLASS_TEXT}),
+    )
+    assert len(ocr_calls) == 1
+    assert timing.get("uia_first_pending") is not True
+    assert any(d.text == "Console" for d in dets)
+
+
 def test_anchor_suffix_and_uia_control_type_filter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

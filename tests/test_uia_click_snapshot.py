@@ -844,6 +844,54 @@ async def test_yolo_mode_instruction_skips_findall(
 
 
 @pytest.mark.asyncio
+async def test_yolo_mode_capture_does_not_defer_ocr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """（YOLO+OCR）must OCR during capture; deferring left text anchors unmatched."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from cua_mcp.select_mouse_target import _detection_from_bbox
+    from cua_mcp.yolo_onnx import YOLO_CLASS_TEXT
+
+    ocr = _detection_from_bbox((20, 20, 40, 16), YOLO_CLASS_TEXT, text="Console", source="ocr")
+    capture_kwargs: dict[str, object] = {}
+
+    def fake_capture(*_a, **kwargs):
+        capture_kwargs.update(kwargs)
+        frame = np.zeros((40, 80, 3), dtype=np.uint8)
+        return (
+            [1],
+            ["shot.png"],
+            [(1, frame)],
+            [ocr],
+            {
+                "capture_s": 0.01,
+                "yolo_s": 0.1,
+                "line_s": 0.0,
+                "uia_input_s": 0.0,
+                "uia_scrollbar_s": 0.0,
+                "uia_text_s": 0.0,
+                "ocr_s": 0.2,
+                "icon_ocr_retry_s": 0.0,
+                "total_s": 0.31,
+            },
+        )
+
+    def fake_finish(*_a, **_k):
+        raise AssertionError("yolo_ocr capture must not leave deferred OCR")
+
+    monkeypatch.setattr(smt, "_uia_only_detections_for_click_window", fake_finish)
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_finish)
+    monkeypatch.setattr(smt, "_capture_and_detect_mouse_candidates", fake_capture)
+    monkeypatch.setattr(smt, "_finish_deferred_ocr_pendings", fake_finish)
+    found = await smt.find_mouse_point("（YOLO+OCR）「Console」文字")
+    assert capture_kwargs.get("defer_ocr") is False
+    assert found is not None
+    assert found[2]["target_text"] == "Console"
+
+
+@pytest.mark.asyncio
 async def test_yolo_mode_finishes_deferred_ocr(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

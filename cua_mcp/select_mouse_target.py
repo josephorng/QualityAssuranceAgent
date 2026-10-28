@@ -283,6 +283,34 @@ def _offset_detection(det: UiDetection, left: int, top: int) -> UiDetection:
 DEFAULT_DEDUPE_OVERLAP_IOU_THRESHOLD: float = 0.5
 
 
+def _prefer_replace_xywh_boxes(
+    yolo_boxes: list[tuple[int, int, int, int]],
+    uia_boxes: list[tuple[int, int, int, int]],
+    *,
+    iou_threshold: float = DEFAULT_DEDUPE_OVERLAP_IOU_THRESHOLD,
+) -> tuple[list[tuple[int, int, int, int]], list[tuple[int, int, int, int]]]:
+    """Prefer UIA boxes; drop YOLO boxes that overlap any UIA box by IoU.
+
+    Returns ``(merged_boxes, uia_boxes_kept)`` where ``merged_boxes`` is UIA
+    first then remaining YOLO, and ``uia_boxes_kept`` is the UIA list used for
+    ``source=\"uia\"`` tagging (empty when UIA was empty).
+    """
+    if not uia_boxes:
+        return list(yolo_boxes), []
+    kept_uia = [
+        (int(b[0]), int(b[1]), int(b[2]), int(b[3])) for b in uia_boxes
+    ]
+    remaining_yolo: list[tuple[int, int, int, int]] = []
+    for box in yolo_boxes:
+        yolo_box = (int(box[0]), int(box[1]), int(box[2]), int(box[3]))
+        if any(
+            iou_xywh(yolo_box, uia_box) > iou_threshold for uia_box in kept_uia
+        ):
+            continue
+        remaining_yolo.append(yolo_box)
+    return kept_uia + remaining_yolo, kept_uia
+
+
 def _detection_content_key(det: UiDetection) -> tuple[str, str]:
     """Identity used for overlap dedupe: OCR text plus sorted icon chinese_ids."""
     text = (det.text or "").strip()
@@ -1437,13 +1465,13 @@ def _detect_mouse_targets_from_bgr(
     overlap by a pixel stay separate; results are sorted in reading order. PUA-only element OCR with 2+ icons is split into one
     single-icon detection per glyph (via character spans).
 
-    After YOLO, when a live ``live_input_hwnd`` is provided, one UIA FindAll
-    (Edit|Document|ScrollBar|Text|Hyperlink|ListItem|Button|MenuItem|TreeItem|
-    DataItem) prefer-replaces YOLO inputs and scrollbars independently, and uses
-    labeled controls as OCR assist (split glued YOLO text blobs, IoU fill,
-    ROI/blob orphans).
+    After YOLO, UIA inputs/scrollbars prefer-replace overlapping YOLO boxes of
+    the same class. Source order: ``uia_prefetched`` when provided; else one
+    live FindAll via ``live_input_hwnd`` + monitor offset + window rect
+    (Edit|Document|ScrollBar|… labeled texts stay debug-only on this path).
     Non-empty UIA inputs skip Hough line-refine (no H-scrollbar overlap drop).
-    Non-empty UIA scrollbars skip arrow-pair create/drop.
+    Non-empty UIA scrollbars set ``used_uia_scrollbar`` so finalize skips
+    arrow-pair create/drop.
     Otherwise horizontal line-pair rectangles refine YOLO ``input`` boxes
     (IoU merge; still drops boxes overlapping horizontal scrollbars).
 
@@ -1619,21 +1647,101 @@ def _detect_mouse_targets_from_bgr(
     uia_labeled_texts: list[tuple[tuple[int, int, int, int], str]] = []
     debug_uia_inputs: list[tuple[int, int, int, int]] = []
     debug_uia_scrollbars: list[tuple[int, int, int, int]] = []
-    # A supplied snapshot is debug-only. Candidates on this path are YOLO + OCR.
+    uia_inputs: list[tuple[int, int, int, int]] = []
+    uia_scrollbars: list[tuple[int, int, int, int]] = []
     if uia_prefetched is not None:
-        uia_inputs, uia_scrollbars, uia_labeled_texts = uia_prefetched
+        pref_inputs, pref_scrollbars, uia_labeled_texts = uia_prefetched
+        uia_inputs = list(pref_inputs or [])
+        uia_scrollbars = list(pref_scrollbars or [])
+    elif (
+        live_input_hwnd is not None
+        and live_input_monitor_offset is not None
+        and live_input_window_screen_xywh is not None
+    ):
+        from src.recorder.uia_input_boxes import (
+            list_uia_input_and_scrollbar_boxes_image_local,
+        )
+
+        findall_started = time.perf_counter()
+        try:
+            live_inputs, live_scrollbars, live_labeled = (
+                list_uia_input_and_scrollbar_boxes_image_local(
+                    int(live_input_hwnd),
+                    monitor_offset=(
+                        int(live_input_monitor_offset[0]),
+                        int(live_input_monitor_offset[1]),
+                    ),
+                    image_w=w,
+                    image_h=h,
+                    ocr_roi=ocr_roi,
+                    ocr_roi_pad=roi_pad,
+                    window_screen_xywh=live_input_window_screen_xywh,
+                )
+            )
+        except Exception as exc:
+            _log_info(
+                "move_mouse uia findall failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            live_inputs, live_scrollbars, live_labeled = [], [], []
+        findall_elapsed = time.perf_counter() - findall_started
+        uia_inputs = list(live_inputs or [])
+        uia_scrollbars = list(live_scrollbars or [])
+        uia_labeled_texts = list(live_labeled or [])
+        # One FindAll covers inputs + scrollbars; attribute time once.
         if uia_inputs:
-            debug_uia_inputs = list(uia_inputs)
-        if uia_scrollbars:
-            debug_uia_scrollbars = list(uia_scrollbars)
+            uia_input_elapsed = findall_elapsed
+        elif uia_scrollbars:
+            uia_scrollbar_elapsed = findall_elapsed
+        else:
+            uia_input_elapsed = findall_elapsed
+    if uia_inputs:
+        debug_uia_inputs = list(uia_inputs)
+    if uia_scrollbars:
+        debug_uia_scrollbars = list(uia_scrollbars)
+
+    uia_input_kept: list[tuple[int, int, int, int]] = []
+    uia_scrollbar_kept: list[tuple[int, int, int, int]] = []
+    if uia_inputs:
+        input_boxes, uia_input_kept = _prefer_replace_xywh_boxes(
+            input_boxes, uia_inputs
+        )
         _log_info(
-            "move_mouse uia snapshot ignored for candidates "
-            f"uia_inputs={len(uia_inputs or [])} "
-            f"uia_scrollbars={len(uia_scrollbars or [])} "
+            "move_mouse uia inputs prefer-replace "
+            f"uia={len(uia_input_kept)} total_inputs={len(input_boxes)}"
+        )
+    if uia_scrollbars:
+        yolo_scrollbars = [
+            bbox
+            for bbox, cls_id in other_non_ocr
+            if cls_id == YOLO_CLASS_SCROLLBAR
+        ]
+        other_non_scroll = [
+            (bbox, cls_id)
+            for bbox, cls_id in other_non_ocr
+            if cls_id != YOLO_CLASS_SCROLLBAR
+        ]
+        merged_scrollbars, uia_scrollbar_kept = _prefer_replace_xywh_boxes(
+            yolo_scrollbars, uia_scrollbars
+        )
+        other_non_ocr = other_non_scroll + [
+            (bbox, YOLO_CLASS_SCROLLBAR) for bbox in merged_scrollbars
+        ]
+        used_uia_scrollbar = bool(uia_scrollbar_kept)
+        _log_info(
+            "move_mouse uia scrollbars prefer-replace "
+            f"uia={len(uia_scrollbar_kept)} "
+            f"total_scrollbars={len(merged_scrollbars)} "
+            f"used_uia_scrollbar={used_uia_scrollbar}"
+        )
+    elif uia_prefetched is not None or live_input_hwnd is not None:
+        _log_info(
+            "move_mouse uia textless controls "
+            f"uia_inputs={len(uia_inputs)} uia_scrollbars=0 "
             f"uia_texts={len(uia_labeled_texts)}"
         )
-    _ = live_input_hwnd, live_input_monitor_offset, live_input_window_screen_xywh
-    if refine_with_uia:
+
+    if refine_with_uia and not uia_input_kept:
         pre_merge_inputs = (
             list(input_boxes) if original_input_bboxes_out is not None else []
         )
@@ -1669,10 +1777,32 @@ def _detect_mouse_targets_from_bgr(
                 for b in input_boxes
                 if _bbox_center_in_ocr_roi(b, ocr_roi, pad=roi_pad)
             ]
-    non_ocr: list[tuple[tuple[int, int, int, int], int]] = [
-        (bbox, YOLO_CLASS_INPUT) for bbox in input_boxes
+    elif refine_with_uia and uia_input_kept:
+        _log_info(
+            "move_mouse input-box line refine skipped; non-empty UIA inputs"
+        )
+    uia_input_set = set(uia_input_kept)
+    uia_scrollbar_set = set(uia_scrollbar_kept)
+    non_ocr: list[tuple[tuple[int, int, int, int], int, str]] = [
+        (
+            bbox,
+            YOLO_CLASS_INPUT,
+            "uia" if bbox in uia_input_set else "yolo",
+        )
+        for bbox in input_boxes
     ]
-    non_ocr.extend(other_non_ocr)
+    non_ocr.extend(
+        (
+            bbox,
+            cls_id,
+            (
+                "uia"
+                if cls_id == YOLO_CLASS_SCROLLBAR and bbox in uia_scrollbar_set
+                else "yolo"
+            ),
+        )
+        for bbox, cls_id in other_non_ocr
+    )
 
     # YOLO text and element boxes are OCR'd as a set. UIA names are not mixed in.
     merged_text_boxes = (
@@ -1738,9 +1868,9 @@ def _detect_mouse_targets_from_bgr(
             ocr_class_id_list.append(YOLO_CLASS_ELEMENT)
 
     partial_candidates: list[UiDetection] = []
-    for bbox, cls_id in non_ocr:
+    for bbox, cls_id, source in non_ocr:
         partial_candidates.append(
-            _detection_from_bbox(bbox, cls_id, source="yolo")
+            _detection_from_bbox(bbox, cls_id, source=source)
         )
     for bbox, label in uia_text_detections:
         partial_candidates.append(
@@ -4520,7 +4650,12 @@ def _finish_captured_mouse_candidates(
     list[UiDetection],
     dict[str, Any],
 ]:
-    """YOLO+OCR on frames already grabbed. Does not read UIA into the candidate list."""
+    """YOLO+OCR on frames already grabbed.
+
+    When ``click_window`` resolves to a live hwnd, UIA inputs/scrollbars
+    prefer-replace overlapping YOLO boxes inside ``_detect_mouse_targets_from_bgr``.
+    UIA labeled text is not mixed into OCR candidates.
+    """
     from src.recorder.landmark_geometry import landmark_geometry_centers
 
     vision_timing: dict[str, Any] = {}

@@ -1316,9 +1316,15 @@ def test_detect_recording_mouse_targets_finishes_ocr_when_uia_thin(
     ocr = _detection_from_bbox(
         (95, 95, 20, 20), YOLO_CLASS_TEXT, text="搜尋", source="ocr"
     )
+    thin_prefetched = (
+        None,
+        None,
+        [((95, 95, 80, 24), "https://m365.cloud.microsoft/hwav2/a/b")],
+    )
 
     def fake_detect(*_a, **kwargs):
-        assert kwargs.get("uia_prefetched") is None
+        # YOLO fallback still receives the snapshot so inputs/scrollbars can merge.
+        assert kwargs.get("uia_prefetched") == thin_prefetched
         return [ocr]
 
     monkeypatch.setattr(
@@ -1331,11 +1337,7 @@ def test_detect_recording_mouse_targets_finishes_ocr_when_uia_thin(
         timing_out=timing,
         local_x=100,
         local_y=100,
-        uia_prefetched=(
-            None,
-            None,
-            [((95, 95, 80, 24), "https://m365.cloud.microsoft/hwav2/a/b")],
-        ),
+        uia_prefetched=thin_prefetched,
     )
     assert timing.get("vision_path") == "yolo_ocr"
     assert timing.get("vision_path_reason") == "可用 UIA 文字不足（0/8）"
@@ -1352,29 +1354,68 @@ def test_detect_recording_empty_click_uses_yolo_neighbor(
     neighbor = _detection_from_bbox(
         (10, 10, 40, 14), YOLO_CLASS_TEXT, text="搜尋", source="ocr"
     )
+    labeled = [
+        ((10, 10 + i * 16, 40, 12), f"列{i:02d}")
+        for i in range(_MIN_NEARBY_TEXT_CANDIDATES)
+    ]
+    empty_click_prefetched = (None, None, labeled)
 
     def fake_detect(*_a, **kwargs):
-        assert kwargs.get("uia_prefetched") is None
+        assert kwargs.get("uia_prefetched") == empty_click_prefetched
         return [neighbor]
 
     monkeypatch.setattr(
         "src.recorder.vision_context._detect_mouse_targets_from_bgr",
         fake_detect,
     )
-    labeled = [
-        ((10, 10 + i * 16, 40, 12), f"列{i:02d}")
-        for i in range(_MIN_NEARBY_TEXT_CANDIDATES)
-    ]
     detections, timing = _detect_recording_mouse_targets(
         bgr,
         local_x=300,
         local_y=150,
-        uia_prefetched=(None, None, labeled),
+        uia_prefetched=empty_click_prefetched,
     )
     assert timing.get("vision_path") == "yolo_ocr"
     assert timing.get("vision_path_reason") == "點擊處沒有可用的 UIA 文字"
     assert [d.text for d in detections] == ["搜尋"]
     assert all(d.source != "uia" for d in detections)
+
+
+def test_detect_recording_yolo_fallback_merges_uia_scrollbar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sparse UIA text still prefer-replaces a UIA scrollbar into YOLO candidates."""
+    from cua_mcp.yolo_onnx import YOLO_CLASS_SCROLLBAR
+
+    bgr = np.zeros((200, 400, 3), dtype=np.uint8)
+    yolo_bar = _detection_from_bbox(
+        (180, 10, 15, 80), YOLO_CLASS_SCROLLBAR, source="yolo"
+    )
+    uia_bar_bbox = (178, 8, 18, 100)
+    prefetched = (None, [uia_bar_bbox], [((10, 10, 40, 14), "名稱")])
+
+    def fake_detect(*_a, **kwargs):
+        assert kwargs.get("uia_prefetched") == prefetched
+        return [
+            yolo_bar,
+            _detection_from_bbox(
+                uia_bar_bbox, YOLO_CLASS_SCROLLBAR, source="uia"
+            ),
+        ]
+
+    monkeypatch.setattr(
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
+        fake_detect,
+    )
+    detections, timing = _detect_recording_mouse_targets(
+        bgr,
+        local_x=185,
+        local_y=50,
+        uia_prefetched=prefetched,
+    )
+    assert timing.get("vision_path") == "yolo_ocr"
+    assert any(
+        d.source == "uia" and d.class_id == YOLO_CLASS_SCROLLBAR for d in detections
+    )
 
 
 @pytest.mark.asyncio

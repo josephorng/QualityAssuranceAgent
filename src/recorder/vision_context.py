@@ -3421,7 +3421,12 @@ def _detect_recording_mouse_targets(
     | None = None,
     forced_scrollbar_bbox: tuple[int, int, int, int] | None = None,
 ) -> tuple[list[UiDetection], dict[str, Any]]:
-    """UIA candidates when the usable-label gate passes; otherwise YOLO+OCR only."""
+    """UIA candidates when the usable-label gate passes; otherwise YOLO+OCR.
+
+    On the YOLO fallback, ``uia_prefetched`` is still passed so UIA inputs and
+    scrollbars can prefer-replace overlapping YOLO boxes. UIA labeled text is
+    not mixed into OCR candidates.
+    """
     _ = live_input_hwnd, live_input_monitor_offset, live_input_window_screen_xywh
     vision_timing: dict[str, Any] = timing_out if timing_out is not None else {}
     uia_detections = _detections_from_uia_prefetched(uia_prefetched)
@@ -3448,9 +3453,12 @@ def _detect_recording_mouse_targets(
         timing_out=vision_timing,
         defer_ocr=False,
         refine_with_uia=True,
-        uia_prefetched=None,
+        # Prefer-replace UIA inputs/scrollbars into YOLO+OCR candidates; texts stay debug-only.
+        uia_prefetched=uia_prefetched,
     )
-    _attach_unused_uia_debug(vision_timing, uia_prefetched)
+    # Detector already writes UIA input/scrollbar/text into debug_layers when prefetched.
+    if uia_prefetched is not None and "debug_layers" not in vision_timing:
+        _attach_unused_uia_debug(vision_timing, uia_prefetched)
     vision_timing["vision_path"] = "yolo_ocr"
     vision_timing["vision_path_reason"] = skip_reason
     vision_timing["recording_ocr_deferred"] = False

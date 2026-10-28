@@ -117,6 +117,10 @@ def test_detect_without_snapshot_returns_only_yolo_ocr(
         lambda *_a, **_k: [],
     )
     monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.list_uia_input_and_scrollbar_boxes_image_local",
+        lambda *_a, **_k: ([], [], []),
+    )
+    monkeypatch.setattr(
         "cua_mcp.select_mouse_target._recognize_ocr_boxes",
         lambda *_a, **_k: ([["舊"]], 0, 1),
     )
@@ -197,7 +201,8 @@ def test_analysis_prefers_click_snapshot_over_live_hwnd(tmp_path: Path) -> None:
             persist_debug=False,
         )
     assert seen.get("live_input_hwnd") is None
-    assert seen.get("uia_prefetched") is None
+    # Snapshot is passed into YOLO fallback for input/scrollbar prefer-replace.
+    assert seen.get("uia_prefetched") is not None
     assert seen.get("refine_with_uia") is True
 
 

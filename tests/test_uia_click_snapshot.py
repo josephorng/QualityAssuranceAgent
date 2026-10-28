@@ -413,7 +413,8 @@ def test_cross_window_press_skips_stale_settle_cache(tmp_path: Path) -> None:
     assert session._cached_uia_before(other, cursor_xy=(5, 5)) is None  # type: ignore[arg-type]
 
 
-def test_cross_window_press_starts_live_fallback_findall(tmp_path: Path) -> None:
+def test_cross_window_press_skips_live_fallback_findall(tmp_path: Path) -> None:
+    """Cache miss must not start a press-time FindAll (post-click tree race)."""
     from concurrent.futures import ThreadPoolExecutor
 
     from src.recorder.capture import RecordingSession, _DeferredCaptureJob
@@ -456,8 +457,8 @@ def test_cross_window_press_starts_live_fallback_findall(tmp_path: Path) -> None
             return_value=("shot.jpeg", 1, (0, 0)),
         ):
             session._capture_pending_left_press(tmp_path, 5, 5)
-            assert 1 in session._left_press_uia_futures
-            session._left_press_uia_futures[1].result(timeout=2)
+            assert session._left_press_uia[1] is None
+            assert session._left_press_uia_futures == {}
             session._left_press_captures[1] = (("pending.jpeg", 1, (0, 0)), [])
             session._worker_emit_left_gesture(
                 _DeferredCaptureJob(
@@ -472,10 +473,9 @@ def test_cross_window_press_starts_live_fallback_findall(tmp_path: Path) -> None
             )
     finally:
         session._uia_executor.shutdown(wait=True)
-    assert calls == [20]
+    assert calls == []
     raw = json.loads((tmp_path / "events" / "event_001.json").read_text(encoding="utf-8"))
-    assert raw["uia_snapshot"]["texts"][0]["text"] == "新窗"
-    assert raw["uia_snapshot"]["hwnd"] == 20
+    assert "uia_snapshot" not in raw
 
 
 def test_matching_settle_cache_skips_live_fallback(tmp_path: Path) -> None:
@@ -545,6 +545,49 @@ def test_stale_settle_generation_misses_before_next_settle(
     ]
     # Event 13 press while settle-after-12 has not published yet.
     assert session._cached_uia_before(window, cursor_xy=(5, 5)) is None  # type: ignore[arg-type]
+
+
+def test_generation_miss_press_does_not_start_live_findall(tmp_path: Path) -> None:
+    """Stale settle generation must not race a live FindAll against the click."""
+    from src.recorder.capture import RecordingSession
+    from src.recorder.models import RecordedEvent
+
+    session = RecordingSession(runs_root=tmp_path)
+    session._uia_executor = object()  # type: ignore[assignment]
+    session._last_settle_uia = {
+        "hwnd": 132566,
+        "window": [0, 0, 100, 80],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [{"bbox": [0, 0, 4, 4], "text": "打字前"}],
+    }
+    session._last_settle_uia_after_index = 4
+    session._events = [
+        RecordedEvent.from_dict(
+            {
+                "index": 5,
+                "timestamp_utc": "t5",
+                "kind": "text_input",
+                "cursor_xy": [1, 1],
+                "text": "123456",
+            }
+        ),
+    ]
+    window = _copilot_window(132566)
+    with patch.object(
+        session,
+        "_begin_press_uia_fallback",
+        side_effect=AssertionError("generation miss must not live FindAll"),
+    ), patch(
+        "src.recorder.capture.resolve_click_window",
+        return_value=window,
+    ), patch(
+        "src.recorder.uia_input_boxes.snapshot_uia_screen",
+        side_effect=AssertionError("press must not FindAll"),
+    ):
+        session._capture_pending_left_press(tmp_path, 20, 20)
+    assert session._left_press_uia[1] is None
+    assert session._left_press_uia_futures == {}
 
 
 def test_settle_generation_reuses_after_previous_event(

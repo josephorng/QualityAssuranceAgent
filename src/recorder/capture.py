@@ -1005,7 +1005,9 @@ class RecordingSession:
         self._last_settle_uia_after_index: int | None = None
         self._left_press_uia: dict[int, dict[str, Any] | None] = {}
         self._right_press_uia: dict[int, dict[str, Any] | None] = {}
-        # Fallback-only: live FindAll when settle cache misses / hwnd mismatches.
+        # Legacy press-time FindAll slots. New presses no longer start a live
+        # walk (it often finishes after the click mutates the tree). Kept so
+        # emit can still join an in-flight future from an older build/session.
         self._uia_executor: ThreadPoolExecutor | None = None
         self._left_press_uia_futures: dict[int, Future[dict[str, Any] | None]] = {}
         self._right_press_uia_futures: dict[int, Future[dict[str, Any] | None]] = {}
@@ -1897,6 +1899,9 @@ class RecordingSession:
         signals_before = self._cached_signals_before()
         self._seal_open_after_cache(windows_before, signals_before)
         click_window = self._click_window_payload_at(x, y)
+        # Settle-cache only. A press-time live FindAll races the click itself
+        # (Excel File → Backstage turns 「檔案」 into 「返回」 before FindAll
+        # returns). Miss → None → analysis uses YOLO on the before-screenshot.
         uia_snapshot = self._cached_uia_before(click_window, cursor_xy=(x, y))
         with self._lock:
             self._left_press_seq += 1
@@ -1909,8 +1914,6 @@ class RecordingSession:
             self._left_press_signals[seq] = signals_before
             self._left_press_click_windows[seq] = click_window
             self._left_press_uia[seq] = uia_snapshot
-        if uia_snapshot is None:
-            self._begin_press_uia_fallback(seq, click_window, side="left")
         settle_frame, settle_latch_note = self._latch_settle_frame(x, y)
         self._enqueue(
             _DeferredCaptureJob(
@@ -1945,8 +1948,6 @@ class RecordingSession:
             self._right_press_signals[seq] = signals_before
             self._right_press_click_windows[seq] = click_window
             self._right_press_uia[seq] = uia_snapshot
-        if uia_snapshot is None:
-            self._begin_press_uia_fallback(seq, click_window, side="right")
         settle_frame, settle_latch_note = self._latch_settle_frame(x, y)
         self._enqueue(
             _DeferredCaptureJob(
@@ -4470,20 +4471,11 @@ class RecordingSession:
         *,
         side: str,
     ) -> None:
-        """Live FindAll under the click hwnd when settle cache cannot be reused."""
-        executor = self._uia_executor
-        if executor is None or click_window is None or not int(click_window.hwnd or 0):
-            return
-        try:
-            future = executor.submit(self._uia_snapshot_for_window, click_window)
-        except RuntimeError:
-            return
-        with self._lock:
-            self._uia_inflight.add(future)
-            if side == "right":
-                self._right_press_uia_futures[press_seq] = future
-            else:
-                self._left_press_uia_futures[press_seq] = future
+        """No-op: press-time live FindAll was removed (post-click tree race).
+
+        Kept as a stub so older tests that patch this name still import cleanly.
+        """
+        _ = (press_seq, click_window, side)
 
     def _uia_snapshot_for_window(
         self, click_window: ClickWindowInfo | None
@@ -4622,12 +4614,15 @@ class RecordingSession:
     ) -> dict[str, Any] | None:
         """Copy last settled FindAll when it matches this click; else None.
 
-        A ``None`` result triggers a press-time fallback FindAll under the click
-        hwnd (async). Matching settle cache skips that live walk.
+        A ``None`` result leaves ``uia_snapshot`` empty so analysis names the
+        target from the before-screenshot (YOLO/OCR). Press-time live FindAll
+        is not used: it often completes after the click has already changed the
+        tree.
 
         Reuse also requires the settle to have been published after the previous
         event (or seed index 0). A same-hwnd cache from an older step is treated
-        as a miss so navigation/scroll between presses gets a fresh FindAll.
+        as a miss so navigation/scroll between presses does not reuse a stale
+        tree.
         """
         previous_index = self._previous_event_index_for_settle_cache()
         with self._lock:

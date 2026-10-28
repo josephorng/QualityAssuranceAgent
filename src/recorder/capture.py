@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import copy
 import ctypes
 import os
 import queue
@@ -173,17 +174,6 @@ class _RawBeforeShot:
     size: tuple[int, int]
     monitor_index: int
     monitor_offset: tuple[int, int]
-
-
-@dataclass
-class _PreclickUiaCache:
-    """One FindAll finished before the next click, tied to a before-shot frame."""
-
-    hwnd: int
-    generation: int
-    frame_id: int
-    snapshot: dict[str, Any] | None = None
-    stale: bool = False
 
 
 @dataclass
@@ -1007,19 +997,18 @@ class RecordingSession:
         ] = {}
         self._left_press_click_windows: dict[int, ClickWindowInfo | None] = {}
         self._right_press_click_windows: dict[int, ClickWindowInfo | None] = {}
-        # FindAll runs here, started at the click. The capture worker never calls it.
+        # Settled FindAll from the previous window-step (or recording seed).
+        # Press copies this as uia_snapshot when hwnd matches.
+        self._last_settle_uia: dict[str, Any] | None = None
+        self._left_press_uia: dict[int, dict[str, Any] | None] = {}
+        self._right_press_uia: dict[int, dict[str, Any] | None] = {}
+        # Fallback-only: live FindAll when settle cache misses / hwnd mismatches.
         self._uia_executor: ThreadPoolExecutor | None = None
         self._left_press_uia_futures: dict[int, Future[dict[str, Any] | None]] = {}
         self._right_press_uia_futures: dict[int, Future[dict[str, Any] | None]] = {}
-        self._drag_end_uia_futures: dict[int, Future[dict[str, Any] | None]] = {}
         self._uia_inflight: set[Future[dict[str, Any] | None]] = set()
+        # Emit waits for pending press fallback and/or drag end_uia before notify.
         self._uia_notify_wait: dict[int, int] = {}
-        self._preclick_uia: _PreclickUiaCache | None = None
-        self._preclick_uia_generation: int = 0
-        self._preclick_startup_queued: bool = False
-        self._preclick_startup_compare: bool = False
-        self._preclick_compare_mono: float = 0.0
-        self._preclick_reference: tuple[bytes, tuple[int, int], int] | None = None
         self._drag_end_captures: dict[int, dict[int, tuple[str, int, tuple[int, int]]]] = {}
         self._pending_right_coords: tuple[int, int] | None = None
         self._pending_right_down_at: float | None = None
@@ -1189,17 +1178,13 @@ class RecordingSession:
             self._right_press_captures = {}
             self._left_press_click_windows = {}
             self._right_press_click_windows = {}
+            self._last_settle_uia = None
+            self._left_press_uia = {}
+            self._right_press_uia = {}
             self._left_press_uia_futures = {}
             self._right_press_uia_futures = {}
-            self._drag_end_uia_futures = {}
             self._uia_inflight = set()
             self._uia_notify_wait = {}
-            self._preclick_uia = None
-            self._preclick_uia_generation = 0
-            self._preclick_startup_queued = False
-            self._preclick_startup_compare = False
-            self._preclick_compare_mono = 0.0
-            self._preclick_reference = None
             self._drag_end_captures = {}
             self._pending_right_coords = None
             self._pending_right_down_at = None
@@ -1233,6 +1218,7 @@ class RecordingSession:
             self._before_shot_frame_id = 0
             self._last_settle_windows = None
             self._last_settle_signals = None
+            self._last_settle_uia = None
             self._start_windows = None
             self._start_signals = None
             self._settle_windows_ready.clear()
@@ -1906,6 +1892,7 @@ class RecordingSession:
         signals_before = self._cached_signals_before()
         self._seal_open_after_cache(windows_before, signals_before)
         click_window = self._click_window_payload_at(x, y)
+        uia_snapshot = self._cached_uia_before(click_window, cursor_xy=(x, y))
         with self._lock:
             self._left_press_seq += 1
             seq = self._left_press_seq
@@ -1916,7 +1903,9 @@ class RecordingSession:
             self._left_press_captures[seq] = (None, windows_before or None)
             self._left_press_signals[seq] = signals_before
             self._left_press_click_windows[seq] = click_window
-        self._latch_press_uia(seq, click_window, side="left")
+            self._left_press_uia[seq] = uia_snapshot
+        if uia_snapshot is None:
+            self._begin_press_uia_fallback(seq, click_window, side="left")
         settle_frame, settle_latch_note = self._latch_settle_frame(x, y)
         self._enqueue(
             _DeferredCaptureJob(
@@ -1939,6 +1928,7 @@ class RecordingSession:
         signals_before = self._cached_signals_before()
         self._seal_open_after_cache(windows_before, signals_before)
         click_window = self._click_window_payload_at(x, y)
+        uia_snapshot = self._cached_uia_before(click_window, cursor_xy=(x, y))
         with self._lock:
             self._right_press_seq += 1
             seq = self._right_press_seq
@@ -1949,7 +1939,9 @@ class RecordingSession:
             self._right_press_captures[seq] = (None, windows_before or None)
             self._right_press_signals[seq] = signals_before
             self._right_press_click_windows[seq] = click_window
-        self._latch_press_uia(seq, click_window, side="right")
+            self._right_press_uia[seq] = uia_snapshot
+        if uia_snapshot is None:
+            self._begin_press_uia_fallback(seq, click_window, side="right")
         settle_frame, settle_latch_note = self._latch_settle_frame(x, y)
         self._enqueue(
             _DeferredCaptureJob(
@@ -2058,7 +2050,6 @@ class RecordingSession:
         with self._lock:
             self._last_settle_frames[mon_key] = frame
             self._last_settle_frame = frame
-        self._note_preclick_before_shot(frame)
         return True
 
     def _publish_last_settle_frame(
@@ -3298,8 +3289,8 @@ class RecordingSession:
             self._pending_signals_before = None
             self._pending_click_window = None
             self._left_press_click_windows.pop(seq, None)
+            self._left_press_uia.pop(seq, None)
             self._left_press_uia_futures.pop(seq, None)
-            self._drag_end_uia_futures.pop(seq, None)
             self._left_press_signals.pop(seq, None)
         self._discard_press_capture_entry(stale)
         self._discard_drag_end_capture_entry(drag_stale)
@@ -3326,6 +3317,7 @@ class RecordingSession:
         self._pending_right_signals_before = None
         self._pending_right_click_window = None
         self._right_press_click_windows.pop(seq, None)
+        self._right_press_uia.pop(seq, None)
         self._right_press_uia_futures.pop(seq, None)
         self._right_press_signals.pop(seq, None)
         return stale, pending_shot
@@ -3551,8 +3543,6 @@ class RecordingSession:
             press_signals = self._pending_signals_before
         self._claim_after_owner(drag_index)
         end_click_window = self._click_window_payload_at(x2, y2)
-        self._mark_preclick_uia_stale()
-        self._begin_click_uia(press_seq, end_click_window, side="drag_end")
         self._flush_pending_text_input(
             shared_end_index=drag_index,
             seal_after_to_cache=True,
@@ -3634,6 +3624,8 @@ class RecordingSession:
                     self._start_signals = (
                         dict(self._last_settle_signals) if self._last_settle_signals else None
                     )
+                # Seed naming tree so event 1 has a before FindAll without press-time walk.
+                self._collect_and_publish_settle_uia(self._foreground_hwnd())
             finally:
                 self._settle_windows_ready.set()
                 done = (job.meta or {}).get("done")
@@ -4192,21 +4184,6 @@ class RecordingSession:
             f"settle probe first plateau event={event_index} "
             f"observed_settle_seconds={seconds}",
         )
-        click_window = raw.get("click_window")
-        hwnd = 0
-        if isinstance(click_window, dict):
-            try:
-                hwnd = int(click_window.get("hwnd") or 0)
-            except (TypeError, ValueError):
-                hwnd = 0
-        with self._lock:
-            frame = self._last_settle_frame
-            frame_id = int(frame.frame_id) if frame is not None else 0
-            self._preclick_startup_compare = False
-        if hwnd > 0:
-            self._queue_preclick_uia(hwnd, frame_id)
-        else:
-            self._mark_preclick_uia_stale()
 
     def _run_settle_probe_tick(self, event_index: int) -> None:
         """Capture/compare one settle sample. Safe to call from the timer thread."""
@@ -4376,17 +4353,6 @@ class RecordingSession:
                 f"mad={mad_text} threshold={DEFAULT_SIMILARITY_THRESHOLD} "
                 f"similar={similar}",
             )
-            if similar is False:
-                already_plateau = False
-                with self._lock:
-                    probe = self._settle_probe
-                    already_plateau = (
-                        probe is not None
-                        and probe.event_index == event_index
-                        and probe.observed_recorded
-                    )
-                if already_plateau:
-                    self._mark_preclick_uia_stale()
 
         if not self._settle_probe_is_current(event_index):
             try:
@@ -4460,18 +4426,25 @@ class RecordingSession:
         except Exception:
             return None
 
+    def _foreground_hwnd(self) -> int:
+        if os.name != "nt":
+            return 0
+        try:
+            return int(ctypes.windll.user32.GetForegroundWindow() or 0)
+        except Exception:
+            return 0
+
     def _start_uia_executor(self) -> None:
-        """One thread for click-time FindAll. Kept off the hook and the capture worker."""
+        """One worker for press-time fallback FindAll only (cache miss / hwnd mismatch)."""
         previous = self._uia_executor
         self._uia_executor = ThreadPoolExecutor(
             max_workers=1,
-            thread_name_prefix="recording-uia-snapshot",
+            thread_name_prefix="recording-uia-fallback",
         )
         if previous is not None:
             previous.shutdown(wait=False, cancel_futures=True)
 
     def _shutdown_uia_executor(self) -> None:
-        """Let an in-flight FindAll patch the event, then stop the snapshot thread."""
         with self._lock:
             executor = self._uia_executor
             self._uia_executor = None
@@ -4482,165 +4455,14 @@ class RecordingSession:
             return
         executor.shutdown(wait=False, cancel_futures=True)
 
-    def _foreground_hwnd(self) -> int:
-        if os.name != "nt":
-            return 0
-        try:
-            return int(ctypes.windll.user32.GetForegroundWindow() or 0)
-        except Exception:
-            return 0
-
-    def _note_preclick_before_shot(self, frame: _RawBeforeShot) -> None:
-        """Queue FindAll on the first before-shot, then watch that frame for change."""
-        with self._lock:
-            if not self._preclick_startup_queued:
-                self._preclick_startup_queued = True
-                self._preclick_startup_compare = True
-                self._preclick_reference = (
-                    bytes(frame.rgb),
-                    frame.size,
-                    int(frame.monitor_index),
-                )
-                self._preclick_compare_mono = time.monotonic()
-                frame_id = int(frame.frame_id)
-                start = True
-                due = False
-                ref_rgb = b""
-                ref_size = (0, 0)
-                sample_rgb = b""
-                sample_size = (0, 0)
-            else:
-                start = False
-                due = False
-                ref_rgb = b""
-                ref_size = (0, 0)
-                sample_rgb = b""
-                sample_size = (0, 0)
-                frame_id = 0
-                ref = self._preclick_reference
-                if (
-                    self._preclick_startup_compare
-                    and ref is not None
-                    and int(frame.monitor_index) == int(ref[2])
-                    and (time.monotonic() - self._preclick_compare_mono)
-                    >= _SETTLE_PROBE_INTERVAL_S
-                ):
-                    self._preclick_compare_mono = time.monotonic()
-                    due = True
-                    ref_rgb, ref_size, _mon = ref
-                    sample_rgb = bytes(frame.rgb)
-                    sample_size = frame.size
-        if start:
-            self._queue_preclick_uia(self._foreground_hwnd(), frame_id)
-            return
-        if due and not rgb_frames_similar(ref_rgb, ref_size, sample_rgb, sample_size):
-            self._mark_preclick_uia_stale()
-
-    def _queue_preclick_uia(self, hwnd: int, frame_id: int) -> None:
-        """Start one FindAll on the snapshot thread. A newer queue drops the old one."""
-        hwnd = int(hwnd or 0)
-        if hwnd <= 0:
-            return
-        executor = self._uia_executor
-        if executor is None:
-            return
-        with self._lock:
-            self._preclick_uia_generation += 1
-            generation = self._preclick_uia_generation
-            self._preclick_uia = _PreclickUiaCache(
-                hwnd=hwnd,
-                generation=generation,
-                frame_id=int(frame_id),
-            )
-        try:
-            future = executor.submit(self._uia_snapshot_for_hwnd, hwnd)
-        except RuntimeError:
-            return
-
-        def _store(done: Future[dict[str, Any] | None]) -> None:
-            snapshot = self._snapshot_from_future(done)
-            with self._lock:
-                slot = self._preclick_uia
-                if (
-                    slot is None
-                    or slot.generation != generation
-                    or slot.stale
-                    or int(slot.hwnd) != hwnd
-                ):
-                    return
-                if snapshot is None:
-                    slot.stale = True
-                    return
-                slot.snapshot = snapshot
-
-        future.add_done_callback(_store)
-
-    def _uia_snapshot_for_hwnd(self, hwnd: int) -> dict[str, Any] | None:
-        from src.recorder.uia_input_boxes import snapshot_uia_screen
-
-        try:
-            value = snapshot_uia_screen(int(hwnd))
-        except Exception:
-            return None
-        return value if isinstance(value, dict) else None
-
-    def _mark_preclick_uia_stale(self) -> None:
-        """Drop the slot and any walk that is still running."""
-        with self._lock:
-            self._preclick_uia_generation += 1
-            slot = self._preclick_uia
-            if slot is None:
-                return
-            slot.stale = True
-            slot.snapshot = None
-            slot.generation = self._preclick_uia_generation
-
-    def _latch_press_uia(
+    def _begin_press_uia_fallback(
         self,
         press_seq: int,
         click_window: ClickWindowInfo | None,
         *,
         side: str,
     ) -> None:
-        """Use a finished pre-click walk when it still matches this window."""
-        hwnd = int(click_window.hwnd or 0) if click_window is not None else 0
-        snapshot: dict[str, Any] | None = None
-        with self._lock:
-            slot = self._preclick_uia
-            if (
-                hwnd
-                and slot is not None
-                and not slot.stale
-                and isinstance(slot.snapshot, dict)
-                and int(slot.hwnd) == hwnd
-                and slot.generation == self._preclick_uia_generation
-            ):
-                snapshot = {
-                    key: list(value) if isinstance(value, list) else value
-                    for key, value in slot.snapshot.items()
-                }
-                self._preclick_uia_generation += 1
-                slot.generation = self._preclick_uia_generation
-        if snapshot is not None:
-            future: Future[dict[str, Any] | None] = Future()
-            future.set_result(snapshot)
-            with self._lock:
-                if side == "right":
-                    self._right_press_uia_futures[press_seq] = future
-                else:
-                    self._left_press_uia_futures[press_seq] = future
-            return
-        self._mark_preclick_uia_stale()
-        self._begin_click_uia(press_seq, click_window, side=side)
-
-    def _begin_click_uia(
-        self,
-        press_seq: int,
-        click_window: ClickWindowInfo | None,
-        *,
-        side: str,
-    ) -> None:
-        """Queue FindAll at the click. ``submit`` returns immediately."""
+        """Live FindAll under the click hwnd when settle cache cannot be reused."""
         executor = self._uia_executor
         if executor is None or click_window is None or not int(click_window.hwnd or 0):
             return
@@ -4652,15 +4474,31 @@ class RecordingSession:
             self._uia_inflight.add(future)
             if side == "right":
                 self._right_press_uia_futures[press_seq] = future
-            elif side == "drag_end":
-                self._drag_end_uia_futures[press_seq] = future
             else:
                 self._left_press_uia_futures[press_seq] = future
+
+    def _uia_snapshot_for_window(
+        self, click_window: ClickWindowInfo | None
+    ) -> dict[str, Any] | None:
+        if click_window is None or not int(click_window.hwnd or 0):
+            return None
+        from src.recorder.uia_input_boxes import snapshot_uia_screen
+
+        hwnd = int(click_window.hwnd)
+        try:
+            value = snapshot_uia_screen(hwnd)
+        except Exception:
+            return None
+        if not isinstance(value, dict):
+            return None
+        snapshot = dict(value)
+        snapshot["hwnd"] = hwnd
+        return snapshot
 
     def _ready_uia_snapshot(
         self, future: Future[dict[str, Any] | None] | None
     ) -> tuple[dict[str, Any] | None, bool]:
-        """Return ``(snapshot, still_running)``. A finished empty tree is a snapshot."""
+        """Return ``(snapshot, still_running)``."""
         if future is None:
             return None, False
         if not future.done():
@@ -4683,7 +4521,6 @@ class RecordingSession:
         event_index: int,
         pending: list[tuple[str, Future[dict[str, Any] | None]]],
     ) -> None:
-        """Patch the event when FindAll finishes, then notify vision."""
         for field, future in pending:
             future.add_done_callback(
                 lambda done, idx=event_index, name=field: self._apply_deferred_uia_snapshot(
@@ -4698,17 +4535,152 @@ class RecordingSession:
         future: Future[dict[str, Any] | None],
     ) -> None:
         snapshot = self._snapshot_from_future(future)
-        event = self._patch_event_uia_field(event_index, field, snapshot)
+        self._patch_event_uia_field(event_index, field, snapshot)
         with self._lock:
             self._uia_inflight.discard(future)
-            left = self._uia_notify_wait.get(event_index, 1) - 1
+        self._release_uia_notify_slot(event_index)
+
+    def _release_uia_notify_slot(self, event_index: int) -> None:
+        """Decrement pending UIA wait; notify vision when the last slot clears."""
+        with self._lock:
+            left = self._uia_notify_wait.get(event_index, 0) - 1
             if left <= 0:
                 self._uia_notify_wait.pop(event_index, None)
+                event = next(
+                    (ev for ev in self._events if ev.index == event_index),
+                    None,
+                )
             else:
                 self._uia_notify_wait[event_index] = left
                 event = None
         if event is not None and event.kind != "text_input":
             self._notify_event(event)
+
+    def _copy_uia_snapshot(
+        self, snapshot: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if not isinstance(snapshot, dict):
+            return None
+        return copy.deepcopy(snapshot)
+
+    def _uia_snapshot_matches_click(
+        self,
+        snapshot: dict[str, Any] | None,
+        click_window: ClickWindowInfo | None,
+        *,
+        cursor_xy: tuple[int, int] | None = None,
+    ) -> bool:
+        """True when the settled tree belongs to the window under this click."""
+        if not isinstance(snapshot, dict) or click_window is None:
+            return False
+        click_hwnd = int(click_window.hwnd or 0)
+        try:
+            cached_hwnd = int(snapshot.get("hwnd") or 0)
+        except (TypeError, ValueError):
+            cached_hwnd = 0
+        # Known hwnds that disagree → wrong tree (YOLO). Do not rescue via rect.
+        if click_hwnd > 0 and cached_hwnd > 0:
+            return click_hwnd == cached_hwnd
+        window = snapshot.get("window")
+        if (
+            cursor_xy is not None
+            and isinstance(window, (list, tuple))
+            and len(window) == 4
+        ):
+            return point_in_rect_xywh(
+                int(cursor_xy[0]),
+                int(cursor_xy[1]),
+                (int(window[0]), int(window[1]), int(window[2]), int(window[3])),
+            )
+        return False
+
+    def _cached_uia_before(
+        self,
+        click_window: ClickWindowInfo | None,
+        *,
+        cursor_xy: tuple[int, int] | None = None,
+    ) -> dict[str, Any] | None:
+        """Copy last settled FindAll when it matches this click; else None.
+
+        A ``None`` result triggers a press-time fallback FindAll under the click
+        hwnd (async). Matching settle cache skips that live walk.
+        """
+        with self._lock:
+            cached = self._last_settle_uia
+        if not self._uia_snapshot_matches_click(
+            cached, click_window, cursor_xy=cursor_xy
+        ):
+            return None
+        return self._copy_uia_snapshot(cached)
+
+    def _collect_and_publish_settle_uia(self, hwnd: int) -> dict[str, Any] | None:
+        """FindAll under one hwnd after settle; publish as next press before-cache."""
+        hwnd = int(hwnd or 0)
+        if hwnd <= 0:
+            return None
+        from src.recorder.uia_input_boxes import snapshot_uia_screen
+
+        try:
+            value = snapshot_uia_screen(hwnd)
+        except Exception:
+            return None
+        if not isinstance(value, dict):
+            return None
+        snapshot = dict(value)
+        snapshot["hwnd"] = hwnd
+        with self._lock:
+            self._last_settle_uia = snapshot
+        return self._copy_uia_snapshot(snapshot)
+
+    def _opened_hwnd_from_change(
+        self,
+        change: dict[str, Any] | None,
+        debug: dict[str, Any] | None,
+    ) -> int:
+        if not isinstance(change, dict):
+            return 0
+        if str(change.get("action") or "").strip() != "opened":
+            return 0
+        title = str(change.get("title") or "").strip()
+        if not title or not isinstance(debug, dict):
+            return 0
+        after_raw = debug.get("windows_after")
+        if not isinstance(after_raw, list):
+            return 0
+        for entry in after_raw:
+            if not isinstance(entry, dict):
+                continue
+            entry_title = str(entry.get("title") or "").strip()
+            if entry_title != title and title not in entry_title and entry_title not in title:
+                continue
+            try:
+                hwnd = int(entry.get("hwnd") or 0)
+            except (TypeError, ValueError):
+                hwnd = 0
+            if hwnd > 0:
+                return hwnd
+        return 0
+
+    def _pick_settle_uia_hwnd(
+        self,
+        item: _QueuedEvent,
+        change: dict[str, Any] | None,
+        debug: dict[str, Any] | None,
+    ) -> int:
+        """Prefer foreground after settle; never FindAll from the desktop root."""
+        fg = self._foreground_hwnd()
+        if fg > 0:
+            return fg
+        opened = self._opened_hwnd_from_change(change, debug)
+        if opened > 0:
+            return opened
+        if item.kind == "drag" and item.end_click_window is not None:
+            end_hwnd = int(item.end_click_window.hwnd or 0)
+            if end_hwnd > 0:
+                return end_hwnd
+        if item.click_window is not None:
+            return int(item.click_window.hwnd or 0)
+        return 0
 
     def _patch_event_uia_field(
         self,
@@ -4716,7 +4688,7 @@ class RecordingSession:
         field: str,
         snapshot: dict[str, Any] | None,
     ) -> RecordedEvent | None:
-        """Write one snapshot onto a persisted event. Returns it when notify can run."""
+        """Write one snapshot onto a persisted event. Returns the patched event."""
         if field not in {"uia_snapshot", "end_uia_snapshot"}:
             return None
         with self._lock:
@@ -4742,18 +4714,11 @@ class RecordingSession:
                     break
         return patched
 
-    def _uia_snapshot_for_window(
-        self, click_window: ClickWindowInfo | None
-    ) -> dict[str, Any] | None:
-        """FindAll on the UIA snapshot thread. Never call this from the hook or capture worker."""
-        if click_window is None or not int(click_window.hwnd or 0):
-            return None
-        from src.recorder.uia_input_boxes import snapshot_uia_screen
-
-        try:
-            return snapshot_uia_screen(int(click_window.hwnd))
-        except Exception:
-            return None
+    def _release_drag_uia_notify(self, item: _QueuedEvent) -> None:
+        """Clear one notify slot after drag window-step finished end_uia (or skipped)."""
+        if item.kind != "drag":
+            return
+        self._release_uia_notify_slot(item.event_index)
 
     def _worker_pending_left_press(self, job: _DeferredCaptureJob) -> None:
         if job.press_seq is None or job.cursor_xy is None:
@@ -4888,13 +4853,13 @@ class RecordingSession:
                 if press_seq is not None
                 else None
             )
-            uia_future = (
-                self._left_press_uia_futures.pop(press_seq, None)
+            uia_snapshot = (
+                self._left_press_uia.pop(press_seq, None)
                 if press_seq is not None
                 else None
             )
-            end_uia_future = (
-                self._drag_end_uia_futures.pop(press_seq, None)
+            uia_future = (
+                self._left_press_uia_futures.pop(press_seq, None)
                 if press_seq is not None
                 else None
             )
@@ -4980,19 +4945,20 @@ class RecordingSession:
         else:
             self._discard_drag_end_capture_entry(drag_end)
 
-        uia_snapshot, uia_pending = self._ready_uia_snapshot(uia_future)
-        end_uia_snapshot: dict[str, Any] | None = None
-        end_pending = False
-        if job.kind == "drag":
-            end_uia_snapshot, end_pending = self._ready_uia_snapshot(end_uia_future)
         pending_uia: list[tuple[str, Future[dict[str, Any] | None]]] = []
-        if uia_pending and uia_future is not None:
-            pending_uia.append(("uia_snapshot", uia_future))
-        if end_pending and end_uia_future is not None:
-            pending_uia.append(("end_uia_snapshot", end_uia_future))
-        if pending_uia:
+        if uia_snapshot is None and uia_future is not None:
+            ready, still_running = self._ready_uia_snapshot(uia_future)
+            if ready is not None:
+                uia_snapshot = ready
+            elif still_running:
+                pending_uia.append(("uia_snapshot", uia_future))
+        wait_slots = len(pending_uia)
+        # Drag drop naming uses end_uia from this step's settled FindAll.
+        if job.kind == "drag":
+            wait_slots += 1
+        if wait_slots:
             with self._lock:
-                self._uia_notify_wait[int(job.event_index)] = len(pending_uia)
+                self._uia_notify_wait[int(job.event_index)] = wait_slots
 
         self._persist_queued_event(
             _QueuedEvent(
@@ -5014,7 +4980,7 @@ class RecordingSession:
                 click_window=click_window,
                 end_click_window=job.end_click_window,
                 uia_snapshot=uia_snapshot,
-                end_uia_snapshot=end_uia_snapshot,
+                end_uia_snapshot=None,
                 signals_before=signals_before,
                 action_monotonic=job.action_monotonic,
             )
@@ -5037,6 +5003,11 @@ class RecordingSession:
             )
             click_window = (
                 self._right_press_click_windows.pop(press_seq, None)
+                if press_seq is not None
+                else None
+            )
+            uia_snapshot = (
+                self._right_press_uia.pop(press_seq, None)
                 if press_seq is not None
                 else None
             )
@@ -5081,12 +5052,15 @@ class RecordingSession:
             job.cursor_xy,
             pending_shot,
         )
-        uia_snapshot, uia_pending = self._ready_uia_snapshot(uia_future)
         pending_uia: list[tuple[str, Future[dict[str, Any] | None]]] = []
-        if uia_pending and uia_future is not None:
-            pending_uia.append(("uia_snapshot", uia_future))
-            with self._lock:
-                self._uia_notify_wait[int(job.event_index)] = len(pending_uia)
+        if uia_snapshot is None and uia_future is not None:
+            ready, still_running = self._ready_uia_snapshot(uia_future)
+            if ready is not None:
+                uia_snapshot = ready
+            elif still_running:
+                pending_uia.append(("uia_snapshot", uia_future))
+                with self._lock:
+                    self._uia_notify_wait[int(job.event_index)] = len(pending_uia)
         self._persist_queued_event(
             _QueuedEvent(
                 kind=job.kind,
@@ -5606,9 +5580,18 @@ class RecordingSession:
             focus_rect = self._sample_debug_focus_rect_for_item(item)
             # Same outcome as ``_resolve_window_change`` with an empty before-cache.
             debug = _window_resolve_failure_debug("missing_before_cache")
+        if not item.window_after_sealed:
+            # One settled FindAll for the next press (and drag end_uia on this event).
+            settle_hwnd = self._pick_settle_uia_hwnd(item, change, debug)
+            settle_snap = self._collect_and_publish_settle_uia(settle_hwnd)
+            if item.kind == "drag" and settle_snap is not None:
+                self._patch_event_uia_field(
+                    item.event_index, "end_uia_snapshot", settle_snap
+                )
         if change is None and title is None and debug is None and focus_rect is None:
-            # Still release deferred text_input vision notify.
+            # Still release deferred text_input / drag vision notify.
             self._notify_pending_text_input(item.event_index)
+            self._release_drag_uia_notify(item)
             return
         self._patch_window_change(
             item.event_index,
@@ -5617,6 +5600,7 @@ class RecordingSession:
             debug,
             focus_rect=focus_rect,
         )
+        self._release_drag_uia_notify(item)
 
     def _patch_window_change(
         self,

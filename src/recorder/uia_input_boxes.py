@@ -1077,10 +1077,9 @@ def list_uia_input_boxes_image_local(
 def snapshot_uia_screen(hwnd: int) -> dict[str, object] | None:
     """FindAll under ``hwnd`` and return screen-space boxes for later analysis.
 
-    Called on the capture worker at press/release time, while the window's
-    accessibility tree is still populated. Returns ``None`` when the hwnd
-    cannot be queried. An empty tree is still a snapshot (analysis must not
-    FindAll again).
+    Called after settle on the window-step thread (and once at recording seed).
+    Returns ``None`` when the hwnd cannot be queried. An empty tree is still a
+    snapshot (analysis must not FindAll again).
     """
     if os.name != "nt" or not int(hwnd or 0):
         return None

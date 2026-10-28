@@ -55,6 +55,7 @@ flowchart LR
 | --- | --- | --- |
 | `_last_settle_frame` | Settle-probe timer, when a sample is published | Mouse hook, which pins it as the next step's screenshot |
 | `_last_settle_windows`, `_last_settle_signals` | Pre-click context loop | Mouse hook, copied at press time and stored with that click |
+| `_last_settle_uia` | Window-step after settle (and recording seed) | Mouse hook, copied at press as `uia_snapshot` when hwnd matches |
 | Worker queue | Mouse hook, keyboard hook, both timers | `screen-recorder-worker`, one job at a time |
 | `_settle_probe` | Worker, immediately after the event JSON is written | Settle-probe timer. A start replaces the slot only when its event index is newer |
 
@@ -86,7 +87,9 @@ Each press has its own pending file so two presses cannot share `_pending_captur
 
 ### Per-step window thread
 
-After the event file exists, the worker starts `window-step-N`. That thread sleeps only the remainder of the settle delay measured from the gesture: 0.25 seconds normally, 0.45 seconds for a title-bar click. It then enumerates windows and runs UI Automation with a 1 second timeout. On timeout it leaves `window_change` empty. Otherwise it patches `window_change`, `target_window_title`, and `window_snapshot_debug` into the event JSON.
+After the event file exists, the worker starts `window-step-N`. That thread sleeps only the remainder of the settle delay measured from the gesture: 0.25 seconds normally, 0.45 seconds for a title-bar click. It then enumerates windows and runs light UI Automation signals with a 1 second timeout. On timeout it leaves `window_change` empty. Otherwise it patches `window_change`, `target_window_title`, and `window_snapshot_debug` into the event JSON.
+
+After that settle work it also runs one naming `FindAll` under a single hwnd (foreground after settle, else opened/end/click window—never the desktop root) and publishes the result into `_last_settle_uia`. The next mouse press copies that cache as `uia_snapshot` when the click hwnd matches. A drag’s `end_uia_snapshot` is the FindAll from this same window-step. When the press window does not match the cached hwnd (or the settle FindAll has not finished yet), press starts one **fallback** async FindAll under the click hwnd only—same-window cache hits never re-FindAll at press. Recording start seeds `_last_settle_uia` once so event 1 has a before tree.
 
 `finalize_stop` joins these threads for up to 2 seconds before it writes `session.json`. A slow step stays on its own thread, so the next click's probe can start while this one is still in UI Automation. A late thread cannot replace a newer probe, because `_start_settle_probe` ignores an event index that is not newer than the probe already running.
 

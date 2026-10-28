@@ -665,10 +665,6 @@ def test_before_shot_keeps_raw_sample_latched_at_click(tmp_path: Path) -> None:
     session._last_settle_frames = {1: latched_frame}
     session._last_settle_frame = latched_frame
     session._run_dir = run_dir
-    session._preclick_startup_queued = True
-    session._preclick_startup_compare = False
-    session._preclick_reference = None
-    session._preclick_compare_mono = 0.0
 
     settle_latched, latch_note = session._latch_settle_frame(10, 10)
     newer = _raw_before_shot(2, (0, 200, 0), size=(40, 30))

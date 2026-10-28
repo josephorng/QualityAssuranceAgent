@@ -201,95 +201,76 @@ def test_analysis_prefers_click_snapshot_over_live_hwnd(tmp_path: Path) -> None:
     assert seen.get("refine_with_uia") is True
 
 
-def test_click_starts_findall_off_the_capture_worker(tmp_path: Path) -> None:
-    from concurrent.futures import ThreadPoolExecutor
-
-    from src.recorder.capture import RecordingSession, _DeferredCaptureJob
+def _copilot_window(hwnd: int = 132566) -> object:
     from src.recorder.window_snapshot import ClickWindowInfo
 
+    return ClickWindowInfo(
+        hwnd=hwnd,
+        title="Microsoft 365 Copilot",
+        process_name="M365Copilot.exe",
+        left=0,
+        top=0,
+        width=120,
+        height=80,
+        is_maximized=False,
+    )
+
+
+def test_press_uses_settled_uia_without_findall(tmp_path: Path) -> None:
+    from src.recorder.capture import RecordingSession, _DeferredCaptureJob
+
     snapshot = {
+        "hwnd": 132566,
         "window": [0, 0, 100, 80],
         "inputs": [],
         "scrollbars": [],
         "texts": [{"bbox": [10, 10, 40, 30], "text": "應用程式及其他"}],
     }
-    window = ClickWindowInfo(
-        hwnd=132566,
-        title="Microsoft 365 Copilot",
-        process_name="M365Copilot.exe",
-        left=0,
-        top=0,
-        width=100,
-        height=80,
-        is_maximized=False,
-    )
-    calls: list[int] = []
-
-    def _fake_shot(_x: int, _y: int, dest: Path) -> tuple[str, int, tuple[int, int]]:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"fake")
-        return str(dest), 1, (0, 0)
-
-    def _snap(hwnd: int) -> dict:
-        calls.append(int(hwnd))
-        return snapshot
-
+    window = _copilot_window(132566)
     session = RecordingSession(runs_root=tmp_path)
     session._run_dir = tmp_path
-    session._uia_executor = ThreadPoolExecutor(max_workers=1)
+    session._last_settle_uia = snapshot
     session._start_window_step = lambda _item: None  # type: ignore[method-assign]
     session._notify_event = lambda _event: None  # type: ignore[method-assign]
     session._start_settle_probe = lambda _event: None  # type: ignore[method-assign]
     session._left_press_seq = 1
-    session._left_press_captures[1] = (None, [])
-    try:
-        with patch(
-            "src.recorder.capture._capture_screenshot_at_point",
-            side_effect=_fake_shot,
-        ), patch(
-            "src.recorder.uia_input_boxes.snapshot_uia_screen",
-            side_effect=_snap,
-        ):
-            session._begin_click_uia(1, window, side="left")
-            session._left_press_uia_futures[1].result(timeout=2)
-            session._worker_pending_left_press(
-                _DeferredCaptureJob(
-                    action="pending_left_press",
-                    press_seq=1,
-                    cursor_xy=(20, 20),
-                )
+    session._left_press_captures[1] = (("pending.jpeg", 1, (0, 0)), [])
+    session._left_press_click_windows[1] = window  # type: ignore[assignment]
+    session._left_press_uia[1] = session._cached_uia_before(
+        window, cursor_xy=(20, 20)  # type: ignore[arg-type]
+    )
+    with patch(
+        "src.recorder.capture._finalize_screenshot",
+        return_value=("shot.jpeg", 1, (0, 0)),
+    ), patch(
+        "src.recorder.uia_input_boxes.snapshot_uia_screen",
+        side_effect=AssertionError("press/emit must not FindAll"),
+    ):
+        session._worker_emit_left_gesture(
+            _DeferredCaptureJob(
+                action="emit_left_gesture",
+                kind="click",
+                press_seq=1,
+                cursor_xy=(20, 20),
+                event_index=1,
+                timestamp_utc="2026-10-21T00:40:00+00:00",
+                button="left",
             )
-            assert calls == [132566]
-            session._worker_emit_left_gesture(
-                _DeferredCaptureJob(
-                    action="emit_left_gesture",
-                    kind="click",
-                    press_seq=1,
-                    cursor_xy=(20, 20),
-                    event_index=1,
-                    timestamp_utc="2026-10-21T00:40:00+00:00",
-                    button="left",
-                )
-            )
-            assert calls == [132566]
-    finally:
-        session._uia_executor.shutdown(wait=True)
+        )
     raw = json.loads((tmp_path / "events" / "event_001.json").read_text(encoding="utf-8"))
     assert raw["uia_snapshot"]["texts"][0]["text"] == "應用程式及其他"
 
 
-def test_emit_notifies_after_findall_finishes(tmp_path: Path) -> None:
-    from concurrent.futures import Future
-
+def test_emit_click_notifies_immediately_with_cached_uia(tmp_path: Path) -> None:
     from src.recorder.capture import RecordingSession, _DeferredCaptureJob
 
     snapshot = {
+        "hwnd": 10,
         "window": [0, 0, 10, 10],
         "inputs": [],
         "scrollbars": [],
         "texts": [{"bbox": [0, 0, 4, 4], "text": "應用程式及其他"}],
     }
-    pending: Future[dict | None] = Future()
     notified: list = []
     session = RecordingSession(runs_root=tmp_path)
     session._run_dir = tmp_path
@@ -298,7 +279,7 @@ def test_emit_notifies_after_findall_finishes(tmp_path: Path) -> None:
     session.set_on_event(notified.append)
     session._left_press_seq = 1
     session._left_press_captures[1] = (("pending.jpeg", 1, (0, 0)), [])
-    session._left_press_uia_futures[1] = pending
+    session._left_press_uia[1] = snapshot
     with patch(
         "src.recorder.capture._finalize_screenshot",
         return_value=("shot.jpeg", 1, (0, 0)),
@@ -314,23 +295,211 @@ def test_emit_notifies_after_findall_finishes(tmp_path: Path) -> None:
                 button="left",
             )
         )
-        assert notified == []
-        pending.set_result(snapshot)
     assert notified[0].uia_snapshot["texts"][0]["text"] == "應用程式及其他"
-    raw = json.loads((tmp_path / "events" / "event_001.json").read_text(encoding="utf-8"))
-    assert raw["uia_snapshot"]["texts"][0]["text"] == "應用程式及其他"
 
 
-def test_drag_emit_stores_release_snapshot(tmp_path: Path) -> None:
+def test_drag_emit_defers_end_uia_to_window_step(tmp_path: Path) -> None:
     from src.recorder.capture import RecordingSession, _DeferredCaptureJob
     from src.recorder.window_snapshot import ClickWindowInfo
 
     press = {
+        "hwnd": 10,
         "window": [0, 0, 40, 40],
         "inputs": [],
         "scrollbars": [],
         "texts": [{"bbox": [0, 0, 10, 10], "text": "按下"}],
     }
+    end_window = ClickWindowInfo(
+        hwnd=77,
+        title="Drop",
+        process_name="app.exe",
+        left=80,
+        top=0,
+        width=40,
+        height=40,
+        is_maximized=False,
+    )
+    session = RecordingSession(runs_root=tmp_path)
+    session._run_dir = tmp_path
+    session._left_press_seq = 3
+    session._left_press_captures[3] = (("pending.jpeg", 1, (0, 0)), [])
+    session._left_press_uia[3] = press
+    queued: list = []
+    session._persist_queued_event = queued.append  # type: ignore[method-assign]
+    with patch(
+        "src.recorder.capture._finalize_screenshot",
+        return_value=("shot.jpeg", 1, (0, 0)),
+    ), patch(
+        "src.recorder.capture._finalize_drag_end_screenshot",
+        return_value=("end.jpeg", 1, (0, 0)),
+    ), patch(
+        "src.recorder.capture._release_monitor_index",
+        return_value=None,
+    ), patch(
+        "src.recorder.uia_input_boxes.snapshot_uia_screen",
+        side_effect=AssertionError("emit must not FindAll"),
+    ):
+        session._worker_emit_left_gesture(
+            _DeferredCaptureJob(
+                action="emit_left_gesture",
+                kind="drag",
+                press_seq=3,
+                cursor_xy=(10, 10),
+                end_xy=(90, 10),
+                event_index=2,
+                timestamp_utc="t",
+                button="left",
+                end_click_window=end_window,
+            )
+        )
+    assert queued[0].uia_snapshot["texts"][0]["text"] == "按下"
+    assert queued[0].end_uia_snapshot is None
+    assert session._uia_notify_wait[2] == 1
+
+
+def test_settle_uia_publishes_for_next_press(tmp_path: Path) -> None:
+    from src.recorder.capture import RecordingSession
+
+    calls: list[int] = []
+
+    def _snap(hwnd: int) -> dict:
+        calls.append(int(hwnd))
+        label = "樹A" if hwnd == 10 else "樹B"
+        return {
+            "window": [0, 0, 10, 10],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [0, 0, 4, 4], "text": label}],
+        }
+
+    session = RecordingSession(runs_root=tmp_path)
+    window_a = _copilot_window(10)
+    window_b = _copilot_window(20)
+    with patch(
+        "src.recorder.uia_input_boxes.snapshot_uia_screen",
+        side_effect=_snap,
+    ):
+        session._collect_and_publish_settle_uia(10)
+        first = session._cached_uia_before(window_a, cursor_xy=(5, 5))  # type: ignore[arg-type]
+        session._collect_and_publish_settle_uia(20)
+        second = session._cached_uia_before(window_b, cursor_xy=(5, 5))  # type: ignore[arg-type]
+    assert calls == [10, 20]
+    assert first is not None and first["texts"][0]["text"] == "樹A"
+    assert second is not None and second["texts"][0]["text"] == "樹B"
+    assert first["hwnd"] == 10
+    assert second["hwnd"] == 20
+
+
+def test_cross_window_press_skips_stale_settle_cache(tmp_path: Path) -> None:
+    from src.recorder.capture import RecordingSession
+
+    session = RecordingSession(runs_root=tmp_path)
+    session._last_settle_uia = {
+        "hwnd": 10,
+        "window": [0, 0, 100, 80],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [{"bbox": [0, 0, 4, 4], "text": "舊窗"}],
+    }
+    other = _copilot_window(20)
+    assert session._cached_uia_before(other, cursor_xy=(5, 5)) is None  # type: ignore[arg-type]
+
+
+def test_cross_window_press_starts_live_fallback_findall(tmp_path: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from src.recorder.capture import RecordingSession, _DeferredCaptureJob
+
+    calls: list[int] = []
+
+    def _snap(hwnd: int) -> dict:
+        calls.append(int(hwnd))
+        return {
+            "window": [0, 0, 40, 40],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [0, 0, 10, 10], "text": "新窗"}],
+        }
+
+    session = RecordingSession(runs_root=tmp_path)
+    session._run_dir = tmp_path
+    session._uia_executor = ThreadPoolExecutor(max_workers=1)
+    session._last_settle_uia = {
+        "hwnd": 10,
+        "window": [0, 0, 100, 80],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [{"bbox": [0, 0, 4, 4], "text": "舊窗"}],
+    }
+    session._start_window_step = lambda _item: None  # type: ignore[method-assign]
+    session._notify_event = lambda _event: None  # type: ignore[method-assign]
+    session._start_settle_probe = lambda _event: None  # type: ignore[method-assign]
+    other = _copilot_window(20)
+    try:
+        with patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            side_effect=_snap,
+        ), patch(
+            "src.recorder.capture.resolve_click_window",
+            return_value=other,
+        ), patch(
+            "src.recorder.capture._finalize_screenshot",
+            return_value=("shot.jpeg", 1, (0, 0)),
+        ):
+            session._capture_pending_left_press(tmp_path, 5, 5)
+            assert 1 in session._left_press_uia_futures
+            session._left_press_uia_futures[1].result(timeout=2)
+            session._left_press_captures[1] = (("pending.jpeg", 1, (0, 0)), [])
+            session._worker_emit_left_gesture(
+                _DeferredCaptureJob(
+                    action="emit_left_gesture",
+                    kind="click",
+                    press_seq=1,
+                    cursor_xy=(5, 5),
+                    event_index=1,
+                    timestamp_utc="t",
+                    button="left",
+                )
+            )
+    finally:
+        session._uia_executor.shutdown(wait=True)
+    assert calls == [20]
+    raw = json.loads((tmp_path / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["uia_snapshot"]["texts"][0]["text"] == "新窗"
+    assert raw["uia_snapshot"]["hwnd"] == 20
+
+
+def test_matching_settle_cache_skips_live_fallback(tmp_path: Path) -> None:
+    from src.recorder.capture import RecordingSession
+
+    session = RecordingSession(runs_root=tmp_path)
+    session._uia_executor = object()  # type: ignore[assignment]
+    session._last_settle_uia = {
+        "hwnd": 132566,
+        "window": [0, 0, 100, 80],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [{"bbox": [0, 0, 4, 4], "text": "快取"}],
+    }
+    window = _copilot_window(132566)
+    with patch.object(
+        session,
+        "_begin_press_uia_fallback",
+        side_effect=AssertionError("matched cache must not live FindAll"),
+    ), patch(
+        "src.recorder.capture.resolve_click_window",
+        return_value=window,
+    ):
+        session._capture_pending_left_press(tmp_path, 20, 20)
+    assert session._left_press_uia[1]["texts"][0]["text"] == "快取"
+    assert session._left_press_uia_futures == {}
+
+
+def test_window_step_findall_sets_drag_end_uia(tmp_path: Path) -> None:
+    from src.recorder.capture import RecordingSession, _QueuedEvent
+    from src.recorder.models import RecordedEvent
+    from src.recorder.window_snapshot import ClickWindowInfo
+
     release = {
         "window": [80, 0, 40, 40],
         "inputs": [],
@@ -347,299 +516,46 @@ def test_drag_emit_stores_release_snapshot(tmp_path: Path) -> None:
         height=40,
         is_maximized=False,
     )
-    from concurrent.futures import Future
-
+    events = tmp_path / "events"
+    events.mkdir()
+    event_raw = {
+        "index": 2,
+        "timestamp_utc": "t",
+        "kind": "drag",
+        "cursor_xy": [10, 10],
+        "end_xy": [90, 10],
+    }
+    (events / "event_002.json").write_text(json.dumps(event_raw), encoding="utf-8")
     session = RecordingSession(runs_root=tmp_path)
     session._run_dir = tmp_path
-    session._left_press_seq = 3
-    session._left_press_captures[3] = (("pending.jpeg", 1, (0, 0)), [])
-    press_future: Future[dict | None] = Future()
-    press_future.set_result(press)
-    release_future: Future[dict | None] = Future()
-    release_future.set_result(release)
-    session._left_press_uia_futures[3] = press_future
-    session._drag_end_uia_futures[3] = release_future
-    queued: list = []
-    session._persist_queued_event = queued.append  # type: ignore[method-assign]
+    session._events = [RecordedEvent.from_dict(event_raw)]
+    session._foreground_hwnd = lambda: 77  # type: ignore[method-assign]
+    session._uia_notify_wait[2] = 1
+    notified: list = []
+    session.set_on_event(notified.append)
     with patch(
-        "src.recorder.capture._finalize_screenshot",
-        return_value=("shot.jpeg", 1, (0, 0)),
-    ), patch(
-        "src.recorder.capture._finalize_drag_end_screenshot",
-        return_value=("end.jpeg", 1, (0, 0)),
-    ), patch(
-        "src.recorder.capture._release_monitor_index",
-        return_value=None,
-    ), patch.object(
-        session,
-        "_uia_snapshot_for_window",
-        side_effect=AssertionError("capture worker must not FindAll"),
-    ):
-        session._worker_emit_left_gesture(
-            _DeferredCaptureJob(
-                action="emit_left_gesture",
+        "src.recorder.uia_input_boxes.snapshot_uia_screen",
+        return_value=release,
+    ), patch.object(session, "_resolve_window_change", return_value=(None, None, {})), patch.object(
+        session, "_sample_debug_focus_rect_for_item", return_value=None
+    ), patch.object(session, "_sleep_remaining_window_settle"):
+        session._window_step_body(
+            _QueuedEvent(
                 kind="drag",
-                press_seq=3,
                 cursor_xy=(10, 10),
                 end_xy=(90, 10),
                 event_index=2,
                 timestamp_utc="t",
-                button="left",
                 end_click_window=end_window,
+                window_after_sealed=False,
             )
         )
-    assert queued[0].uia_snapshot["texts"][0]["text"] == "按下"
-    assert queued[0].end_uia_snapshot["texts"][0]["text"] == "放開"
-
-
-def _copilot_window(hwnd: int = 132566) -> object:
-    from src.recorder.window_snapshot import ClickWindowInfo
-
-    return ClickWindowInfo(
-        hwnd=hwnd,
-        title="Microsoft 365 Copilot",
-        process_name="M365Copilot.exe",
-        left=0,
-        top=0,
-        width=120,
-        height=80,
-        is_maximized=False,
-    )
-
-
-def _wait_preclick(session: object) -> dict:
-    import time
-
-    for _ in range(100):
-        slot = session._preclick_uia  # type: ignore[attr-defined]
-        if slot is not None and isinstance(slot.snapshot, dict):
-            return slot.snapshot
-        time.sleep(0.02)
-    raise AssertionError("pre-click FindAll did not finish")
-
-
-def test_preclick_cache_hit_skips_second_findall(tmp_path: Path) -> None:
-    from concurrent.futures import ThreadPoolExecutor
-
-    from src.recorder.capture import RecordingSession
-
-    calls: list[int] = []
-
-    def _snap(hwnd: int) -> dict:
-        calls.append(int(hwnd))
-        return {
-            "window": [0, 0, 10, 10],
-            "inputs": [],
-            "scrollbars": [],
-            "texts": [{"bbox": [0, 0, 4, 4], "text": "搜尋"}],
-        }
-
-    session = RecordingSession(runs_root=tmp_path)
-    session._uia_executor = ThreadPoolExecutor(max_workers=1)
-    window = _copilot_window()
-    try:
-        with patch(
-            "src.recorder.uia_input_boxes.snapshot_uia_screen",
-            side_effect=_snap,
-        ):
-            session._queue_preclick_uia(window.hwnd, frame_id=3)
-            _wait_preclick(session)
-            session._latch_press_uia(1, window, side="left")
-            session._latch_press_uia(2, window, side="left")
-    finally:
-        session._uia_executor.shutdown(wait=True)
-    assert calls == [window.hwnd]
-    assert session._left_press_uia_futures[1].result()["texts"][0]["text"] == "搜尋"
-    assert session._left_press_uia_futures[2].result()["texts"][0]["text"] == "搜尋"
-
-
-def test_preclick_hwnd_miss_uses_click_time_findall(tmp_path: Path) -> None:
-    from concurrent.futures import ThreadPoolExecutor
-
-    from src.recorder.capture import RecordingSession
-
-    calls: list[int] = []
-
-    def _snap(hwnd: int) -> dict:
-        calls.append(int(hwnd))
-        return {"window": None, "inputs": [], "scrollbars": [], "texts": []}
-
-    session = RecordingSession(runs_root=tmp_path)
-    session._uia_executor = ThreadPoolExecutor(max_workers=1)
-    cached = _copilot_window(10)
-    other = _copilot_window(20)
-    try:
-        with patch(
-            "src.recorder.uia_input_boxes.snapshot_uia_screen",
-            side_effect=_snap,
-        ):
-            session._queue_preclick_uia(cached.hwnd, frame_id=1)
-            _wait_preclick(session)
-            session._latch_press_uia(1, other, side="right")
-            session._right_press_uia_futures[1].result(timeout=2)
-    finally:
-        session._uia_executor.shutdown(wait=True)
-    assert calls == [10, 20]
-
-
-def test_preclick_late_completion_does_not_fill_the_slot(tmp_path: Path) -> None:
-    import threading
-    from concurrent.futures import ThreadPoolExecutor
-
-    from src.recorder.capture import RecordingSession
-
-    started = threading.Event()
-    release = threading.Event()
-
-    def _snap(_hwnd: int) -> dict:
-        started.set()
-        release.wait(2)
-        return {"window": None, "inputs": [], "scrollbars": [], "texts": [{"bbox": [0, 0, 1, 1], "text": "晚到"}]}
-
-    session = RecordingSession(runs_root=tmp_path)
-    session._uia_executor = ThreadPoolExecutor(max_workers=1)
-    try:
-        with patch(
-            "src.recorder.uia_input_boxes.snapshot_uia_screen",
-            side_effect=_snap,
-        ):
-            session._queue_preclick_uia(5, frame_id=1)
-            assert started.wait(2)
-            session._mark_preclick_uia_stale()
-            release.set()
-            session._uia_executor.shutdown(wait=True)
-            session._uia_executor = None
-    finally:
-        release.set()
-    slot = session._preclick_uia
-    assert slot is not None
-    assert slot.stale is True
-    assert slot.snapshot is None
-
-
-def test_preclick_queues_on_first_before_shot_only(tmp_path: Path) -> None:
-    from concurrent.futures import ThreadPoolExecutor
-
-    from src.recorder.capture import RecordingSession, _RawBeforeShot
-
-    calls: list[int] = []
-
-    def _snap(hwnd: int) -> dict:
-        calls.append(int(hwnd))
-        return {"window": None, "inputs": [], "scrollbars": [], "texts": []}
-
-    session = RecordingSession(runs_root=tmp_path)
-    session._uia_executor = ThreadPoolExecutor(max_workers=1)
-    session._foreground_hwnd = lambda: 42  # type: ignore[method-assign]
-    frame = _RawBeforeShot(
-        frame_id=1,
-        rgb=b"\x00\x00\x00",
-        size=(1, 1),
-        monitor_index=1,
-        monitor_offset=(0, 0),
-    )
-    later = _RawBeforeShot(
-        frame_id=2,
-        rgb=b"\x00\x00\x00",
-        size=(1, 1),
-        monitor_index=1,
-        monitor_offset=(0, 0),
-    )
-    try:
-        with patch(
-            "src.recorder.uia_input_boxes.snapshot_uia_screen",
-            side_effect=_snap,
-        ):
-            assert session._install_raw_before_shot(frame) is True
-            assert session._install_raw_before_shot(later) is True
-            _wait_preclick(session)
-    finally:
-        session._uia_executor.shutdown(wait=True)
-    assert calls == [42]
-
-
-def test_startup_before_shot_change_marks_preclick_stale(tmp_path: Path) -> None:
-    from concurrent.futures import ThreadPoolExecutor
-
-    from src.recorder.capture import RecordingSession, _RawBeforeShot
-
-    def _snap(_hwnd: int) -> dict:
-        return {"window": None, "inputs": [], "scrollbars": [], "texts": []}
-
-    session = RecordingSession(runs_root=tmp_path)
-    session._uia_executor = ThreadPoolExecutor(max_workers=1)
-    session._foreground_hwnd = lambda: 42  # type: ignore[method-assign]
-    first = _RawBeforeShot(
-        frame_id=1,
-        rgb=b"\x00\x00\x00",
-        size=(1, 1),
-        monitor_index=1,
-        monitor_offset=(0, 0),
-    )
-    changed = _RawBeforeShot(
-        frame_id=2,
-        rgb=b"\xff\xff\xff",
-        size=(1, 1),
-        monitor_index=1,
-        monitor_offset=(0, 0),
-    )
-    try:
-        with patch(
-            "src.recorder.uia_input_boxes.snapshot_uia_screen",
-            side_effect=_snap,
-        ):
-            session._install_raw_before_shot(first)
-            _wait_preclick(session)
-            session._preclick_compare_mono = 0.0
-            session._install_raw_before_shot(changed)
-    finally:
-        session._uia_executor.shutdown(wait=False, cancel_futures=True)
-    slot = session._preclick_uia
-    assert slot is not None
-    assert slot.stale is True
-    assert slot.snapshot is None
-
-
-def test_preclick_queues_on_first_plateau_only(tmp_path: Path) -> None:
-    import json
-    from concurrent.futures import ThreadPoolExecutor
-
-    from src.recorder.capture import RecordingSession
-
-    calls: list[int] = []
-
-    def _snap(hwnd: int) -> dict:
-        calls.append(int(hwnd))
-        return {"window": None, "inputs": [], "scrollbars": [], "texts": []}
-
-    session = RecordingSession(runs_root=tmp_path)
-    session._run_dir = tmp_path
-    session._uia_executor = ThreadPoolExecutor(max_workers=1)
-    events = tmp_path / "events"
-    events.mkdir()
-    (events / "event_001.json").write_text(
-        json.dumps(
-            {
-                "index": 1,
-                "timestamp_utc": "t",
-                "kind": "click",
-                "click_window": {"hwnd": 77},
-            }
-        ),
-        encoding="utf-8",
-    )
-    try:
-        with patch(
-            "src.recorder.uia_input_boxes.snapshot_uia_screen",
-            side_effect=_snap,
-        ):
-            session._persist_observed_settle(1, 0.03)
-            session._persist_observed_settle(1, 1.5)
-            _wait_preclick(session)
-    finally:
-        session._uia_executor.shutdown(wait=True)
-    assert calls == [77]
-    assert session._preclick_startup_compare is False
+    raw = json.loads((events / "event_002.json").read_text(encoding="utf-8"))
+    assert raw["end_uia_snapshot"]["texts"][0]["text"] == "放開"
+    assert session._last_settle_uia is not None
+    assert session._last_settle_uia["hwnd"] == 77
+    assert notified
+    assert notified[0].end_uia_snapshot["texts"][0]["text"] == "放開"
 
 
 @pytest.mark.asyncio

@@ -2099,12 +2099,15 @@ def _normalize_recorded_anchor_label(label: str) -> str:
 
     Structured ``anchor_text`` values such as ``[檔案] 索引標籤`` must compare
     equal to the live Name string; treating ``[]`` as a hub wrapper would drop
-    the role suffix and break exact match.
+    the role suffix and break exact match. Shell status tails (running-window
+    counts, pinned) are stripped before lookalike folds so ``1`` stays a digit.
     """
+    from src.recorder.uia_input_boxes import canonicalize_uia_shell_status_label
+
     text = _strip_similarity_edges(label or "", _SIMILARITY_WHITESPACE)
     if not text:
         return ""
-    return _canonicalize_similarity_text(text)
+    return _canonicalize_similarity_text(canonicalize_uia_shell_status_label(text))
 
 
 def _normalize_similarity_label(label: str) -> str:
@@ -2148,7 +2151,10 @@ def _normalize_similarity_label(label: str) -> str:
             )
             if inner:
                 text = inner
-    return _canonicalize_similarity_text(text)
+    from src.recorder.uia_input_boxes import canonicalize_uia_shell_status_label
+
+    # Shell status before lookalike folds (``1``→``l`` would break running counts).
+    return _canonicalize_similarity_text(canonicalize_uia_shell_status_label(text))
 
 
 def _label_similarity(a: str, b: str) -> float:

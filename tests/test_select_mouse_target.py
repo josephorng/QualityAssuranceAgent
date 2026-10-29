@@ -3142,6 +3142,39 @@ def test_detection_exact_match_office_bracket_tab_name() -> None:
     )
 
 
+def test_normalize_strips_uia_shell_status_tails() -> None:
+    from cua_mcp.select_mouse_target import (
+        _detection_exact_match_to_query,
+        _normalize_recorded_anchor_label,
+        _normalize_similarity_label,
+    )
+    from cua_mcp.select_ui_element import UiDetection
+
+    assert _normalize_similarity_label("Excel - 已釘選") == "Excel"
+    assert (
+        _normalize_similarity_label("Google Chrome - 1 個執行中視窗 - 已釘選")
+        == "Google Chrome"
+    )
+    assert _normalize_similarity_label("「文件 (已釘選)」文字") == "文件"
+    assert (
+        _normalize_recorded_anchor_label("Cursor - 2 個執行中視窗") == "Cursor"
+    )
+    det = UiDetection(
+        bbox=(0, 0, 10, 10),
+        cx=0,
+        cy=0,
+        class_id=0,
+        class_name="button",
+        text="Excel",
+        source="uia",
+        uia_control_type="button",
+    )
+    assert _detection_exact_match_to_query(det, "Excel - 已釘選")
+    assert _detection_exact_match_to_query(
+        det, "「Excel - 1 個執行中視窗 - 已釘選」按鈕"
+    )
+
+
 def test_matches_for_phrase_recorded_anchor_skips_hub_unwrap() -> None:
     from cua_mcp.select_mouse_target import _matches_for_phrase
     from cua_mcp.select_ui_element import UiDetection

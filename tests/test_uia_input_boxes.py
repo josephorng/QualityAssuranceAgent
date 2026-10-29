@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from src.recorder.uia_input_boxes import (
+    canonicalize_uia_shell_status_label,
     filter_uia_input_rects,
     is_oversized_uia_rect,
+    is_usable_uia_landmark_label,
     merge_nested_element_boxes,
     uia_label_prefer_value,
 )
@@ -97,6 +99,56 @@ def test_uia_label_prefer_value_over_name() -> None:
     assert uia_label_prefer_value("", "  name  ") == "name"
     assert uia_label_prefer_value("   ", "name") == "name"
     assert uia_label_prefer_value("", "") == ""
+
+
+def test_canonicalize_uia_shell_status_label_strips_taskbar_tails() -> None:
+    assert canonicalize_uia_shell_status_label("Excel - 已釘選") == "Excel"
+    assert (
+        canonicalize_uia_shell_status_label("Cursor - 2 個執行中視窗") == "Cursor"
+    )
+    assert (
+        canonicalize_uia_shell_status_label(
+            "Google Chrome - 1 個執行中視窗 - 已釘選"
+        )
+        == "Google Chrome"
+    )
+    assert (
+        canonicalize_uia_shell_status_label("日月晶耀 - 晶鑰系統 - 已釘選")
+        == "日月晶耀 - 晶鑰系統"
+    )
+    assert canonicalize_uia_shell_status_label("文件 (已釘選)") == "文件"
+    assert (
+        canonicalize_uia_shell_status_label("Chrome - 3 running windows")
+        == "Chrome"
+    )
+    assert canonicalize_uia_shell_status_label("Notes - Pinned") == "Notes"
+    assert canonicalize_uia_shell_status_label("Excel") == "Excel"
+    assert uia_label_prefer_value("Excel - 已釘選", "name") == "Excel"
+    assert is_usable_uia_landmark_label("Excel - 已釘選") is True
+    assert is_usable_uia_landmark_label("（已釘選）") is False
+
+
+def test_uia_snapshot_image_local_strips_shell_status_from_old_texts() -> None:
+    from src.recorder.uia_input_boxes import uia_snapshot_image_local
+
+    _inputs, _scrollbars, texts = uia_snapshot_image_local(
+        {
+            "window": [0, 0, 200, 100],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [
+                {
+                    "bbox": [10, 10, 80, 30],
+                    "text": "Google Chrome - 1 個執行中視窗 - 已釘選",
+                    "control_type": "button",
+                }
+            ],
+        },
+        monitor_offset=(0, 0),
+        image_w=200,
+        image_h=100,
+    )
+    assert texts == [((10, 10, 70, 20), "Google Chrome", "button")]
 
 
 def test_scrollbar_thumb_unions_same_line_arrow_buttons() -> None:

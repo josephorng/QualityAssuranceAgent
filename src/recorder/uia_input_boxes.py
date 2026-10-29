@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import re
 from ctypes import wintypes
 from typing import Callable
 
@@ -177,6 +178,39 @@ def is_oversized_uia_rect(
 MAX_USABLE_UIA_LABEL_LEN = 48
 MIN_USABLE_UIA_LANDMARKS = 8
 
+# Windows shell status tails on taskbar / Explorer Names (running count, pinned).
+# Applied as trailing suffixes only so app titles like ``日月晶耀 - 晶鑰系統`` stay.
+_UIA_SHELL_STATUS_SUFFIX_RE = re.compile(
+    r"(?:"
+    r"\s*-\s*\d+\s*個執行中視窗"
+    r"|\s*-\s*\d+\s*running\s+windows?"
+    r"|\s*-\s*已釘選"
+    r"|\s*-\s*Pinned"
+    r"|\s*[\(（]\s*已釘選\s*[\)）]"
+    r"|\s*[\(（]\s*Pinned\s*[\)）]"
+    r")+$",
+    re.IGNORECASE,
+)
+
+
+def canonicalize_uia_shell_status_label(text: str | None) -> str:
+    """Drop variable Windows shell status from a UIA Name/Value.
+
+    Taskbar buttons flip between forms such as ``Excel - 已釘選``,
+    ``Chrome - 2 個執行中視窗``, and ``Chrome - 1 個執行中視窗 - 已釘選``.
+    Explorer pinned items use ``文件 (已釘選)``. Those tails are not stable
+    across sessions, so recording and replay both reduce to the app/item name.
+    """
+    visible = str(text or "").strip()
+    if not visible:
+        return ""
+    previous = None
+    while previous != visible:
+        previous = visible
+        visible = _UIA_SHELL_STATUS_SUFFIX_RE.sub("", visible).strip()
+        visible = visible.rstrip(" \t-–—－").strip()
+    return visible
+
 
 def control_type_token_from_id(control_type_id: int | None) -> str:
     """Stable token for a labeled UIA control type, or ``""`` when unmapped."""
@@ -231,9 +265,11 @@ def is_usable_uia_landmark_label(text: str | None) -> bool:
     """True when a UIA string is short enough to name a control.
 
     URL-like names and ultra-long AutomationIds are omitted from the UIA
-    candidate list and do not count toward the sufficiency gate.
+    candidate list and do not count toward the sufficiency gate. Shell status
+    tails are stripped before the length check so a long `` - N 個執行中視窗``
+    suffix does not hide an otherwise usable app name.
     """
-    visible = str(text or "").strip()
+    visible = canonicalize_uia_shell_status_label(text)
     if len(visible) < 2:
         return False
     if len(visible) > MAX_USABLE_UIA_LABEL_LEN:
@@ -250,8 +286,8 @@ def uia_label_prefer_value(value: str, name: str) -> str:
     """Prefer non-empty stripped Value over Name."""
     stripped_value = str(value or "").strip()
     if stripped_value:
-        return stripped_value
-    return str(name or "").strip()
+        return canonicalize_uia_shell_status_label(stripped_value)
+    return canonicalize_uia_shell_status_label(name)
 
 
 def _is_clipped_uia_sliver(
@@ -369,7 +405,7 @@ def filter_uia_labeled_text_rects(
     label_by_box: dict[RectXywh, tuple[str, str]] = {}
     for item in screen_labeled:
         (left, top, right, bottom), label, control_type = unpack_uia_labeled(item)
-        text = str(label or "").strip()
+        text = canonicalize_uia_shell_status_label(label)
         if not text:
             continue
         if int(right) <= int(left) or int(bottom) <= int(top):
@@ -1095,7 +1131,7 @@ def snapshot_uia_screen(hwnd: int) -> dict[str, object] | None:
     texts: list[dict[str, object]] = []
     for item in labeled:
         box, label, control_type = unpack_uia_labeled(item)
-        text = str(label or "").strip()
+        text = canonicalize_uia_shell_status_label(label)
         if not text:
             continue
         entry: dict[str, object] = {"bbox": [int(v) for v in box], "text": text}
@@ -1161,7 +1197,7 @@ def uia_snapshot_image_local(
             if not isinstance(item, dict):
                 continue
             box = item.get("bbox")
-            text = str(item.get("text") or "").strip()
+            text = canonicalize_uia_shell_status_label(item.get("text"))
             control_type = str(item.get("control_type") or "").strip()
             if control_type not in UIA_CONTROL_TYPE_SUFFIX:
                 control_type = ""

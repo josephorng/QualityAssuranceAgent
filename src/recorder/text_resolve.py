@@ -424,17 +424,30 @@ def _ocr_clip_rect_for_focus(
     detections: list[UiDetection],
     local_x: int,
     local_y: int,
+    uia_field_clip_local: tuple[int, int, int, int] | None = None,
 ) -> tuple[int, int, int, int] | None:
     """Return the OCR clip rect for a focus rect.
 
     Wide UIA field bounds are used as-is. Caret-thin rects are not a usable
-    clip; expand only via a YOLO Input that contains the caret (unioned with
-    the caret) so typed text left of the caret is included. Without a
-    containing Input, return None and let the caller fall back to a single
-    nearest-text result (no wide ``ocr_options`` list).
+    clip; expand via a recorded/live UIA Edit|Document|ComboBox that contains
+    the caret when available, else a YOLO Input that contains the caret
+    (unioned with the caret) so typed text left of the caret is included.
+    Without a containing field/Input, return None and let the caller fall back
+    to a single nearest-text result (no wide ``ocr_options`` list).
     """
     if not _is_caret_thin_rect(local_focus_rect):
         return local_focus_rect
+
+    if uia_field_clip_local is not None:
+        left, top, right, bottom = _normalize_ltrb(uia_field_clip_local)
+        if right > left and bottom > top:
+            padded = (
+                left - _INPUT_CLIP_PAD_PX,
+                top - _INPUT_CLIP_PAD_PX,
+                right + _INPUT_CLIP_PAD_PX,
+                bottom + _INPUT_CLIP_PAD_PX,
+            )
+            return _union_ltrb(padded, local_focus_rect)
 
     input_det = _select_input_containing_caret(detections, local_x, local_y)
     if input_det is None:
@@ -516,6 +529,33 @@ def _nearest_ocr_entry(
     )[0]
 
 
+def _uia_ocr_clip_local_for_event(
+    event: RecordedEvent,
+    *,
+    use_end: bool,
+) -> tuple[int, int, int, int] | None:
+    """Convert ``event.ocr_clip_rect`` (screen LTRB) to screenshot-local LTRB."""
+    clip = event.ocr_clip_rect
+    if clip is None:
+        return None
+    return _focus_rect_to_local(event, clip, use_end=use_end)
+
+
+def _resolve_or_sample_ocr_clip_rect(
+    event: RecordedEvent,
+) -> tuple[int, int, int, int] | None:
+    """Prefer recorded ``ocr_clip_rect``; else live-sample when focus is caret-thin."""
+    if event.ocr_clip_rect is not None:
+        return event.ocr_clip_rect
+    from src.recorder.uia_input_boxes import sample_uia_ocr_clip_rect
+
+    caret_xy = event.cursor_xy or event.anchor_click_xy
+    return sample_uia_ocr_clip_rect(
+        caret_xy=caret_xy,
+        focus_rect=event.focus_rect,
+    )
+
+
 def _resolve_ocr_from_detections(
     *,
     bgr: Any,
@@ -523,6 +563,7 @@ def _resolve_ocr_from_detections(
     local_x: int,
     local_y: int,
     focus_rect_local: tuple[int, int, int, int] | None,
+    uia_field_clip_local: tuple[int, int, int, int] | None = None,
 ) -> tuple[str | None, list[str]]:
     """Return ``(ocr_text, ocr_options)`` from vision detections."""
     if focus_rect_local is not None:
@@ -531,6 +572,7 @@ def _resolve_ocr_from_detections(
             detections=all_detections,
             local_x=local_x,
             local_y=local_y,
+            uia_field_clip_local=uia_field_clip_local,
         )
         if clip is not None:
             caret_thin = _is_caret_thin_rect(focus_rect_local)
@@ -629,6 +671,12 @@ async def resolve_text_input_text(
             ocr_image_path = None
             use_end = False
 
+    # Sample UIA field clip off the vision thread when the event lacks one
+    # (legacy recordings / re-analyze while the app is still open).
+    ocr_clip_screen = await asyncio.to_thread(_resolve_or_sample_ocr_clip_rect, event)
+    if ocr_clip_screen is not None and event.ocr_clip_rect is None:
+        event = replace(event, ocr_clip_rect=ocr_clip_screen)
+
     vision = await asyncio.to_thread(
         build_vision_context_at_point,
         event,
@@ -651,6 +699,7 @@ async def resolve_text_input_text(
         if event.focus_rect is not None
         else None
     )
+    uia_clip_local = _uia_ocr_clip_local_for_event(event, use_end=use_end)
     if bgr is not None and all_detections:
         ocr_text, ocr_options = _resolve_ocr_from_detections(
             bgr=bgr,
@@ -658,6 +707,7 @@ async def resolve_text_input_text(
             local_x=local[0],
             local_y=local[1],
             focus_rect_local=focus_local,
+            uia_field_clip_local=uia_clip_local,
         )
     if bgr is not None and focus_local is not None:
         write_focus_rect_debug_image(

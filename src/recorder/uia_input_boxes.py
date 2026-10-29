@@ -70,6 +70,7 @@ _UIA_ARRAY_GET_ELEMENT = 4
 
 _UIA_CONTROL_TYPE_PROPERTY_ID = 30003
 _UIA_BUTTON_CONTROL_TYPE_ID = 50000
+_UIA_COMBOBOX_CONTROL_TYPE_ID = 50003
 _UIA_EDIT_CONTROL_TYPE_ID = 50004
 _UIA_HYPERLINK_CONTROL_TYPE_ID = 50005
 _UIA_LISTITEM_CONTROL_TYPE_ID = 50007
@@ -80,6 +81,12 @@ _UIA_THUMB_CONTROL_TYPE_ID = 50027
 _UIA_SCROLLBAR_CONTROL_TYPE_ID = 50028
 _UIA_DATAITEM_CONTROL_TYPE_ID = 50029
 _UIA_DOCUMENT_CONTROL_TYPE_ID = 50030
+# Text hosts used to expand a caret-thin focus into an OCR clip rect.
+_OCR_CLIP_FIELD_CONTROL_TYPE_IDS = (
+    _UIA_EDIT_CONTROL_TYPE_ID,
+    _UIA_DOCUMENT_CONTROL_TYPE_ID,
+    _UIA_COMBOBOX_CONTROL_TYPE_ID,
+)
 _UIA_VALUE_PATTERN = 10002
 _UIA_VALUE_GET_CURRENT = 4
 _TREE_SCOPE_DESCENDANTS = 0x4
@@ -1027,6 +1034,287 @@ def enumerate_edit_document_screen_xyxy(hwnd: int) -> list[ScreenXyxy]:
     """FindAll Edit|Document under ``hwnd`` (via combined walk); screen xyxy boxes."""
     inputs, _scrollbars, _labeled = enumerate_edit_document_scrollbar_screen(int(hwnd))
     return inputs
+
+
+def _point_inside_screen_xyxy(x: int, y: int, box: ScreenXyxy) -> bool:
+    left, top, right, bottom = (int(v) for v in box)
+    return left <= int(x) <= right and top <= int(y) <= bottom
+
+
+def _foreground_hwnd() -> int | None:
+    if os.name != "nt":
+        return None
+    hwnd = int(ctypes.windll.user32.GetForegroundWindow() or 0)
+    return hwnd or None
+
+
+def _focused_ocr_clip_field_screen_xyxy() -> ScreenXyxy | None:
+    """Focused UIA Edit/Document/ComboBox bounds when control type matches."""
+    if os.name != "nt":
+        return None
+
+    from src.recorder.focus_point import _UIA_GET_FOCUSED_ELEMENT_INDEX
+
+    ole32 = ctypes.windll.ole32
+    initialized_here = False
+    hr = ole32.CoInitializeEx(None, _COINIT_MULTITHREADED)
+    if hr == _S_OK:
+        initialized_here = True
+    elif hr not in (_S_OK, _S_FALSE) and (hr & 0xFFFFFFFF) != 0x80010106:
+        return None
+
+    automation: ctypes.c_void_p | None = None
+    element: ctypes.c_void_p | None = None
+    try:
+        clsid = _guid_from_string(_CLSID_CUIAutomation)
+        iid = _guid_from_string(_IID_IUIAutomation)
+        automation_ptr = ctypes.c_void_p()
+        hr = ole32.CoCreateInstance(
+            ctypes.byref(clsid),
+            None,
+            _CLSCTX_INPROC_SERVER,
+            ctypes.byref(iid),
+            ctypes.byref(automation_ptr),
+        )
+        if hr != _S_OK or not automation_ptr:
+            return None
+        automation = automation_ptr
+
+        get_focused = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(_com_vtable(automation, _UIA_GET_FOCUSED_ELEMENT_INDEX + 1)[_UIA_GET_FOCUSED_ELEMENT_INDEX])
+        element_ptr = ctypes.c_void_p()
+        hr = get_focused(automation, ctypes.byref(element_ptr))
+        if hr != _S_OK or not element_ptr:
+            return None
+        element = element_ptr
+        control_type = _element_control_type(element)
+        if control_type not in _OCR_CLIP_FIELD_CONTROL_TYPE_IDS:
+            return None
+        return _element_bounding_xyxy(element)
+    except Exception:
+        return None
+    finally:
+        _com_release(element)
+        _com_release(automation)
+        if initialized_here:
+            try:
+                ole32.CoUninitialize()
+            except Exception:
+                pass
+
+
+def enumerate_ocr_clip_field_screen_xyxy(hwnd: int) -> list[ScreenXyxy]:
+    """FindAll Edit|Document|ComboBox under ``hwnd`` (screen xyxy)."""
+    if os.name != "nt" or not hwnd:
+        return []
+
+    ole32 = ctypes.windll.ole32
+    initialized_here = False
+    hr = ole32.CoInitializeEx(None, _COINIT_MULTITHREADED)
+    if hr == _S_OK:
+        initialized_here = True
+    elif hr not in (_S_OK, _S_FALSE) and (hr & 0xFFFFFFFF) != 0x80010106:
+        return []
+
+    automation: ctypes.c_void_p | None = None
+    root: ctypes.c_void_p | None = None
+    leaf_conds: list[ctypes.c_void_p] = []
+    or_nodes: list[ctypes.c_void_p] = []
+    found: ctypes.c_void_p | None = None
+    boxes: list[ScreenXyxy] = []
+    try:
+        clsid = _guid_from_string(_CLSID_CUIAutomation)
+        iid = _guid_from_string(_IID_IUIAutomation)
+        automation_ptr = ctypes.c_void_p()
+        hr = ole32.CoCreateInstance(
+            ctypes.byref(clsid),
+            None,
+            _CLSCTX_INPROC_SERVER,
+            ctypes.byref(iid),
+            ctypes.byref(automation_ptr),
+        )
+        if hr != _S_OK or not automation_ptr:
+            return []
+        automation = automation_ptr
+
+        element_from_handle = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(_com_vtable(automation, _UIA_ELEMENT_FROM_HANDLE + 1)[_UIA_ELEMENT_FROM_HANDLE])
+        root_ptr = ctypes.c_void_p()
+        hr = element_from_handle(
+            automation,
+            ctypes.c_void_p(int(hwnd)),
+            ctypes.byref(root_ptr),
+        )
+        if hr != _S_OK or not root_ptr:
+            return []
+        root = root_ptr
+
+        for type_id in _OCR_CLIP_FIELD_CONTROL_TYPE_IDS:
+            cond = _create_control_type_condition(automation, type_id)
+            if cond is None:
+                return []
+            leaf_conds.append(cond)
+
+        or_cond, or_nodes = _fold_or_conditions(automation, leaf_conds)
+        if or_cond is None:
+            return []
+
+        find_all = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(_com_vtable(root, _UIA_FIND_ALL + 1)[_UIA_FIND_ALL])
+        found_ptr = ctypes.c_void_p()
+        hr = find_all(
+            root,
+            _TREE_SCOPE_DESCENDANTS,
+            or_cond,
+            ctypes.byref(found_ptr),
+        )
+        if hr != _S_OK or not found_ptr:
+            return []
+        found = found_ptr
+
+        get_length = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_int),
+        )(_com_vtable(found, _UIA_ARRAY_GET_LENGTH + 1)[_UIA_ARRAY_GET_LENGTH])
+        get_element = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(_com_vtable(found, _UIA_ARRAY_GET_ELEMENT + 1)[_UIA_ARRAY_GET_ELEMENT])
+        length = ctypes.c_int(0)
+        if get_length(found, ctypes.byref(length)) != _S_OK:
+            return []
+        for index in range(int(length.value)):
+            child = ctypes.c_void_p()
+            if get_element(found, index, ctypes.byref(child)) != _S_OK or not child:
+                continue
+            try:
+                box = _element_bounding_xyxy(child)
+                if box is not None:
+                    boxes.append(box)
+            finally:
+                _com_release(child)
+        return boxes
+    except Exception:
+        return []
+    finally:
+        _com_release(found)
+        for node in reversed(or_nodes):
+            _com_release(node)
+        for cond in leaf_conds:
+            _com_release(cond)
+        _com_release(root)
+        _com_release(automation)
+        if initialized_here:
+            try:
+                ole32.CoUninitialize()
+            except Exception:
+                pass
+
+
+def select_uia_field_clip_containing_point(
+    caret_xy: tuple[int, int],
+    *,
+    root_hwnd: int | None = None,
+    max_area_frac: float = DEFAULT_UIA_OVERSIZE_AREA_FRAC,
+    enumerate_fn: Callable[[int], list[ScreenXyxy]] | None = None,
+    focused_rect_fn: Callable[[], ScreenXyxy | None] | None = None,
+    window_screen_xywh: RectXywh | None = None,
+) -> ScreenXyxy | None:
+    """Smallest Edit/Document/ComboBox containing ``caret_xy``; skip window-sized.
+
+    Used to expand a caret-thin ``focus_rect`` into an OCR clip without replacing
+    the caret for typing-point / debug overlays. Huge Documents (e.g. an Excel
+    sheet) are rejected via ``max_area_frac`` against the root window.
+    """
+    if os.name != "nt":
+        return None
+    x, y = int(caret_xy[0]), int(caret_xy[1])
+    hwnd = int(root_hwnd) if root_hwnd else (_foreground_hwnd() or 0)
+    if not hwnd:
+        return None
+    window = window_screen_xywh or _window_screen_xywh(hwnd)
+    if window is None:
+        return None
+
+    enumerator = enumerate_fn or enumerate_ocr_clip_field_screen_xyxy
+    try:
+        candidates = list(enumerator(hwnd) or [])
+    except Exception:
+        candidates = []
+
+    focused_fn = focused_rect_fn or _focused_ocr_clip_field_screen_xyxy
+    try:
+        focused = focused_fn()
+    except Exception:
+        focused = None
+    if focused is not None:
+        candidates.append(focused)
+
+    containing: list[ScreenXyxy] = []
+    seen: set[ScreenXyxy] = set()
+    _wx, _wy, ww, wh = (int(v) for v in window)
+    window_xywh = (0, 0, ww, wh)  # area compare is size-only via is_oversized
+    for box in candidates:
+        left, top, right, bottom = (int(v) for v in box)
+        if right <= left or bottom <= top:
+            continue
+        key = (left, top, right, bottom)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not _point_inside_screen_xyxy(x, y, key):
+            continue
+        # Compare field area to window area (position ignored).
+        field_xywh = (0, 0, right - left, bottom - top)
+        if is_oversized_uia_rect(field_xywh, window_xywh, max_area_frac=max_area_frac):
+            continue
+        containing.append(key)
+
+    if not containing:
+        return None
+    return min(containing, key=_xyxy_area)
+
+
+def sample_uia_ocr_clip_rect(
+    *,
+    caret_xy: tuple[int, int] | None,
+    focus_rect: tuple[int, int, int, int] | None,
+    caret_thin_max_px: int = 8,
+    select_fn: Callable[..., ScreenXyxy | None] | None = None,
+) -> tuple[int, int, int, int] | None:
+    """When ``focus_rect`` is caret-thin, return a UIA field clip in screen LTRB.
+
+    Wide focus rects already work as OCR clips; sampling is skipped for those.
+    """
+    if caret_xy is None or focus_rect is None:
+        return None
+    left, top, right, bottom = (int(v) for v in focus_rect)
+    if right < left:
+        left, right = right, left
+    if bottom < top:
+        top, bottom = bottom, top
+    if min(right - left, bottom - top) > int(caret_thin_max_px):
+        return None
+    selector = select_fn or select_uia_field_clip_containing_point
+    try:
+        return selector((int(caret_xy[0]), int(caret_xy[1])))
+    except Exception:
+        return None
 
 
 def list_uia_input_and_scrollbar_boxes_image_local(

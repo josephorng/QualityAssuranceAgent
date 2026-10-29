@@ -615,7 +615,10 @@ async def test_resolve_text_input_caret_thin_uses_input_bbox_clip(tmp_path) -> N
     ), patch(
         "src.recorder.text_resolve.extract_nearest_text",
         return_value="搜尋",
-    ) as nearest_mock:
+    ) as nearest_mock, patch(
+        "src.recorder.text_resolve._resolve_or_sample_ocr_clip_rect",
+        return_value=None,
+    ):
         resolved = await resolve_text_input_text(event, run_dir=tmp_path)
 
     nearest_mock.assert_not_called()
@@ -665,7 +668,10 @@ async def test_resolve_text_input_caret_thin_ignores_distant_input(
     ), patch(
         "src.recorder.text_resolve.extract_nearest_text",
         return_value="3",
-    ) as nearest_mock:
+    ) as nearest_mock, patch(
+        "src.recorder.text_resolve._resolve_or_sample_ocr_clip_rect",
+        return_value=None,
+    ):
         resolved = await resolve_text_input_text(event, run_dir=tmp_path)
 
     nearest_mock.assert_called_once()
@@ -708,12 +714,109 @@ async def test_resolve_text_input_caret_thin_without_input_falls_back(
     ), patch(
         "src.recorder.text_resolve.extract_nearest_text",
         return_value="fallback",
-    ) as nearest_mock:
+    ) as nearest_mock, patch(
+        "src.recorder.text_resolve._resolve_or_sample_ocr_clip_rect",
+        return_value=None,
+    ):
         resolved = await resolve_text_input_text(event, run_dir=tmp_path)
 
     nearest_mock.assert_called_once()
     assert resolved["ocr_text"] == "fallback"
     assert resolved["ocr_options"] == ["fallback"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_text_input_caret_thin_uses_uia_ocr_clip_rect(
+    tmp_path,
+) -> None:
+    """Recorded UIA field clip expands caret-thin focus before YOLO Input."""
+    event = RecordedEvent(
+        index=4,
+        timestamp_utc="t",
+        kind="text_input",
+        text="123456",
+        cursor_xy=(222, 236),
+        monitor_offset=(0, 0),
+        focus_rect=(222, 226, 223, 246),
+        ocr_clip_rect=(200, 220, 360, 250),
+        screenshot_path="",
+        ime={"chinese": False, "lang_id": 0x0409},
+    )
+    fake_vision = {
+        "used_vision": True,
+        "candidate_text": "candidate",
+        "local_cursor": (222, 236),
+        "candidates": [],
+        "detection_count": 3,
+        "bgr": np.zeros((1080, 1920, 3), dtype=np.uint8),
+        "all_detections": [
+            # No YOLO Input containing caret — UIA clip alone must gate OCR.
+            _detection_from_bbox((210, 225, 80, 18), YOLO_CLASS_TEXT, text="123456"),
+            _detection_from_bbox((220, 314, 76, 20), YOLO_CLASS_TEXT, text="a日腦n"),
+            _detection_from_bbox((490, 1049, 34, 16), YOLO_CLASS_TEXT, text="搜尋"),
+        ],
+    }
+    with patch(
+        "src.recorder.text_resolve.build_vision_context_at_point",
+        return_value=fake_vision,
+    ), patch(
+        "src.recorder.text_resolve.extract_nearest_text",
+        return_value="a日腦n",
+    ) as nearest_mock:
+        resolved = await resolve_text_input_text(event, run_dir=tmp_path)
+
+    nearest_mock.assert_not_called()
+    assert resolved["ocr_text"] == "123456"
+    assert resolved["ocr_options"] == ["123456"]
+    assert "a日腦n" not in resolved["ocr_options"]
+    assert resolved["text"] == "123456"
+    assert resolved["source"] == "recorded"
+
+
+@pytest.mark.asyncio
+async def test_resolve_text_input_uia_clip_preferred_over_yolo_input(
+    tmp_path,
+) -> None:
+    """When both UIA clip and YOLO Input exist, UIA field clip wins."""
+    event = RecordedEvent(
+        index=15,
+        timestamp_utc="t",
+        kind="text_input",
+        text="hello",
+        cursor_xy=(100, 100),
+        monitor_offset=(0, 0),
+        focus_rect=(100, 90, 101, 110),
+        ocr_clip_rect=(40, 80, 200, 120),
+        screenshot_path="",
+        ime={"chinese": False, "lang_id": 0x0409},
+    )
+    fake_vision = {
+        "used_vision": True,
+        "candidate_text": "candidate",
+        "local_cursor": (100, 100),
+        "candidates": [],
+        "detection_count": 3,
+        "bgr": np.zeros((400, 400, 3), dtype=np.uint8),
+        "all_detections": [
+            # YOLO Input is wider and would include chrome text below.
+            _detection_from_bbox((20, 70, 300, 80), YOLO_CLASS_INPUT),
+            _detection_from_bbox((50, 90, 60, 16), YOLO_CLASS_TEXT, text="hello"),
+            _detection_from_bbox((50, 130, 60, 16), YOLO_CLASS_TEXT, text="chrome"),
+        ],
+    }
+    with patch(
+        "src.recorder.text_resolve.build_vision_context_at_point",
+        return_value=fake_vision,
+    ), patch(
+        "src.recorder.text_resolve.extract_nearest_text",
+        return_value="chrome",
+    ) as nearest_mock:
+        resolved = await resolve_text_input_text(event, run_dir=tmp_path)
+
+    nearest_mock.assert_not_called()
+    assert resolved["ocr_text"] == "hello"
+    assert resolved["ocr_options"] == ["hello"]
+    assert "chrome" not in resolved["ocr_options"]
 
 
 def test_event_with_resolved_text_replaces_text_field() -> None:

@@ -47,6 +47,9 @@ class RecordedEvent:
     anchor_click_xy: tuple[int, int] | None = None
     # Caret/UIA focus bounds in global screen coords (left, top, right, bottom).
     focus_rect: tuple[int, int, int, int] | None = None
+    # Optional UIA Edit/Document/ComboBox bounds for OCR clip when focus_rect is
+    # caret-thin. Screen LTRB; never replaces focus_rect for typing point/debug.
+    ocr_clip_rect: tuple[int, int, int, int] | None = None
     window_change: dict[str, Any] | None = None
     target_window_title: str | None = None
     window_snapshot_debug: dict[str, Any] | None = None
@@ -78,6 +81,10 @@ class RecordedEvent:
             data["anchor_click_xy"] = list(self.anchor_click_xy)
         if self.focus_rect is not None:
             data["focus_rect"] = list(self.focus_rect)
+        if self.ocr_clip_rect is not None:
+            data["ocr_clip_rect"] = list(self.ocr_clip_rect)
+        else:
+            data.pop("ocr_clip_rect", None)
         if self.click_window is None:
             data.pop("click_window", None)
         if self.end_click_window is None:
@@ -100,6 +107,7 @@ class RecordedEvent:
         end_offset = raw.get("end_monitor_offset")
         anchor = raw.get("anchor_click_xy")
         focus = raw.get("focus_rect")
+        ocr_clip = raw.get("ocr_clip_rect")
         keys = raw.get("keys")
         modifiers = raw.get("modifiers")
         observed_settle = raw.get("observed_settle_seconds")
@@ -137,6 +145,11 @@ class RecordedEvent:
             focus_rect=(
                 tuple(int(v) for v in focus)
                 if isinstance(focus, list) and len(focus) == 4
+                else None
+            ),
+            ocr_clip_rect=(
+                tuple(int(v) for v in ocr_clip)
+                if isinstance(ocr_clip, list) and len(ocr_clip) == 4
                 else None
             ),
             window_change=raw.get("window_change") if isinstance(raw.get("window_change"), dict) else None,

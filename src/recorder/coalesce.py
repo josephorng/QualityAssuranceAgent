@@ -134,6 +134,7 @@ def _merge_bridged_text_inputs(first: RecordedEvent, last: RecordedEvent) -> Rec
         ),
         anchor_click_xy=first.anchor_click_xy or last.anchor_click_xy,
         focus_rect=first.focus_rect or last.focus_rect,
+        ocr_clip_rect=first.ocr_clip_rect or last.ocr_clip_rect,
         window_change=last.window_change
         if last.window_change is not None
         else first.window_change,
@@ -249,6 +250,7 @@ def coalesce_consecutive_text_inputs(events: list[RecordedEvent]) -> list[Record
                 ),
                 anchor_click_xy=prev.anchor_click_xy or event.anchor_click_xy,
                 focus_rect=prev.focus_rect or event.focus_rect,
+                ocr_clip_rect=prev.ocr_clip_rect or event.ocr_clip_rect,
                 # Prefer later after-UIA when non-empty; else keep earlier.
                 window_change=(
                     event.window_change
@@ -352,6 +354,7 @@ def retarget_ime_candidate_end_screenshots(
                         end_monitor_offset=end_mon_off,
                         anchor_click_xy=event.anchor_click_xy,
                         focus_rect=event.focus_rect,
+                        ocr_clip_rect=event.ocr_clip_rect,
                         window_change=event.window_change,
                         target_window_title=event.target_window_title,
                         window_snapshot_debug=event.window_snapshot_debug,
@@ -413,6 +416,7 @@ def coalesce_chinese_ime_candidate_keys(
                     end_monitor_offset=end_mon_off,
                     anchor_click_xy=event.anchor_click_xy,
                     focus_rect=event.focus_rect,
+                    ocr_clip_rect=event.ocr_clip_rect,
                     window_change=event.window_change,
                     target_window_title=event.target_window_title,
                     window_snapshot_debug=event.window_snapshot_debug,

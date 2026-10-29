@@ -21,6 +21,7 @@ from src.common.run_state import unique_run_folder_name
 from src.common.settings import load_settings
 from src.eye.capture import capture_all_screens_to_file, resolve_monitor_index
 from src.recorder.focus_point import resolve_typing_focus, sample_debug_focus_rect
+from src.recorder.uia_input_boxes import sample_uia_ocr_clip_rect
 from src.recorder.frame_similarity import (
     DEFAULT_SIMILARITY_THRESHOLD,
     append_settle_probe_debug_record,
@@ -382,6 +383,7 @@ class _QueuedEvent:
     duration_seconds: float | None = None
     anchor_click_xy: tuple[int, int] | None = None
     focus_rect: tuple[int, int, int, int] | None = None
+    ocr_clip_rect: tuple[int, int, int, int] | None = None
     end_xy: tuple[int, int] | None = None
     end_screenshot_path: str = ""
     end_monitor_index: int | None = None
@@ -2941,6 +2943,7 @@ class RecordingSession:
                 "cursor_xy": provisional_xy,
                 "anchor_click_xy": None,
                 "focus_rect": None,
+                "ocr_clip_rect": None,
                 "timestamp_utc": timestamp_utc or utc_now_iso(),
                 "screenshot_path": "",
                 "monitor_index": None,
@@ -5062,6 +5065,10 @@ class RecordingSession:
 
             meta["cursor_xy"] = focus_xy
             meta["focus_rect"] = typing_focus.rect
+            meta["ocr_clip_rect"] = sample_uia_ocr_clip_rect(
+                caret_xy=focus_xy,
+                focus_rect=typing_focus.rect,
+            )
 
             pending_pre_type = job.pending_pre_type
             if pending_pre_type is not None and not _pre_type_focus_still_valid(
@@ -5180,6 +5187,7 @@ class RecordingSession:
                 text="".join(chars),
                 anchor_click_xy=None,
                 focus_rect=meta.get("focus_rect"),
+                ocr_clip_rect=meta.get("ocr_clip_rect"),
                 windows_before=meta.get("windows_before") or self._start_windows_before(),
                 signals_before=meta.get("signals_before") or self._start_signals_before(),
                 action_monotonic=job.action_monotonic,
@@ -5404,6 +5412,7 @@ class RecordingSession:
             end_monitor_offset=item.end_monitor_offset,
             anchor_click_xy=item.anchor_click_xy,
             focus_rect=item.focus_rect,
+            ocr_clip_rect=item.ocr_clip_rect,
             click_window=click_window_payload,
             end_click_window=end_click_window_payload,
             uia_snapshot=item.uia_snapshot if isinstance(item.uia_snapshot, dict) else None,

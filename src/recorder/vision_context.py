@@ -181,6 +181,9 @@ def vision_source_fingerprint(event: RecordedEvent) -> str:
         "text": event.text,
         "click_count": event.click_count,
         "focus_rect": list(event.focus_rect) if event.focus_rect is not None else None,
+        "ocr_clip_rect": (
+            list(event.ocr_clip_rect) if event.ocr_clip_rect is not None else None
+        ),
         "anchor_click_xy": (
             list(event.anchor_click_xy) if event.anchor_click_xy is not None else None
         ),

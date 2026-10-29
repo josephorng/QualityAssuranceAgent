@@ -230,3 +230,83 @@ def test_labeled_text_control_types_include_interactive_items() -> None:
     assert uia._UIA_LISTITEM_CONTROL_TYPE_ID in uia._LABELED_TEXT_CONTROL_TYPES
     assert uia._UIA_TEXT_CONTROL_TYPE_ID in uia._LABELED_TEXT_CONTROL_TYPES
     assert uia._UIA_HYPERLINK_CONTROL_TYPE_ID in uia._LABELED_TEXT_CONTROL_TYPES
+
+
+def test_select_uia_field_clip_picks_smallest_containing_caret() -> None:
+    from src.recorder.uia_input_boxes import select_uia_field_clip_containing_point
+
+    caret = (150, 100)
+    outer = (50, 50, 400, 200)
+    inner = (100, 80, 220, 120)
+    other = (500, 80, 600, 120)
+
+    def _enumerate(_hwnd: int):
+        return [outer, inner, other]
+
+    chosen = select_uia_field_clip_containing_point(
+        caret,
+        root_hwnd=1,
+        enumerate_fn=_enumerate,
+        focused_rect_fn=lambda: None,
+        window_screen_xywh=(0, 0, 800, 600),
+    )
+    assert chosen == inner
+
+
+def test_select_uia_field_clip_rejects_window_sized_document() -> None:
+    from src.recorder.uia_input_boxes import select_uia_field_clip_containing_point
+
+    caret = (400, 300)
+    sheet = (0, 0, 800, 600)  # whole window Document
+
+    chosen = select_uia_field_clip_containing_point(
+        caret,
+        root_hwnd=1,
+        enumerate_fn=lambda _hwnd: [sheet],
+        focused_rect_fn=lambda: None,
+        window_screen_xywh=(0, 0, 800, 600),
+    )
+    assert chosen is None
+
+
+def test_select_uia_field_clip_includes_focused_edit() -> None:
+    from src.recorder.uia_input_boxes import select_uia_field_clip_containing_point
+
+    caret = (120, 90)
+    focused = (100, 80, 300, 110)
+
+    chosen = select_uia_field_clip_containing_point(
+        caret,
+        root_hwnd=1,
+        enumerate_fn=lambda _hwnd: [],
+        focused_rect_fn=lambda: focused,
+        window_screen_xywh=(0, 0, 800, 600),
+    )
+    assert chosen == focused
+
+
+def test_sample_uia_ocr_clip_rect_skips_wide_focus() -> None:
+    from src.recorder.uia_input_boxes import sample_uia_ocr_clip_rect
+
+    calls: list[tuple[int, int]] = []
+
+    def _select(caret_xy, **_kwargs):
+        calls.append(caret_xy)
+        return (10, 20, 30, 40)
+
+    assert (
+        sample_uia_ocr_clip_rect(
+            caret_xy=(50, 50),
+            focus_rect=(10, 40, 400, 70),  # wide field, not caret-thin
+            select_fn=_select,
+        )
+        is None
+    )
+    assert calls == []
+
+    assert sample_uia_ocr_clip_rect(
+        caret_xy=(50, 50),
+        focus_rect=(50, 40, 51, 60),
+        select_fn=_select,
+    ) == (10, 20, 30, 40)
+    assert calls == [(50, 50)]

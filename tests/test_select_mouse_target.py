@@ -5884,16 +5884,6 @@ def test_try_uia_first_unique_select_requires_exact_text() -> None:
             (10, 40, 40, 20), YOLO_CLASS_TEXT, text="更多範本", source="uia"
         ),
     ]
-    # Pad so MIN_USABLE_UIA_LANDMARKS is not relevant here (select only).
-    for i in range(8):
-        dets.append(
-            _detection_from_bbox(
-                (200, 10 + i * 20, 40, 16),
-                YOLO_CLASS_TEXT,
-                text=f"其他{i}",
-                source="uia",
-            )
-        )
     hints = normalize_nearby_hints([])
     chosen, reason = _try_uia_first_unique_select(
         dets,
@@ -5910,15 +5900,6 @@ def test_try_uia_first_unique_select_requires_exact_text() -> None:
             (10, 10, 80, 20), YOLO_CLASS_TEXT, text="空白活頁簿", source="uia"
         ),
     ]
-    for i in range(8):
-        exact.append(
-            _detection_from_bbox(
-                (200, 10 + i * 20, 40, 16),
-                YOLO_CLASS_TEXT,
-                text=f"地標{i}",
-                source="uia",
-            )
-        )
     chosen, reason = _try_uia_first_unique_select(
         exact,
         anchor="「空白活頁簿」文字",

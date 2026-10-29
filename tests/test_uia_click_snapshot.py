@@ -714,18 +714,10 @@ async def test_replay_uia_path_skips_yolo_and_miss_drops_uia_names(
     from cua_mcp import select_mouse_target as smt
     from cua_mcp.select_mouse_target import _detection_from_bbox
     from cua_mcp.yolo_onnx import YOLO_CLASS_TEXT
-    from src.recorder.uia_input_boxes import MIN_USABLE_UIA_LANDMARKS
 
     uia = [
-        _detection_from_bbox((20, 20, 40, 16), YOLO_CLASS_TEXT, text="記事本", source="uia")
-    ] + [
-        _detection_from_bbox(
-            (10, 40 + i * 12, 40, 10),
-            YOLO_CLASS_TEXT,
-            text=f"旁{i:02d}",
-            source="uia",
-        )
-        for i in range(MIN_USABLE_UIA_LANDMARKS)
+        _detection_from_bbox((20, 20, 40, 16), YOLO_CLASS_TEXT, text="記事本", source="uia"),
+        _detection_from_bbox((10, 40, 40, 10), YOLO_CLASS_TEXT, text="旁00", source="uia"),
     ]
     yolo_calls: list[str] = []
     ocr = _detection_from_bbox((80, 80, 30, 16), YOLO_CLASS_TEXT, text="搜尋", source="ocr")
@@ -776,7 +768,6 @@ async def test_replay_uia_path_skips_yolo_and_miss_drops_uia_names(
     def fake_uia_miss(_captured, _window):
         return [
             _detection_from_bbox((10, 10, 40, 16), YOLO_CLASS_TEXT, text="其他", source="uia")
-            for _ in range(MIN_USABLE_UIA_LANDMARKS)
         ]
 
     monkeypatch.setattr(smt, "_uia_only_detections_for_click_window", fake_uia_miss)
@@ -963,17 +954,15 @@ async def test_uia_mode_typed_miss_falls_through_to_yolo(
     from cua_mcp import select_mouse_target as smt
     from cua_mcp.select_mouse_target import _detection_from_bbox
     from cua_mcp.yolo_onnx import YOLO_CLASS_TEXT
-    from src.recorder.uia_input_boxes import MIN_USABLE_UIA_LANDMARKS
 
     uia = [
         _detection_from_bbox(
-            (10, 10 + i * 12, 40, 10),
+            (10, 10, 40, 10),
             YOLO_CLASS_TEXT,
-            text=f"旁{i:02d}",
+            text="旁00",
             source="uia",
             uia_control_type="list_item",
         )
-        for i in range(MIN_USABLE_UIA_LANDMARKS)
     ]
     ocr = _detection_from_bbox((80, 80, 30, 16), YOLO_CLASS_TEXT, text="記事本", source="ocr")
     yolo_calls: list[str] = []
@@ -1024,17 +1013,15 @@ async def test_uia_miss_retries_once_then_uses_original_ocr_instruction(
     from cua_mcp import select_mouse_target as smt
     from cua_mcp.select_mouse_target import _detection_from_bbox
     from cua_mcp.yolo_onnx import YOLO_CLASS_TEXT
-    from src.recorder.uia_input_boxes import MIN_USABLE_UIA_LANDMARKS
     from src.recorder.uia_replay_repair import YoloOcrMoveFallback, bind_yolo_ocr_fallbacks
 
     misses = [
         _detection_from_bbox(
-            (10, 10 + i * 12, 40, 10),
+            (10, 10, 40, 10),
             YOLO_CLASS_TEXT,
-            text=f"旁{i:02d}",
+            text="旁00",
             source="uia",
         )
-        for i in range(MIN_USABLE_UIA_LANDMARKS)
     ]
     ocr = _detection_from_bbox((80, 80, 30, 16), YOLO_CLASS_TEXT, text="文件", source="ocr")
     snapshots: list[str] = []
@@ -1099,16 +1086,14 @@ async def test_uia_second_snapshot_hit_skips_ocr(
     from cua_mcp import select_mouse_target as smt
     from cua_mcp.select_mouse_target import _detection_from_bbox
     from cua_mcp.yolo_onnx import YOLO_CLASS_TEXT
-    from src.recorder.uia_input_boxes import MIN_USABLE_UIA_LANDMARKS
 
     misses = [
         _detection_from_bbox(
-            (10, 10 + i * 12, 40, 10),
+            (10, 10, 40, 10),
             YOLO_CLASS_TEXT,
-            text=f"旁{i:02d}",
+            text="旁00",
             source="uia",
         )
-        for i in range(MIN_USABLE_UIA_LANDMARKS)
     ]
     hit = [
         _detection_from_bbox((20, 20, 40, 16), YOLO_CLASS_TEXT, text="記事本", source="uia")

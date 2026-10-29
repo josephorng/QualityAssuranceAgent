@@ -176,7 +176,6 @@ def is_oversized_uia_rect(
 
 
 MAX_USABLE_UIA_LABEL_LEN = 48
-MIN_USABLE_UIA_LANDMARKS = 8
 
 # Windows shell status tails on taskbar / Explorer Names (running count, pinned).
 # Applied as trailing suffixes only so app titles like ``日月晶耀 - 晶鑰系統`` stay.

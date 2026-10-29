@@ -4562,14 +4562,6 @@ def _uia_input_boxes(
     return boxes
 
 
-def _uia_path_text_count(detections: list[UiDetection]) -> int:
-    return sum(
-        1
-        for det in detections
-        if det.class_id == YOLO_CLASS_TEXT and str(det.source or "") == "uia"
-    )
-
-
 def _live_uia_snapshot_for_click_window(
     click_window: dict[str, Any] | None,
 ) -> tuple[Any, dict[str, Any]] | None:
@@ -5053,8 +5045,6 @@ async def find_mouse_point(
         and isinstance(click_window, dict)
         and click_hwnd
     ):
-        from src.recorder.uia_input_boxes import MIN_USABLE_UIA_LANDMARKS
-
         monitor_indices, image_paths, captured, capture_s = await asyncio.to_thread(
             _grab_selected_monitors
         )
@@ -5063,8 +5053,6 @@ async def find_mouse_point(
         def _select_uia_snapshot(
             dets: list[UiDetection],
         ) -> tuple[UiDetection | None, str]:
-            if _uia_path_text_count(dets) < MIN_USABLE_UIA_LANDMARKS:
-                return None, "few_landmarks"
             return _try_uia_first_unique_select(
                 dets,
                 anchor=match_anchor,

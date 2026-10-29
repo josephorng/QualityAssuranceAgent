@@ -1474,12 +1474,24 @@ class BrainModule:
         return step_succeeded
 
     @staticmethod
-    def _auto_advance_verify_result() -> ScriptStepVerifyResult:
+    def _auto_advance_verify_result(
+        *,
+        window_verify_passed: bool = False,
+    ) -> ScriptStepVerifyResult:
+        if window_verify_passed:
+            reason = (
+                "Actor completed the step with all tools ok; window verify passed."
+            )
+        else:
+            reason = (
+                "Actor completed the step with all tools ok; "
+                "no window verify required."
+            )
         return ScriptStepVerifyResult(
             accomplished=True,
             branch="advance",
             target_step=None,
-            reason="Actor completed the step with all tools ok; no window verify required.",
+            reason=reason,
         )
 
     def _remember_replay_press_point(self, result: ExecutionResult) -> None:
@@ -1934,11 +1946,19 @@ class BrainModule:
                         reason="Verification skipped for this queue run.",
                     )
                 else:
-                    self.manager.log_info(
-                        f"Script step {script_step_index + 1} auto-advancing "
-                        "(actor tools succeeded; no window verify miss)"
+                    if run_window_verify:
+                        self.manager.log_info(
+                            f"Script step {script_step_index + 1} auto-advancing "
+                            "(actor tools succeeded; window verify passed)"
+                        )
+                    else:
+                        self.manager.log_info(
+                            f"Script step {script_step_index + 1} auto-advancing "
+                            "(actor tools succeeded; no window verify required)"
+                        )
+                    verify_result = self._auto_advance_verify_result(
+                        window_verify_passed=run_window_verify
                     )
-                    verify_result = self._auto_advance_verify_result()
             else:
                 hold_retry = self._consume_hold_step_retry()
                 if hold_retry is not None:

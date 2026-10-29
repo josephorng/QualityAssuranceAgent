@@ -1824,8 +1824,8 @@ def _take_matching_entry(
     return None
 
 
-def _disappeared_matches_by_title(item: dict[str, Any]) -> bool:
-    """True when a disappeared entry can be identified by its title.
+def _structural_entry_matches_by_title(item: dict[str, Any]) -> bool:
+    """True when an appeared/disappeared entry can be identified by its title.
 
     Title is paired with class or process. A blank title keeps the class-and-process
     check, and a title with neither class nor process is not an identity.
@@ -1859,7 +1859,7 @@ def disappeared_windows_still_present(
     for item in needed:
         if not isinstance(item, dict) or _is_window_verify_noise(item):
             continue
-        match_title = _disappeared_matches_by_title(item)
+        match_title = _structural_entry_matches_by_title(item)
         for win in after:
             if win.hwnd in seen:
                 continue
@@ -1899,11 +1899,12 @@ def window_verify_satisfied(
     ``appeared`` / ``disappeared`` / ``state`` are checked against the live after
     window list when ``live_windows_after`` is provided: appeared must be present,
     disappeared must be absent, and state labels must match absolute after flags
-    (for example ``maximized`` requires ``is_maximized``). A disappeared entry
-    with a title matches that title as well as class and process, so other
-    windows of the same application may remain. A blank title still matches
-    class and process only. That tolerates a different starting desk (already
-    maximized, or a flyout that was never open). Without ``live_windows_after``,
+    (for example ``maximized`` requires ``is_maximized``). An appeared or
+    disappeared entry with a title matches that title as well as class and
+    process, so a same-app sibling (for example a loader vs a login dialog) does
+    not satisfy the wrong entry. A blank title still matches class and process
+    only. That tolerates a different starting desk (already maximized, or a
+    flyout that was never open). Without ``live_windows_after``,
     appear/disappear/state fall back to the live before→after delta. Extra live
     window changes are ignored. Signal fields
     compare the live after sample to the recorded after value; a missing recorded
@@ -1931,7 +1932,10 @@ def window_verify_satisfied(
                 if not isinstance(item, dict) or _is_window_verify_noise(item):
                     continue
                 if _take_matching_entry(
-                    available, item, match_change=False, match_title=False
+                    available,
+                    item,
+                    match_change=False,
+                    match_title=_structural_entry_matches_by_title(item),
                 ) is None:
                     title = str(item.get("title", "") or "").strip()
                     return False, f"window verify missed appeared: {title or item}"
@@ -1941,7 +1945,10 @@ def window_verify_satisfied(
                 if not isinstance(item, dict) or _is_window_verify_noise(item):
                     continue
                 if _take_matching_entry(
-                    available, item, match_change=False, match_title=False
+                    available,
+                    item,
+                    match_change=False,
+                    match_title=_structural_entry_matches_by_title(item),
                 ) is None:
                     title = str(item.get("title", "") or "").strip()
                     return False, f"window verify missed appeared: {title or item}"
@@ -1961,7 +1968,7 @@ def window_verify_satisfied(
                     available,
                     item,
                     match_change=False,
-                    match_title=_disappeared_matches_by_title(item),
+                    match_title=_structural_entry_matches_by_title(item),
                 ) is None:
                     title = str(item.get("title", "") or "").strip()
                     return False, f"window verify missed disappeared: {title or item}"
@@ -1969,7 +1976,7 @@ def window_verify_satisfied(
             for item in needed_disappeared:
                 if not isinstance(item, dict) or _is_window_verify_noise(item):
                     continue
-                match_title = _disappeared_matches_by_title(item)
+                match_title = _structural_entry_matches_by_title(item)
                 still_present = any(
                     _entries_match(
                         item,

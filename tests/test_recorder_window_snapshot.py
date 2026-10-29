@@ -1597,6 +1597,91 @@ def test_window_verify_appeared_checks_live_after_not_the_delta() -> None:
     assert ok is True
 
 
+def test_window_verify_appeared_requires_recorded_title_among_same_app() -> None:
+    """A same-class/process sibling (loader) must not satisfy a titled login appear."""
+    recorded = {
+        "appeared": [
+            {
+                "class_name": "WindowsForms10.Window.8.app.0.297b065_r6_ad1",
+                "title": "登入系統",
+                "process_name": "WM7Ldr.exe",
+            }
+        ]
+    }
+    loader = _win(
+        1,
+        "WinMaster7Ldr",
+        class_name="WindowsForms10.Window.8.app.0.297b065_r6_ad1",
+        process_name="WM7Ldr.exe",
+    )
+    login = _win(
+        2,
+        "登入系統",
+        class_name="WindowsForms10.Window.8.app.0.297b065_r6_ad1",
+        process_name="WM7Ldr.exe",
+    )
+    ok, reason = window_verify_satisfied(recorded, {}, live_windows_after=[loader])
+    assert ok is False
+    assert "登入系統" in reason
+    ok, _reason = window_verify_satisfied(
+        recorded,
+        {},
+        live_windows_after=[loader, login],
+    )
+    assert ok is True
+    # Delta path must use the same title rule.
+    ok, reason = window_verify_satisfied(
+        recorded,
+        {
+            "appeared": [
+                {
+                    "class_name": "WindowsForms10.Window.8.app.0.297b065_r6_ad1",
+                    "title": "WinMaster7Ldr",
+                    "process_name": "WM7Ldr.exe",
+                }
+            ]
+        },
+    )
+    assert ok is False
+    assert "登入系統" in reason
+    ok, _reason = window_verify_satisfied(
+        recorded,
+        {
+            "appeared": [
+                {
+                    "class_name": "WindowsForms10.Window.8.app.0.297b065_r6_ad1",
+                    "title": "登入系統",
+                    "process_name": "WM7Ldr.exe",
+                }
+            ]
+        },
+    )
+    assert ok is True
+
+
+def test_window_verify_blank_appeared_title_matches_any_same_app_window() -> None:
+    recorded = {
+        "appeared": [
+            {
+                "class_name": "WindowsForms10.Window.8.app.0.297b065_r6_ad1",
+                "title": "",
+                "process_name": "WM7Ldr.exe",
+            }
+        ]
+    }
+    loader = _win(
+        1,
+        "WinMaster7Ldr",
+        class_name="WindowsForms10.Window.8.app.0.297b065_r6_ad1",
+        process_name="WM7Ldr.exe",
+    )
+    ok, _reason = window_verify_satisfied(recorded, {}, live_windows_after=[loader])
+    assert ok is True
+    ok, reason = window_verify_satisfied(recorded, {}, live_windows_after=[])
+    assert ok is False
+    assert "appeared" in reason
+
+
 def test_window_verify_state_checks_live_after_flags_not_the_delta() -> None:
     recorded = {
         "state": [

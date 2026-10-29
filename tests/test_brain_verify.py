@@ -378,6 +378,7 @@ async def test_process_step_empty_window_verify_still_auto_advances(monkeypatch)
     metadata = brain._update_step_metadata.call_args.args[2]
     assert metadata["verify"]["branch"] == "advance"
     assert metadata["verify"]["clearly_unmet"] is False
+    assert "no window verify required" in metadata["verify"]["reason"]
 
 
 @pytest.mark.asyncio
@@ -991,6 +992,10 @@ async def test_process_step_window_verify_success_defers_after_to_next_before(
     # Window verify owns settle; do not also sleep settle_after on this step.
     # Appeared floor is 5s with 2.0x deadline → poll sleeps until match (first try).
     sleep_mock.assert_not_awaited()
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["verify"]["branch"] == "advance"
+    assert metadata["verify"]["accomplished"] is True
+    assert "window verify passed" in metadata["verify"]["reason"]
 
 
 @pytest.mark.asyncio

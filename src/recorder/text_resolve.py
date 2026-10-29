@@ -9,7 +9,7 @@ from typing import Any
 from cua_mcp.icon_map import is_pua_char
 from cua_mcp.select_ui_element import UiDetection
 from cua_mcp.yolo_onnx import YOLO_CLASS_INPUT
-from src.recorder.models import RecordedEvent, screenshot_path_for_event_end
+from src.recorder.models import RecordedEvent
 from src.recorder.vision_context import (
     _global_to_local,
     _global_to_local_end,
@@ -647,29 +647,23 @@ async def resolve_text_input_text(
             "vision": None,
         }
 
-    # Prefer the dedicated typing end frame (captured at focus on the typing monitor).
-    # Shared next-action screenshots can be on another monitor and break OCR anchoring.
-    typing_end = screenshot_path_for_event_end(run_dir, event.index)
+    # Prefer end_screenshot_path when set: shared next-before (same monitor) or
+    # settle-derived typing-monitor JPEG (cross-monitor). Map anchors with the
+    # end frame's monitor offset.
     roi_monitor_offset = event.monitor_offset
-    if typing_end.is_file():
-        local = _global_to_local(event, anchor)
+    end_path = resolve_event_screenshot_path(event, run_dir, debug_name="_end")
+    if end_path is not None:
+        local = _global_to_local_end(event, anchor)
         debug_name = "_end"
-        ocr_image_path = str(typing_end)
+        ocr_image_path = str(end_path)
         use_end = True
+        if event.end_monitor_offset is not None:
+            roi_monitor_offset = event.end_monitor_offset
     else:
-        use_after = resolve_event_screenshot_path(event, run_dir, debug_name="_end") is not None
-        if use_after:
-            local = _global_to_local_end(event, anchor)
-            debug_name = "_end"
-            ocr_image_path = None
-            use_end = True
-            if event.end_monitor_offset is not None:
-                roi_monitor_offset = event.end_monitor_offset
-        else:
-            local = _global_to_local(event, anchor)
-            debug_name = None
-            ocr_image_path = None
-            use_end = False
+        local = _global_to_local(event, anchor)
+        debug_name = None
+        ocr_image_path = None
+        use_end = False
 
     # Sample UIA field clip off the vision thread when the event lacks one
     # (legacy recordings / re-analyze while the app is still open).

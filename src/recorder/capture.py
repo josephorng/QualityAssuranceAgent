@@ -2036,6 +2036,23 @@ class RecordingSession:
         except Exception:
             return None
 
+    def _monitor_fields_at_point(
+        self,
+        x: int,
+        y: int,
+    ) -> tuple[int | None, tuple[int, int] | None]:
+        """Return ``(monitor_index, (left, top))`` for a global point."""
+        with self._lock:
+            monitors = self._pre_click_monitors
+        for index, left, top, width, height in monitors:
+            if left <= int(x) < left + width and top <= int(y) < top + height:
+                return int(index), (int(left), int(top))
+        try:
+            mon_idx, left, top, _, _ = _monitor_at_point(x, y)
+            return int(mon_idx), (int(left), int(top))
+        except Exception:
+            return None, None
+
     def _alloc_before_shot_frame_id(self) -> int:
         with self._lock:
             self._before_shot_frame_id += 1
@@ -2380,8 +2397,14 @@ class RecordingSession:
         # and the previous event's after-cache.
         windows_before = self._cached_windows_before()
         signals_before = self._cached_signals_before()
+        shared_mon, shared_off = self._monitor_fields_at_point(
+            int(cursor_xy[0]),
+            int(cursor_xy[1]),
+        )
         self._flush_pending_text_input(
             shared_end_index=index,
+            shared_end_monitor=shared_mon,
+            shared_end_offset=shared_off,
             seal_after_to_cache=True,
             sealed_windows=windows_before,
             sealed_signals=signals_before,
@@ -2455,6 +2478,13 @@ class RecordingSession:
         if flush_meta is not None and ime_payload is not None:
             flush_meta["ime"] = ime_payload
         shared_index = index if cursor_xy is not None else None
+        shared_mon: int | None = None
+        shared_off: tuple[int, int] | None = None
+        if cursor_xy is not None:
+            shared_mon, shared_off = self._monitor_fields_at_point(
+                int(cursor_xy[0]),
+                int(cursor_xy[1]),
+            )
         windows_before = self._cached_windows_before()
         signals_before = self._cached_signals_before()
         self._seal_open_after_cache(windows_before, signals_before)
@@ -2473,6 +2503,8 @@ class RecordingSession:
                 flush_chars=flush_chars or None,
                 flush_meta=flush_meta,
                 shared_end_index=shared_index,
+                shared_end_monitor=shared_mon,
+                shared_end_offset=shared_off,
                 pending_pre_key=pending_pre_key,
                 windows_before=windows_before,
                 signals_before=signals_before,
@@ -2483,30 +2515,30 @@ class RecordingSession:
             )
         )
 
-    def _capture_typing_ocr_end_shot(
+    def _adopt_typing_monitor_settle_end_shot(
         self,
         run_dir: Path,
         text_index: int,
-        x: int,
-        y: int,
+        typing_monitor: int,
     ) -> tuple[str, int, tuple[int, int]] | None:
-        """Capture the OCR-only post-typing frame at the typing focus point."""
+        """JPEG-encode the typing monitor's before-shot cache for cross-monitor OCR.
+
+        No live mss grab: reuse ``_last_settle_frames`` for the typing display.
+        """
         dest = screenshot_path_for_event_end(run_dir, text_index)
-        if dest.is_file():
-            try:
-                mon_idx, left, top, _, _ = _monitor_at_point(x, y)
-                return str(dest), mon_idx, (left, top)
-            except Exception:
-                return str(dest), 0, (0, 0)
-        try:
-            return self._capture_immediate_screenshot(
-                run_dir,
-                text_index,
-                (x, y),
-                dest=dest,
-            )
-        except Exception:
+        frame = self._latest_settle_frame_for_monitor(int(typing_monitor))
+        if frame is None:
+            if dest.is_file():
+                return str(dest), int(typing_monitor), (0, 0)
             return None
+        if dest.is_file():
+            return (
+                str(dest),
+                int(frame.monitor_index),
+                (int(frame.monitor_offset[0]), int(frame.monitor_offset[1])),
+            )
+        encoded, _note = self._encode_raw_before_shot(frame, dest, write_durable=False)
+        return encoded
 
     def _discard_pending_pre_type_locked(self) -> None:
         pending = self._pending_pre_type_screenshot
@@ -3372,8 +3404,11 @@ class RecordingSession:
             press_windows = self._pending_windows_before
             press_signals = self._pending_signals_before
         self._claim_after_owner(click_index)
+        shared_mon, shared_off = self._monitor_fields_at_point(x, y)
         self._flush_pending_text_input(
             shared_end_index=click_index,
+            shared_end_monitor=shared_mon,
+            shared_end_offset=shared_off,
             seal_after_to_cache=True,
             sealed_windows=press_windows,
             sealed_signals=press_signals,
@@ -3425,8 +3460,11 @@ class RecordingSession:
             press_windows = self._pending_windows_before
             press_signals = self._pending_signals_before
         self._claim_after_owner(hold_index)
+        shared_mon, shared_off = self._monitor_fields_at_point(x, y)
         self._flush_pending_text_input(
             shared_end_index=hold_index,
+            shared_end_monitor=shared_mon,
+            shared_end_offset=shared_off,
             seal_after_to_cache=True,
             sealed_windows=press_windows,
             sealed_signals=press_signals,
@@ -3475,8 +3513,11 @@ class RecordingSession:
             # Keep press_seq + capture dict entry for the emit worker.
             self._clear_pending_right_gesture_locked(discard_capture=False)
         self._claim_after_owner(right_index)
+        shared_mon, shared_off = self._monitor_fields_at_point(x, y)
         self._flush_pending_text_input(
             shared_end_index=right_index,
+            shared_end_monitor=shared_mon,
+            shared_end_offset=shared_off,
             seal_after_to_cache=True,
             sealed_windows=press_windows,
             sealed_signals=press_signals,
@@ -3539,8 +3580,12 @@ class RecordingSession:
             press_signals = self._pending_signals_before
         self._claim_after_owner(drag_index)
         end_click_window = self._click_window_payload_at(x2, y2)
+        # Text after shares the drag *press* before-shot (start monitor).
+        shared_mon, shared_off = self._monitor_fields_at_point(x1, y1)
         self._flush_pending_text_input(
             shared_end_index=drag_index,
+            shared_end_monitor=shared_mon,
+            shared_end_offset=shared_off,
             seal_after_to_cache=True,
             sealed_windows=press_windows,
             sealed_signals=press_signals,
@@ -4661,15 +4706,8 @@ class RecordingSession:
             self._unpin_settle_frame(job.settle_frame)
             return
 
-        if job.text_event_index is not None and job.flush_meta is not None:
-            focus_xy = self._typing_focus_xy_for_ocr(job.flush_meta)
-            if focus_xy is not None:
-                self._capture_typing_ocr_end_shot(
-                    run_dir,
-                    int(job.text_event_index),
-                    focus_xy[0],
-                    focus_xy[1],
-                )
+        # Typing OCR/after no longer live-grabs on press; flush adopts the next
+        # before (same monitor) or the typing-monitor settle cache (cross-mon).
 
         pending_dest = _pending_capture_path(run_dir, job.press_seq)
         try:
@@ -5136,8 +5174,8 @@ class RecordingSession:
         end_shot_path = ""
         end_mon_idx: int | None = None
         end_mon_offset: tuple[int, int] | None = None
-        # Prefer a pre-key settle frame (captured before Tab/Enter) over a live
-        # grab that may already show the key's focus change.
+        # Prefer a pre-key settle frame (captured before Tab/Enter) over a frame
+        # that may already show the key's focus change.
         preferred_end = job.pending_pre_key
         if preferred_end is not None:
             dest = screenshot_path_for_event_end(run_dir, index)
@@ -5153,18 +5191,47 @@ class RecordingSession:
                 except OSError:
                     end_shot_path = ""
 
-        # OCR / after-frame for typing must be on the typing focus monitor, not the
-        # next pointer event's monitor (which can be a different display).
-        if not end_shot_path and shot_xy is not None:
-            ocr_shot = self._capture_typing_ocr_end_shot(
+        typing_mon: int | None = None
+        raw_typing_mon = meta.get("monitor_index")
+        if isinstance(raw_typing_mon, int):
+            typing_mon = raw_typing_mon
+        elif shot_xy is not None:
+            typing_mon = self._monitor_index_for_point(int(shot_xy[0]), int(shot_xy[1]))
+
+        next_mon = job.shared_end_monitor
+        same_monitor = (
+            job.shared_end_index is not None
+            and (
+                typing_mon is None
+                or next_mon is None
+                or int(typing_mon) == int(next_mon)
+            )
+        )
+
+        # Same monitor (or unknown): share the next gesture's before-shot path.
+        # Cross-monitor: JPEG the typing monitor's before-shot cache for OCR.
+        if not end_shot_path and same_monitor and job.shared_end_index is not None:
+            end_shot_path = str(screenshot_path_for_event(run_dir, job.shared_end_index))
+            end_mon_idx = job.shared_end_monitor
+            end_mon_offset = job.shared_end_offset
+        if (
+            not end_shot_path
+            and typing_mon is not None
+            and (
+                job.shared_end_index is None
+                or (
+                    next_mon is not None
+                    and int(typing_mon) != int(next_mon)
+                )
+            )
+        ):
+            settle_shot = self._adopt_typing_monitor_settle_end_shot(
                 run_dir,
                 index,
-                int(shot_xy[0]),
-                int(shot_xy[1]),
+                int(typing_mon),
             )
-            if ocr_shot is not None:
-                end_shot_path, end_mon_idx, end_mon_offset = ocr_shot
-
+            if settle_shot is not None:
+                end_shot_path, end_mon_idx, end_mon_offset = settle_shot
         if not end_shot_path and job.shared_end_index is not None:
             end_shot_path = str(screenshot_path_for_event(run_dir, job.shared_end_index))
             end_mon_idx = job.shared_end_monitor
@@ -5200,16 +5267,6 @@ class RecordingSession:
         # So a later gesture can stamp its before-cache as this typing after
         # (or refine a sealed IME-commit sample) via ``_seal_open_after_cache``.
         self._claim_after_owner(index)
-
-    def _typing_focus_xy_for_ocr(self, text_meta: dict[str, Any]) -> tuple[int, int] | None:
-        """Return focus coords for OCR, waiting for deferred begin-text work if needed."""
-        ready = text_meta.get("capture_ready")
-        if isinstance(ready, threading.Event) and not ready.is_set():
-            ready.wait(timeout=2.0)
-        focus_xy = text_meta.get("cursor_xy")
-        if isinstance(focus_xy, (tuple, list)) and len(focus_xy) == 2:
-            return int(focus_xy[0]), int(focus_xy[1])
-        return None
 
     def _worker_keyboard_event(self, job: _DeferredCaptureJob) -> None:
         pending_pre_key = job.pending_pre_key

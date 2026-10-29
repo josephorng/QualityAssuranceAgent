@@ -1054,18 +1054,15 @@ def after_screenshot_for_outcome(
 ) -> str | None:
     """Return the after frame for verification.
 
-    Prefer the next event's before-shot, then a typing/drag end shot, then the
+    Prefer the next event's before-shot, then a drag/typing end shot (typing end
+    is settle-derived OCR only when there is no next / cross-monitor), then the
     session-level final screenshot taken before the hub window is restored.
     """
     if next_event is not None:
         next_before = _existing_screenshot_path(next_event.screenshot_path)
         if next_before is not None:
             return next_before
-    if event.kind == "text_input":
-        end_shot = _existing_screenshot_path(event.end_screenshot_path)
-        if end_shot is not None:
-            return end_shot
-    if event.kind == "drag":
+    if event.kind in ("text_input", "drag"):
         end_shot = _existing_screenshot_path(event.end_screenshot_path)
         if end_shot is not None:
             return end_shot

@@ -1558,12 +1558,12 @@ def test_write_recording_html_bakes_focus_rect_into_screenshot(tmp_path: Path) -
     assert "focus-rect-overlay" not in html
     assert "Focus rect" in first_group
     assert "Foreground rect" in first_group
-    # Prefer the typing end frame over the next event's before shot.
-    assert "event_001_end_" in first_group or "event_001_" in first_group
-    assert "screenshots/event_002.jpeg" not in first_group
+    # Typing after prefers the next event's before-shot (baked under focus_rect_debug/).
+    assert "event_002_" in first_group
+    assert "event_001_end_" not in first_group
     debug_dir = run_root / "focus_rect_debug"
     annotated = list(debug_dir.glob("*.png"))
-    assert len(annotated) >= 2
+    assert len(annotated) >= 1
     saw_magenta = False
     saw_cyan = False
     for path in annotated:

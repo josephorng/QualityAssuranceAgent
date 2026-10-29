@@ -7216,26 +7216,38 @@ def _render_recording_event_html(
     before = _resolve_recording_screenshot(str(event.get("screenshot_path") or ""), run_root)
     after: Path | None = None
     after_is_own_shot = False
-    # Prefer this event's end frame so typing focus_rect can be baked onto the
-    # after shot (same as session HTML). Fall back to the next event's before,
-    # then the run's final-after frame.
-    end_shot = _resolve_recording_screenshot(
-        str(event.get("end_screenshot_path") or ""),
-        run_root,
-    )
-    if end_shot is not None:
-        after = end_shot
-        after_is_own_shot = True
-    elif next_event is not None:
+    # Prefer the next event's before-shot (replay/after model). Drag keeps its
+    # own release end frame for display. Typing no longer prefers a dedicated
+    # OCR end JPEG over the next before.
+    if kind == "drag":
+        end_shot = _resolve_recording_screenshot(
+            str(event.get("end_screenshot_path") or ""),
+            run_root,
+        )
+        if end_shot is not None:
+            after = end_shot
+            after_is_own_shot = True
+    if after is None and next_event is not None:
         after = _resolve_recording_screenshot(
             str(next_event.get("screenshot_path") or ""),
             run_root,
         )
     if after is None and next_event is None:
-        after = _resolve_recording_screenshot(
-            str(final_after_screenshot or ""),
-            run_root,
-        )
+        # Last step: drag end already handled above; typing/other may use a
+        # settle-derived end path, else the run final-after frame.
+        if kind != "drag":
+            end_shot = _resolve_recording_screenshot(
+                str(event.get("end_screenshot_path") or ""),
+                run_root,
+            )
+            if end_shot is not None:
+                after = end_shot
+                after_is_own_shot = True
+        if after is None:
+            after = _resolve_recording_screenshot(
+                str(final_after_screenshot or ""),
+                run_root,
+            )
     before_focus = _focus_rect_for_screenshot(event, before, use_end=False)
     # Only bake onto this event's own end frame — never onto the next step's before.
     after_focus = (

@@ -456,7 +456,7 @@ def test_event_timestamp_is_captured_before_worker_persistence(tmp_path) -> None
 def test_typing_burst_coalesced_into_one_event(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
     before_dests: list[str] = []
-    end_captures: list[tuple[int, tuple[int, int]]] = []
+    immediate_captures: list[tuple[int, tuple[int, int]]] = []
 
     def track_point(x: int, y: int, dest):
         before_dests.append(Path(dest).name)
@@ -465,7 +465,7 @@ def test_typing_burst_coalesced_into_one_event(tmp_path) -> None:
         return str(dest), 1, (0, 0)
 
     def track_immediate(run_dir, index, cursor_xy, dest=None):
-        end_captures.append((index, cursor_xy))
+        immediate_captures.append((index, cursor_xy))
         path = dest if dest is not None else run_dir / "screenshots" / f"event_{index:03d}.jpeg"
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_bytes(b"fake")
@@ -485,26 +485,37 @@ def test_typing_burst_coalesced_into_one_event(tmp_path) -> None:
         run_dir = session.start()
         try:
             from pynput.keyboard import KeyCode
+            from src.recorder.capture import _RawBeforeShot
 
+            # Seed typing-monitor settle so stop can encode OCR end without a live grab.
+            session._install_raw_before_shot(
+                _RawBeforeShot(
+                    frame_id=1,
+                    rgb=bytes([10, 20, 30] * 4),
+                    size=(2, 2),
+                    monitor_index=1,
+                    monitor_offset=(0, 0),
+                )
+            )
             for ch in "chrome":
                 session._on_key_press(KeyCode.from_char(ch))
             session.wait_for_deferred_work()
             event_dests = [name for name in before_dests if _is_event_screenshot(name)]
-            assert event_dests == ["event_001.jpeg"]
-            assert end_captures == []
+            assert event_dests[0] == "event_001.jpeg"
+            assert immediate_captures == []
             session.stop()
         finally:
             if session.is_active():
                 session.stop()
 
     assert session.event_count() == 1
-    assert len(end_captures) == 1
-    assert end_captures[0][0] == 1
+    assert immediate_captures == []
     raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
     assert raw["kind"] == "text_input"
     assert raw["text"] == "chrome"
     assert raw["screenshot_path"].endswith("event_001.jpeg")
     assert raw["end_screenshot_path"].endswith("event_001_end.jpeg")
+    assert (run_dir / "screenshots" / "event_001_end.jpeg").is_file()
 
 
 def test_numpad_vk_keys_recorded_as_text_input(tmp_path) -> None:
@@ -1782,14 +1793,14 @@ def test_left_click_uses_press_time_screenshot(tmp_path) -> None:
     assert (run_dir / "screenshots" / "event_001.jpeg").is_file()
 
 
-def test_text_input_end_uses_typing_focus_end_shot(tmp_path) -> None:
+def test_text_input_end_shares_next_before_same_monitor(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
-    ocr_points: list[tuple[int, int]] = []
+    end_live_grabs: list[tuple[int, int]] = []
 
     def _track(x: int, y: int, dest):
         name = Path(dest).name
         if name.endswith("_end.jpeg"):
-            ocr_points.append((x, y))
+            end_live_grabs.append((x, y))
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(b"fake")
         return str(dest), 1, (1920, -1)
@@ -1812,7 +1823,7 @@ def test_text_input_end_uses_typing_focus_end_shot(tmp_path) -> None:
             from pynput.keyboard import KeyCode
 
             session._on_key_press(KeyCode.from_char("a"))
-            _left_click(session, 500, 500)
+            _left_click(session, 2500, 500)
         finally:
             session.stop()
 
@@ -1821,12 +1832,104 @@ def test_text_input_end_uses_typing_focus_end_shot(tmp_path) -> None:
     click_raw = json.loads((run_dir / "events" / "event_002.json").read_text(encoding="utf-8"))
     assert text_raw["kind"] == "text_input"
     assert click_raw["kind"] == "click"
-    assert text_raw["end_screenshot_path"].endswith("event_001_end.jpeg")
+    assert text_raw["end_screenshot_path"].endswith("event_002.jpeg")
     assert text_raw["end_monitor_offset"] == [1920, -1]
     assert text_raw["cursor_xy"] == [2416, 240]
-    assert (run_dir / "screenshots" / "event_001_end.jpeg").is_file()
-    assert ocr_points
-    assert ocr_points[0] == (2416, 240)
+    assert not (run_dir / "screenshots" / "event_001_end.jpeg").is_file()
+    assert end_live_grabs == []
+
+
+def test_text_input_cross_monitor_end_uses_typing_settle_cache(tmp_path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+
+    def _track(x: int, y: int, dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"live")
+        mon = 2 if int(x) >= 1920 else 1
+        offset = (1920, 0) if mon == 2 else (0, 0)
+        return str(dest), mon, offset
+
+    def _mon_at_point(x: int, y: int):
+        if int(x) >= 1920:
+            return (2, 1920, 0, 1920, 1080)
+        return (1, 0, 0, 1920, 1080)
+
+    def _mon_fields(self, x: int, y: int):
+        mon, left, top, _, _ = _mon_at_point(x, y)
+        return mon, (left, top)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture.resolve_typing_focus",
+        return_value=TypingFocus(point=(100, 100), rect=(50, 50, 150, 150)),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_track,
+    ), patch(
+        "src.recorder.capture._monitor_at_point",
+        side_effect=_mon_at_point,
+    ), patch.object(
+        RecordingSession,
+        "_monitor_fields_at_point",
+        _mon_fields,
+    ), patch.object(
+        RecordingSession,
+        "_monitor_index_for_point",
+        lambda self, x, y: _mon_at_point(x, y)[0],
+    ), patch.object(
+        RecordingSession,
+        "_refresh_pre_click_monitors",
+        lambda self: None,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import KeyCode
+            from src.recorder.capture import _RawBeforeShot
+
+            session._pre_click_monitors = (
+                (1, 0, 0, 1920, 1080),
+                (2, 1920, 0, 1920, 1080),
+            )
+            # Stop the live before-shot loop so it cannot overwrite seeded frames.
+            session._stop_before_shot_loop()
+            session._install_raw_before_shot(
+                _RawBeforeShot(
+                    frame_id=11,
+                    rgb=bytes([1, 2, 3] * 4),
+                    size=(2, 2),
+                    monitor_index=1,
+                    monitor_offset=(0, 0),
+                )
+            )
+            session._install_raw_before_shot(
+                _RawBeforeShot(
+                    frame_id=12,
+                    rgb=bytes([9, 8, 7] * 4),
+                    size=(2, 2),
+                    monitor_index=2,
+                    monitor_offset=(1920, 0),
+                )
+            )
+            session._on_key_press(KeyCode.from_char("a"))
+            session.wait_for_deferred_work()
+            _left_click(session, 2100, 500)
+        finally:
+            session.stop()
+
+    text_raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    click_raw = json.loads((run_dir / "events" / "event_002.json").read_text(encoding="utf-8"))
+    assert text_raw["kind"] == "text_input"
+    assert click_raw["kind"] == "click"
+    assert click_raw["monitor_index"] == 2
+    assert text_raw["end_screenshot_path"].endswith("event_001_end.jpeg")
+    assert text_raw["end_monitor_index"] == 1
+    assert text_raw["end_monitor_offset"] == [0, 0]
+    end = run_dir / "screenshots" / "event_001_end.jpeg"
+    assert end.is_file()
+    # Encoded from typing-monitor settle RGB, not the click monitor live grab.
+    assert end.read_bytes() != b"live"
 
 
 def test_text_input_stores_before_on_first_key_and_after_on_flush(tmp_path) -> None:
@@ -1849,7 +1952,17 @@ def test_text_input_stores_before_on_first_key_and_after_on_flush(tmp_path) -> N
         run_dir = session.start()
         try:
             from pynput.keyboard import KeyCode
+            from src.recorder.capture import _RawBeforeShot
 
+            session._install_raw_before_shot(
+                _RawBeforeShot(
+                    frame_id=1,
+                    rgb=bytes([40, 50, 60] * 4),
+                    size=(2, 2),
+                    monitor_index=1,
+                    monitor_offset=(0, 0),
+                )
+            )
             session._on_key_press(KeyCode.from_char("a"))
             session._on_key_press(KeyCode.from_char("b"))
             session.stop()
@@ -1859,11 +1972,12 @@ def test_text_input_stores_before_on_first_key_and_after_on_flush(tmp_path) -> N
 
     event_dests = [name for name in dests if _is_event_screenshot(name)]
     assert event_dests[0] == "event_001.jpeg"
-    assert "event_001_end.jpeg" in dests
+    assert "event_001_end.jpeg" not in dests  # settle encode, not live mss
     raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
     assert raw["text"] == "ab"
     assert raw["screenshot_path"].endswith("event_001.jpeg")
     assert raw["end_screenshot_path"].endswith("event_001_end.jpeg")
+    assert (run_dir / "screenshots" / "event_001_end.jpeg").is_file()
 
 
 def _login_and_logo_windows() -> tuple[WindowInfo, WindowInfo]:

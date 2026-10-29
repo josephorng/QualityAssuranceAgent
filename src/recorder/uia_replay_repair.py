@@ -3,6 +3,11 @@
 Only a side whose stored ``vision_path`` is ``yolo_ocr`` is repaired. The live
 FindAll runs beside YOLO+OCR. OCR must still show the recorded target, and one
 UIA label must cover that point, before the instruction is rewritten.
+
+Scrollbar and input class targets are special: OCR confirms ``滾動條`` /
+``輸入欄``, then the live UIA control under the mapped point becomes the
+primary (scrollbar keeps track percent). ``ElementFromPoint`` text names are
+never used for those class targets.
 """
 
 from __future__ import annotations
@@ -396,12 +401,18 @@ def choose_uia_replay_repair(
     uia_boxes: list[LabeledBox],
     ocr_boxes: list[LabeledBox],
     point_probe_fn: Any = None,
+    uia_scrollbar_boxes: list[RectXywh] | None = None,
+    uia_input_boxes: list[RectXywh] | None = None,
 ) -> UiaReplayRepairHit | None:
     """Accept one UIA label when live OCR still shows the recorded target.
 
     The smallest UIA text rect that contains the mapped point wins. Two different
     names covering that point are left unchanged. An empty ``FindAll`` falls
     through to ``point_probe_fn(x, y) -> (label, xywh) | None``.
+
+    When ``recorded_text`` is ``滾動條`` / ``輸入欄``, the smallest live UIA
+    control of that class that contains the mapped point wins instead.
+    ``point_probe_fn`` is never used for those class targets.
     """
     text = str(recorded_text or "").strip()
     if not text:
@@ -411,6 +422,16 @@ def choose_uia_replay_repair(
     )
     if not _ocr_confirms(mapped, text, ocr_boxes):
         return None
+
+    if text == "滾動條":
+        return _choose_uia_class_hit(
+            center, uia_scrollbar_boxes, label="滾動條", source="uia_scrollbar"
+        )
+    if text == "輸入欄":
+        return _choose_uia_class_hit(
+            center, uia_input_boxes, label="輸入欄", source="uia_input"
+        )
+
     from src.recorder.uia_input_boxes import is_usable_uia_landmark_label
 
     containing: list[tuple[RectXywh, str, str]] = []
@@ -451,6 +472,33 @@ def choose_uia_replay_repair(
     return _hit(label, box, "element_from_point", control_type=control_type)
 
 
+def _choose_uia_class_hit(
+    center: tuple[int, int],
+    uia_boxes: list[RectXywh] | None,
+    *,
+    label: str,
+    source: str,
+) -> UiaReplayRepairHit | None:
+    """Smallest live UIA control bbox containing ``center``, or None."""
+    containing: list[RectXywh] = []
+    for raw in uia_boxes or []:
+        if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+            continue
+        try:
+            box = (int(raw[0]), int(raw[1]), int(raw[2]), int(raw[3]))
+        except (TypeError, ValueError):
+            continue
+        if box[2] <= 0 or box[3] <= 0:
+            continue
+        if not _point_in_box(center[0], center[1], box):
+            continue
+        containing.append(box)
+    if not containing:
+        return None
+    box = min(containing, key=lambda item: int(item[2]) * int(item[3]))
+    return _hit(label, box, source)
+
+
 def replay_repair_slots(
     recording_dir: Path,
     event_index: int,
@@ -479,6 +527,9 @@ def attempt_uia_replay_repair(
     click_window: dict[str, Any] | None,
     uia_boxes: list[LabeledBox],
     ocr_boxes: list[LabeledBox],
+    *,
+    uia_scrollbar_boxes: list[RectXywh] | None = None,
+    uia_input_boxes: list[RectXywh] | None = None,
 ) -> tuple[int, int, dict[str, Any]] | None:
     """Match, persist the UIA instruction, and return the click point."""
     from src.recorder.uia_input_boxes import uia_text_element_at_point
@@ -497,6 +548,8 @@ def attempt_uia_replay_repair(
         uia_boxes=uia_boxes,
         ocr_boxes=ocr_boxes,
         point_probe_fn=uia_text_element_at_point,
+        uia_scrollbar_boxes=uia_scrollbar_boxes,
+        uia_input_boxes=uia_input_boxes,
     )
     if hit is None:
         _log(
@@ -510,6 +563,9 @@ def attempt_uia_replay_repair(
         for item in uia_boxes
         if _labeled_parts(item)[1] != hit.label or _labeled_parts(item)[0] != hit.bbox
     ]
+    is_scrollbar = hit.label == "滾動條" or hit.source == "uia_scrollbar"
+    is_input = hit.label == "輸入欄" or hit.source == "uia_input"
+    track_percent = _recorded_track_percent(request) if is_scrollbar else None
     try:
         write_uia_replay_repair(
             request,
@@ -518,28 +574,42 @@ def attempt_uia_replay_repair(
             bbox=hit.bbox,
             others=others,
             control_type=hit.control_type,
+            track_percent=track_percent,
         )
     except Exception as exc:
         _log(
             "uia replay repair persist failed "
             f"event={request.event_index} {type(exc).__name__}: {exc}"
         )
+    cx, cy = hit.cx, hit.cy
+    class_name = "text"
+    target_kind = "text"
+    if track_percent is not None:
+        from cua_mcp.scrollbar_arrows import point_from_scrollbar_percent
+
+        cx, cy = point_from_scrollbar_percent(hit.bbox, track_percent)
+        class_name = "scrollbar"
+        target_kind = "scrollbar"
+    elif is_input:
+        class_name = "input"
+        target_kind = "input"
     _log(
         "uia replay repair hit "
         f"event={request.event_index} side={request.side} "
         f"label={hit.label!r} source={hit.source} "
-        f"center=[{hit.cx},{hit.cy}]"
+        f"center=[{cx},{cy}]"
+        + (f" track_percent={track_percent}" if track_percent is not None else "")
     )
-    return hit.cx, hit.cy, {
+    return cx, cy, {
         "selected_index": 0,
-        "class_name": "text",
-        "image_center": {"x": hit.cx, "y": hit.cy},
-        "resolved_center": {"x": hit.cx, "y": hit.cy},
+        "class_name": class_name,
+        "image_center": {"x": cx, "y": cy},
+        "resolved_center": {"x": cx, "y": cy},
         "relative_offset": {"dx": 0, "dy": 0},
-        "track_percent": None,
+        "track_percent": track_percent,
         "char_target": None,
         "char_occurrence": None,
-        "target_kind": "text",
+        "target_kind": target_kind,
         "target_text": hit.label,
         "target_icons": [],
         "target_bbox": {
@@ -563,6 +633,7 @@ def write_uia_replay_repair(
     bbox: RectXywh,
     others: list[LabeledBox],
     control_type: str = "",
+    track_percent: int | None = None,
 ) -> str | None:
     """Rewrite the analysis instruction from UIA labels and refresh the tool cache."""
     run_dir = Path(request.recording_dir)
@@ -583,6 +654,7 @@ def write_uia_replay_repair(
         others,
         analysis,
         control_type=control_type,
+        track_percent=track_percent,
     )
     if not instruction:
         return None
@@ -597,11 +669,28 @@ def write_uia_replay_repair(
     side_block: dict[str, Any] = {"label": label, "source": source}
     if control_type:
         side_block["control_type"] = control_type
+    if track_percent is not None:
+        side_block["track_percent"] = int(track_percent)
     block[request.side] = side_block
+    # Scrollbar drag: the other side is the same bar at another percent — mark it
+    # too so pin-skipped end loads do not leave a stranded yolo_ocr repair slot.
+    if event.kind == "drag" and label == "滾動條":
+        other_side, other_percent = _paired_scrollbar_other_side(request)
+        if other_side is not None and other_percent is not None:
+            mark_recorded_side_repaired_to_uia(
+                run_dir, request.event_index, other_side
+            )
+            block[other_side] = {
+                "label": "滾動條",
+                "source": source,
+                "track_percent": int(other_percent),
+            }
     block["label"] = label
     block["source"] = source
     if control_type:
         block["control_type"] = control_type
+    if track_percent is not None:
+        block["track_percent"] = int(track_percent)
     analysis["uia_replay_repair"] = block
 
     from src.recorder.compile_tool_calls import (
@@ -615,7 +704,12 @@ def write_uia_replay_repair(
         instruction,
         run_dir=run_dir,
         vision=_vision_for_side(
-            request.side, label, bbox, others, control_type=control_type
+            request.side,
+            label,
+            bbox,
+            others,
+            control_type=control_type,
+            track_percent=track_percent,
         ),
     )
     write_json(analysis_path, analysis)
@@ -637,6 +731,7 @@ def _instruction_from_hit(
     analysis: dict[str, Any],
     *,
     control_type: str = "",
+    track_percent: int | None = None,
 ) -> str | None:
     from src.recorder.analyze import rebuild_pointer_instruction
 
@@ -646,23 +741,31 @@ def _instruction_from_hit(
         box, text, other_type = _labeled_parts(item)
         if not text or (text == label and box == bbox):
             continue
+        if text in _CLASS_REPAIR_LABELS:
+            continue
         extra.append(_candidate(text, box, control_type=other_type))
     repaired = _vision([primary, *extra], (bbox[0] + bbox[2] // 2, bbox[1] + bbox[3] // 2))
     from src.recorder.vision_context import VISION_PATH_REPAIR_REASON
 
     repaired["vision_path"] = "uia"
     repaired["vision_path_reason"] = VISION_PATH_REPAIR_REASON
+    if label == "滾動條" and track_percent is not None:
+        _attach_scrollbar_track(repaired, bbox, track_percent)
     if event.kind == "drag":
-        other_text = _other_side_text(request)
-        if not other_text:
-            other_text = _fallback_other_anchor(
-                str(analysis.get("instruction") or ""), request
-            )
-        if not other_text:
-            return _replace_anchor(str(analysis.get("instruction") or ""), request, label)
-        other = _vision([_candidate(other_text, (0, 0, 8, 8))], (4, 4))
-        other_side = "start" if request.side == "end" else "end"
-        _copy_stored_vision_mode(request, other, other_side)
+        other = _other_side_vision(request)
+        if other is None:
+            other_text = _other_side_text(request)
+            if not other_text:
+                other_text = _fallback_other_anchor(
+                    str(analysis.get("instruction") or ""), request
+                )
+            if not other_text:
+                return _replace_anchor(
+                    str(analysis.get("instruction") or ""), request, label
+                )
+            other = _vision([_candidate(other_text, (0, 0, 8, 8))], (4, 4))
+            other_side = "start" if request.side == "end" else "end"
+            _copy_stored_vision_mode(request, other, other_side)
         if request.side == "end":
             rebuilt = rebuild_pointer_instruction(
                 event, other, repaired, promote_primary=False
@@ -688,22 +791,28 @@ def _vision_for_side(
     others: list[LabeledBox],
     *,
     control_type: str = "",
+    track_percent: int | None = None,
 ) -> dict[str, Any]:
     primary = _candidate(label, bbox, control_type=control_type)
     extra = [
         _candidate(text, box, control_type=other_type)
         for box, text, other_type in (_labeled_parts(item) for item in others)
-        if text
+        if text and text not in _CLASS_REPAIR_LABELS
     ]
     vision = _vision(
         [primary, *extra],
         (bbox[0] + bbox[2] // 2, bbox[1] + bbox[3] // 2),
     )
+    if label == "滾動條" and track_percent is not None:
+        _attach_scrollbar_track(vision, bbox, track_percent)
     if side == "end":
-        return {
+        end_vision: dict[str, Any] = {
             "candidates": [_candidate(label, bbox, control_type=control_type)],
             "used_vision": True,
         }
+        if label == "滾動條" and track_percent is not None:
+            _attach_scrollbar_track(end_vision, bbox, track_percent)
+        return end_vision
     return vision
 
 
@@ -728,9 +837,6 @@ def _load_request(
 
     if instruction and caption_role_from_instruction(instruction):
         return None
-    snapshot = event.end_uia_snapshot if side == "end" else event.uia_snapshot
-    if snapshot_has_usable_text(snapshot if isinstance(snapshot, dict) else None):
-        return None
     window = event.end_click_window if side == "end" else event.click_window
     recorded_window = _window_xywh(window if isinstance(window, dict) else None)
     if recorded_window is None:
@@ -741,10 +847,24 @@ def _load_request(
     payload = load_yolo_ocr_payload(run_dir, event_index, suffix=suffix)
     if not isinstance(payload, dict) or payload.get("vision_path") != "yolo_ocr":
         return None
-    primary = _recorded_primary(payload)
-    if primary is None:
-        return None
-    bbox, text = primary
+    scrollbar_primary = _recorded_scrollbar_primary(
+        payload, allow_off_track=(side == "end")
+    )
+    input_primary = (
+        None if scrollbar_primary is not None else _recorded_input_primary(payload)
+    )
+    if scrollbar_primary is not None:
+        bbox, text = scrollbar_primary
+    elif input_primary is not None:
+        bbox, text = input_primary
+    else:
+        snapshot = event.end_uia_snapshot if side == "end" else event.uia_snapshot
+        if snapshot_has_usable_text(snapshot if isinstance(snapshot, dict) else None):
+            return None
+        primary = _recorded_primary(payload)
+        if primary is None:
+            return None
+        bbox, text = primary
     return UiaReplayRepairRequest(
         recording_dir=run_dir,
         event_index=int(event_index),
@@ -789,6 +909,93 @@ def _parse_candidate_bbox(cand: dict[str, Any]) -> RectXywh | None:
     return box
 
 
+def _payload_local_cursor(payload: dict[str, Any] | None) -> tuple[int, int] | None:
+    if not isinstance(payload, dict):
+        return None
+    local = payload.get("local_cursor")
+    if not isinstance(local, (list, tuple)) or len(local) < 2:
+        local = payload.get("cursor_xy")
+    if not isinstance(local, (list, tuple)) or len(local) < 2:
+        return None
+    try:
+        return int(local[0]), int(local[1])
+    except (TypeError, ValueError):
+        return None
+
+
+def _recorded_scrollbar_primary(
+    payload: dict[str, Any] | None,
+    *,
+    allow_off_track: bool = False,
+) -> tuple[RectXywh, str] | None:
+    """Return the scrollbar under the recorded cursor when present.
+
+    Drag-end releases may sit slightly off the track; pass
+    ``allow_off_track=True`` so those still count via
+    ``_forced_scrollbar_covers_release``. Click/start sides must hit the bar.
+    """
+    if not isinstance(payload, dict):
+        return None
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        return None
+    cursor = _payload_local_cursor(payload)
+    from src.recorder.vision_context import _forced_scrollbar_covers_release
+
+    bars: list[RectXywh] = []
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        if str(cand.get("class_name") or "").strip() != "scrollbar":
+            continue
+        box = _parse_candidate_bbox(cand)
+        if box is None:
+            continue
+        if cursor is None:
+            bars.append(box)
+            continue
+        lx, ly = cursor
+        if _point_in_box(lx, ly, box):
+            bars.append(box)
+            continue
+        if allow_off_track and _forced_scrollbar_covers_release(lx, ly, box):
+            bars.append(box)
+    if not bars:
+        return None
+    box = min(bars, key=lambda item: int(item[2]) * int(item[3]))
+    return box, "滾動條"
+
+
+def _recorded_input_primary(
+    payload: dict[str, Any] | None,
+) -> tuple[RectXywh, str] | None:
+    """Return the input under the recorded cursor when present."""
+    if not isinstance(payload, dict):
+        return None
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        return None
+    cursor = _payload_local_cursor(payload)
+    fields: list[RectXywh] = []
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        if str(cand.get("class_name") or "").strip() != "input":
+            continue
+        box = _parse_candidate_bbox(cand)
+        if box is None:
+            continue
+        if cursor is None:
+            fields.append(box)
+            continue
+        if _point_in_box(cursor[0], cursor[1], box):
+            fields.append(box)
+    if not fields:
+        return None
+    box = min(fields, key=lambda item: int(item[2]) * int(item[3]))
+    return box, "輸入欄"
+
+
 def _recorded_primary(payload: dict[str, Any] | None) -> tuple[RectXywh, str] | None:
     if not isinstance(payload, dict):
         return None
@@ -817,6 +1024,59 @@ def _recorded_primary(payload: dict[str, Any] | None) -> tuple[RectXywh, str] | 
     return None
 
 
+def _recorded_track_percent(request: UiaReplayRepairRequest) -> int | None:
+    """Track percent from stored payload or recorded cursor on the recorded bar."""
+    from cua_mcp.scrollbar_arrows import scrollbar_axis_percent
+    from src.recorder.vision_context import load_yolo_ocr_payload
+
+    suffix = "_end" if request.side == "end" else ""
+    payload = load_yolo_ocr_payload(
+        Path(request.recording_dir), request.event_index, suffix=suffix
+    )
+    if isinstance(payload, dict):
+        track = payload.get("scrollbar_track")
+        if isinstance(track, dict):
+            percent = track.get("percent")
+            if isinstance(percent, int) and not isinstance(percent, bool):
+                if 0 <= percent <= 100:
+                    return percent
+        cursor = _payload_local_cursor(payload)
+        if cursor is not None:
+            return scrollbar_axis_percent(
+                cursor[0], cursor[1], request.recorded_bbox
+            )
+    raw_event = read_json(event_json_path(Path(request.recording_dir), request.event_index), None)
+    if not isinstance(raw_event, dict):
+        return None
+    try:
+        event = RecordedEvent.from_dict(raw_event)
+    except (KeyError, TypeError, ValueError):
+        return None
+    xy = event.end_xy if request.side == "end" else event.cursor_xy
+    if not isinstance(xy, (list, tuple)) or len(xy) < 2:
+        return None
+    try:
+        return scrollbar_axis_percent(int(xy[0]), int(xy[1]), request.recorded_bbox)
+    except (TypeError, ValueError):
+        return None
+
+
+def _attach_scrollbar_track(
+    vision: dict[str, Any],
+    bbox: RectXywh,
+    percent: int,
+) -> None:
+    from cua_mcp.scrollbar_arrows import scrollbar_orientation
+
+    x, y, w, h = (int(v) for v in bbox)
+    vision["scrollbar_track"] = {
+        "bbox": [x, y, w, h],
+        "axis": scrollbar_orientation((x, y, w, h)),
+        "percent": int(percent),
+        "anchor_class": "scrollbar",
+    }
+
+
 def _window_xywh(raw: dict[str, Any] | None) -> RectXywh | None:
     if not isinstance(raw, dict):
         return None
@@ -842,6 +1102,118 @@ def _other_side_text(request: UiaReplayRepairRequest) -> str:
     if primary is None:
         return ""
     return primary[1]
+
+
+def _paired_scrollbar_other_side(
+    request: UiaReplayRepairRequest,
+) -> tuple[str | None, int | None]:
+    """Other drag side name and track percent when that side is also a scrollbar."""
+    other = _other_side_vision(request)
+    if not isinstance(other, dict):
+        return None, None
+    track = other.get("scrollbar_track")
+    if not isinstance(track, dict):
+        return None, None
+    percent = track.get("percent")
+    if not isinstance(percent, int) or isinstance(percent, bool):
+        return None, None
+    if not (0 <= percent <= 100):
+        return None, None
+    other_side = "start" if request.side == "end" else "end"
+    return other_side, percent
+
+
+def _other_side_vision(request: UiaReplayRepairRequest) -> dict[str, Any] | None:
+    """Build the other drag side as a scrollbar+track when that side was a bar."""
+    from src.recorder.vision_context import (
+        VISION_PATH_REPAIR_REASON,
+        load_yolo_ocr_payload,
+    )
+
+    other_side = "start" if request.side == "end" else "end"
+    suffix = "_end" if other_side == "end" else ""
+    payload = load_yolo_ocr_payload(
+        Path(request.recording_dir), request.event_index, suffix=suffix
+    )
+    scrollbar = _recorded_scrollbar_primary(
+        payload, allow_off_track=(other_side == "end")
+    )
+    if scrollbar is None:
+        return None
+    box, _label = scrollbar
+    other_request = UiaReplayRepairRequest(
+        recording_dir=Path(request.recording_dir),
+        event_index=int(request.event_index),
+        side=other_side,
+        recorded_bbox=box,
+        recorded_text="滾動條",
+        recorded_window_xywh=request.recorded_window_xywh,
+    )
+    percent = _recorded_track_percent(other_request)
+    if percent is None:
+        return None
+    vision = _vision(
+        [_candidate("滾動條", box)],
+        (box[0] + box[2] // 2, box[1] + box[3] // 2),
+    )
+    _attach_scrollbar_track(vision, box, percent)
+    # Same physical bar as the repaired side — promote both to UIA together.
+    vision["vision_path"] = "uia"
+    vision["vision_path_reason"] = VISION_PATH_REPAIR_REASON
+    return vision
+
+
+def persist_pinned_scrollbar_end_repair(
+    request: UiaReplayRepairRequest,
+    *,
+    bbox: RectXywh,
+    track_percent: int,
+    others: list[LabeledBox] | None = None,
+) -> str | None:
+    """Persist end-side UIA repair after drag pins onto the start scrollbar.
+
+    Skips YOLO/OCR; the live pin already named the bar and destination percent.
+    """
+    if str(request.recorded_text or "").strip() != "滾動條":
+        return None
+    if not (0 <= int(track_percent) <= 100):
+        return None
+    x, y, w, h = (int(v) for v in bbox)
+    if w <= 0 or h <= 0:
+        return None
+    return write_uia_replay_repair(
+        request,
+        label="滾動條",
+        source="uia_scrollbar",
+        bbox=(x, y, w, h),
+        others=list(others or []),
+        track_percent=int(track_percent),
+    )
+
+
+def landmarks_to_labeled_boxes(landmarks: Any) -> list[LabeledBox]:
+    """Convert move_mouse landmark rects into repair nearby boxes."""
+    if not isinstance(landmarks, list):
+        return []
+    boxes: list[LabeledBox] = []
+    for item in landmarks:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()
+        if not label:
+            continue
+        rect = item.get("rect")
+        if not isinstance(rect, (list, tuple)) or len(rect) != 4:
+            continue
+        try:
+            x1, y1, x2, y2 = (int(v) for v in rect[:4])
+        except (TypeError, ValueError):
+            continue
+        w, h = x2 - x1, y2 - y1
+        if w <= 0 or h <= 0:
+            continue
+        boxes.append(((x1, y1, w, h), label))
+    return boxes
 
 
 def _fallback_other_anchor(instruction: str, request: UiaReplayRepairRequest) -> str:
@@ -873,6 +1245,9 @@ def _replace_anchor(
     if needle in stripped:
         return stripped.replace(needle, replacement, 1)
     if recorded in _CLASS_REPAIR_LABELS and recorded in stripped:
+        # Keep bare 滾動條 / 輸入欄 when the repair target is still that class.
+        if label in _CLASS_REPAIR_LABELS:
+            return stripped
         return stripped.replace(recorded, f"{replacement}文字", 1)
     return None
 
@@ -884,6 +1259,27 @@ def _candidate(
     control_type: str = "",
 ) -> dict[str, Any]:
     x, y, w, h = (int(v) for v in bbox)
+    label = str(text or "").strip()
+    if label == "滾動條":
+        from cua_mcp.yolo_onnx import YOLO_CLASS_SCROLLBAR
+
+        return {
+            "bbox": [x, y, w, h],
+            "center": [x + w // 2, y + h // 2],
+            "class_id": YOLO_CLASS_SCROLLBAR,
+            "class_name": "scrollbar",
+            "text": None,
+        }
+    if label == "輸入欄":
+        from cua_mcp.yolo_onnx import YOLO_CLASS_INPUT
+
+        return {
+            "bbox": [x, y, w, h],
+            "center": [x + w // 2, y + h // 2],
+            "class_id": YOLO_CLASS_INPUT,
+            "class_name": "input",
+            "text": None,
+        }
     payload: dict[str, Any] = {
         "bbox": [x, y, w, h],
         "center": [x + w // 2, y + h // 2],

@@ -256,6 +256,44 @@ def _pinned_scrollbar_destination_meta(
     return end_meta
 
 
+def _consume_pinned_scrollbar_end_repair(
+    start_meta: dict[str, Any],
+    pinned_bbox: tuple[int, int, int, int],
+    track_percent: int,
+) -> None:
+    """Pop the unused end repair slot after pin; persist UIA end without YOLO/OCR."""
+    try:
+        from src.recorder.uia_replay_repair import (
+            landmarks_to_labeled_boxes,
+            persist_pinned_scrollbar_end_repair,
+            take_uia_replay_repair,
+        )
+    except Exception:
+        return
+    end_request = take_uia_replay_repair()
+    if end_request is None:
+        return
+    if str(end_request.recorded_text or "").strip() != "滾動條":
+        return
+    try:
+        persist_pinned_scrollbar_end_repair(
+            end_request,
+            bbox=pinned_bbox,
+            track_percent=int(track_percent),
+            others=landmarks_to_labeled_boxes(start_meta.get("landmarks")),
+        )
+    except Exception as exc:
+        try:
+            from cua_mcp.select_mouse_target import _log_info
+
+            _log_info(
+                "uia replay repair pinned end persist failed "
+                f"{type(exc).__name__}: {exc}"
+            )
+        except Exception:
+            pass
+
+
 async def _drag(
     start_instruction: str,
     destination_instruction: str,
@@ -285,6 +323,9 @@ async def _drag(
                 x=x2,
                 y=y2,
             )
+            _consume_pinned_scrollbar_end_repair(
+                start_meta, pinned_bbox, dest_track_percent
+            )
         else:
             x2, y2, end_meta = await resolve_visual_mouse_point(destination_instruction)
         default_kind = "visual_mouse_target"
@@ -309,6 +350,9 @@ async def _drag(
                 track_percent=dest_track_percent,
                 x=x2,
                 y=y2,
+            )
+            _consume_pinned_scrollbar_end_repair(
+                start_meta, pinned_bbox, dest_track_percent
             )
         else:
             x2, y2, end_meta = await resolve_mouse_point(

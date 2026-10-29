@@ -4524,6 +4524,38 @@ def _labeled_ocr_confirm_boxes(
     return boxes
 
 
+def _uia_scrollbar_boxes(
+    detections: list[UiDetection],
+) -> list[tuple[int, int, int, int]]:
+    """Screen xywh for live UIA scrollbar detections used by replay repair."""
+    boxes: list[tuple[int, int, int, int]] = []
+    for det in detections:
+        if str(det.class_name or "").strip() != "scrollbar":
+            continue
+        if str(det.source or "") != "uia":
+            continue
+        x, y, w, h = (int(v) for v in det.bbox[:4])
+        if w > 0 and h > 0:
+            boxes.append((x, y, w, h))
+    return boxes
+
+
+def _uia_input_boxes(
+    detections: list[UiDetection],
+) -> list[tuple[int, int, int, int]]:
+    """Screen xywh for live UIA input detections used by replay repair."""
+    boxes: list[tuple[int, int, int, int]] = []
+    for det in detections:
+        if str(det.class_name or "").strip() != "input":
+            continue
+        if str(det.source or "") != "uia":
+            continue
+        x, y, w, h = (int(v) for v in det.bbox[:4])
+        if w > 0 and h > 0:
+            boxes.append((x, y, w, h))
+    return boxes
+
+
 def _uia_path_text_count(detections: list[UiDetection]) -> int:
     return sum(
         1
@@ -5266,6 +5298,8 @@ async def find_mouse_point(
             click_window,
             _labeled_text_boxes(uia_dets, source="uia"),
             _labeled_ocr_confirm_boxes(detections),
+            uia_scrollbar_boxes=_uia_scrollbar_boxes(uia_dets),
+            uia_input_boxes=_uia_input_boxes(uia_dets),
         )
         if repaired is not None:
             gx, gy, repair_meta = repaired

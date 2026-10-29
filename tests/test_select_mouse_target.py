@@ -6283,7 +6283,7 @@ async def test_yolo_ocr_replay_overlaps_uia_walk_and_repairs(
         frame = np.zeros((40, 40, 3), dtype=np.uint8)
         return [1], ["shot.png"], [(1, frame)], [ocr], timing
 
-    def fake_attempt(_request, _click_window, uia_boxes, ocr_boxes):
+    def fake_attempt(_request, _click_window, uia_boxes, ocr_boxes, **_kwargs):
         calls["repair"] += 1
         assert uia_boxes == []
         assert ocr_boxes and ocr_boxes[0][1] == "文件"

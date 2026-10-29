@@ -80,22 +80,45 @@ def test_choose_misses_when_icon_ocr_does_not_match() -> None:
     assert hit is None
 
 
-def test_choose_repairs_when_ocr_confirms_input_class() -> None:
+def test_choose_input_uses_uia_field_not_element_from_point() -> None:
+    # Mapped center for _RECORDED_BBOX / windows is (1030, 528).
+    input_box = (1000, 510, 80, 40)
+
+    def probe(x: int, y: int):
+        return "公式列", (1000, 500, 80, 40)
+
     hit = _choose(
         recorded_text="輸入欄",
         ocr_boxes=[(_OCR_BOX, "輸入欄")],
         uia_boxes=[(_UIA_BOX, "公式列")],
+        uia_input_boxes=[input_box],
+        point_probe_fn=probe,
     )
     assert hit is not None
-    assert hit.label == "公式列"
-    assert hit.source == "findall"
+    assert hit.label == "輸入欄"
+    assert hit.source == "uia_input"
+    assert hit.bbox == input_box
+
+
+def test_choose_input_misses_without_uia_field() -> None:
+    def probe(x: int, y: int):
+        return "公式列", (1000, 500, 80, 40)
+
+    hit = _choose(
+        recorded_text="輸入欄",
+        ocr_boxes=[(_OCR_BOX, "輸入欄")],
+        uia_boxes=[(_UIA_BOX, "公式列")],
+        uia_input_boxes=[],
+        point_probe_fn=probe,
+    )
+    assert hit is None
 
 
 def test_choose_misses_when_input_class_does_not_overlap() -> None:
     hit = _choose(
         recorded_text="輸入欄",
         ocr_boxes=[((1200, 700, 40, 16), "輸入欄")],
-        uia_boxes=[(_UIA_BOX, "公式列")],
+        uia_input_boxes=[(1000, 510, 80, 40)],
     )
     assert hit is None
 
@@ -983,3 +1006,718 @@ def test_labeled_ocr_confirm_boxes_includes_input_and_scrollbar() -> None:
     boxes = _labeled_ocr_confirm_boxes([uia_input, yolo_scrollbar])
     assert ((222, 242, 848, 45), "輸入欄") in boxes
     assert ((1900, 100, 20, 800), "滾動條") in boxes
+
+
+def test_choose_scrollbar_uses_uia_bar_not_element_from_point() -> None:
+    # Mapped center for _RECORDED_BBOX / windows is (1030, 528).
+    scrollbar = (1025, 400, 18, 400)
+
+    def probe(x: int, y: int):
+        return "位置", (1000, 500, 80, 40)
+
+    hit = _choose(
+        recorded_text="滾動條",
+        ocr_boxes=[(_OCR_BOX, "滾動條")],
+        uia_boxes=[(_UIA_BOX, "位置")],
+        uia_scrollbar_boxes=[scrollbar],
+        point_probe_fn=probe,
+    )
+    assert hit is not None
+    assert hit.label == "滾動條"
+    assert hit.source == "uia_scrollbar"
+    assert hit.bbox == scrollbar
+
+
+def test_choose_scrollbar_misses_without_uia_bar() -> None:
+    def probe(x: int, y: int):
+        return "位置", (1000, 500, 80, 40)
+
+    hit = _choose(
+        recorded_text="滾動條",
+        ocr_boxes=[(_OCR_BOX, "滾動條")],
+        uia_boxes=[(_UIA_BOX, "位置")],
+        uia_scrollbar_boxes=[],
+        point_probe_fn=probe,
+    )
+    assert hit is None
+
+
+def test_choose_scrollbar_misses_when_ocr_does_not_confirm() -> None:
+    hit = _choose(
+        recorded_text="滾動條",
+        ocr_boxes=[(_OCR_BOX, "搜尋")],
+        uia_scrollbar_boxes=[(1025, 400, 18, 400)],
+    )
+    assert hit is None
+
+
+def test_recorded_scrollbar_primary_covers_off_track_release() -> None:
+    from src.recorder.uia_replay_repair import _recorded_scrollbar_primary
+
+    payload = {
+        "local_cursor": [1470, 845],
+        "candidates": [
+            {
+                "bbox": [1139, 842, 61, 14],
+                "text": "1,450 KB",
+                "class_name": "text",
+            },
+            {
+                "bbox": [1423, 127, 17, 878],
+                "text": None,
+                "class_name": "scrollbar",
+            },
+        ],
+    }
+    assert _recorded_scrollbar_primary(payload) is None
+    primary = _recorded_scrollbar_primary(payload, allow_off_track=True)
+    assert primary == ((1423, 127, 17, 878), "滾動條")
+
+
+def test_recorded_scrollbar_primary_ignores_far_bar_on_click() -> None:
+    from src.recorder.uia_replay_repair import _recorded_scrollbar_primary
+
+    assert (
+        _recorded_scrollbar_primary(
+            {
+                "local_cursor": [339, 326],
+                "candidates": [
+                    {
+                        "bbox": [297, 316, 78, 17],
+                        "text": "空自活頁簿",
+                        "class_name": "text",
+                    },
+                    {
+                        "bbox": [1903, 106, 16, 926],
+                        "text": None,
+                        "class_name": "scrollbar",
+                    },
+                ],
+            }
+        )
+        is None
+    )
+
+
+def test_replay_repair_slots_text_not_far_scrollbar(
+    tmp_path: Path,
+) -> None:
+    from src.recorder.uia_replay_repair import replay_repair_slots
+
+    run = tmp_path / "recording"
+    (run / "events").mkdir(parents=True)
+    (run / "analysis").mkdir()
+    (run / "yolo_ocr").mkdir()
+    event = {
+        "index": 2,
+        "timestamp_utc": "t",
+        "kind": "click",
+        "button": "left",
+        "cursor_xy": [339, 326],
+        "click_window": {
+            "hwnd": 5,
+            "title": "Excel",
+            "process_name": "EXCEL.EXE",
+            "rect": [-8, -8, 1936, 1048],
+            "class_name": "XLMAIN",
+        },
+        "uia_snapshot": None,
+    }
+    (run / "events" / "event_002.json").write_text(json.dumps(event), encoding="utf-8")
+    (run / "analysis" / "event_002.json").write_text(
+        json.dumps(
+            {
+                "event_index": 2,
+                "instruction": "（YOLO+OCR）將滑鼠移到「空自活頁簿」文字，並點擊滑鼠一下。",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run / "yolo_ocr" / "event_002.json").write_text(
+        json.dumps(
+            {
+                "vision_path": "yolo_ocr",
+                "local_cursor": [339, 326],
+                "candidates": [
+                    {
+                        "bbox": [297, 316, 78, 17],
+                        "text": "空自活頁簿",
+                        "class_name": "text",
+                    },
+                    {
+                        "bbox": [1903, 106, 16, 926],
+                        "text": None,
+                        "class_name": "scrollbar",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    slots = replay_repair_slots(run, 2, [{"name": "move_mouse", "arguments": {}}])
+    assert len(slots) == 1 and slots[0] is not None
+    assert slots[0].recorded_text == "空自活頁簿"
+    assert slots[0].recorded_bbox == (297, 316, 78, 17)
+
+
+def test_replay_repair_slots_scrollbar_despite_usable_snapshot_texts(
+    tmp_path: Path,
+) -> None:
+    from src.recorder.uia_replay_repair import replay_repair_slots
+
+    run = tmp_path / "recording"
+    (run / "events").mkdir(parents=True)
+    (run / "analysis").mkdir()
+    (run / "yolo_ocr").mkdir()
+    event = {
+        "index": 14,
+        "timestamp_utc": "t",
+        "kind": "drag",
+        "button": "left",
+        "cursor_xy": [1436, 484],
+        "end_xy": [1470, 845],
+        "click_window": {
+            "hwnd": 5,
+            "title": "文件 - 檔案總管",
+            "process_name": "explorer.exe",
+            "rect": [0, 0, 1920, 1080],
+            "class_name": "CabinetWClass",
+        },
+        "end_click_window": {
+            "hwnd": 5,
+            "title": "文件 - 檔案總管",
+            "process_name": "explorer.exe",
+            "rect": [0, 0, 1920, 1080],
+            "class_name": "CabinetWClass",
+        },
+        "end_uia_snapshot": {
+            "window": [0, 0, 1920, 1080],
+            "inputs": [],
+            "scrollbars": [[1423, 128, 1440, 1004]],
+            "texts": [
+                {"bbox": [10, 10, 40, 16], "text": "文件", "control_type": "text"}
+            ],
+        },
+    }
+    (run / "events" / "event_014.json").write_text(
+        json.dumps(event), encoding="utf-8"
+    )
+    (run / "analysis" / "event_014.json").write_text(
+        json.dumps(
+            {
+                "event_index": 14,
+                "instruction": "（YOLO+OCR）從滾動條的41%處拖到82%處",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    start_payload = {
+        "vision_path": "yolo_ocr",
+        "local_cursor": [1436, 484],
+        "candidates": [
+            {
+                "bbox": [1425, 127, 19, 878],
+                "text": None,
+                "class_name": "scrollbar",
+            }
+        ],
+    }
+    end_payload = {
+        "vision_path": "yolo_ocr",
+        "local_cursor": [1470, 845],
+        "candidates": [
+            {
+                "bbox": [1139, 842, 61, 14],
+                "text": "1,450 KB",
+                "class_name": "text",
+            },
+            {
+                "bbox": [1423, 127, 17, 878],
+                "text": None,
+                "class_name": "scrollbar",
+            },
+        ],
+    }
+    (run / "yolo_ocr" / "event_014.json").write_text(
+        json.dumps(start_payload, ensure_ascii=False), encoding="utf-8"
+    )
+    (run / "yolo_ocr" / "event_014_end.json").write_text(
+        json.dumps(end_payload, ensure_ascii=False), encoding="utf-8"
+    )
+    slots = replay_repair_slots(
+        run, 14, [{"name": "drag", "arguments": {}}]
+    )
+    assert len(slots) == 2
+    assert slots[0] is not None and slots[0].recorded_text == "滾動條"
+    assert slots[1] is not None and slots[1].recorded_text == "滾動條"
+
+
+def test_attempt_scrollbar_repair_keeps_track_percent(tmp_path: Path, monkeypatch) -> None:
+    from cua_mcp.scrollbar_arrows import point_from_scrollbar_percent, scrollbar_axis_percent
+    from src.recorder.uia_replay_repair import (
+        UiaReplayRepairRequest,
+        attempt_uia_replay_repair,
+    )
+
+    run = tmp_path / "recording"
+    (run / "events").mkdir(parents=True)
+    (run / "analysis").mkdir()
+    (run / "yolo_ocr").mkdir()
+    event = {
+        "index": 3,
+        "timestamp_utc": "t",
+        "kind": "click",
+        "button": "left",
+        "cursor_xy": [1030, 528],
+        "click_window": {
+            "hwnd": 5,
+            "title": "Win",
+            "process_name": "app.exe",
+            "rect": list(_RECORDED_WINDOW),
+            "class_name": "App",
+        },
+        "uia_snapshot": {
+            "window": list(_RECORDED_WINDOW),
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [],
+        },
+    }
+    (run / "events" / "event_003.json").write_text(json.dumps(event), encoding="utf-8")
+    (run / "analysis" / "event_003.json").write_text(
+        json.dumps(
+            {
+                "event_index": 3,
+                "instruction": "（YOLO+OCR）將滑鼠移到滾動條的41%處，並點擊滑鼠一下。",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run / "yolo_ocr" / "event_003.json").write_text(
+        json.dumps(
+            {
+                "vision_path": "yolo_ocr",
+                "local_cursor": [1030, 528],
+                "candidates": [
+                    {
+                        "bbox": list(_RECORDED_BBOX),
+                        "text": None,
+                        "class_name": "scrollbar",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    live = ClickWindowInfo(
+        hwnd=5,
+        title="Win",
+        process_name="app.exe",
+        left=_LIVE_WINDOW[0],
+        top=_LIVE_WINDOW[1],
+        width=_LIVE_WINDOW[2],
+        height=_LIVE_WINDOW[3],
+        is_maximized=False,
+        class_name="App",
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        lambda _cw: live,
+    )
+    request = UiaReplayRepairRequest(
+        recording_dir=run,
+        event_index=3,
+        side="click",
+        recorded_bbox=_RECORDED_BBOX,
+        recorded_text="滾動條",
+        recorded_window_xywh=_RECORDED_WINDOW,
+    )
+    # Mapped recorded bar is (1010, 520, 40, 16); live UIA bar covers its center.
+    uia_bar = (1005, 400, 50, 300)
+    result = attempt_uia_replay_repair(
+        request,
+        {"hwnd": 5, "title": "Win", "process_name": "app.exe", "rect": list(_LIVE_WINDOW)},
+        uia_boxes=[((1100, 450, 40, 16), "位置")],
+        ocr_boxes=[((1010, 520, 40, 16), "滾動條")],
+        uia_scrollbar_boxes=[uia_bar],
+    )
+    assert result is not None
+    gx, gy, meta = result
+    percent = scrollbar_axis_percent(1030, 528, _RECORDED_BBOX)
+    expect = point_from_scrollbar_percent(uia_bar, percent)
+    assert (gx, gy) == expect
+    assert meta["class_name"] == "scrollbar"
+    assert meta["track_percent"] == percent
+    assert meta["uia_replay_repair"]["source"] == "uia_scrollbar"
+    from src.common.nearby_side import strip_nearby_context_comments
+
+    saved = json.loads((run / "analysis" / "event_003.json").read_text(encoding="utf-8"))
+    stripped = strip_nearby_context_comments(saved["instruction"])
+    assert "滾動條" in stripped
+    assert f"{percent}%" in stripped
+    assert "位置" not in stripped
+
+
+def test_recorded_input_primary_under_cursor() -> None:
+    from src.recorder.uia_replay_repair import _recorded_input_primary
+
+    primary = _recorded_input_primary(
+        {
+            "local_cursor": [250, 260],
+            "candidates": [
+                {
+                    "bbox": [10, 20, 40, 16],
+                    "text": "標籤",
+                    "class_name": "text",
+                },
+                {
+                    "bbox": [200, 240, 120, 40],
+                    "text": None,
+                    "class_name": "input",
+                },
+            ],
+        }
+    )
+    assert primary == ((200, 240, 120, 40), "輸入欄")
+
+
+def test_replay_repair_slots_input_despite_usable_snapshot_texts(
+    tmp_path: Path,
+) -> None:
+    from src.recorder.uia_replay_repair import replay_repair_slots
+
+    run = tmp_path / "recording"
+    (run / "events").mkdir(parents=True)
+    (run / "analysis").mkdir()
+    (run / "yolo_ocr").mkdir()
+    event = {
+        "index": 7,
+        "timestamp_utc": "t",
+        "kind": "click",
+        "button": "left",
+        "cursor_xy": [250, 260],
+        "click_window": {
+            "hwnd": 5,
+            "title": "App",
+            "process_name": "app.exe",
+            "rect": [0, 0, 800, 600],
+            "class_name": "App",
+        },
+        "uia_snapshot": {
+            "window": [0, 0, 800, 600],
+            "inputs": [[200, 240, 320, 280]],
+            "scrollbars": [],
+            "texts": [
+                {"bbox": [10, 10, 40, 16], "text": "檔案", "control_type": "text"}
+            ],
+        },
+    }
+    (run / "events" / "event_007.json").write_text(json.dumps(event), encoding="utf-8")
+    (run / "analysis" / "event_007.json").write_text(
+        json.dumps(
+            {
+                "event_index": 7,
+                "instruction": "（YOLO+OCR）將滑鼠移到輸入欄，並點擊滑鼠一下。",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run / "yolo_ocr" / "event_007.json").write_text(
+        json.dumps(
+            {
+                "vision_path": "yolo_ocr",
+                "local_cursor": [250, 260],
+                "candidates": [
+                    {
+                        "bbox": [200, 240, 120, 40],
+                        "text": None,
+                        "class_name": "input",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    slots = replay_repair_slots(run, 7, [{"name": "move_mouse", "arguments": {}}])
+    assert len(slots) == 1 and slots[0] is not None
+    assert slots[0].recorded_text == "輸入欄"
+
+
+def test_attempt_input_repair_keeps_class_and_nearby(tmp_path: Path, monkeypatch) -> None:
+    from src.recorder.uia_replay_repair import (
+        UiaReplayRepairRequest,
+        attempt_uia_replay_repair,
+    )
+
+    run = tmp_path / "recording"
+    (run / "events").mkdir(parents=True)
+    (run / "analysis").mkdir()
+    (run / "yolo_ocr").mkdir()
+    event = {
+        "index": 8,
+        "timestamp_utc": "t",
+        "kind": "click",
+        "button": "left",
+        "cursor_xy": [1030, 528],
+        "click_window": {
+            "hwnd": 5,
+            "title": "Win",
+            "process_name": "app.exe",
+            "rect": list(_RECORDED_WINDOW),
+            "class_name": "App",
+        },
+        "uia_snapshot": {
+            "window": list(_RECORDED_WINDOW),
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [],
+        },
+    }
+    (run / "events" / "event_008.json").write_text(json.dumps(event), encoding="utf-8")
+    (run / "analysis" / "event_008.json").write_text(
+        json.dumps(
+            {
+                "event_index": 8,
+                "instruction": "（YOLO+OCR）將滑鼠移到輸入欄，並點擊滑鼠一下。",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run / "yolo_ocr" / "event_008.json").write_text(
+        json.dumps(
+            {
+                "vision_path": "yolo_ocr",
+                "local_cursor": [1030, 528],
+                "candidates": [
+                    {
+                        "bbox": list(_RECORDED_BBOX),
+                        "text": None,
+                        "class_name": "input",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    live = ClickWindowInfo(
+        hwnd=5,
+        title="Win",
+        process_name="app.exe",
+        left=_LIVE_WINDOW[0],
+        top=_LIVE_WINDOW[1],
+        width=_LIVE_WINDOW[2],
+        height=_LIVE_WINDOW[3],
+        is_maximized=False,
+        class_name="App",
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        lambda _cw: live,
+    )
+    request = UiaReplayRepairRequest(
+        recording_dir=run,
+        event_index=8,
+        side="click",
+        recorded_bbox=_RECORDED_BBOX,
+        recorded_text="輸入欄",
+        recorded_window_xywh=_RECORDED_WINDOW,
+    )
+    uia_field = (1000, 510, 80, 40)
+    result = attempt_uia_replay_repair(
+        request,
+        {"hwnd": 5, "title": "Win", "process_name": "app.exe", "rect": list(_LIVE_WINDOW)},
+        uia_boxes=[((1100, 450, 40, 16), "公式列")],
+        ocr_boxes=[((1010, 520, 40, 16), "輸入欄")],
+        uia_input_boxes=[uia_field],
+    )
+    assert result is not None
+    gx, gy, meta = result
+    assert (gx, gy) == (1040, 530)
+    assert meta["class_name"] == "input"
+    assert meta["track_percent"] is None
+    assert meta["uia_replay_repair"]["source"] == "uia_input"
+    from src.common.nearby_side import strip_nearby_context_comments
+
+    saved = json.loads((run / "analysis" / "event_008.json").read_text(encoding="utf-8"))
+    stripped = strip_nearby_context_comments(saved["instruction"])
+    assert "輸入欄" in stripped
+    assert "公式列" not in stripped
+    assert "公式列" in saved["instruction"]
+
+
+def _scrollbar_drag_recording(tmp_path: Path) -> Path:
+    run = tmp_path / "recording"
+    (run / "events").mkdir(parents=True)
+    (run / "analysis").mkdir()
+    (run / "yolo_ocr").mkdir()
+    event = {
+        "index": 14,
+        "timestamp_utc": "t",
+        "kind": "drag",
+        "button": "left",
+        "cursor_xy": [1436, 484],
+        "end_xy": [1470, 845],
+        "click_window": {
+            "hwnd": 5,
+            "title": "文件 - 檔案總管",
+            "process_name": "explorer.exe",
+            "rect": [0, 0, 1920, 1080],
+            "class_name": "CabinetWClass",
+        },
+        "end_click_window": {
+            "hwnd": 5,
+            "title": "文件 - 檔案總管",
+            "process_name": "explorer.exe",
+            "rect": [0, 0, 1920, 1080],
+            "class_name": "CabinetWClass",
+        },
+        "uia_snapshot": {
+            "window": [0, 0, 1920, 1080],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [],
+        },
+        "end_uia_snapshot": {
+            "window": [0, 0, 1920, 1080],
+            "inputs": [],
+            "scrollbars": [[1423, 128, 1440, 1004]],
+            "texts": [],
+        },
+    }
+    (run / "events" / "event_014.json").write_text(json.dumps(event), encoding="utf-8")
+    yolo_instruction = "（YOLO+OCR）從滾動條的41%處拖到82%處"
+    (run / "analysis" / "event_014.json").write_text(
+        json.dumps(
+            {"event_index": 14, "instruction": yolo_instruction},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    start_payload = {
+        "vision_path": "yolo_ocr",
+        "local_cursor": [1436, 484],
+        "scrollbar_track": {
+            "bbox": [1425, 127, 19, 878],
+            "axis": "vertical",
+            "percent": 41,
+            "anchor_class": "scrollbar",
+        },
+        "candidates": [
+            {
+                "bbox": [1425, 127, 19, 878],
+                "text": None,
+                "class_name": "scrollbar",
+            }
+        ],
+    }
+    end_payload = {
+        "vision_path": "yolo_ocr",
+        "local_cursor": [1470, 845],
+        "scrollbar_track": {
+            "bbox": [1423, 127, 17, 878],
+            "axis": "vertical",
+            "percent": 82,
+            "anchor_class": "scrollbar",
+        },
+        "candidates": [
+            {
+                "bbox": [1139, 842, 61, 14],
+                "text": "1,450 KB",
+                "class_name": "text",
+            },
+            {
+                "bbox": [1423, 127, 17, 878],
+                "text": None,
+                "class_name": "scrollbar",
+            },
+        ],
+    }
+    (run / "yolo_ocr" / "event_014.json").write_text(
+        json.dumps(start_payload, ensure_ascii=False), encoding="utf-8"
+    )
+    (run / "yolo_ocr" / "event_014_end.json").write_text(
+        json.dumps(end_payload, ensure_ascii=False), encoding="utf-8"
+    )
+    return run
+
+
+def test_scrollbar_drag_start_repair_marks_both_sides_uia(tmp_path: Path) -> None:
+    run = _scrollbar_drag_recording(tmp_path)
+    request = UiaReplayRepairRequest(
+        recording_dir=run,
+        event_index=14,
+        side="start",
+        recorded_bbox=(1425, 127, 19, 878),
+        recorded_text="滾動條",
+        recorded_window_xywh=(0, 0, 1920, 1080),
+    )
+    live_bar = (1420, 120, 20, 900)
+    instruction = write_uia_replay_repair(
+        request,
+        label="滾動條",
+        source="uia_scrollbar",
+        bbox=live_bar,
+        others=[((1464, 379, 141, 18), "文件 (37 個項目)")],
+        track_percent=41,
+    )
+    assert instruction is not None
+    assert instruction.startswith("（UIA）")
+    assert "41%" in instruction and "82%" in instruction
+    saved = json.loads((run / "analysis" / "event_014.json").read_text(encoding="utf-8"))
+    assert saved["uia_replay_repair"]["start"]["track_percent"] == 41
+    assert saved["uia_replay_repair"]["end"]["track_percent"] == 82
+    assert saved["yolo_ocr_fallback"]["instruction"].startswith("（YOLO+OCR）")
+    start_payload = json.loads(
+        (run / "yolo_ocr" / "event_014.json").read_text(encoding="utf-8")
+    )
+    end_payload = json.loads(
+        (run / "yolo_ocr" / "event_014_end.json").read_text(encoding="utf-8")
+    )
+    assert start_payload["vision_path"] == "uia"
+    assert end_payload["vision_path"] == "uia"
+
+
+def test_persist_pinned_scrollbar_end_repair_writes_uia(tmp_path: Path) -> None:
+    from src.recorder.uia_replay_repair import persist_pinned_scrollbar_end_repair
+
+    run = _scrollbar_drag_recording(tmp_path)
+    # Start already repaired; end still yolo_ocr (stranded pin case).
+    start_path = run / "yolo_ocr" / "event_014.json"
+    start = json.loads(start_path.read_text(encoding="utf-8"))
+    start["vision_path"] = "uia"
+    start["vision_path_reason"] = "重播修復改為 UIA"
+    start_path.write_text(json.dumps(start, ensure_ascii=False), encoding="utf-8")
+    end_request = UiaReplayRepairRequest(
+        recording_dir=run,
+        event_index=14,
+        side="end",
+        recorded_bbox=(1423, 127, 17, 878),
+        recorded_text="滾動條",
+        recorded_window_xywh=(0, 0, 1920, 1080),
+    )
+    live_bar = (1420, 120, 20, 900)
+    instruction = persist_pinned_scrollbar_end_repair(
+        end_request,
+        bbox=live_bar,
+        track_percent=44,
+        others=[((1464, 379, 141, 18), "文件 (37 個項目)")],
+    )
+    assert instruction is not None
+    assert instruction.startswith("（UIA）")
+    assert "44%" in instruction
+    saved = json.loads((run / "analysis" / "event_014.json").read_text(encoding="utf-8"))
+    assert saved["uia_replay_repair"]["end"]["track_percent"] == 44
+    assert saved["yolo_ocr_fallback"]["instruction"].startswith("（YOLO+OCR）")
+    end_payload = json.loads(
+        (run / "yolo_ocr" / "event_014_end.json").read_text(encoding="utf-8")
+    )
+    assert end_payload["vision_path"] == "uia"

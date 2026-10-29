@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from src.common.runtime_context import SMART_MODE_ENV
@@ -165,6 +167,155 @@ async def test_drag_pins_scrollbar_track_percent_to_start_scrollbar(
     assert result["args"]["y2"] == expected_y2
     assert result["destination_target"]["track_percent"] == 100
     assert result["destination_target"]["target_bbox"] == scrollbar_bbox
+
+
+@pytest.mark.asyncio
+async def test_drag_pin_consumes_end_repair_slot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    from cua_mcp import tool_module
+    from src.recorder.uia_replay_repair import (
+        UiaReplayRepairRequest,
+        bind_uia_replay_repairs,
+    )
+
+    monkeypatch.delenv(SMART_MODE_ENV, raising=False)
+    run = tmp_path / "recording"
+    (run / "events").mkdir(parents=True)
+    (run / "analysis").mkdir()
+    (run / "yolo_ocr").mkdir()
+    window = {
+        "hwnd": 5,
+        "title": "文件 - 檔案總管",
+        "process_name": "explorer.exe",
+        "rect": [0, 0, 1920, 1080],
+        "class_name": "CabinetWClass",
+    }
+    event = {
+        "index": 14,
+        "timestamp_utc": "t",
+        "kind": "drag",
+        "button": "left",
+        "cursor_xy": [1436, 484],
+        "end_xy": [1470, 845],
+        "click_window": window,
+        "end_click_window": window,
+        "uia_snapshot": {
+            "window": [0, 0, 1920, 1080],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [],
+        },
+        "end_uia_snapshot": {
+            "window": [0, 0, 1920, 1080],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [],
+        },
+    }
+    (run / "events" / "event_014.json").write_text(json.dumps(event), encoding="utf-8")
+    (run / "analysis" / "event_014.json").write_text(
+        json.dumps(
+            {
+                "event_index": 14,
+                "instruction": "（YOLO+OCR）從滾動條的18%處拖到44%處",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    for name, cursor, percent, box in (
+        ("event_014.json", [1434, 285], 18, [1426, 129, 19, 876]),
+        ("event_014_end.json", [1434, 513], 44, [1423, 129, 17, 876]),
+    ):
+        (run / "yolo_ocr" / name).write_text(
+            json.dumps(
+                {
+                    "vision_path": "yolo_ocr",
+                    "local_cursor": cursor,
+                    "scrollbar_track": {
+                        "bbox": box,
+                        "axis": "vertical",
+                        "percent": percent,
+                        "anchor_class": "scrollbar",
+                    },
+                    "candidates": [
+                        {"bbox": box, "text": None, "class_name": "scrollbar"}
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+    scrollbar_bbox = {"x": 1423, "y": 128, "w": 17, "h": 876}
+
+    async def fake_resolve(instruction: str, nearby_objects: list[str] | None = None, **_kwargs):
+        from src.recorder.uia_replay_repair import take_uia_replay_repair
+
+        # Real find_mouse_point always pops the start repair slot first.
+        take_uia_replay_repair()
+        if "18%" in instruction:
+            return 1431, 286, {
+                "class_name": "scrollbar",
+                "target_kind": "scrollbar",
+                "target_text": "",
+                "target_icons": [],
+                "target_bbox": dict(scrollbar_bbox),
+                "track_percent": 18,
+                "landmarks": [
+                    {
+                        "label": "「文件 (37 個項目)」文字",
+                        "side": "left",
+                        "rect": [1464, 379, 1605, 397],
+                    }
+                ],
+            }
+        raise AssertionError("destination must be pinned")
+
+    monkeypatch.setattr(tool_module, "resolve_mouse_point", fake_resolve)
+    monkeypatch.setattr(
+        tool_module,
+        "_drag_at_points",
+        lambda x1, y1, x2, y2, duration=0.5, button="left": {
+            "ok": True,
+            "action": "drag",
+            "args": {
+                "x1": x1,
+                "y1": y1,
+                "x2": x2,
+                "y2": y2,
+                "duration": duration,
+                "button": button,
+            },
+        },
+    )
+
+    end_request = UiaReplayRepairRequest(
+        recording_dir=run,
+        event_index=14,
+        side="end",
+        recorded_bbox=(1423, 129, 17, 876),
+        recorded_text="滾動條",
+        recorded_window_xywh=(0, 0, 1920, 1080),
+    )
+    with bind_uia_replay_repairs([None, end_request]):
+        await tool_module._drag(
+            start_instruction="（YOLO+OCR）滾動條的18%處",
+            destination_instruction="（YOLO+OCR）44%處",
+        )
+
+    saved = json.loads((run / "analysis" / "event_014.json").read_text(encoding="utf-8"))
+    assert saved["instruction"].startswith("（UIA）")
+    assert saved["uia_replay_repair"]["end"]["track_percent"] == 44
+    assert saved["yolo_ocr_fallback"]["instruction"].startswith("（YOLO+OCR）")
+    end_payload = json.loads(
+        (run / "yolo_ocr" / "event_014_end.json").read_text(encoding="utf-8")
+    )
+    assert end_payload["vision_path"] == "uia"
 
 
 @pytest.mark.asyncio

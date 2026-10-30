@@ -5264,6 +5264,122 @@ async def test_find_mouse_point_replay_miss_stays_unresolved(
     assert found is None
 
 
+def _ui_change_fingerprint(value: int = 0):
+    import numpy as np
+
+    from cua_mcp.select_mouse_target import _UiChangeFingerprint
+
+    return _UiChangeFingerprint(
+        monitor_index=1,
+        bgr=np.full((40, 40, 3), int(value), dtype=np.uint8),
+        roi_xywh=None,
+        source="full_monitor",
+    )
+
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_hit_skips_ui_change_compare(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cua_mcp import select_mouse_target as smt
+
+    calls = {"attempt": 0, "fresh": 0}
+
+    async def fake_attempt(*_a, **_k):
+        calls["attempt"] += 1
+        return (10, 20, {"timing": {}}), _ui_change_fingerprint(0)
+
+    def fake_fresh(_click_window):
+        calls["fresh"] += 1
+        return _ui_change_fingerprint(255)
+
+    monkeypatch.setattr(smt, "_find_mouse_point_attempt", fake_attempt)
+    monkeypatch.setattr(smt, "_fresh_fingerprint_for_compare", fake_fresh)
+    found = await smt.find_mouse_point("將滑鼠移到「目標」文字")
+    assert found == (10, 20, {"timing": {}})
+    assert calls["attempt"] == 1
+    assert calls["fresh"] == 0
+
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_ui_change_retry_skipped_when_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cua_mcp import select_mouse_target as smt
+
+    calls = {"attempt": 0, "fresh": 0}
+
+    async def fake_attempt(*_a, **_k):
+        calls["attempt"] += 1
+        return None, _ui_change_fingerprint(0)
+
+    def fake_fresh(_click_window):
+        calls["fresh"] += 1
+        return _ui_change_fingerprint(0)
+
+    monkeypatch.setattr(smt, "_find_mouse_point_attempt", fake_attempt)
+    monkeypatch.setattr(smt, "_fresh_fingerprint_for_compare", fake_fresh)
+    monkeypatch.setattr(smt, "_ui_change_mad", lambda _a, _b: 0.01)
+    found = await smt.find_mouse_point("將滑鼠移到「目標」文字")
+    assert found is None
+    assert calls["attempt"] == 1
+    assert calls["fresh"] == 1
+
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_ui_change_retries_once_when_changed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cua_mcp import select_mouse_target as smt
+
+    calls = {"attempt": 0}
+
+    async def fake_attempt(*_a, **_k):
+        calls["attempt"] += 1
+        if calls["attempt"] == 1:
+            return None, _ui_change_fingerprint(0)
+        return (30, 40, {"timing": {"select_phase": "select"}}), None
+
+    monkeypatch.setattr(smt, "_find_mouse_point_attempt", fake_attempt)
+    monkeypatch.setattr(
+        smt,
+        "_fresh_fingerprint_for_compare",
+        lambda _cw: _ui_change_fingerprint(255),
+    )
+    monkeypatch.setattr(smt, "_ui_change_mad", lambda _a, _b: 0.2)
+    found = await smt.find_mouse_point("將滑鼠移到「目標」文字")
+    assert calls["attempt"] == 2
+    assert found is not None
+    assert found[0] == 30 and found[1] == 40
+    assert found[2]["ui_change_retry"] is True
+    assert found[2]["ui_change_mad"] == 0.2
+    assert found[2]["timing"]["ui_change_retry"] is True
+
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_ui_change_never_retries_twice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cua_mcp import select_mouse_target as smt
+
+    calls = {"attempt": 0}
+
+    async def fake_attempt(*_a, **_k):
+        calls["attempt"] += 1
+        return None, _ui_change_fingerprint(0)
+
+    monkeypatch.setattr(smt, "_find_mouse_point_attempt", fake_attempt)
+    monkeypatch.setattr(
+        smt,
+        "_fresh_fingerprint_for_compare",
+        lambda _cw: _ui_change_fingerprint(255),
+    )
+    monkeypatch.setattr(smt, "_ui_change_mad", lambda _a, _b: 0.9)
+    found = await smt.find_mouse_point("將滑鼠移到「目標」文字")
+    assert found is None
+    assert calls["attempt"] == 2
+
+
 @pytest.mark.asyncio
 async def test_find_mouse_point_live_miss_still_uses_visual_fallback(
     monkeypatch: pytest.MonkeyPatch,

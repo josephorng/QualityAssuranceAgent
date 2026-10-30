@@ -2316,7 +2316,7 @@ def _filter_mouse_candidates_exact(
 
 
 # Minimum SequenceMatcher score to keep a candidate before the LLM filter.
-_MOUSE_FILTER_SIMILARITY_THRESHOLD = 0.5
+_MOUSE_FILTER_SIMILARITY_THRESHOLD = 0.8
 
 
 def _detections_label_similar(
@@ -4849,6 +4849,107 @@ def require_similarity_match() -> Iterator[None]:
         _require_similarity_match.reset(token)
 
 
+# Soft-miss UI-change retry: MAD above this on the compare ROI means the screen
+# moved under the locator and one immediate re-run is worth trying.
+UI_CHANGE_MAD_THRESHOLD = 0.05
+
+
+@dataclass(frozen=True)
+class _UiChangeFingerprint:
+    """Capture crop used to detect mid-locator UI churn after a soft miss."""
+
+    monitor_index: int
+    bgr: np.ndarray
+    roi_xywh: tuple[int, int, int, int] | None
+    source: str  # "click_window" | "full_monitor"
+
+
+def _fingerprint_from_captured(
+    captured: list[tuple[int, np.ndarray]],
+    click_window: dict[str, Any] | None,
+) -> _UiChangeFingerprint | None:
+    """Build a compare crop from already-captured monitors (window ROI preferred)."""
+    if not captured:
+        return None
+    if isinstance(click_window, dict):
+        from src.recorder.window_snapshot import resolve_live_ocr_roi_local
+
+        for monitor_index, bgr in captured:
+            img_h, img_w = int(bgr.shape[0]), int(bgr.shape[1])
+            live_roi = resolve_live_ocr_roi_local(
+                click_window,
+                image_w=img_w,
+                image_h=img_h,
+                monitor_offset=active_monitor_offset(monitor_index),
+            )
+            if live_roi is None:
+                continue
+            x, y, w, h = (int(v) for v in live_roi)
+            if w < 1 or h < 1:
+                continue
+            x2 = min(img_w, x + w)
+            y2 = min(img_h, y + h)
+            x = max(0, x)
+            y = max(0, y)
+            if x2 <= x or y2 <= y:
+                continue
+            crop = np.array(bgr[y:y2, x:x2], copy=True)
+            return _UiChangeFingerprint(
+                monitor_index=int(monitor_index),
+                bgr=crop,
+                roi_xywh=(x, y, x2 - x, y2 - y),
+                source="click_window",
+            )
+    monitor_index, bgr = captured[0]
+    return _UiChangeFingerprint(
+        monitor_index=int(monitor_index),
+        bgr=np.array(bgr, copy=True),
+        roi_xywh=None,
+        source="full_monitor",
+    )
+
+
+def _fresh_fingerprint_for_compare(
+    click_window: dict[str, Any] | None,
+) -> _UiChangeFingerprint | None:
+    """Re-grab selected monitors and build a fingerprint with the same ROI policy."""
+    _monitor_indices, _image_paths, captured, _capture_s = _grab_selected_monitors()
+    return _fingerprint_from_captured(captured, click_window)
+
+
+def _ui_change_mad(
+    before: _UiChangeFingerprint,
+    after: _UiChangeFingerprint,
+) -> float | None:
+    """Return MAD between two fingerprints, or ``None`` when compare fails."""
+    from src.recorder.frame_similarity import bgr_mean_abs_diff
+
+    try:
+        return float(bgr_mean_abs_diff(before.bgr, after.bgr))
+    except (ValueError, OSError, Exception):
+        return None
+
+
+def _annotate_ui_change_retry_meta(
+    meta: dict[str, Any],
+    *,
+    mad: float,
+    source: str,
+) -> dict[str, Any]:
+    """Attach UI-change retry fields to successful second-attempt metadata."""
+    meta["ui_change_retry"] = True
+    meta["ui_change_mad"] = float(mad)
+    meta["ui_change_roi_source"] = source
+    timing = meta.get("timing")
+    if isinstance(timing, dict):
+        timing = dict(timing)
+        timing["ui_change_retry"] = True
+        timing["ui_change_mad"] = float(mad)
+        timing["ui_change_roi_source"] = source
+        meta["timing"] = timing
+    return meta
+
+
 async def find_mouse_point(
     instruction: str,
     *,
@@ -4895,12 +4996,111 @@ async def find_mouse_point(
     unless the directed nearby landmarks describe exactly one nearby place or
     recorded ``landmark_geometry`` can synthesize / pick a point.
 
+    On soft miss, re-grabs and compares the click-window ROI (else first monitor)
+    to the attempt capture. If MAD exceeds :data:`UI_CHANGE_MAD_THRESHOLD`, runs
+    the locator once more before returning ``None``.
+
     Successful metadata includes ``timing`` with capture / YOLO / OCR / parse /
     select phase seconds for session time profiles.
     """
+    result, fingerprint = await _find_mouse_point_attempt(
+        instruction,
+        nearby_objects=nearby_objects,
+        yolo_conf_threshold=yolo_conf_threshold,
+        click_window=click_window,
+        landmark_geometry=landmark_geometry,
+        anchor_text=anchor_text,
+        control_type=control_type,
+        vision_mode=vision_mode,
+    )
+    if result is not None:
+        return result
+    if fingerprint is None:
+        return None
+
+    fresh = await asyncio.to_thread(_fresh_fingerprint_for_compare, click_window)
+    if fresh is None:
+        _log_info("move_mouse ui_change_retry skipped; fresh capture empty")
+        return None
+    mad = _ui_change_mad(fingerprint, fresh)
+    if mad is None:
+        _log_info(
+            "move_mouse ui_change_retry skipped; MAD compare failed "
+            f"source={fingerprint.source}"
+        )
+        return None
+    if mad <= UI_CHANGE_MAD_THRESHOLD:
+        _log_info(
+            "move_mouse ui_change_retry skipped "
+            f"mad={mad:.4f} threshold={UI_CHANGE_MAD_THRESHOLD} "
+            f"source={fingerprint.source}"
+        )
+        return None
+
+    _log_info(
+        "move_mouse ui_change_retry "
+        f"mad={mad:.4f} threshold={UI_CHANGE_MAD_THRESHOLD} "
+        f"source={fingerprint.source} roi={fingerprint.roi_xywh}"
+    )
+    result2, _fingerprint2 = await _find_mouse_point_attempt(
+        instruction,
+        nearby_objects=nearby_objects,
+        yolo_conf_threshold=yolo_conf_threshold,
+        click_window=click_window,
+        landmark_geometry=landmark_geometry,
+        anchor_text=anchor_text,
+        control_type=control_type,
+        vision_mode=vision_mode,
+    )
+    if result2 is None:
+        return None
+    gx, gy, meta = result2
+    return gx, gy, _annotate_ui_change_retry_meta(
+        meta, mad=mad, source=fingerprint.source
+    )
+
+
+async def _find_mouse_point_attempt(
+    instruction: str,
+    *,
+    nearby_objects: list[str] | None = None,
+    yolo_conf_threshold: float = DEFAULT_CONF_YOLOV26_END2END,
+    click_window: dict[str, Any] | None = None,
+    landmark_geometry: dict[str, Any] | None = None,
+    anchor_text: str | None = None,
+    control_type: str | None = None,
+    vision_mode: str | None = None,
+) -> tuple[
+    tuple[int, int, dict[str, Any]] | None,
+    _UiChangeFingerprint | None,
+]:
+    """One locator pass; returns ``(result, capture_fingerprint)``."""
     instruction_text = (instruction or "").strip()
     if not instruction_text:
         raise ValueError("instruction must be non-empty")
+    captured_for_fp: list[tuple[int, np.ndarray]] = []
+
+    def _pack(
+        *args: Any,
+    ) -> tuple[
+        tuple[int, int, dict[str, Any]] | None,
+        _UiChangeFingerprint | None,
+    ]:
+        # Supports ``_pack(None)``, ``_pack(gx, gy, meta)``, and
+        # ``_pack(_landmark_geometry_synth_meta(...))``.
+        if len(args) == 1:
+            result = args[0]
+        elif len(args) == 3:
+            result = (args[0], args[1], args[2])
+        else:
+            raise TypeError(
+                f"_pack expected 1 or 3 args, got {len(args)}"
+            )
+        return result, _fingerprint_from_captured(captured_for_fp, click_window)
+
+    def _note_capture(frames: list[tuple[int, np.ndarray]]) -> None:
+        captured_for_fp.clear()
+        captured_for_fp.extend(frames)
     structured_anchor_text = (
         str(anchor_text).strip() if isinstance(anchor_text, str) else ""
     ) or None
@@ -4946,7 +5146,7 @@ async def find_mouse_point(
                 "move_mouse caption button "
                 f"role={caption_role} point=[{gx},{gy}]"
             )
-            return gx, gy, meta
+            return _pack(gx, gy, meta)
         caption_roi_screen = await asyncio.to_thread(
             caption_button_cell_screen_rect,
             instruction_text,
@@ -5048,6 +5248,7 @@ async def find_mouse_point(
         monitor_indices, image_paths, captured, capture_s = await asyncio.to_thread(
             _grab_selected_monitors
         )
+        _note_capture(captured)
         grabbed_frames = True
 
         def _select_uia_snapshot(
@@ -5164,6 +5365,7 @@ async def find_mouse_point(
                 defer_ocr=defer_ocr,
             )
         monitor_indices, image_paths, captured, detections, vision_timing = vision
+        _note_capture(captured)
         capture_s = float(vision_timing.get("capture_s", 0.0))
         if grabbed_frames:
             vision_timing["vision_path"] = "yolo_ocr"
@@ -5305,7 +5507,7 @@ async def find_mouse_point(
             repair_meta["timing"] = _timing_meta(
                 select_s=0.0, select_phase="uia_replay_repair"
             )
-            return gx, gy, repair_meta
+            return _pack(gx, gy, repair_meta)
 
     selection_method: str | None = None
     if uia_first_chosen is not None:
@@ -5380,7 +5582,7 @@ async def find_mouse_point(
             meta["selected_text"] = selected_text
         if char_center is not None:
             meta["char_center"] = char_center
-        return resolved_x, resolved_y, meta
+        return _pack(resolved_x, resolved_y, meta)
 
     if not detections:
         if similarity_match_required():
@@ -5388,7 +5590,7 @@ async def find_mouse_point(
                 "move_mouse: no YOLO candidates; similarity match required, "
                 "skipping Gemma ROI fallback"
             )
-            return None
+            return _pack(None)
         # Stage B: Gemma ROI → YOLO/OCR on crop → index pick.
         _log_info(
             "move_mouse: no YOLO candidates; trying Gemma ROI + YOLO-on-crop fallback"
@@ -5406,7 +5608,7 @@ async def find_mouse_point(
         select_s = time.perf_counter() - select_started
         if grounded is None:
             _log_info("move_mouse: Gemma ROI fallback found nothing")
-            return None
+            return _pack(None)
         gx, gy, roi_meta = grounded
         gx = int(gx) + offset_dx
         gy = int(gy) + offset_dy
@@ -5419,7 +5621,7 @@ async def find_mouse_point(
         meta["char_occurrence"] = char_occurrence
         meta["track_percent"] = track_percent
         meta["timing"] = _timing_meta(select_s=select_s, select_phase="gemma_roi")
-        return gx, gy, meta
+        return _pack(gx, gy, meta)
 
     anchor_matches, nearby_matches = _filter_mouse_candidates(
         detections,
@@ -5463,7 +5665,7 @@ async def find_mouse_point(
                 f"point=[{geom_point[0]},{geom_point[1]}] "
                 f"(ignoring raw pixel offset dx={offset_dx} dy={offset_dy})"
             )
-            return _landmark_geometry_synth_meta(
+            return _pack(_landmark_geometry_synth_meta(
                 point=geom_point,
                 offset_dx=0,
                 offset_dy=0,
@@ -5475,7 +5677,7 @@ async def find_mouse_point(
                 image_paths=image_paths,
                 selection_method=geom_method,
                 timing=_timing_meta(select_s=select_s, select_phase=geom_method),
-            )
+            ))
 
     if not anchor_matches:
         # On-object text anchors must match by OCR/similarity. Constellation /
@@ -5490,7 +5692,7 @@ async def find_mouse_point(
                 "move_mouse: no similarity match for text anchor; "
                 "failing step (no constellation fallback for 文字)"
             )
-            return None
+            return _pack(None)
         if (
             similarity_match_required()
             and landmark_geometry is not None
@@ -5519,7 +5721,7 @@ async def find_mouse_point(
                         "move_mouse: landmark geometry synth "
                         f"point=[{geom_point[0]},{geom_point[1]}]"
                     )
-                    return _landmark_geometry_synth_meta(
+                    return _pack(_landmark_geometry_synth_meta(
                         point=geom_point,
                         offset_dx=offset_dx,
                         offset_dy=offset_dy,
@@ -5533,7 +5735,7 @@ async def find_mouse_point(
                         timing=_timing_meta(
                             select_s=select_s, select_phase=geom_method
                         ),
-                    )
+                    ))
         unique = _unique_target_from_landmarks(
             detections,
             nearby_hints,
@@ -5556,7 +5758,7 @@ async def find_mouse_point(
                 "move_mouse: no similarity anchor matches; similarity match required, "
                 "skipping visual one-pass fallback"
             )
-            return None
+            return _pack(None)
         else:
             # Stage A: similarity miss but detections exist → Gemma pick among all.
             _log_info(
@@ -5576,7 +5778,7 @@ async def find_mouse_point(
                     "move_mouse: visual one-pass fallback failed: "
                     f"{type(exc).__name__}: {exc}"
                 )
-                return None
+                return _pack(None)
             selection_method = "visual_one_pass_fallback"
             select_phase = "visual_one_pass"
             _log_info(
@@ -5651,7 +5853,7 @@ async def find_mouse_point(
                         f"point=[{geom_point[0]},{geom_point[1]}] "
                         f"pool={len(anchor_matches)}"
                     )
-                    return _landmark_geometry_synth_meta(
+                    return _pack(_landmark_geometry_synth_meta(
                         point=geom_point,
                         offset_dx=offset_dx,
                         offset_dy=offset_dy,
@@ -5665,7 +5867,7 @@ async def find_mouse_point(
                         timing=_timing_meta(
                             select_s=select_s, select_phase=geom_method
                         ),
-                    )
+                    ))
 
         if used_geometry:
             pass
@@ -5789,7 +5991,7 @@ async def find_mouse_point(
         meta["resolved_char_center"] = char_center
     if selection_method is not None:
         meta["selection_method"] = selection_method
-    return resolved_x, resolved_y, meta
+    return _pack(resolved_x, resolved_y, meta)
 
 
 async def resolve_mouse_point(

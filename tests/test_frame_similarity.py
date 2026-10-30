@@ -7,10 +7,13 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+import numpy as np
+
 from src.recorder.frame_similarity import (
     append_settle_probe_debug_record,
     apply_settle_sample,
     archive_settle_probe_sample,
+    bgr_mean_abs_diff,
     compare_frames,
     frames_similar,
     mean_abs_diff,
@@ -45,6 +48,17 @@ def test_mean_abs_diff_different(tmp_path: Path) -> None:
     similar, mad = compare_frames(a, b)
     assert similar is False
     assert mad is not None and mad > 0.5
+
+
+def test_bgr_mean_abs_diff_identical() -> None:
+    frame = np.full((180, 320, 3), 128, dtype=np.uint8)
+    assert bgr_mean_abs_diff(frame, frame.copy()) < 0.01
+
+
+def test_bgr_mean_abs_diff_different() -> None:
+    a = np.zeros((180, 320, 3), dtype=np.uint8)
+    b = np.full((180, 320, 3), 255, dtype=np.uint8)
+    assert bgr_mean_abs_diff(a, b) > 0.5
 
 
 def test_apply_settle_sample_first_keeps_staging(tmp_path: Path) -> None:

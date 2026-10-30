@@ -3534,21 +3534,45 @@ def test_resolve_window_change_records_failure_reasons() -> None:
 
         return reader, timed_out
 
+    after_gone = (
+        WindowInfo(
+            hwnd=2,
+            title="Other",
+            pid=2,
+            left=0,
+            top=0,
+            width=100,
+            height=100,
+            is_minimized=False,
+            is_maximized=False,
+        ),
+    )
     with patch(
         "src.recorder.capture.snapshot_top_level_windows",
-        return_value=list(before),
+        return_value=list(after_gone),
     ), patch(
         "src.recorder.capture.settle_delay_for_click",
         return_value=0.0,
+    ), patch(
+        "src.recorder.capture.capture_step_signals",
+        return_value={"foreground": {"class_name": "Other", "title": "Other"}},
     ), patch.object(
         session,
         "_uia_reader_or_timeout",
         side_effect=_timed_out_reader,
     ):
         change, title, debug = session._resolve_window_change(item)
-    assert change is None and title is None
-    assert debug == {"resolve_failed": "uia_timeout"}
-    assert window_verify_from_debug(debug) == {}
+    assert debug is not None
+    assert debug.get("uia_timed_out") is True
+    assert "resolve_failed" not in debug
+    assert debug["windows_before"][0]["title"] == "Editor"
+    assert debug["windows_after"][0]["title"] == "Other"
+    assert debug["signals_after"]["foreground"]["title"] == "Other"
+    verify = window_verify_from_debug(debug)
+    assert any(
+        isinstance(item, dict) and item.get("title") == "Editor"
+        for item in verify.get("disappeared", [])
+    )
 
 
 def test_window_step_persists_resolve_failed_when_before_cache_missing(tmp_path) -> None:

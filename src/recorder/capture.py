@@ -97,8 +97,8 @@ _SETTLE_PROBE_KEEP_DEBUG_SAMPLES = False
 # Window list and UI Automation. Kept off the settle-probe timer.
 _PRE_CLICK_CONTEXT_INTERVAL_S = 0.25
 # UI Automation on a closing window can stall. The per-step thread gives up
-# and records ``resolve_failed`` on ``window_snapshot_debug`` rather than
-# blocking the next click.
+# after this many seconds, keeps the already-enumerated window list + fast
+# signals, and sets ``uia_timed_out`` on ``window_snapshot_debug``.
 _WINDOW_UIA_TIMEOUT_S = 1.0
 # Stop waits this long for in-flight window-step threads to patch event JSON.
 _WINDOW_STEP_JOIN_TIMEOUT_S = 2.0
@@ -5386,6 +5386,7 @@ class RecordingSession:
         point_before = identity_from_click_window(item.click_window)
         if point_before is not None:
             signals_before["point_window"] = point_before
+        uia_after_timed_out = False
         if item.window_after_sealed:
             # The next gesture already happened. Use the cache copied before it
             # instead of enumerating windows now.
@@ -5411,8 +5412,9 @@ class RecordingSession:
                 )
             except Exception:
                 signals_after = {}
-            if uia_timed_out["value"]:
-                return None, None, _window_resolve_failure_debug("uia_timeout")
+            # Keep the window enum + fast signals even when UIA stalls; only
+            # the UIA fields are missing (timed-out reader returned {}).
+            uia_after_timed_out = bool(uia_timed_out["value"])
         change: dict[str, Any] | None = None
         title: str | None = None
         debug: dict[str, Any] = {}
@@ -5429,6 +5431,8 @@ class RecordingSession:
         debug["signals_before"] = signals_before
         debug["signals_after"] = signals_after
         debug["signal_kind"] = item.kind
+        if uia_after_timed_out:
+            debug["uia_timed_out"] = True
         return change, title, debug
 
     def _persist_queued_event(self, item: _QueuedEvent) -> None:

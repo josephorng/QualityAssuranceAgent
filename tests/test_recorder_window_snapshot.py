@@ -2184,6 +2184,56 @@ def test_window_verify_cancels_retitled_window_of_same_class_and_process() -> No
     ]
 
 
+def test_window_verify_keeps_titled_close_when_blank_sibling_appears() -> None:
+    """Loading ... → untitled WinForms residue is not a retitle; keep the close."""
+    form_class = "WindowsForms10.Window.8.app.0.141b42a_r8_ad1"
+    main = _win(
+        1,
+        "神網7 (Ver: 2026/10/15 | Cert:2034/04/25)   Joseph(Joseph)",
+        class_name=form_class,
+        process_name="WM7Ldr.exe",
+    )
+    loading = _win(
+        2,
+        "Loading ...",
+        class_name=form_class,
+        process_name="WM7Ldr.exe",
+    )
+    blank = _win(3, "", class_name=form_class, process_name="WM7Ldr.exe")
+    predicate = build_window_verify_predicate([main, loading], [main, blank])
+    assert predicate == {
+        "disappeared": [
+            {
+                "class_name": form_class,
+                "title": "Loading ...",
+                "process_name": "WM7Ldr.exe",
+            }
+        ]
+    }
+
+
+def test_window_verify_drops_blank_sibling_teardown() -> None:
+    """Untitled hwnd vanish is never a disappeared assertion."""
+    form_class = "WindowsForms10.Window.8.app.0.141b42a_r8_ad1"
+    main = _win(
+        1,
+        "神網7 (Ver: 2026/10/15 | Cert:2034/04/25)   Joseph(Joseph)",
+        class_name=form_class,
+        process_name="WM7Ldr.exe",
+    )
+    blank = _win(2, "", class_name=form_class, process_name="WM7Ldr.exe")
+    assert build_window_verify_predicate([main, blank], [main]) == {}
+    # Related WinForms class under the same process (e.g. Window.808 helper).
+    helper = _win(
+        3,
+        "",
+        class_name="WindowsForms10.Window.808.app.0.141b42a_r8_ad1",
+        process_name="WM7Ldr.exe",
+    )
+    assert build_window_verify_predicate([main, helper], [main]) == {}
+    assert build_window_verify_predicate([blank], []) == {}
+
+
 def test_window_verify_drops_same_hwnd_title_flicker() -> None:
     before = [_win(5, "資料夾", class_name="CabinetWClass")]
     after = [_win(5, "資料夾 - 檔案總管", class_name="CabinetWClass")]

@@ -1328,6 +1328,26 @@ def _same_class_and_process(left: dict[str, Any], right: dict[str, Any]) -> bool
     return left_class == right_class and left_process == right_process
 
 
+def _entry_has_title(entry: dict[str, Any]) -> bool:
+    return bool(str(entry.get("title") or "").strip())
+
+
+def _is_titled_replacement(
+    disappeared: dict[str, Any],
+    appeared: dict[str, Any],
+) -> bool:
+    """True when a same-app appear can stand in for a close (retitle / swap).
+
+    A blank-titled appear is teardown residue (e.g. ``Loading ...`` → untitled
+    WinForms sibling), not a replacement window, so the titled close stays.
+    """
+    if not _same_class_and_process(disappeared, appeared):
+        return False
+    if _entry_has_title(disappeared) and not _entry_has_title(appeared):
+        return False
+    return True
+
+
 def build_window_verify_predicate(
     before: list[WindowInfo],
     after: list[WindowInfo],
@@ -1337,9 +1357,11 @@ def build_window_verify_predicate(
     Drops the agent hub window, the taskbar, input-pane strips, and a title
     change on an hwnd that is still present. Flyouts such as 「快顯主機」 are
     included here; script instructions still ignore them. An appeared window
-    and a disappeared window that share class and process cancel one-to-one.
-    Title is ignored, so a profile picker replaced by 「新分頁 - Google Chrome」
-    is not recorded as a close.
+    and a disappeared window that share class and process cancel one-to-one
+    when the appear has a title (or both lack one). A blank-titled appear does
+    not cancel a titled close. Untitled disappeared entries are dropped
+    (same as ignoring untitled closes for ``window_change``), and a blank
+    appear beside a titled same-class/process sibling is dropped as residue.
     """
     before_wins = [
         win
@@ -1353,6 +1375,7 @@ def build_window_verify_predicate(
     ]
     before_by_hwnd = {win.hwnd: win for win in before_wins if win.hwnd}
     after_by_hwnd = {win.hwnd: win for win in after_wins if win.hwnd}
+    after_entries = [_verify_entry(win) for win in after_wins]
 
     disappeared: list[dict[str, Any]] = []
     appeared: list[dict[str, Any]] = []
@@ -1373,7 +1396,7 @@ def build_window_verify_predicate(
             continue
         appeared.append(_verify_entry(win))
 
-    # One new window of the same class and process replaces one that closed.
+    # One new titled window of the same class and process replaces one that closed.
     remaining_appeared = list(appeared)
     kept_disappeared: list[dict[str, Any]] = []
     for item in disappeared:
@@ -1381,7 +1404,7 @@ def build_window_verify_predicate(
             (
                 index
                 for index, candidate in enumerate(remaining_appeared)
-                if _same_class_and_process(item, candidate)
+                if _is_titled_replacement(item, candidate)
             ),
             None,
         )
@@ -1389,8 +1412,18 @@ def build_window_verify_predicate(
             kept_disappeared.append(item)
         else:
             remaining_appeared.pop(match_index)
-    disappeared = kept_disappeared
-    appeared = remaining_appeared
+    # Untitled closes are not user actions (same as window_change). A blank
+    # appear beside a titled same-class/process sibling is teardown residue.
+    disappeared = [item for item in kept_disappeared if _entry_has_title(item)]
+    appeared = [
+        item
+        for item in remaining_appeared
+        if _entry_has_title(item)
+        or not any(
+            _same_class_and_process(item, sibling) and _entry_has_title(sibling)
+            for sibling in after_entries
+        )
+    ]
 
     predicate: dict[str, Any] = {}
     if appeared:

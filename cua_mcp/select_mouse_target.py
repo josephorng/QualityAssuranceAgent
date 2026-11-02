@@ -3913,6 +3913,66 @@ def _resolve_with_landmark_geometry(
     return None, synth, "landmark_geometry_synth"
 
 
+def _resolve_text_anchor_with_landmark_geometry(
+    detections: list[UiDetection],
+    landmark_geometry: dict[str, Any] | None,
+    *,
+    match_anchor: str,
+    recorded_anchor: bool = True,
+) -> tuple[UiDetection, tuple[int, int], str] | None:
+    """Pick on-object text via in-radius highest similarity; never synth-clicks.
+
+    Collects live detections inside the constellation near-synth radius, scores
+    each against ``match_anchor``, and returns the best score (closest on ties).
+    Returns ``None`` when geometry cannot synthesize or no in-radius label clears
+    the text similarity floor.
+    """
+    from src.recorder.landmark_geometry import (
+        TEXT_IN_RADIUS_SIMILARITY_FLOOR,
+        filter_landmarks_by_constellation,
+        parse_landmark_geometry,
+        pick_detection_in_radius_by_similarity,
+        replay_scale,
+        synthesize_target_point,
+    )
+
+    recorded = parse_landmark_geometry(landmark_geometry)
+    if recorded is None or not detections:
+        return None
+    matched = _match_geometry_landmark_centers(detections, recorded)
+    if len(matched) < 1:
+        return None
+    kept_labels = filter_landmarks_by_constellation(recorded, matched)
+    kept_centers = {
+        label: matched[label] for label in kept_labels if label in matched
+    }
+    if len(kept_centers) < 1:
+        return None
+    synth = synthesize_target_point(recorded, kept_centers)
+    if synth is None:
+        return None
+    query = (match_anchor or "").strip()
+    if not query:
+        return None
+    scale = replay_scale(recorded, kept_centers)
+
+    def _score(det: UiDetection) -> float:
+        return _detection_similarity_to_query(
+            det, query, recorded_anchor=recorded_anchor
+        )
+
+    picked = pick_detection_in_radius_by_similarity(
+        detections,
+        synth,
+        scale,
+        _score,
+        min_score=TEXT_IN_RADIUS_SIMILARITY_FLOOR,
+    )
+    if picked is None:
+        return None
+    return picked, (int(picked.cx), int(picked.cy)), "landmark_geometry_pick"
+
+
 def _landmark_geometry_synth_meta(
     *,
     point: tuple[int, int],
@@ -4971,10 +5031,10 @@ async def find_mouse_point(
 
     ``landmark_geometry`` is an optional recorded constellation used during cache
     replay (``require_similarity_match``) for non-text anchors (e.g. empty
-    ``輸入欄``) and for empty-space clicks with relative pixel offsets
-    (``…個像素…的位置``), where constellation replaces raw pixel offsets.
-    On-object text anchors (``…文字`` with no offset) never use constellation;
-    a similarity miss fails the step.
+    ``輸入欄``), empty-space clicks with relative pixel offsets
+    (``…個像素…的位置``), and on-object text anchors. Text uses an in-radius
+    highest-similarity pick (never a synth click); a miss falls through to
+    top-similarity / LLM, and still fails when no OCR label qualifies.
 
     ``anchor_text`` / ``control_type`` / ``vision_mode`` are optional structured
     match fields from recording compile. When ``anchor_text`` is set, matching
@@ -5679,10 +5739,41 @@ async def _find_mouse_point_attempt(
                 timing=_timing_meta(select_s=select_s, select_phase=geom_method),
             ))
 
-    if not anchor_matches:
-        # On-object text anchors must match by OCR/similarity. Constellation /
-        # landmark-unique fallbacks are for non-text targets (e.g. empty 輸入欄)
-        # and for offset empty-space clicks (handled above).
+    # On-object text + constellation: radius gate, then highest similarity.
+    # Never synth-click text; miss falls through to top-similarity / LLM.
+    used_geometry = False
+    if (
+        similarity_match_required()
+        and landmark_geometry is not None
+        and _anchor_is_text(anchor)
+        and not is_offset_click
+    ):
+        text_hit = _resolve_text_anchor_with_landmark_geometry(
+            detections,
+            landmark_geometry,
+            match_anchor=match_anchor,
+            recorded_anchor=recorded_anchor_match,
+        )
+        if text_hit is not None:
+            chosen, _geom_point, selection_method = text_hit
+            try:
+                idx = detections.index(chosen)
+            except ValueError:
+                idx = 0
+            select_phase = selection_method
+            used_geometry = True
+            _log_info(
+                "move_mouse: text landmark geometry radius-similarity pick "
+                f"center=[{chosen.cx},{chosen.cy}] method={selection_method} "
+                f"anchor={match_anchor!r}"
+            )
+
+    if used_geometry:
+        pass
+    elif not anchor_matches:
+        # On-object text anchors must still resolve via OCR/similarity (or the
+        # radius-similarity path above). Constellation synth / landmark-unique
+        # fallbacks remain for non-text targets (e.g. empty 輸入欄).
         if (
             similarity_match_required()
             and _anchor_is_text(anchor)
@@ -5690,7 +5781,7 @@ async def _find_mouse_point_attempt(
         ):
             _log_info(
                 "move_mouse: no similarity match for text anchor; "
-                "failing step (no constellation fallback for 文字)"
+                "failing step (no constellation synth for 文字)"
             )
             return _pack(None)
         if (
@@ -5818,8 +5909,8 @@ async def _find_mouse_point_attempt(
         _log_move_mouse_detections("anchors_after_nearby", anchor_matches)
 
         # Cache replay with recorded constellation: prefer geometry over LLM pick
-        # (e.g. multiple 輸入欄 class matches). On-object text still uses unique/LLM.
-        used_geometry = False
+        # (e.g. multiple 輸入欄 class matches). On-object text uses the
+        # radius-similarity path above (never synth among anchors).
         if (
             similarity_match_required()
             and landmark_geometry is not None

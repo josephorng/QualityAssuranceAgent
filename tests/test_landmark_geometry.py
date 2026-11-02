@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from src.common.nearby_side import NearbyHint, Side
 from src.recorder.landmark_geometry import (
+    TEXT_IN_RADIUS_SIMILARITY_FLOOR,
     build_landmark_geometry,
     filter_landmarks_by_constellation,
     parse_landmark_geometry,
+    pick_detection_in_radius_by_similarity,
     synthesize_target_point,
     target_far_from_synthesized,
     vectors_agree,
@@ -116,7 +118,55 @@ def test_parse_landmark_geometry_rejects_bad_payload() -> None:
     assert parse_landmark_geometry({"version": 1, "landmarks": []}) is None
 
 
-def test_compile_attaches_landmark_geometry_for_input_not_text() -> None:
+class _CenterDet:
+    def __init__(self, cx: int, cy: int, label: str) -> None:
+        self.cx = cx
+        self.cy = cy
+        self.label = label
+
+
+def test_pick_detection_in_radius_by_similarity_prefers_score_then_distance() -> None:
+    near_ext = _CenterDet(60, 60, "Linux (5)")
+    near_weak = _CenterDet(55, 55, "工程部")
+    far_exact = _CenterDet(400, 400, "Linux")
+    scores = {
+        "Linux (5)": 0.71,
+        "工程部": 0.1,
+        "Linux": 1.0,
+    }
+
+    picked = pick_detection_in_radius_by_similarity(
+        [near_ext, near_weak, far_exact],
+        (60, 60),
+        scale=100.0,
+        score_fn=lambda d: scores[d.label],
+        min_score=TEXT_IN_RADIUS_SIMILARITY_FLOOR,
+    )
+    assert picked is near_ext
+
+    closer = _CenterDet(58, 60, "Linux")
+    farther = _CenterDet(70, 60, "Linux")
+    tied = pick_detection_in_radius_by_similarity(
+        [farther, closer],
+        (60, 60),
+        scale=100.0,
+        score_fn=lambda _d: 1.0,
+    )
+    assert tied is closer
+
+    assert (
+        pick_detection_in_radius_by_similarity(
+            [near_weak, far_exact],
+            (60, 60),
+            scale=100.0,
+            score_fn=lambda d: scores[d.label],
+            min_score=TEXT_IN_RADIUS_SIMILARITY_FLOOR,
+        )
+        is None
+    )
+
+
+def test_compile_attaches_landmark_geometry_for_input_and_text() -> None:
     event = RecordedEvent(
         index=1,
         timestamp_utc="t",
@@ -158,7 +208,10 @@ def test_compile_attaches_landmark_geometry_for_input_not_text() -> None:
         vision=_vision_three_landmarks(),
     )
     assert text_calls is not None
-    assert "landmark_geometry" not in text_calls[0]["arguments"]
+    text_geom = text_calls[0]["arguments"].get("landmark_geometry")
+    assert isinstance(text_geom, dict)
+    assert len(text_geom["landmarks"]) == 3
+    assert text_geom["target_label"] == "「搜尋」文字"
 
     offset_instruction = (
         "將滑鼠移到「搜尋」文字右方12個像素、下方49個像素的位置"

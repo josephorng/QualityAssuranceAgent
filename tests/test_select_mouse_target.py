@@ -5529,7 +5529,7 @@ async def test_find_mouse_point_replay_geometry_picks_near_synth(
     monkeypatch.setattr(
         smt,
         "_filter_mouse_candidates",
-        lambda dets, _anchor, _nearby: (
+        lambda dets, _anchor, _nearby, **_kw: (
             [],
             [d for d in dets if d.class_name == "text"],
         ),
@@ -5567,7 +5567,7 @@ async def test_find_mouse_point_replay_geometry_synth_when_peers_far(
     monkeypatch.setattr(
         smt,
         "_filter_mouse_candidates",
-        lambda dets, _anchor, _nearby: (
+        lambda dets, _anchor, _nearby, **_kw: (
             [],
             [d for d in dets if d.class_name == "text"],
         ),
@@ -5608,6 +5608,161 @@ async def test_find_mouse_point_replay_text_miss_fails_without_constellation(
             landmark_geometry=_recorded_input_geometry(),
         )
     assert found is None
+
+
+def _recorded_linux_text_geometry() -> dict:
+    """Constellation for tree label near (60,60) with the same landmark layout."""
+    from src.recorder.landmark_geometry import build_landmark_geometry
+    from src.common.nearby_side import NearbyHint, Side
+
+    vision = {
+        "used_vision": True,
+        "local_cursor": [60, 60],
+        "candidates": [
+            {
+                "bbox": [45, 54, 30, 12],
+                "class_name": "text",
+                "text": "Linux",
+                "icons": [],
+            },
+            {
+                "bbox": [0, 0, 20, 20],
+                "class_name": "text",
+                "text": "eee",
+                "icons": [],
+            },
+            {
+                "bbox": [100, 0, 20, 20],
+                "class_name": "text",
+                "text": "晴時多雲",
+                "icons": [],
+            },
+            {
+                "bbox": [0, 100, 20, 20],
+                "class_name": "text",
+                "text": "Ln1",
+                "icons": [],
+            },
+        ],
+    }
+    geom = build_landmark_geometry(
+        vision,
+        [
+            NearbyHint("「eee」文字", Side.LEFT),
+            NearbyHint("「晴時多雲」文字", Side.RIGHT),
+            NearbyHint("「Ln1」文字", Side.BELOW),
+        ],
+        target_label="「Linux」文字",
+    )
+    assert geom is not None
+    return geom
+
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_replay_text_radius_similarity_prefers_linux_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In-radius ``Linux (5)`` beats far exact ``Linux`` grid cells."""
+    from cua_mcp import select_mouse_target as smt
+
+    async def fake_pick(*_a, **_k):
+        raise AssertionError("LLM must not run when geometry radius-similarity hits")
+
+    def fake_parse(instruction: str):
+        return ("「Linux」文字", 0, 0, [], None, 0, None)
+
+    detections = _geometry_landmark_scene(include_target=False)
+    near_suffix = _detection_from_bbox(
+        (45, 54, 40, 12), YOLO_CLASS_TEXT, text="Linux (5)"
+    )
+    far_a = _detection_from_bbox((400, 180, 30, 11), YOLO_CLASS_TEXT, text="Linux")
+    far_b = _detection_from_bbox((400, 220, 30, 11), YOLO_CLASS_TEXT, text="Linux")
+    detections.extend([near_suffix, far_a, far_b])
+    _install_find_mouse_point_fakes(monkeypatch, detections, pick=fake_pick)
+    monkeypatch.setattr(smt, "parse_mouse_target_instruction", fake_parse)
+
+    with smt.require_similarity_match():
+        found = await smt.find_mouse_point(
+            "「Linux」文字",
+            nearby_objects=_GEOMETRY_NEARBY,
+            landmark_geometry=_recorded_linux_text_geometry(),
+            anchor_text="Linux",
+            control_type="text",
+        )
+    assert found is not None
+    assert found[2]["selection_method"] == "landmark_geometry_pick"
+    assert found[2]["target_text"] == "Linux (5)"
+    assert (found[0], found[1]) == (near_suffix.cx, near_suffix.cy)
+
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_replay_text_radius_weak_labels_fall_through_no_synth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In-radius labels below the floor must not synth-click; fall through fails."""
+    from cua_mcp import select_mouse_target as smt
+
+    async def fake_pick(*_a, **_k):
+        raise AssertionError("visual one-pass must not run during replay")
+
+    def fake_parse(instruction: str):
+        return ("「Linux」文字", 0, 0, [], None, 0, None)
+
+    detections = _geometry_landmark_scene(include_target=False)
+    detections.append(
+        _detection_from_bbox((50, 50, 20, 14), YOLO_CLASS_TEXT, text="工程部")
+    )
+    _install_find_mouse_point_fakes(monkeypatch, detections, pick=fake_pick)
+    monkeypatch.setattr(smt, "parse_mouse_target_instruction", fake_parse)
+    monkeypatch.setattr(
+        smt,
+        "_filter_mouse_candidates",
+        lambda dets, _anchor, _nearby, **_kw: ([], []),
+    )
+
+    with smt.require_similarity_match():
+        found = await smt.find_mouse_point(
+            "「Linux」文字",
+            nearby_objects=_GEOMETRY_NEARBY,
+            landmark_geometry=_recorded_linux_text_geometry(),
+            anchor_text="Linux",
+            control_type="text",
+        )
+    assert found is None
+
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_replay_text_radius_exact_beats_suffix_in_circle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When exact and suffix both sit in-radius, highest similarity wins (exact)."""
+    from cua_mcp import select_mouse_target as smt
+
+    async def fake_pick(*_a, **_k):
+        raise AssertionError("LLM must not run when geometry radius-similarity hits")
+
+    def fake_parse(instruction: str):
+        return ("「Linux」文字", 0, 0, [], None, 0, None)
+
+    detections = _geometry_landmark_scene(include_target=False)
+    exact = _detection_from_bbox((58, 58, 30, 11), YOLO_CLASS_TEXT, text="Linux")
+    suffix = _detection_from_bbox((45, 54, 40, 12), YOLO_CLASS_TEXT, text="Linux (5)")
+    detections.extend([suffix, exact])
+    _install_find_mouse_point_fakes(monkeypatch, detections, pick=fake_pick)
+    monkeypatch.setattr(smt, "parse_mouse_target_instruction", fake_parse)
+
+    with smt.require_similarity_match():
+        found = await smt.find_mouse_point(
+            "「Linux」文字",
+            nearby_objects=_GEOMETRY_NEARBY,
+            landmark_geometry=_recorded_linux_text_geometry(),
+            anchor_text="Linux",
+            control_type="text",
+        )
+    assert found is not None
+    assert found[2]["selection_method"] == "landmark_geometry_pick"
+    assert found[2]["target_text"] == "Linux"
+    assert (found[0], found[1]) == (exact.cx, exact.cy)
 
 
 def _recorded_offset_geometry() -> dict:

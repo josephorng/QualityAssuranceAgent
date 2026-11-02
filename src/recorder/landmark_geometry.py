@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import statistics
+from collections.abc import Callable
 from typing import Any
 
 from src.common.nearby_side import (
@@ -25,6 +26,9 @@ COSINE_OK = 0.85
 NORMALIZED_L2_OK = 0.4
 # Candidate center must lie within this fraction of replay scale from synth point.
 TARGET_NEAR_SYNTH = 0.35
+# In-radius text ranking floor (below global 0.8 top-tie filter so count-suffix
+# OCR like ``Linux`` ↔ ``Linux (5)`` can still qualify near the synth point).
+TEXT_IN_RADIUS_SIMILARITY_FLOOR = 0.7
 # Drop a landmark when more than this fraction of its edges to other matched
 # landmarks fail the vector checks.
 EDGE_FAIL_FRACTION = 0.5
@@ -473,6 +477,45 @@ def pick_detection_near_synthesized(
             continue
         dist = math.hypot(cx - synth_xy[0], cy - synth_xy[1])
         if dist < best_dist:
+            best_dist = dist
+            best = det
+    return best
+
+
+def pick_detection_in_radius_by_similarity(
+    candidates: list[Any],
+    synth_xy: tuple[int, int],
+    scale: float,
+    score_fn: Callable[[Any], float],
+    *,
+    near_frac: float = TARGET_NEAR_SYNTH,
+    min_score: float = TEXT_IN_RADIUS_SIMILARITY_FLOOR,
+) -> Any | None:
+    """Collect in-radius candidates, then pick highest ``score_fn`` (closest ties).
+
+    ``candidates`` are objects with ``.cx`` / ``.cy`` (e.g. ``UiDetection``).
+    Scores below ``min_score`` are dropped. Equal scores prefer the closer center.
+    """
+    best = None
+    best_score = float("-inf")
+    best_dist = float("inf")
+    for det in candidates:
+        try:
+            cx = float(getattr(det, "cx"))
+            cy = float(getattr(det, "cy"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if target_far_from_synthesized((cx, cy), synth_xy, scale, near_frac=near_frac):
+            continue
+        try:
+            score = float(score_fn(det))
+        except (TypeError, ValueError):
+            continue
+        if score < min_score:
+            continue
+        dist = math.hypot(cx - synth_xy[0], cy - synth_xy[1])
+        if score > best_score or (score == best_score and dist < best_dist):
+            best_score = score
             best_dist = dist
             best = det
     return best

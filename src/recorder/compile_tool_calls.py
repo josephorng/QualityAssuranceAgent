@@ -275,58 +275,31 @@ def _move_mouse_call(
     nearby = _nearby_object_phrases(instruction)
     if nearby:
         args["nearby_objects"] = nearby
-        # Constellation for non-text targets (e.g. empty 輸入欄) and for
-        # empty-space clicks that currently encode raw pixel offsets.
-        # On-object 「…」文字 clicks still omit geometry (must match OCR).
+        # Constellation for text and non-text targets (e.g. empty 輸入欄) and
+        # for empty-space clicks that currently encode raw pixel offsets.
+        # Text replay uses radius-then-similarity around the synthesized point.
         offset_click = _is_relative_offset_position(resolved)
-        if (not _move_target_is_text(resolved)) or offset_click:
-            hints = extract_nearby_hints_from_instruction(instruction)
-            if offset_click:
-                from cua_mcp.instruction_offset import (
-                    _parse_relative_pixel_offset_regex,
-                )
-                from src.common.nearby_side import NearbyHint
-
-                ref_anchor, _dx, _dy = _parse_relative_pixel_offset_regex(resolved)
-                ref = (ref_anchor or "").strip()
-                if ref:
-                    hints = [NearbyHint(label=ref, side=None), *hints]
-            geometry = build_landmark_geometry(
-                vision,
-                hints,
-                target_label=resolved,
+        hints = extract_nearby_hints_from_instruction(instruction)
+        if offset_click:
+            from cua_mcp.instruction_offset import (
+                _parse_relative_pixel_offset_regex,
             )
-            if geometry is not None:
-                args["landmark_geometry"] = geometry
+            from src.common.nearby_side import NearbyHint
+
+            ref_anchor, _dx, _dy = _parse_relative_pixel_offset_regex(resolved)
+            ref = (ref_anchor or "").strip()
+            if ref:
+                hints = [NearbyHint(label=ref, side=None), *hints]
+        geometry = build_landmark_geometry(
+            vision,
+            hints,
+            target_label=resolved,
+        )
+        if geometry is not None:
+            args["landmark_geometry"] = geometry
     if click_window is not None:
         args["click_window"] = click_window
     return _call("move_mouse", **args)
-
-
-def _move_target_is_text(target: str) -> bool:
-    """True when the move_mouse primary is an on-object named label.
-
-    UIA control suffixes (``清單項目``, ``按鈕``, …) match by name the same way
-    ``文字`` does. A bare ``按鈕`` with no quoted name stays a class anchor.
-    """
-    text = target or ""
-    for suffix in ("圖示", "輸入欄", "滾動條", "未知", "元素"):
-        if suffix in text:
-            return False
-    if "按鈕" in text and "「" not in text:
-        return False
-    for suffix in (
-        "清單項目",
-        "功能表項目",
-        "樹狀項目",
-        "資料項目",
-        "超連結",
-        "按鈕",
-        "文字",
-    ):
-        if suffix in text:
-            return True
-    return False
 
 
 def _is_relative_offset_position(target: str) -> bool:

@@ -96,6 +96,10 @@ from src.common.settings import (
 )
 from src.recorder.capture import RecordingSession
 from src.recorder.hotkey import RECORDING_HOTKEY_DISPLAY, RecordingHotkeyManager
+from src.recorder.rerecord_step import (
+    StepRerecordSession,
+    event_kind_is_rerecordable,
+)
 from src.recorder.stop_overlay import RecordingStopOverlay, ReplayControlOverlay
 from src.recorder.models import RecordedEvent
 from src.recorder.vision_prefetch import VisionPrefetchWorker
@@ -298,6 +302,7 @@ class MainHub(ctk.CTk):
         self._recording_hotkey = RecordingHotkeyManager()
         self._recording_stop_overlay: RecordingStopOverlay | None = None
         self._replay_overlay: ReplayControlOverlay | None = None
+        self._step_rerecord = StepRerecordSession()
         self._active_recording_dir: Path | None = None
         self._replay_step_instructions: list[str] = []
         self._replay_event_indices: list[int | None] = []
@@ -2232,6 +2237,7 @@ class MainHub(ctk.CTk):
 
     def _on_resume_run(self) -> None:
         self._close_replay_editor()
+        self._cancel_replay_rerecord()
         self._cancel_retry_countdown()
         if self._worker_thread is None or not self._worker_thread.is_alive():
             return
@@ -2380,6 +2386,21 @@ class MainHub(ctk.CTk):
             stop_rect = overlay.ignore_rect()
             if stop_rect is not None:
                 rects.append(stop_rect)
+        return rects
+
+    def _replay_rerecord_ignore_rect_provider(
+        self,
+    ) -> list[tuple[int, int, int, int]]:
+        """Rects ignored while mid-replay re-recording (hub + replay overlay)."""
+        rects: list[tuple[int, int, int, int]] = []
+        hub = self._hub_ignore_rect()
+        if hub is not None:
+            rects.append(hub)
+        overlay = self._replay_overlay
+        if overlay is not None:
+            replay_rect = overlay.ignore_rect()
+            if replay_rect is not None:
+                rects.append(replay_rect)
         return rects
 
     def _recording_status_text(self, *, count: int, name: str, continuing: bool = False) -> str:
@@ -2544,6 +2565,8 @@ class MainHub(ctk.CTk):
             on_stop=self._on_stop_run,
             on_edit=self._on_edit_replay_step,
             on_delete=self._on_delete_replay_step,
+            on_rerecord=self._on_rerecord_replay_step,
+            on_cancel_rerecord=self._cancel_replay_rerecord,
             on_save_edit=self._on_save_replay_step_edit,
             on_open_report=self._on_open_replay_step_report,
             on_previous=lambda: self._on_replay_step_delta(-1),
@@ -2555,6 +2578,7 @@ class MainHub(ctk.CTk):
 
     def _destroy_replay_overlay(self) -> None:
         self._cancel_retry_countdown()
+        self._cancel_replay_rerecord()
         overlay = self._replay_overlay
         self._replay_overlay = None
         if overlay is not None:
@@ -2579,6 +2603,143 @@ class MainHub(ctk.CTk):
         overlay = self._replay_overlay
         if overlay is not None and overlay.is_editing():
             overlay.end_edit()
+
+    def _cancel_replay_rerecord(self) -> None:
+        """Disarm mid-replay re-record without writing."""
+        if self._step_rerecord.is_armed():
+            self._step_rerecord.cancel()
+        overlay = self._replay_overlay
+        if overlay is not None and overlay.is_rerecording():
+            overlay.end_rerecord()
+
+    def _current_replay_event_kind(self) -> str | None:
+        recording_dir = self._active_recording_dir
+        event_index = self._current_replay_event_index()
+        if recording_dir is None or event_index is None:
+            return None
+        payload = read_json(
+            Path(recording_dir) / "events" / f"event_{event_index:03d}.json",
+            None,
+        )
+        if not isinstance(payload, dict):
+            return None
+        kind = payload.get("kind")
+        return kind if isinstance(kind, str) else None
+
+    def _on_rerecord_replay_step(self) -> None:
+        """Pause and arm a one-shot capture that overwrites the current event."""
+        overlay = self._replay_overlay
+        if overlay is None or overlay.is_editing() or overlay.is_rerecording():
+            return
+        if self._recording_session.is_active() or self._step_rerecord.is_armed():
+            show_ctk_message(
+                self,
+                "重新錄製",
+                "目前已有錄製進行中，無法同時重新錄製步驟。",
+                kind="warning",
+            )
+            return
+        if step_is_busy():
+            show_ctk_message(
+                self,
+                "重新錄製",
+                "這個步驟仍在執行中，請等到暫停後再重新錄製。",
+                kind="warning",
+            )
+            return
+        self._cancel_retry_countdown()
+        self._on_pause_run()
+        recording_dir = self._active_recording_dir
+        if recording_dir is None:
+            return
+        event_index = self._current_replay_event_index()
+        kind = self._current_replay_event_kind()
+        if event_index is None:
+            show_ctk_message(
+                self,
+                "重新錄製",
+                "找不到這個步驟的錄製內容。",
+                kind="warning",
+            )
+            return
+        if not event_kind_is_rerecordable(kind):
+            show_ctk_message(
+                self,
+                "重新錄製",
+                "目前只支援重新錄製單擊、雙擊或右鍵點擊步驟。",
+                kind="warning",
+            )
+            return
+        display_index = self._replay_display_index()
+        try:
+            self._step_rerecord.arm(
+                run_dir=Path(recording_dir),
+                event_index=event_index,
+                ignore_rect_provider=self._replay_rerecord_ignore_rect_provider,
+                on_done=lambda result, step=display_index: self.after(
+                    0,
+                    lambda: self._on_replay_rerecord_done(result, step),
+                ),
+                on_error=lambda exc: self.after(
+                    0, lambda: self._on_replay_rerecord_error(exc)
+                ),
+                on_cancelled=lambda: self.after(0, self._on_replay_rerecord_cancelled),
+            )
+        except Exception as exc:
+            show_ctk_message(
+                self,
+                "重新錄製",
+                f"無法開始重新錄製：\n{exc}",
+                kind="error",
+            )
+            return
+        overlay.begin_rerecord("請執行正確的點擊動作（Esc 取消）")
+        self._status.configure(text="已暫停（重新錄製中：請執行正確動作）")
+
+    def _on_replay_rerecord_cancelled(self) -> None:
+        overlay = self._replay_overlay
+        if overlay is not None and overlay.is_rerecording():
+            overlay.end_rerecord()
+        if is_paused():
+            self._status.configure(text="已暫停（已取消重新錄製）")
+
+    def _on_replay_rerecord_error(self, exc: BaseException) -> None:
+        overlay = self._replay_overlay
+        if overlay is not None:
+            overlay.end_rerecord()
+            overlay.set_rerecord_message("")
+        show_ctk_message(
+            self,
+            "重新錄製",
+            f"重新錄製失敗：\n{exc}",
+            kind="error",
+        )
+        if is_paused():
+            self._status.configure(text="已暫停（重新錄製失敗）")
+
+    def _on_replay_rerecord_done(
+        self,
+        result: dict[str, Any],
+        display_index: int | None,
+    ) -> None:
+        """Apply the overwritten step, jump back to it, and resume replay."""
+        overlay = self._replay_overlay
+        if overlay is not None:
+            overlay.end_rerecord()
+        instruction = result.get("instruction")
+        cleaned = instruction.strip() if isinstance(instruction, str) else ""
+        step = display_index if isinstance(display_index, int) else self._replay_display_index()
+        if step is not None and cleaned:
+            while len(self._replay_step_instructions) <= step:
+                self._replay_step_instructions.append("")
+            self._replay_step_instructions[step] = cleaned
+            self._show_replay_step(step)
+        if step is not None:
+            self._replay_nav_index = step
+            self._replay_nav_held = True
+            request_step_jump(step)
+        self._status.configure(text="步驟已重新錄製，繼續執行…")
+        self._on_resume_run()
 
     def _current_replay_event_index(self) -> int | None:
         """Recording event id for the step the overlay is showing."""

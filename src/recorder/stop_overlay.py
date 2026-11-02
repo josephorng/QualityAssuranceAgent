@@ -358,6 +358,8 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
         on_previous: Callable[[], None],
         on_next: Callable[[], None],
         on_delete: Callable[[], None] | None = None,
+        on_rerecord: Callable[[], None] | None = None,
+        on_cancel_rerecord: Callable[[], None] | None = None,
         on_hold_pause: Callable[[], None] | None = None,
         on_save_edit: Callable[[str, list[str]], bool] | None = None,
         on_open_report: Callable[[], None] | None = None,
@@ -368,6 +370,8 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
         self._on_stop = on_stop
         self._on_edit = on_edit
         self._on_delete = on_delete
+        self._on_rerecord = on_rerecord
+        self._on_cancel_rerecord = on_cancel_rerecord
         self._on_previous = on_previous
         self._on_next = on_next
         self._on_hold_pause = on_hold_pause
@@ -375,6 +379,7 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
         self._on_open_report = on_open_report
         self._paused = False
         self._editing = False
+        self._rerecording = False
         self._edit_enabled = edit_enabled
         self._shown_error = ""
         self._error_show_after_id: str | None = None
@@ -389,6 +394,8 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
         self._hold_pause_btn: ctk.CTkButton | None = None
         self._stop_btn: ctk.CTkButton | None = None
         self._edit_btn: ctk.CTkButton | None = None
+        self._rerecord_btn: ctk.CTkButton | None = None
+        self._cancel_rerecord_btn: ctk.CTkButton | None = None
         self._delete_btn: ctk.CTkButton | None = None
         self._prev_btn: ctk.CTkButton | None = None
         self._next_btn: ctk.CTkButton | None = None
@@ -398,10 +405,11 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
         self._checks_scroll: ctk.CTkScrollableFrame | None = None
         self._check_vars: list[tuple[tk.BooleanVar, str]] = []
         self._edit_message: ctk.CTkLabel | None = None
+        self._rerecord_status: ctk.CTkLabel | None = None
         super().__init__(master)
 
     def _min_size(self) -> tuple[int, int]:
-        return (340, 196)
+        return (460, 196)
 
     def _build(self, master: Any) -> None:
         win = ctk.CTkToplevel(master)
@@ -558,6 +566,24 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
             state="normal" if self._edit_enabled else "disabled",
         )
         self._edit_btn.pack(side="left", padx=(0, 8))
+        self._rerecord_btn = ctk.CTkButton(
+            buttons,
+            text="重新錄製",
+            width=100,
+            height=34,
+            command=self._handle_rerecord,
+            state="normal" if self._edit_enabled else "disabled",
+        )
+        self._rerecord_btn.pack(side="left", padx=(0, 8))
+        self._cancel_rerecord_btn = ctk.CTkButton(
+            buttons,
+            text="取消錄製",
+            width=100,
+            height=34,
+            fg_color=("#6e7781", "#6e7781"),
+            hover_color=("#57606a", "#57606a"),
+            command=self._handle_cancel_rerecord,
+        )
         self._delete_btn = ctk.CTkButton(
             buttons,
             text="刪除步驟",
@@ -569,6 +595,15 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
             state="normal" if self._edit_enabled else "disabled",
         )
         self._delete_btn.pack(side="left")
+        self._rerecord_status = ctk.CTkLabel(
+            frame,
+            text="",
+            font=ctk.CTkFont(size=11),
+            text_color=("#0969da", "#58a6ff"),
+            wraplength=292,
+            justify="left",
+            anchor="w",
+        )
 
     def set_paused(self, paused: bool) -> None:
         """Switch the pause button between 暫停 and 繼續."""
@@ -648,13 +683,38 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
         self._hide()
 
     def set_edit_enabled(self, enabled: bool) -> None:
-        """Enable edit and delete only when the running script is a recording folder."""
+        """Enable edit/delete/re-record only when the running script is a recording folder."""
         self._edit_enabled = enabled
-        state = "normal" if enabled else "disabled"
-        for button in (self._edit_btn, self._delete_btn):
-            if button is None or self._destroyed:
+        self._sync_action_buttons()
+
+    def _sync_action_buttons(self) -> None:
+        """Enable/disable edit, delete, and re-record from current mode flags."""
+        if self._destroyed:
+            return
+        editing = self.is_editing()
+        rerecording = self.is_rerecording()
+        base = "normal" if self._edit_enabled else "disabled"
+        for button in (self._edit_btn, self._delete_btn, self._rerecord_btn):
+            if button is None:
                 continue
-            button.configure(state=state)
+            if not self._edit_enabled or editing or rerecording:
+                button.configure(state="disabled")
+            else:
+                button.configure(state=base)
+        cancel = self._cancel_rerecord_btn
+        if cancel is None:
+            return
+        try:
+            if rerecording:
+                if not cancel.winfo_ismapped():
+                    pack_kwargs: dict[str, Any] = {"side": "left", "padx": (0, 8)}
+                    if self._delete_btn is not None:
+                        pack_kwargs["before"] = self._delete_btn
+                    cancel.pack(**pack_kwargs)
+            else:
+                cancel.pack_forget()
+        except Exception:
+            pass
 
     def set_step(
         self,
@@ -687,6 +747,13 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
 
     def destroy(self) -> None:
         self._cancel_error_show()
+        if self.is_rerecording():
+            try:
+                if self._on_cancel_rerecord is not None:
+                    self._on_cancel_rerecord()
+            except Exception:
+                pass
+            self._rerecording = False
         super().destroy()
 
     def _apply_error(self, text: str) -> None:
@@ -696,7 +763,11 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
             return
         cleaned = clip_step_snippet(text, limit=_STEP_ERROR_LIMIT)
         if not cleaned:
-            if not self._countdown_active and not self.is_editing():
+            if (
+                not self._countdown_active
+                and not self.is_editing()
+                and not self.is_rerecording()
+            ):
                 self._pinned = False
             self._shown_error = ""
             self._cancel_error_show()
@@ -746,7 +817,12 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
 
     def _end_error_show(self) -> None:
         self._error_show_after_id = None
-        if self._destroyed or self._countdown_active or self.is_editing():
+        if (
+            self._destroyed
+            or self._countdown_active
+            or self.is_editing()
+            or self.is_rerecording()
+        ):
             return
         self._pinned = False
         self._hide_if_cursor_away()
@@ -754,6 +830,68 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
     def is_editing(self) -> bool:
         """True while the instruction and verification checks are open."""
         return bool(getattr(self, "_editing", False))
+
+    def is_rerecording(self) -> bool:
+        """True while waiting for the user to perform a replacement gesture."""
+        return bool(getattr(self, "_rerecording", False))
+
+    def begin_rerecord(self, message: str = "請執行正確的點擊動作（Esc 取消）") -> None:
+        """Pin the overlay and wait for a live pointer gesture."""
+        if self._destroyed:
+            return
+        if self.is_editing():
+            self.end_edit()
+        self._rerecording = True
+        self._pinned = True
+        self._cancel_error_show()
+        self.set_rerecord_message(message)
+        self._sync_action_buttons()
+        self._sync_nav_buttons()
+        self._measure_and_hide_if_hidden()
+        if not self._visible:
+            self.reveal()
+
+    def end_rerecord(self) -> None:
+        """Leave re-record mode without changing the recording."""
+        self._rerecording = False
+        label = self._rerecord_status
+        if label is not None:
+            try:
+                label.pack_forget()
+                label.configure(text="")
+            except Exception:
+                pass
+        self._sync_action_buttons()
+        self._sync_nav_buttons()
+        self._measure_and_hide_if_hidden()
+        if not self._countdown_active and not self.is_editing():
+            self._pinned = False
+            self._hide_if_cursor_away()
+
+    def set_rerecord_message(self, text: str) -> None:
+        """Show status under the step while re-recording."""
+        label = self._rerecord_status
+        if label is None or self._destroyed:
+            return
+        cleaned = " ".join(str(text or "").split())
+        try:
+            label.configure(text=cleaned)
+            if cleaned:
+                if not label.winfo_ismapped():
+                    pack_kwargs: dict[str, Any] = {
+                        "anchor": "w",
+                        "padx": 14,
+                        "pady": (0, 8),
+                        "fill": "x",
+                    }
+                    if self._nav_frame is not None:
+                        pack_kwargs["before"] = self._nav_frame
+                    label.pack(**pack_kwargs)
+            else:
+                label.pack_forget()
+        except Exception:
+            pass
+        self._measure_and_hide_if_hidden()
 
     def begin_edit(
         self,
@@ -763,6 +901,8 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
         """Pin the overlay and show the instruction and verification checks."""
         if self._destroyed or self._edit_frame is None:
             return
+        if self.is_rerecording():
+            self.end_rerecord()
         self._editing = True
         self._pinned = True
         self._cancel_error_show()
@@ -777,6 +917,7 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
                 self._edit_frame.pack(**pack_kwargs)
         except Exception:
             pass
+        self._sync_action_buttons()
         self._sync_nav_buttons()
         self._measure_and_hide_if_hidden()
         if not self._visible:
@@ -809,9 +950,10 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
             except Exception:
                 pass
         self.set_edit_message("")
+        self._sync_action_buttons()
         self._sync_nav_buttons()
         self._measure_and_hide_if_hidden()
-        if not self._countdown_active:
+        if not self._countdown_active and not self.is_rerecording():
             self._pinned = False
             self._hide_if_cursor_away()
 
@@ -936,7 +1078,7 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
         return instruction, disabled
 
     def _sync_nav_buttons(self) -> None:
-        editing = self.is_editing()
+        editing = self.is_editing() or self.is_rerecording()
         previous = self._prev_btn
         nxt = self._next_btn
         if previous is not None and not self._destroyed:
@@ -997,14 +1139,35 @@ class ReplayControlOverlay(_EdgeRevealOverlay):
             pass
 
     def _handle_edit(self) -> None:
-        if self.is_editing():
+        if self.is_editing() or self.is_rerecording():
             return
         try:
             self._on_edit()
         except Exception:
             pass
 
+    def _handle_rerecord(self) -> None:
+        if self.is_editing() or self.is_rerecording():
+            return
+        try:
+            if self._on_rerecord is not None:
+                self._on_rerecord()
+        except Exception:
+            pass
+
+    def _handle_cancel_rerecord(self) -> None:
+        if not self.is_rerecording():
+            return
+        try:
+            if self._on_cancel_rerecord is not None:
+                self._on_cancel_rerecord()
+        except Exception:
+            pass
+        self.end_rerecord()
+
     def _handle_delete(self) -> None:
+        if self.is_rerecording():
+            return
         try:
             if self._on_delete is not None:
                 self._on_delete()

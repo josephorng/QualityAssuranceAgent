@@ -46,6 +46,83 @@ def test_triton_timeout_seconds_default_and_env(monkeypatch: pytest.MonkeyPatch)
     assert triton_timeout_seconds() == 15.0
 
 
+def test_triton_max_inflight_default_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cua_mcp.vision_backend import triton_max_inflight
+
+    monkeypatch.delenv("TRITON_MAX_INFLIGHT", raising=False)
+    assert triton_max_inflight() == 3
+    monkeypatch.setenv("TRITON_MAX_INFLIGHT", "2")
+    assert triton_max_inflight() == 2
+    monkeypatch.setenv("TRITON_MAX_INFLIGHT", "0")
+    assert triton_max_inflight() == 1
+
+
+def test_infer_yolo_respects_max_inflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Concurrent YOLO infers never exceed TRITON_MAX_INFLIGHT."""
+    import time
+
+    monkeypatch.setenv("VISION_BACKEND", "triton")
+    monkeypatch.setenv("TRITON_MAX_INFLIGHT", "2")
+    batch = np.zeros((1, 3, 1280, 1280), dtype=np.float32)
+    expected = np.zeros((1, 300, 6), dtype=np.float32)
+
+    inflight = {"n": 0, "peak": 0}
+    lock = threading.Lock()
+    two_entered = threading.Event()
+    release_infer = threading.Event()
+
+    def slow_infer(*_args: object, **_kwargs: object) -> MagicMock:
+        with lock:
+            inflight["n"] += 1
+            inflight["peak"] = max(inflight["peak"], inflight["n"])
+            if inflight["n"] >= 2:
+                two_entered.set()
+        assert release_infer.wait(timeout=5)
+        with lock:
+            inflight["n"] -= 1
+        mock_result = MagicMock()
+        mock_result.as_numpy.return_value = expected
+        return mock_result
+
+    mock_client = MagicMock()
+    mock_client.infer.side_effect = slow_infer
+
+    with patch("tritonclient.http.InferenceServerClient", return_value=mock_client):
+        from cua_mcp import vision_triton as vt
+
+        vt.reset_triton_client()
+        vt.reset_triton_inflight_limit()
+
+        errors: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                vt.infer_yolo(batch)
+            except BaseException as exc:  # noqa: BLE001 - collect for assert
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+
+        assert two_entered.wait(timeout=2)
+        # Give queued workers a chance to overrun the gate if it is broken.
+        time.sleep(0.2)
+        with lock:
+            assert inflight["peak"] <= 2
+            assert inflight["n"] == 2
+        release_infer.set()
+        for t in threads:
+            t.join(timeout=5)
+            assert not t.is_alive()
+
+    assert not errors
+    assert inflight["peak"] == 2
+    assert mock_client.infer.call_count == 4
+    vt.reset_triton_client()
+    vt.reset_triton_inflight_limit()
+
+
 def test_triton_client_address_strips_scheme(monkeypatch: pytest.MonkeyPatch) -> None:
     from cua_mcp.vision_backend import triton_client_address, triton_client_use_ssl
 

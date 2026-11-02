@@ -28,7 +28,7 @@ _R = TypeVar("_R")
 
 # Cap concurrent Triton crop/strip calls so one dense frame does not open dozens
 # of HTTP clients at once. Multi-monitor detection uses the same idea.
-YOLO_CROP_INFER_MAX_WORKERS: int = 8
+YOLO_CROP_INFER_MAX_WORKERS: int = 2
 
 
 def _map_parallel(

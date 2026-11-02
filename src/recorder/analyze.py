@@ -881,6 +881,35 @@ def _instruction_result(
     }
 
 
+def _vision_has_candidates(vision: dict[str, Any] | None) -> bool:
+    """True when a vision dict carries a non-empty candidates list."""
+    if not isinstance(vision, dict):
+        return False
+    candidates = vision.get("candidates")
+    return isinstance(candidates, list) and bool(candidates)
+
+
+def _pointer_vision_failed_for_llm_skip(
+    event: RecordedEvent,
+    vision: dict[str, Any],
+    destination: dict[str, Any],
+) -> bool:
+    """True when pointer YOLO/OCR failed and LLM should not run.
+
+    Empty / errored vision is recovered by ``yolo_ocr_retry`` with a
+    deterministic rebuild; calling the instruction LLM here only burns time.
+    Unlabeled-but-present candidates still fall through to the LLM.
+    """
+    if event.kind not in POINTER_EVENT_KINDS:
+        return False
+    if vision.get("yolo_error") or destination.get("yolo_error"):
+        return True
+    has_start = _vision_has_candidates(vision)
+    if event.kind == "drag":
+        return not has_start and not _vision_has_candidates(destination)
+    return not has_start
+
+
 async def analyze_event_to_cache(
     event: RecordedEvent,
     *,
@@ -935,6 +964,14 @@ async def analyze_event_to_cache(
             return _instruction_result(
                 scroll_instruction, event, vision, destination
             )
+
+    if _pointer_vision_failed_for_llm_skip(event, vision, destination):
+        if log_info is not None:
+            log_info(
+                f"analyze_event_to_cache skip LLM event={event.index} "
+                f"kind={event.kind}: pointer YOLO/OCR failed; awaiting retry"
+            )
+        return None
 
     local = vision.get("local_cursor")
     if isinstance(local, (list, tuple)) and len(local) == 2:

@@ -15,6 +15,7 @@ from cua_mcp.vision_backend import (
     triton_client_use_ssl,
     triton_crnn_model_name,
     triton_http_url,
+    triton_max_inflight,
     triton_timeout_seconds,
     triton_yolo_model_name,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "infer_crnn",
     "infer_yolo",
     "reset_triton_client",
+    "reset_triton_inflight_limit",
     "triton_configured",
     "triton_ready",
 ]
@@ -40,6 +42,28 @@ CRNN_OUTPUT_ICON_IDS = "icon_ids"
 CRNN_OUTPUT_NAME = CRNN_OUTPUT_TEXT_IDS
 
 _CLIENT_LOCAL = threading.local()
+_INFLIGHT_LOCK = threading.Lock()
+_INFLIGHT_SEMAPHORE: threading.BoundedSemaphore | None = None
+_INFLIGHT_LIMIT: int | None = None
+
+
+def _inflight_semaphore() -> threading.BoundedSemaphore:
+    """Return the process-wide Triton infer gate (lazy, env-aware)."""
+    global _INFLIGHT_SEMAPHORE, _INFLIGHT_LIMIT
+    limit = triton_max_inflight()
+    with _INFLIGHT_LOCK:
+        if _INFLIGHT_SEMAPHORE is None or _INFLIGHT_LIMIT != limit:
+            _INFLIGHT_SEMAPHORE = threading.BoundedSemaphore(limit)
+            _INFLIGHT_LIMIT = limit
+        return _INFLIGHT_SEMAPHORE
+
+
+def reset_triton_inflight_limit() -> None:
+    """Drop the cached infer semaphore so the next call re-reads ``TRITON_MAX_INFLIGHT``."""
+    global _INFLIGHT_SEMAPHORE, _INFLIGHT_LIMIT
+    with _INFLIGHT_LOCK:
+        _INFLIGHT_SEMAPHORE = None
+        _INFLIGHT_LIMIT = None
 
 
 def _log_triton_profile(message: str) -> None:
@@ -139,6 +163,29 @@ def _infer(
     *,
     _allow_thread_retry: bool = True,
 ) -> np.ndarray | tuple[np.ndarray, ...]:
+    """Run one Triton infer under the process-wide inflight gate."""
+    gate = _inflight_semaphore()
+    gate.acquire()
+    try:
+        return _infer_body(
+            model_name,
+            input_name,
+            input_array,
+            output_names,
+            _allow_thread_retry=_allow_thread_retry,
+        )
+    finally:
+        gate.release()
+
+
+def _infer_body(
+    model_name: str,
+    input_name: str,
+    input_array: np.ndarray,
+    output_names: str | Sequence[str],
+    *,
+    _allow_thread_retry: bool = True,
+) -> np.ndarray | tuple[np.ndarray, ...]:
     import tritonclient.http as httpclient
 
     names = [output_names] if isinstance(output_names, str) else list(output_names)
@@ -195,7 +242,8 @@ def _infer(
                 f"infer retry model={model_name} reason=thread_affinity_error"
             )
             reset_triton_client()
-            return _infer(
+            # Retry without re-acquiring the inflight slot (caller still holds it).
+            return _infer_body(
                 model_name,
                 input_name,
                 input_array,

@@ -203,6 +203,7 @@ class Settings(BaseSettings):
     triton_http_url: str = VISION_BACKEND_PRESETS["triton_192_168_0_17"]["triton_http_url"]
     vision_backend: str = "triton_192_168_0_17"
     triton_timeout_seconds: float = 20.0
+    triton_max_inflight: int = 3
     smart_max_cycles: int = 50
     smart_max_recovery_attempts: int = 3
     # Scripted playback: stop the run after N attempts on the same script line (0 = unlimited).
@@ -413,9 +414,10 @@ def save_agent_settings_dict(data: dict[str, Any]) -> None:
     reset_llm_client()
     apply_vision_env_from_settings()
     try:
-        from cua_mcp.vision_triton import reset_triton_client
+        from cua_mcp.vision_triton import reset_triton_client, reset_triton_inflight_limit
 
         reset_triton_client()
+        reset_triton_inflight_limit()
     except ImportError:
         pass
 
@@ -433,6 +435,7 @@ def load_settings() -> Settings:
         "triton_http_url": agent["triton_http_url"],
         "vision_backend": agent["vision_backend"],
         "triton_timeout_seconds": base.triton_timeout_seconds,
+        "triton_max_inflight": base.triton_max_inflight,
     }
     return Settings(**data)
 
@@ -445,4 +448,5 @@ def apply_vision_env_from_settings() -> None:
     os.environ["TRITON_HTTP_URL"] = normalize_triton_http_url(settings.triton_http_url)
     os.environ["VISION_BACKEND"] = "triton"
     os.environ["TRITON_TIMEOUT_SECONDS"] = str(settings.triton_timeout_seconds)
+    os.environ["TRITON_MAX_INFLIGHT"] = str(max(1, int(settings.triton_max_inflight)))
     os.environ["TRITON_YOLO_MODEL"] = "yolo_ui_small"

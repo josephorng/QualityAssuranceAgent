@@ -4135,6 +4135,99 @@ async def test_analyze_event_to_cache_click_falls_back_to_llm_when_generic(
 
 
 @pytest.mark.asyncio
+async def test_analyze_event_to_cache_click_skips_llm_when_yolo_error(
+    tmp_path: Path,
+) -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(10, 10),
+        button="left",
+        screenshot_path="",
+    )
+    vision = {
+        "used_vision": True,
+        "local_cursor": (10, 10),
+        "candidates": [],
+        "yolo_error": "Triton infer timed out after 20s",
+    }
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision=vision,
+        )
+
+    assert result is None
+    llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_analyze_event_to_cache_click_skips_llm_when_no_candidates(
+    tmp_path: Path,
+) -> None:
+    event = RecordedEvent(
+        index=2,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(10, 10),
+        button="left",
+        screenshot_path="",
+    )
+    vision = {
+        "used_vision": True,
+        "local_cursor": (10, 10),
+        "candidates": [],
+    }
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision=vision,
+        )
+
+    assert result is None
+    llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_analyze_event_to_cache_unmapped_hotkey_still_uses_llm(
+    tmp_path: Path,
+) -> None:
+    event = RecordedEvent(
+        index=3,
+        timestamp_utc="t",
+        kind="hotkey",
+        keys=["vk_123"],
+        screenshot_path="",
+    )
+    llm_payload = {"instruction": "按下特殊熱鍵"}
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(return_value=llm_payload),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision={"used_vision": False, "candidates": []},
+        )
+
+    assert result is not None
+    assert result["instruction"] == "按下特殊熱鍵"
+    llm_mock.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_analyze_event_to_cache_drag_appends_nearby_after_enrichment(tmp_path: Path) -> None:
     event = RecordedEvent(
         index=2,

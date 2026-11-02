@@ -12,6 +12,7 @@ _LEGACY_VISION_BACKEND_ALIASES = {
 DEFAULT_TRITON_HTTP_URL = "http://127.0.0.1:9000"
 DEFAULT_VISION_BACKEND = "triton"
 DEFAULT_TRITON_TIMEOUT_SECONDS = 20.0
+DEFAULT_TRITON_MAX_INFLIGHT = 3
 
 
 def normalize_triton_http_url(url: str) -> str:
@@ -52,6 +53,18 @@ def triton_timeout_seconds() -> float:
     except ValueError:
         return DEFAULT_TRITON_TIMEOUT_SECONDS
     return max(0.1, value)
+
+
+def triton_max_inflight() -> int:
+    """Max concurrent Triton YOLO/CRNN infer calls process-wide."""
+    raw = os.environ.get("TRITON_MAX_INFLIGHT", "").strip()
+    if not raw:
+        return DEFAULT_TRITON_MAX_INFLIGHT
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_TRITON_MAX_INFLIGHT
+    return max(1, value)
 
 
 def triton_client_address() -> str:

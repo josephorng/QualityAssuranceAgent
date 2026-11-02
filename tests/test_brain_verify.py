@@ -7,6 +7,7 @@ import pytest
 
 from src.brain.module import (
     BrainModule,
+    DeferredWindowVerify,
     _APPEARED_POLL_MIN_SECONDS,
     _DISAPPEARED_CLOSE_RETRY_INTERVAL_SECONDS,
     _DISAPPEARED_CLOSE_RETRY_MIN_SECONDS,
@@ -54,6 +55,10 @@ def _brain_for_process_step(*, max_step_attempts: int = 0) -> BrainModule:
     brain._script_event_indices = []
     brain._step_transcript_counter = 3
     brain._pending_after_capture = False
+    brain._replay_press_point_window = None
+    brain._hold_step_retry_reason = None
+    brain._deferred_window_verify = None
+    brain._step_close_windows_ok = False
     brain._hand = MagicMock()
     brain._hand.capture_after_for_last_action = AsyncMock(return_value=None)
     brain._hand.assign_after_for_last_action = AsyncMock(return_value=None)
@@ -302,6 +307,105 @@ async def test_process_step_move_mouse_failure_holds_for_overlay_retry() -> None
     assert metadata["verify"]["branch"] == "retry"
     assert metadata["verify"]["clearly_unmet"] is True
     assert brain._hold_step_retry_reason is None
+    assert brain._deferred_window_verify is None
+
+
+@pytest.mark.asyncio
+async def test_process_step_window_verify_miss_stashes_deferred_verify(
+    monkeypatch,
+) -> None:
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = [None, None, None]
+    brain.script_baseline_after_paths = [None, None, None]
+    brain.script_window_verifies = [{}, _disappeared_flyout_verify(), {}]
+    brain.loop = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "src.brain.module.snapshot_top_level_windows",
+        lambda: [_flyout_window()],
+    )
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", AsyncMock())
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 1
+    pending = brain._deferred_window_verify
+    assert pending is not None
+    assert pending.script_step_index == 1
+    assert pending.recorded == _disappeared_flyout_verify()
+    assert pending.windows_before == [_flyout_window()]
+
+
+@pytest.mark.asyncio
+async def test_process_step_deferred_verify_pass_advances_without_loop(
+    monkeypatch,
+) -> None:
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = [None, None, None]
+    brain.script_baseline_after_paths = [None, None, None]
+    brain.script_window_verifies = [{}, _disappeared_flyout_verify(), {}]
+    brain._deferred_window_verify = DeferredWindowVerify(
+        script_step_index=1,
+        windows_before=[_flyout_window()],
+        recorded=_disappeared_flyout_verify(),
+        replay_press_point_window=None,
+        step_close_windows_ok=False,
+    )
+    brain.loop = AsyncMock(return_value=True)
+    # After countdown the flyout is gone → appeared/disappeared predicate passes.
+    monkeypatch.setattr(
+        "src.brain.module.snapshot_top_level_windows",
+        lambda: [],
+    )
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert result.run_complete is False
+    assert brain._script_step_index == 2
+    brain.loop.assert_not_awaited()
+    assert brain._deferred_window_verify is None
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "completed"
+    assert metadata["deferred_verify_after_countdown"] is True
+    assert metadata["verify"]["branch"] == "advance"
+    assert metadata["verify"]["accomplished"] is True
+
+
+@pytest.mark.asyncio
+async def test_process_step_deferred_verify_fail_falls_through_to_full_retry(
+    monkeypatch,
+) -> None:
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = [None, None, None]
+    brain.script_baseline_after_paths = [None, None, None]
+    brain.script_window_verifies = [{}, _disappeared_flyout_verify(), {}]
+    brain._deferred_window_verify = DeferredWindowVerify(
+        script_step_index=1,
+        windows_before=[_flyout_window()],
+        recorded=_disappeared_flyout_verify(),
+        replay_press_point_window=None,
+        step_close_windows_ok=False,
+    )
+    brain.loop = AsyncMock(return_value=True)
+    # Still present after countdown → deferred miss, then full retry also misses.
+    monkeypatch.setattr(
+        "src.brain.module.snapshot_top_level_windows",
+        lambda: [_flyout_window()],
+    )
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", AsyncMock())
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    assert brain._script_step_index == 1
+    brain.loop.assert_awaited()
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["status"] == "verify_failed"
+    assert metadata["verify"]["branch"] == "retry"
+    # Full retry miss re-stashes for the next overlay wait.
+    assert brain._deferred_window_verify is not None
+    assert brain._deferred_window_verify.script_step_index == 1
 
 
 def _flyout_window() -> WindowInfo:

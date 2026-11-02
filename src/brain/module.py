@@ -171,6 +171,21 @@ class BrainStepResult:
     step_index: int | None = None
 
 
+@dataclass
+class DeferredWindowVerify:
+    """One-shot window/signal re-check after the overlay countdown.
+
+    Stashed when tools succeeded but verify missed, so the next ``process_step``
+    can advance without re-acting if the UI settled during the pause.
+    """
+
+    script_step_index: int
+    windows_before: list[WindowInfo] | None
+    recorded: dict[str, Any]
+    replay_press_point_window: dict[str, Any] | None
+    step_close_windows_ok: bool = False
+
+
 class BrainModule:
     """Orchestrates scripted tasks: vision + LLM tool loop, then window/signal verification and script branching."""
 
@@ -223,6 +238,8 @@ class BrainModule:
         # Set when cache-replay move_mouse fails. process_step holds the step
         # so the overlay can count down and retry, instead of ending the run.
         self._hold_step_retry_reason: str | None = None
+        # Tools-ok verify miss: re-check once after overlay countdown before re-acting.
+        self._deferred_window_verify: DeferredWindowVerify | None = None
         # Set when this step's close_windows succeeded, so a disappeared miss
         # can re-close that window during verify.
         self._step_close_windows_ok = False
@@ -1494,6 +1511,117 @@ class BrainModule:
             reason=reason,
         )
 
+    def _clear_deferred_window_verify(self) -> None:
+        self._deferred_window_verify = None
+
+    def _stash_deferred_window_verify(
+        self,
+        *,
+        script_step_index: int,
+        windows_before: list[WindowInfo] | None,
+        recorded: dict[str, Any],
+    ) -> None:
+        """Remember a tools-ok verify miss for a one-shot check after the overlay wait."""
+        if not window_verify_has_assertions(recorded):
+            self._clear_deferred_window_verify()
+            return
+        press = self._replay_press_point_window
+        self._deferred_window_verify = DeferredWindowVerify(
+            script_step_index=script_step_index,
+            windows_before=(
+                list(windows_before) if windows_before is not None else None
+            ),
+            recorded=dict(recorded),
+            replay_press_point_window=dict(press) if isinstance(press, dict) else None,
+            step_close_windows_ok=bool(self._step_close_windows_ok),
+        )
+
+    def _take_deferred_window_verify(
+        self, script_step_index: int
+    ) -> DeferredWindowVerify | None:
+        """Consume a matching deferred payload, if any."""
+        pending = getattr(self, "_deferred_window_verify", None)
+        if pending is None:
+            return None
+        if pending.script_step_index != script_step_index:
+            return None
+        self._deferred_window_verify = None
+        if not window_verify_has_assertions(pending.recorded):
+            return None
+        return pending
+
+    async def _try_deferred_window_verify_after_countdown(
+        self,
+        *,
+        transcript_counter: int,
+        script_step_index: int,
+        started_iso: str,
+        started_at: float,
+    ) -> BrainStepResult | None:
+        """Re-verify once after overlay pause. ``None`` falls through to a full retry."""
+        if skip_verification_enabled():
+            # Drop a pending check for this step; skip mode does not re-verify.
+            self._take_deferred_window_verify(script_step_index)
+            return None
+        deferred = self._take_deferred_window_verify(script_step_index)
+        if deferred is None:
+            return None
+        self._replay_press_point_window = deferred.replay_press_point_window
+        self._step_close_windows_ok = deferred.step_close_windows_ok
+        miss, _windows_after = await self._window_verify_observation(
+            deferred.windows_before,
+            deferred.recorded,
+            log_result=True,
+        )
+        if miss is not None:
+            self.manager.log_info(
+                f"Script step {script_step_index + 1} deferred verify still unmet "
+                f"after overlay wait; retrying full step. {miss.reason}"
+            )
+            return None
+        self.manager.log_info(
+            f"Script step {script_step_index + 1} deferred verify passed after "
+            "overlay wait; advancing without re-running tools"
+        )
+        verify_result = self._auto_advance_verify_result(window_verify_passed=True)
+        finished_iso = datetime.now(timezone.utc).isoformat()
+        duration_seconds = round(perf_counter() - started_at, 3)
+        self._step_transcript_counter += 1
+        step_goal = self._current_goal()
+        step_expected_outcome = self._current_expected_outcome() or None
+        attempt_number = self._script_step_attempt_number(script_step_index)
+        max_attempts = int(self.settings.script_max_step_attempts)
+        verify_meta = self._verify_result_metadata(
+            verify_result,
+            baseline_after_path=self._current_baseline_after_path(),
+        )
+        run_complete = self._apply_verify_branch(verify_result)
+        self._clear_deferred_window_verify()
+        self._update_step_metadata(
+            transcript_counter,
+            script_step_index,
+            {
+                "started_at_utc": started_iso,
+                "finished_at_utc": finished_iso,
+                "duration_seconds": duration_seconds,
+                "status": "completed",
+                "step_index": script_step_index,
+                "goal": step_goal,
+                "expected_outcome": step_expected_outcome,
+                "attempt_number": attempt_number,
+                "max_attempts": max_attempts,
+                "settle_after_seconds": None,
+                "verify": verify_meta,
+                "deferred_verify_after_countdown": True,
+            },
+        )
+        return BrainStepResult(
+            reason=f"Verify: {verify_result.reason}",
+            step_finished=True,
+            run_complete=run_complete,
+            step_index=script_step_index,
+        )
+
     def _remember_replay_press_point(self, result: ExecutionResult) -> None:
         """Keep the root window read immediately before this step's click."""
         if not result.ok or result.action not in CLICK_KINDS:
@@ -1893,6 +2021,16 @@ class BrainModule:
         # Otherwise finally captures a dedicated after (last step / failure).
         defer_after_capture = False
         try:
+            deferred_result = await self._try_deferred_window_verify_after_countdown(
+                transcript_counter=transcript_counter,
+                script_step_index=script_step_index,
+                started_iso=started_iso,
+                started_at=started_at,
+            )
+            if deferred_result is not None:
+                defer_after_capture = not deferred_result.run_complete
+                return deferred_result
+
             self._replay_press_point_window = None
             self._step_close_windows_ok = False
             skip_verification = skip_verification_enabled()
@@ -1934,7 +2072,14 @@ class BrainModule:
                 await self._sleep_settle_after(settle_after)
             if window_miss is not None:
                 verify_result = window_miss
+                # Tools already ran; after overlay countdown, re-verify before re-acting.
+                self._stash_deferred_window_verify(
+                    script_step_index=script_step_index,
+                    windows_before=windows_before,
+                    recorded=window_verify,
+                )
             elif step_succeeded:
+                self._clear_deferred_window_verify()
                 if skip_verification:
                     self.manager.log_info(
                         f"Script step {script_step_index + 1} skipping verification"
@@ -1960,6 +2105,8 @@ class BrainModule:
                         window_verify_passed=run_window_verify
                     )
             else:
+                # Actor failure (including move_mouse hold-retry): full retry only.
+                self._clear_deferred_window_verify()
                 hold_retry = self._consume_hold_step_retry()
                 if hold_retry is not None:
                     self.manager.log_info(
@@ -2122,6 +2269,7 @@ class BrainModule:
                     step_index=script_step_index,
                 )
             if verify_result.branch == "abort":
+                self._clear_deferred_window_verify()
                 reason = (
                     f"Script step {script_step_index + 1} aborted: {verify_result.reason}"
                 )
@@ -2155,6 +2303,7 @@ class BrainModule:
                 and verify_result.branch == "retry"
                 and attempt_number >= max_attempts
             ):
+                self._clear_deferred_window_verify()
                 reason = (
                     f"Script step {script_step_index + 1} failed after "
                     f"{attempt_number}/{max_attempts} attempt(s): {verify_result.reason}"

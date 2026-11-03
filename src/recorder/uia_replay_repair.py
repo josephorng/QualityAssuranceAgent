@@ -414,23 +414,62 @@ def choose_uia_replay_repair(
     control of that class that contains the mapped point wins instead.
     ``point_probe_fn`` is never used for those class targets.
     """
+    hit, _reason = choose_uia_replay_repair_with_reason(
+        recorded_bbox=recorded_bbox,
+        recorded_text=recorded_text,
+        recorded_window_xywh=recorded_window_xywh,
+        live_window_xywh=live_window_xywh,
+        uia_boxes=uia_boxes,
+        ocr_boxes=ocr_boxes,
+        point_probe_fn=point_probe_fn,
+        uia_scrollbar_boxes=uia_scrollbar_boxes,
+        uia_input_boxes=uia_input_boxes,
+    )
+    return hit
+
+
+def choose_uia_replay_repair_with_reason(
+    *,
+    recorded_bbox: RectXywh,
+    recorded_text: str,
+    recorded_window_xywh: RectXywh,
+    live_window_xywh: RectXywh,
+    uia_boxes: list[LabeledBox],
+    ocr_boxes: list[LabeledBox],
+    point_probe_fn: Any = None,
+    uia_scrollbar_boxes: list[RectXywh] | None = None,
+    uia_input_boxes: list[RectXywh] | None = None,
+) -> tuple[UiaReplayRepairHit | None, str]:
+    """Same as ``choose_uia_replay_repair``, plus a short miss/hit reason string."""
     text = str(recorded_text or "").strip()
     if not text:
-        return None
+        return None, "empty_recorded_text"
     mapped, center = map_recorded_box_to_screen(
         recorded_bbox, recorded_window_xywh, live_window_xywh
     )
     if not _ocr_confirms(mapped, text, ocr_boxes):
-        return None
+        return None, (
+            "ocr_did_not_confirm "
+            f"recorded={text!r} mapped={mapped} center={center} "
+            f"ocr_n={len(ocr_boxes)}"
+        )
 
     if text == "滾動條":
-        return _choose_uia_class_hit(
-            center, uia_scrollbar_boxes, label="滾動條", source="uia_scrollbar"
+        hit, reason = _choose_uia_class_hit_with_reason(
+            center,
+            uia_scrollbar_boxes,
+            label="滾動條",
+            source="uia_scrollbar",
         )
+        return hit, reason
     if text == "輸入欄":
-        return _choose_uia_class_hit(
-            center, uia_input_boxes, label="輸入欄", source="uia_input"
+        hit, reason = _choose_uia_class_hit_with_reason(
+            center,
+            uia_input_boxes,
+            label="輸入欄",
+            source="uia_input",
         )
+        return hit, reason
 
     from src.recorder.uia_input_boxes import is_usable_uia_landmark_label
 
@@ -443,33 +482,54 @@ def choose_uia_replay_repair(
             continue
         containing.append((box, label, control_type))
     if containing:
-        names = {label for _box, label, _control in containing}
+        names = sorted({label for _box, label, _control in containing})
         if len(names) != 1:
-            return None
+            preview = ",".join(names[:5])
+            more = "" if len(names) <= 5 else f"+{len(names) - 5}"
+            return None, (
+                "ambiguous_uia_names "
+                f"names=[{preview}{more}] n={len(names)} center={center} "
+                f"uia_n={len(uia_boxes)}"
+            )
         box, label, control_type = min(
             containing, key=lambda item: int(item[0][2]) * int(item[0][3])
         )
-        return _hit(label, box, "findall", control_type=control_type)
+        return (
+            _hit(label, box, "findall", control_type=control_type),
+            f"findall label={label!r}",
+        )
 
     if point_probe_fn is None:
-        return None
+        return None, (
+            "no_uia_text_at_point_and_no_probe "
+            f"center={center} uia_n={len(uia_boxes)}"
+        )
     probed = point_probe_fn(int(center[0]), int(center[1]))
     if not isinstance(probed, tuple) or len(probed) not in (2, 3):
-        return None
+        return None, (
+            "point_probe_empty "
+            f"center={center} uia_n={len(uia_boxes)}"
+        )
     label = str(probed[0] or "").strip()
     raw_box = probed[1]
     control_type = str(probed[2] or "").strip() if len(probed) >= 3 else ""
     if not is_usable_uia_landmark_label(label):
-        return None
+        return None, f"point_probe_unusable_label label={label!r} center={center}"
     if not isinstance(raw_box, (list, tuple)) or len(raw_box) != 4:
-        return None
+        return None, f"point_probe_bad_box label={label!r} center={center}"
     try:
         box = tuple(int(v) for v in raw_box)
     except (TypeError, ValueError):
-        return None
+        return None, f"point_probe_bad_box label={label!r} center={center}"
     if not _point_in_box(center[0], center[1], box):
-        return None
-    return _hit(label, box, "element_from_point", control_type=control_type)
+        return None, (
+            "point_probe_box_misses_point "
+            f"label={label!r} box={box} center={center}"
+        )
+    return (
+        _hit(label, box, "element_from_point", control_type=control_type),
+        f"element_from_point label={label!r}",
+    )
 
 
 def _choose_uia_class_hit(
@@ -480,6 +540,20 @@ def _choose_uia_class_hit(
     source: str,
 ) -> UiaReplayRepairHit | None:
     """Smallest live UIA control bbox containing ``center``, or None."""
+    hit, _reason = _choose_uia_class_hit_with_reason(
+        center, uia_boxes, label=label, source=source
+    )
+    return hit
+
+
+def _choose_uia_class_hit_with_reason(
+    center: tuple[int, int],
+    uia_boxes: list[RectXywh] | None,
+    *,
+    label: str,
+    source: str,
+) -> tuple[UiaReplayRepairHit | None, str]:
+    """Smallest live UIA control bbox containing ``center``, plus a miss reason."""
     containing: list[RectXywh] = []
     for raw in uia_boxes or []:
         if not isinstance(raw, (list, tuple)) or len(raw) != 4:
@@ -493,10 +567,14 @@ def _choose_uia_class_hit(
         if not _point_in_box(center[0], center[1], box):
             continue
         containing.append(box)
+    total = len(uia_boxes or [])
     if not containing:
-        return None
+        return None, (
+            f"no_{source}_at_point "
+            f"label={label!r} center={center} class_n={total}"
+        )
     box = min(containing, key=lambda item: int(item[2]) * int(item[3]))
-    return _hit(label, box, source)
+    return _hit(label, box, source), f"{source} label={label!r}"
 
 
 def replay_repair_slots(
@@ -510,6 +588,13 @@ def replay_repair_slots(
         for call in calls
         if isinstance(call, dict)
     ]
+    if not any(name in ("drag", "move_mouse") for name in names):
+        _log(
+            "uia replay repair no slots "
+            f"event={int(event_index)} reason=no_pointer_tool_calls "
+            f"tools={names!r}"
+        )
+        return []
     slots: list[UiaReplayRepairRequest | None] = []
     for name in names:
         if name == "drag":
@@ -535,12 +620,19 @@ def attempt_uia_replay_repair(
     from src.recorder.uia_input_boxes import uia_text_element_at_point
     from src.recorder.window_snapshot import find_matching_click_window
 
+    prefix = (
+        "uia replay repair miss "
+        f"event={request.event_index} side={request.side} "
+        f"recorded={request.recorded_text!r}"
+    )
     if not isinstance(click_window, dict):
+        _log(f"{prefix} reason=no_click_window")
         return None
     live = find_matching_click_window(click_window)
     if live is None:
+        _log(f"{prefix} reason=no_live_click_window_match")
         return None
-    hit = choose_uia_replay_repair(
+    hit, reason = choose_uia_replay_repair_with_reason(
         recorded_bbox=request.recorded_bbox,
         recorded_text=request.recorded_text,
         recorded_window_xywh=request.recorded_window_xywh,
@@ -553,9 +645,13 @@ def attempt_uia_replay_repair(
     )
     if hit is None:
         _log(
-            "uia replay repair miss "
-            f"event={request.event_index} side={request.side} "
-            f"recorded={request.recorded_text!r}"
+            f"{prefix} reason={reason} "
+            f"uia_n={len(uia_boxes)} ocr_n={len(ocr_boxes)} "
+            f"input_n={len(uia_input_boxes or [])} "
+            f"scrollbar_n={len(uia_scrollbar_boxes or [])} "
+            f"bbox={request.recorded_bbox} "
+            f"recorded_window={request.recorded_window_xywh} "
+            f"live_window={live.screen_rect()}"
         )
         return None
     others = [
@@ -821,14 +917,29 @@ def _load_request(
     event_index: int,
     side: str,
 ) -> UiaReplayRepairRequest | None:
+    request, reason = _load_request_with_reason(recording_dir, event_index, side)
+    if request is None and reason:
+        _log(
+            "uia replay repair slot skip "
+            f"event={int(event_index)} side={side} reason={reason}"
+        )
+    return request
+
+
+def _load_request_with_reason(
+    recording_dir: Path,
+    event_index: int,
+    side: str,
+) -> tuple[UiaReplayRepairRequest | None, str]:
+    """Build a repair request, or ``(None, reason)`` when this side is not repairable."""
     run_dir = Path(recording_dir)
     raw_event = read_json(event_json_path(run_dir, event_index), None)
     if not isinstance(raw_event, dict):
-        return None
+        return None, "no_event_json"
     try:
         event = RecordedEvent.from_dict(raw_event)
-    except (KeyError, TypeError, ValueError):
-        return None
+    except (KeyError, TypeError, ValueError) as exc:
+        return None, f"bad_event_json:{type(exc).__name__}"
     analysis = read_json(run_dir / "analysis" / f"event_{int(event_index):03d}.json", None)
     instruction = ""
     if isinstance(analysis, dict):
@@ -836,17 +947,20 @@ def _load_request(
     from cua_mcp.caption_buttons import caption_role_from_instruction
 
     if instruction and caption_role_from_instruction(instruction):
-        return None
+        return None, "caption_button_instruction"
     window = event.end_click_window if side == "end" else event.click_window
     recorded_window = _window_xywh(window if isinstance(window, dict) else None)
     if recorded_window is None:
-        return None
+        return None, "no_recorded_click_window"
     from src.recorder.vision_context import load_yolo_ocr_payload
 
     suffix = "_end" if side == "end" else ""
     payload = load_yolo_ocr_payload(run_dir, event_index, suffix=suffix)
-    if not isinstance(payload, dict) or payload.get("vision_path") != "yolo_ocr":
-        return None
+    if not isinstance(payload, dict):
+        return None, "no_yolo_ocr_payload"
+    vision_path = str(payload.get("vision_path") or "").strip()
+    if vision_path != "yolo_ocr":
+        return None, f"vision_path_not_yolo_ocr:{vision_path or 'missing'}"
     scrollbar_primary = _recorded_scrollbar_primary(
         payload, allow_off_track=(side == "end")
     )
@@ -860,18 +974,21 @@ def _load_request(
     else:
         snapshot = event.end_uia_snapshot if side == "end" else event.uia_snapshot
         if snapshot_has_usable_text(snapshot if isinstance(snapshot, dict) else None):
-            return None
+            return None, "recorded_uia_snapshot_already_usable"
         primary = _recorded_primary(payload)
         if primary is None:
-            return None
+            return None, "no_recorded_primary_candidate"
         bbox, text = primary
-    return UiaReplayRepairRequest(
-        recording_dir=run_dir,
-        event_index=int(event_index),
-        side=side,
-        recorded_bbox=bbox,
-        recorded_text=text,
-        recorded_window_xywh=recorded_window,
+    return (
+        UiaReplayRepairRequest(
+            recording_dir=run_dir,
+            event_index=int(event_index),
+            side=side,
+            recorded_bbox=bbox,
+            recorded_text=text,
+            recorded_window_xywh=recorded_window,
+        ),
+        "",
     )
 
 

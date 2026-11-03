@@ -9,6 +9,7 @@ import numpy as np
 
 from src.recorder.uia_replay_repair import (
     choose_uia_replay_repair,
+    choose_uia_replay_repair_with_reason,
     write_uia_replay_repair,
     UiaReplayRepairRequest,
 )
@@ -25,7 +26,7 @@ _OCR_BOX = (1010, 520, 40, 16)
 def _choose(**overrides):
     kwargs = dict(
         recorded_bbox=_RECORDED_BBOX,
-        recorded_text="空自文件",
+        recorded_text="空白文件",
         recorded_window_xywh=_RECORDED_WINDOW,
         live_window_xywh=_LIVE_WINDOW,
         uia_boxes=[(_UIA_BOX, "空白文件")],
@@ -53,6 +54,52 @@ def test_two_uia_names_covering_the_point_do_not_repair() -> None:
         ]
     )
     assert hit is None
+
+
+def test_choose_with_reason_reports_ambiguous_uia_names() -> None:
+    hit, reason = choose_uia_replay_repair_with_reason(
+        recorded_bbox=_RECORDED_BBOX,
+        recorded_text="空白文件",
+        recorded_window_xywh=_RECORDED_WINDOW,
+        live_window_xywh=_LIVE_WINDOW,
+        uia_boxes=[
+            (_UIA_BOX, "空白文件"),
+            ((990, 490, 200, 80), "歡迎使用 Word"),
+        ],
+        ocr_boxes=[(_OCR_BOX, "空白文件")],
+        point_probe_fn=None,
+    )
+    assert hit is None
+    assert reason.startswith("ambiguous_uia_names")
+
+
+def test_choose_with_reason_reports_ocr_miss() -> None:
+    hit, reason = choose_uia_replay_repair_with_reason(
+        recorded_bbox=_RECORDED_BBOX,
+        recorded_text="空白文件",
+        recorded_window_xywh=_RECORDED_WINDOW,
+        live_window_xywh=_LIVE_WINDOW,
+        uia_boxes=[(_UIA_BOX, "空白文件")],
+        ocr_boxes=[(_OCR_BOX, "搜尋檔案")],
+        point_probe_fn=None,
+    )
+    assert hit is None
+    assert reason.startswith("ocr_did_not_confirm")
+
+
+def test_choose_with_reason_reports_missing_input_at_point() -> None:
+    hit, reason = choose_uia_replay_repair_with_reason(
+        recorded_bbox=_RECORDED_BBOX,
+        recorded_text="輸入欄",
+        recorded_window_xywh=_RECORDED_WINDOW,
+        live_window_xywh=_LIVE_WINDOW,
+        uia_boxes=[],
+        ocr_boxes=[(_OCR_BOX, "輸入欄")],
+        uia_input_boxes=[(1200, 600, 40, 20)],
+        point_probe_fn=None,
+    )
+    assert hit is None
+    assert reason.startswith("no_uia_input_at_point")
 
 
 def test_ocr_far_from_recorded_text_does_not_repair() -> None:

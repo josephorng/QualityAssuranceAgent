@@ -1141,7 +1141,11 @@ class BrainModule:
         repair_binding = nullcontext()
         fallback_binding = nullcontext()
         script_path_raw = (os.environ.get(SCRIPT_PATH_ENV) or "").strip()
-        if script_path_raw:
+        if not script_path_raw:
+            self.manager.log_info(
+                "UIA replay repair setup skipped: SCRIPT_PATH unset"
+            )
+        else:
             try:
                 from src.common.script_helper import recording_run_dir
                 from src.recorder.uia_replay_repair import (
@@ -1165,12 +1169,35 @@ class BrainModule:
                         recording_dir, int(event_index), cached_calls
                     )
                     if slots:
+                        armed = sum(1 for slot in slots if slot is not None)
                         repair_binding = bind_uia_replay_repairs(slots)
+                        self.manager.log_info(
+                            "UIA replay repair slots bound "
+                            f"event={int(event_index)} "
+                            f"armed={armed}/{len(slots)} "
+                            f"dir={recording_dir}"
+                        )
+                    else:
+                        self.manager.log_info(
+                            "UIA replay repair no slots "
+                            f"event={int(event_index)} dir={recording_dir}"
+                        )
                     fallback_slots = yolo_ocr_fallback_slots(
                         recording_dir, int(event_index), cached_calls
                     )
                     if fallback_slots:
                         fallback_binding = bind_yolo_ocr_fallbacks(fallback_slots)
+                elif recording_dir is None:
+                    self.manager.log_info(
+                        "UIA replay repair setup skipped: "
+                        f"recording_dir unresolved script={script_path_raw!r}"
+                    )
+                else:
+                    self.manager.log_info(
+                        "UIA replay repair setup skipped: "
+                        f"no event_index step={step_index} "
+                        f"event_ids={len(event_ids)}"
+                    )
             except Exception as exc:
                 self.manager.log_info(f"UIA replay repair setup skipped: {exc}")
 

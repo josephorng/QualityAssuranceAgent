@@ -5282,6 +5282,27 @@ async def _find_mouse_point_attempt(
         from src.recorder.uia_replay_repair import take_uia_replay_repair
 
         repair_request = take_uia_replay_repair()
+        if repair_request is None:
+            _log_info(
+                "uia replay repair skipped: no repair slot "
+                f"vision_mode={vision_mode!r}"
+            )
+        elif vision_mode != "yolo_ocr":
+            _log_info(
+                "uia replay repair skipped: vision_mode not yolo_ocr "
+                f"vision_mode={vision_mode!r} "
+                f"event={repair_request.event_index} "
+                f"side={repair_request.side} "
+                f"recorded={repair_request.recorded_text!r}"
+            )
+        else:
+            _log_info(
+                "uia replay repair armed "
+                f"event={repair_request.event_index} "
+                f"side={repair_request.side} "
+                f"recorded={repair_request.recorded_text!r} "
+                f"bbox={repair_request.recorded_bbox}"
+            )
     # （YOLO+OCR）is the only side a recording asks replay to repair. FindAll
     # does not need the screenshot, so it overlaps capture and OCR. The click
     # still uses YOLO+OCR unless that walk names the same recorded box.
@@ -5297,6 +5318,13 @@ async def _find_mouse_point_attempt(
                 task.exception()
 
         uia_repair_task.add_done_callback(_retrieve_repair_task_error)
+    elif repair_yolo:
+        _log_info(
+            "uia replay repair miss "
+            f"event={repair_request.event_index} side={repair_request.side} "
+            f"recorded={repair_request.recorded_text!r} "
+            "reason=no_click_window_for_walk"
+        )
     allow_uia_select = vision_mode != "yolo_ocr"
     filter_by_control_type = vision_mode == "uia"
     if (
@@ -5547,6 +5575,13 @@ async def _find_mouse_point_attempt(
                 live, snapshot = walked
                 uia_dets = _detections_from_live_uia_snapshot(
                     captured, live, snapshot
+                )
+            else:
+                _log_info(
+                    "uia replay repair walk empty "
+                    f"event={repair_request.event_index} "
+                    f"side={repair_request.side} "
+                    f"recorded={repair_request.recorded_text!r}"
                 )
         assert repair_request is not None
         repaired = attempt_uia_replay_repair(

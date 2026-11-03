@@ -266,8 +266,19 @@ class BrainModule:
             max_tc = max(max_tc, parsed[0])
         return max_tc + 1
 
-    def _script_step_attempt_number(self, script_step_index: int) -> int:
-        """1-based attempt number for ``script_step_index`` (counts existing ``steps/*_<index>.json``)."""
+    def _script_step_attempt_number(
+        self,
+        script_step_index: int,
+        *,
+        exclude_transcript: int | None = None,
+    ) -> int:
+        """1-based attempt number for ``script_step_index``.
+
+        Counts existing ``steps/*_<index>.json`` transcripts. Pass
+        ``exclude_transcript`` for the in-flight attempt when
+        ``_save_step_messages`` already wrote that file, so it is not
+        double-counted.
+        """
         steps_dir = self.manager.require_paths().root / "steps"
         if not steps_dir.is_dir():
             return 1
@@ -277,8 +288,11 @@ class BrainModule:
             if path.suffix != ".json":
                 continue
             parsed = parse_step_artifact_stem(path.stem, one_based=one_based)
-            if parsed is not None and parsed[1] == script_step_index:
-                count += 1
+            if parsed is None or parsed[1] != script_step_index:
+                continue
+            if exclude_transcript is not None and parsed[0] == exclude_transcript:
+                continue
+            count += 1
         return count + 1
 
     def _script_step_smart_recovery_count(self, script_step_index: int) -> int:
@@ -308,11 +322,21 @@ class BrainModule:
                 count += 1
         return count
 
-    def _script_step_retry_limit_reached(self, script_step_index: int) -> bool:
+    def _script_step_retry_limit_reached(
+        self,
+        script_step_index: int,
+        *,
+        exclude_transcript: int | None = None,
+    ) -> bool:
         max_attempts = int(self.settings.script_max_step_attempts)
         if max_attempts <= 0:
             return False
-        return self._script_step_attempt_number(script_step_index) >= max_attempts
+        return (
+            self._script_step_attempt_number(
+                script_step_index, exclude_transcript=exclude_transcript
+            )
+            >= max_attempts
+        )
 
     def _save_step_messages(self, messages: list[dict[str, Any]]) -> None:
         """Save or update the decide-loop transcript under `steps/<tc>_<si>.json` (1-based names)."""
@@ -1616,7 +1640,9 @@ class BrainModule:
         self._step_transcript_counter += 1
         step_goal = self._current_goal()
         step_expected_outcome = self._current_expected_outcome() or None
-        attempt_number = self._script_step_attempt_number(script_step_index)
+        attempt_number = self._script_step_attempt_number(
+            script_step_index, exclude_transcript=transcript_counter
+        )
         max_attempts = int(self.settings.script_max_step_attempts)
         verify_meta = self._verify_result_metadata(
             verify_result,
@@ -2180,7 +2206,9 @@ class BrainModule:
 
             step_goal = self._current_goal()
             step_expected_outcome = self._current_expected_outcome() or None
-            attempt_number = self._script_step_attempt_number(script_step_index)
+            attempt_number = self._script_step_attempt_number(
+                script_step_index, exclude_transcript=transcript_counter
+            )
             max_attempts = int(self.settings.script_max_step_attempts)
             verify_meta = self._verify_result_metadata(
                 verify_result,
@@ -2385,6 +2413,8 @@ class BrainModule:
                     "step_index": script_step_index,
                     "goal": step_goal,
                     "expected_outcome": step_expected_outcome,
+                    "attempt_number": attempt_number,
+                    "max_attempts": max_attempts,
                     "settle_after_seconds": settle_after,
                     "verify": verify_meta,
                 },

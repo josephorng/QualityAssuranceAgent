@@ -288,7 +288,7 @@ async def test_process_step_actor_failure_fails_without_vision_recovery() -> Non
 
 @pytest.mark.asyncio
 async def test_process_step_move_mouse_failure_holds_for_overlay_retry() -> None:
-    brain = _brain_for_process_step()
+    brain = _brain_for_process_step(max_step_attempts=3)
 
     async def _failed_move() -> bool:
         brain._hold_step_retry_reason = "Recorded click_window is not on screen."
@@ -306,8 +306,38 @@ async def test_process_step_move_mouse_failure_holds_for_overlay_retry() -> None
     assert metadata["status"] == "failed"
     assert metadata["verify"]["branch"] == "retry"
     assert metadata["verify"]["clearly_unmet"] is True
+    assert metadata["attempt_number"] == 1
+    assert metadata["max_attempts"] == 3
     assert brain._hold_step_retry_reason is None
     assert brain._deferred_window_verify is None
+
+
+@pytest.mark.asyncio
+async def test_process_step_move_mouse_stops_at_script_retry_limit(
+    tmp_path,
+) -> None:
+    brain = _brain_for_process_step(max_step_attempts=3)
+    steps_dir = tmp_path / "steps"
+    steps_dir.mkdir()
+    (steps_dir / step_artifact_name(0, 1)).write_text("{}", encoding="utf-8")
+    (steps_dir / step_artifact_name(1, 1)).write_text("{}", encoding="utf-8")
+    brain.manager.require_paths.return_value.root = tmp_path
+
+    async def _failed_move() -> bool:
+        brain._hold_step_retry_reason = "Recorded click_window is not on screen."
+        return False
+
+    brain.loop = _failed_move
+
+    result = await brain.process_step()
+
+    assert result.step_finished is False
+    assert brain._script_step_index == 1
+    assert "3/3 attempt(s)" in result.reason
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["attempt_number"] == 3
+    assert metadata["max_attempts"] == 3
+    assert metadata["verify"]["branch"] == "retry"
 
 
 @pytest.mark.asyncio
@@ -1118,6 +1148,12 @@ async def test_process_step_skips_settle_when_settle_none(monkeypatch) -> None:
     sleep_mock.assert_not_awaited()
 
 
+def test_script_max_step_attempts_defaults_to_three() -> None:
+    from src.common.settings import Settings
+
+    assert Settings().script_max_step_attempts == 3
+
+
 @pytest.mark.asyncio
 async def test_process_step_stops_when_script_retry_limit_reached(
     tmp_path, monkeypatch
@@ -1151,6 +1187,36 @@ async def test_process_step_stops_when_script_retry_limit_reached(
 
 
 @pytest.mark.asyncio
+async def test_process_step_retry_limit_ignores_in_flight_transcript(
+    tmp_path, monkeypatch
+) -> None:
+    """Current attempt file from ``_save_step_messages`` must not inflate the count."""
+    brain = _brain_for_process_step(max_step_attempts=3)
+    steps_dir = tmp_path / "steps"
+    steps_dir.mkdir()
+    (steps_dir / step_artifact_name(0, 1)).write_text("{}", encoding="utf-8")
+    (steps_dir / step_artifact_name(1, 1)).write_text("{}", encoding="utf-8")
+    # In-flight transcript for this process_step (counter starts at 3).
+    (steps_dir / step_artifact_name(3, 1)).write_text("{}", encoding="utf-8")
+    brain.manager.require_paths.return_value.root = tmp_path
+    brain.script_window_verifies = [{}, _disappeared_flyout_verify(), {}]
+    brain.loop = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "src.brain.module.snapshot_top_level_windows",
+        lambda: [_flyout_window()],
+    )
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", AsyncMock())
+
+    result = await brain.process_step()
+
+    assert result.step_finished is False
+    assert "3/3 attempt(s)" in result.reason
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["attempt_number"] == 3
+    assert metadata["max_attempts"] == 3
+
+
+@pytest.mark.asyncio
 async def test_process_step_allows_retry_below_script_limit(
     tmp_path, monkeypatch
 ) -> None:
@@ -1176,6 +1242,8 @@ async def test_process_step_allows_retry_below_script_limit(
     assert sleep_mock.await_count == len(expected_sleeps)
     metadata = brain._update_step_metadata.call_args.args[2]
     assert metadata["verify"]["branch"] == "retry"
+    assert metadata["attempt_number"] == 2
+    assert metadata["max_attempts"] == 3
 
 
 def _word_disappeared_verify() -> dict:

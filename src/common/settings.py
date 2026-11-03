@@ -207,7 +207,7 @@ class Settings(BaseSettings):
     smart_max_cycles: int = 50
     smart_max_recovery_attempts: int = 3
     # Scripted playback: stop the run after N attempts on the same script line (0 = unlimited).
-    script_max_step_attempts: int = 0
+    script_max_step_attempts: int = 3
     # Nested smart recovery when script verify returns branch=smart.
     script_smart_recovery_max_cycles: int = 3
     script_smart_recovery_max_per_step: int = 2

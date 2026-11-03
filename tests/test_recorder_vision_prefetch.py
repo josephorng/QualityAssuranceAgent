@@ -60,6 +60,60 @@ def test_vision_source_fingerprint_stable_and_sensitive(tmp_path: Path) -> None:
     assert first != vision_source_fingerprint(
         replace(event, end_screenshot_path=str(tmp_path / "other.jpeg"))
     )
+    # Late-patched click focus_rect must not change the fingerprint.
+    assert first == vision_source_fingerprint(
+        replace(event, focus_rect=(10, 20, 30, 40))
+    )
+
+    typing = RecordedEvent(
+        index=2,
+        timestamp_utc="t",
+        kind="text_input",
+        text="abc",
+        cursor_xy=(50, 60),
+        screenshot_path=str(tmp_path / "type.jpeg"),
+        focus_rect=(1, 2, 3, 4),
+        ocr_clip_rect=(1, 2, 10, 20),
+    )
+    typing_fp = vision_source_fingerprint(typing)
+    assert typing_fp != vision_source_fingerprint(
+        replace(typing, focus_rect=(9, 9, 9, 9))
+    )
+    assert typing_fp != vision_source_fingerprint(
+        replace(typing, ocr_clip_rect=(0, 0, 5, 5))
+    )
+
+
+@pytest.mark.asyncio
+async def test_try_rebuild_vision_from_cache_survives_late_focus_rect(
+    tmp_path: Path,
+) -> None:
+    """Settle-patched focus_rect must not bust a successful click prefetch cache."""
+    (tmp_path / "yolo_ocr").mkdir()
+    event = _click_event(tmp_path)
+    fake_detections = [
+        _detection_from_bbox((8, 8, 10, 10), YOLO_CLASS_TEXT, text="儲存"),
+    ]
+    with patch(
+        "src.recorder.vision_context.imread_bgr",
+        return_value=np.zeros((100, 100, 3), dtype=np.uint8),
+    ), patch(
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
+        return_value=fake_detections,
+    ) as detect:
+        await build_vision_context(event, run_dir=tmp_path, persist_debug=True)
+        assert detect.call_count == 1
+
+    patched = replace(event, focus_rect=(209, 78, 316, 102))
+    with patch(
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
+        side_effect=AssertionError("should not call Triton"),
+    ):
+        rebuilt = try_rebuild_vision_from_cache(patched, tmp_path)
+
+    assert rebuilt is not None
+    assert rebuilt["used_vision"] is True
+    assert len(rebuilt["candidates"]) >= 1
 
 
 @pytest.mark.asyncio

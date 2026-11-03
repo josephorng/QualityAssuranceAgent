@@ -170,7 +170,12 @@ _TIER0_NON_CARDINAL_RANK = 4
 
 
 def vision_source_fingerprint(event: RecordedEvent) -> str:
-    """Stable hash of event fields that affect YOLO/OCR / text-resolve reuse."""
+    """Stable hash of event fields that affect YOLO/OCR / text-resolve reuse.
+
+    Click settle may late-patch ``focus_rect`` for debug overlays; that must not
+    invalidate mid-recording prefetch caches. ``focus_rect`` / ``ocr_clip_rect`` /
+    ``anchor_click_xy`` are hashed only for ``text_input``, where they change OCR.
+    """
     payload = {
         "index": int(event.index),
         "kind": str(event.kind),
@@ -180,14 +185,17 @@ def vision_source_fingerprint(event: RecordedEvent) -> str:
         "end_xy": list(event.end_xy) if event.end_xy is not None else None,
         "text": event.text,
         "click_count": event.click_count,
-        "focus_rect": list(event.focus_rect) if event.focus_rect is not None else None,
-        "ocr_clip_rect": (
-            list(event.ocr_clip_rect) if event.ocr_clip_rect is not None else None
-        ),
-        "anchor_click_xy": (
-            list(event.anchor_click_xy) if event.anchor_click_xy is not None else None
-        ),
     }
+    if event.kind == "text_input":
+        payload["focus_rect"] = (
+            list(event.focus_rect) if event.focus_rect is not None else None
+        )
+        payload["ocr_clip_rect"] = (
+            list(event.ocr_clip_rect) if event.ocr_clip_rect is not None else None
+        )
+        payload["anchor_click_xy"] = (
+            list(event.anchor_click_xy) if event.anchor_click_xy is not None else None
+        )
     if event.end_click_window is not None:
         payload["end_click_window"] = event.end_click_window
     if event.uia_snapshot is not None:

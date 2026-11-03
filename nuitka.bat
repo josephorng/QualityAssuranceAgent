@@ -7,11 +7,21 @@ SETLOCAL EnableDelayedExpansion
 :: To reset the compile cache after big dep changes, run nuitka-clean.bat
 SET ENTRYSCRIPT=main.py
 SET APPNAME=ComputerAgent
-SET APP_VERSION=1.0.0.0
 @REM SET MODEL_DIR=models
 SET OUTPUT_DIR=dist
 SET BUILD_LOG=build.log
 SET BUILD_KIND=RELEASE
+
+:: --- VERSION (bump persisted only after a successful build) ---
+if not exist VERSION (
+    echo 1.0.0.0> VERSION
+)
+set /p LAST_VERSION=<VERSION
+set "LAST_VERSION=!LAST_VERSION: =!"
+if "!LAST_VERSION!"=="" set "LAST_VERSION=1.0.0.0"
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "$v='!LAST_VERSION!'.Trim(); $p=$v.Split('.'); if($p.Length -lt 4){ $p=@('1','0','0','0') }; $p[3]=[string]([int]$p[3]+1); $p -join '.'"`) do set "APP_VERSION=%%I"
+echo Last released version: !LAST_VERSION!
+echo Building as version: !APP_VERSION!
 
 :: --- CLEANUP ---
 echo Stopping any running %APPNAME%.exe (required to replace dist\%APPNAME%.exe)...
@@ -24,7 +34,7 @@ if not exist %OUTPUT_DIR% mkdir %OUTPUT_DIR%
 :: Archive previous exe as old version instead of deleting it.
 if exist %OUTPUT_DIR%\%APPNAME%.exe (
     for /f %%I in ('powershell -NoProfile -Command "(Get-Date).ToString('yyyyMMdd_HHmmss')"') do set "EXE_BACKUP_STAMP=%%I"
-    set "EXE_BACKUP=%OUTPUT_DIR%\%APPNAME%_v%APP_VERSION%_!EXE_BACKUP_STAMP!.exe"
+    set "EXE_BACKUP=%OUTPUT_DIR%\%APPNAME%_v!LAST_VERSION!_!EXE_BACKUP_STAMP!.exe"
     echo Keeping previous build as !EXE_BACKUP!
     move /Y "%OUTPUT_DIR%\%APPNAME%.exe" "!EXE_BACKUP!" >nul
 )
@@ -76,7 +86,7 @@ if !BUILD_M! LSS 10 set "BUILD_M=0!BUILD_M!"
 if !BUILD_S! LSS 10 set "BUILD_S=0!BUILD_S!"
 set "BUILD_ELAPSED_FMT=!BUILD_H!:!BUILD_M!:!BUILD_S!"
 if !BUILD_EXIT! EQU 0 (set "BUILD_STATUS=success") else (set "BUILD_STATUS=failed")
->>"%BUILD_LOG%" echo !BUILD_START_WALL!  %BUILD_KIND%  !BUILD_STATUS!  elapsed=!BUILD_ELAPSED_FMT! (!BUILD_ELAPSED!s)  exit=!BUILD_EXIT!
+>>"%BUILD_LOG%" echo !BUILD_START_WALL!  %BUILD_KIND%  !BUILD_STATUS!  elapsed=!BUILD_ELAPSED_FMT! (!BUILD_ELAPSED!s)  exit=!BUILD_EXIT!  version=!APP_VERSION!
 echo Elapsed: !BUILD_ELAPSED_FMT!  (appended to %BUILD_LOG%)
 
 :: --- CHECK RESULT ---
@@ -85,11 +95,19 @@ if !BUILD_EXIT! EQU 0 (
     echo ========================================
     echo Build Successful!
     echo Your executable is in: %OUTPUT_DIR%\%APPNAME%.exe
+    echo Writing version log for !APP_VERSION!...
+    python scripts/release_version_log.py --version !APP_VERSION!
+    if errorlevel 1 (
+        echo Warning: release_version_log.py failed; VERSION was not advanced.
+    ) else (
+        echo Released version: !APP_VERSION!
+    )
     echo ========================================
 ) else (
     echo.
     echo !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     echo Build Failed with error code !BUILD_EXIT!
+    echo VERSION left at !LAST_VERSION! ^(not advanced^)
     echo !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 )
 

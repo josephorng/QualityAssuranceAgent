@@ -8,7 +8,7 @@ from src.common.run_control import (
     mark_recording_replay_dirty,
     take_recording_replay_dirty,
 )
-from src.common.runtime_context import SCRIPT_PATH_ENV
+from src.common.runtime_context import SCRIPT_EVENT_INDICES_ENV, SCRIPT_PATH_ENV
 from src.common.script_helper import (
     invalidate_recording_replay_cache,
     load_recording_replay_steps,
@@ -177,6 +177,66 @@ def test_reload_pending_skips_disk_when_clean(tmp_path: Path, monkeypatch) -> No
     mark_recording_replay_dirty()
     brain.reload_pending_recording_steps()
     assert brain.script_lines == ["open", "edited while clean"]
+
+
+def test_script_seed_event_indices_from_env(monkeypatch) -> None:
+    monkeypatch.setenv(SCRIPT_EVENT_INDICES_ENV, json.dumps([3, 5, None, 7]))
+    brain = BrainModule.__new__(BrainModule)
+    assert brain._script_seed_event_indices(4) == [3, 5, None, 7]
+    assert brain._script_seed_event_indices(2) == [3, 5]
+    assert brain._script_seed_event_indices(6) == [3, 5, None, 7, None, None]
+
+
+def test_ensure_script_event_indices_backfills_from_disk(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_dir = tmp_path / "rec"
+    _write_recording(run_dir, ("open", "click save", "close"))
+    brain = _brain_for_reload(run_dir, monkeypatch)
+    brain.script_lines = ["open", "click save", "close"]
+    brain._script_event_indices = []
+    monkeypatch.delenv(SCRIPT_EVENT_INDICES_ENV, raising=False)
+
+    brain._ensure_script_event_indices()
+
+    assert brain._script_event_indices == [0, 1, 2]
+
+
+def test_reload_backfills_event_indices_when_dirty_already_consumed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_dir = tmp_path / "rec"
+    _write_recording(run_dir, ("open", "click save"))
+    brain = _brain_for_reload(run_dir, monkeypatch)
+    brain._script_event_indices = []
+    monkeypatch.delenv(SCRIPT_EVENT_INDICES_ENV, raising=False)
+    assert take_recording_replay_dirty() is False
+
+    brain.reload_pending_recording_steps()
+
+    assert brain._script_event_indices == [0, 1]
+
+
+def test_reload_remakes_dirty_when_load_fails(tmp_path: Path, monkeypatch) -> None:
+    run_dir = tmp_path / "rec"
+    _write_recording(run_dir, ("open", "click save"))
+    brain = _brain_for_reload(run_dir, monkeypatch)
+    brain._script_event_indices = []
+    monkeypatch.setenv(SCRIPT_EVENT_INDICES_ENV, json.dumps([10, 11]))
+    mark_recording_replay_dirty()
+    invalidate_recording_replay_cache(run_dir)
+
+    def boom(_path: Path):
+        raise OSError("disk busy")
+
+    monkeypatch.setattr(
+        "src.common.script_helper.load_recording_replay_steps", boom
+    )
+
+    brain.reload_pending_recording_steps()
+
+    assert take_recording_replay_dirty() is True
+    assert brain._script_event_indices == [10, 11]
 
 
 def test_take_recording_replay_dirty_clears_on_read() -> None:

@@ -134,6 +134,7 @@ def prepare_run_session(
     from src.common.runtime_context import (
         RUNTIME_COMMAND_MODE_ENV,
         SCRIPT_BASELINE_AFTER_ENV,
+        SCRIPT_EVENT_INDICES_ENV,
         SCRIPT_LINES_ENV,
         SCRIPT_OUTCOMES_ENV,
         SCRIPT_PATH_ENV,
@@ -164,6 +165,7 @@ def prepare_run_session(
     os.environ.pop(SCRIPT_BASELINE_AFTER_ENV, None)
     os.environ.pop(SCRIPT_SETTLE_AFTER_ENV, None)
     os.environ.pop(SCRIPT_WINDOW_VERIFY_ENV, None)
+    os.environ.pop(SCRIPT_EVENT_INDICES_ENV, None)
 
     if smart_mode:
         goal = (smart_goal or task or "").strip()
@@ -182,6 +184,7 @@ def prepare_run_session(
         os.environ[SCRIPT_LINES_ENV] = json.dumps(script_steps, ensure_ascii=False)
         from src.common.script_helper import (
             collect_recording_baseline_after_paths,
+            collect_recording_instruction_event_indices,
             collect_recording_script_text,
             collect_recording_settle_after_seconds,
             collect_recording_window_verifies,
@@ -220,6 +223,12 @@ def prepare_run_session(
             if len(verifies) != len(script_steps):
                 verifies = [{} for _ in script_steps]
             os.environ[SCRIPT_WINDOW_VERIFY_ENV] = json.dumps(verifies, ensure_ascii=False)
+            event_indices = collect_recording_instruction_event_indices(rec)
+            if len(event_indices) != len(script_steps):
+                event_indices = [None] * len(script_steps)
+            os.environ[SCRIPT_EVENT_INDICES_ENV] = json.dumps(
+                event_indices, ensure_ascii=False
+            )
     primary = eye_monitor_indices[0]
     os.environ["EYE_MONITOR_INDEX"] = str(primary)
     if len(eye_monitor_indices) > 1:

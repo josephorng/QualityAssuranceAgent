@@ -54,6 +54,7 @@ from src.common.run_state import (
 )
 from src.common.runtime_context import (
     SCRIPT_BASELINE_AFTER_ENV,
+    SCRIPT_EVENT_INDICES_ENV,
     SCRIPT_LINES_ENV,
     SCRIPT_OUTCOMES_ENV,
     SCRIPT_PATH_ENV,
@@ -227,8 +228,12 @@ class BrainModule:
             else self._script_seed_window_verifies(len(self.script_lines))
         )
         self._script_step_index = 0
-        # Recording event id for each script step. Filled on the first disk reload.
-        self._script_event_indices: list[int | None] = []
+        # Recording event id for each script step (seeded from env; refreshed on dirty reload).
+        self._script_event_indices: list[int | None] = (
+            []
+            if is_runtime_command_mode() or is_smart_mode()
+            else self._script_seed_event_indices(len(self.script_lines))
+        )
         self._hand = hand
         self._eye = eye
         # Last-tool after-screenshot pending until the next step's before seals it
@@ -496,23 +501,33 @@ class BrainModule:
         if is_runtime_command_mode() or is_smart_mode():
             return
         if not take_recording_replay_dirty():
+            # Dirty is process-global; a concurrent run may have consumed it.
+            # Event ids are still required for UIA repair — backfill if empty.
+            self._ensure_script_event_indices()
             return
         script_path_raw = (os.environ.get(SCRIPT_PATH_ENV) or "").strip()
         if not script_path_raw:
+            self._ensure_script_event_indices()
             return
         from src.common.script_helper import (
             load_recording_replay_steps,
             merge_unstarted_recording_steps,
             recording_run_dir,
         )
+        from src.common.run_control import mark_recording_replay_dirty
 
         recording_dir = recording_run_dir(Path(script_path_raw))
         if recording_dir is None:
+            # Keep dirty so a later path/recording becomes visible; still try env/disk backfill.
+            mark_recording_replay_dirty()
+            self._ensure_script_event_indices()
             return
         try:
             fresh = load_recording_replay_steps(recording_dir)
         except Exception as exc:
+            mark_recording_replay_dirty()
             self.manager.log_info(f"Recording reload skipped: {exc}")
+            self._ensure_script_event_indices()
             return
         merged = merge_unstarted_recording_steps(
             step_index=self._script_step_index,
@@ -543,6 +558,8 @@ class BrainModule:
             ]
         )
         self._script_event_indices = list(merged[5])
+        if not any(isinstance(item, int) for item in self._script_event_indices):
+            self._ensure_script_event_indices()
         if content_same:
             return
         self.script_lines = list(merged[0])
@@ -664,6 +681,66 @@ class BrainModule:
             if isinstance(item, dict) and window_verify_has_assertions(item):
                 verifies[index] = omit_foreground_when_structural(item)
         return verifies
+
+    def _script_seed_event_indices(self, step_count: int) -> list[int | None]:
+        """Load recording event ids aligned with script steps."""
+        indices: list[int | None] = [None] * step_count
+        raw = os.environ.get(SCRIPT_EVENT_INDICES_ENV, "")
+        if not raw:
+            return indices
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return indices
+        if not isinstance(parsed, list):
+            return indices
+        for index in range(min(step_count, len(parsed))):
+            item = parsed[index]
+            if isinstance(item, bool) or item is None:
+                continue
+            if isinstance(item, int):
+                indices[index] = item
+            elif isinstance(item, float) and item == int(item):
+                indices[index] = int(item)
+        return indices
+
+    def _ensure_script_event_indices(self) -> None:
+        """Fill empty event ids from env or the recording on disk."""
+        if any(isinstance(item, int) for item in self._script_event_indices):
+            return
+        step_count = len(self.script_lines)
+        if step_count <= 0:
+            return
+        seeded = self._script_seed_event_indices(step_count)
+        if any(isinstance(item, int) for item in seeded):
+            self._script_event_indices = seeded
+            return
+        script_path_raw = (os.environ.get(SCRIPT_PATH_ENV) or "").strip()
+        if not script_path_raw:
+            return
+        from src.common.script_helper import (
+            collect_recording_instruction_event_indices,
+            recording_run_dir,
+        )
+
+        recording_dir = recording_run_dir(Path(script_path_raw))
+        if recording_dir is None:
+            return
+        try:
+            found = collect_recording_instruction_event_indices(recording_dir)
+        except Exception as exc:
+            self.manager.log_info(f"Event-index backfill skipped: {exc}")
+            return
+        if len(found) != step_count:
+            self.manager.log_info(
+                "Event-index backfill skipped: "
+                f"count mismatch events={len(found)} steps={step_count}"
+            )
+            return
+        self._script_event_indices = [int(item) for item in found]
+        self.manager.log_info(
+            f"Backfilled script event indices ({step_count} step(s)) from recording"
+        )
 
     def _current_expected_outcome(self) -> str:
         if not self.script_expected_outcomes:

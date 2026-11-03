@@ -339,9 +339,13 @@ def _fallback_caption_button_bounds(win: WindowInfo) -> CaptionBounds | None:
         return None
     if win.is_minimized or win.left <= _MINIMIZED_COORD_THRESHOLD:
         return None
+    # Tiny tool/popup hwnds are not system title bars; inventing a strip for them
+    # false-positive OCR caption relabel (e.g. in-app 刪除 → 關閉視窗).
+    min_strip_w = _FALLBACK_CAPTION_BUTTON_WIDTH * _FALLBACK_CAPTION_BUTTON_COUNT
+    if win.width < min_strip_w or win.height < _FALLBACK_CAPTION_HEIGHT:
+        return None
     height = min(_sm_cycaption() + 8, max(win.height // 4, _FALLBACK_CAPTION_HEIGHT))
-    strip_w = _FALLBACK_CAPTION_BUTTON_WIDTH * _FALLBACK_CAPTION_BUTTON_COUNT
-    strip_w = min(strip_w, max(win.width // 2, _FALLBACK_CAPTION_BUTTON_WIDTH))
+    strip_w = min(min_strip_w, max(win.width // 2, _FALLBACK_CAPTION_BUTTON_WIDTH))
     left = win.left + win.width - strip_w
     top = win.top
     right = win.left + win.width

@@ -758,6 +758,10 @@ def test_click_hits_caption_buttons_uses_stored_and_fallback_bounds() -> None:
     assert click_hits_caption_buttons((780, 10), fallback)
     assert not click_hits_caption_buttons((100, 10), fallback)
 
+    # Tiny tool windows must not get an invented caption strip.
+    tiny = _win(3, "", left=1789, top=170, width=32, height=19)
+    assert not click_hits_caption_buttons((1790, 212), tiny)
+
 
 def test_click_hits_caption_buttons_includes_bottom_right_edge() -> None:
     """DWM caption rects are tight; edge and slightly-below clicks still count."""

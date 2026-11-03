@@ -80,6 +80,29 @@ def test_relabel_skips_outside_caption_strip() -> None:
     assert (out[0].icons or [{}])[0]["chinese_id"] == "方框、矩形框線"
 
 
+def test_relabel_skips_tiny_window_fallback_strip() -> None:
+    """Geometry fallback must not invent caption chrome for tiny tool hwnds."""
+    tiny = WindowInfo(
+        hwnd=16385510,
+        title="",
+        pid=1,
+        left=1789,
+        top=170,
+        width=32,
+        height=19,
+        is_minimized=False,
+        is_maximized=False,
+        caption_button_bounds=None,
+    )
+    det = _detection_from_bbox(
+        (1779, 201, 22, 22),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "關閉、取消、刪除", "pua": "\ue02e"}],
+    )
+    out = relabel_caption_button_detections([det], windows=[tiny])
+    assert (out[0].icons or [{}])[0]["chinese_id"] == "關閉、取消、刪除"
+
+
 def test_relabel_uses_coord_offset_for_screen_coords() -> None:
     bounds = (1100, 10, 1250, 42)
     win = _caption_window(bounds)

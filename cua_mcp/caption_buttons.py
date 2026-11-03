@@ -146,21 +146,39 @@ def relabel_caption_button_detections(
     """Rewrite misread caption icons/text to window-chrome labels inside the caption strip.
 
     ``coord_offset`` maps detection centers (screenshot-local) to virtual-desktop
-    screen coordinates before testing against DWM caption bounds.
+    screen coordinates before testing against stored/DWM caption bounds. Geometry
+    fallback strips are ignored so tiny tool windows cannot false-relabel icons.
     """
     if not detections or os.name != "nt":
         return detections
 
-    click_hits_caption_buttons, snapshot_top_level_windows = _window_snapshot()
+    _click_hits_caption_buttons, snapshot_top_level_windows = _window_snapshot()
     pool = windows if windows is not None else snapshot_top_level_windows()
     if not pool:
         return detections
+
+    from src.recorder.window_snapshot import (
+        _CAPTION_HIT_SLACK_PX,
+        dwm_caption_button_bounds,
+    )
+
+    def _hits_system_caption_strip(sx: int, sy: int, win: WindowInfo) -> bool:
+        """True only for stored/DWM caption strips — never geometry fallback."""
+        bounds = dwm_caption_button_bounds(win)
+        if bounds is None:
+            return False
+        left, top, right, bottom = bounds
+        slack = _CAPTION_HIT_SLACK_PX
+        return (
+            left - slack <= sx <= right + slack
+            and top - slack <= sy <= bottom + slack
+        )
 
     out = list(detections)
     relabeled = 0
     for index, det in enumerate(out):
         sx, sy = _detection_screen_center(det, coord_offset)
-        if not any(click_hits_caption_buttons((sx, sy), win) for win in pool):
+        if not any(_hits_system_caption_strip(sx, sy, win) for win in pool):
             continue
 
         new_label: str | None = None

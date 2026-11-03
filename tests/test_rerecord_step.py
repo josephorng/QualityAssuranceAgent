@@ -235,6 +235,9 @@ async def test_reanalyze_rewrites_instruction_and_preserves_outcome(
     assert analysis["use_expected_outcome"] is True
     assert analysis["window_verify_disabled"] == ["appeared:0"]
     assert analysis["settle_after_seconds"] == 1.5
+    # Re-recording event 2 must not rewrite event 1's settle from the timestamp gap.
+    previous = read_json(run_dir / "analysis" / "event_001.json", {})
+    assert previous["settle_after_seconds"] == 1.5
 
     report = read_json(run_dir / "report.json", {})
     assert report["instructions"][1] == "點擊「儲存」"

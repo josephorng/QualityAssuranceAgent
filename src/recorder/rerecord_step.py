@@ -276,35 +276,6 @@ def _rebuild_report_lists(run_dir: Path) -> None:
     write_json(report_path, report)
 
 
-def _patch_previous_settle(
-    run_dir: Path,
-    events: list[RecordedEvent],
-    event_index: int,
-) -> None:
-    """Refresh the previous instruction event's settle_after to the new gap."""
-    positions = {event.index: pos for pos, event in enumerate(events)}
-    pos = positions.get(event_index)
-    if pos is None or pos <= 0:
-        return
-    previous = events[pos - 1]
-    if previous.kind == "wait" or previous.kind == "text_input":
-        return
-    current = events[pos]
-    from src.recorder.coalesce import _elapsed_seconds
-
-    settle = _elapsed_seconds(previous.timestamp_utc, current.timestamp_utc)
-    if settle is None:
-        return
-    analysis_path = run_dir / "analysis" / f"event_{previous.index:03d}.json"
-    analysis = read_json(analysis_path, None)
-    if not isinstance(analysis, dict):
-        return
-    if settle < 0:
-        return
-    analysis["settle_after_seconds"] = round(float(settle), 3)
-    write_json(analysis_path, analysis)
-
-
 async def reanalyze_recording_event(
     run_dir: Path,
     event_index: int,
@@ -424,7 +395,9 @@ async def reanalyze_recording_event(
             analysis["window_verify_disabled"] = list(disabled)
             write_json(analysis_path, analysis)
 
-    _patch_previous_settle(run_dir, events, event_index)
+    # Do not rewrite the previous step's settle_after from the wall-clock gap to
+    # this re-record click. That gap is re-record setup time (or an old recording
+    # timestamp vs now), not UI settle after the previous action.
     rebuild_recording_instruction_tool_cache(run_dir)
     _rebuild_report_lists(run_dir)
     write_recording_html_from_run(run_dir, update_index=False)

@@ -85,6 +85,9 @@ from src.recorder.window_snapshot import (
 # Window-verify polls continuously after actions; deadline is 2.0x of settle when
 # settle is at least ``_SETTLE_POLL_MULTI_MIN_SECONDS``, else 1.0x.
 _SETTLE_POLL_MULTI_MIN_SECONDS = 2.0
+# Match recording settle-probe max (``_SETTLE_PROBE_MAX_WINDOW_S``). Caps replay
+# sleep when a re-record / bad gap wrote an absurd ``settle_after_seconds``.
+_SETTLE_AFTER_SLEEP_MAX_SECONDS = 55.0
 _WINDOW_VERIFY_POLL_INTERVAL_SECONDS = 0.1
 # Appeared asserts floor the poll settle so 2.0x lands at least at 10s (slow launches).
 _APPEARED_POLL_MIN_SECONDS = 5.0
@@ -789,6 +792,13 @@ class BrainModule:
         seconds = float(settle_after)
         if seconds <= 0:
             return
+        max_seconds = float(_SETTLE_AFTER_SLEEP_MAX_SECONDS)
+        if seconds > max_seconds:
+            self.manager.log_info(
+                f"Settle after step: clamping {round(seconds, 3):.3f}s "
+                f"to {max_seconds:.3f}s"
+            )
+            seconds = max_seconds
         waited = round(seconds, 3)
         self.manager.log_info(f"Settle after step: waiting {waited:.3f}s")
         await asyncio.sleep(seconds)

@@ -987,6 +987,26 @@ async def test_process_step_sleeps_settle_when_no_window_verify(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_process_step_clamps_huge_settle_sleep(monkeypatch) -> None:
+    from src.brain.module import _SETTLE_AFTER_SLEEP_MAX_SECONDS
+
+    brain = _brain_for_process_step()
+    brain.script_expected_outcomes = [None, None, None]
+    brain.script_baseline_after_paths = [None, None, None]
+    brain.script_settle_after_seconds = [None, 2272.990, None]
+    brain.loop = AsyncMock(return_value=True)
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
+
+    result = await brain.process_step()
+
+    assert result.step_finished is True
+    sleep_mock.assert_awaited_once_with(float(_SETTLE_AFTER_SLEEP_MAX_SECONDS))
+    metadata = brain._update_step_metadata.call_args.args[2]
+    assert metadata["settle_after_seconds"] == 2272.990
+
+
+@pytest.mark.asyncio
 async def test_process_step_sleeps_settle_with_expected_outcome_no_baseline(
     monkeypatch,
 ) -> None:

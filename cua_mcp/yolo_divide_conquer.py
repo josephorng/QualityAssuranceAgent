@@ -1,6 +1,7 @@
 """
 Divide-and-conquer YOLO inference: if a full-frame pass hits ``max_det``,
-split the image into overlapping 2×2 tiles, predict each, merge with NMS.
+split the image into two overlapping halves along the longer axis, predict
+each, merge with NMS.
 
 Also optional overlap refine: when text boxes overlap / cross / look multi-line,
 crop each hard cluster and re-run YOLO at higher effective resolution. Independent
@@ -135,10 +136,11 @@ def split_bgr_2x2(
     overlap_frac: float = TILE_OVERLAP_FRAC_DEFAULT,
 ) -> list[tuple[np.ndarray, int, int]]:
     """
-    Split ``bgr`` into four overlapping tiles: TL, TR, BL, BR.
+    Split ``bgr`` into two overlapping halves along the longer axis.
 
-    ``overlap_frac`` is relative to half-width / half-height (e.g. 0.15 → each
-    tile extends 15% past the center cut into the neighboring half).
+    Landscape / square (``w >= h``): left + right. Portrait: top + bottom.
+    ``overlap_frac`` is relative to the half-size on the split axis (e.g. 0.15 →
+    each tile extends 15% past the center cut into the neighboring half).
 
     Returns ``(tile_bgr, origin_x, origin_y)`` in full-image coordinates.
     """
@@ -147,17 +149,20 @@ def split_bgr_2x2(
         return [(bgr, 0, 0)]
 
     overlap_frac = max(0.0, float(overlap_frac))
-    half_w = w // 2
-    half_h = h // 2
-    ow = int(round(half_w * overlap_frac))
-    oh = int(round(half_h * overlap_frac))
-
-    regions = (
-        (0, 0, min(w, half_w + ow), min(h, half_h + oh)),
-        (max(0, half_w - ow), 0, w, min(h, half_h + oh)),
-        (0, max(0, half_h - oh), min(w, half_w + ow), h),
-        (max(0, half_w - ow), max(0, half_h - oh), w, h),
-    )
+    if w >= h:
+        half_w = w // 2
+        ow = int(round(half_w * overlap_frac))
+        regions = (
+            (0, 0, min(w, half_w + ow), h),
+            (max(0, half_w - ow), 0, w, h),
+        )
+    else:
+        half_h = h // 2
+        oh = int(round(half_h * overlap_frac))
+        regions = (
+            (0, 0, w, min(h, half_h + oh)),
+            (0, max(0, half_h - oh), w, h),
+        )
     out: list[tuple[np.ndarray, int, int]] = []
     for x0, y0, x1, y1 in regions:
         if x1 <= x0 or y1 <= y0:
@@ -1002,7 +1007,7 @@ def predict_ultralytics_with_2x2_fallback(
 ) -> DetectArrays:
     """
     Run Ultralytics ``model.predict`` on the full image; if the count reaches
-    ``max_det``, re-run on overlapping 2×2 tiles and merge with NMS.
+    ``max_det``, re-run on two overlapping longer-axis halves and merge with NMS.
 
     When ``overlap_refine`` is True, crop overlapping / tall text clusters and
     re-predict each crop to split mixed line boxes. When ``line_cut`` is True, any
@@ -1109,7 +1114,7 @@ def predict_onnx_with_2x2_fallback(
 ) -> DetectArrays:
     """
     Run ``predict_fn(bgr, **kwargs) -> (xyxy, scores, cls)``; if the count reaches
-    ``max_det``, re-run on overlapping 2×2 tiles and merge with NMS.
+    ``max_det``, re-run on two overlapping longer-axis halves and merge with NMS.
 
     When ``overlap_refine`` is True, crop overlapping / tall text clusters and
     re-predict each crop to split mixed line boxes. When ``line_cut`` is True, any
@@ -1117,8 +1122,8 @@ def predict_onnx_with_2x2_fallback(
 
     ``predict_fn`` is typically a *leaf* detector (e.g. Ultralytics or a Triton
     decode without its own tiling). Production ONNX already runs recursive
-    quadtree + Stage 3 inside :func:`yolo_onnx.run_yolo_onnx_end2end`; do not
-    wrap that entry point here or you will nest flat 2×2 / refine on top of it.
+    binary tiles + Stage 3 inside :func:`yolo_onnx.run_yolo_onnx_end2end`; do not
+    wrap that entry point here or you will nest flat halves / refine on top of it.
     If you must wrap it, pass ``overlap_refine=False`` on this helper and on
     ``predict_fn`` (and prefer a ``max_det`` high enough that Stage 2 never runs).
     """

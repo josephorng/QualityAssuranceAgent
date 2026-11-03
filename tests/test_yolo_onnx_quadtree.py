@@ -1,4 +1,4 @@
-"""Tests for YOLO end2end quadtree divide-and-conquer when detections hit max_det."""
+"""Tests for YOLO end2end binary-tile divide-and-conquer when detections hit max_det."""
 
 from __future__ import annotations
 
@@ -57,31 +57,43 @@ def test_count_end2end_valid_ignores_class_and_low_conf():
 
 
 def test_overlapping_quad_rois_cover_and_intersect():
+    # Landscape: left + right halves with horizontal overlap.
     h, w = 800, 1000
     rois = _overlapping_quad_rois(h, w, DEFAULT_QUADTREE_OVERLAP_FRAC)
-    assert len(rois) == 4
+    assert len(rois) == 2
 
-    # Union covers full image.
     xs1 = min(r[0] for r in rois)
     ys1 = min(r[1] for r in rois)
     xs2 = max(r[2] for r in rois)
     ys2 = max(r[3] for r in rois)
     assert (xs1, ys1, xs2, ys2) == (0, 0, w, h)
 
-    tl, tr, bl, br = rois
-    # Horizontal neighbors intersect.
-    assert tl[2] > tr[0]
-    assert bl[2] > br[0]
-    # Vertical neighbors intersect.
-    assert tl[3] > bl[1]
-    assert tr[3] > br[1]
+    left, right = rois
+    assert left[2] > right[0]
+    assert left[1] == 0 and left[3] == h
+    assert right[1] == 0 and right[3] == h
+
+    # Portrait: top + bottom halves with vertical overlap.
+    hp, wp = 1000, 800
+    rois_p = _overlapping_quad_rois(hp, wp, DEFAULT_QUADTREE_OVERLAP_FRAC)
+    assert len(rois_p) == 2
+    top, bottom = rois_p
+    assert top[3] > bottom[1]
+    assert top[0] == 0 and top[2] == wp
+    assert bottom[0] == 0 and bottom[2] == wp
 
 
 def test_quadtree_can_split_respects_depth_and_min_side():
     assert _quadtree_can_split(640, 640, 0) is True
     assert _quadtree_can_split(640, 640, DEFAULT_QUADTREE_MAX_DEPTH) is False
-    assert _quadtree_can_split(DEFAULT_QUADTREE_MIN_SIDE * 2 - 1, 1000, 0) is False
-    assert _quadtree_can_split(1000, DEFAULT_QUADTREE_MIN_SIDE * 2 - 1, 0) is False
+    # Split axis half must stay >= min_side; the short axis is ignored.
+    assert _quadtree_can_split(DEFAULT_QUADTREE_MIN_SIDE * 2 - 1, 1000, 0) is True
+    assert _quadtree_can_split(1000, DEFAULT_QUADTREE_MIN_SIDE * 2 - 1, 0) is True
+    assert _quadtree_can_split(
+        DEFAULT_QUADTREE_MIN_SIDE * 2 - 1,
+        DEFAULT_QUADTREE_MIN_SIDE * 2 - 1,
+        0,
+    ) is False
 
 
 def test_no_split_when_under_cap(monkeypatch: pytest.MonkeyPatch):
@@ -111,7 +123,7 @@ def test_no_split_when_under_cap(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_split_once_when_full_image_hits_cap(monkeypatch: pytest.MonkeyPatch):
-    """Full image returns 300 valid; each tile returns fewer → four extra infers."""
+    """Full image returns 300 valid; each tile returns fewer → two extra infers."""
     call_shapes: list[tuple[int, ...]] = []
     call_i = {"n": 0}
     lock = threading.Lock()
@@ -141,8 +153,8 @@ def test_split_once_when_full_image_hits_cap(monkeypatch: pytest.MonkeyPatch):
         overlap_refine=False,
     )
 
-    # 1 full + 4 tiles
-    assert call_i["n"] == 5
+    # 1 full + 2 tiles
+    assert call_i["n"] == 3
     assert len(xyxy) > 0
     # All boxes must lie inside the parent image.
     assert int(xyxy[:, 0].min()) >= 0
@@ -183,10 +195,10 @@ def test_cross_tile_nms_collapses_duplicate_seam_boxes(
         overlap_refine=False,
     )
 
-    assert call_i["n"] == 5
-    # Seam duplicates should not yield four independent boxes of the same content.
+    assert call_i["n"] == 3
+    # Seam duplicates should not yield two independent boxes of the same content.
     # Exact count depends on scale/offset; at most a small handful after NMS.
-    assert len(xyxy) <= 4
+    assert len(xyxy) <= 2
     assert all(int(c) == YOLO_CLASS_ELEMENT for c in cls_ids)
 
 
@@ -224,8 +236,8 @@ def test_recurse_when_tile_also_hits_cap(monkeypatch: pytest.MonkeyPatch):
         overlap_refine=False,
     )
 
-    # 1 full + 4 depth-1 tiles + 4 grandchildren from the one capping tile.
-    assert call_i["n"] == 9
+    # 1 full + 2 depth-1 tiles + 2 grandchildren from the one capping tile.
+    assert call_i["n"] == 5
     assert len(xyxy) > 0
     assert len(scores) == len(xyxy)
 
@@ -242,7 +254,7 @@ def test_safety_stops_split_on_small_image(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(yolo_mod, "_run_yolo_raw_output", fake_infer)
 
-    # half of 500 = 250 < 320 → no split
+    # half of 639 = 319 < 320 → no split
     side = DEFAULT_QUADTREE_MIN_SIDE * 2 - 1
     bgr = np.zeros((side, side, 3), dtype=np.uint8)
     xyxy, scores, cls_ids = run_yolo_onnx_end2end(
@@ -271,15 +283,15 @@ def test_safety_stops_at_max_depth(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(yolo_mod, "_run_yolo_raw_output", fake_infer)
 
     # Large enough that size stop does not fire before depth stop.
-    # Depth 0 → 4, depth 1 → 16, depth 2 → 64 leaves at depth 3 (no further split).
-    # Infers: 1 + 4 + 16 + 64 = 85
+    # Depth 0 → 2, depth 1 → 4, depth 2 → 8 leaves at depth 3 (no further split).
+    # Infers: 1 + 2 + 4 + 8 = 15
     side = 4096
     bgr = np.zeros((side, side, 3), dtype=np.uint8)
     run_yolo_onnx_end2end(bgr, class_ids={YOLO_CLASS_TEXT}, overlap_refine=False)
 
     expected = 1
     for d in range(DEFAULT_QUADTREE_MAX_DEPTH):
-        expected += 4 ** (d + 1)
+        expected += 2 ** (d + 1)
     assert call_i["n"] == expected
 
 
@@ -301,7 +313,7 @@ def test_cap_uses_raw_buffer_length(monkeypatch: pytest.MonkeyPatch):
 
     bgr = np.zeros((800, 800, 3), dtype=np.uint8)
     run_yolo_onnx_end2end(bgr, class_ids={YOLO_CLASS_TEXT}, overlap_refine=False)
-    assert call_i["n"] == 5
+    assert call_i["n"] == 3
 
 
 def test_letterbox_input_size_unchanged_in_helpers():

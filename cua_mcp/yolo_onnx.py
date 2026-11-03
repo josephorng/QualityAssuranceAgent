@@ -8,10 +8,11 @@ coordinates are mapped back with the same ``scale_boxes`` math as ``ultralytics`
 
 End-to-end output ``(1, N, 6+)`` — ``x1,y1,x2,y2,score,cls``; NMS is in the graph
 (Ultralytics default ``max_det`` ⇒ ``N`` ≈ :data:`YOLO_END2END_MAX_DET`). When a pass
-fills that buffer, :func:`run_yolo_onnx_end2end` recursively splits the image into an
-overlapping 2×2 quadtree, re-infers each tile (in parallel), and merges results.
+fills that buffer, :func:`run_yolo_onnx_end2end` recursively splits the image into two
+overlapping halves along the longer axis, re-infers each tile (in parallel), and merges
+results.
 
-After the full-frame / quadtree pass, overlapping or tall ``text`` clusters can be
+After the full-frame / binary-tile pass, overlapping or tall ``text`` clusters can be
 crop-refined via :func:`cua_mcp.yolo_divide_conquer.refine_overlapping_text_with_crops`
 (Stage 3; on by default), and any ``text`` box still holding multiple lines is split at
 row-profile valleys by :func:`cua_mcp.text_line_cut.cut_multiline_text_boxes` (Stage 4;
@@ -53,8 +54,8 @@ DEFAULT_CONF_YOLOV26_END2END: float = 0.05
 # Ultralytics end2end export default ``max_det`` / output slot count ``(1, N, 6+)``.
 YOLO_END2END_MAX_DET: int = 300
 
-# When valid conf detections fill :data:`YOLO_END2END_MAX_DET`, split into overlapping
-# 2×2 tiles and re-run (quadtree). Only tiles that still hit the cap recurse further.
+# When valid conf detections fill :data:`YOLO_END2END_MAX_DET`, split into two overlapping
+# halves along the longer axis and re-run. Only tiles that still hit the cap recurse.
 DEFAULT_QUADTREE_OVERLAP_FRAC: float = 0.125
 DEFAULT_QUADTREE_MAX_DEPTH: int = 3
 DEFAULT_QUADTREE_MIN_SIDE: int = 320
@@ -159,21 +160,25 @@ def _overlapping_quad_rois(
     overlap_frac: float = DEFAULT_QUADTREE_OVERLAP_FRAC,
 ) -> list[tuple[int, int, int, int]]:
     """
-    Four ``(x1, y1, x2, y2)`` ROIs from a mid split with overlap expanded toward edges.
+    Two ``(x1, y1, x2, y2)`` ROIs from a longer-axis mid split with overlap.
 
-    ``overlap_frac`` is a fraction of each half-size (e.g. ``0.125`` ⇒ each tile grows by
-    12.5% of half-width / half-height into the opposite half). Clipped to image bounds.
+    Landscape / square (``w >= h``): left + right. Portrait: top + bottom.
+    ``overlap_frac`` is a fraction of the half-size on the split axis (e.g. ``0.125``).
+    Clipped to image bounds.
     """
-    mid_x = w // 2
+    overlap_frac = max(0.0, float(overlap_frac))
+    if w >= h:
+        mid_x = w // 2
+        ox = int(round(mid_x * overlap_frac))
+        return [
+            (0, 0, min(w, mid_x + ox), h),
+            (max(0, mid_x - ox), 0, w, h),
+        ]
     mid_y = h // 2
-    ox = int(round(mid_x * float(overlap_frac)))
-    oy = int(round(mid_y * float(overlap_frac)))
-    # TL, TR, BL, BR
+    oy = int(round(mid_y * overlap_frac))
     return [
-        (0, 0, min(w, mid_x + ox), min(h, mid_y + oy)),
-        (max(0, mid_x - ox), 0, w, min(h, mid_y + oy)),
-        (0, max(0, mid_y - oy), min(w, mid_x + ox), h),
-        (max(0, mid_x - ox), max(0, mid_y - oy), w, h),
+        (0, 0, w, min(h, mid_y + oy)),
+        (0, max(0, mid_y - oy), w, h),
     ]
 
 
@@ -243,13 +248,14 @@ def _quadtree_can_split(
     max_depth: int = DEFAULT_QUADTREE_MAX_DEPTH,
     min_side: int = DEFAULT_QUADTREE_MIN_SIDE,
 ) -> bool:
-    """True if recursive 2×2 split is allowed at this depth/size."""
+    """True if a longer-axis binary split is allowed at this depth/size."""
     if depth >= max_depth:
         return False
-    # After a mid split, each half (before overlap) must remain at least ``min_side``.
-    if h // 2 < min_side or w // 2 < min_side:
-        return False
-    return True
+    # After the mid cut on the longer axis, that half (before overlap) must stay
+    # at least ``min_side``.
+    if w >= h:
+        return w // 2 >= min_side
+    return h // 2 >= min_side
 
 
 def run_yolo_onnx_end2end(
@@ -268,7 +274,7 @@ def run_yolo_onnx_end2end(
     Preprocess ``bgr``, run YOLOv26 end2end via Triton, and return
     ``(xyxy, scores, class_ids)`` filtered to ``class_ids``.
 
-    A full detection buffer triggers the overlapping quadtree. Same-class merge,
+    A full detection buffer triggers the overlapping binary-tile split. Same-class merge,
     input expansion, small-text-as-element, overlap refine, and line cut follow
     the module defaults. ``enhance_roi`` limits Stage 3/4 to that xywh box
     (padded by ``enhance_roi_pad``). The first YOLO pass stays full-frame.
@@ -387,7 +393,7 @@ def _run_yolo_onnx_end2end_recursive(
     # Cap hit: discard truncated full-image decode; results come only from tiles.
     rois = _overlapping_quad_rois(h0, w0, DEFAULT_QUADTREE_OVERLAP_FRAC)
     _log_yolo_profile(
-        f"quadtree split depth={depth} size={w0}x{h0} "
+        f"binary-tile split depth={depth} size={w0}x{h0} "
         f"valid={valid} max_det={max_det} tiles={len(rois)}"
     )
 

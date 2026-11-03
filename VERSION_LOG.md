@@ -2,35 +2,23 @@
 
 （每次成功的 `nuitka.bat` 發行建置會在此處新增一筆說明。）
 
-## v1.0.0.1 — 2026-11-03 （草稿／原文）
+## v1.0.0.2 — 2026-11-03
 
-- Log why UIA replay repair is skipped or misses.
-- Advance release version after successful Nuitka builds with Gemma Chinese changelogs.
-- Stop false caption-icon OCR relabel on tiny tool windows.
-- Keep click vision prefetch cache valid after settle focus_rect patches.
-- Pick text clicks by constellation radius then similarity.
-- Cap Triton infer concurrency and skip wasted instruction LLM on YOLO failure.
-- Add mid-replay single-step re-record for click gestures.
-- After overlay retry wait, re-verify before re-acting when tools already succeeded.
-- Ignore untitled WinForms residue in window_verify.
-- Retry find_mouse_point once when the UI changes mid-locate.
-- Keep window lists when after-settle UIA times out.
-- Stop live-grabbing typing OCR end frames.
-- Clip caret-thin typing OCR with UIA Edit/Document bounds.
-- Require appeared window verify to match recorded titles.
-- Allow UIA-first clicks on sparse dialogs without a landmark-count gate.
-- Strip variable Windows shell status from UIA landmark labels.
-- Fix UIA replay repair for inputs and scrollbar drags.
-- Keep a YOLO+OCR twin on UIA steps so replay can fall back when UIA fails.
-- Support UIA replay repair for input and scrollbar class targets.
-- Add UIA replay repair tests for icon OCR chinese_id confirmation.
-- Run OCR during YOLO+OCR capture so text anchors are not deferred away.
-- Disallow miss-path UIA writes so click naming never uses a post-click tree.
-- Stop press-time UIA FindAll so click naming uses a pre-click tree.
-- Gate UIA recording path on unique selectability instead of ≥8 texts.
-- Prefer-replace UIA scrollbars and inputs into YOLO+OCR mouse targeting.
-- icon change
-- Gate settle UIA cache reuse on previous-event freshness.
-- Add time profiling for the recording analyzing process.
-- Match move_mouse replay targets from structured args instead of hub-prose unwrap.
-- Collect UIA naming trees after settle, with press-time FindAll only on cache miss.
+- 優化重新錄製（re-record）機制，避免因重播間隔過大導致執行停滯，並確保前序步驟的結算等待時間正確。
+- 修復非同步報告寫入導致隊列執行名稱異常的問題，並優化執行報告索引的讀取邏輯。
+- 於執行啟動時初始化腳本事件索引，以支援 UIA 修復功能。
+- 優化腳本疊加（overlay）重試機制，限制單一步驟最多重試 3 次。
+- 優化 YOLO 切片邏輯，改為沿長軸切割，減少 Triton 請求數量以提升效率。
+
+## v1.0.0.1 — 2026-11-03
+
+- 優化 UIA 與 YOLO+OCR 混合修復機制，提升輸入框、滾動條與圖標點擊在重播時的穩定性。
+- 改善視窗辨識邏輯，排除無標題視窗或過小視窗的干擾，確保視窗驗證更精準。
+- 優化文字輸入與輸入法（IME）狀態下的 OCR 擷取範圍，減少誤判。
+- 提升重播分析效能，限制 Triton 推論並行度，並在視覺辨識失敗時跳過不必要的 LLM 指令。
+- 新增重播中途的單步重新錄製功能，支援在點擊手勢發生錯誤時進行局部修正。
+- 優化點擊目標匹配演算法，結合位置半徑與相似度，提升文字點擊的準確度。
+- 改進點擊時的 UIA 樹狀結構擷取時機，避免因 UI 變化導致標記錯誤的控制項。
+- 優化滑鼠定位機制，在 UI 變動時自動嘗試重新尋找座標。
+- 強化日誌與分析功能，於 `run.log` 提供詳細的 UIA 與 OCR 失敗原因，並在分析報告中加入時間剖析（Time Profiling）。
+- 優化 Office 等軟體標籤的名稱處理，避免因名稱正規化導致的匹配失效。

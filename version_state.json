@@ -1,37 +1,4 @@
 {
-  "last_logged_commit": "efef613e6cb8e53707eff82ad34600dbef028933",
-  "pending": {
-    "1.0.0.1": [
-      "Log why UIA replay repair is skipped or misses.\nSurface setup, slot-load, walk, and match miss reasons in run.log so YOLO+OCR repair failures are diagnosable without reading code.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Advance release version after successful Nuitka builds with Gemma Chinese changelogs.\nPersist VERSION only on green builds, archive prior exes by last version, and fall back to raw commit text when vLLM is unreachable for retry next time.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Stop false caption-icon OCR relabel on tiny tool windows.\nRelabel only against stored/DWM caption strips, and skip inventing fallback strips for hwnds too small for min/max/close.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Keep click vision prefetch cache valid after settle focus_rect patches.\nHash focus_rect/ocr_clip_rect/anchor_click_xy only for text_input so late debug focus_rect no longer forces analysis to re-run YOLO.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Pick text clicks by constellation radius then similarity.\nAttach landmark_geometry for recorded text steps so cache replay can prefer in-radius OCR labels like Linux (5) over distant exact Linux twins, without synth-clicking text.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Cap Triton infer concurrency and skip wasted instruction LLM on YOLO failure.\nEvent x tile parallelism was stamping the GPU into 20s timeouts; a process-wide inflight gate plus skipping LLM when pointer vision failed cuts retries and analysis wall time.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Add mid-replay single-step re-record for click gestures.\nPause, capture one click/double/right-click, overwrite that event in place, reanalyze it, then retry and continue the same replay.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "After overlay retry wait, re-verify before re-acting when tools already succeeded.\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Ignore untitled WinForms residue in window_verify.\nBlank sibling appears no longer cancel titled closes, and untitled disappear/appear noise is dropped so Loading teardown is not attributed to the next click.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Retry find_mouse_point once when the UI changes mid-locate.\nSoft misses often happen because the screen moved during slow UIA/YOLO/OCR; compare the fresh ROI to the attempt capture and re-run once when MAD is high.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Keep window lists when after-settle UIA times out.\nClosing-window UIA hangs were discarding the already-enumerated before/after snapshots, so closes never landed on the click that caused them.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Stop live-grabbing typing OCR end frames.\nReuse the next step's before-shot on the same monitor, and encode the typing monitor's before-shot cache only for cross-monitor OCR so after frames stay settle-stable.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Clip caret-thin typing OCR with UIA Edit/Document bounds.\nKeep focus_rect as the caret for typing point/debug, and store a guarded ocr_clip_rect so Chinese-IME resolution does not pick nearby chrome OCR.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Require appeared window verify to match recorded titles.\nSame-app siblings (e.g. a loader vs login dialog) no longer satisfy a titled appear check, and successful verify advances now report that window verify passed instead of implying it was skipped.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Allow UIA-first clicks on sparse dialogs without a landmark-count gate.\nSmall windows like login forms often have fewer than eight UIA texts even when the exact AutomationId target is present; unique exact match already guards false commits.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Strip variable Windows shell status from UIA landmark labels.\nTaskbar running-window counts and pinned markers change between sessions, so canonicalize Names at extraction and match time.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Fix UIA replay repair for inputs and scrollbar drags.\nRestrict off-track scrollbar matching to drag ends, keep YOLO+OCR twins when promoting to UIA, and persist pinned end repairs so later replays can use UIA-first.",
-      "Keep a YOLO+OCR twin on UIA steps so replay can fall back when UIA fails.\nRecord OCR instruction/tool_calls under yolo_ocr_fallback whenever UIA wins, preserve that twin across repair/re-analysis, and thread live UIA control_type into repaired hubs.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Support UIA replay repair for input and scrollbar class targets.\nPrefer the clicked 輸入欄/滾動條 bbox over neighbor OCR, confirm via live class overlap, and rewrite bare class anchors when persisting a UIA name.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Add UIA replay repair tests for icon OCR chinese_id confirmation.\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Run OCR during YOLO+OCR capture so text anchors are not deferred away.\nDeferral only helps UIA soft-select; for yolo_ocr it left unread boxes and failed similarity match. Also confirm repair with icon OCR ids and avoid dropping OCR when pending_out is missing.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Disallow miss-path UIA writes so click naming never uses a post-click tree.\nRemove leftover press-time FindAll plumbing and reject late patches to uia_snapshot; cache misses stay empty for YOLO/OCR.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Stop press-time UIA FindAll so click naming uses a pre-click tree.\nA live FindAll started on mouse-down often finished after UI changes (e.g. Excel File to Backstage), so analysis labeled the post-click control instead of the before-screenshot target.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Gate UIA recording path on unique selectability instead of ≥8 texts.\nSparse dialogs can use UIA when cover plus nearby landmarks uniquely pick the click target among peers.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Prefer-replace UIA scrollbars and inputs into YOLO+OCR mouse targeting.\nFixes track-percent drags when YOLO misses chrome or arrow-end drop erases bars, while keeping UIA text out of the OCR candidate path.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "icon change",
-      "Gate settle UIA cache reuse on previous-event freshness.\nAvoid latching a same-hwnd Explorer tree from an older step when the prior event's settle FindAll is still in flight.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Add time profiling for the recording analyzing process.\nTrack wall-clock analysis phases and per-event vision/instruction timings in report and analysis JSON, persist YOLO/OCR seconds, and show them in the recording HTML profile tab.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Match move_mouse replay targets from structured args instead of hub-prose unwrap.\nOffice names like [檔案] 索引標籤 were collapsing during label normalize; compile now stores anchor_text/control_type/vision_mode and matching uses those fields when present.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>",
-      "Collect UIA naming trees after settle, with press-time FindAll only on cache miss.\nStops racing FindAll against same-window clicks while still covering cross-window and slow Excel settle cases via a fallback under the click hwnd.\n\nCo-authored-by: Cursor <cursoragent@cursor.com>"
-    ]
-  }
+  "last_logged_commit": "12ace2871fd8fa16a7cbaf27b4f9b9993f4b0487",
+  "pending": {}
 }

@@ -41,6 +41,9 @@ SECTION_HEADER_RE = re.compile(
     r"^## v(?P<version>\d+\.\d+\.\d+\.\d+) — (?P<date>\d{4}-\d{2}-\d{2})"
     r"(?P<draft>\s*（草稿／原文）)?\s*$"
 )
+_RELEASE_COMMIT_SUBJECT_RE = re.compile(
+    r"^Release v\d+\.\d+\.\d+\.\d+ changelog\.$"
+)
 
 
 def _run_git(*args: str) -> str:
@@ -121,8 +124,14 @@ def _collect_new_commits(last_logged_commit: str | None) -> list[str]:
     commits: list[str] = []
     for block in raw.split("\n---"):
         text = "\n".join(line.rstrip() for line in block.strip().splitlines()).strip()
-        if text:
-            commits.append(text)
+        if not text:
+            continue
+        subject = text.splitlines()[0].strip()
+        # Skip auto-commits created by this script so they do not reappear
+        # in the next release notes.
+        if _RELEASE_COMMIT_SUBJECT_RE.match(subject):
+            continue
+        commits.append(text)
     return commits
 
 
@@ -301,6 +310,55 @@ def _head_sha() -> str:
     return _run_git("rev-parse", "HEAD").strip()
 
 
+def _git_ok(*args: str) -> bool:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip()
+        print(f"warning: git {' '.join(args)} failed: {err}", file=sys.stderr)
+        return False
+    return True
+
+
+def _commit_version_files(version: str) -> None:
+    """Stage and commit VERSION / VERSION_LOG.md / version_state.json only."""
+    paths = ("VERSION", "VERSION_LOG.md", "version_state.json")
+    if not _git_ok("add", "--", *paths):
+        return
+
+    status = subprocess.run(
+        ["git", "diff", "--cached", "--quiet", "--", *paths],
+        cwd=ROOT,
+        check=False,
+    )
+    if status.returncode == 0:
+        print("release_version_log: version files unchanged; skip commit")
+        return
+
+    message = f"Release v{version} changelog."
+    # Message file avoids shell quoting issues on Windows.
+    msg_path = ROOT / ".git" / "RELEASE_VERSION_COMMIT_MSG"
+    try:
+        msg_path.write_text(message + "\n", encoding="utf-8")
+        if not _git_ok("commit", "-F", str(msg_path)):
+            _git_ok("reset", "HEAD", "--", *paths)
+            return
+    finally:
+        try:
+            msg_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    print(f"release_version_log: committed release files at {_head_sha()[:12]}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -390,6 +448,7 @@ def main(argv: list[str] | None = None) -> int:
             + ", ".join(still_pending.keys())
         )
     print(f"release_version_log: VERSION -> {new_version}")
+    _commit_version_files(new_version)
     return 0
 
 

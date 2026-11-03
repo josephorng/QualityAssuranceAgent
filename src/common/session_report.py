@@ -10,13 +10,19 @@ from typing import Any
 
 from src.common.io_utils import write_json
 from src.common.run_state import parse_step_artifact_stem, step_filenames_are_one_based
-from src.common.runtime_context import SCRIPT_PATH_ENV, SMART_GOAL_ENV, SMART_MODE_ENV
+from src.common.runtime_context import (
+    RUN_ROOT_ENV,
+    SCRIPT_PATH_ENV,
+    SMART_GOAL_ENV,
+    SMART_MODE_ENV,
+)
 
 _REPORT_VERSION = 1
 _RUNTIME_COMMANDS_NAME = "runtime_commands.txt"
 _SMART_EVENTS_NAME = "smart_events.jsonl"
 _SMART_STATE_NAME = "smart_state.json"
 _QUEUE_SCRIPT_LOG_MARKER = "Queue starting coordinator for "
+_QUEUE_SKIP_VERIFY_SUFFIX = " (skipping all verification)"
 _RUN_FOLDER_TS_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}_(\d{8})_(\d{6})_\d+$")
 _ROLE_USER = "user"
 _ROLE_ASSISTANT = "assistant"
@@ -1095,7 +1101,42 @@ def _build_summary(
     return summary
 
 
-def _resolve_script_metadata(run_root: Path) -> dict[str, str]:
+def _env_belongs_to_run(run_root: Path) -> bool:
+    """True when process env describes ``run_root`` (or no active run is marked).
+
+    Queue report writes are async: the next script can overwrite ``CUA_SCRIPT_PATH``
+    / ``CUA_RUN_ROOT`` before the previous report is built. Reject env that belongs
+    to a different run so we fall back to run-local artifacts (``run.log``, etc.).
+    """
+    raw = os.environ.get(RUN_ROOT_ENV, "").strip()
+    if not raw:
+        # Tests / offline rebuilds may set script env without RUN_ROOT.
+        return True
+    try:
+        return Path(raw).resolve() == run_root.resolve()
+    except OSError:
+        return False
+
+
+def _queue_script_name_from_run_log(run_root: Path) -> str | None:
+    log_path = run_root / "run.log"
+    if not log_path.is_file():
+        return None
+    try:
+        for line in log_path.read_text(encoding="utf-8").splitlines():
+            if _QUEUE_SCRIPT_LOG_MARKER not in line:
+                continue
+            name = line.split(_QUEUE_SCRIPT_LOG_MARKER, 1)[1].strip()
+            if name.endswith(_QUEUE_SKIP_VERIFY_SUFFIX):
+                name = name[: -len(_QUEUE_SKIP_VERIFY_SUFFIX)].strip()
+            if name:
+                return name
+    except OSError:
+        return None
+    return None
+
+
+def _script_metadata_from_env() -> dict[str, str]:
     if os.environ.get(SMART_MODE_ENV, "").strip().lower() in ("1", "true", "yes"):
         goal = os.environ.get(SMART_GOAL_ENV, "").strip()
         meta: dict[str, str] = {"run_mode": "smart"}
@@ -1112,6 +1153,17 @@ def _resolve_script_metadata(run_root: Path) -> dict[str, str]:
             meta["smart_goal"] = goal
         return meta
 
+    script_path_raw = os.environ.get(SCRIPT_PATH_ENV, "").strip()
+    if script_path_raw:
+        path = Path(script_path_raw)
+        from src.common.script_helper import script_display_name
+
+        return {"script_path": str(path), "script_name": script_display_name(path)}
+    return {}
+
+
+def _resolve_script_metadata(run_root: Path) -> dict[str, str]:
+    # Prefer run-local smart state so queue races cannot invent smart metadata.
     smart_state_path = run_root / _SMART_STATE_NAME
     if smart_state_path.is_file():
         try:
@@ -1125,23 +1177,16 @@ def _resolve_script_metadata(run_root: Path) -> dict[str, str]:
                 meta["smart_goal"] = goal.strip()
             return meta
 
-    script_path_raw = os.environ.get(SCRIPT_PATH_ENV, "").strip()
-    if script_path_raw:
-        path = Path(script_path_raw)
-        from src.common.script_helper import script_display_name
+    # Live env is only safe when it still points at this run (queue report writes
+    # are async and the next prepare_run_session overwrites process env).
+    if _env_belongs_to_run(run_root):
+        env_meta = _script_metadata_from_env()
+        if env_meta:
+            return env_meta
 
-        return {"script_path": str(path), "script_name": script_display_name(path)}
-
-    log_path = run_root / "run.log"
-    if log_path.is_file():
-        try:
-            for line in log_path.read_text(encoding="utf-8").splitlines():
-                if _QUEUE_SCRIPT_LOG_MARKER in line:
-                    name = line.split(_QUEUE_SCRIPT_LOG_MARKER, 1)[1].strip()
-                    if name:
-                        return {"script_name": name}
-        except OSError:
-            pass
+    queue_name = _queue_script_name_from_run_log(run_root)
+    if queue_name:
+        return {"script_name": queue_name}
 
     if (run_root / _RUNTIME_COMMANDS_NAME).is_file():
         return {"script_name": _RUNTIME_COMMANDS_NAME}

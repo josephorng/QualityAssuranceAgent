@@ -19,13 +19,16 @@ from src.common.script_helper import (
     recording_event_json_paths,
     script_display_name,
 )
-from src.common.session_report import _resolve_script_metadata, _resolve_started_at_utc
+from src.common.session_report import (
+    _queue_script_name_from_run_log,
+    _resolve_script_metadata,
+    _resolve_started_at_utc,
+)
 
 _HTML_NAME = "session_steps.html"
 _RECORDING_HTML_NAME = "recording_steps.html"
 _INDEX_HTML_NAME = "index.html"
 _RUN_FOLDER_TS_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}_(\d{8})_(\d{6})_\d+$")
-_QUEUE_SCRIPT_LOG_MARKER = "Queue starting coordinator for "
 _HAND_OP_PREFIX = "動作 "
 _UNGROUPED_GOAL = "未分類動作"
 _FALLBACK_GOAL = "手部動作"
@@ -5223,7 +5226,11 @@ def _reason_badge_class(reason: str, *, has_failures: bool) -> str:
 
 
 def _resolve_index_script_name(run_root: Path, report: dict[str, Any] | None) -> str:
-    """Prefer the saved instruction/script filename, then smart goal text, then folder name."""
+    """Prefer the saved instruction/script filename, then smart goal text, then folder name.
+
+    Queue ``run.log`` markers win over ``report.json``: async queue report writes can
+    bake the *next* script's ``CUA_SCRIPT_PATH`` into the previous report.
+    """
 
     def _filename_from(payload: dict[str, Any] | None) -> str | None:
         if not isinstance(payload, dict):
@@ -5243,6 +5250,10 @@ def _resolve_index_script_name(run_root: Path, report: dict[str, Any] | None) ->
         if isinstance(goal, str) and goal.strip():
             return goal.strip()
         return None
+
+    queue_name = _queue_script_name_from_run_log(run_root)
+    if queue_name:
+        return queue_name
 
     filename = _filename_from(report)
     if filename:
@@ -5264,17 +5275,6 @@ def _resolve_index_script_name(run_root: Path, report: dict[str, Any] | None) ->
         return goal
     if meta.get("script_name"):
         return meta["script_name"]
-
-    log_path = run_root / "run.log"
-    if log_path.is_file():
-        try:
-            for line in log_path.read_text(encoding="utf-8").splitlines():
-                if _QUEUE_SCRIPT_LOG_MARKER in line:
-                    name = line.split(_QUEUE_SCRIPT_LOG_MARKER, 1)[1].strip()
-                    if name:
-                        return name
-        except OSError:
-            pass
 
     return run_root.name
 

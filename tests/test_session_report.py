@@ -778,3 +778,50 @@ def test_write_session_report_skips_recording_backfill(tmp_path: Path) -> None:
     assert not recording_html_path(recording).is_file()
     assert (run_root / "session_steps.html").is_file()
     assert (tmp_path / "index.html").is_file()
+
+
+def test_build_session_report_ignores_next_queue_script_env(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Async queue report writes must not pick up the following script's env."""
+    from src.common.runtime_context import RUN_ROOT_ENV, SCRIPT_PATH_ENV
+    from src.common.session_report import build_session_report
+
+    first = tmp_path / "開啟神網_3_20261103_072813_376513"
+    first.mkdir()
+    (first / "run.log").write_text(
+        "[ts] [app_main_hub] Queue starting coordinator for 開啟神網_3 "
+        "(skipping all verification)\n",
+        encoding="utf-8",
+    )
+    _write_step(first / "steps", 0, 0, goal="open", messages=[])
+
+    second = tmp_path / "電腦資產_2_20261103_072830_424974"
+    second_script = tmp_path / "電腦資產_2"
+    second_script.mkdir()
+    monkeypatch.setenv(RUN_ROOT_ENV, str(second))
+    monkeypatch.setenv(SCRIPT_PATH_ENV, str(second_script))
+
+    report = build_session_report(first, session_end_reason="completed")
+    assert report.get("script_name") == "開啟神網_3"
+    assert report.get("script_path") is None
+
+
+def test_build_session_report_uses_matching_script_env(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from src.common.runtime_context import RUN_ROOT_ENV, SCRIPT_PATH_ENV
+    from src.common.session_report import build_session_report
+
+    run_root = tmp_path / "task_live"
+    run_root.mkdir()
+    script = tmp_path / "my_script.txt"
+    script.write_text("step\n", encoding="utf-8")
+    _write_step(run_root / "steps", 0, 0, goal="step", messages=[])
+
+    monkeypatch.setenv(RUN_ROOT_ENV, str(run_root))
+    monkeypatch.setenv(SCRIPT_PATH_ENV, str(script))
+
+    report = build_session_report(run_root, session_end_reason="completed")
+    assert report.get("script_name") == "my_script.txt"
+    assert report.get("script_path") == str(script)

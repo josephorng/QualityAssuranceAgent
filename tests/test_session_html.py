@@ -1475,6 +1475,37 @@ def test_write_runs_index_uses_run_log_script_name_when_report_missing(tmp_path:
     assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \(UTC[+-]\d{2}:\d{2}\)", html)
 
 
+def test_write_runs_index_prefers_queue_log_over_poisoned_report(tmp_path: Path) -> None:
+    """Race-poisoned report.json must not rename the first queue item in 執行報告."""
+    run_root = tmp_path / "開啟神網_3_20261103_072813_376513"
+    run_root.mkdir()
+    (run_root / "session_steps.html").write_text("<html></html>", encoding="utf-8")
+    (run_root / "run.log").write_text(
+        "[ts] [app_main_hub] Queue starting coordinator for 開啟神網_3\n",
+        encoding="utf-8",
+    )
+    (run_root / "report.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "run_id": run_root.name,
+                "script_name": "電腦資產_2",
+                "script_path": str(tmp_path / "電腦資產_2"),
+                "session_end_reason": "completed",
+                "summary": {},
+                "steps": [],
+                "tool_results": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_runs_index_html(tmp_path).read_text(encoding="utf-8")
+
+    assert "開啟神網_3" in html
+    assert "電腦資產_2" not in html
+
+
 def test_write_runs_index_empty_when_no_reports(tmp_path: Path) -> None:
     html = write_runs_index_html(tmp_path).read_text(encoding="utf-8")
 

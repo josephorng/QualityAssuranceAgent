@@ -4485,6 +4485,43 @@ def _try_uia_first_unique_select(
     return chosen, "hit"
 
 
+def _yolo_subtargets_inside_uia(
+    uia_det: UiDetection,
+    detections: list[UiDetection],
+    anchor: str,
+    *,
+    ocr_class_ids: frozenset[int] | set[int] | None = None,
+    threshold: float = _MOUSE_FILTER_SIMILARITY_THRESHOLD,
+) -> list[UiDetection]:
+    """YOLO/OCR dets whose centers lie in ``uia_det`` and match ``anchor``.
+
+    Used after a UIA-first hit on a repaired step: UIA picks the row/item, then
+    YOLO picks the expand glyph vs label text inside that box. UIA-sourced dets
+    are ignored so the sub-target stays a vision detection.
+    """
+    query = (anchor or "").strip()
+    if not query:
+        return []
+    uia_box = tuple(int(v) for v in uia_det.bbox)
+    allowed = (
+        frozenset(int(v) for v in ocr_class_ids)
+        if ocr_class_ids is not None
+        else None
+    )
+    matched: list[UiDetection] = []
+    for det in detections:
+        if str(det.source or "").strip() == "uia":
+            continue
+        if allowed is not None and int(det.class_id) not in allowed:
+            continue
+        if not point_in_rect_xywh(det.cx, det.cy, uia_box):
+            continue
+        if _detection_similarity_to_query(det, query) < threshold:
+            continue
+        matched.append(det)
+    return matched
+
+
 def _detections_from_uia_prefetched(
     uia_prefetched: tuple[
         list[tuple[int, int, int, int]] | None,
@@ -5268,6 +5305,7 @@ async def _find_mouse_point_attempt(
     nearby_phrases = nearby_hints_to_phrases(nearby_hints)
 
     uia_first_chosen: UiDetection | None = None
+    uia_yolo_subtarget_chosen: UiDetection | None = None
     grabbed_frames = False
     uia_dets: list[UiDetection] = []
     captured: list[tuple[int, np.ndarray]] = []
@@ -5403,7 +5441,7 @@ async def _find_mouse_point_attempt(
                     )
                     nearby_labels = nearby_hints_to_labels(nearby_hints)
                     nearby_phrases = nearby_hints_to_phrases(nearby_hints)
-        if uia_first_chosen is not None:
+        if uia_first_chosen is not None and ocr_fallback is None:
             detections = _sort_detections_reading_order(uia_dets)
             vision_timing = {
                 "capture_s": capture_s,
@@ -5420,6 +5458,72 @@ async def _find_mouse_point_attempt(
             }
             ocr_pendings = []
             _log_info("move_mouse uia_first=hit; skipping YOLO")
+        elif uia_first_chosen is not None and ocr_fallback is not None:
+            # Repaired YOLO step: UIA picked the item; YOLO picks expand vs text.
+            fb_plan = _mouse_vision_plan(
+                ocr_fallback.instruction,
+                list(ocr_fallback.nearby_objects) or None,
+            )
+            (
+                fb_anchor,
+                _fb_dx,
+                _fb_dy,
+                _fb_nearby,
+                _fb_char,
+                _fb_occ,
+                _fb_track,
+            ) = parse_mouse_target_instruction(ocr_fallback.instruction)
+            vision = await asyncio.to_thread(
+                _finish_captured_mouse_candidates,
+                monitor_indices,
+                image_paths,
+                captured,
+                capture_s,
+                yolo_conf_threshold,
+                ocr_class_ids=fb_plan.ocr_class_ids,
+                refine_with_uia=False,
+                click_window=click_window,
+                caption_roi_screen=caption_roi_screen,
+                landmark_geometry=ocr_fallback.landmark_geometry,
+                defer_ocr=False,
+            )
+            (
+                monitor_indices,
+                image_paths,
+                captured,
+                yolo_detections,
+                vision_timing,
+            ) = vision
+            _note_capture(captured)
+            vision_timing["vision_path"] = "uia_yolo_subtarget"
+            vision_timing["uia_first_hit"] = True
+            ocr_pendings = []
+            subtargets = _yolo_subtargets_inside_uia(
+                uia_first_chosen,
+                yolo_detections,
+                fb_anchor,
+                ocr_class_ids=fb_plan.ocr_class_ids,
+            )
+            detections = _sort_detections_reading_order(
+                [*uia_dets, *yolo_detections]
+            )
+            if len(subtargets) == 1:
+                uia_yolo_subtarget_chosen = subtargets[0]
+                _log_info(
+                    "move_mouse uia_yolo_subtarget hit "
+                    f"anchor={fb_anchor!r} "
+                    f"center=[{uia_yolo_subtarget_chosen.cx},"
+                    f"{uia_yolo_subtarget_chosen.cy}] "
+                    f"text={uia_yolo_subtarget_chosen.text!r} "
+                    f"icons={uia_yolo_subtarget_chosen.icons!r}"
+                )
+            else:
+                uia_yolo_subtarget_chosen = None
+                _log_info(
+                    "move_mouse uia_yolo_subtarget miss "
+                    f"anchor={fb_anchor!r} n={len(subtargets)}; "
+                    "keeping UIA center"
+                )
 
     if uia_first_chosen is None:
         # Defer leftover OCR only when a UIA soft-select might skip it.
@@ -5607,10 +5711,16 @@ async def _find_mouse_point_attempt(
     selection_method: str | None = None
     if uia_first_chosen is not None:
         select_started = time.perf_counter()
-        chosen = uia_first_chosen
+        if uia_yolo_subtarget_chosen is not None:
+            chosen = uia_yolo_subtarget_chosen
+            selection_method = "uia_yolo_subtarget"
+            select_phase = "uia_yolo_subtarget"
+        else:
+            chosen = uia_first_chosen
+            selection_method = "uia_first_unique"
+            select_phase = "select_unique"
         idx = 0
         selected_text = chosen.text
-        select_phase = "select_unique"
         select_s = time.perf_counter() - select_started
         nearby_matches: list[UiDetection] = []
         # Jump to resolve / meta construction (same as unique path below).
@@ -5668,7 +5778,7 @@ async def _find_mouse_point_attempt(
             },
             "peer_bboxes": overlay["peer_bboxes"],
             "landmarks": overlay["landmarks"],
-            "selection_method": "uia_first_unique",
+            "selection_method": selection_method,
             "timing": _timing_meta(
                 select_s=select_s, select_phase=select_phase
             ),

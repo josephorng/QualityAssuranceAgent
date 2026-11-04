@@ -4522,6 +4522,38 @@ def _yolo_subtargets_inside_uia(
     return matched
 
 
+def _pending_yolo_boxes_inside_uia(
+    uia_det: UiDetection,
+    pendings: list[_MouseOcrPending],
+    class_id: int,
+) -> list[UiDetection]:
+    """Unlabeled YOLO boxes of ``class_id`` whose centers lie in ``uia_det``.
+
+    Reads deferred ``_MouseOcrPending.ocr_boxes`` (image-local) and maps them to
+    screen space via ``coord_offset``, matching ``_finish_deferred_ocr_pendings``.
+    """
+    uia_box = tuple(int(v) for v in uia_det.bbox)
+    wanted = int(class_id)
+    matched: list[UiDetection] = []
+    for pending in pendings:
+        left, top = pending.coord_offset
+        for bbox, cls_id in zip(
+            pending.ocr_boxes, pending.ocr_class_id_list, strict=True
+        ):
+            if int(cls_id) != wanted:
+                continue
+            x, y, w, h = (int(v) for v in bbox)
+            screen_bbox = (x + left, y + top, w, h)
+            cx = screen_bbox[0] + screen_bbox[2] // 2
+            cy = screen_bbox[1] + screen_bbox[3] // 2
+            if not point_in_rect_xywh(cx, cy, uia_box):
+                continue
+            matched.append(
+                _detection_from_bbox(screen_bbox, wanted, source="yolo")
+            )
+    return matched
+
+
 def _detections_from_uia_prefetched(
     uia_prefetched: tuple[
         list[tuple[int, int, int, int]] | None,
@@ -5460,6 +5492,7 @@ async def _find_mouse_point_attempt(
             _log_info("move_mouse uia_first=hit; skipping YOLO")
         elif uia_first_chosen is not None and ocr_fallback is not None:
             # Repaired YOLO step: UIA picked the item; YOLO picks expand vs text.
+            # Defer OCR so a unique in-box TEXT/ELEMENT box can skip it.
             fb_plan = _mouse_vision_plan(
                 ocr_fallback.instruction,
                 list(ocr_fallback.nearby_objects) or None,
@@ -5485,7 +5518,7 @@ async def _find_mouse_point_attempt(
                 click_window=click_window,
                 caption_roi_screen=caption_roi_screen,
                 landmark_geometry=ocr_fallback.landmark_geometry,
-                defer_ocr=False,
+                defer_ocr=True,
             )
             (
                 monitor_indices,
@@ -5497,33 +5530,72 @@ async def _find_mouse_point_attempt(
             _note_capture(captured)
             vision_timing["vision_path"] = "uia_yolo_subtarget"
             vision_timing["uia_first_hit"] = True
+            pending_raw = vision_timing.pop("_ocr_pending", None)
+            deferred_pendings = (
+                list(pending_raw)
+                if isinstance(pending_raw, list) and pending_raw
+                else []
+            )
             ocr_pendings = []
-            subtargets = _yolo_subtargets_inside_uia(
-                uia_first_chosen,
-                yolo_detections,
-                fb_anchor,
-                ocr_class_ids=fb_plan.ocr_class_ids,
-            )
-            detections = _sort_detections_reading_order(
-                [*uia_dets, *yolo_detections]
-            )
-            if len(subtargets) == 1:
-                uia_yolo_subtarget_chosen = subtargets[0]
+            singleton_ids = fb_plan.ocr_class_ids
+            unique_box: UiDetection | None = None
+            if singleton_ids in (
+                frozenset({YOLO_CLASS_TEXT}),
+                frozenset({YOLO_CLASS_ELEMENT}),
+            ):
+                only_cls = next(iter(singleton_ids))
+                in_box = _pending_yolo_boxes_inside_uia(
+                    uia_first_chosen, deferred_pendings, only_cls
+                )
+                if len(in_box) == 1:
+                    unique_box = in_box[0]
+            if unique_box is not None:
+                uia_yolo_subtarget_chosen = unique_box
+                detections = _sort_detections_reading_order(
+                    [*uia_dets, *yolo_detections, unique_box]
+                )
                 _log_info(
-                    "move_mouse uia_yolo_subtarget hit "
+                    "move_mouse uia_yolo_subtarget unique_box_skip_ocr "
                     f"anchor={fb_anchor!r} "
-                    f"center=[{uia_yolo_subtarget_chosen.cx},"
-                    f"{uia_yolo_subtarget_chosen.cy}] "
-                    f"text={uia_yolo_subtarget_chosen.text!r} "
-                    f"icons={uia_yolo_subtarget_chosen.icons!r}"
+                    f"class_id={unique_box.class_id} "
+                    f"center=[{unique_box.cx},{unique_box.cy}]"
                 )
             else:
-                uia_yolo_subtarget_chosen = None
-                _log_info(
-                    "move_mouse uia_yolo_subtarget miss "
-                    f"anchor={fb_anchor!r} n={len(subtargets)}; "
-                    "keeping UIA center"
+                if deferred_pendings:
+                    yolo_detections, vision_timing = await asyncio.to_thread(
+                        _finish_deferred_ocr_pendings,
+                        deferred_pendings,
+                        timing_base=vision_timing,
+                    )
+                    capture_s = float(vision_timing.get("capture_s", 0.0))
+                    vision_timing["vision_path"] = "uia_yolo_subtarget"
+                    vision_timing["uia_first_hit"] = True
+                subtargets = _yolo_subtargets_inside_uia(
+                    uia_first_chosen,
+                    yolo_detections,
+                    fb_anchor,
+                    ocr_class_ids=fb_plan.ocr_class_ids,
                 )
+                detections = _sort_detections_reading_order(
+                    [*uia_dets, *yolo_detections]
+                )
+                if len(subtargets) == 1:
+                    uia_yolo_subtarget_chosen = subtargets[0]
+                    _log_info(
+                        "move_mouse uia_yolo_subtarget hit "
+                        f"anchor={fb_anchor!r} "
+                        f"center=[{uia_yolo_subtarget_chosen.cx},"
+                        f"{uia_yolo_subtarget_chosen.cy}] "
+                        f"text={uia_yolo_subtarget_chosen.text!r} "
+                        f"icons={uia_yolo_subtarget_chosen.icons!r}"
+                    )
+                else:
+                    uia_yolo_subtarget_chosen = None
+                    _log_info(
+                        "move_mouse uia_yolo_subtarget miss "
+                        f"anchor={fb_anchor!r} n={len(subtargets)}; "
+                        "keeping UIA center"
+                    )
 
     if uia_first_chosen is None:
         # Defer leftover OCR only when a UIA soft-select might skip it.
@@ -5703,8 +5775,70 @@ async def _find_mouse_point_attempt(
             repair_meta["nearby_objects"] = nearby_phrases
             repair_meta["screenshot_path"] = image_path
             repair_meta["screenshot_paths"] = image_paths
+            select_phase = "uia_replay_repair"
+            # Same-run: YOLO already ran for this step — prefer a unique
+            # in-box sub-target (expand glyph vs label) like later UIA runs.
+            target_kind = str(repair_meta.get("target_kind") or "")
+            bbox_raw = repair_meta.get("target_bbox")
+            if (
+                target_kind not in ("scrollbar", "input")
+                and isinstance(bbox_raw, dict)
+                and detections
+            ):
+                try:
+                    uia_box = (
+                        int(bbox_raw["x"]),
+                        int(bbox_raw["y"]),
+                        int(bbox_raw["w"]),
+                        int(bbox_raw["h"]),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    uia_box = None
+                if uia_box is not None and uia_box[2] > 0 and uia_box[3] > 0:
+                    uia_shell = _detection_from_bbox(
+                        uia_box,
+                        YOLO_CLASS_TEXT,
+                        text=str(repair_meta.get("target_text") or ""),
+                        source="uia",
+                    )
+                    subtargets = _yolo_subtargets_inside_uia(
+                        uia_shell,
+                        detections,
+                        match_anchor,
+                        ocr_class_ids=vision_plan.ocr_class_ids,
+                    )
+                    if len(subtargets) == 1:
+                        chosen = subtargets[0]
+                        gx, gy = chosen.cx, chosen.cy
+                        select_phase = "uia_yolo_subtarget"
+                        repair_meta["selection_method"] = "uia_yolo_subtarget"
+                        repair_meta["class_name"] = chosen.class_name
+                        repair_meta["target_kind"] = chosen.class_name
+                        repair_meta["target_text"] = chosen.text or ""
+                        repair_meta["target_icons"] = chosen.icons or []
+                        repair_meta["image_center"] = {"x": gx, "y": gy}
+                        repair_meta["resolved_center"] = {"x": gx, "y": gy}
+                        repair_meta["target_bbox"] = {
+                            "x": chosen.bbox[0],
+                            "y": chosen.bbox[1],
+                            "w": chosen.bbox[2],
+                            "h": chosen.bbox[3],
+                        }
+                        vision_timing["vision_path"] = "uia_yolo_subtarget"
+                        _log_info(
+                            "move_mouse uia_replay_repair yolo_subtarget hit "
+                            f"anchor={match_anchor!r} "
+                            f"center=[{gx},{gy}] "
+                            f"text={chosen.text!r} icons={chosen.icons!r}"
+                        )
+                    else:
+                        _log_info(
+                            "move_mouse uia_replay_repair yolo_subtarget miss "
+                            f"anchor={match_anchor!r} n={len(subtargets)}; "
+                            "keeping UIA repair center"
+                        )
             repair_meta["timing"] = _timing_meta(
-                select_s=0.0, select_phase="uia_replay_repair"
+                select_s=0.0, select_phase=select_phase
             )
             return _pack(gx, gy, repair_meta)
 

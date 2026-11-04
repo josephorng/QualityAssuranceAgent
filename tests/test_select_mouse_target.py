@@ -6608,6 +6608,174 @@ async def test_yolo_ocr_replay_overlaps_uia_walk_and_repairs(
 
 
 @pytest.mark.asyncio
+async def test_uia_replay_repair_unique_yolo_subtarget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same-run repair hit + one YOLO icon inside the UIA box → click the icon."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        UiaReplayRepairRequest,
+        bind_uia_replay_repairs,
+    )
+
+    expand_icon = _detection_from_bbox(
+        (14, 14, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "展開節點"}],
+        source="yolo",
+    )
+
+    def fake_snapshot(_click_window):
+        return None
+
+    def fake_capture(*_a, **_k):
+        timing = {
+            "capture_s": 0.01,
+            "yolo_s": 0.1,
+            "line_s": 0.0,
+            "uia_input_s": 0.0,
+            "uia_scrollbar_s": 0.0,
+            "uia_text_s": 0.0,
+            "ocr_s": 0.2,
+            "icon_ocr_retry_s": 0.0,
+            "total_s": 0.31,
+        }
+        frame = np.zeros((80, 160, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], [expand_icon], timing
+
+    def fake_attempt(_request, _click_window, _uia_boxes, _ocr_boxes, **_kwargs):
+        return 70, 24, {
+            "selection_method": "uia_replay_repair",
+            "target_kind": "text",
+            "target_text": "龜速的網域|1",
+            "target_bbox": {"x": 10, "y": 10, "w": 120, "h": 28},
+            "image_center": {"x": 70, "y": 24},
+            "resolved_center": {"x": 70, "y": 24},
+        }
+
+    monkeypatch.setattr(smt, "_live_uia_snapshot_for_click_window", fake_snapshot)
+    monkeypatch.setattr(smt, "_capture_and_detect_mouse_candidates", fake_capture)
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+    monkeypatch.setattr(
+        "src.recorder.uia_replay_repair.attempt_uia_replay_repair",
+        fake_attempt,
+    )
+    request = UiaReplayRepairRequest(
+        recording_dir=Path("."),
+        event_index=3,
+        side="click",
+        recorded_bbox=(14, 14, 12, 12),
+        recorded_text="展開節點",
+        recorded_window_xywh=(0, 0, 200, 200),
+        recorded_is_icon=True,
+    )
+    with bind_uia_replay_repairs([request]):
+        with smt.require_similarity_match():
+            found = await smt.find_mouse_point(
+                "（YOLO+OCR）將滑鼠移到「展開節點」圖示，並點擊滑鼠一下。",
+                click_window={
+                    "hwnd": 5,
+                    "title": "資產",
+                    "process_name": "app.exe",
+                    "rect": [0, 0, 200, 200],
+                },
+            )
+    assert found is not None
+    assert found[0:2] == (expand_icon.cx, expand_icon.cy)
+    assert found[2]["selection_method"] == "uia_yolo_subtarget"
+    phases = found[2]["timing"]["phases"]
+    assert any(phase.get("name") == "uia_yolo_subtarget" for phase in phases)
+
+
+@pytest.mark.asyncio
+async def test_uia_replay_repair_ambiguous_yolo_subtarget_keeps_uia(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same-run repair with two in-box YOLO matches → keep UIA repair center."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        UiaReplayRepairRequest,
+        bind_uia_replay_repairs,
+    )
+
+    icon_a = _detection_from_bbox(
+        (14, 14, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "展開節點"}],
+        source="yolo",
+    )
+    icon_b = _detection_from_bbox(
+        (90, 14, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "展開節點"}],
+        source="yolo",
+    )
+
+    def fake_snapshot(_click_window):
+        return None
+
+    def fake_capture(*_a, **_k):
+        timing = {
+            "capture_s": 0.01,
+            "yolo_s": 0.1,
+            "line_s": 0.0,
+            "uia_input_s": 0.0,
+            "uia_scrollbar_s": 0.0,
+            "uia_text_s": 0.0,
+            "ocr_s": 0.2,
+            "icon_ocr_retry_s": 0.0,
+            "total_s": 0.31,
+        }
+        frame = np.zeros((80, 160, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], [icon_a, icon_b], timing
+
+    def fake_attempt(_request, _click_window, _uia_boxes, _ocr_boxes, **_kwargs):
+        return 70, 24, {
+            "selection_method": "uia_replay_repair",
+            "target_kind": "text",
+            "target_text": "龜速的網域|1",
+            "target_bbox": {"x": 10, "y": 10, "w": 120, "h": 28},
+            "image_center": {"x": 70, "y": 24},
+            "resolved_center": {"x": 70, "y": 24},
+        }
+
+    monkeypatch.setattr(smt, "_live_uia_snapshot_for_click_window", fake_snapshot)
+    monkeypatch.setattr(smt, "_capture_and_detect_mouse_candidates", fake_capture)
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+    monkeypatch.setattr(
+        "src.recorder.uia_replay_repair.attempt_uia_replay_repair",
+        fake_attempt,
+    )
+    request = UiaReplayRepairRequest(
+        recording_dir=Path("."),
+        event_index=4,
+        side="click",
+        recorded_bbox=(14, 14, 12, 12),
+        recorded_text="展開節點",
+        recorded_window_xywh=(0, 0, 200, 200),
+        recorded_is_icon=True,
+    )
+    with bind_uia_replay_repairs([request]):
+        with smt.require_similarity_match():
+            found = await smt.find_mouse_point(
+                "（YOLO+OCR）將滑鼠移到「展開節點」圖示，並點擊滑鼠一下。",
+                click_window={
+                    "hwnd": 5,
+                    "title": "資產",
+                    "process_name": "app.exe",
+                    "rect": [0, 0, 200, 200],
+                },
+            )
+    assert found is not None
+    assert found[0:2] == (70, 24)
+    assert found[2]["selection_method"] == "uia_replay_repair"
+
+
+@pytest.mark.asyncio
 async def test_uia_instruction_does_not_replay_repair(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6716,11 +6884,50 @@ def test_yolo_subtargets_inside_uia_filters_and_matches() -> None:
     assert matched == [icon_in]
 
 
+def _ocr_pending_for_boxes(
+    boxes: list[tuple[tuple[int, int, int, int], int]],
+    *,
+    coord_offset: tuple[int, int] = (0, 0),
+):
+    """Minimal deferred OCR pending for UIA+fallback skip-OCR tests."""
+    import numpy as np
+
+    from cua_mcp.select_mouse_target import _MouseOcrPending
+
+    frame = np.zeros((80, 160, 3), dtype=np.uint8)
+    ocr_boxes = [bbox for bbox, _cls in boxes]
+    ocr_class_id_list = [cls for _bbox, cls in boxes]
+    return _MouseOcrPending(
+        bgr=frame,
+        ocr_boxes=ocr_boxes,
+        ocr_class_id_list=ocr_class_id_list,
+        partial_candidates=[],
+        used_uia_scrollbar=False,
+        coord_offset=coord_offset,
+        ocr_cache_key=1,
+        ocr_wanted=frozenset(ocr_class_id_list),
+        yolo_s=0.05,
+        line_s=0.0,
+        uia_input_s=0.0,
+        uia_scrollbar_s=0.0,
+        uia_text_s=0.0,
+        vision_started=0.0,
+        uia_text_orphans=0,
+        uia_text_ocr_skipped=0,
+        ocr_roi=None,
+        ocr_roi_pad=0,
+        refine_with_uia=False,
+        yolo_box_count=len(boxes),
+        input_box_count=0,
+        debug_layers={},
+    )
+
+
 @pytest.mark.asyncio
-async def test_uia_hit_with_fallback_unique_yolo_subtarget(
+async def test_uia_hit_with_fallback_unique_element_skips_ocr(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """UIA row hit + YOLO fallback with one in-box icon → click the icon."""
+    """One in-box element under …圖示 → click it without finishing OCR."""
     import numpy as np
 
     from cua_mcp import select_mouse_target as smt
@@ -6732,20 +6939,16 @@ async def test_uia_hit_with_fallback_unique_yolo_subtarget(
     uia_row = _detection_from_bbox(
         (10, 10, 120, 28), YOLO_CLASS_TEXT, text="龜速的網域|1", source="uia"
     )
-    expand_icon = _detection_from_bbox(
-        (14, 14, 12, 12),
-        YOLO_CLASS_ELEMENT,
-        icons=[{"chinese_id": "展開節點"}],
-        source="yolo",
-    )
-    finish_calls: list[str] = []
+    element_box = (14, 14, 12, 12)
+    deferred_calls: list[str] = []
 
     def fake_grab():
         frame = np.zeros((80, 160, 3), dtype=np.uint8)
         return [1], ["shot.png"], [(1, frame)], 0.01
 
     def fake_finish(*_a, **_k):
-        finish_calls.append("finish")
+        assert _k.get("defer_ocr") is True
+        pending = _ocr_pending_for_boxes([(element_box, YOLO_CLASS_ELEMENT)])
         timing = {
             "capture_s": 0.01,
             "yolo_s": 0.05,
@@ -6753,12 +6956,17 @@ async def test_uia_hit_with_fallback_unique_yolo_subtarget(
             "uia_input_s": 0.0,
             "uia_scrollbar_s": 0.0,
             "uia_text_s": 0.0,
-            "ocr_s": 0.02,
+            "ocr_s": 0.0,
             "icon_ocr_retry_s": 0.0,
-            "total_s": 0.08,
+            "total_s": 0.05,
+            "_ocr_pending": [pending],
         }
         frame = np.zeros((80, 160, 3), dtype=np.uint8)
-        return [1], ["shot.png"], [(1, frame)], [expand_icon], timing
+        return [1], ["shot.png"], [(1, frame)], [], timing
+
+    def fake_finish_deferred(*_a, **_k):
+        deferred_calls.append("finish_deferred")
+        raise AssertionError("unique in-box element must skip OCR")
 
     monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
     monkeypatch.setattr(
@@ -6772,6 +6980,7 @@ async def test_uia_hit_with_fallback_unique_yolo_subtarget(
         lambda *_a, **_k: (uia_row, "hit"),
     )
     monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
+    monkeypatch.setattr(smt, "_finish_deferred_ocr_pendings", fake_finish_deferred)
     monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
 
     fallback = YoloOcrMoveFallback(
@@ -6791,16 +7000,98 @@ async def test_uia_hit_with_fallback_unique_yolo_subtarget(
             control_type="text",
         )
     assert found is not None
-    assert found[0:2] == (expand_icon.cx, expand_icon.cy)
+    assert found[0:2] == (20, 20)  # center of (14,14,12,12)
     assert found[2]["selection_method"] == "uia_yolo_subtarget"
-    assert finish_calls == ["finish"]
+    assert deferred_calls == []
+
+
+@pytest.mark.asyncio
+async def test_uia_hit_with_fallback_unique_text_skips_ocr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One in-box text under …文字 → click it without finishing OCR."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        YoloOcrMoveFallback,
+        bind_yolo_ocr_fallbacks,
+    )
+
+    uia_row = _detection_from_bbox(
+        (10, 10, 120, 28), YOLO_CLASS_TEXT, text="龜速的網域|1", source="uia"
+    )
+    text_box = (40, 14, 50, 14)
+    deferred_calls: list[str] = []
+
+    def fake_grab():
+        frame = np.zeros((80, 160, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def fake_finish(*_a, **_k):
+        assert _k.get("defer_ocr") is True
+        pending = _ocr_pending_for_boxes([(text_box, YOLO_CLASS_TEXT)])
+        timing = {
+            "capture_s": 0.01,
+            "yolo_s": 0.05,
+            "line_s": 0.0,
+            "uia_input_s": 0.0,
+            "uia_scrollbar_s": 0.0,
+            "uia_text_s": 0.0,
+            "ocr_s": 0.0,
+            "icon_ocr_retry_s": 0.0,
+            "total_s": 0.05,
+            "_ocr_pending": [pending],
+        }
+        frame = np.zeros((80, 160, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], [], timing
+
+    def fake_finish_deferred(*_a, **_k):
+        deferred_calls.append("finish_deferred")
+        raise AssertionError("unique in-box text must skip OCR")
+
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(
+        smt,
+        "_uia_only_detections_for_click_window",
+        lambda *_a, **_k: [uia_row],
+    )
+    monkeypatch.setattr(
+        smt,
+        "_try_uia_first_unique_select",
+        lambda *_a, **_k: (uia_row, "hit"),
+    )
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
+    monkeypatch.setattr(smt, "_finish_deferred_ocr_pendings", fake_finish_deferred)
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+
+    fallback = YoloOcrMoveFallback(
+        instruction="（YOLO+OCR）將滑鼠移到「龜速的網域」文字，並點擊滑鼠一下。",
+    )
+    with bind_yolo_ocr_fallbacks([fallback]):
+        found = await smt.find_mouse_point(
+            "（UIA）將滑鼠移到「龜速的網域|1」文字",
+            click_window={
+                "hwnd": 5,
+                "title": "資產",
+                "process_name": "app.exe",
+                "rect": [0, 0, 200, 200],
+            },
+            vision_mode="uia",
+            anchor_text="龜速的網域|1",
+            control_type="text",
+        )
+    assert found is not None
+    assert found[0:2] == (65, 21)  # center of (40,14,50,14)
+    assert found[2]["selection_method"] == "uia_yolo_subtarget"
+    assert deferred_calls == []
 
 
 @pytest.mark.asyncio
 async def test_uia_hit_with_fallback_ambiguous_keeps_uia_center(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two matching YOLO icons inside the UIA box → keep UIA center."""
+    """Two in-box elements → finish OCR; two matches → keep UIA center."""
     import numpy as np
 
     from cua_mcp import select_mouse_target as smt
@@ -6824,12 +7115,20 @@ async def test_uia_hit_with_fallback_ambiguous_keeps_uia_center(
         icons=[{"chinese_id": "展開節點"}],
         source="yolo",
     )
+    deferred_calls: list[str] = []
 
     def fake_grab():
         frame = np.zeros((80, 160, 3), dtype=np.uint8)
         return [1], ["shot.png"], [(1, frame)], 0.01
 
     def fake_finish(*_a, **_k):
+        assert _k.get("defer_ocr") is True
+        pending = _ocr_pending_for_boxes(
+            [
+                ((14, 14, 12, 12), YOLO_CLASS_ELEMENT),
+                ((90, 14, 12, 12), YOLO_CLASS_ELEMENT),
+            ]
+        )
         timing = {
             "capture_s": 0.01,
             "yolo_s": 0.05,
@@ -6837,12 +7136,19 @@ async def test_uia_hit_with_fallback_ambiguous_keeps_uia_center(
             "uia_input_s": 0.0,
             "uia_scrollbar_s": 0.0,
             "uia_text_s": 0.0,
-            "ocr_s": 0.02,
+            "ocr_s": 0.0,
             "icon_ocr_retry_s": 0.0,
-            "total_s": 0.08,
+            "total_s": 0.05,
+            "_ocr_pending": [pending],
         }
         frame = np.zeros((80, 160, 3), dtype=np.uint8)
-        return [1], ["shot.png"], [(1, frame)], [icon_a, icon_b], timing
+        return [1], ["shot.png"], [(1, frame)], [], timing
+
+    def fake_finish_deferred(pendings, *, timing_base):
+        deferred_calls.append("finish_deferred")
+        timing = dict(timing_base)
+        timing["ocr_s"] = 0.02
+        return [icon_a, icon_b], timing
 
     monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
     monkeypatch.setattr(
@@ -6856,6 +7162,7 @@ async def test_uia_hit_with_fallback_ambiguous_keeps_uia_center(
         lambda *_a, **_k: (uia_row, "hit"),
     )
     monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
+    monkeypatch.setattr(smt, "_finish_deferred_ocr_pendings", fake_finish_deferred)
     monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
 
     fallback = YoloOcrMoveFallback(
@@ -6877,6 +7184,114 @@ async def test_uia_hit_with_fallback_ambiguous_keeps_uia_center(
     assert found is not None
     assert found[0:2] == (uia_row.cx, uia_row.cy)
     assert found[2]["selection_method"] == "uia_first_unique"
+    assert deferred_calls == ["finish_deferred"]
+
+
+@pytest.mark.asyncio
+async def test_uia_hit_with_fallback_both_class_plan_always_finishes_ocr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TEXT+ELEMENT plan never takes the unique-box OCR skip."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        YoloOcrMoveFallback,
+        bind_yolo_ocr_fallbacks,
+    )
+
+    uia_row = _detection_from_bbox(
+        (10, 10, 120, 28), YOLO_CLASS_TEXT, text="龜速的網域|1", source="uia"
+    )
+    expand_icon = _detection_from_bbox(
+        (14, 14, 12, 12),
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "展開節點"}],
+        source="yolo",
+    )
+    deferred_calls: list[str] = []
+
+    def fake_grab():
+        frame = np.zeros((80, 160, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def fake_finish(*_a, **_k):
+        assert _k.get("defer_ocr") is True
+        # Only one element in-box; skip would fire if plan were element-only.
+        pending = _ocr_pending_for_boxes([((14, 14, 12, 12), YOLO_CLASS_ELEMENT)])
+        timing = {
+            "capture_s": 0.01,
+            "yolo_s": 0.05,
+            "line_s": 0.0,
+            "uia_input_s": 0.0,
+            "uia_scrollbar_s": 0.0,
+            "uia_text_s": 0.0,
+            "ocr_s": 0.0,
+            "icon_ocr_retry_s": 0.0,
+            "total_s": 0.05,
+            "_ocr_pending": [pending],
+        }
+        frame = np.zeros((80, 160, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], [], timing
+
+    def fake_finish_deferred(pendings, *, timing_base):
+        deferred_calls.append("finish_deferred")
+        timing = dict(timing_base)
+        timing["ocr_s"] = 0.02
+        return [expand_icon], timing
+
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(
+        smt,
+        "_uia_only_detections_for_click_window",
+        lambda *_a, **_k: [uia_row],
+    )
+    monkeypatch.setattr(
+        smt,
+        "_try_uia_first_unique_select",
+        lambda *_a, **_k: (uia_row, "hit"),
+    )
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
+    monkeypatch.setattr(smt, "_finish_deferred_ocr_pendings", fake_finish_deferred)
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+
+    fallback = YoloOcrMoveFallback(
+        instruction="（YOLO+OCR）將滑鼠移到「展開節點」圖示，並點擊滑鼠一下。",
+        nearby_objects=("「龜速的網域」文字",),
+    )
+    with bind_yolo_ocr_fallbacks([fallback]):
+        found = await smt.find_mouse_point(
+            "（UIA）將滑鼠移到「龜速的網域|1」文字",
+            click_window={
+                "hwnd": 5,
+                "title": "資產",
+                "process_name": "app.exe",
+                "rect": [0, 0, 200, 200],
+            },
+            vision_mode="uia",
+            anchor_text="龜速的網域|1",
+            control_type="text",
+        )
+    assert found is not None
+    assert found[0:2] == (expand_icon.cx, expand_icon.cy)
+    assert found[2]["selection_method"] == "uia_yolo_subtarget"
+    assert deferred_calls == ["finish_deferred"]
+
+
+def test_pending_yolo_boxes_inside_uia_applies_offset() -> None:
+    from cua_mcp.select_mouse_target import _pending_yolo_boxes_inside_uia
+
+    uia = _detection_from_bbox(
+        (100, 50, 80, 30), YOLO_CLASS_TEXT, text="row", source="uia"
+    )
+    # Image-local (10,10); with offset (100,50) → screen (110,60) inside UIA.
+    pending = _ocr_pending_for_boxes(
+        [((10, 10, 12, 12), YOLO_CLASS_ELEMENT)],
+        coord_offset=(100, 50),
+    )
+    matched = _pending_yolo_boxes_inside_uia(uia, [pending], YOLO_CLASS_ELEMENT)
+    assert len(matched) == 1
+    assert matched[0].bbox == (110, 60, 12, 12)
 
 
 @pytest.mark.asyncio

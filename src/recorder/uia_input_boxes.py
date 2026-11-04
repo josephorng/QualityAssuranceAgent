@@ -296,6 +296,23 @@ def uia_label_prefer_value(value: str, name: str) -> str:
     return canonicalize_uia_shell_status_label(name)
 
 
+def resolve_usable_uia_probe_label(
+    *,
+    preferred: str = "",
+    name: str = "",
+    value: str = "",
+) -> str:
+    """Probe label without the landmark usability gate.
+
+    When ``name`` / ``value`` are present, preference follows
+    :func:`uia_label_prefer_value`. Otherwise ``preferred`` is used (legacy
+    2-/3-tuple probes). Empty strings still return ``""``.
+    """
+    if str(name or "").strip() or str(value or "").strip():
+        return str(uia_label_prefer_value(value, name) or "").strip()
+    return str(canonicalize_uia_shell_status_label(preferred) or "").strip()
+
+
 def _is_clipped_uia_sliver(
     *,
     orig_w: int,
@@ -579,21 +596,26 @@ def _element_value_pattern_current(element: ctypes.c_void_p) -> str:
     return ""
 
 
+def _element_label_parts(element: ctypes.c_void_p) -> tuple[str, str, str]:
+    """Preferred label, raw Name, and ValuePattern CurrentValue."""
+    name = _element_current_name(element)
+    value = _element_value_pattern_current(element)
+    return uia_label_prefer_value(value, name), name, value
+
+
 def _element_label(element: ctypes.c_void_p) -> str:
-    return uia_label_prefer_value(
-        _element_value_pattern_current(element),
-        _element_current_name(element),
-    )
+    return _element_label_parts(element)[0]
 
 
 def uia_text_element_at_point(
     x: int, y: int
-) -> tuple[str, RectXywh, str] | None:
-    """Name, screen xywh, and control-type token under a screen point.
+) -> tuple[str, RectXywh, str, str, str] | None:
+    """Preferred label, screen xywh, control-type token, Name, and Value.
 
     ``ElementFromPoint`` can see a control that ``FindAll`` on the top-level
     hwnd does not return (Word's start page is one of those). The third value is
     a ``UIA_CONTROL_TYPE_SUFFIX`` token (``button``, ``text``, …) or ``""``.
+    Name and Value are the raw UIA strings before preference collapse.
     """
     if os.name != "nt":
         return None
@@ -643,7 +665,10 @@ def uia_text_element_at_point(
         if hr != _S_OK or not element_ptr:
             return None
         element = element_ptr
-        label = _element_label(element).strip()
+        label, name, value = _element_label_parts(element)
+        label = label.strip()
+        name = str(name or "").strip()
+        value = str(value or "").strip()
         bounds = _element_bounding_xyxy(element)
         if not label or bounds is None:
             return None
@@ -653,7 +678,13 @@ def uia_text_element_at_point(
         if width <= 0 or height <= 0:
             return None
         control_type = control_type_token_from_id(_element_control_type(element))
-        return label, (int(left), int(top), width, height), control_type
+        return (
+            label,
+            (int(left), int(top), width, height),
+            control_type,
+            name,
+            value,
+        )
     except Exception:
         return None
     finally:

@@ -33,6 +33,10 @@ def _labeled_parts(item: LabeledBox) -> tuple[RectXywh, str, str]:
     return box, label, control_type
 
 
+# Floor for breaking FindAll name ambiguity via OCR similarity (text targets).
+_REPAIR_OCR_SIMILARITY_THRESHOLD = 0.25
+
+
 @dataclass(frozen=True)
 class UiaReplayRepairRequest:
     """One recorded OCR target whose UIA snapshot had no usable text."""
@@ -43,6 +47,7 @@ class UiaReplayRepairRequest:
     recorded_bbox: RectXywh
     recorded_text: str
     recorded_window_xywh: RectXywh
+    recorded_is_icon: bool = False
 
 
 @dataclass(frozen=True)
@@ -403,12 +408,16 @@ def choose_uia_replay_repair(
     point_probe_fn: Any = None,
     uia_scrollbar_boxes: list[RectXywh] | None = None,
     uia_input_boxes: list[RectXywh] | None = None,
+    recorded_is_icon: bool = False,
 ) -> UiaReplayRepairHit | None:
     """Accept one UIA label when live OCR still shows the recorded target.
 
-    The smallest UIA text rect that contains the mapped point wins. Two different
-    names covering that point are left unchanged. An empty ``FindAll`` falls
-    through to ``point_probe_fn(x, y) -> (label, xywh) | None``.
+    Text targets: the smallest UIA text rect that contains the mapped point
+    wins when names agree; otherwise the most OCR-similar name at/above
+    ``_REPAIR_OCR_SIMILARITY_THRESHOLD``. Icon targets skip FindAll name
+    selection and use the ``ElementFromPoint`` leaf Name/Value. An empty
+    FindAll (text) falls through to
+    ``point_probe_fn(x, y) -> (label, xywh[, control_type[, name, value]])``.
 
     When ``recorded_text`` is ``滾動條`` / ``輸入欄``, the smallest live UIA
     control of that class that contains the mapped point wins instead.
@@ -424,6 +433,7 @@ def choose_uia_replay_repair(
         point_probe_fn=point_probe_fn,
         uia_scrollbar_boxes=uia_scrollbar_boxes,
         uia_input_boxes=uia_input_boxes,
+        recorded_is_icon=recorded_is_icon,
     )
     return hit
 
@@ -439,6 +449,7 @@ def choose_uia_replay_repair_with_reason(
     point_probe_fn: Any = None,
     uia_scrollbar_boxes: list[RectXywh] | None = None,
     uia_input_boxes: list[RectXywh] | None = None,
+    recorded_is_icon: bool = False,
 ) -> tuple[UiaReplayRepairHit | None, str]:
     """Same as ``choose_uia_replay_repair``, plus a short miss/hit reason string."""
     text = str(recorded_text or "").strip()
@@ -471,64 +482,137 @@ def choose_uia_replay_repair_with_reason(
         )
         return hit, reason
 
-    from src.recorder.uia_input_boxes import is_usable_uia_landmark_label
+    if recorded_is_icon:
+        return _choose_icon_leaf_probe_with_reason(
+            center,
+            point_probe_fn=point_probe_fn,
+            uia_n=len(uia_boxes),
+        )
 
     containing: list[tuple[RectXywh, str, str]] = []
     for item in uia_boxes:
         box, label, control_type = _labeled_parts(item)
-        if not is_usable_uia_landmark_label(label):
+        if not str(label or "").strip():
             continue
         if not _point_in_box(center[0], center[1], box):
             continue
         containing.append((box, label, control_type))
     if containing:
         names = sorted({label for _box, label, _control in containing})
-        if len(names) != 1:
-            preview = ",".join(names[:5])
-            more = "" if len(names) <= 5 else f"+{len(names) - 5}"
-            return None, (
-                "ambiguous_uia_names "
-                f"names=[{preview}{more}] n={len(names)} center={center} "
-                f"uia_n={len(uia_boxes)}"
+        if len(names) == 1:
+            box, label, control_type = min(
+                containing, key=lambda item: int(item[0][2]) * int(item[0][3])
             )
-        box, label, control_type = min(
-            containing, key=lambda item: int(item[0][2]) * int(item[0][3])
+            return (
+                _hit(label, box, "findall", control_type=control_type),
+                f"findall label={label!r}",
+            )
+        chosen, score = _pick_most_ocr_similar_containing(containing, text)
+        if chosen is not None:
+            box, label, control_type = chosen
+            return (
+                _hit(label, box, "findall", control_type=control_type),
+                f"findall_ocr_similar label={label!r} score={score:.3f}",
+            )
+        preview = ",".join(names[:5])
+        more = "" if len(names) <= 5 else f"+{len(names) - 5}"
+        return None, (
+            "ambiguous_uia_names "
+            f"names=[{preview}{more}] n={len(names)} "
+            f"best_score={score:.3f} center={center} "
+            f"uia_n={len(uia_boxes)}"
         )
-        return (
-            _hit(label, box, "findall", control_type=control_type),
-            f"findall label={label!r}",
-        )
+
+    return _choose_icon_leaf_probe_with_reason(
+        center,
+        point_probe_fn=point_probe_fn,
+        uia_n=len(uia_boxes),
+    )
+
+
+def _probe_name_value_suffix(name: str, value: str) -> str:
+    """Append raw UIA Name/Value when the point probe returned them."""
+    if not name and not value:
+        return ""
+    return f" name={name!r} value={value!r}"
+
+
+def _pick_most_ocr_similar_containing(
+    containing: list[tuple[RectXywh, str, str]],
+    recorded_text: str,
+) -> tuple[tuple[RectXywh, str, str] | None, float]:
+    """Most OCR-similar containing label, or None when best score is below floor."""
+    from cua_mcp.select_mouse_target import _label_similarity
+
+    scores: dict[str, float] = {}
+    for _box, label, _control in containing:
+        if label not in scores:
+            scores[label] = float(_label_similarity(recorded_text, label))
+    if not scores:
+        return None, 0.0
+    best_score = max(scores.values())
+    if best_score < _REPAIR_OCR_SIMILARITY_THRESHOLD:
+        return None, best_score
+    winners = {name for name, score in scores.items() if score == best_score}
+    tied = [item for item in containing if item[1] in winners]
+    chosen = min(tied, key=lambda item: int(item[0][2]) * int(item[0][3]))
+    return chosen, best_score
+
+
+def _choose_icon_leaf_probe_with_reason(
+    center: tuple[int, int],
+    *,
+    point_probe_fn: Any,
+    uia_n: int,
+) -> tuple[UiaReplayRepairHit | None, str]:
+    """ElementFromPoint leaf using Name/Value preference (no usability gate)."""
+    from src.recorder.uia_input_boxes import resolve_usable_uia_probe_label
 
     if point_probe_fn is None:
         return None, (
             "no_uia_text_at_point_and_no_probe "
-            f"center={center} uia_n={len(uia_boxes)}"
+            f"center={center} uia_n={uia_n}"
         )
     probed = point_probe_fn(int(center[0]), int(center[1]))
-    if not isinstance(probed, tuple) or len(probed) not in (2, 3):
+    if not isinstance(probed, tuple) or len(probed) not in (2, 3, 5):
         return None, (
             "point_probe_empty "
-            f"center={center} uia_n={len(uia_boxes)}"
+            f"center={center} uia_n={uia_n}"
         )
-    label = str(probed[0] or "").strip()
+    preferred = str(probed[0] or "").strip()
     raw_box = probed[1]
     control_type = str(probed[2] or "").strip() if len(probed) >= 3 else ""
-    if not is_usable_uia_landmark_label(label):
-        return None, f"point_probe_unusable_label label={label!r} center={center}"
+    probe_name = str(probed[3] or "").strip() if len(probed) >= 5 else ""
+    probe_value = str(probed[4] or "").strip() if len(probed) >= 5 else ""
+    name_value = _probe_name_value_suffix(probe_name, probe_value)
+    label = resolve_usable_uia_probe_label(
+        preferred=preferred,
+        name=probe_name,
+        value=probe_value,
+    )
+    if not label:
+        return None, (
+            "point_probe_empty_label "
+            f"label={preferred!r}{name_value} center={center}"
+        )
     if not isinstance(raw_box, (list, tuple)) or len(raw_box) != 4:
-        return None, f"point_probe_bad_box label={label!r} center={center}"
+        return None, (
+            f"point_probe_bad_box label={label!r}{name_value} center={center}"
+        )
     try:
         box = tuple(int(v) for v in raw_box)
     except (TypeError, ValueError):
-        return None, f"point_probe_bad_box label={label!r} center={center}"
+        return None, (
+            f"point_probe_bad_box label={label!r}{name_value} center={center}"
+        )
     if not _point_in_box(center[0], center[1], box):
         return None, (
             "point_probe_box_misses_point "
-            f"label={label!r} box={box} center={center}"
+            f"label={label!r}{name_value} box={box} center={center}"
         )
     return (
         _hit(label, box, "element_from_point", control_type=control_type),
-        f"element_from_point label={label!r}",
+        f"element_from_point label={label!r}{name_value}",
     )
 
 
@@ -642,6 +726,7 @@ def attempt_uia_replay_repair(
         point_probe_fn=uia_text_element_at_point,
         uia_scrollbar_boxes=uia_scrollbar_boxes,
         uia_input_boxes=uia_input_boxes,
+        recorded_is_icon=bool(request.recorded_is_icon),
     )
     if hit is None:
         _log(
@@ -967,6 +1052,7 @@ def _load_request_with_reason(
     input_primary = (
         None if scrollbar_primary is not None else _recorded_input_primary(payload)
     )
+    recorded_is_icon = False
     if scrollbar_primary is not None:
         bbox, text = scrollbar_primary
     elif input_primary is not None:
@@ -978,7 +1064,7 @@ def _load_request_with_reason(
         primary = _recorded_primary(payload)
         if primary is None:
             return None, "no_recorded_primary_candidate"
-        bbox, text = primary
+        bbox, text, recorded_is_icon = primary
     return (
         UiaReplayRepairRequest(
             recording_dir=run_dir,
@@ -987,6 +1073,7 @@ def _load_request_with_reason(
             recorded_bbox=bbox,
             recorded_text=text,
             recorded_window_xywh=recorded_window,
+            recorded_is_icon=recorded_is_icon,
         ),
         "",
     )
@@ -1113,7 +1200,10 @@ def _recorded_input_primary(
     return box, "輸入欄"
 
 
-def _recorded_primary(payload: dict[str, Any] | None) -> tuple[RectXywh, str] | None:
+def _recorded_primary(
+    payload: dict[str, Any] | None,
+) -> tuple[RectXywh, str, bool] | None:
+    """Return ``(bbox, text, recorded_is_icon)`` for the first repairable candidate."""
     if not isinstance(payload, dict):
         return None
     candidates = payload.get("candidates")
@@ -1129,15 +1219,15 @@ def _recorded_primary(payload: dict[str, Any] | None) -> tuple[RectXywh, str] | 
             continue
         class_label = _class_repair_label(str(cand.get("class_name") or "").strip())
         if class_label:
-            return box, class_label
+            return box, class_label, False
         text = str(cand.get("text") or "").strip()
         if not text:
             continue
         if text_is_pua_only(text):
             chinese_id = _first_icon_chinese_id(cand)
             if chinese_id:
-                return box, chinese_id
-        return box, text
+                return box, chinese_id, True
+        return box, text, False
     return None
 
 

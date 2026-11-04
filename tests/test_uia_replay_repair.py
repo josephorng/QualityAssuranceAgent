@@ -46,17 +46,7 @@ def test_unique_uia_rect_uses_uia_name_and_rect_center() -> None:
     assert hit.bbox == _UIA_BOX
 
 
-def test_two_uia_names_covering_the_point_do_not_repair() -> None:
-    hit = _choose(
-        uia_boxes=[
-            (_UIA_BOX, "空白文件"),
-            ((990, 490, 200, 80), "歡迎使用 Word"),
-        ]
-    )
-    assert hit is None
-
-
-def test_choose_with_reason_reports_ambiguous_uia_names() -> None:
+def test_two_uia_names_picks_most_ocr_similar() -> None:
     hit, reason = choose_uia_replay_repair_with_reason(
         recorded_bbox=_RECORDED_BBOX,
         recorded_text="空白文件",
@@ -69,8 +59,49 @@ def test_choose_with_reason_reports_ambiguous_uia_names() -> None:
         ocr_boxes=[(_OCR_BOX, "空白文件")],
         point_probe_fn=None,
     )
+    assert hit is not None
+    assert hit.label == "空白文件"
+    assert hit.source == "findall"
+    assert reason.startswith("findall_ocr_similar")
+
+
+def test_choose_with_reason_reports_ambiguous_uia_names_when_similarity_low() -> None:
+    hit, reason = choose_uia_replay_repair_with_reason(
+        recorded_bbox=_RECORDED_BBOX,
+        recorded_text="空白文件",
+        recorded_window_xywh=_RECORDED_WINDOW,
+        live_window_xywh=_LIVE_WINDOW,
+        uia_boxes=[
+            (_UIA_BOX, "AAAA"),
+            ((990, 490, 200, 80), "BBBB"),
+        ],
+        ocr_boxes=[(_OCR_BOX, "空白文件")],
+        point_probe_fn=None,
+    )
     assert hit is None
     assert reason.startswith("ambiguous_uia_names")
+    assert "best_score=" in reason
+
+
+def test_tied_ocr_similar_names_pick_smallest_box() -> None:
+    small = (1020, 520, 20, 16)
+    large = (1000, 500, 80, 40)
+    hit, reason = choose_uia_replay_repair_with_reason(
+        recorded_bbox=_RECORDED_BBOX,
+        recorded_text="AA",
+        recorded_window_xywh=_RECORDED_WINDOW,
+        live_window_xywh=_LIVE_WINDOW,
+        uia_boxes=[
+            (large, "AB"),
+            (small, "AC"),
+        ],
+        ocr_boxes=[(_OCR_BOX, "AA")],
+        point_probe_fn=None,
+    )
+    assert hit is not None
+    assert hit.bbox == small
+    assert hit.label == "AC"
+    assert reason.startswith("findall_ocr_similar")
 
 
 def test_choose_with_reason_reports_ocr_miss() -> None:
@@ -194,6 +225,118 @@ def test_element_from_point_keeps_live_control_type() -> None:
     hit = _choose(uia_boxes=[], point_probe_fn=probe)
     assert hit is not None
     assert hit.control_type == "button"
+
+
+def test_element_from_point_accepts_short_label() -> None:
+    probe_box = (1020, 510, 30, 20)
+
+    def probe(x: int, y: int):
+        return "1", probe_box, "treeitem", "1", ""
+
+    hit, reason = choose_uia_replay_repair_with_reason(
+        recorded_bbox=_RECORDED_BBOX,
+        recorded_text="空白文件",
+        recorded_window_xywh=_RECORDED_WINDOW,
+        live_window_xywh=_LIVE_WINDOW,
+        uia_boxes=[],
+        ocr_boxes=[(_OCR_BOX, "空白文件")],
+        point_probe_fn=probe,
+    )
+    assert hit is not None
+    assert hit.label == "1"
+    assert reason.startswith("element_from_point")
+    assert "name='1'" in reason
+
+
+def test_element_from_point_logs_name_and_value_on_hit() -> None:
+    probe_box = (1020, 510, 30, 20)
+
+    def probe(x: int, y: int):
+        return "展開", probe_box, "button", "展開", "1"
+
+    hit, reason = choose_uia_replay_repair_with_reason(
+        recorded_bbox=_RECORDED_BBOX,
+        recorded_text="空白文件",
+        recorded_window_xywh=_RECORDED_WINDOW,
+        live_window_xywh=_LIVE_WINDOW,
+        uia_boxes=[],
+        ocr_boxes=[(_OCR_BOX, "空白文件")],
+        point_probe_fn=probe,
+    )
+    assert hit is not None
+    # Value wins over Name when both are present.
+    assert hit.label == "1"
+    assert "name='展開'" in reason
+    assert "value='1'" in reason
+
+
+def test_icon_leaf_uses_probe_despite_ambiguous_findall() -> None:
+    probe_box = (1020, 510, 30, 20)
+
+    def probe(x: int, y: int):
+        return "False", probe_box, "button", "", "False"
+
+    hit, reason = choose_uia_replay_repair_with_reason(
+        recorded_bbox=_RECORDED_BBOX,
+        recorded_text="方框、矩形框線",
+        recorded_window_xywh=_RECORDED_WINDOW,
+        live_window_xywh=_LIVE_WINDOW,
+        uia_boxes=[
+            (_UIA_BOX, "False"),
+            ((990, 490, 200, 80), "清單 row 3"),
+        ],
+        ocr_boxes=[(_OCR_BOX, "方框、矩形框線")],
+        point_probe_fn=probe,
+        recorded_is_icon=True,
+    )
+    assert hit is not None
+    assert hit.label == "False"
+    assert hit.source == "element_from_point"
+    assert hit.control_type == "button"
+    assert reason.startswith("element_from_point")
+
+
+def test_icon_leaf_prefers_value_over_name() -> None:
+    probe_box = (1020, 510, 30, 20)
+
+    def probe(x: int, y: int):
+        return "1", probe_box, "button", "自訂勾選", "1"
+
+    hit, reason = choose_uia_replay_repair_with_reason(
+        recorded_bbox=_RECORDED_BBOX,
+        recorded_text="方框、矩形框線",
+        recorded_window_xywh=_RECORDED_WINDOW,
+        live_window_xywh=_LIVE_WINDOW,
+        uia_boxes=[(_UIA_BOX, "清單 row 1")],
+        ocr_boxes=[(_OCR_BOX, "方框、矩形框線")],
+        point_probe_fn=probe,
+        recorded_is_icon=True,
+    )
+    assert hit is not None
+    assert hit.label == "1"
+    assert "name='自訂勾選'" in reason
+    assert "value='1'" in reason
+
+
+def test_icon_leaf_repairs_short_tree_level_value() -> None:
+    probe_box = (1020, 510, 30, 20)
+
+    def probe(x: int, y: int):
+        return "1", probe_box, "treeitem", "1", "1"
+
+    hit, reason = choose_uia_replay_repair_with_reason(
+        recorded_bbox=_RECORDED_BBOX,
+        recorded_text="展開節點",
+        recorded_window_xywh=_RECORDED_WINDOW,
+        live_window_xywh=_LIVE_WINDOW,
+        uia_boxes=[],
+        ocr_boxes=[(_OCR_BOX, "展開節點")],
+        point_probe_fn=probe,
+        recorded_is_icon=True,
+    )
+    assert hit is not None
+    assert hit.label == "1"
+    assert reason.startswith("element_from_point")
 
 
 def test_choose_keeps_findall_control_type() -> None:
@@ -700,7 +843,7 @@ def test_backfill_restores_report_yolo_line(tmp_path: Path) -> None:
 def test_recorded_primary_resolves_pua_to_chinese_id() -> None:
     from src.recorder.uia_replay_repair import _recorded_primary
 
-    box, text = _recorded_primary(
+    box, text, is_icon = _recorded_primary(
         {
             "candidates": [
                 {
@@ -719,12 +862,13 @@ def test_recorded_primary_resolves_pua_to_chinese_id() -> None:
     )
     assert box == (820, 1035, 31, 40)
     assert text == "向上雙V箭頭"
+    assert is_icon is True
 
 
 def test_recorded_primary_keeps_unmapped_pua() -> None:
     from src.recorder.uia_replay_repair import _recorded_primary
 
-    box, text = _recorded_primary(
+    box, text, is_icon = _recorded_primary(
         {
             "candidates": [
                 {
@@ -738,6 +882,7 @@ def test_recorded_primary_keeps_unmapped_pua() -> None:
     )
     assert box == (10, 20, 16, 16)
     assert text == "\ue059"
+    assert is_icon is False
 
 
 def test_replay_repair_slots_resolves_icon_pua_primary(tmp_path: Path) -> None:
@@ -964,7 +1109,7 @@ def test_labeled_ocr_confirm_boxes_includes_icon_ids() -> None:
 def test_recorded_primary_prefers_input_over_neighbor_ocr() -> None:
     from src.recorder.uia_replay_repair import _recorded_primary
 
-    box, text = _recorded_primary(
+    box, text, is_icon = _recorded_primary(
         {
             "candidates": [
                 {
@@ -982,12 +1127,13 @@ def test_recorded_primary_prefers_input_over_neighbor_ocr() -> None:
     )
     assert box == (222, 242, 848, 45)
     assert text == "輸入欄"
+    assert is_icon is False
 
 
 def test_recorded_primary_prefers_scrollbar_class() -> None:
     from src.recorder.uia_replay_repair import _recorded_primary
 
-    box, text = _recorded_primary(
+    box, text, is_icon = _recorded_primary(
         {
             "candidates": [
                 {
@@ -1005,6 +1151,7 @@ def test_recorded_primary_prefers_scrollbar_class() -> None:
     )
     assert box == (1900, 100, 20, 800)
     assert text == "滾動條"
+    assert is_icon is False
 
 
 def test_replace_anchor_bare_input_class() -> None:

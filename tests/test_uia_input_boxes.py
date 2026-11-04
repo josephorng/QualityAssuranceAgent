@@ -101,6 +101,20 @@ def test_uia_label_prefer_value_over_name() -> None:
     assert uia_label_prefer_value("", "") == ""
 
 
+def test_resolve_usable_uia_probe_label_prefers_value_without_usability_gate() -> None:
+    from src.recorder.uia_input_boxes import resolve_usable_uia_probe_label
+
+    assert (
+        resolve_usable_uia_probe_label(preferred="1", name="自訂勾選", value="1")
+        == "1"
+    )
+    assert resolve_usable_uia_probe_label(preferred="1", name="1", value="") == "1"
+    assert resolve_usable_uia_probe_label(preferred="False", name="", value="False") == (
+        "False"
+    )
+    assert resolve_usable_uia_probe_label(preferred="", name="", value="") == ""
+
+
 def test_canonicalize_uia_shell_status_label_strips_taskbar_tails() -> None:
     assert canonicalize_uia_shell_status_label("Excel - 已釘選") == "Excel"
     assert (

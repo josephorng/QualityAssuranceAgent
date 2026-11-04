@@ -1,4 +1,4 @@
-"""Live UIA Edit/Document/ScrollBar + labeled-control enumeration.
+"""Live UIA Edit/Document/ComboBox/Pane/ScrollBar + labeled-control enumeration.
 
 One FindAll under a window hwnd. Recording and replay use the snapshot as its
 own candidate list, or YOLO+OCR when that list is not enough. The two lists
@@ -81,12 +81,16 @@ _UIA_THUMB_CONTROL_TYPE_ID = 50027
 _UIA_SCROLLBAR_CONTROL_TYPE_ID = 50028
 _UIA_DATAITEM_CONTROL_TYPE_ID = 50029
 _UIA_DOCUMENT_CONTROL_TYPE_ID = 50030
-# Text hosts used to expand a caret-thin focus into an OCR clip rect.
-_OCR_CLIP_FIELD_CONTROL_TYPE_IDS = (
+_UIA_PANE_CONTROL_TYPE_ID = 50033
+# Live FindAll + OCR-clip field hosts treated as input boxes.
+_UIA_INPUT_CONTROL_TYPE_IDS = (
     _UIA_EDIT_CONTROL_TYPE_ID,
     _UIA_DOCUMENT_CONTROL_TYPE_ID,
     _UIA_COMBOBOX_CONTROL_TYPE_ID,
+    _UIA_PANE_CONTROL_TYPE_ID,
 )
+# Text hosts used to expand a caret-thin focus into an OCR clip rect.
+_OCR_CLIP_FIELD_CONTROL_TYPE_IDS = _UIA_INPUT_CONTROL_TYPE_IDS
 _UIA_VALUE_PATTERN = 10002
 _UIA_VALUE_GET_CURRENT = 4
 _TREE_SCOPE_DESCENDANTS = 0x4
@@ -900,7 +904,7 @@ def compose_scrollbar_screen_rects(
 def enumerate_edit_document_scrollbar_screen(
     hwnd: int,
 ) -> tuple[list[ScreenXyxy], list[ScreenXyxy], list[LabeledScreenXyxy]]:
-    """One FindAll Edit|Document|ScrollBar|Thumb plus labeled text-like controls."""
+    """One FindAll Edit|Document|ComboBox|Pane|ScrollBar|Thumb plus labeled text-like controls."""
     if os.name != "nt" or not hwnd:
         return [], [], []
 
@@ -955,8 +959,7 @@ def enumerate_edit_document_scrollbar_screen(
         root = root_ptr
 
         type_ids = (
-            _UIA_EDIT_CONTROL_TYPE_ID,
-            _UIA_DOCUMENT_CONTROL_TYPE_ID,
+            *_UIA_INPUT_CONTROL_TYPE_IDS,
             _UIA_SCROLLBAR_CONTROL_TYPE_ID,
             _UIA_THUMB_CONTROL_TYPE_ID,
             _UIA_BUTTON_CONTROL_TYPE_ID,
@@ -1040,10 +1043,7 @@ def enumerate_edit_document_scrollbar_screen(
                     and automation_id in _SCROLLBAR_LINE_BUTTON_AUTOMATION_IDS
                 ):
                     scrollbar_line_buttons.append((box, _element_label(element)))
-                elif control_type in (
-                    _UIA_EDIT_CONTROL_TYPE_ID,
-                    _UIA_DOCUMENT_CONTROL_TYPE_ID,
-                ):
+                elif control_type in _UIA_INPUT_CONTROL_TYPE_IDS:
                     inputs.append(box)
                 elif control_type in _LABELED_TEXT_CONTROL_TYPES:
                     label = _element_label(element)
@@ -1081,7 +1081,7 @@ def enumerate_edit_document_scrollbar_screen(
 
 
 def enumerate_edit_document_screen_xyxy(hwnd: int) -> list[ScreenXyxy]:
-    """FindAll Edit|Document under ``hwnd`` (via combined walk); screen xyxy boxes."""
+    """FindAll Edit|Document|ComboBox|Pane under ``hwnd`` (via combined walk); screen xyxy boxes."""
     inputs, _scrollbars, _labeled = enumerate_edit_document_scrollbar_screen(int(hwnd))
     return inputs
 
@@ -1099,7 +1099,7 @@ def _foreground_hwnd() -> int | None:
 
 
 def _focused_ocr_clip_field_screen_xyxy() -> ScreenXyxy | None:
-    """Focused UIA Edit/Document/ComboBox bounds when control type matches."""
+    """Focused UIA Edit/Document/ComboBox/Pane bounds when control type matches."""
     if os.name != "nt":
         return None
 
@@ -1157,7 +1157,7 @@ def _focused_ocr_clip_field_screen_xyxy() -> ScreenXyxy | None:
 
 
 def enumerate_ocr_clip_field_screen_xyxy(hwnd: int) -> list[ScreenXyxy]:
-    """FindAll Edit|Document|ComboBox under ``hwnd`` (screen xyxy)."""
+    """FindAll Edit|Document|ComboBox|Pane under ``hwnd`` (screen xyxy)."""
     if os.name != "nt" or not hwnd:
         return []
 
@@ -1285,7 +1285,7 @@ def select_uia_field_clip_containing_point(
     focused_rect_fn: Callable[[], ScreenXyxy | None] | None = None,
     window_screen_xywh: RectXywh | None = None,
 ) -> ScreenXyxy | None:
-    """Smallest Edit/Document/ComboBox containing ``caret_xy``; skip window-sized.
+    """Smallest Edit/Document/ComboBox/Pane containing ``caret_xy``; skip window-sized.
 
     Used to expand a caret-thin ``focus_rect`` into an OCR clip without replacing
     the caret for typing-point / debug overlays. Huge Documents (e.g. an Excel
@@ -1416,7 +1416,7 @@ def list_uia_input_boxes_image_local(
     enumerate_fn: UiaScreenEnumerator | None = None,
     window_screen_xywh: RectXywh | None = None,
 ) -> list[RectXywh]:
-    """Live Edit/Document boxes in image-local xywh for one monitor capture."""
+    """Live Edit/Document/ComboBox/Pane boxes in image-local xywh for one monitor capture."""
     window = window_screen_xywh or _window_screen_xywh(int(hwnd))
     if window is None:
         return []

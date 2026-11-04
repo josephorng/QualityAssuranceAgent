@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 from src.recorder.uia_input_boxes import (
+    _UIA_COMBOBOX_CONTROL_TYPE_ID,
+    _UIA_DOCUMENT_CONTROL_TYPE_ID,
+    _UIA_EDIT_CONTROL_TYPE_ID,
+    _UIA_INPUT_CONTROL_TYPE_IDS,
+    _UIA_PANE_CONTROL_TYPE_ID,
     canonicalize_uia_shell_status_label,
     filter_uia_input_rects,
     is_oversized_uia_rect,
@@ -11,6 +16,13 @@ from src.recorder.uia_input_boxes import (
     uia_label_combine_name_value,
     uia_label_prefer_value,
 )
+
+
+def test_uia_input_control_type_ids_include_combobox_and_pane() -> None:
+    assert _UIA_EDIT_CONTROL_TYPE_ID in _UIA_INPUT_CONTROL_TYPE_IDS
+    assert _UIA_DOCUMENT_CONTROL_TYPE_ID in _UIA_INPUT_CONTROL_TYPE_IDS
+    assert _UIA_COMBOBOX_CONTROL_TYPE_ID in _UIA_INPUT_CONTROL_TYPE_IDS
+    assert _UIA_PANE_CONTROL_TYPE_ID in _UIA_INPUT_CONTROL_TYPE_IDS
 
 
 def test_merge_nested_element_boxes_keeps_larger() -> None:

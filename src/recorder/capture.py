@@ -1437,6 +1437,9 @@ class RecordingSession:
             worker.join(timeout=15)
         self._join_window_step_threads()
         self._flush_pending_text_notifies()
+        # Last gesture has no next before-seal; replace its 0.25s after with a
+        # live EnumWindows sample before the hub restores.
+        self._seal_last_event_after_on_stop()
 
         with self._lock:
             events = list(self._events)
@@ -1744,8 +1747,8 @@ class RecordingSession:
     def _claim_after_owner(self, event_index: int) -> None:
         """This event's after-cache is the 0.25s sample until a later gesture seals it.
 
-        A newer owner is left in place. The last event is never sealed, so its
-        0.25s sample remains the after-cache when recording stops.
+        A newer owner is left in place. The last event is sealed at stop with a
+        fresh EnumWindows sample (see ``_seal_last_event_after_on_stop``).
         """
         with self._lock:
             if event_index in self._after_seals:
@@ -1753,6 +1756,46 @@ class RecordingSession:
             owner = self._after_owner_index
             if owner is None or owner == event_index:
                 self._after_owner_index = event_index
+
+    def _seal_last_event_after_on_stop(self) -> None:
+        """Replace the last event's 0.25s after-cache with a stop-time snapshot.
+
+        Mid-script steps get a later after from the next gesture's before-cache.
+        The final gesture has no next press, so closes that finish after 0.25s
+        would otherwise leave ``windows_after`` still listing the dialog and
+        ``window_verify`` empty. Sample before the hub restores.
+        """
+        with self._lock:
+            owner = self._after_owner_index
+            run_dir = self._run_dir
+        if owner is None or run_dir is None:
+            return
+        windows: tuple[WindowInfo, ...] | None = None
+        signals: dict[str, Any] | None = None
+        try:
+            windows = tuple(snapshot_top_level_windows())
+        except Exception:
+            windows = None
+        try:
+            signals = capture_fast_signals()
+        except Exception:
+            signals = None
+        if not windows and not signals:
+            return
+        seal = (
+            windows if windows else None,
+            dict(signals) if signals else None,
+        )
+        with self._lock:
+            if self._after_owner_index != owner:
+                return
+            self._after_owner_index = None
+            self._after_seals[owner] = seal
+        with self._event_json_lock():
+            if self._patch_sealed_after_cache(run_dir, owner, seal):
+                with self._lock:
+                    if self._after_seals.get(owner) == seal:
+                        self._after_seals.pop(owner, None)
 
     def _seal_open_after_cache(
         self,

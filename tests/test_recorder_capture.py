@@ -2375,6 +2375,140 @@ def test_click_after_cache_comes_from_next_gesture_before_cache(tmp_path) -> Non
     assert second_debug["signals_after"]["foreground"]["title"] == "Transient Shell"
 
 
+def test_stop_seals_last_event_windows_after(tmp_path) -> None:
+    """Last gesture keeps the 0.25s after until stop EnumWindows replaces it."""
+    session = RecordingSession(runs_root=tmp_path)
+    form_class = "WindowsForms10.Window.8.app.0.141b42a_r8_ad1"
+    main = WindowInfo(
+        hwnd=1,
+        title="神網7",
+        pid=10,
+        left=0,
+        top=0,
+        width=800,
+        height=600,
+        is_minimized=False,
+        is_maximized=False,
+        class_name=form_class,
+        process_name="WM7Ldr.exe",
+    )
+    dialog = WindowInfo(
+        hwnd=2,
+        title="編輯電腦資產",
+        pid=10,
+        left=92,
+        top=67,
+        width=1734,
+        height=746,
+        is_minimized=False,
+        is_maximized=False,
+        class_name=form_class,
+        process_name="WM7Ldr.exe",
+    )
+    live_windows = {"value": [main, dialog]}
+
+    def _snapshot() -> list[WindowInfo]:
+        return list(live_windows["value"])
+
+    def _fast_signals(*_args, **_kwargs) -> dict:
+        top = live_windows["value"][0]
+        return {
+            "foreground": {
+                "class_name": top.class_name,
+                "title": top.title,
+                "process_name": top.process_name,
+            }
+        }
+
+    def _click_window(_x: int, _y: int) -> ClickWindowInfo:
+        return ClickWindowInfo(
+            hwnd=dialog.hwnd,
+            title=dialog.title,
+            process_name=dialog.process_name,
+            left=dialog.left,
+            top=dialog.top,
+            width=dialog.width,
+            height=dialog.height,
+            is_maximized=False,
+            class_name=dialog.class_name,
+        )
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.snapshot_top_level_windows",
+        side_effect=_snapshot,
+    ), patch(
+        "src.recorder.capture.capture_fast_signals",
+        side_effect=_fast_signals,
+    ), patch(
+        "src.recorder.capture.capture_step_signals",
+        side_effect=_fast_signals,
+    ), patch(
+        "src.recorder.capture.resolve_click_window",
+        side_effect=_click_window,
+    ), patch(
+        "src.recorder.capture.capture_final_after_screenshot",
+        return_value=None,
+    ):
+        run_dir = session.start()
+        acquired = False
+        try:
+            assert session._settle_windows_ready.wait(2.0)
+            acquired = session._window_refresh_lock.acquire(timeout=2.0)
+            assert acquired
+            session._last_settle_windows = (main, dialog)
+            session._last_settle_signals = {
+                "foreground": {
+                    "class_name": dialog.class_name,
+                    "title": dialog.title,
+                    "process_name": dialog.process_name,
+                }
+            }
+            _left_click(session, 1706, 192)
+            deadline = time.monotonic() + 3.0
+            event_path = run_dir / "events" / "event_001.json"
+            while time.monotonic() < deadline:
+                if event_path.is_file():
+                    pending = json.loads(event_path.read_text(encoding="utf-8"))
+                    debug = pending.get("window_snapshot_debug")
+                    if isinstance(debug, dict) and isinstance(
+                        debug.get("windows_after"), list
+                    ):
+                        titles = [
+                            str(w.get("title") or "")
+                            for w in debug["windows_after"]
+                            if isinstance(w, dict)
+                        ]
+                        if "編輯電腦資產" in titles:
+                            break
+                time.sleep(0.02)
+            else:
+                raise AssertionError("click after sample still listing dialog was not written")
+            # Dialog gone by stop; seal replaces the premature 0.25s after.
+            live_windows["value"] = [main]
+        finally:
+            if acquired:
+                session._window_refresh_lock.release()
+            session.stop()
+
+    _raw, debug = _hydrated_event_debug(run_dir, 1)
+    after_titles = [
+        str(w.get("title") or "")
+        for w in debug.get("windows_after") or []
+        if isinstance(w, dict)
+    ]
+    assert after_titles == ["神網7"]
+    assert "編輯電腦資產" not in after_titles
+    verify = window_verify_from_debug(debug)
+    disappeared = verify.get("disappeared") or []
+    assert any(
+        isinstance(item, dict) and item.get("title") == "編輯電腦資產"
+        for item in disappeared
+    )
+
+
 def test_text_flushed_by_enter_does_not_inherit_key_windows(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
     login, logo = _login_and_logo_windows()

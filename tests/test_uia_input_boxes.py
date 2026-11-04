@@ -8,6 +8,7 @@ from src.recorder.uia_input_boxes import (
     is_oversized_uia_rect,
     is_usable_uia_landmark_label,
     merge_nested_element_boxes,
+    uia_label_combine_name_value,
     uia_label_prefer_value,
 )
 
@@ -101,16 +102,32 @@ def test_uia_label_prefer_value_over_name() -> None:
     assert uia_label_prefer_value("", "") == ""
 
 
-def test_resolve_usable_uia_probe_label_prefers_value_without_usability_gate() -> None:
+def test_uia_label_combine_name_value() -> None:
+    assert uia_label_combine_name_value("龜速的網域", "1") == "龜速的網域|1"
+    assert uia_label_combine_name_value("  name  ", "  val  ") == "name|val"
+    assert uia_label_combine_name_value("same", "same") == "same"
+    assert uia_label_combine_name_value("name", "") == "name"
+    assert uia_label_combine_name_value("", "val") == "val"
+    assert uia_label_combine_name_value("", "") == ""
+    assert uia_label_combine_name_value("Excel - 已釘選", "1") == "Excel|1"
+
+
+def test_resolve_usable_uia_probe_label_combines_name_and_value() -> None:
     from src.recorder.uia_input_boxes import resolve_usable_uia_probe_label
 
     assert (
         resolve_usable_uia_probe_label(preferred="1", name="自訂勾選", value="1")
-        == "1"
+        == "自訂勾選|1"
     )
     assert resolve_usable_uia_probe_label(preferred="1", name="1", value="") == "1"
     assert resolve_usable_uia_probe_label(preferred="False", name="", value="False") == (
         "False"
+    )
+    assert (
+        resolve_usable_uia_probe_label(
+            preferred="1", name="龜速的網域", value="1"
+        )
+        == "龜速的網域|1"
     )
     assert resolve_usable_uia_probe_label(preferred="", name="", value="") == ""
 

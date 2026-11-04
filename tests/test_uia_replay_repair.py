@@ -252,7 +252,7 @@ def test_element_from_point_logs_name_and_value_on_hit() -> None:
     probe_box = (1020, 510, 30, 20)
 
     def probe(x: int, y: int):
-        return "展開", probe_box, "button", "展開", "1"
+        return "展開|1", probe_box, "button", "展開", "1"
 
     hit, reason = choose_uia_replay_repair_with_reason(
         recorded_bbox=_RECORDED_BBOX,
@@ -264,8 +264,7 @@ def test_element_from_point_logs_name_and_value_on_hit() -> None:
         point_probe_fn=probe,
     )
     assert hit is not None
-    # Value wins over Name when both are present.
-    assert hit.label == "1"
+    assert hit.label == "展開|1"
     assert "name='展開'" in reason
     assert "value='1'" in reason
 
@@ -296,11 +295,11 @@ def test_icon_leaf_uses_probe_despite_ambiguous_findall() -> None:
     assert reason.startswith("element_from_point")
 
 
-def test_icon_leaf_prefers_value_over_name() -> None:
+def test_icon_leaf_combines_name_and_value() -> None:
     probe_box = (1020, 510, 30, 20)
 
     def probe(x: int, y: int):
-        return "1", probe_box, "button", "自訂勾選", "1"
+        return "自訂勾選|1", probe_box, "button", "自訂勾選", "1"
 
     hit, reason = choose_uia_replay_repair_with_reason(
         recorded_bbox=_RECORDED_BBOX,
@@ -313,16 +312,16 @@ def test_icon_leaf_prefers_value_over_name() -> None:
         recorded_is_icon=True,
     )
     assert hit is not None
-    assert hit.label == "1"
+    assert hit.label == "自訂勾選|1"
     assert "name='自訂勾選'" in reason
     assert "value='1'" in reason
 
 
-def test_icon_leaf_repairs_short_tree_level_value() -> None:
+def test_icon_leaf_repairs_tree_expand_with_name_and_level() -> None:
     probe_box = (1020, 510, 30, 20)
 
     def probe(x: int, y: int):
-        return "1", probe_box, "treeitem", "1", "1"
+        return "龜速的網域|1", probe_box, "treeitem", "龜速的網域", "1"
 
     hit, reason = choose_uia_replay_repair_with_reason(
         recorded_bbox=_RECORDED_BBOX,
@@ -335,7 +334,7 @@ def test_icon_leaf_repairs_short_tree_level_value() -> None:
         recorded_is_icon=True,
     )
     assert hit is not None
-    assert hit.label == "1"
+    assert hit.label == "龜速的網域|1"
     assert reason.startswith("element_from_point")
 
 

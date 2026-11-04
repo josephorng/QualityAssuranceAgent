@@ -288,8 +288,27 @@ def is_usable_uia_landmark_label(text: str | None) -> bool:
     return True
 
 
+def uia_label_combine_name_value(name: str, value: str) -> str:
+    """Build a landmark label from UIA Name and ValuePattern CurrentValue.
+
+    Both non-empty and different → ``Name|Value``. Equal → one copy. Only one
+    present → that side. Canonicalizes shell status tails on each side first.
+    """
+    name_c = canonicalize_uia_shell_status_label(name)
+    value_c = canonicalize_uia_shell_status_label(value)
+    if name_c and value_c:
+        if name_c == value_c:
+            return name_c
+        return f"{name_c}|{value_c}"
+    return name_c or value_c
+
+
 def uia_label_prefer_value(value: str, name: str) -> str:
-    """Prefer non-empty stripped Value over Name."""
+    """Prefer non-empty stripped Value over Name.
+
+    Prefer :func:`uia_label_combine_name_value` for new landmark labeling so
+    FindAll and ElementFromPoint stay in sync.
+    """
     stripped_value = str(value or "").strip()
     if stripped_value:
         return canonicalize_uia_shell_status_label(stripped_value)
@@ -304,12 +323,12 @@ def resolve_usable_uia_probe_label(
 ) -> str:
     """Probe label without the landmark usability gate.
 
-    When ``name`` / ``value`` are present, preference follows
-    :func:`uia_label_prefer_value`. Otherwise ``preferred`` is used (legacy
-    2-/3-tuple probes). Empty strings still return ``""``.
+    When ``name`` / ``value`` are present, compose via
+    :func:`uia_label_combine_name_value`. Otherwise ``preferred`` is used
+    (legacy 2-/3-tuple probes). Empty strings still return ``""``.
     """
     if str(name or "").strip() or str(value or "").strip():
-        return str(uia_label_prefer_value(value, name) or "").strip()
+        return str(uia_label_combine_name_value(name, value) or "").strip()
     return str(canonicalize_uia_shell_status_label(preferred) or "").strip()
 
 
@@ -597,10 +616,10 @@ def _element_value_pattern_current(element: ctypes.c_void_p) -> str:
 
 
 def _element_label_parts(element: ctypes.c_void_p) -> tuple[str, str, str]:
-    """Preferred label, raw Name, and ValuePattern CurrentValue."""
+    """Combined Name|Value label, raw Name, and ValuePattern CurrentValue."""
     name = _element_current_name(element)
     value = _element_value_pattern_current(element)
-    return uia_label_prefer_value(value, name), name, value
+    return uia_label_combine_name_value(name, value), name, value
 
 
 def _element_label(element: ctypes.c_void_p) -> str:
@@ -610,12 +629,12 @@ def _element_label(element: ctypes.c_void_p) -> str:
 def uia_text_element_at_point(
     x: int, y: int
 ) -> tuple[str, RectXywh, str, str, str] | None:
-    """Preferred label, screen xywh, control-type token, Name, and Value.
+    """Combined Name|Value label, screen xywh, control-type, Name, and Value.
 
     ``ElementFromPoint`` can see a control that ``FindAll`` on the top-level
     hwnd does not return (Word's start page is one of those). The third value is
     a ``UIA_CONTROL_TYPE_SUFFIX`` token (``button``, ``text``, …) or ``""``.
-    Name and Value are the raw UIA strings before preference collapse.
+    Name and Value are the raw UIA strings before composition.
     """
     if os.name != "nt":
         return None

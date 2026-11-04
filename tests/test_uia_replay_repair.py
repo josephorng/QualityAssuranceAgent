@@ -1579,6 +1579,79 @@ def test_recorded_input_primary_under_cursor() -> None:
     assert primary == ((200, 240, 120, 40), "輸入欄")
 
 
+def test_recorded_icon_primary_under_cursor_picks_smallest() -> None:
+    from src.recorder.uia_replay_repair import _recorded_icon_primary
+
+    pua = "\ue084"
+    primary = _recorded_icon_primary(
+        {
+            "local_cursor": [305, 250],
+            "candidates": [
+                {
+                    "bbox": [200, 240, 120, 40],
+                    "text": None,
+                    "class_name": "input",
+                },
+                {
+                    "bbox": [290, 245, 30, 20],
+                    "text": pua,
+                    "class_name": "element",
+                    "icons": [{"chinese_id": "向下V箭頭"}],
+                },
+                {
+                    "bbox": [300, 248, 12, 10],
+                    "text": pua,
+                    "class_name": "element",
+                    "icons": [{"chinese_id": "向下V箭頭"}],
+                },
+            ],
+        }
+    )
+    assert primary == ((300, 248, 12, 10), "向下V箭頭", True)
+
+
+def test_recorded_icon_primary_none_when_cursor_only_in_input_body() -> None:
+    from src.recorder.uia_replay_repair import _recorded_icon_primary
+
+    primary = _recorded_icon_primary(
+        {
+            "local_cursor": [220, 250],
+            "candidates": [
+                {
+                    "bbox": [200, 240, 120, 40],
+                    "text": None,
+                    "class_name": "input",
+                },
+                {
+                    "bbox": [300, 248, 12, 10],
+                    "text": "\ue084",
+                    "class_name": "element",
+                    "icons": [{"chinese_id": "向下V箭頭"}],
+                },
+            ],
+        }
+    )
+    assert primary is None
+
+
+def test_recorded_icon_primary_none_without_cursor() -> None:
+    from src.recorder.uia_replay_repair import _recorded_icon_primary
+
+    primary = _recorded_icon_primary(
+        {
+            "candidates": [
+                {
+                    "bbox": [300, 248, 12, 10],
+                    "text": "\ue084",
+                    "class_name": "element",
+                    "icons": [{"chinese_id": "向下V箭頭"}],
+                },
+            ],
+        }
+    )
+    assert primary is None
+
+
 def test_replay_repair_slots_input_despite_usable_snapshot_texts(
     tmp_path: Path,
 ) -> None:
@@ -1641,6 +1714,296 @@ def test_replay_repair_slots_input_despite_usable_snapshot_texts(
     slots = replay_repair_slots(run, 7, [{"name": "move_mouse", "arguments": {}}])
     assert len(slots) == 1 and slots[0] is not None
     assert slots[0].recorded_text == "輸入欄"
+
+
+def test_replay_repair_slots_icon_inside_input_despite_usable_snapshot(
+    tmp_path: Path,
+) -> None:
+    from src.recorder.uia_replay_repair import replay_repair_slots
+
+    run = tmp_path / "recording"
+    (run / "events").mkdir(parents=True)
+    (run / "analysis").mkdir()
+    (run / "yolo_ocr").mkdir()
+    event = {
+        "index": 9,
+        "timestamp_utc": "t",
+        "kind": "click",
+        "button": "left",
+        "cursor_xy": [305, 250],
+        "click_window": {
+            "hwnd": 5,
+            "title": "App",
+            "process_name": "app.exe",
+            "rect": [0, 0, 800, 600],
+            "class_name": "App",
+        },
+        "uia_snapshot": {
+            "window": [0, 0, 800, 600],
+            "inputs": [[200, 240, 320, 280]],
+            "scrollbars": [],
+            "texts": [
+                {"bbox": [10, 10, 40, 16], "text": "檔案", "control_type": "text"}
+            ],
+        },
+    }
+    (run / "events" / "event_009.json").write_text(json.dumps(event), encoding="utf-8")
+    (run / "analysis" / "event_009.json").write_text(
+        json.dumps(
+            {
+                "event_index": 9,
+                "instruction": "（YOLO+OCR）將滑鼠移到「向下V箭頭」圖示，並點擊滑鼠一下。",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run / "yolo_ocr" / "event_009.json").write_text(
+        json.dumps(
+            {
+                "vision_path": "yolo_ocr",
+                "local_cursor": [305, 250],
+                "candidates": [
+                    {
+                        "bbox": [200, 240, 120, 40],
+                        "text": None,
+                        "class_name": "input",
+                    },
+                    {
+                        "bbox": [300, 248, 12, 10],
+                        "text": "\ue084",
+                        "class_name": "element",
+                        "icons": [{"chinese_id": "向下V箭頭"}],
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    slots = replay_repair_slots(run, 9, [{"name": "move_mouse", "arguments": {}}])
+    assert len(slots) == 1 and slots[0] is not None
+    assert slots[0].recorded_text == "向下V箭頭"
+    assert slots[0].recorded_is_icon is True
+    assert slots[0].recorded_bbox == (300, 248, 12, 10)
+
+
+def test_attempt_icon_repair_hits_button_via_element_from_point(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from src.recorder.uia_replay_repair import (
+        UiaReplayRepairRequest,
+        attempt_uia_replay_repair,
+    )
+
+    run = tmp_path / "recording"
+    (run / "events").mkdir(parents=True)
+    (run / "analysis").mkdir()
+    (run / "yolo_ocr").mkdir()
+    event = {
+        "index": 10,
+        "timestamp_utc": "t",
+        "kind": "click",
+        "button": "left",
+        "cursor_xy": [1030, 528],
+        "click_window": {
+            "hwnd": 5,
+            "title": "Win",
+            "process_name": "app.exe",
+            "rect": list(_RECORDED_WINDOW),
+            "class_name": "App",
+        },
+        "uia_snapshot": {
+            "window": list(_RECORDED_WINDOW),
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [],
+        },
+    }
+    (run / "events" / "event_010.json").write_text(json.dumps(event), encoding="utf-8")
+    (run / "analysis" / "event_010.json").write_text(
+        json.dumps(
+            {
+                "event_index": 10,
+                "instruction": "（YOLO+OCR）將滑鼠移到「向下V箭頭」圖示，並點擊滑鼠一下。",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run / "yolo_ocr" / "event_010.json").write_text(
+        json.dumps(
+            {
+                "vision_path": "yolo_ocr",
+                "local_cursor": [30, 28],
+                "candidates": [
+                    {
+                        "bbox": list(_RECORDED_BBOX),
+                        "text": "\ue084",
+                        "class_name": "element",
+                        "icons": [{"chinese_id": "向下V箭頭"}],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    live = ClickWindowInfo(
+        hwnd=5,
+        title="Win",
+        process_name="app.exe",
+        left=_LIVE_WINDOW[0],
+        top=_LIVE_WINDOW[1],
+        width=_LIVE_WINDOW[2],
+        height=_LIVE_WINDOW[3],
+        is_maximized=False,
+        class_name="App",
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        lambda _cw: live,
+    )
+    probe_box = (1020, 510, 30, 20)
+
+    def probe(x: int, y: int):
+        return "下拉", probe_box, "button", "下拉", ""
+
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.uia_text_element_at_point",
+        probe,
+    )
+    request = UiaReplayRepairRequest(
+        recording_dir=run,
+        event_index=10,
+        side="click",
+        recorded_bbox=_RECORDED_BBOX,
+        recorded_text="向下V箭頭",
+        recorded_window_xywh=_RECORDED_WINDOW,
+        recorded_is_icon=True,
+    )
+    result = attempt_uia_replay_repair(
+        request,
+        {"hwnd": 5, "title": "Win", "process_name": "app.exe", "rect": list(_LIVE_WINDOW)},
+        uia_boxes=[],
+        ocr_boxes=[(_OCR_BOX, "向下V箭頭")],
+    )
+    assert result is not None
+    gx, gy, meta = result
+    assert (gx, gy) == (1035, 520)
+    assert meta["uia_replay_repair"]["source"] == "element_from_point"
+    assert meta["uia_replay_repair"]["label"] == "下拉"
+    saved = json.loads((run / "analysis" / "event_010.json").read_text(encoding="utf-8"))
+    assert saved["uia_replay_repair"]["control_type"] == "button"
+
+
+def test_attempt_icon_miss_falls_back_to_input(tmp_path: Path, monkeypatch) -> None:
+    from src.recorder.uia_replay_repair import (
+        UiaReplayRepairRequest,
+        attempt_uia_replay_repair,
+    )
+
+    run = tmp_path / "recording"
+    (run / "events").mkdir(parents=True)
+    (run / "analysis").mkdir()
+    (run / "yolo_ocr").mkdir()
+    event = {
+        "index": 11,
+        "timestamp_utc": "t",
+        "kind": "click",
+        "button": "left",
+        "cursor_xy": [1030, 528],
+        "click_window": {
+            "hwnd": 5,
+            "title": "Win",
+            "process_name": "app.exe",
+            "rect": list(_RECORDED_WINDOW),
+            "class_name": "App",
+        },
+        "uia_snapshot": {
+            "window": list(_RECORDED_WINDOW),
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [],
+        },
+    }
+    (run / "events" / "event_011.json").write_text(json.dumps(event), encoding="utf-8")
+    (run / "analysis" / "event_011.json").write_text(
+        json.dumps(
+            {
+                "event_index": 11,
+                "instruction": "（YOLO+OCR）將滑鼠移到「向下V箭頭」圖示，並點擊滑鼠一下。",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run / "yolo_ocr" / "event_011.json").write_text(
+        json.dumps(
+            {
+                "vision_path": "yolo_ocr",
+                "local_cursor": [30, 28],
+                "candidates": [
+                    {
+                        "bbox": [0, 10, 100, 40],
+                        "text": None,
+                        "class_name": "input",
+                    },
+                    {
+                        "bbox": list(_RECORDED_BBOX),
+                        "text": "\ue084",
+                        "class_name": "element",
+                        "icons": [{"chinese_id": "向下V箭頭"}],
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    live = ClickWindowInfo(
+        hwnd=5,
+        title="Win",
+        process_name="app.exe",
+        left=_LIVE_WINDOW[0],
+        top=_LIVE_WINDOW[1],
+        width=_LIVE_WINDOW[2],
+        height=_LIVE_WINDOW[3],
+        is_maximized=False,
+        class_name="App",
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        lambda _cw: live,
+    )
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.uia_text_element_at_point",
+        lambda *_a, **_k: None,
+    )
+    request = UiaReplayRepairRequest(
+        recording_dir=run,
+        event_index=11,
+        side="click",
+        recorded_bbox=_RECORDED_BBOX,
+        recorded_text="向下V箭頭",
+        recorded_window_xywh=_RECORDED_WINDOW,
+        recorded_is_icon=True,
+    )
+    # Icon OCR does not confirm; overlapping OCR box labeled 輸入欄 + live UIA input.
+    uia_field = (1000, 510, 80, 40)
+    result = attempt_uia_replay_repair(
+        request,
+        {"hwnd": 5, "title": "Win", "process_name": "app.exe", "rect": list(_LIVE_WINDOW)},
+        uia_boxes=[],
+        ocr_boxes=[((1000, 510, 80, 40), "輸入欄")],
+        uia_input_boxes=[uia_field],
+    )
+    assert result is not None
+    gx, gy, meta = result
+    assert (gx, gy) == (1040, 530)
+    assert meta["class_name"] == "input"
+    assert meta["uia_replay_repair"]["source"] == "uia_input"
+    assert meta["uia_replay_repair"]["label"] == "輸入欄"
 
 
 def test_attempt_input_repair_keeps_class_and_nearby(tmp_path: Path, monkeypatch) -> None:

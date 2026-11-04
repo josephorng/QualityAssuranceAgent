@@ -728,6 +728,44 @@ def attempt_uia_replay_repair(
         uia_input_boxes=uia_input_boxes,
         recorded_is_icon=bool(request.recorded_is_icon),
     )
+    write_request = request
+    if hit is None and request.recorded_is_icon:
+        from src.recorder.vision_context import load_yolo_ocr_payload
+
+        suffix = "_end" if request.side == "end" else ""
+        payload = load_yolo_ocr_payload(
+            Path(request.recording_dir), request.event_index, suffix=suffix
+        )
+        input_primary = _recorded_input_primary(payload)
+        if input_primary is not None:
+            input_bbox, input_text = input_primary
+            _log(
+                "uia replay repair icon miss; trying input fallback "
+                f"event={request.event_index} side={request.side} "
+                f"icon_reason={reason} input_bbox={input_bbox}"
+            )
+            hit, reason = choose_uia_replay_repair_with_reason(
+                recorded_bbox=input_bbox,
+                recorded_text=input_text,
+                recorded_window_xywh=request.recorded_window_xywh,
+                live_window_xywh=live.screen_rect(),
+                uia_boxes=uia_boxes,
+                ocr_boxes=ocr_boxes,
+                point_probe_fn=uia_text_element_at_point,
+                uia_scrollbar_boxes=uia_scrollbar_boxes,
+                uia_input_boxes=uia_input_boxes,
+                recorded_is_icon=False,
+            )
+            if hit is not None:
+                write_request = UiaReplayRepairRequest(
+                    recording_dir=request.recording_dir,
+                    event_index=request.event_index,
+                    side=request.side,
+                    recorded_bbox=input_bbox,
+                    recorded_text=input_text,
+                    recorded_window_xywh=request.recorded_window_xywh,
+                    recorded_is_icon=False,
+                )
     if hit is None:
         _log(
             f"{prefix} reason={reason} "
@@ -746,10 +784,10 @@ def attempt_uia_replay_repair(
     ]
     is_scrollbar = hit.label == "滾動條" or hit.source == "uia_scrollbar"
     is_input = hit.label == "輸入欄" or hit.source == "uia_input"
-    track_percent = _recorded_track_percent(request) if is_scrollbar else None
+    track_percent = _recorded_track_percent(write_request) if is_scrollbar else None
     try:
         write_uia_replay_repair(
-            request,
+            write_request,
             label=hit.label,
             source=hit.source,
             bbox=hit.bbox,
@@ -1049,12 +1087,19 @@ def _load_request_with_reason(
     scrollbar_primary = _recorded_scrollbar_primary(
         payload, allow_off_track=(side == "end")
     )
+    icon_primary = (
+        None if scrollbar_primary is not None else _recorded_icon_primary(payload)
+    )
     input_primary = (
-        None if scrollbar_primary is not None else _recorded_input_primary(payload)
+        None
+        if scrollbar_primary is not None or icon_primary is not None
+        else _recorded_input_primary(payload)
     )
     recorded_is_icon = False
     if scrollbar_primary is not None:
         bbox, text = scrollbar_primary
+    elif icon_primary is not None:
+        bbox, text, recorded_is_icon = icon_primary
     elif input_primary is not None:
         bbox, text = input_primary
     else:
@@ -1198,6 +1243,45 @@ def _recorded_input_primary(
         return None
     box = min(fields, key=lambda item: int(item[2]) * int(item[3]))
     return box, "輸入欄"
+
+
+def _recorded_icon_primary(
+    payload: dict[str, Any] | None,
+) -> tuple[RectXywh, str, bool] | None:
+    """Return the smallest PUA icon under the recorded cursor, if any.
+
+    Requires ``local_cursor`` so a bare icon list cannot steal field-body clicks.
+    """
+    if not isinstance(payload, dict):
+        return None
+    cursor = _payload_local_cursor(payload)
+    if cursor is None:
+        return None
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        return None
+    from cua_mcp.icon_map import text_is_pua_only
+
+    icons: list[tuple[RectXywh, str]] = []
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        box = _parse_candidate_bbox(cand)
+        if box is None:
+            continue
+        if not _point_in_box(cursor[0], cursor[1], box):
+            continue
+        text = str(cand.get("text") or "").strip()
+        if not text or not text_is_pua_only(text):
+            continue
+        chinese_id = _first_icon_chinese_id(cand)
+        if not chinese_id:
+            continue
+        icons.append((box, chinese_id))
+    if not icons:
+        return None
+    box, chinese_id = min(icons, key=lambda item: int(item[0][2]) * int(item[0][3]))
+    return box, chinese_id, True
 
 
 def _recorded_primary(

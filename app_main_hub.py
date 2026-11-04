@@ -330,6 +330,9 @@ class MainHub(ctk.CTk):
         self._analyze_recording_btn: ctk.CTkButton | None = None
         self._analysis_progress_frame: ctk.CTkFrame | None = None
         self._analysis_progress: ctk.CTkProgressBar | None = None
+        self._analysis_elapsed_label: ctk.CTkLabel | None = None
+        self._analysis_elapsed_after_id: str | None = None
+        self._analysis_elapsed_started_at: float | None = None
 
         self._build_header()
         # Pack bottom chrome first so the expanding script section cannot clip it
@@ -1849,6 +1852,14 @@ class MainHub(ctk.CTk):
         )
         self._analysis_progress.pack(fill="x")
         self._analysis_progress.set(0)
+        self._analysis_elapsed_label = ctk.CTkLabel(
+            self._analysis_progress_frame,
+            text="已運行 00:00",
+            font=ctk.CTkFont(size=12),
+            text_color=("gray30", "gray65"),
+            anchor="w",
+        )
+        self._analysis_elapsed_label.pack(fill="x", pady=(6, 0))
         self._analysis_progress_frame.pack(fill="x", pady=(20, 0))
         self._analysis_progress_frame.pack_forget()
 
@@ -1998,12 +2009,55 @@ class MainHub(ctk.CTk):
             self._analysis_progress_frame.pack(fill="x", pady=(20, 0))
         if self._analysis_progress is not None:
             self._analysis_progress.set(0)
+        self._start_analysis_elapsed_timer()
 
     def _hide_analysis_progress(self) -> None:
+        self._stop_analysis_elapsed_timer()
         if self._analysis_progress_frame is not None:
             self._analysis_progress_frame.pack_forget()
         if self._analysis_progress is not None:
             self._analysis_progress.set(0)
+
+    @staticmethod
+    def _format_analysis_elapsed(elapsed_seconds: float) -> str:
+        total = max(0, int(elapsed_seconds))
+        hours, rem = divmod(total, 3600)
+        minutes, seconds = divmod(rem, 60)
+        if hours > 0:
+            return f"已運行 {hours:d}:{minutes:02d}:{seconds:02d}"
+        return f"已運行 {minutes:02d}:{seconds:02d}"
+
+    def _start_analysis_elapsed_timer(self) -> None:
+        if self._analysis_elapsed_started_at is not None:
+            return
+        self._analysis_elapsed_started_at = time.monotonic()
+        if self._analysis_elapsed_label is not None:
+            self._analysis_elapsed_label.configure(text=self._format_analysis_elapsed(0))
+        self._analysis_elapsed_after_id = self.after(1000, self._tick_analysis_elapsed)
+
+    def _tick_analysis_elapsed(self) -> None:
+        self._analysis_elapsed_after_id = None
+        started_at = self._analysis_elapsed_started_at
+        if started_at is None:
+            return
+        elapsed = time.monotonic() - started_at
+        if self._analysis_elapsed_label is not None:
+            self._analysis_elapsed_label.configure(
+                text=self._format_analysis_elapsed(elapsed)
+            )
+        self._analysis_elapsed_after_id = self.after(1000, self._tick_analysis_elapsed)
+
+    def _stop_analysis_elapsed_timer(self) -> None:
+        after_id = self._analysis_elapsed_after_id
+        self._analysis_elapsed_after_id = None
+        self._analysis_elapsed_started_at = None
+        if after_id is not None:
+            try:
+                self.after_cancel(after_id)
+            except Exception:
+                pass
+        if self._analysis_elapsed_label is not None:
+            self._analysis_elapsed_label.configure(text="已運行 00:00")
 
     def _set_hub_controls_idle(self) -> None:
         self._run_btn.configure(state="normal")

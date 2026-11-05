@@ -1026,10 +1026,14 @@ async def test_uia_miss_retries_once_then_uses_original_ocr_instruction(
     ocr = _detection_from_bbox((80, 80, 30, 16), YOLO_CLASS_TEXT, text="文件", source="ocr")
     snapshots: list[str] = []
     yolo_calls: list[str] = []
+    grab_paths: list[str] = []
+    finish_paths: list[str] = []
 
     def fake_grab():
+        path = f"shot_{len(grab_paths)}.png"
+        grab_paths.append(path)
         frame = np.zeros((20, 20, 3), dtype=np.uint8)
-        return [1], ["shot.png"], [(1, frame)], 0.01
+        return [1], [path], [(1, frame)], 0.01
 
     def fake_uia(_captured, _window):
         snapshots.append("findall")
@@ -1037,9 +1041,11 @@ async def test_uia_miss_retries_once_then_uses_original_ocr_instruction(
 
     def fake_finish(*_a, **_k):
         yolo_calls.append("yolo")
+        # args: monitor_indices, image_paths, captured, capture_s, ...
+        finish_paths.extend(_a[1])
         return (
             [1],
-            ["shot.png"],
+            list(_a[1]),
             [(1, np.zeros((20, 20, 3), dtype=np.uint8))],
             [ocr],
             {
@@ -1070,6 +1076,8 @@ async def test_uia_miss_retries_once_then_uses_original_ocr_instruction(
             click_window=window,
         )
     assert snapshots == ["findall", "findall"]
+    assert grab_paths == ["shot_0.png", "shot_1.png"]
+    assert finish_paths == ["shot_1.png"]
     assert yolo_calls == ["yolo"]
     assert found is not None
     assert found[2]["target_text"] == "文件"

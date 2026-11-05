@@ -5670,6 +5670,18 @@ async def _find_mouse_point_attempt(
                     )
                     nearby_labels = nearby_hints_to_labels(nearby_hints)
                     nearby_phrases = nearby_hints_to_phrases(nearby_hints)
+                    # UIA retries can outlast dialog paint; do not feed YOLO the
+                    # early blank frame from the first grab.
+                    (
+                        monitor_indices,
+                        image_paths,
+                        captured,
+                        capture_s,
+                    ) = await asyncio.to_thread(_grab_selected_monitors)
+                    _note_capture(captured)
+                    _log_info(
+                        "move_mouse uia→yolo fallback recapture before YOLO"
+                    )
         if uia_first_chosen is not None and ocr_fallback is None:
             detections = _sort_detections_reading_order(uia_dets)
             vision_timing = {

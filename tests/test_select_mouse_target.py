@@ -7477,6 +7477,115 @@ def test_uia_yolo_subtarget_preferred_class_from_hub_wrapper() -> None:
     assert _uia_yolo_subtarget_preferred_class("輸入欄") is None
 
 
+def test_unique_yolo_box_inside_uia_falls_back_to_debug_layers() -> None:
+    """When deferred pending is empty, unique text still comes from debug_layers."""
+    from cua_mcp.select_mouse_target import _unique_yolo_box_inside_uia
+
+    uia = _detection_from_bbox(
+        (1672, 174, 130, 30), YOLO_CLASS_TEXT, text="取消", source="uia"
+    )
+    vision_timing = {
+        "debug_layers": {
+            "yolo": [
+                {"bbox": [1699, 179, 26, 14], "class_name": "text"},
+                {"bbox": [1674, 177, 21, 21], "class_name": "element"},
+            ]
+        }
+    }
+    unique = _unique_yolo_box_inside_uia(uia, [], vision_timing, YOLO_CLASS_TEXT)
+    assert unique is not None
+    assert unique.bbox == (1699, 179, 26, 14)
+    assert (unique.cx, unique.cy) == (1712, 186)
+
+
+@pytest.mark.asyncio
+async def test_uia_yolo_subtarget_unique_text_from_debug_layers_without_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancel-button case: pending lost, but one debug-layer text still skips OCR."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        YoloOcrMoveFallback,
+        bind_yolo_ocr_fallbacks,
+    )
+
+    uia_btn = _detection_from_bbox(
+        (1672, 174, 130, 30), YOLO_CLASS_TEXT, text="取消", source="uia"
+    )
+    deferred_calls: list[str] = []
+
+    def fake_grab():
+        frame = np.zeros((920, 1918, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def fake_finish(*_a, **_k):
+        assert _k.get("defer_ocr") is True
+        timing = {
+            "capture_s": 0.01,
+            "yolo_s": 0.05,
+            "line_s": 0.0,
+            "uia_input_s": 0.0,
+            "uia_scrollbar_s": 0.0,
+            "uia_text_s": 0.0,
+            "ocr_s": 0.0,
+            "icon_ocr_retry_s": 0.0,
+            "total_s": 0.05,
+            "uia_first_pending": True,
+            # Intentionally no _ocr_pending — matches the live miss path.
+            "debug_layers": {
+                "yolo": [
+                    {"bbox": [1699, 179, 26, 14], "class_name": "text"},
+                    {"bbox": [1674, 177, 21, 21], "class_name": "element"},
+                ]
+            },
+        }
+        frame = np.zeros((920, 1918, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], [], timing
+
+    def fake_finish_deferred(*_a, **_k):
+        deferred_calls.append("finish_deferred")
+        raise AssertionError("unique debug-layer text must skip OCR")
+
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(
+        smt,
+        "_uia_only_detections_for_click_window",
+        lambda *_a, **_k: [uia_btn],
+    )
+    monkeypatch.setattr(
+        smt,
+        "_try_uia_first_unique_select",
+        lambda *_a, **_k: (uia_btn, "hit"),
+    )
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
+    monkeypatch.setattr(smt, "_finish_deferred_ocr_pendings", fake_finish_deferred)
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+
+    fallback = YoloOcrMoveFallback(
+        instruction="（YOLO+OCR）將滑鼠移到「取消」文字，並點擊滑鼠一下。",
+        nearby_objects=("在「翻譯」圖示的左邊",),
+    )
+    with bind_yolo_ocr_fallbacks([fallback]):
+        found = await smt.find_mouse_point(
+            "（UIA）將滑鼠移到「取消」按鈕",
+            click_window={
+                "hwnd": 5,
+                "title": "編輯電腦資產",
+                "process_name": "app.exe",
+                "rect": [92, 67, 1734, 746],
+            },
+            vision_mode="uia",
+            anchor_text="取消",
+            control_type="button",
+        )
+    assert found is not None
+    assert found[0:2] == (1712, 186)
+    assert found[2]["selection_method"] == "uia_yolo_subtarget"
+    assert deferred_calls == []
+
+
 @pytest.mark.asyncio
 async def test_uia_hit_without_fallback_still_skips_yolo(
     monkeypatch: pytest.MonkeyPatch,

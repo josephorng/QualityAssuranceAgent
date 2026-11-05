@@ -3147,7 +3147,9 @@ def _collect_monitor_detections(
             if isinstance(layers, dict):
                 timing_out["debug_layers_by_monitor"] = {int(monitor_index): layers}
             if defer_ocr and pending_acc:
+                # Keep both keys: some packaging paths drop private ``_`` attrs.
                 timing_out["_ocr_pending"] = pending_acc
+                timing_out["ocr_pending"] = pending_acc
         return dets
 
     all_detections: list[UiDetection] = []
@@ -3219,6 +3221,7 @@ def _collect_monitor_detections(
             timing_out["debug_layers"] = next(iter(layers_by_monitor.values()))
         if defer_ocr and pending_acc:
             timing_out["_ocr_pending"] = pending_acc
+            timing_out["ocr_pending"] = pending_acc
             timing_out["uia_first_pending"] = True
         elif any_pending:
             timing_out["uia_first_pending"] = True
@@ -4571,6 +4574,84 @@ def _uia_yolo_subtarget_preferred_class(anchor: str) -> int | None:
     return None
 
 
+def _debug_yolo_boxes_inside_uia(
+    uia_det: UiDetection,
+    vision_timing: dict[str, Any],
+    class_id: int,
+) -> list[UiDetection]:
+    """Unlabeled YOLO boxes from ``debug_layers`` whose centers lie in ``uia_det``.
+
+    Fallback when deferred ``_ocr_pending`` was lost after the YOLO pass but the
+    sidecar layers still list text/element boxes (image-local, monitor origin).
+    """
+    wanted_name = (
+        "text"
+        if int(class_id) == YOLO_CLASS_TEXT
+        else "element"
+        if int(class_id) == YOLO_CLASS_ELEMENT
+        else None
+    )
+    if wanted_name is None:
+        return []
+    uia_box = tuple(int(v) for v in uia_det.bbox)
+    layer_groups: list[tuple[tuple[int, int], Any]] = []
+    by_monitor = vision_timing.get("debug_layers_by_monitor")
+    if isinstance(by_monitor, dict) and by_monitor:
+        for monitor_index, layers in by_monitor.items():
+            try:
+                mon = int(monitor_index)
+            except (TypeError, ValueError):
+                continue
+            left, top = active_monitor_offset(mon)
+            layer_groups.append(((left, top), layers))
+    else:
+        layer_groups.append(((0, 0), vision_timing.get("debug_layers")))
+    matched: list[UiDetection] = []
+    for (left, top), layers in layer_groups:
+        if not isinstance(layers, dict):
+            continue
+        yolo_boxes = layers.get("yolo")
+        if not isinstance(yolo_boxes, list):
+            continue
+        for item in yolo_boxes:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("class_name") or "").strip() != wanted_name:
+                continue
+            raw = item.get("bbox")
+            if not (isinstance(raw, (list, tuple)) and len(raw) >= 4):
+                continue
+            x, y, w, h = (int(v) for v in raw[:4])
+            screen_bbox = (x + left, y + top, w, h)
+            cx = screen_bbox[0] + screen_bbox[2] // 2
+            cy = screen_bbox[1] + screen_bbox[3] // 2
+            if not point_in_rect_xywh(cx, cy, uia_box):
+                continue
+            matched.append(
+                _detection_from_bbox(screen_bbox, int(class_id), source="yolo")
+            )
+    return matched
+
+
+def _unique_yolo_box_inside_uia(
+    uia_det: UiDetection,
+    pendings: list[_MouseOcrPending],
+    vision_timing: dict[str, Any],
+    class_id: int,
+) -> UiDetection | None:
+    """Return the sole in-box YOLO box of ``class_id``, or ``None``.
+
+    Prefers deferred OCR pending boxes; falls back to ``debug_layers`` when the
+    pending list is empty so a unique text/icon can still skip OCR.
+    """
+    in_box = _pending_yolo_boxes_inside_uia(uia_det, pendings, class_id)
+    if not in_box:
+        in_box = _debug_yolo_boxes_inside_uia(uia_det, vision_timing, class_id)
+    if len(in_box) == 1:
+        return in_box[0]
+    return None
+
+
 def _detections_from_uia_prefetched(
     uia_prefetched: tuple[
         list[tuple[int, int, int, int]] | None,
@@ -4906,8 +4987,11 @@ def _finish_captured_mouse_candidates(
     timing.update(_vision_roi_fields(vision_timing))
     timing.update(_ocr_reuse_count_fields(vision_timing))
     pending = vision_timing.get("_ocr_pending")
+    if not (isinstance(pending, list) and pending):
+        pending = vision_timing.get("ocr_pending")
     if isinstance(pending, list) and pending:
         timing["_ocr_pending"] = pending
+        timing["ocr_pending"] = pending
         timing["uia_first_pending"] = True
     if "debug_layers_by_monitor" in vision_timing:
         timing["debug_layers_by_monitor"] = vision_timing["debug_layers_by_monitor"]
@@ -5550,20 +5634,28 @@ async def _find_mouse_point_attempt(
             vision_timing["vision_path"] = "uia_yolo_subtarget"
             vision_timing["uia_first_hit"] = True
             pending_raw = vision_timing.pop("_ocr_pending", None)
+            if not (isinstance(pending_raw, list) and pending_raw):
+                pending_raw = vision_timing.pop("ocr_pending", None)
             deferred_pendings = (
                 list(pending_raw)
                 if isinstance(pending_raw, list) and pending_raw
                 else []
             )
+            if vision_timing.get("uia_first_pending") and not deferred_pendings:
+                _log_info(
+                    "move_mouse uia_yolo_subtarget ocr deferred but "
+                    "_ocr_pending missing; using debug_layers for unique-box"
+                )
             ocr_pendings = []
             preferred_cls = _uia_yolo_subtarget_preferred_class(fb_anchor)
             unique_box: UiDetection | None = None
             if preferred_cls is not None:
-                in_box = _pending_yolo_boxes_inside_uia(
-                    uia_first_chosen, deferred_pendings, preferred_cls
+                unique_box = _unique_yolo_box_inside_uia(
+                    uia_first_chosen,
+                    deferred_pendings,
+                    vision_timing,
+                    preferred_cls,
                 )
-                if len(in_box) == 1:
-                    unique_box = in_box[0]
             if unique_box is not None:
                 uia_yolo_subtarget_chosen = unique_box
                 detections = _sort_detections_reading_order(

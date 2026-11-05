@@ -6183,6 +6183,118 @@ def test_try_uia_first_unique_select_requires_exact_text() -> None:
     assert chosen.text == "空白活頁簿"
 
 
+def test_try_uia_first_unique_select_name_then_value_tree_and_table() -> None:
+    """Name-primary match: transient Value optional; Value breaks table ties."""
+    from cua_mcp.select_mouse_target import _try_uia_first_unique_select
+    from src.common.nearby_side import normalize_nearby_hints
+
+    hints = normalize_nearby_hints([])
+
+    # Tree item: recorded Name|1, live Name only → hit.
+    tree_live = [
+        _detection_from_bbox(
+            (10, 10, 80, 20),
+            YOLO_CLASS_TEXT,
+            text="龜速的網域 (3)",
+            source="uia",
+        ),
+        _detection_from_bbox(
+            (10, 40, 80, 20),
+            YOLO_CLASS_TEXT,
+            text="新竹公司 (17)",
+            source="uia",
+        ),
+    ]
+    chosen, reason = _try_uia_first_unique_select(
+        tree_live,
+        anchor="龜速的網域 (3)|1",
+        nearby_hints=hints,
+        nearby_labels=[],
+        nearby_phrases=[],
+        recorded_anchor=True,
+    )
+    assert reason == "hit"
+    assert chosen is not None
+    assert chosen.text == "龜速的網域 (3)"
+
+    # Table cells: shared Name, Value picks the row.
+    table_live = [
+        _detection_from_bbox(
+            (10, 10, 120, 20),
+            YOLO_CLASS_TEXT,
+            text="電腦名稱|lannie-Ubuntu26",
+            source="uia",
+        ),
+        _detection_from_bbox(
+            (10, 40, 120, 20),
+            YOLO_CLASS_TEXT,
+            text="電腦名稱|Red-Hat10",
+            source="uia",
+        ),
+    ]
+    chosen, reason = _try_uia_first_unique_select(
+        table_live,
+        anchor="電腦名稱|lannie-Ubuntu26",
+        nearby_hints=hints,
+        nearby_labels=[],
+        nearby_phrases=[],
+        recorded_anchor=True,
+    )
+    assert reason == "hit"
+    assert chosen is not None
+    assert chosen.text == "電腦名稱|lannie-Ubuntu26"
+
+    # Guardrail: unique Name whose Value disagrees with the query → miss.
+    disagree = [
+        _detection_from_bbox(
+            (10, 10, 120, 20),
+            YOLO_CLASS_TEXT,
+            text="電腦名稱|HeaderOnlyValue",
+            source="uia",
+        ),
+    ]
+    chosen, reason = _try_uia_first_unique_select(
+        disagree,
+        anchor="電腦名稱|CellValue",
+        nearby_hints=hints,
+        nearby_labels=[],
+        nearby_phrases=[],
+        recorded_anchor=True,
+    )
+    assert chosen is None
+    assert reason == "no_anchor"
+
+
+def test_try_uia_first_unique_select_name_then_value_with_control_type() -> None:
+    """Control-type pool still uses Name-then-Value for the structured anchor."""
+    from cua_mcp.select_mouse_target import _try_uia_first_unique_select
+    from src.common.nearby_side import normalize_nearby_hints
+
+    hints = normalize_nearby_hints([])
+    dets = [
+        _detection_from_bbox(
+            (10, 10, 80, 20),
+            YOLO_CLASS_TEXT,
+            text="龜速的網域 (3)",
+            source="uia",
+            uia_control_type="text",
+        ),
+    ]
+    chosen, reason = _try_uia_first_unique_select(
+        dets,
+        anchor="龜速的網域 (3)|1",
+        nearby_hints=hints,
+        nearby_labels=[],
+        nearby_phrases=[],
+        filter_by_control_type=True,
+        control_type_token="text",
+        recorded_anchor=True,
+    )
+    assert reason == "hit"
+    assert chosen is not None
+    assert chosen.text == "龜速的網域 (3)"
+
+
 def test_pick_captured_monitor_for_window_prefers_center(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

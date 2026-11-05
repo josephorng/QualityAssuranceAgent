@@ -4382,6 +4382,92 @@ def _matches_for_phrase(
     return [pool[index] for index in expanded]
 
 
+def _filter_uia_anchor_by_name_then_value(
+    detections: list[UiDetection],
+    anchor: str,
+    *,
+    recorded_anchor: bool = False,
+) -> list[UiDetection]:
+    """Match UIA anchors by Name first; use Value only to break ties.
+
+    Recording may store ``Name|Value`` while live FindAll often exposes Name
+    alone (transient tree-item Values). Table cells share a column Name and
+    need Value to pick the row. A unique Name hit whose live Value disagrees
+    with the query Value is rejected (header vs cell guardrail). Unique Name
+    with empty live Value still accepts a query that carries a Value.
+    """
+    from src.recorder.uia_input_boxes import split_uia_name_value_label
+
+    normalize = (
+        _normalize_recorded_anchor_label
+        if recorded_anchor
+        else _normalize_similarity_label
+    )
+    query_n = normalize(anchor or "")
+    if not query_n:
+        return []
+    name_q, value_q = split_uia_name_value_label(query_n)
+    if not name_q:
+        return []
+
+    name_matches: list[tuple[UiDetection, str]] = []
+    seen: set[int] = set()
+    for det in detections:
+        det_id = id(det)
+        if det_id in seen:
+            continue
+        for label in _detection_match_labels(det):
+            label_n = normalize(label)
+            if not label_n:
+                continue
+            name_d, value_d = split_uia_name_value_label(label_n)
+            if name_d == name_q:
+                name_matches.append((det, value_d))
+                seen.add(det_id)
+                break
+
+    if not name_matches:
+        _log_info(
+            "move_mouse uia name_then_value "
+            f"name_matches=0 value_matches=0 name={name_q!r} value_q={value_q!r}"
+        )
+        return []
+
+    if len(name_matches) == 1:
+        det, value_d = name_matches[0]
+        if value_q and value_d and value_d != value_q:
+            _log_info(
+                "move_mouse uia name_then_value "
+                f"name_matches=1 value_disagree name={name_q!r} "
+                f"value_q={value_q!r} det_value={value_d!r}"
+            )
+            return []
+        _log_info(
+            "move_mouse uia name_then_value "
+            f"name_matches=1 value_matches=1 name={name_q!r} "
+            f"value_q={value_q!r} det_value={value_d!r}"
+        )
+        return [det]
+
+    if not value_q:
+        _log_info(
+            "move_mouse uia name_then_value "
+            f"name_matches={len(name_matches)} value_matches=0 "
+            f"name={name_q!r} value_q='' (no tiebreak)"
+        )
+        return [det for det, _value_d in name_matches]
+
+    value_matches = [
+        det for det, value_d in name_matches if value_d == value_q
+    ]
+    _log_info(
+        "move_mouse uia name_then_value "
+        f"name_matches={len(name_matches)} value_matches={len(value_matches)} "
+        f"name={name_q!r} value_q={value_q!r}"
+    )
+    return value_matches
+
+
 def _log_move_mouse_detections(label: str, detections: list[UiDetection]) -> None:
     """Dump candidate geometries for run.log debugging (empty → still note count)."""
     if not detections:
@@ -4431,13 +4517,15 @@ def _try_uia_first_unique_select(
     )
 
     if filter_by_control_type:
-        anchor_matches = _matches_for_phrase(
-            detections,
-            anchor,
-            control_type_token=control_type_token,
-            recorded_anchor=recorded_anchor,
+        # Anchor: Name-then-Value inside the control-type pool. Nearby: full
+        # exact label match (unchanged) so landmarks stay strict.
+        anchor_pool = _phrase_match_pool(
+            detections, anchor, control_type_token=control_type_token
         )
-        nearby_matches: list[UiDetection] = []
+        anchor_matches = _filter_uia_anchor_by_name_then_value(
+            anchor_pool, anchor, recorded_anchor=recorded_anchor
+        )
+        nearby_matches = []
         seen = {id(det) for det in anchor_matches}
         for phrase in nearby_labels:
             for det in _matches_for_phrase(detections, phrase):
@@ -4446,14 +4534,22 @@ def _try_uia_first_unique_select(
                 seen.add(id(det))
                 nearby_matches.append(det)
     else:
-        # UIA Name/Value is deterministic: exact normalized text only.
-        # Fuzzy similarity stays on the YOLO/OCR path via _filter_mouse_candidates.
-        anchor_matches, nearby_matches = _filter_mouse_candidates_exact(
+        # UIA Name/Value: Name-primary with Value tiebreak for the anchor.
+        # Nearby stays full-string exact. Fuzzy similarity stays on YOLO/OCR.
+        anchor_matches = _filter_uia_anchor_by_name_then_value(
+            detections, anchor, recorded_anchor=recorded_anchor
+        )
+        _anchor_exact, nearby_matches = _filter_mouse_candidates_exact(
             detections,
             anchor,
             nearby_labels,
             recorded_anchor=recorded_anchor,
         )
+        nearby_matches = [
+            det
+            for det in nearby_matches
+            if id(det) not in {id(a) for a in anchor_matches}
+        ]
     _log_info(
         "move_mouse uia_first after_filter "
         f"anchor={len(anchor_matches)} nearby={len(nearby_matches)} "

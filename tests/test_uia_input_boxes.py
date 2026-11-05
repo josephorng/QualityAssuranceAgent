@@ -13,6 +13,7 @@ from src.recorder.uia_input_boxes import (
     is_oversized_uia_rect,
     is_usable_uia_landmark_label,
     merge_nested_element_boxes,
+    split_uia_name_value_label,
     uia_label_combine_name_value,
     uia_label_prefer_value,
 )
@@ -122,6 +123,27 @@ def test_uia_label_combine_name_value() -> None:
     assert uia_label_combine_name_value("", "val") == "val"
     assert uia_label_combine_name_value("", "") == ""
     assert uia_label_combine_name_value("Excel - 已釘選", "1") == "Excel|1"
+
+
+def test_split_uia_name_value_label() -> None:
+    assert split_uia_name_value_label("龜速的網域 (3)|1") == ("龜速的網域 (3)", "1")
+    assert split_uia_name_value_label("龜速的網域 (3)") == ("龜速的網域 (3)", "")
+    assert split_uia_name_value_label("電腦資產|LeftMenu|Asset_PC") == (
+        "電腦資產",
+        "LeftMenu|Asset_PC",
+    )
+    assert split_uia_name_value_label("") == ("", "")
+    assert split_uia_name_value_label(None) == ("", "")
+    assert split_uia_name_value_label("Excel - 已釘選|1") == ("Excel", "1")
+    combined = uia_label_combine_name_value("龜速的網域", "1")
+    assert split_uia_name_value_label(combined) == ("龜速的網域", "1")
+    combined_pipe_value = uia_label_combine_name_value(
+        "電腦資產", "LeftMenu|Asset_PC"
+    )
+    assert split_uia_name_value_label(combined_pipe_value) == (
+        "電腦資產",
+        "LeftMenu|Asset_PC",
+    )
 
 
 def test_resolve_usable_uia_probe_label_combines_name_and_value() -> None:

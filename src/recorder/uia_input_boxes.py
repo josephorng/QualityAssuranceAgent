@@ -307,6 +307,26 @@ def uia_label_combine_name_value(name: str, value: str) -> str:
     return name_c or value_c
 
 
+def split_uia_name_value_label(label: str | None) -> tuple[str, str]:
+    """Split a combined ``Name|Value`` landmark into Name and Value.
+
+    Inverse of :func:`uia_label_combine_name_value`: the first ``|`` separates
+    Name from Value; Value may contain further ``|`` (e.g.
+    ``電腦資產|LeftMenu|Asset_PC``). No ``|`` → ``(label, "")``. Each side is
+    shell-status-canonicalized after the split (same as combine's inputs).
+    """
+    visible = str(label or "").strip()
+    if not visible:
+        return "", ""
+    if "|" not in visible:
+        return canonicalize_uia_shell_status_label(visible), ""
+    name, _sep, value = visible.partition("|")
+    return (
+        canonicalize_uia_shell_status_label(name),
+        canonicalize_uia_shell_status_label(value),
+    )
+
+
 def uia_label_prefer_value(value: str, name: str) -> str:
     """Prefer non-empty stripped Value over Name.
 

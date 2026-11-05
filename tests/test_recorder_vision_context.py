@@ -16,7 +16,6 @@ from cua_mcp.yolo_onnx import (
 )
 from src.recorder.models import RecordedEvent
 from src.recorder.vision_context import (
-    VISION_PATH_POINT_HIT_REASON,
     VISION_PATH_UIA_NOT_UNIQUE_REASON,
     _BBOX_HIT_TOLERANCE_PX,
     _MIN_NEARBY_TEXT_CANDIDATES,
@@ -1453,121 +1452,6 @@ def test_detect_recording_yolo_fallback_merges_uia_scrollbar(
     assert any(
         d.source == "uia" and d.class_id == YOLO_CLASS_SCROLLBAR for d in detections
     )
-
-
-def test_detect_recording_point_hit_hybrid_when_no_snapshot(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No settle snapshot + usable ElementFromPoint → UIA primary + OCR landmarks."""
-    bgr = np.zeros((200, 400, 3), dtype=np.uint8)
-    ocr_same = _detection_from_bbox(
-        (95, 95, 20, 20), YOLO_CLASS_TEXT, text="關配帳列", source="ocr"
-    )
-    ocr_neighbor = _detection_from_bbox(
-        (95, 120, 40, 14), YOLO_CLASS_TEXT, text="存放磁碟區", source="ocr"
-    )
-
-    def fake_detect(*_a, **_k):
-        return [ocr_same, ocr_neighbor]
-
-    monkeypatch.setattr(
-        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
-        fake_detect,
-    )
-    point_hit = {
-        "text": "網路介面卡",
-        "name": "網路介面卡",
-        "value": "",
-        "control_type": "list_item",
-        "bbox": [95, 95, 20, 20],
-    }
-    detections, timing = _detect_recording_mouse_targets(
-        bgr,
-        local_x=100,
-        local_y=100,
-        uia_prefetched=None,
-        uia_point_hit=point_hit,
-    )
-    assert timing.get("vision_path") == "uia"
-    assert timing.get("vision_path_reason") == VISION_PATH_POINT_HIT_REASON
-    assert timing.get("recording_uia_sufficient") is True
-    assert detections[0].text == "網路介面卡"
-    assert detections[0].source == "uia"
-    assert detections[0].uia_control_type == "list_item"
-    assert any(d.text == "存放磁碟區" and d.source == "ocr" for d in detections)
-    assert not any(d.text == "關配帳列" for d in detections)
-    twin = timing.get("yolo_ocr_fallback_detections")
-    assert isinstance(twin, list)
-    assert [d.text for d in twin] == ["關配帳列", "存放磁碟區"]
-
-
-def test_detect_recording_point_hit_ignored_when_snapshot_sufficient(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Rich settle snapshot still wins; point hit does not change the UIA-only path."""
-    bgr = np.zeros((200, 400, 3), dtype=np.uint8)
-    ocr = _detection_from_bbox(
-        (95, 95, 20, 20), YOLO_CLASS_TEXT, text="主按鈕OCR", source="ocr"
-    )
-
-    def fake_detect(*_a, **_k):
-        return [ocr]
-
-    monkeypatch.setattr(
-        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
-        fake_detect,
-    )
-    labeled = [((95, 95, 20, 20), "主按鈕")] + [
-        ((10, 10 + i * 18, 50, 14), f"附近{i:02d}")
-        for i in range(_MIN_NEARBY_TEXT_CANDIDATES)
-    ]
-    point_hit = {
-        "text": "點擊目標別名",
-        "name": "點擊目標別名",
-        "value": "",
-        "control_type": "button",
-        "bbox": [95, 95, 20, 20],
-    }
-    detections, timing = _detect_recording_mouse_targets(
-        bgr,
-        local_x=100,
-        local_y=100,
-        uia_prefetched=(None, None, labeled),
-        uia_point_hit=point_hit,
-    )
-    assert timing.get("vision_path") == "uia"
-    assert "vision_path_reason" not in timing
-    assert any(d.text == "主按鈕" and d.source == "uia" for d in detections)
-    assert all(d.source == "uia" for d in detections)
-    assert not any(d.text == "點擊目標別名" for d in detections)
-
-
-def test_detect_recording_unusable_point_hit_stays_yolo(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Empty/unusable point hit with no snapshot stays on YOLO+OCR."""
-    bgr = np.zeros((200, 400, 3), dtype=np.uint8)
-    ocr = _detection_from_bbox(
-        (95, 95, 20, 20), YOLO_CLASS_TEXT, text="搜尋", source="ocr"
-    )
-
-    def fake_detect(*_a, **_k):
-        return [ocr]
-
-    monkeypatch.setattr(
-        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
-        fake_detect,
-    )
-    detections, timing = _detect_recording_mouse_targets(
-        bgr,
-        local_x=100,
-        local_y=100,
-        uia_prefetched=None,
-        uia_point_hit={"text": "x", "bbox": [95, 95, 20, 20], "control_type": ""},
-    )
-    assert timing.get("vision_path") == "yolo_ocr"
-    assert timing.get("vision_path_reason") == "沒有 UIA 快照"
-    assert [d.text for d in detections] == ["搜尋"]
 
 
 @pytest.mark.asyncio

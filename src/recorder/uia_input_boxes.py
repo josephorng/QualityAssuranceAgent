@@ -630,31 +630,6 @@ def _element_label(element: ctypes.c_void_p) -> str:
     return _element_label_parts(element)[0]
 
 
-def uia_point_hit_payload(x: int, y: int) -> dict[str, object] | None:
-    """Press-time ElementFromPoint leaf as a JSON-friendly dict, or ``None``.
-
-    Shape: ``text``, ``name``, ``value``, ``control_type``, ``bbox`` (screen
-    xywh). Empty when the probe misses or the composed label is unusable.
-    """
-    probed = uia_text_element_at_point(int(x), int(y))
-    if probed is None:
-        return None
-    label, bbox, control_type, name, value = probed
-    text = str(label or "").strip()
-    if not is_usable_uia_landmark_label(text):
-        return None
-    token = str(control_type or "").strip()
-    if token and token not in UIA_CONTROL_TYPE_SUFFIX:
-        token = ""
-    return {
-        "text": text,
-        "name": str(name or "").strip(),
-        "value": str(value or "").strip(),
-        "control_type": token,
-        "bbox": [int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])],
-    }
-
-
 def uia_text_element_at_point(
     x: int, y: int
 ) -> tuple[str, RectXywh, str, str, str] | None:

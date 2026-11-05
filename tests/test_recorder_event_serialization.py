@@ -25,36 +25,6 @@ def test_recorded_event_round_trip_uia_snapshot() -> None:
     assert "uia_snapshot" not in bare.to_dict()
 
 
-def test_recorded_event_round_trip_uia_point_hit() -> None:
-    hit = {
-        "text": "網路介面卡",
-        "name": "網路介面卡",
-        "value": "",
-        "control_type": "list_item",
-        "bbox": [300, 140, 80, 16],
-    }
-    end_hit = {
-        "text": "磁碟機",
-        "name": "磁碟機",
-        "value": "",
-        "control_type": "tree_item",
-        "bbox": [310, 350, 60, 14],
-    }
-    event = RecordedEvent(
-        index=8,
-        timestamp_utc="2026-11-05T00:00:00+00:00",
-        kind="drag",
-        uia_point_hit=hit,
-        end_uia_point_hit=end_hit,
-    )
-    restored = RecordedEvent.from_dict(event.to_dict())
-    assert restored.uia_point_hit == hit
-    assert restored.end_uia_point_hit == end_hit
-    bare = RecordedEvent(index=1, timestamp_utc="t", kind="click")
-    assert "uia_point_hit" not in bare.to_dict()
-    assert "end_uia_point_hit" not in bare.to_dict()
-
-
 def test_recorded_event_round_trip() -> None:
     event = RecordedEvent(
         index=1,

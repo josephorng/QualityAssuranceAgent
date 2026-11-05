@@ -39,7 +39,6 @@ from cua_mcp.select_mouse_target import (
     _MOUSE_FILTER_SIMILARITY_THRESHOLD,
     _box_edge_gap,
     _detect_mouse_targets_from_bgr,
-    _detection_from_bbox,
     _detection_similarity_to_query,
     _detections_from_uia_prefetched,
     _detections_label_similar,
@@ -203,10 +202,6 @@ def vision_source_fingerprint(event: RecordedEvent) -> str:
         payload["uia_snapshot"] = event.uia_snapshot
     if event.end_uia_snapshot is not None:
         payload["end_uia_snapshot"] = event.end_uia_snapshot
-    if event.uia_point_hit is not None:
-        payload["uia_point_hit"] = event.uia_point_hit
-    if event.end_uia_point_hit is not None:
-        payload["end_uia_point_hit"] = event.end_uia_point_hit
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -3195,7 +3190,6 @@ def _detection_to_dict(
 
 VISION_PATH_REPAIR_REASON = "重播修復改為 UIA"
 VISION_PATH_UIA_NOT_UNIQUE_REASON = "UIA 地標無法唯一鎖定目標"
-VISION_PATH_POINT_HIT_REASON = "UIA 點擊目標"
 _VISION_PATHS = frozenset({"uia", "yolo_ocr"})
 _VISION_SECONDS_KEYS = (
     "yolo_s",
@@ -3629,51 +3623,6 @@ def _attach_unused_uia_debug(
     layers["uia"] = uia_boxes
 
 
-def _uia_point_hit_detection(
-    point_hit: dict[str, Any] | None,
-    *,
-    monitor_offset: tuple[int, int],
-) -> UiDetection | None:
-    """Image-local UIA text detection from a press-time ElementFromPoint payload."""
-    if not isinstance(point_hit, dict):
-        return None
-    text = str(point_hit.get("text") or "").strip()
-    if not _usable_uia_landmark_label(text):
-        return None
-    box = point_hit.get("bbox")
-    if not isinstance(box, (list, tuple)) or len(box) != 4:
-        return None
-    try:
-        sx, sy, sw, sh = (int(box[0]), int(box[1]), int(box[2]), int(box[3]))
-    except (TypeError, ValueError):
-        return None
-    if sw <= 0 or sh <= 0:
-        return None
-    origin_x, origin_y = int(monitor_offset[0]), int(monitor_offset[1])
-    local = (sx - origin_x, sy - origin_y, sw, sh)
-    control_type = str(point_hit.get("control_type") or "").strip() or None
-    return _detection_from_bbox(
-        local,
-        YOLO_CLASS_TEXT,
-        text=text,
-        source="uia",
-        uia_control_type=control_type,
-    )
-
-
-def _hybrid_point_hit_candidates(
-    primary: UiDetection,
-    ocr_detections: list[UiDetection],
-) -> list[UiDetection]:
-    """UIA point-hit primary first, then OCR neighbors (drop same-place OCR text)."""
-    kept: list[UiDetection] = [primary]
-    for det in ocr_detections:
-        if _detections_same_place(primary, det):
-            continue
-        kept.append(det)
-    return kept
-
-
 def _detect_recording_mouse_targets(
     bgr: np.ndarray,
     *,
@@ -3692,7 +3641,6 @@ def _detect_recording_mouse_targets(
     ]
     | None = None,
     forced_scrollbar_bbox: tuple[int, int, int, int] | None = None,
-    uia_point_hit: dict[str, Any] | None = None,
 ) -> tuple[list[UiDetection], dict[str, Any]]:
     """UIA candidates when the usable-label gate passes; otherwise YOLO+OCR.
 
@@ -3702,10 +3650,6 @@ def _detect_recording_mouse_targets(
     ``uia_prefetched`` is still passed so UIA inputs and scrollbars can
     prefer-replace overlapping YOLO boxes. UIA labeled text is not mixed into
     OCR candidates.
-
-    When the settle snapshot is missing or cannot uniquely name the click, a
-    usable press-time ``uia_point_hit`` becomes the UIA primary and OCR boxes
-    supply nearby landmarks (hybrid path).
     """
     _ = live_input_hwnd, live_input_monitor_offset, live_input_window_screen_xywh
     vision_timing: dict[str, Any] = timing_out if timing_out is not None else {}
@@ -3746,28 +3690,6 @@ def _detect_recording_mouse_targets(
         vision_timing["recording_uia_sufficient"] = True
         vision_timing["yolo_ocr_fallback_detections"] = detections
         return uia_detections, vision_timing
-
-    point_hit_offset = (
-        live_input_monitor_offset
-        if live_input_monitor_offset is not None
-        else coord_offset
-    )
-    point_hit_det = _uia_point_hit_detection(
-        uia_point_hit,
-        monitor_offset=point_hit_offset,
-    )
-    if (
-        point_hit_det is not None
-        and local_x is not None
-        and local_y is not None
-        and _detection_contains_click(point_hit_det, int(local_x), int(local_y))
-    ):
-        hybrid = _hybrid_point_hit_candidates(point_hit_det, detections)
-        vision_timing["vision_path"] = "uia"
-        vision_timing["vision_path_reason"] = VISION_PATH_POINT_HIT_REASON
-        vision_timing["recording_uia_sufficient"] = True
-        vision_timing["yolo_ocr_fallback_detections"] = detections
-        return hybrid, vision_timing
 
     vision_timing["vision_path"] = "yolo_ocr"
     vision_timing["vision_path_reason"] = skip_reason
@@ -3905,11 +3827,6 @@ def build_vision_context_full_image(
             bgr,
             coord_offset=offset,
             uia_prefetched=uia_prefetched,
-            uia_point_hit=(
-                event.uia_point_hit
-                if isinstance(event.uia_point_hit, dict)
-                else None
-            ),
         )
     except RuntimeError as exc:
         all_detections = []
@@ -3977,7 +3894,6 @@ def build_vision_context_at_point(
     click_window: dict[str, Any] | None = None,
     monitor_offset: tuple[int, int] | None = None,
     uia_snapshot: dict[str, Any] | None | object = _UIA_SNAPSHOT_UNSET,
-    uia_point_hit: dict[str, Any] | None | object = _UIA_SNAPSHOT_UNSET,
     press_scrollbar_screen_xyxy: tuple[int, int, int, int] | None = None,
 ) -> dict[str, Any]:
     """Run YOLO+OCR and rank candidates nearest to explicit screenshot-local coords.
@@ -4073,9 +3989,6 @@ def build_vision_context_at_point(
     chosen_snapshot = (
         event.uia_snapshot if uia_snapshot is _UIA_SNAPSHOT_UNSET else uia_snapshot
     )
-    chosen_point_hit = (
-        event.uia_point_hit if uia_point_hit is _UIA_SNAPSHOT_UNSET else uia_point_hit
-    )
     uia_prefetched = None
     if isinstance(chosen_snapshot, dict):
         img_h, img_w = bgr.shape[:2]
@@ -4107,9 +4020,6 @@ def build_vision_context_at_point(
             local_y=local_y,
             uia_prefetched=uia_prefetched,
             forced_scrollbar_bbox=forced_scrollbar_bbox,
-            uia_point_hit=(
-                chosen_point_hit if isinstance(chosen_point_hit, dict) else None
-            ),
         )
     except RuntimeError as exc:
         all_detections = []
@@ -4579,7 +4489,6 @@ def run_pointer_event_yolo_ocr(
                 debug_name="",
                 source_fingerprint=fingerprint,
                 uia_snapshot=event.uia_snapshot,
-                uia_point_hit=event.uia_point_hit,
             )
             end_future = pool.submit(
                 build_vision_context_at_point,
@@ -4593,7 +4502,6 @@ def run_pointer_event_yolo_ocr(
                 debug_name="_end",
                 source_fingerprint=fingerprint,
                 uia_snapshot=event.end_uia_snapshot,
-                uia_point_hit=event.end_uia_point_hit,
                 click_window=event.end_click_window,
                 monitor_offset=(
                     event.end_monitor_offset

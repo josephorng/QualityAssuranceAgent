@@ -61,6 +61,10 @@ class RecordedEvent:
     uia_snapshot: dict[str, Any] | None = None
     # Drag-release UIA tree. Same shape as ``uia_snapshot``.
     end_uia_snapshot: dict[str, Any] | None = None
+    # Press-time ElementFromPoint leaf (screen xywh bbox). Omitted when empty.
+    uia_point_hit: dict[str, Any] | None = None
+    # Drag-release ElementFromPoint leaf. Same shape as ``uia_point_hit``.
+    end_uia_point_hit: dict[str, Any] | None = None
     # UI settle measured by consecutive screenshot stability during recording.
     observed_settle_seconds: float | None = None
     # Typing-burst IME summary: ``{"chinese": bool, "lang_id": int}``. Omitted
@@ -93,6 +97,10 @@ class RecordedEvent:
             data.pop("uia_snapshot", None)
         if self.end_uia_snapshot is None:
             data.pop("end_uia_snapshot", None)
+        if self.uia_point_hit is None:
+            data.pop("uia_point_hit", None)
+        if self.end_uia_point_hit is None:
+            data.pop("end_uia_point_hit", None)
         if self.observed_settle_seconds is None:
             data.pop("observed_settle_seconds", None)
         if self.ime is None:
@@ -177,6 +185,16 @@ class RecordedEvent:
             end_uia_snapshot=(
                 raw.get("end_uia_snapshot")
                 if isinstance(raw.get("end_uia_snapshot"), dict)
+                else None
+            ),
+            uia_point_hit=(
+                raw.get("uia_point_hit")
+                if isinstance(raw.get("uia_point_hit"), dict)
+                else None
+            ),
+            end_uia_point_hit=(
+                raw.get("end_uia_point_hit")
+                if isinstance(raw.get("end_uia_point_hit"), dict)
                 else None
             ),
             observed_settle_seconds=(

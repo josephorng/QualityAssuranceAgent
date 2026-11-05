@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.recorder.uia_input_boxes import (
     _UIA_COMBOBOX_CONTROL_TYPE_ID,
     _UIA_DOCUMENT_CONTROL_TYPE_ID,
@@ -169,6 +171,37 @@ def test_canonicalize_uia_shell_status_label_strips_taskbar_tails() -> None:
     assert uia_label_prefer_value("Excel - 已釘選", "name") == "Excel"
     assert is_usable_uia_landmark_label("Excel - 已釘選") is True
     assert is_usable_uia_landmark_label("（已釘選）") is False
+
+
+def test_uia_point_hit_payload_from_element_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.recorder.uia_input_boxes import uia_point_hit_payload
+
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.uia_text_element_at_point",
+        lambda x, y: (
+            "網路介面卡",
+            (300, 140, 80, 16),
+            "list_item",
+            "網路介面卡",
+            "",
+        ),
+    )
+    hit = uia_point_hit_payload(320, 148)
+    assert hit == {
+        "text": "網路介面卡",
+        "name": "網路介面卡",
+        "value": "",
+        "control_type": "list_item",
+        "bbox": [300, 140, 80, 16],
+    }
+
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.uia_text_element_at_point",
+        lambda *_a, **_k: ("x", (1, 1, 2, 2), "text", "x", ""),
+    )
+    assert uia_point_hit_payload(1, 1) is None
 
 
 def test_uia_snapshot_image_local_strips_shell_status_from_old_texts() -> None:

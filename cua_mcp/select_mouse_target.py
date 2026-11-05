@@ -4554,6 +4554,23 @@ def _pending_yolo_boxes_inside_uia(
     return matched
 
 
+def _uia_yolo_subtarget_preferred_class(anchor: str) -> int | None:
+    """YOLO class for unique in-box OCR skip, from the fallback hub wrapper.
+
+    Nearby landmarks may force a TEXT+ELEMENT OCR plan, but the click target is
+    still ``…文字`` or ``…圖示``. One in-box box of that class can skip OCR;
+    multiple need OCR to match the anchor. Ambiguous anchors return ``None``.
+    """
+    phrase = (anchor or "").strip()
+    if not phrase:
+        return None
+    if "文字" in phrase:
+        return YOLO_CLASS_TEXT
+    if "圖示" in phrase or "元素" in phrase:
+        return YOLO_CLASS_ELEMENT
+    return None
+
+
 def _detections_from_uia_prefetched(
     uia_prefetched: tuple[
         list[tuple[int, int, int, int]] | None,
@@ -5492,7 +5509,9 @@ async def _find_mouse_point_attempt(
             _log_info("move_mouse uia_first=hit; skipping YOLO")
         elif uia_first_chosen is not None and ocr_fallback is not None:
             # Repaired YOLO step: UIA picked the item; YOLO picks expand vs text.
-            # Defer OCR so a unique in-box TEXT/ELEMENT box can skip it.
+            # Defer OCR so a unique in-box box of the fallback target class can
+            # skip it (even when nearby landmarks inflate the OCR plan to both
+            # TEXT and ELEMENT). Multiple in-box boxes of that class need OCR.
             fb_plan = _mouse_vision_plan(
                 ocr_fallback.instruction,
                 list(ocr_fallback.nearby_objects) or None,
@@ -5537,15 +5556,11 @@ async def _find_mouse_point_attempt(
                 else []
             )
             ocr_pendings = []
-            singleton_ids = fb_plan.ocr_class_ids
+            preferred_cls = _uia_yolo_subtarget_preferred_class(fb_anchor)
             unique_box: UiDetection | None = None
-            if singleton_ids in (
-                frozenset({YOLO_CLASS_TEXT}),
-                frozenset({YOLO_CLASS_ELEMENT}),
-            ):
-                only_cls = next(iter(singleton_ids))
+            if preferred_cls is not None:
                 in_box = _pending_yolo_boxes_inside_uia(
-                    uia_first_chosen, deferred_pendings, only_cls
+                    uia_first_chosen, deferred_pendings, preferred_cls
                 )
                 if len(in_box) == 1:
                     unique_box = in_box[0]
@@ -5570,11 +5585,18 @@ async def _find_mouse_point_attempt(
                     capture_s = float(vision_timing.get("capture_s", 0.0))
                     vision_timing["vision_path"] = "uia_yolo_subtarget"
                     vision_timing["uia_first_hit"] = True
+                # After OCR, match the fallback anchor; prefer the target class
+                # when the hub wrapper names one (ignore sibling class noise).
+                subtarget_classes: frozenset[int] | set[int] | None = (
+                    frozenset({preferred_cls})
+                    if preferred_cls is not None
+                    else fb_plan.ocr_class_ids
+                )
                 subtargets = _yolo_subtargets_inside_uia(
                     uia_first_chosen,
                     yolo_detections,
                     fb_anchor,
-                    ocr_class_ids=fb_plan.ocr_class_ids,
+                    ocr_class_ids=subtarget_classes,
                 )
                 detections = _sort_detections_reading_order(
                     [*uia_dets, *yolo_detections]

@@ -7188,10 +7188,10 @@ async def test_uia_hit_with_fallback_ambiguous_keeps_uia_center(
 
 
 @pytest.mark.asyncio
-async def test_uia_hit_with_fallback_both_class_plan_always_finishes_ocr(
+async def test_uia_hit_with_fallback_unique_element_skips_ocr_despite_text_nearby(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """TEXT+ELEMENT plan never takes the unique-box OCR skip."""
+    """Nearby …文字 inflates OCR plan to both classes; one in-box 圖示 still skips OCR."""
     import numpy as np
 
     from cua_mcp import select_mouse_target as smt
@@ -7203,12 +7203,6 @@ async def test_uia_hit_with_fallback_both_class_plan_always_finishes_ocr(
     uia_row = _detection_from_bbox(
         (10, 10, 120, 28), YOLO_CLASS_TEXT, text="龜速的網域|1", source="uia"
     )
-    expand_icon = _detection_from_bbox(
-        (14, 14, 12, 12),
-        YOLO_CLASS_ELEMENT,
-        icons=[{"chinese_id": "展開節點"}],
-        source="yolo",
-    )
     deferred_calls: list[str] = []
 
     def fake_grab():
@@ -7217,7 +7211,6 @@ async def test_uia_hit_with_fallback_both_class_plan_always_finishes_ocr(
 
     def fake_finish(*_a, **_k):
         assert _k.get("defer_ocr") is True
-        # Only one element in-box; skip would fire if plan were element-only.
         pending = _ocr_pending_for_boxes([((14, 14, 12, 12), YOLO_CLASS_ELEMENT)])
         timing = {
             "capture_s": 0.01,
@@ -7234,11 +7227,9 @@ async def test_uia_hit_with_fallback_both_class_plan_always_finishes_ocr(
         frame = np.zeros((80, 160, 3), dtype=np.uint8)
         return [1], ["shot.png"], [(1, frame)], [], timing
 
-    def fake_finish_deferred(pendings, *, timing_base):
+    def fake_finish_deferred(*_a, **_k):
         deferred_calls.append("finish_deferred")
-        timing = dict(timing_base)
-        timing["ocr_s"] = 0.02
-        return [expand_icon], timing
+        raise AssertionError("unique in-box 圖示 must skip OCR despite text nearby")
 
     monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
     monkeypatch.setattr(
@@ -7273,7 +7264,191 @@ async def test_uia_hit_with_fallback_both_class_plan_always_finishes_ocr(
             control_type="text",
         )
     assert found is not None
-    assert found[0:2] == (expand_icon.cx, expand_icon.cy)
+    assert found[0:2] == (20, 20)  # center of (14,14,12,12)
+    assert found[2]["selection_method"] == "uia_yolo_subtarget"
+    assert deferred_calls == []
+
+
+@pytest.mark.asyncio
+async def test_uia_hit_with_fallback_unique_text_skips_ocr_despite_icon_nearby(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nearby …圖示 inflates OCR plan to both classes; one in-box 文字 still skips OCR."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        YoloOcrMoveFallback,
+        bind_yolo_ocr_fallbacks,
+    )
+
+    uia_btn = _detection_from_bbox(
+        (10, 10, 130, 30), YOLO_CLASS_TEXT, text="取消", source="uia"
+    )
+    text_box = (40, 14, 28, 13)
+    deferred_calls: list[str] = []
+
+    def fake_grab():
+        frame = np.zeros((80, 200, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def fake_finish(*_a, **_k):
+        assert _k.get("defer_ocr") is True
+        # Sibling icon inside the same UIA button must not force OCR.
+        pending = _ocr_pending_for_boxes(
+            [
+                (text_box, YOLO_CLASS_TEXT),
+                ((14, 14, 12, 12), YOLO_CLASS_ELEMENT),
+            ]
+        )
+        timing = {
+            "capture_s": 0.01,
+            "yolo_s": 0.05,
+            "line_s": 0.0,
+            "uia_input_s": 0.0,
+            "uia_scrollbar_s": 0.0,
+            "uia_text_s": 0.0,
+            "ocr_s": 0.0,
+            "icon_ocr_retry_s": 0.0,
+            "total_s": 0.05,
+            "_ocr_pending": [pending],
+        }
+        frame = np.zeros((80, 200, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], [], timing
+
+    def fake_finish_deferred(*_a, **_k):
+        deferred_calls.append("finish_deferred")
+        raise AssertionError("unique in-box 文字 must skip OCR despite icon nearby")
+
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(
+        smt,
+        "_uia_only_detections_for_click_window",
+        lambda *_a, **_k: [uia_btn],
+    )
+    monkeypatch.setattr(
+        smt,
+        "_try_uia_first_unique_select",
+        lambda *_a, **_k: (uia_btn, "hit"),
+    )
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
+    monkeypatch.setattr(smt, "_finish_deferred_ocr_pendings", fake_finish_deferred)
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+
+    fallback = YoloOcrMoveFallback(
+        instruction="（YOLO+OCR）將滑鼠移到「取消」文字，並點擊滑鼠一下。",
+        nearby_objects=("在「翻譯」圖示的左邊", "在「實心正方形」圖示的右邊"),
+    )
+    with bind_yolo_ocr_fallbacks([fallback]):
+        found = await smt.find_mouse_point(
+            "（UIA）將滑鼠移到「取消」按鈕",
+            click_window={
+                "hwnd": 5,
+                "title": "編輯電腦資產",
+                "process_name": "app.exe",
+                "rect": [0, 0, 200, 200],
+            },
+            vision_mode="uia",
+            anchor_text="取消",
+            control_type="button",
+        )
+    assert found is not None
+    assert found[0:2] == (54, 20)  # center of (40,14,28,13)
+    assert found[2]["selection_method"] == "uia_yolo_subtarget"
+    assert deferred_calls == []
+
+
+@pytest.mark.asyncio
+async def test_uia_hit_with_fallback_multiple_texts_finishes_ocr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two in-box text boxes → finish OCR to match 「取消」文字."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        YoloOcrMoveFallback,
+        bind_yolo_ocr_fallbacks,
+    )
+
+    uia_btn = _detection_from_bbox(
+        (10, 10, 130, 30), YOLO_CLASS_TEXT, text="取消", source="uia"
+    )
+    cancel_text = _detection_from_bbox(
+        (40, 14, 28, 13), YOLO_CLASS_TEXT, text="取消", source="yolo"
+    )
+    other_text = _detection_from_bbox(
+        (80, 14, 28, 13), YOLO_CLASS_TEXT, text="確定", source="yolo"
+    )
+    deferred_calls: list[str] = []
+
+    def fake_grab():
+        frame = np.zeros((80, 200, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def fake_finish(*_a, **_k):
+        assert _k.get("defer_ocr") is True
+        pending = _ocr_pending_for_boxes(
+            [
+                ((40, 14, 28, 13), YOLO_CLASS_TEXT),
+                ((80, 14, 28, 13), YOLO_CLASS_TEXT),
+            ]
+        )
+        timing = {
+            "capture_s": 0.01,
+            "yolo_s": 0.05,
+            "line_s": 0.0,
+            "uia_input_s": 0.0,
+            "uia_scrollbar_s": 0.0,
+            "uia_text_s": 0.0,
+            "ocr_s": 0.0,
+            "icon_ocr_retry_s": 0.0,
+            "total_s": 0.05,
+            "_ocr_pending": [pending],
+        }
+        frame = np.zeros((80, 200, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], [], timing
+
+    def fake_finish_deferred(pendings, *, timing_base):
+        deferred_calls.append("finish_deferred")
+        timing = dict(timing_base)
+        timing["ocr_s"] = 0.02
+        return [cancel_text, other_text], timing
+
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(
+        smt,
+        "_uia_only_detections_for_click_window",
+        lambda *_a, **_k: [uia_btn],
+    )
+    monkeypatch.setattr(
+        smt,
+        "_try_uia_first_unique_select",
+        lambda *_a, **_k: (uia_btn, "hit"),
+    )
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
+    monkeypatch.setattr(smt, "_finish_deferred_ocr_pendings", fake_finish_deferred)
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+
+    fallback = YoloOcrMoveFallback(
+        instruction="（YOLO+OCR）將滑鼠移到「取消」文字，並點擊滑鼠一下。",
+        nearby_objects=("在「翻譯」圖示的左邊",),
+    )
+    with bind_yolo_ocr_fallbacks([fallback]):
+        found = await smt.find_mouse_point(
+            "（UIA）將滑鼠移到「取消」按鈕",
+            click_window={
+                "hwnd": 5,
+                "title": "編輯電腦資產",
+                "process_name": "app.exe",
+                "rect": [0, 0, 200, 200],
+            },
+            vision_mode="uia",
+            anchor_text="取消",
+            control_type="button",
+        )
+    assert found is not None
+    assert found[0:2] == (cancel_text.cx, cancel_text.cy)
     assert found[2]["selection_method"] == "uia_yolo_subtarget"
     assert deferred_calls == ["finish_deferred"]
 
@@ -7292,6 +7467,14 @@ def test_pending_yolo_boxes_inside_uia_applies_offset() -> None:
     matched = _pending_yolo_boxes_inside_uia(uia, [pending], YOLO_CLASS_ELEMENT)
     assert len(matched) == 1
     assert matched[0].bbox == (110, 60, 12, 12)
+
+
+def test_uia_yolo_subtarget_preferred_class_from_hub_wrapper() -> None:
+    from cua_mcp.select_mouse_target import _uia_yolo_subtarget_preferred_class
+
+    assert _uia_yolo_subtarget_preferred_class("「取消」文字") == YOLO_CLASS_TEXT
+    assert _uia_yolo_subtarget_preferred_class("「展開節點」圖示") == YOLO_CLASS_ELEMENT
+    assert _uia_yolo_subtarget_preferred_class("輸入欄") is None
 
 
 @pytest.mark.asyncio

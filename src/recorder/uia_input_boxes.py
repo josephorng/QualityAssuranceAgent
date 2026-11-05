@@ -702,6 +702,23 @@ def uia_text_element_at_point(
         _note_element_from_point_elapsed(time.perf_counter() - started)
 
 
+def element_from_point_name_value(x: int, y: int) -> dict[str, str] | None:
+    """Feasibility probe: raw UIA Name/Value under a screen point.
+
+    Returns ``{"name": ..., "value": ...}`` when either string is non-empty,
+    otherwise ``None``. Used to stash ElementFromPoint results on recorded
+    pointer steps without requiring FindAll to expose the same leaf.
+    """
+    probed = uia_text_element_at_point(int(x), int(y))
+    if not isinstance(probed, tuple) or len(probed) < 5:
+        return None
+    name = str(probed[3] or "").strip()
+    value = str(probed[4] or "").strip()
+    if not name and not value:
+        return None
+    return {"name": name, "value": value}
+
+
 def _uia_text_element_at_point_impl(
     x: int, y: int
 ) -> tuple[str, RectXywh, str, str, str] | None:

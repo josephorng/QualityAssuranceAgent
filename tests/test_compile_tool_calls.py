@@ -130,6 +130,20 @@ def test_compile_click_keeps_vision_mode_on_short_target() -> None:
     assert calls[0]["arguments"]["control_type"] == "list_item"
 
 
+def test_compile_click_copies_element_from_point_name_value() -> None:
+    event = _event(
+        kind="click",
+        click_count=1,
+        element_from_point={"name": "展開", "value": "1"},
+    )
+    instruction = "將滑鼠移到「展開」按鈕，並點擊滑鼠一下。"
+    calls = compile_tool_calls(event, instruction)
+    assert calls is not None
+    assert calls[0]["name"] == "move_mouse"
+    assert calls[0]["arguments"]["name"] == "展開"
+    assert calls[0]["arguments"]["value"] == "1"
+
+
 def test_compile_click_office_bracket_tab_structured_fields() -> None:
     event = _event(kind="click", click_count=1)
     instruction = (

@@ -61,6 +61,9 @@ class RecordedEvent:
     uia_snapshot: dict[str, Any] | None = None
     # Drag-release UIA tree. Same shape as ``uia_snapshot``.
     end_uia_snapshot: dict[str, Any] | None = None
+    # Feasibility: ElementFromPoint Name/Value at the press cursor
+    # (``{"name": str, "value": str}``). Compiled into move_mouse args.
+    element_from_point: dict[str, Any] | None = None
     # UI settle measured by consecutive screenshot stability during recording.
     observed_settle_seconds: float | None = None
     # Typing-burst IME summary: ``{"chinese": bool, "lang_id": int}``. Omitted
@@ -93,6 +96,8 @@ class RecordedEvent:
             data.pop("uia_snapshot", None)
         if self.end_uia_snapshot is None:
             data.pop("end_uia_snapshot", None)
+        if self.element_from_point is None:
+            data.pop("element_from_point", None)
         if self.observed_settle_seconds is None:
             data.pop("observed_settle_seconds", None)
         if self.ime is None:
@@ -177,6 +182,11 @@ class RecordedEvent:
             end_uia_snapshot=(
                 raw.get("end_uia_snapshot")
                 if isinstance(raw.get("end_uia_snapshot"), dict)
+                else None
+            ),
+            element_from_point=(
+                raw.get("element_from_point")
+                if isinstance(raw.get("element_from_point"), dict)
                 else None
             ),
             observed_settle_seconds=(

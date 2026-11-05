@@ -46,8 +46,10 @@ def recording_tool_cache_path(run_dir: Path) -> Path:
     return Path(run_dir) / RECORDING_TOOL_CACHE_FILENAME
 
 
-def _call(name: str, **arguments: Any) -> dict[str, Any]:
-    return {"name": name, "arguments": dict(arguments)}
+def _call(tool_name: str, **arguments: Any) -> dict[str, Any]:
+    # First arg is the MCP tool name; do not use ``name`` here — recordings may
+    # pass ElementFromPoint ``name``/``value`` as tool arguments.
+    return {"name": tool_name, "arguments": dict(arguments)}
 
 
 def _validated(calls: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
@@ -253,12 +255,27 @@ def _nearby_object_phrases(instruction: str) -> list[str] | None:
     return phrases or None
 
 
+def _element_from_point_args(
+    element_from_point: dict[str, Any] | None,
+) -> dict[str, str]:
+    """Feasibility: copy recorded ElementFromPoint Name/Value into tool args."""
+    if not isinstance(element_from_point, dict):
+        return {}
+    out: dict[str, str] = {}
+    if "name" in element_from_point:
+        out["name"] = str(element_from_point.get("name") or "")
+    if "value" in element_from_point:
+        out["value"] = str(element_from_point.get("value") or "")
+    return out
+
+
 def _move_mouse_call(
     instruction: str,
     *,
     target: str | None = None,
     click_window: dict[str, Any] | None = None,
     vision: dict[str, Any] | None = None,
+    element_from_point: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build move_mouse with a short target + optional nearby_objects / click_window."""
     resolved = (target if target is not None else _short_move_target(instruction)).strip()
@@ -299,6 +316,7 @@ def _move_mouse_call(
             args["landmark_geometry"] = geometry
     if click_window is not None:
         args["click_window"] = click_window
+    args.update(_element_from_point_args(element_from_point))
     return _call("move_mouse", **args)
 
 
@@ -323,6 +341,7 @@ def _compile_click_family(
             instruction,
             click_window=event.click_window,
             vision=vision,
+            element_from_point=event.element_from_point,
         )
     ]
     modifiers = _modifier_list(event.modifiers)
@@ -443,6 +462,7 @@ def _compile_scroll(
                 target=target,
                 click_window=event.click_window,
                 vision=vision,
+                element_from_point=event.element_from_point,
             )
         )
     calls.append(_call("scroll", clicks=clicks, instruction=instruction))

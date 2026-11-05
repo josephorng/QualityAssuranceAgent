@@ -25,6 +25,19 @@ def test_recorded_event_round_trip_uia_snapshot() -> None:
     assert "uia_snapshot" not in bare.to_dict()
 
 
+def test_recorded_event_round_trip_element_from_point() -> None:
+    event = RecordedEvent(
+        index=5,
+        timestamp_utc="2026-11-05T00:00:00+00:00",
+        kind="click",
+        element_from_point={"name": "展開", "value": "1"},
+    )
+    restored = RecordedEvent.from_dict(event.to_dict())
+    assert restored.element_from_point == {"name": "展開", "value": "1"}
+    bare = RecordedEvent(index=1, timestamp_utc="t", kind="click")
+    assert "element_from_point" not in bare.to_dict()
+
+
 def test_recorded_event_round_trip() -> None:
     event = RecordedEvent(
         index=1,

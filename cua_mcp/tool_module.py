@@ -82,6 +82,8 @@ async def _move_mouse(
     anchor_text: str | None = None,
     control_type: str | None = None,
     vision_mode: str | None = None,
+    name: str | None = None,
+    value: str | None = None,
 ) -> dict[str, Any]:
     gx, gy, meta = await resolve_mouse_point(
         instruction,
@@ -110,6 +112,11 @@ async def _move_mouse(
         merged["control_type"] = control_type
     if vision_mode is not None:
         merged["vision_mode"] = vision_mode
+    # Feasibility: echo recorded ElementFromPoint Name/Value into action args.
+    if name is not None:
+        merged["name"] = name
+    if value is not None:
+        merged["value"] = value
     return _with_unified_target_metadata(
         merged,
         target_kind=str(meta.get("target_kind", "mouse_target")),

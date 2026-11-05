@@ -397,6 +397,8 @@ class _QueuedEvent:
     uia_snapshot: dict[str, Any] | None = None
     # Drag-release UIA snapshot.
     end_uia_snapshot: dict[str, Any] | None = None
+    # Feasibility: ElementFromPoint Name/Value at press cursor.
+    element_from_point: dict[str, Any] | None = None
     # Light/UIA sample copied from the pre-click cache at input time.
     signals_before: dict[str, Any] | None = None
     # time.monotonic() when the gesture happened. The window-step thread sleeps
@@ -1006,6 +1008,10 @@ class RecordingSession:
         self._last_settle_uia_after_index: int | None = None
         self._left_press_uia: dict[int, dict[str, Any] | None] = {}
         self._right_press_uia: dict[int, dict[str, Any] | None] = {}
+        # Feasibility: ElementFromPoint Name/Value probed on the capture worker
+        # at pending press (never on the mouse hook).
+        self._left_press_efp: dict[int, dict[str, Any] | None] = {}
+        self._right_press_efp: dict[int, dict[str, Any] | None] = {}
         # Drag emit waits for window-step end_uia before notifying vision.
         # Click/press UIA is settle-cache only; a miss leaves uia_snapshot empty
         # (never a press-time or deferred FindAll write).
@@ -1183,6 +1189,8 @@ class RecordingSession:
             self._last_settle_uia_after_index = None
             self._left_press_uia = {}
             self._right_press_uia = {}
+            self._left_press_efp = {}
+            self._right_press_efp = {}
             self._uia_notify_wait = {}
             self._drag_end_captures = {}
             self._pending_right_coords = None
@@ -3363,6 +3371,7 @@ class RecordingSession:
             self._pending_click_window = None
             self._left_press_click_windows.pop(seq, None)
             self._left_press_uia.pop(seq, None)
+            self._left_press_efp.pop(seq, None)
             self._left_press_signals.pop(seq, None)
         self._discard_press_capture_entry(stale)
         self._discard_drag_end_capture_entry(drag_stale)
@@ -3390,6 +3399,7 @@ class RecordingSession:
         self._pending_right_click_window = None
         self._right_press_click_windows.pop(seq, None)
         self._right_press_uia.pop(seq, None)
+        self._right_press_efp.pop(seq, None)
         self._right_press_signals.pop(seq, None)
         return stale, pending_shot
 
@@ -4739,6 +4749,19 @@ class RecordingSession:
             return
         self._release_uia_notify_slot(item.event_index)
 
+    def _probe_element_from_point_at(
+        self, cursor_xy: tuple[int, int] | None
+    ) -> dict[str, Any] | None:
+        """ElementFromPoint Name/Value off the hook (feasibility for tool args)."""
+        if cursor_xy is None:
+            return None
+        from src.recorder.uia_input_boxes import element_from_point_name_value
+
+        try:
+            return element_from_point_name_value(int(cursor_xy[0]), int(cursor_xy[1]))
+        except Exception:
+            return None
+
     def _worker_pending_left_press(self, job: _DeferredCaptureJob) -> None:
         if job.press_seq is None or job.cursor_xy is None:
             self._unpin_settle_frame(job.settle_frame)
@@ -4770,10 +4793,12 @@ class RecordingSession:
                 f"{type(exc).__name__}: {exc}",
             )
             info = None
+        efp = self._probe_element_from_point_at(job.cursor_xy)
         with self._lock:
             prev = self._left_press_captures.get(job.press_seq)
             windows_before = prev[1] if prev is not None else None
             self._left_press_captures[job.press_seq] = (info, windows_before)
+            self._left_press_efp[job.press_seq] = efp
             if self._left_press_seq == job.press_seq:
                 self._pending_screenshot = info
                 if windows_before is not None:
@@ -4806,10 +4831,12 @@ class RecordingSession:
                 f"{type(exc).__name__}: {exc}",
             )
             info = None
+        efp = self._probe_element_from_point_at(job.cursor_xy)
         with self._lock:
             prev = self._right_press_captures.get(job.press_seq)
             windows_before = prev[1] if prev is not None else None
             self._right_press_captures[job.press_seq] = (info, windows_before)
+            self._right_press_efp[job.press_seq] = efp
             if self._right_press_seq == job.press_seq:
                 self._pending_right_screenshot = info
                 if windows_before is not None:
@@ -4867,6 +4894,11 @@ class RecordingSession:
             )
             uia_snapshot = (
                 self._left_press_uia.pop(press_seq, None)
+                if press_seq is not None
+                else None
+            )
+            element_from_point = (
+                self._left_press_efp.pop(press_seq, None)
                 if press_seq is not None
                 else None
             )
@@ -4978,6 +5010,9 @@ class RecordingSession:
                 end_click_window=job.end_click_window,
                 uia_snapshot=uia_snapshot,
                 end_uia_snapshot=None,
+                element_from_point=(
+                    element_from_point if isinstance(element_from_point, dict) else None
+                ),
                 signals_before=signals_before,
                 action_monotonic=job.action_monotonic,
             )
@@ -5004,6 +5039,11 @@ class RecordingSession:
             )
             uia_snapshot = (
                 self._right_press_uia.pop(press_seq, None)
+                if press_seq is not None
+                else None
+            )
+            element_from_point = (
+                self._right_press_efp.pop(press_seq, None)
                 if press_seq is not None
                 else None
             )
@@ -5058,6 +5098,9 @@ class RecordingSession:
                 windows_before=pending_windows,
                 click_window=click_window,
                 uia_snapshot=uia_snapshot,
+                element_from_point=(
+                    element_from_point if isinstance(element_from_point, dict) else None
+                ),
                 signals_before=signals_before,
                 action_monotonic=job.action_monotonic,
             )
@@ -5096,6 +5139,7 @@ class RecordingSession:
                 job.event_index,
                 job.cursor_xy,
             )
+        efp = self._probe_element_from_point_at(job.cursor_xy)
         self._persist_queued_event(
             _QueuedEvent(
                 kind=job.kind,
@@ -5110,6 +5154,7 @@ class RecordingSession:
                 scroll_delta=job.scroll_delta,
                 windows_before=job.windows_before or self._start_windows_before(),
                 click_window=job.click_window,
+                element_from_point=efp if isinstance(efp, dict) else None,
                 signals_before=job.signals_before or self._start_signals_before(),
                 action_monotonic=job.action_monotonic,
             )
@@ -5522,6 +5567,11 @@ class RecordingSession:
             uia_snapshot=item.uia_snapshot if isinstance(item.uia_snapshot, dict) else None,
             end_uia_snapshot=(
                 item.end_uia_snapshot if isinstance(item.end_uia_snapshot, dict) else None
+            ),
+            element_from_point=(
+                item.element_from_point
+                if isinstance(item.element_from_point, dict)
+                else None
             ),
             ime=item.ime if isinstance(item.ime, dict) else None,
         )

@@ -196,6 +196,8 @@ async def move_mouse(
     anchor_text: str | None = None,
     control_type: str | None = None,
     vision_mode: str | None = None,
+    name: str | None = None,
+    value: str | None = None,
 ):
     '''
     Take a screenshot, detect UI targets (text, element, input, scrollbar), and move
@@ -223,6 +225,8 @@ async def move_mouse(
     control_type: optional recorded control token (button, list_item, icon, …) used with
     anchor_text for typed UIA/YOLO matching.
     vision_mode: optional "uia" or "yolo_ocr"; overrides a （UIA）/（YOLO+OCR） prefix.
+    name: optional recorded ElementFromPoint UIA Name (feasibility; not used for match).
+    value: optional recorded ElementFromPoint UIA Value (feasibility; not used for match).
     '''
     duration: float = 0.0
     result = await _move_mouse(
@@ -234,6 +238,8 @@ async def move_mouse(
         anchor_text=anchor_text,
         control_type=control_type,
         vision_mode=vision_mode,
+        name=name,
+        value=value,
     )
     result["instruction"] = instruction
     return result

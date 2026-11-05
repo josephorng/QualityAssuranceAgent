@@ -9,6 +9,7 @@ from src.recorder.uia_input_boxes import (
     _UIA_INPUT_CONTROL_TYPE_IDS,
     _UIA_PANE_CONTROL_TYPE_ID,
     canonicalize_uia_shell_status_label,
+    element_from_point_name_value,
     filter_uia_input_rects,
     is_oversized_uia_rect,
     is_usable_uia_landmark_label,
@@ -24,6 +25,22 @@ def test_uia_input_control_type_ids_include_combobox_and_pane() -> None:
     assert _UIA_DOCUMENT_CONTROL_TYPE_ID in _UIA_INPUT_CONTROL_TYPE_IDS
     assert _UIA_COMBOBOX_CONTROL_TYPE_ID in _UIA_INPUT_CONTROL_TYPE_IDS
     assert _UIA_PANE_CONTROL_TYPE_ID in _UIA_INPUT_CONTROL_TYPE_IDS
+
+
+def test_element_from_point_name_value_extracts_raw_strings(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.uia_text_element_at_point",
+        lambda x, y: ("展開|1", (10, 20, 30, 40), "button", "展開", "1"),
+    )
+    assert element_from_point_name_value(100, 200) == {"name": "展開", "value": "1"}
+
+
+def test_element_from_point_name_value_none_when_empty(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.uia_text_element_at_point",
+        lambda x, y: None,
+    )
+    assert element_from_point_name_value(1, 2) is None
 
 
 def test_merge_nested_element_boxes_keeps_larger() -> None:

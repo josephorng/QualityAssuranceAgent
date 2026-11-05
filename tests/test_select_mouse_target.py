@@ -632,6 +632,7 @@ def test_build_move_mouse_timing_includes_ocr_roi_on_yolo_and_ocr_phases() -> No
         total_s=1.5,
         capture_s=0.1,
         vision={
+            "uia_first_s": 0.75,
             "yolo_s": 0.5,
             "line_s": 0.0,
             "ocr_s": 0.4,
@@ -649,8 +650,11 @@ def test_build_move_mouse_timing_includes_ocr_roi_on_yolo_and_ocr_phases() -> No
     )
     assert timing["ocr_roi"] == [12, 34, 100, 80]
     assert timing["ocr_roi_pad"] == 16
+    assert timing["uia_first_s"] == 0.75
     assert timing["icon_ocr_retry_s"] == 1.2
     by_name = {p["name"]: p for p in timing["phases"]}
+    assert by_name["uia_first"]["seconds"] == 0.75
+    assert "ocr_roi" not in by_name["uia_first"]
     assert by_name["yolo"]["ocr_roi"] == [12, 34, 100, 80]
     assert by_name["line_refine"]["ocr_roi"] == [12, 34, 100, 80]
     assert by_name["uia_input"]["ocr_roi"] == [12, 34, 100, 80]

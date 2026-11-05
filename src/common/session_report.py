@@ -115,6 +115,7 @@ _TOOL_TIMING_ACTIONS = _MOVE_MOUSE_TIMING_ACTIONS | {_DRAG_TIMING_ACTION}
 
 _MOVE_MOUSE_PHASE_LABELS = {
     "capture": "Screenshot capture",
+    "uia_first": "UIA-first FindAll",
     "yolo": "YOLO detect",
     "line_refine": "Input line refine",
     "uia_input": "UIA input refine",
@@ -205,6 +206,7 @@ def _details_from_move_mouse_timing(timing: dict[str, Any]) -> list[dict[str, An
         return details
     for key, label in (
         ("capture_s", "Screenshot capture"),
+        ("uia_first_s", "UIA-first FindAll"),
         ("yolo_s", "YOLO detect"),
         ("line_s", "Input line refine"),
         ("uia_input_s", "UIA input refine"),

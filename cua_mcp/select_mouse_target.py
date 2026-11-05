@@ -785,6 +785,7 @@ def _build_move_mouse_timing(
     """Structured timing for move_mouse / check_object_exists tool results."""
     yolo_s = _round_timing_s(float(vision.get("yolo_s", 0.0)))
     line_s = _round_timing_s(float(vision.get("line_s", 0.0)))
+    uia_first_s = _round_timing_s(float(vision.get("uia_first_s", 0.0)))
     uia_input_s = _round_timing_s(float(vision.get("uia_input_s", 0.0)))
     uia_scrollbar_s = _round_timing_s(float(vision.get("uia_scrollbar_s", 0.0)))
     uia_text_s = _round_timing_s(float(vision.get("uia_text_s", 0.0)))
@@ -800,6 +801,7 @@ def _build_move_mouse_timing(
     ocr_phase: dict[str, Any] = {"name": "ocr", "seconds": ocr_s, **roi_fields, **reuse_fields}
     phases: list[dict[str, Any]] = [
         {"name": "capture", "seconds": capture_s},
+        {"name": "uia_first", "seconds": uia_first_s},
         yolo_phase,
         {"name": "line_refine", "seconds": line_s, **roi_fields},
         {"name": "uia_input", "seconds": uia_input_s, **roi_fields},
@@ -813,6 +815,7 @@ def _build_move_mouse_timing(
     result: dict[str, Any] = {
         "total_s": total_s,
         "capture_s": capture_s,
+        "uia_first_s": uia_first_s,
         "yolo_s": yolo_s,
         "line_s": line_s,
         "uia_input_s": uia_input_s,
@@ -5535,6 +5538,8 @@ async def _find_mouse_point_attempt(
 
     uia_first_chosen: UiDetection | None = None
     uia_yolo_subtarget_chosen: UiDetection | None = None
+    uia_first_s = 0.0
+    uia_first_measured = False
     grabbed_frames = False
     uia_dets: list[UiDetection] = []
     captured: list[tuple[int, np.ndarray]] = []
@@ -5620,9 +5625,12 @@ async def _find_mouse_point_attempt(
                 recorded_anchor=recorded_anchor_match,
             )
 
+        uia_first_started = time.perf_counter()
         uia_dets = await asyncio.to_thread(
             _uia_only_detections_for_click_window, captured, click_window
         )
+        uia_first_s += time.perf_counter() - uia_first_started
+        uia_first_measured = True
         _log_info(
             "move_mouse uia_first snapshot "
             f"total={len(uia_dets)} {_uia_snapshot_class_counts(uia_dets)}"
@@ -5630,9 +5638,11 @@ async def _find_mouse_point_attempt(
         uia_first_chosen, uia_first_reason = _select_uia_snapshot(uia_dets)
         if uia_first_chosen is None:
             _log_info(f"move_mouse uia_first miss reason={uia_first_reason}")
+            uia_first_started = time.perf_counter()
             uia_dets = await asyncio.to_thread(
                 _uia_only_detections_for_click_window, captured, click_window
             )
+            uia_first_s += time.perf_counter() - uia_first_started
             _log_info(
                 "move_mouse uia_first retry snapshot "
                 f"total={len(uia_dets)} {_uia_snapshot_class_counts(uia_dets)}"
@@ -5686,6 +5696,7 @@ async def _find_mouse_point_attempt(
             detections = _sort_detections_reading_order(uia_dets)
             vision_timing = {
                 "capture_s": capture_s,
+                "uia_first_s": uia_first_s,
                 "yolo_s": 0.0,
                 "line_s": 0.0,
                 "uia_input_s": 0.0,
@@ -5873,10 +5884,13 @@ async def _find_mouse_point_attempt(
                 )
 
     def _timing_meta(*, select_s: float, select_phase: str) -> dict[str, Any]:
+        timing_vision = dict(vision_timing)
+        if uia_first_measured:
+            timing_vision["uia_first_s"] = uia_first_s
         return _build_move_mouse_timing(
             total_s=time.perf_counter() - total_started,
             capture_s=capture_s,
-            vision=vision_timing,
+            vision=timing_vision,
             parse_s=parse_s,
             select_s=select_s,
             select_phase=select_phase,

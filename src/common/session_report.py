@@ -123,6 +123,7 @@ _MOVE_MOUSE_PHASE_LABELS = {
     "uia_text": "UIA text assist",
     "ocr": "OCR",
     "icon_ocr_retry": "Unknown-icon OCR retry",
+    "element_from_point": "ElementFromPoint",
     "parse_instruction": "Parse instruction (overlapped)",
     "select": "Target select",
     "select_unique": "Unique target (skip LLM)",
@@ -201,6 +202,10 @@ def _details_from_move_mouse_timing(timing: dict[str, Any]) -> list[dict[str, An
                 )
             if name == "ocr":
                 _attach_ocr_reuse_counts(detail, phase)
+            if name == "element_from_point":
+                calls = phase.get("calls")
+                if isinstance(calls, int) and not isinstance(calls, bool):
+                    detail["calls"] = int(calls)
             details.append(detail)
     if details:
         return details
@@ -214,6 +219,7 @@ def _details_from_move_mouse_timing(timing: dict[str, Any]) -> list[dict[str, An
         ("uia_text_s", "UIA text assist"),
         ("ocr_s", "OCR"),
         ("icon_ocr_retry_s", "Unknown-icon OCR retry"),
+        ("element_from_point_s", "ElementFromPoint"),
         ("parse_s", "Parse instruction (overlapped)"),
         ("select_s", "Target select"),
         ("hand_move_s", "Cursor move"),
@@ -240,6 +246,10 @@ def _details_from_move_mouse_timing(timing: dict[str, Any]) -> list[dict[str, An
                     fallback_roi=fallback_roi,
                     fallback_rois=fallback_rois,
                 )
+            if phase_name == "element_from_point":
+                calls = timing.get("element_from_point_n")
+                if isinstance(calls, int) and not isinstance(calls, bool):
+                    detail["calls"] = int(calls)
             if phase_name == "ocr":
                 _attach_ocr_reuse_counts(detail, timing)
             details.append(detail)

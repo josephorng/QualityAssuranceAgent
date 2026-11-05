@@ -789,6 +789,9 @@ def _build_move_mouse_timing(
     uia_input_s = _round_timing_s(float(vision.get("uia_input_s", 0.0)))
     uia_scrollbar_s = _round_timing_s(float(vision.get("uia_scrollbar_s", 0.0)))
     uia_text_s = _round_timing_s(float(vision.get("uia_text_s", 0.0)))
+    element_from_point_s = _round_timing_s(
+        float(vision.get("element_from_point_s", 0.0))
+    )
     ocr_s = _round_timing_s(float(vision.get("ocr_s", 0.0)))
     icon_ocr_retry_s = _round_timing_s(float(vision.get("icon_ocr_retry_s", 0.0)))
     capture_s = _round_timing_s(capture_s)
@@ -799,6 +802,13 @@ def _build_move_mouse_timing(
     reuse_fields = _ocr_reuse_count_fields(vision)
     yolo_phase: dict[str, Any] = {"name": "yolo", "seconds": yolo_s, **roi_fields}
     ocr_phase: dict[str, Any] = {"name": "ocr", "seconds": ocr_s, **roi_fields, **reuse_fields}
+    efp_phase: dict[str, Any] = {
+        "name": "element_from_point",
+        "seconds": element_from_point_s,
+    }
+    efp_n = vision.get("element_from_point_n")
+    if isinstance(efp_n, int) and not isinstance(efp_n, bool):
+        efp_phase["calls"] = int(efp_n)
     phases: list[dict[str, Any]] = [
         {"name": "capture", "seconds": capture_s},
         {"name": "uia_first", "seconds": uia_first_s},
@@ -809,6 +819,7 @@ def _build_move_mouse_timing(
         {"name": "uia_text", "seconds": uia_text_s, **roi_fields},
         ocr_phase,
         {"name": "icon_ocr_retry", "seconds": icon_ocr_retry_s},
+        efp_phase,
         {"name": "parse_instruction", "seconds": parse_s, "overlapped": False},
         {"name": select_phase, "seconds": select_s},
     ]
@@ -821,12 +832,15 @@ def _build_move_mouse_timing(
         "uia_input_s": uia_input_s,
         "uia_scrollbar_s": uia_scrollbar_s,
         "uia_text_s": uia_text_s,
+        "element_from_point_s": element_from_point_s,
         "ocr_s": ocr_s,
         "icon_ocr_retry_s": icon_ocr_retry_s,
         "parse_s": parse_s,
         "select_s": select_s,
         "phases": phases,
     }
+    if isinstance(efp_n, int) and not isinstance(efp_n, bool):
+        result["element_from_point_n"] = int(efp_n)
     if "uia_first_hit" in vision:
         result["uia_first_hit"] = bool(vision.get("uia_first_hit"))
     if vision.get("vision_path"):
@@ -6011,6 +6025,12 @@ async def _find_mouse_point_attempt(
             repair_meta["nearby_objects"] = nearby_phrases
             repair_meta["screenshot_path"] = image_path
             repair_meta["screenshot_paths"] = image_paths
+            efp_s = repair_meta.get("element_from_point_s")
+            if isinstance(efp_s, (int, float)) and not isinstance(efp_s, bool):
+                vision_timing["element_from_point_s"] = float(efp_s)
+            efp_n = repair_meta.get("element_from_point_n")
+            if isinstance(efp_n, int) and not isinstance(efp_n, bool):
+                vision_timing["element_from_point_n"] = int(efp_n)
             select_phase = "uia_replay_repair"
             # Same-run: YOLO already ran for this step — prefer a unique
             # in-box sub-target (expand glyph vs label) like later UIA runs.

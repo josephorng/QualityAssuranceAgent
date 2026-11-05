@@ -401,6 +401,11 @@ def test_time_profile_includes_move_mouse_internal_timing_details(tmp_path: Path
             {"name": "capture", "seconds": 0.2},
             {"name": "uia_first", "seconds": 0.8},
             {
+                "name": "element_from_point",
+                "seconds": 0.015,
+                "calls": 1,
+            },
+            {
                 "name": "yolo",
                 "seconds": 1.0,
                 "ocr_roi": [10, 20, 300, 200],
@@ -483,27 +488,31 @@ def test_time_profile_includes_move_mouse_internal_timing_details(tmp_path: Path
     assert details[1]["kind"] == "move_mouse_uia_first"
     assert details[1]["label"] == "UIA-first FindAll"
     assert details[1]["duration_seconds"] == 0.8
-    assert details[2]["kind"] == "move_mouse_yolo"
-    assert details[2]["duration_seconds"] == 1.0
-    assert details[2]["roi"] == [10, 20, 300, 200]
-    assert details[2]["roi_pad"] == 16
-    assert details[3]["kind"] == "move_mouse_line_refine"
-    assert details[3]["label"] == "Input line refine"
-    assert details[3]["duration_seconds"] == 0.1
+    assert details[2]["kind"] == "move_mouse_element_from_point"
+    assert details[2]["label"] == "ElementFromPoint"
+    assert details[2]["duration_seconds"] == 0.015
+    assert details[2]["calls"] == 1
+    assert details[3]["kind"] == "move_mouse_yolo"
+    assert details[3]["duration_seconds"] == 1.0
     assert details[3]["roi"] == [10, 20, 300, 200]
     assert details[3]["roi_pad"] == 16
-    assert details[4]["kind"] == "move_mouse_ocr"
-    assert details[4]["duration_seconds"] == 2.5
+    assert details[4]["kind"] == "move_mouse_line_refine"
+    assert details[4]["label"] == "Input line refine"
+    assert details[4]["duration_seconds"] == 0.1
     assert details[4]["roi"] == [10, 20, 300, 200]
-    assert details[4]["ocr_reused"] == 12
-    assert details[4]["ocr_fresh"] == 3
-    assert details[4]["uia_text_orphans"] == 2
-    assert details[4]["uia_text_ocr_skipped"] == 5
-    assert details[5]["kind"] == "move_mouse_icon_ocr_retry"
-    assert details[5]["label"] == "Unknown-icon OCR retry"
-    assert details[5]["duration_seconds"] == 1.1
-    assert "ocr_reused" not in details[2]
+    assert details[4]["roi_pad"] == 16
+    assert details[5]["kind"] == "move_mouse_ocr"
+    assert details[5]["duration_seconds"] == 2.5
+    assert details[5]["roi"] == [10, 20, 300, 200]
+    assert details[5]["ocr_reused"] == 12
+    assert details[5]["ocr_fresh"] == 3
+    assert details[5]["uia_text_orphans"] == 2
+    assert details[5]["uia_text_ocr_skipped"] == 5
+    assert details[6]["kind"] == "move_mouse_icon_ocr_retry"
+    assert details[6]["label"] == "Unknown-icon OCR retry"
+    assert details[6]["duration_seconds"] == 1.1
     assert "ocr_reused" not in details[3]
+    assert "ocr_reused" not in details[4]
     assert any(d["kind"] == "move_mouse_llm_pick" for d in details)
     assert any(d["kind"] == "move_mouse_hand_move" for d in details)
 

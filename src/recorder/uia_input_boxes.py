@@ -14,8 +14,11 @@ from __future__ import annotations
 import ctypes
 import os
 import re
+import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from ctypes import wintypes
-from typing import Callable
+from typing import Callable, Iterator
 
 from cua_mcp.geometry import (
     clip_box,
@@ -650,6 +653,38 @@ def _element_label(element: ctypes.c_void_p) -> str:
     return _element_label_parts(element)[0]
 
 
+_element_from_point_samples: ContextVar[list[float] | None] = ContextVar(
+    "element_from_point_samples",
+    default=None,
+)
+
+
+@contextmanager
+def bind_element_from_point_timing() -> Iterator[list[float]]:
+    """Accumulate wall times for each ``uia_text_element_at_point`` call."""
+    samples: list[float] = []
+    token = _element_from_point_samples.set(samples)
+    try:
+        yield samples
+    finally:
+        _element_from_point_samples.reset(token)
+
+
+def _note_element_from_point_elapsed(seconds: float) -> None:
+    samples = _element_from_point_samples.get()
+    if samples is not None:
+        samples.append(float(seconds))
+
+
+def summarize_element_from_point_timing(
+    samples: list[float] | None,
+) -> tuple[float, int]:
+    """Return ``(total_seconds, call_count)`` for recorded ElementFromPoint probes."""
+    if not samples:
+        return 0.0, 0
+    return float(sum(samples)), int(len(samples))
+
+
 def uia_text_element_at_point(
     x: int, y: int
 ) -> tuple[str, RectXywh, str, str, str] | None:
@@ -660,6 +695,16 @@ def uia_text_element_at_point(
     a ``UIA_CONTROL_TYPE_SUFFIX`` token (``button``, ``text``, …) or ``""``.
     Name and Value are the raw UIA strings before composition.
     """
+    started = time.perf_counter()
+    try:
+        return _uia_text_element_at_point_impl(x, y)
+    finally:
+        _note_element_from_point_elapsed(time.perf_counter() - started)
+
+
+def _uia_text_element_at_point_impl(
+    x: int, y: int
+) -> tuple[str, RectXywh, str, str, str] | None:
     if os.name != "nt":
         return None
     ole32 = ctypes.windll.ole32

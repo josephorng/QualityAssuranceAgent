@@ -701,7 +701,11 @@ def attempt_uia_replay_repair(
     uia_input_boxes: list[RectXywh] | None = None,
 ) -> tuple[int, int, dict[str, Any]] | None:
     """Match, persist the UIA instruction, and return the click point."""
-    from src.recorder.uia_input_boxes import uia_text_element_at_point
+    from src.recorder.uia_input_boxes import (
+        bind_element_from_point_timing,
+        summarize_element_from_point_timing,
+        uia_text_element_at_point,
+    )
     from src.recorder.window_snapshot import find_matching_click_window
 
     prefix = (
@@ -716,56 +720,59 @@ def attempt_uia_replay_repair(
     if live is None:
         _log(f"{prefix} reason=no_live_click_window_match")
         return None
-    hit, reason = choose_uia_replay_repair_with_reason(
-        recorded_bbox=request.recorded_bbox,
-        recorded_text=request.recorded_text,
-        recorded_window_xywh=request.recorded_window_xywh,
-        live_window_xywh=live.screen_rect(),
-        uia_boxes=uia_boxes,
-        ocr_boxes=ocr_boxes,
-        point_probe_fn=uia_text_element_at_point,
-        uia_scrollbar_boxes=uia_scrollbar_boxes,
-        uia_input_boxes=uia_input_boxes,
-        recorded_is_icon=bool(request.recorded_is_icon),
-    )
-    write_request = request
-    if hit is None and request.recorded_is_icon:
-        from src.recorder.vision_context import load_yolo_ocr_payload
-
-        suffix = "_end" if request.side == "end" else ""
-        payload = load_yolo_ocr_payload(
-            Path(request.recording_dir), request.event_index, suffix=suffix
+    with bind_element_from_point_timing() as efp_samples:
+        hit, reason = choose_uia_replay_repair_with_reason(
+            recorded_bbox=request.recorded_bbox,
+            recorded_text=request.recorded_text,
+            recorded_window_xywh=request.recorded_window_xywh,
+            live_window_xywh=live.screen_rect(),
+            uia_boxes=uia_boxes,
+            ocr_boxes=ocr_boxes,
+            point_probe_fn=uia_text_element_at_point,
+            uia_scrollbar_boxes=uia_scrollbar_boxes,
+            uia_input_boxes=uia_input_boxes,
+            recorded_is_icon=bool(request.recorded_is_icon),
         )
-        input_primary = _recorded_input_primary(payload)
-        if input_primary is not None:
-            input_bbox, input_text = input_primary
-            _log(
-                "uia replay repair icon miss; trying input fallback "
-                f"event={request.event_index} side={request.side} "
-                f"icon_reason={reason} input_bbox={input_bbox}"
+        write_request = request
+        if hit is None and request.recorded_is_icon:
+            from src.recorder.vision_context import load_yolo_ocr_payload
+
+            suffix = "_end" if request.side == "end" else ""
+            payload = load_yolo_ocr_payload(
+                Path(request.recording_dir), request.event_index, suffix=suffix
             )
-            hit, reason = choose_uia_replay_repair_with_reason(
-                recorded_bbox=input_bbox,
-                recorded_text=input_text,
-                recorded_window_xywh=request.recorded_window_xywh,
-                live_window_xywh=live.screen_rect(),
-                uia_boxes=uia_boxes,
-                ocr_boxes=ocr_boxes,
-                point_probe_fn=uia_text_element_at_point,
-                uia_scrollbar_boxes=uia_scrollbar_boxes,
-                uia_input_boxes=uia_input_boxes,
-                recorded_is_icon=False,
-            )
-            if hit is not None:
-                write_request = UiaReplayRepairRequest(
-                    recording_dir=request.recording_dir,
-                    event_index=request.event_index,
-                    side=request.side,
+            input_primary = _recorded_input_primary(payload)
+            if input_primary is not None:
+                input_bbox, input_text = input_primary
+                _log(
+                    "uia replay repair icon miss; trying input fallback "
+                    f"event={request.event_index} side={request.side} "
+                    f"icon_reason={reason} input_bbox={input_bbox}"
+                )
+                hit, reason = choose_uia_replay_repair_with_reason(
                     recorded_bbox=input_bbox,
                     recorded_text=input_text,
                     recorded_window_xywh=request.recorded_window_xywh,
+                    live_window_xywh=live.screen_rect(),
+                    uia_boxes=uia_boxes,
+                    ocr_boxes=ocr_boxes,
+                    point_probe_fn=uia_text_element_at_point,
+                    uia_scrollbar_boxes=uia_scrollbar_boxes,
+                    uia_input_boxes=uia_input_boxes,
                     recorded_is_icon=False,
                 )
+                if hit is not None:
+                    write_request = UiaReplayRepairRequest(
+                        recording_dir=request.recording_dir,
+                        event_index=request.event_index,
+                        side=request.side,
+                        recorded_bbox=input_bbox,
+                        recorded_text=input_text,
+                        recorded_window_xywh=request.recorded_window_xywh,
+                        recorded_is_icon=False,
+                    )
+    efp_s, efp_n = summarize_element_from_point_timing(efp_samples)
+    efp_timing_note = f" element_from_point_s={efp_s:.3f} n={efp_n}"
     if hit is None:
         _log(
             f"{prefix} reason={reason} "
@@ -775,6 +782,7 @@ def attempt_uia_replay_repair(
             f"bbox={request.recorded_bbox} "
             f"recorded_window={request.recorded_window_xywh} "
             f"live_window={live.screen_rect()}"
+            f"{efp_timing_note}"
         )
         return None
     others = [
@@ -818,6 +826,7 @@ def attempt_uia_replay_repair(
         f"label={hit.label!r} source={hit.source} "
         f"center=[{cx},{cy}]"
         + (f" track_percent={track_percent}" if track_percent is not None else "")
+        + efp_timing_note
     )
     return cx, cy, {
         "selected_index": 0,
@@ -841,6 +850,8 @@ def attempt_uia_replay_repair(
         "landmarks": [],
         "selection_method": "uia_replay_repair",
         "uia_replay_repair": {"label": hit.label, "source": hit.source},
+        "element_from_point_s": round(float(efp_s), 3),
+        "element_from_point_n": int(efp_n),
     }
 
 

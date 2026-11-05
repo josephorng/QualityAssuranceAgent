@@ -1870,7 +1870,7 @@ def test_attempt_icon_repair_hits_button_via_element_from_point(
         return "下拉", probe_box, "button", "下拉", ""
 
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.uia_text_element_at_point",
+        "src.recorder.uia_input_boxes._uia_text_element_at_point_impl",
         probe,
     )
     request = UiaReplayRepairRequest(
@@ -1893,6 +1893,8 @@ def test_attempt_icon_repair_hits_button_via_element_from_point(
     assert (gx, gy) == (1035, 520)
     assert meta["uia_replay_repair"]["source"] == "element_from_point"
     assert meta["uia_replay_repair"]["label"] == "下拉"
+    assert meta["element_from_point_n"] == 1
+    assert meta["element_from_point_s"] >= 0.0
     saved = json.loads((run / "analysis" / "event_010.json").read_text(encoding="utf-8"))
     assert saved["uia_replay_repair"]["control_type"] == "button"
 
@@ -1977,7 +1979,7 @@ def test_attempt_icon_miss_falls_back_to_input(tmp_path: Path, monkeypatch) -> N
         lambda _cw: live,
     )
     monkeypatch.setattr(
-        "src.recorder.uia_input_boxes.uia_text_element_at_point",
+        "src.recorder.uia_input_boxes._uia_text_element_at_point_impl",
         lambda *_a, **_k: None,
     )
     request = UiaReplayRepairRequest(

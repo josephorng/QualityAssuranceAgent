@@ -198,3 +198,48 @@ def test_anchor_efp_blank_recorded_skips_probes() -> None:
     assert det is None
     assert point == (10, 10)
     assert probes == []
+
+
+def test_uia_yolo_subtarget_efp_nearer_wrong_farther_wins() -> None:
+    """In-pane YOLO boxes: synth = UIA pane center; first-by-distance wrong Name."""
+    pane_center = (2000, 500)
+    near_wrong = _det(1990, 400, text="圖片")  # closer to pane center
+    far_right = _det(1990, 280, text="下載")
+
+    def probe(x: int, y: int):
+        if (x, y) == (1990, 280):
+            return ("label", (0, 0, 1, 1), "text", "下載 (已釘選)", "下載 (已釘選)")
+        return ("label", (0, 0, 1, 1), "text", "圖片", "圖片")
+
+    det, point, reason = _verify_geometry_candidates_with_efp(
+        [near_wrong, far_right],
+        synth=pane_center,
+        geom_det=None,
+        recorded_name="下載 (已釘選)",
+        recorded_value="下載 (已釘選)",
+        point_probe_fn=probe,
+    )
+    assert reason == "hit"
+    assert det is far_right
+    assert point == (1990, 280)
+
+
+def test_uia_yolo_subtarget_efp_all_miss() -> None:
+    pane_center = (2000, 500)
+    a = _det(1990, 400)
+    b = _det(1990, 280)
+
+    def probe(x: int, y: int):
+        return ("label", (0, 0, 1, 1), "text", "圖片", "圖片")
+
+    det, point, reason = _verify_geometry_candidates_with_efp(
+        [a, b],
+        synth=pane_center,
+        geom_det=None,
+        recorded_name="下載 (已釘選)",
+        recorded_value="下載 (已釘選)",
+        point_probe_fn=probe,
+    )
+    assert reason == "miss"
+    assert det is None
+    assert point is None

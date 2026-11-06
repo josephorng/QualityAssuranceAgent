@@ -4750,17 +4750,51 @@ class RecordingSession:
         self._release_uia_notify_slot(item.event_index)
 
     def _probe_element_from_point_at(
-        self, cursor_xy: tuple[int, int] | None
+        self,
+        cursor_xy: tuple[int, int] | None,
+        *,
+        run_dir: Path | None = None,
+        press_seq: int | None = None,
+        event_index: int | None = None,
     ) -> dict[str, Any] | None:
-        """ElementFromPoint Name/Value off the hook (feasibility for tool args)."""
+        """ElementFromPoint Name/Value (+elapsed) off the hook for tool args."""
         if cursor_xy is None:
             return None
         from src.recorder.uia_input_boxes import element_from_point_name_value
 
+        x = int(cursor_xy[0])
+        y = int(cursor_xy[1])
         try:
-            return element_from_point_name_value(int(cursor_xy[0]), int(cursor_xy[1]))
-        except Exception:
+            payload = element_from_point_name_value(x, y)
+        except Exception as exc:
+            if run_dir is not None:
+                where = (
+                    f"event={event_index}"
+                    if event_index is not None
+                    else f"press_seq={press_seq}"
+                )
+                self._log(
+                    run_dir,
+                    f"element_from_point {where} xy=({x},{y}) "
+                    f"failed {type(exc).__name__}: {exc}",
+                )
             return None
+        if run_dir is not None and isinstance(payload, dict):
+            where = (
+                f"event={event_index}"
+                if event_index is not None
+                else f"press_seq={press_seq}"
+            )
+            efp_s = payload.get("element_from_point_s")
+            name = payload.get("name")
+            value = payload.get("value")
+            self._log(
+                run_dir,
+                f"element_from_point {where} xy=({x},{y}) "
+                f"element_from_point_s={efp_s} "
+                f"name={name!r} value={value!r}",
+            )
+        return payload if isinstance(payload, dict) else None
 
     def _worker_pending_left_press(self, job: _DeferredCaptureJob) -> None:
         if job.press_seq is None or job.cursor_xy is None:
@@ -4793,7 +4827,11 @@ class RecordingSession:
                 f"{type(exc).__name__}: {exc}",
             )
             info = None
-        efp = self._probe_element_from_point_at(job.cursor_xy)
+        efp = self._probe_element_from_point_at(
+            job.cursor_xy,
+            run_dir=run_dir,
+            press_seq=job.press_seq,
+        )
         with self._lock:
             prev = self._left_press_captures.get(job.press_seq)
             windows_before = prev[1] if prev is not None else None
@@ -4831,7 +4869,11 @@ class RecordingSession:
                 f"{type(exc).__name__}: {exc}",
             )
             info = None
-        efp = self._probe_element_from_point_at(job.cursor_xy)
+        efp = self._probe_element_from_point_at(
+            job.cursor_xy,
+            run_dir=run_dir,
+            press_seq=job.press_seq,
+        )
         with self._lock:
             prev = self._right_press_captures.get(job.press_seq)
             windows_before = prev[1] if prev is not None else None
@@ -5139,7 +5181,11 @@ class RecordingSession:
                 job.event_index,
                 job.cursor_xy,
             )
-        efp = self._probe_element_from_point_at(job.cursor_xy)
+        efp = self._probe_element_from_point_at(
+            job.cursor_xy,
+            run_dir=run_dir,
+            event_index=job.event_index,
+        )
         self._persist_queued_event(
             _QueuedEvent(
                 kind=job.kind,

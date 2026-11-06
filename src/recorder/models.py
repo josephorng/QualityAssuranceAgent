@@ -61,8 +61,9 @@ class RecordedEvent:
     uia_snapshot: dict[str, Any] | None = None
     # Drag-release UIA tree. Same shape as ``uia_snapshot``.
     end_uia_snapshot: dict[str, Any] | None = None
-    # Feasibility: ElementFromPoint Name/Value at the press cursor
-    # (``{"name": str, "value": str}``). Compiled into move_mouse args.
+    # Feasibility: ElementFromPoint at the press cursor
+    # (``{"name", "value", "element_from_point_s"}``). Name/Value compile into
+    # move_mouse args; ``element_from_point_s`` is probe wall time.
     element_from_point: dict[str, Any] | None = None
     # UI settle measured by consecutive screenshot stability during recording.
     observed_settle_seconds: float | None = None

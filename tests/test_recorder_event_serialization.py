@@ -30,10 +30,18 @@ def test_recorded_event_round_trip_element_from_point() -> None:
         index=5,
         timestamp_utc="2026-11-05T00:00:00+00:00",
         kind="click",
-        element_from_point={"name": "展開", "value": "1"},
+        element_from_point={
+            "name": "展開",
+            "value": "1",
+            "element_from_point_s": 0.012,
+        },
     )
     restored = RecordedEvent.from_dict(event.to_dict())
-    assert restored.element_from_point == {"name": "展開", "value": "1"}
+    assert restored.element_from_point == {
+        "name": "展開",
+        "value": "1",
+        "element_from_point_s": 0.012,
+    }
     bare = RecordedEvent(index=1, timestamp_utc="t", kind="click")
     assert "element_from_point" not in bare.to_dict()
 

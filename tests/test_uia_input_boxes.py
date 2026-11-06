@@ -32,15 +32,23 @@ def test_element_from_point_name_value_extracts_raw_strings(monkeypatch) -> None
         "src.recorder.uia_input_boxes.uia_text_element_at_point",
         lambda x, y: ("展開|1", (10, 20, 30, 40), "button", "展開", "1"),
     )
-    assert element_from_point_name_value(100, 200) == {"name": "展開", "value": "1"}
+    payload = element_from_point_name_value(100, 200)
+    assert payload["name"] == "展開"
+    assert payload["value"] == "1"
+    assert isinstance(payload["element_from_point_s"], float)
+    assert payload["element_from_point_s"] >= 0.0
 
 
-def test_element_from_point_name_value_none_when_empty(monkeypatch) -> None:
+def test_element_from_point_name_value_keeps_timing_when_empty(monkeypatch) -> None:
     monkeypatch.setattr(
         "src.recorder.uia_input_boxes.uia_text_element_at_point",
         lambda x, y: None,
     )
-    assert element_from_point_name_value(1, 2) is None
+    payload = element_from_point_name_value(1, 2)
+    assert "name" not in payload
+    assert "value" not in payload
+    assert isinstance(payload["element_from_point_s"], float)
+    assert payload["element_from_point_s"] >= 0.0
 
 
 def test_merge_nested_element_boxes_keeps_larger() -> None:

@@ -18,7 +18,7 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from ctypes import wintypes
-from typing import Callable, Iterator
+from typing import Any, Callable, Iterator
 
 from cua_mcp.geometry import (
     clip_box,
@@ -702,21 +702,26 @@ def uia_text_element_at_point(
         _note_element_from_point_elapsed(time.perf_counter() - started)
 
 
-def element_from_point_name_value(x: int, y: int) -> dict[str, str] | None:
+def element_from_point_name_value(x: int, y: int) -> dict[str, Any]:
     """Feasibility probe: raw UIA Name/Value under a screen point.
 
-    Returns ``{"name": ..., "value": ...}`` when either string is non-empty,
-    otherwise ``None``. Used to stash ElementFromPoint results on recorded
-    pointer steps without requiring FindAll to expose the same leaf.
+    Always returns ``{"element_from_point_s": float}`` for the wall time of
+    the probe. When Name and/or Value are non-empty, also includes
+    ``"name"`` / ``"value"``. Used to stash ElementFromPoint results on
+    recorded pointer steps without requiring FindAll to expose the same leaf.
     """
+    started = time.perf_counter()
     probed = uia_text_element_at_point(int(x), int(y))
+    elapsed_s = round(time.perf_counter() - started, 3)
+    out: dict[str, Any] = {"element_from_point_s": elapsed_s}
     if not isinstance(probed, tuple) or len(probed) < 5:
-        return None
+        return out
     name = str(probed[3] or "").strip()
     value = str(probed[4] or "").strip()
-    if not name and not value:
-        return None
-    return {"name": name, "value": value}
+    if name or value:
+        out["name"] = name
+        out["value"] = value
+    return out
 
 
 def _uia_text_element_at_point_impl(

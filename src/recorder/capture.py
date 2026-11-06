@@ -1013,8 +1013,8 @@ class RecordingSession:
         self._left_press_efp: dict[int, dict[str, Any] | None] = {}
         self._right_press_efp: dict[int, dict[str, Any] | None] = {}
         # Drag emit waits for window-step end_uia before notifying vision.
-        # Click/press UIA is settle-cache only; a miss leaves uia_snapshot empty
-        # (never a press-time or deferred FindAll write).
+        # Click/press UIA prefers settle-cache; ComboLBox popup miss FindAlls
+        # under click_window on the worker. Same-hwnd generation miss stays empty.
         self._uia_notify_wait: dict[int, int] = {}
         self._drag_end_captures: dict[int, dict[int, tuple[str, int, tuple[int, int]]]] = {}
         self._pending_right_coords: tuple[int, int] | None = None
@@ -1941,9 +1941,9 @@ class RecordingSession:
         signals_before = self._cached_signals_before()
         self._seal_open_after_cache(windows_before, signals_before)
         click_window = self._click_window_payload_at(x, y)
-        # Settle-cache only. A press-time live FindAll races the click itself
-        # (Excel File → Backstage turns 「檔案」 into 「返回」 before FindAll
-        # returns). Miss → None → analysis uses YOLO on the before-screenshot.
+        # Prefer settle-cache on the hook (no live FindAll). Same-hwnd generation
+        # miss stays empty to avoid Excel Backstage races. ComboLBox popup miss
+        # is filled on the worker via click_window FindAll only.
         uia_snapshot = self._cached_uia_before(click_window, cursor_xy=(x, y))
         with self._lock:
             self._left_press_seq += 1
@@ -4605,10 +4605,10 @@ class RecordingSession:
     ) -> dict[str, Any] | None:
         """Copy last settled FindAll when it matches this click; else None.
 
-        A ``None`` result leaves ``uia_snapshot`` empty so analysis names the
-        target from the before-screenshot (YOLO/OCR). Press-time live FindAll
-        is not used: it often completes after the click has already changed the
-        tree.
+        A ``None`` result may be filled on the capture worker with FindAll under
+        ``click_window`` only when that window is a ComboLBox popup miss.
+        Same-hwnd generation misses stay empty so Excel Backstage-style races
+        do not run FindAll on the wrong tree timing.
 
         Reuse also requires the settle to have been published after the previous
         event (or seed index 0). A same-hwnd cache from an older step is treated
@@ -4667,6 +4667,14 @@ class RecordingSession:
         if str(change.get("action") or "").strip() != "opened":
             return 0
         title = str(change.get("title") or "").strip()
+        # Untitled popups (ComboLBox) are stored as ``hwnd:<n>`` in the change title.
+        if title.lower().startswith("hwnd:"):
+            try:
+                hwnd = int(title.split(":", 1)[1].strip())
+            except (TypeError, ValueError, IndexError):
+                hwnd = 0
+            if hwnd > 0:
+                return hwnd
         if not title or not isinstance(debug, dict):
             return 0
         after_raw = debug.get("windows_after")
@@ -4686,19 +4694,82 @@ class RecordingSession:
                 return hwnd
         return 0
 
+    @staticmethod
+    def _is_dropdown_popup_click_window(
+        click_window: ClickWindowInfo | None,
+    ) -> bool:
+        """True for Win32 ComboLBox (and similar) dropdown list popups."""
+        if click_window is None:
+            return False
+        class_name = str(click_window.class_name or "").strip()
+        if class_name == "ComboLBox":
+            return True
+        # Untitled flyout with empty title is still not enough; require ComboLBox.
+        return False
+
+    @staticmethod
+    def _opened_change_is_dropdown_popup(
+        change: dict[str, Any] | None,
+        debug: dict[str, Any] | None,
+        opened_hwnd: int,
+    ) -> bool:
+        """True when the opened window looks like a ComboLBox dropdown."""
+        if opened_hwnd <= 0:
+            return False
+        title = str((change or {}).get("title") or "").strip()
+        # Untitled popups are recorded as ``hwnd:<n>``.
+        if title.lower().startswith("hwnd:"):
+            if isinstance(debug, dict):
+                after_raw = debug.get("windows_after")
+                if isinstance(after_raw, list):
+                    for entry in after_raw:
+                        if not isinstance(entry, dict):
+                            continue
+                        try:
+                            hwnd = int(entry.get("hwnd") or 0)
+                        except (TypeError, ValueError):
+                            hwnd = 0
+                        if hwnd != opened_hwnd:
+                            continue
+                        if str(entry.get("class_name") or "").strip() == "ComboLBox":
+                            return True
+            # hwnd: title without class still treated as dropdown candidate.
+            return True
+        if isinstance(debug, dict):
+            after_raw = debug.get("windows_after")
+            if isinstance(after_raw, list):
+                for entry in after_raw:
+                    if not isinstance(entry, dict):
+                        continue
+                    try:
+                        hwnd = int(entry.get("hwnd") or 0)
+                    except (TypeError, ValueError):
+                        hwnd = 0
+                    if hwnd == opened_hwnd and str(
+                        entry.get("class_name") or ""
+                    ).strip() == "ComboLBox":
+                        return True
+        return False
+
     def _pick_settle_uia_hwnd(
         self,
         item: _QueuedEvent,
         change: dict[str, Any] | None,
         debug: dict[str, Any] | None,
     ) -> int:
-        """Prefer foreground after settle; never FindAll from the desktop root."""
+        """Prefer ComboLBox popup when opened; else foreground; never desktop root.
+
+        Only dropdown popups beat FG so a normal dialog open (e.g. 編輯電腦資產)
+        does not steal the settle FindAll away from the owner form.
+        """
+        opened = self._opened_hwnd_from_change(change, debug)
+        if opened > 0 and self._opened_change_is_dropdown_popup(
+            change, debug, opened
+        ):
+            return opened
         fg = self._foreground_hwnd()
         if fg > 0:
             return fg
-        opened = self._opened_hwnd_from_change(change, debug)
-        if opened > 0:
-            return opened
         if item.kind == "drag" and item.end_click_window is not None:
             end_hwnd = int(item.end_click_window.hwnd or 0)
             if end_hwnd > 0:
@@ -4706,6 +4777,55 @@ class RecordingSession:
         if item.click_window is not None:
             return int(item.click_window.hwnd or 0)
         return 0
+
+    def _should_press_findall_on_click_window(
+        self,
+        click_window: ClickWindowInfo | None,
+    ) -> bool:
+        """True only for ComboLBox popup settle-cache misses.
+
+        Same-hwnd generation misses stay empty (Excel Backstage race). Ordinary
+        cross-window misses (dialogs, main form) do not FindAll on the worker.
+        """
+        if not self._is_dropdown_popup_click_window(click_window):
+            return False
+        assert click_window is not None
+        click_hwnd = int(click_window.hwnd or 0)
+        if click_hwnd <= 0:
+            return False
+        with self._lock:
+            cached = self._last_settle_uia
+        if not isinstance(cached, dict):
+            return True
+        try:
+            cached_hwnd = int(cached.get("hwnd") or 0)
+        except (TypeError, ValueError):
+            cached_hwnd = 0
+        if cached_hwnd <= 0:
+            return True
+        return click_hwnd != cached_hwnd
+
+    def _findall_uia_for_click_window(
+        self,
+        click_window: ClickWindowInfo | None,
+    ) -> dict[str, Any] | None:
+        """Worker-side FindAll under ``click_window.hwnd`` (never on the hook)."""
+        if click_window is None:
+            return None
+        hwnd = int(click_window.hwnd or 0)
+        if hwnd <= 0:
+            return None
+        from src.recorder.uia_input_boxes import snapshot_uia_screen
+
+        try:
+            value = snapshot_uia_screen(hwnd)
+        except Exception:
+            return None
+        if not isinstance(value, dict):
+            return None
+        snapshot = dict(value)
+        snapshot["hwnd"] = hwnd
+        return snapshot
 
     def _patch_event_uia_field(
         self,
@@ -4833,10 +4953,19 @@ class RecordingSession:
             press_seq=job.press_seq,
         )
         with self._lock:
+            click_window = self._left_press_click_windows.get(job.press_seq)
+            uia_snapshot = self._left_press_uia.get(job.press_seq)
+        if uia_snapshot is None and self._should_press_findall_on_click_window(
+            click_window
+        ):
+            uia_snapshot = self._findall_uia_for_click_window(click_window)
+        with self._lock:
             prev = self._left_press_captures.get(job.press_seq)
             windows_before = prev[1] if prev is not None else None
             self._left_press_captures[job.press_seq] = (info, windows_before)
             self._left_press_efp[job.press_seq] = efp
+            if uia_snapshot is not None:
+                self._left_press_uia[job.press_seq] = uia_snapshot
             if self._left_press_seq == job.press_seq:
                 self._pending_screenshot = info
                 if windows_before is not None:
@@ -4875,10 +5004,19 @@ class RecordingSession:
             press_seq=job.press_seq,
         )
         with self._lock:
+            click_window = self._right_press_click_windows.get(job.press_seq)
+            uia_snapshot = self._right_press_uia.get(job.press_seq)
+        if uia_snapshot is None and self._should_press_findall_on_click_window(
+            click_window
+        ):
+            uia_snapshot = self._findall_uia_for_click_window(click_window)
+        with self._lock:
             prev = self._right_press_captures.get(job.press_seq)
             windows_before = prev[1] if prev is not None else None
             self._right_press_captures[job.press_seq] = (info, windows_before)
             self._right_press_efp[job.press_seq] = efp
+            if uia_snapshot is not None:
+                self._right_press_uia[job.press_seq] = uia_snapshot
             if self._right_press_seq == job.press_seq:
                 self._pending_right_screenshot = info
                 if windows_before is not None:

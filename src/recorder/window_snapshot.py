@@ -2448,19 +2448,50 @@ def find_matching_click_window(
                 )
             return matched
 
-    # Fall back: same process + title among top-level windows.
+    # Fall back among top-level windows.
+    # Untitled popups (ComboLBox): require class_name + process; never title.
+    # Titled windows: process + title, then closest area (class unused).
     title_key = _normalize_title(info.title)
     process_name = (info.process_name or "").lower()
+    class_name = (info.class_name or "").strip()
+    use_class_fallback = (not title_key) and bool(class_name)
     best: ClickWindowInfo | None = None
     best_area_delta: int | None = None
     for win in snapshot_top_level_windows():
-        if title_key and _normalize_title(win.title) != title_key:
-            continue
-        live = _click_window_from_window_info(win)
-        if process_name:
-            live_proc = (live.process_name or "").lower()
-            if live_proc and live_proc != process_name:
+        if use_class_fallback:
+            # Prefer WindowInfo.class_name (snapshot already filled it); live
+            # GetClassName can be empty for ephemeral/test hwnds.
+            live_class = (win.class_name or "").strip() or (
+                _window_class_name(int(win.hwnd or 0)) or ""
+            ).strip()
+            if live_class != class_name:
                 continue
+            if process_name:
+                live_proc = (win.process_name or "").lower()
+                if live_proc and live_proc != process_name:
+                    continue
+        else:
+            if title_key and _normalize_title(win.title) != title_key:
+                continue
+            if process_name:
+                live_proc = (win.process_name or "").lower()
+                if live_proc and live_proc != process_name:
+                    continue
+        live = _click_window_from_window_info(win)
+        if use_class_fallback and not (live.class_name or "").strip():
+            live = ClickWindowInfo(
+                hwnd=live.hwnd,
+                title=live.title,
+                process_name=live.process_name,
+                left=live.left,
+                top=live.top,
+                width=live.width,
+                height=live.height,
+                is_maximized=live.is_maximized,
+                is_taskbar=live.is_taskbar,
+                is_flyout=live.is_flyout,
+                class_name=class_name,
+            )
         delta = abs(live.area() - info.area())
         if best is None or best_area_delta is None or delta < best_area_delta:
             best = live

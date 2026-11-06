@@ -415,8 +415,8 @@ def test_cross_window_press_skips_stale_settle_cache(tmp_path: Path) -> None:
     assert session._cached_uia_before(other, cursor_xy=(5, 5)) is None  # type: ignore[arg-type]
 
 
-def test_cross_window_press_skips_live_fallback_findall(tmp_path: Path) -> None:
-    """Cache miss must not FindAll or late-write uia_snapshot."""
+def test_cross_window_press_skips_findall_for_normal_windows(tmp_path: Path) -> None:
+    """Ordinary cross-window settle miss must not FindAll on the worker."""
     from src.recorder.capture import RecordingSession, _DeferredCaptureJob
 
     calls: list[int] = []
@@ -453,8 +453,19 @@ def test_cross_window_press_skips_live_fallback_findall(tmp_path: Path) -> None:
     ), patch(
         "src.recorder.capture._finalize_screenshot",
         return_value=("shot.jpeg", 1, (0, 0)),
+    ), patch(
+        "src.recorder.uia_input_boxes.element_from_point_name_value",
+        return_value={"element_from_point_s": 0.0},
     ):
         session._capture_pending_left_press(tmp_path, 5, 5)
+        assert session._left_press_uia[1] is None
+        session._worker_pending_left_press(
+            _DeferredCaptureJob(
+                action="pending_left_press",
+                cursor_xy=(5, 5),
+                press_seq=1,
+            )
+        )
         assert session._left_press_uia[1] is None
         session._left_press_captures[1] = (("pending.jpeg", 1, (0, 0)), [])
         session._worker_emit_left_gesture(
@@ -471,6 +482,166 @@ def test_cross_window_press_skips_live_fallback_findall(tmp_path: Path) -> None:
     assert calls == []
     raw = json.loads((tmp_path / "events" / "event_001.json").read_text(encoding="utf-8"))
     assert "uia_snapshot" not in raw
+
+
+def test_combolbox_press_findall_under_click_hwnd(tmp_path: Path) -> None:
+    """ComboLBox settle miss FindAlls under the popup on the worker."""
+    from src.recorder.capture import RecordingSession, _DeferredCaptureJob
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    calls: list[int] = []
+
+    def _snap(hwnd: int) -> dict:
+        calls.append(int(hwnd))
+        return {
+            "window": [0, 0, 40, 40],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [
+                {
+                    "bbox": [0, 0, 10, 10],
+                    "text": "磁碟機陣列",
+                    "control_type": "list_item",
+                }
+            ],
+        }
+
+    popup = ClickWindowInfo(
+        hwnd=20,
+        title="",
+        process_name="WM7Ldr.exe",
+        left=290,
+        top=94,
+        width=268,
+        height=314,
+        is_maximized=False,
+        class_name="ComboLBox",
+    )
+    session = RecordingSession(runs_root=tmp_path)
+    session._run_dir = tmp_path
+    session._last_settle_uia = {
+        "hwnd": 10,
+        "window": [0, 0, 100, 80],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [{"bbox": [0, 0, 4, 4], "text": "舊窗"}],
+    }
+    session._last_settle_uia_after_index = 0
+    session._start_window_step = lambda _item: None  # type: ignore[method-assign]
+    session._notify_event = lambda _event: None  # type: ignore[method-assign]
+    session._start_settle_probe = lambda _event: None  # type: ignore[method-assign]
+    with patch(
+        "src.recorder.uia_input_boxes.snapshot_uia_screen",
+        side_effect=_snap,
+    ), patch(
+        "src.recorder.capture.resolve_click_window",
+        return_value=popup,
+    ), patch(
+        "src.recorder.capture._finalize_screenshot",
+        return_value=("shot.jpeg", 1, (0, 0)),
+    ), patch(
+        "src.recorder.uia_input_boxes.element_from_point_name_value",
+        return_value={"element_from_point_s": 0.0},
+    ):
+        session._capture_pending_left_press(tmp_path, 5, 5)
+        assert session._left_press_uia[1] is None
+        session._worker_pending_left_press(
+            _DeferredCaptureJob(
+                action="pending_left_press",
+                cursor_xy=(5, 5),
+                press_seq=1,
+            )
+        )
+        assert session._left_press_uia[1] is not None
+        assert session._left_press_uia[1]["texts"][0]["text"] == "磁碟機陣列"
+        session._left_press_captures[1] = (("pending.jpeg", 1, (0, 0)), [])
+        session._worker_emit_left_gesture(
+            _DeferredCaptureJob(
+                action="emit_left_gesture",
+                kind="click",
+                press_seq=1,
+                cursor_xy=(5, 5),
+                event_index=1,
+                timestamp_utc="t",
+                button="left",
+            )
+        )
+    assert calls == [20]
+    raw = json.loads((tmp_path / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["uia_snapshot"]["hwnd"] == 20
+    assert raw["uia_snapshot"]["texts"][0]["text"] == "磁碟機陣列"
+
+
+def test_pick_settle_uia_hwnd_prefers_combolbox_opened_over_foreground() -> None:
+    from src.recorder.capture import RecordingSession, _QueuedEvent
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
+    session._foreground_hwnd = lambda: 99  # type: ignore[method-assign]
+    item = _QueuedEvent(
+        kind="click",
+        cursor_xy=(1, 1),
+        event_index=1,
+        timestamp_utc="t",
+        click_window=ClickWindowInfo(
+            hwnd=50,
+            title="App",
+            process_name="app.exe",
+            left=0,
+            top=0,
+            width=10,
+            height=10,
+            is_maximized=False,
+        ),
+    )
+    hwnd = session._pick_settle_uia_hwnd(
+        item,
+        {"action": "opened", "title": "hwnd:777"},
+        {
+            "windows_after": [
+                {"hwnd": 777, "title": "", "class_name": "ComboLBox"},
+            ]
+        },
+    )
+    assert hwnd == 777
+
+
+def test_pick_settle_uia_hwnd_keeps_fg_for_titled_dialog_open() -> None:
+    from src.recorder.capture import RecordingSession, _QueuedEvent
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
+    session._foreground_hwnd = lambda: 99  # type: ignore[method-assign]
+    item = _QueuedEvent(
+        kind="click",
+        cursor_xy=(1, 1),
+        event_index=1,
+        timestamp_utc="t",
+        click_window=ClickWindowInfo(
+            hwnd=50,
+            title="App",
+            process_name="app.exe",
+            left=0,
+            top=0,
+            width=10,
+            height=10,
+            is_maximized=False,
+        ),
+    )
+    hwnd = session._pick_settle_uia_hwnd(
+        item,
+        {"action": "opened", "title": "編輯電腦資產"},
+        {
+            "windows_after": [
+                {
+                    "hwnd": 777,
+                    "title": "編輯電腦資產",
+                    "class_name": "WindowsForms10.Window.8.app",
+                },
+            ]
+        },
+    )
+    assert hwnd == 99
 
 
 def test_matching_settle_cache_skips_live_fallback(tmp_path: Path) -> None:

@@ -37,6 +37,45 @@ def _choose(**overrides):
     return choose_uia_replay_repair(**kwargs)
 
 
+def test_build_repair_uia_snapshot_prefers_live_findall() -> None:
+    from src.recorder.uia_replay_repair import build_repair_uia_snapshot
+
+    live = {
+        "window": [1, 2, 3, 4],
+        "inputs": [[10, 20, 30, 40]],
+        "scrollbars": [],
+        "texts": [{"bbox": [1, 2, 3, 4], "text": "A"}],
+    }
+    out = build_repair_uia_snapshot(
+        live_hwnd=99,
+        live_window_xywh=_LIVE_WINDOW,
+        live_uia_snapshot=live,
+        uia_boxes=[((0, 0, 1, 1), "ignored")],
+    )
+    assert out["hwnd"] == 99
+    assert out["texts"] == live["texts"]
+    assert out["inputs"] == live["inputs"]
+
+
+def test_build_repair_uia_snapshot_rebuilds_from_boxes() -> None:
+    from src.recorder.uia_replay_repair import build_repair_uia_snapshot
+
+    out = build_repair_uia_snapshot(
+        live_hwnd=7,
+        live_window_xywh=_LIVE_WINDOW,
+        uia_boxes=[((10, 20, 30, 40), "標籤", "text")],
+        uia_input_boxes=[(1, 2, 3, 4)],
+        uia_scrollbar_boxes=[(5, 6, 7, 8)],
+    )
+    assert out == {
+        "hwnd": 7,
+        "window": list(_LIVE_WINDOW),
+        "inputs": [[1, 2, 4, 6]],
+        "scrollbars": [[5, 6, 12, 14]],
+        "texts": [{"bbox": [10, 20, 40, 60], "text": "標籤", "control_type": "text"}],
+    }
+
+
 def test_unique_uia_rect_uses_uia_name_and_rect_center() -> None:
     hit = _choose()
     assert hit is not None
@@ -412,12 +451,22 @@ def test_write_replaces_ocr_instruction_and_leaves_event_snapshot(tmp_path: Path
         recorded_text="空自文件",
         recorded_window_xywh=_RECORDED_WINDOW,
     )
+    live_snapshot = {
+        "hwnd": 42,
+        "window": list(_LIVE_WINDOW),
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [
+            {"bbox": [1000, 500, 1080, 540], "text": "空白文件", "control_type": "text"}
+        ],
+    }
     instruction = write_uia_replay_repair(
         request,
         label="空白文件",
         source="findall",
         bbox=_UIA_BOX,
         others=[],
+        uia_snapshot=live_snapshot,
     )
     assert instruction is not None
     assert instruction.startswith("（UIA）")
@@ -426,6 +475,8 @@ def test_write_replaces_ocr_instruction_and_leaves_event_snapshot(tmp_path: Path
     saved = json.loads((run / "analysis" / "event_006.json").read_text(encoding="utf-8"))
     assert saved["uia_replay_repair"]["label"] == "空白文件"
     assert saved["uia_replay_repair"]["source"] == "findall"
+    assert saved["uia_replay_repair"]["uia_snapshot"] == live_snapshot
+    assert saved["uia_replay_repair"]["click"]["uia_snapshot"] == live_snapshot
     assert saved["tool_calls"]
     kept = json.loads(event_path.read_text(encoding="utf-8"))
     assert kept["uia_snapshot"]["texts"] == []
@@ -1538,6 +1589,12 @@ def test_attempt_scrollbar_repair_keeps_track_percent(tmp_path: Path, monkeypatc
         uia_boxes=[((1100, 450, 40, 16), "位置")],
         ocr_boxes=[((1010, 520, 40, 16), "滾動條")],
         uia_scrollbar_boxes=[uia_bar],
+        live_uia_snapshot={
+            "window": list(_LIVE_WINDOW),
+            "inputs": [],
+            "scrollbars": [[1005, 400, 1055, 700]],
+            "texts": [{"bbox": [1100, 450, 1140, 466], "text": "位置"}],
+        },
     )
     assert result is not None
     gx, gy, meta = result
@@ -1554,6 +1611,10 @@ def test_attempt_scrollbar_repair_keeps_track_percent(tmp_path: Path, monkeypatc
     assert "滾動條" in stripped
     assert f"{percent}%" in stripped
     assert "位置" not in stripped
+    snap = saved["uia_replay_repair"]["uia_snapshot"]
+    assert snap["hwnd"] == 5
+    assert snap["scrollbars"] == [[1005, 400, 1055, 700]]
+    assert snap["texts"][0]["text"] == "位置"
 
 
 def test_recorded_input_primary_under_cursor() -> None:

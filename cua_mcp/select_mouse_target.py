@@ -5988,6 +5988,7 @@ async def _find_mouse_point_attempt(
             )
             capture_s = float(vision_timing.get("capture_s", 0.0))
             ocr_pendings = []
+        repair_live_snapshot: dict[str, Any] | None = None
         if uia_repair_task is not None:
             walked: tuple[Any, dict[str, Any]] | None = None
             try:
@@ -5999,6 +6000,8 @@ async def _find_mouse_point_attempt(
                 )
             if walked is not None:
                 live, snapshot = walked
+                if isinstance(snapshot, dict):
+                    repair_live_snapshot = snapshot
                 uia_dets = _detections_from_live_uia_snapshot(
                     captured, live, snapshot
                 )
@@ -6017,6 +6020,7 @@ async def _find_mouse_point_attempt(
             _labeled_ocr_confirm_boxes(detections),
             uia_scrollbar_boxes=_uia_scrollbar_boxes(uia_dets),
             uia_input_boxes=_uia_input_boxes(uia_dets),
+            live_uia_snapshot=repair_live_snapshot,
         )
         if repaired is not None:
             gx, gy, repair_meta = repaired

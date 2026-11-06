@@ -8,6 +8,10 @@ Scrollbar and input class targets are special: OCR confirms ``滾動條`` /
 ``輸入欄``, then the live UIA control under the mapped point becomes the
 primary (scrollbar keeps track percent). ``ElementFromPoint`` text names are
 never used for those class targets.
+
+On a successful repair the live FindAll snapshot (same shape as a recorded
+``uia_snapshot``) is stored under ``analysis.uia_replay_repair`` for debug. The
+event's recorded ``uia_snapshot`` is not rewritten.
 """
 
 from __future__ import annotations
@@ -383,6 +387,55 @@ def snapshot_has_usable_text(snapshot: dict[str, Any] | None) -> bool:
     return False
 
 
+def _xywh_to_xyxy(box: RectXywh) -> list[int]:
+    x, y, w, h = (int(v) for v in box)
+    return [x, y, x + w, y + h]
+
+
+def build_repair_uia_snapshot(
+    *,
+    live_hwnd: int,
+    live_window_xywh: RectXywh,
+    live_uia_snapshot: dict[str, Any] | None = None,
+    uia_boxes: list[LabeledBox] | None = None,
+    uia_input_boxes: list[RectXywh] | None = None,
+    uia_scrollbar_boxes: list[RectXywh] | None = None,
+) -> dict[str, Any]:
+    """Copy the live FindAll into recorded ``uia_snapshot`` shape for debug.
+
+    Prefer the raw ``snapshot_uia_screen`` dict from the repair walk. When that
+    is missing, rebuild texts/inputs/scrollbars from the boxes used to match.
+    """
+    hwnd = int(live_hwnd or 0)
+    if isinstance(live_uia_snapshot, dict):
+        out = dict(live_uia_snapshot)
+        if hwnd > 0:
+            out["hwnd"] = hwnd
+        if out.get("window") is None:
+            out["window"] = [int(v) for v in live_window_xywh]
+        return out
+    texts: list[dict[str, Any]] = []
+    for item in uia_boxes or []:
+        box, label, control_type = _labeled_parts(item)
+        text = str(label or "").strip()
+        if not text:
+            continue
+        entry: dict[str, Any] = {
+            "bbox": _xywh_to_xyxy(box),
+            "text": text,
+        }
+        if control_type:
+            entry["control_type"] = control_type
+        texts.append(entry)
+    return {
+        "hwnd": hwnd if hwnd > 0 else None,
+        "window": [int(v) for v in live_window_xywh],
+        "inputs": [_xywh_to_xyxy(box) for box in (uia_input_boxes or [])],
+        "scrollbars": [_xywh_to_xyxy(box) for box in (uia_scrollbar_boxes or [])],
+        "texts": texts,
+    }
+
+
 def map_recorded_box_to_screen(
     recorded_bbox: RectXywh,
     recorded_window_xywh: RectXywh,
@@ -699,6 +752,7 @@ def attempt_uia_replay_repair(
     *,
     uia_scrollbar_boxes: list[RectXywh] | None = None,
     uia_input_boxes: list[RectXywh] | None = None,
+    live_uia_snapshot: dict[str, Any] | None = None,
 ) -> tuple[int, int, dict[str, Any]] | None:
     """Match, persist the UIA instruction, and return the click point."""
     from src.recorder.uia_input_boxes import (
@@ -793,6 +847,14 @@ def attempt_uia_replay_repair(
     is_scrollbar = hit.label == "滾動條" or hit.source == "uia_scrollbar"
     is_input = hit.label == "輸入欄" or hit.source == "uia_input"
     track_percent = _recorded_track_percent(write_request) if is_scrollbar else None
+    repair_snapshot = build_repair_uia_snapshot(
+        live_hwnd=int(live.hwnd or 0),
+        live_window_xywh=live.screen_rect(),
+        live_uia_snapshot=live_uia_snapshot,
+        uia_boxes=uia_boxes,
+        uia_input_boxes=uia_input_boxes,
+        uia_scrollbar_boxes=uia_scrollbar_boxes,
+    )
     try:
         write_uia_replay_repair(
             write_request,
@@ -802,6 +864,7 @@ def attempt_uia_replay_repair(
             others=others,
             control_type=hit.control_type,
             track_percent=track_percent,
+            uia_snapshot=repair_snapshot,
         )
     except Exception as exc:
         _log(
@@ -864,6 +927,7 @@ def write_uia_replay_repair(
     others: list[LabeledBox],
     control_type: str = "",
     track_percent: int | None = None,
+    uia_snapshot: dict[str, Any] | None = None,
 ) -> str | None:
     """Rewrite the analysis instruction from UIA labels and refresh the tool cache."""
     run_dir = Path(request.recording_dir)
@@ -901,6 +965,8 @@ def write_uia_replay_repair(
         side_block["control_type"] = control_type
     if track_percent is not None:
         side_block["track_percent"] = int(track_percent)
+    if isinstance(uia_snapshot, dict):
+        side_block["uia_snapshot"] = uia_snapshot
     block[request.side] = side_block
     # Scrollbar drag: the other side is the same bar at another percent — mark it
     # too so pin-skipped end loads do not leave a stranded yolo_ocr repair slot.
@@ -910,17 +976,22 @@ def write_uia_replay_repair(
             mark_recorded_side_repaired_to_uia(
                 run_dir, request.event_index, other_side
             )
-            block[other_side] = {
+            other_block: dict[str, Any] = {
                 "label": "滾動條",
                 "source": source,
                 "track_percent": int(other_percent),
             }
+            if isinstance(uia_snapshot, dict):
+                other_block["uia_snapshot"] = uia_snapshot
+            block[other_side] = other_block
     block["label"] = label
     block["source"] = source
     if control_type:
         block["control_type"] = control_type
     if track_percent is not None:
         block["track_percent"] = int(track_percent)
+    if isinstance(uia_snapshot, dict):
+        block["uia_snapshot"] = uia_snapshot
     analysis["uia_replay_repair"] = block
 
     from src.recorder.compile_tool_calls import (

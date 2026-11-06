@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from src.recorder.window_snapshot import (
+    ClickWindowInfo,
     WindowInfo,
     WindowStateChange,
     build_window_verify_predicate,
@@ -12,6 +13,7 @@ from src.recorder.window_snapshot import (
     diff_snapshots,
     diff_snapshots_with_debug,
     expected_outcome_for_window_change,
+    find_matching_click_window,
     format_window_change_hint,
     instruction_for_window_change,
     is_agent_app_restore,
@@ -1413,6 +1415,50 @@ def test_click_window_to_local_payload_subtracts_monitor_offset() -> None:
     payload = info.to_local_payload((50, 80))
     assert payload["rect"] == [50, 120, 300, 400]
     assert payload["is_flyout"] is True
+
+
+def test_find_matching_click_window_untitled_uses_class_and_process() -> None:
+    """Stale ComboLBox hwnd must not fall back to the titled owner by area alone."""
+    recorded = ClickWindowInfo(
+        hwnd=1,
+        title="",
+        process_name="WM7Ldr.exe",
+        left=290,
+        top=94,
+        width=268,
+        height=314,
+        is_maximized=False,
+        class_name="ComboLBox",
+    )
+    main = _win(
+        2,
+        "神網7",
+        width=1900,
+        height=900,
+        class_name="WindowsForms10.Window.8.app",
+        process_name="WM7Ldr.exe",
+    )
+    popup = _win(
+        3,
+        "",
+        left=290,
+        top=94,
+        width=268,
+        height=314,
+        class_name="ComboLBox",
+        process_name="WM7Ldr.exe",
+    )
+    with patch(
+        "src.recorder.window_snapshot._hwnd_still_valid",
+        return_value=False,
+    ), patch(
+        "src.recorder.window_snapshot.snapshot_top_level_windows",
+        return_value=[main, popup],
+    ):
+        matched = find_matching_click_window(recorded)
+    assert matched is not None
+    assert matched.hwnd == 3
+    assert matched.class_name == "ComboLBox"
 
 
 def test_nchittest_lparam_packs_signed_screen_coordinates() -> None:

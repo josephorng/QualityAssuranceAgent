@@ -100,7 +100,11 @@ from src.recorder.rerecord_step import (
     StepRerecordSession,
     event_kind_is_rerecordable,
 )
-from src.recorder.stop_overlay import RecordingStopOverlay, ReplayControlOverlay
+from src.recorder.stop_overlay import (
+    RecordingStopOverlay,
+    RecordingUiaStatusOverlay,
+    ReplayControlOverlay,
+)
 from src.recorder.models import RecordedEvent
 from src.recorder.vision_prefetch import VisionPrefetchWorker
 
@@ -299,8 +303,10 @@ class MainHub(ctk.CTk):
 
         self._recording_session = RecordingSession()
         self._recording_session.set_on_event(self._on_recording_event)
+        self._recording_session.set_on_uia_status(self._on_recording_uia_status)
         self._recording_hotkey = RecordingHotkeyManager()
         self._recording_stop_overlay: RecordingStopOverlay | None = None
+        self._recording_uia_status_overlay: RecordingUiaStatusOverlay | None = None
         self._replay_overlay: ReplayControlOverlay | None = None
         self._step_rerecord = StepRerecordSession()
         self._active_recording_dir: Path | None = None
@@ -2470,6 +2476,18 @@ class MainHub(ctk.CTk):
             self,
             on_stop=self._on_record_button,
         )
+        self._recording_uia_status_overlay = RecordingUiaStatusOverlay(self)
+        self._recording_uia_status_overlay.set_state("red")
+
+    def _on_recording_uia_status(self, payload: dict) -> None:
+        """Settle-UIA LED + idle EFP label (capture threads → Tk)."""
+        self.after(0, lambda p=dict(payload): self._apply_recording_uia_status(p))
+
+    def _apply_recording_uia_status(self, payload: dict) -> None:
+        overlay = self._recording_uia_status_overlay
+        if overlay is None:
+            return
+        overlay.apply_status(payload)
 
     def _remember_replay_steps(self, raw: str, recording_dir: Path | None) -> None:
         """Cache step text for the overlay and enable edit only for a recording."""
@@ -3146,6 +3164,10 @@ class MainHub(ctk.CTk):
         self._recording_stop_overlay = None
         if overlay is not None:
             overlay.destroy()
+        status = self._recording_uia_status_overlay
+        self._recording_uia_status_overlay = None
+        if status is not None:
+            status.destroy()
 
     def _schedule_toggle_recording(self) -> None:
         self.after(0, self._toggle_recording)
@@ -3261,12 +3283,18 @@ class MainHub(ctk.CTk):
             ),
             text_color=("gray20", "gray65"),
         )
+        # Create overlays before iconify so construction is not racing minimize.
+        # Stop without restoring the hub: floating control + hotkey while minimized.
+        self._show_recording_stop_overlay()
         try:
             self.iconify()
         except Exception:
             pass
-        # Stop without restoring the hub: floating control + hotkey while minimized.
-        self._show_recording_stop_overlay()
+        # Hub minimize must not hide the UIA LED (it is not transient); re-pin.
+        status = self._recording_uia_status_overlay
+        if status is not None:
+            self.after(0, status.ensure_visible)
+            self.after(100, status.ensure_visible)
 
     def _on_recording_event(self, event: RecordedEvent) -> None:
         self._vision_prefetch.enqueue(event)

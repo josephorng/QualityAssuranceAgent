@@ -115,8 +115,24 @@ _SETTLE_PROBE_KINDS = frozenset(
         "key_press",
     }
 )
+# Pointer kinds that pulse attach/miss on the UIA status LED when persisted.
+_UIA_STATUS_PULSE_KINDS = frozenset(
+    {
+        "click",
+        "double_click",
+        "triple_click",
+        "right_click",
+        "middle_click",
+        "drag",
+        "hold",
+    }
+)
+# Idle ElementFromPoint for the recording LED label (never on the mouse hook).
+_IDLE_EFP_DEBOUNCE_S = 0.45
+_IDLE_EFP_LABEL_MAX_CHARS = 48
 _QUEUE_SENTINEL = object()
 _DRAIN_MARKER = object()
+_EFP_UNSET = object()
 
 
 def settle_probe_interval_s(step: int) -> float:
@@ -188,7 +204,7 @@ class _DeferredCaptureJob:
     # begin_text_input | flush_text_input | keyboard_event | settle_pre_key
     # | pending_left_press | pending_right_press | pending_drag_end
     # | emit_left_gesture | emit_right_gesture | mouse_pointer_event
-    # | seed_settle_windows | read_clipboard_paste
+    # | seed_settle_windows | read_clipboard_paste | idle_efp
     meta: dict[str, Any] | None = None
     pending_pre_type: _PendingPreTypeShot | None = None
     pending_pre_key: _PendingPreTypeShot | None = None
@@ -1093,10 +1109,25 @@ class RecordingSession:
         self._event_queue: queue.Queue[object] = queue.Queue()
         self._worker_thread: threading.Thread | None = None
         self._on_event: Callable[[RecordedEvent], None] | None = None
+        # Settle-UIA LED + idle ElementFromPoint label (hub marshals to Tk).
+        self._on_uia_status: Callable[[dict[str, Any]], None] | None = None
+        self._uia_status_state: str = "red"
+        self._uia_status_after_index: int | None = None
+        self._uia_status_efp_name: str = ""
+        self._uia_status_efp_value: str = ""
+        self._uia_status_efp_pending: bool = False
+        self._idle_efp_generation: int = 0
+        self._idle_efp_timer: threading.Timer | None = None
         self._finalizing = False
 
     def set_on_event(self, callback: Callable[[RecordedEvent], None] | None) -> None:
         self._on_event = callback
+
+    def set_on_uia_status(
+        self, callback: Callable[[dict[str, Any]], None] | None
+    ) -> None:
+        """Receive settle-UIA LED state and idle ElementFromPoint Name/Value."""
+        self._on_uia_status = callback
 
     def is_active(self) -> bool:
         with self._lock:
@@ -1237,10 +1268,20 @@ class RecordingSession:
             self._pending_right_signals_before = None
             self._pre_click_monitors = ()
             self._last_pointer_cursor_xy = None
+            self._uia_status_state = "red"
+            self._uia_status_after_index = None
+            self._uia_status_efp_name = ""
+            self._uia_status_efp_value = ""
+            self._uia_status_efp_pending = False
+            self._idle_efp_generation = 0
+            idle_timer = self._idle_efp_timer
+            self._idle_efp_timer = None
             pending = self._pending_click_timer
             self._pending_click_timer = None
             self._event_queue = queue.Queue()
 
+        if idle_timer is not None:
+            idle_timer.cancel()
         if pending is not None:
             pending.cancel()
 
@@ -1250,6 +1291,7 @@ class RecordingSession:
             daemon=True,
         )
         self._worker_thread.start()
+        self._emit_uia_status(state="red")
 
         # Snapshot stays the first worker job. Hooks do not wait for it.
         self._enqueue(_DeferredCaptureJob(action="seed_settle_windows"))
@@ -1318,6 +1360,8 @@ class RecordingSession:
                 press_windows = self._pending_right_windows_before
                 press_signals = self._pending_right_signals_before
             self._pending_click_timer = None
+            self._cancel_idle_efp_timer_locked()
+            self._bump_idle_efp_generation_locked()
 
         self._stop_pre_click_pump(invalidate_context=True)
         self._stop_before_shot_loop()
@@ -1621,6 +1665,132 @@ class RecordingSession:
                 self._on_event(event)
             except Exception:
                 pass
+
+    @staticmethod
+    def _truncate_uia_status_label(text: str) -> str:
+        cleaned = " ".join(str(text or "").split())
+        if len(cleaned) <= _IDLE_EFP_LABEL_MAX_CHARS:
+            return cleaned
+        if _IDLE_EFP_LABEL_MAX_CHARS <= 1:
+            return "…"
+        return cleaned[: _IDLE_EFP_LABEL_MAX_CHARS - 1] + "…"
+
+    def _emit_uia_status(
+        self,
+        *,
+        state: str | None = None,
+        pulse: str | None = None,
+        after_index: int | None | object = _EFP_UNSET,
+        efp_name: str | None | object = _EFP_UNSET,
+        efp_value: str | None | object = _EFP_UNSET,
+        efp_pending: bool | None = None,
+    ) -> None:
+        """Publish settle-UIA LED + idle EFP label. Safe from worker/window threads."""
+        with self._lock:
+            if state is not None:
+                self._uia_status_state = str(state)
+            if after_index is not _EFP_UNSET:
+                self._uia_status_after_index = (
+                    None if after_index is None else int(after_index)  # type: ignore[arg-type]
+                )
+            if efp_name is not _EFP_UNSET:
+                self._uia_status_efp_name = self._truncate_uia_status_label(
+                    "" if efp_name is None else str(efp_name)
+                )
+            if efp_value is not _EFP_UNSET:
+                self._uia_status_efp_value = self._truncate_uia_status_label(
+                    "" if efp_value is None else str(efp_value)
+                )
+            if efp_pending is not None:
+                self._uia_status_efp_pending = bool(efp_pending)
+            payload = {
+                "state": self._uia_status_state,
+                "pulse": pulse,
+                "after_index": self._uia_status_after_index,
+                "efp_name": self._uia_status_efp_name,
+                "efp_value": self._uia_status_efp_value,
+                "efp_pending": self._uia_status_efp_pending,
+            }
+            callback = self._on_uia_status
+        if callback is None:
+            return
+        try:
+            callback(payload)
+        except Exception:
+            pass
+
+    def _cancel_idle_efp_timer_locked(self) -> None:
+        timer = self._idle_efp_timer
+        self._idle_efp_timer = None
+        if timer is not None:
+            timer.cancel()
+
+    def _bump_idle_efp_generation_locked(self) -> int:
+        self._idle_efp_generation += 1
+        return int(self._idle_efp_generation)
+
+    def _schedule_idle_efp(self, x: int, y: int) -> None:
+        """Debounce ElementFromPoint for the LED label. Hook-safe (timer only)."""
+        with self._lock:
+            if not self._accepting_input or self._finalizing:
+                return
+            self._cancel_idle_efp_timer_locked()
+            generation = self._bump_idle_efp_generation_locked()
+            self._uia_status_efp_pending = False
+            timer = threading.Timer(
+                _IDLE_EFP_DEBOUNCE_S,
+                self._idle_efp_timer_fired,
+                args=(generation, int(x), int(y)),
+            )
+            timer.daemon = True
+            self._idle_efp_timer = timer
+        timer.start()
+
+    def _idle_efp_timer_fired(self, generation: int, x: int, y: int) -> None:
+        with self._lock:
+            if not self._accepting_input or self._finalizing:
+                return
+            if int(generation) != int(self._idle_efp_generation):
+                return
+            self._idle_efp_timer = None
+        self._emit_uia_status(efp_pending=True)
+        self._enqueue(
+            _DeferredCaptureJob(
+                action="idle_efp",
+                cursor_xy=(int(x), int(y)),
+                meta={"generation": int(generation)},
+            )
+        )
+
+    def _worker_idle_efp(self, job: _DeferredCaptureJob) -> None:
+        meta = job.meta if isinstance(job.meta, dict) else {}
+        try:
+            generation = int(meta.get("generation") or 0)
+        except (TypeError, ValueError):
+            generation = 0
+        cursor = job.cursor_xy
+        if cursor is None:
+            self._emit_uia_status(efp_name="", efp_value="", efp_pending=False)
+            return
+        with self._lock:
+            if generation != int(self._idle_efp_generation):
+                return
+        from src.recorder.uia_input_boxes import uia_text_element_at_point
+
+        probed = uia_text_element_at_point(int(cursor[0]), int(cursor[1]))
+        with self._lock:
+            if generation != int(self._idle_efp_generation):
+                return
+        name = ""
+        value = ""
+        if isinstance(probed, tuple) and len(probed) >= 5:
+            name = str(probed[3] or "").strip()
+            value = str(probed[4] or "").strip()
+        self._emit_uia_status(
+            efp_name=name,
+            efp_value=value,
+            efp_pending=False,
+        )
 
     def _notify_pending_text_input(self, event_index: int) -> None:
         """Fire deferred vision notify once the window step has patched (or failed)."""
@@ -3730,6 +3900,8 @@ class RecordingSession:
                     done.set()
         elif job.action == "read_clipboard_paste":
             self._worker_read_clipboard_paste(job)
+        elif job.action == "idle_efp":
+            self._worker_idle_efp(job)
         # settle_probe_tick runs on its own timer thread (not this queue).
         # Window settle and UI Automation run on a per-step thread started
         # after the event is saved, so they cannot delay the next probe.
@@ -4641,20 +4813,25 @@ class RecordingSession:
         """
         hwnd = int(hwnd or 0)
         if hwnd <= 0:
+            self._emit_uia_status(state="red", after_index=int(after_event_index))
             return None
+        self._emit_uia_status(state="yellow", after_index=int(after_event_index))
         from src.recorder.uia_input_boxes import snapshot_uia_screen
 
         try:
             value = snapshot_uia_screen(hwnd)
         except Exception:
+            self._emit_uia_status(state="red", after_index=int(after_event_index))
             return None
         if not isinstance(value, dict):
+            self._emit_uia_status(state="red", after_index=int(after_event_index))
             return None
         snapshot = dict(value)
         snapshot["hwnd"] = hwnd
         with self._lock:
             self._last_settle_uia = snapshot
             self._last_settle_uia_after_index = int(after_event_index)
+        self._emit_uia_status(state="green", after_index=int(after_event_index))
         return self._copy_uia_snapshot(snapshot)
 
     def _opened_hwnd_from_change(
@@ -5771,6 +5948,18 @@ class RecordingSession:
             uia_waiting = self._uia_notify_wait.get(event.index, 0)
         if event.kind != "text_input" and uia_waiting == 0:
             self._notify_event(event)
+        if event.kind in _UIA_STATUS_PULSE_KINDS:
+            pulse = (
+                "attach"
+                if isinstance(event.uia_snapshot, dict)
+                else "miss"
+            )
+            # Pulse then red: a new settle FindAll cycle starts for this event.
+            self._emit_uia_status(
+                state="red",
+                pulse=pulse,
+                after_index=int(event.index),
+            )
         if event.kind in _SETTLE_PROBE_KINDS:
             self._start_settle_probe(event)
         else:
@@ -5835,6 +6024,9 @@ class RecordingSession:
                 self._patch_event_uia_field(
                     item.event_index, "end_uia_snapshot", settle_snap
                 )
+        else:
+            # Next gesture already sealed after-cache; skip FindAll for this step.
+            self._emit_uia_status(state="red", after_index=int(item.event_index))
         if change is None and title is None and debug is None and focus_rect is None:
             # Still release deferred text_input / drag vision notify.
             self._notify_pending_text_input(item.event_index)
@@ -5932,10 +6124,18 @@ class RecordingSession:
         with self._lock:
             self._last_move_xy = (ix, iy)
             self._last_pointer_cursor_xy = (ix, iy)
-            if not self._left_button_down or self._pending_click_coords is None:
-                return
-            sx, sy, _btn = self._pending_click_coords
+            accepting = self._accepting_input and not self._finalizing
+            left_down = self._left_button_down
+            pending_coords = self._pending_click_coords
             dragging = self._left_press_dragging
+            sx = sy = 0
+            if pending_coords is not None:
+                sx, sy, _btn = pending_coords
+        if accepting:
+            # Debounce idle ElementFromPoint for the LED Name/Value label.
+            self._schedule_idle_efp(ix, iy)
+        if not left_down or pending_coords is None:
+            return
         # Missed mouse-up: OS says released but we still track a press. Synthesize
         # up at the press point so a later far move cannot become a false drag
         # (toolbar click → flyout pick).

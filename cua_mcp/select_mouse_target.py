@@ -4399,6 +4399,130 @@ def _matches_for_phrase(
     return [pool[index] for index in expanded]
 
 
+def _recorded_efp_present(name: str | None, value: str | None) -> bool:
+    return bool(str(name or "").strip() or str(value or "").strip())
+
+
+def _efp_name_value_matches(
+    live_name: str,
+    live_value: str,
+    recorded_name: str,
+    recorded_value: str,
+) -> bool:
+    """True when live EFP matches recorded Name/Value (strip equality)."""
+    rn = str(recorded_name or "").strip()
+    rv = str(recorded_value or "").strip()
+    ln = str(live_name or "").strip()
+    lv = str(live_value or "").strip()
+    if not rn and not rv:
+        return True
+    if rn and ln != rn:
+        return False
+    if rv and lv != rv:
+        return False
+    return True
+
+
+def _probe_efp_name_value_at(
+    x: int,
+    y: int,
+    *,
+    point_probe_fn: Any | None = None,
+) -> tuple[str, str]:
+    """Live ElementFromPoint Name/Value at a screen point."""
+    probe = point_probe_fn
+    if probe is None:
+        from src.recorder.uia_input_boxes import uia_text_element_at_point
+
+        probe = uia_text_element_at_point
+    try:
+        probed = probe(int(x), int(y))
+    except Exception:
+        return "", ""
+    if not isinstance(probed, tuple) or len(probed) < 5:
+        return "", ""
+    return str(probed[3] or "").strip(), str(probed[4] or "").strip()
+
+
+def _order_geometry_efp_candidates(
+    pool: list[UiDetection],
+    synth: tuple[int, int],
+    preferred: UiDetection | None,
+) -> list[UiDetection]:
+    """Preferred first, then remaining pool nearest to the synthesized point."""
+    sx, sy = int(synth[0]), int(synth[1])
+
+    def _dist2(det: UiDetection) -> int:
+        dx = int(det.cx) - sx
+        dy = int(det.cy) - sy
+        return dx * dx + dy * dy
+
+    ordered: list[UiDetection] = []
+    seen: set[int] = set()
+    if preferred is not None:
+        ordered.append(preferred)
+        seen.add(id(preferred))
+    rest = [det for det in pool if id(det) not in seen]
+    rest.sort(key=_dist2)
+    ordered.extend(rest)
+    return ordered
+
+
+def _verify_geometry_candidates_with_efp(
+    pool: list[UiDetection],
+    *,
+    synth: tuple[int, int],
+    geom_det: UiDetection | None,
+    recorded_name: str,
+    recorded_value: str,
+    point_probe_fn: Any | None = None,
+) -> tuple[UiDetection | None, tuple[int, int] | None, str]:
+    """Probe EFP on geometry candidates; return first Name/Value match.
+
+    Returns ``(detection_or_None, point_or_None, reason)`` where reason is
+    ``hit``, ``synth_hit``, or ``miss``.
+    """
+    rn = str(recorded_name or "").strip()
+    rv = str(recorded_value or "").strip()
+    if not rn and not rv:
+        if geom_det is not None:
+            return geom_det, (int(geom_det.cx), int(geom_det.cy)), "hit"
+        return None, (int(synth[0]), int(synth[1])), "synth_hit"
+
+    candidates = _order_geometry_efp_candidates(pool, synth, geom_det)
+    for det in candidates:
+        live_name, live_value = _probe_efp_name_value_at(
+            int(det.cx), int(det.cy), point_probe_fn=point_probe_fn
+        )
+        if _efp_name_value_matches(live_name, live_value, rn, rv):
+            _log_info(
+                "move_mouse landmark_geometry_efp hit "
+                f"center=[{det.cx},{det.cy}] "
+                f"name={live_name!r} value={live_value!r} "
+                f"recorded_name={rn!r} recorded_value={rv!r}"
+            )
+            return det, (int(det.cx), int(det.cy)), "hit"
+
+    if geom_det is None and not candidates:
+        live_name, live_value = _probe_efp_name_value_at(
+            int(synth[0]), int(synth[1]), point_probe_fn=point_probe_fn
+        )
+        if _efp_name_value_matches(live_name, live_value, rn, rv):
+            _log_info(
+                "move_mouse landmark_geometry_efp synth_hit "
+                f"point=[{int(synth[0])},{int(synth[1])}] "
+                f"name={live_name!r} value={live_value!r}"
+            )
+            return None, (int(synth[0]), int(synth[1])), "synth_hit"
+
+    _log_info(
+        "move_mouse landmark_geometry_efp_miss "
+        f"pool={len(candidates)} synth=[{int(synth[0])},{int(synth[1])}] "
+        f"recorded_name={rn!r} recorded_value={rv!r}"
+    )
+    return None, None, "miss"
+
+
 def _filter_uia_anchor_by_name_then_value(
     detections: list[UiDetection],
     anchor: str,
@@ -5303,6 +5427,8 @@ async def find_mouse_point(
     anchor_text: str | None = None,
     control_type: str | None = None,
     vision_mode: str | None = None,
+    recorded_efp_name: str | None = None,
+    recorded_efp_value: str | None = None,
 ) -> tuple[int, int, dict[str, Any]] | None:
     """
     Capture selected monitor(s), build YOLO+OCR candidates, filter and pick via LLM.
@@ -5355,6 +5481,8 @@ async def find_mouse_point(
         anchor_text=anchor_text,
         control_type=control_type,
         vision_mode=vision_mode,
+        recorded_efp_name=recorded_efp_name,
+        recorded_efp_value=recorded_efp_value,
     )
     if result is not None:
         return result
@@ -5394,6 +5522,8 @@ async def find_mouse_point(
         anchor_text=anchor_text,
         control_type=control_type,
         vision_mode=vision_mode,
+        recorded_efp_name=recorded_efp_name,
+        recorded_efp_value=recorded_efp_value,
     )
     if result2 is None:
         return None
@@ -5413,6 +5543,8 @@ async def _find_mouse_point_attempt(
     anchor_text: str | None = None,
     control_type: str | None = None,
     vision_mode: str | None = None,
+    recorded_efp_name: str | None = None,
+    recorded_efp_value: str | None = None,
 ) -> tuple[
     tuple[int, int, dict[str, Any]] | None,
     _UiChangeFingerprint | None,
@@ -5455,6 +5587,12 @@ async def _find_mouse_point_attempt(
     ) or None
     if structured_vision_mode not in (None, "uia", "yolo_ocr"):
         structured_vision_mode = None
+    recorded_efp_name = (
+        str(recorded_efp_name).strip() if isinstance(recorded_efp_name, str) else ""
+    )
+    recorded_efp_value = (
+        str(recorded_efp_value).strip() if isinstance(recorded_efp_value, str) else ""
+    )
     recorded_anchor_match = structured_anchor_text is not None
     from src.recorder.uia_replay_repair import take_yolo_ocr_fallback
 
@@ -6450,6 +6588,8 @@ async def _find_mouse_point_attempt(
         # Cache replay with recorded constellation: prefer geometry over LLM pick
         # (e.g. multiple 輸入欄 class matches). On-object text uses the
         # radius-similarity path above (never synth among anchors).
+        # When recorded ElementFromPoint Name/Value is present, verify (and
+        # retry nearer candidates) before committing the geometry pick.
         if (
             similarity_match_required()
             and landmark_geometry is not None
@@ -6465,7 +6605,63 @@ async def _find_mouse_point_attempt(
             )
             if geom_hit is not None:
                 geom_det, geom_point, geom_method = geom_hit
-                if geom_det is not None:
+                need_efp = _recorded_efp_present(
+                    recorded_efp_name, recorded_efp_value
+                )
+                if need_efp:
+                    efp_det, efp_point, efp_reason = (
+                        _verify_geometry_candidates_with_efp(
+                            list(anchor_matches),
+                            synth=geom_point,
+                            geom_det=geom_det,
+                            recorded_name=recorded_efp_name,
+                            recorded_value=recorded_efp_value,
+                        )
+                    )
+                    if efp_reason == "miss":
+                        _log_info(
+                            "move_mouse: landmark_geometry_efp_miss among anchors "
+                            f"vision_mode={vision_mode!r} pool={len(anchor_matches)}"
+                        )
+                        if vision_mode == "uia":
+                            # Geometry/UIA locate failed Name/Value gate.
+                            return _pack(None)
+                        # yolo_ocr: skip geometry commit; continue select.
+                    elif efp_reason == "synth_hit" and efp_point is not None:
+                        select_s = time.perf_counter() - select_started
+                        _log_info(
+                            "move_mouse: landmark geometry EFP synth among anchors "
+                            f"point=[{efp_point[0]},{efp_point[1]}] "
+                            f"pool={len(anchor_matches)}"
+                        )
+                        return _pack(_landmark_geometry_synth_meta(
+                            point=efp_point,
+                            offset_dx=offset_dx,
+                            offset_dy=offset_dy,
+                            track_percent=track_percent,
+                            char_target=char_target,
+                            char_occurrence=char_occurrence,
+                            instruction_text=instruction_text,
+                            nearby_phrases=nearby_phrases,
+                            image_paths=image_paths,
+                            selection_method="landmark_geometry_efp_synth",
+                            timing=_timing_meta(
+                                select_s=select_s,
+                                select_phase="landmark_geometry_efp_synth",
+                            ),
+                        ))
+                    elif efp_det is not None:
+                        chosen = efp_det
+                        idx = detections.index(efp_det)
+                        selection_method = "landmark_geometry_efp_pick"
+                        select_phase = selection_method
+                        used_geometry = True
+                        _log_info(
+                            "move_mouse: landmark geometry EFP pick among anchors "
+                            f"center=[{chosen.cx},{chosen.cy}] "
+                            f"pool={len(anchor_matches)}"
+                        )
+                elif geom_det is not None:
                     chosen = geom_det
                     idx = detections.index(geom_det)
                     selection_method = geom_method
@@ -6501,6 +6697,39 @@ async def _find_mouse_point_attempt(
 
         if used_geometry:
             pass
+        elif _recorded_efp_present(recorded_efp_name, recorded_efp_value) and anchor_matches:
+            # Recorded press-time Name/Value: disambiguate shortlist by live EFP
+            # alone (skip unique/LLM). Geometry path already verified above when
+            # it committed; this covers geometry miss/skip and no-geometry select.
+            mean_cx = int(
+                round(sum(int(d.cx) for d in anchor_matches) / len(anchor_matches))
+            )
+            mean_cy = int(
+                round(sum(int(d.cy) for d in anchor_matches) / len(anchor_matches))
+            )
+            efp_det, _efp_point, efp_reason = _verify_geometry_candidates_with_efp(
+                list(anchor_matches),
+                synth=(mean_cx, mean_cy),
+                geom_det=None,
+                recorded_name=recorded_efp_name,
+                recorded_value=recorded_efp_value,
+            )
+            if efp_reason == "miss" or efp_det is None:
+                _log_info(
+                    "move_mouse: anchor_efp_miss "
+                    f"pool={len(anchor_matches)} "
+                    f"recorded_name={recorded_efp_name!r} "
+                    f"recorded_value={recorded_efp_value!r}"
+                )
+                return _pack(None)
+            chosen = efp_det
+            idx = detections.index(efp_det)
+            selection_method = "anchor_efp_pick"
+            select_phase = selection_method
+            _log_info(
+                "move_mouse: anchor_efp_pick "
+                f"center=[{chosen.cx},{chosen.cy}] pool={len(anchor_matches)}"
+            )
         elif len(anchor_matches) == 1:
             idx = 0
             chosen = anchor_matches[0]
@@ -6634,6 +6863,8 @@ async def resolve_mouse_point(
     anchor_text: str | None = None,
     control_type: str | None = None,
     vision_mode: str | None = None,
+    recorded_efp_name: str | None = None,
+    recorded_efp_value: str | None = None,
 ) -> tuple[int, int, dict[str, Any]]:
     """
     Capture selected monitor(s), build YOLO+OCR candidates, filter and pick via LLM.
@@ -6655,6 +6886,8 @@ async def resolve_mouse_point(
         anchor_text=anchor_text,
         control_type=control_type,
         vision_mode=vision_mode,
+        recorded_efp_name=recorded_efp_name,
+        recorded_efp_value=recorded_efp_value,
     )
     if found is None:
         raise ValueError(RECORDED_ANCHOR_MISS_MESSAGE)

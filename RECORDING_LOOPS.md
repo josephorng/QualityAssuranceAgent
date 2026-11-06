@@ -91,6 +91,24 @@ After the event file exists, the worker starts `window-step-N`. That thread slee
 
 After that settle work it also runs one naming `FindAll` under a single hwnd (`ComboLBox` / untitled dropdown when just opened, else foreground, else end/click window—never the desktop root) and publishes the result into `_last_settle_uia`. The next mouse press copies that cache as `uia_snapshot` only when the click hwnd matches **and** the settle was published after the previous event (generation gate). A drag’s `end_uia_snapshot` is the FindAll from this same window-step. A same-hwnd generation miss leaves `uia_snapshot` empty so analysis can fall back to YOLO+OCR (avoids Excel Backstage races). A **`ComboLBox` popup** settle miss (click hwnd is `ComboLBox` and differs from the settle cache, or there is no cache) runs `FindAll` under that popup on the capture worker (never on the mouse hook) and still never late-patches `uia_snapshot` after persist. Ordinary cross-window misses (dialogs, main form) do not FindAll on press. Recording start seeds `_last_settle_uia` once so event 1 has a before tree.
 
+### Recording UIA status LED
+
+While recording, an always-on-top strip (`RecordingUiaStatusOverlay`) shows:
+
+| Signal | Meaning |
+| --- | --- |
+| Red | Waiting for settle FindAll (or sealed/cancelled/failed) |
+| Yellow | Settle `FindAll` / `snapshot_uia_screen` in progress |
+| Green | `_last_settle_uia` published — cache ready for a matching next press |
+| Brief attach/miss pulse | Just-persisted pointer event did / did not get `uia_snapshot` |
+| Name \| Value text | Idle `ElementFromPoint` after ~0.45s without mouse move (preview only; not written to event JSON) |
+
+Pixel settle-probe MAD ticks do **not** drive the LED. The strip is click-through and uses `WDA_EXCLUDEFROMCAPTURE` so it should not appear in recording screenshots. There is no hover rectangle — only the LED and the Name/Value label.
+
+### Cache replay: EFP gate after landmark geometry
+
+Press-time ElementFromPoint `name` / `value` are compiled onto `move_mouse` args. During cache replay, after non-text `landmark_geometry` picks among class anchors (e.g. many `輸入欄`), live EFP is probed at each candidate (nearest synthesized point first). A Name/Value match commits (`landmark_geometry_efp_pick`). If recorded name/value are blank, geometry behaves as before. If every candidate misses and `vision_mode` is `uia`, the locate soft-misses (UIA/geometry path failed); for `yolo_ocr` the geometry commit is skipped and select continues. When geometry does not commit and recorded Name/Value is still present, the nearby-prefiltered anchor shortlist is resolved by live EFP only (`anchor_efp_pick`, no LLM); a total miss soft-fails the locate.
+
 `finalize_stop` joins these threads for up to 2 seconds before it writes `session.json`. A slow step stays on its own thread, so the next click's probe can start while this one is still in UI Automation. A late thread cannot replace a newer probe, because `_start_settle_probe` ignores an event index that is not newer than the probe already running.
 
 ### Vision prefetch pool

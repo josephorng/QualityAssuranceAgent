@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import os
 from typing import Any, Callable
 
 import customtkinter as ctk
@@ -10,6 +12,26 @@ import mss
 import pyautogui
 
 from src.recorder.hotkey import RECORDING_HOTKEY_DISPLAY
+
+# Windows: keep recording HUD out of BitBlt/mss screenshots (Win10 2004+).
+_WDA_EXCLUDEFROMCAPTURE = 0x00000011
+_GWL_EXSTYLE = -20
+_WS_EX_LAYERED = 0x00080000
+_WS_EX_TRANSPARENT = 0x00000020
+_WS_EX_TOOLWINDOW = 0x00000080
+
+_UIA_LED_COLORS = {
+    "red": "#e74c3c",
+    "yellow": "#f1c40f",
+    "green": "#2ecc71",
+}
+_UIA_LED_PULSE_COLORS = {
+    "attach": "#27ae60",
+    "miss": "#e67e22",
+}
+_UIA_LED_SIZE = 14
+_UIA_STATUS_PULSE_MS = 350
+_UIA_EFP_LABEL_WIDTH = 42
 
 _EDGE_TRIGGER_PX = 4
 _HIDE_DELAY_MS = 450
@@ -340,6 +362,248 @@ class RecordingStopOverlay(_EdgeRevealOverlay):
     def _handle_stop(self) -> None:
         try:
             self._on_stop()
+        except Exception:
+            pass
+
+
+def _toplevel_hwnd(win: Any) -> int:
+    """Outer Win32 HWND for a Tk/CTk window (``winfo_id`` is often an inner frame)."""
+    if os.name != "nt":
+        return 0
+    try:
+        hwnd = int(win.winfo_id())
+    except Exception:
+        return 0
+    if hwnd <= 0:
+        return 0
+    try:
+        # GA_ROOT = 2
+        root = int(ctypes.windll.user32.GetAncestor(hwnd, 2))
+        if root > 0:
+            return root
+    except Exception:
+        pass
+    return hwnd
+
+
+def _apply_exclude_from_capture(win: Any) -> None:
+    hwnd = _toplevel_hwnd(win)
+    if hwnd <= 0:
+        return
+    try:
+        ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, _WDA_EXCLUDEFROMCAPTURE)
+    except Exception:
+        pass
+
+
+def _apply_click_through(win: Any) -> None:
+    hwnd = _toplevel_hwnd(win)
+    if hwnd <= 0:
+        return
+    try:
+        user32 = ctypes.windll.user32
+        style = int(user32.GetWindowLongW(hwnd, _GWL_EXSTYLE))
+        style |= _WS_EX_LAYERED | _WS_EX_TRANSPARENT | _WS_EX_TOOLWINDOW
+        user32.SetWindowLongW(hwnd, _GWL_EXSTYLE, style)
+    except Exception:
+        pass
+
+
+class RecordingUiaStatusOverlay:
+    """Always-on-top settle-UIA LED + idle ElementFromPoint Name/Value label."""
+
+    def __init__(self, master: Any) -> None:
+        self._master = master
+        self._window: ctk.CTkToplevel | None = None
+        self._led: ctk.CTkLabel | None = None
+        self._label: ctk.CTkLabel | None = None
+        self._state = "red"
+        self._pulse_after_id: str | None = None
+        self._destroyed = False
+        self._build(master)
+
+    def _build(self, master: Any) -> None:
+        win = ctk.CTkToplevel(master)
+        self._window = win
+        win.title("UIA")
+        win.resizable(False, False)
+        # Do NOT transient() to the hub: recording iconifies the hub, and a
+        # transient child is hidden with its master.
+        try:
+            win.overrideredirect(True)
+        except Exception:
+            pass
+        try:
+            win.attributes("-topmost", True)
+        except Exception:
+            pass
+
+        frame = ctk.CTkFrame(win, corner_radius=8, fg_color=("#2c3e50", "#2c3e50"))
+        frame.pack(fill="both", expand=True, padx=2, pady=2)
+
+        row = ctk.CTkFrame(frame, fg_color="transparent")
+        row.pack(padx=10, pady=6)
+
+        self._led = ctk.CTkLabel(
+            row,
+            text="●",
+            width=_UIA_LED_SIZE + 4,
+            font=ctk.CTkFont(size=_UIA_LED_SIZE + 2),
+            text_color=_UIA_LED_COLORS["red"],
+        )
+        self._led.pack(side="left", padx=(0, 8))
+        self._label = ctk.CTkLabel(
+            row,
+            text="—",
+            font=ctk.CTkFont(size=12),
+            text_color=("#ecf0f1", "#ecf0f1"),
+            anchor="w",
+        )
+        self._label.pack(side="left")
+
+        self.ensure_visible()
+        # hwnd is valid after map; apply capture-exclude + click-through.
+        try:
+            win.after(50, lambda: self._harden_window(win))
+        except Exception:
+            self._harden_window(win)
+
+    def ensure_visible(self) -> None:
+        """Show and pin topmost (call again after the hub iconifies)."""
+        if self._destroyed:
+            return
+        win = self._window
+        if win is None:
+            return
+        try:
+            win.update_idletasks()
+            width = max(int(win.winfo_reqwidth()), 240)
+            height = max(int(win.winfo_reqheight()), 32)
+            screen_w = int(win.winfo_screenwidth())
+            x = max(0, (screen_w - width) // 2)
+            win.geometry(f"{width}x{height}+{x}+8")
+        except Exception:
+            pass
+        try:
+            win.deiconify()
+            win.lift()
+            win.attributes("-topmost", True)
+        except Exception:
+            pass
+
+    def _harden_window(self, win: Any) -> None:
+        if self._destroyed:
+            return
+        self.ensure_visible()
+        _apply_exclude_from_capture(win)
+        _apply_click_through(win)
+        # Click-through / affinity can reorder Z; pin again.
+        self.ensure_visible()
+
+    def set_state(self, state: str) -> None:
+        if self._destroyed:
+            return
+        key = str(state or "red").strip().lower()
+        if key not in _UIA_LED_COLORS:
+            key = "red"
+        self._state = key
+        self._apply_led_color(_UIA_LED_COLORS[key])
+
+    def pulse(self, kind: str | None) -> None:
+        if self._destroyed or not kind:
+            return
+        color = _UIA_LED_PULSE_COLORS.get(str(kind).strip().lower())
+        if not color:
+            return
+        self._cancel_pulse()
+        self._apply_led_color(color)
+
+        def _restore() -> None:
+            self._pulse_after_id = None
+            if self._destroyed:
+                return
+            self._apply_led_color(_UIA_LED_COLORS.get(self._state, _UIA_LED_COLORS["red"]))
+
+        try:
+            self._pulse_after_id = self._master.after(_UIA_STATUS_PULSE_MS, _restore)
+        except Exception:
+            _restore()
+
+    def set_efp_label(
+        self,
+        name: str | None,
+        value: str | None,
+        *,
+        pending: bool = False,
+    ) -> None:
+        if self._destroyed or self._label is None:
+            return
+        name_s = str(name or "").strip()
+        value_s = str(value or "").strip()
+        if pending and not name_s and not value_s:
+            text = "…"
+        elif name_s and value_s:
+            text = f"{name_s} | {value_s}"
+        elif name_s:
+            text = name_s
+        elif value_s:
+            text = value_s
+        else:
+            text = "—"
+        if len(text) > _UIA_EFP_LABEL_WIDTH:
+            text = text[: _UIA_EFP_LABEL_WIDTH - 1] + "…"
+        try:
+            self._label.configure(text=text)
+        except Exception:
+            pass
+
+    def apply_status(self, payload: dict[str, Any] | None) -> None:
+        """Apply a RecordingSession UIA status payload on the Tk thread."""
+        if not isinstance(payload, dict) or self._destroyed:
+            return
+        state = payload.get("state")
+        if isinstance(state, str) and state:
+            self.set_state(state)
+        pulse = payload.get("pulse")
+        if isinstance(pulse, str) and pulse:
+            self.pulse(pulse)
+        self.set_efp_label(
+            str(payload.get("efp_name") or ""),
+            str(payload.get("efp_value") or ""),
+            pending=bool(payload.get("efp_pending")),
+        )
+
+    def _apply_led_color(self, color: str) -> None:
+        if self._led is None:
+            return
+        try:
+            self._led.configure(text_color=color)
+        except Exception:
+            pass
+
+    def _cancel_pulse(self) -> None:
+        after_id = self._pulse_after_id
+        self._pulse_after_id = None
+        if after_id is None:
+            return
+        try:
+            self._master.after_cancel(after_id)
+        except Exception:
+            pass
+
+    def destroy(self) -> None:
+        if self._destroyed:
+            return
+        self._destroyed = True
+        self._cancel_pulse()
+        win = self._window
+        self._window = None
+        self._led = None
+        self._label = None
+        if win is None:
+            return
+        try:
+            win.destroy()
         except Exception:
             pass
 

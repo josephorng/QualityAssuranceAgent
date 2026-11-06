@@ -93,6 +93,8 @@ async def _move_mouse(
         anchor_text=anchor_text,
         control_type=control_type,
         vision_mode=vision_mode,
+        recorded_efp_name=name,
+        recorded_efp_value=value,
     )
     move_started = time.perf_counter()
     result = hand_tools.move(x=gx, y=gy, duration=duration)

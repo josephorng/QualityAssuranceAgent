@@ -506,6 +506,88 @@ def test_seed_uia_covers_taskbar_and_skips_noise(tmp_path: Path, monkeypatch: py
     assert hit["texts"][0]["text"] == "搜尋"
 
 
+def test_seed_uia_covers_progman_desktop_shell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Event-1 seed FindAlls Progman so a desktop icon click attaches UIA."""
+    from src.recorder.capture import RecordingSession
+    from src.recorder.window_snapshot import ClickWindowInfo, WindowInfo
+
+    calls: list[int] = []
+
+    def _snap(hwnd: int) -> dict:
+        calls.append(int(hwnd))
+        label = {10: "前景", 131256: "WinMaster7 Console"}.get(hwnd, f"hwnd{hwnd}")
+        return {
+            "window": [0, 0, 40, 40],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [
+                {
+                    "bbox": [0, 0, 8, 8],
+                    "text": label,
+                    "control_type": "list_item",
+                }
+            ],
+        }
+
+    windows = (
+        WindowInfo(
+            hwnd=10,
+            title="App",
+            pid=1,
+            left=0,
+            top=0,
+            width=800,
+            height=600,
+            is_minimized=False,
+            is_maximized=True,
+            class_name="Chrome_WidgetWin_1",
+            process_name="app.exe",
+        ),
+        WindowInfo(
+            hwnd=131256,
+            title="Program Manager",
+            pid=2,
+            left=0,
+            top=0,
+            width=1918,
+            height=920,
+            is_minimized=False,
+            is_maximized=False,
+            class_name="Progman",
+            process_name="explorer.exe",
+        ),
+    )
+    session = RecordingSession(runs_root=tmp_path)
+    monkeypatch.setattr(session, "_foreground_hwnd", lambda: 10)
+    with patch(
+        "src.recorder.uia_input_boxes.snapshot_uia_screen",
+        side_effect=_snap,
+    ):
+        primary = session._collect_and_publish_seed_uia_screens(windows)
+        desktop = ClickWindowInfo(
+            hwnd=131256,
+            title="Program Manager",
+            process_name="explorer.exe",
+            left=0,
+            top=0,
+            width=1918,
+            height=920,
+            is_maximized=False,
+            is_taskbar=False,
+            class_name="Progman",
+        )
+        hit = session._cached_uia_before(desktop, cursor_xy=(114, 153))
+    assert sorted(calls) == [10, 131256]
+    assert primary is not None and primary["texts"][0]["text"] == "前景"
+    assert set(session._last_settle_uia_by_hwnd) == {10, 131256}
+    assert session._last_settle_uia_by_hwnd[131256].get("class_name") == "Progman"
+    assert hit is not None
+    assert hit["hwnd"] == 131256
+    assert hit["texts"][0]["text"] == "WinMaster7 Console"
+
+
 def test_single_settle_retains_taskbar_seed_entry(tmp_path: Path) -> None:
     """A later single-hwnd settle drops non-shell seed entries but keeps taskbar."""
     from src.recorder.capture import RecordingSession
@@ -580,6 +662,85 @@ def test_single_settle_retains_taskbar_seed_entry(tmp_path: Path) -> None:
     assert hit["hwnd"] == 20
     assert hit["texts"][0]["text"] == "工作列"
     assert session._cached_uia_before(_copilot_window(10), cursor_xy=(5, 5)) is not None  # type: ignore[arg-type]
+
+
+def test_single_settle_retains_progman_seed_entry(tmp_path: Path) -> None:
+    """A later single-hwnd settle drops non-shell seed entries but keeps Progman."""
+    from src.recorder.capture import RecordingSession
+    from src.recorder.models import RecordedEvent
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    session = RecordingSession(runs_root=tmp_path)
+    session._last_settle_uia_by_hwnd = {
+        10: {
+            "hwnd": 10,
+            "class_name": "Chrome_WidgetWin_1",
+            "window": [0, 0, 10, 10],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [0, 0, 4, 4], "text": "前景"}],
+        },
+        131256: {
+            "hwnd": 131256,
+            "class_name": "Progman",
+            "window": [0, 0, 1918, 920],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [
+                {
+                    "bbox": [76, 111, 152, 196],
+                    "text": "WinMaster7 Console",
+                    "control_type": "list_item",
+                }
+            ],
+        },
+    }
+    session._last_settle_uia_after_index = 0
+    with (
+        patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            return_value={
+                "window": [0, 0, 10, 10],
+                "inputs": [],
+                "scrollbars": [],
+                "texts": [{"bbox": [0, 0, 4, 4], "text": "下一步"}],
+            },
+        ),
+        patch("src.recorder.capture._window_class_name", return_value="Chrome_WidgetWin_1"),
+    ):
+        session._collect_and_publish_settle_uia(10, after_event_index=1)
+    assert set(session._last_settle_uia_by_hwnd) == {131256}
+    assert (
+        session._last_settle_uia_by_hwnd[131256]["texts"][0]["text"]
+        == "WinMaster7 Console"
+    )
+    session._events = [
+        RecordedEvent(
+            index=1,
+            timestamp_utc="t",
+            kind="click",
+            cursor_xy=(1, 1),
+            screenshot_path="x.jpeg",
+            monitor_index=1,
+            monitor_offset=(0, 0),
+        )
+    ]
+    desktop = ClickWindowInfo(
+        hwnd=131256,
+        title="Program Manager",
+        process_name="explorer.exe",
+        left=0,
+        top=0,
+        width=1918,
+        height=920,
+        is_maximized=False,
+        is_taskbar=False,
+        class_name="Progman",
+    )
+    hit = session._cached_uia_before(desktop, cursor_xy=(114, 153))
+    assert hit is not None
+    assert hit["hwnd"] == 131256
+    assert hit["texts"][0]["text"] == "WinMaster7 Console"
 
 
 def test_seed_then_settle_keeps_taskbar_for_later_click(
@@ -1259,6 +1420,100 @@ def test_combolbox_press_findall_under_click_hwnd(tmp_path: Path) -> None:
     raw = json.loads((tmp_path / "events" / "event_001.json").read_text(encoding="utf-8"))
     assert raw["uia_snapshot"]["hwnd"] == 20
     assert raw["uia_snapshot"]["texts"][0]["text"] == "磁碟機陣列"
+
+
+def test_progman_press_findall_under_click_hwnd(tmp_path: Path) -> None:
+    """Progman settle miss FindAlls under the desktop on the worker."""
+    from src.recorder.capture import RecordingSession, _DeferredCaptureJob
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    calls: list[int] = []
+
+    def _snap(hwnd: int) -> dict:
+        calls.append(int(hwnd))
+        return {
+            "window": [0, 0, 1918, 920],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [
+                {
+                    "bbox": [76, 111, 152, 196],
+                    "text": "WinMaster7 Console",
+                    "control_type": "list_item",
+                }
+            ],
+        }
+
+    desktop = ClickWindowInfo(
+        hwnd=131256,
+        title="Program Manager",
+        process_name="explorer.exe",
+        left=0,
+        top=0,
+        width=1918,
+        height=920,
+        is_maximized=False,
+        is_taskbar=False,
+        class_name="Progman",
+    )
+    session = RecordingSession(runs_root=tmp_path)
+    session._run_dir = tmp_path
+    session._last_settle_uia = {
+        "hwnd": 10,
+        "window": [0, 0, 100, 80],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [{"bbox": [0, 0, 4, 4], "text": "舊窗"}],
+    }
+    session._last_settle_uia_after_index = 0
+    session._start_window_step = lambda _item: None  # type: ignore[method-assign]
+    session._notify_event = lambda _event: None  # type: ignore[method-assign]
+    session._start_settle_probe = lambda _event: None  # type: ignore[method-assign]
+    with patch(
+        "src.recorder.uia_input_boxes.snapshot_uia_screen",
+        side_effect=_snap,
+    ), patch(
+        "src.recorder.capture.resolve_click_window",
+        return_value=desktop,
+    ), patch(
+        "src.recorder.capture._finalize_screenshot",
+        return_value=("shot.jpeg", 1, (0, 0)),
+    ), patch(
+        "src.recorder.uia_input_boxes.element_from_point_name_value",
+        return_value={
+            "element_from_point_s": 0.0,
+            "name": "WinMaster7 Console",
+            "value": "",
+            "control_type": "list_item",
+        },
+    ):
+        session._capture_pending_left_press(tmp_path, 114, 153)
+        assert session._left_press_uia[1] is None
+        session._worker_pending_left_press(
+            _DeferredCaptureJob(
+                action="pending_left_press",
+                cursor_xy=(114, 153),
+                press_seq=1,
+            )
+        )
+        assert session._left_press_uia[1] is not None
+        assert session._left_press_uia[1]["texts"][0]["text"] == "WinMaster7 Console"
+        session._left_press_captures[1] = (("pending.jpeg", 1, (0, 0)), [])
+        session._worker_emit_left_gesture(
+            _DeferredCaptureJob(
+                action="emit_left_gesture",
+                kind="double_click",
+                press_seq=1,
+                cursor_xy=(114, 153),
+                event_index=1,
+                timestamp_utc="t",
+                button="left",
+            )
+        )
+    assert calls == [131256]
+    raw = json.loads((tmp_path / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["uia_snapshot"]["hwnd"] == 131256
+    assert raw["uia_snapshot"]["texts"][0]["text"] == "WinMaster7 Console"
 
 
 def test_pick_settle_uia_hwnd_prefers_combolbox_opened_over_foreground() -> None:

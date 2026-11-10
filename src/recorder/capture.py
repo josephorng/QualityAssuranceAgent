@@ -80,6 +80,9 @@ _SEED_UIA_NOISE_CLASS_NAMES = frozenset(
         "CEF-OSC-WIDGET",
     }
 )
+# Desktop icon host (Progman or wallpaper WorkerW). Retained across settles
+# like the taskbar so icon clicks can attach FindAll UIA instead of YOLO+OCR.
+_DESKTOP_SHELL_UIA_CLASS_NAMES = frozenset({"Progman", "WorkerW"})
 # Distinct from None, which means mouse-up reserved the drag-end slot
 # before the mouse-down monitor grab finished.
 _DRAG_END_UNCLAIMED = object()
@@ -4936,6 +4939,22 @@ class RecordingSession:
             return int(self._events[-1].index)
 
     @staticmethod
+    def _is_shell_retained_uia_class(class_name: str) -> bool:
+        """True for taskbar or desktop-shell classes kept across settles."""
+        name = str(class_name or "").strip()
+        return name in _TASKBAR_CLASS_NAMES or name in _DESKTOP_SHELL_UIA_CLASS_NAMES
+
+    @staticmethod
+    def _is_desktop_shell_click_window(
+        click_window: ClickWindowInfo | None,
+    ) -> bool:
+        """True for Progman / WorkerW desktop icon hosts."""
+        if click_window is None:
+            return False
+        class_name = str(click_window.class_name or "").strip()
+        return class_name in _DESKTOP_SHELL_UIA_CLASS_NAMES
+
+    @staticmethod
     def _seed_uia_window_eligible(win: WindowInfo) -> bool:
         """True when recording seed should FindAll under this top-level hwnd."""
         class_name = str(win.class_name or "").strip()
@@ -4984,7 +5003,7 @@ class RecordingSession:
         *,
         settle_hwnd: int = 0,
     ) -> dict[int, dict[str, Any]]:
-        """Keep taskbar-class or hover-warmed peers; drop the settle hwnd."""
+        """Keep taskbar/desktop-shell or hover-warmed peers; drop the settle hwnd."""
         try:
             drop_hwnd = int(settle_hwnd or 0)
         except (TypeError, ValueError):
@@ -5001,7 +5020,10 @@ class RecordingSession:
                 continue
             class_name = str(snapshot.get("class_name") or "").strip()
             cache_kind = str(snapshot.get("cache_kind") or "").strip()
-            if class_name in _TASKBAR_CLASS_NAMES or cache_kind == "hover":
+            if (
+                RecordingSession._is_shell_retained_uia_class(class_name)
+                or cache_kind == "hover"
+            ):
                 retained[hwnd] = snapshot
         return retained
 
@@ -5009,7 +5031,7 @@ class RecordingSession:
     def _shell_uia_by_hwnd_retained(
         existing: dict[int, dict[str, Any]] | None,
     ) -> dict[int, dict[str, Any]]:
-        """Keep taskbar-class / hover peers (no settle hwnd to drop)."""
+        """Keep taskbar/desktop-shell / hover peers (no settle hwnd to drop)."""
         return RecordingSession._by_hwnd_retained_across_settle(existing, settle_hwnd=0)
 
     def _cached_uia_before(
@@ -5139,7 +5161,8 @@ class RecordingSession:
         ``after_event_index`` is the event whose window-step produced this tree
         (``0`` for recording seed). The next press reuses it only when that index
         is still the previous event. Drops non-shell seed map entries but keeps
-        taskbar-class and hover-warmed (``cache_kind=hover``) snapshots.
+        taskbar-class, desktop-shell (Progman/WorkerW), and hover-warmed
+        (``cache_kind=hover``) snapshots.
         """
         hwnd = int(hwnd or 0)
         if hwnd <= 0:
@@ -5181,7 +5204,7 @@ class RecordingSession:
                 self._last_settle_uia_by_hwnd,
                 settle_hwnd=hwnd,
             )
-            if class_name in _TASKBAR_CLASS_NAMES:
+            if self._is_shell_retained_uia_class(class_name):
                 retained[hwnd] = snapshot
             self._last_settle_uia = snapshot
             self._last_settle_uia_by_hwnd = retained
@@ -5314,12 +5337,17 @@ class RecordingSession:
         self,
         click_window: ClickWindowInfo | None,
     ) -> bool:
-        """True only for ComboLBox popup settle-cache misses.
+        """True for ComboLBox or desktop-shell settle-cache misses.
 
         Same-hwnd generation misses stay empty (Excel Backstage race). Ordinary
         cross-window misses (dialogs, main form) do not FindAll on the worker.
+        Desktop shell (Progman/WorkerW) is treated like ComboLBox so icon clicks
+        can still attach FindAll when the seed/settle map missed.
         """
-        if not self._is_dropdown_popup_click_window(click_window):
+        if not (
+            self._is_dropdown_popup_click_window(click_window)
+            or self._is_desktop_shell_click_window(click_window)
+        ):
             return False
         assert click_window is not None
         click_hwnd = int(click_window.hwnd or 0)

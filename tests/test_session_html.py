@@ -2651,6 +2651,113 @@ def test_write_recording_html_copy_includes_expected_outcome(tmp_path: Path) -> 
     assert "instruction-expected" in html
 
 
+def test_write_recording_html_shows_yolo_ocr_twin(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000032"
+    _write_recording_fixture(run_root)
+    primary = "（UIA）將滑鼠移到「輸入欄」，並點擊滑鼠一下。"
+    twin = "（YOLO+OCR）將滑鼠移到「下載」文字，並點擊滑鼠一下。"
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": primary,
+                "yolo_ocr_fallback": {
+                    "instruction": twin,
+                    "tool_calls": [],
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+
+    assert f'class="instruction-title">{primary}</span>' in html
+    assert 'class="instruction-yolo-twin"' in html
+    assert f"YOLO+OCR 備援：{twin}" in html
+    assert f"<dt>YOLO+OCR 備援</dt><dd>{twin}</dd>" in html
+
+
+def test_write_session_html_shows_yolo_ocr_twin(tmp_path: Path) -> None:
+    recordings = tmp_path / "recordings"
+    recording = recordings / "twin_rec"
+    primary = "（UIA）將滑鼠移到「輸入欄」，並點擊滑鼠一下。"
+    twin = "（YOLO+OCR）將滑鼠移到「下載」文字，並點擊滑鼠一下。"
+    _write_playback_recording(recording, [primary])
+    (recording / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": primary,
+                "use_expected_outcome": False,
+                "yolo_ocr_fallback": {
+                    "instruction": twin,
+                    "tool_calls": [],
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    run_root = tmp_path / "runs" / "twin_session"
+    after = _make_png(run_root / "eye" / "after.png")
+    _write_step(
+        run_root,
+        transcript_counter=0,
+        script_step_index=0,
+        goal=primary,
+        started_at="2026-06-11T06:00:00+00:00",
+        finished_at="2026-06-11T06:00:01+00:00",
+    )
+    _write_hand_csv(
+        run_root,
+        [
+            {
+                "timestamp": "2026-06-11T06:00:00+00:00",
+                "action": "click",
+                "args": {"instruction": "輸入欄"},
+                "ok": True,
+                "screenshot_name": "",
+                "screenshot_before_path": "",
+                "screenshot_after_path": str(after),
+                "message": "executed",
+            }
+        ],
+    )
+    (run_root / "report.json").write_text(
+        json.dumps(
+            {
+                "script_path": str(recording),
+                "script_name": recording.name,
+                "tool_results": [
+                    {
+                        "timestamp_utc": "2026-06-11T06:00:00+00:00",
+                        "transcript_counter": 0,
+                        "script_step_index": 0,
+                    }
+                ],
+                "steps": [
+                    {
+                        "transcript_counter": 0,
+                        "script_step_index": 0,
+                        "goal": primary,
+                        "status": "ok",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_session_html_from_run(run_root).read_text(encoding="utf-8")
+    assert f'class="instruction-title">{primary}</span>' in html
+    assert 'class="instruction-yolo-twin"' in html
+    assert f"YOLO+OCR 備援：{twin}" in html
+
+
 def test_write_recording_html_renders_window_verify_conditions(tmp_path: Path) -> None:
     run_root = tmp_path / "recording_20260721_120000_000031"
     _write_recording_fixture(run_root)

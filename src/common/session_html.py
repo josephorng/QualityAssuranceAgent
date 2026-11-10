@@ -120,6 +120,9 @@ h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
 .instruction-group > summary .instruction-expected {
   font-size: .82rem; font-weight: 500; color: #57606a; line-height: 1.35;
 }
+.instruction-group > summary .instruction-yolo-twin {
+  font-size: .82rem; font-weight: 500; color: #57606a; line-height: 1.35;
+}
 .instruction-group > summary .instruction-verify-miss {
   font-size: .82rem; font-weight: 700; color: #cf222e; line-height: 1.35;
 }
@@ -3401,6 +3404,35 @@ def _instruction_meta_pairs(args: Any) -> list[tuple[str, str]]:
     return pairs
 
 
+def _yolo_ocr_twin_instruction(analysis: Any, *, primary: str = "") -> str:
+    """Return the durable YOLO+OCR twin instruction, if it differs from ``primary``."""
+    if not isinstance(analysis, dict):
+        return ""
+    fallback = analysis.get("yolo_ocr_fallback")
+    if not isinstance(fallback, dict):
+        return ""
+    twin = fallback.get("instruction")
+    if not isinstance(twin, str):
+        return ""
+    text = twin.strip()
+    if not text:
+        return ""
+    if primary.strip() and text == primary.strip():
+        return ""
+    return text
+
+
+def _yolo_ocr_twin_summary_html(twin: str) -> str:
+    """Muted summary line for the YOLO+OCR twin under the primary instruction."""
+    if not twin:
+        return ""
+    return (
+        f'<span class="instruction-yolo-twin">'
+        f"YOLO+OCR 備援：{escape(twin)}"
+        f"</span>"
+    )
+
+
 def _args_without_instructions(args: Any) -> Any:
     if not isinstance(args, dict):
         return args
@@ -5168,6 +5200,21 @@ def _render_instruction_group_html(
     vision_badges = _vision_mode_summary_badges(recording_target)
     vision_badges += _replay_vision_summary_badges(operations)
 
+    twin_summary = ""
+    if editor is not None:
+        twin_summary = editor.get("twin_summary") or ""
+    if not twin_summary:
+        twin_analysis = None
+        if isinstance(recording_target, dict) and isinstance(
+            recording_target.get("analysis"), dict
+        ):
+            twin_analysis = recording_target.get("analysis")
+        elif isinstance(recording_analysis, dict):
+            twin_analysis = recording_analysis
+        twin_summary = _yolo_ocr_twin_summary_html(
+            _yolo_ocr_twin_instruction(twin_analysis, primary=title_text)
+        )
+
     return (
         f'<details class="instruction-group" id="step-{step_number}"{edit_attrs}>'
         f"<summary>"
@@ -5175,6 +5222,7 @@ def _render_instruction_group_html(
         f'<span class="instruction-number">{step_label}</span>'
         f'<span class="instruction-summary-text">'
         f'<span class="instruction-title">{escape(title_text)}</span>'
+        f"{twin_summary}"
         f"{expected_summary}"
         f"{miss_summary}"
         f"</span>"
@@ -6932,6 +6980,8 @@ def _render_recording_step_editor_html(
         )
     else:
         expected_summary = ""
+    twin_instruction = _yolo_ocr_twin_instruction(analysis, primary=instruction or title)
+    twin_summary = _yolo_ocr_twin_summary_html(twin_instruction)
 
     add_wait_html = ""
     add_wait_seconds: int | None = None
@@ -6993,6 +7043,8 @@ def _render_recording_step_editor_html(
         "char_target_html": char_target_html,
         "tool_cache_badge": tool_cache_badge,
         "expected_summary": expected_summary,
+        "twin_summary": twin_summary,
+        "twin_instruction": twin_instruction,
         "add_wait_html": add_wait_html,
         "copy_button_html": copy_button_html,
         "verify_label": verify_label,
@@ -7211,6 +7263,10 @@ def _render_recording_event_html(
     if after_wait_seconds is not None:
         meta_rows.append(("等待", escape(f"{after_wait_seconds} 秒")))
 
+    twin_instruction = _yolo_ocr_twin_instruction(analysis, primary=instruction)
+    if twin_instruction:
+        meta_rows.append(("YOLO+OCR 備援", escape(twin_instruction)))
+
     meta_html = "".join(f"<dt>{escape(label)}</dt><dd>{value}</dd>" for label, value in meta_rows)
 
     before = _resolve_recording_screenshot(str(event.get("screenshot_path") or ""), run_root)
@@ -7338,6 +7394,7 @@ def _render_recording_event_html(
     char_target_html = editor["char_target_html"]
     tool_cache_badge = editor["tool_cache_badge"]
     expected_summary = editor["expected_summary"]
+    twin_summary = editor.get("twin_summary") or ""
     add_wait_html = editor["add_wait_html"]
     copy_button_html = editor["copy_button_html"]
 
@@ -7356,6 +7413,7 @@ def _render_recording_event_html(
         f'<span class="instruction-number">{step_label}</span>'
         f'<span class="instruction-summary-text">'
         f'<span class="instruction-title">{escape(title)}</span>'
+        f"{twin_summary}"
         f"{expected_summary}"
         f"</span>"
         f'<span class="badge neutral">{kind_badge}</span>'

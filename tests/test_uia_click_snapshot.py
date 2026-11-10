@@ -751,7 +751,9 @@ def test_hover_findall_warms_uncached_hwnd(tmp_path: Path) -> None:
     from src.recorder.capture import RecordingSession, _DeferredCaptureJob
     from src.recorder.window_snapshot import ClickWindowInfo
 
+    statuses: list[dict] = []
     session = RecordingSession(runs_root=tmp_path)
+    session.set_on_uia_status(statuses.append)
     session._accepting_input = True
     session._idle_efp_generation = 1
     session._uia_status_state = "green"
@@ -818,11 +820,107 @@ def test_hover_findall_warms_uncached_hwnd(tmp_path: Path) -> None:
     assert session._last_settle_uia_after_index == 0
     assert session._last_settle_uia is not None
     assert session._last_settle_uia["hwnd"] == 10
+    assert [row["state"] for row in statuses if row.get("state") in ("yellow", "green")][
+        -2:
+    ] == ["yellow", "green"]
+    assert session._hover_uia_led_active is False
     # No events yet → previous_index 0 matches seed/ready after_index.
     hit = session._cached_uia_before(hover_win, cursor_xy=(100, 100))
     assert hit is not None
     assert hit["hwnd"] == 55
     assert hit.get("cache_kind") == "hover"
+
+
+def test_hover_findall_fail_restores_green(tmp_path: Path) -> None:
+    from src.recorder.capture import RecordingSession
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    statuses: list[dict] = []
+    session = RecordingSession(runs_root=tmp_path)
+    session.set_on_uia_status(statuses.append)
+    session._accepting_input = True
+    session._idle_efp_generation = 1
+    session._uia_status_state = "green"
+    session._last_settle_uia_after_index = 0
+    session._last_settle_uia = {"hwnd": 10, "window": [0, 0, 1, 1]}
+    session._last_settle_uia_by_hwnd = {}
+    hover_win = ClickWindowInfo(
+        hwnd=55,
+        title="Other",
+        process_name="other.exe",
+        left=50,
+        top=50,
+        width=400,
+        height=300,
+        is_maximized=False,
+        class_name="Chrome_WidgetWin_1",
+    )
+    with (
+        patch(
+            "src.recorder.capture.resolve_click_window",
+            return_value=hover_win,
+        ),
+        patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            return_value=None,
+        ),
+    ):
+        session._maybe_hover_findall_uia(1, 100, 100)
+    assert session._last_settle_uia_by_hwnd == {}
+    assert [row["state"] for row in statuses] == ["yellow", "green"]
+    assert session._hover_uia_led_active is False
+
+
+def test_hover_findall_settle_steal_skips_green_and_upsert(tmp_path: Path) -> None:
+    from src.recorder.capture import RecordingSession
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    statuses: list[dict] = []
+    session = RecordingSession(runs_root=tmp_path)
+    session.set_on_uia_status(statuses.append)
+    session._accepting_input = True
+    session._idle_efp_generation = 1
+    session._uia_status_state = "green"
+    session._last_settle_uia_after_index = 0
+    session._last_settle_uia = {"hwnd": 10, "window": [0, 0, 1, 1]}
+    session._last_settle_uia_by_hwnd = {}
+    hover_win = ClickWindowInfo(
+        hwnd=55,
+        title="Other",
+        process_name="other.exe",
+        left=50,
+        top=50,
+        width=400,
+        height=300,
+        is_maximized=False,
+        class_name="Chrome_WidgetWin_1",
+    )
+
+    def _snap_and_steal(hwnd: int) -> dict:
+        session._begin_settle_uia_yellow(after_index=1)
+        return {
+            "window": [50, 50, 400, 300],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [0, 0, 8, 8], "text": "晚到"}],
+        }
+
+    with (
+        patch(
+            "src.recorder.capture.resolve_click_window",
+            return_value=hover_win,
+        ),
+        patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            side_effect=_snap_and_steal,
+        ),
+    ):
+        session._maybe_hover_findall_uia(1, 100, 100)
+    assert 55 not in session._last_settle_uia_by_hwnd
+    assert session._hover_uia_led_active is False
+    # Hover yellow, then settle yellow; no hover green after steal.
+    assert [row["state"] for row in statuses] == ["yellow", "yellow"]
+    assert statuses[-1]["after_index"] == 1
 
 
 def test_hover_findall_skips_when_already_cached_or_yellow_or_mismatch(

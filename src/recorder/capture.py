@@ -1133,6 +1133,9 @@ class RecordingSession:
         self._uia_status_efp_name: str = ""
         self._uia_status_efp_value: str = ""
         self._uia_status_efp_pending: bool = False
+        # Idle hover FindAll LED claim; settle/seed yellow bumps the token.
+        self._hover_uia_led_active: bool = False
+        self._hover_uia_led_token: int = 0
         self._idle_efp_generation: int = 0
         self._idle_efp_timer: threading.Timer | None = None
         self._finalizing = False
@@ -1292,6 +1295,8 @@ class RecordingSession:
             self._uia_status_efp_name = ""
             self._uia_status_efp_value = ""
             self._uia_status_efp_pending = False
+            self._hover_uia_led_active = False
+            self._hover_uia_led_token = 0
             self._idle_efp_generation = 0
             idle_timer = self._idle_efp_timer
             self._idle_efp_timer = None
@@ -1815,12 +1820,30 @@ class RecordingSession:
             generation, int(cursor[0]), int(cursor[1])
         )
 
+    def _begin_settle_uia_yellow(self, *, after_index: int) -> None:
+        """Settle/seed FindAll starting: invalidate hover LED claim, then yellow."""
+        with self._lock:
+            self._hover_uia_led_active = False
+            self._hover_uia_led_token += 1
+        self._emit_uia_status(state="yellow", after_index=int(after_index))
+
+    def _release_hover_uia_led_to_green(self, claim_token: int) -> None:
+        """Restore green only if ``claim_token`` is still the active hover claim."""
+        with self._lock:
+            if (
+                not self._hover_uia_led_active
+                or int(claim_token) != int(self._hover_uia_led_token)
+            ):
+                return
+            self._hover_uia_led_active = False
+        self._emit_uia_status(state="green")
+
     def _maybe_hover_findall_uia(self, generation: int, x: int, y: int) -> None:
         """Warm FindAll under the idle cursor hwnd when the settle cache lacks it.
 
-        Does not change ``_last_settle_uia`` / ``after_index`` or the LED. Skips
-        while settle FindAll is yellow, when generation is not ready for the next
-        press, or when the hwnd is already cached.
+        Shows yellow→green on the LED while fetching (never red). Does not change
+        ``_last_settle_uia`` / ``after_index``. Settle yellow bumps the hover LED
+        token so hover cannot paint green over an in-flight settle.
         """
         previous_index = self._previous_event_index_for_settle_cache()
         with self._lock:
@@ -1828,7 +1851,11 @@ class RecordingSession:
                 return
             if generation != int(self._idle_efp_generation):
                 return
-            if str(self._uia_status_state) == "yellow":
+            # Settle (or seed) FindAll in flight — not our hover claim.
+            if (
+                str(self._uia_status_state) == "yellow"
+                and not self._hover_uia_led_active
+            ):
                 return
             after_index = self._last_settle_uia_after_index
             by_hwnd = self._last_settle_uia_by_hwnd
@@ -1848,13 +1875,41 @@ class RecordingSession:
             return
         if hwnd in by_hwnd:
             return
+
+        with self._lock:
+            if not self._accepting_input or self._finalizing:
+                return
+            if generation != int(self._idle_efp_generation):
+                return
+            if (
+                str(self._uia_status_state) == "yellow"
+                and not self._hover_uia_led_active
+            ):
+                return
+            if hwnd in self._last_settle_uia_by_hwnd:
+                return
+            try:
+                current_last_hwnd = int(
+                    (self._last_settle_uia or {}).get("hwnd") or 0
+                ) if isinstance(self._last_settle_uia, dict) else 0
+            except (TypeError, ValueError):
+                current_last_hwnd = 0
+            if hwnd == current_last_hwnd:
+                return
+            self._hover_uia_led_token += 1
+            claim_token = int(self._hover_uia_led_token)
+            self._hover_uia_led_active = True
+        self._emit_uia_status(state="yellow")
+
         from src.recorder.uia_input_boxes import snapshot_uia_screen
 
         try:
             value = snapshot_uia_screen(hwnd)
         except Exception:
+            self._release_hover_uia_led_to_green(claim_token)
             return
         if not isinstance(value, dict):
+            self._release_hover_uia_led_to_green(claim_token)
             return
         snapshot = dict(value)
         snapshot["hwnd"] = hwnd
@@ -1865,23 +1920,33 @@ class RecordingSession:
             snapshot["class_name"] = class_name
         snapshot["cache_kind"] = "hover"
         with self._lock:
-            if not self._accepting_input or self._finalizing:
+            if (
+                not self._hover_uia_led_active
+                or int(claim_token) != int(self._hover_uia_led_token)
+            ):
+                # Settle stole the LED; do not upsert or paint green.
                 return
-            if generation != int(self._idle_efp_generation):
+            self._hover_uia_led_active = False
+            if (
+                self._accepting_input
+                and not self._finalizing
+                and generation == int(self._idle_efp_generation)
+            ):
+                try:
+                    current_last_hwnd = int(
+                        (self._last_settle_uia or {}).get("hwnd") or 0
+                    ) if isinstance(self._last_settle_uia, dict) else 0
+                except (TypeError, ValueError):
+                    current_last_hwnd = 0
+                if (
+                    hwnd != current_last_hwnd
+                    and hwnd not in self._last_settle_uia_by_hwnd
+                ):
+                    self._last_settle_uia_by_hwnd[hwnd] = snapshot
+            # Re-check token before painting green (settle may have raced).
+            if int(claim_token) != int(self._hover_uia_led_token):
                 return
-            if str(self._uia_status_state) == "yellow":
-                return
-            try:
-                current_last_hwnd = int(
-                    (self._last_settle_uia or {}).get("hwnd") or 0
-                ) if isinstance(self._last_settle_uia, dict) else 0
-            except (TypeError, ValueError):
-                current_last_hwnd = 0
-            if hwnd == current_last_hwnd:
-                return
-            if hwnd in self._last_settle_uia_by_hwnd:
-                return
-            self._last_settle_uia_by_hwnd[hwnd] = snapshot
+        self._emit_uia_status(state="green")
 
     def _notify_pending_text_input(self, event_index: int) -> None:
         """Fire deferred vision notify once the window step has patched (or failed)."""
@@ -5008,7 +5073,7 @@ class RecordingSession:
             self._emit_uia_status(state="red", after_index=after_event_index)
             return None
 
-        self._emit_uia_status(state="yellow", after_index=after_event_index)
+        self._begin_settle_uia_yellow(after_index=after_event_index)
         from src.recorder.uia_input_boxes import snapshot_uia_screen
 
         by_hwnd: dict[int, dict[str, Any]] = {}
@@ -5075,7 +5140,7 @@ class RecordingSession:
                 )
             self._emit_uia_status(state="red", after_index=int(after_event_index))
             return None
-        self._emit_uia_status(state="yellow", after_index=int(after_event_index))
+        self._begin_settle_uia_yellow(after_index=int(after_event_index))
         from src.recorder.uia_input_boxes import snapshot_uia_screen
 
         try:

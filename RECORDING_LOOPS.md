@@ -93,7 +93,7 @@ After that settle work it also runs one naming `FindAll` under a single hwnd (`C
 
 ### Idle hover FindAll
 
-The same ~0.45s idle debounce that drives the EFP Name/Value label may also `FindAll` under the click window at the cursor when that hwnd is eligible (not noise/flyout), the settle generation is already ready for the next press, the LED is not yellow (settle FindAll in flight), and the hwnd is not already `_last_settle_uia` or in `_last_settle_uia_by_hwnd`. The result is upserted into `_last_settle_uia_by_hwnd` only (`cache_kind=hover`); it does not change `_last_settle_uia`, `after_index`, or the red/yellow/green LED.
+The same ~0.45s idle debounce that drives the EFP Name/Value label may also `FindAll` under the click window at the cursor when that hwnd is eligible (not noise/flyout), the settle generation is already ready for the next press, the LED is not settle-yellow (settle FindAll in flight), and the hwnd is not already `_last_settle_uia` or in `_last_settle_uia_by_hwnd`. The result is upserted into `_last_settle_uia_by_hwnd` only (`cache_kind=hover`); it does not change `_last_settle_uia` or `after_index`. While that hover FindAll runs the LED goes **yellow → green** (never red) so the user sees a new window being fetched. Settle/seed yellow invalidates the hover LED claim so hover cannot paint green over an in-flight settle.
 
 ### Recording UIA status LED
 
@@ -102,8 +102,8 @@ While recording, an always-on-top strip (`RecordingUiaStatusOverlay`) shows:
 | Signal | Meaning |
 | --- | --- |
 | Red | Waiting for settle FindAll (or sealed/cancelled/failed) |
-| Yellow | Settle `FindAll` / `snapshot_uia_screen` in progress |
-| Green | `_last_settle_uia` published — cache ready for a matching next press |
+| Yellow | Settle or idle-hover `FindAll` / `snapshot_uia_screen` in progress |
+| Green | `_last_settle_uia` published — cache ready for a matching next press (also restored after hover FindAll) |
 | Brief attach/miss pulse | Just-persisted pointer event did / did not get `uia_snapshot` |
 | Name \| Value text | Idle `ElementFromPoint` after ~0.45s without mouse move (preview only; not written to event JSON) |
 

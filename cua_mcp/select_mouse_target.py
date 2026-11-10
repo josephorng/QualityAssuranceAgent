@@ -3541,6 +3541,27 @@ def _anchor_type_suffix(anchor: str) -> str | None:
     return None
 
 
+def _hub_is_input_or_scrollbar(
+    *,
+    instruction: str = "",
+    anchor: str = "",
+    control_type_token: str | None = None,
+) -> bool:
+    """True when the click hub is an 輸入欄 / 滾動條 (including named-input form).
+
+    Used to skip ``uia_yolo_subtarget``: those hubs are the click target itself,
+    not a container that needs an in-pane YOLO leaf.
+    """
+    token = (control_type_token or "").strip().lower()
+    if token in ("input", "scrollbar"):
+        return True
+    for phrase in (anchor, instruction):
+        suffix = _anchor_type_suffix(phrase or "")
+        if suffix in ("輸入欄", "滾動條"):
+            return True
+    return False
+
+
 def _anchor_is_text(anchor: str) -> bool:
     """True when the anchor is an on-object named label (``…文字`` or a UIA type)."""
     suffix = _anchor_type_suffix(anchor)
@@ -6294,7 +6315,14 @@ async def _find_mouse_point_attempt(
                     _log_info(
                         "move_mouse uia→yolo fallback recapture before YOLO"
                     )
-        if uia_first_chosen is not None and ocr_fallback is None:
+        skip_yolo_subtarget = _hub_is_input_or_scrollbar(
+            instruction=instruction_text,
+            anchor=anchor,
+            control_type_token=control_type_token,
+        )
+        if uia_first_chosen is not None and (
+            ocr_fallback is None or skip_yolo_subtarget
+        ):
             if constellation_yolo_dets:
                 detections = _sort_detections_reading_order(
                     [*uia_dets, *constellation_yolo_dets]
@@ -6327,12 +6355,18 @@ async def _find_mouse_point_attempt(
                 "uia_first_hit": True,
             }
             ocr_pendings = []
-            _log_info(
-                "move_mouse uia_first=hit; skipping YOLO"
-                if not constellation_yolo_dets
-                else "move_mouse uia_first=hit; constellation YOLO already ran "
-                "(OCR still deferred)"
-            )
+            if skip_yolo_subtarget and ocr_fallback is not None:
+                _log_info(
+                    "move_mouse uia_first=hit; skip uia_yolo_subtarget "
+                    "for input/scrollbar hub"
+                )
+            else:
+                _log_info(
+                    "move_mouse uia_first=hit; skipping YOLO"
+                    if not constellation_yolo_dets
+                    else "move_mouse uia_first=hit; constellation YOLO already ran "
+                    "(OCR still deferred)"
+                )
         elif uia_first_chosen is not None and ocr_fallback is not None:
             # Repaired YOLO step: UIA picked the item; YOLO picks expand vs text.
             # Synth-only constellation hits are not a real pane for subtarget —

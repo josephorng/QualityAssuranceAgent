@@ -50,6 +50,23 @@ def test_hub_match_fields_yolo_icon_and_bare_input() -> None:
     )
 
 
+def test_hub_match_fields_named_text_inside_input() -> None:
+    assert hub_match_fields("「搜尋」文字所在的輸入欄") == (
+        None,
+        "搜尋",
+        "input",
+    )
+    assert hub_match_fields("（UIA）「文件1」文字所在的輸入欄") == (
+        "uia",
+        "文件1",
+        "input",
+    )
+    assert (
+        hub_phrase_from_match_fields("文件1", "input", vision_mode="uia")
+        == "（UIA）「文件1」輸入欄"
+    )
+
+
 def test_parse_relative_pixel_offset_regex_right_and_up() -> None:
     anchor, dx, dy = _parse_relative_pixel_offset_regex(
         "「振銓」文字右方5個像素、上方28個像素的位置"

@@ -7087,6 +7087,96 @@ def _ocr_pending_for_boxes(
     )
 
 
+def test_hub_is_input_or_scrollbar_named_input_and_scrollbar() -> None:
+    from cua_mcp.select_mouse_target import _hub_is_input_or_scrollbar
+
+    assert _hub_is_input_or_scrollbar(
+        instruction="（UIA）「文件1」文字所在的輸入欄",
+        anchor="「文件1」文字所在的輸入欄",
+        control_type_token="input",
+    )
+    assert _hub_is_input_or_scrollbar(
+        instruction="將滑鼠移到輸入欄",
+        anchor="輸入欄",
+        control_type_token=None,
+    )
+    assert _hub_is_input_or_scrollbar(
+        instruction="將滑鼠移到滾動條",
+        anchor="滾動條",
+        control_type_token="scrollbar",
+    )
+    assert not _hub_is_input_or_scrollbar(
+        instruction="（UIA）「文件1」文字",
+        anchor="「文件1」文字",
+        control_type_token="text",
+    )
+
+
+@pytest.mark.asyncio
+async def test_uia_hit_input_hub_skips_yolo_subtarget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Input hubs commit UIA-first even when a YOLO twin is bound."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        YoloOcrMoveFallback,
+        bind_yolo_ocr_fallbacks,
+    )
+
+    uia_input = _detection_from_bbox(
+        (100, 200, 400, 300),
+        YOLO_CLASS_INPUT,
+        text="文件1",
+        source="uia",
+    )
+
+    def fake_grab():
+        frame = np.zeros((600, 800, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def boom_finish(*_a, **_k):
+        raise AssertionError("input hub must not enter uia_yolo_subtarget YOLO")
+
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(
+        smt,
+        "_uia_only_detections_for_click_window",
+        lambda *_a, **_k: [uia_input],
+    )
+    monkeypatch.setattr(
+        smt,
+        "_try_uia_first_unique_select",
+        lambda *_a, **_k: (uia_input, "hit"),
+    )
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", boom_finish)
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+
+    fallback = YoloOcrMoveFallback(
+        instruction="（YOLO+OCR）將滑鼠移到「Intel」文字所在的輸入欄，並點擊滑鼠一下。",
+    )
+    with bind_yolo_ocr_fallbacks([fallback]):
+        found = await smt.find_mouse_point(
+            "（UIA）將滑鼠移到「文件1」文字所在的輸入欄",
+            click_window={
+                "hwnd": 5,
+                "title": "文件1 - Word",
+                "process_name": "WINWORD.EXE",
+                "rect": [0, 0, 800, 600],
+            },
+            vision_mode="uia",
+            anchor_text="文件1",
+            control_type="input",
+            recorded_efp_name="文件1",
+            recorded_efp_value="",
+        )
+    assert found is not None
+    assert found[0:2] == (uia_input.cx, uia_input.cy)
+    assert found[2]["selection_method"] in ("hit", "uia_first_unique")
+    assert found[2]["selection_method"] != "uia_yolo_subtarget"
+
+
 @pytest.mark.asyncio
 async def test_uia_hit_with_fallback_unique_element_skips_ocr(
     monkeypatch: pytest.MonkeyPatch,

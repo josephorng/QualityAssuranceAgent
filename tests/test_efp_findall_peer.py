@@ -103,6 +103,81 @@ def test_efp_peer_dedupes_matching_findall_label() -> None:
     )
 
 
+def test_coextensive_text_input_prefers_named_input_hub() -> None:
+    """Page-sized Text Name + equal Input → 「…」文字所在的輸入欄 primary."""
+    from src.recorder.analyze import instruction_for_click
+    from src.recorder.models import RecordedEvent
+
+    bbox = [0, 0, 1903, 791]
+    candidates = [
+        {
+            "bbox": bbox,
+            "center": [951, 395],
+            "class_id": YOLO_CLASS_TEXT,
+            "class_name": "text",
+            "text": "文件1",
+            "icons": None,
+            "source": "uia",
+        },
+        {
+            "bbox": list(bbox),
+            "center": [951, 395],
+            "class_id": YOLO_CLASS_INPUT,
+            "class_name": "input",
+            "text": None,
+            "icons": None,
+            "source": "uia",
+        },
+    ]
+    primary = select_click_primary_candidate(candidates, 960, 400)
+    assert primary is not None
+    assert primary.get("class_name") == "input"
+    assert primary.get("text") == "文件1"
+
+    vision = {"candidates": candidates, "local_cursor": [960, 400]}
+    event = RecordedEvent(
+        index=3,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(960, 400),
+        button="left",
+        screenshot_path="",
+    )
+    assert (
+        instruction_for_click(event, vision)
+        == "將滑鼠移到「文件1」文字所在的輸入欄"
+    )
+
+
+def test_small_text_leaf_inside_input_still_text_hub() -> None:
+    """Explorer-style leaf Text inside a large Input stays 「…」文字."""
+    candidates = [
+        {
+            "bbox": [0, 0, 400, 900],
+            "center": [200, 450],
+            "class_id": YOLO_CLASS_INPUT,
+            "class_name": "input",
+            "text": None,
+            "icons": None,
+            "source": "uia",
+        },
+        {
+            "bbox": [100, 200, 80, 40],
+            "center": [140, 220],
+            "class_id": YOLO_CLASS_TEXT,
+            "class_name": "text",
+            "text": "下載",
+            "icons": None,
+            "source": "uia",
+            "uia_control_type": "list_item",
+        },
+    ]
+    primary = select_click_primary_candidate(candidates, 120, 210)
+    assert primary is not None
+    assert primary.get("class_name") == "text"
+    assert primary.get("text") == "下載"
+
+
 def test_uia_first_miss_reaches_yolo_path_gate() -> None:
     """Documented fallthrough: UIA-first miss leaves chosen None so YOLO runs.
 

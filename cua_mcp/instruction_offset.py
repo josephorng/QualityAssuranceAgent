@@ -109,6 +109,9 @@ def hub_match_fields(
     if quoted is not None:
         anchor_text = quoted.group(1)
         after = rest[quoted.end() :]
+        # 「搜尋」文字所在的輸入欄 — compound before bare 「…」文字.
+        if after.startswith("文字所在的輸入欄") or "文字所在的輸入欄" in after:
+            return mode, anchor_text, "input"
         for token, zh in UIA_CONTROL_TYPE_SUFFIX.items():
             if after.startswith(zh):
                 return mode, anchor_text, token

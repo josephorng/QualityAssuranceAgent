@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     import numpy as np
 
 from cua_mcp.char_target import detect_clicked_char
-from cua_mcp.geometry import point_in_rect_xywh
+from cua_mcp.geometry import iou_xywh, point_in_rect_xywh
 from cua_mcp.color_spatial_segment import (
     ColorSegmentResult,
     SegmentDetection,
@@ -1024,6 +1024,55 @@ def _destination_target_at_point(
     )
 
 
+# Text Name coextensive with an Input (e.g. Word document surface) → named input.
+_COEXTENSIVE_TEXT_INPUT_IOU = 0.7
+
+
+def _prefer_coextensive_named_input(
+    hits: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """When a multi-char Text and an Input nearly share a bbox, prefer the Input.
+
+    Copies the Text label onto the Input so hubs become
+    ``「…」文字所在的輸入欄``. Small leaves inside a large Input (low IoU) are
+    left alone so Explorer-style named rows stay ``「…」文字``.
+    """
+    texts: list[dict[str, Any]] = []
+    inputs: list[dict[str, Any]] = []
+    for candidate in hits:
+        class_name = str(candidate.get("class_name") or "").strip()
+        if class_name == "text" and len(_visible_text(candidate.get("text"))) > 1:
+            texts.append(candidate)
+        elif class_name == "input":
+            inputs.append(candidate)
+    if not texts or not inputs:
+        return None
+
+    best_input: dict[str, Any] | None = None
+    best_label = ""
+    best_iou = 0.0
+    for inp in inputs:
+        ib = _as_bbox_xywh(inp.get("bbox"))
+        if ib is None:
+            continue
+        for txt in texts:
+            tb = _as_bbox_xywh(txt.get("bbox"))
+            if tb is None:
+                continue
+            iou = iou_xywh(ib, tb)
+            if iou < _COEXTENSIVE_TEXT_INPUT_IOU:
+                continue
+            label = _visible_text(txt.get("text"))
+            if iou > best_iou and label:
+                best_input = inp
+                best_label = label
+                best_iou = iou
+    if best_input is None or not best_label:
+        return None
+    best_input["text"] = best_label
+    return best_input
+
+
 def _candidate_containing_click(
     candidates: list[dict[str, Any]],
     local_x: int,
@@ -1035,6 +1084,9 @@ def _candidate_containing_click(
     icons, then other text, then decorative icons, then others; UIA before OCR;
     smallest area breaks ties. Includes inputs/scrollbars so an on-field click
     keeps that container as the primary anchor.
+
+    Exception: a multi-char Text nearly coextensive with a containing Input
+    (document-surface Name) yields the Input with that Name copied on.
     """
     hits = [
         candidate
@@ -1044,6 +1096,10 @@ def _candidate_containing_click(
     ]
     if not hits:
         return None
+
+    named_input = _prefer_coextensive_named_input(hits)
+    if named_input is not None:
+        return named_input
 
     def _hit_key(candidate: dict[str, Any]) -> tuple[int, int, int]:
         bbox = _as_bbox_xywh(candidate.get("bbox"))

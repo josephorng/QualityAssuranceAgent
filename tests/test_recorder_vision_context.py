@@ -19,9 +19,11 @@ from src.recorder.vision_context import (
     VISION_PATH_UIA_NOT_UNIQUE_REASON,
     _BBOX_HIT_TOLERANCE_PX,
     _MIN_NEARBY_TEXT_CANDIDATES,
+    _align_drag_scrollbar_tracks_with_press,
     _detect_recording_mouse_targets,
     _drag_ends_share_monitor,
     _drop_point_inside_candidate,
+    _force_drag_onto_press_scrollbar,
     _local_cursor,
     _nearest_candidates,
     _usable_uia_landmark_label,
@@ -2419,3 +2421,128 @@ def test_annotate_scrollbar_track_horizontal_and_outside_cast() -> None:
     assert end_track is not None
     assert end_track["percent"] == 100
     assert point_from_scrollbar_percent(bbox, 100)[0] == 199
+
+
+def test_align_drag_scrollbar_tracks_forces_yolo_twins_like_uia() -> None:
+    """Off-bar release + start twin missing track still get %→% twin wording."""
+    from src.recorder.analyze import instruction_for_drag
+    from src.recorder.uia_replay_repair import build_yolo_ocr_fallback_from_vision
+
+    bbox = [210, 120, 17, 236]
+    start_track = {
+        "bbox": bbox,
+        "axis": "vertical",
+        "percent": 65,
+        "anchor_class": "scrollbar",
+    }
+    scrollbar_cand = {
+        "bbox": list(bbox),
+        "center": [218, 238],
+        "class_name": "scrollbar",
+        "text": None,
+    }
+    input_cand = {
+        "bbox": [100, 120, 220, 236],
+        "center": [210, 238],
+        "class_name": "input",
+        "text": None,
+    }
+    # Start twin saw a scrollbar candidate but point-inside track annotate missed.
+    start_twin = {
+        "used_vision": True,
+        "vision_path": "yolo_ocr",
+        "candidates": [dict(scrollbar_cand)],
+        "candidate_text": "scrollbar",
+        "local_cursor": (218, 273),
+    }
+    # Dest twin ranked the large adjacent input over the thin bar.
+    dest_twin = {
+        "used_vision": True,
+        "vision_path": "yolo_ocr",
+        "candidates": [dict(input_cand), dict(scrollbar_cand)],
+        "candidate_text": "input",
+        "local_cursor": (218, 155),
+    }
+    start_compact = {
+        "used_vision": True,
+        "scrollbar_track": start_track,
+        "candidates": [dict(scrollbar_cand)],
+        "candidate_text": "scrollbar",
+        "local_cursor": (218, 273),
+        "yolo_ocr_fallback_vision": start_twin,
+    }
+    end_compact = {
+        "used_vision": True,
+        "candidates": [dict(input_cand)],
+        "candidate_text": "input",
+        "local_cursor": (218, 155),
+        "yolo_ocr_fallback_vision": dest_twin,
+    }
+
+    _align_drag_scrollbar_tracks_with_press(
+        start_compact,
+        end_compact,
+        start_local=(218, 273),
+        end_local=(218, 155),
+        force_primary_end=True,
+        force_dest_twin=True,
+    )
+
+    assert isinstance(end_compact.get("scrollbar_track"), dict)
+    assert isinstance(start_twin.get("scrollbar_track"), dict)
+    assert isinstance(dest_twin.get("scrollbar_track"), dict)
+    assert dest_twin["candidates"][0]["class_name"] == "scrollbar"
+    assert instruction_for_drag(start_twin, dest_twin) == (
+        f"從滾動條的{start_twin['scrollbar_track']['percent']}%處"
+        f"拖到{dest_twin['scrollbar_track']['percent']}%處"
+    )
+
+    event = RecordedEvent.from_dict(
+        {
+            "index": 8,
+            "timestamp_utc": "2026-11-10T00:00:00+00:00",
+            "kind": "drag",
+            "button": "left",
+            "cursor_xy": [218, 273],
+            "end_xy": [218, 155],
+            "click_window": {
+                "hwnd": 1,
+                "title": "另存新檔",
+                "process_name": "WINWORD.EXE",
+                "rect": [0, 0, 960, 571],
+                "class_name": "#32770",
+            },
+            "end_click_window": {
+                "hwnd": 1,
+                "title": "另存新檔",
+                "process_name": "WINWORD.EXE",
+                "rect": [0, 0, 960, 571],
+                "class_name": "#32770",
+            },
+        }
+    )
+    fallback = build_yolo_ocr_fallback_from_vision(
+        event,
+        {**start_compact, "destination": end_compact},
+    )
+    assert fallback is not None
+    assert "從滾動條的" in fallback["instruction"]
+    assert "%處拖到" in fallback["instruction"]
+    assert "拖到輸入欄" not in fallback["instruction"]
+    drag = next(call for call in fallback["tool_calls"] if call["name"] == "drag")
+    assert "滾動條" in drag["arguments"]["start_instruction"]
+    assert "%" in drag["arguments"]["start_instruction"]
+    assert "%" in drag["arguments"]["destination_instruction"]
+
+
+def test_force_drag_onto_press_scrollbar_noops_without_track() -> None:
+    vision = {"candidates": [{"bbox": [0, 0, 10, 10], "class_name": "input"}]}
+    assert (
+        _force_drag_onto_press_scrollbar(
+            vision,
+            local_xy=(5, 5),
+            start_track=None,
+        )
+        is None
+    )
+    assert "scrollbar_track" not in vision

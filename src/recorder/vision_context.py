@@ -450,20 +450,14 @@ def try_rebuild_vision_from_cache(
         else:
             return None
 
-        start_track = start_compact.get("scrollbar_track")
-        if (
-            isinstance(start_track, dict)
-            and "bbox" in start_track
-            and end_local is not None
-            and not isinstance(end_compact.get("scrollbar_track"), dict)
-        ):
-            annotate_scrollbar_track(
-                end_compact,
-                local_x=end_local[0],
-                local_y=end_local[1],
-                require_point_inside=False,
-                scrollbar_bbox=start_track["bbox"],
-            )
+        _align_drag_scrollbar_tracks_with_press(
+            start_compact,
+            end_compact,
+            start_local=_local_cursor(event),
+            end_local=end_local,
+            force_primary_end=not isinstance(end_compact.get("scrollbar_track"), dict),
+            force_dest_twin=False,
+        )
 
         combined_error = start_compact.get("yolo_error") or end_payload.get("yolo_error")
         return {
@@ -4443,6 +4437,83 @@ def _promote_scrollbar_in_candidates(
     return [primary, *others]
 
 
+def _force_drag_onto_press_scrollbar(
+    vision: dict[str, Any] | None,
+    *,
+    local_xy: tuple[int, int],
+    start_track: Any,
+    all_detections: list[UiDetection] | None = None,
+) -> dict[str, Any] | None:
+    """Project a drag point onto the press scrollbar (shared by UIA + YOLO twin).
+
+    No-ops unless ``start_track`` has a ``bbox``. Uses the same
+    ``require_point_inside=False`` cast as primary drag release.
+    """
+    if not isinstance(vision, dict):
+        return None
+    if not isinstance(start_track, dict) or "bbox" not in start_track:
+        return None
+    return annotate_scrollbar_track(
+        vision,
+        local_x=int(local_xy[0]),
+        local_y=int(local_xy[1]),
+        all_detections=all_detections,
+        require_point_inside=False,
+        scrollbar_bbox=start_track["bbox"],
+    )
+
+
+def _align_drag_scrollbar_tracks_with_press(
+    start_compact: dict[str, Any],
+    end_compact: dict[str, Any],
+    *,
+    start_local: tuple[int, int] | None,
+    end_local: tuple[int, int] | None,
+    all_detections: list[UiDetection] | None = None,
+    force_primary_end: bool = True,
+    force_dest_twin: bool = True,
+) -> None:
+    """Force primary end + YOLO twins onto the press scrollbar when start has a track.
+
+    Primary and twin share this helper so UIA and YOLO+OCR use the same cast.
+    """
+    start_track = start_compact.get("scrollbar_track")
+    if not isinstance(start_track, dict) or "bbox" not in start_track:
+        return
+
+    if end_local is not None and (
+        force_primary_end or not isinstance(end_compact.get("scrollbar_track"), dict)
+    ):
+        _force_drag_onto_press_scrollbar(
+            end_compact,
+            local_xy=end_local,
+            start_track=start_track,
+            all_detections=all_detections,
+        )
+
+    start_twin = start_compact.get("yolo_ocr_fallback_vision")
+    if (
+        isinstance(start_twin, dict)
+        and start_local is not None
+        and not isinstance(start_twin.get("scrollbar_track"), dict)
+    ):
+        _force_drag_onto_press_scrollbar(
+            start_twin,
+            local_xy=start_local,
+            start_track=start_track,
+        )
+
+    dest_twin = end_compact.get("yolo_ocr_fallback_vision")
+    if isinstance(dest_twin, dict) and end_local is not None and (
+        force_dest_twin or not isinstance(dest_twin.get("scrollbar_track"), dict)
+    ):
+        _force_drag_onto_press_scrollbar(
+            dest_twin,
+            local_xy=end_local,
+            start_track=start_track,
+        )
+
+
 def annotate_scrollbar_track(
     vision: dict[str, Any],
     *,
@@ -4605,18 +4676,17 @@ def run_pointer_event_yolo_ocr(
             end_result,
             end_local=end_local,
         )
-        start_track = start_compact.get("scrollbar_track")
-        if isinstance(start_track, dict) and "bbox" in start_track:
-            annotate_scrollbar_track(
-                end_compact,
-                local_x=end_local[0],
-                local_y=end_local[1],
-                all_detections=end_result.get("all_detections")
-                if isinstance(end_result.get("all_detections"), list)
-                else None,
-                require_point_inside=False,
-                scrollbar_bbox=start_track["bbox"],
-            )
+        _align_drag_scrollbar_tracks_with_press(
+            start_compact,
+            end_compact,
+            start_local=start_local,
+            end_local=end_local,
+            all_detections=end_result.get("all_detections")
+            if isinstance(end_result.get("all_detections"), list)
+            else None,
+            force_primary_end=True,
+            force_dest_twin=True,
+        )
         if persist_debug:
             filtered_payload: dict[str, Any] = {
                 "event_index": event.index,

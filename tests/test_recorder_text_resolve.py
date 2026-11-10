@@ -10,6 +10,7 @@ from cua_mcp.yolo_onnx import YOLO_CLASS_INPUT, YOLO_CLASS_TEXT
 from src.recorder.models import RecordedEvent
 from src.recorder.text_resolve import (
     _is_caret_thin_rect,
+    _nearest_ocr_entry,
     _strip_ocr_caret,
     draw_focus_rect_bgr,
     event_with_resolved_text,
@@ -27,6 +28,25 @@ def test_strip_ocr_caret_removes_trailing_pipe() -> None:
     assert _strip_ocr_caret("office") == "office"
     assert _strip_ocr_caret("|") == ""
     assert _strip_ocr_caret("a|b") == "a|b"
+
+
+def test_nearest_ocr_entry_prefers_same_line_when_nothing_left_of_caret() -> None:
+    """Word-style chrome above the caret must lose to typed text on the caret row."""
+    entries = [
+        ("[檔案] 索引標籤", 60, 229),
+        ("123456", 74, 251),
+    ]
+    assert (
+        _nearest_ocr_entry(
+            entries,
+            30,
+            252,
+            band_top=236,
+            band_bottom=269,
+            prefer_left_of_caret=True,
+        )
+        == "123456"
+    )
 
 
 def test_focused_uia_text_from_event_reads_signals_after() -> None:

@@ -212,7 +212,68 @@ def test_apply_hard_rules_chinese_ime_without_cjk_ocr_keeps_recorded() -> None:
     )
     assert updated["resolved_text"] == "123456"
     assert updated["source"] == "recorded"
-    assert "no CJK OCR" in updated["reason"]
+    assert "recorded matches OCR" in updated["reason"]
+
+
+def test_apply_hard_rules_chinese_ime_keeps_digits_despite_cjk_chrome() -> None:
+    """Event_004: Chinese IME + digits must not latch onto nearby Word chrome OCR."""
+    updated = apply_text_choice_hard_rules(
+        {
+            "recorded_text": "123456",
+            "uia_text": None,
+            "ime": {"chinese": True, "lang_id": 1028},
+            "ocr_text": "[檔案] 索引標籤",
+            "ocr_options": [
+                "[檔案] 索引標籤",
+                "123456",
+                "啟用 Windows",
+                "移至 [設定] 以啟用 windows·",
+            ],
+            "resolved_text": "[檔案] 索引標籤",
+            "source": "ocr",
+            "reason": "Chinese IME; prefer OCR",
+        }
+    )
+    assert updated["resolved_text"] == "123456"
+    assert updated["source"] == "recorded"
+    assert "recorded matches OCR" in updated["reason"]
+
+
+def test_apply_hard_rules_chinese_ime_literal_digits_without_ocr_match() -> None:
+    """Digits under 中 stay recorded even when OCR only sees CJK chrome."""
+    updated = apply_text_choice_hard_rules(
+        {
+            "recorded_text": "123456",
+            "uia_text": None,
+            "ime": {"chinese": True, "lang_id": 1028},
+            "ocr_text": "[檔案] 索引標籤",
+            "ocr_options": ["[檔案] 索引標籤", "啟用 Windows"],
+            "resolved_text": "[檔案] 索引標籤",
+            "source": "ocr",
+            "reason": "Chinese IME; prefer OCR",
+        }
+    )
+    assert updated["resolved_text"] == "123456"
+    assert updated["source"] == "recorded"
+    assert "literal recorded" in updated["reason"]
+
+
+def test_apply_hard_rules_chinese_ime_prefers_primary_cjk_ocr() -> None:
+    updated = apply_text_choice_hard_rules(
+        {
+            "recorded_text": "nihao",
+            "uia_text": None,
+            "ime": {"chinese": True, "lang_id": 0x0804},
+            "ocr_text": "你好",
+            "ocr_options": ["你好", "[檔案] 索引標籤"],
+            "resolved_text": "nihao",
+            "source": "recorded",
+            "reason": "prefer recorded",
+        }
+    )
+    assert updated["resolved_text"] == "你好"
+    assert updated["source"] == "ocr"
+    assert "Chinese IME; prefer OCR" in updated["reason"]
 
 
 def test_needs_llm_text_choice_skips_when_ime_present() -> None:

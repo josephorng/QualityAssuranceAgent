@@ -523,6 +523,16 @@ def _nearest_ocr_entry(
         left = [item for item in pool if item[1] <= local_x]
         if left:
             pool = left
+        else:
+            # Nothing left of caret (e.g. caret at field start): prefer the same
+            # text line over diagonally nearer chrome above/below the caret.
+            return min(
+                pool,
+                key=lambda item: (
+                    abs(item[2] - local_y),
+                    (item[1] - local_x) ** 2 + (item[2] - local_y) ** 2,
+                ),
+            )[0]
     return min(
         pool,
         key=lambda item: (item[1] - local_x) ** 2 + (item[2] - local_y) ** 2,

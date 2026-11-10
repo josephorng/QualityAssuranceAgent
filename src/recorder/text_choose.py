@@ -59,6 +59,11 @@ def ime_chinese_flag(text_resolution: dict[str, Any]) -> bool | None:
     return chinese if isinstance(chinese, bool) else None
 
 
+def recorded_has_latin_letters(text: str) -> bool:
+    """True when recorded text has A–Z/a–z (typical IME composition under 中)."""
+    return any(("a" <= ch <= "z") or ("A" <= ch <= "Z") for ch in str(text or ""))
+
+
 def collect_ocr_candidates(text_resolution: dict[str, Any]) -> list[str]:
     """Unique OCR strings from ``ocr_text`` / ``ocr_options`` (order preserved)."""
     options: list[str] = []
@@ -178,10 +183,21 @@ def apply_text_choice_hard_rules(text_resolution: dict[str, Any]) -> dict[str, A
         updated["reason"] = "English IME; prefer recorded"
         return updated
 
-    # 4. Chinese IME → focus-local CJK OCR when present; else recorded (ASCII under 中).
+    # 4. Chinese IME → recorded when corroborated or literal; else CJK OCR for conversion.
     if ime_chinese is True:
+        if recorded and any(texts_equivalent(recorded, text) for text in ocr_candidates):
+            updated["resolved_text"] = recorded
+            updated["source"] = "recorded"
+            updated["reason"] = "Chinese IME; recorded matches OCR, prefer recorded"
+            return updated
+        if recorded and not recorded_has_latin_letters(recorded):
+            updated["resolved_text"] = recorded
+            updated["source"] = "recorded"
+            updated["reason"] = "Chinese IME; literal recorded, prefer recorded"
+            return updated
         if cjk_ocr:
-            updated["resolved_text"] = cjk_ocr
+            chosen_ocr = primary_ocr if text_contains_cjk(primary_ocr) else cjk_ocr
+            updated["resolved_text"] = chosen_ocr
             updated["source"] = "ocr"
             updated["reason"] = "Chinese IME; prefer OCR"
             return updated

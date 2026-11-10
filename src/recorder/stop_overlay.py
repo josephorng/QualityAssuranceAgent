@@ -14,11 +14,30 @@ import pyautogui
 from src.recorder.hotkey import RECORDING_HOTKEY_DISPLAY
 
 # Windows: keep recording HUD out of BitBlt/mss screenshots (Win10 2004+).
+# Skip on RDP / Enhanced Session / VM guests — those view paths treat the
+# affinity as "not on a monitor", so the FindAll LED + EFP strip vanish.
 _WDA_EXCLUDEFROMCAPTURE = 0x00000011
 _GWL_EXSTYLE = -20
 _WS_EX_LAYERED = 0x00080000
 _WS_EX_TRANSPARENT = 0x00000020
 _WS_EX_TOOLWINDOW = 0x00000080
+_LWA_ALPHA = 0x00000002
+_SM_REMOTESESSION = 0x1000
+# "0" / "false" / "no" forces the strip into capture (and onto RDP/VM viewers).
+_UIA_STATUS_EXCLUDE_FROM_CAPTURE_ENV = "CUA_UIA_STATUS_EXCLUDE_FROM_CAPTURE"
+_VM_PRODUCT_MARKERS = (
+    "virtual",
+    "vmware",
+    "virtualbox",
+    "vbox",
+    "hyper-v",
+    "hyperv",
+    "kvm",
+    "qemu",
+    "xen",
+    "parallels",
+    "bochs",
+)
 
 _UIA_LED_COLORS = {
     "red": "#e74c3c",
@@ -386,7 +405,58 @@ def _toplevel_hwnd(win: Any) -> int:
     return hwnd
 
 
+def _env_flag_disabled(name: str) -> bool:
+    raw = str(os.environ.get(name, "") or "").strip().lower()
+    return raw in {"0", "false", "no", "off"}
+
+
+def _is_remote_display_session() -> bool:
+    """True for RDP and Hyper-V Enhanced Session (capture-style remoting)."""
+    if os.name != "nt":
+        return False
+    try:
+        if int(ctypes.windll.user32.GetSystemMetrics(_SM_REMOTESESSION)):
+            return True
+    except Exception:
+        pass
+    session = str(os.environ.get("SESSIONNAME", "") or "").strip().upper()
+    return session.startswith("RDP-")
+
+
+def _is_virtual_machine_guest() -> bool:
+    """Best-effort guest hypervisor detection via SystemProductName."""
+    if os.name != "nt":
+        return False
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\SystemInformation",
+        ) as key:
+            product, _ = winreg.QueryValueEx(key, "SystemProductName")
+    except OSError:
+        return False
+    blob = str(product or "").strip().lower()
+    if not blob:
+        return False
+    return any(marker in blob for marker in _VM_PRODUCT_MARKERS)
+
+
+def _should_exclude_uia_status_from_capture() -> bool:
+    """Whether the UIA status strip may use WDA_EXCLUDEFROMCAPTURE."""
+    if _env_flag_disabled(_UIA_STATUS_EXCLUDE_FROM_CAPTURE_ENV):
+        return False
+    if _is_remote_display_session():
+        return False
+    if _is_virtual_machine_guest():
+        return False
+    return True
+
+
 def _apply_exclude_from_capture(win: Any) -> None:
+    if not _should_exclude_uia_status_from_capture():
+        return
     hwnd = _toplevel_hwnd(win)
     if hwnd <= 0:
         return
@@ -405,6 +475,9 @@ def _apply_click_through(win: Any) -> None:
         style = int(user32.GetWindowLongW(hwnd, _GWL_EXSTYLE))
         style |= _WS_EX_LAYERED | _WS_EX_TRANSPARENT | _WS_EX_TOOLWINDOW
         user32.SetWindowLongW(hwnd, _GWL_EXSTYLE, style)
+        # Setting WS_EX_LAYERED without an alpha update can blank the window on
+        # some VM display adapters; keep the strip fully opaque.
+        user32.SetLayeredWindowAttributes(hwnd, 0, 255, _LWA_ALPHA)
     except Exception:
         pass
 

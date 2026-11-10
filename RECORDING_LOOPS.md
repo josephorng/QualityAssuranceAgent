@@ -103,7 +103,7 @@ While recording, an always-on-top strip (`RecordingUiaStatusOverlay`) shows:
 | Brief attach/miss pulse | Just-persisted pointer event did / did not get `uia_snapshot` |
 | Name \| Value text | Idle `ElementFromPoint` after ~0.45s without mouse move (preview only; not written to event JSON) |
 
-Pixel settle-probe MAD ticks do **not** drive the LED. The strip is click-through and uses `WDA_EXCLUDEFROMCAPTURE` so it should not appear in recording screenshots. There is no hover rectangle — only the LED and the Name/Value label.
+Pixel settle-probe MAD ticks do **not** drive the LED. The strip is click-through and, on a normal local desktop, uses `WDA_EXCLUDEFROMCAPTURE` so it should not appear in recording screenshots. That affinity is skipped for RDP / Hyper-V Enhanced Session and detected VM guests (otherwise the LED + EFP text never reach the viewer); set `CUA_UIA_STATUS_EXCLUDE_FROM_CAPTURE=0` to force the same. There is no hover rectangle — only the LED and the Name/Value label.
 
 ### FindAll vs EFP identity channels
 

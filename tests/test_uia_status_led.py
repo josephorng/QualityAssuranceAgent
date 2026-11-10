@@ -232,3 +232,76 @@ def test_recording_uia_status_overlay_apply_status() -> None:
         overlay.destroy()
     finally:
         root.destroy()
+
+
+def test_should_exclude_uia_status_skips_remote_and_vm(monkeypatch) -> None:
+    from src.recorder import stop_overlay as so
+
+    monkeypatch.delenv(so._UIA_STATUS_EXCLUDE_FROM_CAPTURE_ENV, raising=False)
+    monkeypatch.setattr(so, "_is_remote_display_session", lambda: False)
+    monkeypatch.setattr(so, "_is_virtual_machine_guest", lambda: False)
+    assert so._should_exclude_uia_status_from_capture() is True
+
+    monkeypatch.setattr(so, "_is_remote_display_session", lambda: True)
+    assert so._should_exclude_uia_status_from_capture() is False
+
+    monkeypatch.setattr(so, "_is_remote_display_session", lambda: False)
+    monkeypatch.setattr(so, "_is_virtual_machine_guest", lambda: True)
+    assert so._should_exclude_uia_status_from_capture() is False
+
+    monkeypatch.setattr(so, "_is_virtual_machine_guest", lambda: False)
+    monkeypatch.setenv(so._UIA_STATUS_EXCLUDE_FROM_CAPTURE_ENV, "0")
+    assert so._should_exclude_uia_status_from_capture() is False
+
+
+def test_apply_exclude_from_capture_noop_when_gated(monkeypatch) -> None:
+    from src.recorder import stop_overlay as so
+
+    calls: list[tuple[int, int]] = []
+
+    class _User32:
+        @staticmethod
+        def SetWindowDisplayAffinity(hwnd: int, affinity: int) -> int:
+            calls.append((hwnd, affinity))
+            return 1
+
+    monkeypatch.setattr(so, "_should_exclude_uia_status_from_capture", lambda: False)
+    monkeypatch.setattr(so, "_toplevel_hwnd", lambda _win: 42)
+    monkeypatch.setattr(so.ctypes, "windll", type("W", (), {"user32": _User32()})())
+    so._apply_exclude_from_capture(object())
+    assert calls == []
+
+    monkeypatch.setattr(so, "_should_exclude_uia_status_from_capture", lambda: True)
+    so._apply_exclude_from_capture(object())
+    assert calls == [(42, so._WDA_EXCLUDEFROMCAPTURE)]
+
+
+def test_apply_click_through_sets_opaque_layered_alpha(monkeypatch) -> None:
+    from src.recorder import stop_overlay as so
+
+    styles: list[int] = []
+    alphas: list[tuple[int, int, int, int]] = []
+
+    class _User32:
+        @staticmethod
+        def GetWindowLongW(_hwnd: int, _index: int) -> int:
+            return 0
+
+        @staticmethod
+        def SetWindowLongW(_hwnd: int, _index: int, style: int) -> int:
+            styles.append(int(style))
+            return style
+
+        @staticmethod
+        def SetLayeredWindowAttributes(
+            hwnd: int, color: int, alpha: int, flags: int
+        ) -> int:
+            alphas.append((hwnd, color, alpha, flags))
+            return 1
+
+    monkeypatch.setattr(so, "_toplevel_hwnd", lambda _win: 7)
+    monkeypatch.setattr(so.ctypes, "windll", type("W", (), {"user32": _User32()})())
+    so._apply_click_through(object())
+    assert styles and (styles[-1] & so._WS_EX_LAYERED)
+    assert styles[-1] & so._WS_EX_TRANSPARENT
+    assert alphas == [(7, 0, 255, so._LWA_ALPHA)]

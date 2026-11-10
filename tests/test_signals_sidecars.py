@@ -105,6 +105,89 @@ def test_appeared_foreground_reads_signal_sidecar(tmp_path: Path) -> None:
     assert isinstance(debug["signals_after"], str)
 
 
+def test_write_event_analysis_keeps_appeared_when_later_foregrounds_omitted(
+    tmp_path: Path,
+) -> None:
+    """Empty later_foregrounds must not wipe appeared if this step's after-FG exists."""
+    from src.common.io_utils import read_json
+    from src.recorder.models import RecordedEvent
+    from src.recorder.orchestrator import _write_event_analysis
+
+    run_dir = tmp_path / "rec"
+    (run_dir / "events").mkdir(parents=True)
+    (run_dir / "analysis").mkdir(parents=True)
+    dialog = {
+        "hwnd": 42,
+        "title": "登入系統",
+        "pid": 1,
+        "left": 10,
+        "top": 10,
+        "width": 200,
+        "height": 100,
+        "is_minimized": False,
+        "is_maximized": False,
+        "class_name": "WindowsForms10.Window.8.app.0.x",
+        "process_name": "WM7Ldr.exe",
+    }
+    write_event_json(
+        run_dir,
+        {
+            "index": 1,
+            "timestamp_utc": "2026-01-01T00:00:00+00:00",
+            "kind": "double_click",
+            "window_snapshot_debug": {
+                "windows_before": [],
+                "windows_after": [dialog],
+                "signals_before": {
+                    "foreground": {
+                        "class_name": "Progman",
+                        "title": "Program Manager",
+                        "process_name": "explorer.exe",
+                    }
+                },
+                "signals_after": {
+                    "foreground": {
+                        "class_name": dialog["class_name"],
+                        "title": dialog["title"],
+                        "process_name": dialog["process_name"],
+                    }
+                },
+                "signal_kind": "double_click",
+            },
+        },
+    )
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    event = RecordedEvent.from_dict(raw)
+    assert isinstance(event.window_snapshot_debug, dict)
+    assert isinstance(event.window_snapshot_debug["signals_after"], str)
+
+    analysis_path = run_dir / "analysis" / "event_001.json"
+    _write_event_analysis(
+        analysis_path,
+        event=event,
+        result={"instruction": "click", "use_char_target": False},
+        instruction="click",
+        vision={},
+        expected_outcome=None,
+        use_expected_outcome=False,
+        elapsed_since_previous=None,
+        settle_after_seconds=None,
+        text_resolution=None,
+        later_foregrounds=[],
+        next_windows_before=None,
+        run_dir=run_dir,
+    )
+    analysis = read_json(analysis_path, {})
+    assert isinstance(analysis, dict)
+    assert analysis.get("window_verify", {}).get("appeared") == [
+        {
+            "class_name": dialog["class_name"],
+            "title": dialog["title"],
+            "process_name": dialog["process_name"],
+        }
+    ]
+
+
 def test_peel_does_not_mutate_input(tmp_path: Path) -> None:
     run_dir = tmp_path / "rec"
     (run_dir / "signals").mkdir(parents=True)

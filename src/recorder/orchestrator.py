@@ -948,13 +948,33 @@ def _write_event_analysis(
     )
 
     tool_calls = compile_tool_calls(event, instruction, vision=vision)
-    window_verify = window_verify_from_debug(
+    resolved_run_dir = Path(run_dir) if run_dir is not None else analysis_path.parent.parent
+    # Signal samples are often peeled to sidecar paths on disk. Hydrate before
+    # building window_verify, and fall back to this step's after-foreground when
+    # the caller omitted later_foregrounds (otherwise every appeared entry drops).
+    hydrated_debug = hydrate_window_snapshot_debug(
+        resolved_run_dir,
+        event.index,
         event.window_snapshot_debug,
+    )
+    verify_debug = (
+        hydrated_debug
+        if isinstance(hydrated_debug, dict)
+        else event.window_snapshot_debug
+    )
+    appear_foregrounds = list(later_foregrounds or [])
+    if not appear_foregrounds and isinstance(verify_debug, dict):
+        appear_foregrounds = foreground_identities_from_debug(
+            verify_debug,
+            include_before=False,
+        )
+    window_verify = window_verify_from_debug(
+        verify_debug,
         typed_text=event.text if event.kind == "text_input" else None,
     )
     window_verify = limit_appeared_to_later_foreground(
         window_verify,
-        later_foregrounds or [],
+        appear_foregrounds,
     )
     window_verify = limit_disappeared_absent_from_next_before(
         window_verify,

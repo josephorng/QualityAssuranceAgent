@@ -397,6 +397,173 @@ def test_settle_uia_publishes_for_next_press(tmp_path: Path) -> None:
     assert first["hwnd"] == 10
     assert second["hwnd"] == 20
     assert session._last_settle_uia_after_index == 0
+    assert session._last_settle_uia_by_hwnd == {}
+
+
+def test_seed_uia_covers_taskbar_and_skips_noise(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Event-1 seed FindAlls shown top-levels + taskbar; skips shell noise."""
+    from src.recorder.capture import RecordingSession
+    from src.recorder.window_snapshot import ClickWindowInfo, WindowInfo
+
+    calls: list[int] = []
+
+    def _snap(hwnd: int) -> dict:
+        calls.append(int(hwnd))
+        label = {10: "前景", 131388: "搜尋", 99: "噪音"}.get(hwnd, f"hwnd{hwnd}")
+        return {
+            "window": [0, 0, 40, 40],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [0, 0, 8, 8], "text": label}],
+        }
+
+    windows = (
+        WindowInfo(
+            hwnd=10,
+            title="App",
+            pid=1,
+            left=0,
+            top=0,
+            width=800,
+            height=600,
+            is_minimized=False,
+            is_maximized=True,
+            class_name="Chrome_WidgetWin_1",
+            process_name="app.exe",
+        ),
+        WindowInfo(
+            hwnd=131388,
+            title="",
+            pid=2,
+            left=0,
+            top=1040,
+            width=1920,
+            height=40,
+            is_minimized=False,
+            is_maximized=False,
+            class_name="Shell_TrayWnd",
+            process_name="explorer.exe",
+        ),
+        WindowInfo(
+            hwnd=99,
+            title="",
+            pid=2,
+            left=0,
+            top=0,
+            width=10,
+            height=10,
+            is_minimized=False,
+            is_maximized=False,
+            class_name="DummyDWMListenerWindow",
+            process_name="explorer.exe",
+        ),
+        WindowInfo(
+            hwnd=100,
+            title="",
+            pid=2,
+            left=-32000,
+            top=-32000,
+            width=160,
+            height=28,
+            is_minimized=True,
+            is_maximized=False,
+            class_name="Chrome_WidgetWin_1",
+            process_name="app.exe",
+        ),
+    )
+    session = RecordingSession(runs_root=tmp_path)
+    monkeypatch.setattr(session, "_foreground_hwnd", lambda: 10)
+    with patch(
+        "src.recorder.uia_input_boxes.snapshot_uia_screen",
+        side_effect=_snap,
+    ):
+        primary = session._collect_and_publish_seed_uia_screens(windows)
+        taskbar = ClickWindowInfo(
+            hwnd=131388,
+            title="",
+            process_name="explorer.exe",
+            left=0,
+            top=1040,
+            width=1920,
+            height=40,
+            is_maximized=False,
+            is_taskbar=True,
+            class_name="Shell_TrayWnd",
+        )
+        hit = session._cached_uia_before(taskbar, cursor_xy=(555, 1055))
+    assert sorted(calls) == [10, 131388]
+    assert primary is not None and primary["texts"][0]["text"] == "前景"
+    assert session._last_settle_uia_after_index == 0
+    assert set(session._last_settle_uia_by_hwnd) == {10, 131388}
+    assert hit is not None
+    assert hit["hwnd"] == 131388
+    assert hit["texts"][0]["text"] == "搜尋"
+
+
+def test_single_settle_clears_seed_multi_map(tmp_path: Path) -> None:
+    """A later single-hwnd settle drops the event-1 multi map."""
+    from src.recorder.capture import RecordingSession
+    from src.recorder.models import RecordedEvent
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    session = RecordingSession(runs_root=tmp_path)
+    session._last_settle_uia_by_hwnd = {
+        10: {
+            "hwnd": 10,
+            "window": [0, 0, 10, 10],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [0, 0, 4, 4], "text": "前景"}],
+        },
+        20: {
+            "hwnd": 20,
+            "window": [0, 1040, 100, 40],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [0, 0, 4, 4], "text": "工作列"}],
+        },
+    }
+    session._last_settle_uia_after_index = 0
+    with patch(
+        "src.recorder.uia_input_boxes.snapshot_uia_screen",
+        return_value={
+            "window": [0, 0, 10, 10],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [0, 0, 4, 4], "text": "下一步"}],
+        },
+    ):
+        session._collect_and_publish_settle_uia(10, after_event_index=1)
+    assert session._last_settle_uia_by_hwnd == {}
+    assert session._last_settle_uia_after_index == 1
+    assert session._last_settle_uia is not None
+    assert session._last_settle_uia["texts"][0]["text"] == "下一步"
+    # Generation matches event 1 → event 2 press, but taskbar is no longer cached.
+    session._events = [
+        RecordedEvent(
+            index=1,
+            timestamp_utc="t",
+            kind="click",
+            cursor_xy=(1, 1),
+            screenshot_path="x.jpeg",
+            monitor_index=1,
+            monitor_offset=(0, 0),
+        )
+    ]
+    other = ClickWindowInfo(
+        hwnd=20,
+        title="",
+        process_name="explorer.exe",
+        left=0,
+        top=1040,
+        width=100,
+        height=40,
+        is_maximized=False,
+        is_taskbar=True,
+        class_name="Shell_TrayWnd",
+    )
+    assert session._cached_uia_before(other, cursor_xy=(5, 1055)) is None
+    assert session._cached_uia_before(_copilot_window(10), cursor_xy=(5, 5)) is not None  # type: ignore[arg-type]
 
 
 def test_cross_window_press_skips_stale_settle_cache(tmp_path: Path) -> None:

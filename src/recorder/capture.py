@@ -56,6 +56,8 @@ from src.recorder.verify_signals import (
 from src.recorder.window_snapshot import (
     ClickWindowInfo,
     WindowInfo,
+    _MINIMIZED_COORD_THRESHOLD,
+    _TASKBAR_CLASS_NAMES,
     _windows_debug_list,
     diff_snapshots_with_debug,
     resolve_click_window,
@@ -68,6 +70,15 @@ from src.recorder.ime_state import ImeInputState, read_ime_input_state
 _DOUBLE_CLICK_INTERVAL_S = 0.35
 _DOUBLE_CLICK_MAX_DIST_PX = 8
 _DRAG_THRESHOLD_PX = 8
+# Non-interactive shell helpers skipped by the event-1 multi-hwnd UIA seed.
+_SEED_UIA_NOISE_CLASS_NAMES = frozenset(
+    {
+        "DummyDWMListenerWindow",
+        "EdgeUiInputTopWndClass",
+        "ThumbnailDeviceHelperWnd",
+        "CEF-OSC-WIDGET",
+    }
+)
 # Distinct from None, which means mouse-up reserved the drag-end slot
 # before the mouse-down monitor grab finished.
 _DRAG_END_UNCLAIMED = object()
@@ -1020,6 +1031,9 @@ class RecordingSession:
         # Press copies this as uia_snapshot when hwnd matches and the settle
         # was published after that previous event (see after_index).
         self._last_settle_uia: dict[str, Any] | None = None
+        # Event-1 seed only: FindAll under each shown top-level (incl. taskbar).
+        # Cleared when a later single-hwnd settle publishes.
+        self._last_settle_uia_by_hwnd: dict[int, dict[str, Any]] = {}
         # Event index whose window-step published ``_last_settle_uia`` (0 = seed).
         self._last_settle_uia_after_index: int | None = None
         self._left_press_uia: dict[int, dict[str, Any] | None] = {}
@@ -1217,6 +1231,7 @@ class RecordingSession:
             self._left_press_click_windows = {}
             self._right_press_click_windows = {}
             self._last_settle_uia = None
+            self._last_settle_uia_by_hwnd = {}
             self._last_settle_uia_after_index = None
             self._left_press_uia = {}
             self._right_press_uia = {}
@@ -1257,6 +1272,7 @@ class RecordingSession:
             self._last_settle_windows = None
             self._last_settle_signals = None
             self._last_settle_uia = None
+            self._last_settle_uia_by_hwnd = {}
             self._last_settle_uia_after_index = None
             self._start_windows = None
             self._start_signals = None
@@ -3888,11 +3904,11 @@ class RecordingSession:
                     self._start_signals = (
                         dict(self._last_settle_signals) if self._last_settle_signals else None
                     )
-                # Seed naming tree so event 1 has a before FindAll without press-time walk.
-                self._collect_and_publish_settle_uia(
-                    self._foreground_hwnd(),
-                    after_event_index=0,
-                )
+                # Seed naming trees for every shown top-level (incl. taskbar)
+                # so event 1 can attach UIA even when the click is not FG.
+                with self._lock:
+                    seed_windows = self._last_settle_windows
+                self._collect_and_publish_seed_uia_screens(seed_windows)
             finally:
                 self._settle_windows_ready.set()
                 done = (job.meta or {}).get("done")
@@ -4769,6 +4785,20 @@ class RecordingSession:
                 return 0
             return int(self._events[-1].index)
 
+    @staticmethod
+    def _seed_uia_window_eligible(win: WindowInfo) -> bool:
+        """True when recording seed should FindAll under this top-level hwnd."""
+        class_name = str(win.class_name or "").strip()
+        if class_name in _TASKBAR_CLASS_NAMES:
+            return True
+        if class_name in _SEED_UIA_NOISE_CLASS_NAMES:
+            return False
+        if win.is_minimized:
+            return False
+        if win.left <= _MINIMIZED_COORD_THRESHOLD or win.top <= _MINIMIZED_COORD_THRESHOLD:
+            return False
+        return int(win.width) * int(win.height) > 0
+
     def _cached_uia_before(
         self,
         click_window: ClickWindowInfo | None,
@@ -4786,18 +4816,101 @@ class RecordingSession:
         event (or seed index 0). A same-hwnd cache from an older step is treated
         as a miss so navigation/scroll between presses does not reuse a stale
         tree.
+
+        Event-1 seed may publish several hwnd trees; prefer the click hwnd from
+        that map when present.
         """
         previous_index = self._previous_event_index_for_settle_cache()
         with self._lock:
             cached = self._last_settle_uia
+            by_hwnd = self._last_settle_uia_by_hwnd
             after_index = self._last_settle_uia_after_index
         if after_index != previous_index:
             return None
+        if click_window is not None and by_hwnd:
+            try:
+                click_hwnd = int(click_window.hwnd or 0)
+            except (TypeError, ValueError):
+                click_hwnd = 0
+            if click_hwnd > 0:
+                mapped = by_hwnd.get(click_hwnd)
+                if isinstance(mapped, dict):
+                    return self._copy_uia_snapshot(mapped)
         if not self._uia_snapshot_matches_click(
             cached, click_window, cursor_xy=cursor_xy
         ):
             return None
         return self._copy_uia_snapshot(cached)
+
+    def _collect_and_publish_seed_uia_screens(
+        self,
+        windows: tuple[WindowInfo, ...] | None,
+    ) -> dict[str, Any] | None:
+        """FindAll under each shown top-level at recording start (event 1 only).
+
+        Stores a hwnd→snapshot map so the first press can attach UIA for the
+        clicked window (including the taskbar) without a desktop-root walk.
+        """
+        after_event_index = 0
+        eligible: list[WindowInfo] = []
+        seen: set[int] = set()
+        for win in windows or ():
+            hwnd = int(win.hwnd or 0)
+            if hwnd <= 0 or hwnd in seen:
+                continue
+            if not self._seed_uia_window_eligible(win):
+                continue
+            seen.add(hwnd)
+            eligible.append(win)
+        if not eligible:
+            with self._lock:
+                self._last_settle_uia = None
+                self._last_settle_uia_by_hwnd = {}
+                self._last_settle_uia_after_index = after_event_index
+            self._emit_uia_status(state="red", after_index=after_event_index)
+            return None
+
+        self._emit_uia_status(state="yellow", after_index=after_event_index)
+        from src.recorder.uia_input_boxes import snapshot_uia_screen
+
+        by_hwnd: dict[int, dict[str, Any]] = {}
+        for win in eligible:
+            hwnd = int(win.hwnd)
+            try:
+                value = snapshot_uia_screen(hwnd)
+            except Exception:
+                continue
+            if not isinstance(value, dict):
+                continue
+            snapshot = dict(value)
+            snapshot["hwnd"] = hwnd
+            by_hwnd[hwnd] = snapshot
+
+        if not by_hwnd:
+            with self._lock:
+                self._last_settle_uia = None
+                self._last_settle_uia_by_hwnd = {}
+                self._last_settle_uia_after_index = after_event_index
+            self._emit_uia_status(state="red", after_index=after_event_index)
+            return None
+
+        fg = self._foreground_hwnd()
+        primary = by_hwnd.get(fg)
+        if primary is None:
+            for win in eligible:
+                class_name = str(win.class_name or "").strip()
+                if class_name in _TASKBAR_CLASS_NAMES and int(win.hwnd) in by_hwnd:
+                    primary = by_hwnd[int(win.hwnd)]
+                    break
+        if primary is None:
+            primary = next(iter(by_hwnd.values()))
+
+        with self._lock:
+            self._last_settle_uia = primary
+            self._last_settle_uia_by_hwnd = by_hwnd
+            self._last_settle_uia_after_index = after_event_index
+        self._emit_uia_status(state="green", after_index=after_event_index)
+        return self._copy_uia_snapshot(primary)
 
     def _collect_and_publish_settle_uia(
         self,
@@ -4809,10 +4922,13 @@ class RecordingSession:
 
         ``after_event_index`` is the event whose window-step produced this tree
         (``0`` for recording seed). The next press reuses it only when that index
-        is still the previous event.
+        is still the previous event. Clears the multi-hwnd seed map so only the
+        recording-start seed uses it.
         """
         hwnd = int(hwnd or 0)
         if hwnd <= 0:
+            with self._lock:
+                self._last_settle_uia_by_hwnd = {}
             self._emit_uia_status(state="red", after_index=int(after_event_index))
             return None
         self._emit_uia_status(state="yellow", after_index=int(after_event_index))
@@ -4821,15 +4937,20 @@ class RecordingSession:
         try:
             value = snapshot_uia_screen(hwnd)
         except Exception:
+            with self._lock:
+                self._last_settle_uia_by_hwnd = {}
             self._emit_uia_status(state="red", after_index=int(after_event_index))
             return None
         if not isinstance(value, dict):
+            with self._lock:
+                self._last_settle_uia_by_hwnd = {}
             self._emit_uia_status(state="red", after_index=int(after_event_index))
             return None
         snapshot = dict(value)
         snapshot["hwnd"] = hwnd
         with self._lock:
             self._last_settle_uia = snapshot
+            self._last_settle_uia_by_hwnd = {}
             self._last_settle_uia_after_index = int(after_event_index)
         self._emit_uia_status(state="green", after_index=int(after_event_index))
         return self._copy_uia_snapshot(snapshot)

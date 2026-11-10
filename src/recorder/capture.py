@@ -58,6 +58,7 @@ from src.recorder.window_snapshot import (
     WindowInfo,
     _MINIMIZED_COORD_THRESHOLD,
     _TASKBAR_CLASS_NAMES,
+    _window_class_name,
     _windows_debug_list,
     diff_snapshots_with_debug,
     resolve_click_window,
@@ -216,6 +217,7 @@ class _DeferredCaptureJob:
     # | pending_left_press | pending_right_press | pending_drag_end
     # | emit_left_gesture | emit_right_gesture | mouse_pointer_event
     # | seed_settle_windows | read_clipboard_paste | idle_efp
+    # idle_efp: ElementFromPoint LED label, then optional hover FindAll warm
     meta: dict[str, Any] | None = None
     pending_pre_type: _PendingPreTypeShot | None = None
     pending_pre_key: _PendingPreTypeShot | None = None
@@ -1031,8 +1033,9 @@ class RecordingSession:
         # Press copies this as uia_snapshot when hwnd matches and the settle
         # was published after that previous event (see after_index).
         self._last_settle_uia: dict[str, Any] | None = None
-        # Event-1 seed only: FindAll under each shown top-level (incl. taskbar).
-        # Cleared when a later single-hwnd settle publishes.
+        # Seed: FindAll under each shown top-level (incl. taskbar). Later
+        # single-hwnd settles drop non-shell seed entries but keep taskbar-class
+        # and hover-warmed (cache_kind=hover) snapshots for later presses.
         self._last_settle_uia_by_hwnd: dict[int, dict[str, Any]] = {}
         # Event index whose window-step published ``_last_settle_uia`` (0 = seed).
         self._last_settle_uia_after_index: int | None = None
@@ -1779,6 +1782,7 @@ class RecordingSession:
         )
 
     def _worker_idle_efp(self, job: _DeferredCaptureJob) -> None:
+        """Idle EFP LED label, then optional hover FindAll into by_hwnd."""
         meta = job.meta if isinstance(job.meta, dict) else {}
         try:
             generation = int(meta.get("generation") or 0)
@@ -1807,6 +1811,77 @@ class RecordingSession:
             efp_value=value,
             efp_pending=False,
         )
+        self._maybe_hover_findall_uia(
+            generation, int(cursor[0]), int(cursor[1])
+        )
+
+    def _maybe_hover_findall_uia(self, generation: int, x: int, y: int) -> None:
+        """Warm FindAll under the idle cursor hwnd when the settle cache lacks it.
+
+        Does not change ``_last_settle_uia`` / ``after_index`` or the LED. Skips
+        while settle FindAll is yellow, when generation is not ready for the next
+        press, or when the hwnd is already cached.
+        """
+        previous_index = self._previous_event_index_for_settle_cache()
+        with self._lock:
+            if not self._accepting_input or self._finalizing:
+                return
+            if generation != int(self._idle_efp_generation):
+                return
+            if str(self._uia_status_state) == "yellow":
+                return
+            after_index = self._last_settle_uia_after_index
+            by_hwnd = self._last_settle_uia_by_hwnd
+            last = self._last_settle_uia
+        if after_index != previous_index:
+            return
+        click_window = self._click_window_payload_at(int(x), int(y))
+        if not self._hover_uia_click_window_eligible(click_window):
+            return
+        assert click_window is not None
+        hwnd = int(click_window.hwnd)
+        try:
+            last_hwnd = int((last or {}).get("hwnd") or 0) if isinstance(last, dict) else 0
+        except (TypeError, ValueError):
+            last_hwnd = 0
+        if hwnd == last_hwnd:
+            return
+        if hwnd in by_hwnd:
+            return
+        from src.recorder.uia_input_boxes import snapshot_uia_screen
+
+        try:
+            value = snapshot_uia_screen(hwnd)
+        except Exception:
+            return
+        if not isinstance(value, dict):
+            return
+        snapshot = dict(value)
+        snapshot["hwnd"] = hwnd
+        class_name = str(click_window.class_name or "").strip()
+        if not class_name:
+            class_name = str(_window_class_name(hwnd) or "").strip()
+        if class_name:
+            snapshot["class_name"] = class_name
+        snapshot["cache_kind"] = "hover"
+        with self._lock:
+            if not self._accepting_input or self._finalizing:
+                return
+            if generation != int(self._idle_efp_generation):
+                return
+            if str(self._uia_status_state) == "yellow":
+                return
+            try:
+                current_last_hwnd = int(
+                    (self._last_settle_uia or {}).get("hwnd") or 0
+                ) if isinstance(self._last_settle_uia, dict) else 0
+            except (TypeError, ValueError):
+                current_last_hwnd = 0
+            if hwnd == current_last_hwnd:
+                return
+            if hwnd in self._last_settle_uia_by_hwnd:
+                return
+            self._last_settle_uia_by_hwnd[hwnd] = snapshot
 
     def _notify_pending_text_input(self, event_index: int) -> None:
         """Fire deferred vision notify once the window step has patched (or failed)."""
@@ -4799,6 +4874,69 @@ class RecordingSession:
             return False
         return int(win.width) * int(win.height) > 0
 
+    @staticmethod
+    def _hover_uia_click_window_eligible(
+        click_window: ClickWindowInfo | None,
+    ) -> bool:
+        """True when idle hover may FindAll under this click window."""
+        if click_window is None:
+            return False
+        try:
+            hwnd = int(click_window.hwnd or 0)
+        except (TypeError, ValueError):
+            hwnd = 0
+        if hwnd <= 0:
+            return False
+        class_name = str(click_window.class_name or "").strip()
+        if not class_name:
+            return False
+        if class_name in _TASKBAR_CLASS_NAMES:
+            return True
+        if class_name in _SEED_UIA_NOISE_CLASS_NAMES:
+            return False
+        if bool(click_window.is_flyout):
+            return False
+        if (
+            int(click_window.left) <= _MINIMIZED_COORD_THRESHOLD
+            or int(click_window.top) <= _MINIMIZED_COORD_THRESHOLD
+        ):
+            return False
+        return int(click_window.width) * int(click_window.height) > 0
+
+    @staticmethod
+    def _by_hwnd_retained_across_settle(
+        existing: dict[int, dict[str, Any]] | None,
+        *,
+        settle_hwnd: int = 0,
+    ) -> dict[int, dict[str, Any]]:
+        """Keep taskbar-class or hover-warmed peers; drop the settle hwnd."""
+        try:
+            drop_hwnd = int(settle_hwnd or 0)
+        except (TypeError, ValueError):
+            drop_hwnd = 0
+        retained: dict[int, dict[str, Any]] = {}
+        for raw_hwnd, snapshot in (existing or {}).items():
+            if not isinstance(snapshot, dict):
+                continue
+            try:
+                hwnd = int(raw_hwnd)
+            except (TypeError, ValueError):
+                continue
+            if hwnd <= 0 or (drop_hwnd > 0 and hwnd == drop_hwnd):
+                continue
+            class_name = str(snapshot.get("class_name") or "").strip()
+            cache_kind = str(snapshot.get("cache_kind") or "").strip()
+            if class_name in _TASKBAR_CLASS_NAMES or cache_kind == "hover":
+                retained[hwnd] = snapshot
+        return retained
+
+    @staticmethod
+    def _shell_uia_by_hwnd_retained(
+        existing: dict[int, dict[str, Any]] | None,
+    ) -> dict[int, dict[str, Any]]:
+        """Keep taskbar-class / hover peers (no settle hwnd to drop)."""
+        return RecordingSession._by_hwnd_retained_across_settle(existing, settle_hwnd=0)
+
     def _cached_uia_before(
         self,
         click_window: ClickWindowInfo | None,
@@ -4884,6 +5022,9 @@ class RecordingSession:
                 continue
             snapshot = dict(value)
             snapshot["hwnd"] = hwnd
+            class_name = str(win.class_name or "").strip()
+            if class_name:
+                snapshot["class_name"] = class_name
             by_hwnd[hwnd] = snapshot
 
         if not by_hwnd:
@@ -4922,13 +5063,16 @@ class RecordingSession:
 
         ``after_event_index`` is the event whose window-step produced this tree
         (``0`` for recording seed). The next press reuses it only when that index
-        is still the previous event. Clears the multi-hwnd seed map so only the
-        recording-start seed uses it.
+        is still the previous event. Drops non-shell seed map entries but keeps
+        taskbar-class and hover-warmed (``cache_kind=hover``) snapshots.
         """
         hwnd = int(hwnd or 0)
         if hwnd <= 0:
             with self._lock:
-                self._last_settle_uia_by_hwnd = {}
+                self._last_settle_uia_by_hwnd = self._by_hwnd_retained_across_settle(
+                    self._last_settle_uia_by_hwnd,
+                    settle_hwnd=0,
+                )
             self._emit_uia_status(state="red", after_index=int(after_event_index))
             return None
         self._emit_uia_status(state="yellow", after_index=int(after_event_index))
@@ -4938,19 +5082,34 @@ class RecordingSession:
             value = snapshot_uia_screen(hwnd)
         except Exception:
             with self._lock:
-                self._last_settle_uia_by_hwnd = {}
+                self._last_settle_uia_by_hwnd = self._by_hwnd_retained_across_settle(
+                    self._last_settle_uia_by_hwnd,
+                    settle_hwnd=hwnd,
+                )
             self._emit_uia_status(state="red", after_index=int(after_event_index))
             return None
         if not isinstance(value, dict):
             with self._lock:
-                self._last_settle_uia_by_hwnd = {}
+                self._last_settle_uia_by_hwnd = self._by_hwnd_retained_across_settle(
+                    self._last_settle_uia_by_hwnd,
+                    settle_hwnd=hwnd,
+                )
             self._emit_uia_status(state="red", after_index=int(after_event_index))
             return None
         snapshot = dict(value)
         snapshot["hwnd"] = hwnd
+        class_name = str(_window_class_name(hwnd) or "").strip()
+        if class_name:
+            snapshot["class_name"] = class_name
         with self._lock:
+            retained = self._by_hwnd_retained_across_settle(
+                self._last_settle_uia_by_hwnd,
+                settle_hwnd=hwnd,
+            )
+            if class_name in _TASKBAR_CLASS_NAMES:
+                retained[hwnd] = snapshot
             self._last_settle_uia = snapshot
-            self._last_settle_uia_by_hwnd = {}
+            self._last_settle_uia_by_hwnd = retained
             self._last_settle_uia_after_index = int(after_event_index)
         self._emit_uia_status(state="green", after_index=int(after_event_index))
         return self._copy_uia_snapshot(snapshot)

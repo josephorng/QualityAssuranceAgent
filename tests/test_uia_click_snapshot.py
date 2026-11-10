@@ -383,9 +383,12 @@ def test_settle_uia_publishes_for_next_press(tmp_path: Path) -> None:
     session = RecordingSession(runs_root=tmp_path)
     window_a = _copilot_window(10)
     window_b = _copilot_window(20)
-    with patch(
-        "src.recorder.uia_input_boxes.snapshot_uia_screen",
-        side_effect=_snap,
+    with (
+        patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            side_effect=_snap,
+        ),
+        patch("src.recorder.capture._window_class_name", return_value="Chrome_WidgetWin_1"),
     ):
         session._collect_and_publish_settle_uia(10, after_event_index=0)
         first = session._cached_uia_before(window_a, cursor_xy=(5, 5))  # type: ignore[arg-type]
@@ -397,6 +400,7 @@ def test_settle_uia_publishes_for_next_press(tmp_path: Path) -> None:
     assert first["hwnd"] == 10
     assert second["hwnd"] == 20
     assert session._last_settle_uia_after_index == 0
+    # No taskbar-class stamps → nothing retained in the multi map.
     assert session._last_settle_uia_by_hwnd == {}
 
 
@@ -493,15 +497,17 @@ def test_seed_uia_covers_taskbar_and_skips_noise(tmp_path: Path, monkeypatch: py
         hit = session._cached_uia_before(taskbar, cursor_xy=(555, 1055))
     assert sorted(calls) == [10, 131388]
     assert primary is not None and primary["texts"][0]["text"] == "前景"
+    assert primary.get("class_name") == "Chrome_WidgetWin_1"
     assert session._last_settle_uia_after_index == 0
     assert set(session._last_settle_uia_by_hwnd) == {10, 131388}
+    assert session._last_settle_uia_by_hwnd[131388].get("class_name") == "Shell_TrayWnd"
     assert hit is not None
     assert hit["hwnd"] == 131388
     assert hit["texts"][0]["text"] == "搜尋"
 
 
-def test_single_settle_clears_seed_multi_map(tmp_path: Path) -> None:
-    """A later single-hwnd settle drops the event-1 multi map."""
+def test_single_settle_retains_taskbar_seed_entry(tmp_path: Path) -> None:
+    """A later single-hwnd settle drops non-shell seed entries but keeps taskbar."""
     from src.recorder.capture import RecordingSession
     from src.recorder.models import RecordedEvent
     from src.recorder.window_snapshot import ClickWindowInfo
@@ -510,6 +516,7 @@ def test_single_settle_clears_seed_multi_map(tmp_path: Path) -> None:
     session._last_settle_uia_by_hwnd = {
         10: {
             "hwnd": 10,
+            "class_name": "Chrome_WidgetWin_1",
             "window": [0, 0, 10, 10],
             "inputs": [],
             "scrollbars": [],
@@ -517,6 +524,7 @@ def test_single_settle_clears_seed_multi_map(tmp_path: Path) -> None:
         },
         20: {
             "hwnd": 20,
+            "class_name": "Shell_TrayWnd",
             "window": [0, 1040, 100, 40],
             "inputs": [],
             "scrollbars": [],
@@ -524,21 +532,26 @@ def test_single_settle_clears_seed_multi_map(tmp_path: Path) -> None:
         },
     }
     session._last_settle_uia_after_index = 0
-    with patch(
-        "src.recorder.uia_input_boxes.snapshot_uia_screen",
-        return_value={
-            "window": [0, 0, 10, 10],
-            "inputs": [],
-            "scrollbars": [],
-            "texts": [{"bbox": [0, 0, 4, 4], "text": "下一步"}],
-        },
+    with (
+        patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            return_value={
+                "window": [0, 0, 10, 10],
+                "inputs": [],
+                "scrollbars": [],
+                "texts": [{"bbox": [0, 0, 4, 4], "text": "下一步"}],
+            },
+        ),
+        patch("src.recorder.capture._window_class_name", return_value="Chrome_WidgetWin_1"),
     ):
         session._collect_and_publish_settle_uia(10, after_event_index=1)
-    assert session._last_settle_uia_by_hwnd == {}
+    assert set(session._last_settle_uia_by_hwnd) == {20}
+    assert session._last_settle_uia_by_hwnd[20]["texts"][0]["text"] == "工作列"
     assert session._last_settle_uia_after_index == 1
     assert session._last_settle_uia is not None
     assert session._last_settle_uia["texts"][0]["text"] == "下一步"
-    # Generation matches event 1 → event 2 press, but taskbar is no longer cached.
+    assert session._last_settle_uia.get("class_name") == "Chrome_WidgetWin_1"
+    # Generation matches event 1 → event 2 press; taskbar seed entry still attaches.
     session._events = [
         RecordedEvent(
             index=1,
@@ -562,8 +575,419 @@ def test_single_settle_clears_seed_multi_map(tmp_path: Path) -> None:
         is_taskbar=True,
         class_name="Shell_TrayWnd",
     )
-    assert session._cached_uia_before(other, cursor_xy=(5, 1055)) is None
+    hit = session._cached_uia_before(other, cursor_xy=(5, 1055))
+    assert hit is not None
+    assert hit["hwnd"] == 20
+    assert hit["texts"][0]["text"] == "工作列"
     assert session._cached_uia_before(_copilot_window(10), cursor_xy=(5, 5)) is not None  # type: ignore[arg-type]
+
+
+def test_seed_then_settle_keeps_taskbar_for_later_click(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Event-012 shape: seed app+taskbar, settle under app, taskbar click still UIA."""
+    from src.recorder.capture import RecordingSession
+    from src.recorder.models import RecordedEvent
+    from src.recorder.window_snapshot import ClickWindowInfo, WindowInfo
+
+    def _snap(hwnd: int) -> dict:
+        label = {10: "前景", 131388: "搜尋"}.get(hwnd, f"hwnd{hwnd}")
+        return {
+            "window": [0, 0, 40, 40],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [0, 0, 8, 8], "text": label}],
+        }
+
+    windows = (
+        WindowInfo(
+            hwnd=10,
+            title="App",
+            pid=1,
+            left=0,
+            top=0,
+            width=800,
+            height=600,
+            is_minimized=False,
+            is_maximized=True,
+            class_name="Chrome_WidgetWin_1",
+            process_name="app.exe",
+        ),
+        WindowInfo(
+            hwnd=131388,
+            title="",
+            pid=2,
+            left=0,
+            top=1040,
+            width=1920,
+            height=40,
+            is_minimized=False,
+            is_maximized=False,
+            class_name="Shell_TrayWnd",
+            process_name="explorer.exe",
+        ),
+    )
+    session = RecordingSession(runs_root=tmp_path)
+    monkeypatch.setattr(session, "_foreground_hwnd", lambda: 10)
+    taskbar = ClickWindowInfo(
+        hwnd=131388,
+        title="",
+        process_name="explorer.exe",
+        left=0,
+        top=1040,
+        width=1920,
+        height=40,
+        is_maximized=False,
+        is_taskbar=True,
+        class_name="Shell_TrayWnd",
+    )
+    with (
+        patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            side_effect=_snap,
+        ),
+        patch("src.recorder.capture._window_class_name", return_value="Chrome_WidgetWin_1"),
+    ):
+        session._collect_and_publish_seed_uia_screens(windows)
+        session._collect_and_publish_settle_uia(10, after_event_index=1)
+    session._events = [
+        RecordedEvent(
+            index=1,
+            timestamp_utc="t",
+            kind="click",
+            cursor_xy=(1, 1),
+            screenshot_path="x.jpeg",
+            monitor_index=1,
+            monitor_offset=(0, 0),
+        )
+    ]
+    assert set(session._last_settle_uia_by_hwnd) == {131388}
+    hit = session._cached_uia_before(taskbar, cursor_xy=(555, 1055))
+    assert hit is not None
+    assert hit["hwnd"] == 131388
+    assert hit["texts"][0]["text"] == "搜尋"
+    assert hit.get("class_name") == "Shell_TrayWnd"
+
+
+def test_settle_retains_hover_peer_and_drops_seed_non_shell(tmp_path: Path) -> None:
+    """Settle keeps hover-warmed peers; plain seed non-shell entries still drop."""
+    from src.recorder.capture import RecordingSession
+    from src.recorder.models import RecordedEvent
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    session = RecordingSession(runs_root=tmp_path)
+    session._last_settle_uia_by_hwnd = {
+        10: {
+            "hwnd": 10,
+            "class_name": "Chrome_WidgetWin_1",
+            "window": [0, 0, 10, 10],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [0, 0, 4, 4], "text": "種子前景"}],
+        },
+        30: {
+            "hwnd": 30,
+            "class_name": "Chrome_WidgetWin_1",
+            "cache_kind": "hover",
+            "window": [100, 100, 200, 150],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [0, 0, 4, 4], "text": "懸停對話框"}],
+        },
+        20: {
+            "hwnd": 20,
+            "class_name": "Shell_TrayWnd",
+            "window": [0, 1040, 100, 40],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [0, 0, 4, 4], "text": "工作列"}],
+        },
+    }
+    with (
+        patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            return_value={
+                "window": [0, 0, 10, 10],
+                "inputs": [],
+                "scrollbars": [],
+                "texts": [{"bbox": [0, 0, 4, 4], "text": "下一步"}],
+            },
+        ),
+        patch("src.recorder.capture._window_class_name", return_value="Chrome_WidgetWin_1"),
+    ):
+        session._collect_and_publish_settle_uia(10, after_event_index=1)
+    assert set(session._last_settle_uia_by_hwnd) == {20, 30}
+    assert session._last_settle_uia_by_hwnd[30]["cache_kind"] == "hover"
+    session._events = [
+        RecordedEvent(
+            index=1,
+            timestamp_utc="t",
+            kind="click",
+            cursor_xy=(1, 1),
+            screenshot_path="x.jpeg",
+            monitor_index=1,
+            monitor_offset=(0, 0),
+        )
+    ]
+    hover_win = ClickWindowInfo(
+        hwnd=30,
+        title="Dialog",
+        process_name="app.exe",
+        left=100,
+        top=100,
+        width=200,
+        height=150,
+        is_maximized=False,
+        class_name="Chrome_WidgetWin_1",
+    )
+    hit = session._cached_uia_before(hover_win, cursor_xy=(150, 120))
+    assert hit is not None
+    assert hit["texts"][0]["text"] == "懸停對話框"
+    assert hit.get("cache_kind") == "hover"
+
+
+def test_hover_findall_warms_uncached_hwnd(tmp_path: Path) -> None:
+    """Idle EFP worker FindAlls an uncached eligible hwnd into by_hwnd."""
+    from src.recorder.capture import RecordingSession, _DeferredCaptureJob
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    session = RecordingSession(runs_root=tmp_path)
+    session._accepting_input = True
+    session._idle_efp_generation = 1
+    session._uia_status_state = "green"
+    session._last_settle_uia = {
+        "hwnd": 10,
+        "class_name": "Chrome_WidgetWin_1",
+        "window": [0, 0, 10, 10],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [],
+    }
+    session._last_settle_uia_after_index = 0
+    session._last_settle_uia_by_hwnd = {}
+    hover_win = ClickWindowInfo(
+        hwnd=55,
+        title="Other",
+        process_name="other.exe",
+        left=50,
+        top=50,
+        width=400,
+        height=300,
+        is_maximized=False,
+        class_name="Chrome_WidgetWin_1",
+    )
+    snap_calls: list[int] = []
+
+    def _snap(hwnd: int) -> dict:
+        snap_calls.append(int(hwnd))
+        return {
+            "window": [50, 50, 400, 300],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [0, 0, 8, 8], "text": "懸停"}],
+        }
+
+    with (
+        patch(
+            "src.recorder.uia_input_boxes.uia_text_element_at_point",
+            return_value=("x", (0, 0, 1, 1), "text", "Leaf", "V"),
+        ),
+        patch(
+            "src.recorder.capture.resolve_click_window",
+            return_value=hover_win,
+        ),
+        patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            side_effect=_snap,
+        ),
+    ):
+        session._worker_idle_efp(
+            _DeferredCaptureJob(
+                action="idle_efp",
+                cursor_xy=(100, 100),
+                meta={"generation": 1},
+            )
+        )
+    assert snap_calls == [55]
+    assert 55 in session._last_settle_uia_by_hwnd
+    warmed = session._last_settle_uia_by_hwnd[55]
+    assert warmed.get("cache_kind") == "hover"
+    assert warmed.get("class_name") == "Chrome_WidgetWin_1"
+    assert warmed["texts"][0]["text"] == "懸停"
+    # after_index / primary unchanged
+    assert session._last_settle_uia_after_index == 0
+    assert session._last_settle_uia is not None
+    assert session._last_settle_uia["hwnd"] == 10
+    # No events yet → previous_index 0 matches seed/ready after_index.
+    hit = session._cached_uia_before(hover_win, cursor_xy=(100, 100))
+    assert hit is not None
+    assert hit["hwnd"] == 55
+    assert hit.get("cache_kind") == "hover"
+
+
+def test_hover_findall_skips_when_already_cached_or_yellow_or_mismatch(
+    tmp_path: Path,
+) -> None:
+    from src.recorder.capture import RecordingSession, _DeferredCaptureJob
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    hover_win = ClickWindowInfo(
+        hwnd=55,
+        title="Other",
+        process_name="other.exe",
+        left=50,
+        top=50,
+        width=400,
+        height=300,
+        is_maximized=False,
+        class_name="Chrome_WidgetWin_1",
+    )
+    flyout = ClickWindowInfo(
+        hwnd=66,
+        title="快顯主機",
+        process_name="explorer.exe",
+        left=50,
+        top=50,
+        width=200,
+        height=100,
+        is_maximized=False,
+        is_flyout=True,
+        class_name="Windows.UI.Core.CoreWindow",
+    )
+    noise = ClickWindowInfo(
+        hwnd=77,
+        title="",
+        process_name="explorer.exe",
+        left=0,
+        top=0,
+        width=10,
+        height=10,
+        is_maximized=False,
+        class_name="DummyDWMListenerWindow",
+    )
+
+    def _run(session: RecordingSession) -> list[int]:
+        calls: list[int] = []
+
+        def _snap(hwnd: int) -> dict:
+            calls.append(int(hwnd))
+            return {
+                "window": [0, 0, 10, 10],
+                "inputs": [],
+                "scrollbars": [],
+                "texts": [],
+            }
+
+        with (
+            patch(
+                "src.recorder.uia_input_boxes.uia_text_element_at_point",
+                return_value=("x", (0, 0, 1, 1), "text", "N", "V"),
+            ),
+            patch(
+                "src.recorder.capture.resolve_click_window",
+                return_value=hover_win,
+            ),
+            patch(
+                "src.recorder.uia_input_boxes.snapshot_uia_screen",
+                side_effect=_snap,
+            ),
+        ):
+            session._worker_idle_efp(
+                _DeferredCaptureJob(
+                    action="idle_efp",
+                    cursor_xy=(100, 100),
+                    meta={"generation": 1},
+                )
+            )
+        return calls
+
+    # Already in by_hwnd
+    session = RecordingSession(runs_root=tmp_path)
+    session._accepting_input = True
+    session._idle_efp_generation = 1
+    session._uia_status_state = "green"
+    session._last_settle_uia_after_index = 0
+    session._last_settle_uia = {"hwnd": 10, "window": [0, 0, 1, 1]}
+    session._last_settle_uia_by_hwnd = {
+        55: {"hwnd": 55, "cache_kind": "hover", "class_name": "Chrome_WidgetWin_1"}
+    }
+    assert _run(session) == []
+
+    # Matches last_settle hwnd
+    session._last_settle_uia_by_hwnd = {}
+    session._last_settle_uia = {"hwnd": 55, "window": [0, 0, 1, 1]}
+    assert _run(session) == []
+
+    # Yellow settle in flight
+    session._last_settle_uia = {"hwnd": 10, "window": [0, 0, 1, 1]}
+    session._uia_status_state = "yellow"
+    assert _run(session) == []
+
+    # Generation mismatch for next press
+    session._uia_status_state = "green"
+    session._last_settle_uia_after_index = 0
+    from src.recorder.models import RecordedEvent
+
+    session._events = [
+        RecordedEvent(
+            index=3,
+            timestamp_utc="t",
+            kind="click",
+            cursor_xy=(1, 1),
+            screenshot_path="x.jpeg",
+            monitor_index=1,
+            monitor_offset=(0, 0),
+        )
+    ]
+    assert _run(session) == []
+
+    # Flyout / noise ineligible
+    session._events = []
+    session._last_settle_uia_after_index = 0
+    with (
+        patch(
+            "src.recorder.uia_input_boxes.uia_text_element_at_point",
+            return_value=("x", (0, 0, 1, 1), "text", "N", "V"),
+        ),
+        patch(
+            "src.recorder.capture.resolve_click_window",
+            return_value=flyout,
+        ),
+        patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            return_value={"window": [0, 0, 1, 1], "inputs": [], "scrollbars": [], "texts": []},
+        ) as snap,
+    ):
+        session._worker_idle_efp(
+            _DeferredCaptureJob(
+                action="idle_efp",
+                cursor_xy=(100, 100),
+                meta={"generation": 1},
+            )
+        )
+        assert snap.call_count == 0
+    with (
+        patch(
+            "src.recorder.uia_input_boxes.uia_text_element_at_point",
+            return_value=("x", (0, 0, 1, 1), "text", "N", "V"),
+        ),
+        patch(
+            "src.recorder.capture.resolve_click_window",
+            return_value=noise,
+        ),
+        patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            return_value={"window": [0, 0, 1, 1], "inputs": [], "scrollbars": [], "texts": []},
+        ) as snap,
+    ):
+        session._worker_idle_efp(
+            _DeferredCaptureJob(
+                action="idle_efp",
+                cursor_xy=(100, 100),
+                meta={"generation": 1},
+            )
+        )
+        assert snap.call_count == 0
 
 
 def test_cross_window_press_skips_stale_settle_cache(tmp_path: Path) -> None:

@@ -28,33 +28,67 @@ def test_collect_and_publish_settle_uia_emits_yellow_then_green() -> None:
             "texts": [{"bbox": [0, 0, 1, 1], "text": "A"}],
         }
 
-    with patch("src.recorder.uia_input_boxes.snapshot_uia_screen", side_effect=_snap):
+    with (
+        patch("src.recorder.uia_input_boxes.snapshot_uia_screen", side_effect=_snap),
+        patch("src.recorder.capture._window_class_name", return_value="Chrome_WidgetWin_1"),
+    ):
         out = session._collect_and_publish_settle_uia(42, after_event_index=3)
 
     assert out is not None
     assert [row["state"] for row in statuses] == ["yellow", "green"]
     assert statuses[-1]["after_index"] == 3
+    assert session._last_settle_uia_by_hwnd == {}
 
 
 def test_collect_and_publish_settle_uia_emits_red_on_fail() -> None:
     statuses: list[dict] = []
     session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
     session.set_on_uia_status(statuses.append)
+    session._last_settle_uia_by_hwnd = {
+        10: {
+            "hwnd": 10,
+            "class_name": "Chrome_WidgetWin_1",
+            "window": [0, 0, 1, 1],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [],
+        },
+        20: {
+            "hwnd": 20,
+            "class_name": "Shell_TrayWnd",
+            "window": [0, 0, 1, 1],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [],
+        },
+    }
 
     with patch("src.recorder.uia_input_boxes.snapshot_uia_screen", return_value=None):
         out = session._collect_and_publish_settle_uia(42, after_event_index=1)
 
     assert out is None
     assert [row["state"] for row in statuses] == ["yellow", "red"]
+    assert set(session._last_settle_uia_by_hwnd) == {20}
 
 
 def test_collect_and_publish_settle_uia_red_for_bad_hwnd() -> None:
     statuses: list[dict] = []
     session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
     session.set_on_uia_status(statuses.append)
+    session._last_settle_uia_by_hwnd = {
+        20: {
+            "hwnd": 20,
+            "class_name": "Shell_TrayWnd",
+            "window": [0, 0, 1, 1],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [],
+        },
+    }
     assert session._collect_and_publish_settle_uia(0, after_event_index=2) is None
     assert statuses[-1]["state"] == "red"
     assert statuses[-1]["after_index"] == 2
+    assert set(session._last_settle_uia_by_hwnd) == {20}
 
 
 def test_persist_pointer_pulses_attach_then_red(tmp_path: Path) -> None:

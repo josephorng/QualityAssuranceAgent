@@ -306,6 +306,16 @@ _SPECIAL_KEYS = frozenset(
         keyboard.Key.f12,
     }
 )
+# Lock toggles only affect subsequent typing / LED state. Remote desktop and
+# VM tools often inject them to sync lock state; they are not useful replay steps
+# because typed text is already captured as the resulting characters.
+_LOCK_KEYS = frozenset(
+    {
+        keyboard.Key.caps_lock,
+        keyboard.Key.num_lock,
+        keyboard.Key.scroll_lock,
+    }
+)
 _HOTKEY_SUPPRESS_KEYS = frozenset(
     {
         keyboard.Key.ctrl,
@@ -6774,6 +6784,13 @@ class RecordingSession:
             with self._lock:
                 self._pressed_modifiers.add(mod)
             self._log_key_press(action="mod_down", token=mod, key=key, ime=ime)
+            return
+
+        if key in _LOCK_KEYS:
+            # Still pop hardware sample above; never emit a key_press/hotkey step.
+            self._log_key_press(
+                action="ignored_lock", token=_key_token(key), key=key, ime=ime
+            )
             return
 
         try:

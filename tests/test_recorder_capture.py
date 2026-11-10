@@ -1719,6 +1719,42 @@ def test_backspace_without_typing_records_key_press(tmp_path) -> None:
     assert keys == ["backspace", "left", "home", "end"]
 
 
+def test_lock_keys_are_not_recorded(tmp_path) -> None:
+    """Caps/Num/Scroll Lock are often injected by remote/VM sync; skip as steps."""
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            session._on_key_press(Key.caps_lock)
+            session._on_key_press(Key.num_lock)
+            session._on_key_press(Key.scroll_lock)
+            session._on_key_press(KeyCode.from_char("a"))
+            session._on_key_press(Key.tab)
+        finally:
+            session.stop()
+
+    assert session.event_count() == 2
+    text_event = json.loads(
+        (run_dir / "events" / "event_001.json").read_text(encoding="utf-8")
+    )
+    tab_event = json.loads(
+        (run_dir / "events" / "event_002.json").read_text(encoding="utf-8")
+    )
+    assert text_event["kind"] == "text_input"
+    assert text_event["text"] == "a"
+    assert tab_event["kind"] == "key_press"
+    assert tab_event["key"] == "tab"
+
+
 def test_delete_all_pending_chars_emits_no_text_input(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
 

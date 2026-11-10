@@ -258,7 +258,12 @@ def _nearby_object_phrases(instruction: str) -> list[str] | None:
 def _element_from_point_args(
     element_from_point: dict[str, Any] | None,
 ) -> dict[str, str]:
-    """Feasibility: copy recorded ElementFromPoint Name/Value into tool args."""
+    """Copy press-time ElementFromPoint Name/Value into tool args (EFP channel).
+
+    These are separate from FindAll hub identity (`instruction` / `anchor_text`).
+    Replay uses ``name``/``value`` only for live EFP verify — never as the
+    FindAll/OCR similarity query, and never to overwrite the hub label.
+    """
     if not isinstance(element_from_point, dict):
         return {}
     out: dict[str, str] = {}
@@ -277,7 +282,13 @@ def _move_mouse_call(
     vision: dict[str, Any] | None = None,
     element_from_point: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build move_mouse with a short target + optional nearby_objects / click_window."""
+    """Build move_mouse with a short target + optional nearby_objects / click_window.
+
+    FindAll / hub identity stays on ``instruction`` + ``anchor_text`` (from
+    ``resolved``). Press-time EFP is appended as ``name``/``value`` only and must
+    not replace the hub when the two differ (e.g. ``Launch 檔案總管`` vs
+    ``CoreInput``).
+    """
     resolved = (target if target is not None else _short_move_target(instruction)).strip()
     if not resolved:
         resolved = instruction.strip()
@@ -316,6 +327,7 @@ def _move_mouse_call(
             args["landmark_geometry"] = geometry
     if click_window is not None:
         args["click_window"] = click_window
+    # EFP side-car only — never rewrite instruction/anchor_text from EFP.
     args.update(_element_from_point_args(element_from_point))
     return _call("move_mouse", **args)
 

@@ -197,12 +197,40 @@ def test_choose_misses_when_icon_ocr_does_not_match() -> None:
     assert hit is None
 
 
-def test_choose_input_uses_uia_field_not_element_from_point() -> None:
+def test_choose_input_prefers_usable_element_from_point() -> None:
     # Mapped center for _RECORDED_BBOX / windows is (1030, 528).
+    input_box = (1000, 510, 80, 40)
+    leaf_box = (1020, 520, 30, 20)
+
+    def probe(x: int, y: int):
+        return (
+            "下載 (已釘選)",
+            leaf_box,
+            "list_item",
+            "下載 (已釘選)",
+            "下載 (已釘選)",
+        )
+
+    hit = _choose(
+        recorded_text="輸入欄",
+        ocr_boxes=[(_OCR_BOX, "輸入欄")],
+        uia_boxes=[(_UIA_BOX, "公式列")],
+        uia_input_boxes=[input_box],
+        point_probe_fn=probe,
+    )
+    assert hit is not None
+    # Shell status `` (已釘選)`` stripped by resolve_usable_uia_probe_label.
+    assert hit.label == "下載"
+    assert hit.source == "element_from_point"
+    assert hit.bbox == leaf_box
+
+
+def test_choose_input_falls_back_to_uia_field_when_efp_unusable() -> None:
     input_box = (1000, 510, 80, 40)
 
     def probe(x: int, y: int):
-        return "公式列", (1000, 500, 80, 40)
+        # Empty label → unusable; keep class input hit.
+        return "", (1020, 520, 30, 20), "text", "", ""
 
     hit = _choose(
         recorded_text="輸入欄",
@@ -217,9 +245,48 @@ def test_choose_input_uses_uia_field_not_element_from_point() -> None:
     assert hit.bbox == input_box
 
 
-def test_choose_input_misses_without_uia_field() -> None:
+def test_choose_input_rejects_weak_coreinput_efp_hub() -> None:
+    """CoreInput must not replace FindAll/class hub for recorded 輸入欄."""
+    input_box = (1000, 510, 80, 40)
+
     def probe(x: int, y: int):
-        return "公式列", (1000, 500, 80, 40)
+        return "CoreInput", (1020, 520, 30, 20), "text", "CoreInput", ""
+
+    hit = _choose(
+        recorded_text="輸入欄",
+        ocr_boxes=[(_OCR_BOX, "輸入欄")],
+        uia_boxes=[(_UIA_BOX, "公式列")],
+        uia_input_boxes=[input_box],
+        point_probe_fn=probe,
+    )
+    assert hit is not None
+    assert hit.label == "輸入欄"
+    assert hit.source == "uia_input"
+    assert hit.bbox == input_box
+
+
+def test_choose_input_uses_efp_without_uia_field() -> None:
+    leaf_box = (1020, 520, 30, 20)
+
+    def probe(x: int, y: int):
+        return "公式列", leaf_box, "text", "公式列", ""
+
+    hit = _choose(
+        recorded_text="輸入欄",
+        ocr_boxes=[(_OCR_BOX, "輸入欄")],
+        uia_boxes=[(_UIA_BOX, "公式列")],
+        uia_input_boxes=[],
+        point_probe_fn=probe,
+    )
+    assert hit is not None
+    assert hit.label == "公式列"
+    assert hit.source == "element_from_point"
+    assert hit.bbox == leaf_box
+
+
+def test_choose_input_misses_without_uia_field_or_usable_efp() -> None:
+    def probe(x: int, y: int):
+        return "", (1020, 520, 30, 20), "text", "", ""
 
     hit = _choose(
         recorded_text="輸入欄",
@@ -2141,6 +2208,11 @@ def test_attempt_input_repair_keeps_class_and_nearby(tmp_path: Path, monkeypatch
     monkeypatch.setattr(
         "src.recorder.window_snapshot.find_matching_click_window",
         lambda _cw: live,
+    )
+    # No usable EFP leaf → repair keeps the class input hit.
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.uia_text_element_at_point",
+        lambda x, y: None,
     )
     request = UiaReplayRepairRequest(
         recording_dir=run,

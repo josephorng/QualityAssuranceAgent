@@ -39,6 +39,7 @@ from cua_mcp.select_mouse_target import (
     _MOUSE_FILTER_SIMILARITY_THRESHOLD,
     _box_edge_gap,
     _detect_mouse_targets_from_bgr,
+    _detection_from_bbox,
     _detection_similarity_to_query,
     _detections_from_uia_prefetched,
     _detections_label_similar,
@@ -3880,6 +3881,83 @@ def build_vision_context_full_image(
     return result
 
 
+def _bboxes_overlap_xywh(
+    a: tuple[int, int, int, int],
+    b: tuple[int, int, int, int],
+) -> bool:
+    ax, ay, aw, ah = (int(v) for v in a[:4])
+    bx, by, bw, bh = (int(v) for v in b[:4])
+    if aw <= 0 or ah <= 0 or bw <= 0 or bh <= 0:
+        return False
+    return not (
+        ax + aw <= bx or bx + bw <= ax or ay + ah <= by or by + bh <= ay
+    )
+
+
+def _efp_peer_detection_from_payload(
+    element_from_point: dict[str, Any] | None,
+    *,
+    monitor_offset: tuple[int, int],
+    local_x: int,
+    local_y: int,
+    existing: list[UiDetection],
+) -> UiDetection | None:
+    """Build a FindAll-shaped UIA text peer from stored press-time EFP.
+
+    Returns ``None`` when bbox/label is missing or unusable, or when an
+    existing detection already carries the same label and covers the click /
+    overlaps the leaf box (dedupe).
+    """
+    if not isinstance(element_from_point, dict):
+        return None
+    from src.recorder.uia_input_boxes import (
+        is_usable_uia_landmark_label,
+        is_weak_efp_hub_label,
+        resolve_usable_uia_probe_label,
+    )
+
+    name = str(element_from_point.get("name") or "").strip()
+    value = str(element_from_point.get("value") or "").strip()
+    label = resolve_usable_uia_probe_label(name=name, value=value)
+    # Weak host generics (CoreInput) stay EFP-only; do not inject as FindAll peers.
+    if (
+        not label
+        or not is_usable_uia_landmark_label(label)
+        or is_weak_efp_hub_label(label)
+    ):
+        return None
+    raw_bbox = element_from_point.get("bbox")
+    if not (isinstance(raw_bbox, (list, tuple)) and len(raw_bbox) == 4):
+        return None
+    try:
+        sx, sy, sw, sh = (int(v) for v in raw_bbox[:4])
+    except (TypeError, ValueError):
+        return None
+    if sw <= 0 or sh <= 0:
+        return None
+    origin_x, origin_y = int(monitor_offset[0]), int(monitor_offset[1])
+    local_bbox = (sx - origin_x, sy - origin_y, sw, sh)
+    if not point_in_rect_xywh(int(local_x), int(local_y), local_bbox):
+        # Click must still lie in the leaf; otherwise keep FindAll-only ranking.
+        return None
+    label_n = _visible_text(label).casefold()
+    for det in existing:
+        if _visible_text(det.text).casefold() != label_n:
+            continue
+        if point_in_rect_xywh(int(local_x), int(local_y), det.bbox):
+            return None
+        if _bboxes_overlap_xywh(local_bbox, det.bbox):
+            return None
+    control_type = str(element_from_point.get("control_type") or "").strip() or None
+    return _detection_from_bbox(
+        local_bbox,
+        YOLO_CLASS_TEXT,
+        text=label,
+        source="uia",
+        uia_control_type=control_type,
+    )
+
+
 def build_vision_context_at_point(
     event: RecordedEvent,
     *,
@@ -4024,6 +4102,16 @@ def build_vision_context_at_point(
     except RuntimeError as exc:
         all_detections = []
         yolo_error = str(exc)
+
+    efp_peer = _efp_peer_detection_from_payload(
+        event.element_from_point if isinstance(event.element_from_point, dict) else None,
+        monitor_offset=screenshot_offset,
+        local_x=local_x,
+        local_y=local_y,
+        existing=all_detections,
+    )
+    if efp_peer is not None:
+        all_detections = [*all_detections, efp_peer]
 
     nearest: list[UiDetection] = []
     candidate_text = ""

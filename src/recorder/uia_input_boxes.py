@@ -295,6 +295,34 @@ def is_usable_uia_landmark_label(text: str | None) -> bool:
     return True
 
 
+# Host / chrome leaves that must not replace a FindAll hub label (EFP channel
+# only). Keep in sync with repair promote gates.
+_WEAK_EFP_HUB_LABELS = frozenset(
+    {
+        "coreinput",
+        "core window",
+        "corewindow",
+    }
+)
+
+
+def is_weak_efp_hub_label(text: str | None) -> bool:
+    """True when an EFP leaf name is too generic to become the hub instruction.
+
+    FindAll labels (e.g. ``Launch 檔案總管``) stay the hub; weak EFP names like
+    ``CoreInput`` remain on the ``name``/``value`` side-car for verify only.
+    """
+    visible = canonicalize_uia_shell_status_label(text)
+    if not visible:
+        return True
+    lowered = visible.casefold()
+    if lowered in _WEAK_EFP_HUB_LABELS:
+        return True
+    if lowered.startswith("windows.ui."):
+        return True
+    return False
+
+
 def uia_label_combine_name_value(name: str, value: str) -> str:
     """Build a landmark label from UIA Name and ValuePattern CurrentValue.
 
@@ -703,12 +731,15 @@ def uia_text_element_at_point(
 
 
 def element_from_point_name_value(x: int, y: int) -> dict[str, Any]:
-    """Feasibility probe: raw UIA Name/Value under a screen point.
+    """Feasibility probe: raw UIA Name/Value (+ leaf bbox) under a screen point.
 
     Always returns ``{"element_from_point_s": float}`` for the wall time of
     the probe. When Name and/or Value are non-empty, also includes
-    ``"name"`` / ``"value"``. Used to stash ElementFromPoint results on
-    recorded pointer steps without requiring FindAll to expose the same leaf.
+    ``"name"`` / ``"value"``. When the live leaf has a box, also includes
+    screen ``"bbox"`` xywh and ``"control_type"`` (UIA suffix token). Used to
+    stash ElementFromPoint results on recorded pointer steps without requiring
+    FindAll to expose the same leaf; analysis may inject the leaf as a
+    FindAll-shaped peer for instruction naming.
     """
     started = time.perf_counter()
     probed = uia_text_element_at_point(int(x), int(y))
@@ -721,6 +752,17 @@ def element_from_point_name_value(x: int, y: int) -> dict[str, Any]:
     if name or value:
         out["name"] = name
         out["value"] = value
+    raw_box = probed[1]
+    if isinstance(raw_box, (list, tuple)) and len(raw_box) == 4:
+        try:
+            bbox = [int(v) for v in raw_box]
+        except (TypeError, ValueError):
+            bbox = []
+        if len(bbox) == 4 and bbox[2] > 0 and bbox[3] > 0:
+            out["bbox"] = bbox
+    control_type = str(probed[2] or "").strip()
+    if control_type:
+        out["control_type"] = control_type
     return out
 
 

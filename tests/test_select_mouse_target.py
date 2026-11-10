@@ -7591,6 +7591,75 @@ def test_pending_yolo_boxes_inside_uia_applies_offset() -> None:
     assert matched[0].bbox == (110, 60, 12, 12)
 
 
+def test_pending_yolo_detections_hydrates_unlabeled_geometry() -> None:
+    """Deferred ocr_boxes become unlabeled YOLO dets; OCR is not finished."""
+    from cua_mcp.select_mouse_target import (
+        YOLO_CLASS_ELEMENT,
+        YOLO_CLASS_TEXT,
+        _pending_yolo_detections,
+    )
+
+    pending = _ocr_pending_for_boxes(
+        [
+            ((10, 10, 20, 12), YOLO_CLASS_TEXT),
+            ((40, 50, 14, 14), YOLO_CLASS_ELEMENT),
+            ((1, 1, 8, 8), YOLO_CLASS_INPUT),  # filtered out
+        ],
+        coord_offset=(100, 200),
+    )
+    dets = _pending_yolo_detections(
+        [pending],
+        class_ids=frozenset({YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT}),
+    )
+    assert len(dets) == 2
+    assert dets[0].bbox == (110, 210, 20, 12)
+    assert dets[0].source == "yolo"
+    assert dets[0].text in (None, "")
+    assert dets[0].class_id == YOLO_CLASS_TEXT
+    assert dets[1].bbox == (140, 250, 14, 14)
+    assert dets[1].class_id == YOLO_CLASS_ELEMENT
+    # Pending left unfinished for soft-miss / subtarget OCR.
+    assert len(pending.ocr_boxes) == 3
+
+
+def test_constellation_yolo_dets_from_deferred_timing_near_synth() -> None:
+    """Input-only yolo_raw timing still yields TEXT geometry from _ocr_pending."""
+    from cua_mcp.select_mouse_target import (
+        YOLO_CLASS_TEXT,
+        _constellation_yolo_dets_from_deferred_timing,
+        _findall_pool_near_synth,
+    )
+
+    # Image-local near synth (75,277) after offset (0,0).
+    pending = _ocr_pending_for_boxes(
+        [((65, 270, 20, 14), YOLO_CLASS_TEXT)],
+        coord_offset=(0, 0),
+    )
+    timing = {
+        "yolo_s": 0.5,
+        # Returned finish candidates would be inputs only under defer_ocr.
+        "_ocr_pending": [pending],
+        "ocr_pending": [pending],
+    }
+    yolo_dets = _constellation_yolo_dets_from_deferred_timing(timing)
+    assert len(yolo_dets) == 1
+    assert yolo_dets[0].source == "yolo"
+    assert yolo_dets[0].cx == 75
+    assert yolo_dets[0].cy == 277
+
+    toolbar = _detection_from_bbox(
+        (206, 84, 40, 40), YOLO_CLASS_TEXT, text="貼上", source="uia"
+    )
+    pool = _findall_pool_near_synth(
+        [toolbar, *yolo_dets],
+        synth=(75, 277),
+        k=20,
+    )
+    assert pool
+    assert pool[0] is yolo_dets[0]
+    assert pending.ocr_boxes  # OCR not finished
+
+
 def test_uia_yolo_subtarget_preferred_class_from_hub_wrapper() -> None:
     from cua_mcp.select_mouse_target import _uia_yolo_subtarget_preferred_class
 

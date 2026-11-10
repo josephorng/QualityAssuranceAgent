@@ -6,8 +6,9 @@ UIA label must cover that point, before the instruction is rewritten.
 
 Scrollbar and input class targets are special: OCR confirms ``滾動條`` /
 ``輸入欄``, then the live UIA control under the mapped point becomes the
-primary (scrollbar keeps track percent). ``ElementFromPoint`` text names are
-never used for those class targets.
+primary (scrollbar keeps track percent). For ``輸入欄``, a usable
+``ElementFromPoint`` leaf Name/Value is preferred when present (named nav
+leaves inside a bare pane); ``滾動條`` stays class-only and never uses EFP.
 
 On a successful repair the live FindAll snapshot (same shape as a recorded
 ``uia_snapshot``) is stored under ``analysis.uia_replay_repair`` for debug. The
@@ -472,9 +473,10 @@ def choose_uia_replay_repair(
     FindAll (text) falls through to
     ``point_probe_fn(x, y) -> (label, xywh[, control_type[, name, value]])``.
 
-    When ``recorded_text`` is ``滾動條`` / ``輸入欄``, the smallest live UIA
-    control of that class that contains the mapped point wins instead.
-    ``point_probe_fn`` is never used for those class targets.
+    When ``recorded_text`` is ``滾動條``, the smallest live UIA scrollbar that
+    contains the mapped point wins (EFP unused). For ``輸入欄``, a usable EFP
+    leaf is preferred when the probe returns a landmark label; otherwise the
+    smallest live input box under the point wins.
     """
     hit, _reason = choose_uia_replay_repair_with_reason(
         recorded_bbox=recorded_bbox,
@@ -527,6 +529,24 @@ def choose_uia_replay_repair_with_reason(
         )
         return hit, reason
     if text == "輸入欄":
+        from src.recorder.uia_input_boxes import (
+            is_usable_uia_landmark_label,
+            is_weak_efp_hub_label,
+        )
+
+        efp_hit, efp_reason = _choose_icon_leaf_probe_with_reason(
+            center,
+            point_probe_fn=point_probe_fn,
+            uia_n=len(uia_boxes),
+        )
+        # Promote EFP leaf to hub only when it is a usable landmark name — not
+        # a weak host generic (e.g. CoreInput) that would overwrite FindAll.
+        if (
+            efp_hit is not None
+            and is_usable_uia_landmark_label(efp_hit.label)
+            and not is_weak_efp_hub_label(efp_hit.label)
+        ):
+            return efp_hit, efp_reason
         hit, reason = _choose_uia_class_hit_with_reason(
             center,
             uia_input_boxes,

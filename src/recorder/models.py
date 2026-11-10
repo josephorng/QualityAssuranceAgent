@@ -62,8 +62,10 @@ class RecordedEvent:
     # Drag-release UIA tree. Same shape as ``uia_snapshot``.
     end_uia_snapshot: dict[str, Any] | None = None
     # Feasibility: ElementFromPoint at the press cursor
-    # (``{"name", "value", "element_from_point_s"}``). Name/Value compile into
-    # move_mouse args; ``element_from_point_s`` is probe wall time.
+    # (``{"name", "value", "bbox", "control_type", "element_from_point_s"}``).
+    # Name/Value compile into move_mouse args; screen ``bbox`` xywh +
+    # ``control_type`` let analysis inject a FindAll-shaped peer;
+    # ``element_from_point_s`` is probe wall time.
     element_from_point: dict[str, Any] | None = None
     # UI settle measured by consecutive screenshot stability during recording.
     observed_settle_seconds: float | None = None

@@ -105,9 +105,22 @@ While recording, an always-on-top strip (`RecordingUiaStatusOverlay`) shows:
 
 Pixel settle-probe MAD ticks do **not** drive the LED. The strip is click-through and uses `WDA_EXCLUDEFROMCAPTURE` so it should not appear in recording screenshots. There is no hover rectangle — only the LED and the Name/Value label.
 
+### FindAll vs EFP identity channels
+
+Cache `move_mouse` keeps two separate identities:
+
+- **FindAll / hub:** `instruction` + `anchor_text` (+ `control_type`) — Name shortlist and OCR/similarity.
+- **EFP:** press-time `name` / `value` — live ElementFromPoint verify only.
+
+They often disagree (e.g. FindAll `Launch 檔案總管` vs EFP `CoreInput`). Compile never rewrites the hub from EFP. Replay never scores FindAll/OCR text against recorded EFP Name, and never requires EFP Name to equal FindAll Name.
+
 ### Cache replay: EFP gate after landmark geometry
 
-Press-time ElementFromPoint `name` / `value` are compiled onto `move_mouse` args. During cache replay, after non-text `landmark_geometry` picks among class anchors (e.g. many `輸入欄`), live EFP is probed at each candidate (nearest synthesized point first). A Name/Value match commits (`landmark_geometry_efp_pick`). If recorded name/value are blank, geometry behaves as before. If every candidate misses and `vision_mode` is `uia`, the locate soft-misses (UIA/geometry path failed); for `yolo_ocr` the geometry commit is skipped and select continues. When geometry does not commit and recorded Name/Value is still present, the nearby-prefiltered anchor shortlist is resolved by live EFP only (`anchor_efp_pick`, no LLM); a total miss soft-fails the locate. On `uia_yolo_subtarget` (unique UIA pane + in-pane YOLO), recorded EFP is tried first against unlabeled in-pane box centers (`uia_yolo_subtarget_efp`); OCR twin text matching remains the fallback.
+Press-time ElementFromPoint `name` / `value` are compiled onto `move_mouse` args. During cache replay, after non-text `landmark_geometry` picks among class anchors (e.g. many `輸入欄`), live EFP is probed at each candidate (nearest synthesized point first). A Name/Value match commits (`landmark_geometry_efp_pick`). If recorded name/value are blank, geometry behaves as before. If every candidate misses and `vision_mode` is `uia`, the locate soft-misses (UIA/geometry path failed); for `yolo_ocr` the geometry commit is skipped and select continues. When geometry does not commit and recorded Name/Value is still present, the nearby-prefiltered anchor shortlist is resolved by live EFP only (`anchor_efp_pick`, no LLM); a total miss soft-fails the locate. On UIA-first, when constellation + recorded EFP exist, unlabeled deferred YOLO TEXT/ELEMENT geometry (from pending `ocr_boxes`, no OCR yet) is merged with FindAll UIA; near-synth ranking keeps all FindAll/UIA boxes but hard-filters YOLO to the hub class from the wrapper and/or structured `control_type` (`文字`/`text`/`hyperlink`→text, `圖示`/`icon`→element; bare name alone keeps both), then ranks by distance from the synthesized point to each bbox (containment wins); EFP probes nearer pool centers first, then the synth point last (prefer a real FindAll/YOLO box over a bare synth commit). OCR stays deferred until a soft-miss falls through to the full YOLO+OCR path; a miss does not Name-unique commit. On `uia_yolo_subtarget` (unique UIA pane + in-pane YOLO), recorded EFP is tried first against unlabeled in-pane box centers (`uia_yolo_subtarget_efp`); an EFP miss soft-misses without `unique_box_skip_ocr` undo and adopts the OCR-twin fallback instruction before YOLO select. Synth-only constellation hits are not used as a subtarget pane.
+
+### Recording: EFP as FindAll-shaped peer
+
+When press-time EFP has a usable Name/Value and a screen `bbox`, analysis injects one UIA text peer into the detection pool (same shape as FindAll labeled text) before primary promote. Named leaves (e.g. `下載 (已釘選)`) then outrank bare container `輸入欄` for the hub instruction. Replay does not inject a second peer without a point: it resolves via FindAll Name match and the EFP gates above. UIA repair keeps a usable FindAll hub label when present; for recorded `輸入欄` only, a usable EFP leaf may become the hub when FindAll has no better named leaf (weak generics like `CoreInput` are not promoted). `滾動條` stays class-only.
 
 `finalize_stop` joins these threads for up to 2 seconds before it writes `session.json`. A slow step stays on its own thread, so the next click's probe can start while this one is still in UI Automation. A late thread cannot replace a newer probe, because `_start_settle_probe` ignores an event index that is not newer than the probe already running.
 

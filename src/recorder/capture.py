@@ -5085,11 +5085,14 @@ class RecordingSession:
             efp_s = payload.get("element_from_point_s")
             name = payload.get("name")
             value = payload.get("value")
+            bbox = payload.get("bbox")
+            control_type = payload.get("control_type")
             self._log(
                 run_dir,
                 f"element_from_point {where} xy=({x},{y}) "
                 f"element_from_point_s={efp_s} "
-                f"name={name!r} value={value!r}",
+                f"name={name!r} value={value!r} "
+                f"bbox={bbox!r} control_type={control_type!r}",
             )
         return payload if isinstance(payload, dict) else None
 

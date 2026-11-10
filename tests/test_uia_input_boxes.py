@@ -35,6 +35,8 @@ def test_element_from_point_name_value_extracts_raw_strings(monkeypatch) -> None
     payload = element_from_point_name_value(100, 200)
     assert payload["name"] == "展開"
     assert payload["value"] == "1"
+    assert payload["bbox"] == [10, 20, 30, 40]
+    assert payload["control_type"] == "button"
     assert isinstance(payload["element_from_point_s"], float)
     assert payload["element_from_point_s"] >= 0.0
 
@@ -47,6 +49,8 @@ def test_element_from_point_name_value_keeps_timing_when_empty(monkeypatch) -> N
     payload = element_from_point_name_value(1, 2)
     assert "name" not in payload
     assert "value" not in payload
+    assert "bbox" not in payload
+    assert "control_type" not in payload
     assert isinstance(payload["element_from_point_s"], float)
     assert payload["element_from_point_s"] >= 0.0
 
@@ -216,6 +220,12 @@ def test_canonicalize_uia_shell_status_label_strips_taskbar_tails() -> None:
     assert uia_label_prefer_value("Excel - 已釘選", "name") == "Excel"
     assert is_usable_uia_landmark_label("Excel - 已釘選") is True
     assert is_usable_uia_landmark_label("（已釘選）") is False
+    from src.recorder.uia_input_boxes import is_weak_efp_hub_label
+
+    assert is_weak_efp_hub_label("CoreInput") is True
+    assert is_weak_efp_hub_label("Windows.UI.Core.CoreWindow") is True
+    assert is_weak_efp_hub_label("Launch 檔案總管") is False
+    assert is_weak_efp_hub_label("下載 (已釘選)") is False
 
 
 def test_uia_snapshot_image_local_strips_shell_status_from_old_texts() -> None:

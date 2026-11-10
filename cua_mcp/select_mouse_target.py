@@ -5827,6 +5827,22 @@ async def find_mouse_point(
     Successful metadata includes ``timing`` with capture / YOLO / OCR / parse /
     select phase seconds for session time profiles.
     """
+    from src.recorder.window_snapshot import ensure_recorded_click_window_maximized
+
+    maximize_meta = await asyncio.to_thread(
+        ensure_recorded_click_window_maximized, click_window
+    )
+
+    def _with_maximize_meta(
+        point: tuple[int, int, dict[str, Any]],
+    ) -> tuple[int, int, dict[str, Any]]:
+        if maximize_meta is None:
+            return point
+        x, y, meta = point
+        out = dict(meta)
+        out["click_window_maximize"] = maximize_meta
+        return x, y, out
+
     result, fingerprint = await _find_mouse_point_attempt(
         instruction,
         nearby_objects=nearby_objects,
@@ -5840,7 +5856,7 @@ async def find_mouse_point(
         recorded_efp_value=recorded_efp_value,
     )
     if result is not None:
-        return result
+        return _with_maximize_meta(result)
     if fingerprint is None:
         return None
 
@@ -5883,8 +5899,14 @@ async def find_mouse_point(
     if result2 is None:
         return None
     gx, gy, meta = result2
-    return gx, gy, _annotate_ui_change_retry_meta(
-        meta, mad=mad, source=fingerprint.source
+    return _with_maximize_meta(
+        (
+            gx,
+            gy,
+            _annotate_ui_change_retry_meta(
+                meta, mad=mad, source=fingerprint.source
+            ),
+        )
     )
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import os
 import re
+import time
 from dataclasses import asdict, dataclass, replace
 from typing import Any, Sequence
 
@@ -23,6 +24,8 @@ _FALLBACK_CAPTION_HEIGHT = 32
 _CAPTION_HIT_SLACK_PX = 12
 WINDOW_SETTLE_DELAY_S = 0.25
 WINDOW_SETTLE_TITLE_BAR_DELAY_S = 0.45
+_SW_RESTORE = 9
+_SW_MAXIMIZE = 3
 CaptionBounds = tuple[int, int, int, int]
 RectXywh = tuple[int, int, int, int]
 
@@ -287,6 +290,15 @@ def _is_iconic(hwnd: int) -> bool:
     if os.name != "nt" or hwnd == 0:
         return False
     return bool(ctypes.windll.user32.IsIconic(int(hwnd)))
+
+
+def _show_window(hwnd: int, cmd: int) -> bool:
+    if os.name != "nt" or hwnd == 0:
+        return False
+    try:
+        return bool(ctypes.windll.user32.ShowWindow(int(hwnd), int(cmd)))
+    except Exception:
+        return False
 
 
 def _sm_cycaption() -> int:
@@ -2497,6 +2509,55 @@ def find_matching_click_window(
             best = live
             best_area_delta = delta
     return best
+
+
+def ensure_recorded_click_window_maximized(
+    click_window: ClickWindowInfo | dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Maximize the live match when recording had ``is_maximized``.
+
+    Replay precondition only: does nothing when the recorded window was not
+    maximized. Uses hwnd matching (not title+LLM ``maximize_windows``).
+
+    Returns ``None`` when there is no maximize precondition. Otherwise returns a
+    status dict with ``status`` one of ``already_maximized``, ``maximized``,
+    ``skipped_no_match``, ``skipped_taskbar``, ``skipped_flyout``.
+    """
+    info = (
+        click_window
+        if isinstance(click_window, ClickWindowInfo)
+        else ClickWindowInfo.from_dict(click_window) if isinstance(click_window, dict) else None
+    )
+    if info is None or not info.is_maximized:
+        return None
+    if info.is_taskbar:
+        return {"status": "skipped_taskbar", "hwnd": int(info.hwnd)}
+    if info.is_flyout:
+        return {"status": "skipped_flyout", "hwnd": int(info.hwnd)}
+
+    # find_matching_click_window falls back to nearest area when title and class
+    # are both blank; refuse that path so we never maximize a random window.
+    hwnd_ok = bool(info.hwnd) and _hwnd_still_valid(int(info.hwnd))
+    if not hwnd_ok and not _normalize_title(info.title) and not (info.class_name or "").strip():
+        return {"status": "skipped_no_match"}
+
+    live = find_matching_click_window(info)
+    if live is None or not live.hwnd:
+        return {"status": "skipped_no_match"}
+    if live.is_taskbar:
+        return {"status": "skipped_taskbar", "hwnd": int(live.hwnd)}
+    if live.is_flyout:
+        return {"status": "skipped_flyout", "hwnd": int(live.hwnd)}
+
+    hwnd = int(live.hwnd)
+    if _is_zoomed(hwnd):
+        return {"status": "already_maximized", "hwnd": hwnd}
+
+    if _is_iconic(hwnd):
+        _show_window(hwnd, _SW_RESTORE)
+    _show_window(hwnd, _SW_MAXIMIZE)
+    time.sleep(WINDOW_SETTLE_DELAY_S)
+    return {"status": "maximized", "hwnd": hwnd}
 
 
 def _clip_xywh_to_image(

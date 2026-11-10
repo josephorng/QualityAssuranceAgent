@@ -1378,6 +1378,48 @@ async def test_find_mouse_point_skips_vision_for_caption_button(
 
 
 @pytest.mark.asyncio
+async def test_find_mouse_point_ensures_recorded_maximized_before_locate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cua_mcp import select_mouse_target as smt
+
+    order: list[str] = []
+    click_window = {
+        "hwnd": 7,
+        "rect": [-8, -8, 1920, 1080],
+        "is_maximized": True,
+    }
+
+    def fake_ensure(cw):
+        order.append("ensure")
+        assert cw is click_window
+        return {"status": "maximized", "hwnd": 42}
+
+    async def fake_attempt(*_args, **_kwargs):
+        order.append("attempt")
+        return (
+            10,
+            20,
+            {"selection_method": "test", "target_kind": "text", "target_text": "x"},
+        ), None
+
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.ensure_recorded_click_window_maximized",
+        fake_ensure,
+    )
+    monkeypatch.setattr(smt, "_find_mouse_point_attempt", fake_attempt)
+
+    found = await smt.find_mouse_point("移到目標", click_window=click_window)
+    assert found is not None
+    assert found[0:2] == (10, 20)
+    assert order == ["ensure", "attempt"]
+    assert found[2]["click_window_maximize"] == {
+        "status": "maximized",
+        "hwnd": 42,
+    }
+
+
+@pytest.mark.asyncio
 async def test_find_mouse_point_uses_vision_when_caption_hit_misses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

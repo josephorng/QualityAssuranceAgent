@@ -12,6 +12,7 @@ from src.recorder.window_snapshot import (
     click_hits_caption_buttons,
     diff_snapshots,
     diff_snapshots_with_debug,
+    ensure_recorded_click_window_maximized,
     expected_outcome_for_window_change,
     find_matching_click_window,
     format_window_change_hint,
@@ -1415,6 +1416,232 @@ def test_click_window_to_local_payload_subtracts_monitor_offset() -> None:
     payload = info.to_local_payload((50, 80))
     assert payload["rect"] == [50, 120, 300, 400]
     assert payload["is_flyout"] is True
+
+
+def test_ensure_recorded_click_window_maximized_noop_when_not_recorded_maximized() -> None:
+    recorded = ClickWindowInfo(
+        hwnd=7,
+        title="Excel",
+        process_name="EXCEL.EXE",
+        left=10,
+        top=10,
+        width=800,
+        height=600,
+        is_maximized=False,
+    )
+    with patch(
+        "src.recorder.window_snapshot.find_matching_click_window"
+    ) as match:
+        assert ensure_recorded_click_window_maximized(recorded) is None
+        match.assert_not_called()
+
+
+def test_ensure_recorded_click_window_maximized_skips_taskbar() -> None:
+    recorded = ClickWindowInfo(
+        hwnd=7,
+        title="",
+        process_name="explorer.exe",
+        left=0,
+        top=1040,
+        width=1920,
+        height=40,
+        is_maximized=True,
+        is_taskbar=True,
+    )
+    assert ensure_recorded_click_window_maximized(recorded) == {
+        "status": "skipped_taskbar",
+        "hwnd": 7,
+    }
+
+
+def test_ensure_recorded_click_window_maximized_skips_flyout() -> None:
+    recorded = ClickWindowInfo(
+        hwnd=7,
+        title="Clock flyout",
+        process_name="ShellExperienceHost.exe",
+        left=100,
+        top=100,
+        width=300,
+        height=400,
+        is_maximized=True,
+        is_flyout=True,
+    )
+    assert ensure_recorded_click_window_maximized(recorded) == {
+        "status": "skipped_flyout",
+        "hwnd": 7,
+    }
+
+
+def test_ensure_recorded_click_window_maximized_skips_no_match() -> None:
+    recorded = ClickWindowInfo(
+        hwnd=7,
+        title="Excel",
+        process_name="EXCEL.EXE",
+        left=-8,
+        top=-8,
+        width=1936,
+        height=1056,
+        is_maximized=True,
+    )
+    with patch(
+        "src.recorder.window_snapshot._hwnd_still_valid",
+        return_value=False,
+    ), patch(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        return_value=None,
+    ):
+        assert ensure_recorded_click_window_maximized(recorded) == {
+            "status": "skipped_no_match"
+        }
+
+
+def test_ensure_recorded_click_window_maximized_skips_weak_identity() -> None:
+    """Stale hwnd with no title/class must not maximize a nearest-area guess."""
+    recorded = ClickWindowInfo(
+        hwnd=7,
+        title="",
+        process_name=None,
+        left=-8,
+        top=-8,
+        width=1920,
+        height=1080,
+        is_maximized=True,
+    )
+    with patch(
+        "src.recorder.window_snapshot._hwnd_still_valid",
+        return_value=False,
+    ), patch(
+        "src.recorder.window_snapshot.find_matching_click_window",
+    ) as match:
+        assert ensure_recorded_click_window_maximized(recorded) == {
+            "status": "skipped_no_match"
+        }
+        match.assert_not_called()
+
+
+def test_ensure_recorded_click_window_maximized_already_zoomed() -> None:
+    recorded = ClickWindowInfo(
+        hwnd=7,
+        title="Excel",
+        process_name="EXCEL.EXE",
+        left=-8,
+        top=-8,
+        width=1936,
+        height=1056,
+        is_maximized=True,
+    )
+    live = ClickWindowInfo(
+        hwnd=42,
+        title="Excel",
+        process_name="EXCEL.EXE",
+        left=-8,
+        top=-8,
+        width=1936,
+        height=1056,
+        is_maximized=True,
+    )
+    with patch(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        return_value=live,
+    ), patch(
+        "src.recorder.window_snapshot._is_zoomed",
+        return_value=True,
+    ), patch(
+        "src.recorder.window_snapshot._show_window",
+    ) as show:
+        assert ensure_recorded_click_window_maximized(recorded) == {
+            "status": "already_maximized",
+            "hwnd": 42,
+        }
+        show.assert_not_called()
+
+
+def test_ensure_recorded_click_window_maximized_restores_then_maximizes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded = ClickWindowInfo(
+        hwnd=7,
+        title="Excel",
+        process_name="EXCEL.EXE",
+        left=-8,
+        top=-8,
+        width=1936,
+        height=1056,
+        is_maximized=True,
+    )
+    live = ClickWindowInfo(
+        hwnd=42,
+        title="Excel",
+        process_name="EXCEL.EXE",
+        left=100,
+        top=100,
+        width=800,
+        height=600,
+        is_maximized=False,
+    )
+    calls: list[tuple[int, int]] = []
+
+    def fake_show(hwnd: int, cmd: int) -> bool:
+        calls.append((hwnd, cmd))
+        return True
+
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        lambda _cw: live,
+    )
+    monkeypatch.setattr("src.recorder.window_snapshot._is_zoomed", lambda _h: False)
+    monkeypatch.setattr("src.recorder.window_snapshot._is_iconic", lambda _h: True)
+    monkeypatch.setattr("src.recorder.window_snapshot._show_window", fake_show)
+    monkeypatch.setattr("src.recorder.window_snapshot.time.sleep", lambda _s: None)
+
+    from src.recorder.window_snapshot import _SW_MAXIMIZE, _SW_RESTORE
+
+    assert ensure_recorded_click_window_maximized(recorded) == {
+        "status": "maximized",
+        "hwnd": 42,
+    }
+    assert calls == [(42, _SW_RESTORE), (42, _SW_MAXIMIZE)]
+
+
+def test_ensure_recorded_click_window_maximized_from_dict_restored_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live = ClickWindowInfo(
+        hwnd=99,
+        title="Word",
+        process_name="WINWORD.EXE",
+        left=50,
+        top=50,
+        width=900,
+        height=700,
+        is_maximized=False,
+    )
+    calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        lambda _cw: live,
+    )
+    monkeypatch.setattr("src.recorder.window_snapshot._is_zoomed", lambda _h: False)
+    monkeypatch.setattr("src.recorder.window_snapshot._is_iconic", lambda _h: False)
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot._show_window",
+        lambda hwnd, cmd: calls.append((hwnd, cmd)) or True,
+    )
+    monkeypatch.setattr("src.recorder.window_snapshot.time.sleep", lambda _s: None)
+
+    from src.recorder.window_snapshot import _SW_MAXIMIZE
+
+    result = ensure_recorded_click_window_maximized(
+        {
+            "hwnd": 7,
+            "title": "Word",
+            "process_name": "WINWORD.EXE",
+            "rect": [-8, -8, 1936, 1056],
+            "is_maximized": True,
+        }
+    )
+    assert result == {"status": "maximized", "hwnd": 99}
+    assert calls == [(99, _SW_MAXIMIZE)]
 
 
 def test_find_matching_click_window_untitled_uses_class_and_process() -> None:

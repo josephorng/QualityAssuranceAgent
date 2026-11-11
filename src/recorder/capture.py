@@ -1086,6 +1086,10 @@ class RecordingSession:
         self._hover_uia_led_token: int = 0
         self._idle_efp_generation: int = 0
         self._idle_efp_timer: threading.Timer | None = None
+        # Last idle probe used to re-evaluate LED after settle/hover FindAll.
+        self._idle_efp_cursor_xy: tuple[int, int] | None = None
+        self._idle_efp_probed_name: str = ""
+        self._idle_efp_probed_value: str = ""
         self._finalizing = False
 
     def set_on_event(self, callback: Callable[[RecordedEvent], None] | None) -> None:
@@ -1244,6 +1248,9 @@ class RecordingSession:
             self._hover_uia_led_active = False
             self._hover_uia_led_token = 0
             self._idle_efp_generation = 0
+            self._idle_efp_cursor_xy = None
+            self._idle_efp_probed_name = ""
+            self._idle_efp_probed_value = ""
             idle_timer = self._idle_efp_timer
             self._idle_efp_timer = None
             pending = self._pending_click_timer
@@ -1726,8 +1733,87 @@ class RecordingSession:
             )
         )
 
+    def _uia_path_ready_at_cursor(
+        self,
+        cursor_xy: tuple[int, int] | None,
+    ) -> bool:
+        """True when the attachable FindAll cache would record a UIA vision path."""
+        if cursor_xy is None:
+            return False
+        x, y = int(cursor_xy[0]), int(cursor_xy[1])
+        click_window = self._click_window_payload_at(x, y)
+        snapshot = self._cached_uia_before(click_window, cursor_xy=(x, y))
+        if not isinstance(snapshot, dict):
+            return False
+        from src.recorder.vision_context import recording_uia_snapshot_ready_at_point
+
+        return recording_uia_snapshot_ready_at_point(
+            snapshot,
+            screen_xy=(x, y),
+        )
+
+    def _emit_uia_path_readiness(
+        self,
+        *,
+        cursor_xy: tuple[int, int] | None = None,
+        efp_name: str | None = None,
+        efp_value: str | None = None,
+        after_index: int | None | object = _EFP_UNSET,
+        claim_token: int | None = None,
+        from_settle: bool = False,
+    ) -> None:
+        """Paint green only when FindAll at the cursor is UIA-path sufficient.
+
+        EFP Name/Value is shown only when green. Otherwise LED is red and the
+        label is cleared so green+EFP never falsely promise a UIA recording path.
+        """
+        if claim_token is not None:
+            with self._lock:
+                if (
+                    not self._hover_uia_led_active
+                    or int(claim_token) != int(self._hover_uia_led_token)
+                ):
+                    # Settle stole the hover claim (token bump / hover cleared).
+                    return
+                self._hover_uia_led_active = False
+
+        with self._lock:
+            if cursor_xy is None:
+                cursor_xy = self._idle_efp_cursor_xy
+            if efp_name is None:
+                efp_name = self._idle_efp_probed_name
+            if efp_value is None:
+                efp_value = self._idle_efp_probed_value
+            # Do not override an in-flight settle yellow (idle finish path).
+            # Settle completion itself passes ``from_settle=True``.
+            if (
+                claim_token is None
+                and not from_settle
+                and str(self._uia_status_state) == "yellow"
+                and not self._hover_uia_led_active
+            ):
+                return
+
+        ready = self._uia_path_ready_at_cursor(cursor_xy)
+        if ready:
+            self._emit_uia_status(
+                state="green",
+                after_index=after_index,
+                efp_name=efp_name or "",
+                efp_value=efp_value or "",
+                efp_pending=False,
+            )
+        else:
+            self._emit_uia_status(
+                state="red",
+                after_index=after_index,
+                efp_name="",
+                efp_value="",
+                efp_pending=False,
+            )
+
     def _worker_idle_efp(self, job: _DeferredCaptureJob) -> None:
-        """Idle EFP LED label, then optional hover FindAll into by_hwnd."""
+        """Idle EFP probe, optional hover FindAll, then UIA-path readiness LED."""
         meta = job.meta if isinstance(job.meta, dict) else {}
         try:
             generation = int(meta.get("generation") or 0)
@@ -1735,6 +1821,10 @@ class RecordingSession:
             generation = 0
         cursor = job.cursor_xy
         if cursor is None:
+            with self._lock:
+                self._idle_efp_cursor_xy = None
+                self._idle_efp_probed_name = ""
+                self._idle_efp_probed_value = ""
             self._emit_uia_status(efp_name="", efp_value="", efp_pending=False)
             return
         with self._lock:
@@ -1751,13 +1841,37 @@ class RecordingSession:
         if isinstance(probed, tuple) and len(probed) >= 5:
             name = str(probed[3] or "").strip()
             value = str(probed[4] or "").strip()
-        self._emit_uia_status(
+        with self._lock:
+            self._idle_efp_cursor_xy = (int(cursor[0]), int(cursor[1]))
+            self._idle_efp_probed_name = name
+            self._idle_efp_probed_value = value
+        # Keep pending until readiness decides whether the label may show.
+        hovered = self._maybe_hover_findall_uia(
+            generation,
+            int(cursor[0]),
+            int(cursor[1]),
             efp_name=name,
             efp_value=value,
-            efp_pending=False,
         )
-        self._maybe_hover_findall_uia(
-            generation, int(cursor[0]), int(cursor[1])
+        if hovered:
+            return
+        leave_settle_yellow = False
+        with self._lock:
+            if generation != int(self._idle_efp_generation):
+                return
+            # Settle FindAll in flight — leave yellow; settle refresh will paint.
+            if (
+                str(self._uia_status_state) == "yellow"
+                and not self._hover_uia_led_active
+            ):
+                leave_settle_yellow = True
+        if leave_settle_yellow:
+            self._emit_uia_status(efp_pending=False)
+            return
+        self._emit_uia_path_readiness(
+            cursor_xy=(int(cursor[0]), int(cursor[1])),
+            efp_name=name,
+            efp_value=value,
         )
 
     def _begin_settle_uia_yellow(self, *, after_index: int) -> None:
@@ -1767,44 +1881,59 @@ class RecordingSession:
             self._hover_uia_led_token += 1
         self._emit_uia_status(state="yellow", after_index=int(after_index))
 
-    def _release_hover_uia_led_to_green(self, claim_token: int) -> None:
-        """Restore green only if ``claim_token`` is still the active hover claim."""
-        with self._lock:
-            if (
-                not self._hover_uia_led_active
-                or int(claim_token) != int(self._hover_uia_led_token)
-            ):
-                return
-            self._hover_uia_led_active = False
-        self._emit_uia_status(state="green")
+    def _release_hover_uia_led_to_readiness(
+        self,
+        claim_token: int,
+        *,
+        cursor_xy: tuple[int, int],
+        efp_name: str,
+        efp_value: str,
+    ) -> None:
+        """End a hover FindAll claim by re-evaluating UIA-path readiness."""
+        self._emit_uia_path_readiness(
+            cursor_xy=cursor_xy,
+            efp_name=efp_name,
+            efp_value=efp_value,
+            claim_token=int(claim_token),
+        )
 
-    def _maybe_hover_findall_uia(self, generation: int, x: int, y: int) -> None:
+    def _maybe_hover_findall_uia(
+        self,
+        generation: int,
+        x: int,
+        y: int,
+        *,
+        efp_name: str = "",
+        efp_value: str = "",
+    ) -> bool:
         """Warm FindAll under the idle cursor hwnd when the settle cache lacks it.
 
-        Shows yellow→green on the LED while fetching (never red). Does not change
-        ``_last_settle_uia`` / ``after_index``. Settle yellow bumps the hover LED
-        token so hover cannot paint green over an in-flight settle.
+        Shows yellow while fetching, then green/red from UIA-path readiness (never
+        unconditional green). Does not change ``_last_settle_uia`` / ``after_index``.
+        Settle yellow bumps the hover LED token so hover cannot paint over an
+        in-flight settle. Returns True when this call claimed the LED path
+        (caller should not emit a second readiness paint).
         """
         previous_index = self._previous_event_index_for_settle_cache()
         with self._lock:
             if not self._accepting_input or self._finalizing:
-                return
+                return False
             if generation != int(self._idle_efp_generation):
-                return
+                return False
             # Settle (or seed) FindAll in flight — not our hover claim.
             if (
                 str(self._uia_status_state) == "yellow"
                 and not self._hover_uia_led_active
             ):
-                return
+                return False
             after_index = self._last_settle_uia_after_index
             by_hwnd = self._last_settle_uia_by_hwnd
             last = self._last_settle_uia
         if after_index != previous_index:
-            return
+            return False
         click_window = self._click_window_payload_at(int(x), int(y))
         if not self._hover_uia_click_window_eligible(click_window):
-            return
+            return False
         assert click_window is not None
         hwnd = int(click_window.hwnd)
         try:
@@ -1812,22 +1941,22 @@ class RecordingSession:
         except (TypeError, ValueError):
             last_hwnd = 0
         if hwnd == last_hwnd:
-            return
+            return False
         if hwnd in by_hwnd:
-            return
+            return False
 
         with self._lock:
             if not self._accepting_input or self._finalizing:
-                return
+                return False
             if generation != int(self._idle_efp_generation):
-                return
+                return False
             if (
                 str(self._uia_status_state) == "yellow"
                 and not self._hover_uia_led_active
             ):
-                return
+                return False
             if hwnd in self._last_settle_uia_by_hwnd:
-                return
+                return False
             try:
                 current_last_hwnd = int(
                     (self._last_settle_uia or {}).get("hwnd") or 0
@@ -1835,7 +1964,7 @@ class RecordingSession:
             except (TypeError, ValueError):
                 current_last_hwnd = 0
             if hwnd == current_last_hwnd:
-                return
+                return False
             self._hover_uia_led_token += 1
             claim_token = int(self._hover_uia_led_token)
             self._hover_uia_led_active = True
@@ -1846,11 +1975,21 @@ class RecordingSession:
         try:
             value = snapshot_uia_screen(hwnd)
         except Exception:
-            self._release_hover_uia_led_to_green(claim_token)
-            return
+            self._release_hover_uia_led_to_readiness(
+                claim_token,
+                cursor_xy=(int(x), int(y)),
+                efp_name=efp_name,
+                efp_value=efp_value,
+            )
+            return True
         if not isinstance(value, dict):
-            self._release_hover_uia_led_to_green(claim_token)
-            return
+            self._release_hover_uia_led_to_readiness(
+                claim_token,
+                cursor_xy=(int(x), int(y)),
+                efp_name=efp_name,
+                efp_value=efp_value,
+            )
+            return True
         snapshot = dict(value)
         snapshot["hwnd"] = hwnd
         class_name = str(click_window.class_name or "").strip()
@@ -1864,9 +2003,8 @@ class RecordingSession:
                 not self._hover_uia_led_active
                 or int(claim_token) != int(self._hover_uia_led_token)
             ):
-                # Settle stole the LED; do not upsert or paint green.
-                return
-            self._hover_uia_led_active = False
+                # Settle stole the LED; do not upsert or paint readiness.
+                return True
             if (
                 self._accepting_input
                 and not self._finalizing
@@ -1883,10 +2021,17 @@ class RecordingSession:
                     and hwnd not in self._last_settle_uia_by_hwnd
                 ):
                     self._last_settle_uia_by_hwnd[hwnd] = snapshot
-            # Re-check token before painting green (settle may have raced).
+            # Re-check token before painting (settle may have raced).
             if int(claim_token) != int(self._hover_uia_led_token):
-                return
-        self._emit_uia_status(state="green")
+                self._hover_uia_led_active = False
+                return True
+        self._emit_uia_path_readiness(
+            cursor_xy=(int(x), int(y)),
+            efp_name=efp_name,
+            efp_value=efp_value,
+            claim_token=claim_token,
+        )
+        return True
 
     def _notify_pending_text_input(self, event_index: int) -> None:
         """Fire deferred vision notify once the window step has patched (or failed)."""
@@ -4501,7 +4646,10 @@ class RecordingSession:
             self._last_settle_uia = primary
             self._last_settle_uia_by_hwnd = by_hwnd
             self._last_settle_uia_after_index = after_event_index
-        self._emit_uia_status(state="green", after_index=after_event_index)
+        self._emit_uia_path_readiness(
+            after_index=after_event_index,
+            from_settle=True,
+        )
         return self._copy_uia_snapshot(primary)
 
     def _collect_and_publish_settle_uia(
@@ -4563,7 +4711,10 @@ class RecordingSession:
             self._last_settle_uia = snapshot
             self._last_settle_uia_by_hwnd = retained
             self._last_settle_uia_after_index = int(after_event_index)
-        self._emit_uia_status(state="green", after_index=int(after_event_index))
+        self._emit_uia_path_readiness(
+            after_index=int(after_event_index),
+            from_settle=True,
+        )
         return self._copy_uia_snapshot(snapshot)
 
     def _opened_hwnd_from_change(

@@ -85,7 +85,7 @@ After that settle work it also runs one naming `FindAll` under a single hwnd (`C
 
 ### Idle hover FindAll
 
-The same ~0.45s idle debounce that drives the EFP Name/Value label may also `FindAll` under the click window at the cursor when that hwnd is eligible (not noise/flyout), the settle generation is already ready for the next press, the LED is not settle-yellow (settle FindAll in flight), and the hwnd is not already `_last_settle_uia` or in `_last_settle_uia_by_hwnd`. The result is upserted into `_last_settle_uia_by_hwnd` only (`cache_kind=hover`); it does not change `_last_settle_uia` or `after_index`. While that hover FindAll runs the LED goes **yellow → green** (never red) so the user sees a new window being fetched. Settle/seed yellow invalidates the hover LED claim so hover cannot paint green over an in-flight settle.
+The same ~0.45s idle debounce that drives the EFP Name/Value label may also `FindAll` under the click window at the cursor when that hwnd is eligible (not noise/flyout), the settle generation is already ready for the next press, the LED is not settle-yellow (settle FindAll in flight), and the hwnd is not already `_last_settle_uia` or in `_last_settle_uia_by_hwnd`. The result is upserted into `_last_settle_uia_by_hwnd` only (`cache_kind=hover`); it does not change `_last_settle_uia` or `after_index`. While that hover FindAll runs the LED goes **yellow**, then green or red from the UIA-path readiness gate below. Settle/seed yellow invalidates the hover LED claim so hover cannot paint over an in-flight settle.
 
 ### Recording UIA status LED
 
@@ -93,11 +93,11 @@ While recording, an always-on-top strip (`RecordingUiaStatusOverlay`) shows:
 
 | Signal | Meaning |
 | --- | --- |
-| Red | Waiting for settle FindAll (or sealed/cancelled/failed) |
+| Red | Waiting for settle FindAll (or sealed/cancelled/failed), or attachable FindAll at the cursor is not UIA-path sufficient |
 | Yellow | Settle or idle-hover `FindAll` / `snapshot_uia_screen` in progress |
-| Green | `_last_settle_uia` published — cache ready for a matching next press (also restored after hover FindAll) |
+| Green | Attachable FindAll for the cursor hwnd passes `recording_uia_skip_reason` (a click now would record `vision_path=uia`) |
 | Brief attach/miss pulse | Just-persisted pointer event did / did not get `uia_snapshot` |
-| Name \| Value text | Idle `ElementFromPoint` after ~0.45s without mouse move (preview only; not written to event JSON) |
+| Name \| Value text | Idle `ElementFromPoint` after ~0.45s without mouse move — shown only when green (preview; not written to event JSON). Cleared on red so green+EFP never falsely promise a UIA path. |
 
 The strip is click-through and, on a normal local desktop, uses `WDA_EXCLUDEFROMCAPTURE` so it should not appear in recording screenshots. That affinity is skipped for RDP / Hyper-V Enhanced Session and detected VM guests (otherwise the LED + EFP text never reach the viewer); set `CUA_UIA_STATUS_EXCLUDE_FROM_CAPTURE=0` to force the same. It stays top-center by default and relocates to the top-left or top-right of the same monitor when the cursor overlaps it, then returns to center once clear. There is no hover rectangle — only the LED and the Name/Value label.
 

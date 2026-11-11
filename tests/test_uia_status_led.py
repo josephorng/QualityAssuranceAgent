@@ -15,7 +15,8 @@ from src.recorder.capture import (
 from src.recorder.window_snapshot import ClickWindowInfo
 
 
-def test_collect_and_publish_settle_uia_emits_yellow_then_green() -> None:
+def test_collect_and_publish_settle_uia_emits_yellow_then_red_without_cursor() -> None:
+    """Settle publish no longer auto-greens; no idle cursor → red."""
     statuses: list[dict] = []
     session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
     session.set_on_uia_status(statuses.append)
@@ -25,7 +26,7 @@ def test_collect_and_publish_settle_uia_emits_yellow_then_green() -> None:
             "window": [0, 0, 10, 10],
             "inputs": [],
             "scrollbars": [],
-            "texts": [{"bbox": [0, 0, 1, 1], "text": "A"}],
+            "texts": [{"bbox": [0, 0, 8, 8], "text": "A"}],
         }
 
     with (
@@ -35,9 +36,54 @@ def test_collect_and_publish_settle_uia_emits_yellow_then_green() -> None:
         out = session._collect_and_publish_settle_uia(42, after_event_index=3)
 
     assert out is not None
-    assert [row["state"] for row in statuses] == ["yellow", "green"]
+    assert [row["state"] for row in statuses] == ["yellow", "red"]
     assert statuses[-1]["after_index"] == 3
+    assert statuses[-1]["efp_name"] == ""
     assert session._last_settle_uia_by_hwnd == {}
+
+
+def test_collect_and_publish_settle_uia_emits_green_when_cursor_ready() -> None:
+    statuses: list[dict] = []
+    session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
+    session.set_on_uia_status(statuses.append)
+    session._idle_efp_cursor_xy = (4, 4)
+    session._idle_efp_probed_name = "關閉"
+    session._idle_efp_probed_value = ""
+
+    def _snap(hwnd: int) -> dict:
+        return {
+            "window": [0, 0, 10, 10],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [0, 0, 8, 8], "text": "關閉"}],
+        }
+
+    click_win = ClickWindowInfo(
+        hwnd=42,
+        title="T",
+        process_name="a.exe",
+        left=0,
+        top=0,
+        width=10,
+        height=10,
+        is_maximized=False,
+        class_name="Chrome_WidgetWin_1",
+    )
+    with (
+        patch("src.recorder.uia_input_boxes.snapshot_uia_screen", side_effect=_snap),
+        patch("src.recorder.capture._window_class_name", return_value="Chrome_WidgetWin_1"),
+        patch(
+            "src.recorder.capture.resolve_click_window",
+            return_value=click_win,
+        ),
+    ):
+        # after_index=0 matches empty-event previous_index so the cache attaches.
+        out = session._collect_and_publish_settle_uia(42, after_event_index=0)
+
+    assert out is not None
+    assert [row["state"] for row in statuses] == ["yellow", "green"]
+    assert statuses[-1]["efp_name"] == "關閉"
+    assert statuses[-1]["after_index"] == 0
 
 
 def test_collect_and_publish_settle_uia_emits_red_on_fail() -> None:
@@ -183,6 +229,26 @@ def test_idle_efp_timer_cancel_on_move_drops_stale(tmp_path: Path) -> None:
     session._run_dir = tmp_path
     session._accepting_input = True
     session.set_on_uia_status(statuses.append)
+    session._last_settle_uia_after_index = 0
+    session._last_settle_uia = {
+        "hwnd": 7,
+        "class_name": "Chrome_WidgetWin_1",
+        "window": [0, 0, 100, 100],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [{"bbox": [0, 0, 80, 80], "text": "NameA"}],
+    }
+    click_win = ClickWindowInfo(
+        hwnd=7,
+        title="T",
+        process_name="a.exe",
+        left=0,
+        top=0,
+        width=100,
+        height=100,
+        is_maximized=False,
+        class_name="Chrome_WidgetWin_1",
+    )
 
     calls: list[tuple[int, int]] = []
 
@@ -190,9 +256,15 @@ def test_idle_efp_timer_cancel_on_move_drops_stale(tmp_path: Path) -> None:
         calls.append((x, y))
         return ("label", (0, 0, 1, 1), "text", "NameA", "ValA")
 
-    with patch(
-        "src.recorder.uia_input_boxes.uia_text_element_at_point",
-        side_effect=_probe,
+    with (
+        patch(
+            "src.recorder.uia_input_boxes.uia_text_element_at_point",
+            side_effect=_probe,
+        ),
+        patch(
+            "src.recorder.capture.resolve_click_window",
+            return_value=click_win,
+        ),
     ):
         session._schedule_idle_efp(10, 20)
         first_gen = session._idle_efp_generation
@@ -214,9 +286,58 @@ def test_idle_efp_timer_cancel_on_move_drops_stale(tmp_path: Path) -> None:
         session._worker_idle_efp(job)
 
     assert calls == [(30, 40)]
+    assert statuses[-1]["state"] == "green"
     assert statuses[-1]["efp_name"] == "NameA"
     assert statuses[-1]["efp_value"] == "ValA"
     assert statuses[-1]["efp_pending"] is False
+
+
+def test_idle_efp_clears_label_when_findall_empty(tmp_path: Path) -> None:
+    statuses: list[dict] = []
+    session = RecordingSession(runs_root=tmp_path)
+    session._accepting_input = True
+    session.set_on_uia_status(statuses.append)
+    session._idle_efp_generation = 1
+    session._last_settle_uia_after_index = 0
+    session._last_settle_uia = {
+        "hwnd": 7,
+        "class_name": "ComboLBox",
+        "window": [0, 0, 100, 100],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [],
+    }
+    click_win = ClickWindowInfo(
+        hwnd=7,
+        title="",
+        process_name="a.exe",
+        left=0,
+        top=0,
+        width=100,
+        height=100,
+        is_maximized=False,
+        class_name="ComboLBox",
+    )
+    with (
+        patch(
+            "src.recorder.uia_input_boxes.uia_text_element_at_point",
+            return_value=("x", (0, 0, 1, 1), "text", "Leaf", "V"),
+        ),
+        patch(
+            "src.recorder.capture.resolve_click_window",
+            return_value=click_win,
+        ),
+    ):
+        session._worker_idle_efp(
+            _DeferredCaptureJob(
+                action="idle_efp",
+                cursor_xy=(30, 40),
+                meta={"generation": 1},
+            )
+        )
+    assert statuses[-1]["state"] == "red"
+    assert statuses[-1]["efp_name"] == ""
+    assert statuses[-1]["efp_value"] == ""
 
 
 def test_worker_idle_efp_ignores_stale_generation() -> None:

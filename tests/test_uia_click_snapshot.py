@@ -945,7 +945,8 @@ def test_hover_findall_warms_uncached_hwnd(tmp_path: Path) -> None:
             "window": [50, 50, 400, 300],
             "inputs": [],
             "scrollbars": [],
-            "texts": [{"bbox": [0, 0, 8, 8], "text": "懸停"}],
+            # Screen xyxy covering cursor (100, 100) so readiness paints green.
+            "texts": [{"bbox": [60, 60, 180, 140], "text": "懸停"}],
         }
 
     with (
@@ -982,6 +983,7 @@ def test_hover_findall_warms_uncached_hwnd(tmp_path: Path) -> None:
     assert [row["state"] for row in statuses if row.get("state") in ("yellow", "green")][
         -2:
     ] == ["yellow", "green"]
+    assert statuses[-1]["efp_name"] == "Leaf"
     assert session._hover_uia_led_active is False
     # No events yet → previous_index 0 matches seed/ready after_index.
     hit = session._cached_uia_before(hover_win, cursor_xy=(100, 100))
@@ -990,7 +992,7 @@ def test_hover_findall_warms_uncached_hwnd(tmp_path: Path) -> None:
     assert hit.get("cache_kind") == "hover"
 
 
-def test_hover_findall_fail_restores_green(tmp_path: Path) -> None:
+def test_hover_findall_fail_restores_readiness_not_auto_green(tmp_path: Path) -> None:
     from src.recorder.capture import RecordingSession
     from src.recorder.window_snapshot import ClickWindowInfo
 
@@ -1026,7 +1028,9 @@ def test_hover_findall_fail_restores_green(tmp_path: Path) -> None:
     ):
         session._maybe_hover_findall_uia(1, 100, 100)
     assert session._last_settle_uia_by_hwnd == {}
-    assert [row["state"] for row in statuses] == ["yellow", "green"]
+    # Hover miss leaves no attachable cache under cursor → red, not auto-green.
+    assert [row["state"] for row in statuses] == ["yellow", "red"]
+    assert statuses[-1]["efp_name"] == ""
     assert session._hover_uia_led_active is False
 
 

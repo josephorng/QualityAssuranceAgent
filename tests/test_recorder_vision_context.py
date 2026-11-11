@@ -43,6 +43,7 @@ from src.recorder.vision_context import (
     press_scrollbar_screen_xyxy,
     recording_uia_detections_sufficient,
     recording_uia_skip_reason,
+    recording_uia_snapshot_ready_at_point,
     resolve_event_screenshot_path,
     scrollbar_track_percent_phrase,
     select_click_primary_candidate,
@@ -1212,6 +1213,53 @@ def test_recording_uia_release_past_track_counts_as_press_scrollbar() -> None:
         local_y=40,
         forced_scrollbar_bbox=bar,
     )
+
+
+def test_recording_uia_snapshot_ready_at_point_list_items() -> None:
+    """ComboLBox-style FindAll texts covering the cursor → UIA path ready."""
+    snapshot = {
+        "window": [290, 94, 268, 314],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [
+            {
+                "bbox": [291, 131, 557, 143],
+                "text": "可攜式裝置",
+                "control_type": "list_item",
+            },
+            {
+                "bbox": [291, 143, 557, 155],
+                "text": "列印佇列",
+                "control_type": "list_item",
+            },
+            {
+                "bbox": [291, 155, 557, 167],
+                "text": "存放(SCSI及RAID)控制器",
+                "control_type": "list_item",
+            },
+        ],
+    }
+    assert recording_uia_snapshot_ready_at_point(
+        snapshot, screen_xy=(335, 149)
+    )
+    assert (
+        recording_uia_snapshot_ready_at_point(snapshot, screen_xy=(10, 10))
+        is False
+    )
+
+
+def test_recording_uia_snapshot_ready_at_point_empty_texts() -> None:
+    empty = {
+        "window": [290, 94, 268, 314],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [],
+    }
+    assert (
+        recording_uia_snapshot_ready_at_point(empty, screen_xy=(335, 149))
+        is False
+    )
+    assert recording_uia_snapshot_ready_at_point(None, screen_xy=(335, 149)) is False
 
 
 def test_press_scrollbar_screen_xyxy_skips_text_hit() -> None:

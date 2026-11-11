@@ -3677,6 +3677,75 @@ def recording_uia_detections_sufficient(
     )
 
 
+def recording_uia_snapshot_ready_at_point(
+    snapshot: dict[str, Any] | None,
+    *,
+    screen_xy: tuple[int, int],
+    monitor_offset: tuple[int, int] | None = None,
+) -> bool:
+    """True when this FindAll snapshot would record a UIA vision path at ``screen_xy``.
+
+    Uses the same ``recording_uia_skip_reason`` gate as analysis. Snapshot boxes
+    are screen xyxy (window is screen xywh). When ``monitor_offset`` is omitted,
+    the snapshot window origin is used so idle overlay checks need no screenshot.
+    """
+    if not isinstance(snapshot, dict):
+        return False
+    window_raw = snapshot.get("window")
+    if monitor_offset is None:
+        if isinstance(window_raw, (list, tuple)) and len(window_raw) == 4:
+            try:
+                ox, oy = int(window_raw[0]), int(window_raw[1])
+            except (TypeError, ValueError):
+                ox, oy = 0, 0
+        else:
+            ox, oy = 0, 0
+    else:
+        ox, oy = int(monitor_offset[0]), int(monitor_offset[1])
+    local_x = int(screen_xy[0]) - ox
+    local_y = int(screen_xy[1]) - oy
+    image_w = 1
+    image_h = 1
+    if isinstance(window_raw, (list, tuple)) and len(window_raw) == 4:
+        try:
+            ww, wh = int(window_raw[2]), int(window_raw[3])
+        except (TypeError, ValueError):
+            ww = wh = 0
+        if ww > 0 and wh > 0:
+            image_w = max(image_w, ww)
+            image_h = max(image_h, wh)
+    image_w = max(image_w, local_x + 1)
+    image_h = max(image_h, local_y + 1)
+    for key in ("texts", "inputs", "scrollbars"):
+        rows = snapshot.get(key)
+        if not isinstance(rows, list):
+            continue
+        for item in rows:
+            box = item.get("bbox") if isinstance(item, dict) else item
+            if not (isinstance(box, (list, tuple)) and len(box) == 4):
+                continue
+            try:
+                x1, y1, x2, y2 = (int(v) for v in box[:4])
+            except (TypeError, ValueError):
+                continue
+            image_w = max(image_w, x2 - ox, x1 - ox + 1)
+            image_h = max(image_h, y2 - oy, y1 - oy + 1)
+    prefetched = _prefetched_uia_from_snapshot(
+        snapshot,
+        monitor_offset=(ox, oy),
+        image_w=max(1, image_w),
+        image_h=max(1, image_h),
+        ocr_roi=None,
+        window_screen_xywh=None,
+    )
+    detections = _detections_from_uia_prefetched(prefetched)
+    return recording_uia_detections_sufficient(
+        detections,
+        local_x=local_x,
+        local_y=local_y,
+    )
+
+
 def mark_recorded_side_repaired_to_uia(
     run_root: Path,
     event_index: int,

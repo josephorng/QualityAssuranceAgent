@@ -20,7 +20,6 @@ flowchart LR
   end
 
   subgraph loops [Loops]
-    Probe[Settle-probe timer]
     BeforeShot[Before-shot grab loop]
     Context[Pre-click context loop]
     Worker[screen-recorder-worker]
@@ -43,7 +42,7 @@ flowchart LR
 
   Context -->|every 0.25s| Windows
   Worker -->|JPEG-encode pinned frame| Queue
-  Worker -->|write event JSON, then start probe| Probe
+  Worker -->|write event JSON| Queue
   Worker -->|hand off window diff| WindowStep
   WindowStep -->|patch window_change| Worker
   Worker -->|notify| Vision
@@ -53,11 +52,10 @@ flowchart LR
 
 | Name | Written by | Read by |
 | --- | --- | --- |
-| `_last_settle_frame` | Settle-probe timer, when a sample is published | Mouse hook, which pins it as the next step's screenshot |
+| `_last_settle_frames` | Before-shot grab loop | Mouse hook, which pins a monitor's latest raw frame as the next step's screenshot |
 | `_last_settle_windows`, `_last_settle_signals` | Pre-click context loop | Mouse hook, copied at press time and stored with that click |
 | `_last_settle_uia` | Window-step after settle (and recording seed) | Mouse hook, copied at press as `uia_snapshot` when hwnd matches |
 | Worker queue | Mouse hook, keyboard hook, both timers | `screen-recorder-worker`, one job at a time |
-| `_settle_probe` | Worker, immediately after the event JSON is written | Settle-probe timer. A start replaces the slot only when its event index is newer |
 
 ## Loops
 
@@ -65,15 +63,9 @@ flowchart LR
 
 Thread `screen-recorder-before-shot`. Round-robins each physical monitor with a long-lived `mss` instance and stores raw RGB in `_last_settle_frames` (no JPEG in this loop). Mouse-down pins that monitor's latest raw frame. The worker JPEG-encodes the pinned frame when adopting it into `_pending_capture_*.jpeg` / `event_N.jpeg`, and refreshes durable `_last_settle_frame.jpeg` only then.
 
-### Settle-probe timer
-
-One slot. After each recorded click, drag, hold, text input, or key press, the worker replaces that slot without waiting for an in-flight tick: the timer is cancelled, the new probe starts, and a superseded tick no-ops before it publishes.
-
-The first sample is immediate. Later samples wait `_SETTLE_PROBE_INTERVAL_S` (1.0s), up to 55 seconds. The first similar pair records `observed_settle_seconds` but does not stop the probe; sampling continues until the next event replaces the slot (or the max window). Settle samples measure stability only; they do not publish before-shots. The probe timer does not enumerate windows. The context loop owns that cache.
-
 ### Pre-click context loop
 
-Thread `screen-recorder-preclick-context`. Every 0.25 seconds (`_PRE_CLICK_CONTEXT_INTERVAL_S`) it refreshes the window list and the fast signals. Clipboard and UI Automation are refreshed at most once a second on this same thread, so a stall here does not block the probe timer.
+Thread `screen-recorder-preclick-context`. Every 0.25 seconds (`_PRE_CLICK_CONTEXT_INTERVAL_S`) it refreshes the window list and the fast signals. Clipboard and UI Automation are refreshed at most once a second on this same thread, so a stall here does not block the before-shot loop.
 
 The mouse hook copies this cache at press time. It does not enumerate windows itself.
 
@@ -81,7 +73,7 @@ The mouse hook copies this cache at press time. It does not enumerate windows it
 
 Thread `screen-recorder-worker`. One queue, one job at a time. The first job seeds the window list so the context loop can start.
 
-For a click the queue holds two jobs: `pending_left_press` (JPEG-encode the pinned raw before-shot into `_pending_capture_{press_seq}.jpeg`) and, after mouse-up, the emitted click. Persisting that click writes the event JSON, notifies the hub, and starts the settle probe. It does not sleep and it does not call UI Automation.
+For a click the queue holds two jobs: `pending_left_press` (JPEG-encode the pinned raw before-shot into `_pending_capture_{press_seq}.jpeg`) and, after mouse-up, the emitted click. Persisting that click writes the event JSON, notifies the hub, and starts the window-step thread. It does not sleep and it does not call UI Automation.
 
 Each press has its own pending file so two presses cannot share `_pending_capture.jpeg`.
 
@@ -107,7 +99,7 @@ While recording, an always-on-top strip (`RecordingUiaStatusOverlay`) shows:
 | Brief attach/miss pulse | Just-persisted pointer event did / did not get `uia_snapshot` |
 | Name \| Value text | Idle `ElementFromPoint` after ~0.45s without mouse move (preview only; not written to event JSON) |
 
-Pixel settle-probe MAD ticks do **not** drive the LED. The strip is click-through and, on a normal local desktop, uses `WDA_EXCLUDEFROMCAPTURE` so it should not appear in recording screenshots. That affinity is skipped for RDP / Hyper-V Enhanced Session and detected VM guests (otherwise the LED + EFP text never reach the viewer); set `CUA_UIA_STATUS_EXCLUDE_FROM_CAPTURE=0` to force the same. It stays top-center by default and relocates to the top-left or top-right of the same monitor when the cursor overlaps it, then returns to center once clear. There is no hover rectangle — only the LED and the Name/Value label.
+The strip is click-through and, on a normal local desktop, uses `WDA_EXCLUDEFROMCAPTURE` so it should not appear in recording screenshots. That affinity is skipped for RDP / Hyper-V Enhanced Session and detected VM guests (otherwise the LED + EFP text never reach the viewer); set `CUA_UIA_STATUS_EXCLUDE_FROM_CAPTURE=0` to force the same. It stays top-center by default and relocates to the top-left or top-right of the same monitor when the cursor overlaps it, then returns to center once clear. There is no hover rectangle — only the LED and the Name/Value label.
 
 ### FindAll vs EFP identity channels
 
@@ -126,11 +118,11 @@ Press-time ElementFromPoint `name` / `value` are compiled onto `move_mouse` args
 
 When press-time EFP has a usable Name/Value and a screen `bbox`, analysis injects one UIA text peer into the detection pool (same shape as FindAll labeled text) before primary promote. Named leaves (e.g. `下載 (已釘選)`) then outrank bare container `輸入欄` for the hub instruction. Edit/Document/ComboBox/Pane EFP leaves are tagged `control_type=input`; when that Name peer sits mostly inside a field-sized FindAll Edit (even if IoU is below the coextensive gate), primary promote copies the Name onto the Input so the hub becomes `「…」文字所在的輸入欄` with `control_type=input`. Explicit non-input leaf types (`list_item`, `button`, FindAll `text`, …) and page-sized Documents that dwarf the leaf stay `「…」文字`. Replay does not inject a second peer without a point: it resolves via FindAll Name match and the EFP gates above. UIA repair keeps a usable FindAll hub label when present; for recorded `輸入欄` only, a usable EFP leaf may become the hub when FindAll has no better named leaf (weak generics like `CoreInput` are not promoted). `滾動條` stays class-only.
 
-`finalize_stop` joins these threads for up to 2 seconds before it writes `session.json`. A slow step stays on its own thread, so the next click's probe can start while this one is still in UI Automation. A late thread cannot replace a newer probe, because `_start_settle_probe` ignores an event index that is not newer than the probe already running.
+`finalize_stop` joins these threads for up to 2 seconds before it writes `session.json`. A slow step stays on its own thread, so the next click's window-step can start while this one is still in UI Automation.
 
 ### Vision prefetch pool
 
-`recording-vision-prefetch` in `src/recorder/vision_prefetch.py`. The hub's `_on_recording_event` enqueues the saved event. YOLO and OCR run here and do not block the worker. In the 05:52 session, step 1's prefetch was still running when step 4's probe started.
+`recording-vision-prefetch` in `src/recorder/vision_prefetch.py`. The hub's `_on_recording_event` enqueues the saved event. YOLO and OCR run here and do not block the worker. In the 05:52 session, step 1's prefetch was still running when step 4's window-step started.
 
 ### One-shot timers
 
@@ -144,4 +136,4 @@ These are not loops. They are how input reaches the worker.
 
 ### Stop
 
-`_finish_settle_against_final_after` replaces the probe timer. It captures the full desktop until the sample matches `final_after.jpeg` or 55 seconds pass.
+`finalize_stop` seals the last event's after-cache, captures `final_after.jpeg`, writes `session.json`, and joins in-flight window-step threads.

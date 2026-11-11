@@ -763,7 +763,7 @@ _KNOWN_TIMING_KINDS = frozenset(
     }
 )
 # After the last tool, the interval until step end is usually window/signal verify
-# polling (and a tiny advance). That span can overlap recorded settle_after.
+# polling (and a tiny advance).
 _WAITING_PROFILE_KINDS = frozenset({"step_verification"})
 _DEFERRED_SETTLE_PROFILE_KINDS = frozenset({"deferred_settle"})
 
@@ -780,8 +780,6 @@ def _coerce_positive_seconds(value: Any) -> float | None:
 def _build_timing_summary(
     timing: dict[str, Any],
     time_profile: list[dict[str, Any]],
-    *,
-    settle_after_seconds: float | None = None,
 ) -> dict[str, Any]:
     execution_llm = _sum_profile_durations(time_profile, {"llm_inference"})
     verify_llm = _sum_profile_durations(time_profile, {"verify_llm_inference"})
@@ -806,26 +804,16 @@ def _build_timing_summary(
         profile_total = accounted + deferred_settle + other_from_profile
         total = round(profile_total, 3) if profile_total > 0 else None
 
-    # Wall-clock remainder holds settle sleeps and other unprofiled gaps.
+    # Wall-clock remainder holds fixed step gaps and other unprofiled gaps.
     raw_other = other_from_profile
     if total is not None:
         raw_other = round(max(0.0, total - accounted), 3)
 
-    settle = _coerce_positive_seconds(settle_after_seconds)
-    if settle is None:
-        settle = _coerce_positive_seconds(timing.get("settle_after_seconds"))
     verification = _sum_profile_durations(time_profile, _WAITING_PROFILE_KINDS)
-    # Explicit deferred-settle waits (executed before tools) count as waiting first.
-    # Outbound settle_after on this step is scheduled for a later step when deferred,
-    # so only peel settle_after / post-tool verification from the leftover when there
-    # was no inbound deferred wait (blocking settle-before-verify case).
+    # Explicit deferred-settle waits (legacy) count as waiting first; otherwise
+    # peel window-verify polling from the leftover.
     remainder_after_deferred = max(0.0, raw_other - deferred_settle)
-    if deferred_settle > 0:
-        extra_waiting = min(float(verification or 0.0), remainder_after_deferred)
-    elif settle is not None:
-        extra_waiting = min(float(settle), remainder_after_deferred)
-    else:
-        extra_waiting = min(float(verification or 0.0), remainder_after_deferred)
+    extra_waiting = min(float(verification or 0.0), remainder_after_deferred)
     waiting = round(deferred_settle + extra_waiting, 3)
     other = round(max(0.0, raw_other - waiting), 3)
 
@@ -868,7 +856,6 @@ def _build_step_records(
                 "finished_at_utc",
                 "duration_seconds",
                 "status",
-                "settle_after_seconds",
                 "deferred_settle_waited_seconds",
             )
             if key in step_timing
@@ -884,7 +871,6 @@ def _build_step_records(
             for_verify=True,
         )
         time_profile = actor_profile + verify_profile
-        settle_after = _coerce_positive_seconds(step_timing.get("settle_after_seconds"))
 
         record: dict[str, Any] = {
             "transcript_counter": transcript_counter,
@@ -892,11 +878,7 @@ def _build_step_records(
             "goal": _resolve_goal(transcript_counter, script_step_index, step_timing, runtime_goals),
             "timing": timing,
             "time_profile": time_profile,
-            "timing_summary": _build_timing_summary(
-                timing,
-                time_profile,
-                settle_after_seconds=settle_after,
-            ),
+            "timing_summary": _build_timing_summary(timing, time_profile),
         }
         expected_outcome = step_timing.get("expected_outcome")
         if isinstance(expected_outcome, str) and expected_outcome.strip():

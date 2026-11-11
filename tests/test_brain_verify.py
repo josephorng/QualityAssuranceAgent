@@ -12,6 +12,7 @@ from src.brain.module import (
     _DISAPPEARED_CLOSE_RETRY_INTERVAL_SECONDS,
     _DISAPPEARED_CLOSE_RETRY_MIN_SECONDS,
     _DISAPPEARED_POLL_MIN_SECONDS,
+    _FIXED_STEP_GAP_SECONDS,
     _SIGNAL_POLL_MIN_SECONDS,
     _WINDOW_VERIFY_POLL_INTERVAL_SECONDS,
     _close_retry_due,
@@ -49,7 +50,6 @@ def _brain_for_process_step(*, max_step_attempts: int = 0) -> BrainModule:
         "5 entered",
     ]
     brain.script_baseline_after_paths = [None, None, None]
-    brain.script_settle_after_seconds = [None, None, None]
     brain.script_window_verifies = [{}, {}, {}]
     brain._script_step_index = 1
     brain._script_event_indices = []
@@ -165,7 +165,6 @@ async def test_process_step_saves_record_when_cancelled() -> None:
 async def test_process_step_skip_verification_advances_without_checks(monkeypatch) -> None:
     brain = _brain_for_process_step()
     brain.script_baseline_after_paths = [None, "after.jpeg", None]
-    brain.script_settle_after_seconds = [None, 2.5, None]
     brain.script_window_verifies = [
         {},
         {
@@ -193,7 +192,7 @@ async def test_process_step_skip_verification_advances_without_checks(monkeypatc
 
     assert result.step_finished is True
     assert brain._script_step_index == 2
-    sleep_mock.assert_awaited_once_with(2.5)
+    sleep_mock.assert_awaited_once_with(float(_FIXED_STEP_GAP_SECONDS))
     metadata = brain._update_step_metadata.call_args.args[2]
     assert metadata["status"] == "completed"
     assert metadata["verify"]["branch"] == "advance"
@@ -657,7 +656,6 @@ async def test_process_step_window_verify_polls_until_appeared(
     brain = _brain_for_process_step()
     brain.script_expected_outcomes = [None, None, None]
     brain.script_baseline_after_paths = [None, None, None]
-    brain.script_settle_after_seconds = [None, 2.0, None]
     brain.script_window_verifies = [{}, _appeared_word_verify(), {}]
     brain.loop = AsyncMock(return_value=True)
 
@@ -699,7 +697,6 @@ async def test_process_step_window_verify_fails_only_at_2x_settle(
     brain = _brain_for_process_step()
     brain.script_expected_outcomes = [None, None, None]
     brain.script_baseline_after_paths = [None, None, None]
-    brain.script_settle_after_seconds = [None, 2.0, None]
     brain.script_window_verifies = [{}, _appeared_word_verify(), {}]
     brain.loop = AsyncMock(return_value=True)
     monkeypatch.setattr(
@@ -733,7 +730,6 @@ async def test_process_step_appeared_without_settle_uses_poll_floor(
     brain = _brain_for_process_step()
     brain.script_expected_outcomes = [None, None, None]
     brain.script_baseline_after_paths = [None, None, None]
-    brain.script_settle_after_seconds = [None, None, None]
     brain.script_window_verifies = [{}, _appeared_word_verify(), {}]
     brain.loop = AsyncMock(return_value=True)
     monkeypatch.setattr(
@@ -765,7 +761,6 @@ async def test_process_step_disappeared_without_settle_uses_poll_floor(
     brain = _brain_for_process_step()
     brain.script_expected_outcomes = [None, None, None]
     brain.script_baseline_after_paths = [None, None, None]
-    brain.script_settle_after_seconds = [None, None, None]
     brain.script_window_verifies = [{}, _disappeared_flyout_verify(), {}]
     brain.loop = AsyncMock(return_value=True)
 
@@ -807,7 +802,6 @@ async def test_process_step_disappeared_without_settle_fails_at_poll_deadline(
     brain = _brain_for_process_step()
     brain.script_expected_outcomes = [None, None, None]
     brain.script_baseline_after_paths = [None, None, None]
-    brain.script_settle_after_seconds = [None, None, None]
     brain.script_window_verifies = [{}, _disappeared_flyout_verify(), {}]
     brain.loop = AsyncMock(return_value=True)
     monkeypatch.setattr(
@@ -835,38 +829,6 @@ async def test_process_step_disappeared_without_settle_fails_at_poll_deadline(
     assert "disappeared" in metadata["verify"]["reason"]
 
 
-@pytest.mark.asyncio
-async def test_process_step_appeared_tiny_settle_uses_poll_floor(
-    monkeypatch,
-) -> None:
-    brain = _brain_for_process_step()
-    brain.script_expected_outcomes = [None, None, None]
-    brain.script_baseline_after_paths = [None, None, None]
-    brain.script_settle_after_seconds = [None, 0.109, None]
-    brain.script_window_verifies = [{}, _appeared_word_verify(), {}]
-    brain.loop = AsyncMock(return_value=True)
-    monkeypatch.setattr(
-        "src.brain.module.snapshot_top_level_windows",
-        lambda: [],
-    )
-    sleep_mock = AsyncMock()
-    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
-
-    result = await brain.process_step()
-
-    assert result.step_finished is True
-    assert brain._script_step_index == 1
-    # Tiny positive settle is floored to 5.0s → deadline 10s.
-    expected_sleeps = _expected_poll_sleeps(_appeared_poll_deadline_seconds())
-    assert sleep_mock.await_count == len(expected_sleeps)
-    assert [call.args[0] for call in sleep_mock.await_args_list] == pytest.approx(
-        expected_sleeps
-    )
-    metadata = brain._update_step_metadata.call_args.args[2]
-    assert metadata["verify"]["branch"] == "retry"
-    assert "appeared" in metadata["verify"]["reason"]
-
-
 def _search_foreground() -> dict[str, str]:
     return {
         "class_name": "Windows.UI.Core.CoreWindow",
@@ -876,56 +838,12 @@ def _search_foreground() -> dict[str, str]:
 
 
 @pytest.mark.asyncio
-async def test_process_step_foreground_tiny_settle_uses_poll_floor(
-    monkeypatch,
-) -> None:
-    brain = _brain_for_process_step()
-    brain.script_expected_outcomes = [None, None, None]
-    brain.script_baseline_after_paths = [None, None, None]
-    brain.script_settle_after_seconds = [None, 0.016, None]
-    brain.script_window_verifies = [{}, {"foreground": _search_foreground()}, {}]
-    brain.loop = AsyncMock(return_value=True)
-    monkeypatch.setattr(
-        "src.brain.module.snapshot_top_level_windows",
-        lambda: [_flyout_window()],
-    )
-    monkeypatch.setattr(
-        "src.brain.module.capture_replay_after_signals",
-        lambda _recorded, _press_point=None: {
-            "foreground": {
-                "class_name": "Progman",
-                "title": "Program Manager",
-                "process_name": "explorer.exe",
-            }
-        },
-    )
-    sleep_mock = AsyncMock()
-    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
-
-    result = await brain.process_step()
-
-    assert result.step_finished is True
-    assert brain._script_step_index == 1
-    # Tiny positive settle is floored to 1.0s → deadline 1.0s.
-    expected_sleeps = _expected_poll_sleeps(_signal_poll_deadline_seconds())
-    assert sleep_mock.await_count == len(expected_sleeps)
-    assert [call.args[0] for call in sleep_mock.await_args_list] == pytest.approx(
-        expected_sleeps
-    )
-    assert sum(expected_sleeps) == pytest.approx(_signal_poll_deadline_seconds())
-    metadata = brain._update_step_metadata.call_args.args[2]
-    assert metadata["verify"]["branch"] == "retry"
-    assert "foreground" in metadata["verify"]["reason"]
-
-
-@pytest.mark.asyncio
 async def test_process_step_window_verify_polls_until_foreground(
     monkeypatch,
 ) -> None:
     brain = _brain_for_process_step()
     brain.script_expected_outcomes = [None, None, None]
     brain.script_baseline_after_paths = [None, None, None]
-    brain.script_settle_after_seconds = [None, 0.016, None]
     search = _search_foreground()
     brain.script_window_verifies = [{}, {"foreground": search}, {}]
     brain.loop = AsyncMock(return_value=True)
@@ -969,11 +887,12 @@ async def test_process_step_window_verify_polls_until_foreground(
 
 
 @pytest.mark.asyncio
-async def test_process_step_sleeps_settle_when_no_window_verify(monkeypatch) -> None:
+async def test_process_step_fixed_gap_when_window_verify_empty(monkeypatch) -> None:
+    """Empty window_verify + success awaits the fixed 0.25s step gap."""
     brain = _brain_for_process_step()
     brain.script_expected_outcomes = [None, None, None]
     brain.script_baseline_after_paths = [None, "C:/fake/baseline.jpeg", None]
-    brain.script_settle_after_seconds = [None, 2.5, None]
+    brain.script_window_verifies = [{}, {}, {}]
     brain.loop = AsyncMock(return_value=True)
     sleep_mock = AsyncMock()
     monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
@@ -981,39 +900,19 @@ async def test_process_step_sleeps_settle_when_no_window_verify(monkeypatch) -> 
     result = await brain.process_step()
 
     assert result.step_finished is True
-    sleep_mock.assert_awaited_once_with(2.5)
+    sleep_mock.assert_awaited_once_with(0.25)
+    assert float(_FIXED_STEP_GAP_SECONDS) == 0.25
     metadata = brain._update_step_metadata.call_args.args[2]
-    assert metadata["settle_after_seconds"] == 2.5
+    assert "settle_after_seconds" not in metadata
 
 
 @pytest.mark.asyncio
-async def test_process_step_clamps_huge_settle_sleep(monkeypatch) -> None:
-    from src.brain.module import _SETTLE_AFTER_SLEEP_MAX_SECONDS
-
-    brain = _brain_for_process_step()
-    brain.script_expected_outcomes = [None, None, None]
-    brain.script_baseline_after_paths = [None, None, None]
-    brain.script_settle_after_seconds = [None, 2272.990, None]
-    brain.loop = AsyncMock(return_value=True)
-    sleep_mock = AsyncMock()
-    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
-
-    result = await brain.process_step()
-
-    assert result.step_finished is True
-    sleep_mock.assert_awaited_once_with(float(_SETTLE_AFTER_SLEEP_MAX_SECONDS))
-    metadata = brain._update_step_metadata.call_args.args[2]
-    assert metadata["settle_after_seconds"] == 2272.990
-
-
-@pytest.mark.asyncio
-async def test_process_step_sleeps_settle_with_expected_outcome_no_baseline(
+async def test_process_step_fixed_gap_with_expected_outcome_no_baseline(
     monkeypatch,
 ) -> None:
     brain = _brain_for_process_step()
     brain.script_expected_outcomes = ["panel open", "calc open", "5 entered"]
     brain.script_baseline_after_paths = [None, None, None]
-    brain.script_settle_after_seconds = [None, 3.0, None]
     brain.loop = AsyncMock(return_value=True)
     sleep_mock = AsyncMock()
     monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
@@ -1021,9 +920,9 @@ async def test_process_step_sleeps_settle_with_expected_outcome_no_baseline(
     result = await brain.process_step()
 
     assert result.step_finished is True
-    sleep_mock.assert_awaited_once_with(3.0)
+    sleep_mock.assert_awaited_once_with(float(_FIXED_STEP_GAP_SECONDS))
     metadata = brain._update_step_metadata.call_args.args[2]
-    assert metadata["settle_after_seconds"] == 3.0
+    assert "settle_after_seconds" not in metadata
 
 
 @pytest.mark.asyncio
@@ -1045,7 +944,6 @@ async def test_process_step_defers_after_to_next_before(monkeypatch) -> None:
     brain = _brain_for_process_step()
     brain.script_expected_outcomes = [None, None, None]
     brain.script_baseline_after_paths = [None, None, None]
-    brain.script_settle_after_seconds = [None, 2.5, None]
 
     async def _loop_marks_pending() -> bool:
         brain._mark_pending_after_capture()
@@ -1058,18 +956,17 @@ async def test_process_step_defers_after_to_next_before(monkeypatch) -> None:
     result = await brain.process_step()
 
     assert result.step_finished is True
-    sleep_mock.assert_awaited_once_with(2.5)
+    sleep_mock.assert_awaited_once_with(float(_FIXED_STEP_GAP_SECONDS))
     assert brain._pending_after_capture is True
     brain._hand.capture_after_for_last_action.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_process_step_defers_after_even_without_settle(monkeypatch) -> None:
+async def test_process_step_defers_after_with_fixed_gap(monkeypatch) -> None:
     """Advancing steps leave after pending for the next before; no extra capture."""
     brain = _brain_for_process_step()
     brain.script_expected_outcomes = [None, None, None]
     brain.script_baseline_after_paths = [None, None, None]
-    brain.script_settle_after_seconds = [None, None, None]
 
     async def _loop_marks_pending() -> bool:
         brain._mark_pending_after_capture()
@@ -1091,7 +988,6 @@ async def test_process_step_final_step_captures_dedicated_after(monkeypatch) -> 
     brain._script_step_index = 2  # last script line
     brain.script_expected_outcomes = [None, None, None]
     brain.script_baseline_after_paths = [None, None, None]
-    brain.script_settle_after_seconds = [None, None, None]
 
     async def _loop_marks_pending() -> bool:
         brain._mark_pending_after_capture()
@@ -1114,7 +1010,6 @@ async def test_process_step_window_verify_success_defers_after_to_next_before(
     brain = _brain_for_process_step()
     brain.script_expected_outcomes = [None, None, None]
     brain.script_baseline_after_paths = [None, None, None]
-    brain.script_settle_after_seconds = [None, 2.0, None]
     brain.script_window_verifies = [{}, _appeared_word_verify(), {}]
 
     async def _loop_marks_pending() -> bool:
@@ -1143,29 +1038,13 @@ async def test_process_step_window_verify_success_defers_after_to_next_before(
     assert result.step_finished is True
     brain._hand.capture_after_for_last_action.assert_not_awaited()
     assert brain._pending_after_capture is True
-    # Window verify owns settle; do not also sleep settle_after on this step.
+    # Window verify owns the gap; do not also sleep the fixed step gap.
     # Appeared floor is 5s with 2.0x deadline → poll sleeps until match (first try).
     sleep_mock.assert_not_awaited()
     metadata = brain._update_step_metadata.call_args.args[2]
     assert metadata["verify"]["branch"] == "advance"
     assert metadata["verify"]["accomplished"] is True
     assert "window verify passed" in metadata["verify"]["reason"]
-
-
-@pytest.mark.asyncio
-async def test_process_step_skips_settle_when_settle_none(monkeypatch) -> None:
-    brain = _brain_for_process_step()
-    brain.script_expected_outcomes = [None, None, None]
-    brain.script_baseline_after_paths = [None, None, None]
-    brain.script_settle_after_seconds = [None, None, None]
-    brain.loop = AsyncMock(return_value=True)
-    sleep_mock = AsyncMock()
-    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
-
-    result = await brain.process_step()
-
-    assert result.step_finished is True
-    sleep_mock.assert_not_awaited()
 
 
 def test_script_max_step_attempts_defaults_to_three() -> None:
@@ -1408,31 +1287,6 @@ async def test_disappeared_close_retry_stops_at_extended_deadline(
 
 
 @pytest.mark.asyncio
-async def test_disappeared_close_retry_keeps_longer_settle_deadline(
-    monkeypatch,
-) -> None:
-    brain = _brain_for_process_step()
-    brain.script_settle_after_seconds = [None, 6.0, None]
-    brain.script_window_verifies = [{}, _word_disappeared_verify(), {}]
-    _loop_marks_close_windows(brain)
-    monkeypatch.setattr(
-        "src.brain.module.snapshot_top_level_windows",
-        lambda: [_word_window()],
-    )
-    sleep_mock = AsyncMock()
-    monkeypatch.setattr("src.brain.module.asyncio.sleep", sleep_mock)
-    closed = _record_close_hwnds(monkeypatch)
-
-    await brain.process_step()
-
-    deadline = 12.0
-    expected_sleeps = _expected_poll_sleeps(deadline)
-    assert sleep_mock.await_count == len(expected_sleeps)
-    assert sum(expected_sleeps) == pytest.approx(deadline)
-    assert len(closed) == _expected_close_attempts(deadline)
-
-
-@pytest.mark.asyncio
 async def test_disappeared_close_retry_skips_splash_title(
     monkeypatch,
 ) -> None:
@@ -1568,7 +1422,6 @@ async def test_foreground_miss_does_not_retry_close(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_appeared_miss_does_not_retry_close(monkeypatch) -> None:
     brain = _brain_for_process_step()
-    brain.script_settle_after_seconds = [None, 2.0, None]
     brain.script_window_verifies = [{}, _appeared_word_verify(), {}]
     _loop_marks_close_windows(brain)
     monkeypatch.setattr(

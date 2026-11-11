@@ -171,7 +171,6 @@ def test_write_event_analysis_keeps_appeared_when_later_foregrounds_omitted(
         expected_outcome=None,
         use_expected_outcome=False,
         elapsed_since_previous=None,
-        settle_after_seconds=None,
         text_resolution=None,
         later_foregrounds=[],
         next_windows_before=None,

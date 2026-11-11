@@ -64,7 +64,6 @@ from src.recorder.window_snapshot import (
 )
 
 
-_SETTLE_AFTER_MIN_SECONDS = 1.0
 _FINAL_AFTER_RELATIVE = "screenshots/final_after.jpeg"
 # Cap concurrent Triton YOLO+OCR jobs so the GPU is not flooded.
 _DEFAULT_VISION_WORKERS = 4
@@ -278,8 +277,8 @@ def _drop_trailing_agent_restore(
     also deletes those events' raw files and prefers the earliest dropped restore
     screenshot as the last action's after-frame (UI just before the hub restored).
 
-    Returns ``(kept_events, trailing_settle_end_utc)`` where the timestamp is the
-    earliest dropped restore click (a better settle end than session stop).
+    Returns ``(kept_events, trailing_restore_end_utc)``. The timestamp is retained
+    for callers/tests that still unpack the pair; settle timing no longer uses it.
     """
     if not events:
         return events, None
@@ -301,10 +300,10 @@ def _drop_trailing_agent_restore(
         dropped.append(last)
         events = events[:-1]
 
-    trailing_settle_end_utc: str | None = None
+    trailing_restore_end_utc: str | None = None
     if dropped:
         # dropped[-1] is the earliest restore (first click that brought the hub back).
-        trailing_settle_end_utc = dropped[-1].timestamp_utc
+        trailing_restore_end_utc = dropped[-1].timestamp_utc
 
     if dropped and run_dir is not None:
         # dropped[0] is the last restore; dropped[-1] is the earliest (first restore click).
@@ -332,7 +331,7 @@ def _drop_trailing_agent_restore(
                         f"purge trailing agent restore event index={last.index} "
                         f"skipped: {exc}"
                     )
-    return events, trailing_settle_end_utc
+    return events, trailing_restore_end_utc
 
 
 def _resolve_final_after_screenshot(run_dir: Path) -> str | None:
@@ -934,7 +933,6 @@ def _write_event_analysis(
     expected_outcome: str | None,
     use_expected_outcome: bool,
     elapsed_since_previous: float | None,
-    settle_after_seconds: float | None,
     text_resolution: dict[str, Any] | None,
     later_foregrounds: list[dict[str, Any]] | None = None,
     next_windows_before: list[Any] | None = None,
@@ -1012,11 +1010,6 @@ def _write_event_analysis(
             **(
                 {"elapsed_since_previous_seconds": elapsed_since_previous}
                 if elapsed_since_previous is not None
-                else {}
-            ),
-            **(
-                {"settle_after_seconds": settle_after_seconds}
-                if settle_after_seconds is not None
                 else {}
             ),
             "vision": {
@@ -1232,60 +1225,6 @@ async def _retry_failed_pointer_yolo_ocr(
     return stats
 
 
-def _settle_after_if_long_enough(
-    start_timestamp_utc: str, end_timestamp_utc: str | None
-) -> float | None:
-    """Return elapsed seconds when present and at least ``_SETTLE_AFTER_MIN_SECONDS``."""
-    if not isinstance(end_timestamp_utc, str) or not end_timestamp_utc.strip():
-        return None
-    settle = _elapsed_seconds(start_timestamp_utc, end_timestamp_utc.strip())
-    if settle is not None and settle >= _SETTLE_AFTER_MIN_SECONDS:
-        return settle
-    return None
-
-
-def _next_instruction_event_settle(
-    *,
-    events: list[RecordedEvent],
-    event_pos: int,
-    event: RecordedEvent,
-    prepared_list: list[Any],
-    instruction_results: list[Any],
-    trailing_settle_end_utc: str | None = None,
-) -> float | None:
-    """Forward settle for this instruction event.
-
-    Prefer ``observed_settle_seconds`` from the recording settle probe when it is
-    zero or positive. Zero means the screen was already still, and is not replaced
-    by the timestamp gap. Otherwise use the timestamp gap to the next instruction
-    event when the gap is at least ``_SETTLE_AFTER_MIN_SECONDS``.
-
-    ``text_input`` always settles for one second. Replay pastes the string, so
-    neither the keystroke span nor a pause before the next action is a wait.
-
-    For the last instruction event, optionally use ``trailing_settle_end_utc``
-    (e.g. a purged hub-restore click). Never use session ``stopped_at`` — that
-    includes stop-UI latency and inflates settle.
-    """
-    if event.kind == "wait":
-        return None
-    if event.kind == "text_input":
-        return float(_SETTLE_AFTER_MIN_SECONDS)
-    observed = event.observed_settle_seconds
-    if isinstance(observed, (int, float)) and not isinstance(observed, bool) and float(observed) >= 0:
-        return float(observed)
-    for next_pos in range(event_pos + 1, len(events)):
-        if prepared_list[next_pos] is None:
-            continue
-        next_result = instruction_results[next_pos]
-        if next_result is _UNSET or next_result is None:
-            continue
-        return _settle_after_if_long_enough(
-            event.timestamp_utc, events[next_pos].timestamp_utc
-        )
-    return _settle_after_if_long_enough(event.timestamp_utc, trailing_settle_end_utc)
-
-
 async def analyze_recording_session(
     run_dir: Path,
     *,
@@ -1334,7 +1273,7 @@ async def analyze_recording_session(
                     )
                 )
             )
-            events, trailing_settle_end_utc = _drop_trailing_agent_restore(
+            events, _trailing_restore_end_utc = _drop_trailing_agent_restore(
                 events,
                 run_dir=run_dir,
                 log_info=log_info,
@@ -1470,15 +1409,6 @@ async def analyze_recording_session(
                         event.timestamp_utc,
                     )
 
-                settle_after_seconds = _next_instruction_event_settle(
-                    events=events,
-                    event_pos=event_pos,
-                    event=event,
-                    prepared_list=prepared_list,
-                    instruction_results=instruction_results,
-                    trailing_settle_end_utc=trailing_settle_end_utc,
-                )
-
                 instructions.append(instruction)
                 expected_outcomes.append(None)
                 previous_instruction_event = event
@@ -1493,7 +1423,6 @@ async def analyze_recording_session(
                     expected_outcome=None,
                     use_expected_outcome=False,
                     elapsed_since_previous=elapsed_since_previous,
-                    settle_after_seconds=settle_after_seconds,
                     text_resolution=text_resolution,
                     later_foregrounds=_foregrounds_after_appeared(
                         events, event_pos, run_dir=run_dir

@@ -58,7 +58,6 @@ from src.common.runtime_context import (
     SCRIPT_LINES_ENV,
     SCRIPT_OUTCOMES_ENV,
     SCRIPT_PATH_ENV,
-    SCRIPT_SETTLE_AFTER_ENV,
     SCRIPT_WINDOW_VERIFY_ENV,
     get_runtime_env,
     is_runtime_command_mode,
@@ -82,12 +81,11 @@ from src.recorder.window_snapshot import (
     window_verify_satisfied,
 )
 
-# Window-verify polls continuously after actions; deadline is 2.0x of settle when
-# settle is at least ``_SETTLE_POLL_MULTI_MIN_SECONDS``, else 1.0x.
+# Window-verify polls continuously after actions; deadline is 2.0x of the poll
+# base when that base is at least ``_SETTLE_POLL_MULTI_MIN_SECONDS``, else 1.0x.
 _SETTLE_POLL_MULTI_MIN_SECONDS = 2.0
-# Match recording settle-probe max (``_SETTLE_PROBE_MAX_WINDOW_S``). Caps replay
-# sleep when a re-record / bad gap wrote an absurd ``settle_after_seconds``.
-_SETTLE_AFTER_SLEEP_MAX_SECONDS = 55.0
+# Fixed end-of-step pause when the step has no window_verify assertions.
+_FIXED_STEP_GAP_SECONDS = 0.25
 _WINDOW_VERIFY_POLL_INTERVAL_SECONDS = 0.1
 # Appeared asserts floor the poll settle so 2.0x lands at least at 10s (slow launches).
 _APPEARED_POLL_MIN_SECONDS = 5.0
@@ -219,11 +217,6 @@ class BrainModule:
             []
             if is_runtime_command_mode() or is_smart_mode()
             else self._script_seed_baseline_after_paths(len(self.script_lines))
-        )
-        self.script_settle_after_seconds = (
-            []
-            if is_runtime_command_mode() or is_smart_mode()
-            else self._script_seed_settle_after_seconds(len(self.script_lines))
         )
         self.script_window_verifies = (
             []
@@ -537,7 +530,6 @@ class BrainModule:
             current_lines=list(self.script_lines),
             current_outcomes=list(self.script_expected_outcomes),
             current_baselines=list(self.script_baseline_after_paths),
-            current_settles=list(self.script_settle_after_seconds),
             current_verifies=[
                 dict(item) if isinstance(item, dict) else {}
                 for item in self.script_window_verifies
@@ -546,21 +538,19 @@ class BrainModule:
             fresh_lines=fresh[0],
             fresh_outcomes=fresh[1],
             fresh_baselines=fresh[2],
-            fresh_settles=fresh[3],
-            fresh_verifies=fresh[4],
-            fresh_event_indices=fresh[5],
+            fresh_verifies=fresh[3],
+            fresh_event_indices=fresh[4],
         )
         content_same = (
             merged[0] == list(self.script_lines)
             and merged[1] == list(self.script_expected_outcomes)
             and merged[2] == list(self.script_baseline_after_paths)
-            and merged[3] == list(self.script_settle_after_seconds)
-            and merged[4] == [
+            and merged[3] == [
                 dict(item) if isinstance(item, dict) else {}
                 for item in self.script_window_verifies
             ]
         )
-        self._script_event_indices = list(merged[5])
+        self._script_event_indices = list(merged[4])
         if not any(isinstance(item, int) for item in self._script_event_indices):
             self._ensure_script_event_indices()
         if content_same:
@@ -568,8 +558,7 @@ class BrainModule:
         self.script_lines = list(merged[0])
         self.script_expected_outcomes = list(merged[1])
         self.script_baseline_after_paths = list(merged[2])
-        self.script_settle_after_seconds = list(merged[3])
-        self.script_window_verifies = list(merged[4])
+        self.script_window_verifies = list(merged[3])
         pending = max(0, len(self.script_lines) - self._script_step_index)
         self.manager.log_info(
             f"Applied recording edits to {pending} unstarted step(s); "
@@ -644,28 +633,6 @@ class BrainModule:
                 path = Path(item.strip())
                 baselines[index] = str(path) if path.is_file() else None
         return baselines
-
-    def _script_seed_settle_after_seconds(self, step_count: int) -> list[float | None]:
-        """Load optional post-action settle delays aligned with script steps."""
-        raw = os.environ.get(SCRIPT_SETTLE_AFTER_ENV, "")
-        settles: list[float | None] = [None] * step_count
-        if not raw:
-            return settles
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            return settles
-        if not isinstance(parsed, list):
-            return settles
-        for index in range(min(step_count, len(parsed))):
-            item = parsed[index]
-            if isinstance(item, bool) or item is None:
-                continue
-            if isinstance(item, (int, float)):
-                value = float(item)
-                if value > 0:
-                    settles[index] = value
-        return settles
 
     def _script_seed_window_verifies(self, step_count: int) -> list[dict[str, Any]]:
         """Load recorded window-diff predicates aligned with script steps."""
@@ -764,18 +731,6 @@ class BrainModule:
         path = Path(value.strip())
         return str(path) if path.is_file() else None
 
-    def _current_settle_after_seconds(self) -> float | None:
-        if not self.script_settle_after_seconds:
-            return None
-        if self._script_step_index >= len(self.script_settle_after_seconds):
-            return None
-        value = self.script_settle_after_seconds[self._script_step_index]
-        if isinstance(value, bool) or value is None:
-            return None
-        if isinstance(value, (int, float)) and float(value) > 0:
-            return float(value)
-        return None
-
     def _current_window_verify(self) -> dict[str, Any]:
         verifies = getattr(self, "script_window_verifies", None)
         if not verifies:
@@ -786,22 +741,6 @@ class BrainModule:
         if isinstance(value, dict) and window_verify_has_assertions(value):
             return value
         return {}
-
-    async def _sleep_settle_after(self, settle_after: float) -> None:
-        """Block on this step's recording settle gap (when window-verify does not own it)."""
-        seconds = float(settle_after)
-        if seconds <= 0:
-            return
-        max_seconds = float(_SETTLE_AFTER_SLEEP_MAX_SECONDS)
-        if seconds > max_seconds:
-            self.manager.log_info(
-                f"Settle after step: clamping {round(seconds, 3):.3f}s "
-                f"to {max_seconds:.3f}s"
-            )
-            seconds = max_seconds
-        waited = round(seconds, 3)
-        self.manager.log_info(f"Settle after step: waiting {waited:.3f}s")
-        await asyncio.sleep(seconds)
 
     async def _flush_pending_after_capture(self) -> None:
         """Capture a dedicated after-screenshot when no next-step before will seal it."""
@@ -847,7 +786,6 @@ class BrainModule:
         self.script_lines = [cleaned]
         self.script_expected_outcomes = [None]
         self.script_baseline_after_paths = [None]
-        self.script_settle_after_seconds = [None]
         self.script_window_verifies = [{}]
         self._script_step_index = 0
 
@@ -865,7 +803,6 @@ class BrainModule:
         saved_lines = list(self.script_lines)
         saved_outcomes = list(self.script_expected_outcomes)
         saved_baselines = list(self.script_baseline_after_paths)
-        saved_settles = list(self.script_settle_after_seconds)
         saved_verifies = list(getattr(self, "script_window_verifies", []))
         saved_index = self._script_step_index
         transcript_counter = self._step_transcript_counter
@@ -873,7 +810,6 @@ class BrainModule:
         self.script_lines = [cleaned]
         self.script_expected_outcomes = [None]
         self.script_baseline_after_paths = [None]
-        self.script_settle_after_seconds = [None]
         self.script_window_verifies = [{}]
         self._script_step_index = 0
         self.manager.set_step_log_context(transcript_counter, script_step_index)
@@ -901,7 +837,6 @@ class BrainModule:
             self.script_lines = saved_lines
             self.script_expected_outcomes = saved_outcomes
             self.script_baseline_after_paths = saved_baselines
-            self.script_settle_after_seconds = saved_settles
             self.script_window_verifies = saved_verifies
             self._script_step_index = saved_index
             self.manager.clear_step_log_context()
@@ -1750,7 +1685,6 @@ class BrainModule:
                 "expected_outcome": step_expected_outcome,
                 "attempt_number": attempt_number,
                 "max_attempts": max_attempts,
-                "settle_after_seconds": None,
                 "verify": verify_meta,
                 "deferred_verify_after_countdown": True,
             },
@@ -1790,16 +1724,16 @@ class BrainModule:
     ) -> float | None:
         """Settle budget base for window-verify continuous polling.
 
-        Prefer the recording ``settle_after``. When the step expects a new window
-        (``appeared``), floor the budget at ``_APPEARED_POLL_MIN_SECONDS`` so a
-        slow launch keeps a long enough deadline (2.0x of this base is at least
-        10s). When it expects a window to leave (``disappeared``), floor at
-        ``_DISAPPEARED_POLL_MIN_SECONDS`` so async closes are not judged on a
-        single immediate after-snapshot. When it expects signal end-state
-        (``foreground``, ``click_window``, clipboard, caret, focused, scroll),
-        floor at ``_SIGNAL_POLL_MIN_SECONDS`` for the same reason. Floors
-        combine with ``max``. Polling starts immediately after actions and
-        early-exits on match.
+        ``settle_after`` is unused (kept for call-site compatibility). When the
+        step expects a new window (``appeared``), floor the budget at
+        ``_APPEARED_POLL_MIN_SECONDS`` so a slow launch keeps a long enough
+        deadline (2.0x of this base is at least 10s). When it expects a window
+        to leave (``disappeared``), floor at ``_DISAPPEARED_POLL_MIN_SECONDS``
+        so async closes are not judged on a single immediate after-snapshot.
+        When it expects signal end-state (``foreground``, ``click_window``,
+        clipboard, caret, focused, scroll), floor at ``_SIGNAL_POLL_MIN_SECONDS``
+        for the same reason. Floors combine with ``max``. Polling starts
+        immediately after actions and early-exits on match.
         """
         appeared = recorded.get("appeared")
         disappeared = recorded.get("disappeared")
@@ -1813,11 +1747,7 @@ class BrainModule:
             floor = max(floor, float(_DISAPPEARED_POLL_MIN_SECONDS))
         if has_signals:
             floor = max(floor, float(_SIGNAL_POLL_MIN_SECONDS))
-        if settle_after is not None and float(settle_after) > 0:
-            base = float(settle_after)
-            if floor > 0:
-                return max(base, floor)
-            return base
+        _ = settle_after
         if floor > 0:
             return floor
         return None
@@ -2180,14 +2110,11 @@ class BrainModule:
                 windows_before = await self._snapshot_top_level_windows()
 
             step_succeeded = await self.loop()
-            settle_after = None
-            if step_succeeded:
-                settle_after = self._current_settle_after_seconds()
-            # Window verify polls continuously when present; otherwise sleep the
-            # recording gap on this step before finished_at is stamped.
+            # Window verify polls continuously when present (floors only).
+            # Otherwise sleep a fixed short gap before finished_at is stamped.
             run_window_verify = step_succeeded and bool(window_verify)
             window_poll_settle = (
-                self._window_verify_poll_settle(settle_after, window_verify)
+                self._window_verify_poll_settle(None, window_verify)
                 if run_window_verify
                 else None
             )
@@ -2204,12 +2131,13 @@ class BrainModule:
                     window_miss = await self._window_verify_miss(
                         windows_before, window_verify
                     )
-            elif (
-                step_succeeded
-                and settle_after is not None
-                and settle_after > 0
-            ):
-                await self._sleep_settle_after(settle_after)
+            elif step_succeeded:
+                gap = float(_FIXED_STEP_GAP_SECONDS)
+                if gap > 0:
+                    self.manager.log_info(
+                        f"Fixed step gap: waiting {gap:.3f}s"
+                    )
+                    await asyncio.sleep(gap)
             if window_miss is not None:
                 verify_result = window_miss
                 # Tools already ran; after overlay countdown, re-verify before re-acting.
@@ -2281,7 +2209,6 @@ class BrainModule:
                         "status": "failed",
                         "step_index": script_step_index,
                         "goal": self._current_goal(),
-                        "settle_after_seconds": settle_after,
                         "verify": None,
                     },
                 )
@@ -2502,7 +2429,6 @@ class BrainModule:
                     "expected_outcome": step_expected_outcome,
                     "attempt_number": attempt_number,
                     "max_attempts": max_attempts,
-                    "settle_after_seconds": settle_after,
                     "verify": verify_meta,
                 },
             )

@@ -164,13 +164,13 @@ def test_collect_nearby_hint_labels_prefers_text_over_icons() -> None:
                 "text": "",
                 "icons": [{"chinese_id": "Chrome"}],
             },
-            # Closer on the right than OneNote, but text must still win that side.
+            # Closer on the right than OneNote, but decorative icons lose to text.
             {
                 "bbox": [140, 100, 20, 20],
                 "center": [150, 110],
                 "class_name": "element",
                 "text": "",
-                "icons": [{"chinese_id": "Docker"}],
+                "icons": [{"chinese_id": "頭像、使用者頭像"}],
             },
             {
                 "bbox": [180, 100, 40, 16],
@@ -188,8 +188,9 @@ def test_collect_nearby_hint_labels_prefers_text_over_icons() -> None:
     }
     labels = collect_nearby_hint_labels(vision, instruction="點擊「Chrome」圖示")
     assert "「OneNote」文字" in labels
-    assert "「Docker」圖示" not in labels
     assert "「Slack」文字" in labels
+    # Directed sides prefer text; decorative icons may still fill spare slots later.
+    assert labels.index("「OneNote」文字") < labels.index("「頭像、使用者頭像」圖示")
 
 
 def test_collect_nearby_hints_prefers_closest_directed_texts() -> None:
@@ -1878,11 +1879,12 @@ async def test_analyze_recording_session_llm_chooses_ocr_on_disagreement(
         report = await analyze_recording_session(run_dir)
 
     assert report["cached"] == 1
-    assert report["instructions"] == ["輸入「winmaster7」"]
-    choose_mock.assert_awaited_once()
+    # English typing with recorded text uses hard rules; LLM is not consulted.
+    assert report["instructions"] == ["輸入「winwinmaster7」"]
+    choose_mock.assert_not_awaited()
     analysis = json.loads((run_dir / "analysis" / "event_001.json").read_text(encoding="utf-8"))
-    assert analysis["text_resolution"]["resolved_text"] == "winmaster7"
-    assert analysis["text_resolution"]["source"] == "llm"
+    assert analysis["text_resolution"]["resolved_text"] == "winwinmaster7"
+    assert analysis["text_resolution"]["source"] == "recorded"
     assert analysis["text_resolution"]["recorded_text"] == "winwinmaster7"
     assert analysis["text_resolution"]["ocr_text"] == "winmaster7"
 
@@ -1908,24 +1910,24 @@ def test_elapsed_seconds_requires_valid_ordered_timezone_aware_timestamps() -> N
 
 def test_vision_max_workers_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RECORDING_VISION_WORKERS", raising=False)
-    assert _vision_max_workers() == 3
+    assert _vision_max_workers() == 4
     monkeypatch.setenv("RECORDING_VISION_WORKERS", "5")
     assert _vision_max_workers() == 5
     monkeypatch.setenv("RECORDING_VISION_WORKERS", "0")
     assert _vision_max_workers() == 1
     monkeypatch.setenv("RECORDING_VISION_WORKERS", "nope")
-    assert _vision_max_workers() == 3
+    assert _vision_max_workers() == 4
 
 
 def test_llm_max_workers_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RECORDING_LLM_WORKERS", raising=False)
-    assert _llm_max_workers() == 3
-    monkeypatch.setenv("RECORDING_LLM_WORKERS", "4")
     assert _llm_max_workers() == 4
+    monkeypatch.setenv("RECORDING_LLM_WORKERS", "6")
+    assert _llm_max_workers() == 6
     monkeypatch.setenv("RECORDING_LLM_WORKERS", "0")
     assert _llm_max_workers() == 1
     monkeypatch.setenv("RECORDING_LLM_WORKERS", "nope")
-    assert _llm_max_workers() == 3
+    assert _llm_max_workers() == 4
 
 
 @pytest.mark.asyncio
@@ -2206,12 +2208,11 @@ async def test_analyze_recording_session_writes_settle_after_not_wait_instructio
     assert "wait_instruction" not in first_analysis
     assert "wait_instruction" not in second_analysis
     assert "wait_instruction" not in third_analysis
-    assert first_analysis["settle_after_seconds"] == 10.0
-    assert second_analysis["elapsed_since_previous_seconds"] == 10.0
-    assert second_analysis["settle_after_seconds"] == 10.25
-    assert third_analysis["elapsed_since_previous_seconds"] == 10.25
-    # Last event must not use stopped_at gap as settle (stop-UI latency).
+    assert "settle_after_seconds" not in first_analysis
+    assert "settle_after_seconds" not in second_analysis
     assert "settle_after_seconds" not in third_analysis
+    assert second_analysis["elapsed_since_previous_seconds"] == 10.0
+    assert third_analysis["elapsed_since_previous_seconds"] == 10.25
 
 
 @pytest.mark.asyncio
@@ -2278,6 +2279,7 @@ async def test_analyze_recording_session_omits_settle_under_one_second(
     assert "wait_instruction" not in first_analysis
 
 
+@pytest.mark.asyncio
 async def test_analyze_recording_session_drops_trailing_agent_restore(
     tmp_path: Path,
 ) -> None:
@@ -2351,8 +2353,8 @@ async def test_analyze_recording_session_drops_trailing_agent_restore(
     first_analysis = json.loads(
         (run_dir / "analysis" / "event_001.json").read_text(encoding="utf-8")
     )
-    # Settle ends at the purged restore click, not an inflated session-stop gap.
-    assert first_analysis["settle_after_seconds"] == 1.0
+    assert "settle_after_seconds" not in first_analysis
+    assert first_analysis.get("elapsed_since_previous_seconds") is None
 
 
 @pytest.mark.asyncio

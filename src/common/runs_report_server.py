@@ -608,10 +608,7 @@ def _copy_verification_between_analyses(
     else:
         recipient.pop("window_verify_disabled", None)
 
-    if "settle_after_seconds" in donor:
-        recipient["settle_after_seconds"] = donor["settle_after_seconds"]
-    else:
-        recipient.pop("settle_after_seconds", None)
+    recipient.pop("settle_after_seconds", None)
 
     write_json(recipient_path, recipient)
 

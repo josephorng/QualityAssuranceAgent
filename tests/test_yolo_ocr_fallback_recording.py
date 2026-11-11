@@ -113,7 +113,6 @@ def test_write_event_analysis_persists_and_preserves_fallback(tmp_path: Path) ->
         expected_outcome=None,
         use_expected_outcome=False,
         elapsed_since_previous=None,
-        settle_after_seconds=None,
         text_resolution=None,
         run_dir=run,
     )
@@ -137,7 +136,6 @@ def test_write_event_analysis_persists_and_preserves_fallback(tmp_path: Path) ->
         expected_outcome=None,
         use_expected_outcome=False,
         elapsed_since_previous=None,
-        settle_after_seconds=None,
         text_resolution=None,
         run_dir=run,
     )

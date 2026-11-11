@@ -19,7 +19,7 @@ flowchart TD
 
 Replay does not send a screenshot to a verifier LLM. A successful actor with no recorded window or signal assertion advances without a screenshot.
 
-`settle_after` is the recording gap until the next event. Polling starts immediately after the actions and repeats every 0.1 seconds. The deadline is 2.0× that gap when the gap is at least 2 seconds, otherwise 1.0×. `appeared` floors the budget at 5 seconds. `disappeared` and signal assertions (`foreground`, `click_window`, clipboard, caret, focused, scroll) floor it at 1 second. When `close_windows` succeeded and a disappeared window is still present, verify re-closes it until the check passes or the deadline, which is at least 10 seconds.
+Polling starts immediately after the actions and repeats every 0.1 seconds. The poll budget uses assertion floors only: `appeared` floors at 5 seconds; `disappeared` and signal assertions (`foreground`, `click_window`, clipboard, caret, focused, scroll) floor at 1 second. The deadline is 2.0× that base when the base is at least 2 seconds, otherwise 1.0×. When `close_windows` succeeded and a disappeared window is still present, verify re-closes it until the check passes or the deadline, which is at least 10 seconds. Steps without window-verify assertions wait a fixed 0.25 seconds before advancing.
 
 ## Where the recorded predicate comes from
 
@@ -43,7 +43,7 @@ Recording stores two samples on `window_snapshot_debug`, then `window_verify_fro
 | `disappeared` | An hwnd was in the before list and is gone after. Taskbar, the input-pane strip, and the agent hub are dropped. | The window must be absent from the live after list. It does not need to have been open before the step. |
 | `state` | The same hwnd is still there and `is_minimized` or `is_maximized` flipped. Label is `minimized`, `restored`, `maximized`, or `unmaximized`. | The matching window must be present in the live after list and already hold that end flag (`maximized` → `is_maximized`, `minimized` → `is_minimized`, `restored` → not minimized, `unmaximized` → not maximized). It does not need to flip during the step. |
 
-Replay takes the before list at the start of the step and the after list after `settle_after`.
+Replay takes the before list at the start of the step and the after list during/after window-verify polling (or after the fixed 0.25s gap when there is no window verify).
 
 ## Signals
 

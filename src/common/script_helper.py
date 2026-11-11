@@ -27,7 +27,6 @@ _ReplaySteps = tuple[
     list[str],
     list[str | None],
     list[str | None],
-    list[float | None],
     list[dict[str, Any]],
     list[int | None],
 ]
@@ -408,54 +407,6 @@ def collect_recording_baseline_after_paths(
     )
 
 
-def _settles_from_rows(rows: _InstructionRows) -> list[float | None]:
-    settles: list[float | None] = []
-    for index, (event, analysis) in enumerate(rows):
-        if event.kind == "wait":
-            settles.append(None)
-            continue
-        analysis_settle = analysis.get("settle_after_seconds")
-        if (
-            isinstance(analysis_settle, (int, float))
-            and not isinstance(analysis_settle, bool)
-            and float(analysis_settle) >= 0
-        ):
-            settles.append(float(analysis_settle))
-            continue
-        observed = event.observed_settle_seconds
-        if (
-            isinstance(observed, (int, float))
-            and not isinstance(observed, bool)
-            and float(observed) >= 0
-        ):
-            settles.append(float(observed))
-            continue
-        if index + 1 >= len(rows):
-            settles.append(None)
-            continue
-        end_ts = rows[index + 1][0].timestamp_utc
-        settle = _elapsed_seconds_between(event.timestamp_utc, end_ts)
-        if settle is not None and settle >= 1.0:
-            settles.append(settle)
-        else:
-            settles.append(None)
-    return settles
-
-
-def collect_recording_settle_after_seconds(run_dir: Path) -> list[float | None]:
-    """Collect post-action settle seconds aligned with ``collect_recording_instructions``.
-
-    Preference order per instruction event:
-    1. ``analysis/event_NNN.json`` ``settle_after_seconds`` (including 0)
-    2. event ``observed_settle_seconds`` (recording settle probe, including 0)
-    3. timestamp gap to next instruction event when ≥ 1s
-
-    The last event does not fall back to session ``stopped_at`` (stop-UI latency).
-    Gaps under 1s (legacy path) and ``kind=wait`` events yield ``None``.
-    """
-    return _settles_from_rows(_load_instruction_event_rows(run_dir))
-
-
 def _replay_typed_text(analysis: dict[str, Any]) -> str | None:
     """Text ``type_text`` will enter for this step, when the analysis records it."""
     calls = analysis.get("tool_calls")
@@ -509,14 +460,12 @@ def recording_replay_steps(
     lines: list[str],
     outcomes: list[str | None],
     baselines: list[str | None],
-    settles: list[float | None],
     verifies: list[dict[str, Any]],
     event_indices: list[int | None],
 ) -> tuple[
     list[str],
     list[str | None],
     list[str | None],
-    list[float | None],
     list[dict[str, Any]],
     list[int | None],
 ]:
@@ -524,7 +473,6 @@ def recording_replay_steps(
     count = len(lines)
     padded_outcomes: list[str | None] = []
     padded_baselines: list[str | None] = []
-    padded_settles: list[float | None] = []
     padded_verifies: list[dict[str, Any]] = []
     padded_events: list[int | None] = []
     for index in range(count):
@@ -532,13 +480,6 @@ def recording_replay_steps(
         padded_outcomes.append(outcome if isinstance(outcome, str) and outcome.strip() else None)
         baseline = baselines[index] if index < len(baselines) else None
         padded_baselines.append(baseline if isinstance(baseline, str) and baseline.strip() else None)
-        settle = settles[index] if index < len(settles) else None
-        if isinstance(settle, bool) or settle is None:
-            padded_settles.append(None)
-        elif isinstance(settle, (int, float)):
-            padded_settles.append(float(settle))
-        else:
-            padded_settles.append(None)
         verify = verifies[index] if index < len(verifies) else {}
         padded_verifies.append(dict(verify) if isinstance(verify, dict) else {})
         event_index = event_indices[index] if index < len(event_indices) else None
@@ -547,7 +488,6 @@ def recording_replay_steps(
         list(lines),
         padded_outcomes,
         padded_baselines,
-        padded_settles,
         padded_verifies,
         padded_events,
     )
@@ -580,7 +520,6 @@ def _build_recording_replay_steps_from_rows(
         instructions,
         outcomes,
         _baselines_from_rows(run_dir, rows, include_disabled=False),
-        _settles_from_rows(rows),
         verifies,
         event_indices,
     )
@@ -592,7 +531,6 @@ def load_recording_replay_steps(
     list[str],
     list[str | None],
     list[str | None],
-    list[float | None],
     list[dict[str, Any]],
     list[int | None],
 ]:
@@ -615,20 +553,17 @@ def merge_unstarted_recording_steps(
     current_lines: list[str],
     current_outcomes: list[str | None],
     current_baselines: list[str | None],
-    current_settles: list[float | None],
     current_verifies: list[dict[str, Any]],
     current_event_indices: list[int | None],
     fresh_lines: list[str],
     fresh_outcomes: list[str | None],
     fresh_baselines: list[str | None],
-    fresh_settles: list[float | None],
     fresh_verifies: list[dict[str, Any]],
     fresh_event_indices: list[int | None],
 ) -> tuple[
     list[str],
     list[str | None],
     list[str | None],
-    list[float | None],
     list[dict[str, Any]],
     list[int | None],
 ]:
@@ -643,7 +578,6 @@ def merge_unstarted_recording_steps(
         fresh_lines,
         fresh_outcomes,
         fresh_baselines,
-        fresh_settles,
         fresh_verifies,
         fresh_event_indices,
     )
@@ -663,7 +597,7 @@ def merge_unstarted_recording_steps(
         consumed = {event_index for event_index in prefix_ids if isinstance(event_index, int)}
         tail_indexes = [
             index
-            for index, event_index in enumerate(fresh[5])
+            for index, event_index in enumerate(fresh[4])
             if isinstance(event_index, int) and event_index not in consumed
         ]
     else:
@@ -672,7 +606,6 @@ def merge_unstarted_recording_steps(
     lines = [current_lines[index] for index in range(prefix_len)]
     outcomes: list[str | None] = []
     baselines: list[str | None] = []
-    settles: list[float | None] = []
     verifies: list[dict[str, Any]] = []
     event_indices: list[int | None] = list(prefix_ids)
     for index in range(prefix_len):
@@ -680,49 +613,21 @@ def merge_unstarted_recording_steps(
         outcomes.append(outcome if isinstance(outcome, str) and outcome.strip() else None)
         baseline = current_baselines[index] if index < len(current_baselines) else None
         baselines.append(baseline if isinstance(baseline, str) and baseline.strip() else None)
-        settle = current_settles[index] if index < len(current_settles) else None
-        if isinstance(settle, bool) or settle is None:
-            settles.append(None)
-        elif isinstance(settle, (int, float)):
-            settles.append(float(settle))
-        else:
-            settles.append(None)
         verify = current_verifies[index] if index < len(current_verifies) else {}
         verifies.append(dict(verify) if isinstance(verify, dict) else {})
 
     fresh_lines_aligned = fresh[0]
     fresh_outcomes_aligned = fresh[1]
     fresh_baselines_aligned = fresh[2]
-    fresh_settles_aligned = fresh[3]
-    fresh_verifies_aligned = fresh[4]
-    fresh_events_aligned = fresh[5]
+    fresh_verifies_aligned = fresh[3]
+    fresh_events_aligned = fresh[4]
     for index in tail_indexes:
         lines.append(fresh_lines_aligned[index])
         outcomes.append(fresh_outcomes_aligned[index])
         baselines.append(fresh_baselines_aligned[index])
-        settles.append(fresh_settles_aligned[index])
         verifies.append(dict(fresh_verifies_aligned[index]))
         event_indices.append(fresh_events_aligned[index])
-    return (lines, outcomes, baselines, settles, verifies, event_indices)
-
-
-def _elapsed_seconds_between(
-    previous_timestamp_utc: str, current_timestamp_utc: str | None
-) -> float | None:
-    """Return non-negative elapsed seconds between two timezone-aware ISO timestamps."""
-    if not isinstance(current_timestamp_utc, str) or not current_timestamp_utc.strip():
-        return None
-    try:
-        previous = datetime.fromisoformat(previous_timestamp_utc.replace("Z", "+00:00"))
-        current = datetime.fromisoformat(
-            current_timestamp_utc.strip().replace("Z", "+00:00")
-        )
-    except (TypeError, ValueError):
-        return None
-    if previous.tzinfo is None or current.tzinfo is None:
-        return None
-    elapsed = (current - previous).total_seconds()
-    return elapsed if elapsed >= 0 else None
+    return (lines, outcomes, baselines, verifies, event_indices)
 
 
 def collect_recording_script_text(run_dir: Path) -> str:

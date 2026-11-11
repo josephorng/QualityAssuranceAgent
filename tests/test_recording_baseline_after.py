@@ -11,7 +11,6 @@ from src.common.runtime_context import (
     SCRIPT_LINES_ENV,
     SCRIPT_OUTCOMES_ENV,
     SCRIPT_PATH_ENV,
-    SCRIPT_SETTLE_AFTER_ENV,
     SMART_GOAL_ENV,
     SMART_MODE_ENV,
 )
@@ -19,7 +18,6 @@ from src.common.script_helper import (
     collect_recording_baseline_after_paths,
     collect_recording_instruction_event_indices,
     collect_recording_instructions,
-    collect_recording_settle_after_seconds,
     collect_recording_window_verifies,
 )
 
@@ -91,7 +89,6 @@ def test_collect_recording_baseline_after_paths_ignores_virtual_wait(tmp_path: P
     run_dir = _write_recording(tmp_path)
     instructions, outcomes = collect_recording_instructions(run_dir)
     baselines = collect_recording_baseline_after_paths(run_dir)
-    settles = collect_recording_settle_after_seconds(run_dir)
 
     assert instructions == ["click step 0", "click step 1"]
     assert outcomes == [None, None]
@@ -100,7 +97,6 @@ def test_collect_recording_baseline_after_paths_ignores_virtual_wait(tmp_path: P
     assert baselines[0].endswith("event_001.jpeg")
     assert baselines[1] is not None
     assert baselines[1].endswith("final_after.jpeg")
-    assert settles == [9.0, None]
 
 
 def test_instruction_event_indices_skip_events_without_instruction(tmp_path: Path) -> None:
@@ -174,71 +170,6 @@ def test_instruction_event_indices_skip_events_without_instruction(tmp_path: Pat
     assert len(indices) == len(instructions)
 
 
-def test_collect_recording_settle_prefers_analysis_settle_after(tmp_path: Path) -> None:
-    run_dir = _write_recording(tmp_path)
-    first = run_dir / "analysis" / "event_000.json"
-    payload = json.loads(first.read_text(encoding="utf-8"))
-    payload["settle_after_seconds"] = 2.5
-    first.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-
-    settles = collect_recording_settle_after_seconds(run_dir)
-    assert settles[0] == 2.5
-    assert settles[1] is None
-
-
-def test_collect_recording_settle_keeps_zero_observed(tmp_path: Path) -> None:
-    run_dir = _write_recording(tmp_path)
-    event0 = run_dir / "events" / "event_000.json"
-    payload = json.loads(event0.read_text(encoding="utf-8"))
-    payload["observed_settle_seconds"] = 0.0
-    event0.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-
-    settles = collect_recording_settle_after_seconds(run_dir)
-    assert settles[0] == 0.0
-    assert settles[1] is None
-
-
-def test_collect_recording_settle_keeps_zero_analysis_settle(tmp_path: Path) -> None:
-    run_dir = _write_recording(tmp_path)
-    first = run_dir / "analysis" / "event_000.json"
-    payload = json.loads(first.read_text(encoding="utf-8"))
-    payload["settle_after_seconds"] = 0.0
-    first.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-
-    settles = collect_recording_settle_after_seconds(run_dir)
-    assert settles[0] == 0.0
-    assert settles[1] is None
-
-
-def test_collect_recording_settle_prefers_observed_over_timestamp_gap(
-    tmp_path: Path,
-) -> None:
-    run_dir = _write_recording(tmp_path)
-    event0 = run_dir / "events" / "event_000.json"
-    payload = json.loads(event0.read_text(encoding="utf-8"))
-    payload["observed_settle_seconds"] = 1.5
-    event0.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-
-    settles = collect_recording_settle_after_seconds(run_dir)
-    assert settles[0] == 1.5
-    assert settles[1] is None
-
-
-def test_collect_recording_settle_analysis_wins_over_observed(tmp_path: Path) -> None:
-    run_dir = _write_recording(tmp_path)
-    event0 = run_dir / "events" / "event_000.json"
-    event_payload = json.loads(event0.read_text(encoding="utf-8"))
-    event_payload["observed_settle_seconds"] = 1.5
-    event0.write_text(json.dumps(event_payload, ensure_ascii=False), encoding="utf-8")
-    first = run_dir / "analysis" / "event_000.json"
-    analysis_payload = json.loads(first.read_text(encoding="utf-8"))
-    analysis_payload["settle_after_seconds"] = 2.25
-    first.write_text(json.dumps(analysis_payload, ensure_ascii=False), encoding="utf-8")
-
-    settles = collect_recording_settle_after_seconds(run_dir)
-    assert settles[0] == 2.25
-
-
 def test_collect_recording_baseline_after_paths_skips_disabled_verification(
     tmp_path: Path,
 ) -> None:
@@ -276,7 +207,7 @@ def test_collect_recording_baseline_after_paths_survives_renamed_folder(tmp_path
     assert Path(baselines[1]).is_file()
 
 
-def test_prepare_run_session_seeds_baseline_and_settle_env(tmp_path: Path, monkeypatch) -> None:
+def test_prepare_run_session_seeds_baseline_env(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv(RUNTIME_COMMAND_MODE_ENV, raising=False)
     monkeypatch.delenv(SMART_MODE_ENV, raising=False)
     monkeypatch.delenv(SMART_GOAL_ENV, raising=False)
@@ -284,7 +215,6 @@ def test_prepare_run_session_seeds_baseline_and_settle_env(tmp_path: Path, monke
     monkeypatch.delenv(SCRIPT_LINES_ENV, raising=False)
     monkeypatch.delenv(SCRIPT_OUTCOMES_ENV, raising=False)
     monkeypatch.delenv(SCRIPT_BASELINE_AFTER_ENV, raising=False)
-    monkeypatch.delenv(SCRIPT_SETTLE_AFTER_ENV, raising=False)
 
     run_dir = _write_recording(tmp_path)
     instructions, _ = collect_recording_instructions(run_dir)
@@ -299,16 +229,14 @@ def test_prepare_run_session_seeds_baseline_and_settle_env(tmp_path: Path, monke
     )
 
     baselines = json.loads(os.environ[SCRIPT_BASELINE_AFTER_ENV])
-    settles = json.loads(os.environ[SCRIPT_SETTLE_AFTER_ENV])
     assert len(baselines) == len(instructions)
     assert isinstance(baselines[0], str) and baselines[0].endswith("event_001.jpeg")
     assert isinstance(baselines[1], str) and baselines[1].endswith("final_after.jpeg")
-    assert settles == [9.0, None]
+    assert "CUA_SCRIPT_SETTLE_AFTER_JSON" not in os.environ
 
 
 def test_prepare_run_session_drops_baselines_when_script_edited(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv(SCRIPT_BASELINE_AFTER_ENV, raising=False)
-    monkeypatch.delenv(SCRIPT_SETTLE_AFTER_ENV, raising=False)
     run_dir = _write_recording(tmp_path)
     # Edited hub script: fewer lines than collected baselines
     prepare_run_session(
@@ -321,9 +249,7 @@ def test_prepare_run_session_drops_baselines_when_script_edited(tmp_path: Path, 
         clear_runs_root=False,
     )
     baselines = json.loads(os.environ[SCRIPT_BASELINE_AFTER_ENV])
-    settles = json.loads(os.environ[SCRIPT_SETTLE_AFTER_ENV])
     assert baselines == [None]
-    assert settles == [None]
 
 
 def test_collect_recording_window_verifies_skips_unchecked(tmp_path: Path) -> None:

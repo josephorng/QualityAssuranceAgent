@@ -499,7 +499,6 @@ def test_coalesce_same_location_clicks_preserves_first_press_uia_on_double() -> 
     first.click_window = click_window
     first.uia_snapshot = uia_snapshot
     first.element_from_point = element_from_point
-    first.observed_settle_seconds = 0.015
     events = [
         first,
         _click_event(2, timestamp_utc="2026-08-12T00:00:00.300000+00:00"),
@@ -510,7 +509,6 @@ def test_coalesce_same_location_clicks_preserves_first_press_uia_on_double() -> 
     assert merged[0].click_window == click_window
     assert merged[0].uia_snapshot == uia_snapshot
     assert merged[0].element_from_point == element_from_point
-    assert merged[0].observed_settle_seconds == 0.015
     assert merged[0].screenshot_path == "a.jpeg"
 
 

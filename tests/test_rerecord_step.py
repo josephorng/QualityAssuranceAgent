@@ -58,7 +58,6 @@ def _write_recording(run_dir: Path, *, event_count: int = 2) -> None:
                     "instruction": f"click {index}",
                     "expected_outcome": f"result {index}",
                     "use_expected_outcome": True,
-                    "settle_after_seconds": 1.5,
                     "window_verify": {"appeared": [{"title": "A"}]},
                     "window_verify_disabled": ["appeared:0"],
                     "tool_calls": [{"name": "click", "arguments": {}}],
@@ -234,10 +233,9 @@ async def test_reanalyze_rewrites_instruction_and_preserves_outcome(
     assert analysis["expected_outcome"] == "result 2"
     assert analysis["use_expected_outcome"] is True
     assert analysis["window_verify_disabled"] == ["appeared:0"]
-    assert analysis["settle_after_seconds"] == 1.5
-    # Re-recording event 2 must not rewrite event 1's settle from the timestamp gap.
+    assert "settle_after_seconds" not in analysis
     previous = read_json(run_dir / "analysis" / "event_001.json", {})
-    assert previous["settle_after_seconds"] == 1.5
+    assert "settle_after_seconds" not in previous
 
     report = read_json(run_dir / "report.json", {})
     assert report["instructions"][1] == "點擊「儲存」"
@@ -321,15 +319,13 @@ def test_replace_and_reanalyze_keeps_index_for_replay_reload(
         current_lines=["click 1", "click 2"],
         current_outcomes=[None, None],
         current_baselines=[None, None],
-        current_settles=[None, None],
         current_verifies=[{}, {}],
         current_event_indices=[1, 2],
         fresh_lines=fresh[0],
         fresh_outcomes=fresh[1],
         fresh_baselines=fresh[2],
-        fresh_settles=fresh[3],
-        fresh_verifies=fresh[4],
-        fresh_event_indices=fresh[5],
+        fresh_verifies=fresh[3],
+        fresh_event_indices=fresh[4],
     )
     assert merged[0] == ["click 1", "點擊「新目標」"]
-    assert merged[5] == [1, 2]
+    assert merged[4] == [1, 2]

@@ -3759,7 +3759,6 @@ def test_write_session_html_includes_time_profile_tab(tmp_path: Path) -> None:
                     "status": "completed",
                     "step_index": 0,
                     "goal": "開啟記事本",
-                    "settle_after_seconds": 2.0,
                 },
             },
             ensure_ascii=False,
@@ -3816,7 +3815,6 @@ def test_write_session_html_includes_time_profile_tab(tmp_path: Path) -> None:
     assert "執行 LLM" in html
     assert "驗證 LLM" in html
     assert "等待" in html
-    assert "settle_after" in html
     assert "步驟間隙" in html
     assert "步驟間隙合計" in html
     assert "步驟間隙 1 → 2" in html
@@ -4021,7 +4019,6 @@ def test_write_recording_html_includes_time_profile_tab(tmp_path: Path) -> None:
                 "event_index": 1,
                 "instruction": "點擊「搜尋」按鈕",
                 "elapsed_since_previous_seconds": 2.5,
-                "settle_after_seconds": 1.2,
                 "time_profile": [
                     {
                         "kind": "vision",
@@ -4096,9 +4093,7 @@ def test_write_recording_html_includes_time_profile_tab(tmp_path: Path) -> None:
     assert '<th class="num">視覺</th>' in html
     assert "平均等待" in html
     assert "等待合計" in html
-    assert "Settle" in html
     assert "2.50s" in html
-    assert "1.20s" in html
     assert "1.25s" in html
     assert "0.80s" in html
     assert "分析總長" in html
@@ -4107,7 +4102,7 @@ def test_write_recording_html_includes_time_profile_tab(tmp_path: Path) -> None:
     assert 'id="tab-steps"' in html
 
     first_group = html.split('data-event-index="1"', 1)[1].split("</details>", 1)[0]
-    assert "<dt>Settle</dt>" in first_group
+    assert "<dt>Settle</dt>" not in first_group
 
 
 def test_replay_step_records_the_path_that_succeeded(tmp_path: Path) -> None:

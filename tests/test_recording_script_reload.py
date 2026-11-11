@@ -55,7 +55,6 @@ def _brain_for_reload(run_dir: Path, monkeypatch) -> BrainModule:
     brain.script_lines = ["open", "click save"]
     brain.script_expected_outcomes = [None, None]
     brain.script_baseline_after_paths = [None, None]
-    brain.script_settle_after_seconds = [None, None]
     brain.script_window_verifies = [{}, {}]
     brain._script_event_indices = [0, 1]
     return brain
@@ -76,17 +75,15 @@ def _merge(
         current_lines=lines,
         current_outcomes=outcomes or [None] * len(lines),
         current_baselines=[None] * len(lines),
-        current_settles=[None] * len(lines),
         current_verifies=[{} for _ in lines],
         current_event_indices=event_indices,
         fresh_lines=fresh_lines,
         fresh_outcomes=fresh_outcomes or [None] * len(fresh_lines),
         fresh_baselines=[None] * len(fresh_lines),
-        fresh_settles=[None] * len(fresh_lines),
         fresh_verifies=[{} for _ in fresh_lines],
         fresh_event_indices=fresh_event_indices,
     )
-    return merged[0], merged[1], merged[5]
+    return merged[0], merged[1], merged[4]
 
 
 def test_merge_keeps_started_steps_and_updates_the_rest() -> None:

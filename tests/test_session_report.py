@@ -619,7 +619,7 @@ def test_time_profile_includes_drag_start_and_destination_timing_details(
     assert details[3]["label"] == "終點 · LLM target pick"
 
 
-def test_timing_summary_attributes_settle_after_as_waiting(tmp_path: Path) -> None:
+def test_timing_summary_without_settle_keeps_remainder_as_other(tmp_path: Path) -> None:
     run_root = tmp_path / "task_settle_waiting"
     run_root.mkdir()
     steps_dir = run_root / "steps"
@@ -656,20 +656,19 @@ def test_timing_summary_attributes_settle_after_as_waiting(tmp_path: Path) -> No
             "status": "completed",
             "step_index": 0,
             "goal": "Click OK",
-            "settle_after_seconds": 3.0,
         },
     }
     (steps_dir / step_artifact_name(0, 0)).write_text(json.dumps(payload), encoding="utf-8")
 
     report = build_session_report(run_root, session_end_reason="completed")
     summary = report["steps"][0]["timing_summary"]
-    # Actor LLM 2s + verify LLM 3s = 5s accounted; wall remainder 5s; settle peels 3s.
+    # Actor LLM 2s + verify LLM 3s = 5s accounted; wall remainder 5s stays other.
     assert summary["execution_llm_seconds"] == 2.0
     assert summary["verify_llm_seconds"] == 3.0
-    assert summary["waiting_seconds"] == 3.0
-    assert summary["other_seconds"] == 2.0
-    assert report["summary"]["waiting_seconds"] == 3.0
-    assert report["steps"][0]["timing"]["settle_after_seconds"] == 3.0
+    assert summary["waiting_seconds"] == 0.0
+    assert summary["other_seconds"] == 5.0
+    assert report["summary"]["waiting_seconds"] == 0.0
+    assert "settle_after_seconds" not in report["steps"][0]["timing"]
 
 
 def test_timing_summary_attributes_deferred_settle_at_execution_point(
@@ -727,7 +726,6 @@ def test_timing_summary_attributes_deferred_settle_at_execution_point(
             "status": "completed",
             "step_index": 1,
             "goal": "Click OK",
-            "settle_after_seconds": 1.9,
             "deferred_settle_waited_seconds": 6.0,
         },
     }
@@ -743,9 +741,9 @@ def test_timing_summary_attributes_deferred_settle_at_execution_point(
     summary = step["timing_summary"]
     assert summary["deferred_settle_seconds"] == 6.0
     assert summary["waiting_seconds"] == 6.0
-    # Outbound settle_after must not inflate waiting when inbound deferred settle ran.
     assert summary["tool_execution_seconds"] == 3.0
     assert step["timing"]["deferred_settle_waited_seconds"] == 6.0
+    assert "settle_after_seconds" not in step["timing"]
 
 
 def test_write_session_report_creates_report_json(tmp_path: Path) -> None:

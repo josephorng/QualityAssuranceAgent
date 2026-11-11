@@ -982,7 +982,7 @@ def test_ctrl_v_with_text_records_as_text_input(tmp_path) -> None:
         "src.recorder.capture._capture_screenshot_at_point",
         side_effect=_mock_screenshot,
     ), patch(
-        "src.recorder.capture.pyperclip.paste",
+        "src.recorder.capture.read_clipboard_text",
         return_value="hello world",
     ):
         run_dir = session.start()
@@ -1023,7 +1023,7 @@ def test_ctrl_v_reads_clipboard_off_the_hook_thread(tmp_path) -> None:
         "src.recorder.capture._capture_screenshot_at_point",
         side_effect=_mock_screenshot,
     ), patch(
-        "src.recorder.capture.pyperclip.paste",
+        "src.recorder.capture.read_clipboard_text",
         side_effect=_blocked_paste,
     ):
         run_dir = session.start()
@@ -1059,7 +1059,7 @@ def test_ctrl_v_empty_clipboard_stays_hotkey(tmp_path) -> None:
         "src.recorder.capture._capture_screenshot_at_point",
         side_effect=_mock_screenshot,
     ), patch(
-        "src.recorder.capture.pyperclip.paste",
+        "src.recorder.capture.read_clipboard_text",
         return_value="",
     ):
         run_dir = session.start()
@@ -1088,7 +1088,7 @@ def test_ctrl_v_clipboard_read_failure_stays_hotkey(tmp_path) -> None:
         "src.recorder.capture._capture_screenshot_at_point",
         side_effect=_mock_screenshot,
     ), patch(
-        "src.recorder.capture.pyperclip.paste",
+        "pyperclip.paste",
         side_effect=RuntimeError("clipboard locked"),
     ):
         run_dir = session.start()
@@ -1117,7 +1117,7 @@ def test_ctrl_shift_v_with_text_records_as_text_input(tmp_path) -> None:
         "src.recorder.capture._capture_screenshot_at_point",
         side_effect=_mock_screenshot,
     ), patch(
-        "src.recorder.capture.pyperclip.paste",
+        "src.recorder.capture.read_clipboard_text",
         return_value="plain text",
     ):
         run_dir = session.start()
@@ -1148,7 +1148,7 @@ def test_paste_coalesces_with_prior_typing(tmp_path) -> None:
         "src.recorder.capture._capture_screenshot_at_point",
         side_effect=_mock_screenshot,
     ), patch(
-        "src.recorder.capture.pyperclip.paste",
+        "src.recorder.capture.read_clipboard_text",
         return_value=" world",
     ):
         run_dir = session.start()
@@ -2615,6 +2615,14 @@ def test_text_input_reuses_pre_type_screenshot_from_prior_click(tmp_path) -> Non
             from pynput.keyboard import KeyCode
 
             _left_click(session, 400, 300)
+            # Wait for the click worker to finish refresh_pre_type before typing.
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                if (run_dir / "screenshots" / "_pending_pre_type.jpeg").is_file():
+                    break
+                time.sleep(0.02)
+            else:
+                raise AssertionError("pre-type screenshot was not prepared after click")
             session._on_key_press(KeyCode.from_char("a"))
             session._on_key_press(KeyCode.from_char("b"))
             session.stop()
@@ -2847,82 +2855,6 @@ def test_pending_capture_paths_differ_per_press(tmp_path) -> None:
     assert len(pending_names) >= 2
     assert len(set(pending_names)) >= 2
     assert all(name.startswith("_pending_capture_") for name in pending_names)
-
-
-def test_blocked_window_step_does_not_delay_next_probe(tmp_path) -> None:
-    session = RecordingSession(runs_root=tmp_path)
-    first_entered = threading.Event()
-    release = threading.Event()
-    calls = {"n": 0}
-    open_window = WindowInfo(
-        hwnd=100,
-        title="Editor",
-        pid=1,
-        left=0,
-        top=0,
-        width=800,
-        height=600,
-        is_minimized=False,
-        is_maximized=False,
-    )
-
-    def _signals(*_args, **_kwargs):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            first_entered.set()
-            assert release.wait(3.0)
-        return {}
-
-    with _default_capture_window_patches(), patch(
-        "src.recorder.capture._capture_screenshot_at_point",
-        side_effect=_mock_screenshot,
-    ), patch(
-        "src.recorder.capture.snapshot_top_level_windows",
-        return_value=[open_window],
-    ), patch(
-        "src.recorder.capture.capture_step_signals",
-        side_effect=_signals,
-    ):
-        session.start()
-        try:
-            _left_click(session, 10, 10)
-            assert first_entered.wait(2.0)
-            probe = session._settle_probe
-            assert probe is not None and probe.event_index == 1
-            _left_click(session, 30, 30)
-            deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline:
-                probe = session._settle_probe
-                if probe is not None and probe.event_index == 2:
-                    break
-                time.sleep(0.02)
-            probe = session._settle_probe
-            assert probe is not None and probe.event_index == 2
-            assert not release.is_set()
-        finally:
-            release.set()
-            session.stop()
-
-
-def test_older_settle_probe_does_not_replace_newer(tmp_path) -> None:
-    from src.recorder.models import RecordedEvent
-
-    session = RecordingSession(runs_root=tmp_path)
-    with _default_capture_window_patches(), patch(
-        "src.recorder.capture._capture_screenshot_at_point",
-        side_effect=_mock_screenshot,
-    ):
-        session.start()
-        try:
-            newer = RecordedEvent(index=2, timestamp_utc="t", kind="click", cursor_xy=(1, 1))
-            older = RecordedEvent(index=1, timestamp_utc="t", kind="click", cursor_xy=(2, 2))
-            session._start_settle_probe(newer)
-            session._start_settle_probe(older)
-            probe = session._settle_probe
-            assert probe is not None
-            assert probe.event_index == 2
-        finally:
-            session.stop()
 
 
 def test_pointer_click_persists_debug_focus_rect_after_settle(tmp_path) -> None:

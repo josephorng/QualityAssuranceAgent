@@ -67,8 +67,6 @@ class RecordedEvent:
     # ``control_type`` let analysis inject a FindAll-shaped peer;
     # ``element_from_point_s`` is probe wall time.
     element_from_point: dict[str, Any] | None = None
-    # UI settle measured by consecutive screenshot stability during recording.
-    observed_settle_seconds: float | None = None
     # Typing-burst IME summary: ``{"chinese": bool, "lang_id": int}``. Omitted
     # on legacy recordings / non-typing events.
     ime: dict[str, Any] | None = None
@@ -101,10 +99,10 @@ class RecordedEvent:
             data.pop("end_uia_snapshot", None)
         if self.element_from_point is None:
             data.pop("element_from_point", None)
-        if self.observed_settle_seconds is None:
-            data.pop("observed_settle_seconds", None)
         if self.ime is None:
             data.pop("ime", None)
+        # Ignore legacy observed_settle_seconds if present in older dicts.
+        data.pop("observed_settle_seconds", None)
         return data
 
     @classmethod
@@ -118,7 +116,6 @@ class RecordedEvent:
         ocr_clip = raw.get("ocr_clip_rect")
         keys = raw.get("keys")
         modifiers = raw.get("modifiers")
-        observed_settle = raw.get("observed_settle_seconds")
         return cls(
             index=int(raw["index"]),
             timestamp_utc=str(raw["timestamp_utc"]),
@@ -190,11 +187,6 @@ class RecordedEvent:
             element_from_point=(
                 raw.get("element_from_point")
                 if isinstance(raw.get("element_from_point"), dict)
-                else None
-            ),
-            observed_settle_seconds=(
-                float(observed_settle)
-                if isinstance(observed_settle, (int, float)) and not isinstance(observed_settle, bool)
                 else None
             ),
             ime=raw.get("ime") if isinstance(raw.get("ime"), dict) else None,

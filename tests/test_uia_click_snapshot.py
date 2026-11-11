@@ -240,7 +240,6 @@ def test_press_uses_settled_uia_without_findall(tmp_path: Path) -> None:
     session._last_settle_uia_after_index = 0
     session._start_window_step = lambda _item: None  # type: ignore[method-assign]
     session._notify_event = lambda _event: None  # type: ignore[method-assign]
-    session._start_settle_probe = lambda _event: None  # type: ignore[method-assign]
     session._left_press_seq = 1
     session._left_press_captures[1] = (("pending.jpeg", 1, (0, 0)), [])
     session._left_press_click_windows[1] = window  # type: ignore[assignment]
@@ -283,7 +282,6 @@ def test_emit_click_notifies_immediately_with_cached_uia(tmp_path: Path) -> None
     session = RecordingSession(runs_root=tmp_path)
     session._run_dir = tmp_path
     session._start_window_step = lambda _item: None  # type: ignore[method-assign]
-    session._start_settle_probe = lambda _event: None  # type: ignore[method-assign]
     session.set_on_event(notified.append)
     session._left_press_seq = 1
     session._left_press_captures[1] = (("pending.jpeg", 1, (0, 0)), [])
@@ -1292,7 +1290,6 @@ def test_cross_window_press_skips_findall_for_normal_windows(tmp_path: Path) -> 
     session._last_settle_uia_after_index = 0
     session._start_window_step = lambda _item: None  # type: ignore[method-assign]
     session._notify_event = lambda _event: None  # type: ignore[method-assign]
-    session._start_settle_probe = lambda _event: None  # type: ignore[method-assign]
     other = _copilot_window(20)
     with patch(
         "src.recorder.uia_input_boxes.snapshot_uia_screen",
@@ -1379,7 +1376,6 @@ def test_combolbox_press_findall_under_click_hwnd(tmp_path: Path) -> None:
     session._last_settle_uia_after_index = 0
     session._start_window_step = lambda _item: None  # type: ignore[method-assign]
     session._notify_event = lambda _event: None  # type: ignore[method-assign]
-    session._start_settle_probe = lambda _event: None  # type: ignore[method-assign]
     with patch(
         "src.recorder.uia_input_boxes.snapshot_uia_screen",
         side_effect=_snap,
@@ -1468,7 +1464,6 @@ def test_progman_press_findall_under_click_hwnd(tmp_path: Path) -> None:
     session._last_settle_uia_after_index = 0
     session._start_window_step = lambda _item: None  # type: ignore[method-assign]
     session._notify_event = lambda _event: None  # type: ignore[method-assign]
-    session._start_settle_probe = lambda _event: None  # type: ignore[method-assign]
     with patch(
         "src.recorder.uia_input_boxes.snapshot_uia_screen",
         side_effect=_snap,
@@ -1564,7 +1559,6 @@ def test_live_double_click_keeps_first_press_uia_snapshot(tmp_path: Path) -> Non
     session._last_settle_uia_after_index = 0
     session._start_window_step = lambda _item: None  # type: ignore[method-assign]
     session._notify_event = lambda _event: None  # type: ignore[method-assign]
-    session._start_settle_probe = lambda _event: None  # type: ignore[method-assign]
     jobs: list[_DeferredCaptureJob] = []
 
     def _enqueue(job: _DeferredCaptureJob) -> None:

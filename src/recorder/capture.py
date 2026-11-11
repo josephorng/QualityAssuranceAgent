@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import copy
 import ctypes
@@ -22,17 +22,7 @@ from src.common.settings import load_settings
 from src.eye.capture import capture_all_screens_to_file, resolve_monitor_index
 from src.recorder.focus_point import resolve_typing_focus, sample_debug_focus_rect
 from src.recorder.uia_input_boxes import sample_uia_ocr_clip_rect
-from src.recorder.frame_similarity import (
-    DEFAULT_SIMILARITY_THRESHOLD,
-    append_settle_probe_debug_record,
-    apply_settle_sample,
-    archive_settle_probe_sample,
-    compare_frames,
-    rgb_frames_similar,
-    last_settle_frame_path,
-    settle_probe_kept_path,
-    settle_probe_staging_path,
-)
+from src.recorder.frame_similarity import last_settle_frame_path
 from src.recorder.models import (
     RecordedEvent,
     SessionManifest,
@@ -98,18 +88,10 @@ _PRE_KEY_SETTLE_S = 0.3
 # After Chinese IME Enter, wait for composition to commit before sealing
 # ``signals_after`` (avoid mid-zhuyin settle cache and late unsealed live samples).
 _IME_COMMIT_SETTLE_S = 0.3
-# Consecutive-screenshot settle probe (UI stability after an action).
-# Samples: the first shot is immediate, then every 1s. Each sample grabs the
-# full virtual desktop so a window appearing on another monitor is still seen.
-# The probe only measures observed_settle; it does not publish the next step's
-# before-shot. A separate before-shot loop round-robins each physical monitor
-# and keeps the latest raw RGB frame per monitor in memory. A click pins that
-# raw frame; the worker JPEG-encodes it only when the frame is adopted.
-_SETTLE_PROBE_INTERVAL_S = 1.0
-_SETTLE_PROBE_MAX_WINDOW_S = 55.0
-# Retain every settle-probe capture under screenshots/settle_debug/ for MAD tuning.
-_SETTLE_PROBE_KEEP_DEBUG_SAMPLES = False
-# Window list and UI Automation. Kept off the settle-probe timer.
+# Before-shot loop round-robins each physical monitor and keeps the latest
+# raw RGB frame per monitor in memory. A click pins that raw frame; the worker
+# JPEG-encodes it only when the frame is adopted.
+# Window list and UI Automation refresh interval.
 _PRE_CLICK_CONTEXT_INTERVAL_S = 0.25
 # UI Automation on a closing window can stall. The per-step thread gives up
 # after this many seconds, keeps the already-enumerated window list + fast
@@ -117,19 +99,6 @@ _PRE_CLICK_CONTEXT_INTERVAL_S = 0.25
 _WINDOW_UIA_TIMEOUT_S = 1.0
 # Stop waits this long for in-flight window-step threads to patch event JSON.
 _WINDOW_STEP_JOIN_TIMEOUT_S = 2.0
-_SETTLE_PROBE_KINDS = frozenset(
-    {
-        "click",
-        "double_click",
-        "triple_click",
-        "right_click",
-        "middle_click",
-        "drag",
-        "hold",
-        "text_input",
-        "key_press",
-    }
-)
 # Pointer kinds that pulse attach/miss on the UIA status LED when persisted.
 _UIA_STATUS_PULSE_KINDS = frozenset(
     {
@@ -148,39 +117,6 @@ _IDLE_EFP_LABEL_MAX_CHARS = 48
 _QUEUE_SENTINEL = object()
 _DRAIN_MARKER = object()
 _EFP_UNSET = object()
-
-
-def settle_probe_interval_s(step: int) -> float:
-    """Return the delay (seconds) before settle sample ``step``.
-
-    Sample 0 is immediate. Every later sample waits ``_SETTLE_PROBE_INTERVAL_S``.
-    """
-    if int(step) <= 0:
-        return 0.0
-    return _SETTLE_PROBE_INTERVAL_S
-
-
-# First probe delay (same as ``settle_probe_interval_s(0)``); kept for callers/tests.
-_SETTLE_PROBE_FIRST_S = settle_probe_interval_s(0)
-
-
-@dataclass
-class _SettleProbeState:
-    """In-flight consecutive-frame settle measurement for one persisted event."""
-
-    event_index: int
-    started_monotonic: float
-    cursor_xy: tuple[int, int] | None = None
-    kept_path: str | None = None
-    kept_age_s: float | None = None
-    last_mon_index: int | None = None
-    last_mon_offset: tuple[int, int] | None = None
-    sample_seq: int = 0
-    kept_sample_seq: int | None = None
-    # Next sample index for ``settle_probe_interval_s`` when scheduling a tick.
-    interval_step: int = 0
-    # First similar plateau recorded to event JSON; probe keeps sampling after.
-    observed_recorded: bool = False
 
 
 @dataclass(frozen=True)
@@ -1088,10 +1024,7 @@ class RecordingSession:
         self._pending_pre_key_timer: threading.Timer | None = None
         # Chinese IME Enter: delay flush until composition commits, then seal.
         self._pending_ime_commit_timer: threading.Timer | None = None
-        self._settle_probe: _SettleProbeState | None = None
-        self._settle_probe_timer: threading.Timer | None = None
         # Serialize settle ticks (timer thread) vs cancel/start (capture worker).
-        self._settle_tick_lock = threading.Lock()
         self._before_shot_stop = threading.Event()
         self._before_shot_thread: threading.Thread | None = None
         # Event JSON is patched by the probe timer and by per-step window threads.
@@ -1277,8 +1210,6 @@ class RecordingSession:
             self._pending_pre_key_screenshot = None
             self._cancel_pre_key_settle_timer_locked()
             self._cancel_ime_commit_timer_locked()
-            self._settle_probe = None
-            self._settle_probe_timer = None
             self._before_shot_stop.clear()
             self._before_shot_thread = None
             self._window_step_threads = []
@@ -1534,7 +1465,6 @@ class RecordingSession:
             events = list(self._events)
 
         if run_dir is None or run_id is None or started_at is None:
-            self._cancel_settle_probe(cleanup_files=True, reason="recording_stop_empty")
             with self._lock:
                 self._finalizing = False
             if on_after_screenshot is not None:
@@ -1548,13 +1478,8 @@ class RecordingSession:
         final_after = capture_final_after_screenshot(run_dir, events)
         if final_after is not None:
             self._log(run_dir, f"final after screenshot saved path={final_after}")
-            self._finish_settle_against_final_after(Path(final_after))
         else:
             self._log(run_dir, "final after screenshot capture failed")
-            self._cancel_settle_probe(
-                cleanup_files=True,
-                reason="recording_stop_no_final_after",
-            )
         if on_after_screenshot is not None:
             try:
                 on_after_screenshot()
@@ -4098,273 +4023,18 @@ class RecordingSession:
             self._worker_read_clipboard_paste(job)
         elif job.action == "idle_efp":
             self._worker_idle_efp(job)
-        # settle_probe_tick runs on its own timer thread (not this queue).
         # Window settle and UI Automation run on a per-step thread started
-        # after the event is saved, so they cannot delay the next probe.
+        # after the event is saved.
 
-    def _cancel_settle_probe(
-        self,
-        *,
-        cleanup_files: bool = True,
-        reason: str | None = None,
-    ) -> None:
-        """Stop the settle probe timer and clear probe state.
+    def _event_json_lock(self) -> threading.Lock:
+        """Lock for event JSON. Sessions built without ``__init__`` get one on first use."""
+        lock = getattr(self, "_event_file_lock", None)
+        if lock is not None:
+            return lock
+        lock = threading.Lock()
+        self._event_file_lock = lock
+        return lock
 
-        Does not wait for an in-flight timer tick. The tick checks the current
-        event index and no-ops before publishing when this slot was replaced.
-        """
-        with self._lock:
-            timer = self._settle_probe_timer
-            self._settle_probe_timer = None
-            probe = self._settle_probe
-            self._settle_probe = None
-            run_dir = self._run_dir
-        if timer is not None:
-            timer.cancel()
-        if probe is not None and run_dir is not None and reason:
-            age_s = time.monotonic() - probe.started_monotonic
-            kept_age = (
-                f"{probe.kept_age_s:.3f}" if probe.kept_age_s is not None else "none"
-            )
-            self._log(
-                run_dir,
-                "settle probe cancelled "
-                f"event={probe.event_index} reason={reason} "
-                f"age_s={age_s:.3f} kept_age_s={kept_age}",
-            )
-        if not cleanup_files or probe is None or run_dir is None:
-            return
-        # Skip cleanup while a tick still holds the lock (it may be writing these
-        # paths). Recording stop / a later idle cancel will remove leftovers.
-        acquired = self._settle_tick_lock.acquire(blocking=False)
-        if not acquired:
-            return
-        try:
-            self._cleanup_settle_probe_temp_files(run_dir, probe)
-        finally:
-            self._settle_tick_lock.release()
-
-    def _cleanup_settle_probe_temp_files(
-        self,
-        run_dir: Path,
-        probe: _SettleProbeState,
-    ) -> None:
-        """Delete probe-only temps for ``probe``. Caller holds ``_settle_tick_lock``."""
-        for path in (
-            settle_probe_staging_path(run_dir, probe.event_index),
-            settle_probe_kept_path(run_dir, probe.event_index),
-            Path(probe.kept_path) if probe.kept_path else None,
-        ):
-            if path is None:
-                continue
-            try:
-                # Never delete the durable next-before candidate.
-                if path.resolve() == last_settle_frame_path(run_dir).resolve():
-                    continue
-            except OSError:
-                pass
-            try:
-                if path.is_file():
-                    path.unlink()
-            except OSError:
-                pass
-
-    def _settle_probe_is_current(self, event_index: int) -> bool:
-        with self._lock:
-            probe = self._settle_probe
-            return probe is not None and probe.event_index == event_index
-
-    def _schedule_settle_probe_tick(self, delay_s: float, event_index: int) -> None:
-        with self._lock:
-            if self._settle_probe is None or self._settle_probe.event_index != event_index:
-                return
-            prev = self._settle_probe_timer
-            self._settle_probe_timer = None
-
-        if prev is not None:
-            prev.cancel()
-
-        def _fire() -> None:
-            try:
-                self._run_settle_probe_tick(event_index)
-            except Exception as exc:
-                with self._lock:
-                    run_dir = self._run_dir
-                if run_dir is not None:
-                    self._log(
-                        run_dir,
-                        f"settle probe tick failed event={event_index}: {exc}",
-                    )
-
-        timer = threading.Timer(max(0.0, float(delay_s)), _fire)
-        timer.daemon = True
-        with self._lock:
-            if self._settle_probe is None or self._settle_probe.event_index != event_index:
-                return
-            self._settle_probe_timer = timer
-        timer.start()
-
-    def _consume_settle_probe_delay_s(self, probe: _SettleProbeState) -> float:
-        """Advance the sample counter on ``probe`` and return the next delay."""
-        delay = settle_probe_interval_s(probe.interval_step)
-        probe.interval_step += 1
-        return delay
-
-    def _schedule_next_settle_probe_tick(self, event_index: int) -> None:
-        """Schedule the next settle sample using the fixed 1s interval."""
-        with self._lock:
-            probe = self._settle_probe
-            if probe is None or probe.event_index != event_index:
-                return
-            delay = self._consume_settle_probe_delay_s(probe)
-        self._schedule_settle_probe_tick(delay, event_index)
-
-    def _event_already_has_observed_settle(self, event_index: int) -> bool:
-        with self._lock:
-            run_dir = self._run_dir
-            events = list(self._events)
-        if run_dir is None:
-            return False
-        for event in events:
-            if event.index != event_index:
-                continue
-            observed = event.observed_settle_seconds
-            return (
-                isinstance(observed, (int, float))
-                and not isinstance(observed, bool)
-                and float(observed) > 0
-            )
-        path = event_json_path(run_dir, event_index)
-        raw = read_json(path, None)
-        if not isinstance(raw, dict):
-            return False
-        observed = raw.get("observed_settle_seconds")
-        return (
-            isinstance(observed, (int, float))
-            and not isinstance(observed, bool)
-            and float(observed) > 0
-        )
-
-    def _finish_settle_against_final_after(self, final_after: Path) -> None:
-        """Match the last action's settle probe to the all-monitor final-after frame.
-
-        Consecutive-pair probing stops here. New samples use the full virtual
-        desktop (same geometry as ``final_after``) until similar or the max window.
-        """
-        final_path = Path(final_after)
-        if not final_path.is_file():
-            self._cancel_settle_probe(
-                cleanup_files=True,
-                reason="recording_stop_final_after_missing",
-            )
-            return
-
-        # Stop the timer but keep probe state for age / event index.
-        with self._settle_tick_lock:
-            with self._lock:
-                timer = self._settle_probe_timer
-                self._settle_probe_timer = None
-                probe = self._settle_probe
-                run_dir = self._run_dir
-            if timer is not None:
-                timer.cancel()
-
-        if probe is None or run_dir is None:
-            return
-
-        if self._event_already_has_observed_settle(probe.event_index):
-            self._cancel_settle_probe(
-                cleanup_files=True,
-                reason="recording_stop_already_observed",
-            )
-            return
-
-        self._log(
-            run_dir,
-            f"settle probe match_final_after start event={probe.event_index} "
-            f"path={final_path}",
-        )
-
-        staging = settle_probe_staging_path(run_dir, probe.event_index)
-        while True:
-            sample_age = time.monotonic() - probe.started_monotonic
-            if sample_age > _SETTLE_PROBE_MAX_WINDOW_S:
-                self._log(
-                    run_dir,
-                    f"settle probe match_final_after timeout event={probe.event_index} "
-                    f"age_s={sample_age:.3f}",
-                )
-                self._cancel_settle_probe(
-                    cleanup_files=True,
-                    reason="recording_stop_final_after_timeout",
-                )
-                return
-
-            try:
-                # final_after is always all-monitors; samples must match that geometry.
-                capture_all_screens_to_file(staging)
-            except Exception as exc:
-                self._log(
-                    run_dir,
-                    f"settle probe match_final_after capture failed "
-                    f"event={probe.event_index}: {exc}",
-                )
-                time.sleep(self._consume_settle_probe_delay_s(probe))
-                continue
-
-            similar, mad = compare_frames(
-                staging,
-                final_path,
-                threshold=DEFAULT_SIMILARITY_THRESHOLD,
-            )
-            mad_text = f"{mad:.6f}" if mad is not None else "error"
-            self._archive_settle_debug_sample(
-                run_dir=run_dir,
-                event_index=probe.event_index,
-                source=staging,
-                age_s=sample_age,
-                tag="final",
-                record={
-                    "kind": "match_final_after",
-                    "mad": mad,
-                    "threshold": DEFAULT_SIMILARITY_THRESHOLD,
-                    "similar": similar,
-                    "final_after": final_path.name,
-                },
-            )
-            self._log(
-                run_dir,
-                f"settle probe match_final_after compare event={probe.event_index} "
-                f"age_s={sample_age:.3f} mad={mad_text} "
-                f"threshold={DEFAULT_SIMILARITY_THRESHOLD} similar={similar}",
-            )
-            if similar:
-                self._publish_last_settle_frame(staging, 0, (0, 0))
-                self._persist_observed_settle(probe.event_index, sample_age)
-                with self._lock:
-                    self._settle_probe = None
-                    self._settle_probe_timer = None
-                for path in (
-                    staging,
-                    settle_probe_kept_path(run_dir, probe.event_index),
-                ):
-                    try:
-                        if (
-                            path.is_file()
-                            and path.resolve()
-                            != last_settle_frame_path(run_dir).resolve()
-                        ):
-                            path.unlink()
-                    except OSError:
-                        pass
-                self._log(
-                    run_dir,
-                    f"settle probe match_final_after stable event={probe.event_index} "
-                    f"observed_settle_seconds={round(float(sample_age), 3)}",
-                )
-                return
-
-            time.sleep(self._consume_settle_probe_delay_s(probe))
 
     def _pointer_cursor_for_capture(self) -> tuple[int, int] | None:
         with self._lock:
@@ -4409,8 +4079,7 @@ class RecordingSession:
 
         Round-robins each physical monitor into in-memory RGB. Mouse-down pins
         that monitor's latest finished frame; the worker JPEG-encodes on adopt.
-        The loop does not wait for a settle probe, so the next action still
-        gets a frame when the previous probe has not sampled yet.
+        Continuously refreshes so the next action can pin a recent frame.
         """
         self._before_shot_stop.clear()
         thread = threading.Thread(
@@ -4526,350 +4195,6 @@ class RecordingSession:
         if self._before_shot_stop.is_set():
             return False
         return self._install_raw_before_shot(frame)
-
-    def _start_baseline_settle_probe(self) -> None:
-        """Grab immediately, then every 1s, until the next action replaces this probe.
-
-        Event index 0 is not a recorded step. Recording start uses the
-        before-shot loop for pre-click frames; this probe is not started there.
-        """
-        cursor = self._pointer_cursor_for_capture()
-        with self._lock:
-            if self._run_dir is None:
-                return
-            self._settle_probe = _SettleProbeState(
-                event_index=0,
-                started_monotonic=time.monotonic(),
-                cursor_xy=cursor,
-                interval_step=0,
-            )
-            run_dir = self._run_dir
-            first_delay = self._consume_settle_probe_delay_s(self._settle_probe)
-        self._log(
-            run_dir,
-            f"settle probe start event=0 "
-            f"first_s={first_delay} interval_s={_SETTLE_PROBE_INTERVAL_S} "
-            f"max_window_s={_SETTLE_PROBE_MAX_WINDOW_S} "
-            f"threshold={DEFAULT_SIMILARITY_THRESHOLD}",
-        )
-        self._schedule_settle_probe_tick(first_delay, 0)
-
-    def _settle_probe_is_current_or_newer(self, event_index: int) -> bool:
-        with self._lock:
-            probe = self._settle_probe
-            return probe is not None and probe.event_index >= event_index
-
-    def _start_settle_probe(self, event: RecordedEvent) -> None:
-        if event.kind not in _SETTLE_PROBE_KINDS:
-            return
-        if self._settle_probe_is_current_or_newer(event.index):
-            return
-        self._cancel_settle_probe(
-            cleanup_files=True,
-            reason=f"replaced_by_event_{event.index}",
-        )
-        if self._settle_probe_is_current_or_newer(event.index):
-            return
-        cursor = event.cursor_xy or event.end_xy or event.anchor_click_xy
-        with self._lock:
-            if self._run_dir is None:
-                return
-            self._settle_probe = _SettleProbeState(
-                event_index=event.index,
-                started_monotonic=time.monotonic(),
-                cursor_xy=cursor,
-                interval_step=0,
-            )
-            run_dir = self._run_dir
-            first_delay = self._consume_settle_probe_delay_s(self._settle_probe)
-        self._log(
-            run_dir,
-            f"settle probe start event={event.index} "
-            f"first_s={first_delay} interval_s={_SETTLE_PROBE_INTERVAL_S} "
-            f"max_window_s={_SETTLE_PROBE_MAX_WINDOW_S} "
-            f"threshold={DEFAULT_SIMILARITY_THRESHOLD}",
-        )
-        self._schedule_settle_probe_tick(first_delay, event.index)
-
-    def _promote_settle_staging(self, staging: Path, kept_dest: Path) -> Path:
-        kept_dest.parent.mkdir(parents=True, exist_ok=True)
-        if staging.resolve() == kept_dest.resolve():
-            return kept_dest
-        try:
-            if kept_dest.is_file():
-                kept_dest.unlink()
-        except OSError:
-            pass
-        try:
-            staging.replace(kept_dest)
-        except OSError:
-            try:
-                import shutil
-
-                shutil.copy2(staging, kept_dest)
-                staging.unlink(missing_ok=True)
-            except OSError:
-                return staging
-        return kept_dest
-
-    def _event_json_lock(self) -> threading.Lock:
-        """Lock for event JSON. Sessions built without ``__init__`` get one on first use."""
-        lock = getattr(self, "_event_file_lock", None)
-        if lock is not None:
-            return lock
-        lock = threading.Lock()
-        self._event_file_lock = lock
-        return lock
-
-    def _persist_observed_settle(self, event_index: int, observed_settle_seconds: float) -> None:
-        """Record the first similar-plateau age. Later plateaus leave the value alone."""
-        with self._lock:
-            run_dir = self._run_dir
-            events = self._events
-        if run_dir is None:
-            return
-        path = event_json_path(run_dir, event_index)
-        with self._event_json_lock():
-            raw = read_json(path, None)
-            if not isinstance(raw, dict):
-                return
-            existing = raw.get("observed_settle_seconds")
-            if isinstance(existing, (int, float)) and not isinstance(existing, bool):
-                return
-            seconds = round(float(observed_settle_seconds), 3)
-            raw["observed_settle_seconds"] = seconds
-            write_event_json(run_dir, raw)
-        with self._lock:
-            for index, event in enumerate(events):
-                if event.index == event_index:
-                    events[index] = RecordedEvent.from_dict(raw)
-                    break
-        self._log(
-            run_dir,
-            f"settle probe first plateau event={event_index} "
-            f"observed_settle_seconds={seconds}",
-        )
-
-    def _run_settle_probe_tick(self, event_index: int) -> None:
-        """Capture/compare one settle sample. Safe to call from the timer thread."""
-        if not isinstance(event_index, int):
-            return
-        hit_max_window = False
-        with self._settle_tick_lock:
-            with self._lock:
-                probe = self._settle_probe
-                run_dir = self._run_dir
-                if (
-                    probe is None
-                    or run_dir is None
-                    or probe.event_index != event_index
-                ):
-                    return
-                started = probe.started_monotonic
-                kept_path = Path(probe.kept_path) if probe.kept_path else None
-                kept_age = probe.kept_age_s
-
-            sample_age = time.monotonic() - started
-            if sample_age > _SETTLE_PROBE_MAX_WINDOW_S:
-                hit_max_window = True
-            else:
-                self._settle_probe_tick_body(
-                    event_index=event_index,
-                    run_dir=run_dir,
-                    kept_path=kept_path,
-                    kept_age=kept_age,
-                    sample_age=sample_age,
-                )
-        if hit_max_window:
-            self._cancel_settle_probe(cleanup_files=True, reason="max_window")
-
-    def _archive_settle_debug_sample(
-        self,
-        *,
-        run_dir: Path,
-        event_index: int,
-        source: Path,
-        age_s: float,
-        tag: str,
-        record: dict[str, Any],
-    ) -> int | None:
-        """Persist a settle sample + JSONL row when debug retention is enabled."""
-        if not _SETTLE_PROBE_KEEP_DEBUG_SAMPLES:
-            return None
-        with self._lock:
-            probe = self._settle_probe
-            if probe is None or probe.event_index != event_index:
-                return None
-            probe.sample_seq += 1
-            sample_index = probe.sample_seq
-        archived = archive_settle_probe_sample(
-            run_dir=run_dir,
-            event_index=event_index,
-            sample_index=sample_index,
-            source=source,
-            age_s=age_s,
-            tag=tag,
-        )
-        payload = {
-            "sample": sample_index,
-            "age_s": round(float(age_s), 3),
-            "tag": tag,
-            "path": archived.name if archived is not None else None,
-            **record,
-        }
-        append_settle_probe_debug_record(run_dir, event_index, payload)
-        return sample_index
-
-    def _settle_probe_tick_body(
-        self,
-        *,
-        event_index: int,
-        run_dir: Path,
-        kept_path: Path | None,
-        kept_age: float | None,
-        sample_age: float,
-    ) -> None:
-        """Inner settle tick; caller holds ``_settle_tick_lock``.
-
-        If this event was replaced while capturing, drop the sample. This tick
-        measures settle only and does not publish a before-shot.
-
-        Always grabs the full virtual desktop (all monitors). A click on one
-        monitor must still see a window that opens or closes on another.
-        """
-        staging = settle_probe_staging_path(run_dir, event_index)
-        mon_idx = 0
-        mon_offset: tuple[int, int] = (0, 0)
-        try:
-            mon_idx, mon_offset = self._grab_screenshot(None, staging)
-        except Exception as exc:
-            self._log(run_dir, f"settle probe capture failed event={event_index}: {exc}")
-            self._schedule_next_settle_probe_tick(event_index)
-            return
-
-        # Replaced while capturing: drop this sample (do not publish or reschedule).
-        if not self._settle_probe_is_current(event_index):
-            try:
-                if staging.is_file():
-                    staging.unlink()
-            except OSError:
-                pass
-            return
-
-        similar: bool | None = None
-        mad: float | None = None
-        kept_sample_seq: int | None = None
-        with self._lock:
-            if self._settle_probe is not None and self._settle_probe.event_index == event_index:
-                kept_sample_seq = self._settle_probe.kept_sample_seq
-
-        if kept_path is None or not kept_path.is_file():
-            sample_index = self._archive_settle_debug_sample(
-                run_dir=run_dir,
-                event_index=event_index,
-                source=staging,
-                age_s=sample_age,
-                tag="sample",
-                record={"kind": "first_keep"},
-            )
-            self._log(
-                run_dir,
-                f"settle probe sample event={event_index} age_s={sample_age:.3f} "
-                "first_keep=True",
-            )
-            if sample_index is not None:
-                with self._lock:
-                    if (
-                        self._settle_probe is not None
-                        and self._settle_probe.event_index == event_index
-                    ):
-                        self._settle_probe.kept_sample_seq = sample_index
-        else:
-            similar, mad = compare_frames(
-                kept_path,
-                staging,
-                threshold=DEFAULT_SIMILARITY_THRESHOLD,
-            )
-            mad_text = f"{mad:.6f}" if mad is not None else "error"
-            kept_age_text = (
-                f"{kept_age:.3f}" if kept_age is not None else "none"
-            )
-            sample_index = self._archive_settle_debug_sample(
-                run_dir=run_dir,
-                event_index=event_index,
-                source=staging,
-                age_s=sample_age,
-                tag="sample",
-                record={
-                    "kind": "compare",
-                    "kept_sample": kept_sample_seq,
-                    "kept_age_s": (
-                        round(float(kept_age), 3) if kept_age is not None else None
-                    ),
-                    "mad": mad,
-                    "threshold": DEFAULT_SIMILARITY_THRESHOLD,
-                    "similar": similar,
-                },
-            )
-            self._log(
-                run_dir,
-                f"settle probe compare event={event_index} "
-                f"age_s={sample_age:.3f} kept_age_s={kept_age_text} "
-                f"mad={mad_text} threshold={DEFAULT_SIMILARITY_THRESHOLD} "
-                f"similar={similar}",
-            )
-
-        if not self._settle_probe_is_current(event_index):
-            try:
-                if staging.is_file():
-                    staging.unlink()
-            except OSError:
-                pass
-            return
-
-        new_kept, new_age, observed = apply_settle_sample(
-            kept_path=kept_path,
-            kept_age_s=kept_age,
-            staging_path=staging,
-            sample_age_s=sample_age,
-            similar=similar,
-        )
-
-        # First similar pair records observed_settle. Later pairs leave that
-        # value alone. The probe keeps sampling until the next event replaces
-        # it. Before-shots are published by the before-shot loop.
-        if observed is not None:
-            record_observed = False
-            with self._lock:
-                if (
-                    self._settle_probe is not None
-                    and self._settle_probe.event_index == event_index
-                    and not self._settle_probe.observed_recorded
-                ):
-                    self._settle_probe.observed_recorded = True
-                    record_observed = True
-            if record_observed:
-                self._persist_observed_settle(event_index, observed)
-
-        if not self._settle_probe_is_current(event_index):
-            return
-
-        official = settle_probe_kept_path(run_dir, event_index)
-        if new_kept is not None:
-            official = self._promote_settle_staging(Path(new_kept), official)
-        # Settle samples stay on the probe. The before-shot loop is the only
-        # writer of raw ``_last_settle_frames``.
-        with self._lock:
-            if self._settle_probe is None or self._settle_probe.event_index != event_index:
-                return
-            self._settle_probe.kept_path = str(official)
-            self._settle_probe.kept_age_s = new_age
-            self._settle_probe.last_mon_index = int(mon_idx)
-            self._settle_probe.last_mon_offset = (int(mon_offset[0]), int(mon_offset[1]))
-            # Current sample is now the kept frame (first keep or replace on change).
-            if sample_index is not None:
-                self._settle_probe.kept_sample_seq = sample_index
-        self._schedule_next_settle_probe_tick(event_index)
 
     def _discard_pending_pre_type_file(
         self,
@@ -6372,13 +5697,6 @@ class RecordingSession:
                 state="red",
                 pulse=pulse,
                 after_index=int(event.index),
-            )
-        if event.kind in _SETTLE_PROBE_KINDS:
-            self._start_settle_probe(event)
-        else:
-            self._cancel_settle_probe(
-                cleanup_files=True,
-                reason=f"non_probe_event_{event.kind}_{event.index}",
             )
         self._start_window_step(item)
 

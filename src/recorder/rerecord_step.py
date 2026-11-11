@@ -250,7 +250,6 @@ def overwrite_pointer_event(
         window_change=change,
         target_window_title=title,
         window_snapshot_debug=debug,
-        observed_settle_seconds=float(_WINDOW_AFTER_SETTLE_S),
     )
     end_shot = screenshot_path_for_event_end(run_dir, event_index)
     if end_shot.is_file():
@@ -335,14 +334,6 @@ async def reanalyze_recording_event(
         if "use_expected_outcome" in previous_analysis
         else use_expected_outcome_enabled(previous_analysis)
     )
-    preserved_settle = previous_analysis.get("settle_after_seconds")
-    if isinstance(preserved_settle, (int, float)) and not isinstance(preserved_settle, bool):
-        settle_after = float(preserved_settle)
-    elif isinstance(event.observed_settle_seconds, (int, float)):
-        settle_after = float(event.observed_settle_seconds)
-    else:
-        settle_after = None
-
     _bind_run_state_for_analysis(run_dir, run_dir.name)
     prepared = await prepare_event_vision(event, run_dir=run_dir, log_info=_log)
     result = await analyze_event_to_cache(
@@ -377,7 +368,6 @@ async def reanalyze_recording_event(
         expected_outcome=preserved_outcome,
         use_expected_outcome=bool(preserved_use and preserved_outcome),
         elapsed_since_previous=elapsed_since_previous,
-        settle_after_seconds=settle_after,
         text_resolution=prepared.text_resolution,
         later_foregrounds=_foregrounds_after_appeared(
             events, event_pos, run_dir=run_dir
@@ -395,9 +385,6 @@ async def reanalyze_recording_event(
             analysis["window_verify_disabled"] = list(disabled)
             write_json(analysis_path, analysis)
 
-    # Do not rewrite the previous step's settle_after from the wall-clock gap to
-    # this re-record click. That gap is re-record setup time (or an old recording
-    # timestamp vs now), not UI settle after the previous action.
     rebuild_recording_instruction_tool_cache(run_dir)
     _rebuild_report_lists(run_dir)
     write_recording_html_from_run(run_dir, update_index=False)

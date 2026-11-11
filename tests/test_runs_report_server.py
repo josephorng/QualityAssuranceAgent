@@ -1085,7 +1085,6 @@ def _set_analysis_verification(
     use_expected_outcome: bool,
     window_verify: dict,
     window_verify_disabled: list[str] | None = None,
-    settle_after_seconds: float | None = None,
 ) -> None:
     path = run_root / "analysis" / f"event_{event_index:03d}.json"
     analysis = json.loads(path.read_text(encoding="utf-8"))
@@ -1099,10 +1098,7 @@ def _set_analysis_verification(
         analysis["window_verify_disabled"] = window_verify_disabled
     else:
         analysis.pop("window_verify_disabled", None)
-    if settle_after_seconds is None:
-        analysis.pop("settle_after_seconds", None)
-    else:
-        analysis["settle_after_seconds"] = settle_after_seconds
+    analysis.pop("settle_after_seconds", None)
     path.write_text(json.dumps(analysis, ensure_ascii=False), encoding="utf-8")
 
 
@@ -1117,7 +1113,6 @@ def test_delete_recording_event_handoffs_verification_to_previous(
         expected_outcome="舊結果",
         use_expected_outcome=True,
         window_verify={"clipboard": "old"},
-        settle_after_seconds=0.1,
     )
     _set_analysis_verification(
         run_root,
@@ -1129,7 +1124,6 @@ def test_delete_recording_event_handoffs_verification_to_previous(
             "clipboard": "copied",
         },
         window_verify_disabled=["clipboard"],
-        settle_after_seconds=1.5,
     )
 
     delete_recording_event(runs_root, "recording_delete_handoff", 2)
@@ -1145,7 +1139,7 @@ def test_delete_recording_event_handoffs_verification_to_previous(
         "clipboard": "copied",
     }
     assert previous["window_verify_disabled"] == ["clipboard"]
-    assert previous["settle_after_seconds"] == 1.5
+    assert "settle_after_seconds" not in previous
     assert not (run_root / "analysis" / "event_002.json").exists()
 
 
@@ -1176,7 +1170,6 @@ def test_delete_recording_events_consecutive_handoff_uses_last_deleted(
         expected_outcome="step3 final",
         use_expected_outcome=False,
         window_verify={"appeared": [{"title": "Done"}]},
-        settle_after_seconds=2.0,
     )
 
     delete_recording_events(
@@ -1190,7 +1183,7 @@ def test_delete_recording_events_consecutive_handoff_uses_last_deleted(
     assert previous["use_expected_outcome"] is False
     assert previous["window_verify"] == {"appeared": [{"title": "Done"}]}
     assert "window_verify_disabled" not in previous
-    assert previous["settle_after_seconds"] == 2.0
+    assert "settle_after_seconds" not in previous
 
 
 def test_delete_recording_events_nonconsecutive_handoffs_each_run(

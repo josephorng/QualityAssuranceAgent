@@ -97,7 +97,6 @@ def test_persist_pointer_pulses_attach_then_red(tmp_path: Path) -> None:
     session._run_dir = tmp_path
     (tmp_path / "events").mkdir(parents=True, exist_ok=True)
     session.set_on_uia_status(statuses.append)
-    session._start_settle_probe = lambda _event: None  # type: ignore[method-assign]
     session._start_window_step = lambda _item: None  # type: ignore[method-assign]
     session._notify_event = lambda _event: None  # type: ignore[method-assign]
 
@@ -128,7 +127,6 @@ def test_persist_pointer_pulses_miss_without_snapshot(tmp_path: Path) -> None:
     session._run_dir = tmp_path
     (tmp_path / "events").mkdir(parents=True, exist_ok=True)
     session.set_on_uia_status(statuses.append)
-    session._start_settle_probe = lambda _event: None  # type: ignore[method-assign]
     session._start_window_step = lambda _item: None  # type: ignore[method-assign]
     session._notify_event = lambda _event: None  # type: ignore[method-assign]
 

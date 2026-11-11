@@ -6,6 +6,7 @@ from cua_mcp.select_ui_element import UiDetection
 from cua_mcp.select_mouse_target import (
     YOLO_CLASS_ELEMENT,
     YOLO_CLASS_INPUT,
+    YOLO_CLASS_SCROLLBAR,
     YOLO_CLASS_TEXT,
     _distance_synth_to_det_bbox,
     _efp_gate_required_for_hub,
@@ -15,6 +16,7 @@ from cua_mcp.select_mouse_target import (
     _label_similarity,
     _mouse_select_fields_from_ocr_fallback_instruction,
     _order_geometry_efp_candidates,
+    _phrase_match_pool,
     _preferred_yolo_class_for_near_synth,
     _recorded_efp_present,
     _try_uia_first_unique_select,
@@ -812,6 +814,54 @@ def test_uia_first_input_hub_efp_miss_continues_name_shortlist() -> None:
     assert reason != "landmark_efp_miss"
     assert reason == "hit"
     assert chosen is named_input
+
+
+def test_phrase_match_pool_keeps_input_and_scrollbar_by_class_name() -> None:
+    unlabeled_input = _det(976, 447, text="", class_name="input")
+    sibling_text = _det(853, 448, text="密碼", class_name="text")
+    scrollbar = _det(50, 50, text="", class_name="scrollbar", class_id=YOLO_CLASS_SCROLLBAR)
+
+    input_pool = _phrase_match_pool(
+        [unlabeled_input, sibling_text, scrollbar],
+        "密碼|Textbox|txt_Password",
+        control_type_token="input",
+    )
+    assert input_pool == [unlabeled_input]
+
+    scrollbar_pool = _phrase_match_pool(
+        [unlabeled_input, sibling_text, scrollbar],
+        "滾動條",
+        control_type_token="scrollbar",
+    )
+    assert scrollbar_pool == [scrollbar]
+
+
+def test_uia_first_input_hub_soft_miss_does_not_unique_hit_sibling_text() -> None:
+    """Unlabeled Edit + same-Name Text must not commit the Text after soft EFP."""
+    geom = _simple_landmark_geometry()
+    landmark = _det(100, 100, text="LM", class_name="text")
+    sibling_text = _det(853, 448, text="密碼", class_name="text")
+    unlabeled_input = _det(976, 447, text="", class_name="input")
+
+    def probe(x: int, y: int):
+        return ("label", (0, 0, 1, 1), "text", "其他", "")
+
+    chosen, reason = _try_uia_first_unique_select(
+        [landmark, sibling_text, unlabeled_input],
+        anchor="密碼|Textbox|txt_Password",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        filter_by_control_type=True,
+        control_type_token="input",
+        recorded_anchor=True,
+        landmark_geometry=geom,
+        recorded_efp_name="密碼|Textbox|txt_Password",
+        recorded_efp_value="",
+        point_probe_fn=probe,
+    )
+    assert reason == "no_anchor"
+    assert chosen is None
 
 
 def test_uia_first_geom_unavailable_soft_miss() -> None:

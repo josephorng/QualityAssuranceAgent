@@ -4405,8 +4405,22 @@ def _phrase_match_pool(
     )
 
     token = (control_type_token or "").strip() or None
+    # Replay FindAll inputs/scrollbars are class_name boxes (no uia_control_type).
+    # Keep them before the UIA-suffix wipe so Name shortlist cannot unique-hit
+    # a sibling Text label after a soft constellation EFP miss.
+    if token in ("input", "scrollbar"):
+        typed = [
+            det for det in detections if (det.class_name or "") == token
+        ]
+        if typed:
+            return typed
+        _log_info(
+            "control_type_fallback "
+            f"phrase={phrase!r} token={token} detections={len(detections)}"
+        )
+        return detections
     if token and token not in UIA_CONTROL_TYPE_SUFFIX:
-        # YOLO-only tokens (icon/input/…) are not UIA control types.
+        # YOLO-only tokens (icon/…) are not UIA control types.
         token = None
     if not token:
         token = control_token_for_suffix(_anchor_type_suffix(phrase))

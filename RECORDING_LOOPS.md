@@ -138,7 +138,7 @@ These are not loops. They are how input reaches the worker.
 
 | Timer | Delay | What it does |
 | --- | --- | --- |
-| Double-click | Up to 0.35 seconds after mouse-down | Mouse-up schedules it. It then enqueues the click, or a hold or drag. A second press at the same spot emits a double-click instead. |
+| Double-click | Up to 0.35 seconds after mouse-down | Mouse-up schedules it. It then enqueues the click, or a hold or drag. A second press at the same spot emits a double-click via ``emit_left_gesture`` reusing the first press (same UIA attach rules as click), not ``mouse_pointer_event``. |
 | Pre-key | 0.3 seconds after typing pauses | Enqueues a before-shot so the next Tab or Enter can reuse a settled frame. The low-level hook cannot grab the screen before that key is delivered. |
 | Clipboard | Join 0.25 seconds | A short thread inside a signal refresh. If the clipboard owner blocks, the caller continues without text. |
 

@@ -3774,15 +3774,41 @@ class RecordingSession:
         timer.start()
 
     def _flush_pending_click(self, x: int, y: int, button: str) -> None:
+        self._emit_pending_left_gesture(
+            kind="click",
+            x=x,
+            y=y,
+            button=button,
+        )
+
+    def _emit_pending_left_gesture(
+        self,
+        *,
+        kind: str,
+        x: int,
+        y: int,
+        button: str,
+        timestamp_utc: str | None = None,
+    ) -> bool:
+        """Emit a deferred left click/double-click via ``emit_left_gesture``.
+
+        Keeps the first-press capture maps (UIA / EFP / click_window) so the
+        worker can attach ``uia_snapshot``. Clears only the deferred-click
+        timer/coords so a following mouse-up does not emit again.
+        """
         with self._lock:
             run_dir = self._run_dir
             if run_dir is None:
-                return
+                return False
             if self._pending_click_coords != (x, y, button):
-                return
+                return False
             click_index = self._take_pending_left_event_index_locked()
             press_seq = self._left_press_seq
-            timestamp_utc = self._pending_click_timestamp_utc or utc_now_iso()
+            resolved_timestamp = (
+                timestamp_utc
+                or self._pending_click_timestamp_utc
+                or utc_now_iso()
+            )
             modifiers = self._pending_click_modifiers
             action_monotonic = self._pending_click_down_at or time.monotonic()
             self._pending_click_timer = None
@@ -3811,10 +3837,10 @@ class RecordingSession:
         self._enqueue(
             _DeferredCaptureJob(
                 action="emit_left_gesture",
-                kind="click",
+                kind=kind,
                 cursor_xy=(x, y),
                 event_index=click_index,
-                timestamp_utc=timestamp_utc,
+                timestamp_utc=resolved_timestamp,
                 button=button,
                 modifiers=modifiers,
                 press_seq=press_seq,
@@ -3822,6 +3848,7 @@ class RecordingSession:
                 action_monotonic=action_monotonic,
             )
         )
+        return True
 
     def _flush_pending_hold(
         self,
@@ -6564,18 +6591,14 @@ class RecordingSession:
             ):
                 if pending_timer is not None:
                     pending_timer.cancel()
-                with self._lock:
-                    # Reuse the first-press reserved index for the double-click.
-                    double_index = self._take_pending_left_event_index_locked()
-                    self._pending_click_timer = None
-                self._clear_pending_left_gesture()
-                self._queue_pointer_event_immediate(
+                # Reuse the first press (capture / UIA / EFP) via emit_left_gesture.
+                # Do not clear press maps or go through mouse_pointer_event (no UIA).
+                self._emit_pending_left_gesture(
                     kind="double_click",
-                    cursor_xy=(ix, iy),
-                    button=btn,
-                    modifiers=self._snapshot_pressed_modifiers(),
+                    x=px,
+                    y=py,
+                    button=pbtn,
                     timestamp_utc=action_timestamp_utc,
-                    event_index=double_index,
                 )
                 return
 

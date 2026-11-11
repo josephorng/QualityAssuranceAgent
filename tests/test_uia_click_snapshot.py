@@ -1516,6 +1516,111 @@ def test_progman_press_findall_under_click_hwnd(tmp_path: Path) -> None:
     assert raw["uia_snapshot"]["texts"][0]["text"] == "WinMaster7 Console"
 
 
+def test_live_double_click_keeps_first_press_uia_snapshot(tmp_path: Path) -> None:
+    """Second mouse-down emits double_click via emit_left_gesture; UIA maps stay."""
+    import time
+
+    from src.recorder.capture import RecordingSession, _DeferredCaptureJob
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    calls: list[int] = []
+
+    def _snap(hwnd: int) -> dict:
+        calls.append(int(hwnd))
+        return {
+            "window": [0, 0, 1918, 920],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [
+                {
+                    "bbox": [76, 111, 152, 196],
+                    "text": "WinMaster7 Console",
+                    "control_type": "list_item",
+                }
+            ],
+        }
+
+    desktop = ClickWindowInfo(
+        hwnd=131256,
+        title="Program Manager",
+        process_name="explorer.exe",
+        left=0,
+        top=0,
+        width=1918,
+        height=920,
+        is_maximized=False,
+        is_taskbar=False,
+        class_name="Progman",
+    )
+    session = RecordingSession(runs_root=tmp_path)
+    session._run_dir = tmp_path
+    session._last_settle_uia = {
+        "hwnd": 10,
+        "window": [0, 0, 100, 80],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [{"bbox": [0, 0, 4, 4], "text": "舊窗"}],
+    }
+    session._last_settle_uia_after_index = 0
+    session._start_window_step = lambda _item: None  # type: ignore[method-assign]
+    session._notify_event = lambda _event: None  # type: ignore[method-assign]
+    session._start_settle_probe = lambda _event: None  # type: ignore[method-assign]
+    jobs: list[_DeferredCaptureJob] = []
+
+    def _enqueue(job: _DeferredCaptureJob) -> None:
+        jobs.append(job)
+
+    session._enqueue = _enqueue  # type: ignore[method-assign]
+    with patch(
+        "src.recorder.uia_input_boxes.snapshot_uia_screen",
+        side_effect=_snap,
+    ), patch(
+        "src.recorder.capture.resolve_click_window",
+        return_value=desktop,
+    ), patch(
+        "src.recorder.capture._finalize_screenshot",
+        return_value=("shot.jpeg", 1, (0, 0)),
+    ), patch(
+        "src.recorder.uia_input_boxes.element_from_point_name_value",
+        return_value={
+            "element_from_point_s": 0.0,
+            "name": "WinMaster7 Console",
+            "value": "",
+            "control_type": "list_item",
+        },
+    ):
+        session._pending_click_coords = (114, 153, "left")
+        session._pending_click_down_at = time.monotonic()
+        session._pending_click_timestamp_utc = "t0"
+        session._pending_click_event_index = 1
+        session._next_index = 2
+        session._left_button_down = True
+        session._capture_pending_left_press(tmp_path, 114, 153)
+        press_job = next(j for j in jobs if j.action == "pending_left_press")
+        session._worker_pending_left_press(press_job)
+        assert session._left_press_uia[1] is not None
+        session._left_press_captures[1] = (("pending.jpeg", 1, (0, 0)), [])
+        # First mouse-up keeps deferred coords; second down promotes to double-click.
+        session._left_button_down = False
+        session._on_left_mouse_down(114, 153, "left", timestamp_utc="t1")
+        emit_jobs = [j for j in jobs if j.action == "emit_left_gesture"]
+        assert len(emit_jobs) == 1
+        assert emit_jobs[0].kind == "double_click"
+        assert emit_jobs[0].press_seq == 1
+        assert emit_jobs[0].event_index == 1
+        assert 1 in session._left_press_uia
+        assert session._left_press_uia[1]["texts"][0]["text"] == "WinMaster7 Console"
+        assert not any(j.action == "mouse_pointer_event" for j in jobs)
+        session._worker_emit_left_gesture(emit_jobs[0])
+    assert calls == [131256]
+    raw = json.loads((tmp_path / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "double_click"
+    assert raw["click_window"]["class_name"] == "Progman"
+    assert raw["uia_snapshot"]["hwnd"] == 131256
+    assert raw["uia_snapshot"]["texts"][0]["text"] == "WinMaster7 Console"
+    assert raw["element_from_point"]["name"] == "WinMaster7 Console"
+
+
 def test_pick_settle_uia_hwnd_prefers_combolbox_opened_over_foreground() -> None:
     from src.recorder.capture import RecordingSession, _QueuedEvent
     from src.recorder.window_snapshot import ClickWindowInfo

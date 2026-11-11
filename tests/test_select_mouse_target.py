@@ -5638,6 +5638,148 @@ async def test_find_mouse_point_replay_geometry_synth_when_peers_far(
 
 
 @pytest.mark.asyncio
+async def test_find_mouse_point_input_hub_efp_miss_commits_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bare 輸入欄 + recorded Name miss still commits nearby/geometry pick."""
+    from cua_mcp import select_mouse_target as smt
+
+    async def fake_pick(*_a, **_k):
+        raise AssertionError("visual one-pass must not run during replay")
+
+    def fake_parse(instruction: str):
+        return ("輸入欄", 0, 0, [], None, 0, None)
+
+    def probe_miss(x: int, y: int):
+        return ("label", (0, 0, 1, 1), "text", "其他", "")
+
+    detections = _geometry_landmark_scene(include_target=False)
+    near = _detection_from_bbox((52, 52, 16, 16), YOLO_CLASS_INPUT, text="")
+    far = _detection_from_bbox((400, 400, 16, 16), YOLO_CLASS_INPUT, text="")
+    detections.extend([near, far])
+    _install_find_mouse_point_fakes(monkeypatch, detections, pick=fake_pick)
+    monkeypatch.setattr(smt, "parse_mouse_target_instruction", fake_parse)
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.uia_text_element_at_point",
+        probe_miss,
+    )
+
+    with smt.require_similarity_match():
+        found = await smt.find_mouse_point(
+            "（YOLO+OCR）輸入欄",
+            nearby_objects=_GEOMETRY_NEARBY,
+            landmark_geometry=_recorded_input_geometry(),
+            vision_mode="yolo_ocr",
+            control_type="input",
+            recorded_efp_name="密碼|Textbox|txt_Password",
+            recorded_efp_value="",
+        )
+    assert found is not None
+    assert found[2]["selection_method"] in (
+        "landmark_geometry_pick",
+        "landmark_geometry_efp_pick",
+    )
+    assert (found[0], found[1]) == (near.cx, near.cy)
+
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_input_hub_efp_hit_prefers_matching_box(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Soft EFP still prefers the live Name match among input candidates."""
+    from cua_mcp import select_mouse_target as smt
+
+    async def fake_pick(*_a, **_k):
+        raise AssertionError("visual one-pass must not run during replay")
+
+    def fake_parse(instruction: str):
+        return ("輸入欄", 0, 0, [], None, 0, None)
+
+    detections = _geometry_landmark_scene(include_target=False)
+    near = _detection_from_bbox((52, 52, 16, 16), YOLO_CLASS_INPUT, text="")
+    far = _detection_from_bbox((400, 400, 16, 16), YOLO_CLASS_INPUT, text="")
+    detections.extend([near, far])
+
+    def probe(x: int, y: int):
+        if (x, y) == (far.cx, far.cy):
+            return (
+                "密碼|Textbox|txt_Password",
+                (0, 0, 1, 1),
+                "input",
+                "密碼|Textbox|txt_Password",
+                "",
+            )
+        return ("label", (0, 0, 1, 1), "text", "其他", "")
+
+    _install_find_mouse_point_fakes(monkeypatch, detections, pick=fake_pick)
+    monkeypatch.setattr(smt, "parse_mouse_target_instruction", fake_parse)
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.uia_text_element_at_point",
+        probe,
+    )
+    # Keep both inputs in the shortlist so EFP can prefer the far Name match.
+    monkeypatch.setattr(
+        smt,
+        "_prefilter_anchors_by_nearby",
+        lambda anchors, *_a, **_k: list(anchors),
+    )
+
+    with smt.require_similarity_match():
+        found = await smt.find_mouse_point(
+            "（YOLO+OCR）輸入欄",
+            nearby_objects=_GEOMETRY_NEARBY,
+            landmark_geometry=_recorded_input_geometry(),
+            vision_mode="yolo_ocr",
+            control_type="input",
+            recorded_efp_name="密碼|Textbox|txt_Password",
+            recorded_efp_value="",
+        )
+    assert found is not None
+    assert found[2]["selection_method"] == "landmark_geometry_efp_pick"
+    assert (found[0], found[1]) == (far.cx, far.cy)
+
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_text_hub_efp_miss_still_hard_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Labeled text hubs keep a hard EFP gate on recorded Name miss."""
+    from cua_mcp import select_mouse_target as smt
+
+    async def fake_pick(*_a, **_k):
+        raise AssertionError("visual one-pass must not run during replay")
+
+    def fake_parse(instruction: str):
+        return ("「下載」文字", 0, 0, [], None, 0, None)
+
+    def probe_miss(x: int, y: int):
+        return ("label", (0, 0, 1, 1), "text", "其他", "")
+
+    # No constellation: shortlist + hard anchor_efp (not radius-similarity).
+    detections = [
+        _detection_from_bbox((40, 40, 40, 16), YOLO_CLASS_TEXT, text="下載"),
+        _detection_from_bbox((200, 40, 40, 16), YOLO_CLASS_TEXT, text="下載"),
+    ]
+    _install_find_mouse_point_fakes(monkeypatch, detections, pick=fake_pick)
+    monkeypatch.setattr(smt, "parse_mouse_target_instruction", fake_parse)
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.uia_text_element_at_point",
+        probe_miss,
+    )
+
+    with smt.require_similarity_match():
+        found = await smt.find_mouse_point(
+            "（YOLO+OCR）「下載」文字",
+            vision_mode="yolo_ocr",
+            anchor_text="下載",
+            control_type="text",
+            recorded_efp_name="下載 (已釘選)",
+            recorded_efp_value="下載 (已釘選)",
+        )
+    assert found is None
+
+
+@pytest.mark.asyncio
 async def test_find_mouse_point_replay_text_miss_fails_without_constellation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

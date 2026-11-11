@@ -3562,6 +3562,31 @@ def _hub_is_input_or_scrollbar(
     return False
 
 
+def _efp_gate_required_for_hub(
+    *,
+    instruction: str = "",
+    anchor: str = "",
+    control_type_token: str | None = None,
+    recorded_efp_name: str | None = None,
+    recorded_efp_value: str | None = None,
+) -> bool:
+    """True when recorded EFP must match live EFP before committing.
+
+    Input/scrollbar hubs treat press-time Name/Value as a soft preference only
+    (constellation / nearby already disambiguate textless fields). Labeled
+    leaves (text, button, list_item, …) keep a hard Name/Value gate.
+    """
+    if not _recorded_efp_present(recorded_efp_name, recorded_efp_value):
+        return False
+    if _hub_is_input_or_scrollbar(
+        instruction=instruction,
+        anchor=anchor,
+        control_type_token=control_type_token,
+    ):
+        return False
+    return True
+
+
 def _anchor_is_text(anchor: str) -> bool:
     """True when the anchor is an on-object named label (``…文字`` or a UIA type)."""
     suffix = _anchor_type_suffix(anchor)
@@ -4887,11 +4912,21 @@ def _try_uia_first_unique_select(
                 f"point=[{efp_point[0]},{efp_point[1]}]"
             )
             return synth_det, "landmark_efp_synth_hit"
+        # Input/scrollbar: EFP is soft — continue Name shortlist / unique path.
+        # Labeled hubs: hard miss so YOLO/OCR can take over.
+        if not _hub_is_input_or_scrollbar(
+            anchor=anchor,
+            control_type_token=control_type_token,
+        ):
+            _log_info(
+                "move_mouse uia_first landmark_efp_miss "
+                f"pool={len(pool)}; soft-miss (no Name unique)"
+            )
+            return None, "landmark_efp_miss"
         _log_info(
-            "move_mouse uia_first landmark_efp_miss "
-            f"pool={len(pool)}; soft-miss (no Name unique)"
+            "move_mouse uia_first landmark_efp_miss soft_input_hub "
+            f"pool={len(pool)}; continue Name shortlist"
         )
-        return None, "landmark_efp_miss"
 
     if filter_by_control_type:
         # Anchor: Name-then-Value inside the control-type pool. Nearby: full
@@ -7258,10 +7293,18 @@ async def _find_mouse_point_attempt(
             )
             if geom_hit is not None:
                 geom_det, geom_point, geom_method = geom_hit
-                need_efp = _recorded_efp_present(
+                efp_present = _recorded_efp_present(
                     recorded_efp_name, recorded_efp_value
                 )
-                if need_efp:
+                hard_efp = _efp_gate_required_for_hub(
+                    instruction=instruction_text,
+                    anchor=match_anchor or anchor,
+                    control_type_token=control_type_token,
+                    recorded_efp_name=recorded_efp_name,
+                    recorded_efp_value=recorded_efp_value,
+                )
+                skip_geom_after_hard_miss = False
+                if efp_present:
                     efp_det, efp_point, efp_reason = (
                         _verify_geometry_candidates_with_efp(
                             list(anchor_matches),
@@ -7271,15 +7314,17 @@ async def _find_mouse_point_attempt(
                             recorded_value=recorded_efp_value,
                         )
                     )
-                    if efp_reason == "miss":
+                    if efp_reason == "hit" and efp_det is not None:
+                        chosen = efp_det
+                        idx = detections.index(efp_det)
+                        selection_method = "landmark_geometry_efp_pick"
+                        select_phase = selection_method
+                        used_geometry = True
                         _log_info(
-                            "move_mouse: landmark_geometry_efp_miss among anchors "
-                            f"vision_mode={vision_mode!r} pool={len(anchor_matches)}"
+                            "move_mouse: landmark geometry EFP pick among anchors "
+                            f"center=[{chosen.cx},{chosen.cy}] "
+                            f"pool={len(anchor_matches)}"
                         )
-                        if vision_mode == "uia":
-                            # Geometry/UIA locate failed Name/Value gate.
-                            return _pack(None)
-                        # yolo_ocr: skip geometry commit; continue select.
                     elif efp_reason == "synth_hit" and efp_point is not None:
                         select_s = time.perf_counter() - select_started
                         _log_info(
@@ -7303,57 +7348,69 @@ async def _find_mouse_point_attempt(
                                 select_phase="landmark_geometry_efp_synth",
                             ),
                         ))
-                    elif efp_det is not None:
-                        chosen = efp_det
-                        idx = detections.index(efp_det)
-                        selection_method = "landmark_geometry_efp_pick"
-                        select_phase = selection_method
+                    elif hard_efp:
+                        _log_info(
+                            "move_mouse: landmark_geometry_efp_miss among anchors "
+                            f"vision_mode={vision_mode!r} pool={len(anchor_matches)}"
+                        )
+                        if vision_mode == "uia":
+                            # Geometry/UIA locate failed Name/Value gate.
+                            return _pack(None)
+                        # yolo_ocr hard gate: skip geometry commit; continue select.
+                        skip_geom_after_hard_miss = True
+                    else:
+                        _log_info(
+                            "move_mouse: landmark_geometry_efp_miss soft_input_hub "
+                            f"vision_mode={vision_mode!r} pool={len(anchor_matches)}; "
+                            "commit geometry without EFP"
+                        )
+                if not used_geometry and not skip_geom_after_hard_miss:
+                    if geom_det is not None:
+                        chosen = geom_det
+                        idx = detections.index(geom_det)
+                        selection_method = geom_method
+                        select_phase = geom_method
                         used_geometry = True
                         _log_info(
-                            "move_mouse: landmark geometry EFP pick among anchors "
-                            f"center=[{chosen.cx},{chosen.cy}] "
+                            "move_mouse: landmark geometry pick among anchors "
+                            f"center=[{chosen.cx},{chosen.cy}] method={geom_method} "
                             f"pool={len(anchor_matches)}"
                         )
-                elif geom_det is not None:
-                    chosen = geom_det
-                    idx = detections.index(geom_det)
-                    selection_method = geom_method
-                    select_phase = geom_method
-                    used_geometry = True
-                    _log_info(
-                        "move_mouse: landmark geometry pick among anchors "
-                        f"center=[{chosen.cx},{chosen.cy}] method={geom_method} "
-                        f"pool={len(anchor_matches)}"
-                    )
-                else:
-                    select_s = time.perf_counter() - select_started
-                    _log_info(
-                        "move_mouse: landmark geometry synth among anchors "
-                        f"point=[{geom_point[0]},{geom_point[1]}] "
-                        f"pool={len(anchor_matches)}"
-                    )
-                    return _pack(_landmark_geometry_synth_meta(
-                        point=geom_point,
-                        offset_dx=offset_dx,
-                        offset_dy=offset_dy,
-                        track_percent=track_percent,
-                        char_target=char_target,
-                        char_occurrence=char_occurrence,
-                        instruction_text=instruction_text,
-                        nearby_phrases=nearby_phrases,
-                        image_paths=image_paths,
-                        selection_method=geom_method,
-                        timing=_timing_meta(
-                            select_s=select_s, select_phase=geom_method
-                        ),
-                    ))
+                    else:
+                        select_s = time.perf_counter() - select_started
+                        _log_info(
+                            "move_mouse: landmark geometry synth among anchors "
+                            f"point=[{geom_point[0]},{geom_point[1]}] "
+                            f"pool={len(anchor_matches)}"
+                        )
+                        return _pack(_landmark_geometry_synth_meta(
+                            point=geom_point,
+                            offset_dx=offset_dx,
+                            offset_dy=offset_dy,
+                            track_percent=track_percent,
+                            char_target=char_target,
+                            char_occurrence=char_occurrence,
+                            instruction_text=instruction_text,
+                            nearby_phrases=nearby_phrases,
+                            image_paths=image_paths,
+                            selection_method=geom_method,
+                            timing=_timing_meta(
+                                select_s=select_s, select_phase=geom_method
+                            ),
+                        ))
 
         if used_geometry:
             pass
         elif _recorded_efp_present(recorded_efp_name, recorded_efp_value) and anchor_matches:
-            # Recorded press-time Name/Value: disambiguate shortlist by live EFP
-            # alone (skip unique/LLM). Geometry path already verified above when
-            # it committed; this covers geometry miss/skip and no-geometry select.
+            # Recorded press-time Name/Value: prefer live EFP among the shortlist.
+            # Input/scrollbar hubs soft-miss into unique/LLM; labeled hubs hard-fail.
+            hard_efp = _efp_gate_required_for_hub(
+                instruction=instruction_text,
+                anchor=match_anchor or anchor,
+                control_type_token=control_type_token,
+                recorded_efp_name=recorded_efp_name,
+                recorded_efp_value=recorded_efp_value,
+            )
             mean_cx = int(
                 round(sum(int(d.cx) for d in anchor_matches) / len(anchor_matches))
             )
@@ -7367,7 +7424,16 @@ async def _find_mouse_point_attempt(
                 recorded_name=recorded_efp_name,
                 recorded_value=recorded_efp_value,
             )
-            if efp_reason == "miss" or efp_det is None:
+            if efp_reason == "hit" and efp_det is not None:
+                chosen = efp_det
+                idx = detections.index(efp_det)
+                selection_method = "anchor_efp_pick"
+                select_phase = selection_method
+                _log_info(
+                    "move_mouse: anchor_efp_pick "
+                    f"center=[{chosen.cx},{chosen.cy}] pool={len(anchor_matches)}"
+                )
+            elif hard_efp:
                 _log_info(
                     "move_mouse: anchor_efp_miss "
                     f"pool={len(anchor_matches)} "
@@ -7375,14 +7441,13 @@ async def _find_mouse_point_attempt(
                     f"recorded_value={recorded_efp_value!r}"
                 )
                 return _pack(None)
-            chosen = efp_det
-            idx = detections.index(efp_det)
-            selection_method = "anchor_efp_pick"
-            select_phase = selection_method
-            _log_info(
-                "move_mouse: anchor_efp_pick "
-                f"center=[{chosen.cx},{chosen.cy}] pool={len(anchor_matches)}"
-            )
+            else:
+                _log_info(
+                    "move_mouse: anchor_efp_miss soft_input_hub "
+                    f"pool={len(anchor_matches)} "
+                    f"recorded_name={recorded_efp_name!r} "
+                    f"recorded_value={recorded_efp_value!r}; continue select"
+                )
         elif len(anchor_matches) == 1:
             idx = 0
             chosen = anchor_matches[0]

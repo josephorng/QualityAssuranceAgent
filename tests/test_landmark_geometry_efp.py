@@ -8,6 +8,7 @@ from cua_mcp.select_mouse_target import (
     YOLO_CLASS_INPUT,
     YOLO_CLASS_TEXT,
     _distance_synth_to_det_bbox,
+    _efp_gate_required_for_hub,
     _efp_name_value_matches,
     _filter_yolo_for_near_synth_pool,
     _findall_pool_near_synth,
@@ -71,6 +72,39 @@ def test_recorded_efp_present() -> None:
     assert _recorded_efp_present("", "v") is True
     assert _recorded_efp_present("  ", "") is False
     assert _recorded_efp_present(None, None) is False
+
+
+def test_efp_gate_required_for_hub_soft_on_input_scrollbar() -> None:
+    assert not _efp_gate_required_for_hub(
+        anchor="輸入欄",
+        control_type_token="input",
+        recorded_efp_name="密碼|Textbox|txt_Password",
+        recorded_efp_value="",
+    )
+    assert not _efp_gate_required_for_hub(
+        anchor="「密碼|Textbox|txt_Password」文字所在的輸入欄",
+        control_type_token="input",
+        recorded_efp_name="密碼|Textbox|txt_Password",
+        recorded_efp_value="",
+    )
+    assert not _efp_gate_required_for_hub(
+        anchor="滾動條",
+        control_type_token="scrollbar",
+        recorded_efp_name="ScrollbarThumb",
+        recorded_efp_value="",
+    )
+    assert _efp_gate_required_for_hub(
+        anchor="「下載」文字",
+        control_type_token="text",
+        recorded_efp_name="下載 (已釘選)",
+        recorded_efp_value="下載 (已釘選)",
+    )
+    assert not _efp_gate_required_for_hub(
+        anchor="「下載」文字",
+        control_type_token="text",
+        recorded_efp_name="",
+        recorded_efp_value="",
+    )
 
 
 def test_efp_name_value_matches_rules() -> None:
@@ -748,6 +782,36 @@ def test_uia_first_findall_near_synth_efp_miss() -> None:
     )
     assert reason == "landmark_efp_miss"
     assert chosen is None
+
+
+def test_uia_first_input_hub_efp_miss_continues_name_shortlist() -> None:
+    """Input hubs soft-miss constellation EFP and continue into Name unique."""
+    geom = _simple_landmark_geometry()
+    landmark = _det(100, 100, text="LM", class_name="text")
+    named_input = _det(
+        148, 100, text="密碼|Textbox|txt_Password", class_name="input"
+    )
+
+    def probe(x: int, y: int):
+        return ("label", (0, 0, 1, 1), "text", "其他", "")
+
+    chosen, reason = _try_uia_first_unique_select(
+        [landmark, named_input],
+        anchor="密碼|Textbox|txt_Password",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        filter_by_control_type=True,
+        control_type_token="input",
+        recorded_anchor=True,
+        landmark_geometry=geom,
+        recorded_efp_name="密碼|Textbox|txt_Password",
+        recorded_efp_value="",
+        point_probe_fn=probe,
+    )
+    assert reason != "landmark_efp_miss"
+    assert reason == "hit"
+    assert chosen is named_input
 
 
 def test_uia_first_geom_unavailable_soft_miss() -> None:

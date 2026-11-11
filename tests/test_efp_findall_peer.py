@@ -178,6 +178,126 @@ def test_small_text_leaf_inside_input_still_text_hub() -> None:
     assert primary.get("text") == "下載"
 
 
+def test_field_sized_efp_name_inside_edit_prefers_named_input_hub() -> None:
+    """WinForms TextBox: EFP Name slightly smaller than FindAll Edit → named input.
+
+    IoU is below the coextensive gate (~0.59) but the Name leaf is mostly
+    inside a field-sized Edit, so the hub must be ``「…」文字所在的輸入欄``.
+    """
+    from src.recorder.analyze import instruction_for_click
+    from src.recorder.models import RecordedEvent
+
+    # Matches recorded password field geometry: Name 150x13, Edit 158x21.
+    name_bbox = [903, 441, 150, 13]
+    edit_bbox = [897, 437, 158, 21]
+    candidates = [
+        {
+            "bbox": name_bbox,
+            "center": [978, 447],
+            "class_id": YOLO_CLASS_TEXT,
+            "class_name": "text",
+            "text": "密碼|Textbox|txt_Password",
+            "icons": None,
+            "source": "uia",
+            "uia_control_type": "input",
+        },
+        {
+            "bbox": edit_bbox,
+            "center": [976, 447],
+            "class_id": YOLO_CLASS_INPUT,
+            "class_name": "input",
+            "text": None,
+            "icons": None,
+            "source": "uia",
+        },
+        {
+            "bbox": [839, 440, 29, 16],
+            "center": [853, 448],
+            "class_id": YOLO_CLASS_TEXT,
+            "class_name": "text",
+            "text": "密碼",
+            "icons": None,
+            "source": "uia",
+            "uia_control_type": "text",
+        },
+    ]
+    primary = select_click_primary_candidate(candidates, 924, 447)
+    assert primary is not None
+    assert primary.get("class_name") == "input"
+    assert primary.get("text") == "密碼|Textbox|txt_Password"
+
+    vision = {"candidates": candidates, "local_cursor": [924, 447]}
+    event = RecordedEvent(
+        index=9,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(924, 447),
+        button="left",
+        screenshot_path="",
+    )
+    assert (
+        instruction_for_click(event, vision)
+        == "將滑鼠移到「密碼|Textbox|txt_Password」文字所在的輸入欄"
+    )
+
+
+def test_legacy_efp_name_without_control_type_still_names_input() -> None:
+    """Pre-token recordings: empty EFP control_type still promotes onto Edit."""
+    candidates = [
+        {
+            "bbox": [903, 441, 150, 13],
+            "center": [978, 447],
+            "class_id": YOLO_CLASS_TEXT,
+            "class_name": "text",
+            "text": "帳號|Textbox|txt_ID",
+            "icons": None,
+            "source": "uia",
+        },
+        {
+            "bbox": [897, 437, 158, 21],
+            "center": [976, 447],
+            "class_id": YOLO_CLASS_INPUT,
+            "class_name": "input",
+            "text": None,
+            "icons": None,
+            "source": "uia",
+        },
+    ]
+    primary = select_click_primary_candidate(candidates, 924, 447)
+    assert primary is not None
+    assert primary.get("class_name") == "input"
+    assert primary.get("text") == "帳號|Textbox|txt_ID"
+
+
+def test_findall_text_control_inside_input_does_not_promote() -> None:
+    """FindAll Text (uia_control_type=text) inside an Edit stays text hub."""
+    candidates = [
+        {
+            "bbox": [897, 437, 158, 21],
+            "center": [976, 447],
+            "class_id": YOLO_CLASS_INPUT,
+            "class_name": "input",
+            "text": None,
+            "icons": None,
+            "source": "uia",
+        },
+        {
+            "bbox": [910, 440, 40, 14],
+            "center": [930, 447],
+            "class_id": YOLO_CLASS_TEXT,
+            "class_name": "text",
+            "text": "密碼",
+            "icons": None,
+            "source": "uia",
+            "uia_control_type": "text",
+        },
+    ]
+    primary = select_click_primary_candidate(candidates, 930, 447)
+    assert primary is not None
+    assert primary.get("class_name") == "text"
+    assert primary.get("text") == "密碼"
+
+
 def test_uia_first_miss_reaches_yolo_path_gate() -> None:
     """Documented fallthrough: UIA-first miss leaves chosen None so YOLO runs.
 

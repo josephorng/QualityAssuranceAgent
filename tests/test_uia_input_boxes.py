@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from src.recorder.uia_input_boxes import (
+    _UIA_BUTTON_CONTROL_TYPE_ID,
     _UIA_COMBOBOX_CONTROL_TYPE_ID,
     _UIA_DOCUMENT_CONTROL_TYPE_ID,
     _UIA_EDIT_CONTROL_TYPE_ID,
     _UIA_INPUT_CONTROL_TYPE_IDS,
     _UIA_PANE_CONTROL_TYPE_ID,
+    _UIA_TEXT_CONTROL_TYPE_ID,
     canonicalize_uia_shell_status_label,
+    control_type_token_from_id,
     element_from_point_name_value,
     filter_uia_input_rects,
     is_oversized_uia_rect,
@@ -25,6 +28,16 @@ def test_uia_input_control_type_ids_include_combobox_and_pane() -> None:
     assert _UIA_DOCUMENT_CONTROL_TYPE_ID in _UIA_INPUT_CONTROL_TYPE_IDS
     assert _UIA_COMBOBOX_CONTROL_TYPE_ID in _UIA_INPUT_CONTROL_TYPE_IDS
     assert _UIA_PANE_CONTROL_TYPE_ID in _UIA_INPUT_CONTROL_TYPE_IDS
+
+
+def test_control_type_token_from_id_maps_edit_hosts_to_input() -> None:
+    assert control_type_token_from_id(_UIA_EDIT_CONTROL_TYPE_ID) == "input"
+    assert control_type_token_from_id(_UIA_DOCUMENT_CONTROL_TYPE_ID) == "input"
+    assert control_type_token_from_id(_UIA_COMBOBOX_CONTROL_TYPE_ID) == "input"
+    assert control_type_token_from_id(_UIA_PANE_CONTROL_TYPE_ID) == "input"
+    assert control_type_token_from_id(_UIA_BUTTON_CONTROL_TYPE_ID) == "button"
+    assert control_type_token_from_id(_UIA_TEXT_CONTROL_TYPE_ID) == "text"
+    assert control_type_token_from_id(None) == ""
 
 
 def test_element_from_point_name_value_extracts_raw_strings(monkeypatch) -> None:

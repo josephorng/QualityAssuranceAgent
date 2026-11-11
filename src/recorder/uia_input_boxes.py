@@ -226,7 +226,11 @@ def canonicalize_uia_shell_status_label(text: str | None) -> str:
 
 
 def control_type_token_from_id(control_type_id: int | None) -> str:
-    """Stable token for a labeled UIA control type, or ``""`` when unmapped."""
+    """Stable token for a UIA control type, or ``""`` when unmapped.
+
+    Edit/Document/ComboBox/Pane map to ``\"input\"`` so press-time EFP can
+    mark field hosts (FindAll still enumerates them as geometry-only inputs).
+    """
     if control_type_id is None:
         return ""
     return {
@@ -237,6 +241,10 @@ def control_type_token_from_id(control_type_id: int | None) -> str:
         _UIA_TEXT_CONTROL_TYPE_ID: "text",
         _UIA_TREEITEM_CONTROL_TYPE_ID: "tree_item",
         _UIA_DATAITEM_CONTROL_TYPE_ID: "data_item",
+        _UIA_EDIT_CONTROL_TYPE_ID: "input",
+        _UIA_DOCUMENT_CONTROL_TYPE_ID: "input",
+        _UIA_COMBOBOX_CONTROL_TYPE_ID: "input",
+        _UIA_PANE_CONTROL_TYPE_ID: "input",
     }.get(int(control_type_id), "")
 
 

@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     import numpy as np
 
 from cua_mcp.char_target import detect_clicked_char
-from cua_mcp.geometry import iou_xywh, point_in_rect_xywh
+from cua_mcp.geometry import intersection_area_xywh, iou_xywh, point_in_rect_xywh
 from cua_mcp.color_spatial_segment import (
     ColorSegmentResult,
     SegmentDetection,
@@ -1026,6 +1026,22 @@ def _destination_target_at_point(
 
 # Text Name coextensive with an Input (e.g. Word document surface) → named input.
 _COEXTENSIVE_TEXT_INPUT_IOU = 0.7
+# UIA Name leaf mostly inside a field-sized Edit (WinForms TextBox) → named input.
+# Caps Input/Text area so Explorer rows inside page-sized Documents stay text.
+_CONTAINED_TEXT_INPUT_AREA_RATIO = 12.0
+_CONTAINED_TEXT_IN_INPUT_FRAC = 0.85
+# Explicit non-input UIA leaf types must not promote onto a containing Input.
+_NON_INPUT_UIA_LEAF_TYPES = frozenset(
+    {
+        "button",
+        "hyperlink",
+        "list_item",
+        "menu_item",
+        "text",
+        "tree_item",
+        "data_item",
+    }
+)
 
 
 def _prefer_coextensive_named_input(
@@ -1073,6 +1089,77 @@ def _prefer_coextensive_named_input(
     return best_input
 
 
+def _uia_text_may_name_containing_input(candidate: dict[str, Any]) -> bool:
+    """True when a UIA Text leaf may donate its Name onto a containing Input."""
+    if str(candidate.get("source") or "").strip().lower() != "uia":
+        return False
+    if str(candidate.get("class_name") or "").strip() != "text":
+        return False
+    if len(_visible_text(candidate.get("text"))) <= 1:
+        return False
+    leaf_type = str(candidate.get("uia_control_type") or "").strip()
+    # Empty (legacy EFP) or ``input`` (Edit/Document/ComboBox/Pane) may promote.
+    # Labeled non-input leaves (list_item, button, FindAll Text, …) stay text.
+    if leaf_type in _NON_INPUT_UIA_LEAF_TYPES:
+        return False
+    return True
+
+
+def _prefer_contained_named_input(
+    hits: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """When a UIA Name Text sits mostly inside a field-sized Input, prefer Input.
+
+    Covers WinForms TextBox cases where EFP Name bbox is slightly smaller than
+    the FindAll Edit (IoU below :data:`_COEXTENSIVE_TEXT_INPUT_IOU`). Copies the
+    Name onto the Input so hubs become ``「…」文字所在的輸入欄``.
+    """
+    texts = [c for c in hits if _uia_text_may_name_containing_input(c)]
+    inputs = [
+        c for c in hits if str(c.get("class_name") or "").strip() == "input"
+    ]
+    if not texts or not inputs:
+        return None
+
+    best_input: dict[str, Any] | None = None
+    best_label = ""
+    best_score = -1.0
+    for inp in inputs:
+        ib = _as_bbox_xywh(inp.get("bbox"))
+        if ib is None:
+            continue
+        input_area = float(_bbox_area(ib))
+        if input_area <= 0:
+            continue
+        for txt in texts:
+            tb = _as_bbox_xywh(txt.get("bbox"))
+            if tb is None:
+                continue
+            text_area = float(_bbox_area(tb))
+            if text_area <= 0:
+                continue
+            if input_area / text_area > _CONTAINED_TEXT_INPUT_AREA_RATIO:
+                continue
+            if not _bbox_center_inside(ib, tb):
+                continue
+            contained = intersection_area_xywh(ib, tb) / text_area
+            if contained < _CONTAINED_TEXT_IN_INPUT_FRAC:
+                continue
+            label = _visible_text(txt.get("text"))
+            if not label:
+                continue
+            # Prefer tighter field hosts, then higher containment.
+            score = contained + (1.0 / (input_area / text_area))
+            if score > best_score:
+                best_input = inp
+                best_label = label
+                best_score = score
+    if best_input is None or not best_label:
+        return None
+    best_input["text"] = best_label
+    return best_input
+
+
 def _candidate_containing_click(
     candidates: list[dict[str, Any]],
     local_x: int,
@@ -1086,7 +1173,8 @@ def _candidate_containing_click(
     keeps that container as the primary anchor.
 
     Exception: a multi-char Text nearly coextensive with a containing Input
-    (document-surface Name) yields the Input with that Name copied on.
+    (document-surface Name), or a UIA Name leaf mostly inside a field-sized
+    Edit, yields the Input with that Name copied on.
     """
     hits = [
         candidate
@@ -1098,6 +1186,9 @@ def _candidate_containing_click(
         return None
 
     named_input = _prefer_coextensive_named_input(hits)
+    if named_input is not None:
+        return named_input
+    named_input = _prefer_contained_named_input(hits)
     if named_input is not None:
         return named_input
 

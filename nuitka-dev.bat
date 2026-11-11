@@ -4,8 +4,13 @@ SETLOCAL EnableDelayedExpansion
 :: --- CONFIGURATION ---
 :: Fast iterative build: standalone folder only (no onefile packing).
 :: Run: dist\main.dist\ComputerAgent.exe
-:: For a single-exe release build, use nuitka.bat instead.
+:: Publish / single-exe release: use nuitka.bat instead.
 :: To reset the compile cache after big dep changes, run nuitka-clean.bat
+::
+:: Windows speed tips (often the largest free win):
+:: - Exclude this repo's dist\ folder (or the whole repo) from Defender realtime scan.
+:: - Build on a local SSD; avoid OneDrive-synced trees for dist\.
+:: - Optional later: install ccache and point Nuitka at it for cold/partial rebuilds.
 SET ENTRYSCRIPT=main.py
 SET APPNAME=ComputerAgent
 SET APP_VERSION=1.0.0.0
@@ -39,7 +44,9 @@ python -m nuitka ^
     --standalone ^
     --jobs=0 ^
     --lto=no ^
-    --follow-imports ^
+    --assume-yes-for-downloads ^
+    --nofollow-import-to=pytest ^
+    --nofollow-import-to=pytest.* ^
     --show-progress ^
     --output-dir=%OUTPUT_DIR% ^
     --output-filename=%APPNAME% ^

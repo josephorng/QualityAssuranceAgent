@@ -2,9 +2,16 @@
 SETLOCAL EnableDelayedExpansion
 
 :: --- CONFIGURATION ---
-:: Release build: single onefile exe with splash screen.
-:: For faster day-to-day iteration, use nuitka-dev.bat instead.
-:: To reset the compile cache after big dep changes, run nuitka-clean.bat
+:: Release / publish build: single onefile exe with splash screen.
+:: Day-to-day iteration: use nuitka-dev.bat (standalone, no onefile packing).
+:: Incremental RELEASE still takes ~10+ min for this app because of --onefile;
+:: that is expected. Keep dist\main.build; only run nuitka-clean.bat after
+:: major dependency changes if incremental builds misbehave.
+::
+:: Windows speed tips (often the largest free win):
+:: - Exclude this repo's dist\ folder (or the whole repo) from Defender realtime scan.
+:: - Build on a local SSD; avoid OneDrive-synced trees for dist\.
+:: - Optional later: install ccache and point Nuitka at it for cold/partial rebuilds.
 SET ENTRYSCRIPT=main.py
 SET APPNAME=ComputerAgent
 @REM SET MODEL_DIR=models
@@ -55,7 +62,9 @@ python -m nuitka ^
     --onefile ^
     --jobs=0 ^
     --lto=no ^
-    --follow-imports ^
+    --assume-yes-for-downloads ^
+    --nofollow-import-to=pytest ^
+    --nofollow-import-to=pytest.* ^
     --show-progress ^
     --output-dir=%OUTPUT_DIR% ^
     --output-filename=%APPNAME% ^

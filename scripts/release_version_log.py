@@ -21,7 +21,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
-from datetime import date
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -37,8 +37,10 @@ FIRST_RUN_COMMIT_LIMIT = 30
 GEMMA_TIMEOUT_SECONDS = 60
 
 DRAFT_MARKER = "（草稿／原文）"
+# Accept legacy date-only headers plus new date+time stamps.
 SECTION_HEADER_RE = re.compile(
-    r"^## v(?P<version>\d+\.\d+\.\d+\.\d+) — (?P<date>\d{4}-\d{2}-\d{2})"
+    r"^## v(?P<version>\d+\.\d+\.\d+\.\d+) — "
+    r"(?P<date>\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2}(?::\d{2})?)?)"
     r"(?P<draft>\s*（草稿／原文）)?\s*$"
 )
 _RELEASE_COMMIT_SUBJECT_RE = re.compile(
@@ -244,10 +246,10 @@ def _parse_version_log_sections(text: str) -> tuple[str, list[dict[str, Any]]]:
     return preamble, sections
 
 
-def _render_section(version: str, day: str, body: str, *, draft: bool) -> str:
+def _render_section(version: str, stamp: str, body: str, *, draft: bool) -> str:
     marker = f" {DRAFT_MARKER}" if draft else ""
     body = body.rstrip()
-    return f"## v{version} — {day}{marker}\n\n{body}\n"
+    return f"## v{version} — {stamp}{marker}\n\n{body}\n"
 
 
 def _write_version_log(
@@ -267,7 +269,7 @@ def _write_version_log(
     if not preamble.strip():
         preamble = "# ComputerAgent 版本紀錄\n"
 
-    today = date.today().isoformat()
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     # Drop an existing section for this version if we are rewriting mid-run
     # (should not normally happen), then rebuild.
     sections = [s for s in sections if s["version"] != new_version]
@@ -289,7 +291,7 @@ def _write_version_log(
 
     parts: list[str] = [preamble.rstrip(), ""]
     parts.append(
-        _render_section(new_version, today, new_body, draft=new_draft).rstrip()
+        _render_section(new_version, stamp, new_body, draft=new_draft).rstrip()
     )
     for section in updated:
         body = "\n".join(section["body_lines"]).strip() or "- （無說明）"

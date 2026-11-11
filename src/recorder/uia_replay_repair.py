@@ -1739,20 +1739,57 @@ def _hit(
 
 
 def _ocr_confirms(mapped: RectXywh, recorded_text: str, ocr_boxes: list[LabeledBox]) -> bool:
-    from cua_mcp.geometry import boxes_overlap
+    """True when live OCR still shows ``recorded_text`` over the mapped box.
+
+    Accepts a single overlapping label at the mouse-filter similarity floor, or
+    a split caption: every whitespace token covered by some overlapping label,
+    or a reading-order stitch (space / no-space join) of those labels.
+    """
+    from cua_mcp.geometry import boxes_overlap, sort_by_reading_order
     from cua_mcp.select_mouse_target import (
         _MOUSE_FILTER_SIMILARITY_THRESHOLD,
         _label_similarity,
     )
 
-    for box, text in ocr_boxes:
-        if not str(text or "").strip():
+    recorded = str(recorded_text or "").strip()
+    if not recorded:
+        return False
+    overlapping: list[tuple[RectXywh, str]] = []
+    for item in ocr_boxes:
+        box, text, _control = _labeled_parts(item)
+        label = str(text or "").strip()
+        if not label:
             continue
         if not boxes_overlap(mapped, box):
             continue
-        if _label_similarity(recorded_text, text) >= _MOUSE_FILTER_SIMILARITY_THRESHOLD:
+        if _label_similarity(recorded, label) >= _MOUSE_FILTER_SIMILARITY_THRESHOLD:
             return True
-    return False
+        overlapping.append((box, label))
+    if not overlapping:
+        return False
+    tokens = [tok for tok in recorded.split() if tok]
+    if len(tokens) >= 2:
+        if all(
+            any(
+                _label_similarity(token, label) >= _MOUSE_FILTER_SIMILARITY_THRESHOLD
+                for _box, label in overlapping
+            )
+            for token in tokens
+        ):
+            return True
+    ordered = sort_by_reading_order(
+        overlapping,
+        center_fn=lambda item: (item[0][0] + item[0][2] / 2.0, item[0][1] + item[0][3] / 2.0),
+        row_height_fn=lambda item: float(item[0][3]),
+        x_fn=lambda item: float(item[0][0]),
+    )
+    labels = [label for _box, label in ordered]
+    joined_space = " ".join(labels)
+    joined_tight = "".join(labels)
+    return (
+        _label_similarity(recorded, joined_space) >= _MOUSE_FILTER_SIMILARITY_THRESHOLD
+        or _label_similarity(recorded, joined_tight) >= _MOUSE_FILTER_SIMILARITY_THRESHOLD
+    )
 
 
 def _point_in_box(x: int, y: int, box: RectXywh) -> bool:

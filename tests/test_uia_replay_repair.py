@@ -177,6 +177,65 @@ def test_ocr_far_from_recorded_text_does_not_repair() -> None:
     assert hit is None
 
 
+def test_split_caption_ocr_confirms_via_token_coverage() -> None:
+    """Recorded multi-word caption split into line OCR boxes still repairs."""
+    recorded_bbox = (76, 111, 76, 85)
+    recorded_window = (0, 0, 1918, 920)
+    live_window = (0, 0, 1918, 920)
+    uia_box = (70, 100, 90, 100)
+    hit, reason = choose_uia_replay_repair_with_reason(
+        recorded_bbox=recorded_bbox,
+        recorded_text="WinMaster7 Console",
+        recorded_window_xywh=recorded_window,
+        live_window_xywh=live_window,
+        uia_boxes=[(uia_box, "WinMaster7 Console")],
+        ocr_boxes=[
+            ((79, 165, 70, 14), "WinMaster7"),
+            ((90, 180, 49, 13), "Console"),
+        ],
+        point_probe_fn=None,
+    )
+    assert hit is not None
+    assert hit.label == "WinMaster7 Console"
+    assert hit.source == "findall"
+    assert reason.startswith("findall")
+
+
+def test_split_caption_partial_ocr_does_not_confirm() -> None:
+    """One overlapping token is not enough when the recorded caption has two."""
+    recorded_bbox = (76, 111, 76, 85)
+    recorded_window = (0, 0, 1918, 920)
+    live_window = (0, 0, 1918, 920)
+    hit, reason = choose_uia_replay_repair_with_reason(
+        recorded_bbox=recorded_bbox,
+        recorded_text="WinMaster7 Console",
+        recorded_window_xywh=recorded_window,
+        live_window_xywh=live_window,
+        uia_boxes=[((70, 100, 90, 100), "WinMaster7 Console")],
+        ocr_boxes=[((79, 165, 70, 14), "WinMaster7")],
+        point_probe_fn=None,
+    )
+    assert hit is None
+    assert reason.startswith("ocr_did_not_confirm")
+
+
+def test_split_caption_unrelated_ocr_does_not_confirm() -> None:
+    recorded_bbox = (76, 111, 76, 85)
+    recorded_window = (0, 0, 1918, 920)
+    live_window = (0, 0, 1918, 920)
+    hit, reason = choose_uia_replay_repair_with_reason(
+        recorded_bbox=recorded_bbox,
+        recorded_text="WinMaster7 Console",
+        recorded_window_xywh=recorded_window,
+        live_window_xywh=live_window,
+        uia_boxes=[((70, 100, 90, 100), "WinMaster7 Console")],
+        ocr_boxes=[((79, 165, 70, 14), "搜尋檔案")],
+        point_probe_fn=None,
+    )
+    assert hit is None
+    assert reason.startswith("ocr_did_not_confirm")
+
+
 def test_choose_repairs_when_ocr_confirms_icon_chinese_id() -> None:
     hit = _choose(
         recorded_text="向上雙V箭頭",

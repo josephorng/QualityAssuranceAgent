@@ -1142,6 +1142,54 @@ def test_caption_button_role_at_point_falls_back_to_strip_cell() -> None:
         assert caption_button_role_at_point((790, 120), maximized) == "縮小視窗"
 
 
+def test_caption_button_role_at_point_rejects_htclient_outside_tight_strip() -> None:
+    """Slack-admitted client clicks must not become minimize via strip-cell clamp.
+
+    Mirrors short login dialog: strip right half, click left-of-strip / below
+    bottom still inside 12px slack (account textbox under title bar).
+    """
+    from src.recorder.window_snapshot import (
+        _CAPTION_HIT_SLACK_PX,
+        caption_button_role_at_point,
+        click_hits_caption_buttons,
+    )
+
+    # Window 登入系統-like: (827,363) 264x153; strip right 132px, height ~31
+    bounds = (959, 363, 1091, 394)
+    win = _win(
+        2098882,
+        "登入系統",
+        left=827,
+        top=363,
+        width=264,
+        height=153,
+        caption_button_bounds=bounds,
+    )
+    # Left of strip, at strip bottom + slack → was false-positive 最小化視窗
+    click_left_of_strip = (951, 394 + _CAPTION_HIT_SLACK_PX)
+    assert click_hits_caption_buttons(click_left_of_strip, win)
+    with patch(
+        "src.recorder.window_snapshot._nchittest_sender",
+        return_value=object(),
+    ), patch(
+        "src.recorder.window_snapshot._send_wm_nchittest",
+        return_value=1,  # HTCLIENT
+    ):
+        assert caption_button_role_at_point(click_left_of_strip, win) is None
+
+    # Below strip bottom, still in vertical slack, x inside minimize cell
+    click_below_strip = (970, 394 + _CAPTION_HIT_SLACK_PX)
+    assert click_hits_caption_buttons(click_below_strip, win)
+    with patch(
+        "src.recorder.window_snapshot._nchittest_sender",
+        return_value=object(),
+    ), patch(
+        "src.recorder.window_snapshot._send_wm_nchittest",
+        return_value=1,
+    ):
+        assert caption_button_role_at_point(click_below_strip, win) is None
+
+
 def test_caption_button_role_at_point_rejects_flyout() -> None:
     from src.recorder.window_snapshot import caption_button_role_at_point
 

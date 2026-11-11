@@ -73,6 +73,8 @@ _CLICK_POINTER_KINDS = frozenset(
 # Caption chrome clicks are left-button only (right-click opens the system menu).
 _CAPTION_CLICK_KINDS = frozenset({"click", "double_click", "triple_click", "hold"})
 _CAPTION_ROLES = frozenset({"最小化視窗", "最大化視窗", "縮小視窗", "關閉視窗"})
+# EFP content controls under a short title bar must not keep a false caption role.
+_CAPTION_EFP_CONTENT_CONTROL_TYPES = frozenset({"input", "edit"})
 _CLICK_MOVE_PREFIX = "將滑鼠移到"
 _POINTER_CLICK_ACTION_SUFFIX_BY_KIND = {
     "click": "，並點擊滑鼠一下。",
@@ -461,13 +463,26 @@ def _live_caption_role_from_event(event: RecordedEvent) -> str | None:
     return caption_button_role_at_point(click_xy, win)
 
 
+def _efp_blocks_caption_role(event: RecordedEvent) -> bool:
+    """True when ElementFromPoint is clearly client content, not caption chrome."""
+    efp = event.element_from_point
+    if not isinstance(efp, dict):
+        return False
+    control_type = str(efp.get("control_type") or "").strip().lower()
+    return control_type in _CAPTION_EFP_CONTENT_CONTROL_TYPES
+
+
 def caption_role_from_recorded_event(event: RecordedEvent) -> str | None:
     """Caption chrome role for a left-button click, or None to keep the vision path.
 
     Prefers ``window_snapshot_debug["caption_button_role"]`` stored at capture.
     Falls back to a live hit-test against ``windows_before`` for older recordings.
+    An EFP content control (``input`` / ``edit``) vetoes both paths so a false
+    caption tag from slack/strip-cell cannot short-circuit vision on re-analyze.
     """
     if not _is_left_caption_click(event):
+        return None
+    if _efp_blocks_caption_role(event):
         return None
     debug = event.window_snapshot_debug
     if isinstance(debug, dict):

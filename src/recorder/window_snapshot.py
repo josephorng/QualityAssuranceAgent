@@ -579,6 +579,16 @@ def _caption_role_from_strip_cell(
     return "關閉視窗"
 
 
+def _point_in_caption_bounds_tight(
+    click_xy: tuple[int, int],
+    bounds: CaptionBounds,
+) -> bool:
+    """True when click is inside caption strip bounds with no slack padding."""
+    x, y = int(click_xy[0]), int(click_xy[1])
+    left, top, right, bottom = (int(v) for v in bounds)
+    return left <= x <= right and top <= y <= bottom
+
+
 def caption_button_role_at_point(
     click_xy: tuple[int, int] | None,
     win: WindowInfo,
@@ -586,7 +596,12 @@ def caption_button_role_at_point(
     """Return 最小化/最大化/縮小/關閉視窗 when ``click_xy`` hits that caption button.
 
     Prefers a live WM_NCHITTEST on ``win.hwnd``. When the window does not answer
-    or reports HTCLIENT, falls back to the DWM strip cell under the click.
+    or reports HTCLIENT, falls back to the DWM strip cell under the click — but
+    only when the click is inside the **tight** caption strip (no slack). Slack
+    still admits points into this function for settle/title-bar heuristics via
+    :func:`click_hits_caption_buttons`; strip-cell fallback must not map those
+    near-miss client clicks (e.g. a textbox under a short dialog title bar) to
+    minimize/max/close.
     Flyouts always return None.
     """
     if click_xy is None:
@@ -607,6 +622,9 @@ def caption_button_role_at_point(
                 return role
     bounds = caption_button_bounds_for_window(win)
     if bounds is None:
+        return None
+    # HTCLIENT / no-hit: geometric cells only for points still in the real strip.
+    if not _point_in_caption_bounds_tight((x, y), bounds):
         return None
     return _caption_role_from_strip_cell(
         (x, y), bounds, is_maximized=bool(win.is_maximized)

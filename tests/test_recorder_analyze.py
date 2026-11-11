@@ -1346,6 +1346,86 @@ def test_caption_role_from_recorded_event_prefers_stored_debug() -> None:
     )
 
 
+def test_caption_role_from_recorded_event_vetoes_efp_input_control() -> None:
+    event = RecordedEvent(
+        index=3,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(951, 406),
+        button="left",
+        screenshot_path="",
+        window_snapshot_debug={
+            "caption_button_role": "最小化視窗",
+            "title_bar_click": True,
+        },
+        element_from_point={
+            "name": "帳號|Textbox|txt_ID",
+            "value": "",
+            "bbox": [903, 404, 150, 13],
+            "control_type": "input",
+        },
+    )
+    assert caption_role_from_recorded_event(event) is None
+
+
+@pytest.mark.asyncio
+async def test_analyze_event_to_cache_efp_input_blocks_caption_role(
+    tmp_path: Path,
+) -> None:
+    event = RecordedEvent(
+        index=3,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(951, 406),
+        button="left",
+        screenshot_path="",
+        window_snapshot_debug={
+            "caption_button_role": "最小化視窗",
+            "title_bar_click": True,
+        },
+        element_from_point={
+            "name": "帳號|Textbox|txt_ID",
+            "value": "",
+            "bbox": [903, 404, 150, 13],
+            "control_type": "input",
+        },
+    )
+    vision = {
+        "used_vision": True,
+        "candidate_text": "",
+        "local_cursor": (978, 410),
+        "candidates": [
+            {
+                "bbox": [903, 404, 150, 13],
+                "center": [978, 410],
+                "class_name": "input",
+                "text": None,
+            },
+            {
+                "bbox": [903, 404, 150, 13],
+                "center": [978, 410],
+                "class_name": "text",
+                "text": "帳號|Textbox|txt_ID",
+            },
+        ],
+    }
+
+    with patch(
+        "src.recorder.analyze.build_vision_context",
+        new=AsyncMock(side_effect=AssertionError("vision already provided")),
+    ), patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(event, run_dir=tmp_path, vision=vision)
+
+    assert result is not None
+    instruction = result.get("instruction") or ""
+    assert "最小化視窗" not in instruction
+    assert "帳號|Textbox|txt_ID" in instruction
+    llm_mock.assert_not_called()
+
+
 def test_caption_role_from_recorded_event_ignores_right_click() -> None:
     event = RecordedEvent(
         index=5,

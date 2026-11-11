@@ -2174,6 +2174,46 @@ def _normalize_similarity_label(label: str) -> str:
     return _canonicalize_similarity_text(canonicalize_uia_shell_status_label(text))
 
 
+def _sequence_ratio(left: str, right: str) -> float:
+    """Case-insensitive ``SequenceMatcher`` ratio for already-normalized strings."""
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+    return SequenceMatcher(None, left.casefold(), right.casefold()).ratio()
+
+
+def _pipe_aware_normalized_similarity(left_n: str, right_n: str) -> float:
+    """Full-string similarity, plus Name|Value head/tail when either side has ``|``.
+
+    Compound UIA labels such as ``異動認列|TopTab|Allot`` must match short OCR
+    ``異動認列`` (Name) and ``電腦名稱|lannie-Ubuntu26`` must match Value-only OCR.
+    Uses the same first-``|`` split as :func:`split_uia_name_value_label`.
+    """
+    score = _sequence_ratio(left_n, right_n)
+    if "|" not in left_n and "|" not in right_n:
+        return score
+
+    from src.recorder.uia_input_boxes import split_uia_name_value_label
+
+    left_name, left_value = split_uia_name_value_label(left_n)
+    right_name, right_value = split_uia_name_value_label(right_n)
+    candidates = [score]
+    if left_name:
+        candidates.append(_sequence_ratio(left_name, right_n))
+        if right_name:
+            candidates.append(_sequence_ratio(left_name, right_name))
+    if left_value:
+        candidates.append(_sequence_ratio(left_value, right_n))
+        if right_value:
+            candidates.append(_sequence_ratio(left_value, right_value))
+    if right_name:
+        candidates.append(_sequence_ratio(left_n, right_name))
+    if right_value:
+        candidates.append(_sequence_ratio(left_n, right_value))
+    return max(candidates)
+
+
 def _label_similarity(a: str, b: str) -> float:
     """Case-insensitive string similarity in ``[0, 1]``."""
     left = (a or "").strip()
@@ -2184,9 +2224,11 @@ def _label_similarity(a: str, b: str) -> float:
         return 1.0
     left_n = _normalize_similarity_label(left)
     right_n = _normalize_similarity_label(right)
+    if not left_n or not right_n:
+        return 0.0
     if left_n == right_n:
         return 1.0
-    return SequenceMatcher(None, left_n.casefold(), right_n.casefold()).ratio()
+    return _pipe_aware_normalized_similarity(left_n, right_n)
 
 
 def _recorded_anchor_label_similarity(query: str, label: str) -> float:
@@ -2203,7 +2245,7 @@ def _recorded_anchor_label_similarity(query: str, label: str) -> float:
         return 0.0
     if left_n == right_n:
         return 1.0
-    return SequenceMatcher(None, left_n.casefold(), right_n.casefold()).ratio()
+    return _pipe_aware_normalized_similarity(left_n, right_n)
 
 
 def _detection_similarity_to_query(

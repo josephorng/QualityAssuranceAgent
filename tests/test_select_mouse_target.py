@@ -3279,6 +3279,48 @@ def test_label_similarity_ocr_canonicalization_folds() -> None:
     assert _label_similarity("「More...」文字", "More…") == 1.0
 
 
+def test_label_similarity_compound_uia_name_matches_short_ocr() -> None:
+    from cua_mcp.select_mouse_target import (
+        _label_similarity,
+        _recorded_anchor_label_similarity,
+    )
+
+    # AutomationId-style Name|role|id vs visible OCR Name head.
+    assert _label_similarity("異動認列|TopTab|Allot", "異動認列") == 1.0
+    assert _recorded_anchor_label_similarity("異動認列|TopTab|Allot", "異動認列") == 1.0
+    assert _label_similarity("「異動認列|TopTab|Allot」文字", "異動認列") == 1.0
+    # Name|Value vs Value-only OCR (table cell / tree item).
+    assert _label_similarity("電腦名稱|lannie-Ubuntu26", "lannie-Ubuntu26") == 1.0
+    assert (
+        _recorded_anchor_label_similarity("電腦名稱|lannie-Ubuntu26", "lannie-Ubuntu26")
+        == 1.0
+    )
+    # Unrelated short labels must stay below the mouse-filter threshold.
+    assert _label_similarity("異動認列|TopTab|Allot", "衝突處理") < 0.8
+    assert _recorded_anchor_label_similarity("異動認列|TopTab|Allot", "衝突處理") < 0.8
+    # Existing Office / hub-wrapper cases still exact-match.
+    assert _label_similarity("「[檔案] 索引標籤」按鈕", "[檔案] 索引標籤") == 1.0
+
+
+def test_filter_mouse_candidates_compound_uia_anchor_matches_ocr(
+) -> None:
+    from cua_mcp.select_mouse_target import _filter_mouse_candidates
+
+    detections = [
+        _detection_from_bbox((500, 30, 52, 14), YOLO_CLASS_TEXT, text="異動認列"),
+        _detection_from_bbox((740, 30, 53, 14), YOLO_CLASS_TEXT, text="衝突處理"),
+        _detection_from_bbox((10, 24, 39, 13), YOLO_CLASS_TEXT, text="功能列"),
+    ]
+    anchor_matches, nearby_matches = _filter_mouse_candidates(
+        detections,
+        "異動認列|TopTab|Allot",
+        ["在「衝突處理」文字的左邊", "在「功能列」文字的右邊"],
+        recorded_anchor=True,
+    )
+    assert [det.text for det in anchor_matches] == ["異動認列"]
+    assert {det.text for det in nearby_matches} == {"衝突處理", "功能列"}
+
+
 def test_prefilter_keeps_ocr_near_miss_over_shared_suffix() -> None:
     from cua_mcp.select_mouse_target import _prefilter_detections_by_similarity
 

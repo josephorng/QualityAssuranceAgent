@@ -57,6 +57,8 @@ _HIDE_DELAY_MS = 450
 _POLL_MS = 80
 _UIA_STATUS_POLL_MS = 120
 _OVERLAY_MARGIN = 16
+_UIA_STATUS_CURSOR_PAD_PX = 20
+_UIA_STATUS_SLOTS = ("center", "left", "right")
 _MONITORS_CACHE_TTL_S = 2.0
 _STEP_SNIPPET_LIMIT = 42
 _STEP_ERROR_LIMIT = 160
@@ -142,6 +144,81 @@ def _top_center_geometry(
     ox = int(mon["left"]) + max(margin, (int(mon["width"]) - width) // 2)
     oy = int(mon["top"]) + margin
     return width, height, ox, oy
+
+
+def _top_edge_geometry(
+    mon: dict[str, int],
+    width: int,
+    height: int,
+    slot: str = "center",
+    *,
+    margin: int = _OVERLAY_MARGIN,
+) -> tuple[int, int, int, int]:
+    """Return (width, height, x, y) for a top-edge strip slot on ``mon``."""
+    key = str(slot or "center").strip().lower()
+    if key not in _UIA_STATUS_SLOTS:
+        key = "center"
+    left = int(mon["left"])
+    top = int(mon["top"])
+    mon_w = int(mon["width"])
+    oy = top + margin
+    if key == "left":
+        ox = left + margin
+    elif key == "right":
+        ox = left + max(margin, mon_w - width - margin)
+    else:
+        ox = left + max(margin, (mon_w - width) // 2)
+    return width, height, ox, oy
+
+
+def _rect_contains(
+    x: int,
+    y: int,
+    ox: int,
+    oy: int,
+    width: int,
+    height: int,
+    *,
+    pad: int = 0,
+) -> bool:
+    """True when ``(x, y)`` lies inside the rect inflated by ``pad``."""
+    pad_i = max(0, int(pad))
+    return (
+        int(ox) - pad_i <= int(x) < int(ox) + int(width) + pad_i
+        and int(oy) - pad_i <= int(y) < int(oy) + int(height) + pad_i
+    )
+
+
+def _uia_status_slot_for_cursor(
+    mon: dict[str, int],
+    width: int,
+    height: int,
+    cx: int,
+    cy: int,
+    *,
+    pad: int = _UIA_STATUS_CURSOR_PAD_PX,
+    margin: int = _OVERLAY_MARGIN,
+) -> str:
+    """Pick a top-edge slot that keeps the strip clear of the cursor."""
+    _w, _h, ox, oy = _top_edge_geometry(
+        mon, width, height, "center", margin=margin
+    )
+    if not _rect_contains(cx, cy, ox, oy, width, height, pad=pad):
+        return "center"
+
+    left = int(mon["left"])
+    mon_w = int(mon["width"])
+    center_x = left + mon_w / 2.0
+    # Prefer the side farther from the cursor so the strip jumps away once.
+    primary = "left" if float(cx) >= center_x else "right"
+    secondary = "right" if primary == "left" else "left"
+    for slot in (primary, secondary):
+        _w, _h, sox, soy = _top_edge_geometry(
+            mon, width, height, slot, margin=margin
+        )
+        if not _rect_contains(cx, cy, sox, soy, width, height, pad=pad):
+            return slot
+    return primary
 
 
 def _fallback_monitor(win: Any | None = None) -> dict[str, int]:
@@ -532,6 +609,7 @@ class RecordingUiaStatusOverlay:
         self._poll_after_id: str | None = None
         self._destroyed = False
         self._placed_monitor_key: tuple[int, int, int, int] | None = None
+        self._placed_slot = "center"
         self._last_width = 240
         self._last_height = 32
         self._build(master)
@@ -609,25 +687,34 @@ class RecordingUiaStatusOverlay:
         mon: dict[str, int],
         *,
         force: bool = False,
+        cursor: tuple[int, int] | None = None,
     ) -> bool:
-        """Move to top-center of ``mon``. Returns True when geometry changed."""
+        """Move to a top-edge slot on ``mon``. Returns True when geometry changed."""
         win = self._window
         if win is None:
             return False
         key = _monitor_key(mon)
         width, height = self._measure()
+        if cursor is None:
+            slot = "center"
+        else:
+            slot = _uia_status_slot_for_cursor(
+                mon, width, height, int(cursor[0]), int(cursor[1])
+            )
         if (
             not force
             and key is not None
             and key == self._placed_monitor_key
+            and slot == self._placed_slot
         ):
             return False
-        _w, _h, ox, oy = _top_center_geometry(mon, width, height)
+        _w, _h, ox, oy = _top_edge_geometry(mon, width, height, slot)
         try:
             win.geometry(f"{width}x{height}+{ox}+{oy}")
         except Exception:
             return False
         self._placed_monitor_key = key
+        self._placed_slot = slot
         return True
 
     def ensure_visible(self, *, force: bool = False) -> None:
@@ -642,7 +729,7 @@ class RecordingUiaStatusOverlay:
             mon = _fallback_monitor(win)
         else:
             mon = _monitor_for_point(xy[0], xy[1]) or _fallback_monitor(win)
-        self._place_on_monitor(mon, force=force)
+        self._place_on_monitor(mon, force=force, cursor=xy)
         try:
             win.deiconify()
             win.lift()
@@ -679,7 +766,7 @@ class RecordingUiaStatusOverlay:
         if xy is not None:
             mon = _monitor_for_point(xy[0], xy[1])
             if mon is not None:
-                moved = self._place_on_monitor(mon)
+                moved = self._place_on_monitor(mon, cursor=xy)
                 if moved:
                     try:
                         self._window.attributes("-topmost", True)

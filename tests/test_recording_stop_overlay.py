@@ -10,13 +10,16 @@ from src.recorder.stop_overlay import (
 
 
 
-def test_replay_overlay_uses_the_same_top_edge() -> None:
-    overlay = ReplayControlOverlay.__new__(ReplayControlOverlay)
-    overlay._monitors_cache = [
+def test_replay_overlay_uses_the_same_top_edge(monkeypatch) -> None:
+    monitors = [
         {"left": 0, "top": 0, "width": 1920, "height": 1080},
         {"left": 1920, "top": -200, "width": 1920, "height": 1080},
     ]
-    overlay._monitors_cache_at = 1e18
+    monkeypatch.setattr(
+        "src.recorder.stop_overlay._cached_monitors",
+        lambda force=False: monitors,
+    )
+    overlay = ReplayControlOverlay.__new__(ReplayControlOverlay)
 
     assert overlay._cursor_at_top_edge(100, _EDGE_TRIGGER_PX) is True
     assert overlay._cursor_at_top_edge(100, _EDGE_TRIGGER_PX + 1) is False
@@ -165,12 +168,15 @@ def test_editing_keeps_overlay_pinned(monkeypatch) -> None:
 
 
 def test_cursor_at_top_edge_uses_monitor_top(monkeypatch) -> None:
-    overlay = RecordingStopOverlay.__new__(RecordingStopOverlay)
-    overlay._monitors_cache = [
+    monitors = [
         {"left": 0, "top": 0, "width": 1920, "height": 1080},
         {"left": 1920, "top": -200, "width": 1920, "height": 1080},
     ]
-    overlay._monitors_cache_at = 1e18
+    monkeypatch.setattr(
+        "src.recorder.stop_overlay._cached_monitors",
+        lambda force=False: monitors,
+    )
+    overlay = RecordingStopOverlay.__new__(RecordingStopOverlay)
 
     assert overlay._cursor_at_top_edge(100, 0) is True
     assert overlay._cursor_at_top_edge(100, _EDGE_TRIGGER_PX) is True

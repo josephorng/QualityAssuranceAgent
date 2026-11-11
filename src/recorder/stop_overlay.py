@@ -55,10 +55,15 @@ _UIA_EFP_LABEL_WIDTH = 42
 _EDGE_TRIGGER_PX = 4
 _HIDE_DELAY_MS = 450
 _POLL_MS = 80
+_UIA_STATUS_POLL_MS = 120
 _OVERLAY_MARGIN = 16
+_MONITORS_CACHE_TTL_S = 2.0
 _STEP_SNIPPET_LIMIT = 42
 _STEP_ERROR_LIMIT = 160
 _ERROR_SHOW_MS = 3000
+
+_monitors_cache: list[dict[str, int]] = []
+_monitors_cache_at = 0.0
 
 
 def clip_step_snippet(text: str, *, limit: int = _STEP_SNIPPET_LIMIT) -> str:
@@ -69,6 +74,88 @@ def clip_step_snippet(text: str, *, limit: int = _STEP_SNIPPET_LIMIT) -> str:
     if limit <= 1:
         return "…"
     return cleaned[: limit - 1] + "…"
+
+
+def _read_monitors() -> list[dict[str, int]]:
+    try:
+        with mss.mss() as sct:
+            return [
+                {
+                    "left": int(mon["left"]),
+                    "top": int(mon["top"]),
+                    "width": int(mon["width"]),
+                    "height": int(mon["height"]),
+                }
+                for mon in sct.monitors[1:]
+            ]
+    except Exception:
+        return []
+
+
+def _cached_monitors(*, force: bool = False) -> list[dict[str, int]]:
+    import time
+
+    global _monitors_cache, _monitors_cache_at
+    now = time.monotonic()
+    if force or not _monitors_cache or now - _monitors_cache_at > _MONITORS_CACHE_TTL_S:
+        _monitors_cache = _read_monitors()
+        _monitors_cache_at = now
+    return _monitors_cache
+
+
+def _monitor_for_point(
+    x: int,
+    y: int,
+    *,
+    monitors: list[dict[str, int]] | None = None,
+) -> dict[str, int] | None:
+    rows = monitors if monitors is not None else _cached_monitors()
+    for mon in rows:
+        left = int(mon["left"])
+        top = int(mon["top"])
+        width = int(mon["width"])
+        height = int(mon["height"])
+        if left <= x < left + width and top <= y < top + height:
+            return mon
+    return rows[0] if rows else None
+
+
+def _monitor_key(mon: dict[str, int] | None) -> tuple[int, int, int, int] | None:
+    if mon is None:
+        return None
+    return (
+        int(mon["left"]),
+        int(mon["top"]),
+        int(mon["width"]),
+        int(mon["height"]),
+    )
+
+
+def _top_center_geometry(
+    mon: dict[str, int],
+    width: int,
+    height: int,
+    *,
+    margin: int = _OVERLAY_MARGIN,
+) -> tuple[int, int, int, int]:
+    """Return (width, height, x, y) for a top-centered strip on ``mon``."""
+    ox = int(mon["left"]) + max(margin, (int(mon["width"]) - width) // 2)
+    oy = int(mon["top"]) + margin
+    return width, height, ox, oy
+
+
+def _fallback_monitor(win: Any | None = None) -> dict[str, int]:
+    if win is not None:
+        try:
+            return {
+                "left": 0,
+                "top": 0,
+                "width": int(win.winfo_screenwidth()),
+                "height": int(win.winfo_screenheight()),
+            }
+        except Exception:
+            pass
+    return {"left": 0, "top": 0, "width": 1280, "height": 720}
 
 
 class _EdgeRevealOverlay:
@@ -84,8 +171,6 @@ class _EdgeRevealOverlay:
         self._pinned = False
         self._width = 200
         self._height = 100
-        self._monitors_cache: list[dict[str, int]] = []
-        self._monitors_cache_at = 0.0
         self._build(master)
         self._measure_and_hide()
         self._schedule_poll()
@@ -167,41 +252,11 @@ class _EdgeRevealOverlay:
             self._schedule_hide()
         self._schedule_poll()
 
-    @staticmethod
-    def _read_monitors() -> list[dict[str, int]]:
-        try:
-            with mss.mss() as sct:
-                return [
-                    {
-                        "left": int(mon["left"]),
-                        "top": int(mon["top"]),
-                        "width": int(mon["width"]),
-                        "height": int(mon["height"]),
-                    }
-                    for mon in sct.monitors[1:]
-                ]
-        except Exception:
-            return []
-
     def _monitors(self) -> list[dict[str, int]]:
-        import time
-
-        now = time.monotonic()
-        if not self._monitors_cache or now - self._monitors_cache_at > 2.0:
-            self._monitors_cache = self._read_monitors()
-            self._monitors_cache_at = now
-        return self._monitors_cache
+        return _cached_monitors()
 
     def _monitor_for_point(self, x: int, y: int) -> dict[str, int] | None:
-        for mon in self._monitors():
-            left = int(mon["left"])
-            top = int(mon["top"])
-            width = int(mon["width"])
-            height = int(mon["height"])
-            if left <= x < left + width and top <= y < top + height:
-                return mon
-        monitors = self._monitors()
-        return monitors[0] if monitors else None
+        return _monitor_for_point(x, y)
 
     def _cursor_at_top_edge(self, x: int, y: int) -> bool:
         mon = self._monitor_for_point(x, y)
@@ -222,26 +277,8 @@ class _EdgeRevealOverlay:
         win = self._window
         if win is None:
             return
-        mon = self._monitor_for_point(x, y)
-        if mon is None:
-            try:
-                mon = {
-                    "left": 0,
-                    "top": 0,
-                    "width": int(win.winfo_screenwidth()),
-                    "height": int(win.winfo_screenheight()),
-                }
-            except Exception:
-                mon = {"left": 0, "top": 0, "width": 1280, "height": 720}
-
-        width = self._width
-        height = self._height
-        # Center horizontally on the monitor whose top edge was touched.
-        ox = int(mon["left"]) + max(
-            _OVERLAY_MARGIN,
-            (int(mon["width"]) - width) // 2,
-        )
-        oy = int(mon["top"]) + _OVERLAY_MARGIN
+        mon = self._monitor_for_point(x, y) or _fallback_monitor(win)
+        width, height, ox, oy = _top_center_geometry(mon, self._width, self._height)
         try:
             win.geometry(f"{width}x{height}+{ox}+{oy}")
             win.attributes("-topmost", True)
@@ -492,7 +529,11 @@ class RecordingUiaStatusOverlay:
         self._label: ctk.CTkLabel | None = None
         self._state = "red"
         self._pulse_after_id: str | None = None
+        self._poll_after_id: str | None = None
         self._destroyed = False
+        self._placed_monitor_key: tuple[int, int, int, int] | None = None
+        self._last_width = 240
+        self._last_height = 32
         self._build(master)
 
     def _build(self, master: Any) -> None:
@@ -534,29 +575,74 @@ class RecordingUiaStatusOverlay:
         )
         self._label.pack(side="left")
 
-        self.ensure_visible()
+        self.ensure_visible(force=True)
+        self._schedule_poll()
         # hwnd is valid after map; apply capture-exclude + click-through.
         try:
             win.after(50, lambda: self._harden_window(win))
         except Exception:
             self._harden_window(win)
 
-    def ensure_visible(self) -> None:
-        """Show and pin topmost (call again after the hub iconifies)."""
+    def _cursor_xy(self) -> tuple[int, int] | None:
+        try:
+            pos = pyautogui.position()
+            return int(pos.x), int(pos.y)
+        except Exception:
+            return None
+
+    def _measure(self) -> tuple[int, int]:
+        win = self._window
+        if win is None:
+            return self._last_width, self._last_height
+        try:
+            win.update_idletasks()
+            width = max(int(win.winfo_reqwidth()), 240)
+            height = max(int(win.winfo_reqheight()), 32)
+            self._last_width = width
+            self._last_height = height
+        except Exception:
+            pass
+        return self._last_width, self._last_height
+
+    def _place_on_monitor(
+        self,
+        mon: dict[str, int],
+        *,
+        force: bool = False,
+    ) -> bool:
+        """Move to top-center of ``mon``. Returns True when geometry changed."""
+        win = self._window
+        if win is None:
+            return False
+        key = _monitor_key(mon)
+        width, height = self._measure()
+        if (
+            not force
+            and key is not None
+            and key == self._placed_monitor_key
+        ):
+            return False
+        _w, _h, ox, oy = _top_center_geometry(mon, width, height)
+        try:
+            win.geometry(f"{width}x{height}+{ox}+{oy}")
+        except Exception:
+            return False
+        self._placed_monitor_key = key
+        return True
+
+    def ensure_visible(self, *, force: bool = False) -> None:
+        """Show and pin topmost on the monitor under the cursor."""
         if self._destroyed:
             return
         win = self._window
         if win is None:
             return
-        try:
-            win.update_idletasks()
-            width = max(int(win.winfo_reqwidth()), 240)
-            height = max(int(win.winfo_reqheight()), 32)
-            screen_w = int(win.winfo_screenwidth())
-            x = max(0, (screen_w - width) // 2)
-            win.geometry(f"{width}x{height}+{x}+8")
-        except Exception:
-            pass
+        xy = self._cursor_xy()
+        if xy is None:
+            mon = _fallback_monitor(win)
+        else:
+            mon = _monitor_for_point(xy[0], xy[1]) or _fallback_monitor(win)
+        self._place_on_monitor(mon, force=force)
         try:
             win.deiconify()
             win.lift()
@@ -564,14 +650,51 @@ class RecordingUiaStatusOverlay:
         except Exception:
             pass
 
+    def _schedule_poll(self) -> None:
+        if self._destroyed or self._window is None:
+            return
+        try:
+            self._poll_after_id = self._master.after(
+                _UIA_STATUS_POLL_MS,
+                self._poll_cursor_monitor,
+            )
+        except Exception:
+            self._poll_after_id = None
+
+    def _cancel_poll(self) -> None:
+        after_id = self._poll_after_id
+        self._poll_after_id = None
+        if after_id is None:
+            return
+        try:
+            self._master.after_cancel(after_id)
+        except Exception:
+            pass
+
+    def _poll_cursor_monitor(self) -> None:
+        self._poll_after_id = None
+        if self._destroyed or self._window is None:
+            return
+        xy = self._cursor_xy()
+        if xy is not None:
+            mon = _monitor_for_point(xy[0], xy[1])
+            if mon is not None:
+                moved = self._place_on_monitor(mon)
+                if moved:
+                    try:
+                        self._window.attributes("-topmost", True)
+                    except Exception:
+                        pass
+        self._schedule_poll()
+
     def _harden_window(self, win: Any) -> None:
         if self._destroyed:
             return
-        self.ensure_visible()
+        self.ensure_visible(force=True)
         _apply_exclude_from_capture(win)
         _apply_click_through(win)
         # Click-through / affinity can reorder Z; pin again.
-        self.ensure_visible()
+        self.ensure_visible(force=True)
 
     def set_state(self, state: str) -> None:
         if self._destroyed:
@@ -668,6 +791,7 @@ class RecordingUiaStatusOverlay:
         if self._destroyed:
             return
         self._destroyed = True
+        self._cancel_poll()
         self._cancel_pulse()
         win = self._window
         self._window = None

@@ -268,6 +268,114 @@ def test_recording_uia_status_overlay_apply_status() -> None:
         root.destroy()
 
 
+def test_monitor_for_point_picks_secondary() -> None:
+    from src.recorder.stop_overlay import _monitor_for_point, _top_center_geometry
+
+    monitors = [
+        {"left": 0, "top": 0, "width": 1920, "height": 1080},
+        {"left": 1920, "top": -100, "width": 2560, "height": 1440},
+    ]
+    mon = _monitor_for_point(2000, 50, monitors=monitors)
+    assert mon is not None
+    assert mon["left"] == 1920
+    width, height, ox, oy = _top_center_geometry(mon, 300, 40)
+    assert width == 300
+    assert height == 40
+    assert ox == 1920 + (2560 - 300) // 2
+    assert oy == -100 + 16
+
+
+def test_uia_status_overlay_places_on_cursor_monitor(monkeypatch) -> None:
+    from src.recorder import stop_overlay as so
+
+    monitors = [
+        {"left": 0, "top": 0, "width": 1920, "height": 1080},
+        {"left": 1920, "top": -100, "width": 2560, "height": 1440},
+    ]
+    geometries: list[str] = []
+
+    class _FakeWin:
+        def update_idletasks(self) -> None:
+            return None
+
+        def winfo_reqwidth(self) -> int:
+            return 300
+
+        def winfo_reqheight(self) -> int:
+            return 40
+
+        def geometry(self, value: str) -> None:
+            geometries.append(value)
+
+        def deiconify(self) -> None:
+            return None
+
+        def lift(self) -> None:
+            return None
+
+        def attributes(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+    overlay = so.RecordingUiaStatusOverlay.__new__(so.RecordingUiaStatusOverlay)
+    overlay._destroyed = False
+    overlay._window = _FakeWin()
+    overlay._placed_monitor_key = None
+    overlay._last_width = 240
+    overlay._last_height = 32
+    overlay._cursor_xy = lambda: (2100, 20)  # type: ignore[method-assign]
+
+    monkeypatch.setattr(so, "_cached_monitors", lambda force=False: monitors)
+
+    overlay.ensure_visible()
+    assert geometries
+    assert geometries[-1].endswith("+3050+-84")
+    assert overlay._placed_monitor_key == (1920, -100, 2560, 1440)
+
+    before = len(geometries)
+    overlay.ensure_visible()
+    assert len(geometries) == before
+
+    overlay._cursor_xy = lambda: (100, 20)  # type: ignore[method-assign]
+    overlay.ensure_visible()
+    assert len(geometries) == before + 1
+    assert geometries[-1].endswith("+810+16")
+    assert overlay._placed_monitor_key == (0, 0, 1920, 1080)
+
+
+def test_uia_status_overlay_place_same_monitor_noop() -> None:
+    from src.recorder import stop_overlay as so
+
+    geometries: list[str] = []
+
+    class _FakeWin:
+        def update_idletasks(self) -> None:
+            return None
+
+        def winfo_reqwidth(self) -> int:
+            return 240
+
+        def winfo_reqheight(self) -> int:
+            return 32
+
+        def geometry(self, value: str) -> None:
+            geometries.append(value)
+
+    overlay = so.RecordingUiaStatusOverlay.__new__(so.RecordingUiaStatusOverlay)
+    overlay._destroyed = False
+    overlay._window = _FakeWin()
+    overlay._placed_monitor_key = None
+    overlay._last_width = 240
+    overlay._last_height = 32
+    mon = {"left": 0, "top": 0, "width": 1920, "height": 1080}
+
+    assert overlay._place_on_monitor(mon) is True
+    assert len(geometries) == 1
+    assert overlay._place_on_monitor(mon) is False
+    assert len(geometries) == 1
+    assert overlay._place_on_monitor(mon, force=True) is True
+    assert len(geometries) == 2
+
+
 def test_should_exclude_uia_status_skips_remote_and_vm(monkeypatch) -> None:
     from src.recorder import stop_overlay as so
 

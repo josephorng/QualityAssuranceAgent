@@ -476,6 +476,82 @@ def test_coalesce_same_location_clicks_three_singles_to_triple() -> None:
     assert merged[0].screenshot_path == "a.jpeg"
 
 
+def test_coalesce_same_location_clicks_preserves_first_press_uia_on_double() -> None:
+    click_window = {
+        "hwnd": 131256,
+        "title": "Program Manager",
+        "class_name": "Progman",
+    }
+    uia_snapshot = {
+        "hwnd": 131256,
+        "texts": [{"bbox": [76, 111, 152, 196], "text": "WinMaster7 Console"}],
+    }
+    element_from_point = {
+        "name": "WinMaster7 Console",
+        "value": "",
+        "control_type": "list_item",
+    }
+    first = _click_event(
+        1,
+        timestamp_utc="2026-08-12T00:00:00+00:00",
+        screenshot_path="a.jpeg",
+    )
+    first.click_window = click_window
+    first.uia_snapshot = uia_snapshot
+    first.element_from_point = element_from_point
+    first.observed_settle_seconds = 0.015
+    events = [
+        first,
+        _click_event(2, timestamp_utc="2026-08-12T00:00:00.300000+00:00"),
+    ]
+    merged = coalesce_consecutive_same_location_clicks(events)
+    assert len(merged) == 1
+    assert merged[0].kind == "double_click"
+    assert merged[0].click_window == click_window
+    assert merged[0].uia_snapshot == uia_snapshot
+    assert merged[0].element_from_point == element_from_point
+    assert merged[0].observed_settle_seconds == 0.015
+    assert merged[0].screenshot_path == "a.jpeg"
+
+
+def test_coalesce_same_location_clicks_preserves_first_press_uia_on_triple() -> None:
+    click_window = {
+        "hwnd": 131256,
+        "title": "Program Manager",
+        "class_name": "Progman",
+    }
+    uia_snapshot = {
+        "hwnd": 131256,
+        "texts": [{"bbox": [76, 111, 152, 196], "text": "WinMaster7 Console"}],
+    }
+    element_from_point = {
+        "name": "WinMaster7 Console",
+        "value": "",
+        "control_type": "list_item",
+    }
+    first = _click_event(
+        1,
+        timestamp_utc="2026-08-12T00:00:00+00:00",
+        screenshot_path="a.jpeg",
+    )
+    first.click_window = click_window
+    first.uia_snapshot = uia_snapshot
+    first.element_from_point = element_from_point
+    events = [
+        first,
+        _click_event(2, timestamp_utc="2026-08-12T00:00:00.400000+00:00"),
+        _click_event(3, timestamp_utc="2026-08-12T00:00:00.800000+00:00"),
+    ]
+    merged = coalesce_consecutive_same_location_clicks(events)
+    assert len(merged) == 1
+    assert merged[0].kind == "triple_click"
+    assert merged[0].index == 1
+    assert merged[0].click_window == click_window
+    assert merged[0].uia_snapshot == uia_snapshot
+    assert merged[0].element_from_point == element_from_point
+    assert merged[0].screenshot_path == "a.jpeg"
+
+
 def test_coalesce_same_location_clicks_double_plus_click_to_triple() -> None:
     events = [
         _click_event(

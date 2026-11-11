@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
@@ -494,24 +495,16 @@ def _kind_and_count_for_total(total: int) -> tuple[str, int | None]:
 
 
 def _merge_click_group(group: list[RecordedEvent]) -> RecordedEvent:
+    """Merge same-spot clicks; keep the first event's press UIA / window fields."""
     first = group[0]
     total = sum(_click_weight(event) for event in group)
     kind, click_count = _kind_and_count_for_total(total)
-    return RecordedEvent(
-        index=first.index,
-        timestamp_utc=first.timestamp_utc,
+    return replace(
+        first,
         kind=kind,
-        cursor_xy=first.cursor_xy,
         button=first.button or "left",
         modifiers=list(first.modifiers) if first.modifiers else None,
         click_count=click_count,
-        screenshot_path=first.screenshot_path,
-        monitor_index=first.monitor_index,
-        monitor_offset=first.monitor_offset,
-        anchor_click_xy=first.anchor_click_xy,
-        window_change=first.window_change,
-        target_window_title=first.target_window_title,
-        window_snapshot_debug=first.window_snapshot_debug,
     )
 
 

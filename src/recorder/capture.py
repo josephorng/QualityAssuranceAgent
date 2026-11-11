@@ -92,7 +92,9 @@ _IME_COMMIT_SETTLE_S = 0.3
 # raw RGB frame per monitor in memory. A click pins that raw frame; the worker
 # JPEG-encodes it only when the frame is adopted.
 # Window list and UI Automation refresh interval.
-_PRE_CLICK_CONTEXT_INTERVAL_S = 0.25
+_PRE_CLICK_CONTEXT_INTERVAL_S = 0.5
+# Pace before-shot monitor grabs so continuous mss does not saturate CPU.
+_BEFORE_SHOT_INTERVAL_S = 0.5
 # UI Automation on a closing window can stall. The per-step thread gives up
 # after this many seconds, keeps the already-enumerated window list + fast
 # signals, and sets ``uia_timed_out`` on ``window_snapshot_debug``.
@@ -4135,10 +4137,10 @@ class RecordingSession:
         try:
             with mss.mss() as sct:
                 while not self._before_shot_stop.is_set():
-                    published = self._capture_and_publish_before_shot(sct)
+                    self._capture_and_publish_before_shot(sct)
                     if self._before_shot_stop.is_set():
                         return
-                    if not published and self._before_shot_stop.wait(0.05):
+                    if self._before_shot_stop.wait(_BEFORE_SHOT_INTERVAL_S):
                         return
         except Exception as exc:
             with self._lock:

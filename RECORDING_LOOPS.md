@@ -40,7 +40,7 @@ flowchart LR
   Keys --> KeyTimer
   KeyTimer -->|before-shot for Tab or Enter| Queue
 
-  Context -->|every 0.25s| Windows
+  Context -->|every 0.5s| Windows
   Worker -->|JPEG-encode pinned frame| Queue
   Worker -->|write event JSON| Queue
   Worker -->|hand off window diff| WindowStep
@@ -61,11 +61,11 @@ flowchart LR
 
 ### Before-shot grab loop
 
-Thread `screen-recorder-before-shot`. Round-robins each physical monitor with a long-lived `mss` instance and stores raw RGB in `_last_settle_frames` (no JPEG in this loop). Mouse-down pins that monitor's latest raw frame. The worker JPEG-encodes the pinned frame when adopting it into `_pending_capture_*.jpeg` / `event_N.jpeg`, and refreshes durable `_last_settle_frame.jpeg` only then.
+Thread `screen-recorder-before-shot`. Round-robins each physical monitor with a long-lived `mss` instance and stores raw RGB in `_last_settle_frames` (no JPEG in this loop). Paces at `_BEFORE_SHOT_INTERVAL_S` (0.5s) after each monitor grab. Mouse-down pins that monitor's latest raw frame. The worker JPEG-encodes the pinned frame when adopting it into `_pending_capture_*.jpeg` / `event_N.jpeg`, and refreshes durable `_last_settle_frame.jpeg` only then.
 
 ### Pre-click context loop
 
-Thread `screen-recorder-preclick-context`. Every 0.25 seconds (`_PRE_CLICK_CONTEXT_INTERVAL_S`) it refreshes the window list and the fast signals. Clipboard and UI Automation are refreshed at most once a second on this same thread, so a stall here does not block the before-shot loop.
+Thread `screen-recorder-preclick-context`. Every 0.5 seconds (`_PRE_CLICK_CONTEXT_INTERVAL_S`) it refreshes the window list and the fast signals. Clipboard and UI Automation are refreshed at most once a second on this same thread, so a stall here does not block the before-shot loop.
 
 The mouse hook copies this cache at press time. It does not enumerate windows itself.
 

@@ -11,6 +11,7 @@ from src.recorder.uia_input_boxes import (
     _UIA_CUSTOM_CONTROL_TYPE_ID,
     _UIA_DOCUMENT_CONTROL_TYPE_ID,
     _UIA_EDIT_CONTROL_TYPE_ID,
+    _UIA_FIND_ALL_BUILD_CACHE,
     _UIA_HEADER_CONTROL_TYPE_ID,
     _UIA_HEADERITEM_CONTROL_TYPE_ID,
     _UIA_INPUT_CONTROL_TYPE_IDS,
@@ -19,6 +20,7 @@ from src.recorder.uia_input_boxes import (
     _UIA_SPLITBUTTON_CONTROL_TYPE_ID,
     _UIA_TABITEM_CONTROL_TYPE_ID,
     _UIA_TEXT_CONTROL_TYPE_ID,
+    bind_findall_timing,
     canonicalize_uia_shell_status_label,
     control_type_token_from_id,
     element_from_point_name_value,
@@ -28,6 +30,7 @@ from src.recorder.uia_input_boxes import (
     merge_nested_element_boxes,
     snapshot_uia_screen,
     split_uia_name_value_label,
+    summarize_findall_timing,
     uia_label_combine_name_value,
     uia_label_prefer_value,
 )
@@ -77,10 +80,24 @@ def test_control_type_token_from_id_maps_expanded_labeled_types() -> None:
     assert UIA_CONTROL_TYPE_SUFFIX["custom"] == "自訂"
 
 
+def test_findall_build_cache_slot_and_timing_helpers() -> None:
+    # Full vtable index for IUIAutomationElement::FindAllBuildCache.
+    assert _UIA_FIND_ALL_BUILD_CACHE == 8
+    with bind_findall_timing() as samples:
+        from src.recorder.uia_input_boxes import _note_findall_timing
+
+        _note_findall_timing(elapsed_s=0.125, count=12)
+        _note_findall_timing(elapsed_s=0.05, count=3)
+    total_s, calls, hits = summarize_findall_timing(samples)
+    assert calls == 2
+    assert hits == 15
+    assert abs(total_s - 0.175) < 1e-6
+
+
 def test_snapshot_uia_screen_keeps_expanded_labeled_control_types(monkeypatch) -> None:
     monkeypatch.setattr(
         "src.recorder.uia_input_boxes.enumerate_edit_document_scrollbar_screen",
-        lambda hwnd: (
+        lambda hwnd, **_kwargs: (
             [],
             [],
             [

@@ -397,6 +397,15 @@ def test_idle_efp_clears_label_when_findall_empty(tmp_path: Path) -> None:
             "src.recorder.capture.resolve_click_window",
             return_value=click_win,
         ),
+        patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_hover_subtree",
+            return_value={
+                "window": [0, 0, 100, 100],
+                "inputs": [],
+                "scrollbars": [],
+                "texts": [],
+            },
+        ),
     ):
         session._worker_idle_efp(
             _DeferredCaptureJob(

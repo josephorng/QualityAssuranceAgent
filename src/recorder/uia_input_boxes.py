@@ -53,25 +53,43 @@ DEFAULT_NESTED_ELEMENT_CONTAINMENT_FRAC = 0.7
 DEFAULT_UIA_CLIP_MIN_SIDE_PX = 2
 DEFAULT_UIA_CLIP_KEEP_AREA_FRAC = 0.5
 
-# IUIAutomation vtable (after IUnknown 0..2).
+# IUIAutomation vtable (full slots including IUnknown 0..2).
 _UIA_ELEMENT_FROM_HANDLE = 6
 _UIA_ELEMENT_FROM_POINT = 7
+_UIA_GET_CONTROL_VIEW_WALKER = 14
+_UIA_CREATE_CACHE_REQUEST = 20
 _UIA_CREATE_PROPERTY_CONDITION = 23
 _UIA_CREATE_OR_CONDITION = 28
 
 # IUIAutomationElement
 _UIA_FIND_ALL = 6
+_UIA_FIND_ALL_BUILD_CACHE = 8
 _UIA_GET_CURRENT_PATTERN = 16
 _UIA_GET_CURRENT_CONTROL_TYPE = 21
 _UIA_GET_CURRENT_NAME = 23
 # IUIAutomationElement::get_CurrentAutomationId. Bounding rect is slot 43.
 _UIA_GET_CURRENT_AUTOMATION_ID = 29
+_UIA_GET_CURRENT_NATIVE_WINDOW_HANDLE = 36
+_UIA_GET_CACHED_CONTROL_TYPE = 53
+_UIA_GET_CACHED_NAME = 55
+_UIA_GET_CACHED_AUTOMATION_ID = 61
+_UIA_GET_CACHED_BOUNDING_RECTANGLE = 75
+
+# IUIAutomationCacheRequest
+_UIA_CACHE_REQUEST_ADD_PROPERTY = 3
+_UIA_CACHE_REQUEST_PUT_TREE_SCOPE = 7
+
+# IUIAutomationTreeWalker
+_UIA_TREE_WALKER_GET_PARENT_ELEMENT = 3
 
 # IUIAutomationElementArray
 _UIA_ARRAY_GET_LENGTH = 3
 _UIA_ARRAY_GET_ELEMENT = 4
 
+_UIA_BOUNDING_RECTANGLE_PROPERTY_ID = 30001
 _UIA_CONTROL_TYPE_PROPERTY_ID = 30003
+_UIA_NAME_PROPERTY_ID = 30005
+_UIA_AUTOMATION_ID_PROPERTY_ID = 30011
 _UIA_BUTTON_CONTROL_TYPE_ID = 50000
 _UIA_CUSTOM_CONTROL_TYPE_ID = 50001
 _UIA_CHECKBOX_CONTROL_TYPE_ID = 50002
@@ -89,6 +107,7 @@ _UIA_SCROLLBAR_CONTROL_TYPE_ID = 50028
 _UIA_DATAITEM_CONTROL_TYPE_ID = 50029
 _UIA_DOCUMENT_CONTROL_TYPE_ID = 50030
 _UIA_SPLITBUTTON_CONTROL_TYPE_ID = 50031
+_UIA_WINDOW_CONTROL_TYPE_ID = 50032
 _UIA_PANE_CONTROL_TYPE_ID = 50033
 _UIA_HEADER_CONTROL_TYPE_ID = 50034
 _UIA_HEADERITEM_CONTROL_TYPE_ID = 50035
@@ -103,8 +122,13 @@ _UIA_INPUT_CONTROL_TYPE_IDS = (
 _OCR_CLIP_FIELD_CONTROL_TYPE_IDS = _UIA_INPUT_CONTROL_TYPE_IDS
 _UIA_VALUE_PATTERN = 10002
 _UIA_VALUE_GET_CURRENT = 4
+_TREE_SCOPE_ELEMENT = 0x1
 _TREE_SCOPE_DESCENDANTS = 0x4
 _VT_I4 = 3
+# Idle hover FindAll: climb to a container covering at least this fraction of
+# the top-level window area (or Window/Document / hwnd root).
+_HOVER_SUBTREE_AREA_FRAC = 0.15
+_HOVER_SUBTREE_MAX_CLIMB = 12
 
 _SCROLLBAR_THUMB_AUTOMATION_ID = "ScrollbarThumb"
 _SCROLLBAR_LINE_BUTTON_AUTOMATION_IDS = frozenset({"UpButton", "DownButton"})
@@ -627,16 +651,21 @@ def _window_screen_xywh(hwnd: int) -> RectXywh | None:
     return (int(rect.left), int(rect.top), w, h)
 
 
-def _element_bounding_xyxy(element: ctypes.c_void_p) -> ScreenXyxy | None:
+def _element_bounding_xyxy(
+    element: ctypes.c_void_p,
+    *,
+    cached: bool = False,
+) -> ScreenXyxy | None:
+    slot = (
+        _UIA_GET_CACHED_BOUNDING_RECTANGLE
+        if cached
+        else _UIA_GET_CURRENT_BOUNDING_RECTANGLE_INDEX
+    )
     get_bounds = ctypes.WINFUNCTYPE(
         ctypes.HRESULT,
         ctypes.c_void_p,
         ctypes.POINTER(wintypes.RECT),
-    )(
-        _com_vtable(element, _UIA_GET_CURRENT_BOUNDING_RECTANGLE_INDEX + 1)[
-            _UIA_GET_CURRENT_BOUNDING_RECTANGLE_INDEX
-        ]
-    )
+    )(_com_vtable(element, slot + 1)[slot])
     rect = wintypes.RECT()
     hr = get_bounds(element, ctypes.byref(rect))
     if hr != _S_OK:
@@ -646,16 +675,19 @@ def _element_bounding_xyxy(element: ctypes.c_void_p) -> ScreenXyxy | None:
     return (int(rect.left), int(rect.top), int(rect.right), int(rect.bottom))
 
 
-def _element_control_type(element: ctypes.c_void_p) -> int | None:
+def _element_control_type(
+    element: ctypes.c_void_p,
+    *,
+    cached: bool = False,
+) -> int | None:
+    slot = (
+        _UIA_GET_CACHED_CONTROL_TYPE if cached else _UIA_GET_CURRENT_CONTROL_TYPE
+    )
     get_ct = ctypes.WINFUNCTYPE(
         ctypes.HRESULT,
         ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_int),
-    )(
-        _com_vtable(element, _UIA_GET_CURRENT_CONTROL_TYPE + 1)[
-            _UIA_GET_CURRENT_CONTROL_TYPE
-        ]
-    )
+    )(_com_vtable(element, slot + 1)[slot])
     control_type = ctypes.c_int(0)
     hr = get_ct(element, ctypes.byref(control_type))
     if hr != _S_OK:
@@ -663,18 +695,52 @@ def _element_control_type(element: ctypes.c_void_p) -> int | None:
     return int(control_type.value)
 
 
-def _element_automation_id(element: ctypes.c_void_p) -> str:
+def _element_automation_id(
+    element: ctypes.c_void_p,
+    *,
+    cached: bool = False,
+) -> str:
     try:
-        return _uia_current_bstr(element, _UIA_GET_CURRENT_AUTOMATION_ID).strip()
+        slot = (
+            _UIA_GET_CACHED_AUTOMATION_ID
+            if cached
+            else _UIA_GET_CURRENT_AUTOMATION_ID
+        )
+        return _uia_current_bstr(element, slot).strip()
     except Exception:
         return ""
 
 
-def _element_current_name(element: ctypes.c_void_p) -> str:
+def _element_current_name(
+    element: ctypes.c_void_p,
+    *,
+    cached: bool = False,
+) -> str:
     try:
-        return _uia_current_bstr(element, _UIA_GET_CURRENT_NAME)
+        slot = _UIA_GET_CACHED_NAME if cached else _UIA_GET_CURRENT_NAME
+        return _uia_current_bstr(element, slot)
     except Exception:
         return ""
+
+
+def _element_native_hwnd(element: ctypes.c_void_p) -> int:
+    getter = ctypes.WINFUNCTYPE(
+        ctypes.HRESULT,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    )(
+        _com_vtable(element, _UIA_GET_CURRENT_NATIVE_WINDOW_HANDLE + 1)[
+            _UIA_GET_CURRENT_NATIVE_WINDOW_HANDLE
+        ]
+    )
+    handle = ctypes.c_void_p()
+    hr = getter(element, ctypes.byref(handle))
+    if hr != _S_OK or not handle:
+        return 0
+    try:
+        return int(handle.value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _element_value_pattern_current(element: ctypes.c_void_p) -> str:
@@ -706,15 +772,67 @@ def _element_value_pattern_current(element: ctypes.c_void_p) -> str:
     return ""
 
 
-def _element_label_parts(element: ctypes.c_void_p) -> tuple[str, str, str]:
+def _element_label_parts(
+    element: ctypes.c_void_p,
+    *,
+    cached_name: bool = False,
+) -> tuple[str, str, str]:
     """Combined Name|Value label, raw Name, and ValuePattern CurrentValue."""
-    name = _element_current_name(element)
+    name = _element_current_name(element, cached=cached_name)
     value = _element_value_pattern_current(element)
     return uia_label_combine_name_value(name, value), name, value
 
 
-def _element_label(element: ctypes.c_void_p) -> str:
-    return _element_label_parts(element)[0]
+def _element_label(element: ctypes.c_void_p, *, cached_name: bool = False) -> str:
+    return _element_label_parts(element, cached_name=cached_name)[0]
+
+
+_findall_timing_samples: ContextVar[list[dict[str, float | int]] | None] = ContextVar(
+    "findall_timing_samples",
+    default=None,
+)
+
+
+@contextmanager
+def bind_findall_timing() -> Iterator[list[dict[str, float | int]]]:
+    """Accumulate ``findall_s`` / ``findall_count`` for each FindAllBuildCache."""
+    samples: list[dict[str, float | int]] = []
+    token = _findall_timing_samples.set(samples)
+    try:
+        yield samples
+    finally:
+        _findall_timing_samples.reset(token)
+
+
+def _note_findall_timing(*, elapsed_s: float, count: int) -> None:
+    samples = _findall_timing_samples.get()
+    if samples is not None:
+        samples.append(
+            {
+                "findall_s": round(float(elapsed_s), 3),
+                "findall_count": int(count),
+            }
+        )
+
+
+def summarize_findall_timing(
+    samples: list[dict[str, float | int]] | None,
+) -> tuple[float, int, int]:
+    """Return ``(total_seconds, call_count, total_hits)`` for FindAll samples."""
+    if not samples:
+        return 0.0, 0, 0
+    total_s = 0.0
+    total_hits = 0
+    for row in samples:
+        try:
+            total_s += float(row.get("findall_s") or 0.0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            total_hits += int(row.get("findall_count") or 0)
+        except (TypeError, ValueError):
+            pass
+    return float(total_s), int(len(samples)), int(total_hits)
 
 
 _element_from_point_samples: ContextVar[list[float] | None] = ContextVar(
@@ -947,6 +1065,238 @@ def _fold_or_conditions(
     return current, created
 
 
+def _create_findall_cache_request(
+    automation: ctypes.c_void_p,
+) -> ctypes.c_void_p | None:
+    """Cache BoundingRectangle / ControlType / Name / AutomationId on matches."""
+    create = ctypes.WINFUNCTYPE(
+        ctypes.HRESULT,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    )(
+        _com_vtable(automation, _UIA_CREATE_CACHE_REQUEST + 1)[
+            _UIA_CREATE_CACHE_REQUEST
+        ]
+    )
+    request_ptr = ctypes.c_void_p()
+    hr = create(automation, ctypes.byref(request_ptr))
+    if hr != _S_OK or not request_ptr:
+        return None
+    request = request_ptr
+    add_prop = ctypes.WINFUNCTYPE(
+        ctypes.HRESULT,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    )(
+        _com_vtable(request, _UIA_CACHE_REQUEST_ADD_PROPERTY + 1)[
+            _UIA_CACHE_REQUEST_ADD_PROPERTY
+        ]
+    )
+    put_scope = ctypes.WINFUNCTYPE(
+        ctypes.HRESULT,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    )(
+        _com_vtable(request, _UIA_CACHE_REQUEST_PUT_TREE_SCOPE + 1)[
+            _UIA_CACHE_REQUEST_PUT_TREE_SCOPE
+        ]
+    )
+    for prop_id in (
+        _UIA_BOUNDING_RECTANGLE_PROPERTY_ID,
+        _UIA_CONTROL_TYPE_PROPERTY_ID,
+        _UIA_NAME_PROPERTY_ID,
+        _UIA_AUTOMATION_ID_PROPERTY_ID,
+    ):
+        if add_prop(request, int(prop_id)) != _S_OK:
+            _com_release(request)
+            return None
+    if put_scope(request, _TREE_SCOPE_ELEMENT) != _S_OK:
+        _com_release(request)
+        return None
+    return request
+
+
+def _coinitialize_uia() -> tuple[Any, bool] | tuple[None, bool]:
+    """Return ``(ole32, initialized_here)`` or ``(None, False)`` on failure."""
+    if os.name != "nt":
+        return None, False
+    ole32 = ctypes.windll.ole32
+    hr = ole32.CoInitializeEx(None, _COINIT_MULTITHREADED)
+    if hr == _S_OK:
+        return ole32, True
+    if hr in (_S_OK, _S_FALSE) or (hr & 0xFFFFFFFF) == 0x80010106:
+        return ole32, False
+    return None, False
+
+
+def _create_uia_automation() -> ctypes.c_void_p | None:
+    ole32 = ctypes.windll.ole32
+    clsid = _guid_from_string(_CLSID_CUIAutomation)
+    iid = _guid_from_string(_IID_IUIAutomation)
+    automation_ptr = ctypes.c_void_p()
+    hr = ole32.CoCreateInstance(
+        ctypes.byref(clsid),
+        None,
+        _CLSCTX_INPROC_SERVER,
+        ctypes.byref(iid),
+        ctypes.byref(automation_ptr),
+    )
+    if hr != _S_OK or not automation_ptr:
+        return None
+    return automation_ptr
+
+
+def _element_from_handle(
+    automation: ctypes.c_void_p, hwnd: int
+) -> ctypes.c_void_p | None:
+    element_from_handle = ctypes.WINFUNCTYPE(
+        ctypes.HRESULT,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    )(
+        _com_vtable(automation, _UIA_ELEMENT_FROM_HANDLE + 1)[
+            _UIA_ELEMENT_FROM_HANDLE
+        ]
+    )
+    root_ptr = ctypes.c_void_p()
+    hr = element_from_handle(
+        automation,
+        ctypes.c_void_p(int(hwnd)),
+        ctypes.byref(root_ptr),
+    )
+    if hr != _S_OK or not root_ptr:
+        return None
+    return root_ptr
+
+
+def _element_from_point(
+    automation: ctypes.c_void_p, x: int, y: int
+) -> ctypes.c_void_p | None:
+    class _POINT(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    element_from_point = ctypes.WINFUNCTYPE(
+        ctypes.HRESULT,
+        ctypes.c_void_p,
+        _POINT,
+        ctypes.POINTER(ctypes.c_void_p),
+    )(
+        _com_vtable(automation, _UIA_ELEMENT_FROM_POINT + 1)[
+            _UIA_ELEMENT_FROM_POINT
+        ]
+    )
+    element_ptr = ctypes.c_void_p()
+    hr = element_from_point(
+        automation,
+        _POINT(int(x), int(y)),
+        ctypes.byref(element_ptr),
+    )
+    if hr != _S_OK or not element_ptr:
+        return None
+    return element_ptr
+
+
+def _control_view_parent(
+    automation: ctypes.c_void_p, element: ctypes.c_void_p
+) -> ctypes.c_void_p | None:
+    get_walker = ctypes.WINFUNCTYPE(
+        ctypes.HRESULT,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    )(
+        _com_vtable(automation, _UIA_GET_CONTROL_VIEW_WALKER + 1)[
+            _UIA_GET_CONTROL_VIEW_WALKER
+        ]
+    )
+    walker_ptr = ctypes.c_void_p()
+    hr = get_walker(automation, ctypes.byref(walker_ptr))
+    if hr != _S_OK or not walker_ptr:
+        return None
+    walker = walker_ptr
+    try:
+        get_parent = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(
+            _com_vtable(walker, _UIA_TREE_WALKER_GET_PARENT_ELEMENT + 1)[
+                _UIA_TREE_WALKER_GET_PARENT_ELEMENT
+            ]
+        )
+        parent_ptr = ctypes.c_void_p()
+        hr = get_parent(walker, element, ctypes.byref(parent_ptr))
+        if hr != _S_OK or not parent_ptr:
+            return None
+        return parent_ptr
+    finally:
+        _com_release(walker)
+
+
+def _com_addref(ptr: ctypes.c_void_p | None) -> None:
+    if not ptr:
+        return
+    addref = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(_com_vtable(ptr, 3)[1])
+    addref(ptr)
+
+
+def _hover_container_ready(
+    element: ctypes.c_void_p,
+    *,
+    top_hwnd: int,
+    min_area: int,
+) -> bool:
+    box = _element_bounding_xyxy(element)
+    control_type = _element_control_type(element)
+    native = _element_native_hwnd(element)
+    area = _xyxy_area(box) if box is not None else 0
+    if int(top_hwnd) > 0 and native == int(top_hwnd):
+        return True
+    if area >= int(min_area):
+        return True
+    return control_type in (
+        _UIA_WINDOW_CONTROL_TYPE_ID,
+        _UIA_DOCUMENT_CONTROL_TYPE_ID,
+    )
+
+
+def _climb_hover_findall_root(
+    automation: ctypes.c_void_p,
+    start: ctypes.c_void_p,
+    *,
+    top_hwnd: int,
+    window_area: int,
+) -> ctypes.c_void_p | None:
+    """Return an AddRef'd container for hover FindAll (caller must release).
+
+    Stops at the first ancestor whose area is >= ``_HOVER_SUBTREE_AREA_FRAC`` of
+    the top-level window, or Window/Document, or whose native hwnd is
+    ``top_hwnd``. Returns ``None`` when the caller should fall back to
+    ``ElementFromHandle(top_hwnd)``.
+    """
+    min_area = max(1, int(float(window_area) * float(_HOVER_SUBTREE_AREA_FRAC)))
+    current = start
+    owned = False
+    for _ in range(int(_HOVER_SUBTREE_MAX_CLIMB)):
+        if _hover_container_ready(
+            current, top_hwnd=int(top_hwnd), min_area=min_area
+        ):
+            if not owned:
+                _com_addref(current)
+            return current
+        parent = _control_view_parent(automation, current)
+        if owned:
+            _com_release(current)
+        if parent is None:
+            return None
+        current = parent
+        owned = True
+    if owned:
+        _com_release(current)
+    return None
+
+
 def _xyxy_area(box: ScreenXyxy) -> int:
     return max(0, int(box[2]) - int(box[0])) * max(0, int(box[3]) - int(box[1]))
 
@@ -1068,24 +1418,29 @@ def compose_scrollbar_screen_rects(
 
 def enumerate_edit_document_scrollbar_screen(
     hwnd: int,
+    *,
+    root_element: ctypes.c_void_p | None = None,
+    automation: ctypes.c_void_p | None = None,
 ) -> tuple[list[ScreenXyxy], list[ScreenXyxy], list[LabeledScreenXyxy]]:
-    """One FindAll Edit|Document|ComboBox|Pane|ScrollBar|Thumb plus labeled text-like controls."""
-    if os.name != "nt" or not hwnd:
+    """One FindAllBuildCache Edit|Document|ComboBox|Pane|ScrollBar|Thumb + labeled texts.
+
+    When ``automation`` / ``root_element`` are provided the caller owns them (not
+    released here). Otherwise a top-level ``ElementFromHandle(hwnd)`` root is used.
+    """
+    if os.name != "nt" or not int(hwnd or 0):
         return [], [], []
 
-    ole32 = ctypes.windll.ole32
-    initialized_here = False
-    hr = ole32.CoInitializeEx(None, _COINIT_MULTITHREADED)
-    if hr == _S_OK:
-        initialized_here = True
-    elif hr not in (_S_OK, _S_FALSE) and (hr & 0xFFFFFFFF) != 0x80010106:
+    ole32, initialized_here = _coinitialize_uia()
+    if ole32 is None:
         return [], [], []
 
-    automation: ctypes.c_void_p | None = None
-    root: ctypes.c_void_p | None = None
+    own_automation = automation is None
+    own_root = root_element is None
+    automation_ptr: ctypes.c_void_p | None = automation
+    root: ctypes.c_void_p | None = root_element
+    cache_request: ctypes.c_void_p | None = None
     leaf_conds: list[ctypes.c_void_p] = []
     or_nodes: list[ctypes.c_void_p] = []
-    or_cond: ctypes.c_void_p | None = None
     found: ctypes.c_void_p | None = None
     inputs: list[ScreenXyxy] = []
     scrollbars: list[ScreenXyxy] = []
@@ -1093,35 +1448,14 @@ def enumerate_edit_document_scrollbar_screen(
     scrollbar_line_buttons: list[tuple[ScreenXyxy, str]] = []
     labeled: list[LabeledScreenXyxy] = []
     try:
-        clsid = _guid_from_string(_CLSID_CUIAutomation)
-        iid = _guid_from_string(_IID_IUIAutomation)
-        automation_ptr = ctypes.c_void_p()
-        hr = ole32.CoCreateInstance(
-            ctypes.byref(clsid),
-            None,
-            _CLSCTX_INPROC_SERVER,
-            ctypes.byref(iid),
-            ctypes.byref(automation_ptr),
-        )
-        if hr != _S_OK or not automation_ptr:
-            return [], [], []
-        automation = automation_ptr
-
-        element_from_handle = ctypes.WINFUNCTYPE(
-            ctypes.HRESULT,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_void_p),
-        )(_com_vtable(automation, _UIA_ELEMENT_FROM_HANDLE + 1)[_UIA_ELEMENT_FROM_HANDLE])
-        root_ptr = ctypes.c_void_p()
-        hr = element_from_handle(
-            automation,
-            ctypes.c_void_p(int(hwnd)),
-            ctypes.byref(root_ptr),
-        )
-        if hr != _S_OK or not root_ptr:
-            return [], [], []
-        root = root_ptr
+        if automation_ptr is None:
+            automation_ptr = _create_uia_automation()
+            if automation_ptr is None:
+                return [], [], []
+        if root is None:
+            root = _element_from_handle(automation_ptr, int(hwnd))
+            if root is None:
+                return [], [], []
 
         type_ids = (
             *_UIA_INPUT_CONTROL_TYPE_IDS,
@@ -1130,13 +1464,17 @@ def enumerate_edit_document_scrollbar_screen(
             *_LABELED_TEXT_CONTROL_TYPES,
         )
         for type_id in type_ids:
-            cond = _create_control_type_condition(automation, type_id)
+            cond = _create_control_type_condition(automation_ptr, type_id)
             if cond is None:
                 return [], [], []
             leaf_conds.append(cond)
 
-        or_cond, or_nodes = _fold_or_conditions(automation, leaf_conds)
+        or_cond, or_nodes = _fold_or_conditions(automation_ptr, leaf_conds)
         if or_cond is None:
+            return [], [], []
+
+        cache_request = _create_findall_cache_request(automation_ptr)
+        if cache_request is None:
             return [], [], []
 
         find_all = ctypes.WINFUNCTYPE(
@@ -1144,16 +1482,25 @@ def enumerate_edit_document_scrollbar_screen(
             ctypes.c_void_p,
             ctypes.c_int,
             ctypes.c_void_p,
+            ctypes.c_void_p,
             ctypes.POINTER(ctypes.c_void_p),
-        )(_com_vtable(root, _UIA_FIND_ALL + 1)[_UIA_FIND_ALL])
+        )(
+            _com_vtable(root, _UIA_FIND_ALL_BUILD_CACHE + 1)[
+                _UIA_FIND_ALL_BUILD_CACHE
+            ]
+        )
         found_ptr = ctypes.c_void_p()
+        started = time.perf_counter()
         hr = find_all(
             root,
             _TREE_SCOPE_DESCENDANTS,
             or_cond,
+            cache_request,
             ctypes.byref(found_ptr),
         )
+        findall_s = time.perf_counter() - started
         if hr != _S_OK or not found_ptr:
+            _note_findall_timing(elapsed_s=findall_s, count=0)
             return [], [], []
         found = found_ptr
 
@@ -1170,26 +1517,36 @@ def enumerate_edit_document_scrollbar_screen(
         )(_com_vtable(found, _UIA_ARRAY_GET_ELEMENT + 1)[_UIA_ARRAY_GET_ELEMENT])
         length = ctypes.c_int(0)
         hr = get_length(found, ctypes.byref(length))
-        if hr != _S_OK or length.value <= 0:
+        hit_count = int(length.value) if hr == _S_OK and length.value > 0 else 0
+        _note_findall_timing(elapsed_s=findall_s, count=hit_count)
+        if hit_count <= 0:
             return [], [], []
 
-        for index in range(int(length.value)):
+        for index in range(hit_count):
             elem_ptr = ctypes.c_void_p()
             hr = get_element(found, index, ctypes.byref(elem_ptr))
             if hr != _S_OK or not elem_ptr:
                 continue
             element = elem_ptr
             try:
-                box = _element_bounding_xyxy(element)
+                box = _element_bounding_xyxy(element, cached=True)
+                if box is None:
+                    box = _element_bounding_xyxy(element, cached=False)
                 if box is None:
                     continue
-                control_type = _element_control_type(element)
+                control_type = _element_control_type(element, cached=True)
+                if control_type is None:
+                    control_type = _element_control_type(element, cached=False)
                 automation_id = ""
                 if control_type in (
                     _UIA_THUMB_CONTROL_TYPE_ID,
                     _UIA_BUTTON_CONTROL_TYPE_ID,
                 ):
-                    automation_id = _element_automation_id(element)
+                    automation_id = _element_automation_id(element, cached=True)
+                    if not automation_id:
+                        automation_id = _element_automation_id(
+                            element, cached=False
+                        )
                 if control_type == _UIA_SCROLLBAR_CONTROL_TYPE_ID:
                     scrollbars.append(box)
                 elif (
@@ -1201,11 +1558,13 @@ def enumerate_edit_document_scrollbar_screen(
                     control_type == _UIA_BUTTON_CONTROL_TYPE_ID
                     and automation_id in _SCROLLBAR_LINE_BUTTON_AUTOMATION_IDS
                 ):
-                    scrollbar_line_buttons.append((box, _element_label(element)))
+                    scrollbar_line_buttons.append(
+                        (box, _element_label(element, cached_name=True))
+                    )
                 elif control_type in _UIA_INPUT_CONTROL_TYPE_IDS:
                     inputs.append(box)
                 elif control_type in _LABELED_TEXT_CONTROL_TYPES:
-                    label = _element_label(element)
+                    label = _element_label(element, cached_name=True)
                     if label:
                         labeled.append(
                             (box, label, control_type_token_from_id(control_type))
@@ -1226,12 +1585,15 @@ def enumerate_edit_document_scrollbar_screen(
         return [], [], []
     finally:
         _com_release(found)
+        _com_release(cache_request)
         for node in reversed(or_nodes):
             _com_release(node)
         for cond in leaf_conds:
             _com_release(cond)
-        _com_release(root)
-        _com_release(automation)
+        if own_root:
+            _com_release(root)
+        if own_automation:
+            _com_release(automation_ptr)
         if initialized_here:
             try:
                 ole32.CoUninitialize()
@@ -1610,19 +1972,12 @@ def list_uia_input_boxes_image_local(
 
 
 
-def snapshot_uia_screen(hwnd: int) -> dict[str, object] | None:
-    """FindAll under ``hwnd`` and return screen-space boxes for later analysis.
-
-    Called after settle on the window-step thread (and once at recording seed).
-    Returns ``None`` when the hwnd cannot be queried. An empty tree is still a
-    snapshot (analysis must not FindAll again).
-    """
-    if os.name != "nt" or not int(hwnd or 0):
-        return None
-    try:
-        inputs, scrollbars, labeled = enumerate_edit_document_scrollbar_screen(int(hwnd))
-    except Exception:
-        return None
+def _snapshot_dict_from_lists(
+    hwnd: int,
+    inputs: list[ScreenXyxy],
+    scrollbars: list[ScreenXyxy],
+    labeled: list[LabeledScreenXyxy],
+) -> dict[str, object]:
     window = _window_screen_xywh(int(hwnd))
     texts: list[dict[str, object]] = []
     for item in labeled:
@@ -1640,6 +1995,82 @@ def snapshot_uia_screen(hwnd: int) -> dict[str, object] | None:
         "scrollbars": [[int(v) for v in box] for box in scrollbars],
         "texts": texts,
     }
+
+
+def snapshot_uia_screen(hwnd: int) -> dict[str, object] | None:
+    """FindAll under ``hwnd`` and return screen-space boxes for later analysis.
+
+    Called after settle on the window-step thread (and once at recording seed).
+    Returns ``None`` when the hwnd cannot be queried. An empty tree is still a
+    snapshot (analysis must not FindAll again).
+    """
+    if os.name != "nt" or not int(hwnd or 0):
+        return None
+    try:
+        inputs, scrollbars, labeled = enumerate_edit_document_scrollbar_screen(
+            int(hwnd)
+        )
+    except Exception:
+        return None
+    return _snapshot_dict_from_lists(int(hwnd), inputs, scrollbars, labeled)
+
+
+def snapshot_uia_hover_subtree(
+    hwnd: int,
+    x: int,
+    y: int,
+) -> dict[str, object] | None:
+    """Hover warm-up: one automation, ElementFromPoint climb, then FindAllBuildCache.
+
+    Snapshot ``window`` / boxes stay in screen space under the top-level
+    ``hwnd``. Returns ``None`` only when UIA cannot be created; an empty tree is
+    still a snapshot dict.
+    """
+    if os.name != "nt" or not int(hwnd or 0):
+        return None
+    ole32, initialized_here = _coinitialize_uia()
+    if ole32 is None:
+        return None
+    automation: ctypes.c_void_p | None = None
+    point_el: ctypes.c_void_p | None = None
+    climb_root: ctypes.c_void_p | None = None
+    try:
+        automation = _create_uia_automation()
+        if automation is None:
+            return None
+        point_el = _element_from_point(automation, int(x), int(y))
+        window = _window_screen_xywh(int(hwnd))
+        window_area = 0
+        if window is not None:
+            window_area = max(0, int(window[2]) * int(window[3]))
+        if point_el is not None and window_area > 0:
+            climb_root = _climb_hover_findall_root(
+                automation,
+                point_el,
+                top_hwnd=int(hwnd),
+                window_area=window_area,
+            )
+        if climb_root is None:
+            climb_root = _element_from_handle(automation, int(hwnd))
+        if climb_root is None:
+            return None
+        inputs, scrollbars, labeled = enumerate_edit_document_scrollbar_screen(
+            int(hwnd),
+            root_element=climb_root,
+            automation=automation,
+        )
+        return _snapshot_dict_from_lists(int(hwnd), inputs, scrollbars, labeled)
+    except Exception:
+        return None
+    finally:
+        _com_release(climb_root)
+        _com_release(point_el)
+        _com_release(automation)
+        if initialized_here:
+            try:
+                ole32.CoUninitialize()
+            except Exception:
+                pass
 
 
 def _snapshot_xyxy_list(raw: object) -> list[ScreenXyxy]:

@@ -939,7 +939,7 @@ def test_hover_findall_warms_uncached_hwnd(tmp_path: Path) -> None:
     )
     snap_calls: list[int] = []
 
-    def _snap(hwnd: int) -> dict:
+    def _snap(hwnd: int, x: int, y: int) -> dict:
         snap_calls.append(int(hwnd))
         return {
             "window": [50, 50, 400, 300],
@@ -959,7 +959,7 @@ def test_hover_findall_warms_uncached_hwnd(tmp_path: Path) -> None:
             return_value=hover_win,
         ),
         patch(
-            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            "src.recorder.uia_input_boxes.snapshot_uia_hover_subtree",
             side_effect=_snap,
         ),
     ):
@@ -1022,7 +1022,7 @@ def test_hover_findall_fail_restores_readiness_not_auto_green(tmp_path: Path) ->
             return_value=hover_win,
         ),
         patch(
-            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            "src.recorder.uia_input_boxes.snapshot_uia_hover_subtree",
             return_value=None,
         ),
     ):
@@ -1059,7 +1059,7 @@ def test_hover_findall_settle_steal_skips_green_and_upsert(tmp_path: Path) -> No
         class_name="Chrome_WidgetWin_1",
     )
 
-    def _snap_and_steal(hwnd: int) -> dict:
+    def _snap_and_steal(hwnd: int, x: int, y: int) -> dict:
         session._begin_settle_uia_yellow(after_index=1)
         return {
             "window": [50, 50, 400, 300],
@@ -1074,7 +1074,7 @@ def test_hover_findall_settle_steal_skips_green_and_upsert(tmp_path: Path) -> No
             return_value=hover_win,
         ),
         patch(
-            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            "src.recorder.uia_input_boxes.snapshot_uia_hover_subtree",
             side_effect=_snap_and_steal,
         ),
     ):
@@ -1130,7 +1130,7 @@ def test_hover_findall_skips_when_already_cached_or_yellow_or_mismatch(
     def _run(session: RecordingSession) -> list[int]:
         calls: list[int] = []
 
-        def _snap(hwnd: int) -> dict:
+        def _snap(hwnd: int, x: int, y: int) -> dict:
             calls.append(int(hwnd))
             return {
                 "window": [0, 0, 10, 10],
@@ -1149,7 +1149,7 @@ def test_hover_findall_skips_when_already_cached_or_yellow_or_mismatch(
                 return_value=hover_win,
             ),
             patch(
-                "src.recorder.uia_input_boxes.snapshot_uia_screen",
+                "src.recorder.uia_input_boxes.snapshot_uia_hover_subtree",
                 side_effect=_snap,
             ),
         ):
@@ -1162,7 +1162,7 @@ def test_hover_findall_skips_when_already_cached_or_yellow_or_mismatch(
             )
         return calls
 
-    # Already in by_hwnd with leaves
+    # Already ready at cursor (covering bbox) — skip hover FindAll
     session = RecordingSession(runs_root=tmp_path)
     session._accepting_input = True
     session._idle_efp_generation = 1
@@ -1174,15 +1174,31 @@ def test_hover_findall_skips_when_already_cached_or_yellow_or_mismatch(
             "hwnd": 55,
             "cache_kind": "hover",
             "class_name": "Chrome_WidgetWin_1",
-            "window": [0, 0, 1, 1],
+            "window": [0, 0, 400, 300],
             "inputs": [],
             "scrollbars": [],
-            "texts": [{"bbox": [0, 0, 4, 4], "text": "cached"}],
+            "texts": [{"bbox": [50, 50, 200, 200], "text": "cached"}],
         }
     }
     assert _run(session) == []
 
-    # Empty by_hwnd entry is not a warm hit — hover FindAll retries
+    # Leaves exist but do not cover the cursor — hover FindAll retries / merges
+    session._last_settle_uia_by_hwnd = {
+        55: {
+            "hwnd": 55,
+            "cache_kind": "hover",
+            "class_name": "Chrome_WidgetWin_1",
+            "window": [0, 0, 400, 300],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [0, 0, 4, 4], "text": "far"}],
+        }
+    }
+    assert _run(session) == [55]
+    # Empty FindAll result must not wipe existing far leaf
+    assert session._last_settle_uia_by_hwnd[55]["texts"][0]["text"] == "far"
+
+    # Empty by_hwnd entry is not ready — hover FindAll retries
     session._last_settle_uia_by_hwnd = {
         55: {
             "hwnd": 55,
@@ -1198,14 +1214,14 @@ def test_hover_findall_skips_when_already_cached_or_yellow_or_mismatch(
     # Empty FindAll result must not re-poison by_hwnd
     assert session._last_settle_uia_by_hwnd[55]["texts"] == []
 
-    # Matches last_settle hwnd with leaves
+    # Primary settle hwnd ready at cursor — skip
     session._last_settle_uia_by_hwnd = {}
     session._last_settle_uia = {
         "hwnd": 55,
-        "window": [0, 0, 1, 1],
+        "window": [0, 0, 400, 300],
         "inputs": [],
         "scrollbars": [],
-        "texts": [{"bbox": [0, 0, 4, 4], "text": "primary"}],
+        "texts": [{"bbox": [50, 50, 200, 200], "text": "primary"}],
     }
     assert _run(session) == []
 
@@ -1245,7 +1261,7 @@ def test_hover_findall_skips_when_already_cached_or_yellow_or_mismatch(
             return_value=flyout,
         ),
         patch(
-            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            "src.recorder.uia_input_boxes.snapshot_uia_hover_subtree",
             return_value={"window": [0, 0, 1, 1], "inputs": [], "scrollbars": [], "texts": []},
         ) as snap,
     ):
@@ -1267,7 +1283,7 @@ def test_hover_findall_skips_when_already_cached_or_yellow_or_mismatch(
             return_value=noise,
         ),
         patch(
-            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            "src.recorder.uia_input_boxes.snapshot_uia_hover_subtree",
             return_value={"window": [0, 0, 1, 1], "inputs": [], "scrollbars": [], "texts": []},
         ) as snap,
     ):
@@ -1279,6 +1295,137 @@ def test_hover_findall_skips_when_already_cached_or_yellow_or_mismatch(
             )
         )
         assert snap.call_count == 0
+
+
+def test_merge_uia_hover_snapshot_keeps_settle_kind_and_union(tmp_path: Path) -> None:
+    from src.recorder.capture import RecordingSession
+
+    existing = {
+        "hwnd": 55,
+        "cache_kind": "settle",
+        "class_name": "Chrome_WidgetWin_1",
+        "window": [0, 0, 400, 300],
+        "inputs": [[10, 10, 40, 30]],
+        "scrollbars": [],
+        "texts": [{"bbox": [0, 0, 4, 4], "text": "舊", "control_type": "text"}],
+    }
+    incoming = {
+        "hwnd": 55,
+        "cache_kind": "hover",
+        "window": [0, 0, 400, 300],
+        "inputs": [[10, 10, 40, 30], [80, 80, 120, 100]],
+        "scrollbars": [[390, 0, 400, 300]],
+        "texts": [
+            {"bbox": [0, 0, 4, 4], "text": "舊", "control_type": "text"},
+            {"bbox": [100, 100, 160, 140], "text": "新", "control_type": "button"},
+        ],
+    }
+    merged = RecordingSession._merge_uia_hover_snapshot(existing, incoming)
+    assert merged["cache_kind"] == "settle"
+    assert merged["inputs"] == [[10, 10, 40, 30], [80, 80, 120, 100]]
+    assert merged["scrollbars"] == [[390, 0, 400, 300]]
+    assert [row["text"] for row in merged["texts"]] == ["舊", "新"]
+
+
+def test_hover_findall_rewarm_merges_uncovered_point(tmp_path: Path) -> None:
+    from src.recorder.capture import RecordingSession
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    session = RecordingSession(runs_root=tmp_path)
+    session._accepting_input = True
+    session._idle_efp_generation = 1
+    session._last_settle_uia_after_index = 0
+    session._last_settle_uia = {"hwnd": 10, "window": [0, 0, 1, 1]}
+    session._last_settle_uia_by_hwnd = {
+        55: {
+            "hwnd": 55,
+            "cache_kind": "hover",
+            "class_name": "Chrome_WidgetWin_1",
+            "window": [0, 0, 400, 300],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [0, 0, 4, 4], "text": "遠方"}],
+        }
+    }
+    hover_win = ClickWindowInfo(
+        hwnd=55,
+        title="Other",
+        process_name="other.exe",
+        left=50,
+        top=50,
+        width=400,
+        height=300,
+        is_maximized=False,
+        class_name="Chrome_WidgetWin_1",
+    )
+
+    def _snap(hwnd: int, x: int, y: int) -> dict:
+        return {
+            "window": [50, 50, 400, 300],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [60, 60, 180, 140], "text": "近處"}],
+        }
+
+    with (
+        patch(
+            "src.recorder.capture.resolve_click_window",
+            return_value=hover_win,
+        ),
+        patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_hover_subtree",
+            side_effect=_snap,
+        ),
+    ):
+        assert session._maybe_hover_findall_uia(1, 100, 100, efp_name="L", efp_value="V")
+    texts = [row["text"] for row in session._last_settle_uia_by_hwnd[55]["texts"]]
+    assert texts == ["遠方", "近處"]
+    assert session._last_settle_uia_by_hwnd[55]["cache_kind"] == "hover"
+
+
+def test_hover_findall_stale_generation_skips_merge(tmp_path: Path) -> None:
+    from src.recorder.capture import RecordingSession
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    session = RecordingSession(runs_root=tmp_path)
+    session._accepting_input = True
+    session._idle_efp_generation = 1
+    session._last_settle_uia_after_index = 0
+    session._last_settle_uia = {"hwnd": 10, "window": [0, 0, 1, 1]}
+    session._last_settle_uia_by_hwnd = {}
+    hover_win = ClickWindowInfo(
+        hwnd=55,
+        title="Other",
+        process_name="other.exe",
+        left=50,
+        top=50,
+        width=400,
+        height=300,
+        is_maximized=False,
+        class_name="Chrome_WidgetWin_1",
+    )
+
+    def _snap_and_bump(hwnd: int, x: int, y: int) -> dict:
+        session._idle_efp_generation = 2
+        return {
+            "window": [50, 50, 400, 300],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [60, 60, 180, 140], "text": "過期"}],
+        }
+
+    with (
+        patch(
+            "src.recorder.capture.resolve_click_window",
+            return_value=hover_win,
+        ),
+        patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_hover_subtree",
+            side_effect=_snap_and_bump,
+        ),
+    ):
+        session._maybe_hover_findall_uia(1, 100, 100)
+    assert 55 not in session._last_settle_uia_by_hwnd
 
 
 def test_cross_window_press_skips_stale_settle_cache(tmp_path: Path) -> None:

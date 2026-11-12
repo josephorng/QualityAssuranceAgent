@@ -1926,7 +1926,7 @@ class RecordingSession:
         efp_name: str = "",
         efp_value: str = "",
     ) -> bool:
-        """Warm FindAll under the idle cursor hwnd when the settle cache lacks it.
+        """Warm a cursor-local FindAll when the settle cache is not ready at point.
 
         Shows yellow while fetching, then green/red from UIA-path readiness (never
         unconditional green). Does not change ``_last_settle_uia`` / ``after_index``.
@@ -1947,8 +1947,6 @@ class RecordingSession:
             ):
                 return False
             after_index = self._last_settle_uia_after_index
-            by_hwnd = self._last_settle_uia_by_hwnd
-            last = self._last_settle_uia
         if after_index != previous_index:
             return False
         click_window = self._click_window_payload_at(int(x), int(y))
@@ -1956,15 +1954,9 @@ class RecordingSession:
             return False
         assert click_window is not None
         hwnd = int(click_window.hwnd)
-        try:
-            last_hwnd = int((last or {}).get("hwnd") or 0) if isinstance(last, dict) else 0
-        except (TypeError, ValueError):
-            last_hwnd = 0
-        # Empty cached trees do not count as warm hits (allow hover retry).
-        if hwnd == last_hwnd and self._uia_snapshot_has_leaves(last):
-            return False
-        mapped = by_hwnd.get(hwnd) if isinstance(by_hwnd, dict) else None
-        if self._uia_snapshot_has_leaves(mapped if isinstance(mapped, dict) else None):
+        cursor_xy = (int(x), int(y))
+        # Skip only when an attachable cache already covers this cursor point.
+        if self._uia_path_ready_at_cursor(cursor_xy):
             return False
 
         with self._lock:
@@ -1977,36 +1969,35 @@ class RecordingSession:
                 and not self._hover_uia_led_active
             ):
                 return False
-            locked_mapped = self._last_settle_uia_by_hwnd.get(hwnd)
-            if self._uia_snapshot_has_leaves(
-                locked_mapped if isinstance(locked_mapped, dict) else None
-            ):
-                return False
-            try:
-                current_last = self._last_settle_uia
-                current_last_hwnd = int(
-                    (current_last or {}).get("hwnd") or 0
-                ) if isinstance(current_last, dict) else 0
-            except (TypeError, ValueError):
-                current_last = None
-                current_last_hwnd = 0
-            if hwnd == current_last_hwnd and self._uia_snapshot_has_leaves(
-                current_last if isinstance(current_last, dict) else None
-            ):
-                return False
+            # Readiness was checked outside the lock; do not re-enter
+            # ``_cached_uia_before`` here (same non-reentrant ``_lock``).
             self._hover_uia_led_token += 1
             claim_token = int(self._hover_uia_led_token)
             self._hover_uia_led_active = True
         self._emit_uia_status(state="yellow")
 
-        from src.recorder.uia_input_boxes import snapshot_uia_screen
+        from src.recorder.uia_input_boxes import (
+            bind_findall_timing,
+            snapshot_uia_hover_subtree,
+            summarize_findall_timing,
+        )
 
         try:
-            value = snapshot_uia_screen(hwnd)
+            with bind_findall_timing() as findall_samples:
+                value = snapshot_uia_hover_subtree(hwnd, int(x), int(y))
+            total_s, calls, hits = summarize_findall_timing(findall_samples)
+            if calls > 0:
+                run_dir = self._run_dir
+                if run_dir is not None:
+                    self._log(
+                        run_dir,
+                        f"hover FindAll hwnd={hwnd} findall_s={total_s:.3f} "
+                        f"hits={hits}",
+                    )
         except Exception:
             self._release_hover_uia_led_to_readiness(
                 claim_token,
-                cursor_xy=(int(x), int(y)),
+                cursor_xy=cursor_xy,
                 efp_name=efp_name,
                 efp_value=efp_value,
             )
@@ -2014,7 +2005,7 @@ class RecordingSession:
         if not isinstance(value, dict):
             self._release_hover_uia_led_to_readiness(
                 claim_token,
-                cursor_xy=(int(x), int(y)),
+                cursor_xy=cursor_xy,
                 efp_name=efp_name,
                 efp_value=efp_value,
             )
@@ -2026,7 +2017,7 @@ class RecordingSession:
             class_name = str(_window_class_name(hwnd) or "").strip()
         if class_name:
             snapshot["class_name"] = class_name
-        snapshot["cache_kind"] = "hover"
+        stale_generation = False
         with self._lock:
             if (
                 not self._hover_uia_led_active
@@ -2034,10 +2025,13 @@ class RecordingSession:
             ):
                 # Settle stole the LED; do not upsert or paint readiness.
                 return True
-            if (
+            if generation != int(self._idle_efp_generation):
+                # Cursor moved; drop stale hover without merge or LED paint.
+                self._hover_uia_led_active = False
+                stale_generation = True
+            elif (
                 self._accepting_input
                 and not self._finalizing
-                and generation == int(self._idle_efp_generation)
                 and self._uia_snapshot_has_leaves(snapshot)
             ):
                 try:
@@ -2048,17 +2042,23 @@ class RecordingSession:
                 except (TypeError, ValueError):
                     current_last = None
                     current_last_hwnd = 0
-                current_mapped = self._last_settle_uia_by_hwnd.get(hwnd)
-                if hwnd != current_last_hwnd and not self._uia_snapshot_has_leaves(
-                    current_mapped if isinstance(current_mapped, dict) else None
-                ):
-                    self._last_settle_uia_by_hwnd[hwnd] = snapshot
+                # Do not merge into the primary settle tree for this hwnd; peers
+                # in by_hwnd are progressive hover warms.
+                if hwnd != current_last_hwnd:
+                    existing = self._last_settle_uia_by_hwnd.get(hwnd)
+                    merged = self._merge_uia_hover_snapshot(
+                        existing if isinstance(existing, dict) else None,
+                        snapshot,
+                    )
+                    self._last_settle_uia_by_hwnd[hwnd] = merged
             # Re-check token before painting (settle may have raced).
             if int(claim_token) != int(self._hover_uia_led_token):
                 self._hover_uia_led_active = False
                 return True
+        if stale_generation:
+            return True
         self._emit_uia_path_readiness(
-            cursor_xy=(int(x), int(y)),
+            cursor_xy=cursor_xy,
             efp_name=efp_name,
             efp_value=efp_value,
             claim_token=claim_token,
@@ -4606,6 +4606,97 @@ class RecordingSession:
             if isinstance(raw, list) and len(raw) > 0:
                 return True
         return False
+
+    @staticmethod
+    def _uia_box_key(box: object) -> tuple[int, int, int, int] | None:
+        if isinstance(box, (list, tuple)) and len(box) == 4:
+            try:
+                return (int(box[0]), int(box[1]), int(box[2]), int(box[3]))
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    @classmethod
+    def _merge_uia_hover_snapshot(
+        cls,
+        existing: dict[str, Any] | None,
+        incoming: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Union hover/settle peer leaves; never drop richer existing rows.
+
+        Keeps ``cache_kind=settle`` (or other non-hover) when the stored entry
+        was not hover-built. New entries default to ``hover``.
+        """
+        if not isinstance(existing, dict) or not cls._uia_snapshot_has_leaves(existing):
+            out = dict(incoming)
+            out.setdefault("cache_kind", "hover")
+            return out
+        merged = dict(existing)
+        for key in ("inputs", "scrollbars"):
+            base_rows = list(merged.get(key) or []) if isinstance(merged.get(key), list) else []
+            seen = {
+                box_key
+                for box_key in (cls._uia_box_key(row) for row in base_rows)
+                if box_key is not None
+            }
+            extra = incoming.get(key) if isinstance(incoming.get(key), list) else []
+            for row in extra or []:
+                box_key = cls._uia_box_key(row)
+                if box_key is None or box_key in seen:
+                    continue
+                seen.add(box_key)
+                base_rows.append(row)
+            merged[key] = base_rows
+        base_texts = (
+            list(merged.get("texts") or [])
+            if isinstance(merged.get("texts"), list)
+            else []
+        )
+        text_seen: set[tuple[tuple[int, int, int, int], str, str]] = set()
+        for row in base_texts:
+            if not isinstance(row, dict):
+                continue
+            box_key = cls._uia_box_key(row.get("bbox"))
+            if box_key is None:
+                continue
+            text_seen.add(
+                (
+                    box_key,
+                    str(row.get("text") or ""),
+                    str(row.get("control_type") or ""),
+                )
+            )
+        extra_texts = (
+            incoming.get("texts") if isinstance(incoming.get("texts"), list) else []
+        )
+        for row in extra_texts or []:
+            if not isinstance(row, dict):
+                continue
+            box_key = cls._uia_box_key(row.get("bbox"))
+            if box_key is None:
+                continue
+            signature = (
+                box_key,
+                str(row.get("text") or ""),
+                str(row.get("control_type") or ""),
+            )
+            if signature in text_seen:
+                continue
+            text_seen.add(signature)
+            base_texts.append(dict(row))
+        merged["texts"] = base_texts
+        if incoming.get("window") is not None and merged.get("window") is None:
+            merged["window"] = incoming.get("window")
+        if incoming.get("hwnd") is not None:
+            merged["hwnd"] = incoming.get("hwnd")
+        if incoming.get("class_name") and not merged.get("class_name"):
+            merged["class_name"] = incoming.get("class_name")
+        existing_kind = str(merged.get("cache_kind") or "").strip()
+        if existing_kind and existing_kind != "hover":
+            merged["cache_kind"] = existing_kind
+        else:
+            merged["cache_kind"] = "hover"
+        return merged
 
     def _uia_snapshot_matches_click(
         self,

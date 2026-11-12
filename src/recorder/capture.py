@@ -992,6 +992,9 @@ class RecordingSession:
         self._last_settle_uia_by_hwnd: dict[int, dict[str, Any]] = {}
         # Event index whose window-step published ``_last_settle_uia`` (0 = seed).
         self._last_settle_uia_after_index: int | None = None
+        # Bumped on each typing/edit key that dirties settle; typing-pause
+        # FindAll publishes only when the generation still matches.
+        self._typing_uia_generation: int = 0
         self._left_press_uia: dict[int, dict[str, Any] | None] = {}
         self._right_press_uia: dict[int, dict[str, Any] | None] = {}
         # Feasibility: ElementFromPoint Name/Value probed on the capture worker
@@ -1198,6 +1201,7 @@ class RecordingSession:
             self._last_settle_uia = None
             self._last_settle_uia_by_hwnd = {}
             self._last_settle_uia_after_index = None
+            self._typing_uia_generation = 0
             self._left_press_uia = {}
             self._right_press_uia = {}
             self._left_press_efp = {}
@@ -1239,6 +1243,7 @@ class RecordingSession:
             self._last_settle_uia = None
             self._last_settle_uia_by_hwnd = {}
             self._last_settle_uia_after_index = None
+            self._typing_uia_generation = 0
             self._start_windows = None
             self._start_signals = None
             self._settle_windows_ready.clear()
@@ -3136,8 +3141,67 @@ class RecordingSession:
             seal_sample_supplied=True,
         )
 
+    def _invalidate_settle_uia_for_typing_host(self) -> int:
+        """Dirty the foreground typing-host settle tree; LED red until debounce FindAll.
+
+        Returns the new ``_typing_uia_generation`` so a late FindAll from an older
+        keystroke cannot republish over a newer one. Keeps taskbar/desktop-shell
+        peers in ``_last_settle_uia_by_hwnd``. Does not change ``after_index`` —
+        a successful typing-pause publish must remain generation-attachable.
+        """
+        hwnd = self._foreground_hwnd()
+        try:
+            host = int(hwnd or 0)
+        except (TypeError, ValueError):
+            host = 0
+        with self._lock:
+            self._typing_uia_generation += 1
+            generation = int(self._typing_uia_generation)
+            self._hover_uia_led_active = False
+            self._hover_uia_led_token += 1
+            cached = self._last_settle_uia
+            try:
+                cached_hwnd = (
+                    int((cached or {}).get("hwnd") or 0)
+                    if isinstance(cached, dict)
+                    else 0
+                )
+            except (TypeError, ValueError):
+                cached_hwnd = 0
+            if host > 0 and cached_hwnd == host:
+                self._last_settle_uia = None
+            elif host <= 0 and isinstance(cached, dict):
+                # Unknown FG — drop primary so a stale Search tree cannot attach.
+                self._last_settle_uia = None
+            if host > 0 and host in self._last_settle_uia_by_hwnd:
+                del self._last_settle_uia_by_hwnd[host]
+            after_index = self._last_settle_uia_after_index
+        self._emit_uia_status(
+            state="red",
+            after_index=after_index,
+            efp_name="",
+            efp_value="",
+            efp_pending=False,
+        )
+        return generation
+
     def _schedule_pre_key_settle(self) -> None:
-        """After typing pauses, capture a before-shot for the next Tab/Enter/etc."""
+        """After typing pauses, capture a before-shot for the next Tab/Enter/etc.
+
+        Also dirties the typing-host settle UIA and schedules a FindAll refresh so
+        Search/result clicks can attach a post-query tree (LED yellow→green/red).
+        """
+        with self._lock:
+            if (
+                self._run_dir is None
+                or not self._accepting_input
+                or self._finalizing
+                or self._pending_text_meta is None
+            ):
+                return
+            self._cancel_pre_key_settle_timer_locked()
+        # Dirty before arming the timer so the fire reads the new generation.
+        self._invalidate_settle_uia_for_typing_host()
         with self._lock:
             if (
                 self._run_dir is None
@@ -3162,7 +3226,13 @@ class RecordingSession:
                 or self._pending_text_meta is None
             ):
                 return
-        self._enqueue(_DeferredCaptureJob(action="settle_pre_key"))
+            generation = int(self._typing_uia_generation)
+        self._enqueue(
+            _DeferredCaptureJob(
+                action="settle_pre_key",
+                meta={"typing_uia_generation": generation},
+            )
+        )
 
     def _mirror_shot_to_pre_key(
         self,
@@ -3273,6 +3343,82 @@ class RecordingSession:
                 monitor_offset=mon_offset,
                 focus_xy=(int(focus_xy[0]), int(focus_xy[1])),
             )
+
+    def _prefetch_typing_settle_uia(self, *, typing_uia_generation: int) -> None:
+        """FindAll under the FG typing host after a typing pause; publish for next press.
+
+        Search flyouts are included (unlike idle hover FindAll). Keeps
+        ``after_index`` equal to the previous persisted event so the generation
+        gate still attaches. Late results after a newer keystroke are discarded.
+        """
+        with self._lock:
+            if (
+                self._run_dir is None
+                or not self._accepting_input
+                or self._finalizing
+                or self._pending_text_meta is None
+            ):
+                return
+            if int(typing_uia_generation) != int(self._typing_uia_generation):
+                return
+        hwnd = self._foreground_hwnd()
+        try:
+            host = int(hwnd or 0)
+        except (TypeError, ValueError):
+            host = 0
+        if host <= 0:
+            with self._lock:
+                if int(typing_uia_generation) != int(self._typing_uia_generation):
+                    return
+                after_index = self._previous_event_index_for_settle_cache()
+            self._emit_uia_status(state="red", after_index=after_index)
+            return
+
+        after_event_index = self._previous_event_index_for_settle_cache()
+        self._begin_settle_uia_yellow(after_index=int(after_event_index))
+        from src.recorder.uia_input_boxes import snapshot_uia_screen
+
+        try:
+            value = snapshot_uia_screen(host)
+        except Exception:
+            value = None
+        paint_red = False
+        with self._lock:
+            if int(typing_uia_generation) != int(self._typing_uia_generation):
+                return
+            if (
+                self._run_dir is None
+                or not self._accepting_input
+                or self._finalizing
+                or self._pending_text_meta is None
+            ):
+                paint_red = True
+            elif not isinstance(value, dict):
+                # Keep after_index so a later successful prefetch can still attach.
+                paint_red = True
+            else:
+                snapshot = dict(value)
+                snapshot["hwnd"] = host
+                class_name = str(_window_class_name(host) or "").strip()
+                if class_name:
+                    snapshot["class_name"] = class_name
+                snapshot["cache_kind"] = "typing"
+                retained = self._by_hwnd_retained_across_settle(
+                    self._last_settle_uia_by_hwnd,
+                    settle_hwnd=host,
+                )
+                if self._is_shell_retained_uia_class(class_name):
+                    retained[host] = snapshot
+                self._last_settle_uia = snapshot
+                self._last_settle_uia_by_hwnd = retained
+                self._last_settle_uia_after_index = int(after_event_index)
+        if paint_red:
+            self._emit_uia_status(state="red", after_index=int(after_event_index))
+            return
+        self._emit_uia_path_readiness(
+            after_index=int(after_event_index),
+            from_settle=True,
+        )
 
     def _refresh_pending_pre_type(
         self,
@@ -4160,6 +4306,12 @@ class RecordingSession:
             self._worker_keyboard_event(job)
         elif job.action == "settle_pre_key":
             self._refresh_pending_pre_key()
+            meta = job.meta if isinstance(job.meta, dict) else {}
+            try:
+                typing_gen = int(meta.get("typing_uia_generation") or 0)
+            except (TypeError, ValueError):
+                typing_gen = 0
+            self._prefetch_typing_settle_uia(typing_uia_generation=typing_gen)
         elif job.action == "pending_left_press":
             self._worker_pending_left_press(job)
         elif job.action == "pending_right_press":

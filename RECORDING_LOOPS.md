@@ -87,14 +87,18 @@ After that settle work it also runs one naming `FindAll` under a single hwnd (`C
 
 The same ~0.45s idle debounce that drives the EFP Name/Value label may also `FindAll` under the click window at the cursor when that hwnd is eligible (not noise/flyout), the settle generation is already ready for the next press, the LED is not settle-yellow (settle FindAll in flight), and the hwnd is not already `_last_settle_uia` or in `_last_settle_uia_by_hwnd`. The result is upserted into `_last_settle_uia_by_hwnd` only (`cache_kind=hover`); it does not change `_last_settle_uia` or `after_index`. While that hover FindAll runs the LED goes **yellow**, then green or red from the UIA-path readiness gate below. Settle/seed yellow invalidates the hover LED claim so hover cannot paint over an in-flight settle.
 
+### Typing-pause FindAll (Search / query UIs)
+
+Each typed/edit/paste key that reschedules the ~0.3s pre-key settle also **dirties** the foreground typing-host settle tree (clears `_last_settle_uia` when it matches that hwnd, drops that hwnd from `_last_settle_uia_by_hwnd`, bumps `_typing_uia_generation`, LED **red**). After the typing pause, the same `settle_pre_key` worker job runs `FindAll` under the foreground hwnd — **including Search flyouts** that idle hover skips — and publishes into `_last_settle_uia` with `cache_kind=typing`, keeping `after_index` equal to the previous persisted event so the generation gate still attaches. LED goes **yellow** during that FindAll, then green/red from the readiness gate. A late FindAll whose generation no longer matches is discarded. This is how type-`chrome`-then-click-result can attach a post-query tree instead of a stale Recent list; green means the prefetched snapshot is ready before the click.
+
 ### Recording UIA status LED
 
 While recording, an always-on-top strip (`RecordingUiaStatusOverlay`) shows:
 
 | Signal | Meaning |
 | --- | --- |
-| Red | Waiting for settle FindAll (or sealed/cancelled/failed), or attachable FindAll at the cursor is not UIA-path sufficient |
-| Yellow | Settle or idle-hover `FindAll` / `snapshot_uia_screen` in progress |
+| Red | Waiting for settle FindAll (or sealed/cancelled/failed), typing just dirtied the host tree, or attachable FindAll at the cursor is not UIA-path sufficient |
+| Yellow | Settle, typing-pause, or idle-hover `FindAll` / `snapshot_uia_screen` in progress |
 | Green | Attachable FindAll for the cursor hwnd passes `recording_uia_skip_reason` (a click now would record `vision_path=uia`) |
 | Brief attach/miss pulse | Just-persisted pointer event did / did not get `uia_snapshot` |
 | Name \| Value text | Idle `ElementFromPoint` after ~0.45s without mouse move — shown only when green (preview; not written to event JSON). Cleared on red so green+EFP never falsely promise a UIA path. |

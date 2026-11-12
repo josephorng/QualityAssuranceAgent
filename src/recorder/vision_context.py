@@ -3332,7 +3332,50 @@ def _detection_to_dict(
 
 VISION_PATH_REPAIR_REASON = "重播修復改為 UIA"
 VISION_PATH_UIA_NOT_UNIQUE_REASON = "UIA 地標無法唯一鎖定目標"
+VISION_PATH_WEAK_EFP_OCR_DISAGREE_REASON = "弱 EFP 且 OCR 與 UIA 目標不一致"
 _VISION_PATHS = frozenset({"uia", "yolo_ocr"})
+
+
+def _press_efp_is_weak_hub(element_from_point: dict[str, Any] | None) -> bool:
+    """True when press-time EFP Name/Value is missing or a weak host generic."""
+    if not isinstance(element_from_point, dict):
+        return False
+    from src.recorder.uia_input_boxes import (
+        is_weak_efp_hub_label,
+        resolve_usable_uia_probe_label,
+    )
+
+    name = str(element_from_point.get("name") or "").strip()
+    value = str(element_from_point.get("value") or "").strip()
+    label = resolve_usable_uia_probe_label(name=name, value=value)
+    if not label:
+        return True
+    return is_weak_efp_hub_label(label)
+
+
+def _maybe_demote_uia_path_for_weak_efp_ocr_disagree(
+    *,
+    vision_timing: dict[str, Any],
+    element_from_point: dict[str, Any] | None,
+    uia_primary_text: str | None,
+    yolo_primary_text: str | None,
+) -> bool:
+    """Demote UIA→YOLO when weak EFP and OCR nearest hub disagrees with UIA.
+
+    Mutates ``vision_timing`` in place. Returns True when demoted.
+    """
+    if vision_timing.get("vision_path") != "uia":
+        return False
+    if not _press_efp_is_weak_hub(element_from_point):
+        return False
+    uia_label = _visible_text(uia_primary_text).casefold()
+    yolo_label = _visible_text(yolo_primary_text).casefold()
+    if not uia_label or not yolo_label or uia_label == yolo_label:
+        return False
+    vision_timing["vision_path"] = "yolo_ocr"
+    vision_timing["vision_path_reason"] = VISION_PATH_WEAK_EFP_OCR_DISAGREE_REASON
+    vision_timing["recording_uia_sufficient"] = False
+    return True
 _VISION_SECONDS_KEYS = (
     "yolo_s",
     "ocr_s",
@@ -4313,8 +4356,13 @@ def build_vision_context_at_point(
         all_detections = []
         yolo_error = str(exc)
 
+    efp_payload = (
+        event.element_from_point
+        if isinstance(event.element_from_point, dict)
+        else None
+    )
     efp_peer = _efp_peer_detection_from_payload(
-        event.element_from_point if isinstance(event.element_from_point, dict) else None,
+        efp_payload,
         monitor_offset=screenshot_offset,
         local_x=local_x,
         local_y=local_y,
@@ -4322,6 +4370,32 @@ def build_vision_context_at_point(
     )
     if efp_peer is not None:
         all_detections = [*all_detections, efp_peer]
+
+    # Weak-EFP safety: if UIA won but OCR nearest hub disagrees, demote to YOLO.
+    fallback_for_demote = vision_timing.get("yolo_ocr_fallback_detections")
+    if (
+        vision_timing.get("vision_path") == "uia"
+        and isinstance(fallback_for_demote, list)
+        and fallback_for_demote
+    ):
+        yolo_probe = _nearest_candidates(
+            fallback_for_demote,
+            local_x,
+            local_y,
+        )
+        yolo_probe = _promote_click_primary_detections(yolo_probe, local_x, local_y)
+        uia_probe = _nearest_candidates(all_detections, local_x, local_y)
+        uia_probe = _promote_click_primary_detections(uia_probe, local_x, local_y)
+        uia_text = uia_probe[0].text if uia_probe else None
+        yolo_text = yolo_probe[0].text if yolo_probe else None
+        if _maybe_demote_uia_path_for_weak_efp_ocr_disagree(
+            vision_timing=vision_timing,
+            element_from_point=efp_payload,
+            uia_primary_text=uia_text,
+            yolo_primary_text=yolo_text,
+        ):
+            all_detections = list(fallback_for_demote)
+            vision_timing.pop("yolo_ocr_fallback_detections", None)
 
     nearest: list[UiDetection] = []
     candidate_text = ""

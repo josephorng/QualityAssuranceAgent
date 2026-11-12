@@ -161,12 +161,23 @@ def apply_text_choice_hard_rules(text_resolution: dict[str, Any]) -> dict[str, A
     elif "uia_text" not in updated:
         updated["uia_text"] = None
 
-    # 1. Non-empty UIA focused value wins.
+    # 1. Non-empty UIA focused value wins, unless it is a truncated
+    # prefix of recorded (e.g. Chrome ValuePattern lag: "Stephen Curr"
+    # vs recorded "Stephen Curry").
     if uia:
-        updated["resolved_text"] = uia
-        updated["source"] = "uia"
-        updated["reason"] = "prefer UIA focused value"
-        return updated
+        uia_n = normalize_text_for_compare(uia)
+        recorded_n = normalize_text_for_compare(recorded) if recorded else ""
+        truncated = (
+            bool(recorded_n)
+            and recorded_n.startswith(uia_n)
+            and len(uia_n) < len(recorded_n)
+        )
+        if not truncated:
+            updated["resolved_text"] = uia
+            updated["source"] = "uia"
+            updated["reason"] = "prefer UIA focused value"
+            return updated
+        # else: skip UIA and continue to rules 2–8
 
     # 2. Masked OCR → recorded (passwords).
     if ocr_candidates and all(is_masked_ocr_text(text) for text in ocr_candidates):

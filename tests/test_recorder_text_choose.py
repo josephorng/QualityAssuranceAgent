@@ -108,6 +108,41 @@ def test_apply_hard_rules_prefers_uia_focused_value() -> None:
     assert "UIA" in updated["reason"]
 
 
+def test_apply_hard_rules_skips_truncated_uia_prefix_of_recorded() -> None:
+    """Chrome ValuePattern lag: truncated UIA must not beat longer recorded."""
+    updated = apply_text_choice_hard_rules(
+        {
+            "recorded_text": "Stephen Curry",
+            "uia_text": "Stephen Curr",
+            "ocr_text": "Stephen Curry",
+            "ocr_options": ["Stephen Curry"],
+            "ime": {"chinese": False, "lang_id": 1028},
+            "resolved_text": "Stephen Curr",
+            "source": "uia",
+            "reason": "prefer UIA focused value",
+        }
+    )
+    assert updated["resolved_text"] == "Stephen Curry"
+    assert updated["source"] == "recorded"
+    assert updated["uia_text"] == "Stephen Curr"
+
+    # OCR disagreement must not block the recorded-prefix exception.
+    updated_no_ocr_agree = apply_text_choice_hard_rules(
+        {
+            "recorded_text": "Stephen Curry",
+            "uia_text": "Stephen Curr",
+            "ocr_text": "Stephen Carry",
+            "ocr_options": ["Stephen Carry"],
+            "ime": {"chinese": False, "lang_id": 1028},
+            "resolved_text": "Stephen Curr",
+            "source": "uia",
+            "reason": "prefer UIA focused value",
+        }
+    )
+    assert updated_no_ocr_agree["resolved_text"] == "Stephen Curry"
+    assert updated_no_ocr_agree["source"] == "recorded"
+
+
 def test_apply_hard_rules_prefers_short_uia_over_longer_cjk_ocr() -> None:
     """Strict UIA-first: non-empty UIA wins even when CJK OCR is a longer extension."""
     updated = apply_text_choice_hard_rules(

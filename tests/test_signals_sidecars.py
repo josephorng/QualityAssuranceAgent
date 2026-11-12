@@ -187,6 +187,92 @@ def test_write_event_analysis_keeps_appeared_when_later_foregrounds_omitted(
     ]
 
 
+def test_write_event_analysis_keeps_foreground_when_appeared_filtered_out(
+    tmp_path: Path,
+) -> None:
+    """Unrelated later_foregrounds must not erase a real foreground change.
+
+    omit_foreground_when_structural used to run before appear filtering, so a
+    dropped appear left window_verify empty even though focus had moved.
+    """
+    from src.common.io_utils import read_json
+    from src.recorder.models import RecordedEvent
+    from src.recorder.orchestrator import _write_event_analysis
+
+    run_dir = tmp_path / "rec"
+    (run_dir / "events").mkdir(parents=True)
+    (run_dir / "analysis").mkdir(parents=True)
+    dialog = {
+        "hwnd": 42,
+        "title": "登入系統",
+        "pid": 1,
+        "left": 10,
+        "top": 10,
+        "width": 200,
+        "height": 100,
+        "is_minimized": False,
+        "is_maximized": False,
+        "class_name": "WindowsForms10.Window.8.app.0.x",
+        "process_name": "WM7Ldr.exe",
+    }
+    after_fg = {
+        "class_name": dialog["class_name"],
+        "title": dialog["title"],
+        "process_name": dialog["process_name"],
+    }
+    write_event_json(
+        run_dir,
+        {
+            "index": 1,
+            "timestamp_utc": "2026-01-01T00:00:00+00:00",
+            "kind": "double_click",
+            "window_snapshot_debug": {
+                "windows_before": [],
+                "windows_after": [dialog],
+                "signals_before": {
+                    "foreground": {
+                        "class_name": "Progman",
+                        "title": "Program Manager",
+                        "process_name": "explorer.exe",
+                    }
+                },
+                "signals_after": {"foreground": after_fg},
+                "signal_kind": "double_click",
+            },
+        },
+    )
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    event = RecordedEvent.from_dict(raw)
+    analysis_path = run_dir / "analysis" / "event_001.json"
+    _write_event_analysis(
+        analysis_path,
+        event=event,
+        result={"instruction": "click", "use_char_target": False},
+        instruction="click",
+        vision={},
+        expected_outcome=None,
+        use_expected_outcome=False,
+        elapsed_since_previous=None,
+        text_resolution=None,
+        # Force appear filtering to drop the dialog (no matching FG identity).
+        later_foregrounds=[
+            {
+                "class_name": "Notepad",
+                "title": "Untitled",
+                "process_name": "Notepad.exe",
+            }
+        ],
+        next_windows_before=None,
+        run_dir=run_dir,
+    )
+    analysis = read_json(analysis_path, {})
+    assert isinstance(analysis, dict)
+    verify = analysis.get("window_verify")
+    assert isinstance(verify, dict)
+    assert "appeared" not in verify
+    assert verify.get("foreground") == after_fg
+
+
 def test_peel_does_not_mutate_input(tmp_path: Path) -> None:
     run_dir = tmp_path / "rec"
     (run_dir / "signals").mkdir(parents=True)

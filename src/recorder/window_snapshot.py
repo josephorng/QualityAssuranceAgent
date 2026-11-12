@@ -1554,8 +1554,16 @@ def window_verify_from_debug(
     debug: dict[str, Any] | None,
     *,
     typed_text: str | None = None,
+    omit_structural_foreground: bool = True,
 ) -> dict[str, Any]:
-    """Build a replay predicate from stored window lists and changed signals."""
+    """Build a replay predicate from stored window lists and changed signals.
+
+    When ``omit_structural_foreground`` is False, keep a changed foreground even
+    if appeared/disappeared/state is present. Analysis should filter appeared
+    first (``limit_appeared_to_later_foreground``), then call
+    ``omit_foreground_when_structural`` so a dropped appear cannot wipe the only
+    remaining assertion.
+    """
     if not isinstance(debug, dict):
         return {}
     before_windows: list[WindowInfo] = []
@@ -1581,10 +1589,9 @@ def window_verify_from_debug(
             kind=str(debug.get("signal_kind") or "") or None,
         )
     )
-    return omit_focused_value_unrelated_to_typed_text(
-        omit_foreground_when_structural(predicate),
-        typed_text,
-    )
+    if omit_structural_foreground:
+        predicate = omit_foreground_when_structural(predicate)
+    return omit_focused_value_unrelated_to_typed_text(predicate, typed_text)
 
 
 def foreground_identities_from_debug(

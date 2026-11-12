@@ -59,6 +59,7 @@ from src.recorder.window_snapshot import (
     limit_appeared_to_later_foreground,
     limit_disappeared_absent_from_next_before,
     normalize_window_verify_disabled,
+    omit_foreground_when_structural,
     resolve_window_change,
     window_verify_from_debug,
 )
@@ -966,9 +967,13 @@ def _write_event_analysis(
             verify_debug,
             include_before=False,
         )
+    # Keep foreground until after appear filtering. Omitting it first lets
+    # limit_appeared_to_later_foreground wipe the only assertion when the new
+    # window is dropped as never-foreground noise.
     window_verify = window_verify_from_debug(
         verify_debug,
         typed_text=event.text if event.kind == "text_input" else None,
+        omit_structural_foreground=False,
     )
     window_verify = limit_appeared_to_later_foreground(
         window_verify,
@@ -978,6 +983,7 @@ def _write_event_analysis(
         window_verify,
         next_windows_before,
     )
+    window_verify = omit_foreground_when_structural(window_verify)
     disabled = _preserved_window_verify_disabled(analysis_path, window_verify)
     fallback = build_yolo_ocr_fallback_from_vision(
         event,

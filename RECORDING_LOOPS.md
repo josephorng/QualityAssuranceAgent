@@ -85,7 +85,9 @@ After that settle work it also runs one naming `FindAll` under a single hwnd (`C
 
 ### Idle hover FindAll
 
-The same ~0.45s idle debounce that drives the EFP Name/Value label may also `FindAll` under the click window at the cursor when that hwnd is eligible (not noise/flyout), the settle generation is already ready for the next press, the LED is not settle-yellow (settle FindAll in flight), and the hwnd is not already `_last_settle_uia` or in `_last_settle_uia_by_hwnd`. The result is upserted into `_last_settle_uia_by_hwnd` only (`cache_kind=hover`); it does not change `_last_settle_uia` or `after_index`. While that hover FindAll runs the LED goes **yellow**, then green or red from the UIA-path readiness gate below. Settle/seed yellow invalidates the hover LED claim so hover cannot paint over an in-flight settle.
+The same ~0.45s idle debounce that drives the EFP Name/Value label may also `FindAll` under the click window at the cursor when that hwnd is eligible (not noise/flyout), the settle generation is already ready for the next press, the LED is not settle-yellow (settle FindAll in flight), and the hwnd is not already a **non-empty** `_last_settle_uia` or `_last_settle_uia_by_hwnd` entry. Empty FindAll trees do not count as warm hits (hover may retry) and are not published into the settle/hover caches. A successful result is upserted into `_last_settle_uia_by_hwnd` only (`cache_kind=hover`); it does not change `_last_settle_uia` or `after_index`. While that hover FindAll runs the LED goes **yellow**, then green or red from the UIA-path readiness gate below. Settle/seed yellow invalidates the hover LED claim so hover cannot paint over an in-flight settle.
+
+Labeled FindAll leaves include Button, Hyperlink, ListItem, MenuItem, Text, TreeItem, DataItem, plus TabItem, CheckBox, RadioButton, SplitButton, Header, HeaderItem, and **named** Custom (unnamed Custom hosts stay excluded). Window/Pane/Group/Image/TitleBar and similar chrome types remain out of the labeled set (Pane still participates as input geometry only).
 
 ### Typing-pause FindAll (Search / query UIs)
 

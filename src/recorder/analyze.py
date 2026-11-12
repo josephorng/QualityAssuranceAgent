@@ -49,7 +49,11 @@ _EXPECTED_OUTCOME_RESPONSE_SCHEMA: dict[str, Any] = {
     "required": ["expected_outcome"],
 }
 
-_UIA_CLASS_SUFFIX = "清單項目|功能表項目|樹狀項目|資料項目|超連結"
+# Longer suffixes before shorter ones (標頭項目 before 標頭).
+_UIA_CLASS_SUFFIX = (
+    "清單項目|功能表項目|樹狀項目|資料項目|超連結|"
+    "索引標籤|核取方塊|選項按鈕|分割按鈕|標頭項目|標頭|自訂"
+)
 _DRAG_ANCHOR_RE = re.compile(r"拖到「([^」]+)」")
 _DRAG_SOURCE_RE = re.compile(
     rf"^從「[^」]+」(?:{_UIA_CLASS_SUFFIX}|文字|圖示|檔案|資料夾|按鈕|元素)*"

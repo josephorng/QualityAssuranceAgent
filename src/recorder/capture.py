@@ -1960,9 +1960,11 @@ class RecordingSession:
             last_hwnd = int((last or {}).get("hwnd") or 0) if isinstance(last, dict) else 0
         except (TypeError, ValueError):
             last_hwnd = 0
-        if hwnd == last_hwnd:
+        # Empty cached trees do not count as warm hits (allow hover retry).
+        if hwnd == last_hwnd and self._uia_snapshot_has_leaves(last):
             return False
-        if hwnd in by_hwnd:
+        mapped = by_hwnd.get(hwnd) if isinstance(by_hwnd, dict) else None
+        if self._uia_snapshot_has_leaves(mapped if isinstance(mapped, dict) else None):
             return False
 
         with self._lock:
@@ -1975,15 +1977,22 @@ class RecordingSession:
                 and not self._hover_uia_led_active
             ):
                 return False
-            if hwnd in self._last_settle_uia_by_hwnd:
+            locked_mapped = self._last_settle_uia_by_hwnd.get(hwnd)
+            if self._uia_snapshot_has_leaves(
+                locked_mapped if isinstance(locked_mapped, dict) else None
+            ):
                 return False
             try:
+                current_last = self._last_settle_uia
                 current_last_hwnd = int(
-                    (self._last_settle_uia or {}).get("hwnd") or 0
-                ) if isinstance(self._last_settle_uia, dict) else 0
+                    (current_last or {}).get("hwnd") or 0
+                ) if isinstance(current_last, dict) else 0
             except (TypeError, ValueError):
+                current_last = None
                 current_last_hwnd = 0
-            if hwnd == current_last_hwnd:
+            if hwnd == current_last_hwnd and self._uia_snapshot_has_leaves(
+                current_last if isinstance(current_last, dict) else None
+            ):
                 return False
             self._hover_uia_led_token += 1
             claim_token = int(self._hover_uia_led_token)
@@ -2029,16 +2038,19 @@ class RecordingSession:
                 self._accepting_input
                 and not self._finalizing
                 and generation == int(self._idle_efp_generation)
+                and self._uia_snapshot_has_leaves(snapshot)
             ):
                 try:
+                    current_last = self._last_settle_uia
                     current_last_hwnd = int(
-                        (self._last_settle_uia or {}).get("hwnd") or 0
-                    ) if isinstance(self._last_settle_uia, dict) else 0
+                        (current_last or {}).get("hwnd") or 0
+                    ) if isinstance(current_last, dict) else 0
                 except (TypeError, ValueError):
+                    current_last = None
                     current_last_hwnd = 0
-                if (
-                    hwnd != current_last_hwnd
-                    and hwnd not in self._last_settle_uia_by_hwnd
+                current_mapped = self._last_settle_uia_by_hwnd.get(hwnd)
+                if hwnd != current_last_hwnd and not self._uia_snapshot_has_leaves(
+                    current_mapped if isinstance(current_mapped, dict) else None
                 ):
                     self._last_settle_uia_by_hwnd[hwnd] = snapshot
             # Re-check token before painting (settle may have raced).
@@ -3407,11 +3419,25 @@ class RecordingSession:
                     self._last_settle_uia_by_hwnd,
                     settle_hwnd=host,
                 )
-                if self._is_shell_retained_uia_class(class_name):
-                    retained[host] = snapshot
-                self._last_settle_uia = snapshot
-                self._last_settle_uia_by_hwnd = retained
-                self._last_settle_uia_after_index = int(after_event_index)
+                if not self._uia_snapshot_has_leaves(snapshot):
+                    prior = self._last_settle_uia
+                    try:
+                        prior_hwnd = int(
+                            (prior or {}).get("hwnd") or 0
+                        ) if isinstance(prior, dict) else 0
+                    except (TypeError, ValueError):
+                        prior_hwnd = 0
+                    if prior_hwnd == host or not self._uia_snapshot_has_leaves(prior):
+                        self._last_settle_uia = None
+                    self._last_settle_uia_by_hwnd = retained
+                    self._last_settle_uia_after_index = int(after_event_index)
+                    paint_red = True
+                else:
+                    if self._is_shell_retained_uia_class(class_name):
+                        retained[host] = snapshot
+                    self._last_settle_uia = snapshot
+                    self._last_settle_uia_by_hwnd = retained
+                    self._last_settle_uia_after_index = int(after_event_index)
         if paint_red:
             self._emit_uia_status(state="red", after_index=int(after_event_index))
             return
@@ -4570,6 +4596,17 @@ class RecordingSession:
             return None
         return copy.deepcopy(snapshot)
 
+    @staticmethod
+    def _uia_snapshot_has_leaves(snapshot: dict[str, Any] | None) -> bool:
+        """True when FindAll stored at least one text, input, or scrollbar box."""
+        if not isinstance(snapshot, dict):
+            return False
+        for key in ("texts", "inputs", "scrollbars"):
+            raw = snapshot.get(key)
+            if isinstance(raw, list) and len(raw) > 0:
+                return True
+        return False
+
     def _uia_snapshot_matches_click(
         self,
         snapshot: dict[str, Any] | None,
@@ -4744,11 +4781,13 @@ class RecordingSession:
                 click_hwnd = 0
             if click_hwnd > 0:
                 mapped = by_hwnd.get(click_hwnd)
-                if isinstance(mapped, dict):
+                if isinstance(mapped, dict) and self._uia_snapshot_has_leaves(mapped):
                     return self._copy_uia_snapshot(mapped)
         if not self._uia_snapshot_matches_click(
             cached, click_window, cursor_xy=cursor_xy
         ):
+            return None
+        if not self._uia_snapshot_has_leaves(cached):
             return None
         return self._copy_uia_snapshot(cached)
 
@@ -4797,7 +4836,8 @@ class RecordingSession:
             class_name = str(win.class_name or "").strip()
             if class_name:
                 snapshot["class_name"] = class_name
-            by_hwnd[hwnd] = snapshot
+            if self._uia_snapshot_has_leaves(snapshot):
+                by_hwnd[hwnd] = snapshot
 
         if not by_hwnd:
             with self._lock:
@@ -4877,6 +4917,25 @@ class RecordingSession:
         class_name = str(_window_class_name(hwnd) or "").strip()
         if class_name:
             snapshot["class_name"] = class_name
+        if not self._uia_snapshot_has_leaves(snapshot):
+            with self._lock:
+                retained = self._by_hwnd_retained_across_settle(
+                    self._last_settle_uia_by_hwnd,
+                    settle_hwnd=hwnd,
+                )
+                prior = self._last_settle_uia
+                try:
+                    prior_hwnd = int(
+                        (prior or {}).get("hwnd") or 0
+                    ) if isinstance(prior, dict) else 0
+                except (TypeError, ValueError):
+                    prior_hwnd = 0
+                if prior_hwnd == hwnd or not self._uia_snapshot_has_leaves(prior):
+                    self._last_settle_uia = None
+                self._last_settle_uia_by_hwnd = retained
+                self._last_settle_uia_after_index = int(after_event_index)
+            self._emit_uia_status(state="red", after_index=int(after_event_index))
+            return None
         with self._lock:
             retained = self._by_hwnd_retained_across_settle(
                 self._last_settle_uia_by_hwnd,

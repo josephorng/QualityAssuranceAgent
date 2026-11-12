@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 from src.recorder.uia_input_boxes import (
+    UIA_CONTROL_TYPE_SUFFIX,
+    _LABELED_TEXT_CONTROL_TYPES,
     _UIA_BUTTON_CONTROL_TYPE_ID,
+    _UIA_CHECKBOX_CONTROL_TYPE_ID,
     _UIA_COMBOBOX_CONTROL_TYPE_ID,
+    _UIA_CUSTOM_CONTROL_TYPE_ID,
     _UIA_DOCUMENT_CONTROL_TYPE_ID,
     _UIA_EDIT_CONTROL_TYPE_ID,
+    _UIA_HEADER_CONTROL_TYPE_ID,
+    _UIA_HEADERITEM_CONTROL_TYPE_ID,
     _UIA_INPUT_CONTROL_TYPE_IDS,
     _UIA_PANE_CONTROL_TYPE_ID,
+    _UIA_RADIOBUTTON_CONTROL_TYPE_ID,
+    _UIA_SPLITBUTTON_CONTROL_TYPE_ID,
+    _UIA_TABITEM_CONTROL_TYPE_ID,
     _UIA_TEXT_CONTROL_TYPE_ID,
     canonicalize_uia_shell_status_label,
     control_type_token_from_id,
@@ -17,6 +26,7 @@ from src.recorder.uia_input_boxes import (
     is_oversized_uia_rect,
     is_usable_uia_landmark_label,
     merge_nested_element_boxes,
+    snapshot_uia_screen,
     split_uia_name_value_label,
     uia_label_combine_name_value,
     uia_label_prefer_value,
@@ -38,6 +48,71 @@ def test_control_type_token_from_id_maps_edit_hosts_to_input() -> None:
     assert control_type_token_from_id(_UIA_BUTTON_CONTROL_TYPE_ID) == "button"
     assert control_type_token_from_id(_UIA_TEXT_CONTROL_TYPE_ID) == "text"
     assert control_type_token_from_id(None) == ""
+
+
+def test_control_type_token_from_id_maps_expanded_labeled_types() -> None:
+    assert control_type_token_from_id(_UIA_TABITEM_CONTROL_TYPE_ID) == "tab_item"
+    assert control_type_token_from_id(_UIA_CHECKBOX_CONTROL_TYPE_ID) == "check_box"
+    assert control_type_token_from_id(_UIA_RADIOBUTTON_CONTROL_TYPE_ID) == "radio_button"
+    assert control_type_token_from_id(_UIA_SPLITBUTTON_CONTROL_TYPE_ID) == "split_button"
+    assert control_type_token_from_id(_UIA_HEADER_CONTROL_TYPE_ID) == "header"
+    assert control_type_token_from_id(_UIA_HEADERITEM_CONTROL_TYPE_ID) == "header_item"
+    assert control_type_token_from_id(_UIA_CUSTOM_CONTROL_TYPE_ID) == "custom"
+    for type_id in (
+        _UIA_TABITEM_CONTROL_TYPE_ID,
+        _UIA_CHECKBOX_CONTROL_TYPE_ID,
+        _UIA_RADIOBUTTON_CONTROL_TYPE_ID,
+        _UIA_SPLITBUTTON_CONTROL_TYPE_ID,
+        _UIA_HEADER_CONTROL_TYPE_ID,
+        _UIA_HEADERITEM_CONTROL_TYPE_ID,
+        _UIA_CUSTOM_CONTROL_TYPE_ID,
+    ):
+        assert type_id in _LABELED_TEXT_CONTROL_TYPES
+    assert UIA_CONTROL_TYPE_SUFFIX["tab_item"] == "索引標籤"
+    assert UIA_CONTROL_TYPE_SUFFIX["check_box"] == "核取方塊"
+    assert UIA_CONTROL_TYPE_SUFFIX["radio_button"] == "選項按鈕"
+    assert UIA_CONTROL_TYPE_SUFFIX["split_button"] == "分割按鈕"
+    assert UIA_CONTROL_TYPE_SUFFIX["header"] == "標頭"
+    assert UIA_CONTROL_TYPE_SUFFIX["header_item"] == "標頭項目"
+    assert UIA_CONTROL_TYPE_SUFFIX["custom"] == "自訂"
+
+
+def test_snapshot_uia_screen_keeps_expanded_labeled_control_types(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.enumerate_edit_document_scrollbar_screen",
+        lambda hwnd: (
+            [],
+            [],
+            [
+                ((10, 20, 30, 40), "面板設定|TopTab|Setting", "tab_item"),
+                ((50, 60, 70, 80), "自訂葉", "custom"),
+                ((1, 2, 3, 4), "", "custom"),  # unnamed Custom dropped by snapshot
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes._window_screen_xywh",
+        lambda hwnd: (0, 0, 100, 100),
+    )
+
+    class _OsStub:
+        name = "nt"
+
+    monkeypatch.setattr("src.recorder.uia_input_boxes.os", _OsStub())
+    snap = snapshot_uia_screen(123)
+    assert snap is not None
+    assert snap["texts"] == [
+        {
+            "bbox": [10, 20, 30, 40],
+            "text": "面板設定|TopTab|Setting",
+            "control_type": "tab_item",
+        },
+        {
+            "bbox": [50, 60, 70, 80],
+            "text": "自訂葉",
+            "control_type": "custom",
+        },
+    ]
 
 
 def test_element_from_point_name_value_extracts_raw_strings(monkeypatch) -> None:

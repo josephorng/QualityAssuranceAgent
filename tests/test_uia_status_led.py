@@ -86,6 +86,76 @@ def test_collect_and_publish_settle_uia_emits_green_when_cursor_ready() -> None:
     assert statuses[-1]["after_index"] == 0
 
 
+def test_collect_and_publish_settle_uia_skips_empty_tree_keeps_prior() -> None:
+    statuses: list[dict] = []
+    session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
+    session.set_on_uia_status(statuses.append)
+    prior = {
+        "hwnd": 10,
+        "class_name": "Chrome_WidgetWin_1",
+        "window": [0, 0, 10, 10],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [{"bbox": [0, 0, 4, 4], "text": "先前"}],
+    }
+    session._last_settle_uia = prior
+    session._last_settle_uia_by_hwnd = {10: dict(prior)}
+    session._last_settle_uia_after_index = 1
+
+    with (
+        patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            return_value={
+                "window": [0, 0, 10, 10],
+                "inputs": [],
+                "scrollbars": [],
+                "texts": [],
+            },
+        ),
+        patch(
+            "src.recorder.capture._window_class_name",
+            return_value="Chrome_WidgetWin_1",
+        ),
+    ):
+        out = session._collect_and_publish_settle_uia(42, after_event_index=2)
+
+    assert out is None
+    assert session._last_settle_uia is not None
+    assert session._last_settle_uia["hwnd"] == 10
+    assert session._last_settle_uia["texts"][0]["text"] == "先前"
+    assert 42 not in session._last_settle_uia_by_hwnd
+    assert session._last_settle_uia_after_index == 2
+    assert [row["state"] for row in statuses] == ["yellow", "red"]
+
+
+def test_collect_and_publish_settle_uia_clears_same_hwnd_when_empty() -> None:
+    session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
+    session._last_settle_uia = {
+        "hwnd": 42,
+        "window": [0, 0, 10, 10],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [{"bbox": [0, 0, 4, 4], "text": "舊"}],
+    }
+    with (
+        patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            return_value={
+                "window": [0, 0, 10, 10],
+                "inputs": [],
+                "scrollbars": [],
+                "texts": [],
+            },
+        ),
+        patch(
+            "src.recorder.capture._window_class_name",
+            return_value="Chrome_WidgetWin_1",
+        ),
+    ):
+        assert session._collect_and_publish_settle_uia(42, after_event_index=3) is None
+    assert session._last_settle_uia is None
+
+
 def test_collect_and_publish_settle_uia_emits_red_on_fail() -> None:
     statuses: list[dict] = []
     session = RecordingSession(runs_root=None)  # type: ignore[arg-type]

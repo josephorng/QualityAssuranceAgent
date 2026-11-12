@@ -1262,6 +1262,55 @@ def test_recording_uia_snapshot_ready_at_point_empty_texts() -> None:
     assert recording_uia_snapshot_ready_at_point(None, screen_xy=(335, 149)) is False
 
 
+def test_recording_uia_snapshot_ready_at_point_tab_item_and_custom() -> None:
+    snapshot = {
+        "window": [0, 0, 800, 600],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [
+            {
+                "bbox": [330, 25, 450, 57],
+                "text": "面板設定|TopTab|Setting",
+                "control_type": "tab_item",
+            },
+            {
+                "bbox": [500, 25, 620, 57],
+                "text": "資產編覽|TopTab|Browse",
+                "control_type": "custom",
+            },
+        ],
+    }
+    assert recording_uia_snapshot_ready_at_point(
+        snapshot, screen_xy=(390, 40)
+    )
+    # Same label peers under different boxes → not unique when both match? They
+    # have different labels, so each point is unique.
+    assert recording_uia_snapshot_ready_at_point(
+        snapshot, screen_xy=(560, 40)
+    )
+    ambiguous = {
+        "window": [0, 0, 800, 600],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [
+            {
+                "bbox": [100, 10, 200, 40],
+                "text": "重複",
+                "control_type": "tab_item",
+            },
+            {
+                "bbox": [300, 10, 400, 40],
+                "text": "重複",
+                "control_type": "tab_item",
+            },
+        ],
+    }
+    assert (
+        recording_uia_snapshot_ready_at_point(ambiguous, screen_xy=(150, 25))
+        is False
+    )
+
+
 def test_press_scrollbar_screen_xyxy_skips_text_hit() -> None:
     bar = [1423, 128, 1440, 1004]
     texts = [

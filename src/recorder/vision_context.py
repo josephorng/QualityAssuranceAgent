@@ -1034,12 +1034,19 @@ _CONTAINED_TEXT_IN_INPUT_FRAC = 0.85
 _NON_INPUT_UIA_LEAF_TYPES = frozenset(
     {
         "button",
+        "custom",
+        "check_box",
         "hyperlink",
         "list_item",
         "menu_item",
+        "radio_button",
+        "tab_item",
         "text",
         "tree_item",
         "data_item",
+        "split_button",
+        "header",
+        "header_item",
     }
 )
 

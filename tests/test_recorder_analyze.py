@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from src.recorder.analyze import (
+    _CLICK_TARGET_SUFFIX_RE,
     after_screenshot_for_outcome,
     analyze_event_to_cache,
     before_screenshot_for_outcome,
@@ -2580,6 +2581,44 @@ def test_enrich_drag_instruction_offset_appends_exact_pixels() -> None:
     instruction = "從「Chrome」圖示拖到「Desktop」文字"
     enriched = enrich_drag_instruction_offset(instruction, destination)
     assert enriched == "從「Chrome」圖示拖到「Desktop」文字下方49個像素的位置"
+
+
+def test_click_target_suffix_recognizes_expanded_uia_class_words() -> None:
+    for suffix in (
+        "索引標籤",
+        "核取方塊",
+        "選項按鈕",
+        "分割按鈕",
+        "標頭項目",
+        "標頭",
+        "自訂",
+    ):
+        match = _CLICK_TARGET_SUFFIX_RE.match(f"{suffix}附近")
+        assert match is not None
+        assert match.group(0) == suffix
+    # Longer 標頭項目 must win before bare 標頭.
+    match = _CLICK_TARGET_SUFFIX_RE.match("標頭項目附近")
+    assert match is not None
+    assert match.group(0) == "標頭項目"
+
+
+def test_enrich_click_instruction_offset_skips_expanded_uia_suffix() -> None:
+    vision = {
+        "local_cursor": (390, 80),
+        "candidates": [
+            {
+                "bbox": [330, 25, 120, 32],
+                "center": [390, 41],
+                "class_name": "text",
+                "text": "面板設定|TopTab|Setting",
+            },
+        ],
+    }
+    instruction = "將滑鼠移到「面板設定|TopTab|Setting」索引標籤附近"
+    enriched = enrich_click_instruction_offset(instruction, vision)
+    assert enriched.startswith("將滑鼠移到「面板設定|TopTab|Setting」索引標籤")
+    assert "附近" not in enriched
+    assert "的位置" in enriched
 
 
 def test_enrich_click_instruction_offset_replaces_nearby_with_pixels() -> None:

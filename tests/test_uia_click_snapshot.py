@@ -1162,7 +1162,7 @@ def test_hover_findall_skips_when_already_cached_or_yellow_or_mismatch(
             )
         return calls
 
-    # Already in by_hwnd
+    # Already in by_hwnd with leaves
     session = RecordingSession(runs_root=tmp_path)
     session._accepting_input = True
     session._idle_efp_generation = 1
@@ -1170,13 +1170,43 @@ def test_hover_findall_skips_when_already_cached_or_yellow_or_mismatch(
     session._last_settle_uia_after_index = 0
     session._last_settle_uia = {"hwnd": 10, "window": [0, 0, 1, 1]}
     session._last_settle_uia_by_hwnd = {
-        55: {"hwnd": 55, "cache_kind": "hover", "class_name": "Chrome_WidgetWin_1"}
+        55: {
+            "hwnd": 55,
+            "cache_kind": "hover",
+            "class_name": "Chrome_WidgetWin_1",
+            "window": [0, 0, 1, 1],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [0, 0, 4, 4], "text": "cached"}],
+        }
     }
     assert _run(session) == []
 
-    # Matches last_settle hwnd
+    # Empty by_hwnd entry is not a warm hit — hover FindAll retries
+    session._last_settle_uia_by_hwnd = {
+        55: {
+            "hwnd": 55,
+            "cache_kind": "hover",
+            "class_name": "Chrome_WidgetWin_1",
+            "window": [0, 0, 1, 1],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [],
+        }
+    }
+    assert _run(session) == [55]
+    # Empty FindAll result must not re-poison by_hwnd
+    assert session._last_settle_uia_by_hwnd[55]["texts"] == []
+
+    # Matches last_settle hwnd with leaves
     session._last_settle_uia_by_hwnd = {}
-    session._last_settle_uia = {"hwnd": 55, "window": [0, 0, 1, 1]}
+    session._last_settle_uia = {
+        "hwnd": 55,
+        "window": [0, 0, 1, 1],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [{"bbox": [0, 0, 4, 4], "text": "primary"}],
+    }
     assert _run(session) == []
 
     # Yellow settle in flight

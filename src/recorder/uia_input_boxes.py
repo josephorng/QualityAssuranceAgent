@@ -73,18 +73,25 @@ _UIA_ARRAY_GET_ELEMENT = 4
 
 _UIA_CONTROL_TYPE_PROPERTY_ID = 30003
 _UIA_BUTTON_CONTROL_TYPE_ID = 50000
+_UIA_CUSTOM_CONTROL_TYPE_ID = 50001
+_UIA_CHECKBOX_CONTROL_TYPE_ID = 50002
 _UIA_COMBOBOX_CONTROL_TYPE_ID = 50003
 _UIA_EDIT_CONTROL_TYPE_ID = 50004
 _UIA_HYPERLINK_CONTROL_TYPE_ID = 50005
 _UIA_LISTITEM_CONTROL_TYPE_ID = 50007
 _UIA_MENUITEM_CONTROL_TYPE_ID = 50011
+_UIA_RADIOBUTTON_CONTROL_TYPE_ID = 50013
+_UIA_TABITEM_CONTROL_TYPE_ID = 50019
 _UIA_TEXT_CONTROL_TYPE_ID = 50020
 _UIA_TREEITEM_CONTROL_TYPE_ID = 50025
 _UIA_THUMB_CONTROL_TYPE_ID = 50027
 _UIA_SCROLLBAR_CONTROL_TYPE_ID = 50028
 _UIA_DATAITEM_CONTROL_TYPE_ID = 50029
 _UIA_DOCUMENT_CONTROL_TYPE_ID = 50030
+_UIA_SPLITBUTTON_CONTROL_TYPE_ID = 50031
 _UIA_PANE_CONTROL_TYPE_ID = 50033
+_UIA_HEADER_CONTROL_TYPE_ID = 50034
+_UIA_HEADERITEM_CONTROL_TYPE_ID = 50035
 # Live FindAll + OCR-clip field hosts treated as input boxes.
 _UIA_INPUT_CONTROL_TYPE_IDS = (
     _UIA_EDIT_CONTROL_TYPE_ID,
@@ -110,12 +117,19 @@ _SCROLLBAR_CONTROL_CONTAIN_AREA_RATIO = 4.0
 _LABELED_TEXT_CONTROL_TYPES = frozenset(
     {
         _UIA_BUTTON_CONTROL_TYPE_ID,
+        _UIA_CUSTOM_CONTROL_TYPE_ID,
+        _UIA_CHECKBOX_CONTROL_TYPE_ID,
         _UIA_HYPERLINK_CONTROL_TYPE_ID,
         _UIA_LISTITEM_CONTROL_TYPE_ID,
         _UIA_MENUITEM_CONTROL_TYPE_ID,
+        _UIA_RADIOBUTTON_CONTROL_TYPE_ID,
+        _UIA_TABITEM_CONTROL_TYPE_ID,
         _UIA_TEXT_CONTROL_TYPE_ID,
         _UIA_TREEITEM_CONTROL_TYPE_ID,
         _UIA_DATAITEM_CONTROL_TYPE_ID,
+        _UIA_SPLITBUTTON_CONTROL_TYPE_ID,
+        _UIA_HEADER_CONTROL_TYPE_ID,
+        _UIA_HEADERITEM_CONTROL_TYPE_ID,
     }
 )
 
@@ -128,12 +142,19 @@ LabeledRectXywh = tuple[RectXywh, str, str]
 # Tokens stored on snapshot texts. Chinese suffixes are the instruction words.
 UIA_CONTROL_TYPE_SUFFIX: dict[str, str] = {
     "button": "按鈕",
+    "custom": "自訂",
+    "check_box": "核取方塊",
     "hyperlink": "超連結",
     "list_item": "清單項目",
     "menu_item": "功能表項目",
+    "radio_button": "選項按鈕",
+    "tab_item": "索引標籤",
     "text": "文字",
     "tree_item": "樹狀項目",
     "data_item": "資料項目",
+    "split_button": "分割按鈕",
+    "header": "標頭",
+    "header_item": "標頭項目",
 }
 
 UiaScreenEnumerator = Callable[[int], list[ScreenXyxy]]
@@ -235,12 +256,19 @@ def control_type_token_from_id(control_type_id: int | None) -> str:
         return ""
     return {
         _UIA_BUTTON_CONTROL_TYPE_ID: "button",
+        _UIA_CUSTOM_CONTROL_TYPE_ID: "custom",
+        _UIA_CHECKBOX_CONTROL_TYPE_ID: "check_box",
         _UIA_HYPERLINK_CONTROL_TYPE_ID: "hyperlink",
         _UIA_LISTITEM_CONTROL_TYPE_ID: "list_item",
         _UIA_MENUITEM_CONTROL_TYPE_ID: "menu_item",
+        _UIA_RADIOBUTTON_CONTROL_TYPE_ID: "radio_button",
+        _UIA_TABITEM_CONTROL_TYPE_ID: "tab_item",
         _UIA_TEXT_CONTROL_TYPE_ID: "text",
         _UIA_TREEITEM_CONTROL_TYPE_ID: "tree_item",
         _UIA_DATAITEM_CONTROL_TYPE_ID: "data_item",
+        _UIA_SPLITBUTTON_CONTROL_TYPE_ID: "split_button",
+        _UIA_HEADER_CONTROL_TYPE_ID: "header",
+        _UIA_HEADERITEM_CONTROL_TYPE_ID: "header_item",
         _UIA_EDIT_CONTROL_TYPE_ID: "input",
         _UIA_DOCUMENT_CONTROL_TYPE_ID: "input",
         _UIA_COMBOBOX_CONTROL_TYPE_ID: "input",
@@ -1099,13 +1127,7 @@ def enumerate_edit_document_scrollbar_screen(
             *_UIA_INPUT_CONTROL_TYPE_IDS,
             _UIA_SCROLLBAR_CONTROL_TYPE_ID,
             _UIA_THUMB_CONTROL_TYPE_ID,
-            _UIA_BUTTON_CONTROL_TYPE_ID,
-            _UIA_HYPERLINK_CONTROL_TYPE_ID,
-            _UIA_LISTITEM_CONTROL_TYPE_ID,
-            _UIA_MENUITEM_CONTROL_TYPE_ID,
-            _UIA_TEXT_CONTROL_TYPE_ID,
-            _UIA_TREEITEM_CONTROL_TYPE_ID,
-            _UIA_DATAITEM_CONTROL_TYPE_ID,
+            *_LABELED_TEXT_CONTROL_TYPES,
         )
         for type_id in type_ids:
             cond = _create_control_type_condition(automation, type_id)

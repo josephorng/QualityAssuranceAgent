@@ -116,6 +116,8 @@ _UIA_STATUS_PULSE_KINDS = frozenset(
 # Idle ElementFromPoint for the recording LED label (never on the mouse hook).
 _IDLE_EFP_DEBOUNCE_S = 0.45
 _IDLE_EFP_LABEL_MAX_CHARS = 48
+# Max distance (px) between idle probe xy and press xy to latch idle for EFP.
+_IDLE_EFP_PRESS_MAX_DIST_PX = 12
 _QUEUE_SENTINEL = object()
 _DRAIN_MARKER = object()
 _EFP_UNSET = object()
@@ -996,6 +998,9 @@ class RecordingSession:
         # at pending press (never on the mouse hook).
         self._left_press_efp: dict[int, dict[str, Any] | None] = {}
         self._right_press_efp: dict[int, dict[str, Any] | None] = {}
+        # Pre-click idle EFP latched on the press hook when near press xy.
+        self._left_press_efp_idle: dict[int, dict[str, Any] | None] = {}
+        self._right_press_efp_idle: dict[int, dict[str, Any] | None] = {}
         # Drag emit waits for window-step end_uia before notifying vision.
         # Click/press UIA prefers settle-cache; ComboLBox popup miss FindAlls
         # under click_window on the worker. Same-hwnd generation miss stays empty.
@@ -1090,6 +1095,8 @@ class RecordingSession:
         self._idle_efp_cursor_xy: tuple[int, int] | None = None
         self._idle_efp_probed_name: str = ""
         self._idle_efp_probed_value: str = ""
+        # Full idle ElementFromPoint payload for press-time EFP fallback.
+        self._idle_efp_payload: dict[str, Any] | None = None
         self._finalizing = False
 
     def set_on_event(self, callback: Callable[[RecordedEvent], None] | None) -> None:
@@ -1195,6 +1202,8 @@ class RecordingSession:
             self._right_press_uia = {}
             self._left_press_efp = {}
             self._right_press_efp = {}
+            self._left_press_efp_idle = {}
+            self._right_press_efp_idle = {}
             self._uia_notify_wait = {}
             self._drag_end_captures = {}
             self._pending_right_coords = None
@@ -1251,6 +1260,7 @@ class RecordingSession:
             self._idle_efp_cursor_xy = None
             self._idle_efp_probed_name = ""
             self._idle_efp_probed_value = ""
+            self._idle_efp_payload = None
             idle_timer = self._idle_efp_timer
             self._idle_efp_timer = None
             pending = self._pending_click_timer
@@ -1825,26 +1835,31 @@ class RecordingSession:
                 self._idle_efp_cursor_xy = None
                 self._idle_efp_probed_name = ""
                 self._idle_efp_probed_value = ""
+                self._idle_efp_payload = None
             self._emit_uia_status(efp_name="", efp_value="", efp_pending=False)
             return
         with self._lock:
             if generation != int(self._idle_efp_generation):
                 return
-        from src.recorder.uia_input_boxes import uia_text_element_at_point
+        from src.recorder.uia_input_boxes import element_from_point_name_value
 
-        probed = uia_text_element_at_point(int(cursor[0]), int(cursor[1]))
+        payload = element_from_point_name_value(int(cursor[0]), int(cursor[1]))
         with self._lock:
             if generation != int(self._idle_efp_generation):
                 return
         name = ""
         value = ""
-        if isinstance(probed, tuple) and len(probed) >= 5:
-            name = str(probed[3] or "").strip()
-            value = str(probed[4] or "").strip()
+        stored: dict[str, Any] | None = None
+        if isinstance(payload, dict):
+            name = str(payload.get("name") or "").strip()
+            value = str(payload.get("value") or "").strip()
+            if name or value:
+                stored = dict(payload)
         with self._lock:
             self._idle_efp_cursor_xy = (int(cursor[0]), int(cursor[1]))
             self._idle_efp_probed_name = name
             self._idle_efp_probed_value = value
+            self._idle_efp_payload = stored
         # Keep pending until readiness decides whether the label may show.
         hovered = self._maybe_hover_findall_uia(
             generation,
@@ -2367,6 +2382,10 @@ class RecordingSession:
             self._left_press_signals[seq] = signals_before
             self._left_press_click_windows[seq] = click_window
             self._left_press_uia[seq] = uia_snapshot
+            # Hook-safe memcpy of already-probed idle EFP (no live UIA here).
+            self._left_press_efp_idle[seq] = self._idle_efp_payload_near_press_locked(
+                x, y
+            )
         settle_frame, settle_latch_note = self._latch_settle_frame(x, y)
         self._enqueue(
             _DeferredCaptureJob(
@@ -2401,6 +2420,9 @@ class RecordingSession:
             self._right_press_signals[seq] = signals_before
             self._right_press_click_windows[seq] = click_window
             self._right_press_uia[seq] = uia_snapshot
+            self._right_press_efp_idle[seq] = self._idle_efp_payload_near_press_locked(
+                x, y
+            )
         settle_frame, settle_latch_note = self._latch_settle_frame(x, y)
         self._enqueue(
             _DeferredCaptureJob(
@@ -3783,6 +3805,7 @@ class RecordingSession:
             self._left_press_click_windows.pop(seq, None)
             self._left_press_uia.pop(seq, None)
             self._left_press_efp.pop(seq, None)
+            self._left_press_efp_idle.pop(seq, None)
             self._left_press_signals.pop(seq, None)
         self._discard_press_capture_entry(stale)
         self._discard_drag_end_capture_entry(drag_stale)
@@ -3811,6 +3834,7 @@ class RecordingSession:
         self._right_press_click_windows.pop(seq, None)
         self._right_press_uia.pop(seq, None)
         self._right_press_efp.pop(seq, None)
+        self._right_press_efp_idle.pop(seq, None)
         self._right_press_signals.pop(seq, None)
         return stale, pending_shot
 
@@ -4934,6 +4958,81 @@ class RecordingSession:
             return
         self._release_uia_notify_slot(item.event_index)
 
+    @staticmethod
+    def _efp_name_value_pair(
+        payload: dict[str, Any] | None,
+    ) -> tuple[str, str]:
+        if not isinstance(payload, dict):
+            return "", ""
+        return (
+            str(payload.get("name") or "").strip(),
+            str(payload.get("value") or "").strip(),
+        )
+
+    @staticmethod
+    def _efp_payload_usable(payload: dict[str, Any] | None) -> bool:
+        name, value = RecordingSession._efp_name_value_pair(payload)
+        return bool(name or value)
+
+    def _idle_efp_payload_near_press_locked(
+        self,
+        x: int,
+        y: int,
+    ) -> dict[str, Any] | None:
+        """Copy idle EFP when probe xy is near press. Caller holds ``_lock``."""
+        payload = self._idle_efp_payload
+        if not self._efp_payload_usable(payload):
+            return None
+        cursor = self._idle_efp_cursor_xy
+        if cursor is None:
+            return None
+        dx = int(cursor[0]) - int(x)
+        dy = int(cursor[1]) - int(y)
+        if (dx * dx + dy * dy) > (_IDLE_EFP_PRESS_MAX_DIST_PX ** 2):
+            return None
+        assert isinstance(payload, dict)
+        return dict(payload)
+
+    def _resolve_press_element_from_point(
+        self,
+        live: dict[str, Any] | None,
+        idle: dict[str, Any] | None,
+        *,
+        run_dir: Path | None = None,
+        press_seq: int | None = None,
+        cursor_xy: tuple[int, int] | None = None,
+    ) -> dict[str, Any] | None:
+        """Prefer near-press idle EFP when live Name/Value diverges.
+
+        Empty FindAll does not block idle. Live wins when names match or idle
+        was not latched near the press.
+        """
+        idle_ok = self._efp_payload_usable(idle)
+        live_ok = self._efp_payload_usable(live)
+        idle_name, idle_value = self._efp_name_value_pair(idle)
+        live_name, live_value = self._efp_name_value_pair(live)
+        if idle_ok and (not live_ok or (live_name, live_value) != (idle_name, idle_value)):
+            source = "idle_only" if not live_ok else "idle_fallback"
+            chosen = dict(idle) if isinstance(idle, dict) else None
+        elif live_ok:
+            source = "live"
+            chosen = dict(live) if isinstance(live, dict) else None
+        else:
+            source = "live"
+            chosen = live if isinstance(live, dict) else None
+        if run_dir is not None:
+            xy = ""
+            if cursor_xy is not None:
+                xy = f" xy=({int(cursor_xy[0])},{int(cursor_xy[1])})"
+            where = f"press_seq={press_seq}" if press_seq is not None else "press"
+            self._log(
+                run_dir,
+                f"element_from_point {where}{xy} source={source} "
+                f"live_name={live_name!r} live_value={live_value!r} "
+                f"idle_name={idle_name!r} idle_value={idle_value!r}",
+            )
+        return chosen
+
     def _probe_element_from_point_at(
         self,
         cursor_xy: tuple[int, int] | None,
@@ -4990,9 +5089,25 @@ class RecordingSession:
             return
         with self._lock:
             run_dir = self._run_dir
+            idle_efp = self._left_press_efp_idle.get(job.press_seq)
         if run_dir is None:
             self._unpin_settle_frame(job.settle_frame)
             return
+
+        # Probe live EFP before screenshot adopt to shrink post-click races
+        # (e.g. Word File tab → Backstage 返回) when idle was empty.
+        live_efp = self._probe_element_from_point_at(
+            job.cursor_xy,
+            run_dir=run_dir,
+            press_seq=job.press_seq,
+        )
+        efp = self._resolve_press_element_from_point(
+            live_efp,
+            idle_efp,
+            run_dir=run_dir,
+            press_seq=job.press_seq,
+            cursor_xy=job.cursor_xy,
+        )
 
         # Typing OCR/after no longer live-grabs on press; flush adopts the next
         # before (same monitor) or the typing-monitor settle cache (cross-mon).
@@ -5015,11 +5130,6 @@ class RecordingSession:
                 f"{type(exc).__name__}: {exc}",
             )
             info = None
-        efp = self._probe_element_from_point_at(
-            job.cursor_xy,
-            run_dir=run_dir,
-            press_seq=job.press_seq,
-        )
         with self._lock:
             click_window = self._left_press_click_windows.get(job.press_seq)
             uia_snapshot = self._left_press_uia.get(job.press_seq)
@@ -5045,9 +5155,22 @@ class RecordingSession:
             return
         with self._lock:
             run_dir = self._run_dir
+            idle_efp = self._right_press_efp_idle.get(job.press_seq)
         if run_dir is None:
             self._unpin_settle_frame(job.settle_frame)
             return
+        live_efp = self._probe_element_from_point_at(
+            job.cursor_xy,
+            run_dir=run_dir,
+            press_seq=job.press_seq,
+        )
+        efp = self._resolve_press_element_from_point(
+            live_efp,
+            idle_efp,
+            run_dir=run_dir,
+            press_seq=job.press_seq,
+            cursor_xy=job.cursor_xy,
+        )
         pending_dest = _pending_right_capture_path(run_dir, job.press_seq)
         try:
             info = self._pending_screenshot_from_settle_or_capture(
@@ -5066,11 +5189,6 @@ class RecordingSession:
                 f"{type(exc).__name__}: {exc}",
             )
             info = None
-        efp = self._probe_element_from_point_at(
-            job.cursor_xy,
-            run_dir=run_dir,
-            press_seq=job.press_seq,
-        )
         with self._lock:
             click_window = self._right_press_click_windows.get(job.press_seq)
             uia_snapshot = self._right_press_uia.get(job.press_seq)
@@ -5150,6 +5268,8 @@ class RecordingSession:
                 if press_seq is not None
                 else None
             )
+            if press_seq is not None:
+                self._left_press_efp_idle.pop(press_seq, None)
             signals_before = (
                 self._left_press_signals.pop(press_seq, None)
                 if press_seq is not None
@@ -5295,6 +5415,8 @@ class RecordingSession:
                 if press_seq is not None
                 else None
             )
+            if press_seq is not None:
+                self._right_press_efp_idle.pop(press_seq, None)
             signals_before = (
                 self._right_press_signals.pop(press_seq, None)
                 if press_seq is not None

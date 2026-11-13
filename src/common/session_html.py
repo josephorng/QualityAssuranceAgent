@@ -6396,6 +6396,14 @@ def _format_window_verify_value(key: str, value: Any) -> str | None:
             f'<span class="mono">{escape(", ".join(parts))}</span>' if parts else None
         )
     if key == "scroll":
+        if isinstance(value, dict) and value:
+            parts: list[str] = []
+            for axis, label in (("vertical", "垂直"), ("horizontal", "水平")):
+                raw = value.get(axis)
+                if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                    continue
+                parts.append(f"{label} {float(raw):.1f}%")
+            return escape(" / ".join(parts)) if parts else None
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None
         return escape(f"{float(value):.1f}%")

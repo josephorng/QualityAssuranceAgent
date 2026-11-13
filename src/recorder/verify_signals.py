@@ -2,8 +2,12 @@
 
 Light reads (foreground, window under the cursor, clipboard, caret) run with
 the window snapshot, off the mouse hook. UI Automation runs only for the click,
-type, or scroll step that needs it, and again on replay only when the recorded
-predicate contains that field.
+type, scroll, or drag step that needs it, and again on replay only when the
+recorded predicate contains that field.
+
+Scroll position prefers UIA ScrollPattern ``vertical`` / ``horizontal``
+percents (stored under ``scroll`` as a dict). RangeValue on a single bar
+remains a legacy float fallback.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from src.recorder.focus_point import (
     _IID_IUIAutomation,
     _S_FALSE,
     _S_OK,
+    _UIA_GET_CURRENT_BOUNDING_RECTANGLE_INDEX,
     _UIA_GET_FOCUSED_ELEMENT_INDEX,
     _bstr_to_str,
     _com_release,
@@ -58,6 +63,7 @@ _UIA_SELECTION_ITEM_PATTERN = 10010
 _UIA_EXPAND_COLLAPSE_PATTERN = 10005
 _UIA_VALUE_PATTERN = 10002
 _UIA_RANGE_VALUE_PATTERN = 10003
+_UIA_SCROLL_PATTERN = 10004
 
 # Pattern getters sit after the mutating methods on each interface.
 _UIA_TOGGLE_GET_STATE = 4
@@ -67,6 +73,11 @@ _UIA_VALUE_GET_CURRENT = 4
 _UIA_RANGE_GET_VALUE = 4
 _UIA_RANGE_GET_MAX = 6
 _UIA_RANGE_GET_MIN = 7
+# IUIAutomationScrollPattern: Scroll, SetScrollPercent, then getters.
+_UIA_SCROLL_GET_HORIZONTAL_PERCENT = 5
+_UIA_SCROLL_GET_VERTICAL_PERCENT = 6
+# UIA_ScrollPatternNoScroll — axis is not scrollable.
+_UIA_SCROLL_NO_SCROLL = -1.0
 
 _TOGGLE_LABELS = {0: "unchecked", 1: "checked", 2: "indeterminate"}
 _EXPAND_LABELS = {0: "collapsed", 1: "expanded", 2: "partial"}
@@ -77,6 +88,8 @@ CLICK_KINDS = frozenset(
 )
 TYPE_KINDS = frozenset({"text_input"})
 SCROLL_KINDS = frozenset({"scroll"})
+# Wheel scroll and scrollbar thumb/track drag both need V/H scroll percents.
+SCROLL_POSITION_KINDS = frozenset({"scroll", "drag"})
 
 _TH32CS_SNAPPROCESS = 0x00000002
 
@@ -404,7 +417,7 @@ def capture_step_signals(
     text = _read_clipboard()
     if text is not None:
         sample["clipboard"] = text
-    if kind in CLICK_KINDS or kind in TYPE_KINDS or kind in SCROLL_KINDS:
+    if kind in CLICK_KINDS or kind in TYPE_KINDS or kind in SCROLL_POSITION_KINDS:
         reader = uia_reader or read_uia_for_kind
         try:
             extra = reader(kind, cursor_xy)
@@ -433,7 +446,7 @@ def read_uia_for_kind(
             want_focused=True,
             want_scroll=False,
         )
-    if kind in SCROLL_KINDS:
+    if kind in SCROLL_POSITION_KINDS:
         return read_uia_fields(
             cursor_xy=cursor_xy,
             want_control=False,
@@ -468,9 +481,7 @@ def capture_replay_after_signals(
     need_clipboard = "clipboard" in recorded
     need_caret = _caret_verify_identity(recorded.get("caret")) is not None
     need_focused = isinstance(recorded.get("focused"), dict) and bool(recorded["focused"])
-    need_scroll = isinstance(recorded.get("scroll"), (int, float)) and not isinstance(
-        recorded.get("scroll"), bool
-    )
+    need_scroll = _has_scroll_assertion(recorded.get("scroll"))
     cursor = _cursor_xy() if need_scroll else None
     sample: dict[str, Any] = {}
     if need_foreground or need_caret:
@@ -512,9 +523,7 @@ def predicate_has_signal_assertions(predicate: dict[str, Any] | None) -> bool:
         return True
     if isinstance(predicate.get("focused"), dict) and predicate["focused"]:
         return True
-    if isinstance(predicate.get("scroll"), (int, float)) and not isinstance(
-        predicate.get("scroll"), bool
-    ):
+    if _has_scroll_assertion(predicate.get("scroll")):
         return True
     return False
 
@@ -644,13 +653,89 @@ def _focused_changed(
     return stored or None
 
 
+def _is_scroll_percent_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _has_scroll_assertion(value: Any) -> bool:
+    """True when ``scroll`` is a legacy percent or a non-empty V/H dict."""
+    if _is_scroll_percent_number(value):
+        return True
+    if not isinstance(value, dict) or not value:
+        return False
+    return any(
+        axis in value and _is_scroll_percent_number(value.get(axis))
+        for axis in ("vertical", "horizontal")
+    )
+
+
 def _scroll_percent(sample: dict[str, Any] | None) -> float | None:
+    """Legacy single-axis scroll percent (RangeValue fallback)."""
     if not isinstance(sample, dict) or "scroll" not in sample:
         return None
     value = sample.get("scroll")
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not _is_scroll_percent_number(value):
         return None
     return float(value)
+
+
+def _scroll_axis_percents(sample: dict[str, Any] | None) -> dict[str, float]:
+    """Return ``vertical`` / ``horizontal`` percents from a signals sample.
+
+    Prefers a ScrollPattern dict. A legacy float ``scroll`` is treated as the
+    vertical axis only (RangeValue on a bar does not say which axis it is, but
+    most wheel targets are vertical).
+    """
+    if not isinstance(sample, dict):
+        return {}
+    value = sample.get("scroll")
+    if isinstance(value, dict):
+        out: dict[str, float] = {}
+        for axis in ("vertical", "horizontal"):
+            raw = value.get(axis)
+            if _is_scroll_percent_number(raw):
+                out[axis] = float(raw)
+        return out
+    if _is_scroll_percent_number(value):
+        return {"vertical": float(value)}
+    return {}
+
+
+def _scroll_verify_field(
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+) -> Any | None:
+    """After scroll value(s) that changed enough to assert on replay."""
+    before_axes = _scroll_axis_percents(before)
+    after_axes = _scroll_axis_percents(after)
+    if before_axes and after_axes:
+        changed: dict[str, float] = {}
+        for axis in ("vertical", "horizontal"):
+            if axis not in before_axes or axis not in after_axes:
+                continue
+            if abs(before_axes[axis] - after_axes[axis]) > _SCROLL_CHANGE_PERCENT:
+                changed[axis] = round(after_axes[axis], 1)
+        if not changed:
+            return None
+        # Keep a plain float when only the legacy vertical mapping changed and
+        # the after sample itself was a float (RangeValue path).
+        after_raw = after.get("scroll") if isinstance(after, dict) else None
+        if (
+            list(changed.keys()) == ["vertical"]
+            and _is_scroll_percent_number(after_raw)
+        ):
+            return changed["vertical"]
+        return changed
+
+    before_scroll = _scroll_percent(before)
+    after_scroll = _scroll_percent(after)
+    if (
+        before_scroll is not None
+        and after_scroll is not None
+        and abs(before_scroll - after_scroll) > _SCROLL_CHANGE_PERCENT
+    ):
+        return round(after_scroll, 1)
+    return None
 
 
 def signal_verify_fields(
@@ -703,15 +788,10 @@ def signal_verify_fields(
     # replay assertion: after a flyout closes, ElementFromPoint often hits a
     # different window under the same cursor and the state is noise.
 
-    if kind in SCROLL_KINDS:
-        before_scroll = _scroll_percent(before)
-        after_scroll = _scroll_percent(after)
-        if (
-            before_scroll is not None
-            and after_scroll is not None
-            and abs(before_scroll - after_scroll) > _SCROLL_CHANGE_PERCENT
-        ):
-            fields["scroll"] = round(after_scroll, 1)
+    if kind in SCROLL_POSITION_KINDS:
+        scroll_field = _scroll_verify_field(before, after)
+        if scroll_field is not None:
+            fields["scroll"] = scroll_field
 
     return fields
 
@@ -771,14 +851,44 @@ def signal_assertions_satisfied(
         ):
             return False, "window verify missed focused"
 
-    if isinstance(recorded.get("scroll"), (int, float)) and not isinstance(
-        recorded.get("scroll"), bool
-    ):
-        live_scroll = _scroll_percent(live_after)
-        if live_scroll is None or abs(live_scroll - float(recorded["scroll"])) > _SCROLL_TOLERANCE_PERCENT:
+    recorded_scroll = recorded.get("scroll")
+    if _has_scroll_assertion(recorded_scroll):
+        if not _scroll_assertion_satisfied(recorded_scroll, live_after):
             return False, "window verify missed scroll"
 
     return True, ""
+
+
+def _scroll_assertion_satisfied(
+    recorded_scroll: Any,
+    live_after: dict[str, Any] | None,
+) -> bool:
+    """True when live scroll percents match the recorded assertion within tolerance."""
+    if _is_scroll_percent_number(recorded_scroll):
+        live_scroll = _scroll_percent(live_after)
+        if live_scroll is None:
+            # Dict live samples still satisfy a legacy float via vertical.
+            live_axes = _scroll_axis_percents(live_after)
+            live_scroll = live_axes.get("vertical")
+        return (
+            live_scroll is not None
+            and abs(live_scroll - float(recorded_scroll)) <= _SCROLL_TOLERANCE_PERCENT
+        )
+    if not isinstance(recorded_scroll, dict):
+        return False
+    live_axes = _scroll_axis_percents(live_after)
+    matched_any = False
+    for axis in ("vertical", "horizontal"):
+        expected = recorded_scroll.get(axis)
+        if not _is_scroll_percent_number(expected):
+            continue
+        live_value = live_axes.get(axis)
+        if live_value is None:
+            return False
+        if abs(live_value - float(expected)) > _SCROLL_TOLERANCE_PERCENT:
+            return False
+        matched_any = True
+    return matched_any
 
 
 def _uia_get_pattern(element: ctypes.c_void_p, pattern_id: int) -> ctypes.c_void_p | None:
@@ -864,25 +974,52 @@ def _uia_focused_value(element: ctypes.c_void_p) -> dict[str, str] | None:
     return {"name": name, "value": value}
 
 
+def _uia_pattern_double(
+    pattern: ctypes.c_void_p,
+    index: int,
+) -> float | None:
+    """Read a double property getter at vtable ``index`` on a UIA pattern."""
+    getter = ctypes.WINFUNCTYPE(
+        ctypes.HRESULT,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_double),
+    )(_com_vtable(pattern, index + 1)[index])
+    number = ctypes.c_double()
+    if getter(pattern, ctypes.byref(number)) != _S_OK:
+        return None
+    return float(number.value)
+
+
+def _uia_scroll_pattern_percents(element: ctypes.c_void_p) -> dict[str, float] | None:
+    """Return ScrollPattern vertical/horizontal percents (omit non-scrollable axes)."""
+    pattern = _uia_get_pattern(element, _UIA_SCROLL_PATTERN)
+    if not pattern:
+        return None
+    try:
+        horizontal = _uia_pattern_double(pattern, _UIA_SCROLL_GET_HORIZONTAL_PERCENT)
+        vertical = _uia_pattern_double(pattern, _UIA_SCROLL_GET_VERTICAL_PERCENT)
+        out: dict[str, float] = {}
+        if vertical is not None and vertical != _UIA_SCROLL_NO_SCROLL and vertical >= 0.0:
+            out["vertical"] = vertical
+        if (
+            horizontal is not None
+            and horizontal != _UIA_SCROLL_NO_SCROLL
+            and horizontal >= 0.0
+        ):
+            out["horizontal"] = horizontal
+        return out or None
+    finally:
+        _com_release(pattern)
+
+
 def _uia_scroll_percent(element: ctypes.c_void_p) -> float | None:
     pattern = _uia_get_pattern(element, _UIA_RANGE_VALUE_PATTERN)
     if not pattern:
         return None
     try:
-        def _double_at(index: int) -> float | None:
-            getter = ctypes.WINFUNCTYPE(
-                ctypes.HRESULT,
-                ctypes.c_void_p,
-                ctypes.POINTER(ctypes.c_double),
-            )(_com_vtable(pattern, index + 1)[index])
-            number = ctypes.c_double()
-            if getter(pattern, ctypes.byref(number)) != _S_OK:
-                return None
-            return float(number.value)
-
-        value = _double_at(_UIA_RANGE_GET_VALUE)
-        maximum = _double_at(_UIA_RANGE_GET_MAX)
-        minimum = _double_at(_UIA_RANGE_GET_MIN)
+        value = _uia_pattern_double(pattern, _UIA_RANGE_GET_VALUE)
+        maximum = _uia_pattern_double(pattern, _UIA_RANGE_GET_MAX)
+        minimum = _uia_pattern_double(pattern, _UIA_RANGE_GET_MIN)
         if value is None or maximum is None or minimum is None:
             return None
         span = maximum - minimum
@@ -891,6 +1028,94 @@ def _uia_scroll_percent(element: ctypes.c_void_p) -> float | None:
         return (value - minimum) / span * 100.0
     finally:
         _com_release(pattern)
+
+
+def _uia_element_bbox_wh(
+    element: ctypes.c_void_p,
+) -> tuple[int, int] | None:
+    """Return ``(width, height)`` from CurrentBoundingRectangle, if valid."""
+    getter = ctypes.WINFUNCTYPE(
+        ctypes.HRESULT,
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.RECT),
+    )(
+        _com_vtable(element, _UIA_GET_CURRENT_BOUNDING_RECTANGLE_INDEX + 1)[
+            _UIA_GET_CURRENT_BOUNDING_RECTANGLE_INDEX
+        ]
+    )
+    rect = wintypes.RECT()
+    if getter(element, ctypes.byref(rect)) != _S_OK:
+        return None
+    width = int(rect.right) - int(rect.left)
+    height = int(rect.bottom) - int(rect.top)
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
+
+
+def _uia_range_value_axis_percent(
+    element: ctypes.c_void_p,
+) -> tuple[str, float] | None:
+    """Map a RangeValue control to ``(vertical|horizontal, percent)`` via bbox."""
+    percent = _uia_scroll_percent(element)
+    if percent is None:
+        return None
+    size = _uia_element_bbox_wh(element)
+    if size is None:
+        return None
+    width, height = size
+    axis = "vertical" if height >= width else "horizontal"
+    return axis, percent
+
+
+def _collect_scroll_position(
+    element: ctypes.c_void_p,
+    walker: ctypes.c_void_p | None,
+    limit: int,
+) -> dict[str, float] | float | None:
+    """Walk parents for ScrollPattern (both axes) or RangeValue bars by orientation.
+
+    Returns a ``{vertical?, horizontal?}`` dict when at least one axis is known,
+    a legacy float when only an unoriented RangeValue is found, or ``None``.
+    """
+    current: ctypes.c_void_p | None = element
+    owned = False
+    axes: dict[str, float] = {}
+    legacy: float | None = None
+    try:
+        for _index in range(max(1, limit)):
+            if current is None:
+                break
+            pattern_axes = _uia_scroll_pattern_percents(current)
+            if isinstance(pattern_axes, dict) and pattern_axes:
+                return {
+                    axis: float(value)
+                    for axis, value in pattern_axes.items()
+                    if axis in {"vertical", "horizontal"}
+                }
+            oriented = _uia_range_value_axis_percent(current)
+            if oriented is not None:
+                axis, percent = oriented
+                axes.setdefault(axis, percent)
+                if len(axes) >= 2:
+                    return axes
+            elif legacy is None:
+                raw = _uia_scroll_percent(current)
+                if raw is not None:
+                    legacy = raw
+            if walker is None:
+                break
+            parent = _uia_parent(walker, current)
+            if owned:
+                _com_release(current)
+            current = parent
+            owned = parent is not None
+        if axes:
+            return axes
+        return legacy
+    finally:
+        if owned and current is not None:
+            _com_release(current)
 
 
 def _uia_parent(walker: ctypes.c_void_p, element: ctypes.c_void_p) -> ctypes.c_void_p | None:
@@ -1031,14 +1256,22 @@ def read_uia_fields(
             if isinstance(state, str) and state:
                 fields["control_state"] = state
         if want_scroll and point_element is not None:
-            percent = _walk_for(
+            # Prefer ScrollPattern (both axes). Else accumulate RangeValue bars
+            # classified by bbox orientation while walking parents.
+            collected = _collect_scroll_position(
                 point_element,
                 walker,
                 _UIA_PARENT_WALK_SCROLL,
-                _uia_scroll_percent,
             )
-            if isinstance(percent, float):
-                fields["scroll"] = percent
+            if isinstance(collected, dict) and collected:
+                fields["scroll"] = {
+                    axis: round(float(value), 1)
+                    for axis, value in collected.items()
+                    if axis in {"vertical", "horizontal"}
+                    and _is_scroll_percent_number(value)
+                }
+            elif isinstance(collected, float):
+                fields["scroll"] = collected
         if want_focused:
             focused_value = None
             if focused is not None:

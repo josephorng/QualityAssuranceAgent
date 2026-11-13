@@ -3502,7 +3502,6 @@ def test_window_verify_uia_signals_only_when_the_step_changed_them(monkeypatch) 
         raise AssertionError("automation object")
 
     monkeypatch.setattr("src.recorder.verify_signals.read_uia_fields", _boom)
-    assert read_uia_for_kind("drag", (1, 1)) == {}
     assert read_uia_for_kind("key_press", (1, 1)) == {}
 
     calls: list[str] = []
@@ -3513,13 +3512,17 @@ def test_window_verify_uia_signals_only_when_the_step_changed_them(monkeypatch) 
             return {"focused": {"name": "Name", "value": "Ada"}}
         if kind == "scroll":
             return {"scroll": 40.0}
+        if kind == "drag":
+            return {
+                "scroll": {"vertical": 55.0, "horizontal": 12.0},
+            }
         return {"control_state": "selected"}
 
     capture_step_signals(cursor_xy=(1, 1), kind="text_input", uia_reader=_reader)
     capture_step_signals(cursor_xy=(1, 1), kind="scroll", uia_reader=_reader)
     capture_step_signals(cursor_xy=(1, 1), kind="click", uia_reader=_reader)
     capture_step_signals(cursor_xy=(1, 1), kind="drag", uia_reader=_reader)
-    assert calls == ["text_input", "scroll", "click"]
+    assert calls == ["text_input", "scroll", "click", "drag"]
 
     assert "control_state" not in signal_verify_fields(
         {"foreground": _explorer_foreground()},
@@ -3558,6 +3561,32 @@ def test_window_verify_uia_signals_only_when_the_step_changed_them(monkeypatch) 
     ok, _reason = window_verify_satisfied(scrolled, {}, live_after={"scroll": 43.0})
     assert ok is True
     ok, reason = window_verify_satisfied(scrolled, {}, live_after={"scroll": 50.0})
+    assert ok is False
+    assert "scroll" in reason
+
+    both_axes = signal_verify_fields(
+        {"scroll": {"vertical": 10.0, "horizontal": 5.0}},
+        {"scroll": {"vertical": 40.0, "horizontal": 5.0}},
+        kind="drag",
+    )
+    assert both_axes == {"scroll": {"vertical": 40.0}}
+    both_changed = signal_verify_fields(
+        {"scroll": {"vertical": 10.0, "horizontal": 5.0}},
+        {"scroll": {"vertical": 40.0, "horizontal": 25.0}},
+        kind="scroll",
+    )
+    assert both_changed == {"scroll": {"vertical": 40.0, "horizontal": 25.0}}
+    ok, _reason = window_verify_satisfied(
+        both_changed,
+        {},
+        live_after={"scroll": {"vertical": 42.0, "horizontal": 27.0}},
+    )
+    assert ok is True
+    ok, reason = window_verify_satisfied(
+        both_changed,
+        {},
+        live_after={"scroll": {"vertical": 40.0, "horizontal": 50.0}},
+    )
     assert ok is False
     assert "scroll" in reason
 

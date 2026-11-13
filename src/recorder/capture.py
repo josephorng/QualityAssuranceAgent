@@ -6234,8 +6234,15 @@ class RecordingSession:
                     )
             uia_reader, uia_timed_out = self._uia_reader_or_timeout()
             try:
+                # Drag: read scroll percents under the release point so after
+                # signals reflect the thumb/track position after the gesture.
+                signal_xy = (
+                    item.end_xy
+                    if item.kind == "drag" and item.end_xy is not None
+                    else item.cursor_xy
+                )
                 signals_after = capture_step_signals(
-                    cursor_xy=item.cursor_xy,
+                    cursor_xy=signal_xy,
                     kind=item.kind,
                     uia_reader=uia_reader,
                 )

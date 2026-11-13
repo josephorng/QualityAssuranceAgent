@@ -1102,6 +1102,53 @@ def _set_analysis_verification(
     path.write_text(json.dumps(analysis, ensure_ascii=False), encoding="utf-8")
 
 
+def _set_event_window_snapshot(
+    run_root: Path,
+    event_index: int,
+    *,
+    windows_before: list[dict],
+    windows_after: list[dict],
+    signals_before: dict | None = None,
+    signals_after: dict | None = None,
+    signal_kind: str = "click",
+) -> None:
+    path = run_root / "events" / f"event_{event_index:03d}.json"
+    event = json.loads(path.read_text(encoding="utf-8"))
+    debug: dict = {
+        "windows_before": windows_before,
+        "windows_after": windows_after,
+        "signal_kind": signal_kind,
+    }
+    if signals_before is not None:
+        debug["signals_before"] = signals_before
+    if signals_after is not None:
+        debug["signals_after"] = signals_after
+    event["window_snapshot_debug"] = debug
+    path.write_text(json.dumps(event, ensure_ascii=False), encoding="utf-8")
+
+
+def _sample_dialog_window(
+    *,
+    hwnd: int = 42,
+    title: str = "登入系統",
+    class_name: str = "WindowsForms10.Window.8.app.0.x",
+    process_name: str = "WM7Ldr.exe",
+) -> dict:
+    return {
+        "hwnd": hwnd,
+        "title": title,
+        "pid": 1,
+        "left": 10,
+        "top": 10,
+        "width": 200,
+        "height": 100,
+        "is_minimized": False,
+        "is_maximized": False,
+        "class_name": class_name,
+        "process_name": process_name,
+    }
+
+
 def test_delete_recording_event_handoffs_verification_to_previous(
     tmp_path: Path,
 ) -> None:
@@ -1140,6 +1187,71 @@ def test_delete_recording_event_handoffs_verification_to_previous(
     }
     assert previous["window_verify_disabled"] == ["clipboard"]
     assert "settle_after_seconds" not in previous
+    assert not (run_root / "analysis" / "event_002.json").exists()
+
+
+def test_delete_empty_verify_step_keeps_prior_appeared(tmp_path: Path) -> None:
+    """Deleting a no-op middle step must not wipe the open-app appeared assert."""
+    runs_root = tmp_path / "runs"
+    run_root = _make_recording_three_event_run(
+        runs_root, "recording_delete_keeps_appeared"
+    )
+    dialog = _sample_dialog_window()
+    fg = {
+        "class_name": dialog["class_name"],
+        "title": dialog["title"],
+        "process_name": dialog["process_name"],
+    }
+    appeared = {
+        "class_name": dialog["class_name"],
+        "title": dialog["title"],
+        "process_name": dialog["process_name"],
+    }
+    _set_event_window_snapshot(
+        run_root,
+        1,
+        windows_before=[],
+        windows_after=[dialog],
+        signals_before={
+            "foreground": {
+                "class_name": "Progman",
+                "title": "Program Manager",
+                "process_name": "explorer.exe",
+            }
+        },
+        signals_after={"foreground": fg},
+        signal_kind="double_click",
+    )
+    _set_event_window_snapshot(
+        run_root,
+        2,
+        windows_before=[dialog],
+        windows_after=[dialog],
+        signals_before={"foreground": fg},
+        signals_after={"foreground": fg},
+        signal_kind="click",
+    )
+    _set_analysis_verification(
+        run_root,
+        1,
+        expected_outcome=None,
+        use_expected_outcome=False,
+        window_verify={"appeared": [appeared]},
+    )
+    _set_analysis_verification(
+        run_root,
+        2,
+        expected_outcome=None,
+        use_expected_outcome=False,
+        window_verify={},
+    )
+
+    delete_recording_event(runs_root, "recording_delete_keeps_appeared", 2)
+
+    previous = json.loads(
+        (run_root / "analysis" / "event_001.json").read_text(encoding="utf-8")
+    )
+    assert previous["window_verify"] == {"appeared": [appeared]}
     assert not (run_root / "analysis" / "event_002.json").exists()
 
 

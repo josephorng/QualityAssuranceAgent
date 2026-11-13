@@ -38,7 +38,15 @@ from urllib.parse import unquote, urlparse
 
 from cua_mcp.char_target import parse_char_target_instruction
 from src.common.io_utils import read_json, write_json
-from src.recorder.window_snapshot import normalize_window_verify_disabled
+from src.recorder.window_snapshot import (
+    foreground_identities_from_debug,
+    limit_appeared_to_later_foreground,
+    limit_disappeared_absent_from_next_before,
+    normalize_window_verify_disabled,
+    omit_foreground_when_structural,
+    window_verify_from_debug,
+    window_verify_has_assertions,
+)
 from src.common.nearby_side import (
     NearbyHint,
     apply_nearby_landmarks,
@@ -69,6 +77,7 @@ from src.recorder.models import (
     POINTER_EVENT_KINDS,
     RecordedEvent,
     event_json_path,
+    hydrate_window_snapshot_debug,
     next_recording_event_index,
     screenshot_path_for_event,
     screenshot_path_for_event_end,
@@ -566,17 +575,145 @@ def _session_ordered_event_indices(run_dir: Path) -> list[int]:
     return ordered
 
 
+def _event_window_snapshot_debug(
+    run_dir: Path,
+    event_index: int,
+) -> dict[str, Any] | None:
+    """Hydrated ``window_snapshot_debug`` for one on-disk event, or None."""
+    raw = read_json(event_json_path(run_dir, event_index), None)
+    if not isinstance(raw, dict):
+        return None
+    debug = raw.get("window_snapshot_debug")
+    if not isinstance(debug, dict):
+        return None
+    hydrated = hydrate_window_snapshot_debug(run_dir, event_index, debug)
+    return hydrated if isinstance(hydrated, dict) else debug
+
+
+def _handoff_foregrounds(
+    run_dir: Path,
+    *,
+    donor_debug: dict[str, Any],
+    ordered: list[int],
+    donor_index: int,
+    delete_set: set[int],
+) -> list[dict[str, Any]]:
+    """Donor after-foreground plus later surviving steps' foreground samples."""
+    found = foreground_identities_from_debug(donor_debug, include_before=False)
+    try:
+        donor_pos = ordered.index(donor_index)
+    except ValueError:
+        return found
+    for later_index in ordered[donor_pos + 1 :]:
+        if later_index in delete_set:
+            continue
+        later_debug = _event_window_snapshot_debug(run_dir, later_index)
+        if later_debug is None:
+            continue
+        found.extend(foreground_identities_from_debug(later_debug))
+    return found
+
+
+def _recompute_window_verify_for_handoff(
+    run_dir: Path,
+    *,
+    recipient_index: int,
+    donor_index: int,
+    ordered: list[int],
+    delete_set: set[int],
+    next_survivor_index: int | None,
+) -> dict[str, Any] | None:
+    """Build verify for recipient-before → donor-after. None when snapshots missing."""
+    recipient_event = read_json(event_json_path(run_dir, recipient_index), None)
+    recipient_debug = _event_window_snapshot_debug(run_dir, recipient_index)
+    donor_debug = _event_window_snapshot_debug(run_dir, donor_index)
+    if not isinstance(recipient_debug, dict) or not isinstance(donor_debug, dict):
+        return None
+    before = recipient_debug.get("windows_before")
+    after = donor_debug.get("windows_after")
+    if not isinstance(before, list) or not isinstance(after, list):
+        return None
+
+    signal_kind = (
+        str(recipient_debug.get("signal_kind") or "").strip()
+        or str(donor_debug.get("signal_kind") or "").strip()
+        or None
+    )
+    synthetic: dict[str, Any] = {
+        "windows_before": before,
+        "windows_after": after,
+        "signal_kind": signal_kind,
+    }
+    signals_before = recipient_debug.get("signals_before")
+    if isinstance(signals_before, dict):
+        synthetic["signals_before"] = signals_before
+    signals_after = donor_debug.get("signals_after")
+    if isinstance(signals_after, dict):
+        synthetic["signals_after"] = signals_after
+
+    typed_text = None
+    if isinstance(recipient_event, dict) and recipient_event.get("kind") == "text_input":
+        text = recipient_event.get("text")
+        typed_text = text if isinstance(text, str) else None
+
+    predicate = window_verify_from_debug(
+        synthetic,
+        typed_text=typed_text,
+        omit_structural_foreground=False,
+    )
+    predicate = limit_appeared_to_later_foreground(
+        predicate,
+        _handoff_foregrounds(
+            run_dir,
+            donor_debug=donor_debug,
+            ordered=ordered,
+            donor_index=donor_index,
+            delete_set=delete_set,
+        ),
+    )
+    next_windows_before = None
+    if next_survivor_index is not None:
+        next_debug = _event_window_snapshot_debug(run_dir, next_survivor_index)
+        if isinstance(next_debug, dict):
+            raw_next = next_debug.get("windows_before")
+            if isinstance(raw_next, list):
+                next_windows_before = raw_next
+    predicate = limit_disappeared_absent_from_next_before(
+        predicate,
+        next_windows_before,
+    )
+    return omit_foreground_when_structural(predicate)
+
+
+def _fallback_window_verify_for_handoff(
+    recipient: dict[str, Any],
+    donor: dict[str, Any],
+) -> dict[str, Any]:
+    """When snapshots are missing: keep recipient if donor verify is empty."""
+    donor_verify = donor.get("window_verify")
+    if isinstance(donor_verify, dict) and window_verify_has_assertions(donor_verify):
+        return copy.deepcopy(donor_verify)
+    recipient_verify = recipient.get("window_verify")
+    if isinstance(recipient_verify, dict):
+        return copy.deepcopy(recipient_verify)
+    return {}
+
+
 def _copy_verification_between_analyses(
     run_dir: Path,
     *,
     donor_index: int,
     recipient_index: int,
+    ordered: list[int] | None = None,
+    delete_set: set[int] | None = None,
+    next_survivor_index: int | None = None,
 ) -> None:
-    """Replace ``recipient`` verification with ``donor``'s (after-state handoff).
+    """Hand off verification so the survivor ends at the deleted step's after frame.
 
-    A step's verification describes its after frame, which is the next step's
-    before shot. When the next step is deleted, the survivor that now ends at
-    that after frame inherits the deleted step's verification.
+    Prefers recomputing ``window_verify`` from the recipient's before snapshot and
+    the donor's after snapshot. When those lists are missing, falls back to the
+    donor analysis blob, but keeps the recipient verify when the donor is empty
+    so deleting no-op middle steps cannot wipe an earlier ``appeared``.
     """
     if donor_index == recipient_index:
         return
@@ -597,14 +734,33 @@ def _copy_verification_between_analyses(
     else:
         recipient["use_expected_outcome"] = use_expected_outcome_enabled(donor)
 
-    if isinstance(donor.get("window_verify"), dict):
-        recipient["window_verify"] = copy.deepcopy(donor["window_verify"])
+    session_order = ordered if ordered is not None else _session_ordered_event_indices(run_dir)
+    deleted = delete_set if delete_set is not None else {donor_index}
+    recomputed = _recompute_window_verify_for_handoff(
+        run_dir,
+        recipient_index=recipient_index,
+        donor_index=donor_index,
+        ordered=session_order,
+        delete_set=deleted,
+        next_survivor_index=next_survivor_index,
+    )
+    if recomputed is not None:
+        recipient["window_verify"] = recomputed
     else:
-        recipient["window_verify"] = {}
+        recipient["window_verify"] = _fallback_window_verify_for_handoff(
+            recipient, donor
+        )
 
-    disabled = donor.get("window_verify_disabled")
-    if isinstance(disabled, list) and disabled:
-        recipient["window_verify_disabled"] = list(disabled)
+    disabled_source = donor.get("window_verify_disabled")
+    if not isinstance(disabled_source, list):
+        disabled_source = recipient.get("window_verify_disabled")
+    normalized = normalize_window_verify_disabled(
+        recipient.get("window_verify"),
+        disabled_source if isinstance(disabled_source, list) else [],
+        strict=False,
+    )
+    if normalized:
+        recipient["window_verify_disabled"] = normalized
     else:
         recipient.pop("window_verify_disabled", None)
 
@@ -642,10 +798,14 @@ def _handoff_verification_before_delete(
             continue
         donor_index = ordered[index - 1]
         recipient_index = ordered[run_start - 1]
+        next_survivor = ordered[index] if index < len(ordered) else None
         _copy_verification_between_analyses(
             run_dir,
             donor_index=donor_index,
             recipient_index=recipient_index,
+            ordered=ordered,
+            delete_set=delete_set,
+            next_survivor_index=next_survivor,
         )
 
 

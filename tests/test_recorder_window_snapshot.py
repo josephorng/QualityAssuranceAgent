@@ -2004,6 +2004,94 @@ def test_ensure_recorded_click_window_on_screen_skips_desktop_taskbar_flyout() -
         "status": "skipped_flyout",
         "hwnd": 3,
     }
+    combo = ClickWindowInfo(
+        hwnd=4,
+        title="",
+        process_name="WM7Ldr.exe",
+        left=290,
+        top=94,
+        width=268,
+        height=302,
+        is_maximized=False,
+        class_name="ComboLBox",
+    )
+    assert ensure_recorded_click_window_on_screen(combo) == {
+        "status": "skipped_combolbox",
+        "hwnd": 4,
+    }
+
+
+def test_ensure_recorded_click_window_on_screen_skips_combolbox_without_foreground(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recorded ComboLBox must not SetForegroundWindow (dismisses the dropdown)."""
+    recorded = ClickWindowInfo(
+        hwnd=67566,
+        title="",
+        process_name="WM7Ldr.exe",
+        left=290,
+        top=94,
+        width=268,
+        height=302,
+        is_maximized=False,
+        class_name="ComboLBox",
+    )
+    foreground_calls: list[int] = []
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot._bring_hwnd_foreground_best_effort",
+        lambda hwnd: foreground_calls.append(int(hwnd)) or True,
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        lambda _cw: (_ for _ in ()).throw(AssertionError("must not match")),
+    )
+    assert ensure_recorded_click_window_on_screen(recorded) == {
+        "status": "skipped_combolbox",
+        "hwnd": 67566,
+    }
+    assert foreground_calls == []
+
+
+def test_ensure_recorded_click_window_on_screen_skips_live_combolbox_without_foreground(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live ComboLBox match (blank recorded class) must not be foregrounded."""
+    recorded = ClickWindowInfo(
+        hwnd=7,
+        title="神網7",
+        process_name="WM7Ldr.exe",
+        left=290,
+        top=94,
+        width=268,
+        height=302,
+        is_maximized=False,
+        class_name="",
+    )
+    live = ClickWindowInfo(
+        hwnd=99,
+        title="",
+        process_name="WM7Ldr.exe",
+        left=290,
+        top=94,
+        width=268,
+        height=302,
+        is_maximized=False,
+        class_name="ComboLBox",
+    )
+    foreground_calls: list[int] = []
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        lambda _cw: live,
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot._bring_hwnd_foreground_best_effort",
+        lambda hwnd: foreground_calls.append(int(hwnd)) or True,
+    )
+    assert ensure_recorded_click_window_on_screen(recorded) == {
+        "status": "skipped_combolbox",
+        "hwnd": 99,
+    }
+    assert foreground_calls == []
 
 
 def test_ensure_recorded_click_window_on_screen_already_on_screen(

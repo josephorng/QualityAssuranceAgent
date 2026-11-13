@@ -2648,13 +2648,15 @@ def ensure_recorded_click_window_on_screen(
 ) -> dict[str, Any] | None:
     """Restore a minimized live match so replay can locate inside it.
 
-    Skips desktop shell, taskbar, flyout, and weak identity. Does not maximize
-    or move windows across monitors. Best-effort foreground only.
+    Skips desktop shell, taskbar, flyout, ComboLBox dropdowns, and weak
+    identity. Does not maximize or move windows across monitors. Best-effort
+    foreground only.
 
     Returns ``None`` when there is nothing to do (missing payload). Otherwise a
     status dict with ``status`` one of ``already_on_screen``, ``restored``,
     ``foregrounded``, ``skipped_no_match``, ``skipped_taskbar``,
-    ``skipped_flyout``, ``skipped_desktop``, ``skipped_input_pane``.
+    ``skipped_flyout``, ``skipped_desktop``, ``skipped_input_pane``,
+    ``skipped_combolbox``.
     """
     info = (
         click_window
@@ -2673,6 +2675,10 @@ def ensure_recorded_click_window_on_screen(
         return {"status": "skipped_desktop", "hwnd": int(info.hwnd)}
     if str(info.class_name or "").strip() in _INPUT_PANE_CLASS_NAMES:
         return {"status": "skipped_input_pane", "hwnd": int(info.hwnd)}
+    # ComboLBox is ephemeral: SetForegroundWindow (or a stale HWND match to the
+    # owner) dismisses the open dropdown before locate can run.
+    if str(info.class_name or "").strip() == "ComboLBox":
+        return {"status": "skipped_combolbox", "hwnd": int(info.hwnd)}
 
     hwnd_ok = bool(info.hwnd) and _hwnd_still_valid(int(info.hwnd))
     if not hwnd_ok and not _normalize_title(info.title) and not (info.class_name or "").strip():
@@ -2689,6 +2695,8 @@ def ensure_recorded_click_window_on_screen(
         return {"status": "skipped_flyout", "hwnd": int(live.hwnd)}
     if _is_desktop_shell_class(live.class_name):
         return {"status": "skipped_desktop", "hwnd": int(live.hwnd)}
+    if str(live.class_name or "").strip() == "ComboLBox":
+        return {"status": "skipped_combolbox", "hwnd": int(live.hwnd)}
 
     hwnd = int(live.hwnd)
     restored = False

@@ -392,6 +392,25 @@ def test_element_from_point_keeps_live_control_type() -> None:
     assert hit.control_type == "button"
 
 
+def test_element_from_point_keeps_input_control_type() -> None:
+    """Edit/Document EFP tokens stay typed (outside UIA_CONTROL_TYPE_SUFFIX)."""
+    probe_box = (1010, 520, 40, 16)
+
+    def probe(x: int, y: int):
+        return "網址與搜尋列", probe_box, "input", "網址與搜尋列", ""
+
+    hit = _choose(
+        recorded_text="網址與搜尋列",
+        uia_boxes=[],
+        ocr_boxes=[(_OCR_BOX, "網址與搜尋列")],
+        point_probe_fn=probe,
+    )
+    assert hit is not None
+    assert hit.label == "網址與搜尋列"
+    assert hit.source == "element_from_point"
+    assert hit.control_type == "input"
+
+
 def test_element_from_point_accepts_short_label() -> None:
     probe_box = (1020, 510, 30, 20)
 
@@ -883,6 +902,99 @@ def test_write_repair_uses_live_uia_control_type(tmp_path: Path) -> None:
     move = next(call for call in saved["tool_calls"] if call["name"] == "move_mouse")
     assert move["arguments"]["control_type"] == "button"
     assert move["arguments"]["vision_mode"] == "uia"
+    assert saved["yolo_ocr_fallback"]["instruction"] == yolo_instruction
+
+
+def test_write_repair_efp_input_becomes_named_input_hub(tmp_path: Path) -> None:
+    """Chrome omnibox-shaped EFP Edit → 「…」文字所在的輸入欄, not 「…」文字."""
+    run = tmp_path / "recording"
+    (run / "events").mkdir(parents=True)
+    (run / "analysis").mkdir()
+    (run / "yolo_ocr").mkdir()
+    omnibox = (209, 67, 1431, 33)
+    event = {
+        "index": 6,
+        "timestamp_utc": "2026-11-13T00:00:00+00:00",
+        "kind": "click",
+        "button": "left",
+        "cursor_xy": [300, 83],
+        "click_window": {
+            "hwnd": 5,
+            "title": "新分頁 - Google Chrome",
+            "process_name": "chrome.exe",
+            "rect": [-8, -8, 1936, 1048],
+            "is_maximized": True,
+            "class_name": "Chrome_WidgetWin_1",
+        },
+        "element_from_point": {
+            "name": "網址與搜尋列",
+            "value": "",
+            "bbox": list(omnibox),
+            "control_type": "input",
+        },
+        "uia_snapshot": {
+            "window": [-8, -8, 1936, 1048],
+            "inputs": [[209, 67, 1640, 100]],
+            "scrollbars": [],
+            "texts": [],
+        },
+    }
+    (run / "events" / "event_006.json").write_text(
+        json.dumps(event, ensure_ascii=False), encoding="utf-8"
+    )
+    yolo_instruction = (
+        "（YOLO+OCR）將滑鼠移到「網址與搜尋列」文字所在的輸入欄，並點擊滑鼠一下。"
+    )
+    (run / "analysis" / "event_006.json").write_text(
+        json.dumps(
+            {"event_index": 6, "instruction": yolo_instruction},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run / "yolo_ocr" / "event_006.json").write_text(
+        json.dumps(
+            {
+                "vision_path": "yolo_ocr",
+                "candidates": [
+                    {
+                        "bbox": list(omnibox),
+                        "center": [924, 83],
+                        "class_name": "input",
+                        "text": "網址與搜尋列",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    request = UiaReplayRepairRequest(
+        recording_dir=run,
+        event_index=6,
+        side="click",
+        recorded_bbox=omnibox,
+        recorded_text="網址與搜尋列",
+        recorded_window_xywh=(-8, -8, 1936, 1048),
+    )
+    instruction = write_uia_replay_repair(
+        request,
+        label="網址與搜尋列",
+        source="element_from_point",
+        bbox=omnibox,
+        others=[((1649, 67, 100, 33), "「AI 模式」按鈕，按下 Enter 鍵即可詢問 AI 模式", "button")],
+        control_type="input",
+    )
+    assert instruction is not None
+    assert instruction.startswith("（UIA）")
+    assert "「網址與搜尋列」文字所在的輸入欄" in instruction
+    assert "「網址與搜尋列」文字（" not in instruction
+    saved = json.loads((run / "analysis" / "event_006.json").read_text(encoding="utf-8"))
+    assert saved["uia_replay_repair"]["control_type"] == "input"
+    move = next(call for call in saved["tool_calls"] if call["name"] == "move_mouse")
+    assert move["arguments"]["control_type"] == "input"
+    assert move["arguments"]["anchor_text"] == "網址與搜尋列"
+    assert move["arguments"]["name"] == "網址與搜尋列"
     assert saved["yolo_ocr_fallback"]["instruction"] == yolo_instruction
 
 

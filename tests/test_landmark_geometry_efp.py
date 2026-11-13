@@ -90,6 +90,12 @@ def test_efp_gate_required_for_hub_soft_on_input_scrollbar() -> None:
         recorded_efp_value="",
     )
     assert not _efp_gate_required_for_hub(
+        anchor="「網址與搜尋列」文字所在的輸入欄",
+        control_type_token="input",
+        recorded_efp_name="網址與搜尋列",
+        recorded_efp_value="",
+    )
+    assert not _efp_gate_required_for_hub(
         anchor="滾動條",
         control_type_token="scrollbar",
         recorded_efp_name="ScrollbarThumb",
@@ -100,6 +106,12 @@ def test_efp_gate_required_for_hub_soft_on_input_scrollbar() -> None:
         control_type_token="text",
         recorded_efp_name="下載 (已釘選)",
         recorded_efp_value="下載 (已釘選)",
+    )
+    assert _efp_gate_required_for_hub(
+        anchor="「網址與搜尋列」文字",
+        control_type_token="text",
+        recorded_efp_name="網址與搜尋列",
+        recorded_efp_value="",
     )
     assert not _efp_gate_required_for_hub(
         anchor="「下載」文字",
@@ -834,6 +846,19 @@ def test_phrase_match_pool_keeps_input_and_scrollbar_by_class_name() -> None:
         control_type_token="scrollbar",
     )
     assert scrollbar_pool == [scrollbar]
+
+
+def test_phrase_match_pool_omnibox_named_input_excludes_same_name_text() -> None:
+    """「網址與搜尋列」文字所在的輸入欄 must not unique-hit a Text leaf."""
+    omnibox = _det(924, 83, text="網址與搜尋列", class_name="input")
+    # Same Name wrongly typed as text (old recording shape).
+    text_leaf = _det(924, 83, text="網址與搜尋列", class_name="text")
+    pool = _phrase_match_pool(
+        [text_leaf, omnibox],
+        "網址與搜尋列",
+        control_type_token="input",
+    )
+    assert pool == [omnibox]
 
 
 def test_uia_first_input_hub_soft_miss_does_not_unique_hit_sibling_text() -> None:

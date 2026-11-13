@@ -961,8 +961,16 @@ def attempt_uia_replay_repair(
         for item in uia_boxes
         if _labeled_parts(item)[1] != hit.label or _labeled_parts(item)[0] != hit.bbox
     ]
-    is_scrollbar = hit.label == "滾動條" or hit.source == "uia_scrollbar"
-    is_input = hit.label == "輸入欄" or hit.source == "uia_input"
+    is_scrollbar = (
+        hit.label == "滾動條"
+        or hit.source == "uia_scrollbar"
+        or hit.control_type == "scrollbar"
+    )
+    is_input = (
+        hit.label == "輸入欄"
+        or hit.source == "uia_input"
+        or hit.control_type == "input"
+    )
     track_percent = _recorded_track_percent(write_request) if is_scrollbar else None
     repair_snapshot = build_repair_uia_snapshot(
         live_hwnd=int(live.hwnd or 0),
@@ -1760,7 +1768,8 @@ def _candidate(
 ) -> dict[str, Any]:
     x, y, w, h = (int(v) for v in bbox)
     label = str(text or "").strip()
-    if label == "滾動條":
+    token = str(control_type or "").strip()
+    if label == "滾動條" or token == "scrollbar":
         from cua_mcp.yolo_onnx import YOLO_CLASS_SCROLLBAR
 
         return {
@@ -1770,15 +1779,18 @@ def _candidate(
             "class_name": "scrollbar",
             "text": None,
         }
-    if label == "輸入欄":
+    if label == "輸入欄" or token == "input":
         from cua_mcp.yolo_onnx import YOLO_CLASS_INPUT
 
+        # Named field hosts (EFP Edit Name) keep text for 「…」文字所在的輸入欄.
+        # Bare class-only 輸入欄 stays unlabeled geometry.
+        named = None if label == "輸入欄" else (label or None)
         return {
             "bbox": [x, y, w, h],
             "center": [x + w // 2, y + h // 2],
             "class_id": YOLO_CLASS_INPUT,
             "class_name": "input",
-            "text": None,
+            "text": named,
         }
     payload: dict[str, Any] = {
         "bbox": [x, y, w, h],
@@ -1786,7 +1798,6 @@ def _candidate(
         "class_name": "text",
         "text": text,
     }
-    token = str(control_type or "").strip()
     if token:
         from src.recorder.uia_input_boxes import UIA_CONTROL_TYPE_SUFFIX
 
@@ -1833,7 +1844,12 @@ def _hit(
     if token:
         from src.recorder.uia_input_boxes import UIA_CONTROL_TYPE_SUFFIX
 
-        if token not in UIA_CONTROL_TYPE_SUFFIX:
+        # FindAll field hosts are outside the labeled-suffix map but must stay
+        # typed so repair rebuilds 「…」文字所在的輸入欄 / 滾動條 hubs.
+        if token not in UIA_CONTROL_TYPE_SUFFIX and token not in (
+            "input",
+            "scrollbar",
+        ):
             token = ""
     return UiaReplayRepairHit(
         label=label,

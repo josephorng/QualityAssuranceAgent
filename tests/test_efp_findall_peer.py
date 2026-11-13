@@ -103,6 +103,124 @@ def test_efp_peer_dedupes_matching_findall_label() -> None:
     )
 
 
+def test_efp_input_peer_injects_named_input_when_no_findall_edit() -> None:
+    efp = _efp_peer_detection_from_payload(
+        {
+            "name": "網址與搜尋列",
+            "value": "",
+            "bbox": [209, 67, 1431, 33],
+            "control_type": "input",
+        },
+        monitor_offset=(0, 0),
+        local_x=300,
+        local_y=83,
+        existing=[],
+    )
+    assert efp is not None
+    assert efp.class_name == "input"
+    assert efp.text == "網址與搜尋列"
+    assert efp.uia_control_type is None
+
+
+def test_efp_input_names_overlapping_findall_edit_in_place() -> None:
+    """Chrome omnibox: coextensive FindAll Edit gets EFP Name; no second peer."""
+    from src.recorder.analyze import instruction_for_click
+    from src.recorder.models import RecordedEvent
+    from src.recorder.vision_context import (
+        _promote_click_primary_detections,
+        format_drag_candidate_anchor,
+        _detection_to_dict,
+    )
+
+    edit = _detection_from_bbox(
+        (209, 67, 1431, 33),
+        YOLO_CLASS_INPUT,
+        text=None,
+        source="uia",
+    )
+    page = _detection_from_bbox(
+        (0, 0, 1920, 1080),
+        YOLO_CLASS_INPUT,
+        text=None,
+        source="uia",
+    )
+    existing = [page, edit]
+    peer = _efp_peer_detection_from_payload(
+        {
+            "name": "網址與搜尋列",
+            "value": "",
+            "bbox": [209, 67, 1431, 33],
+            "control_type": "input",
+        },
+        monitor_offset=(0, 0),
+        local_x=300,
+        local_y=83,
+        existing=existing,
+    )
+    assert peer is None
+    assert existing[1].class_name == "input"
+    assert existing[1].text == "網址與搜尋列"
+    # Tight Edit named; page-sized host left unlabeled.
+    assert existing[0].text is None
+
+    promoted = _promote_click_primary_detections(existing, 300, 83)
+    assert promoted[0].class_name == "input"
+    assert promoted[0].text == "網址與搜尋列"
+    assert (
+        format_drag_candidate_anchor(_detection_to_dict(promoted[0]))
+        == "「網址與搜尋列」文字所在的輸入欄"
+    )
+
+    vision = {
+        "candidates": [_detection_to_dict(d) for d in promoted],
+        "local_cursor": [300, 83],
+    }
+    event = RecordedEvent(
+        index=6,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(300, 83),
+        button="left",
+        screenshot_path="",
+    )
+    assert (
+        instruction_for_click(event, vision)
+        == "將滑鼠移到「網址與搜尋列」文字所在的輸入欄"
+    )
+
+
+def test_promote_detections_same_bbox_text_input_keeps_named_input() -> None:
+    """Detection-path promote must not leave Text on top when boxes match."""
+    from src.recorder.vision_context import (
+        _promote_click_primary_detections,
+        format_drag_candidate_anchor,
+        _detection_to_dict,
+    )
+
+    bbox = (209, 67, 1431, 33)
+    text = _detection_from_bbox(
+        bbox,
+        YOLO_CLASS_TEXT,
+        text="網址與搜尋列",
+        source="uia",
+        uia_control_type="input",
+    )
+    inp = _detection_from_bbox(
+        bbox,
+        YOLO_CLASS_INPUT,
+        text=None,
+        source="uia",
+    )
+    # Nearest order: multi-char text first (content priority).
+    out = _promote_click_primary_detections([text, inp], 300, 83)
+    assert out[0].class_name == "input"
+    assert out[0].text == "網址與搜尋列"
+    assert (
+        format_drag_candidate_anchor(_detection_to_dict(out[0]))
+        == "「網址與搜尋列」文字所在的輸入欄"
+    )
+
+
 def test_coextensive_text_input_prefers_named_input_hub() -> None:
     """Page-sized Text Name + equal Input → 「…」文字所在的輸入欄 primary."""
     from src.recorder.analyze import instruction_for_click

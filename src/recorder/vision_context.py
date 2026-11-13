@@ -1338,21 +1338,27 @@ def _promote_click_primary_detections(
     local_x: int,
     local_y: int,
 ) -> list[UiDetection]:
-    """Reorder YOLO detections with the click-landmark primary first."""
+    """Reorder detections with the click-landmark primary first.
+
+    Rebuilds from promoted candidate dicts so coextensive/contained Name copies
+    survive frozen ``UiDetection``, and same-bbox Text+Input picks Input by
+    class rather than the first bbox match.
+    """
     if not detections:
         return detections
     as_dicts = [_detection_to_dict(det) for det in detections]
     promoted = promote_click_primary_candidates(as_dicts, local_x, local_y)
-    if not promoted or promoted[0] is as_dicts[0]:
-        return detections
-    primary_bbox = tuple(int(v) for v in promoted[0]["bbox"])
-    index = next(
-        (i for i, det in enumerate(detections) if tuple(det.bbox) == primary_bbox),
-        0,
+    rebuilt = [_candidate_dict_to_detection(c) for c in promoted]
+    if len(rebuilt) != len(detections):
+        return rebuilt
+    unchanged = all(
+        rebuilt[i].bbox == detections[i].bbox
+        and rebuilt[i].class_name == detections[i].class_name
+        and rebuilt[i].text == detections[i].text
+        and rebuilt[i].uia_control_type == detections[i].uia_control_type
+        for i in range(len(detections))
     )
-    if index == 0:
-        return detections
-    return [detections[index], *detections[:index], *detections[index + 1 :]]
+    return detections if unchanged else rebuilt
 
 
 def _nearest_candidate_by_class(
@@ -4154,6 +4160,30 @@ def _bboxes_overlap_xywh(
     )
 
 
+def _efp_name_overlapping_input(
+    existing: list[UiDetection],
+    *,
+    local_bbox: tuple[int, int, int, int],
+    local_x: int,
+    local_y: int,
+) -> int | None:
+    """Index of the tightest FindAll input covering the click / overlapping EFP."""
+    best_i: int | None = None
+    best_area: int | None = None
+    for i, det in enumerate(existing):
+        if str(det.class_name or "").strip() != "input":
+            continue
+        covers = point_in_rect_xywh(int(local_x), int(local_y), det.bbox)
+        overlaps = _bboxes_overlap_xywh(local_bbox, det.bbox)
+        if not covers and not overlaps:
+            continue
+        area = _bbox_area(det.bbox)
+        if best_area is None or area < best_area:
+            best_i = i
+            best_area = area
+    return best_i
+
+
 def _efp_peer_detection_from_payload(
     element_from_point: dict[str, Any] | None,
     *,
@@ -4162,15 +4192,23 @@ def _efp_peer_detection_from_payload(
     local_y: int,
     existing: list[UiDetection],
 ) -> UiDetection | None:
-    """Build a FindAll-shaped UIA text peer from stored press-time EFP.
+    """Build a FindAll-shaped UIA peer from stored press-time EFP.
 
-    Returns ``None`` when bbox/label is missing or unusable, or when an
-    existing detection already carries the same label and covers the click /
-    overlaps the leaf box (dedupe).
+    Control-type split matches FindAll channels:
+
+    - ``input`` → named input peer (or Name copied onto an overlapping FindAll
+      Edit, returning ``None`` so a second same-box peer is not injected)
+    - tokens in ``UIA_CONTROL_TYPE_SUFFIX`` → labeled text peer
+    - empty / legacy → text peer (contained/coextensive promotion may name Edit)
+
+    Returns ``None`` when bbox/label is missing or unusable, when a same-label
+    labeled leaf already covers the click / overlaps the leaf, or when an
+    overlapping FindAll input was named in place.
     """
     if not isinstance(element_from_point, dict):
         return None
     from src.recorder.uia_input_boxes import (
+        UIA_CONTROL_TYPE_SUFFIX,
         is_usable_uia_landmark_label,
         is_weak_efp_hub_label,
         resolve_usable_uia_probe_label,
@@ -4200,6 +4238,35 @@ def _efp_peer_detection_from_payload(
     if not point_in_rect_xywh(int(local_x), int(local_y), local_bbox):
         # Click must still lie in the leaf; otherwise keep FindAll-only ranking.
         return None
+
+    control_type = str(element_from_point.get("control_type") or "").strip() or None
+    if control_type == "input":
+        # Prefer naming an existing FindAll Edit over a duplicate same-box peer.
+        hit_i = _efp_name_overlapping_input(
+            existing,
+            local_bbox=local_bbox,
+            local_x=local_x,
+            local_y=local_y,
+        )
+        if hit_i is not None:
+            host = existing[hit_i]
+            if _visible_text(host.text).casefold() != _visible_text(label).casefold():
+                existing[hit_i] = _detection_from_bbox(
+                    host.bbox,
+                    YOLO_CLASS_INPUT,
+                    text=label,
+                    source=host.source or "uia",
+                    uia_control_type=None,
+                )
+            return None
+        return _detection_from_bbox(
+            local_bbox,
+            YOLO_CLASS_INPUT,
+            text=label,
+            source="uia",
+            uia_control_type=None,
+        )
+
     label_n = _visible_text(label).casefold()
     for det in existing:
         if _visible_text(det.text).casefold() != label_n:
@@ -4208,13 +4275,17 @@ def _efp_peer_detection_from_payload(
             return None
         if _bboxes_overlap_xywh(local_bbox, det.bbox):
             return None
-    control_type = str(element_from_point.get("control_type") or "").strip() or None
+
+    # Labeled leaves keep uia_control_type; unknown/legacy stay text for promote.
+    peer_type = (
+        control_type if control_type in UIA_CONTROL_TYPE_SUFFIX else None
+    )
     return _detection_from_bbox(
         local_bbox,
         YOLO_CLASS_TEXT,
         text=label,
         source="uia",
-        uia_control_type=control_type,
+        uia_control_type=peer_type,
     )
 
 

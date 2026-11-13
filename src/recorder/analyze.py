@@ -365,6 +365,10 @@ def _click_target_anchor(vision: dict[str, Any]) -> str | None:
 
     primary = candidates[0]
     if primary.get("class_name") == "input":
+        # EFP/repair may put the field Name on the input candidate itself.
+        named = format_drag_candidate_anchor(primary)
+        if named and named != "輸入欄":
+            return named
         visible = _visible_input_field_text(vision)
         if visible:
             return f"「{visible}」文字所在的輸入欄"

@@ -224,3 +224,16 @@ def test_demote_skips_when_labels_agree() -> None:
         yolo_primary_text="Google Chrome",
     )
     assert timing["vision_path"] == "uia"
+
+
+def test_demote_skips_when_ocr_soft_agrees_with_findall_list_item_name() -> None:
+    """Short OCR hub vs longer Search list-item Name must keep UIA."""
+    timing = {"vision_path": "uia", "recording_uia_sufficient": True}
+    assert not _maybe_demote_uia_path_for_weak_efp_ocr_disagree(
+        vision_timing=timing,
+        element_from_point={"name": "CoreInput", "value": ""},
+        uia_primary_text="Google Chrome, 應用程式, 按右鍵以檢視選項",
+        yolo_primary_text="Google Chrome",
+    )
+    assert timing["vision_path"] == "uia"
+    assert timing["recording_uia_sufficient"] is True

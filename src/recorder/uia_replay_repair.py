@@ -25,10 +25,14 @@ from typing import Any, Iterator
 
 from src.common.io_utils import read_json, write_json
 from src.recorder.models import RecordedEvent, event_json_path
+from src.recorder.uia_input_boxes import OCR_UIA_LABEL_SOFT_AGREE_THRESHOLD
 
 RectXywh = tuple[int, int, int, int]
 # (bbox, label) or (bbox, label, uia_control_type)
 LabeledBox = tuple[RectXywh, str] | tuple[RectXywh, str, str]
+
+# Floor for breaking FindAll name ambiguity via OCR similarity (text targets).
+_REPAIR_OCR_SIMILARITY_THRESHOLD = float(OCR_UIA_LABEL_SOFT_AGREE_THRESHOLD)
 
 
 def _labeled_parts(item: LabeledBox) -> tuple[RectXywh, str, str]:
@@ -38,13 +42,9 @@ def _labeled_parts(item: LabeledBox) -> tuple[RectXywh, str, str]:
     return box, label, control_type
 
 
-# Floor for breaking FindAll name ambiguity via OCR similarity (text targets).
-_REPAIR_OCR_SIMILARITY_THRESHOLD = 0.25
-
-
 @dataclass(frozen=True)
 class UiaReplayRepairRequest:
-    """One recorded OCR target whose UIA snapshot had no usable text."""
+    """One recorded OCR target eligible for live FindAll UIA repair."""
 
     recording_dir: Path
     event_index: int
@@ -396,20 +396,20 @@ def snapshot_has_usable_text(snapshot: dict[str, Any] | None) -> bool:
     return False
 
 
-def snapshot_has_usable_text_at_point(
+def snapshot_usable_covering_labels(
     snapshot: dict[str, Any] | None,
     screen_xy: tuple[int, int] | None,
-) -> bool:
-    """True when a non-oversized usable UIA text covers ``screen_xy``.
+) -> list[str]:
+    """Usable non-oversized UIA text labels whose bbox covers ``screen_xy``.
 
     Snapshot ``texts[*].bbox`` values are screen ``xyxy``. Window-sized labels
     are ignored the same way recording drops them in ``uia_snapshot_image_local``.
     """
     if not isinstance(snapshot, dict) or screen_xy is None:
-        return False
+        return []
     texts = snapshot.get("texts")
     if not isinstance(texts, list):
-        return False
+        return []
     from src.recorder.uia_input_boxes import (
         is_oversized_uia_rect,
         is_usable_uia_landmark_label,
@@ -418,13 +418,15 @@ def snapshot_has_usable_text_at_point(
     try:
         x, y = int(screen_xy[0]), int(screen_xy[1])
     except (TypeError, ValueError, IndexError):
-        return False
+        return []
     window = _xywh_tuple(snapshot.get("window"))
     pad = _REPAIR_HIT_TOLERANCE_PX
+    labels: list[str] = []
     for item in texts:
         if not isinstance(item, dict):
             continue
-        if not is_usable_uia_landmark_label(str(item.get("text") or "")):
+        label = str(item.get("text") or "").strip()
+        if not is_usable_uia_landmark_label(label):
             continue
         box = item.get("bbox")
         if not isinstance(box, (list, tuple)) or len(box) != 4:
@@ -445,8 +447,16 @@ def snapshot_has_usable_text_at_point(
             y,
             (left - pad, top - pad, width + 2 * pad, height + 2 * pad),
         ):
-            return True
-    return False
+            labels.append(label)
+    return labels
+
+
+def snapshot_has_usable_text_at_point(
+    snapshot: dict[str, Any] | None,
+    screen_xy: tuple[int, int] | None,
+) -> bool:
+    """True when a non-oversized usable UIA text covers ``screen_xy``."""
+    return bool(snapshot_usable_covering_labels(snapshot, screen_xy))
 
 
 def _xywh_tuple(raw: Any) -> RectXywh | None:
@@ -1322,11 +1332,18 @@ def _load_request_with_reason(
             bbox,
             snapshot if isinstance(snapshot, dict) else None,
         )
-        if snapshot_has_usable_text_at_point(
+        covering = snapshot_usable_covering_labels(
             snapshot if isinstance(snapshot, dict) else None,
             probe,
-        ):
-            return None, "recorded_uia_snapshot_already_usable"
+        )
+        # Soft-agree covering FindAll (OCR hub vs longer Accessibility Name)
+        # still opens a repair slot so replay can upgrade YOLO→UIA. Hard-
+        # disagree covering means recording intentionally kept YOLO.
+        if covering:
+            from src.recorder.uia_input_boxes import ocr_uia_labels_soft_agree
+
+            if not any(ocr_uia_labels_soft_agree(text, label) for label in covering):
+                return None, "recorded_uia_snapshot_already_usable"
     return (
         UiaReplayRepairRequest(
             recording_dir=run_dir,

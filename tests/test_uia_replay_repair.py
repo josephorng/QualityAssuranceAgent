@@ -1720,9 +1720,83 @@ def test_replay_repair_slots_text_despite_usable_snapshot_texts_elsewhere(
     assert slots[0].recorded_bbox == (452, 23, 120, 32)
 
 
-def test_replay_repair_slots_text_skips_when_usable_uia_covers_click(
+def test_replay_repair_slots_text_skips_when_hard_disagree_uia_covers_click(
     tmp_path: Path,
 ) -> None:
+    """Unrelated covering FindAll keeps the already_usable skip."""
+    from src.recorder.uia_replay_repair import (
+        _load_request_with_reason,
+        replay_repair_slots,
+    )
+
+    run = tmp_path / "recording"
+    (run / "events").mkdir(parents=True)
+    (run / "analysis").mkdir()
+    (run / "yolo_ocr").mkdir()
+    event = {
+        "index": 1,
+        "timestamp_utc": "t",
+        "kind": "click",
+        "button": "left",
+        "cursor_xy": [250, 40],
+        "click_window": {
+            "hwnd": 5,
+            "title": "App",
+            "process_name": "app.exe",
+            "rect": [0, 0, 800, 600],
+            "class_name": "App",
+        },
+        "uia_snapshot": {
+            "window": [0, 0, 800, 600],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [
+                {
+                    "bbox": [200, 20, 320, 60],
+                    "text": "變更螢幕保護裝置",
+                    "control_type": "button",
+                }
+            ],
+        },
+    }
+    (run / "events" / "event_001.json").write_text(json.dumps(event), encoding="utf-8")
+    (run / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": "（YOLO+OCR）將滑鼠移到「Google Chrome」文字，並點擊滑鼠一下。",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run / "yolo_ocr" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "vision_path": "yolo_ocr",
+                "local_cursor": [250, 40],
+                "candidates": [
+                    {
+                        "bbox": [200, 20, 120, 40],
+                        "text": "Google Chrome",
+                        "class_name": "text",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    req, reason = _load_request_with_reason(run, 1, "click")
+    assert req is None
+    assert reason == "recorded_uia_snapshot_already_usable"
+    assert replay_repair_slots(run, 1, [{"name": "move_mouse", "arguments": {}}]) == []
+
+
+def test_replay_repair_slots_text_opens_when_ocr_soft_agrees_covering_uia(
+    tmp_path: Path,
+) -> None:
+    """Soft-agree covering FindAll (exact OCR match) opens a repair slot."""
     from src.recorder.uia_replay_repair import (
         _load_request_with_reason,
         replay_repair_slots,
@@ -1787,9 +1861,89 @@ def test_replay_repair_slots_text_skips_when_usable_uia_covers_click(
         encoding="utf-8",
     )
     req, reason = _load_request_with_reason(run, 1, "click")
-    assert req is None
-    assert reason == "recorded_uia_snapshot_already_usable"
-    assert replay_repair_slots(run, 1, [{"name": "move_mouse", "arguments": {}}]) == []
+    assert reason == ""
+    assert req is not None
+    assert req.recorded_text == "確定"
+    slots = replay_repair_slots(run, 1, [{"name": "move_mouse", "arguments": {}}])
+    assert len(slots) == 1 and slots[0] is not None
+    assert slots[0].recorded_text == "確定"
+
+
+def test_replay_repair_slots_text_opens_for_search_list_item_soft_agree(
+    tmp_path: Path,
+) -> None:
+    """Event-3 style: short OCR vs longer Search list-item Name opens repair."""
+    from src.recorder.uia_replay_repair import (
+        _load_request_with_reason,
+        replay_repair_slots,
+    )
+
+    run = tmp_path / "recording"
+    (run / "events").mkdir(parents=True)
+    (run / "analysis").mkdir()
+    (run / "yolo_ocr").mkdir()
+    event = {
+        "index": 3,
+        "timestamp_utc": "t",
+        "kind": "click",
+        "button": "left",
+        "cursor_xy": [628, 294],
+        "click_window": {
+            "hwnd": 5,
+            "title": "搜尋",
+            "process_name": "SearchHost.exe",
+            "rect": [487, 142, 858, 938],
+            "class_name": "Windows.UI.Core.CoreWindow",
+        },
+        "uia_snapshot": {
+            "window": [487, 142, 858, 938],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [
+                {
+                    "bbox": [529, 264, 875, 343],
+                    "text": "Google Chrome, 應用程式, 按右鍵以檢視選項",
+                    "control_type": "list_item",
+                }
+            ],
+        },
+    }
+    (run / "events" / "event_003.json").write_text(json.dumps(event), encoding="utf-8")
+    (run / "analysis" / "event_003.json").write_text(
+        json.dumps(
+            {
+                "event_index": 3,
+                "instruction": "（YOLO+OCR）將滑鼠移到「Google Chrome」文字，並點擊滑鼠一下。",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run / "yolo_ocr" / "event_003.json").write_text(
+        json.dumps(
+            {
+                "vision_path": "yolo_ocr",
+                "vision_path_reason": "弱 EFP 且 OCR 與 UIA 目標不一致",
+                "local_cursor": [628, 294],
+                "candidates": [
+                    {
+                        "bbox": [583, 283, 119, 20],
+                        "text": "Google Chrome",
+                        "class_name": "text",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    req, reason = _load_request_with_reason(run, 3, "click")
+    assert reason == ""
+    assert req is not None
+    assert req.recorded_text == "Google Chrome"
+    slots = replay_repair_slots(run, 3, [{"name": "move_mouse", "arguments": {}}])
+    assert len(slots) == 1 and slots[0] is not None
+    assert slots[0].recorded_text == "Google Chrome"
 
 
 def test_replay_repair_slots_text_ignores_oversized_usable_covering_name(

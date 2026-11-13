@@ -3375,15 +3375,21 @@ def _maybe_demote_uia_path_for_weak_efp_ocr_disagree(
 ) -> bool:
     """Demote UIA→YOLO when weak EFP and OCR nearest hub disagrees with UIA.
 
-    Mutates ``vision_timing`` in place. Returns True when demoted.
+    Soft OCR↔UIA agreement (e.g. short OCR vs longer FindAll list-item Name)
+    keeps the UIA path. Mutates ``vision_timing`` in place. Returns True when
+    demoted.
     """
     if vision_timing.get("vision_path") != "uia":
         return False
     if not _press_efp_is_weak_hub(element_from_point):
         return False
-    uia_label = _visible_text(uia_primary_text).casefold()
-    yolo_label = _visible_text(yolo_primary_text).casefold()
-    if not uia_label or not yolo_label or uia_label == yolo_label:
+    from src.recorder.uia_input_boxes import ocr_uia_labels_soft_agree
+
+    uia_label = _visible_text(uia_primary_text)
+    yolo_label = _visible_text(yolo_primary_text)
+    if not uia_label or not yolo_label or ocr_uia_labels_soft_agree(
+        yolo_label, uia_label
+    ):
         return False
     vision_timing["vision_path"] = "yolo_ocr"
     vision_timing["vision_path_reason"] = VISION_PATH_WEAK_EFP_OCR_DISAGREE_REASON

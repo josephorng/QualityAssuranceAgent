@@ -355,6 +355,30 @@ def is_usable_uia_landmark_label(text: str | None) -> bool:
     return True
 
 
+# Same floor as replay FindAll OCR-similarity picks (Search list-item Names, …).
+OCR_UIA_LABEL_SOFT_AGREE_THRESHOLD = 0.25
+
+
+def ocr_uia_labels_soft_agree(ocr_text: str | None, uia_text: str | None) -> bool:
+    """True when OCR and UIA hub labels are the same target (exact or soft match).
+
+    Soft match uses ``_label_similarity`` so short OCR hubs like ``Google Chrome``
+    agree with longer FindAll Accessibility Names such as
+    ``Google Chrome, 應用程式, 按右鍵以檢視選項``.
+    """
+    left = str(ocr_text or "").strip()
+    right = str(uia_text or "").strip()
+    if not left or not right:
+        return False
+    if left.casefold() == right.casefold():
+        return True
+    from cua_mcp.select_mouse_target import _label_similarity
+
+    return float(_label_similarity(left, right)) >= float(
+        OCR_UIA_LABEL_SOFT_AGREE_THRESHOLD
+    )
+
+
 # Host / chrome leaves that must not replace a FindAll hub label (EFP channel
 # only). Keep in sync with repair promote gates.
 _WEAK_EFP_HUB_LABELS = frozenset(

@@ -16,6 +16,7 @@ from src.recorder.vision_context import (
     candidate_anchor_name,
     candidate_offset_for_instruction,
     ensure_click_primary_candidate,
+    ensure_scroll_primary_candidate,
     format_drag_candidate_anchor,
     format_drag_destination_offset_hints,
     format_field_context_hint,
@@ -841,7 +842,8 @@ def rebuild_pointer_instruction(
     receive their action suffix (e.g. 「，並點擊滑鼠一下。」).
 
     When ``promote_primary`` is False, do not re-rank ``candidates[0]`` via
-    ``ensure_click_primary_candidate`` (honors an explicit user target pick).
+    ``ensure_click_primary_candidate`` / ``ensure_scroll_primary_candidate``
+    (honors an explicit user target pick).
     """
     dest = destination if isinstance(destination, dict) else {}
 
@@ -877,7 +879,7 @@ def rebuild_pointer_instruction(
 
     if event.kind == "scroll":
         if promote_primary:
-            ensure_click_primary_candidate(vision)
+            ensure_scroll_primary_candidate(vision)
         base = instruction_for_scroll(event, vision)
         if base is None:
             return None
@@ -982,6 +984,7 @@ async def analyze_event_to_cache(
             return payload
 
     if event.kind == "scroll":
+        ensure_scroll_primary_candidate(vision)
         scroll_instruction = instruction_for_scroll(event, vision)
         if scroll_instruction is not None:
             return _instruction_result(

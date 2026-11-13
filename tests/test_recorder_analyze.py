@@ -3523,6 +3523,66 @@ def test_instruction_for_scroll_on_scrollbar() -> None:
     assert instruction_for_scroll(event, vision) == "在滾動條附近向下捲動"
 
 
+def test_rebuild_scroll_promotes_owning_scrollbar_over_data_item() -> None:
+    """Wheel over a row leaf should target the owning scrollbar, not Value|N."""
+    event = RecordedEvent(
+        index=3,
+        timestamp_utc="t",
+        kind="scroll",
+        cursor_xy=(1571, 1043),
+        scroll_delta=-3,
+        screenshot_path="",
+    )
+    vision = {
+        "local_cursor": (1571, 1043),
+        "vision_path": "yolo_ocr",
+        "candidates": [
+            {
+                "bbox": [872, 1025, 1398, 36],
+                "center": [1571, 1043],
+                "class_name": "text",
+                "text": "Value|20",
+                "uia_control_type": "data_item",
+            },
+            {
+                "bbox": [2266, 740, 31, 758],
+                "center": [2282, 1119],
+                "class_name": "scrollbar",
+                "text": None,
+            },
+        ],
+    }
+    assert rebuild_pointer_instruction(event, vision, include_nearby=False) == (
+        "（YOLO+OCR）在滾動條附近向下捲動"
+    )
+    assert vision["candidates"][0]["class_name"] == "scrollbar"
+
+
+def test_rebuild_scroll_keeps_named_leaf_without_scrollbar() -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="scroll",
+        cursor_xy=(100, 200),
+        scroll_delta=-3,
+        screenshot_path="",
+    )
+    vision = {
+        "local_cursor": (100, 200),
+        "candidates": [
+            {
+                "bbox": [80, 180, 40, 20],
+                "center": [100, 190],
+                "class_name": "text",
+                "text": "檔案清單",
+            },
+        ],
+    }
+    assert rebuild_pointer_instruction(event, vision, include_nearby=False) == (
+        "在「檔案清單」文字附近向下捲動"
+    )
+
+
 def test_instruction_for_click_returns_none_for_generic_anchor() -> None:
     event = RecordedEvent(
         index=1,

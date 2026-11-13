@@ -194,6 +194,37 @@ def test_compile_scroll_with_hover() -> None:
     assert calls[1]["arguments"]["clicks"] == 3
 
 
+def test_compile_scroll_scrollbar_omits_leaf_element_from_point() -> None:
+    event = _event(
+        kind="scroll",
+        scroll_delta=-3,
+        element_from_point={"name": "Value", "value": "20"},
+    )
+    instruction = "（YOLO+OCR）在滾動條附近向下捲動"
+    calls = compile_tool_calls(event, instruction)
+    assert calls is not None
+    assert [c["name"] for c in calls] == ["move_mouse", "scroll"]
+    args = calls[0]["arguments"]
+    assert args["instruction"] == "（YOLO+OCR）滾動條"
+    assert args["control_type"] == "scrollbar"
+    assert "name" not in args
+    assert "value" not in args
+
+
+def test_compile_scroll_leaf_hover_keeps_element_from_point() -> None:
+    event = _event(
+        kind="scroll",
+        scroll_delta=-3,
+        element_from_point={"name": "Value", "value": "20"},
+    )
+    instruction = "在「Value|20」資料項目附近向下捲動"
+    calls = compile_tool_calls(event, instruction)
+    assert calls is not None
+    args = calls[0]["arguments"]
+    assert args["name"] == "Value"
+    assert args["value"] == "20"
+
+
 def test_compile_window_maximize() -> None:
     event = _event(
         kind="click",

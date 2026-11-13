@@ -1333,6 +1333,29 @@ def ensure_click_primary_candidate(vision: dict[str, Any]) -> dict[str, Any]:
     return vision
 
 
+def ensure_scroll_primary_candidate(vision: dict[str, Any]) -> dict[str, Any]:
+    """Promote the owning scrollbar to ``candidates[0]`` for scroll steps.
+
+    Mutates ``vision`` in place when a local cursor and an owning scrollbar exist.
+    Leaves leaf ranking unchanged when no owning scrollbar is found.
+    """
+    local = vision.get("local_cursor")
+    candidates = vision.get("candidates")
+    if not isinstance(local, (list, tuple)) or len(local) != 2:
+        return vision
+    if not isinstance(candidates, list) or not candidates:
+        return vision
+    owning = _find_owning_scrollbar_for_point(
+        candidates,
+        int(local[0]),
+        int(local[1]),
+    )
+    if owning is None:
+        return vision
+    vision["candidates"] = _promote_scrollbar_in_candidates(candidates, owning)
+    return vision
+
+
 def _promote_click_primary_detections(
     detections: list[UiDetection],
     local_x: int,
@@ -4792,6 +4815,86 @@ def _find_containing_scrollbar(
         return None
     hits.sort(key=lambda item: item[0])
     return hits[0][1]
+
+
+def _find_owning_scrollbar_for_point(
+    candidates: list[dict[str, Any]],
+    local_x: int,
+    local_y: int,
+) -> dict[str, Any] | None:
+    """Return the scrollbar that owns scroll content at ``(local_x, local_y)``.
+
+    Prefer a scrollbar that already contains the point. Otherwise pick the
+    nearest vertical bar to the right of the cursor whose track covers
+    ``local_y`` (or nearest horizontal bar below whose track covers
+    ``local_x``), with no intervening same-orientation scrollbar between the
+    cursor and the bar. Unlike landmark ``_scrollbar_content_region``, this
+    does not cap content reach at 480px.
+    """
+    containing = _find_containing_scrollbar(candidates, local_x, local_y)
+    if isinstance(containing, dict):
+        return containing
+
+    scrollbars: list[tuple[dict[str, Any], tuple[int, int, int, int]]] = []
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        if str(cand.get("class_name") or "").strip() != "scrollbar":
+            continue
+        bbox = _candidate_bbox_tuple(cand)
+        if bbox is None:
+            continue
+        scrollbars.append((cand, bbox))
+    if not scrollbars:
+        return None
+
+    vertical: list[tuple[int, dict[str, Any]]] = []
+    horizontal: list[tuple[int, dict[str, Any]]] = []
+    for cand, (x, y, w, h) in scrollbars:
+        if h >= w:
+            if not (y <= local_y < y + h):
+                continue
+            if local_x >= x:
+                continue
+            intervening = False
+            for _other, (ox, oy, ow, oh) in scrollbars:
+                if oh < ow:
+                    continue
+                if not (local_x < ox < x):
+                    continue
+                if oy <= local_y < oy + oh:
+                    intervening = True
+                    break
+            if intervening:
+                continue
+            vertical.append((x - local_x, cand))
+        else:
+            if not (x <= local_x < x + w):
+                continue
+            if local_y >= y:
+                continue
+            intervening = False
+            for _other, (ox, oy, ow, oh) in scrollbars:
+                if oh >= ow:
+                    continue
+                if not (local_y < oy < y):
+                    continue
+                if ox <= local_x < ox + ow:
+                    intervening = True
+                    break
+            if intervening:
+                continue
+            horizontal.append((y - local_y, cand))
+
+    best_v = min(vertical, key=lambda item: item[0]) if vertical else None
+    best_h = min(horizontal, key=lambda item: item[0]) if horizontal else None
+    if best_v is not None and best_h is not None:
+        return best_v[1] if best_v[0] <= best_h[0] else best_h[1]
+    if best_v is not None:
+        return best_v[1]
+    if best_h is not None:
+        return best_h[1]
+    return None
 
 
 def _point_hits_scrollbar_end_arrow(

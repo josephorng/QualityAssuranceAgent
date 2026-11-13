@@ -32,6 +32,8 @@ from src.recorder.vision_context import (
     build_vision_context_at_point,
     candidate_offset_for_instruction,
     ensure_click_primary_candidate,
+    ensure_scroll_primary_candidate,
+    _find_owning_scrollbar_for_point,
     format_drag_candidate_anchor,
     format_drag_destination_offset_hints,
     format_drag_relative_offset_phrase,
@@ -554,6 +556,99 @@ def test_ensure_click_primary_candidate_reorders_vision() -> None:
     }
     ensure_click_primary_candidate(vision)
     assert vision["candidates"][0].get("text") == "識別名稱2"
+
+
+def test_ensure_scroll_primary_promotes_owning_vertical_scrollbar() -> None:
+    leaf = {
+        "bbox": [872, 1025, 1398, 36],
+        "center": [1571, 1043],
+        "class_name": "text",
+        "text": "Value|20",
+    }
+    owning = {
+        "bbox": [2266, 740, 31, 758],
+        "center": [2282, 1119],
+        "class_name": "scrollbar",
+        "text": None,
+    }
+    vision = {
+        "local_cursor": (1571, 1043),
+        "candidates": [leaf, owning],
+    }
+    ensure_scroll_primary_candidate(vision)
+    assert vision["candidates"][0] is owning
+
+
+def test_ensure_scroll_primary_no_op_without_owning_scrollbar() -> None:
+    leaf = {
+        "bbox": [80, 180, 40, 20],
+        "center": [100, 190],
+        "class_name": "text",
+        "text": "檔案清單",
+    }
+    vision = {"local_cursor": (100, 200), "candidates": [leaf]}
+    ensure_scroll_primary_candidate(vision)
+    assert vision["candidates"][0] is leaf
+
+
+def test_find_owning_scrollbar_picks_nearer_of_two_vertical_bars() -> None:
+    far = {
+        "bbox": [2500, 700, 20, 800],
+        "center": [2510, 1100],
+        "class_name": "scrollbar",
+        "text": None,
+    }
+    near = {
+        "bbox": [2200, 700, 20, 800],
+        "center": [2210, 1100],
+        "class_name": "scrollbar",
+        "text": None,
+    }
+    leaf = {
+        "bbox": [900, 1000, 100, 20],
+        "center": [950, 1010],
+        "class_name": "text",
+        "text": "row",
+    }
+    found = _find_owning_scrollbar_for_point([leaf, far, near], 950, 1010)
+    assert found is near
+
+
+def test_find_owning_scrollbar_skips_far_bar_when_nearer_exists() -> None:
+    """Content left of two vertical tracks owns the nearer (intervening) bar."""
+    outer = {
+        "bbox": [2500, 700, 20, 800],
+        "center": [2510, 1100],
+        "class_name": "scrollbar",
+        "text": None,
+    }
+    inner = {
+        "bbox": [2200, 700, 20, 800],
+        "center": [2210, 1100],
+        "class_name": "scrollbar",
+        "text": None,
+    }
+    # From content, outer is blocked by intervening inner → pick inner.
+    assert _find_owning_scrollbar_for_point([outer, inner], 950, 1010) is inner
+    # Between the two bars: only outer sits to the right (no intervening).
+    assert _find_owning_scrollbar_for_point([outer, inner], 2300, 1010) is outer
+
+
+def test_find_owning_scrollbar_when_cursor_on_track() -> None:
+    bar = {
+        "bbox": [2104, 156, 22, 842],
+        "center": [2115, 577],
+        "class_name": "scrollbar",
+        "text": None,
+    }
+    leaf = {
+        "bbox": [100, 500, 40, 20],
+        "center": [120, 510],
+        "class_name": "text",
+        "text": "other",
+    }
+    found = _find_owning_scrollbar_for_point([leaf, bar], 2115, 577)
+    assert found is bar
 
 
 def test_nearest_candidates_spatial_neighbor_reorder() -> None:

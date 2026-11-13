@@ -468,13 +468,21 @@ def _compile_scroll(
         prefix = vision_mode_prefix(mode)
         if prefix:
             target = prefix + target
+        # Scrollbar hubs are stable containers; drop leaf EFP (e.g. Value|20)
+        # recorded under the wheel so replay does not soft-prefer a row cell.
+        _vision_mode, _anchor, control_type = hub_match_fields(target)
+        efp = (
+            None
+            if control_type == "scrollbar"
+            else event.element_from_point
+        )
         calls.append(
             _move_mouse_call(
                 instruction,
                 target=target,
                 click_window=event.click_window,
                 vision=vision,
-                element_from_point=event.element_from_point,
+                element_from_point=efp,
             )
         )
     calls.append(_call("scroll", clicks=clicks, instruction=instruction))

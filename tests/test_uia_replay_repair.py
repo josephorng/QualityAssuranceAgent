@@ -1532,6 +1532,229 @@ def test_replay_repair_slots_text_not_far_scrollbar(
     assert slots[0].recorded_bbox == (297, 316, 78, 17)
 
 
+def test_replay_repair_slots_text_despite_usable_snapshot_texts_elsewhere(
+    tmp_path: Path,
+) -> None:
+    """Rich FindAll elsewhere must not block repair when the click has no UIA text."""
+    from src.recorder.uia_replay_repair import replay_repair_slots
+
+    run = tmp_path / "recording"
+    (run / "events").mkdir(parents=True)
+    (run / "analysis").mkdir()
+    (run / "yolo_ocr").mkdir()
+    event = {
+        "index": 1,
+        "timestamp_utc": "t",
+        "kind": "click",
+        "button": "left",
+        "cursor_xy": [523, 35],
+        "click_window": {
+            "hwnd": 5,
+            "title": "App",
+            "process_name": "app.exe",
+            "rect": [0, 0, 1920, 880],
+            "class_name": "App",
+        },
+        "uia_snapshot": {
+            "window": [0, 0, 1920, 880],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [
+                {
+                    "bbox": [400, 500, 600, 524],
+                    "text": "電腦名稱|DC01",
+                    "control_type": "data_item",
+                },
+                {
+                    "bbox": [1725, 492, 1740, 509],
+                    "text": "Line up",
+                    "control_type": "button",
+                },
+            ],
+        },
+    }
+    (run / "events" / "event_001.json").write_text(json.dumps(event), encoding="utf-8")
+    (run / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": "（YOLO+OCR）將滑鼠移到「異動認列|TopTab|Allot」文字，並點擊滑鼠一下。",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run / "yolo_ocr" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "vision_path": "yolo_ocr",
+                "vision_path_reason": "點擊處沒有可用的 UIA 文字",
+                "local_cursor": [523, 35],
+                "candidates": [
+                    {
+                        "bbox": [452, 23, 120, 32],
+                        "text": "異動認列|TopTab|Allot",
+                        "class_name": "text",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    slots = replay_repair_slots(run, 1, [{"name": "move_mouse", "arguments": {}}])
+    assert len(slots) == 1 and slots[0] is not None
+    assert slots[0].recorded_text == "異動認列|TopTab|Allot"
+    assert slots[0].recorded_bbox == (452, 23, 120, 32)
+
+
+def test_replay_repair_slots_text_skips_when_usable_uia_covers_click(
+    tmp_path: Path,
+) -> None:
+    from src.recorder.uia_replay_repair import (
+        _load_request_with_reason,
+        replay_repair_slots,
+    )
+
+    run = tmp_path / "recording"
+    (run / "events").mkdir(parents=True)
+    (run / "analysis").mkdir()
+    (run / "yolo_ocr").mkdir()
+    event = {
+        "index": 1,
+        "timestamp_utc": "t",
+        "kind": "click",
+        "button": "left",
+        "cursor_xy": [250, 40],
+        "click_window": {
+            "hwnd": 5,
+            "title": "App",
+            "process_name": "app.exe",
+            "rect": [0, 0, 800, 600],
+            "class_name": "App",
+        },
+        "uia_snapshot": {
+            "window": [0, 0, 800, 600],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [
+                {
+                    "bbox": [200, 20, 320, 60],
+                    "text": "確定",
+                    "control_type": "button",
+                }
+            ],
+        },
+    }
+    (run / "events" / "event_001.json").write_text(json.dumps(event), encoding="utf-8")
+    (run / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": "（YOLO+OCR）將滑鼠移到「確定」文字，並點擊滑鼠一下。",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run / "yolo_ocr" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "vision_path": "yolo_ocr",
+                "local_cursor": [250, 40],
+                "candidates": [
+                    {
+                        "bbox": [200, 20, 120, 40],
+                        "text": "確定",
+                        "class_name": "text",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    req, reason = _load_request_with_reason(run, 1, "click")
+    assert req is None
+    assert reason == "recorded_uia_snapshot_already_usable"
+    assert replay_repair_slots(run, 1, [{"name": "move_mouse", "arguments": {}}]) == []
+
+
+def test_replay_repair_slots_text_ignores_oversized_usable_covering_name(
+    tmp_path: Path,
+) -> None:
+    """Window-spanning Names must not block repair (recording drops them too)."""
+    from src.recorder.uia_replay_repair import replay_repair_slots
+
+    run = tmp_path / "recording"
+    (run / "events").mkdir(parents=True)
+    (run / "analysis").mkdir()
+    (run / "yolo_ocr").mkdir()
+    event = {
+        "index": 1,
+        "timestamp_utc": "t",
+        "kind": "click",
+        "button": "left",
+        "cursor_xy": [523, 35],
+        "click_window": {
+            "hwnd": 5,
+            "title": "App",
+            "process_name": "app.exe",
+            "rect": [0, 0, 1920, 880],
+            "class_name": "App",
+        },
+        "uia_snapshot": {
+            "window": [0, 0, 1920, 880],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [
+                {
+                    "bbox": [0, 0, 1920, 880],
+                    "text": "神網主視窗",
+                    "control_type": "custom",
+                },
+                {
+                    "bbox": [400, 500, 600, 524],
+                    "text": "電腦名稱|DC01",
+                    "control_type": "data_item",
+                },
+            ],
+        },
+    }
+    (run / "events" / "event_001.json").write_text(json.dumps(event), encoding="utf-8")
+    (run / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": "（YOLO+OCR）將滑鼠移到「異動認列|TopTab|Allot」文字，並點擊滑鼠一下。",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run / "yolo_ocr" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "vision_path": "yolo_ocr",
+                "vision_path_reason": "點擊處沒有可用的 UIA 文字",
+                "local_cursor": [523, 35],
+                "candidates": [
+                    {
+                        "bbox": [452, 23, 120, 32],
+                        "text": "異動認列|TopTab|Allot",
+                        "class_name": "text",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    slots = replay_repair_slots(run, 1, [{"name": "move_mouse", "arguments": {}}])
+    assert len(slots) == 1 and slots[0] is not None
+    assert slots[0].recorded_text == "異動認列|TopTab|Allot"
+
+
 def test_replay_repair_slots_scrollbar_despite_usable_snapshot_texts(
     tmp_path: Path,
 ) -> None:

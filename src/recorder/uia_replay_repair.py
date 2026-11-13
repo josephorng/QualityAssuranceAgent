@@ -371,8 +371,16 @@ def yolo_ocr_fallback_slots(
     return slots
 
 
+# Match recording's ``_BBOX_HIT_TOLERANCE_PX`` for click-vs-UIA coverage.
+_REPAIR_HIT_TOLERANCE_PX = 4
+
+
 def snapshot_has_usable_text(snapshot: dict[str, Any] | None) -> bool:
-    """True when a recorded snapshot already has a landmark label."""
+    """True when a recorded snapshot already has a landmark label.
+
+    Prefer :func:`snapshot_has_usable_text_at_point` for repair eligibility:
+    a rich window can have usable labels elsewhere while the click itself has none.
+    """
     if not isinstance(snapshot, dict):
         return False
     texts = snapshot.get("texts")
@@ -386,6 +394,95 @@ def snapshot_has_usable_text(snapshot: dict[str, Any] | None) -> bool:
         if is_usable_uia_landmark_label(str(item.get("text") or "")):
             return True
     return False
+
+
+def snapshot_has_usable_text_at_point(
+    snapshot: dict[str, Any] | None,
+    screen_xy: tuple[int, int] | None,
+) -> bool:
+    """True when a non-oversized usable UIA text covers ``screen_xy``.
+
+    Snapshot ``texts[*].bbox`` values are screen ``xyxy``. Window-sized labels
+    are ignored the same way recording drops them in ``uia_snapshot_image_local``.
+    """
+    if not isinstance(snapshot, dict) or screen_xy is None:
+        return False
+    texts = snapshot.get("texts")
+    if not isinstance(texts, list):
+        return False
+    from src.recorder.uia_input_boxes import (
+        is_oversized_uia_rect,
+        is_usable_uia_landmark_label,
+    )
+
+    try:
+        x, y = int(screen_xy[0]), int(screen_xy[1])
+    except (TypeError, ValueError, IndexError):
+        return False
+    window = _xywh_tuple(snapshot.get("window"))
+    pad = _REPAIR_HIT_TOLERANCE_PX
+    for item in texts:
+        if not isinstance(item, dict):
+            continue
+        if not is_usable_uia_landmark_label(str(item.get("text") or "")):
+            continue
+        box = item.get("bbox")
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            continue
+        try:
+            left, top, right, bottom = (int(v) for v in box[:4])
+        except (TypeError, ValueError):
+            continue
+        width = right - left
+        height = bottom - top
+        if width <= 0 or height <= 0:
+            continue
+        xywh = (left, top, width, height)
+        if window is not None and is_oversized_uia_rect(xywh, window):
+            continue
+        if _point_in_box(
+            x,
+            y,
+            (left - pad, top - pad, width + 2 * pad, height + 2 * pad),
+        ):
+            return True
+    return False
+
+
+def _xywh_tuple(raw: Any) -> RectXywh | None:
+    if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+        return None
+    try:
+        box = (int(raw[0]), int(raw[1]), int(raw[2]), int(raw[3]))
+    except (TypeError, ValueError):
+        return None
+    if box[2] <= 0 or box[3] <= 0:
+        return None
+    return box
+
+
+def _repair_probe_screen_xy(
+    event: RecordedEvent,
+    side: str,
+    recorded_window: RectXywh,
+    recorded_bbox: RectXywh,
+    snapshot: dict[str, Any] | None,
+) -> tuple[int, int] | None:
+    """Screen point for the repair coverage gate (cursor, else mapped bbox center)."""
+    xy = event.end_xy if side == "end" else event.cursor_xy
+    if isinstance(xy, (list, tuple)) and len(xy) >= 2:
+        try:
+            return (int(xy[0]), int(xy[1]))
+        except (TypeError, ValueError):
+            pass
+    snap_window = (
+        _xywh_tuple(snapshot.get("window")) if isinstance(snapshot, dict) else None
+    )
+    dest = snap_window if snap_window is not None else recorded_window
+    _mapped, center = map_recorded_box_to_screen(
+        recorded_bbox, recorded_window, dest
+    )
+    return center
 
 
 def _xywh_to_xyxy(box: RectXywh) -> list[int]:
@@ -1206,12 +1303,22 @@ def _load_request_with_reason(
         bbox, text = input_primary
     else:
         snapshot = event.end_uia_snapshot if side == "end" else event.uia_snapshot
-        if snapshot_has_usable_text(snapshot if isinstance(snapshot, dict) else None):
-            return None, "recorded_uia_snapshot_already_usable"
         primary = _recorded_primary(payload)
         if primary is None:
             return None, "no_recorded_primary_candidate"
         bbox, text, recorded_is_icon = primary
+        probe = _repair_probe_screen_xy(
+            event,
+            side,
+            recorded_window,
+            bbox,
+            snapshot if isinstance(snapshot, dict) else None,
+        )
+        if snapshot_has_usable_text_at_point(
+            snapshot if isinstance(snapshot, dict) else None,
+            probe,
+        ):
+            return None, "recorded_uia_snapshot_already_usable"
     return (
         UiaReplayRepairRequest(
             recording_dir=run_dir,

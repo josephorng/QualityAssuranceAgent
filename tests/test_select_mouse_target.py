@@ -1390,6 +1390,11 @@ async def test_find_mouse_point_ensures_recorded_maximized_before_locate(
         "is_maximized": True,
     }
 
+    def fake_on_screen(cw):
+        order.append("on_screen")
+        assert cw is click_window
+        return {"status": "already_on_screen", "hwnd": 42}
+
     def fake_ensure(cw):
         order.append("ensure")
         assert cw is click_window
@@ -1404,6 +1409,10 @@ async def test_find_mouse_point_ensures_recorded_maximized_before_locate(
         ), None
 
     monkeypatch.setattr(
+        "src.recorder.window_snapshot.ensure_recorded_click_window_on_screen",
+        fake_on_screen,
+    )
+    monkeypatch.setattr(
         "src.recorder.window_snapshot.ensure_recorded_click_window_maximized",
         fake_ensure,
     )
@@ -1412,7 +1421,11 @@ async def test_find_mouse_point_ensures_recorded_maximized_before_locate(
     found = await smt.find_mouse_point("移到目標", click_window=click_window)
     assert found is not None
     assert found[0:2] == (10, 20)
-    assert order == ["ensure", "attempt"]
+    assert order == ["on_screen", "ensure", "attempt"]
+    assert found[2]["click_window_on_screen"] == {
+        "status": "already_on_screen",
+        "hwnd": 42,
+    }
     assert found[2]["click_window_maximize"] == {
         "status": "maximized",
         "hwnd": 42,
@@ -4881,6 +4894,65 @@ def test_collect_fails_when_no_live_click_window(
         )
 
 
+def test_collect_desktop_live_miss_scans_full_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    from cua_mcp.select_mouse_target import _collect_monitor_detections
+    from cua_mcp.select_ui_element import UiDetection
+
+    seen: list[tuple[tuple[int, int, int, int] | None, tuple[int, int, int, int] | None]] = []
+
+    def fake_build(
+        bgr,
+        *,
+        yolo_conf_threshold: float = 0.05,
+        ocr_roi=None,
+        yolo_crop_roi=None,
+        **_kwargs,
+    ):
+        seen.append((ocr_roi, yolo_crop_roi))
+        return [
+            UiDetection(
+                bbox=(0, 0, 1, 1),
+                cx=0,
+                cy=0,
+                class_id=YOLO_CLASS_TEXT,
+                class_name="text",
+                text="WinMaster7 Console",
+                icons=None,
+            )
+        ]
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._detect_mouse_targets_from_bgr",
+        fake_build,
+    )
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target.active_monitor_offset",
+        lambda _idx: (0, 0),
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.resolve_live_ocr_roi_local",
+        lambda *_a, **_k: None,
+    )
+
+    img = np.full((40, 80, 3), 1, dtype=np.uint8)
+    dets = _collect_monitor_detections(
+        [(1, img)],
+        yolo_conf_threshold=0.05,
+        click_window={
+            "hwnd": 1,
+            "title": "Program Manager",
+            "process_name": "explorer.exe",
+            "class_name": "Progman",
+            "rect": [0, 0, 1918, 920],
+        },
+    )
+    assert len(dets) == 1
+    assert seen == [(None, None)]
+
+
 def test_collect_crops_yolo_only_with_live_roi(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8145,3 +8217,280 @@ async def test_uia_hit_without_fallback_still_skips_yolo(
     assert found[0:2] == (uia_row.cx, uia_row.cy)
     assert found[2]["selection_method"] == "uia_first_unique"
     assert finish_calls == []
+
+
+@pytest.mark.asyncio
+async def test_uia_empty_constellation_desktop_uses_ocr_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty UIA + constellation must not raise click_window miss before YOLO."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        YoloOcrMoveFallback,
+        bind_yolo_ocr_fallbacks,
+    )
+
+    ocr = _detection_from_bbox(
+        (80, 80, 40, 20), YOLO_CLASS_TEXT, text="WinMaster7 Console", source="ocr"
+    )
+    snapshots: list[int] = []
+    finish_calls: list[str] = []
+
+    def fake_grab():
+        frame = np.zeros((200, 200, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def fake_uia(_captured, _window):
+        snapshots.append(1)
+        return []
+
+    def fake_finish(*_a, **_k):
+        finish_calls.append("yolo")
+        return (
+            [1],
+            ["shot.png"],
+            [(1, np.zeros((200, 200, 3), dtype=np.uint8))],
+            [ocr],
+            {
+                "capture_s": 0.01,
+                "yolo_s": 0.1,
+                "line_s": 0.0,
+                "uia_input_s": 0.0,
+                "uia_scrollbar_s": 0.0,
+                "uia_text_s": 0.0,
+                "ocr_s": 0.2,
+                "icon_ocr_retry_s": 0.0,
+                "total_s": 0.31,
+            },
+        )
+
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(smt, "_uia_only_detections_for_click_window", fake_uia)
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.ensure_recorded_click_window_on_screen",
+        lambda _cw: {"status": "skipped_desktop", "hwnd": 1},
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.ensure_recorded_click_window_maximized",
+        lambda _cw: None,
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.resolve_live_ocr_roi_local",
+        lambda *_a, **_k: None,
+    )
+
+    landmark_geometry = {
+        "version": 1,
+        "scale": 100.0,
+        "landmarks": [{"label": "AnyDesk", "side": "right", "xy": [10.0, 10.0]}],
+        "landmark_to_landmark": [],
+        "landmark_to_target": [{"from": "AnyDesk", "dx": 0.5, "dy": 0.0}],
+        "target_label": "WinMaster7 Console",
+    }
+    fallback = YoloOcrMoveFallback(
+        instruction="（YOLO+OCR）「WinMaster7 Console」文字",
+        landmark_geometry=landmark_geometry,
+    )
+    with bind_yolo_ocr_fallbacks([fallback]):
+        found = await smt.find_mouse_point(
+            "（UIA）「WinMaster7 Console」清單項目",
+            click_window={
+                "hwnd": 1,
+                "title": "Program Manager",
+                "process_name": "explorer.exe",
+                "class_name": "Progman",
+                "rect": [0, 0, 1918, 920],
+            },
+            vision_mode="uia",
+            anchor_text="WinMaster7 Console",
+            control_type="list_item",
+            landmark_geometry=landmark_geometry,
+            recorded_efp_name="WinMaster7 Console",
+            recorded_efp_value="",
+        )
+    assert snapshots == [1, 1]
+    assert finish_calls == ["yolo"]
+    assert found is not None
+    assert found[2]["target_text"] == "WinMaster7 Console"
+    assert found[2]["timing"]["vision_path"] == "yolo_ocr"
+
+
+@pytest.mark.asyncio
+async def test_uia_empty_non_desktop_missing_window_still_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from cua_mcp.select_mouse_target import CLICK_WINDOW_MISS_MESSAGE
+
+    def fake_grab():
+        frame = np.zeros((200, 200, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def fake_finish(*_a, **_k):
+        raise ValueError(CLICK_WINDOW_MISS_MESSAGE)
+
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(smt, "_uia_only_detections_for_click_window", lambda *_a, **_k: [])
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.ensure_recorded_click_window_on_screen",
+        lambda _cw: {"status": "skipped_no_match"},
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.ensure_recorded_click_window_maximized",
+        lambda _cw: None,
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.resolve_live_ocr_roi_local",
+        lambda *_a, **_k: None,
+    )
+
+    with pytest.raises(ValueError, match="Recorded click_window is not on screen"):
+        await smt.find_mouse_point(
+            "（UIA）「文件」文字",
+            click_window={
+                "hwnd": 7,
+                "title": "Missing App",
+                "process_name": "app.exe",
+                "class_name": "Chrome_WidgetWin_1",
+                "rect": [0, 0, 800, 600],
+            },
+            vision_mode="uia",
+            anchor_text="文件",
+            control_type="text",
+            landmark_geometry={
+                "version": 1,
+                "scale": 10.0,
+                "landmarks": [],
+                "landmark_to_landmark": [],
+                "landmark_to_target": [],
+            },
+            recorded_efp_name="文件",
+            recorded_efp_value="",
+        )
+
+
+@pytest.mark.asyncio
+async def test_uia_empty_without_ocr_fallback_falls_through_to_yolo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+
+    ocr = _detection_from_bbox(
+        (40, 40, 30, 16), YOLO_CLASS_TEXT, text="Chrome", source="ocr"
+    )
+
+    def fake_grab():
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def fake_finish(*_a, **_k):
+        return (
+            [1],
+            ["shot.png"],
+            [(1, np.zeros((100, 100, 3), dtype=np.uint8))],
+            [ocr],
+            {
+                "capture_s": 0.01,
+                "yolo_s": 0.1,
+                "line_s": 0.0,
+                "uia_input_s": 0.0,
+                "uia_scrollbar_s": 0.0,
+                "uia_text_s": 0.0,
+                "ocr_s": 0.2,
+                "icon_ocr_retry_s": 0.0,
+                "total_s": 0.31,
+            },
+        )
+
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(smt, "_uia_only_detections_for_click_window", lambda *_a, **_k: [])
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.ensure_recorded_click_window_on_screen",
+        lambda _cw: {"status": "already_on_screen", "hwnd": 5},
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.ensure_recorded_click_window_maximized",
+        lambda _cw: None,
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.resolve_live_ocr_roi_local",
+        lambda *_a, **_k: (0, 0, 100, 100),
+    )
+
+    found = await smt.find_mouse_point(
+        "（UIA）「Chrome」清單項目",
+        click_window={
+            "hwnd": 5,
+            "title": "Program Manager",
+            "process_name": "explorer.exe",
+            "class_name": "Progman",
+            "rect": [0, 0, 100, 100],
+        },
+        vision_mode="uia",
+        anchor_text="Chrome|1",
+        control_type="list_item",
+    )
+    assert found is not None
+    assert found[2]["target_text"] == "Chrome"
+    assert found[2]["timing"]["vision_path"] == "yolo_ocr"
+
+
+@pytest.mark.asyncio
+async def test_ui_change_retry_preserves_ocr_fallback_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        YoloOcrMoveFallback,
+        bind_yolo_ocr_fallbacks,
+        _yolo_ocr_fallback_slots,
+    )
+
+    seen: list[object] = []
+    calls = {"attempt": 0}
+    fb1 = YoloOcrMoveFallback(instruction="（YOLO+OCR）「一」文字")
+    fb2 = YoloOcrMoveFallback(instruction="（YOLO+OCR）「二」文字")
+
+    async def fake_attempt(*_a, **kwargs):
+        calls["attempt"] += 1
+        seen.append(kwargs.get("ocr_fallback"))
+        if calls["attempt"] == 1:
+            return None, _ui_change_fingerprint(0)
+        return (11, 22, {"timing": {"select_phase": "select"}}), None
+
+    monkeypatch.setattr(smt, "_find_mouse_point_attempt", fake_attempt)
+    monkeypatch.setattr(
+        smt,
+        "_fresh_fingerprint_for_compare",
+        lambda _cw: _ui_change_fingerprint(255),
+    )
+    monkeypatch.setattr(smt, "_ui_change_mad", lambda _a, _b: 0.2)
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.ensure_recorded_click_window_on_screen",
+        lambda _cw: None,
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.ensure_recorded_click_window_maximized",
+        lambda _cw: None,
+    )
+
+    with bind_yolo_ocr_fallbacks([fb1, fb2]):
+        found = await smt.find_mouse_point("將滑鼠移到「目標」文字")
+        remaining = _yolo_ocr_fallback_slots.get()
+
+    assert found is not None
+    assert calls["attempt"] == 2
+    assert seen == [fb1, fb1]
+    assert remaining == [fb2]

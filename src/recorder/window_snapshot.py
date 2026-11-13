@@ -53,6 +53,8 @@ _FLYOUT_CLASS_NAMES = frozenset(
     }
 )
 _FLYOUT_TITLES = frozenset({"快顯主機"})
+# Desktop icon host: wallpaper may move SHELLDLL_DefView between Progman and WorkerW.
+DESKTOP_SHELL_CLASS_NAMES = frozenset({"Progman", "WorkerW"})
 
 
 @dataclass(frozen=True)
@@ -2373,6 +2375,69 @@ def _is_flyout_window(*, class_name: str, title: str) -> bool:
     return class_name in _FLYOUT_CLASS_NAMES
 
 
+def _is_desktop_shell_class(class_name: str | None) -> bool:
+    return str(class_name or "").strip() in DESKTOP_SHELL_CLASS_NAMES
+
+
+def is_desktop_shell_click_window(
+    click_window: ClickWindowInfo | dict[str, Any] | None,
+) -> bool:
+    """True when ``click_window`` is Progman / WorkerW (desktop icon host)."""
+    info = (
+        click_window
+        if isinstance(click_window, ClickWindowInfo)
+        else ClickWindowInfo.from_dict(click_window) if isinstance(click_window, dict) else None
+    )
+    if info is None:
+        return False
+    return _is_desktop_shell_class(info.class_name)
+
+
+def _hwnd_is_visible(hwnd: int) -> bool:
+    if os.name != "nt" or hwnd == 0:
+        return False
+    try:
+        return bool(ctypes.windll.user32.IsWindowVisible(int(hwnd)))
+    except Exception:
+        return False
+
+
+def _live_hwnd_usable_for_match(
+    live: WindowInfo,
+    *,
+    require_visible: bool = True,
+) -> bool:
+    """Reject hidden or zero-size hwnds so matching can fall through.
+
+    ``require_visible`` is for the recorded-hwnd path. Top-level snapshot
+    candidates are already ``IsWindowVisible``-filtered.
+    """
+    if int(live.width) <= 0 or int(live.height) <= 0:
+        return False
+    if live.is_minimized:
+        # Minimized apps still match (on-screen prep restores them); desktop
+        # shell should never be iconic for icon FindAll.
+        return not _is_desktop_shell_class(live.class_name)
+    if require_visible and not _hwnd_is_visible(int(live.hwnd)):
+        return False
+    return True
+
+
+def _desktop_shell_process_ok(
+    recorded_process: str,
+    live_process: str | None,
+) -> bool:
+    """Explorer desktop hosts share explorer.exe when a process name is known."""
+    if not recorded_process:
+        return True
+    live = (live_process or "").lower()
+    if not live:
+        # snapshot_top_level_windows may omit process until attach; class match
+        # is enough for Progman/WorkerW equivalence.
+        return True
+    return live == recorded_process
+
+
 def _click_window_from_window_info(win: WindowInfo) -> ClickWindowInfo:
     class_name = _window_class_name(win.hwnd)
     title = win.title or ""
@@ -2464,43 +2529,57 @@ def find_matching_click_window(
     if info is None:
         return None
 
+    recorded_desktop = _is_desktop_shell_class(info.class_name)
+
     if info.hwnd and _hwnd_still_valid(info.hwnd):
-        live = _window_info_from_hwnd(info.hwnd)
-        if live is not None:
-            matched = _click_window_from_window_info(live)
-            # Keep recorded taskbar/flyout flags when class lookup is noisy.
-            if info.is_taskbar or info.is_flyout:
-                matched = ClickWindowInfo(
-                    hwnd=matched.hwnd,
-                    title=matched.title or info.title,
-                    process_name=matched.process_name or info.process_name,
-                    left=matched.left,
-                    top=matched.top,
-                    width=matched.width,
-                    height=matched.height,
-                    is_maximized=matched.is_maximized,
-                    is_taskbar=info.is_taskbar or matched.is_taskbar,
-                    is_flyout=info.is_flyout or matched.is_flyout,
-                    class_name=matched.class_name or info.class_name,
-                )
-            return matched
+        live_info = _window_info_from_hwnd(info.hwnd)
+        if live_info is not None and _live_hwnd_usable_for_match(live_info):
+            live_desktop = _is_desktop_shell_class(live_info.class_name)
+            # Recorded desktop hwnd reused by a non-shell window: search instead.
+            if not (recorded_desktop and not live_desktop):
+                matched = _click_window_from_window_info(live_info)
+                # Keep recorded taskbar/flyout flags when class lookup is noisy.
+                if info.is_taskbar or info.is_flyout:
+                    matched = ClickWindowInfo(
+                        hwnd=matched.hwnd,
+                        title=matched.title or info.title,
+                        process_name=matched.process_name or info.process_name,
+                        left=matched.left,
+                        top=matched.top,
+                        width=matched.width,
+                        height=matched.height,
+                        is_maximized=matched.is_maximized,
+                        is_taskbar=info.is_taskbar or matched.is_taskbar,
+                        is_flyout=info.is_flyout or matched.is_flyout,
+                        class_name=matched.class_name or info.class_name,
+                    )
+                return matched
 
     # Fall back among top-level windows.
     # Untitled popups (ComboLBox): require class_name + process; never title.
+    # Desktop shell (Progman/WorkerW): either class matches explorer hosts.
     # Titled windows: process + title, then closest area (class unused).
     title_key = _normalize_title(info.title)
     process_name = (info.process_name or "").lower()
     class_name = (info.class_name or "").strip()
-    use_class_fallback = (not title_key) and bool(class_name)
+    use_desktop_shell = recorded_desktop
+    use_class_fallback = (not title_key) and bool(class_name) and not use_desktop_shell
     best: ClickWindowInfo | None = None
     best_area_delta: int | None = None
     for win in snapshot_top_level_windows():
-        if use_class_fallback:
+        if not _live_hwnd_usable_for_match(win, require_visible=False):
+            continue
+        live_class = (win.class_name or "").strip() or (
+            _window_class_name(int(win.hwnd or 0)) or ""
+        ).strip()
+        if use_desktop_shell:
+            if not _is_desktop_shell_class(live_class):
+                continue
+            if not _desktop_shell_process_ok(process_name, win.process_name):
+                continue
+        elif use_class_fallback:
             # Prefer WindowInfo.class_name (snapshot already filled it); live
             # GetClassName can be empty for ephemeral/test hwnds.
-            live_class = (win.class_name or "").strip() or (
-                _window_class_name(int(win.hwnd or 0)) or ""
-            ).strip()
             if live_class != class_name:
                 continue
             if process_name:
@@ -2515,7 +2594,10 @@ def find_matching_click_window(
                 if live_proc and live_proc != process_name:
                     continue
         live = _click_window_from_window_info(win)
-        if use_class_fallback and not (live.class_name or "").strip():
+        if (
+            (use_class_fallback or use_desktop_shell)
+            and not (live.class_name or "").strip()
+        ):
             live = ClickWindowInfo(
                 hwnd=live.hwnd,
                 title=live.title,
@@ -2527,13 +2609,107 @@ def find_matching_click_window(
                 is_maximized=live.is_maximized,
                 is_taskbar=live.is_taskbar,
                 is_flyout=live.is_flyout,
-                class_name=class_name,
+                class_name=live_class or class_name,
             )
         delta = abs(live.area() - info.area())
         if best is None or best_area_delta is None or delta < best_area_delta:
             best = live
             best_area_delta = delta
     return best
+
+
+def _bring_hwnd_foreground_best_effort(hwnd: int) -> bool:
+    """Best-effort BringWindowToTop + SetForegroundWindow; never raises."""
+    if os.name != "nt" or hwnd == 0:
+        return False
+    user32 = ctypes.windll.user32
+    changed = False
+    try:
+        fg = int(user32.GetForegroundWindow() or 0)
+    except Exception:
+        fg = 0
+    if fg == int(hwnd):
+        return False
+    try:
+        if user32.BringWindowToTop(int(hwnd)):
+            changed = True
+    except Exception:
+        pass
+    try:
+        if user32.SetForegroundWindow(int(hwnd)):
+            changed = True
+    except Exception:
+        pass
+    return changed
+
+
+def ensure_recorded_click_window_on_screen(
+    click_window: ClickWindowInfo | dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Restore a minimized live match so replay can locate inside it.
+
+    Skips desktop shell, taskbar, flyout, and weak identity. Does not maximize
+    or move windows across monitors. Best-effort foreground only.
+
+    Returns ``None`` when there is nothing to do (missing payload). Otherwise a
+    status dict with ``status`` one of ``already_on_screen``, ``restored``,
+    ``foregrounded``, ``skipped_no_match``, ``skipped_taskbar``,
+    ``skipped_flyout``, ``skipped_desktop``, ``skipped_input_pane``.
+    """
+    info = (
+        click_window
+        if isinstance(click_window, ClickWindowInfo)
+        else ClickWindowInfo.from_dict(click_window) if isinstance(click_window, dict) else None
+    )
+    if info is None:
+        return None
+    if info.is_taskbar or _is_taskbar_class(info.class_name):
+        return {"status": "skipped_taskbar", "hwnd": int(info.hwnd)}
+    if info.is_flyout or _is_flyout_window(
+        class_name=str(info.class_name or ""), title=str(info.title or "")
+    ):
+        return {"status": "skipped_flyout", "hwnd": int(info.hwnd)}
+    if _is_desktop_shell_class(info.class_name):
+        return {"status": "skipped_desktop", "hwnd": int(info.hwnd)}
+    if str(info.class_name or "").strip() in _INPUT_PANE_CLASS_NAMES:
+        return {"status": "skipped_input_pane", "hwnd": int(info.hwnd)}
+
+    hwnd_ok = bool(info.hwnd) and _hwnd_still_valid(int(info.hwnd))
+    if not hwnd_ok and not _normalize_title(info.title) and not (info.class_name or "").strip():
+        return {"status": "skipped_no_match"}
+
+    live = find_matching_click_window(info)
+    if live is None or not live.hwnd:
+        return {"status": "skipped_no_match"}
+    if live.is_taskbar or _is_taskbar_class(live.class_name):
+        return {"status": "skipped_taskbar", "hwnd": int(live.hwnd)}
+    if live.is_flyout or _is_flyout_window(
+        class_name=str(live.class_name or ""), title=str(live.title or "")
+    ):
+        return {"status": "skipped_flyout", "hwnd": int(live.hwnd)}
+    if _is_desktop_shell_class(live.class_name):
+        return {"status": "skipped_desktop", "hwnd": int(live.hwnd)}
+
+    hwnd = int(live.hwnd)
+    restored = False
+    if (
+        _is_iconic(hwnd)
+        or int(live.left) <= _MINIMIZED_COORD_THRESHOLD
+        or int(live.top) <= _MINIMIZED_COORD_THRESHOLD
+    ):
+        _show_window(hwnd, _SW_RESTORE)
+        restored = True
+        time.sleep(WINDOW_SETTLE_DELAY_S)
+
+    foregrounded = _bring_hwnd_foreground_best_effort(hwnd)
+    if foregrounded and not restored:
+        time.sleep(WINDOW_SETTLE_DELAY_S)
+
+    if restored:
+        return {"status": "restored", "hwnd": hwnd}
+    if foregrounded:
+        return {"status": "foregrounded", "hwnd": hwnd}
+    return {"status": "already_on_screen", "hwnd": hwnd}
 
 
 def ensure_recorded_click_window_maximized(
@@ -2559,6 +2735,8 @@ def ensure_recorded_click_window_maximized(
         return {"status": "skipped_taskbar", "hwnd": int(info.hwnd)}
     if info.is_flyout:
         return {"status": "skipped_flyout", "hwnd": int(info.hwnd)}
+    if _is_desktop_shell_class(info.class_name):
+        return {"status": "skipped_desktop", "hwnd": int(info.hwnd)}
 
     # find_matching_click_window falls back to nearest area when title and class
     # are both blank; refuse that path so we never maximize a random window.
@@ -2573,6 +2751,8 @@ def ensure_recorded_click_window_maximized(
         return {"status": "skipped_taskbar", "hwnd": int(live.hwnd)}
     if live.is_flyout:
         return {"status": "skipped_flyout", "hwnd": int(live.hwnd)}
+    if _is_desktop_shell_class(live.class_name):
+        return {"status": "skipped_desktop", "hwnd": int(live.hwnd)}
 
     hwnd = int(live.hwnd)
     if _is_zoomed(hwnd):

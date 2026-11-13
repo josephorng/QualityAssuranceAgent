@@ -3132,45 +3132,60 @@ def _collect_monitor_detections(
         if click_window is not None and not _any_monitor_has_live_click_window(
             captured, click_window
         ):
-            _log_info("move_mouse fail: no live click_window match")
-            raise ValueError(CLICK_WINDOW_MISS_MESSAGE)
-        landmarks_outside = False
-        for monitor_index, bgr in captured:
-            if click_window is None or not landmark_centers:
-                break
-            img_h, img_w = bgr.shape[:2]
-            recorded_roi = resolve_recorded_ocr_roi_local(
-                click_window,
-                image_w=img_w,
-                image_h=img_h,
-                monitor_offset=active_monitor_offset(monitor_index),
-            )
-            if _landmarks_clearly_outside_window(recorded_roi, landmark_centers):
-                landmarks_outside = True
+            from src.recorder.window_snapshot import is_desktop_shell_click_window
+
+            if is_desktop_shell_click_window(click_window):
+                # Progman/WorkerW mismatch or stale shell hwnd: still scan the
+                # captured monitor(s) so YOLO+OCR can find desktop icons.
                 _log_info(
-                    "move_mouse yolo full-frame: landmarks outside recorded window "
-                    f"monitor={monitor_index} roi={recorded_roi} "
-                    f"landmarks={len(landmark_centers)}"
+                    "move_mouse desktop click_window live miss; "
+                    "scanning full monitor(s)"
                 )
-                break
-        if landmarks_outside:
-            # Need desktop-wide detections; do not gate OCR to the window.
-            planned = [
-                (monitor_index, bgr, None, None) for monitor_index, bgr in captured
-            ]
-        else:
+                planned = [
+                    (monitor_index, bgr, None, None)
+                    for monitor_index, bgr in captured
+                ]
+            else:
+                _log_info("move_mouse fail: no live click_window match")
+                raise ValueError(CLICK_WINDOW_MISS_MESSAGE)
+        landmarks_outside = False
+        if not planned:
             for monitor_index, bgr in captured:
-                gate = _gate_roi(monitor_index, bgr)
-                crop = (
-                    _yolo_crop_for_window(monitor_index, bgr)
-                    if gate is not None
-                    else None
+                if click_window is None or not landmark_centers:
+                    break
+                img_h, img_w = bgr.shape[:2]
+                recorded_roi = resolve_recorded_ocr_roi_local(
+                    click_window,
+                    image_w=img_w,
+                    image_h=img_h,
+                    monitor_offset=active_monitor_offset(monitor_index),
                 )
-                # A recorded rect must not pull in a monitor the live window
-                # does not intersect. Those monitors are dropped below.
-                if click_window is not None and crop is None:
-                    gate = None
-                planned.append((monitor_index, bgr, gate, crop))
+                if _landmarks_clearly_outside_window(recorded_roi, landmark_centers):
+                    landmarks_outside = True
+                    _log_info(
+                        "move_mouse yolo full-frame: landmarks outside recorded window "
+                        f"monitor={monitor_index} roi={recorded_roi} "
+                        f"landmarks={len(landmark_centers)}"
+                    )
+                    break
+            if landmarks_outside:
+                # Need desktop-wide detections; do not gate OCR to the window.
+                planned = [
+                    (monitor_index, bgr, None, None) for monitor_index, bgr in captured
+                ]
+            else:
+                for monitor_index, bgr in captured:
+                    gate = _gate_roi(monitor_index, bgr)
+                    crop = (
+                        _yolo_crop_for_window(monitor_index, bgr)
+                        if gate is not None
+                        else None
+                    )
+                    # A recorded rect must not pull in a monitor the live window
+                    # does not intersect. Those monitors are dropped below.
+                    if click_window is not None and crop is None:
+                        gate = None
+                    planned.append((monitor_index, bgr, gate, crop))
 
     if any(gate is not None for _idx, _bgr, gate, _crop in planned):
         skipped = [idx for idx, _bgr, gate, _crop in planned if gate is None]
@@ -5939,20 +5954,31 @@ async def find_mouse_point(
     Successful metadata includes ``timing`` with capture / YOLO / OCR / parse /
     select phase seconds for session time profiles.
     """
-    from src.recorder.window_snapshot import ensure_recorded_click_window_maximized
+    from src.recorder.uia_replay_repair import take_yolo_ocr_fallback
+    from src.recorder.window_snapshot import (
+        ensure_recorded_click_window_maximized,
+        ensure_recorded_click_window_on_screen,
+    )
 
+    # Restore minimized apps before maximize / locate. Pop OCR twin once so
+    # ui_change_retry reuses the same slot instead of consuming the next one.
+    on_screen_meta = await asyncio.to_thread(
+        ensure_recorded_click_window_on_screen, click_window
+    )
     maximize_meta = await asyncio.to_thread(
         ensure_recorded_click_window_maximized, click_window
     )
+    ocr_fallback = take_yolo_ocr_fallback()
 
-    def _with_maximize_meta(
+    def _with_prep_meta(
         point: tuple[int, int, dict[str, Any]],
     ) -> tuple[int, int, dict[str, Any]]:
-        if maximize_meta is None:
-            return point
         x, y, meta = point
         out = dict(meta)
-        out["click_window_maximize"] = maximize_meta
+        if on_screen_meta is not None:
+            out["click_window_on_screen"] = on_screen_meta
+        if maximize_meta is not None:
+            out["click_window_maximize"] = maximize_meta
         return x, y, out
 
     result, fingerprint = await _find_mouse_point_attempt(
@@ -5966,9 +5992,10 @@ async def find_mouse_point(
         vision_mode=vision_mode,
         recorded_efp_name=recorded_efp_name,
         recorded_efp_value=recorded_efp_value,
+        ocr_fallback=ocr_fallback,
     )
     if result is not None:
-        return _with_maximize_meta(result)
+        return _with_prep_meta(result)
     if fingerprint is None:
         return None
 
@@ -6007,11 +6034,12 @@ async def find_mouse_point(
         vision_mode=vision_mode,
         recorded_efp_name=recorded_efp_name,
         recorded_efp_value=recorded_efp_value,
+        ocr_fallback=ocr_fallback,
     )
     if result2 is None:
         return None
     gx, gy, meta = result2
-    return _with_maximize_meta(
+    return _with_prep_meta(
         (
             gx,
             gy,
@@ -6034,11 +6062,16 @@ async def _find_mouse_point_attempt(
     vision_mode: str | None = None,
     recorded_efp_name: str | None = None,
     recorded_efp_value: str | None = None,
+    ocr_fallback: Any | None = None,
 ) -> tuple[
     tuple[int, int, dict[str, Any]] | None,
     _UiChangeFingerprint | None,
 ]:
-    """One locator pass; returns ``(result, capture_fingerprint)``."""
+    """One locator pass; returns ``(result, capture_fingerprint)``.
+
+    ``ocr_fallback`` is popped once in :func:`find_mouse_point` and passed here
+    so a ui_change_retry reuses the same twin instead of consuming the next slot.
+    """
     instruction_text = (instruction or "").strip()
     if not instruction_text:
         raise ValueError("instruction must be non-empty")
@@ -6083,9 +6116,6 @@ async def _find_mouse_point_attempt(
         str(recorded_efp_value).strip() if isinstance(recorded_efp_value, str) else ""
     )
     recorded_anchor_match = structured_anchor_text is not None
-    from src.recorder.uia_replay_repair import take_yolo_ocr_fallback
-
-    ocr_fallback = take_yolo_ocr_fallback()
 
     total_started = time.perf_counter()
     caption_role = caption_role_from_instruction(instruction_text)
@@ -6183,6 +6213,7 @@ async def _find_mouse_point_attempt(
     uia_yolo_subtarget_method = "uia_yolo_subtarget"
     uia_first_s = 0.0
     uia_first_measured = False
+    uia_snapshot_was_empty = False
     grabbed_frames = False
     uia_dets: list[UiDetection] = []
     captured: list[tuple[int, np.ndarray]] = []
@@ -6286,7 +6317,10 @@ async def _find_mouse_point_attempt(
             """FindAll UIA ∪ deferred-OCR YOLO boxes for constellation EFP."""
             nonlocal constellation_yolo_dets, constellation_yolo_timing
             nonlocal monitor_indices, image_paths, captured, capture_s
-            if not constellation_joint:
+            # Empty UIA has no labeled landmarks for constellation EFP; running
+            # deferred YOLO here only risks a premature click_window miss before
+            # UIA retry / YOLO+OCR fallback can run.
+            if not constellation_joint or not uia_list:
                 return list(uia_list)
             if constellation_yolo_dets and allow_reuse:
                 yolo_boxes = constellation_yolo_dets
@@ -6339,6 +6373,8 @@ async def _find_mouse_point_attempt(
         )
         uia_first_s += time.perf_counter() - uia_first_started
         uia_first_measured = True
+        if not uia_dets:
+            uia_snapshot_was_empty = True
         _log_info(
             "move_mouse uia_first snapshot "
             f"total={len(uia_dets)} {_uia_snapshot_class_counts(uia_dets)}"
@@ -6354,6 +6390,10 @@ async def _find_mouse_point_attempt(
                 _uia_only_detections_for_click_window, captured, click_window
             )
             uia_first_s += time.perf_counter() - uia_first_started
+            if uia_dets:
+                uia_snapshot_was_empty = False
+            else:
+                uia_snapshot_was_empty = True
             _log_info(
                 "move_mouse uia_first retry snapshot "
                 f"total={len(uia_dets)} {_uia_snapshot_class_counts(uia_dets)}"
@@ -6405,6 +6445,40 @@ async def _find_mouse_point_attempt(
                     constellation_yolo_timing = {}
                     _log_info(
                         "move_mouse uia→yolo fallback recapture before YOLO"
+                    )
+                elif uia_snapshot_was_empty:
+                    # No OCR twin stored; still leave the UIA channel so YOLO+OCR
+                    # can match the visible label (desktop icons, dead UIA tree).
+                    _log_info(
+                        "move_mouse uia empty; YOLO+OCR fallback without twin "
+                        f"anchor={match_anchor!r}"
+                    )
+                    vision_mode = "yolo_ocr"
+                    allow_uia_select = False
+                    filter_by_control_type = False
+                    recorded_anchor_match = False
+                    control_type_token = None
+                    if "|" in str(match_anchor or ""):
+                        match_anchor = (
+                            str(match_anchor).split("|", 1)[0].strip() or match_anchor
+                        )
+                    vision_plan = _MouseVisionPlan(
+                        ocr_class_ids=frozenset(
+                            {YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT}
+                        ),
+                        refine_with_uia=True,
+                    )
+                    (
+                        monitor_indices,
+                        image_paths,
+                        captured,
+                        capture_s,
+                    ) = await asyncio.to_thread(_grab_selected_monitors)
+                    _note_capture(captured)
+                    constellation_yolo_dets = []
+                    constellation_yolo_timing = {}
+                    _log_info(
+                        "move_mouse uia→yolo empty-fallback recapture before YOLO"
                     )
         skip_yolo_subtarget = _hub_is_input_or_scrollbar(
             instruction=instruction_text,
@@ -7359,6 +7433,13 @@ async def _find_mouse_point_attempt(
                     recorded_efp_name=recorded_efp_name,
                     recorded_efp_value=recorded_efp_value,
                 )
+                if hard_efp and uia_snapshot_was_empty:
+                    # Dead UIA tree: do not let empty ElementFromPoint veto OCR.
+                    hard_efp = False
+                    _log_info(
+                        "move_mouse: soft EFP gate after empty UIA snapshot "
+                        f"vision_mode={vision_mode!r}"
+                    )
                 skip_geom_after_hard_miss = False
                 if efp_present:
                     efp_det, efp_point, efp_reason = (
@@ -7455,9 +7536,12 @@ async def _find_mouse_point_attempt(
                             ),
                         ))
 
-        if used_geometry:
-            pass
-        elif _recorded_efp_present(recorded_efp_name, recorded_efp_value) and anchor_matches:
+        selection_done = bool(used_geometry)
+        if (
+            not selection_done
+            and _recorded_efp_present(recorded_efp_name, recorded_efp_value)
+            and anchor_matches
+        ):
             # Recorded press-time Name/Value: prefer live EFP among the shortlist.
             # Input/scrollbar hubs soft-miss into unique/LLM; labeled hubs hard-fail.
             hard_efp = _efp_gate_required_for_hub(
@@ -7467,6 +7551,12 @@ async def _find_mouse_point_attempt(
                 recorded_efp_name=recorded_efp_name,
                 recorded_efp_value=recorded_efp_value,
             )
+            if hard_efp and uia_snapshot_was_empty:
+                hard_efp = False
+                _log_info(
+                    "move_mouse: soft EFP gate after empty UIA snapshot "
+                    f"vision_mode={vision_mode!r} pool={len(anchor_matches)}"
+                )
             mean_cx = int(
                 round(sum(int(d.cx) for d in anchor_matches) / len(anchor_matches))
             )
@@ -7485,6 +7575,7 @@ async def _find_mouse_point_attempt(
                 idx = detections.index(efp_det)
                 selection_method = "anchor_efp_pick"
                 select_phase = selection_method
+                selection_done = True
                 _log_info(
                     "move_mouse: anchor_efp_pick "
                     f"center=[{chosen.cx},{chosen.cy}] pool={len(anchor_matches)}"
@@ -7504,28 +7595,30 @@ async def _find_mouse_point_attempt(
                     f"recorded_name={recorded_efp_name!r} "
                     f"recorded_value={recorded_efp_value!r}; continue select"
                 )
-        elif len(anchor_matches) == 1:
-            idx = 0
-            chosen = anchor_matches[0]
-            select_phase = "select_unique"
-            _log_info(
-                "move_mouse: single anchor candidate after filter; skipping LLM pick"
-            )
-        else:
-            pool_idx, selected_text = await _select_center_with_llm(
-                anchor,
-                anchor_matches,
-                image_paths,
-                neighbor_candidates=nearby_matches,
-                nearby_labels=nearby_phrases,
-            )
-            idx = pool_idx
-            chosen = anchor_matches[pool_idx]
-            select_phase = "llm_pick"
-            _log_info(
-                f"move_mouse: LLM picked index={pool_idx} "
-                f"text={selected_text!r} center=[{chosen.cx},{chosen.cy}]"
-            )
+        if not selection_done:
+            if len(anchor_matches) == 1:
+                idx = 0
+                chosen = anchor_matches[0]
+                select_phase = "select_unique"
+                _log_info(
+                    "move_mouse: single anchor candidate after filter; "
+                    "skipping LLM pick"
+                )
+            else:
+                pool_idx, selected_text = await _select_center_with_llm(
+                    anchor,
+                    anchor_matches,
+                    image_paths,
+                    neighbor_candidates=nearby_matches,
+                    nearby_labels=nearby_phrases,
+                )
+                idx = pool_idx
+                chosen = anchor_matches[pool_idx]
+                select_phase = "llm_pick"
+                _log_info(
+                    f"move_mouse: LLM picked index={pool_idx} "
+                    f"text={selected_text!r} center=[{chosen.cx},{chosen.cy}]"
+                )
     select_s = time.perf_counter() - select_started
 
     # similar_function_describe runs on move_mouse_visual only (see visual_mouse.py).

@@ -13,11 +13,13 @@ from src.recorder.window_snapshot import (
     diff_snapshots,
     diff_snapshots_with_debug,
     ensure_recorded_click_window_maximized,
+    ensure_recorded_click_window_on_screen,
     expected_outcome_for_window_change,
     find_matching_click_window,
     format_window_change_hint,
     instruction_for_window_change,
     is_agent_app_restore,
+    is_desktop_shell_click_window,
     resolve_window_change,
     settle_delay_for_click,
     filter_disabled_window_verify,
@@ -1734,6 +1736,314 @@ def test_find_matching_click_window_untitled_uses_class_and_process() -> None:
     assert matched is not None
     assert matched.hwnd == 3
     assert matched.class_name == "ComboLBox"
+
+
+def test_is_desktop_shell_click_window() -> None:
+    assert is_desktop_shell_click_window(
+        {"hwnd": 1, "class_name": "Progman", "rect": [0, 0, 100, 100]}
+    )
+    assert is_desktop_shell_click_window(
+        ClickWindowInfo(
+            hwnd=2,
+            title="",
+            process_name="explorer.exe",
+            left=0,
+            top=0,
+            width=100,
+            height=100,
+            is_maximized=False,
+            class_name="WorkerW",
+        )
+    )
+    assert not is_desktop_shell_click_window(
+        {"hwnd": 3, "class_name": "Chrome_WidgetWin_1", "rect": [0, 0, 100, 100]}
+    )
+
+
+def test_find_matching_click_window_desktop_workerw_matches_progman() -> None:
+    recorded = ClickWindowInfo(
+        hwnd=1,
+        title="",
+        process_name="explorer.exe",
+        left=0,
+        top=0,
+        width=1918,
+        height=920,
+        is_maximized=False,
+        class_name="WorkerW",
+    )
+    progman = _win(
+        2,
+        "Program Manager",
+        width=1918,
+        height=920,
+        class_name="Progman",
+        process_name="explorer.exe",
+    )
+    with patch(
+        "src.recorder.window_snapshot._hwnd_still_valid",
+        return_value=False,
+    ), patch(
+        "src.recorder.window_snapshot.snapshot_top_level_windows",
+        return_value=[progman],
+    ), patch(
+        "src.recorder.window_snapshot._click_window_from_window_info",
+        side_effect=lambda win: ClickWindowInfo(
+            hwnd=win.hwnd,
+            title=win.title,
+            process_name=win.process_name,
+            left=win.left,
+            top=win.top,
+            width=win.width,
+            height=win.height,
+            is_maximized=win.is_maximized,
+            class_name=win.class_name,
+        ),
+    ):
+        matched = find_matching_click_window(recorded)
+    assert matched is not None
+    assert matched.hwnd == 2
+    assert matched.class_name == "Progman"
+
+
+def test_find_matching_click_window_desktop_progman_matches_workerw() -> None:
+    recorded = ClickWindowInfo(
+        hwnd=1,
+        title="Program Manager",
+        process_name="explorer.exe",
+        left=0,
+        top=0,
+        width=1918,
+        height=920,
+        is_maximized=False,
+        class_name="Progman",
+    )
+    worker = _win(
+        3,
+        "",
+        width=1918,
+        height=920,
+        class_name="WorkerW",
+        process_name="explorer.exe",
+    )
+    with patch(
+        "src.recorder.window_snapshot._hwnd_still_valid",
+        return_value=False,
+    ), patch(
+        "src.recorder.window_snapshot.snapshot_top_level_windows",
+        return_value=[worker],
+    ), patch(
+        "src.recorder.window_snapshot._click_window_from_window_info",
+        side_effect=lambda win: ClickWindowInfo(
+            hwnd=win.hwnd,
+            title=win.title,
+            process_name=win.process_name,
+            left=win.left,
+            top=win.top,
+            width=win.width,
+            height=win.height,
+            is_maximized=win.is_maximized,
+            class_name=win.class_name,
+        ),
+    ):
+        matched = find_matching_click_window(recorded)
+    assert matched is not None
+    assert matched.hwnd == 3
+    assert matched.class_name == "WorkerW"
+
+
+def test_find_matching_click_window_skips_hidden_or_zero_size_stale_hwnd() -> None:
+    recorded = ClickWindowInfo(
+        hwnd=99,
+        title="Program Manager",
+        process_name="explorer.exe",
+        left=0,
+        top=0,
+        width=1918,
+        height=920,
+        is_maximized=False,
+        class_name="Progman",
+    )
+    hidden = _win(
+        99,
+        "Program Manager",
+        width=0,
+        height=0,
+        class_name="Progman",
+        process_name="explorer.exe",
+    )
+    live = _win(
+        5,
+        "",
+        width=1918,
+        height=920,
+        class_name="WorkerW",
+        process_name="explorer.exe",
+    )
+    with patch(
+        "src.recorder.window_snapshot._hwnd_still_valid",
+        return_value=True,
+    ), patch(
+        "src.recorder.window_snapshot._window_info_from_hwnd",
+        return_value=hidden,
+    ), patch(
+        "src.recorder.window_snapshot.snapshot_top_level_windows",
+        return_value=[live],
+    ), patch(
+        "src.recorder.window_snapshot._click_window_from_window_info",
+        side_effect=lambda win: ClickWindowInfo(
+            hwnd=win.hwnd,
+            title=win.title,
+            process_name=win.process_name,
+            left=win.left,
+            top=win.top,
+            width=win.width,
+            height=win.height,
+            is_maximized=win.is_maximized,
+            class_name=win.class_name,
+        ),
+    ):
+        matched = find_matching_click_window(recorded)
+    assert matched is not None
+    assert matched.hwnd == 5
+    assert matched.class_name == "WorkerW"
+
+
+def test_ensure_recorded_click_window_on_screen_restores_minimized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded = ClickWindowInfo(
+        hwnd=7,
+        title="Excel",
+        process_name="EXCEL.EXE",
+        left=10,
+        top=10,
+        width=800,
+        height=600,
+        is_maximized=False,
+    )
+    live = ClickWindowInfo(
+        hwnd=42,
+        title="Excel",
+        process_name="EXCEL.EXE",
+        left=-32000,
+        top=-32000,
+        width=160,
+        height=28,
+        is_maximized=False,
+    )
+    calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        lambda _cw: live,
+    )
+    monkeypatch.setattr("src.recorder.window_snapshot._is_iconic", lambda _h: True)
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot._show_window",
+        lambda hwnd, cmd: calls.append((hwnd, cmd)) or True,
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot._bring_hwnd_foreground_best_effort",
+        lambda _h: False,
+    )
+    monkeypatch.setattr("src.recorder.window_snapshot.time.sleep", lambda _s: None)
+
+    from src.recorder.window_snapshot import _SW_RESTORE
+
+    assert ensure_recorded_click_window_on_screen(recorded) == {
+        "status": "restored",
+        "hwnd": 42,
+    }
+    assert calls == [(42, _SW_RESTORE)]
+
+
+def test_ensure_recorded_click_window_on_screen_skips_desktop_taskbar_flyout() -> None:
+    desktop = ClickWindowInfo(
+        hwnd=1,
+        title="Program Manager",
+        process_name="explorer.exe",
+        left=0,
+        top=0,
+        width=1918,
+        height=920,
+        is_maximized=False,
+        class_name="Progman",
+    )
+    assert ensure_recorded_click_window_on_screen(desktop) == {
+        "status": "skipped_desktop",
+        "hwnd": 1,
+    }
+    taskbar = ClickWindowInfo(
+        hwnd=2,
+        title="",
+        process_name="explorer.exe",
+        left=0,
+        top=1040,
+        width=1920,
+        height=40,
+        is_maximized=False,
+        is_taskbar=True,
+        class_name="Shell_TrayWnd",
+    )
+    assert ensure_recorded_click_window_on_screen(taskbar) == {
+        "status": "skipped_taskbar",
+        "hwnd": 2,
+    }
+    flyout = ClickWindowInfo(
+        hwnd=3,
+        title="快顯主機",
+        process_name="explorer.exe",
+        left=100,
+        top=100,
+        width=200,
+        height=200,
+        is_maximized=False,
+        is_flyout=True,
+    )
+    assert ensure_recorded_click_window_on_screen(flyout) == {
+        "status": "skipped_flyout",
+        "hwnd": 3,
+    }
+
+
+def test_ensure_recorded_click_window_on_screen_already_on_screen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded = ClickWindowInfo(
+        hwnd=7,
+        title="Word",
+        process_name="WINWORD.EXE",
+        left=50,
+        top=50,
+        width=900,
+        height=700,
+        is_maximized=False,
+    )
+    live = ClickWindowInfo(
+        hwnd=99,
+        title="Word",
+        process_name="WINWORD.EXE",
+        left=50,
+        top=50,
+        width=900,
+        height=700,
+        is_maximized=False,
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        lambda _cw: live,
+    )
+    monkeypatch.setattr("src.recorder.window_snapshot._is_iconic", lambda _h: False)
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot._bring_hwnd_foreground_best_effort",
+        lambda _h: False,
+    )
+    with patch("src.recorder.window_snapshot._show_window") as show:
+        assert ensure_recorded_click_window_on_screen(recorded) == {
+            "status": "already_on_screen",
+            "hwnd": 99,
+        }
+        show.assert_not_called()
 
 
 def test_nchittest_lparam_packs_signed_screen_coordinates() -> None:

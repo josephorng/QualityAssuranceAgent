@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from cua_mcp.select_mouse_target import _detection_from_bbox
-from cua_mcp.yolo_onnx import YOLO_CLASS_INPUT, YOLO_CLASS_TEXT
+from cua_mcp.yolo_onnx import YOLO_CLASS_INPUT, YOLO_CLASS_SCROLLBAR, YOLO_CLASS_TEXT
 from src.recorder.vision_context import (
     _efp_peer_detection_from_payload,
     select_click_primary_candidate,
@@ -71,6 +71,52 @@ def test_efp_peer_skips_without_bbox() -> None:
             local_x=10,
             local_y=10,
             existing=[],
+        )
+        is None
+    )
+
+
+def test_efp_position_thumb_injects_scrollbar_peer() -> None:
+    """WinForms thumb Name=Position (unmapped control_type) → scrollbar, not text."""
+    efp = _efp_peer_detection_from_payload(
+        {
+            "name": "Position",
+            "value": "",
+            "bbox": [2289, 162, 23, 251],
+        },
+        monitor_offset=(0, 0),
+        local_x=2296,
+        local_y=258,
+        existing=[],
+    )
+    assert efp is not None
+    assert efp.class_name == "scrollbar"
+    assert efp.class_id == YOLO_CLASS_SCROLLBAR
+    assert efp.text is None
+    assert efp.bbox == (2289, 162, 23, 251)
+    assert efp.source == "uia"
+
+
+def test_efp_position_skipped_when_findall_scrollbar_covers_press() -> None:
+    existing = [
+        _detection_from_bbox(
+            (2289, 137, 23, 468),
+            YOLO_CLASS_SCROLLBAR,
+            text=None,
+            source="uia",
+        )
+    ]
+    assert (
+        _efp_peer_detection_from_payload(
+            {
+                "name": "Position",
+                "value": "",
+                "bbox": [2289, 162, 23, 251],
+            },
+            monitor_offset=(0, 0),
+            local_x=2296,
+            local_y=258,
+            existing=existing,
         )
         is None
     )

@@ -5,8 +5,11 @@ own candidate list, or YOLO+OCR when that list is not enough. The two lists
 are not merged.
 
 A control-type ScrollBar is a scrollbar. A Thumb whose AutomationId is
-``ScrollbarThumb`` is one too. ``UpButton`` / ``DownButton`` buttons on that
-thumb's line are included in the same scrollbar rectangle.
+``ScrollbarThumb`` (or Win32/WinForms Name ``Position``) is one too.
+``UpButton`` / ``DownButton`` AutomationIds, or Win32 Names such as
+``Line up`` / ``Line down`` / ``Column left`` / ``Column right`` (and
+``Page *`` mid-track parts), on that thumb's line are included in the same
+scrollbar rectangle.
 """
 
 from __future__ import annotations
@@ -137,11 +140,56 @@ _HOVER_SUBTREE_MAX_CLIMB = 12
 
 _SCROLLBAR_THUMB_AUTOMATION_ID = "ScrollbarThumb"
 _SCROLLBAR_LINE_BUTTON_AUTOMATION_IDS = frozenset({"UpButton", "DownButton"})
+# Win32/WinForms accessible Names when AutomationId is empty / non-WPF.
+_SCROLLBAR_THUMB_NAMES = frozenset({"position"})
+_SCROLLBAR_LINE_BUTTON_NAMES = frozenset(
+    {
+        "line up",
+        "line down",
+        "line left",
+        "line right",
+        "column left",
+        "column right",
+        "page up",
+        "page down",
+        "page left",
+        "page right",
+    }
+)
 # Same-line when the shared span covers this fraction of the shorter cross-axis side.
 _SCROLLBAR_LINE_OVERLAP_FRAC = 0.5
 # A thumb-built rect inside a ScrollBar control is a duplicate when the control
 # is at most this many times larger than the thumb rect.
 _SCROLLBAR_CONTROL_CONTAIN_AREA_RATIO = 4.0
+
+
+def is_uia_scrollbar_thumb_part(
+    *,
+    automation_id: str | None = None,
+    name: str | None = None,
+) -> bool:
+    """True for WPF ``ScrollbarThumb`` or Win32/WinForms Name ``Position``."""
+    auto = str(automation_id or "").strip()
+    if auto == _SCROLLBAR_THUMB_AUTOMATION_ID:
+        return True
+    return str(name or "").strip().casefold() in _SCROLLBAR_THUMB_NAMES
+
+
+def is_uia_scrollbar_line_button_part(
+    *,
+    automation_id: str | None = None,
+    name: str | None = None,
+) -> bool:
+    """True for WPF Up/DownButton or Win32 Line/Column/Page button Names."""
+    auto = str(automation_id or "").strip()
+    if auto in _SCROLLBAR_LINE_BUTTON_AUTOMATION_IDS:
+        return True
+    return str(name or "").strip().casefold() in _SCROLLBAR_LINE_BUTTON_NAMES
+
+
+def is_winforms_scrollbar_thumb_efp_name(name: str | None) -> bool:
+    """True when an EFP leaf Name should seed a scrollbar peer (``Position``)."""
+    return str(name or "").strip().casefold() in _SCROLLBAR_THUMB_NAMES
 
 _LABELED_TEXT_CONTROL_TYPES = frozenset(
     {
@@ -1482,11 +1530,12 @@ def compose_scrollbar_screen_rects(
     thumbs: list[ScreenXyxy],
     line_buttons: list[ScreenXyxy],
 ) -> tuple[list[ScreenXyxy], list[int]]:
-    """ScrollBar controls plus one rect per ``ScrollbarThumb`` and its line buttons.
+    """ScrollBar controls plus one rect per thumb and its line buttons.
 
-    Each thumb is a scrollbar. ``UpButton`` / ``DownButton`` boxes on that
-    thumb's line are unioned into the same rectangle. A thumb already covered
-    by a similar-sized ScrollBar control is not added again.
+    Each thumb is a scrollbar (WPF ``ScrollbarThumb`` or WinForms ``Position``).
+    Line/page buttons on that thumb's line are unioned into the same rectangle.
+    A thumb already covered by a similar-sized ScrollBar control is not added
+    again.
 
     The second list is the indexes of ``line_buttons`` absorbed into a thumb.
     """
@@ -1651,6 +1700,7 @@ def enumerate_edit_document_scrollbar_screen(
                 if control_type is None:
                     control_type = _element_control_type(element, cached=False)
                 automation_id = ""
+                part_name = ""
                 if control_type in (
                     _UIA_THUMB_CONTROL_TYPE_ID,
                     _UIA_BUTTON_CONTROL_TYPE_ID,
@@ -1660,19 +1710,30 @@ def enumerate_edit_document_scrollbar_screen(
                         automation_id = _element_automation_id(
                             element, cached=False
                         )
+                    part_name = _element_current_name(element, cached=True)
+                    if not part_name:
+                        part_name = _element_current_name(element, cached=False)
                 if control_type == _UIA_SCROLLBAR_CONTROL_TYPE_ID:
                     scrollbars.append(box)
-                elif (
-                    control_type == _UIA_THUMB_CONTROL_TYPE_ID
-                    and automation_id == _SCROLLBAR_THUMB_AUTOMATION_ID
+                elif control_type == _UIA_THUMB_CONTROL_TYPE_ID and (
+                    is_uia_scrollbar_thumb_part(
+                        automation_id=automation_id,
+                        name=part_name,
+                    )
                 ):
                     scrollbar_thumbs.append(box)
-                elif (
-                    control_type == _UIA_BUTTON_CONTROL_TYPE_ID
-                    and automation_id in _SCROLLBAR_LINE_BUTTON_AUTOMATION_IDS
+                elif control_type == _UIA_BUTTON_CONTROL_TYPE_ID and (
+                    is_uia_scrollbar_line_button_part(
+                        automation_id=automation_id,
+                        name=part_name,
+                    )
                 ):
                     scrollbar_line_buttons.append(
-                        (box, _element_label(element, cached_name=True))
+                        (
+                            box,
+                            part_name
+                            or _element_label(element, cached_name=True),
+                        )
                     )
                 elif control_type in _UIA_INPUT_CONTROL_TYPE_IDS:
                     name = _element_current_name(element, cached=True)

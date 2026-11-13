@@ -4204,6 +4204,8 @@ def _efp_peer_detection_from_payload(
 
     - ``input`` → named input peer (or Name copied onto an overlapping FindAll
       Edit, returning ``None`` so a second same-box peer is not injected)
+    - Win32/WinForms thumb Name ``Position`` with empty control_type → scrollbar
+      peer (skipped when FindAll already has a scrollbar covering the press)
     - tokens in ``UIA_CONTROL_TYPE_SUFFIX`` → labeled text peer
     - empty / legacy → text peer (contained/coextensive promotion may name Edit)
 
@@ -4217,6 +4219,7 @@ def _efp_peer_detection_from_payload(
         UIA_CONTROL_TYPE_SUFFIX,
         is_usable_uia_landmark_label,
         is_weak_efp_hub_label,
+        is_winforms_scrollbar_thumb_efp_name,
         resolve_usable_uia_probe_label,
     )
 
@@ -4271,6 +4274,20 @@ def _efp_peer_detection_from_payload(
             text=label,
             source="uia",
             uia_control_type=None,
+        )
+
+    # WinForms thumb: Name=Position, Thumb control type unmapped → empty token.
+    if is_winforms_scrollbar_thumb_efp_name(name) and control_type is None:
+        for det in existing:
+            if str(det.class_name or "").strip() != "scrollbar":
+                continue
+            if point_in_rect_xywh(int(local_x), int(local_y), det.bbox):
+                return None
+        return _detection_from_bbox(
+            local_bbox,
+            YOLO_CLASS_SCROLLBAR,
+            text=None,
+            source="uia",
         )
 
     label_n = _visible_text(label).casefold()

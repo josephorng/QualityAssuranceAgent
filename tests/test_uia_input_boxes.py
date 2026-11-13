@@ -493,6 +493,50 @@ def test_scrollbar_thumb_inside_huge_control_is_kept() -> None:
     assert used == []
 
 
+def test_winforms_position_thumb_unions_line_up_down_by_name_gates() -> None:
+    """Name gates accept Position + Line up/down; compose unions same column."""
+    from src.recorder.uia_input_boxes import (
+        compose_scrollbar_screen_rects,
+        is_uia_scrollbar_line_button_part,
+        is_uia_scrollbar_thumb_part,
+    )
+
+    assert is_uia_scrollbar_thumb_part(name="Position")
+    assert is_uia_scrollbar_thumb_part(automation_id="ScrollbarThumb")
+    assert not is_uia_scrollbar_thumb_part(name="", automation_id="")
+    assert not is_uia_scrollbar_thumb_part(name="Slider", automation_id="")
+    assert is_uia_scrollbar_line_button_part(name="Line up")
+    assert is_uia_scrollbar_line_button_part(name="Line down")
+    assert is_uia_scrollbar_line_button_part(name="Page down")
+    assert is_uia_scrollbar_line_button_part(name="Column left")
+    assert is_uia_scrollbar_line_button_part(automation_id="UpButton")
+    assert not is_uia_scrollbar_line_button_part(name="Next")
+
+    # Geometry from recording_20261113_062457 thumb + ends (screen xyxy).
+    thumb = (2289, 162, 2312, 413)  # Position bbox xywh → xyxy
+    line_up = (2289, 137, 2312, 163)
+    line_down = (2289, 579, 2312, 605)
+    page_down = (2289, 413, 2312, 580)
+    other_column = (278, 71, 301, 97)
+    rects, used = compose_scrollbar_screen_rects(
+        [],
+        [thumb],
+        [line_up, line_down, page_down, other_column],
+    )
+    assert rects == [(2289, 137, 2312, 605)]
+    assert used == [0, 1, 2]
+
+
+def test_line_up_without_thumb_does_not_create_scrollbar() -> None:
+    from src.recorder.uia_input_boxes import compose_scrollbar_screen_rects
+
+    line_up = (2289, 137, 2312, 163)
+    line_down = (2289, 579, 2312, 605)
+    rects, used = compose_scrollbar_screen_rects([], [], [line_up, line_down])
+    assert rects == []
+    assert used == []
+
+
 def test_labeled_text_control_types_include_interactive_items() -> None:
     from src.recorder import uia_input_boxes as uia
 

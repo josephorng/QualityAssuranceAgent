@@ -22,10 +22,13 @@ from src.recorder.uia_input_boxes import (
     _UIA_TEXT_CONTROL_TYPE_ID,
     bind_findall_timing,
     canonicalize_uia_shell_status_label,
+    compose_uia_input_landmark_label,
     control_type_token_from_id,
     element_from_point_name_value,
     filter_uia_input_rects,
+    filter_uia_scrollbar_rects,
     is_oversized_uia_rect,
+    is_uia_input_container_rect,
     is_usable_uia_landmark_label,
     merge_nested_element_boxes,
     snapshot_uia_screen,
@@ -33,6 +36,7 @@ from src.recorder.uia_input_boxes import (
     summarize_findall_timing,
     uia_label_combine_name_value,
     uia_label_prefer_value,
+    uia_snapshot_image_local,
 )
 
 
@@ -105,6 +109,7 @@ def test_snapshot_uia_screen_keeps_expanded_labeled_control_types(monkeypatch) -
                 ((50, 60, 70, 80), "自訂葉", "custom"),
                 ((1, 2, 3, 4), "", "custom"),  # unnamed Custom dropped by snapshot
             ],
+            [],
         ),
     )
     monkeypatch.setattr(
@@ -196,6 +201,69 @@ def test_filter_uia_input_rects_drops_oversized_and_out_of_roi() -> None:
         ocr_roi_pad=0,
     )
     assert boxes == [(20, 30, 180, 40)]
+
+
+def test_filter_uia_input_rects_drops_tall_containers_keeps_wide_thin() -> None:
+    window = (0, 0, 1400, 900)
+    screen_boxes = [
+        (100, 100, 300, 128),  # normal field
+        (20, 200, 1368, 221),  # wide thin single-line (keep)
+        (20, 50, 1368, 500),  # tall wide container (~36% area, w/h frac)
+        (10, 10, 1560, 820),  # huge area container (>=0.4)
+    ]
+    boxes = filter_uia_input_rects(
+        screen_boxes,
+        window_screen_xywh=window,
+        monitor_offset=(0, 0),
+        image_w=1400,
+        image_h=900,
+        drop_container_inputs=True,
+    )
+    assert (100, 100, 200, 28) in boxes
+    assert (20, 200, 1348, 21) in boxes
+    assert all(box[3] < 100 or box[2] < 900 for box in boxes)
+    scrollbars = filter_uia_scrollbar_rects(
+        [(1380, 20, 1396, 870)],
+        window_screen_xywh=window,
+        monitor_offset=(0, 0),
+        image_w=1400,
+        image_h=900,
+        drop_container_inputs=True,
+    )
+    assert scrollbars == [(1380, 20, 16, 850)]
+
+
+def test_compose_uia_input_landmark_label_keeps_embedded_automation_id() -> None:
+    assert (
+        compose_uia_input_landmark_label("傳真號碼|Textbox|txt_Fax", "txt_Fax")
+        == "傳真號碼|Textbox|txt_Fax"
+    )
+    assert compose_uia_input_landmark_label("傳真號碼", "txt_Fax") == "傳真號碼|txt_Fax"
+    assert compose_uia_input_landmark_label("", "txt_Fax") == "txt_Fax"
+
+
+def test_uia_snapshot_image_local_keeps_input_labels() -> None:
+    inputs, scrollbars, texts = uia_snapshot_image_local(
+        {
+            "window": [0, 0, 800, 600],
+            "inputs": [[100, 200, 300, 230], [10, 10, 700, 500]],
+            "input_labels": ["傳真號碼|txt_Fax", ""],
+            "scrollbars": [],
+            "texts": [],
+        },
+        monitor_offset=(0, 0),
+        image_w=800,
+        image_h=600,
+    )
+    assert scrollbars is None
+    assert texts == []
+    assert inputs is not None
+    # Tall container dropped; labeled fax field kept as labeled row.
+    assert len(inputs) == 1
+    box, label, _ct = inputs[0]
+    assert box == (100, 200, 200, 30)
+    assert label == "傳真號碼|txt_Fax"
+    assert is_uia_input_container_rect((10, 10, 690, 490), (0, 0, 800, 600)) is True
 
 
 def test_filter_uia_input_rects_drops_edge_sliver_from_wrong_monitor() -> None:

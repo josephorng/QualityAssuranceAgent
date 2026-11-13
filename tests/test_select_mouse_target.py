@@ -5306,10 +5306,11 @@ def _install_find_mouse_point_fakes(
 
     monkeypatch.setattr(smt, "parse_mouse_target_instruction", fake_parse)
     monkeypatch.setattr(smt, "selected_eye_monitor_indices", lambda: [1])
+    monkeypatch.setattr(smt, "active_monitor_offset", lambda *_a, **_k: (0, 0))
     monkeypatch.setattr(
         smt,
         "grab_monitor_bgr",
-        lambda *_a, **_k: (1, np.zeros((50, 50, 3), dtype=np.uint8)),
+        lambda *_a, **_k: (1, np.zeros((500, 500, 3), dtype=np.uint8)),
     )
     monkeypatch.setattr(smt, "imwrite_bgr", lambda *_a, **_k: True)
     monkeypatch.setattr(smt, "_collect_monitor_detections", lambda *_a, **_k: detections)
@@ -5794,6 +5795,72 @@ async def test_find_mouse_point_input_hub_efp_miss_commits_geometry(
         "landmark_geometry_efp_pick",
     )
     assert (found[0], found[1]) == (near.cx, near.cy)
+
+
+@pytest.mark.asyncio
+async def test_find_mouse_point_soft_hub_rejects_out_of_bounds_synth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inflated landmark synth off-screen must not soft-commit; fall through."""
+    from cua_mcp import select_mouse_target as smt
+
+    async def fake_pick(*_a, **_k):
+        raise AssertionError("visual one-pass must not run during replay")
+
+    def fake_parse(instruction: str):
+        return ("輸入欄", 0, 0, [], None, 0, None)
+
+    def probe_miss(x: int, y: int):
+        return ("label", (0, 0, 1, 1), "text", "其他", "")
+
+    # Landmarks far apart so live replay_scale explodes the cancel-like vector.
+    detections = [
+        _detection_from_bbox((0, 0, 20, 20), YOLO_CLASS_TEXT, text="eee"),
+        _detection_from_bbox((100, 0, 20, 20), YOLO_CLASS_TEXT, text="晴時多雲"),
+        _detection_from_bbox((0, 100, 20, 20), YOLO_CLASS_TEXT, text="Ln1"),
+        _detection_from_bbox((450, 50, 20, 20), YOLO_CLASS_TEXT, text="遠方"),
+        _detection_from_bbox((52, 52, 16, 16), YOLO_CLASS_INPUT, text=""),
+    ]
+    # Recorded geometry: target near (60,60) but with a huge negative dx from
+    # a far-right landmark so inflated live scale yields x << 0.
+    geom = _recorded_input_geometry()
+    geom = {
+        **geom,
+        "landmarks": list(geom["landmarks"])
+        + [{"label": "「遠方」文字", "side": "lower_left", "xy": [450.0, 50.0]}],
+        "landmark_to_target": list(geom["landmark_to_target"])
+        + [{"from": "「遠方」文字", "dx": -9.0, "dy": 0.1}],
+        "landmark_to_landmark": list(geom.get("landmark_to_landmark") or []),
+    }
+    _install_find_mouse_point_fakes(monkeypatch, detections, pick=fake_pick)
+    monkeypatch.setattr(smt, "parse_mouse_target_instruction", fake_parse)
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.uia_text_element_at_point",
+        probe_miss,
+    )
+    # Force synth to a known off-screen point regardless of geometry math.
+    monkeypatch.setattr(
+        smt,
+        "_resolve_with_landmark_geometry",
+        lambda *_a, **_k: (None, (-1122, 75), "landmark_geometry_synth"),
+    )
+
+    with smt.require_similarity_match():
+        found = await smt.find_mouse_point(
+            "（YOLO+OCR）輸入欄",
+            nearby_objects=_GEOMETRY_NEARBY + ["在「遠方」文字的左下方"],
+            landmark_geometry=geom,
+            vision_mode="yolo_ocr",
+            control_type="input",
+            recorded_efp_name="密碼|Textbox|txt_Password",
+            recorded_efp_value="",
+        )
+    # Must not commit the off-screen synth point (captured 500x500 rejects it).
+    if found is not None:
+        assert found[0] >= 0
+        assert found[1] >= 0
+        assert (found[0], found[1]) != (-1122, 75)
+        assert found[2].get("selection_method") != "landmark_geometry_synth"
 
 
 @pytest.mark.asyncio

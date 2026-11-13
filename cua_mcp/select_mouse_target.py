@@ -1667,8 +1667,13 @@ def _detect_mouse_targets_from_bgr(
     uia_inputs: list[tuple[int, int, int, int]] = []
     uia_scrollbars: list[tuple[int, int, int, int]] = []
     if uia_prefetched is not None:
+        from src.recorder.uia_input_boxes import coerce_uia_input_xywh
+
         pref_inputs, pref_scrollbars, uia_labeled_texts = uia_prefetched
-        uia_inputs = list(pref_inputs or [])
+        uia_inputs = [
+            coerce_uia_input_xywh(item)[0] for item in (pref_inputs or [])
+        ]
+        uia_inputs = [box for box in uia_inputs if box[2] > 0 and box[3] > 0]
         uia_scrollbars = list(pref_scrollbars or [])
     elif (
         live_input_hwnd is not None
@@ -4096,6 +4101,42 @@ def _resolve_text_anchor_with_landmark_geometry(
     return picked, (int(picked.cx), int(picked.cy)), "landmark_geometry_pick"
 
 
+def _synth_point_within_bounds(
+    point: tuple[int, int],
+    *,
+    captured: list[tuple[int, np.ndarray]] | None = None,
+    click_window: dict[str, Any] | None = None,
+) -> bool:
+    """True when ``point`` lies inside the click window or a captured monitor.
+
+    Prefers ``click_window["rect"]`` (image-/screen-local xywh) when present and
+    valid. Otherwise requires the point to fall inside at least one captured
+    monitor frame. With neither context, returns True so unit tests without a
+    window/capture are not blocked.
+    """
+    px, py = int(point[0]), int(point[1])
+    if isinstance(click_window, dict):
+        rect = click_window.get("rect")
+        if isinstance(rect, (list, tuple)) and len(rect) == 4:
+            try:
+                left, top, width, height = (int(v) for v in rect)
+            except (TypeError, ValueError):
+                left = top = width = height = 0
+            if width > 0 and height > 0:
+                return (
+                    left <= px < left + width
+                    and top <= py < top + height
+                )
+    if captured:
+        for monitor_index, bgr in captured:
+            left, top = active_monitor_offset(monitor_index)
+            img_h, img_w = bgr.shape[:2]
+            if left <= px < left + img_w and top <= py < top + img_h:
+                return True
+        return False
+    return True
+
+
 def _landmark_geometry_synth_meta(
     *,
     point: tuple[int, int],
@@ -4825,9 +4866,31 @@ def _filter_uia_anchor_by_name_then_value(
         )
         return []
 
+    def _values_agree(value_d: str, value_query: str) -> bool:
+        """Exact Value match, or trailing AutomationId token agreement.
+
+        Recorded EFP labels may be ``Name|Textbox|txt_Fax`` while FindAll
+        composes ``Name|txt_Fax``. Empty live Value still accepts a query Value.
+        """
+        if not value_query:
+            return True
+        if not value_d:
+            return True
+        if value_d == value_query:
+            return True
+        query_tail = value_query.split("|")[-1].strip()
+        det_tail = value_d.split("|")[-1].strip()
+        if query_tail and det_tail and query_tail == det_tail:
+            return True
+        if query_tail and (
+            value_d == query_tail or value_d.endswith("|" + query_tail)
+        ):
+            return True
+        return False
+
     if len(name_matches) == 1:
         det, value_d = name_matches[0]
-        if value_q and value_d and value_d != value_q:
+        if value_q and value_d and not _values_agree(value_d, value_q):
             _log_info(
                 "move_mouse uia name_then_value "
                 f"name_matches=1 value_disagree name={name_q!r} "
@@ -4850,7 +4913,7 @@ def _filter_uia_anchor_by_name_then_value(
         return [det for det, _value_d in name_matches]
 
     value_matches = [
-        det for det, value_d in name_matches if value_d == value_q
+        det for det, value_d in name_matches if _values_agree(value_d, value_q)
     ]
     _log_info(
         "move_mouse uia name_then_value "
@@ -5337,6 +5400,7 @@ def _detections_from_uia_prefetched(
     if uia_prefetched is None:
         return []
     from src.recorder.uia_input_boxes import (
+        coerce_uia_input_xywh,
         is_usable_uia_landmark_label,
         unpack_uia_labeled,
     )
@@ -5357,11 +5421,18 @@ def _detections_from_uia_prefetched(
                 uia_control_type=control_type or None,
             )
         )
-    for box in inputs or []:
+    for item in inputs or []:
+        box, label = coerce_uia_input_xywh(item)
+        if box[2] <= 0 or box[3] <= 0:
+            continue
+        text = str(label or "").strip() or None
+        if text is not None and not is_usable_uia_landmark_label(text):
+            text = None
         detections.append(
             _detection_from_bbox(
                 (int(box[0]), int(box[1]), int(box[2]), int(box[3])),
                 YOLO_CLASS_INPUT,
+                text=text,
                 source="uia",
             )
         )
@@ -7214,25 +7285,37 @@ async def _find_mouse_point_attempt(
         )
         if geom_hit is not None:
             _geom_det, geom_point, geom_method = geom_hit
-            select_s = time.perf_counter() - select_started
+            if _synth_point_within_bounds(
+                geom_point,
+                captured=captured,
+                click_window=click_window,
+            ):
+                select_s = time.perf_counter() - select_started
+                _log_info(
+                    "move_mouse: landmark geometry synth for offset click "
+                    f"point=[{geom_point[0]},{geom_point[1]}] "
+                    f"(ignoring raw pixel offset dx={offset_dx} dy={offset_dy})"
+                )
+                return _pack(_landmark_geometry_synth_meta(
+                    point=geom_point,
+                    offset_dx=0,
+                    offset_dy=0,
+                    track_percent=track_percent,
+                    char_target=char_target,
+                    char_occurrence=char_occurrence,
+                    instruction_text=instruction_text,
+                    nearby_phrases=nearby_phrases,
+                    image_paths=image_paths,
+                    selection_method=geom_method,
+                    timing=_timing_meta(
+                        select_s=select_s, select_phase=geom_method
+                    ),
+                ))
             _log_info(
-                "move_mouse: landmark geometry synth for offset click "
+                "move_mouse: landmark_geometry_synth_out_of_bounds "
                 f"point=[{geom_point[0]},{geom_point[1]}] "
-                f"(ignoring raw pixel offset dx={offset_dx} dy={offset_dy})"
+                "(offset click; continuing select)"
             )
-            return _pack(_landmark_geometry_synth_meta(
-                point=geom_point,
-                offset_dx=0,
-                offset_dy=0,
-                track_percent=track_percent,
-                char_target=char_target,
-                char_occurrence=char_occurrence,
-                instruction_text=instruction_text,
-                nearby_phrases=nearby_phrases,
-                image_paths=image_paths,
-                selection_method=geom_method,
-                timing=_timing_meta(select_s=select_s, select_phase=geom_method),
-            ))
 
     # On-object text + constellation: radius gate, then highest similarity.
     # Never synth-click text; miss falls through to top-similarity / LLM.
@@ -7302,26 +7385,39 @@ async def _find_mouse_point_attempt(
                         f"center=[{chosen.cx},{chosen.cy}] method={geom_method}"
                     )
                 else:
-                    select_s = time.perf_counter() - select_started
-                    _log_info(
-                        "move_mouse: landmark geometry synth "
-                        f"point=[{geom_point[0]},{geom_point[1]}]"
+                    resolved = (
+                        int(geom_point[0]) + int(offset_dx),
+                        int(geom_point[1]) + int(offset_dy),
                     )
-                    return _pack(_landmark_geometry_synth_meta(
-                        point=geom_point,
-                        offset_dx=offset_dx,
-                        offset_dy=offset_dy,
-                        track_percent=track_percent,
-                        char_target=char_target,
-                        char_occurrence=char_occurrence,
-                        instruction_text=instruction_text,
-                        nearby_phrases=nearby_phrases,
-                        image_paths=image_paths,
-                        selection_method=geom_method,
-                        timing=_timing_meta(
-                            select_s=select_s, select_phase=geom_method
-                        ),
-                    ))
+                    if _synth_point_within_bounds(
+                        resolved,
+                        captured=captured,
+                        click_window=click_window,
+                    ):
+                        select_s = time.perf_counter() - select_started
+                        _log_info(
+                            "move_mouse: landmark geometry synth "
+                            f"point=[{geom_point[0]},{geom_point[1]}]"
+                        )
+                        return _pack(_landmark_geometry_synth_meta(
+                            point=geom_point,
+                            offset_dx=offset_dx,
+                            offset_dy=offset_dy,
+                            track_percent=track_percent,
+                            char_target=char_target,
+                            char_occurrence=char_occurrence,
+                            instruction_text=instruction_text,
+                            nearby_phrases=nearby_phrases,
+                            image_paths=image_paths,
+                            selection_method=geom_method,
+                            timing=_timing_meta(
+                                select_s=select_s, select_phase=geom_method
+                            ),
+                        ))
+                    _log_info(
+                        "move_mouse: landmark_geometry_synth_out_of_bounds "
+                        f"point=[{resolved[0]},{resolved[1]}]"
+                    )
         unique = _unique_target_from_landmarks(
             detections,
             nearby_hints,
@@ -7463,28 +7559,43 @@ async def _find_mouse_point_attempt(
                             f"pool={len(anchor_matches)}"
                         )
                     elif efp_reason == "synth_hit" and efp_point is not None:
-                        select_s = time.perf_counter() - select_started
-                        _log_info(
-                            "move_mouse: landmark geometry EFP synth among anchors "
-                            f"point=[{efp_point[0]},{efp_point[1]}] "
-                            f"pool={len(anchor_matches)}"
+                        efp_resolved = (
+                            int(efp_point[0]) + int(offset_dx),
+                            int(efp_point[1]) + int(offset_dy),
                         )
-                        return _pack(_landmark_geometry_synth_meta(
-                            point=efp_point,
-                            offset_dx=offset_dx,
-                            offset_dy=offset_dy,
-                            track_percent=track_percent,
-                            char_target=char_target,
-                            char_occurrence=char_occurrence,
-                            instruction_text=instruction_text,
-                            nearby_phrases=nearby_phrases,
-                            image_paths=image_paths,
-                            selection_method="landmark_geometry_efp_synth",
-                            timing=_timing_meta(
-                                select_s=select_s,
-                                select_phase="landmark_geometry_efp_synth",
-                            ),
-                        ))
+                        if _synth_point_within_bounds(
+                            efp_resolved,
+                            captured=captured,
+                            click_window=click_window,
+                        ):
+                            select_s = time.perf_counter() - select_started
+                            _log_info(
+                                "move_mouse: landmark geometry EFP synth among anchors "
+                                f"point=[{efp_point[0]},{efp_point[1]}] "
+                                f"pool={len(anchor_matches)}"
+                            )
+                            return _pack(_landmark_geometry_synth_meta(
+                                point=efp_point,
+                                offset_dx=offset_dx,
+                                offset_dy=offset_dy,
+                                track_percent=track_percent,
+                                char_target=char_target,
+                                char_occurrence=char_occurrence,
+                                instruction_text=instruction_text,
+                                nearby_phrases=nearby_phrases,
+                                image_paths=image_paths,
+                                selection_method="landmark_geometry_efp_synth",
+                                timing=_timing_meta(
+                                    select_s=select_s,
+                                    select_phase="landmark_geometry_efp_synth",
+                                ),
+                            ))
+                        _log_info(
+                            "move_mouse: landmark_geometry_synth_out_of_bounds "
+                            f"point=[{efp_resolved[0]},{efp_resolved[1]}] "
+                            "(efp synth; continuing select)"
+                        )
+                        skip_geom_after_hard_miss = True
                     elif hard_efp:
                         _log_info(
                             "move_mouse: landmark_geometry_efp_miss among anchors "
@@ -7514,27 +7625,41 @@ async def _find_mouse_point_attempt(
                             f"pool={len(anchor_matches)}"
                         )
                     else:
-                        select_s = time.perf_counter() - select_started
-                        _log_info(
-                            "move_mouse: landmark geometry synth among anchors "
-                            f"point=[{geom_point[0]},{geom_point[1]}] "
-                            f"pool={len(anchor_matches)}"
+                        resolved = (
+                            int(geom_point[0]) + int(offset_dx),
+                            int(geom_point[1]) + int(offset_dy),
                         )
-                        return _pack(_landmark_geometry_synth_meta(
-                            point=geom_point,
-                            offset_dx=offset_dx,
-                            offset_dy=offset_dy,
-                            track_percent=track_percent,
-                            char_target=char_target,
-                            char_occurrence=char_occurrence,
-                            instruction_text=instruction_text,
-                            nearby_phrases=nearby_phrases,
-                            image_paths=image_paths,
-                            selection_method=geom_method,
-                            timing=_timing_meta(
-                                select_s=select_s, select_phase=geom_method
-                            ),
-                        ))
+                        if _synth_point_within_bounds(
+                            resolved,
+                            captured=captured,
+                            click_window=click_window,
+                        ):
+                            select_s = time.perf_counter() - select_started
+                            _log_info(
+                                "move_mouse: landmark geometry synth among anchors "
+                                f"point=[{geom_point[0]},{geom_point[1]}] "
+                                f"pool={len(anchor_matches)}"
+                            )
+                            return _pack(_landmark_geometry_synth_meta(
+                                point=geom_point,
+                                offset_dx=offset_dx,
+                                offset_dy=offset_dy,
+                                track_percent=track_percent,
+                                char_target=char_target,
+                                char_occurrence=char_occurrence,
+                                instruction_text=instruction_text,
+                                nearby_phrases=nearby_phrases,
+                                image_paths=image_paths,
+                                selection_method=geom_method,
+                                timing=_timing_meta(
+                                    select_s=select_s, select_phase=geom_method
+                                ),
+                            ))
+                        _log_info(
+                            "move_mouse: landmark_geometry_synth_out_of_bounds "
+                            f"point=[{resolved[0]},{resolved[1]}] "
+                            f"pool={len(anchor_matches)}; skipping geometry commit"
+                        )
 
         selection_done = bool(used_geometry)
         if (

@@ -42,6 +42,11 @@ from src.recorder.focus_point import (
 
 # Fraction of window area at/above which a UIA rect is treated as window-sized.
 DEFAULT_UIA_OVERSIZE_AREA_FRAC = 0.8
+# Input-only: drop tall/huge Pane/Edit containers that are not near full-window
+# but still dominate FindAll (scrollbars use the plain oversize filter only).
+DEFAULT_UIA_INPUT_CONTAINER_AREA_FRAC = 0.4
+DEFAULT_UIA_INPUT_CONTAINER_WIDTH_FRAC = 0.7
+DEFAULT_UIA_INPUT_CONTAINER_HEIGHT_FRAC = 0.25
 # Match ``DEFAULT_DEDUPE_OVERLAP_IOU_THRESHOLD`` in select_mouse_target (avoid cycle).
 DEFAULT_TEXT_ELEMENT_CLUSTER_IOU_THRESHOLD = 0.5
 # YOLO mostly inside UIA when intersection covers at least this fraction of YOLO area.
@@ -182,10 +187,10 @@ UIA_CONTROL_TYPE_SUFFIX: dict[str, str] = {
 }
 
 UiaScreenEnumerator = Callable[[int], list[ScreenXyxy]]
-# (inputs, scrollbars, labeled_texts)
+# (inputs, scrollbars, labeled_texts, input_labels)
 UiaCombinedScreenEnumerator = Callable[
     [int],
-    tuple[list[ScreenXyxy], list[ScreenXyxy], list[LabeledScreenXyxy]],
+    tuple[list[ScreenXyxy], list[ScreenXyxy], list[LabeledScreenXyxy], list[str]],
 ]
 
 
@@ -231,6 +236,52 @@ def is_oversized_uia_rect(
     if window_area <= 0.0:
         return True
     return (float(w) * float(h)) / window_area >= float(max_area_frac)
+
+
+def is_uia_input_container_rect(
+    rect_xywh: RectXywh,
+    window_xywh: RectXywh,
+    *,
+    max_area_frac: float = DEFAULT_UIA_INPUT_CONTAINER_AREA_FRAC,
+    min_width_frac: float = DEFAULT_UIA_INPUT_CONTAINER_WIDTH_FRAC,
+    min_height_frac: float = DEFAULT_UIA_INPUT_CONTAINER_HEIGHT_FRAC,
+) -> bool:
+    """True for tall/huge input hosts that are not single-line fields.
+
+    Wide thin edits (e.g. ``w=1348, h=21``) stay. Full-height scrollbars are
+    filtered separately and must not use this helper.
+    """
+    _x, _y, w, h = (int(v) for v in rect_xywh)
+    _wx, _wy, ww, wh = (int(v) for v in window_xywh)
+    if w <= 0 or h <= 0 or ww <= 0 or wh <= 0:
+        return True
+    area_frac = (float(w) * float(h)) / float(ww * wh)
+    if area_frac >= float(max_area_frac):
+        return True
+    return (
+        float(w) / float(ww) >= float(min_width_frac)
+        and float(h) / float(wh) >= float(min_height_frac)
+    )
+
+
+def compose_uia_input_landmark_label(name: str, automation_id: str) -> str:
+    """Combine FindAll Name + AutomationId into a replay landmark label.
+
+    When Name already embeds ``|`` segments (e.g. recorded EFP shape
+    ``傳真號碼|Textbox|txt_Fax``), keep it as-is if AutomationId is already
+    present. Otherwise append AutomationId via ``Name|AutomationId``.
+    """
+    name_c = canonicalize_uia_shell_status_label(name)
+    auto_c = canonicalize_uia_shell_status_label(automation_id)
+    if not auto_c:
+        return name_c
+    if not name_c:
+        return auto_c
+    if auto_c == name_c or name_c.endswith("|" + auto_c):
+        return name_c
+    if auto_c in name_c.split("|"):
+        return name_c
+    return uia_label_combine_name_value(name_c, auto_c)
 
 
 
@@ -508,8 +559,13 @@ def filter_uia_input_rects(
     ocr_roi: RectXywh | None = None,
     ocr_roi_pad: int = 0,
     max_area_frac: float = DEFAULT_UIA_OVERSIZE_AREA_FRAC,
+    drop_container_inputs: bool = False,
 ) -> list[RectXywh]:
-    """Convert screen xyxy → image-local xywh; drop empty, oversized, out-of-ROI."""
+    """Convert screen xyxy → image-local xywh; drop empty, oversized, out-of-ROI.
+
+    When ``drop_container_inputs`` is True, also drop tall/huge Pane/Edit
+    containers (not used for scrollbars).
+    """
     ox, oy = int(monitor_offset[0]), int(monitor_offset[1])
     out: list[RectXywh] = []
     seen: set[RectXywh] = set()
@@ -541,6 +597,8 @@ def filter_uia_input_rects(
         )
         if is_oversized_uia_rect(box, window_local, max_area_frac=max_area_frac):
             continue
+        if drop_container_inputs and is_uia_input_container_rect(box, window_local):
+            continue
         if ocr_roi is not None and not point_in_rect_xywh(
             x + w * 0.5,
             y + h * 0.5,
@@ -555,7 +613,31 @@ def filter_uia_input_rects(
     return out
 
 
-filter_uia_scrollbar_rects = filter_uia_input_rects
+def filter_uia_scrollbar_rects(
+    screen_xyxy: list[ScreenXyxy],
+    *,
+    window_screen_xywh: RectXywh,
+    monitor_offset: tuple[int, int],
+    image_w: int,
+    image_h: int,
+    ocr_roi: RectXywh | None = None,
+    ocr_roi_pad: int = 0,
+    max_area_frac: float = DEFAULT_UIA_OVERSIZE_AREA_FRAC,
+    drop_container_inputs: bool = False,
+) -> list[RectXywh]:
+    """Scrollbar filter: same as inputs but never drops tall container shapes."""
+    del drop_container_inputs  # scrollbars may span the full window height
+    return filter_uia_input_rects(
+        screen_xyxy,
+        window_screen_xywh=window_screen_xywh,
+        monitor_offset=monitor_offset,
+        image_w=image_w,
+        image_h=image_h,
+        ocr_roi=ocr_roi,
+        ocr_roi_pad=ocr_roi_pad,
+        max_area_frac=max_area_frac,
+        drop_container_inputs=False,
+    )
 
 
 def filter_uia_labeled_text_rects(
@@ -1445,18 +1527,24 @@ def enumerate_edit_document_scrollbar_screen(
     *,
     root_element: ctypes.c_void_p | None = None,
     automation: ctypes.c_void_p | None = None,
-) -> tuple[list[ScreenXyxy], list[ScreenXyxy], list[LabeledScreenXyxy]]:
+) -> tuple[list[ScreenXyxy], list[ScreenXyxy], list[LabeledScreenXyxy], list[str]]:
     """One FindAllBuildCache Edit|Document|ComboBox|Pane|ScrollBar|Thumb + labeled texts.
+
+    Returns ``(inputs, scrollbars, labeled_texts, input_labels)``. ``input_labels``
+    is aligned with ``inputs`` (Name/AutomationId landmark text, possibly empty).
 
     When ``automation`` / ``root_element`` are provided the caller owns them (not
     released here). Otherwise a top-level ``ElementFromHandle(hwnd)`` root is used.
     """
+    empty: tuple[
+        list[ScreenXyxy], list[ScreenXyxy], list[LabeledScreenXyxy], list[str]
+    ] = ([], [], [], [])
     if os.name != "nt" or not int(hwnd or 0):
-        return [], [], []
+        return empty
 
     ole32, initialized_here = _coinitialize_uia()
     if ole32 is None:
-        return [], [], []
+        return empty
 
     own_automation = automation is None
     own_root = root_element is None
@@ -1467,6 +1555,7 @@ def enumerate_edit_document_scrollbar_screen(
     or_nodes: list[ctypes.c_void_p] = []
     found: ctypes.c_void_p | None = None
     inputs: list[ScreenXyxy] = []
+    input_labels: list[str] = []
     scrollbars: list[ScreenXyxy] = []
     scrollbar_thumbs: list[ScreenXyxy] = []
     scrollbar_line_buttons: list[tuple[ScreenXyxy, str]] = []
@@ -1475,11 +1564,11 @@ def enumerate_edit_document_scrollbar_screen(
         if automation_ptr is None:
             automation_ptr = _create_uia_automation()
             if automation_ptr is None:
-                return [], [], []
+                return empty
         if root is None:
             root = _element_from_handle(automation_ptr, int(hwnd))
             if root is None:
-                return [], [], []
+                return empty
 
         type_ids = (
             *_UIA_INPUT_CONTROL_TYPE_IDS,
@@ -1490,16 +1579,16 @@ def enumerate_edit_document_scrollbar_screen(
         for type_id in type_ids:
             cond = _create_control_type_condition(automation_ptr, type_id)
             if cond is None:
-                return [], [], []
+                return empty
             leaf_conds.append(cond)
 
         or_cond, or_nodes = _fold_or_conditions(automation_ptr, leaf_conds)
         if or_cond is None:
-            return [], [], []
+            return empty
 
         cache_request = _create_findall_cache_request(automation_ptr)
         if cache_request is None:
-            return [], [], []
+            return empty
 
         find_all = ctypes.WINFUNCTYPE(
             ctypes.HRESULT,
@@ -1525,7 +1614,7 @@ def enumerate_edit_document_scrollbar_screen(
         findall_s = time.perf_counter() - started
         if hr != _S_OK or not found_ptr:
             _note_findall_timing(elapsed_s=findall_s, count=0)
-            return [], [], []
+            return empty
         found = found_ptr
 
         get_length = ctypes.WINFUNCTYPE(
@@ -1544,7 +1633,7 @@ def enumerate_edit_document_scrollbar_screen(
         hit_count = int(length.value) if hr == _S_OK and length.value > 0 else 0
         _note_findall_timing(elapsed_s=findall_s, count=hit_count)
         if hit_count <= 0:
-            return [], [], []
+            return empty
 
         for index in range(hit_count):
             elem_ptr = ctypes.c_void_p()
@@ -1586,7 +1675,16 @@ def enumerate_edit_document_scrollbar_screen(
                         (box, _element_label(element, cached_name=True))
                     )
                 elif control_type in _UIA_INPUT_CONTROL_TYPE_IDS:
+                    name = _element_current_name(element, cached=True)
+                    if not name:
+                        name = _element_current_name(element, cached=False)
+                    auto_id = _element_automation_id(element, cached=True)
+                    if not auto_id:
+                        auto_id = _element_automation_id(element, cached=False)
                     inputs.append(box)
+                    input_labels.append(
+                        compose_uia_input_landmark_label(name, auto_id)
+                    )
                 elif control_type in _LABELED_TEXT_CONTROL_TYPES:
                     label = _element_label(element, cached_name=True)
                     if label:
@@ -1604,9 +1702,9 @@ def enumerate_edit_document_scrollbar_screen(
             if index in used_line_buttons or not label:
                 continue
             labeled.append((box, label, "button"))
-        return inputs, scrollbars, labeled
+        return inputs, scrollbars, labeled, input_labels
     except Exception:
-        return [], [], []
+        return empty
     finally:
         _com_release(found)
         _com_release(cache_request)
@@ -1627,7 +1725,9 @@ def enumerate_edit_document_scrollbar_screen(
 
 def enumerate_edit_document_screen_xyxy(hwnd: int) -> list[ScreenXyxy]:
     """FindAll Edit|Document|ComboBox|Pane under ``hwnd`` (via combined walk); screen xyxy boxes."""
-    inputs, _scrollbars, _labeled = enumerate_edit_document_scrollbar_screen(int(hwnd))
+    inputs, _scrollbars, _labeled, _input_labels = (
+        enumerate_edit_document_scrollbar_screen(int(hwnd))
+    )
     return inputs
 
 
@@ -1930,9 +2030,15 @@ def list_uia_input_and_scrollbar_boxes_image_local(
         return [], [], []
     enumerator = enumerate_fn or enumerate_edit_document_scrollbar_screen
     try:
-        input_screen, scrollbar_screen, labeled_screen = enumerator(int(hwnd))
+        enumerated = enumerator(int(hwnd))
     except Exception:
         return [], [], []
+    if len(enumerated) >= 4:
+        input_screen, scrollbar_screen, labeled_screen, input_labels = enumerated[:4]
+    else:
+        input_screen, scrollbar_screen, labeled_screen = enumerated[:3]
+        input_labels = []
+    del input_labels  # prefer-replace path keeps bare boxes; labels via snapshot
     filter_kwargs = dict(
         window_screen_xywh=window,
         monitor_offset=monitor_offset,
@@ -1943,7 +2049,11 @@ def list_uia_input_and_scrollbar_boxes_image_local(
         max_area_frac=max_area_frac,
     )
     return (
-        filter_uia_input_rects(input_screen or [], **filter_kwargs),
+        filter_uia_input_rects(
+            input_screen or [],
+            drop_container_inputs=True,
+            **filter_kwargs,
+        ),
         filter_uia_scrollbar_rects(scrollbar_screen or [], **filter_kwargs),
         filter_uia_labeled_text_rects(labeled_screen or [], **filter_kwargs),
     )
@@ -1981,6 +2091,7 @@ def list_uia_input_boxes_image_local(
             ocr_roi=ocr_roi,
             ocr_roi_pad=ocr_roi_pad,
             max_area_frac=max_area_frac,
+            drop_container_inputs=True,
         )
     inputs, _scrollbars, _labeled = list_uia_input_and_scrollbar_boxes_image_local(
         int(hwnd),
@@ -2001,6 +2112,7 @@ def _snapshot_dict_from_lists(
     inputs: list[ScreenXyxy],
     scrollbars: list[ScreenXyxy],
     labeled: list[LabeledScreenXyxy],
+    input_labels: list[str] | None = None,
 ) -> dict[str, object]:
     window = _window_screen_xywh(int(hwnd))
     texts: list[dict[str, object]] = []
@@ -2013,12 +2125,19 @@ def _snapshot_dict_from_lists(
         if control_type:
             entry["control_type"] = control_type
         texts.append(entry)
-    return {
+    labels = list(input_labels or [])
+    while len(labels) < len(inputs):
+        labels.append("")
+    labels = labels[: len(inputs)]
+    out: dict[str, object] = {
         "window": [int(v) for v in window] if window is not None else None,
         "inputs": [[int(v) for v in box] for box in inputs],
         "scrollbars": [[int(v) for v in box] for box in scrollbars],
         "texts": texts,
     }
+    if any(str(label or "").strip() for label in labels):
+        out["input_labels"] = [str(label or "") for label in labels]
+    return out
 
 
 def snapshot_uia_screen(hwnd: int) -> dict[str, object] | None:
@@ -2031,12 +2150,14 @@ def snapshot_uia_screen(hwnd: int) -> dict[str, object] | None:
     if os.name != "nt" or not int(hwnd or 0):
         return None
     try:
-        inputs, scrollbars, labeled = enumerate_edit_document_scrollbar_screen(
-            int(hwnd)
+        inputs, scrollbars, labeled, input_labels = (
+            enumerate_edit_document_scrollbar_screen(int(hwnd))
         )
     except Exception:
         return None
-    return _snapshot_dict_from_lists(int(hwnd), inputs, scrollbars, labeled)
+    return _snapshot_dict_from_lists(
+        int(hwnd), inputs, scrollbars, labeled, input_labels
+    )
 
 
 def snapshot_uia_hover_subtree(
@@ -2078,12 +2199,16 @@ def snapshot_uia_hover_subtree(
             climb_root = _element_from_handle(automation, int(hwnd))
         if climb_root is None:
             return None
-        inputs, scrollbars, labeled = enumerate_edit_document_scrollbar_screen(
-            int(hwnd),
-            root_element=climb_root,
-            automation=automation,
+        inputs, scrollbars, labeled, input_labels = (
+            enumerate_edit_document_scrollbar_screen(
+                int(hwnd),
+                root_element=climb_root,
+                automation=automation,
+            )
         )
-        return _snapshot_dict_from_lists(int(hwnd), inputs, scrollbars, labeled)
+        return _snapshot_dict_from_lists(
+            int(hwnd), inputs, scrollbars, labeled, input_labels
+        )
     except Exception:
         return None
     finally:
@@ -2107,6 +2232,24 @@ def _snapshot_xyxy_list(raw: object) -> list[ScreenXyxy]:
     return out
 
 
+def coerce_uia_input_xywh(item: object) -> tuple[RectXywh, str]:
+    """Unpack a bare xywh or labeled input row into ``(box, label)``."""
+    if isinstance(item, (list, tuple)) and len(item) >= 2:
+        first = item[0]
+        if isinstance(first, (list, tuple)) and len(first) == 4:
+            box, label, _control_type = unpack_uia_labeled(item)
+            return box, str(label or "")
+    if isinstance(item, (list, tuple)) and len(item) == 4:
+        try:
+            return (
+                (int(item[0]), int(item[1]), int(item[2]), int(item[3])),
+                "",
+            )
+        except (TypeError, ValueError):
+            return (0, 0, 0, 0), ""
+    return (0, 0, 0, 0), ""
+
+
 def uia_snapshot_image_local(
     snapshot: dict[str, object],
     *,
@@ -2116,11 +2259,16 @@ def uia_snapshot_image_local(
     ocr_roi: RectXywh | None = None,
     ocr_roi_pad: int = 0,
     window_screen_xywh: RectXywh | None = None,
-) -> tuple[list[RectXywh] | None, list[RectXywh] | None, list[LabeledRectXywh]]:
+) -> tuple[
+    list[LabeledRectXywh] | list[RectXywh] | None,
+    list[RectXywh] | None,
+    list[LabeledRectXywh],
+]:
     """Convert a click-time snapshot to image-local boxes. Does not call FindAll.
 
     Empty input/scrollbar lists become ``None`` so YOLO/Hough refine still runs.
-    Labeled texts stay a list (possibly empty).
+    Labeled texts stay a list (possibly empty). When ``input_labels`` are present,
+    inputs are returned as ``LabeledRectXywh`` rows (control_type ``\"\"``).
     """
     window_raw = snapshot.get("window")
     window = window_screen_xywh
@@ -2161,9 +2309,35 @@ def uia_snapshot_image_local(
                     control_type,
                 )
             )
-    inputs = filter_uia_input_rects(_snapshot_xyxy_list(snapshot.get("inputs")), **filter_kwargs)
+    input_screen = _snapshot_xyxy_list(snapshot.get("inputs"))
+    labels_raw = snapshot.get("input_labels")
+    input_labels: list[str] = []
+    if isinstance(labels_raw, list):
+        input_labels = [str(item or "") for item in labels_raw]
+    while len(input_labels) < len(input_screen):
+        input_labels.append("")
+    has_input_labels = any(str(label or "").strip() for label in input_labels)
+    labeled_out: list[LabeledRectXywh] = []
+    bare_out: list[RectXywh] = []
+    for index, screen_box in enumerate(input_screen):
+        kept = filter_uia_input_rects(
+            [screen_box],
+            drop_container_inputs=True,
+            **filter_kwargs,
+        )
+        if not kept:
+            continue
+        local_box = kept[0]
+        bare_out.append(local_box)
+        labeled_out.append((local_box, input_labels[index], ""))
+    if has_input_labels:
+        inputs: list[LabeledRectXywh] | list[RectXywh] | None = (
+            labeled_out or None
+        )
+    else:
+        inputs = bare_out or None
     scrollbars = filter_uia_scrollbar_rects(
         _snapshot_xyxy_list(snapshot.get("scrollbars")), **filter_kwargs
     )
     texts = filter_uia_labeled_text_rects(labeled, **filter_kwargs)
-    return (inputs or None, scrollbars or None, texts)
+    return (inputs, scrollbars or None, texts)

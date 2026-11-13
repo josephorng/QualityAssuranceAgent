@@ -828,6 +828,34 @@ def test_uia_first_input_hub_efp_miss_continues_name_shortlist() -> None:
     assert chosen is named_input
 
 
+def test_uia_first_input_hub_matches_automation_id_tail() -> None:
+    """FindAll Name|AutomationId agrees with recorded Name|Textbox|AutomationId."""
+    geom = _simple_landmark_geometry()
+    landmark = _det(100, 100, text="LM", class_name="text")
+    named_input = _det(148, 100, text="傳真號碼|txt_Fax", class_name="input")
+    sibling = _det(200, 100, text="連絡電話|txt_Phone", class_name="input")
+
+    def probe(x: int, y: int):
+        return ("label", (0, 0, 1, 1), "text", "其他", "")
+
+    chosen, reason = _try_uia_first_unique_select(
+        [landmark, named_input, sibling],
+        anchor="傳真號碼|Textbox|txt_Fax",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        filter_by_control_type=True,
+        control_type_token="input",
+        recorded_anchor=True,
+        landmark_geometry=geom,
+        recorded_efp_name="傳真號碼|Textbox|txt_Fax",
+        recorded_efp_value="",
+        point_probe_fn=probe,
+    )
+    assert reason == "hit"
+    assert chosen is named_input
+
+
 def test_phrase_match_pool_keeps_input_and_scrollbar_by_class_name() -> None:
     unlabeled_input = _det(976, 447, text="", class_name="input")
     sibling_text = _det(853, 448, text="密碼", class_name="text")

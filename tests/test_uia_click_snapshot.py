@@ -69,6 +69,35 @@ def test_uia_snapshot_image_local_keeps_control_type() -> None:
     assert by_text["舊標籤"][1] == ""
 
 
+def test_uia_snapshot_image_local_keeps_input_name_automation_id() -> None:
+    inputs, scrollbars, texts = uia_snapshot_image_local(
+        {
+            "window": [0, 0, 400, 300],
+            "inputs": [[50, 80, 200, 110]],
+            "input_labels": ["傳真號碼|txt_Fax"],
+            "scrollbars": [],
+            "texts": [],
+        },
+        monitor_offset=(0, 0),
+        image_w=400,
+        image_h=300,
+    )
+    assert scrollbars is None
+    assert texts == []
+    assert inputs is not None
+    assert len(inputs) == 1
+    box, label, _ct = inputs[0]
+    assert box == (50, 80, 150, 30)
+    assert label == "傳真號碼|txt_Fax"
+
+    from cua_mcp.select_mouse_target import _detections_from_uia_prefetched
+
+    dets = _detections_from_uia_prefetched((inputs, None, []))
+    assert len(dets) == 1
+    assert dets[0].class_name == "input"
+    assert dets[0].text == "傳真號碼|txt_Fax"
+
+
 def test_detect_uses_prefetched_snapshot_and_keeps_ocr_twin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

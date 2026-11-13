@@ -9,6 +9,7 @@ from unittest.mock import patch
 from src.recorder.capture import (
     RecordingSession,
     _DeferredCaptureJob,
+    _IDLE_EFP_DEBOUNCE_GREEN_S,
     _IDLE_EFP_DEBOUNCE_S,
     _QueuedEvent,
 )
@@ -362,7 +363,8 @@ def test_idle_efp_timer_cancel_on_move_drops_stale(tmp_path: Path) -> None:
     assert statuses[-1]["efp_pending"] is False
 
 
-def test_idle_efp_clears_label_when_findall_empty(tmp_path: Path) -> None:
+def test_idle_efp_keeps_label_when_findall_empty_red(tmp_path: Path) -> None:
+    """EFP Name/Value stay visible after probe even when readiness paints red."""
     statuses: list[dict] = []
     session = RecordingSession(runs_root=tmp_path)
     session._accepting_input = True
@@ -415,8 +417,206 @@ def test_idle_efp_clears_label_when_findall_empty(tmp_path: Path) -> None:
             )
         )
     assert statuses[-1]["state"] == "red"
+    assert statuses[-1]["efp_name"] == "Leaf"
+    assert statuses[-1]["efp_value"] == "V"
+    # Probe paints before hover/readiness.
+    assert any(
+        row.get("efp_name") == "Leaf" and row.get("efp_pending") is False
+        for row in statuses
+    )
+
+
+def test_idle_efp_label_visible_during_hover_yellow(tmp_path: Path) -> None:
+    statuses: list[dict] = []
+    session = RecordingSession(runs_root=tmp_path)
+    session._accepting_input = True
+    session.set_on_uia_status(statuses.append)
+    session._idle_efp_generation = 1
+    session._last_settle_uia_after_index = 0
+    session._last_settle_uia = {"hwnd": 10, "window": [0, 0, 1, 1]}
+    session._last_settle_uia_by_hwnd = {}
+    click_win = ClickWindowInfo(
+        hwnd=55,
+        title="Other",
+        process_name="other.exe",
+        left=50,
+        top=50,
+        width=400,
+        height=300,
+        is_maximized=False,
+        class_name="Chrome_WidgetWin_1",
+    )
+
+    def _snap(hwnd: int, x: int, y: int) -> dict:
+        return {
+            "window": [50, 50, 400, 300],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [{"bbox": [60, 60, 180, 140], "text": "懸停"}],
+        }
+
+    with (
+        patch(
+            "src.recorder.uia_input_boxes.element_from_point_name_value",
+            return_value={"name": "Leaf", "value": "V", "element_from_point_s": 0.0},
+        ),
+        patch(
+            "src.recorder.capture.resolve_click_window",
+            return_value=click_win,
+        ),
+        patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_hover_subtree",
+            side_effect=_snap,
+        ),
+        patch.object(session, "_reschedule_idle_efp_from_last_pointer"),
+    ):
+        session._worker_idle_efp(
+            _DeferredCaptureJob(
+                action="idle_efp",
+                cursor_xy=(100, 100),
+                meta={"generation": 1},
+            )
+        )
+    # Immediate EFP before hover yellow, then green after FindAll.
+    assert any(
+        row.get("efp_name") == "Leaf" and row.get("state") != "green"
+        for row in statuses[:-1]
+    )
+    assert statuses[-1]["state"] == "green"
+    assert statuses[-1]["efp_name"] == "Leaf"
+
+
+def test_idle_efp_pending_clears_stale_label(tmp_path: Path) -> None:
+    statuses: list[dict] = []
+    session = RecordingSession(runs_root=tmp_path)
+    session._accepting_input = True
+    session.set_on_uia_status(statuses.append)
+    session._idle_efp_generation = 1
+    session._uia_status_efp_name = "舊細胞"
+    session._uia_status_efp_value = "1"
+    session._idle_efp_timer_fired(1, 10, 20)
+    assert statuses[-1]["efp_pending"] is True
     assert statuses[-1]["efp_name"] == ""
     assert statuses[-1]["efp_value"] == ""
+
+
+def test_settle_yellow_clears_efp_and_reschedules(tmp_path: Path) -> None:
+    statuses: list[dict] = []
+    session = RecordingSession(runs_root=tmp_path)
+    session._accepting_input = True
+    session.set_on_uia_status(statuses.append)
+    session._last_move_xy = (11, 22)
+    session._idle_efp_probed_name = "舊"
+    session._idle_efp_probed_value = "x"
+    reschedule: list[tuple[int, int]] = []
+
+    def _sched(x: int, y: int) -> None:
+        reschedule.append((int(x), int(y)))
+
+    with (
+        patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_screen",
+            return_value={
+                "window": [0, 0, 10, 10],
+                "inputs": [],
+                "scrollbars": [],
+                "texts": [{"bbox": [0, 0, 8, 8], "text": "A"}],
+            },
+        ),
+        patch("src.recorder.capture._window_class_name", return_value="Chrome_WidgetWin_1"),
+        patch.object(session, "_schedule_idle_efp", side_effect=_sched),
+    ):
+        session._collect_and_publish_settle_uia(42, after_event_index=0)
+    assert statuses[0]["state"] == "yellow"
+    assert statuses[0]["efp_name"] == ""
+    assert statuses[0]["efp_pending"] is True
+    assert reschedule == [(11, 22)]
+
+
+def test_schedule_idle_efp_uses_green_debounce(tmp_path: Path) -> None:
+    session = RecordingSession(runs_root=tmp_path)
+    session._accepting_input = True
+    session._uia_status_state = "green"
+    delays: list[float] = []
+
+    class _FakeTimer:
+        def __init__(self, interval, function, args=None, kwargs=None):
+            delays.append(float(interval))
+            self.daemon = False
+
+        def start(self) -> None:
+            return None
+
+        def cancel(self) -> None:
+            return None
+
+    with patch("src.recorder.capture.threading.Timer", _FakeTimer):
+        session._schedule_idle_efp(1, 2)
+    assert delays == [_IDLE_EFP_DEBOUNCE_GREEN_S]
+    session._uia_status_state = "red"
+    with patch("src.recorder.capture.threading.Timer", _FakeTimer):
+        session._schedule_idle_efp(3, 4)
+    assert delays[-1] == _IDLE_EFP_DEBOUNCE_S
+
+
+def test_worker_idle_efp_coalesces_to_latest(tmp_path: Path) -> None:
+    statuses: list[dict] = []
+    session = RecordingSession(runs_root=tmp_path)
+    session._accepting_input = True
+    session.set_on_uia_status(statuses.append)
+    session._idle_efp_generation = 2
+    session._last_settle_uia_after_index = 0
+    session._last_settle_uia = {
+        "hwnd": 7,
+        "window": [0, 0, 100, 100],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [{"bbox": [0, 0, 80, 80], "text": "Ready"}],
+    }
+    click_win = ClickWindowInfo(
+        hwnd=7,
+        title="T",
+        process_name="a.exe",
+        left=0,
+        top=0,
+        width=100,
+        height=100,
+        is_maximized=False,
+        class_name="Chrome_WidgetWin_1",
+    )
+    calls: list[tuple[int, int]] = []
+
+    def _probe(x: int, y: int):
+        calls.append((int(x), int(y)))
+        return {"name": f"N{x}", "value": "", "element_from_point_s": 0.0}
+
+    session._enqueue(
+        _DeferredCaptureJob(
+            action="idle_efp",
+            cursor_xy=(40, 40),
+            meta={"generation": 2},
+        )
+    )
+    with (
+        patch(
+            "src.recorder.uia_input_boxes.element_from_point_name_value",
+            side_effect=_probe,
+        ),
+        patch(
+            "src.recorder.capture.resolve_click_window",
+            return_value=click_win,
+        ),
+    ):
+        session._worker_idle_efp(
+            _DeferredCaptureJob(
+                action="idle_efp",
+                cursor_xy=(10, 10),
+                meta={"generation": 1},
+            )
+        )
+    assert calls == [(40, 40)]
+    assert statuses[-1]["efp_name"] == "N40"
+    assert statuses[-1]["state"] == "green"
 
 
 def test_worker_idle_efp_ignores_stale_generation() -> None:

@@ -115,6 +115,8 @@ _UIA_STATUS_PULSE_KINDS = frozenset(
 )
 # Idle ElementFromPoint for the recording LED label (never on the mouse hook).
 _IDLE_EFP_DEBOUNCE_S = 0.45
+# Faster refresh while the LED is already green (cache ready at cursor).
+_IDLE_EFP_DEBOUNCE_GREEN_S = 0.15
 _IDLE_EFP_LABEL_MAX_CHARS = 48
 # Max distance (px) between idle probe xy and press xy to latch idle for EFP.
 _IDLE_EFP_PRESS_MAX_DIST_PX = 12
@@ -1723,14 +1725,29 @@ class RecordingSession:
             self._cancel_idle_efp_timer_locked()
             generation = self._bump_idle_efp_generation_locked()
             self._uia_status_efp_pending = False
+            delay_s = (
+                _IDLE_EFP_DEBOUNCE_GREEN_S
+                if str(self._uia_status_state) == "green"
+                else _IDLE_EFP_DEBOUNCE_S
+            )
             timer = threading.Timer(
-                _IDLE_EFP_DEBOUNCE_S,
+                float(delay_s),
                 self._idle_efp_timer_fired,
                 args=(generation, int(x), int(y)),
             )
             timer.daemon = True
             self._idle_efp_timer = timer
         timer.start()
+
+    def _reschedule_idle_efp_from_last_pointer(self) -> None:
+        """Queue a fresh idle EFP at the latest cursor after FindAll finishes."""
+        with self._lock:
+            if not self._accepting_input or self._finalizing:
+                return
+            xy = self._last_move_xy or self._last_pointer_cursor_xy
+        if xy is None:
+            return
+        self._schedule_idle_efp(int(xy[0]), int(xy[1]))
 
     def _idle_efp_timer_fired(self, generation: int, x: int, y: int) -> None:
         with self._lock:
@@ -1739,7 +1756,8 @@ class RecordingSession:
             if int(generation) != int(self._idle_efp_generation):
                 return
             self._idle_efp_timer = None
-        self._emit_uia_status(efp_pending=True)
+        # Clear stale Name/Value while the worker probe is pending (overlay "…").
+        self._emit_uia_status(efp_name="", efp_value="", efp_pending=True)
         self._enqueue(
             _DeferredCaptureJob(
                 action="idle_efp",
@@ -1747,6 +1765,25 @@ class RecordingSession:
                 meta={"generation": int(generation)},
             )
         )
+
+    def _coalesce_idle_efp_job(
+        self, first: _DeferredCaptureJob
+    ) -> _DeferredCaptureJob:
+        """Drain queued idle_efp jobs; keep the newest and requeue the rest."""
+        latest = first
+        deferred: list[object] = []
+        while True:
+            try:
+                item = self._event_queue.get_nowait()
+            except queue.Empty:
+                break
+            if isinstance(item, _DeferredCaptureJob) and item.action == "idle_efp":
+                latest = item
+                continue
+            deferred.append(item)
+        for item in deferred:
+            self._event_queue.put(item)
+        return latest
 
     def _uia_path_ready_at_cursor(
         self,
@@ -1779,8 +1816,8 @@ class RecordingSession:
     ) -> None:
         """Paint green only when FindAll at the cursor is UIA-path sufficient.
 
-        EFP Name/Value is shown only when green. Otherwise LED is red and the
-        label is cleared so green+EFP never falsely promise a UIA recording path.
+        EFP Name/Value is a live cursor preview on any LED color. Red updates
+        the LED only and does not clear a just-probed label.
         """
         if claim_token is not None:
             with self._lock:
@@ -1819,16 +1856,16 @@ class RecordingSession:
                 efp_pending=False,
             )
         else:
+            # Keep existing EFP preview; only the readiness LED goes red.
             self._emit_uia_status(
                 state="red",
                 after_index=after_index,
-                efp_name="",
-                efp_value="",
                 efp_pending=False,
             )
 
     def _worker_idle_efp(self, job: _DeferredCaptureJob) -> None:
-        """Idle EFP probe, optional hover FindAll, then UIA-path readiness LED."""
+        """Idle EFP probe (label immediately), optional hover FindAll, then LED."""
+        job = self._coalesce_idle_efp_job(job)
         meta = job.meta if isinstance(job.meta, dict) else {}
         try:
             generation = int(meta.get("generation") or 0)
@@ -1865,7 +1902,30 @@ class RecordingSession:
             self._idle_efp_probed_name = name
             self._idle_efp_probed_value = value
             self._idle_efp_payload = stored
-        # Keep pending until readiness decides whether the label may show.
+        # Show Name/Value as soon as the probe returns (any LED color).
+        self._emit_uia_status(efp_name=name, efp_value=value, efp_pending=False)
+        cursor_xy = (int(cursor[0]), int(cursor[1]))
+        leave_settle_yellow = False
+        with self._lock:
+            if generation != int(self._idle_efp_generation):
+                return
+            if (
+                str(self._uia_status_state) == "yellow"
+                and not self._hover_uia_led_active
+            ):
+                leave_settle_yellow = True
+        # Cache already ready — paint green and skip hover FindAll.
+        if self._uia_path_ready_at_cursor(cursor_xy):
+            if leave_settle_yellow:
+                return
+            self._emit_uia_path_readiness(
+                cursor_xy=cursor_xy,
+                efp_name=name,
+                efp_value=value,
+            )
+            return
+        if leave_settle_yellow:
+            return
         hovered = self._maybe_hover_findall_uia(
             generation,
             int(cursor[0]),
@@ -1875,21 +1935,8 @@ class RecordingSession:
         )
         if hovered:
             return
-        leave_settle_yellow = False
-        with self._lock:
-            if generation != int(self._idle_efp_generation):
-                return
-            # Settle FindAll in flight — leave yellow; settle refresh will paint.
-            if (
-                str(self._uia_status_state) == "yellow"
-                and not self._hover_uia_led_active
-            ):
-                leave_settle_yellow = True
-        if leave_settle_yellow:
-            self._emit_uia_status(efp_pending=False)
-            return
         self._emit_uia_path_readiness(
-            cursor_xy=(int(cursor[0]), int(cursor[1])),
+            cursor_xy=cursor_xy,
             efp_name=name,
             efp_value=value,
         )
@@ -1899,7 +1946,13 @@ class RecordingSession:
         with self._lock:
             self._hover_uia_led_active = False
             self._hover_uia_led_token += 1
-        self._emit_uia_status(state="yellow", after_index=int(after_index))
+        self._emit_uia_status(
+            state="yellow",
+            after_index=int(after_index),
+            efp_name="",
+            efp_value="",
+            efp_pending=True,
+        )
 
     def _release_hover_uia_led_to_readiness(
         self,
@@ -1974,7 +2027,8 @@ class RecordingSession:
             self._hover_uia_led_token += 1
             claim_token = int(self._hover_uia_led_token)
             self._hover_uia_led_active = True
-        self._emit_uia_status(state="yellow")
+        # LED yellow only; keep the just-probed EFP Name/Value visible.
+        self._emit_uia_status(state="yellow", efp_pending=False)
 
         from src.recorder.uia_input_boxes import (
             bind_findall_timing,
@@ -2001,6 +2055,7 @@ class RecordingSession:
                 efp_name=efp_name,
                 efp_value=efp_value,
             )
+            self._reschedule_idle_efp_from_last_pointer()
             return True
         if not isinstance(value, dict):
             self._release_hover_uia_led_to_readiness(
@@ -2009,6 +2064,7 @@ class RecordingSession:
                 efp_name=efp_name,
                 efp_value=efp_value,
             )
+            self._reschedule_idle_efp_from_last_pointer()
             return True
         snapshot = dict(value)
         snapshot["hwnd"] = hwnd
@@ -2056,6 +2112,7 @@ class RecordingSession:
                 self._hover_uia_led_active = False
                 return True
         if stale_generation:
+            self._reschedule_idle_efp_from_last_pointer()
             return True
         self._emit_uia_path_readiness(
             cursor_xy=cursor_xy,
@@ -2063,6 +2120,7 @@ class RecordingSession:
             efp_value=efp_value,
             claim_token=claim_token,
         )
+        self._reschedule_idle_efp_from_last_pointer()
         return True
 
     def _notify_pending_text_input(self, event_index: int) -> None:
@@ -3440,11 +3498,13 @@ class RecordingSession:
                     self._last_settle_uia_after_index = int(after_event_index)
         if paint_red:
             self._emit_uia_status(state="red", after_index=int(after_event_index))
+            self._reschedule_idle_efp_from_last_pointer()
             return
         self._emit_uia_path_readiness(
             after_index=int(after_event_index),
             from_settle=True,
         )
+        self._reschedule_idle_efp_from_last_pointer()
 
     def _refresh_pending_pre_type(
         self,
@@ -4957,6 +5017,7 @@ class RecordingSession:
             after_index=after_event_index,
             from_settle=True,
         )
+        self._reschedule_idle_efp_from_last_pointer()
         return self._copy_uia_snapshot(primary)
 
     def _collect_and_publish_settle_uia(
@@ -4994,6 +5055,7 @@ class RecordingSession:
                     settle_hwnd=hwnd,
                 )
             self._emit_uia_status(state="red", after_index=int(after_event_index))
+            self._reschedule_idle_efp_from_last_pointer()
             return None
         if not isinstance(value, dict):
             with self._lock:
@@ -5002,6 +5064,7 @@ class RecordingSession:
                     settle_hwnd=hwnd,
                 )
             self._emit_uia_status(state="red", after_index=int(after_event_index))
+            self._reschedule_idle_efp_from_last_pointer()
             return None
         snapshot = dict(value)
         snapshot["hwnd"] = hwnd
@@ -5026,6 +5089,7 @@ class RecordingSession:
                 self._last_settle_uia_by_hwnd = retained
                 self._last_settle_uia_after_index = int(after_event_index)
             self._emit_uia_status(state="red", after_index=int(after_event_index))
+            self._reschedule_idle_efp_from_last_pointer()
             return None
         with self._lock:
             retained = self._by_hwnd_retained_across_settle(
@@ -5041,6 +5105,7 @@ class RecordingSession:
             after_index=int(after_event_index),
             from_settle=True,
         )
+        self._reschedule_idle_efp_from_last_pointer()
         return self._copy_uia_snapshot(snapshot)
 
     def _opened_hwnd_from_change(

@@ -24,7 +24,6 @@ from ctypes import wintypes
 from typing import Any, Callable, Iterator
 
 from cua_mcp.geometry import (
-    clip_box,
     intersection_area_xywh,
     point_in_rect_xywh,
 )
@@ -570,6 +569,26 @@ def resolve_usable_uia_probe_label(
     return str(canonicalize_uia_shell_status_label(preferred) or "").strip()
 
 
+def _intersect_local_box(
+    lx: int,
+    ly: int,
+    w: int,
+    h: int,
+    image_w: int,
+    image_h: int,
+) -> RectXywh | None:
+    """True image-local intersection; ``None`` when the box misses the frame."""
+    x1 = max(0, int(lx))
+    y1 = max(0, int(ly))
+    x2 = min(int(image_w), int(lx) + int(w))
+    y2 = min(int(image_h), int(ly) + int(h))
+    iw = x2 - x1
+    ih = y2 - y1
+    if iw <= 0 or ih <= 0:
+        return None
+    return (x1, y1, iw, ih)
+
+
 def _is_clipped_uia_sliver(
     *,
     orig_w: int,
@@ -626,9 +645,12 @@ def filter_uia_input_rects(
             int(right) - int(left),
             int(bottom) - int(top),
         )
-        x, y, w, h = clip_box(local[0], local[1], local[2], local[3], image_w, image_h)
-        if w <= 0 or h <= 0:
+        clipped = _intersect_local_box(
+            local[0], local[1], local[2], local[3], image_w, image_h
+        )
+        if clipped is None:
             continue
+        x, y, w, h = clipped
         if _is_clipped_uia_sliver(
             orig_w=local[2],
             orig_h=local[3],
@@ -727,9 +749,12 @@ def filter_uia_labeled_text_rects(
             int(right) - int(left),
             int(bottom) - int(top),
         )
-        x, y, w, h = clip_box(local[0], local[1], local[2], local[3], image_w, image_h)
-        if w <= 0 or h <= 0:
+        clipped = _intersect_local_box(
+            local[0], local[1], local[2], local[3], image_w, image_h
+        )
+        if clipped is None:
             continue
+        x, y, w, h = clipped
         label_by_box[(x, y, w, h)] = (text, control_type)
     out: list[LabeledRectXywh] = []
     seen: set[RectXywh] = set()

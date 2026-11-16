@@ -1471,7 +1471,7 @@ async def test_find_mouse_point_uses_vision_when_caption_hit_misses(
     )
     monkeypatch.setattr(
         "cua_mcp.select_mouse_target._grab_selected_monitors",
-        lambda: (
+        lambda *_a, **_k: (
             [1],
             ["shot.png"],
             [(1, np.zeros((10, 10, 3), dtype=np.uint8))],
@@ -6711,6 +6711,171 @@ def test_pick_captured_monitor_for_window_prefers_center(
     assert bgr is primary
 
 
+def test_pick_captured_monitor_for_window_returns_none_when_off_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+
+    primary = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    captured = [(1, primary)]
+
+    def _offset(monitor_index: int | None = None) -> tuple[int, int]:
+        return {1: (1920, -1)}.get(int(monitor_index or 1), (1920, -1))
+
+    monkeypatch.setattr(smt, "active_monitor_offset", _offset)
+
+    live = type(
+        "Live",
+        (),
+        {"left": 0, "top": 1032, "width": 1920, "height": 48},
+    )()
+    assert smt._pick_captured_monitor_for_window(captured, live) is None
+
+    minimized = type(
+        "Live",
+        (),
+        {"left": -32000, "top": -32000, "width": 1920, "height": 1080},
+    )()
+    assert smt._pick_captured_monitor_for_window(captured, minimized) is None
+
+
+def test_detections_from_live_uia_snapshot_empty_when_window_misses_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+
+    primary = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    captured = [(1, primary)]
+    live = type(
+        "Live",
+        (),
+        {"left": 0, "top": 1032, "width": 1920, "height": 48},
+    )()
+
+    monkeypatch.setattr(smt, "_pick_captured_monitor_for_window", lambda *_a, **_k: None)
+    assert smt._detections_from_live_uia_snapshot(captured, live, {"texts": []}) == []
+
+
+def test_extra_monitor_index_for_click_window_home_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    # Monitor 1 = primary at (0,0); monitor 2 = secondary at (1920,0).
+    details = [
+        {"index": 0, "left": 0, "top": 0, "width": 3840, "height": 1080, "name": "all_screens"},
+        {"index": 1, "left": 0, "top": 0, "width": 1920, "height": 1080},
+        {"index": 2, "left": 1920, "top": 0, "width": 1920, "height": 1080},
+    ]
+    monkeypatch.setattr(smt, "monitor_details", lambda: details)
+
+    assert smt._extra_monitor_index_for_click_window(None, [1]) is None
+    assert smt._extra_monitor_index_for_click_window({"hwnd": 1}, [0]) is None
+
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        lambda *_a, **_k: None,
+    )
+    assert smt._extra_monitor_index_for_click_window({"hwnd": 1}, [1]) is None
+
+    live = ClickWindowInfo(
+        hwnd=10,
+        title="",
+        process_name="explorer.exe",
+        left=1920,
+        top=1032,
+        width=1920,
+        height=48,
+        is_maximized=False,
+        is_taskbar=True,
+        class_name="Shell_TrayWnd",
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        lambda *_a, **_k: live,
+    )
+    assert smt._extra_monitor_index_for_click_window({"hwnd": 10}, [1]) == 2
+    assert smt._extra_monitor_index_for_click_window({"hwnd": 10}, [2]) is None
+    assert smt._extra_monitor_index_for_click_window({"hwnd": 10}, [1, 2]) is None
+
+    # Maximized on secondary with ~8px overhang onto primary → still home=2.
+    overhang = ClickWindowInfo(
+        hwnd=11,
+        title="App",
+        process_name="app.exe",
+        left=1912,
+        top=-9,
+        width=1936,
+        height=1048,
+        is_maximized=True,
+        class_name="AppWindow",
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        lambda *_a, **_k: overhang,
+    )
+    assert smt._extra_monitor_index_for_click_window({"hwnd": 11}, [1]) == 2
+
+
+def test_grab_selected_monitors_appends_home_monitor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    grabbed: list[int] = []
+
+    def fake_grab(monitor_index: int, *, include_cursor: bool = False):
+        del include_cursor
+        grabbed.append(int(monitor_index))
+        return int(monitor_index), np.zeros((10, 10, 3), dtype=np.uint8)
+
+    monkeypatch.setattr(smt, "selected_eye_monitor_indices", lambda: [1])
+    monkeypatch.setattr(smt, "grab_monitor_bgr", fake_grab)
+    monkeypatch.setattr(smt, "imwrite_bgr", lambda *_a, **_k: True)
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+    monkeypatch.setattr(
+        smt,
+        "monitor_details",
+        lambda: [
+            {"index": 0, "left": 0, "top": 0, "width": 3840, "height": 1080},
+            {"index": 1, "left": 1920, "top": -1, "width": 1920, "height": 1080},
+            {"index": 2, "left": 0, "top": 0, "width": 1920, "height": 1080},
+        ],
+    )
+    live = ClickWindowInfo(
+        hwnd=10,
+        title="",
+        process_name="explorer.exe",
+        left=0,
+        top=1032,
+        width=1920,
+        height=48,
+        is_maximized=False,
+        is_taskbar=True,
+        class_name="Shell_TrayWnd",
+    )
+    monkeypatch.setattr(
+        "src.recorder.window_snapshot.find_matching_click_window",
+        lambda *_a, **_k: live,
+    )
+
+    indices, paths, captured, _s = smt._grab_selected_monitors(
+        {"hwnd": 10, "class_name": "Shell_TrayWnd"}
+    )
+    assert indices == [1, 2]
+    assert grabbed == [1, 2]
+    assert len(paths) == 2
+    assert [idx for idx, _bgr in captured] == [1, 2]
+
+
 @pytest.mark.asyncio
 async def test_find_mouse_point_uia_first_hit_skips_ocr(
     monkeypatch: pytest.MonkeyPatch,
@@ -7289,7 +7454,7 @@ async def test_uia_instruction_does_not_replay_repair(
     ]
     repair_calls: list[str] = []
 
-    def fake_grab():
+    def fake_grab(*_a, **_k):
         frame = np.zeros((80, 80, 3), dtype=np.uint8)
         return [1], ["shot.png"], [(1, frame)], 0.01
 
@@ -7455,7 +7620,7 @@ async def test_uia_hit_input_hub_skips_yolo_subtarget(
         source="uia",
     )
 
-    def fake_grab():
+    def fake_grab(*_a, **_k):
         frame = np.zeros((600, 800, 3), dtype=np.uint8)
         return [1], ["shot.png"], [(1, frame)], 0.01
 
@@ -7519,7 +7684,7 @@ async def test_uia_hit_with_fallback_unique_element_skips_ocr(
     element_box = (14, 14, 12, 12)
     deferred_calls: list[str] = []
 
-    def fake_grab():
+    def fake_grab(*_a, **_k):
         frame = np.zeros((80, 160, 3), dtype=np.uint8)
         return [1], ["shot.png"], [(1, frame)], 0.01
 
@@ -7601,7 +7766,7 @@ async def test_uia_hit_with_fallback_unique_text_skips_ocr(
     text_box = (40, 14, 50, 14)
     deferred_calls: list[str] = []
 
-    def fake_grab():
+    def fake_grab(*_a, **_k):
         frame = np.zeros((80, 160, 3), dtype=np.uint8)
         return [1], ["shot.png"], [(1, frame)], 0.01
 
@@ -7694,7 +7859,7 @@ async def test_uia_hit_with_fallback_ambiguous_keeps_uia_center(
     )
     deferred_calls: list[str] = []
 
-    def fake_grab():
+    def fake_grab(*_a, **_k):
         frame = np.zeros((80, 160, 3), dtype=np.uint8)
         return [1], ["shot.png"], [(1, frame)], 0.01
 
@@ -7782,7 +7947,7 @@ async def test_uia_hit_with_fallback_unique_element_skips_ocr_despite_text_nearb
     )
     deferred_calls: list[str] = []
 
-    def fake_grab():
+    def fake_grab(*_a, **_k):
         frame = np.zeros((80, 160, 3), dtype=np.uint8)
         return [1], ["shot.png"], [(1, frame)], 0.01
 
@@ -7865,7 +8030,7 @@ async def test_uia_hit_with_fallback_unique_text_skips_ocr_despite_icon_nearby(
     text_box = (40, 14, 28, 13)
     deferred_calls: list[str] = []
 
-    def fake_grab():
+    def fake_grab(*_a, **_k):
         frame = np.zeros((80, 200, 3), dtype=np.uint8)
         return [1], ["shot.png"], [(1, frame)], 0.01
 
@@ -7959,7 +8124,7 @@ async def test_uia_hit_with_fallback_multiple_texts_finishes_ocr(
     )
     deferred_calls: list[str] = []
 
-    def fake_grab():
+    def fake_grab(*_a, **_k):
         frame = np.zeros((80, 200, 3), dtype=np.uint8)
         return [1], ["shot.png"], [(1, frame)], 0.01
 
@@ -8162,7 +8327,7 @@ async def test_uia_yolo_subtarget_unique_text_from_debug_layers_without_pending(
     )
     deferred_calls: list[str] = []
 
-    def fake_grab():
+    def fake_grab(*_a, **_k):
         frame = np.zeros((920, 1918, 3), dtype=np.uint8)
         return [1], ["shot.png"], [(1, frame)], 0.01
 
@@ -8246,7 +8411,7 @@ async def test_uia_hit_without_fallback_still_skips_yolo(
     )
     finish_calls: list[str] = []
 
-    def fake_grab():
+    def fake_grab(*_a, **_k):
         frame = np.zeros((80, 80, 3), dtype=np.uint8)
         return [1], ["shot.png"], [(1, frame)], 0.01
 
@@ -8305,7 +8470,7 @@ async def test_uia_empty_constellation_desktop_uses_ocr_fallback(
     snapshots: list[int] = []
     finish_calls: list[str] = []
 
-    def fake_grab():
+    def fake_grab(*_a, **_k):
         frame = np.zeros((200, 200, 3), dtype=np.uint8)
         return [1], ["shot.png"], [(1, frame)], 0.01
 
@@ -8395,7 +8560,7 @@ async def test_uia_empty_non_desktop_missing_window_still_raises(
     from cua_mcp import select_mouse_target as smt
     from cua_mcp.select_mouse_target import CLICK_WINDOW_MISS_MESSAGE
 
-    def fake_grab():
+    def fake_grab(*_a, **_k):
         frame = np.zeros((200, 200, 3), dtype=np.uint8)
         return [1], ["shot.png"], [(1, frame)], 0.01
 
@@ -8456,7 +8621,7 @@ async def test_uia_empty_without_ocr_fallback_falls_through_to_yolo(
         (40, 40, 30, 16), YOLO_CLASS_TEXT, text="Chrome", source="ocr"
     )
 
-    def fake_grab():
+    def fake_grab(*_a, **_k):
         frame = np.zeros((100, 100, 3), dtype=np.uint8)
         return [1], ["shot.png"], [(1, frame)], 0.01
 

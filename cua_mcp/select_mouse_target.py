@@ -5690,16 +5690,74 @@ def _live_uia_snapshot_for_click_window(
     return live, snapshot
 
 
+def _extra_monitor_index_for_click_window(
+    click_window: dict[str, Any] | None,
+    selected: list[int],
+) -> int | None:
+    """Return the live click_window home monitor when it is not already selected.
+
+    Home monitor = contains window center, else largest overlap among physical
+    monitors (``monitor_details`` indices ``>= 1``). Returns ``None`` when there
+    is nothing to add (no payload, all-screens selected, no live match, or home
+    already selected). Short-circuits before any ``mss`` call when possible.
+    """
+    if not isinstance(click_window, dict):
+        return None
+    selected_list = [int(i) for i in selected]
+    if 0 in selected_list:
+        return None
+    from src.recorder.window_snapshot import find_matching_click_window
+
+    live = find_matching_click_window(click_window)
+    if live is None:
+        return None
+    left, top, w, h = live.screen_rect()
+    if w <= 0 or h <= 0:
+        return None
+    cx, cy = left + w // 2, top + h // 2
+
+    physical = [m for m in monitor_details() if int(m["index"]) >= 1]
+    if not physical:
+        return None
+    home: int | None = None
+    best_area = 0
+    for m in physical:
+        ml, mt, mw, mh = (
+            int(m["left"]),
+            int(m["top"]),
+            int(m["width"]),
+            int(m["height"]),
+        )
+        if ml <= cx < ml + mw and mt <= cy < mt + mh:
+            home = int(m["index"])
+            break
+        area = max(0, min(left + w, ml + mw) - max(left, ml)) * max(
+            0, min(top + h, mt + mh) - max(top, mt)
+        )
+        if area > best_area:
+            home = int(m["index"])
+            best_area = area
+    if home is None:
+        return None
+    max_idx = len(physical)
+    resolved_selected = {min(max(int(i), 0), max_idx) for i in selected_list}
+    if home in resolved_selected:
+        return None
+    return home
+
+
 def _pick_captured_monitor_for_window(
     captured: list[tuple[int, np.ndarray]],
     live: Any,
-) -> tuple[int, np.ndarray, tuple[int, int]]:
+) -> tuple[int, np.ndarray, tuple[int, int]] | None:
     """Choose the capture whose monitor best covers ``live``.
 
     Prefer the monitor that contains the window center. If none does, pick the
-    monitor with the largest intersection area with the window. Fall back to the
-    first capture when nothing overlaps (e.g. empty size).
+    monitor with the largest intersection area with the window. Returns ``None``
+    when nothing overlaps (no phantom mapping onto an unrelated capture).
     """
+    if not captured:
+        return None
     left = int(getattr(live, "left", 0) or 0)
     top = int(getattr(live, "top", 0) or 0)
     width = max(0, int(getattr(live, "width", 0) or 0))
@@ -5725,8 +5783,7 @@ def _pick_captured_monitor_for_window(
             best = (monitor_index, bgr, offset)
     if best is not None and best_area > 0:
         return best
-    monitor_index, bgr = captured[0]
-    return (monitor_index, bgr, active_monitor_offset(monitor_index))
+    return None
 
 
 def _detections_from_live_uia_snapshot(
@@ -5739,7 +5796,10 @@ def _detections_from_live_uia_snapshot(
         return []
     from src.recorder.uia_input_boxes import uia_snapshot_image_local
 
-    _monitor_index, bgr, offset = _pick_captured_monitor_for_window(captured, live)
+    picked = _pick_captured_monitor_for_window(captured, live)
+    if picked is None:
+        return []
+    _monitor_index, bgr, offset = picked
     height, width = bgr.shape[:2]
     prefetched = uia_snapshot_image_local(
         snapshot,
@@ -5767,15 +5827,28 @@ def _uia_only_detections_for_click_window(
     return _detections_from_live_uia_snapshot(captured, live, snapshot)
 
 
-def _grab_selected_monitors() -> tuple[
+def _grab_selected_monitors(
+    click_window: dict[str, Any] | None = None,
+) -> tuple[
     list[int],
     list[str],
     list[tuple[int, np.ndarray]],
     float,
 ]:
-    """Grab selected monitors once. Desktop grabbers stay on this thread."""
+    """Grab selected monitors once. Desktop grabbers stay on this thread.
+
+    When ``click_window``'s live home monitor is not already selected, append it
+    so YOLO/UIA see the window without requiring the user to pick every display.
+    """
     paths = _run_manager().require_paths()
-    monitor_indices = selected_eye_monitor_indices()
+    monitor_indices = list(selected_eye_monitor_indices())
+    extra = _extra_monitor_index_for_click_window(click_window, monitor_indices)
+    if extra is not None:
+        _log_info(
+            f"move_mouse click_window on unselected monitor={extra}; "
+            "adding to capture"
+        )
+        monitor_indices.append(extra)
     stamp = ts_name()
     image_paths: list[str] = []
     captured: list[tuple[int, np.ndarray]] = []
@@ -5910,7 +5983,9 @@ def _capture_and_detect_mouse_candidates(
     When ``defer_ocr=True``, leftover OCR is skipped when class candidates
     exist; ``timing["_ocr_pending"]`` holds finish state for a later pass.
     """
-    monitor_indices, image_paths, captured, capture_s = _grab_selected_monitors()
+    monitor_indices, image_paths, captured, capture_s = _grab_selected_monitors(
+        click_window
+    )
     return _finish_captured_mouse_candidates(
         monitor_indices,
         image_paths,
@@ -6068,7 +6143,9 @@ def _fresh_fingerprint_for_compare(
     click_window: dict[str, Any] | None,
 ) -> _UiChangeFingerprint | None:
     """Re-grab selected monitors and build a fingerprint with the same ROI policy."""
-    _monitor_indices, _image_paths, captured, _capture_s = _grab_selected_monitors()
+    _monitor_indices, _image_paths, captured, _capture_s = _grab_selected_monitors(
+        click_window
+    )
     return _fingerprint_from_captured(captured, click_window)
 
 
@@ -6486,7 +6563,7 @@ async def _find_mouse_point_attempt(
         and click_hwnd
     ):
         monitor_indices, image_paths, captured, capture_s = await asyncio.to_thread(
-            _grab_selected_monitors
+            _grab_selected_monitors, click_window
         )
         _note_capture(captured)
         grabbed_frames = True
@@ -6645,7 +6722,9 @@ async def _find_mouse_point_attempt(
                         image_paths,
                         captured,
                         capture_s,
-                    ) = await asyncio.to_thread(_grab_selected_monitors)
+                    ) = await asyncio.to_thread(
+                        _grab_selected_monitors, click_window
+                    )
                     _note_capture(captured)
                     constellation_yolo_dets = []
                     constellation_yolo_timing = {}
@@ -6679,7 +6758,9 @@ async def _find_mouse_point_attempt(
                         image_paths,
                         captured,
                         capture_s,
-                    ) = await asyncio.to_thread(_grab_selected_monitors)
+                    ) = await asyncio.to_thread(
+                        _grab_selected_monitors, click_window
+                    )
                     _note_capture(captured)
                     constellation_yolo_dets = []
                     constellation_yolo_timing = {}

@@ -267,9 +267,9 @@ def test_uia_snapshot_image_local_keeps_input_labels() -> None:
 
 
 def test_filter_uia_input_rects_drops_edge_sliver_from_wrong_monitor() -> None:
-    """Off-monitor boxes that clip to a 1px primary edge must not become targets."""
+    """Off-monitor boxes with no true intersection must not become targets."""
     window = (1912, -9, 1936, 1048)  # maximized on secondary, left overlaps primary
-    # Real control on secondary; clipping onto primary (0..1920) leaves a 1px strip.
+    # Real control on secondary; no overlap with primary (0..1920).
     screen_boxes = [
         (2100, 300, 2250, 330),
         (100, 200, 220, 240),  # fully on primary — keep
@@ -282,6 +282,40 @@ def test_filter_uia_input_rects_drops_edge_sliver_from_wrong_monitor() -> None:
         image_h=1080,
     )
     assert boxes == [(100, 200, 120, 40)]
+
+
+def test_filter_uia_input_rects_drops_fully_off_and_intersects_partial() -> None:
+    from src.recorder.uia_input_boxes import filter_uia_labeled_text_rects
+
+    window = (0, 0, 1920, 1080)
+    boxes = filter_uia_input_rects(
+        [
+            (-500, 300, -350, 330),  # fully off left
+            (100, -400, 250, -370),  # fully off top
+            (2100, 300, 2102, 330),  # tiny fully off right
+            (-50, 300, 100, 330),  # partial left → true intersect
+        ],
+        window_screen_xywh=window,
+        monitor_offset=(0, 0),
+        image_w=1920,
+        image_h=1080,
+    )
+    assert boxes == [(0, 300, 100, 30)]
+
+    labeled = filter_uia_labeled_text_rects(
+        [
+            ((-500, 300, -350, 330), "A", "text"),
+            ((-500, 300, -350, 330), "B", "text"),
+            ((100, 200, 220, 240), "Keep", "text"),
+        ],
+        window_screen_xywh=window,
+        monitor_offset=(0, 0),
+        image_w=1920,
+        image_h=1080,
+    )
+    assert [(box, label) for box, label, _ct in labeled] == [
+        ((100, 200, 120, 40), "Keep")
+    ]
 
 
 def test_is_clipped_uia_sliver_keeps_uncropped_small_box() -> None:

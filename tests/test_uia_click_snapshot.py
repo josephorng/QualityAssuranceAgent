@@ -2146,7 +2146,7 @@ async def test_replay_uia_path_skips_yolo_and_miss_drops_uia_names(
     yolo_calls: list[str] = []
     ocr = _detection_from_bbox((80, 80, 30, 16), YOLO_CLASS_TEXT, text="搜尋", source="ocr")
 
-    def fake_grab():
+    def fake_grab(*_a, **_k):
         frame = np.zeros((20, 20, 3), dtype=np.uint8)
         return [1], ["shot.png"], [(1, frame)], 0.01
 
@@ -2391,7 +2391,7 @@ async def test_uia_mode_typed_miss_falls_through_to_yolo(
     ocr = _detection_from_bbox((80, 80, 30, 16), YOLO_CLASS_TEXT, text="記事本", source="ocr")
     yolo_calls: list[str] = []
 
-    def fake_grab():
+    def fake_grab(*_a, **_k):
         frame = np.zeros((20, 20, 3), dtype=np.uint8)
         return [1], ["shot.png"], [(1, frame)], 0.01
 
@@ -2453,7 +2453,7 @@ async def test_uia_miss_retries_once_then_uses_original_ocr_instruction(
     grab_paths: list[str] = []
     finish_paths: list[str] = []
 
-    def fake_grab():
+    def fake_grab(*_a, **_k):
         path = f"shot_{len(grab_paths)}.png"
         grab_paths.append(path)
         frame = np.zeros((20, 20, 3), dtype=np.uint8)
@@ -2533,7 +2533,7 @@ async def test_uia_second_snapshot_hit_skips_ocr(
     snapshots: list[int] = []
     yolo_calls: list[str] = []
 
-    def fake_grab():
+    def fake_grab(*_a, **_k):
         frame = np.zeros((20, 20, 3), dtype=np.uint8)
         return [1], ["shot.png"], [(1, frame)], 0.01
 

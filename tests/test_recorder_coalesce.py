@@ -3,6 +3,7 @@ from __future__ import annotations
 from src.recorder.coalesce import (
     coalesce_chinese_ime_candidate_keys,
     coalesce_consecutive_same_location_clicks,
+    coalesce_consecutive_scrolls,
     coalesce_consecutive_text_inputs,
     coalesce_text_inputs_bridged_by_edit_keys,
     reclassify_flyout_pick_drags_as_clicks,
@@ -773,3 +774,366 @@ def test_reclassify_flyout_pick_keeps_drag_when_flyout_still_open() -> None:
     ]
     result = reclassify_flyout_pick_drags_as_clicks(events)
     assert result[0].kind == "drag"
+
+
+def _scroll_event(
+    index: int,
+    *,
+    timestamp_utc: str,
+    scroll_delta: int | None,
+    cursor_xy: tuple[int, int] | None = (100, 200),
+    modifiers: list[str] | None = None,
+    screenshot_path: str = "",
+    end_screenshot_path: str = "",
+    click_window: dict | None = None,
+    uia_snapshot: dict | None = None,
+    element_from_point: dict | None = None,
+    window_snapshot_debug: dict | None = None,
+    window_change: dict | None = None,
+    target_window_title: str | None = None,
+) -> RecordedEvent:
+    return RecordedEvent(
+        index=index,
+        timestamp_utc=timestamp_utc,
+        kind="scroll",
+        cursor_xy=cursor_xy,
+        modifiers=modifiers,
+        scroll_delta=scroll_delta,
+        screenshot_path=screenshot_path,
+        end_screenshot_path=end_screenshot_path,
+        click_window=click_window,
+        uia_snapshot=uia_snapshot,
+        element_from_point=element_from_point,
+        window_snapshot_debug=window_snapshot_debug,
+        window_change=window_change,
+        target_window_title=target_window_title,
+    )
+
+
+def test_coalesce_scrolls_merges_downward_burst() -> None:
+    events = [
+        _scroll_event(
+            1,
+            timestamp_utc="2026-08-12T00:00:00+00:00",
+            scroll_delta=-1,
+            screenshot_path="a.jpeg",
+        ),
+        _scroll_event(
+            2,
+            timestamp_utc="2026-08-12T00:00:00.200000+00:00",
+            scroll_delta=-2,
+        ),
+        _scroll_event(
+            3,
+            timestamp_utc="2026-08-12T00:00:00.400000+00:00",
+            scroll_delta=-3,
+        ),
+    ]
+    merged = coalesce_consecutive_scrolls(events)
+    assert len(merged) == 1
+    assert merged[0].index == 1
+    assert merged[0].scroll_delta == -6
+    assert merged[0].screenshot_path == "a.jpeg"
+    assert merged[0].timestamp_utc == "2026-08-12T00:00:00+00:00"
+
+
+def test_coalesce_scrolls_merges_upward_burst() -> None:
+    events = [
+        _scroll_event(
+            1,
+            timestamp_utc="2026-08-12T00:00:00+00:00",
+            scroll_delta=2,
+        ),
+        _scroll_event(
+            2,
+            timestamp_utc="2026-08-12T00:00:00.300000+00:00",
+            scroll_delta=1,
+        ),
+        _scroll_event(
+            3,
+            timestamp_utc="2026-08-12T00:00:00.600000+00:00",
+            scroll_delta=2,
+        ),
+    ]
+    merged = coalesce_consecutive_scrolls(events)
+    assert len(merged) == 1
+    assert merged[0].scroll_delta == 5
+
+
+def test_coalesce_scrolls_direction_reverse_breaks_group() -> None:
+    events = [
+        _scroll_event(
+            1,
+            timestamp_utc="2026-08-12T00:00:00+00:00",
+            scroll_delta=-2,
+        ),
+        _scroll_event(
+            2,
+            timestamp_utc="2026-08-12T00:00:00.200000+00:00",
+            scroll_delta=-2,
+        ),
+        _scroll_event(
+            3,
+            timestamp_utc="2026-08-12T00:00:00.400000+00:00",
+            scroll_delta=1,
+        ),
+        _scroll_event(
+            4,
+            timestamp_utc="2026-08-12T00:00:00.600000+00:00",
+            scroll_delta=3,
+        ),
+    ]
+    merged = coalesce_consecutive_scrolls(events)
+    assert len(merged) == 2
+    assert merged[0].scroll_delta == -4
+    assert merged[1].scroll_delta == 4
+
+
+def test_coalesce_scrolls_gap_boundary() -> None:
+    events = [
+        _scroll_event(
+            1,
+            timestamp_utc="2026-08-12T00:00:00+00:00",
+            scroll_delta=-1,
+        ),
+        _scroll_event(
+            2,
+            timestamp_utc="2026-08-12T00:00:01.000000+00:00",
+            scroll_delta=-1,
+        ),
+        _scroll_event(
+            3,
+            timestamp_utc="2026-08-12T00:00:02.000100+00:00",
+            scroll_delta=-1,
+        ),
+    ]
+    merged = coalesce_consecutive_scrolls(events)
+    assert len(merged) == 2
+    assert merged[0].scroll_delta == -2
+    assert merged[1].scroll_delta == -1
+
+
+def test_coalesce_scrolls_chained_gaps_merge_long_burst() -> None:
+    events = [
+        _scroll_event(
+            1,
+            timestamp_utc="2026-08-12T00:00:00+00:00",
+            scroll_delta=-1,
+        ),
+        _scroll_event(
+            2,
+            timestamp_utc="2026-08-12T00:00:00.900000+00:00",
+            scroll_delta=-1,
+        ),
+        _scroll_event(
+            3,
+            timestamp_utc="2026-08-12T00:00:01.800000+00:00",
+            scroll_delta=-1,
+        ),
+    ]
+    merged = coalesce_consecutive_scrolls(events)
+    assert len(merged) == 1
+    assert merged[0].scroll_delta == -3
+
+
+def test_coalesce_scrolls_cursor_distance_boundary() -> None:
+    near = [
+        _scroll_event(
+            1,
+            timestamp_utc="2026-08-12T00:00:00+00:00",
+            scroll_delta=-1,
+            cursor_xy=(100, 200),
+        ),
+        _scroll_event(
+            2,
+            timestamp_utc="2026-08-12T00:00:00.200000+00:00",
+            scroll_delta=-1,
+            cursor_xy=(116, 200),
+        ),
+    ]
+    far = [
+        _scroll_event(
+            1,
+            timestamp_utc="2026-08-12T00:00:00+00:00",
+            scroll_delta=-1,
+            cursor_xy=(100, 200),
+        ),
+        _scroll_event(
+            2,
+            timestamp_utc="2026-08-12T00:00:00.200000+00:00",
+            scroll_delta=-1,
+            cursor_xy=(117, 200),
+        ),
+    ]
+    assert len(coalesce_consecutive_scrolls(near)) == 1
+    assert len(coalesce_consecutive_scrolls(far)) == 2
+
+
+def test_coalesce_scrolls_modifiers_mismatch_breaks() -> None:
+    events = [
+        _scroll_event(
+            1,
+            timestamp_utc="2026-08-12T00:00:00+00:00",
+            scroll_delta=-1,
+        ),
+        _scroll_event(
+            2,
+            timestamp_utc="2026-08-12T00:00:00.200000+00:00",
+            scroll_delta=-1,
+            modifiers=["ctrl"],
+        ),
+    ]
+    merged = coalesce_consecutive_scrolls(events)
+    assert len(merged) == 2
+
+
+def test_coalesce_scrolls_matching_modifiers_merge() -> None:
+    events = [
+        _scroll_event(
+            1,
+            timestamp_utc="2026-08-12T00:00:00+00:00",
+            scroll_delta=-1,
+            modifiers=["ctrl"],
+        ),
+        _scroll_event(
+            2,
+            timestamp_utc="2026-08-12T00:00:00.200000+00:00",
+            scroll_delta=-2,
+            modifiers=["ctrl"],
+        ),
+    ]
+    merged = coalesce_consecutive_scrolls(events)
+    assert len(merged) == 1
+    assert merged[0].scroll_delta == -3
+    assert merged[0].modifiers == ["ctrl"]
+
+
+def test_coalesce_scrolls_invalid_fields_do_not_merge() -> None:
+    none_delta = [
+        _scroll_event(
+            1,
+            timestamp_utc="2026-08-12T00:00:00+00:00",
+            scroll_delta=-1,
+        ),
+        _scroll_event(
+            2,
+            timestamp_utc="2026-08-12T00:00:00.200000+00:00",
+            scroll_delta=None,
+        ),
+    ]
+    zero_delta = [
+        _scroll_event(
+            1,
+            timestamp_utc="2026-08-12T00:00:00+00:00",
+            scroll_delta=-1,
+        ),
+        _scroll_event(
+            2,
+            timestamp_utc="2026-08-12T00:00:00.200000+00:00",
+            scroll_delta=0,
+        ),
+    ]
+    missing_cursor = [
+        _scroll_event(
+            1,
+            timestamp_utc="2026-08-12T00:00:00+00:00",
+            scroll_delta=-1,
+            cursor_xy=(100, 200),
+        ),
+        _scroll_event(
+            2,
+            timestamp_utc="2026-08-12T00:00:00.200000+00:00",
+            scroll_delta=-1,
+            cursor_xy=None,
+        ),
+    ]
+    assert len(coalesce_consecutive_scrolls(none_delta)) == 2
+    assert len(coalesce_consecutive_scrolls(zero_delta)) == 2
+    assert len(coalesce_consecutive_scrolls(missing_cursor)) == 2
+
+
+def test_coalesce_scrolls_non_scroll_interruption() -> None:
+    events = [
+        _scroll_event(
+            1,
+            timestamp_utc="2026-08-12T00:00:00+00:00",
+            scroll_delta=-1,
+        ),
+        _click_event(
+            2,
+            timestamp_utc="2026-08-12T00:00:00.100000+00:00",
+        ),
+        _scroll_event(
+            3,
+            timestamp_utc="2026-08-12T00:00:00.200000+00:00",
+            scroll_delta=-1,
+        ),
+    ]
+    merged = coalesce_consecutive_scrolls(events)
+    assert len(merged) == 3
+    assert [event.kind for event in merged] == ["scroll", "click", "scroll"]
+
+
+def test_coalesce_scrolls_keeps_first_before_and_last_after() -> None:
+    click_window = {"hwnd": 1, "title": "Pane"}
+    uia_snapshot = {"hwnd": 1, "texts": []}
+    element_from_point = {"name": "Value", "value": "20", "control_type": "data_item"}
+    first_debug = {
+        "signal_kind": "scroll",
+        "windows_before": [{"hwnd": 1}],
+        "windows_before_count": 1,
+        "windows_after": [{"hwnd": 1}],
+        "windows_after_count": 1,
+        "signals_before": {"scroll": {"vertical": 10.0}},
+        "signals_after": {"scroll": {"vertical": 12.0}},
+    }
+    last_debug = {
+        "signal_kind": "scroll",
+        "windows_before": [{"hwnd": 1}],
+        "windows_before_count": 1,
+        "windows_after": [{"hwnd": 1}, {"hwnd": 2}],
+        "windows_after_count": 2,
+        "signals_before": {"scroll": {"vertical": 14.0}},
+        "signals_after": {"scroll": {"vertical": 40.0}},
+    }
+    first = _scroll_event(
+        1,
+        timestamp_utc="2026-08-12T00:00:00+00:00",
+        scroll_delta=-1,
+        screenshot_path="before.jpeg",
+        end_screenshot_path="first_end.jpeg",
+        click_window=click_window,
+        uia_snapshot=uia_snapshot,
+        element_from_point=element_from_point,
+        window_snapshot_debug=first_debug,
+        window_change={"appeared": []},
+        target_window_title="first",
+    )
+    last = _scroll_event(
+        2,
+        timestamp_utc="2026-08-12T00:00:00.200000+00:00",
+        scroll_delta=-2,
+        screenshot_path="mid.jpeg",
+        end_screenshot_path="last_end.jpeg",
+        window_snapshot_debug=last_debug,
+        window_change={"disappeared": [{"title": "UIA"}]},
+        target_window_title="last",
+    )
+    merged = coalesce_consecutive_scrolls([first, last])
+    assert len(merged) == 1
+    event = merged[0]
+    assert event.scroll_delta == -3
+    assert event.screenshot_path == "before.jpeg"
+    assert event.end_screenshot_path == "last_end.jpeg"
+    assert event.click_window == click_window
+    assert event.uia_snapshot == uia_snapshot
+    assert event.element_from_point == element_from_point
+    assert event.target_window_title == "last"
+    assert event.window_change == {"disappeared": [{"title": "UIA"}]}
+    debug = event.window_snapshot_debug
+    assert debug is not None
+    assert debug["signals_before"] == {"scroll": {"vertical": 10.0}}
+    assert debug["signals_after"] == {"scroll": {"vertical": 40.0}}
+    assert debug["windows_before"] == [{"hwnd": 1}]
+    assert debug["windows_after"] == [{"hwnd": 1}, {"hwnd": 2}]
+    assert debug["signal_kind"] == "scroll"

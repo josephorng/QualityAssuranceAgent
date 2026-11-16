@@ -13,6 +13,9 @@ _MULTI_CLICK_MAX_DIST_PX = 8
 _NEGLIGIBLE_DRAG_DIST_PX = 8
 # Follow-up flyout pick may land a few px off the drag end (menu item targeting).
 _FLYOUT_PICK_MAX_DIST_PX = 16
+# Wheel bursts: same gap as multi-click; slightly looser distance for wrist drift.
+_SCROLL_MAX_GAP_S = 1.0
+_SCROLL_MAX_DIST_PX = 16
 _COALESCABLE_CLICK_KINDS = frozenset({"click", "double_click", "triple_click"})
 _IME_CANDIDATE_KEYS = frozenset({"up", "down", "left", "right", "enter"})
 _TEXT_EDIT_BRIDGE_KEYS = frozenset({"backspace", "delete"})
@@ -666,6 +669,146 @@ def coalesce_consecutive_same_location_clicks(
             continue
         flush()
         if event.kind in _COALESCABLE_CLICK_KINDS and _is_left_button(event.button):
+            group = [event]
+        else:
+            merged.append(event)
+    flush()
+    return merged
+
+
+def _scroll_delta_int(delta: Any) -> int | None:
+    """Non-zero integer scroll delta, or None when missing/invalid/zero."""
+    if delta is None or isinstance(delta, bool):
+        return None
+    try:
+        value = int(delta)
+    except (TypeError, ValueError):
+        return None
+    return value if value != 0 else None
+
+
+def _can_merge_consecutive_scrolls(prev: RecordedEvent, event: RecordedEvent) -> bool:
+    if prev.kind != "scroll" or event.kind != "scroll":
+        return False
+    prev_delta = _scroll_delta_int(prev.scroll_delta)
+    event_delta = _scroll_delta_int(event.scroll_delta)
+    if prev_delta is None or event_delta is None:
+        return False
+    if (prev_delta > 0) != (event_delta > 0):
+        return False
+    if _modifiers_key(prev.modifiers) != _modifiers_key(event.modifiers):
+        return False
+    if prev.cursor_xy is None or event.cursor_xy is None:
+        return False
+    if not _points_within(prev.cursor_xy, event.cursor_xy, _SCROLL_MAX_DIST_PX):
+        return False
+    elapsed = _elapsed_seconds(prev.timestamp_utc, event.timestamp_utc)
+    if elapsed is None or elapsed > _SCROLL_MAX_GAP_S:
+        return False
+    return True
+
+
+def _merge_scroll_window_debug(
+    first_debug: dict[str, Any] | None,
+    last_debug: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Combine first before-state with last after-state for a scroll burst."""
+    first = first_debug if isinstance(first_debug, dict) else None
+    last = last_debug if isinstance(last_debug, dict) else None
+    if first is None and last is None:
+        return None
+    if first is None:
+        base = dict(last or {})
+        base["signal_kind"] = base.get("signal_kind") or "scroll"
+        return base
+    if last is None:
+        base = dict(first)
+        base["signal_kind"] = base.get("signal_kind") or "scroll"
+        return base
+    base = dict(first)
+    for key in ("windows_before", "windows_before_count", "signals_before"):
+        if key in first:
+            base[key] = first[key]
+    for key in ("windows_after", "windows_after_count", "signals_after"):
+        if key in last:
+            base[key] = last[key]
+        elif key in first:
+            base[key] = first[key]
+    base["signal_kind"] = first.get("signal_kind") or last.get("signal_kind") or "scroll"
+    return base
+
+
+def _merge_scroll_group(group: list[RecordedEvent]) -> RecordedEvent:
+    """Merge same-direction scrolls; keep first before-frame, last after-frame."""
+    first = group[0]
+    last = group[-1]
+    total_delta = sum(int(event.scroll_delta) for event in group if event.scroll_delta)
+    end_screenshot = last.end_screenshot_path or first.end_screenshot_path
+    end_monitor_index = (
+        last.end_monitor_index
+        if last.end_monitor_index is not None
+        else first.end_monitor_index
+    )
+    end_monitor_offset = (
+        last.end_monitor_offset
+        if last.end_monitor_offset is not None
+        else first.end_monitor_offset
+    )
+    return replace(
+        first,
+        scroll_delta=total_delta,
+        end_screenshot_path=end_screenshot,
+        end_monitor_index=end_monitor_index,
+        end_monitor_offset=end_monitor_offset,
+        window_change=(
+            last.window_change
+            if last.window_change is not None
+            else first.window_change
+        ),
+        target_window_title=(
+            last.target_window_title
+            if last.target_window_title is not None
+            else first.target_window_title
+        ),
+        window_snapshot_debug=_merge_scroll_window_debug(
+            first.window_snapshot_debug
+            if isinstance(first.window_snapshot_debug, dict)
+            else None,
+            last.window_snapshot_debug
+            if isinstance(last.window_snapshot_debug, dict)
+            else None,
+        ),
+    )
+
+
+def coalesce_consecutive_scrolls(
+    events: list[RecordedEvent],
+) -> list[RecordedEvent]:
+    """Merge rapid same-direction wheel notches into one scroll event.
+
+    Consecutive ``scroll`` events that share direction and modifiers, stay near
+    the same cursor point, and fall within a short pairwise time gap are combined
+    by summing ``scroll_delta``. Opposite directions never merge or cancel.
+    """
+    if not events:
+        return []
+
+    merged: list[RecordedEvent] = []
+    group: list[RecordedEvent] = []
+
+    def flush() -> None:
+        nonlocal group
+        if not group:
+            return
+        merged.append(group[0] if len(group) == 1 else _merge_scroll_group(group))
+        group = []
+
+    for event in events:
+        if group and _can_merge_consecutive_scrolls(group[-1], event):
+            group.append(event)
+            continue
+        flush()
+        if event.kind == "scroll" and _scroll_delta_int(event.scroll_delta) is not None:
             group = [event]
         else:
             merged.append(event)

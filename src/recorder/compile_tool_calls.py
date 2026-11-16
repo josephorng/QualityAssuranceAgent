@@ -24,7 +24,10 @@ from src.recorder.analyze import _effective_left_click_count, typed_text_from_in
 from src.recorder.landmark_geometry import build_landmark_geometry
 from src.recorder.models import RecordedEvent, event_json_path
 from src.recorder.to_cache import validate_tool_calls
-from src.recorder.window_snapshot import should_ignore_window_change
+from src.recorder.window_snapshot import (
+    is_agent_app_minimize,
+    should_ignore_window_change,
+)
 
 RECORDING_TOOL_CACHE_FILENAME = "instruction_tool_cache.json"
 _CACHE_VERSION = 1
@@ -216,8 +219,11 @@ def _compile_window_change(
             return None
         verb, title = match.group(1), match.group(2)
         action = {"最小化": "minimize", "最大化": "maximize", "關閉": "close"}[verb]
-    # Flyout dismissals are never close_windows / chrome tools.
-    if should_ignore_window_change({"title": title, "action": action}):
+    # Flyout dismissals and hub minimizes are never close/minimize/maximize tools.
+    change_identity = {"title": title, "action": action}
+    if should_ignore_window_change(change_identity) or is_agent_app_minimize(
+        change_identity
+    ):
         return None
     tool_by_action = {
         "minimize": "minimize_windows",
@@ -547,7 +553,8 @@ def compile_tool_calls(
 
     # Confident window chrome actions take priority over the underlying pointer kind.
     # Shell flyouts (快顯主機, …) are ignored here: dismissals stay in window_verify
-    # as disappeared, not as close_windows.
+    # as disappeared, not as close_windows. Hub minimizes are also ignored (start-
+    # recording side effect); fall through to the underlying pointer compile.
     if isinstance(event.window_change, dict):
         confidence = event.window_change.get("confidence")
         action = str(event.window_change.get("action") or "")
@@ -555,6 +562,7 @@ def compile_tool_calls(
             confidence in {"high", "medium"}
             and action in {"minimize", "maximize", "close"}
             and not should_ignore_window_change(event.window_change)
+            and not is_agent_app_minimize(event.window_change)
         ):
             if action != "close" or event.window_change.get("from_title_bar_close"):
                 compiled = _compile_window_change(event, goal, analysis)

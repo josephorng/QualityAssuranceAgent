@@ -1258,7 +1258,9 @@ def diff_snapshots_with_debug(
     return WindowDiffResult(change=None, debug=debug)
 
 
-# Hub app title; trailing restores are dropped during analysis (stop-recording artifact).
+# Hub app title; trailing restores are dropped during analysis (stop-recording
+# artifact). Hub minimizes are ignored when building instructions / compiling
+# window chrome tools (start-recording side effect).
 _AGENT_APP_WINDOW_TITLE = "電腦使用代理"
 
 
@@ -1293,6 +1295,17 @@ def is_agent_app_restore(change: WindowStateChange | dict[str, Any] | None) -> b
     data = _window_change_data(change)
     return (
         str(data.get("action", "")).strip() == "restored"
+        and str(data.get("title", "")).strip() == _AGENT_APP_WINDOW_TITLE
+    )
+
+
+def is_agent_app_minimize(change: WindowStateChange | dict[str, Any] | None) -> bool:
+    """True when the change minimizes the Computer Use Agent hub window."""
+    if change is None:
+        return False
+    data = _window_change_data(change)
+    return (
+        str(data.get("action", "")).strip() == "minimize"
         and str(data.get("title", "")).strip() == _AGENT_APP_WINDOW_TITLE
     )
 
@@ -2287,6 +2300,8 @@ def instruction_for_window_change(change: WindowStateChange | dict[str, Any]) ->
     """Build a hub-script instruction for a confident window state change."""
     data = _window_change_data(change)
     if _should_ignore_window_change(data):
+        return None
+    if is_agent_app_minimize(data):
         return None
     confidence = data.get("confidence")
     if confidence not in {"high", "medium"}:

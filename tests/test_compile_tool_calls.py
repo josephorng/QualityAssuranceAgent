@@ -363,6 +363,24 @@ def test_compile_never_emits_close_windows_for_flyout_title() -> None:
     assert compile_tool_calls(event, "關閉「快顯主機」視窗") is None
 
 
+def test_compile_ignores_agent_hub_minimize_window_change() -> None:
+    event = _event(
+        kind="click",
+        click_count=1,
+        window_change={
+            "action": "minimize",
+            "title": "電腦使用代理",
+            "confidence": "medium",
+            "process_name": "python.exe",
+        },
+    )
+    calls = compile_tool_calls(event, "將滑鼠移到「搜尋方塊」輸入欄，並點擊滑鼠一下。")
+    assert calls is not None
+    assert [c["name"] for c in calls] == ["move_mouse", "click"]
+    assert "minimize_windows" not in {c["name"] for c in calls}
+    assert compile_tool_calls(event, "最小化「電腦使用代理」視窗") is None
+
+
 def test_compile_drag() -> None:
     event = _event(kind="drag")
     instruction = "從「A」圖示拖到「B」文字（附近有「C」文字）"

@@ -18,6 +18,7 @@ from src.recorder.window_snapshot import (
     find_matching_click_window,
     format_window_change_hint,
     instruction_for_window_change,
+    is_agent_app_minimize,
     is_agent_app_restore,
     is_desktop_shell_click_window,
     resolve_window_change,
@@ -680,6 +681,9 @@ def test_instruction_for_high_confidence_window_change() -> None:
         {"action": "close", "title": "Notepad", "confidence": "high"}
     ) is None
     assert instruction_for_window_change({"action": "minimize", "title": "Chrome", "confidence": "medium"}) == "最小化「Chrome」視窗"
+    assert instruction_for_window_change(
+        {"action": "minimize", "title": "電腦使用代理", "confidence": "medium"}
+    ) is None
     assert instruction_for_window_change({"action": "restored", "title": "電腦使用代理", "confidence": "medium"}) == "還原「電腦使用代理」視窗"
     assert instruction_for_window_change({"action": "opened", "title": "X", "confidence": "medium"}) is None
 
@@ -821,6 +825,19 @@ def test_is_agent_app_restore() -> None:
         {"action": "minimize", "title": "電腦使用代理", "confidence": "high"}
     )
     assert not is_agent_app_restore(None)
+
+
+def test_is_agent_app_minimize() -> None:
+    assert is_agent_app_minimize(
+        {"action": "minimize", "title": "電腦使用代理", "confidence": "medium"}
+    )
+    assert not is_agent_app_minimize(
+        {"action": "minimize", "title": "Google Chrome", "confidence": "medium"}
+    )
+    assert not is_agent_app_minimize(
+        {"action": "restored", "title": "電腦使用代理", "confidence": "high"}
+    )
+    assert not is_agent_app_minimize(None)
 
 
 def test_resolve_window_change_prefers_captured_then_rediffs_debug() -> None:

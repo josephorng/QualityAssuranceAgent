@@ -1301,6 +1301,54 @@ async def test_analyze_event_to_cache_window_change_is_deterministic(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_analyze_event_to_cache_ignores_agent_hub_minimize(tmp_path: Path) -> None:
+    event = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(579, 1062),
+        button="left",
+        screenshot_path="",
+        window_change={
+            "action": "minimize",
+            "title": "電腦使用代理",
+            "confidence": "medium",
+            "process_name": "python.exe",
+        },
+    )
+    vision = {
+        "used_vision": True,
+        "candidate_text": "",
+        "local_cursor": None,
+        "candidates": [
+            {
+                "text": "搜尋方塊",
+                "class_name": "輸入欄",
+                "center": [579, 1062],
+                "width": 165,
+                "height": 32,
+            }
+        ],
+    }
+
+    with patch(
+        "src.recorder.analyze.request_json_with_retry",
+        new=AsyncMock(),
+    ) as llm_mock:
+        result = await analyze_event_to_cache(
+            event,
+            run_dir=tmp_path,
+            vision=vision,
+        )
+
+    assert result is not None
+    assert "最小化" not in result["instruction"]
+    assert "電腦使用代理" not in result["instruction"]
+    assert "搜尋方塊" in result["instruction"]
+    llm_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_analyze_event_to_cache_medium_close_is_deterministic(tmp_path: Path) -> None:
     event = RecordedEvent(
         index=3,

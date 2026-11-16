@@ -18,6 +18,7 @@ from cua_mcp.select_mouse_target import (
     _order_geometry_efp_candidates,
     _phrase_match_pool,
     _preferred_yolo_class_for_near_synth,
+    _recorded_efp_agrees_with_hub,
     _recorded_efp_present,
     _try_uia_first_unique_select,
     _verify_geometry_candidates_with_efp,
@@ -991,3 +992,150 @@ def test_uia_first_empty_pool_synth_hit() -> None:
     assert reason == "landmark_efp_synth_hit"
     assert chosen is not None
     assert (chosen.cx, chosen.cy) == (800, 800)
+
+
+def test_recorded_efp_agrees_with_hub_rejects_overlay_poison() -> None:
+    assert _recorded_efp_agrees_with_hub(
+        "下載", "下載 (已釘選)", "下載 (已釘選)"
+    )
+    assert not _recorded_efp_agrees_with_hub(
+        "WinMaster7 Console", "NVIDIA GeForce Overlay", ""
+    )
+    # Weak chrome Names still allow constellation FindAll-over-EFP.
+    assert _recorded_efp_agrees_with_hub(
+        "Launch 檔案總管", "CoreInput", ""
+    )
+
+
+def test_uia_first_skips_constellation_efp_when_hub_disagrees() -> None:
+    """Poisoned overlay EFP must not false-hit; fall through to Name shortlist."""
+    geom = _simple_landmark_geometry(
+        landmark_label="側欄地標",
+        landmark_xy=(50.0, 50.0),
+        target_xy=(172.0, 67.0),
+        scale=100.0,
+    )
+    landmark = _det(50, 50, text="側欄地標", class_name="text")
+    hub = UiDetection(
+        bbox=(167, 62, 10, 10),
+        cx=172,
+        cy=67,
+        class_id=YOLO_CLASS_TEXT,
+        class_name="text",
+        text="WinMaster7 Console",
+        source="uia",
+        uia_control_type="list_item",
+    )
+    sibling = UiDetection(
+        bbox=(282, 51, 10, 10),
+        cx=287,
+        cy=56,
+        class_id=YOLO_CLASS_TEXT,
+        class_name="text",
+        text="SourceAsk",
+        source="uia",
+        uia_control_type="list_item",
+    )
+    # Fullscreen overlay — would be dist=0 from synth and match poisoned EFP.
+    overlay = UiDetection(
+        bbox=(0, 0, 2560, 1600),
+        cx=1280,
+        cy=800,
+        class_id=YOLO_CLASS_INPUT,
+        class_name="input",
+        text="NVIDIA GeForce Overlay",
+        source="uia",
+    )
+
+    def probe(x: int, y: int):
+        return (
+            "label",
+            (0, 0, 1, 1),
+            "text",
+            "NVIDIA GeForce Overlay",
+            "",
+        )
+
+    chosen, reason = _try_uia_first_unique_select(
+        [landmark, hub, sibling, overlay],
+        anchor="WinMaster7 Console",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        filter_by_control_type=True,
+        control_type_token="list_item",
+        recorded_anchor=True,
+        landmark_geometry=geom,
+        recorded_efp_name="NVIDIA GeForce Overlay",
+        recorded_efp_value="",
+        point_probe_fn=probe,
+    )
+    assert reason != "landmark_efp_hit"
+    assert reason != "landmark_efp_synth_hit"
+    assert chosen is not overlay
+    assert chosen is hub
+
+
+def test_findall_pool_near_synth_drops_oversize_overlay() -> None:
+    icon = _det(172, 67, text="WinMaster7 Console", class_name="text")
+    sibling = _det(287, 56, text="SourceAsk", class_name="text")
+    overlay = UiDetection(
+        bbox=(0, 0, 2560, 1600),
+        cx=1280,
+        cy=800,
+        class_id=YOLO_CLASS_INPUT,
+        class_name="input",
+        text="NVIDIA GeForce Overlay",
+        source="uia",
+    )
+    pool = _findall_pool_near_synth(
+        [icon, sibling, overlay],
+        (172, 67),
+        scale=100.0,
+        k=20,
+    )
+    assert overlay not in pool
+    assert icon in pool
+    assert sibling in pool
+
+
+def test_uia_first_oversize_overlay_does_not_win_efp_even_if_name_matches() -> None:
+    """When EFP agrees with hub, fullscreen overlay still must not pool-win."""
+    geom = _simple_landmark_geometry(
+        landmark_label="側欄地標",
+        landmark_xy=(50.0, 50.0),
+        target_xy=(172.0, 67.0),
+        scale=100.0,
+    )
+    landmark = _det(50, 50, text="側欄地標", class_name="text")
+    hub = _det(172, 67, text="下載", class_name="text")
+    sibling = _det(287, 56, text="鄰居", class_name="text")
+    overlay = UiDetection(
+        bbox=(0, 0, 2560, 1600),
+        cx=1280,
+        cy=800,
+        class_id=YOLO_CLASS_INPUT,
+        class_name="input",
+        text="下載",
+        source="uia",
+    )
+
+    def probe(x: int, y: int):
+        # Every point reports the recorded Name — overlay would false-hit
+        # without the oversize filter.
+        return ("label", (0, 0, 1, 1), "text", "下載", "")
+
+    chosen, reason = _try_uia_first_unique_select(
+        [overlay, landmark, hub, sibling],
+        anchor="下載",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        landmark_geometry=geom,
+        recorded_efp_name="下載",
+        recorded_efp_value="",
+        point_probe_fn=probe,
+    )
+    assert reason == "landmark_efp_hit"
+    assert chosen is hub
+    assert chosen is not overlay

@@ -946,8 +946,15 @@ def _write_event_analysis(
         yolo_ocr_fallback_payload,
     )
 
-    tool_calls = compile_tool_calls(event, instruction, vision=vision)
     resolved_run_dir = Path(run_dir) if run_dir is not None else analysis_path.parent.parent
+    # Pass run_dir so landmark_geometry can fall back to yolo_ocr/ when the
+    # in-memory vision payload is candidate-thin (analysis only keeps text).
+    tool_calls = compile_tool_calls(
+        event,
+        instruction,
+        vision=vision,
+        run_dir=resolved_run_dir,
+    )
     # Signal samples are often peeled to sidecar paths on disk. Hydrate before
     # building window_verify, and fall back to this step's after-foreground when
     # the caller omitted later_foregrounds (otherwise every appeared entry drops).
@@ -1476,12 +1483,12 @@ async def analyze_recording_session(
             report["yolo_ocr_retried"] = int(yolo_stats["retried"])
             report["yolo_ocr_recovered"] = int(yolo_stats["recovered"])
         try:
-            from src.recorder.compile_tool_calls import (
-                rebuild_recording_instruction_tool_cache,
-            )
+            from src.recorder.compile_tool_calls import ensure_recording_tool_cache
 
             with phase_timer.phase("tool_cache_rebuild"):
-                rebuild_recording_instruction_tool_cache(run_dir)
+                # Recompile so UIA steps pick up landmark_geometry from
+                # yolo_ocr/ sidecars (copy-only rebuild would keep thin args).
+                ensure_recording_tool_cache(run_dir)
         except Exception as exc:
             log_info(f"analyze_recording_session tool cache rebuild failed: {exc}")
 

@@ -4561,6 +4561,57 @@ def _recorded_efp_present(name: str | None, value: str | None) -> bool:
     return bool(str(name or "").strip() or str(value or "").strip())
 
 
+# Stricter than OCR↔UIA soft-agree (0.25): constellation-EFP must not treat
+# unrelated overlay Names (NVIDIA GeForce Overlay ↔ WinMaster7 Console ≈ 0.25)
+# as hub agreement.
+_CONSTELLATION_EFP_HUB_AGREE_THRESHOLD = 0.5
+
+
+def _recorded_efp_agrees_with_hub(
+    anchor: str,
+    recorded_efp_name: str | None,
+    recorded_efp_value: str | None,
+) -> bool:
+    """True when press-time EFP soft-agrees with the FindAll hub anchor.
+
+    Constellation-EFP must not commit on a poisoned overlay Name (e.g. NVIDIA
+    GeForce Overlay) when the hub is a different leaf (WinMaster7 Console).
+    Weak EFP chrome names (``CoreInput``) are treated as agreeing so the
+    classic FindAll-over-EFP constellation path still runs.
+    """
+    hub = str(anchor or "").strip()
+    if not hub or not _recorded_efp_present(recorded_efp_name, recorded_efp_value):
+        return False
+    from src.recorder.uia_input_boxes import (
+        is_weak_efp_hub_label,
+        uia_label_combine_name_value,
+    )
+
+    def _agrees(label: str) -> bool:
+        text = str(label or "").strip()
+        if not text:
+            return False
+        # Weak chrome Names are FindAll-over-EFP side-cars, not competing hubs.
+        if is_weak_efp_hub_label(text):
+            return True
+        if text.casefold() == hub.casefold():
+            return True
+        return float(_label_similarity(text, hub)) >= float(
+            _CONSTELLATION_EFP_HUB_AGREE_THRESHOLD
+        )
+
+    combined = uia_label_combine_name_value(
+        str(recorded_efp_name or ""),
+        str(recorded_efp_value or ""),
+    )
+    if _agrees(combined):
+        return True
+    name_only = str(recorded_efp_name or "").strip()
+    if name_only and name_only != combined and _agrees(name_only):
+        return True
+    return False
+
+
 def _efp_name_value_matches(
     live_name: str,
     live_value: str,
@@ -4773,6 +4824,61 @@ def _filter_yolo_for_near_synth_pool(
     return out
 
 
+def _detections_frame_xywh(
+    detections: list[UiDetection],
+) -> tuple[int, int, int, int] | None:
+    """Axis-aligned union of detection bboxes; ``None`` when none are usable."""
+    min_x: int | None = None
+    min_y: int | None = None
+    max_r: int | None = None
+    max_b: int | None = None
+    for det in detections:
+        try:
+            x, y, w, h = (int(v) for v in det.bbox)
+        except (TypeError, ValueError):
+            continue
+        if w <= 0 or h <= 0:
+            continue
+        right = x + w
+        bottom = y + h
+        min_x = x if min_x is None else min(min_x, x)
+        min_y = y if min_y is None else min(min_y, y)
+        max_r = right if max_r is None else max(max_r, right)
+        max_b = bottom if max_b is None else max(max_b, bottom)
+    if min_x is None or min_y is None or max_r is None or max_b is None:
+        return None
+    return (min_x, min_y, max_r - min_x, max_b - min_y)
+
+
+def _det_swallows_sibling_centers(
+    det: UiDetection,
+    detections: list[UiDetection],
+) -> bool:
+    """True when ``det`` contains at least half of the other detection centers.
+
+    Fullscreen overlays (NVIDIA GeForce Overlay) swallow desktop icons; a
+    normal left-nav pane usually leaves toolbar siblings outside.
+    """
+    others = [other for other in detections if other is not det]
+    if not others:
+        return False
+    try:
+        bbox = tuple(int(v) for v in det.bbox)
+    except (TypeError, ValueError):
+        return False
+    if len(bbox) != 4:
+        return False
+    contained = 0
+    for other in others:
+        try:
+            cx, cy = int(other.cx), int(other.cy)
+        except (TypeError, ValueError):
+            continue
+        if point_in_rect_xywh(cx, cy, bbox):
+            contained += 1
+    return contained * 2 >= len(others)
+
+
 def _findall_pool_near_synth(
     detections: list[UiDetection],
     synth: tuple[int, int],
@@ -4785,13 +4891,29 @@ def _findall_pool_near_synth(
     Ranks by distance from ``synth`` to each detection bbox (0 if contained).
     Keeps both FindAll UIA and YOLO sources. Drops boxes farther than
     ``max(2*scale, 200)`` when scale is known, then keeps the nearest ``k``.
+    Full-frame overlays that swallow sibling centers (NVIDIA GeForce Overlay)
+    are dropped so they cannot win at ``dist=0``.
     """
+    from src.recorder.uia_input_boxes import is_oversized_uia_rect
+
     radius: float | None = None
     if scale is not None and scale > 0.0:
         radius = max(2.0 * float(scale), _FINDALL_EFP_MIN_RADIUS_PX)
 
+    frame = _detections_frame_xywh(detections)
     scored: list[tuple[float, UiDetection]] = []
     for det in detections:
+        if frame is not None:
+            try:
+                bbox = tuple(int(v) for v in det.bbox)
+            except (TypeError, ValueError):
+                bbox = ()
+            if (
+                len(bbox) == 4
+                and is_oversized_uia_rect(bbox, frame)
+                and _det_swallows_sibling_centers(det, detections)
+            ):
+                continue
         dist = _distance_synth_to_det_bbox(synth, det)
         if radius is not None and dist > radius:
             continue
@@ -4982,7 +5104,20 @@ def _try_uia_first_unique_select(
     )
 
     # Constellation-first: FindAll near synth + live EFP (skip Name shortlist).
-    if landmark_geometry is not None and _recorded_efp_present(
+    # Skip when press-time EFP disagrees with the FindAll hub (overlay poison).
+    if (
+        landmark_geometry is not None
+        and _recorded_efp_present(recorded_efp_name, recorded_efp_value)
+        and not _recorded_efp_agrees_with_hub(
+            anchor, recorded_efp_name, recorded_efp_value
+        )
+    ):
+        _log_info(
+            "move_mouse uia_first landmark_efp_skip_hub_disagree "
+            f"anchor={anchor!r} recorded_name={recorded_efp_name!r} "
+            f"recorded_value={recorded_efp_value!r}; continue Name shortlist"
+        )
+    elif landmark_geometry is not None and _recorded_efp_present(
         recorded_efp_name, recorded_efp_value
     ):
         geom_hit = _resolve_with_landmark_geometry(

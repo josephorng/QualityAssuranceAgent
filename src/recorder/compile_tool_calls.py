@@ -496,8 +496,16 @@ def _vision_for_compile(
     event: RecordedEvent,
     vision: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Prefer an explicit vision payload, else analysis candidates, else yolo_ocr."""
-    if isinstance(vision, dict) and isinstance(vision.get("candidates"), list):
+    """Prefer an explicit vision payload, else analysis candidates, else yolo_ocr.
+
+    Empty ``candidates: []`` is not usable for landmark_geometry — fall through
+    so ``yolo_ocr/event_NNN.json`` can still supply bbox-bearing hubs.
+    """
+    if (
+        isinstance(vision, dict)
+        and isinstance(vision.get("candidates"), list)
+        and vision.get("candidates")
+    ):
         return vision
     if isinstance(analysis, dict):
         analysis_vision = analysis.get("vision")

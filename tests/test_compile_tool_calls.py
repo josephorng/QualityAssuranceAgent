@@ -453,6 +453,91 @@ def test_compile_rejects_condition() -> None:
     assert compile_tool_calls(event, "如果畫面上有「X」") is None
 
 
+def test_compile_uia_landmark_geometry_from_yolo_ocr_sidecar(tmp_path: Path) -> None:
+    """Empty/analysis-thin vision falls through to yolo_ocr/ for constellation."""
+    run_dir = tmp_path / "rec"
+    (run_dir / "events").mkdir(parents=True)
+    (run_dir / "analysis").mkdir(parents=True)
+    (run_dir / "yolo_ocr").mkdir(parents=True)
+    event = _event(kind="double_click", click_count=2)
+    (run_dir / "events" / "event_001.json").write_text(
+        json.dumps(event.to_dict(), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    instruction = (
+        "（UIA）將滑鼠移到「WinMaster7 Console」清單項目"
+        "（在「SourceAsk-0.1.4+cb42c94」清單項目的左邊、"
+        "在「資源回收筒」清單項目的右邊），並連按2下。"
+    )
+    sidecar = {
+        "vision_path": "uia",
+        "local_cursor": [172, 67],
+        "candidates": [
+            {
+                "bbox": [115, 5, 114, 125],
+                "class_name": "text",
+                "text": "WinMaster7 Console",
+                "uia_control_type": "list_item",
+            },
+            {
+                "bbox": [230, 5, 114, 102],
+                "class_name": "text",
+                "text": "SourceAsk-0.1.4+cb42c94",
+                "uia_control_type": "list_item",
+            },
+            {
+                "bbox": [0, 5, 114, 102],
+                "class_name": "text",
+                "text": "資源回收筒",
+                "uia_control_type": "list_item",
+            },
+        ],
+    }
+    (run_dir / "yolo_ocr" / "event_001.json").write_text(
+        json.dumps(sidecar, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    analysis = {
+        "event_index": 1,
+        "instruction": instruction,
+        "vision": {
+            "used_vision": True,
+            "candidate_text": "text only — no candidates array",
+        },
+    }
+    # Empty candidates must not trap the sidecar fallback.
+    calls = compile_tool_calls(
+        event,
+        instruction,
+        analysis,
+        vision={"used_vision": True, "candidates": []},
+        run_dir=run_dir,
+    )
+    assert calls is not None
+    args = calls[0]["arguments"]
+    assert args["anchor_text"] == "WinMaster7 Console"
+    assert args["control_type"] == "list_item"
+    geom = args.get("landmark_geometry")
+    assert isinstance(geom, dict)
+    assert len(geom["landmarks"]) >= 2
+
+
+def test_compile_empty_candidates_without_run_dir_skips_geometry() -> None:
+    event = _event(kind="click", click_count=1)
+    instruction = (
+        "將滑鼠移到「WinMaster7 Console」清單項目"
+        "（在「資源回收筒」清單項目的右邊），並點擊滑鼠一下。"
+    )
+    calls = compile_tool_calls(
+        event,
+        instruction,
+        vision={"used_vision": True, "candidates": []},
+    )
+    assert calls is not None
+    assert "landmark_geometry" not in calls[0]["arguments"]
+    assert calls[0]["arguments"]["nearby_objects"]
+
+
 def test_ensure_upgrades_full_hub_script_move_mouse(tmp_path: Path) -> None:
     run_dir = tmp_path / "rec"
     (run_dir / "events").mkdir(parents=True)

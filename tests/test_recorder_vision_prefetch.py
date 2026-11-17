@@ -445,3 +445,51 @@ def test_vision_prefetch_runs_events_in_parallel(tmp_path: Path, monkeypatch) ->
 
     assert max_active >= 2
     assert elapsed < 0.20
+
+
+def test_vision_prefetch_coalesces_queued_scrolls(tmp_path: Path) -> None:
+    """A later scroll drops not-yet-started prior scroll jobs (wheel-burst safety)."""
+    import asyncio
+    import time
+
+    (tmp_path / "yolo_ocr").mkdir()
+    worker = VisionPrefetchWorker(max_workers=1)
+    started_indexes: list[int] = []
+    lock = threading.Lock()
+    first_started = threading.Event()
+
+    async def gated_prepare(event, **_kwargs):
+        with lock:
+            started_indexes.append(event.index)
+        if event.index == 1:
+            first_started.set()
+            await asyncio.sleep(0.15)
+        from src.recorder.orchestrator import _PreparedEvent
+
+        return _PreparedEvent(
+            event=event,
+            event_for_llm=event,
+            vision={"used_vision": False, "candidate_text": "", "local_cursor": None},
+            text_resolution=None,
+        )
+
+    scrolls = [
+        replace(_click_event(tmp_path, index=i), kind="scroll") for i in range(1, 5)
+    ]
+    with patch(
+        "src.recorder.vision_prefetch.prepare_event_vision",
+        new=gated_prepare,
+    ):
+        worker.start(tmp_path)
+        worker.enqueue(scrolls[0])
+        assert first_started.wait(timeout=2.0)
+        for event in scrolls[1:]:
+            worker.enqueue(event)
+            time.sleep(0.01)
+        worker.drain_and_stop(timeout=30.0)
+
+    # First scroll runs; queued 2/3 are cancelled when 4 arrives; 4 runs after.
+    assert started_indexes[0] == 1
+    assert 4 in started_indexes
+    assert 2 not in started_indexes
+    assert 3 not in started_indexes

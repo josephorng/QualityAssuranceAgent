@@ -324,7 +324,9 @@ class MainHub(ctk.CTk):
         self._active_replay_event_index: int | None = None
         self._recording_analysis_thread: threading.Thread | None = None
         self._recording_finalize_thread: threading.Thread | None = None
-        self._vision_prefetch = VisionPrefetchWorker()
+        # Live capture must stay serial: parallel YOLO+OCR twins during scroll
+        # bursts have hard-killed the process (exit 1, no Python crash log).
+        self._vision_prefetch = VisionPrefetchWorker(max_workers=1)
         self._analysis_cancel_event = threading.Event()
         self._suppress_script_cache_sync = False
         self._sync_cache_after_id: str | None = None

@@ -24,7 +24,8 @@ class VisionPrefetchWorker:
         self._run_dir: Path | None = None
         self._executor: ThreadPoolExecutor | None = None
         self._futures: set[Future[Any]] = set()
-        self._lock = threading.Lock()
+        # RLock: cancelling a queued Future runs done callbacks on this thread.
+        self._lock = threading.RLock()
         self._accepting = False
         self._drain_progress: Callable[[int, int], None] | None = None
         self._drain_total = 0
@@ -56,9 +57,25 @@ class VisionPrefetchWorker:
                 return
             executor = self._executor
             run_dir = self._run_dir
+            # Wheel bursts enqueue many scrolls while one YOLO+OCR job still runs.
+            # Drop not-yet-started prior scrolls so live capture does not backlog
+            # (or stack native work) behind obsolete notches.
+            if event.kind == "scroll":
+                self._cancel_queued_scrolls_locked()
             future = executor.submit(self._run_one, event, run_dir)
+            # Tag scroll futures so a later notch can cancel queued ones.
+            if event.kind == "scroll":
+                setattr(future, "_vision_prefetch_kind", "scroll")
             self._futures.add(future)
             future.add_done_callback(self._on_future_done)
+
+    def _cancel_queued_scrolls_locked(self) -> None:
+        """Cancel not-started scroll prefetch jobs. Caller must hold ``_lock``."""
+        for future in list(self._futures):
+            if getattr(future, "_vision_prefetch_kind", None) != "scroll":
+                continue
+            if future.cancel():
+                self._futures.discard(future)
 
     def drain_and_stop(
         self,

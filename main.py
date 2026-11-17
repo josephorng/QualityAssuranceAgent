@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import faulthandler
 import json
 import os
 import shutil
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 CRASH_LOG_FILENAME = "ComputerAgent_crash.log"
+FAULT_LOG_FILENAME = "ComputerAgent_fault.log"
 
 
 def _application_dir_for_crash_log() -> Path:
@@ -35,6 +37,23 @@ def _application_dir_for_crash_log() -> Path:
 
 def _crash_log_path() -> Path:
     return _application_dir_for_crash_log() / CRASH_LOG_FILENAME
+
+
+def _fault_log_path() -> Path:
+    return _application_dir_for_crash_log() / FAULT_LOG_FILENAME
+
+
+def _install_faulthandler() -> None:
+    """Dump native / fatal-error traces (segfaults bypass sys.excepthook)."""
+    candidates = [_fault_log_path(), Path(tempfile.gettempdir()) / FAULT_LOG_FILENAME]
+    for path in candidates:
+        try:
+            # Keep the handle open for the process lifetime; faulthandler needs it.
+            fault_file = open(path, "a", encoding="utf-8", errors="replace")
+            faulthandler.enable(file=fault_file, all_threads=True)
+            return
+        except OSError:
+            continue
 
 
 def write_crash_log(
@@ -350,6 +369,7 @@ def main() -> None:
 if __name__ == "__main__":
     _ensure_stdio_streams()
     _install_crash_logging()
+    _install_faulthandler()
     try:
         if os.name == "nt":
             signal.signal(signal.SIGINT, signal.default_int_handler)

@@ -183,19 +183,25 @@ def build_landmark_geometry(
     *,
     target_xy: tuple[float, float] | None = None,
     target_label: str = "",
+    min_landmarks: int | None = None,
 ) -> dict[str, Any] | None:
     """Build a full scale-normalized constellation from recording vision.
 
-    Returns ``None`` when fewer than ``MIN_LANDMARKS_FOR_BUILD`` landmarks resolve
-    or the target center is unavailable.
+    Returns ``None`` when fewer than ``min_landmarks`` (default
+    ``MIN_LANDMARKS_FOR_BUILD``) landmarks resolve or the target center is
+    unavailable. Pass ``min_landmarks=1`` for scroll viewport hover that only
+    needs the owning ``滾動條`` hub plus an explicit ``target_xy``.
     """
     if not isinstance(vision, dict):
         return None
+    required = (
+        MIN_LANDMARKS_FOR_BUILD if min_landmarks is None else max(1, int(min_landmarks))
+    )
     hints = normalize_nearby_hints(nearby_hints)
-    if len(hints) < MIN_LANDMARKS_FOR_BUILD:
+    if len(hints) < required:
         return None
     resolved = _resolve_landmark_centers(vision, hints)
-    if len(resolved) < MIN_LANDMARKS_FOR_BUILD:
+    if len(resolved) < required:
         return None
     target = _resolve_target_xy(vision, target_xy)
     if target is None:

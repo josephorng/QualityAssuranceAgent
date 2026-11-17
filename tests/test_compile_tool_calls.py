@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from src.common.instruction_tool_cache import lookup_tool_calls
 from src.recorder.compile_tool_calls import (
     compile_tool_calls,
@@ -194,6 +196,44 @@ def test_compile_scroll_with_hover() -> None:
     assert calls[1]["arguments"]["clicks"] == 3
 
 
+def test_compile_scroll_offset_position_hover() -> None:
+    event = _event(kind="scroll", scroll_delta=-3)
+    instruction = (
+        "（UIA）在「檔案清單」文字右方100個像素、下方10個像素的位置附近向下捲動"
+        "（在「附近00」文字的左上方）"
+    )
+    vision = {
+        "candidates": [
+            {
+                "bbox": [80, 180, 40, 20],
+                "center": [100, 190],
+                "class_name": "text",
+                "text": "檔案清單",
+            },
+            {
+                "bbox": [10, 10, 40, 16],
+                "center": [30, 18],
+                "class_name": "text",
+                "text": "附近00",
+            },
+        ],
+        "local_cursor": [200, 200],
+    }
+    calls = compile_tool_calls(event, instruction, vision=vision)
+    assert calls is not None
+    assert [c["name"] for c in calls] == ["move_mouse", "scroll"]
+    args = calls[0]["arguments"]
+    assert args["instruction"] == (
+        "（UIA）「檔案清單」文字右方100個像素、下方10個像素的位置"
+    )
+    assert args["vision_mode"] == "uia"
+    assert args["anchor_text"] == "檔案清單"
+    assert args["nearby_objects"] == ["在「附近00」文字的左上方"]
+    assert "landmark_geometry" in args
+    assert len(args["landmark_geometry"]["landmarks"]) >= 2
+    assert calls[1]["arguments"]["clicks"] == 3
+
+
 def test_compile_scroll_scrollbar_omits_leaf_element_from_point() -> None:
     event = _event(
         kind="scroll",
@@ -209,6 +249,48 @@ def test_compile_scroll_scrollbar_omits_leaf_element_from_point() -> None:
     assert args["control_type"] == "scrollbar"
     assert "name" not in args
     assert "value" not in args
+
+
+def test_compile_scroll_viewport_hover_uses_scroll_hover_local() -> None:
+    event = _event(
+        kind="scroll",
+        scroll_delta=-1,
+        element_from_point={"name": "Value", "value": "20"},
+    )
+    instruction = "在滾動條附近向下捲動1格（在「清單」文字的左邊）"
+    vision = {
+        "local_cursor": [950, 1010],
+        "scroll_hover_local": [1100, 1100],
+        "candidates": [
+            {
+                "bbox": [2200, 700, 20, 800],
+                "center": [2210, 1100],
+                "class_name": "scrollbar",
+                "text": None,
+            },
+            {
+                "bbox": [900, 1000, 100, 20],
+                "center": [950, 1010],
+                "class_name": "text",
+                "text": "清單",
+            },
+        ],
+    }
+    calls = compile_tool_calls(event, instruction, vision=vision)
+    assert calls is not None
+    assert [c["name"] for c in calls] == ["move_mouse", "scroll"]
+    args = calls[0]["arguments"]
+    assert args["instruction"] == "滾動條"
+    assert args["control_type"] == "scrollbar"
+    assert "name" not in args
+    assert "value" not in args
+    geom = args["landmark_geometry"]
+    assert geom["target_label"] == "滾動條"
+    by_from = {row["from"]: row for row in geom["landmark_to_target"]}
+    assert "滾動條" in by_from
+    # Hover is left of the bar (viewport center), not on the track.
+    assert by_from["滾動條"]["dx"] < 0
+    assert by_from["滾動條"]["dy"] == pytest.approx(0.0)
 
 
 def test_compile_scroll_leaf_hover_keeps_element_from_point() -> None:

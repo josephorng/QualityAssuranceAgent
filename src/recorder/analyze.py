@@ -623,7 +623,14 @@ def instruction_for_scroll(
     event: RecordedEvent,
     vision: dict[str, Any],
 ) -> str | None:
-    """Build a hub-script scroll line from scroll_delta and nearest candidate."""
+    """Build a hub-script scroll line from scroll_delta and nearest candidate.
+
+    Owning-scrollbar hubs (on-bar or content-area) stay bare
+    ``在滾動條附近{dir}捲動{n}格``; viewport hover uses ``scroll_hover_local``
+    at compile time. Empty whitespace without an owning bar uses the same
+    offset shape as empty clicks: ``在{anchor}{offset}的位置附近…``.
+    ``n`` is ``abs(scroll_delta)`` (wheel notches) so the UI shows the amount.
+    """
     if event.kind != "scroll":
         return None
     delta = event.scroll_delta
@@ -631,10 +638,19 @@ def instruction_for_scroll(
         return None
 
     direction = "向上" if delta > 0 else "向下"
+    amount = abs(int(delta))
+    action = f"{direction}捲動{amount}格"
     anchor = _click_target_anchor(vision)
-    if anchor:
-        return f"在{anchor}附近{direction}捲動"
-    return f"{direction}捲動"
+    if not anchor:
+        return action
+    # Scrollbar hubs hover via scroll_hover_local / bar center — never encode
+    # viewport pixels into the Chinese instruction.
+    if anchor == "滾動條":
+        return f"在{anchor}附近{action}"
+    offset_phrase = primary_candidate_offset(vision)
+    if offset_phrase:
+        return f"在{anchor}{offset_phrase}的位置附近{action}"
+    return f"在{anchor}附近{action}"
 
 
 def instruction_for_drag(

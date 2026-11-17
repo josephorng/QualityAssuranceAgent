@@ -34,6 +34,7 @@ from src.recorder.vision_context import (
     ensure_click_primary_candidate,
     ensure_scroll_primary_candidate,
     _find_owning_scrollbar_for_point,
+    _owning_scroll_viewport_region,
     format_drag_candidate_anchor,
     format_drag_destination_offset_hints,
     format_drag_relative_offset_phrase,
@@ -42,6 +43,7 @@ from src.recorder.vision_context import (
     format_scrollbar_context_hint,
     primary_candidate_offset,
     promote_click_primary_candidates,
+    owning_scrollbar_screen_xyxy,
     press_scrollbar_screen_xyxy,
     recording_uia_detections_sufficient,
     recording_uia_skip_reason,
@@ -558,7 +560,7 @@ def test_ensure_click_primary_candidate_reorders_vision() -> None:
     assert vision["candidates"][0].get("text") == "識別名稱2"
 
 
-def test_ensure_scroll_primary_promotes_owning_vertical_scrollbar() -> None:
+def test_ensure_scroll_primary_promotes_owning_bar_and_on_bar() -> None:
     leaf = {
         "bbox": [872, 1025, 1398, 36],
         "center": [1571, 1043],
@@ -571,12 +573,23 @@ def test_ensure_scroll_primary_promotes_owning_vertical_scrollbar() -> None:
         "class_name": "scrollbar",
         "text": None,
     }
-    vision = {
+    # Content-area wheel: promote owning bar + stash viewport center.
+    content = {
         "local_cursor": (1571, 1043),
         "candidates": [leaf, owning],
     }
-    ensure_scroll_primary_candidate(vision)
-    assert vision["candidates"][0] is owning
+    ensure_scroll_primary_candidate(content)
+    assert content["candidates"][0] is owning
+    assert content["scroll_hover_local"] == [1133, 1119]
+
+    # On-bar wheel: promote the scrollbar under the cursor (no viewport hover).
+    on_bar = {
+        "local_cursor": (2280, 900),
+        "candidates": [leaf, owning],
+    }
+    ensure_scroll_primary_candidate(on_bar)
+    assert on_bar["candidates"][0] is owning
+    assert "scroll_hover_local" not in on_bar
 
 
 def test_ensure_scroll_primary_no_op_without_owning_scrollbar() -> None:
@@ -589,6 +602,42 @@ def test_ensure_scroll_primary_no_op_without_owning_scrollbar() -> None:
     vision = {"local_cursor": (100, 200), "candidates": [leaf]}
     ensure_scroll_primary_candidate(vision)
     assert vision["candidates"][0] is leaf
+    assert "scroll_hover_local" not in vision
+
+
+def test_owning_scroll_viewport_region_clamps_at_intervening_bar() -> None:
+    outer = {
+        "bbox": [2500, 700, 20, 800],
+        "center": [2510, 1100],
+        "class_name": "scrollbar",
+        "text": None,
+    }
+    inner = {
+        "bbox": [2200, 700, 20, 800],
+        "center": [2210, 1100],
+        "class_name": "scrollbar",
+        "text": None,
+    }
+    leaf = {
+        "bbox": [900, 1000, 100, 20],
+        "center": [950, 1010],
+        "class_name": "text",
+        "text": "row",
+    }
+    region = _owning_scroll_viewport_region([leaf, outer, inner], 950, 1010)
+    assert region is not None
+    bbox, bar = region
+    assert bar is inner
+    # Left of inner, clamped by nothing to the left → starts at 0.
+    assert bbox == (0, 700, 2200, 800)
+    # Between bars: owning is outer; left clamped by inner's right edge.
+    between = _owning_scroll_viewport_region([leaf, outer, inner], 2300, 1010)
+    assert between is not None
+    between_bbox, between_bar = between
+    assert between_bar is outer
+    assert between_bbox == (2220, 700, 280, 800)
+    # On-bar: no content viewport.
+    assert _owning_scroll_viewport_region([leaf, outer, inner], 2210, 1010) is None
 
 
 def test_find_owning_scrollbar_picks_nearer_of_two_vertical_bars() -> None:
@@ -649,6 +698,52 @@ def test_find_owning_scrollbar_when_cursor_on_track() -> None:
     }
     found = _find_owning_scrollbar_for_point([leaf, bar], 2115, 577)
     assert found is bar
+
+
+def test_owning_scrollbar_screen_xyxy_content_on_bar_and_missing() -> None:
+    bar = [2200, 700, 2220, 1500]
+    content = RecordedEvent(
+        index=1,
+        timestamp_utc="t",
+        kind="scroll",
+        cursor_xy=(1131, 1000),
+        scroll_delta=-1,
+        screenshot_path="",
+        uia_snapshot={"scrollbars": [bar]},
+    )
+    assert owning_scrollbar_screen_xyxy(content) == (2200, 700, 2220, 1500)
+
+    on_bar = RecordedEvent(
+        index=2,
+        timestamp_utc="t",
+        kind="scroll",
+        cursor_xy=(2210, 1000),
+        scroll_delta=-1,
+        screenshot_path="",
+        uia_snapshot={"scrollbars": [bar]},
+    )
+    assert owning_scrollbar_screen_xyxy(on_bar) == (2200, 700, 2220, 1500)
+
+    no_bars = RecordedEvent(
+        index=3,
+        timestamp_utc="t",
+        kind="scroll",
+        cursor_xy=(1131, 1000),
+        scroll_delta=-1,
+        screenshot_path="",
+        uia_snapshot={"scrollbars": []},
+    )
+    assert owning_scrollbar_screen_xyxy(no_bars) is None
+
+    no_snap = RecordedEvent(
+        index=4,
+        timestamp_utc="t",
+        kind="scroll",
+        cursor_xy=(1131, 1000),
+        scroll_delta=-1,
+        screenshot_path="",
+    )
+    assert owning_scrollbar_screen_xyxy(no_snap) is None
 
 
 def test_nearest_candidates_spatial_neighbor_reorder() -> None:
@@ -1170,6 +1265,21 @@ def test_recording_uia_detections_sufficient_requires_cover_and_uniqueness() -> 
             text="https://m365.cloud.microsoft/chat",
             source="uia",
         ),
+    ]
+    # Click covered only by URL-like UIA and no usable hubs → insufficient.
+    assert (
+        recording_uia_detections_sufficient(
+            url_only, local_x=click[0], local_y=click[1]
+        )
+        is False
+    )
+    assert (
+        recording_uia_skip_reason(url_only, local_x=click[0], local_y=click[1])
+        == "點擊處沒有可用的 UIA 文字"
+    )
+    # URL under cursor with unique nearby hubs → empty-synth UIA win.
+    url_with_hubs = [
+        url_only[0],
         *[
             _detection_from_bbox(
                 (10, 10 + i * 20, 40, 16),
@@ -1180,16 +1290,8 @@ def test_recording_uia_detections_sufficient_requires_cover_and_uniqueness() -> 
             for i in range(_MIN_NEARBY_TEXT_CANDIDATES)
         ],
     ]
-    # Click covered only by URL-like UIA → insufficient for primary.
-    assert (
-        recording_uia_detections_sufficient(
-            url_only, local_x=click[0], local_y=click[1]
-        )
-        is False
-    )
-    assert (
-        recording_uia_skip_reason(url_only, local_x=click[0], local_y=click[1])
-        == "點擊處沒有可用的 UIA 文字"
+    assert recording_uia_detections_sufficient(
+        url_with_hubs, local_x=click[0], local_y=click[1]
     )
 
     # Unique labeled cover needs no landmark quota — a few texts are enough.
@@ -1234,9 +1336,14 @@ def test_recording_uia_accepts_textless_scrollbar_or_input() -> None:
     ocr_bar = _detection_from_bbox(
         (90, 40, 16, 160), YOLO_CLASS_SCROLLBAR, source="ocr"
     )
+    # OCR scrollbar is not a UIA hub; unique nearby UIA texts still win via
+    # empty-point synth when nothing usable covers the click.
+    assert recording_uia_detections_sufficient(
+        [*landmarks, ocr_bar], local_x=click[0], local_y=click[1]
+    )
     assert (
         recording_uia_detections_sufficient(
-            [*landmarks, ocr_bar], local_x=click[0], local_y=click[1]
+            [ocr_bar], local_x=click[0], local_y=click[1]
         )
         is False
     )
@@ -1285,25 +1392,65 @@ def test_recording_uia_text_on_click_still_passes_with_scrollbar() -> None:
     )
 
 
+def test_recording_uia_empty_point_accepts_unique_nearest_hub() -> None:
+    """Whitespace with a uniquely selectable nearby UIA hub is UIA-sufficient."""
+    empty = (200, 200)
+    hub = _detection_from_bbox(
+        (10, 10, 40, 16), YOLO_CLASS_TEXT, text="唯一標籤", source="uia"
+    )
+    landmarks = _uia_landmark_texts(3)
+    assert recording_uia_detections_sufficient(
+        [hub, *landmarks], local_x=empty[0], local_y=empty[1]
+    )
+    assert (
+        recording_uia_skip_reason([hub, *landmarks], local_x=empty[0], local_y=empty[1])
+        is None
+    )
+
+
+def test_recording_uia_empty_point_rejects_no_hubs() -> None:
+    assert (
+        recording_uia_skip_reason([], local_x=50, local_y=50)
+        == "點擊處沒有可用的 UIA 文字"
+    )
+
+
+def test_recording_uia_empty_point_rejects_ambiguous_nearest_hubs() -> None:
+    empty = (200, 200)
+    twin_a = _detection_from_bbox(
+        (10, 10, 40, 16), YOLO_CLASS_TEXT, text="同名", source="uia"
+    )
+    twin_b = _detection_from_bbox(
+        (10, 40, 40, 16), YOLO_CLASS_TEXT, text="同名", source="uia"
+    )
+    assert (
+        recording_uia_skip_reason(
+            [twin_a, twin_b], local_x=empty[0], local_y=empty[1]
+        )
+        == VISION_PATH_UIA_NOT_UNIQUE_REASON
+    )
+
+
 def test_recording_uia_release_past_track_counts_as_press_scrollbar() -> None:
     bar = (100, 100, 20, 200)
     landmarks = _uia_landmark_texts(_MIN_NEARBY_TEXT_CANDIDATES)
-    # Left of the bar and above the track.
+    # Left of the bar / above the track: empty-synth via unique landmarks wins.
+    assert recording_uia_detections_sufficient(
+        landmarks, local_x=90, local_y=40
+    )
+    # No hubs at all → only forced press scrollbar can cover the release.
     assert (
-        recording_uia_detections_sufficient(
-            landmarks, local_x=90, local_y=40
-        )
+        recording_uia_detections_sufficient([], local_x=90, local_y=40)
         is False
     )
     assert recording_uia_detections_sufficient(
-        landmarks,
+        [],
         local_x=90,
         local_y=40,
         forced_scrollbar_bbox=bar,
     )
-    # Forced bar with no peer scrollbars is uniquely selectable.
     assert recording_uia_detections_sufficient(
-        landmarks[:3],
+        landmarks,
         local_x=90,
         local_y=40,
         forced_scrollbar_bbox=bar,
@@ -1337,10 +1484,8 @@ def test_recording_uia_snapshot_ready_at_point_list_items() -> None:
     assert recording_uia_snapshot_ready_at_point(
         snapshot, screen_xy=(335, 149)
     )
-    assert (
-        recording_uia_snapshot_ready_at_point(snapshot, screen_xy=(10, 10))
-        is False
-    )
+    # Far from every list item: still UIA-ready via unique nearest-hub synth.
+    assert recording_uia_snapshot_ready_at_point(snapshot, screen_xy=(10, 10))
 
 
 def test_recording_uia_snapshot_ready_at_point_empty_texts() -> None:
@@ -1574,9 +1719,10 @@ def test_detect_recording_mouse_targets_finishes_ocr_when_uia_thin(
     assert all(d.source != "uia" for d in detections)
 
 
-def test_detect_recording_empty_click_uses_yolo_neighbor(
+def test_detect_recording_empty_click_uses_unique_uia_hub(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Empty whitespace with unique UIA hubs stays on the UIA path (offset synth)."""
     bgr = np.zeros((200, 400, 3), dtype=np.uint8)
     neighbor = _detection_from_bbox(
         (10, 10, 40, 14), YOLO_CLASS_TEXT, text="搜尋", source="ocr"
@@ -1586,6 +1732,35 @@ def test_detect_recording_empty_click_uses_yolo_neighbor(
         for i in range(_MIN_NEARBY_TEXT_CANDIDATES)
     ]
     empty_click_prefetched = (None, None, labeled)
+
+    def fake_detect(*_a, **kwargs):
+        assert kwargs.get("uia_prefetched") == empty_click_prefetched
+        return [neighbor]
+
+    monkeypatch.setattr(
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
+        fake_detect,
+    )
+    detections, timing = _detect_recording_mouse_targets(
+        bgr,
+        local_x=300,
+        local_y=150,
+        uia_prefetched=empty_click_prefetched,
+    )
+    assert timing.get("vision_path") == "uia"
+    assert timing.get("recording_uia_sufficient") is True
+    assert timing.get("yolo_ocr_fallback_detections") is not None
+    assert any(d.source == "uia" for d in detections)
+
+
+def test_detect_recording_empty_click_no_uia_hubs_uses_yolo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bgr = np.zeros((200, 400, 3), dtype=np.uint8)
+    neighbor = _detection_from_bbox(
+        (10, 10, 40, 14), YOLO_CLASS_TEXT, text="搜尋", source="ocr"
+    )
+    empty_click_prefetched = (None, None, [])
 
     def fake_detect(*_a, **kwargs):
         assert kwargs.get("uia_prefetched") == empty_click_prefetched

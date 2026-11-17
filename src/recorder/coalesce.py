@@ -13,9 +13,10 @@ _MULTI_CLICK_MAX_DIST_PX = 8
 _NEGLIGIBLE_DRAG_DIST_PX = 8
 # Follow-up flyout pick may land a few px off the drag end (menu item targeting).
 _FLYOUT_PICK_MAX_DIST_PX = 16
-# Wheel bursts: same gap as multi-click; slightly looser distance for wrist drift.
-_SCROLL_MAX_GAP_S = 1.0
-_SCROLL_MAX_DIST_PX = 16
+# Wheel bursts without UIA owning-bar identity: allow wrist drift inside a pane.
+# Consecutive same-direction scrolls are not time-gated. When both events resolve
+# the same owning scrollbar from ``uia_snapshot``, distance is skipped.
+_SCROLL_MAX_DIST_PX = 64
 _COALESCABLE_CLICK_KINDS = frozenset({"click", "double_click", "triple_click"})
 _IME_CANDIDATE_KEYS = frozenset({"up", "down", "left", "right", "enter"})
 _TEXT_EDIT_BRIDGE_KEYS = frozenset({"backspace", "delete"})
@@ -700,12 +701,15 @@ def _can_merge_consecutive_scrolls(prev: RecordedEvent, event: RecordedEvent) ->
         return False
     if prev.cursor_xy is None or event.cursor_xy is None:
         return False
-    if not _points_within(prev.cursor_xy, event.cursor_xy, _SCROLL_MAX_DIST_PX):
-        return False
-    elapsed = _elapsed_seconds(prev.timestamp_utc, event.timestamp_utc)
-    if elapsed is None or elapsed > _SCROLL_MAX_GAP_S:
-        return False
-    return True
+    from src.recorder.vision_context import owning_scrollbar_screen_xyxy
+
+    prev_owner = owning_scrollbar_screen_xyxy(prev)
+    event_owner = owning_scrollbar_screen_xyxy(event)
+    if prev_owner is not None and event_owner is not None:
+        # Same viewport (owning bar) merges; different owners never merge via
+        # the distance fallback (avoids gluing nested panes that sit nearby).
+        return prev_owner == event_owner
+    return _points_within(prev.cursor_xy, event.cursor_xy, _SCROLL_MAX_DIST_PX)
 
 
 def _merge_scroll_window_debug(
@@ -784,11 +788,13 @@ def _merge_scroll_group(group: list[RecordedEvent]) -> RecordedEvent:
 def coalesce_consecutive_scrolls(
     events: list[RecordedEvent],
 ) -> list[RecordedEvent]:
-    """Merge rapid same-direction wheel notches into one scroll event.
+    """Merge consecutive same-direction wheel notches into one scroll event.
 
-    Consecutive ``scroll`` events that share direction and modifiers, stay near
-    the same cursor point, and fall within a short pairwise time gap are combined
-    by summing ``scroll_delta``. Opposite directions never merge or cancel.
+    Consecutive ``scroll`` events that share direction and modifiers are combined
+    by summing ``scroll_delta`` when they share the same UIA owning scrollbar
+    (same viewport), or — when ownership is unavailable — when cursors stay
+    within ``_SCROLL_MAX_DIST_PX``. Opposite directions never merge or cancel.
+    There is no pairwise time-gap limit.
     """
     if not events:
         return []

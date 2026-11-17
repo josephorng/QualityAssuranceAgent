@@ -42,7 +42,9 @@ _WAIT_INSTRUCTION_RE = re.compile(r"^等待\s*([0-9]+(?:\.[0-9]+)?)\s*秒")
 _DRAG_SPLIT_RE = re.compile(r"^從(.+?)拖到(.+)$")
 _CLICK_ACTION_SUFFIX_RE = re.compile(r"(，(?:並|用).+。)$")
 _MOVE_PREFIX = "將滑鼠移到"
-_SCROLL_HOVER_RE = re.compile(r"^在(.+?)附近(?:向上|向下)捲動")
+# Optional trailing ``N格`` (wheel notches) is display-only; clicks still come
+# from ``event.scroll_delta``.
+_SCROLL_HOVER_RE = re.compile(r"^在(.+?)附近(?:向上|向下)捲動(?:\d+格)?")
 
 
 def recording_tool_cache_path(run_dir: Path) -> Path:
@@ -309,10 +311,14 @@ def _move_mouse_call(
     nearby = _nearby_object_phrases(instruction)
     if nearby:
         args["nearby_objects"] = nearby
-        # Constellation for text and non-text targets (e.g. empty 輸入欄) and
-        # for empty-space clicks that currently encode raw pixel offsets.
-        # Text replay uses radius-then-similarity around the synthesized point.
-        offset_click = _is_relative_offset_position(resolved)
+    # Constellation for text and non-text targets (e.g. empty 輸入欄) and
+    # for empty-space clicks/scrolls that encode raw pixel offsets — even when
+    # the instruction has no trailing （在…） nearby comments.
+    # Text replay uses radius-then-similarity around the synthesized point.
+    # Content-area scrolls stash viewport center on vision["scroll_hover_local"].
+    offset_click = _is_relative_offset_position(resolved)
+    scroll_hover = _scroll_hover_local_xy(vision)
+    if nearby or offset_click or scroll_hover is not None:
         hints = extract_nearby_hints_from_instruction(instruction)
         if offset_click:
             from cua_mcp.instruction_offset import (
@@ -321,13 +327,24 @@ def _move_mouse_call(
             from src.common.nearby_side import NearbyHint
 
             ref_anchor, _dx, _dy = _parse_relative_pixel_offset_regex(resolved)
-            ref = (ref_anchor or "").strip()
+            _ref_mode, ref_body = split_vision_mode((ref_anchor or "").strip())
+            ref = (ref_body or "").strip()
             if ref:
                 hints = [NearbyHint(label=ref, side=None), *hints]
+        min_landmarks = None
+        target_xy = None
+        if scroll_hover is not None:
+            from src.common.nearby_side import NearbyHint
+
+            hints = [NearbyHint(label="滾動條", side=None), *hints]
+            target_xy = scroll_hover
+            min_landmarks = 1
         geometry = build_landmark_geometry(
             vision,
             hints,
+            target_xy=target_xy,
             target_label=resolved,
+            min_landmarks=min_landmarks,
         )
         if geometry is not None:
             args["landmark_geometry"] = geometry
@@ -336,6 +353,21 @@ def _move_mouse_call(
     # EFP side-car only — never rewrite instruction/anchor_text from EFP.
     args.update(_element_from_point_args(element_from_point))
     return _call("move_mouse", **args)
+
+
+def _scroll_hover_local_xy(
+    vision: dict[str, Any] | None,
+) -> tuple[float, float] | None:
+    """Return vision ``scroll_hover_local`` as ``(x, y)`` when present."""
+    if not isinstance(vision, dict):
+        return None
+    raw = vision.get("scroll_hover_local")
+    if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+        return None
+    try:
+        return float(raw[0]), float(raw[1])
+    except (TypeError, ValueError):
+        return None
 
 
 def _is_relative_offset_position(target: str) -> bool:

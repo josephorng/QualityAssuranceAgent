@@ -3678,11 +3678,11 @@ def test_instruction_for_scroll_on_scrollbar() -> None:
             },
         ],
     }
-    assert instruction_for_scroll(event, vision) == "在滾動條附近向下捲動"
+    assert instruction_for_scroll(event, vision) == "在滾動條附近向下捲動3格"
 
 
-def test_rebuild_scroll_promotes_owning_scrollbar_over_data_item() -> None:
-    """Wheel over a row leaf should target the owning scrollbar, not Value|N."""
+def test_rebuild_scroll_promotes_owning_scrollbar_for_content_area() -> None:
+    """Content-area wheel promotes owning bar; hover stashed at viewport center."""
     event = RecordedEvent(
         index=3,
         timestamp_utc="t",
@@ -3711,9 +3711,35 @@ def test_rebuild_scroll_promotes_owning_scrollbar_over_data_item() -> None:
         ],
     }
     assert rebuild_pointer_instruction(event, vision, include_nearby=False) == (
-        "（YOLO+OCR）在滾動條附近向下捲動"
+        "（YOLO+OCR）在滾動條附近向下捲動3格"
     )
     assert vision["candidates"][0]["class_name"] == "scrollbar"
+    assert vision["scroll_hover_local"] == [1133, 1119]
+
+
+def test_instruction_for_scroll_empty_uses_offset_position() -> None:
+    event = RecordedEvent(
+        index=4,
+        timestamp_utc="t",
+        kind="scroll",
+        cursor_xy=(200, 200),
+        scroll_delta=-2,
+        screenshot_path="",
+    )
+    vision = {
+        "local_cursor": (200, 200),
+        "candidates": [
+            {
+                "bbox": [80, 180, 40, 20],
+                "center": [100, 190],
+                "class_name": "text",
+                "text": "檔案清單",
+            },
+        ],
+    }
+    assert instruction_for_scroll(event, vision) == (
+        "在「檔案清單」文字右方100個像素、下方10個像素的位置附近向下捲動2格"
+    )
 
 
 def test_rebuild_scroll_keeps_named_leaf_without_scrollbar() -> None:
@@ -3737,7 +3763,7 @@ def test_rebuild_scroll_keeps_named_leaf_without_scrollbar() -> None:
         ],
     }
     assert rebuild_pointer_instruction(event, vision, include_nearby=False) == (
-        "在「檔案清單」文字附近向下捲動"
+        "在「檔案清單」文字附近向下捲動3格"
     )
 
 
@@ -3835,7 +3861,7 @@ def test_instruction_for_scroll_with_named_target() -> None:
             },
         ],
     }
-    assert instruction_for_scroll(event, vision) == "在「檔案清單」文字附近向下捲動"
+    assert instruction_for_scroll(event, vision) == "在「檔案清單」文字附近向下捲動3格"
 
 
 def test_instruction_for_scroll_without_named_target() -> None:
@@ -3853,7 +3879,7 @@ def test_instruction_for_scroll_without_named_target() -> None:
             {"bbox": [0, 0, 20, 20], "center": [10, 10], "class_name": "element", "text": None},
         ],
     }
-    assert instruction_for_scroll(event, vision) == "向上捲動"
+    assert instruction_for_scroll(event, vision) == "向上捲動2格"
 
 
 def test_instruction_for_scroll_returns_none_without_delta() -> None:
@@ -4042,7 +4068,7 @@ async def test_analyze_event_to_cache_scroll_is_deterministic(tmp_path: Path) ->
         )
 
     assert result is not None
-    assert result["instruction"].startswith("在「檔案清單」文字附近向下捲動")
+    assert result["instruction"].startswith("在「檔案清單」文字附近向下捲動1格")
     assert "其他" in result["instruction"]
     llm_mock.assert_not_called()
 

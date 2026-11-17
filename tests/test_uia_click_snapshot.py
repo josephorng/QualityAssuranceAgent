@@ -1211,7 +1211,7 @@ def test_hover_findall_skips_when_already_cached_or_yellow_or_mismatch(
     }
     assert _run(session) == []
 
-    # Leaves exist but do not cover the cursor — hover FindAll retries / merges
+    # Unique far hub is empty-synth ready — skip hover FindAll
     session._last_settle_uia_by_hwnd = {
         55: {
             "hwnd": 55,
@@ -1223,9 +1223,29 @@ def test_hover_findall_skips_when_already_cached_or_yellow_or_mismatch(
             "texts": [{"bbox": [0, 0, 4, 4], "text": "far"}],
         }
     }
+    assert _run(session) == []
+
+    # Ambiguous same-label hubs are not ready — hover FindAll retries / merges
+    session._last_settle_uia_by_hwnd = {
+        55: {
+            "hwnd": 55,
+            "cache_kind": "hover",
+            "class_name": "Chrome_WidgetWin_1",
+            "window": [0, 0, 400, 300],
+            "inputs": [],
+            "scrollbars": [],
+            "texts": [
+                {"bbox": [0, 0, 40, 14], "text": "同名"},
+                {"bbox": [0, 40, 40, 54], "text": "同名"},
+            ],
+        }
+    }
     assert _run(session) == [55]
-    # Empty FindAll result must not wipe existing far leaf
-    assert session._last_settle_uia_by_hwnd[55]["texts"][0]["text"] == "far"
+    # Empty FindAll result must not wipe existing ambiguous leaves
+    assert [row["text"] for row in session._last_settle_uia_by_hwnd[55]["texts"]] == [
+        "同名",
+        "同名",
+    ]
 
     # Empty by_hwnd entry is not ready — hover FindAll retries
     session._last_settle_uia_by_hwnd = {
@@ -1365,6 +1385,7 @@ def test_hover_findall_rewarm_merges_uncovered_point(tmp_path: Path) -> None:
     session._idle_efp_generation = 1
     session._last_settle_uia_after_index = 0
     session._last_settle_uia = {"hwnd": 10, "window": [0, 0, 1, 1]}
+    # Ambiguous same-label hubs keep the point non-ready so hover rewarm runs.
     session._last_settle_uia_by_hwnd = {
         55: {
             "hwnd": 55,
@@ -1373,7 +1394,10 @@ def test_hover_findall_rewarm_merges_uncovered_point(tmp_path: Path) -> None:
             "window": [0, 0, 400, 300],
             "inputs": [],
             "scrollbars": [],
-            "texts": [{"bbox": [0, 0, 4, 4], "text": "遠方"}],
+            "texts": [
+                {"bbox": [0, 0, 40, 14], "text": "遠方"},
+                {"bbox": [0, 40, 40, 54], "text": "遠方"},
+            ],
         }
     }
     hover_win = ClickWindowInfo(
@@ -1408,7 +1432,7 @@ def test_hover_findall_rewarm_merges_uncovered_point(tmp_path: Path) -> None:
     ):
         assert session._maybe_hover_findall_uia(1, 100, 100, efp_name="L", efp_value="V")
     texts = [row["text"] for row in session._last_settle_uia_by_hwnd[55]["texts"]]
-    assert texts == ["遠方", "近處"]
+    assert texts == ["遠方", "遠方", "近處"]
     assert session._last_settle_uia_by_hwnd[55]["cache_kind"] == "hover"
 
 
@@ -2556,3 +2580,144 @@ async def test_uia_second_snapshot_hit_skips_ocr(
     assert found[2]["selection_method"] == "uia_first_unique"
     assert found[2]["target_text"] == "記事本"
     assert found[2]["timing"]["vision_path"] == "uia"
+
+
+def test_worker_mouse_pointer_scroll_attaches_cached_uia_snapshot(tmp_path: Path) -> None:
+    """Scrolls reuse settle/hover FindAll the same way clicks do."""
+    from src.recorder.capture import RecordingSession, _DeferredCaptureJob
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    session = RecordingSession(runs_root=tmp_path)
+    run_dir = session.start()
+    click_win = ClickWindowInfo(
+        hwnd=55,
+        title="Downloads",
+        process_name="explorer.exe",
+        left=0,
+        top=0,
+        width=800,
+        height=600,
+        is_maximized=False,
+        class_name="CabinetWClass",
+    )
+    snap = {
+        "hwnd": 55,
+        "window": [0, 0, 800, 600],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [{"bbox": [10, 10, 80, 30], "text": "下載", "control_type": "text"}],
+    }
+    persisted: list = []
+
+    def _persist(item) -> None:
+        persisted.append(item)
+
+    with (
+        patch.object(
+            session,
+            "_pending_screenshot_from_settle_or_capture",
+            return_value=(str(run_dir / "screenshots" / "event_001.jpeg"), 1, (0, 0)),
+        ),
+        patch.object(session, "_probe_element_from_point_at", return_value=None),
+        patch.object(session, "_cached_uia_before", return_value=snap) as cached,
+        patch.object(session, "_persist_queued_event", side_effect=_persist),
+        patch.object(session, "_refresh_pending_pre_type"),
+    ):
+        session._worker_mouse_pointer_event(
+            _DeferredCaptureJob(
+                action="mouse_pointer_event",
+                kind="scroll",
+                cursor_xy=(120, 340),
+                event_index=1,
+                timestamp_utc="t",
+                scroll_delta=-1,
+                click_window=click_win,
+                refresh_pre_type=True,
+            )
+        )
+    cached.assert_called_once()
+    assert len(persisted) == 1
+    assert persisted[0].kind == "scroll"
+    assert persisted[0].uia_snapshot == snap
+    assert persisted[0].scroll_delta == -1
+
+
+def test_worker_mouse_pointer_scroll_reuses_previous_scroll_uia(
+    tmp_path: Path,
+) -> None:
+    """Rapid follow-up scrolls reuse the prior scroll FindAll on settle miss."""
+    from src.recorder.capture import RecordingSession, _DeferredCaptureJob
+    from src.recorder.models import RecordedEvent
+    from src.recorder.window_snapshot import ClickWindowInfo
+
+    session = RecordingSession(runs_root=tmp_path)
+    run_dir = session.start()
+    click_win = ClickWindowInfo(
+        hwnd=55,
+        title="Downloads",
+        process_name="explorer.exe",
+        left=0,
+        top=0,
+        width=800,
+        height=600,
+        is_maximized=False,
+        class_name="CabinetWClass",
+    )
+    prior_snap = {
+        "hwnd": 55,
+        "window": [0, 0, 800, 600],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [{"bbox": [10, 10, 80, 30], "text": "今天", "control_type": "text"}],
+    }
+    session._events = [
+        RecordedEvent(
+            index=5,
+            timestamp_utc="t0",
+            kind="scroll",
+            cursor_xy=(935, 293),
+            scroll_delta=2,
+            screenshot_path="",
+            uia_snapshot=prior_snap,
+            click_window={
+                "hwnd": 55,
+                "title": "Downloads",
+                "process_name": "explorer.exe",
+                "left": 0,
+                "top": 0,
+                "width": 800,
+                "height": 600,
+                "is_maximized": False,
+                "class_name": "CabinetWClass",
+            },
+        )
+    ]
+    persisted: list = []
+
+    with (
+        patch.object(
+            session,
+            "_pending_screenshot_from_settle_or_capture",
+            return_value=(str(run_dir / "screenshots" / "event_006.jpeg"), 1, (0, 0)),
+        ),
+        patch.object(session, "_probe_element_from_point_at", return_value=None),
+        patch.object(session, "_cached_uia_before", return_value=None),
+        patch.object(session, "_persist_queued_event", side_effect=persisted.append),
+        patch.object(session, "_refresh_pending_pre_type"),
+    ):
+        session._worker_mouse_pointer_event(
+            _DeferredCaptureJob(
+                action="mouse_pointer_event",
+                kind="scroll",
+                cursor_xy=(937, 313),
+                event_index=6,
+                timestamp_utc="t1",
+                scroll_delta=2,
+                click_window=click_win,
+                refresh_pre_type=True,
+            )
+        )
+    assert len(persisted) == 1
+    assert persisted[0].uia_snapshot is not None
+    assert persisted[0].uia_snapshot["texts"][0]["text"] == "今天"
+    assert persisted[0].uia_snapshot is not prior_snap

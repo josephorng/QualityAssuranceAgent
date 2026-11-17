@@ -2120,7 +2120,11 @@ class RecordingSession:
             efp_value=efp_value,
             claim_token=claim_token,
         )
-        self._reschedule_idle_efp_from_last_pointer()
+        # Completed FindAll: only keep polling when the point is now UIA-ready
+        # (including empty-synth hubs). Confirmed empty / non-unique stays red
+        # until the mouse moves or settle republishes.
+        if self._uia_path_ready_at_cursor(cursor_xy):
+            self._reschedule_idle_efp_from_last_pointer()
         return True
 
     def _notify_pending_text_input(self, event_index: int) -> None:
@@ -4801,6 +4805,34 @@ class RecordingSession:
                 return 0
             return int(self._events[-1].index)
 
+    def _uia_snapshot_from_previous_scroll(
+        self,
+        click_window: ClickWindowInfo | None,
+        *,
+        cursor_xy: tuple[int, int] | None = None,
+    ) -> dict[str, Any] | None:
+        """Copy FindAll from the prior scroll when settle cache is still in flight.
+
+        Consecutive wheel notches often persist before the previous scroll's
+        window-step republishes ``after_index``, so ``_cached_uia_before`` misses.
+        Reusing that notch's snapshot keeps the burst on the UIA path when the
+        click window (hwnd) still matches.
+        """
+        with self._lock:
+            if not self._events:
+                return None
+            prior = self._events[-1]
+        if prior.kind != "scroll":
+            return None
+        snapshot = prior.uia_snapshot
+        if not isinstance(snapshot, dict) or not self._uia_snapshot_has_leaves(snapshot):
+            return None
+        if not self._uia_snapshot_matches_click(
+            snapshot, click_window, cursor_xy=cursor_xy
+        ):
+            return None
+        return self._copy_uia_snapshot(snapshot)
+
     @staticmethod
     def _is_shell_retained_uia_class(class_name: str) -> bool:
         """True for taskbar or desktop-shell classes kept across settles."""
@@ -5881,6 +5913,22 @@ class RecordingSession:
             run_dir=run_dir,
             event_index=job.event_index,
         )
+        # Scrolls/middle-clicks share this worker: reuse settle/hover FindAll when
+        # the cache still matches this click_window. Rapid scroll bursts often
+        # outrun the prior step's settle republish — fall back to the previous
+        # scroll's snapshot when hwnd still matches (miss stays None → YOLO).
+        uia_snapshot = self._cached_uia_before(
+            job.click_window,
+            cursor_xy=job.cursor_xy,
+        )
+        if (
+            uia_snapshot is None
+            and job.kind == "scroll"
+        ):
+            uia_snapshot = self._uia_snapshot_from_previous_scroll(
+                job.click_window,
+                cursor_xy=job.cursor_xy,
+            )
         self._persist_queued_event(
             _QueuedEvent(
                 kind=job.kind,
@@ -5895,6 +5943,7 @@ class RecordingSession:
                 scroll_delta=job.scroll_delta,
                 windows_before=job.windows_before or self._start_windows_before(),
                 click_window=job.click_window,
+                uia_snapshot=uia_snapshot if isinstance(uia_snapshot, dict) else None,
                 element_from_point=efp if isinstance(efp, dict) else None,
                 signals_before=job.signals_before or self._start_signals_before(),
                 action_monotonic=job.action_monotonic,

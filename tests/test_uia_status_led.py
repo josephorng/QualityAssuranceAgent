@@ -408,6 +408,7 @@ def test_idle_efp_keeps_label_when_findall_empty_red(tmp_path: Path) -> None:
                 "texts": [],
             },
         ),
+        patch.object(session, "_reschedule_idle_efp_from_last_pointer") as reschedule,
     ):
         session._worker_idle_efp(
             _DeferredCaptureJob(
@@ -419,11 +420,67 @@ def test_idle_efp_keeps_label_when_findall_empty_red(tmp_path: Path) -> None:
     assert statuses[-1]["state"] == "red"
     assert statuses[-1]["efp_name"] == "Leaf"
     assert statuses[-1]["efp_value"] == "V"
+    # Confirmed empty after completed FindAll: do not loop hover FindAll.
+    reschedule.assert_not_called()
     # Probe paints before hover/readiness.
     assert any(
         row.get("efp_name") == "Leaf" and row.get("efp_pending") is False
         for row in statuses
     )
+
+
+def test_idle_efp_empty_synthable_hub_goes_green(tmp_path: Path) -> None:
+    """Unique nearest UIA hub makes empty whitespace green without hover refetch."""
+    statuses: list[dict] = []
+    session = RecordingSession(runs_root=tmp_path)
+    session._accepting_input = True
+    session.set_on_uia_status(statuses.append)
+    session._idle_efp_generation = 1
+    session._last_settle_uia_after_index = 0
+    session._last_settle_uia = {
+        "hwnd": 7,
+        "class_name": "Chrome_WidgetWin_1",
+        "window": [0, 0, 400, 300],
+        "inputs": [],
+        "scrollbars": [],
+        "texts": [{"bbox": [10, 10, 50, 26], "text": "唯一標籤", "control_type": "text"}],
+    }
+    click_win = ClickWindowInfo(
+        hwnd=7,
+        title="App",
+        process_name="a.exe",
+        left=0,
+        top=0,
+        width=400,
+        height=300,
+        is_maximized=False,
+        class_name="Chrome_WidgetWin_1",
+    )
+    with (
+        patch(
+            "src.recorder.uia_input_boxes.uia_text_element_at_point",
+            return_value=("x", (0, 0, 1, 1), "text", "Pane", ""),
+        ),
+        patch(
+            "src.recorder.capture.resolve_click_window",
+            return_value=click_win,
+        ),
+        patch(
+            "src.recorder.uia_input_boxes.snapshot_uia_hover_subtree",
+        ) as hover_findall,
+        patch.object(session, "_reschedule_idle_efp_from_last_pointer") as reschedule,
+    ):
+        session._worker_idle_efp(
+            _DeferredCaptureJob(
+                action="idle_efp",
+                cursor_xy=(200, 200),
+                meta={"generation": 1},
+            )
+        )
+    assert statuses[-1]["state"] == "green"
+    # Already ready from settle cache → skip hover FindAll and its reschedule loop.
+    hover_findall.assert_not_called()
+    reschedule.assert_not_called()
 
 
 def test_idle_efp_label_visible_during_hover_yellow(tmp_path: Path) -> None:

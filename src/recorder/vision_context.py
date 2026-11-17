@@ -1334,10 +1334,12 @@ def ensure_click_primary_candidate(vision: dict[str, Any]) -> dict[str, Any]:
 
 
 def ensure_scroll_primary_candidate(vision: dict[str, Any]) -> dict[str, Any]:
-    """Promote the owning scrollbar to ``candidates[0]`` for scroll steps.
+    """Promote the owning scrollbar for scroll steps and stash viewport hover.
 
-    Mutates ``vision`` in place when a local cursor and an owning scrollbar exist.
-    Leaves leaf ranking unchanged when no owning scrollbar is found.
+    On-bar: promote the containing scrollbar (instruction stays
+    ``在滾動條附近…``). Content-area with an owning bar: promote that bar and
+    set ``scroll_hover_local`` to the viewport center so compile/replay aims
+    at the pane, not a volatile leaf. No owning bar: leave nearest-leaf ranking.
     """
     local = vision.get("local_cursor")
     candidates = vision.get("candidates")
@@ -1345,14 +1347,21 @@ def ensure_scroll_primary_candidate(vision: dict[str, Any]) -> dict[str, Any]:
         return vision
     if not isinstance(candidates, list) or not candidates:
         return vision
-    owning = _find_owning_scrollbar_for_point(
-        candidates,
-        int(local[0]),
-        int(local[1]),
-    )
-    if owning is None:
+    lx, ly = int(local[0]), int(local[1])
+    vision.pop("scroll_hover_local", None)
+    containing = _find_containing_scrollbar(candidates, lx, ly)
+    if isinstance(containing, dict):
+        vision["candidates"] = _promote_scrollbar_in_candidates(candidates, containing)
         return vision
-    vision["candidates"] = _promote_scrollbar_in_candidates(candidates, owning)
+    region = _owning_scroll_viewport_region(candidates, lx, ly)
+    if region is None:
+        return vision
+    viewport_bbox, scrollbar = region
+    vx, vy, vw, vh = viewport_bbox
+    if vw <= 0 or vh <= 0:
+        return vision
+    vision["candidates"] = _promote_scrollbar_in_candidates(candidates, scrollbar)
+    vision["scroll_hover_local"] = [int(vx + vw // 2), int(vy + vh // 2)]
     return vision
 
 
@@ -3557,6 +3566,58 @@ def press_scrollbar_screen_xyxy(
     return best[1]
 
 
+def owning_scrollbar_screen_xyxy(
+    event: RecordedEvent,
+) -> tuple[int, int, int, int] | None:
+    """Screen xyxy of the scrollbar that owns the scroll at ``event.cursor_xy``.
+
+    Uses ``uia_snapshot["scrollbars"]`` (screen xyxy) with the same owning-bar
+    rules as ``_find_owning_scrollbar_for_point`` (on-bar or content-area left /
+    above the track). Returns ``None`` when cursor/snapshot/bars are missing or
+    no owner can be resolved — coalesce then falls back to cursor distance.
+    """
+    if event.cursor_xy is None:
+        return None
+    snapshot = event.uia_snapshot
+    if not isinstance(snapshot, dict):
+        return None
+    bars = snapshot.get("scrollbars")
+    if not isinstance(bars, list) or not bars:
+        return None
+    sx, sy = int(event.cursor_xy[0]), int(event.cursor_xy[1])
+    # Treat screen space as the working coordinate system so we can reuse the
+    # local xywh owning-bar helper without monitor_offset conversion.
+    candidates: list[dict[str, Any]] = []
+    xyxy_by_bbox: dict[tuple[int, int, int, int], tuple[int, int, int, int]] = {}
+    for item in bars:
+        if not isinstance(item, (list, tuple)) or len(item) != 4:
+            continue
+        left, top, right, bottom = (int(v) for v in item[:4])
+        w = right - left
+        h = bottom - top
+        if w <= 0 or h <= 0:
+            continue
+        bbox = (left, top, w, h)
+        candidates.append(
+            {
+                "bbox": [left, top, w, h],
+                "center": [left + w // 2, top + h // 2],
+                "class_name": "scrollbar",
+                "text": None,
+            }
+        )
+        xyxy_by_bbox[bbox] = (left, top, right, bottom)
+    if not candidates:
+        return None
+    owning = _find_owning_scrollbar_for_point(candidates, sx, sy)
+    if not isinstance(owning, dict):
+        return None
+    owned = _candidate_bbox_tuple(owning)
+    if owned is None:
+        return None
+    return xyxy_by_bbox.get(owned)
+
+
 def _screen_xyxy_to_local_xywh(
     xyxy: tuple[int, int, int, int],
     monitor_offset: tuple[int, int],
@@ -3639,6 +3700,26 @@ def _pick_uia_click_primary(
     return forced
 
 
+def _pick_nearest_usable_uia_hub(
+    detections: list[UiDetection],
+    *,
+    point_x: int,
+    point_y: int,
+) -> UiDetection | None:
+    """Nearest usable UIA text/input/scrollbar for empty-point offset synth."""
+    hubs = [
+        det
+        for det in detections
+        if _is_usable_uia_text_detection(det) or _is_uia_textless_control(det)
+    ]
+    if not hubs:
+        return None
+    return min(
+        hubs,
+        key=lambda det: _nearest_detection_rank_key(det, point_x, point_y),
+    )
+
+
 def _uia_landmarks_uniquely_select_primary(
     primary: UiDetection,
     detections: list[UiDetection],
@@ -3707,6 +3788,10 @@ def recording_uia_skip_reason(
     ``forced_scrollbar_bbox`` is the press scrollbar for a drag release: the
     release counts as that bar after the cross-axis snap, even past the track.
 
+    When nothing covers the pointer, the nearest usable UIA hub may still win
+    for empty-point offset synth (click/scroll/right-click), if landmarks
+    uniquely select that hub among peers.
+
     When the click has ambiguous peers (same-label text/icon, or multiple
     inputs/scrollbars), nearby unique-label UIA landmarks must uniquely
     prefilter the primary the same way replay nearby matching does.
@@ -3727,7 +3812,13 @@ def recording_uia_skip_reason(
         forced_scrollbar_bbox=forced_scrollbar_bbox,
     )
     if primary is None:
-        return "點擊處沒有可用的 UIA 文字"
+        primary = _pick_nearest_usable_uia_hub(
+            detections,
+            point_x=point_x,
+            point_y=point_y,
+        )
+        if primary is None:
+            return "點擊處沒有可用的 UIA 文字"
     if _uia_landmarks_uniquely_select_primary(
         primary,
         detections,
@@ -3746,10 +3837,12 @@ def recording_uia_detections_sufficient(
 ) -> bool:
     """True when deferred UIA-only candidates uniquely select the click target.
 
-    The click must land on usable UIA text, a UIA input, or a UIA scrollbar (or
-    a drag release assigned to ``forced_scrollbar_bbox``). When peers make that
-    target ambiguous, unique-label UIA landmarks must uniquely prefilter it.
-    URL-like / ultra-long UIA names do not count as usable text.
+    The click may land on usable UIA text, a UIA input, or a UIA scrollbar (or
+    a drag release assigned to ``forced_scrollbar_bbox``). Empty whitespace may
+    still win when a nearest usable UIA hub is uniquely landmark-selected for
+    offset synth. When peers make that target ambiguous, unique-label UIA
+    landmarks must uniquely prefilter it. URL-like / ultra-long UIA names do
+    not count as usable text.
     """
     return (
         recording_uia_skip_reason(
@@ -4817,6 +4910,23 @@ def _find_containing_scrollbar(
     return hits[0][1]
 
 
+def _collect_scrollbar_bboxes(
+    candidates: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], tuple[int, int, int, int]]]:
+    """Return ``(cand, bbox)`` pairs for scrollbar candidates with valid bboxes."""
+    scrollbars: list[tuple[dict[str, Any], tuple[int, int, int, int]]] = []
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        if str(cand.get("class_name") or "").strip() != "scrollbar":
+            continue
+        bbox = _candidate_bbox_tuple(cand)
+        if bbox is None:
+            continue
+        scrollbars.append((cand, bbox))
+    return scrollbars
+
+
 def _find_owning_scrollbar_for_point(
     candidates: list[dict[str, Any]],
     local_x: int,
@@ -4835,16 +4945,7 @@ def _find_owning_scrollbar_for_point(
     if isinstance(containing, dict):
         return containing
 
-    scrollbars: list[tuple[dict[str, Any], tuple[int, int, int, int]]] = []
-    for cand in candidates:
-        if not isinstance(cand, dict):
-            continue
-        if str(cand.get("class_name") or "").strip() != "scrollbar":
-            continue
-        bbox = _candidate_bbox_tuple(cand)
-        if bbox is None:
-            continue
-        scrollbars.append((cand, bbox))
+    scrollbars = _collect_scrollbar_bboxes(candidates)
     if not scrollbars:
         return None
 
@@ -4895,6 +4996,58 @@ def _find_owning_scrollbar_for_point(
     if best_h is not None:
         return best_h[1]
     return None
+
+
+def _owning_scroll_viewport_region(
+    candidates: list[dict[str, Any]],
+    local_x: int,
+    local_y: int,
+) -> tuple[tuple[int, int, int, int], dict[str, Any]] | None:
+    """Return ``(viewport_bbox, scrollbar)`` for content owned by a scrollbar.
+
+    Viewport is the uncapped content strip beside the owning bar (left of a
+    vertical track, above a horizontal track), clamped by intervening
+    same-orientation scrollbars. Returns ``None`` when the point is on a bar
+    (no content strip) or no owner exists.
+    """
+    containing = _find_containing_scrollbar(candidates, local_x, local_y)
+    if isinstance(containing, dict):
+        return None
+    owning = _find_owning_scrollbar_for_point(candidates, local_x, local_y)
+    if not isinstance(owning, dict):
+        return None
+    bbox = _candidate_bbox_tuple(owning)
+    if bbox is None:
+        return None
+    x, y, w, h = bbox
+    scrollbars = _collect_scrollbar_bboxes(candidates)
+    if h >= w:
+        left = 0
+        for _other, (ox, oy, ow, oh) in scrollbars:
+            if oh < ow:
+                continue
+            if ox + ow > x:
+                continue
+            if oy + oh <= y or oy >= y + h:
+                continue
+            left = max(left, ox + ow)
+        width = x - left
+        if width <= 0:
+            return None
+        return (left, y, width, h), owning
+    top = 0
+    for _other, (ox, oy, ow, oh) in scrollbars:
+        if oh >= ow:
+            continue
+        if oy + oh > y:
+            continue
+        if ox + ow <= x or ox >= x + w:
+            continue
+        top = max(top, oy + oh)
+    height = y - top
+    if height <= 0:
+        return None
+    return (x, top, w, height), owning
 
 
 def _point_hits_scrollbar_end_arrow(

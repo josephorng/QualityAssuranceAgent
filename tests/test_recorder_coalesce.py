@@ -889,7 +889,8 @@ def test_coalesce_scrolls_direction_reverse_breaks_group() -> None:
     assert merged[1].scroll_delta == 4
 
 
-def test_coalesce_scrolls_gap_boundary() -> None:
+def test_coalesce_scrolls_ignores_time_gap() -> None:
+    """Same-direction scrolls merge regardless of pairwise timestamp gap."""
     events = [
         _scroll_event(
             1,
@@ -903,14 +904,13 @@ def test_coalesce_scrolls_gap_boundary() -> None:
         ),
         _scroll_event(
             3,
-            timestamp_utc="2026-08-12T00:00:02.000100+00:00",
+            timestamp_utc="2026-08-12T00:00:12.000100+00:00",
             scroll_delta=-1,
         ),
     ]
     merged = coalesce_consecutive_scrolls(events)
-    assert len(merged) == 2
-    assert merged[0].scroll_delta == -2
-    assert merged[1].scroll_delta == -1
+    assert len(merged) == 1
+    assert merged[0].scroll_delta == -3
 
 
 def test_coalesce_scrolls_chained_gaps_merge_long_burst() -> None:
@@ -937,6 +937,7 @@ def test_coalesce_scrolls_chained_gaps_merge_long_burst() -> None:
 
 
 def test_coalesce_scrolls_cursor_distance_boundary() -> None:
+    """Without UIA owners, merge when distance <= 64px and split beyond."""
     near = [
         _scroll_event(
             1,
@@ -948,7 +949,7 @@ def test_coalesce_scrolls_cursor_distance_boundary() -> None:
             2,
             timestamp_utc="2026-08-12T00:00:00.200000+00:00",
             scroll_delta=-1,
-            cursor_xy=(116, 200),
+            cursor_xy=(164, 200),
         ),
     ]
     far = [
@@ -962,11 +963,65 @@ def test_coalesce_scrolls_cursor_distance_boundary() -> None:
             2,
             timestamp_utc="2026-08-12T00:00:00.200000+00:00",
             scroll_delta=-1,
-            cursor_xy=(117, 200),
+            cursor_xy=(165, 200),
         ),
     ]
     assert len(coalesce_consecutive_scrolls(near)) == 1
     assert len(coalesce_consecutive_scrolls(far)) == 2
+
+
+def test_coalesce_scrolls_same_uia_owner_ignores_distance() -> None:
+    bar = [2200, 700, 2220, 1500]
+    snap = {"scrollbars": [bar]}
+    events = [
+        _scroll_event(
+            1,
+            timestamp_utc="2026-08-12T00:00:00+00:00",
+            scroll_delta=-1,
+            cursor_xy=(1131, 590),
+            uia_snapshot=snap,
+        ),
+        _scroll_event(
+            2,
+            timestamp_utc="2026-08-12T00:00:01.500000+00:00",
+            scroll_delta=-1,
+            cursor_xy=(1109, 564),
+            uia_snapshot=snap,
+        ),
+    ]
+    # ~34px apart and well under a large pane, but historically >16; same owner merges.
+    merged = coalesce_consecutive_scrolls(events)
+    assert len(merged) == 1
+    assert merged[0].scroll_delta == -2
+
+
+def test_coalesce_scrolls_different_uia_owners_do_not_merge() -> None:
+    left_bar = [800, 700, 820, 1500]
+    right_bar = [2200, 700, 2220, 1500]
+    snap = {"scrollbars": [left_bar, right_bar]}
+    events = [
+        _scroll_event(
+            1,
+            timestamp_utc="2026-08-12T00:00:00+00:00",
+            scroll_delta=-1,
+            # Owns left_bar (nearest vertical track to the right).
+            cursor_xy=(700, 1000),
+            uia_snapshot=snap,
+        ),
+        _scroll_event(
+            2,
+            timestamp_utc="2026-08-12T00:00:00.200000+00:00",
+            scroll_delta=-1,
+            # Between bars → owns right_bar. Distance from first is 200px, but
+            # even nearby different owners must not merge via the distance gate.
+            cursor_xy=(900, 1000),
+            uia_snapshot=snap,
+        ),
+    ]
+    merged = coalesce_consecutive_scrolls(events)
+    assert len(merged) == 2
+    assert merged[0].scroll_delta == -1
+    assert merged[1].scroll_delta == -1
 
 
 def test_coalesce_scrolls_modifiers_mismatch_breaks() -> None:

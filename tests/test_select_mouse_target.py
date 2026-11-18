@@ -7666,6 +7666,322 @@ async def test_uia_hit_input_hub_skips_yolo_subtarget(
 
 
 @pytest.mark.asyncio
+async def test_uia_hit_empty_efp_relative_offset_skips_yolo_subtarget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty recorded EFP + offset click commits hub+(dx,dy); no subtarget YOLO."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        YoloOcrMoveFallback,
+        bind_yolo_ocr_fallbacks,
+    )
+
+    uia_quote = _detection_from_bbox(
+        (940, 248, 133, 68),
+        YOLO_CLASS_TEXT,
+        text="引文",
+        source="uia",
+    )
+
+    def fake_grab(*_a, **_k):
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def boom_finish(*_a, **_k):
+        raise AssertionError(
+            "empty-EFP relative-offset must not enter uia_yolo_subtarget YOLO"
+        )
+
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(
+        smt,
+        "_uia_only_detections_for_click_window",
+        lambda *_a, **_k: [uia_quote],
+    )
+    monkeypatch.setattr(
+        smt,
+        "_try_uia_first_unique_select",
+        lambda *_a, **_k: (uia_quote, "hit"),
+    )
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", boom_finish)
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+
+    fallback = YoloOcrMoveFallback(
+        instruction=(
+            "（YOLO+OCR）將滑鼠移到「剪貼簿」文字左方10個像素、下方80個像素的位置，"
+            "並點擊滑鼠一下。"
+        ),
+    )
+    with bind_yolo_ocr_fallbacks([fallback]):
+        found = await smt.find_mouse_point(
+            "（UIA）將滑鼠移到「引文」清單項目左方931個像素的位置，並點擊滑鼠一下。",
+            click_window={
+                "hwnd": 5,
+                "title": "文件1 - Word",
+                "process_name": "WINWORD.EXE",
+                "rect": [0, 0, 1920, 1080],
+            },
+            vision_mode="uia",
+            anchor_text="引文",
+            control_type="list_item",
+            recorded_efp_name="",
+            recorded_efp_value="",
+        )
+    assert found is not None
+    assert found[0:2] == (uia_quote.cx - 931, uia_quote.cy)
+    assert found[2]["selection_method"] in ("hit", "uia_first_unique")
+    assert found[2]["relative_offset"] == {"dx": -931, "dy": 0}
+
+
+@pytest.mark.asyncio
+async def test_uia_hit_offset_efp_synth_when_in_hub_pool_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-empty EFP + offset: empty in-hub YOLO pool still commits offset synth."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        YoloOcrMoveFallback,
+        bind_yolo_ocr_fallbacks,
+    )
+
+    uia_quote = _detection_from_bbox(
+        (940, 248, 133, 68),
+        YOLO_CLASS_TEXT,
+        text="引文",
+        source="uia",
+    )
+    synth_x = int(uia_quote.cx) - 931
+    synth_y = int(uia_quote.cy)
+
+    def fake_grab(*_a, **_k):
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def fake_finish(*_a, **_k):
+        # Deferred OCR pending with no in-hub boxes → empty EFP pool.
+        timing = {
+            "capture_s": 0.01,
+            "yolo_s": 0.05,
+            "line_s": 0.0,
+            "uia_input_s": 0.0,
+            "uia_scrollbar_s": 0.0,
+            "uia_text_s": 0.0,
+            "ocr_s": 0.0,
+            "icon_ocr_retry_s": 0.0,
+            "total_s": 0.05,
+            "_ocr_pending": [],
+            "debug_layers": {"yolo": []},
+        }
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], [], timing
+
+    def fake_probe(x: int, y: int, *, point_probe_fn=None):
+        del point_probe_fn
+        if int(x) == synth_x and int(y) == synth_y:
+            return "文件1", ""
+        return "", ""
+
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(
+        smt,
+        "_uia_only_detections_for_click_window",
+        lambda *_a, **_k: [uia_quote],
+    )
+    monkeypatch.setattr(
+        smt,
+        "_try_uia_first_unique_select",
+        lambda *_a, **_k: (uia_quote, "hit"),
+    )
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", fake_finish)
+    monkeypatch.setattr(smt, "_probe_efp_name_value_at", fake_probe)
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+
+    fallback = YoloOcrMoveFallback(
+        instruction=(
+            "（YOLO+OCR）將滑鼠移到「剪貼簿」文字左方10個像素、下方80個像素的位置，"
+            "並點擊滑鼠一下。"
+        ),
+    )
+    with bind_yolo_ocr_fallbacks([fallback]):
+        found = await smt.find_mouse_point(
+            "（UIA）將滑鼠移到「引文」清單項目左方931個像素的位置，並點擊滑鼠一下。",
+            click_window={
+                "hwnd": 5,
+                "title": "文件1 - Word",
+                "process_name": "WINWORD.EXE",
+                "rect": [0, 0, 1920, 1080],
+            },
+            vision_mode="uia",
+            anchor_text="引文",
+            control_type="list_item",
+            recorded_efp_name="文件1",
+            recorded_efp_value="",
+        )
+    assert found is not None
+    assert found[0:2] == (synth_x, synth_y)
+    assert found[2]["selection_method"] == "uia_yolo_subtarget_efp_synth"
+    # Must not fall through to OCR twin 「剪貼簿」.
+    assert "剪貼簿" not in str(found[2].get("anchor_instruction") or "")
+
+
+@pytest.mark.asyncio
+async def test_landmark_efp_synth_hit_commits_not_ocr_scrollbar_twin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Excel DataItem: EFP-verified constellation synth must not adopt OCR twin.
+
+    UIA-first returns ``landmark_efp_synth_hit`` (no FindAll leaf). The recorded
+    YOLO twin is a grid scrollbar percent click — adopting it would miss the cell.
+    """
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        YoloOcrMoveFallback,
+        bind_yolo_ocr_fallbacks,
+    )
+
+    synth_x, synth_y = 285, 356
+    synth_det = smt._synth_detection_at_point((synth_x, synth_y), text="D2")
+    uia_scrollbar = _detection_from_bbox(
+        (19, 300, 1654, 672),
+        YOLO_CLASS_SCROLLBAR,
+        source="uia",
+    )
+
+    def fake_grab(*_a, **_k):
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def boom_finish(*_a, **_k):
+        raise AssertionError(
+            "EFP synth hit must not enter uia_yolo_subtarget / OCR twin YOLO"
+        )
+
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(
+        smt,
+        "_uia_only_detections_for_click_window",
+        lambda *_a, **_k: [uia_scrollbar],
+    )
+    monkeypatch.setattr(
+        smt,
+        "_try_uia_first_unique_select",
+        lambda *_a, **_k: (synth_det, "landmark_efp_synth_hit"),
+    )
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", boom_finish)
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+
+    fallback = YoloOcrMoveFallback(
+        instruction=(
+            "（YOLO+OCR）將滑鼠移到滾動條的24%處（在「A1」文字的下面），"
+            "並點擊滑鼠一下。"
+        ),
+    )
+    with bind_yolo_ocr_fallbacks([fallback]):
+        found = await smt.find_mouse_point(
+            "（UIA）將滑鼠移到「D2」資料項目（在滾動條的裡面），並點擊滑鼠一下。",
+            click_window={
+                "hwnd": 5,
+                "title": "活頁簿1 - Excel",
+                "process_name": "EXCEL.EXE",
+                "rect": [0, 0, 1920, 1080],
+            },
+            vision_mode="uia",
+            anchor_text="D2",
+            control_type="data_item",
+            recorded_efp_name="D2",
+            recorded_efp_value="",
+        )
+    assert found is not None
+    assert found[0:2] == (synth_x, synth_y)
+    assert found[2]["selection_method"] == "landmark_efp_synth_hit"
+    # Kept UIA cell instruction; did not rewrite to YOLO scrollbar twin.
+    assert "YOLO" not in str(found[2].get("anchor_instruction") or "")
+    assert "24%" not in str(found[2].get("anchor_instruction") or "")
+    assert found[2].get("track_percent") is None
+    assert found[2].get("class_name") != "scrollbar"
+
+
+@pytest.mark.asyncio
+async def test_landmark_efp_neighbor_hit_commits_not_ocr_scrollbar_twin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Excel DataItem neighbor EFP hit must not adopt OCR scrollbar twin."""
+    import numpy as np
+
+    from cua_mcp import select_mouse_target as smt
+    from src.recorder.uia_replay_repair import (
+        YoloOcrMoveFallback,
+        bind_yolo_ocr_fallbacks,
+    )
+
+    hit_x, hit_y = 500, 340
+    neighbor_det = smt._synth_detection_at_point((hit_x, hit_y), text="K10")
+    uia_scrollbar = _detection_from_bbox(
+        (19, 300, 1654, 672),
+        YOLO_CLASS_SCROLLBAR,
+        source="uia",
+    )
+
+    def fake_grab(*_a, **_k):
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        return [1], ["shot.png"], [(1, frame)], 0.01
+
+    def boom_finish(*_a, **_k):
+        raise AssertionError(
+            "EFP neighbor hit must not enter uia_yolo_subtarget / OCR twin YOLO"
+        )
+
+    monkeypatch.setattr(smt, "_grab_selected_monitors", fake_grab)
+    monkeypatch.setattr(
+        smt,
+        "_uia_only_detections_for_click_window",
+        lambda *_a, **_k: [uia_scrollbar],
+    )
+    monkeypatch.setattr(
+        smt,
+        "_try_uia_first_unique_select",
+        lambda *_a, **_k: (neighbor_det, "landmark_efp_neighbor_hit"),
+    )
+    monkeypatch.setattr(smt, "_finish_captured_mouse_candidates", boom_finish)
+    monkeypatch.setattr(smt, "_run_manager", _quiet_run_manager)
+
+    fallback = YoloOcrMoveFallback(
+        instruction=(
+            "（YOLO+OCR）將滑鼠移到滾動條的42%處（在「A1」文字的下面），"
+            "並點擊滑鼠一下。"
+        ),
+    )
+    with bind_yolo_ocr_fallbacks([fallback]):
+        found = await smt.find_mouse_point(
+            "（UIA）將滑鼠移到「K10」資料項目（在滾動條的裡面），並點擊滑鼠一下。",
+            click_window={
+                "hwnd": 5,
+                "title": "活頁簿1 - Excel",
+                "process_name": "EXCEL.EXE",
+                "rect": [0, 0, 1920, 1080],
+            },
+            vision_mode="uia",
+            anchor_text="K10",
+            control_type="data_item",
+            recorded_efp_name="K10",
+            recorded_efp_value="",
+        )
+    assert found is not None
+    assert found[0:2] == (hit_x, hit_y)
+    assert found[2]["selection_method"] == "landmark_efp_neighbor_hit"
+    assert "YOLO" not in str(found[2].get("anchor_instruction") or "")
+    assert "42%" not in str(found[2].get("anchor_instruction") or "")
+    assert found[2].get("track_percent") is None
+    assert found[2].get("class_name") != "scrollbar"
+
+
+@pytest.mark.asyncio
 async def test_uia_hit_with_fallback_unique_element_skips_ocr(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -4639,6 +4639,17 @@ def _probe_efp_name_value_at(
     point_probe_fn: Any | None = None,
 ) -> tuple[str, str]:
     """Live ElementFromPoint Name/Value at a screen point."""
+    name, value, _bbox = _probe_efp_leaf_at(x, y, point_probe_fn=point_probe_fn)
+    return name, value
+
+
+def _probe_efp_leaf_at(
+    x: int,
+    y: int,
+    *,
+    point_probe_fn: Any | None = None,
+) -> tuple[str, str, tuple[int, int, int, int] | None]:
+    """Live ElementFromPoint Name/Value and optional leaf bbox xywh."""
     probe = point_probe_fn
     if probe is None:
         from src.recorder.uia_input_boxes import uia_text_element_at_point
@@ -4647,10 +4658,139 @@ def _probe_efp_name_value_at(
     try:
         probed = probe(int(x), int(y))
     except Exception:
-        return "", ""
+        return "", "", None
     if not isinstance(probed, tuple) or len(probed) < 5:
-        return "", ""
-    return str(probed[3] or "").strip(), str(probed[4] or "").strip()
+        return "", "", None
+    name = str(probed[3] or "").strip()
+    value = str(probed[4] or "").strip()
+    bbox: tuple[int, int, int, int] | None = None
+    raw_box = probed[1] if len(probed) > 1 else None
+    if isinstance(raw_box, (list, tuple)) and len(raw_box) == 4:
+        try:
+            bx, by, bw, bh = (int(v) for v in raw_box[:4])
+        except (TypeError, ValueError):
+            bx = by = bw = bh = 0
+        if bw > 0 and bh > 0:
+            bbox = (bx, by, bw, bh)
+    return name, value, bbox
+
+
+# Fixed Excel DataItem neighborhood scan step (px); not derived from leaf bbox.
+_DATA_ITEM_EFP_STEP_X = 24
+_DATA_ITEM_EFP_STEP_Y = 20
+_DATA_ITEM_EFP_NEIGHBOR_LIVE_CAP = 16
+_DATA_ITEM_EFP_NEIGHBOR_MAX_RING = 4
+
+
+def _chebyshev_ring_offsets(ring: int) -> list[tuple[int, int]]:
+    """Integer offsets with ``max(|ix|, |iy|) == ring`` (8*ring points).
+
+    Axis-aligned (cardinal) offsets are listed before diagonals / edge points.
+    """
+    r = int(ring)
+    if r <= 0:
+        return []
+    pts: list[tuple[int, int]] = []
+    for ix in range(-r, r + 1):
+        for iy in range(-r, r + 1):
+            if max(abs(ix), abs(iy)) != r:
+                continue
+            pts.append((ix, iy))
+    pts.sort(
+        key=lambda p: (
+            0 if p[0] == 0 or p[1] == 0 else 1,
+            p[1],
+            p[0],
+        )
+    )
+    return pts
+
+
+def _scan_efp_neighbors_for_name(
+    synth: tuple[int, int],
+    recorded_name: str,
+    recorded_value: str,
+    *,
+    point_probe_fn: Any | None = None,
+    step_x: int = _DATA_ITEM_EFP_STEP_X,
+    step_y: int = _DATA_ITEM_EFP_STEP_Y,
+    live_cap: int = _DATA_ITEM_EFP_NEIGHBOR_LIVE_CAP,
+    max_ring: int = _DATA_ITEM_EFP_NEIGHBOR_MAX_RING,
+) -> tuple[int, int] | None:
+    """Chebyshev-ring EFP walk around ``synth`` for a Name/Value match.
+
+    Seeds occupancy from the synth leaf bbox, then probes ring candidates at
+    fixed ``(step_x, step_y)``, skipping points already inside a probed leaf
+    bbox. Returns the first matching screen point, or ``None``.
+    """
+    rn = str(recorded_name or "").strip()
+    rv = str(recorded_value or "").strip()
+    if not rn and not rv:
+        return None
+
+    sx, sy = int(synth[0]), int(synth[1])
+    occupied: list[tuple[int, int, int, int]] = []
+    logs: list[str] = []
+
+    def _occupy(bbox: tuple[int, int, int, int] | None) -> None:
+        if bbox is None:
+            return
+        occupied.append(bbox)
+
+    def _is_occupied(x: int, y: int) -> bool:
+        return any(point_in_rect_xywh(x, y, box) for box in occupied)
+
+    seed_name, seed_value, seed_bbox = _probe_efp_leaf_at(
+        sx, sy, point_probe_fn=point_probe_fn
+    )
+    _occupy(seed_bbox)
+    logs.append(
+        f"[seed] point=[{sx},{sy}] name={seed_name!r} value={seed_value!r} "
+        f"bbox={seed_bbox!r}"
+    )
+    if _efp_name_value_matches(seed_name, seed_value, rn, rv):
+        _log_info(
+            "move_mouse landmark_efp_neighbor_hit "
+            f"point=[{sx},{sy}] name={seed_name!r} value={seed_value!r} "
+            f"(seed)\n" + "\n".join(logs)
+        )
+        return (sx, sy)
+
+    live = 0
+    for ring in range(1, max(1, int(max_ring)) + 1):
+        if live >= int(live_cap):
+            break
+        for ix, iy in _chebyshev_ring_offsets(ring):
+            if live >= int(live_cap):
+                break
+            x = sx + int(ix) * int(step_x)
+            y = sy + int(iy) * int(step_y)
+            if _is_occupied(x, y):
+                logs.append(f"[skip] point=[{x},{y}] ring={ring} occupied")
+                continue
+            live_name, live_value, live_bbox = _probe_efp_leaf_at(
+                x, y, point_probe_fn=point_probe_fn
+            )
+            live += 1
+            _occupy(live_bbox)
+            logs.append(
+                f"[live] point=[{x},{y}] ring={ring} "
+                f"name={live_name!r} value={live_value!r} bbox={live_bbox!r}"
+            )
+            if _efp_name_value_matches(live_name, live_value, rn, rv):
+                _log_info(
+                    "move_mouse landmark_efp_neighbor_hit "
+                    f"point=[{x},{y}] name={live_name!r} value={live_value!r} "
+                    f"live={live}\n" + "\n".join(logs)
+                )
+                return (x, y)
+
+    _log_info(
+        "move_mouse landmark_efp_neighbor_miss "
+        f"synth=[{sx},{sy}] recorded_name={rn!r} recorded_value={rv!r} "
+        f"live={live} occupied={len(occupied)}\n" + "\n".join(logs)
+    )
+    return None
 
 
 def _order_geometry_efp_candidates(
@@ -4704,10 +4844,19 @@ def _verify_geometry_candidates_with_efp(
             return geom_det, (int(geom_det.cx), int(geom_det.cy)), "hit"
         return None, (int(synth[0]), int(synth[1])), "synth_hit"
 
+    # Live EFP Name/Value samples for miss diagnostics (hit path still logs itself).
+    probed: list[str] = []
+
+    def _record_probe(kind: str, x: int, y: int, name: str, value: str) -> None:
+        probed.append(
+            f"[{kind}] point=[{int(x)},{int(y)}] name={name!r} value={value!r}"
+        )
+
     if prefer_synth_first:
         live_name, live_value = _probe_efp_name_value_at(
             int(synth[0]), int(synth[1]), point_probe_fn=point_probe_fn
         )
+        _record_probe("synth", int(synth[0]), int(synth[1]), live_name, live_value)
         if _efp_name_value_matches(live_name, live_value, rn, rv):
             # Prefer snapping to a pool det that also matches (FindAll channel
             # box) instead of returning a bare synth point.
@@ -4737,6 +4886,7 @@ def _verify_geometry_candidates_with_efp(
         live_name, live_value = _probe_efp_name_value_at(
             int(det.cx), int(det.cy), point_probe_fn=point_probe_fn
         )
+        _record_probe("pool", int(det.cx), int(det.cy), live_name, live_value)
         if _efp_name_value_matches(live_name, live_value, rn, rv):
             _log_info(
                 "move_mouse landmark_geometry_efp hit "
@@ -4751,6 +4901,7 @@ def _verify_geometry_candidates_with_efp(
         live_name, live_value = _probe_efp_name_value_at(
             int(synth[0]), int(synth[1]), point_probe_fn=point_probe_fn
         )
+        _record_probe("synth", int(synth[0]), int(synth[1]), live_name, live_value)
         if _efp_name_value_matches(live_name, live_value, rn, rv):
             _log_info(
                 "move_mouse landmark_geometry_efp synth_hit "
@@ -4759,10 +4910,12 @@ def _verify_geometry_candidates_with_efp(
             )
             return None, (int(synth[0]), int(synth[1])), "synth_hit"
 
+    probe_dump = "\n".join(probed) if probed else "(no probes)"
     _log_info(
         "move_mouse landmark_geometry_efp_miss "
         f"pool={len(candidates)} synth=[{int(synth[0])},{int(synth[1])}] "
-        f"recorded_name={rn!r} recorded_value={rv!r}"
+        f"recorded_name={rn!r} recorded_value={rv!r} "
+        f"probes={len(probed)}\n{probe_dump}"
     )
     return None, None, "miss"
 
@@ -5181,6 +5334,26 @@ def _try_uia_first_unique_select(
                 f"point=[{efp_point[0]},{efp_point[1]}]"
             )
             return synth_det, "landmark_efp_synth_hit"
+        # Excel DataItem: FindAll omits cells — walk fixed-step EFP neighbors
+        # around the constellation synth before soft-missing.
+        token = (control_type_token or "").strip().lower()
+        if token == "data_item":
+            neighbor = _scan_efp_neighbors_for_name(
+                geom_point,
+                str(recorded_efp_name or ""),
+                str(recorded_efp_value or ""),
+                point_probe_fn=point_probe_fn,
+            )
+            if neighbor is not None:
+                neighbor_det = _synth_detection_at_point(
+                    neighbor,
+                    text=str(recorded_efp_name or "").strip() or None,
+                )
+                _log_info(
+                    "move_mouse uia_first landmark_efp_neighbor_hit "
+                    f"point=[{neighbor[0]},{neighbor[1]}]"
+                )
+                return neighbor_det, "landmark_efp_neighbor_hit"
         # Input/scrollbar: EFP is soft — continue Name shortlist / unique path.
         # Labeled hubs: hard miss so YOLO/OCR can take over.
         if not _hub_is_input_or_scrollbar(
@@ -6767,13 +6940,32 @@ async def _find_mouse_point_attempt(
                     _log_info(
                         "move_mouse uia→yolo empty-fallback recapture before YOLO"
                     )
+        is_offset_click = bool(offset_dx or offset_dy) or _is_relative_offset_position(
+            instruction_text
+        )
         skip_yolo_subtarget = _hub_is_input_or_scrollbar(
             instruction=instruction_text,
             anchor=anchor,
             control_type_token=control_type_token,
         )
+        # Empty recorded EFP + relative-offset → empty-space click; commit
+        # anchor+(dx,dy) without in-hub YOLO subtarget / OCR twin fallthrough.
+        skip_yolo_subtarget_empty_offset = bool(
+            is_offset_click
+            and not _recorded_efp_present(recorded_efp_name, recorded_efp_value)
+        )
+        if skip_yolo_subtarget_empty_offset:
+            skip_yolo_subtarget = True
+        # EFP-verified constellation synth / neighbor is the click target
+        # (e.g. Excel DataItem with no FindAll leaf). Do not rewrite to OCR twin.
+        commit_efp_synth = uia_first_reason in (
+            "landmark_efp_synth_hit",
+            "landmark_efp_neighbor_hit",
+        )
         if uia_first_chosen is not None and (
-            ocr_fallback is None or skip_yolo_subtarget
+            ocr_fallback is None
+            or skip_yolo_subtarget
+            or commit_efp_synth
         ):
             if constellation_yolo_dets:
                 detections = _sort_detections_reading_order(
@@ -6807,11 +6999,22 @@ async def _find_mouse_point_attempt(
                 "uia_first_hit": True,
             }
             ocr_pendings = []
-            if skip_yolo_subtarget and ocr_fallback is not None:
+            if commit_efp_synth and ocr_fallback is not None:
                 _log_info(
-                    "move_mouse uia_first=hit; skip uia_yolo_subtarget "
-                    "for input/scrollbar hub"
+                    f"move_mouse uia_first={uia_first_reason}; "
+                    "commit synth/neighbor, skip ocr_fallback"
                 )
+            elif skip_yolo_subtarget and ocr_fallback is not None:
+                if skip_yolo_subtarget_empty_offset:
+                    _log_info(
+                        "move_mouse uia_first=hit; skip uia_yolo_subtarget "
+                        "for empty-EFP relative-offset"
+                    )
+                else:
+                    _log_info(
+                        "move_mouse uia_first=hit; skip uia_yolo_subtarget "
+                        "for input/scrollbar hub"
+                    )
             else:
                 _log_info(
                     "move_mouse uia_first=hit; skipping YOLO"
@@ -6820,12 +7023,205 @@ async def _find_mouse_point_attempt(
                     "(OCR still deferred)"
                 )
         elif uia_first_chosen is not None and ocr_fallback is not None:
-            # Repaired YOLO step: UIA picked the item; YOLO picks expand vs text.
-            # Synth-only constellation hits are not a real pane for subtarget —
-            # adopt the OCR-twin FindAll channel and soft-miss into YOLO select.
-            if uia_first_reason == "landmark_efp_synth_hit":
+            # Repaired YOLO step: UIA picked a real FindAll pane/item; YOLO
+            # picks expand vs text inside that box.
+            # Defer OCR so a unique in-box box of the fallback target class can
+            # skip it (even when nearby landmarks inflate the OCR plan to both
+            # TEXT and ELEMENT). Multiple in-box boxes of that class need OCR.
+            fb_plan = _mouse_vision_plan(
+                ocr_fallback.instruction,
+                list(ocr_fallback.nearby_objects) or None,
+            )
+            (
+                fb_anchor,
+                _fb_dx,
+                _fb_dy,
+                _fb_nearby,
+                _fb_char,
+                _fb_occ,
+                _fb_track,
+            ) = parse_mouse_target_instruction(ocr_fallback.instruction)
+            vision = await asyncio.to_thread(
+                _finish_captured_mouse_candidates,
+                monitor_indices,
+                image_paths,
+                captured,
+                capture_s,
+                yolo_conf_threshold,
+                ocr_class_ids=fb_plan.ocr_class_ids,
+                refine_with_uia=False,
+                click_window=click_window,
+                caption_roi_screen=caption_roi_screen,
+                landmark_geometry=ocr_fallback.landmark_geometry,
+                defer_ocr=True,
+            )
+            (
+                monitor_indices,
+                image_paths,
+                captured,
+                yolo_detections,
+                vision_timing,
+            ) = vision
+            _note_capture(captured)
+            vision_timing["vision_path"] = "uia_yolo_subtarget"
+            vision_timing["uia_first_hit"] = True
+            pending_raw = vision_timing.pop("_ocr_pending", None)
+            if not (isinstance(pending_raw, list) and pending_raw):
+                pending_raw = vision_timing.pop("ocr_pending", None)
+            deferred_pendings = (
+                list(pending_raw)
+                if isinstance(pending_raw, list) and pending_raw
+                else []
+            )
+            if vision_timing.get("uia_first_pending") and not deferred_pendings:
                 _log_info(
-                    "move_mouse uia_yolo_subtarget skip synth-only pane; "
+                    "move_mouse uia_yolo_subtarget ocr deferred but "
+                    "_ocr_pending missing; using debug_layers for unique-box"
+                )
+            ocr_pendings = []
+            preferred_cls = _uia_yolo_subtarget_preferred_class(fb_anchor)
+            efp_subtarget_hit = False
+            efp_subtarget_required_miss = False
+            if _recorded_efp_present(recorded_efp_name, recorded_efp_value):
+                # Prefer live EFP Name/Value over OCR twin text for in-pane
+                # disambiguation (e.g. 下載 vs 圖片 inside one Explorer pane).
+                efp_class_ids: frozenset[int] | set[int]
+                if preferred_cls is not None:
+                    efp_class_ids = frozenset({preferred_cls})
+                elif fb_plan.ocr_class_ids:
+                    efp_class_ids = frozenset(
+                        int(v) for v in fb_plan.ocr_class_ids
+                    )
+                else:
+                    efp_class_ids = frozenset(
+                        {YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT}
+                    )
+                efp_pool = _yolo_boxes_inside_uia_for_classes(
+                    uia_first_chosen,
+                    deferred_pendings,
+                    vision_timing,
+                    efp_class_ids,
+                )
+                if is_offset_click:
+                    # Relative-offset: probe in-hub YOLO boxes and the
+                    # offset synth point (empty-space destination). Soft-miss
+                    # only when both miss — not when the in-hub pool is empty.
+                    offset_synth = (
+                        int(uia_first_chosen.cx) + int(offset_dx),
+                        int(uia_first_chosen.cy) + int(offset_dy),
+                    )
+                    efp_det, efp_pt, efp_reason = (
+                        _verify_geometry_candidates_with_efp(
+                            efp_pool,
+                            synth=offset_synth,
+                            geom_det=None,
+                            recorded_name=recorded_efp_name,
+                            recorded_value=recorded_efp_value,
+                        )
+                    )
+                    if efp_reason == "hit" and efp_det is not None:
+                        uia_yolo_subtarget_chosen = efp_det
+                        uia_yolo_subtarget_method = "uia_yolo_subtarget_efp"
+                        detections = _sort_detections_reading_order(
+                            [*uia_dets, *yolo_detections, efp_det]
+                        )
+                        efp_subtarget_hit = True
+                        _log_info(
+                            "move_mouse uia_yolo_subtarget_efp "
+                            f"center=[{efp_det.cx},{efp_det.cy}] "
+                            f"pool={len(efp_pool)} "
+                            f"recorded_name={recorded_efp_name!r} "
+                            f"recorded_value={recorded_efp_value!r}"
+                        )
+                    elif efp_reason == "synth_hit" and efp_pt is not None:
+                        synth_det = _synth_detection_at_point(
+                            efp_pt,
+                            text=(
+                                str(recorded_efp_name or "").strip() or None
+                            ),
+                        )
+                        uia_yolo_subtarget_chosen = synth_det
+                        uia_yolo_subtarget_method = (
+                            "uia_yolo_subtarget_efp_synth"
+                        )
+                        # Synth already includes the instruction offset.
+                        offset_dx = 0
+                        offset_dy = 0
+                        detections = _sort_detections_reading_order(
+                            [*uia_dets, *yolo_detections, synth_det]
+                        )
+                        efp_subtarget_hit = True
+                        _log_info(
+                            "move_mouse uia_yolo_subtarget_efp_synth "
+                            f"point=[{efp_pt[0]},{efp_pt[1]}] "
+                            f"pool={len(efp_pool)} "
+                            f"recorded_name={recorded_efp_name!r} "
+                            f"recorded_value={recorded_efp_value!r}"
+                        )
+                    else:
+                        efp_subtarget_required_miss = True
+                        _log_info(
+                            "move_mouse uia_yolo_subtarget_efp_miss "
+                            f"pool={len(efp_pool)}; soft-miss "
+                            "(skip unique_box_skip_ocr) "
+                            f"recorded_name={recorded_efp_name!r} "
+                            f"recorded_value={recorded_efp_value!r}"
+                        )
+                elif efp_pool:
+                    efp_det, _efp_pt, efp_reason = (
+                        _verify_geometry_candidates_with_efp(
+                            efp_pool,
+                            synth=(
+                                int(uia_first_chosen.cx),
+                                int(uia_first_chosen.cy),
+                            ),
+                            geom_det=None,
+                            recorded_name=recorded_efp_name,
+                            recorded_value=recorded_efp_value,
+                        )
+                    )
+                    if efp_reason != "miss" and efp_det is not None:
+                        uia_yolo_subtarget_chosen = efp_det
+                        uia_yolo_subtarget_method = "uia_yolo_subtarget_efp"
+                        detections = _sort_detections_reading_order(
+                            [*uia_dets, *yolo_detections, efp_det]
+                        )
+                        efp_subtarget_hit = True
+                        _log_info(
+                            "move_mouse uia_yolo_subtarget_efp "
+                            f"center=[{efp_det.cx},{efp_det.cy}] "
+                            f"pool={len(efp_pool)} "
+                            f"recorded_name={recorded_efp_name!r} "
+                            f"recorded_value={recorded_efp_value!r}"
+                        )
+                    else:
+                        efp_subtarget_required_miss = True
+                        _log_info(
+                            "move_mouse uia_yolo_subtarget_efp_miss "
+                            f"pool={len(efp_pool)}; soft-miss "
+                            "(skip unique_box_skip_ocr) "
+                            f"recorded_name={recorded_efp_name!r} "
+                            f"recorded_value={recorded_efp_value!r}"
+                        )
+                else:
+                    efp_subtarget_required_miss = True
+                    _log_info(
+                        "move_mouse uia_yolo_subtarget_efp_miss "
+                        "pool=0; soft-miss (skip unique_box_skip_ocr) "
+                        f"recorded_name={recorded_efp_name!r} "
+                        f"recorded_value={recorded_efp_value!r}"
+                    )
+            if efp_subtarget_hit:
+                pass
+            elif efp_subtarget_required_miss:
+                # Recorded EFP was required and missed: do not undo with a
+                # unique in-pane YOLO box or OCR twin commit on the wrong pane.
+                # Adopt OCR-twin FindAll channel before YOLO fallthrough.
+                uia_yolo_subtarget_chosen = None
+                uia_first_chosen = None
+                _log_info(
+                    "move_mouse uia_yolo_subtarget_efp soft_miss; "
+                    "clearing uia_first for YOLO fallthrough; "
                     "adopting ocr_fallback instruction"
                 )
                 fb_fields = _mouse_select_fields_from_ocr_fallback_instruction(
@@ -6840,7 +7236,9 @@ async def _find_mouse_point_attempt(
                 vision_mode = str(fb_fields["vision_mode"] or "")
                 vision_plan = fb_fields["vision_plan"]
                 allow_uia_select = bool(fb_fields["allow_uia_select"])
-                filter_by_control_type = bool(fb_fields["filter_by_control_type"])
+                filter_by_control_type = bool(
+                    fb_fields["filter_by_control_type"]
+                )
                 anchor = str(fb_fields["anchor"] or "")
                 offset_dx = int(fb_fields["offset_dx"])
                 offset_dy = int(fb_fields["offset_dy"])
@@ -6851,231 +7249,69 @@ async def _find_mouse_point_attempt(
                 nearby_hints = list(fb_fields["nearby_hints"])
                 nearby_labels = list(fb_fields["nearby_labels"])
                 nearby_phrases = list(fb_fields["nearby_phrases"])
-                uia_first_chosen = None
-                uia_yolo_subtarget_chosen = None
             else:
-                # Defer OCR so a unique in-box box of the fallback target class can
-                # skip it (even when nearby landmarks inflate the OCR plan to both
-                # TEXT and ELEMENT). Multiple in-box boxes of that class need OCR.
-                fb_plan = _mouse_vision_plan(
-                    ocr_fallback.instruction,
-                    list(ocr_fallback.nearby_objects) or None,
-                )
-                (
-                    fb_anchor,
-                    _fb_dx,
-                    _fb_dy,
-                    _fb_nearby,
-                    _fb_char,
-                    _fb_occ,
-                    _fb_track,
-                ) = parse_mouse_target_instruction(ocr_fallback.instruction)
-                vision = await asyncio.to_thread(
-                    _finish_captured_mouse_candidates,
-                    monitor_indices,
-                    image_paths,
-                    captured,
-                    capture_s,
-                    yolo_conf_threshold,
-                    ocr_class_ids=fb_plan.ocr_class_ids,
-                    refine_with_uia=False,
-                    click_window=click_window,
-                    caption_roi_screen=caption_roi_screen,
-                    landmark_geometry=ocr_fallback.landmark_geometry,
-                    defer_ocr=True,
-                )
-                (
-                    monitor_indices,
-                    image_paths,
-                    captured,
-                    yolo_detections,
-                    vision_timing,
-                ) = vision
-                _note_capture(captured)
-                vision_timing["vision_path"] = "uia_yolo_subtarget"
-                vision_timing["uia_first_hit"] = True
-                pending_raw = vision_timing.pop("_ocr_pending", None)
-                if not (isinstance(pending_raw, list) and pending_raw):
-                    pending_raw = vision_timing.pop("ocr_pending", None)
-                deferred_pendings = (
-                    list(pending_raw)
-                    if isinstance(pending_raw, list) and pending_raw
-                    else []
-                )
-                if vision_timing.get("uia_first_pending") and not deferred_pendings:
-                    _log_info(
-                        "move_mouse uia_yolo_subtarget ocr deferred but "
-                        "_ocr_pending missing; using debug_layers for unique-box"
-                    )
-                ocr_pendings = []
-                preferred_cls = _uia_yolo_subtarget_preferred_class(fb_anchor)
-                efp_subtarget_hit = False
-                efp_subtarget_required_miss = False
-                if _recorded_efp_present(recorded_efp_name, recorded_efp_value):
-                    # Prefer live EFP Name/Value over OCR twin text for in-pane
-                    # disambiguation (e.g. 下載 vs 圖片 inside one Explorer pane).
-                    efp_class_ids: frozenset[int] | set[int]
-                    if preferred_cls is not None:
-                        efp_class_ids = frozenset({preferred_cls})
-                    elif fb_plan.ocr_class_ids:
-                        efp_class_ids = frozenset(
-                            int(v) for v in fb_plan.ocr_class_ids
-                        )
-                    else:
-                        efp_class_ids = frozenset(
-                            {YOLO_CLASS_TEXT, YOLO_CLASS_ELEMENT}
-                        )
-                    efp_pool = _yolo_boxes_inside_uia_for_classes(
+                unique_box: UiDetection | None = None
+                if preferred_cls is not None:
+                    unique_box = _unique_yolo_box_inside_uia(
                         uia_first_chosen,
                         deferred_pendings,
                         vision_timing,
-                        efp_class_ids,
+                        preferred_cls,
                     )
-                    if efp_pool:
-                        efp_det, _efp_pt, efp_reason = (
-                            _verify_geometry_candidates_with_efp(
-                                efp_pool,
-                                synth=(
-                                    int(uia_first_chosen.cx),
-                                    int(uia_first_chosen.cy),
-                                ),
-                                geom_det=None,
-                                recorded_name=recorded_efp_name,
-                                recorded_value=recorded_efp_value,
-                            )
-                        )
-                        if efp_reason != "miss" and efp_det is not None:
-                            uia_yolo_subtarget_chosen = efp_det
-                            uia_yolo_subtarget_method = "uia_yolo_subtarget_efp"
-                            detections = _sort_detections_reading_order(
-                                [*uia_dets, *yolo_detections, efp_det]
-                            )
-                            efp_subtarget_hit = True
-                            _log_info(
-                                "move_mouse uia_yolo_subtarget_efp "
-                                f"center=[{efp_det.cx},{efp_det.cy}] "
-                                f"pool={len(efp_pool)} "
-                                f"recorded_name={recorded_efp_name!r} "
-                                f"recorded_value={recorded_efp_value!r}"
-                            )
-                        else:
-                            efp_subtarget_required_miss = True
-                            _log_info(
-                                "move_mouse uia_yolo_subtarget_efp_miss "
-                                f"pool={len(efp_pool)}; soft-miss "
-                                "(skip unique_box_skip_ocr) "
-                                f"recorded_name={recorded_efp_name!r} "
-                                f"recorded_value={recorded_efp_value!r}"
-                            )
-                    else:
-                        efp_subtarget_required_miss = True
-                        _log_info(
-                            "move_mouse uia_yolo_subtarget_efp_miss "
-                            "pool=0; soft-miss (skip unique_box_skip_ocr) "
-                            f"recorded_name={recorded_efp_name!r} "
-                            f"recorded_value={recorded_efp_value!r}"
-                        )
-                if efp_subtarget_hit:
-                    pass
-                elif efp_subtarget_required_miss:
-                    # Recorded EFP was required and missed: do not undo with a
-                    # unique in-pane YOLO box or OCR twin commit on the wrong pane.
-                    # Adopt OCR-twin FindAll channel before YOLO fallthrough.
-                    uia_yolo_subtarget_chosen = None
-                    uia_first_chosen = None
+                if unique_box is not None:
+                    uia_yolo_subtarget_chosen = unique_box
+                    detections = _sort_detections_reading_order(
+                        [*uia_dets, *yolo_detections, unique_box]
+                    )
                     _log_info(
-                        "move_mouse uia_yolo_subtarget_efp soft_miss; "
-                        "clearing uia_first for YOLO fallthrough; "
-                        "adopting ocr_fallback instruction"
+                        "move_mouse uia_yolo_subtarget unique_box_skip_ocr "
+                        f"anchor={fb_anchor!r} "
+                        f"class_id={unique_box.class_id} "
+                        f"center=[{unique_box.cx},{unique_box.cy}]"
                     )
-                    fb_fields = _mouse_select_fields_from_ocr_fallback_instruction(
-                        ocr_fallback.instruction,
-                        list(ocr_fallback.nearby_objects) or None,
-                    )
-                    instruction_text = str(fb_fields["instruction_text"])
-                    nearby_objects = fb_fields["nearby_objects"]
-                    landmark_geometry = ocr_fallback.landmark_geometry
-                    recorded_anchor_match = bool(fb_fields["recorded_anchor_match"])
-                    control_type_token = fb_fields["control_type_token"]
-                    vision_mode = str(fb_fields["vision_mode"] or "")
-                    vision_plan = fb_fields["vision_plan"]
-                    allow_uia_select = bool(fb_fields["allow_uia_select"])
-                    filter_by_control_type = bool(
-                        fb_fields["filter_by_control_type"]
-                    )
-                    anchor = str(fb_fields["anchor"] or "")
-                    offset_dx = int(fb_fields["offset_dx"])
-                    offset_dy = int(fb_fields["offset_dy"])
-                    char_target = fb_fields["char_target"]
-                    char_occurrence = int(fb_fields["char_occurrence"] or 0)
-                    track_percent = fb_fields["track_percent"]
-                    match_anchor = str(fb_fields["match_anchor"] or "")
-                    nearby_hints = list(fb_fields["nearby_hints"])
-                    nearby_labels = list(fb_fields["nearby_labels"])
-                    nearby_phrases = list(fb_fields["nearby_phrases"])
                 else:
-                    unique_box: UiDetection | None = None
-                    if preferred_cls is not None:
-                        unique_box = _unique_yolo_box_inside_uia(
-                            uia_first_chosen,
+                    if deferred_pendings:
+                        yolo_detections, vision_timing = await asyncio.to_thread(
+                            _finish_deferred_ocr_pendings,
                             deferred_pendings,
-                            vision_timing,
-                            preferred_cls,
+                            timing_base=vision_timing,
                         )
-                    if unique_box is not None:
-                        uia_yolo_subtarget_chosen = unique_box
-                        detections = _sort_detections_reading_order(
-                            [*uia_dets, *yolo_detections, unique_box]
-                        )
+                        capture_s = float(vision_timing.get("capture_s", 0.0))
+                        vision_timing["vision_path"] = "uia_yolo_subtarget"
+                        vision_timing["uia_first_hit"] = True
+                    # After OCR, match the fallback anchor; prefer the target class
+                    # when the hub wrapper names one (ignore sibling class noise).
+                    subtarget_classes: frozenset[int] | set[int] | None = (
+                        frozenset({preferred_cls})
+                        if preferred_cls is not None
+                        else fb_plan.ocr_class_ids
+                    )
+                    subtargets = _yolo_subtargets_inside_uia(
+                        uia_first_chosen,
+                        yolo_detections,
+                        fb_anchor,
+                        ocr_class_ids=subtarget_classes,
+                    )
+                    detections = _sort_detections_reading_order(
+                        [*uia_dets, *yolo_detections]
+                    )
+                    if len(subtargets) == 1:
+                        uia_yolo_subtarget_chosen = subtargets[0]
                         _log_info(
-                            "move_mouse uia_yolo_subtarget unique_box_skip_ocr "
+                            "move_mouse uia_yolo_subtarget hit "
                             f"anchor={fb_anchor!r} "
-                            f"class_id={unique_box.class_id} "
-                            f"center=[{unique_box.cx},{unique_box.cy}]"
+                            f"center=[{uia_yolo_subtarget_chosen.cx},"
+                            f"{uia_yolo_subtarget_chosen.cy}] "
+                            f"text={uia_yolo_subtarget_chosen.text!r} "
+                            f"icons={uia_yolo_subtarget_chosen.icons!r}"
                         )
                     else:
-                        if deferred_pendings:
-                            yolo_detections, vision_timing = await asyncio.to_thread(
-                                _finish_deferred_ocr_pendings,
-                                deferred_pendings,
-                                timing_base=vision_timing,
-                            )
-                            capture_s = float(vision_timing.get("capture_s", 0.0))
-                            vision_timing["vision_path"] = "uia_yolo_subtarget"
-                            vision_timing["uia_first_hit"] = True
-                        # After OCR, match the fallback anchor; prefer the target class
-                        # when the hub wrapper names one (ignore sibling class noise).
-                        subtarget_classes: frozenset[int] | set[int] | None = (
-                            frozenset({preferred_cls})
-                            if preferred_cls is not None
-                            else fb_plan.ocr_class_ids
+                        uia_yolo_subtarget_chosen = None
+                        _log_info(
+                            "move_mouse uia_yolo_subtarget miss "
+                            f"anchor={fb_anchor!r} n={len(subtargets)}; "
+                            "keeping UIA center"
                         )
-                        subtargets = _yolo_subtargets_inside_uia(
-                            uia_first_chosen,
-                            yolo_detections,
-                            fb_anchor,
-                            ocr_class_ids=subtarget_classes,
-                        )
-                        detections = _sort_detections_reading_order(
-                            [*uia_dets, *yolo_detections]
-                        )
-                        if len(subtargets) == 1:
-                            uia_yolo_subtarget_chosen = subtargets[0]
-                            _log_info(
-                                "move_mouse uia_yolo_subtarget hit "
-                                f"anchor={fb_anchor!r} "
-                                f"center=[{uia_yolo_subtarget_chosen.cx},"
-                                f"{uia_yolo_subtarget_chosen.cy}] "
-                                f"text={uia_yolo_subtarget_chosen.text!r} "
-                                f"icons={uia_yolo_subtarget_chosen.icons!r}"
-                            )
-                        else:
-                            uia_yolo_subtarget_chosen = None
-                            _log_info(
-                                "move_mouse uia_yolo_subtarget miss "
-                                f"anchor={fb_anchor!r} n={len(subtargets)}; "
-                                "keeping UIA center"
-                            )
 
     if uia_first_chosen is None:
         # Defer leftover OCR only when a UIA soft-select might skip it.
@@ -7350,6 +7586,7 @@ async def _find_mouse_point_attempt(
             if uia_first_reason in (
                 "landmark_efp_hit",
                 "landmark_efp_synth_hit",
+                "landmark_efp_neighbor_hit",
             ):
                 selection_method = uia_first_reason
                 select_phase = uia_first_reason

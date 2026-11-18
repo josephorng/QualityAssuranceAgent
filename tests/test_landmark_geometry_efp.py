@@ -8,6 +8,9 @@ from cua_mcp.select_mouse_target import (
     YOLO_CLASS_INPUT,
     YOLO_CLASS_SCROLLBAR,
     YOLO_CLASS_TEXT,
+    _DATA_ITEM_EFP_STEP_X,
+    _DATA_ITEM_EFP_STEP_Y,
+    _chebyshev_ring_offsets,
     _distance_synth_to_det_bbox,
     _efp_gate_required_for_hub,
     _efp_name_value_matches,
@@ -20,6 +23,7 @@ from cua_mcp.select_mouse_target import (
     _preferred_yolo_class_for_near_synth,
     _recorded_efp_agrees_with_hub,
     _recorded_efp_present,
+    _scan_efp_neighbors_for_name,
     _try_uia_first_unique_select,
     _verify_geometry_candidates_with_efp,
 )
@@ -203,6 +207,41 @@ def test_verify_exhaust_returns_miss() -> None:
     assert reason == "miss"
     assert det is None
     assert point is None
+
+
+def test_verify_miss_logs_live_efp_name_value(monkeypatch) -> None:
+    """Miss diagnostics must include live ElementFromPoint Name/Value samples."""
+    a = _det(10, 10, text="Word")
+    logs: list[str] = []
+
+    def probe(x: int, y: int):
+        if (x, y) == (10, 10):
+            return ("label", (0, 0, 1, 1), "text", "Word", "")
+        return ("label", (0, 0, 1, 1), "text", "任務列", "")
+
+    monkeypatch.setattr(
+        "cua_mcp.select_mouse_target._log_info",
+        lambda msg: logs.append(str(msg)),
+    )
+
+    det, point, reason = _verify_geometry_candidates_with_efp(
+        [a],
+        synth=(12, 10),
+        geom_det=None,
+        recorded_name="Word - 已釘選",
+        recorded_value="",
+        point_probe_fn=probe,
+    )
+    assert reason == "miss"
+    assert det is None
+    assert point is None
+    joined = "\n".join(logs)
+    assert "landmark_geometry_efp_miss" in joined
+    assert "recorded_name='Word - 已釘選'" in joined
+    assert "name='Word'" in joined
+    assert "name='任務列'" in joined
+    assert "[pool] point=[10,10]" in joined
+    assert "[synth] point=[12,10]" in joined
 
 
 def test_verify_synth_only_hit() -> None:
@@ -992,6 +1031,82 @@ def test_uia_first_empty_pool_synth_hit() -> None:
     assert reason == "landmark_efp_synth_hit"
     assert chosen is not None
     assert (chosen.cx, chosen.cy) == (800, 800)
+
+
+def test_chebyshev_ring_counts() -> None:
+    assert len(_chebyshev_ring_offsets(1)) == 8
+    assert len(_chebyshev_ring_offsets(2)) == 16
+    assert (0, -1) in _chebyshev_ring_offsets(1)
+    assert (0, -2) in _chebyshev_ring_offsets(2)
+
+
+def test_scan_efp_neighbors_skips_occupied_bbox_then_hits() -> None:
+    """Tall synth cell bbox skips in-cell ring points; next leaf is K10."""
+    synth = (500, 400)
+    # Cell covers ring-1 up (500,380); K10 is first free cardinal on ring 2.
+    k11_bbox = (480, 380, 40, 40)  # y=[380,420) → (500,380) occupied
+    k10_point = (500, 360)  # (0, -2) * step_y
+    live_points: list[tuple[int, int]] = []
+
+    def probe(x: int, y: int):
+        live_points.append((x, y))
+        if (x, y) == synth:
+            return ("K11", k11_bbox, "data_item", "K11", "")
+        if (x, y) == k10_point:
+            return ("K10", (480, 350, 40, 20), "data_item", "K10", "")
+        return ("other", (x - 5, y - 5, 10, 10), "data_item", "other", "")
+
+    hit = _scan_efp_neighbors_for_name(
+        synth,
+        "K10",
+        "",
+        point_probe_fn=probe,
+        step_x=_DATA_ITEM_EFP_STEP_X,
+        step_y=_DATA_ITEM_EFP_STEP_Y,
+    )
+    assert hit == k10_point
+    # Seed + live probes; (500, 380) must not be live-probed.
+    assert live_points[0] == synth
+    assert (500, 380) not in live_points
+    assert k10_point in live_points
+
+
+def test_uia_first_data_item_neighbor_hit() -> None:
+    """Constellation miss at K11 → neighbor scan finds K10."""
+    landmark = _det(100, 100, text="LM", class_name="text")
+    synth_xy = (800, 800)
+    geom_far = _simple_landmark_geometry(
+        landmark_xy=(100.0, 100.0),
+        target_xy=(float(synth_xy[0]), float(synth_xy[1])),
+        scale=50.0,
+    )
+    k11_bbox = (780, 780, 40, 40)  # y=[780,820) → (800,780) occupied
+    k10_point = (800, 760)  # (0, -2) * 20
+
+    def probe(x: int, y: int):
+        # Pool/synth verify path + neighbor scan share this probe.
+        if (x, y) == synth_xy:
+            return ("K11", k11_bbox, "data_item", "K11", "")
+        if (x, y) == k10_point:
+            return ("K10", (780, 750, 40, 20), "data_item", "K10", "")
+        # Other pool centers (landmark) miss Name.
+        return ("LM", (x - 5, y - 5, 10, 10), "text", "LM", "")
+
+    chosen, reason = _try_uia_first_unique_select(
+        [landmark],
+        anchor="K10",
+        nearby_hints=[],
+        nearby_labels=[],
+        nearby_phrases=[],
+        control_type_token="data_item",
+        landmark_geometry=geom_far,
+        recorded_efp_name="K10",
+        recorded_efp_value="",
+        point_probe_fn=probe,
+    )
+    assert reason == "landmark_efp_neighbor_hit"
+    assert chosen is not None
+    assert (chosen.cx, chosen.cy) == k10_point
 
 
 def test_recorded_efp_agrees_with_hub_rejects_overlay_poison() -> None:

@@ -4469,8 +4469,9 @@ def _efp_peer_detection_from_payload(
     synthetic leaf for non-input peers.
 
     Returns ``None`` when bbox/label is missing or unusable, when a same-label
-    labeled leaf already covers the click / overlaps the leaf, or when an
-    overlapping FindAll input was named in place.
+    labeled leaf already covers the click / overlaps the leaf, when FindAll
+    already names a different usable leaf on the click (stale post-action EFP),
+    or when an overlapping FindAll input was named in place.
     """
     if not isinstance(element_from_point, dict):
         return None
@@ -4479,6 +4480,7 @@ def _efp_peer_detection_from_payload(
         is_usable_uia_landmark_label,
         is_weak_efp_hub_label,
         is_winforms_scrollbar_thumb_efp_name,
+        ocr_uia_labels_soft_agree,
         resolve_usable_uia_probe_label,
     )
 
@@ -4498,6 +4500,26 @@ def _efp_peer_detection_from_payload(
         focused_type = str(focused_element.get("control_type") or "").strip()
         if focused_type:
             control_type = focused_type
+
+    # FindAll text channel already names the click with a different usable
+    # leaf — do not inject a foreign EFP peer (e.g. post-close Excel
+    # data_item over Save). Named input hosts (ProperTreeHost) are ignored
+    # here so EFP can still repair tree/list leaves inside them.
+    covering_labels = [
+        _visible_text(det.text)
+        for det in existing
+        if _is_usable_uia_text_detection(det)
+        and point_in_rect_xywh(int(local_x), int(local_y), det.bbox)
+    ]
+    covering_labels = [text for text in covering_labels if text]
+    if covering_labels and not any(
+        text.casefold() == _visible_text(label).casefold()
+        or ocr_uia_labels_soft_agree(text, label)
+        for text in covering_labels
+    ):
+        if isinstance(timing_out, dict):
+            timing_out["efp_peer_skipped_reason"] = "findall_covers_click_disagrees"
+        return None
 
     resolved = _efp_peer_local_bbox(
         element_from_point,

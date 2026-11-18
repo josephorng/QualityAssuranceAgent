@@ -101,8 +101,29 @@ def test_idle_efp_latch_requires_near_press_xy(tmp_path: Path) -> None:
     assert far is None
 
 
+def test_idle_efp_latch_when_press_inside_leaf_bbox(tmp_path: Path) -> None:
+    """Click can drift on a large button; latch if press stays in idle bbox."""
+    session = RecordingSession(runs_root=tmp_path)
+    idle = {
+        "name": "儲存(S)",
+        "value": "",
+        "bbox": [2635, 613, 99, 28],
+        "control_type": "button",
+    }
+    session._idle_efp_payload = idle
+    # Probe near text center; press ~34px right still on the button.
+    session._idle_efp_cursor_xy = (2660, 627)
+    with session._lock:
+        latched = session._idle_efp_payload_near_press_locked(2718, 631)
+        outside = session._idle_efp_payload_near_press_locked(2800, 631)
+    assert latched is not None
+    assert latched["name"] == "儲存(S)"
+    assert outside is None
+
+
 def test_worker_idle_efp_stores_full_payload(tmp_path: Path) -> None:
     session = RecordingSession(runs_root=tmp_path)
+    session._run_dir = tmp_path
     session._accepting_input = True
     session._idle_efp_generation = 1
     session._last_settle_uia_after_index = 0
@@ -153,6 +174,10 @@ def test_worker_idle_efp_stores_full_payload(tmp_path: Path) -> None:
     assert session._idle_efp_payload["name"] == "[檔案] 索引標籤"
     assert session._idle_efp_payload["bbox"] == [30, 60, 67, 37]
     assert session._idle_efp_cursor_xy == (40, 70)
+    log_text = (tmp_path / "record.log").read_text(encoding="utf-8")
+    assert "element_from_point idle generation=1 xy=(40,70)" in log_text
+    assert "name='[檔案] 索引標籤'" in log_text
+    assert "control_type='button'" in log_text
 
 
 def test_worker_pending_left_press_idle_fallback(tmp_path: Path) -> None:
@@ -197,7 +222,7 @@ def test_worker_pending_left_press_idle_fallback(tmp_path: Path) -> None:
         patch(
             "src.recorder.uia_input_boxes.element_from_point_name_value",
             return_value=live,
-        ),
+        ) as live_probe,
     ):
         session._capture_pending_left_press(tmp_path, 40, 70)
         assert session._left_press_efp_idle[1] is not None
@@ -209,6 +234,7 @@ def test_worker_pending_left_press_idle_fallback(tmp_path: Path) -> None:
                 press_seq=1,
             )
         )
+        live_probe.assert_not_called()
     recorded = session._left_press_efp[1]
     assert recorded is not None
     assert recorded["name"] == "[檔案] 索引標籤"
@@ -232,11 +258,12 @@ def test_worker_pending_left_press_keeps_live_when_idle_far(tmp_path: Path) -> N
     idle = {
         "name": "[檔案] 索引標籤",
         "value": "",
-        "bbox": [30, 60, 67, 37],
+        # Far from press (40, 70): outside bbox and >12px from probe cursor.
+        "bbox": [200, 200, 20, 20],
     }
     live = {"name": "返回", "value": "", "bbox": [0, 50, 175, 56]}
     session._idle_efp_payload = idle
-    session._idle_efp_cursor_xy = (200, 200)  # far from press
+    session._idle_efp_cursor_xy = (210, 210)
     with (
         patch(
             "src.recorder.capture.resolve_click_window",
@@ -263,6 +290,61 @@ def test_worker_pending_left_press_keeps_live_when_idle_far(tmp_path: Path) -> N
     recorded = session._left_press_efp[1]
     assert recorded is not None
     assert recorded["name"] == "返回"
+
+
+def test_resolve_press_efp_rejects_live_when_findall_covers_disagrees() -> None:
+    session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
+    live = {
+        "name": "K15",
+        "value": "",
+        "bbox": [2674, 630, 72, 22],
+        "control_type": "data_item",
+    }
+    snapshot = {
+        "window": [1920, -1, 941, 667],
+        "texts": [
+            {
+                "bbox": [2635, 613, 2734, 641],
+                "text": "儲存(S)",
+                "control_type": "button",
+            }
+        ],
+    }
+    chosen = session._resolve_press_element_from_point(
+        live,
+        None,
+        cursor_xy=(2718, 631),
+        uia_snapshot=snapshot,
+    )
+    assert chosen is None
+
+
+def test_resolve_press_efp_keeps_live_when_findall_agrees() -> None:
+    session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
+    live = {
+        "name": "儲存(S)",
+        "value": "",
+        "bbox": [2635, 613, 99, 28],
+        "control_type": "button",
+    }
+    snapshot = {
+        "window": [1920, -1, 941, 667],
+        "texts": [
+            {
+                "bbox": [2635, 613, 2734, 641],
+                "text": "儲存(S)",
+                "control_type": "button",
+            }
+        ],
+    }
+    chosen = session._resolve_press_element_from_point(
+        live,
+        None,
+        cursor_xy=(2718, 631),
+        uia_snapshot=snapshot,
+    )
+    assert chosen is not None
+    assert chosen["name"] == "儲存(S)"
 
 
 def test_worker_pending_right_press_idle_fallback(tmp_path: Path) -> None:
@@ -295,7 +377,7 @@ def test_worker_pending_right_press_idle_fallback(tmp_path: Path) -> None:
         patch(
             "src.recorder.uia_input_boxes.element_from_point_name_value",
             return_value=live,
-        ),
+        ) as live_probe,
     ):
         session._capture_pending_right_press(tmp_path, 15, 15)
         assert session._right_press_efp_idle[1] is not None
@@ -306,6 +388,7 @@ def test_worker_pending_right_press_idle_fallback(tmp_path: Path) -> None:
                 press_seq=1,
             )
         )
+        live_probe.assert_not_called()
     recorded = session._right_press_efp[1]
     assert recorded is not None
     assert recorded["name"] == "貼上"

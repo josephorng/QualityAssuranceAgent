@@ -1924,6 +1924,44 @@ class RecordingSession:
                 efp_pending=False,
             )
 
+    def _log_idle_efp_probe(
+        self,
+        *,
+        run_dir: Path | None,
+        generation: int,
+        cursor_xy: tuple[int, int] | None,
+        payload: dict[str, Any] | None,
+    ) -> None:
+        """Append LED idle-probe Name/Value to record.log (grep ``element_from_point idle``)."""
+        if run_dir is None:
+            return
+        if cursor_xy is None:
+            self._log(
+                run_dir,
+                f"element_from_point idle generation={int(generation)} "
+                f"xy=None name='' value='' cleared=1",
+            )
+            return
+        x, y = int(cursor_xy[0]), int(cursor_xy[1])
+        name = ""
+        value = ""
+        bbox = None
+        control_type = None
+        efp_s = None
+        if isinstance(payload, dict):
+            name = str(payload.get("name") or "").strip()
+            value = str(payload.get("value") or "").strip()
+            bbox = payload.get("bbox")
+            control_type = payload.get("control_type")
+            efp_s = payload.get("element_from_point_s")
+        self._log(
+            run_dir,
+            f"element_from_point idle generation={int(generation)} "
+            f"xy=({x},{y}) element_from_point_s={efp_s} "
+            f"name={name!r} value={value!r} "
+            f"bbox={bbox!r} control_type={control_type!r}",
+        )
+
     def _worker_idle_efp(self, job: _DeferredCaptureJob) -> None:
         """Idle EFP probe (label immediately), optional hover FindAll, then LED."""
         job = self._coalesce_idle_efp_job(job)
@@ -1935,21 +1973,30 @@ class RecordingSession:
         cursor = job.cursor_xy
         if cursor is None:
             with self._lock:
+                run_dir = self._run_dir
                 self._idle_efp_cursor_xy = None
                 self._idle_efp_probed_name = ""
                 self._idle_efp_probed_value = ""
                 self._idle_efp_payload = None
+            self._log_idle_efp_probe(
+                run_dir=run_dir,
+                generation=generation,
+                cursor_xy=None,
+                payload=None,
+            )
             self._emit_uia_status(efp_name="", efp_value="", efp_pending=False)
             return
         with self._lock:
             if generation != int(self._idle_efp_generation):
                 return
+            run_dir = self._run_dir
         from src.recorder.uia_input_boxes import element_from_point_name_value
 
         payload = element_from_point_name_value(int(cursor[0]), int(cursor[1]))
         with self._lock:
             if generation != int(self._idle_efp_generation):
                 return
+            run_dir = self._run_dir
         name = ""
         value = ""
         stored: dict[str, Any] | None = None
@@ -1963,6 +2010,12 @@ class RecordingSession:
             self._idle_efp_probed_name = name
             self._idle_efp_probed_value = value
             self._idle_efp_payload = stored
+        self._log_idle_efp_probe(
+            run_dir=run_dir,
+            generation=generation,
+            cursor_xy=(int(cursor[0]), int(cursor[1])),
+            payload=payload if isinstance(payload, dict) else None,
+        )
         # Show Name/Value as soon as the probe returns (any LED color).
         self._emit_uia_status(efp_name=name, efp_value=value, efp_pending=False)
         cursor_xy = (int(cursor[0]), int(cursor[1]))
@@ -5439,19 +5492,68 @@ class RecordingSession:
         x: int,
         y: int,
     ) -> dict[str, Any] | None:
-        """Copy idle EFP when probe xy is near press. Caller holds ``_lock``."""
+        """Copy idle EFP when probe xy is near press or press is in leaf bbox.
+
+        Caller holds ``_lock``. The 12px probe-distance rule still applies.
+        When the idle payload has a screen xywh ``bbox``, a press inside that
+        leaf also latches (click stayed on the same control the LED named).
+        """
         payload = self._idle_efp_payload
         if not self._efp_payload_usable(payload):
             return None
         cursor = self._idle_efp_cursor_xy
         if cursor is None:
             return None
+        assert isinstance(payload, dict)
         dx = int(cursor[0]) - int(x)
         dy = int(cursor[1]) - int(y)
-        if (dx * dx + dy * dy) > (_IDLE_EFP_PRESS_MAX_DIST_PX ** 2):
-            return None
-        assert isinstance(payload, dict)
-        return dict(payload)
+        if (dx * dx + dy * dy) <= (_IDLE_EFP_PRESS_MAX_DIST_PX ** 2):
+            return dict(payload)
+        raw_bbox = payload.get("bbox")
+        if isinstance(raw_bbox, (list, tuple)) and len(raw_bbox) == 4:
+            try:
+                bbox = (
+                    int(raw_bbox[0]),
+                    int(raw_bbox[1]),
+                    int(raw_bbox[2]),
+                    int(raw_bbox[3]),
+                )
+            except (TypeError, ValueError):
+                return None
+            if bbox[2] > 0 and bbox[3] > 0 and point_in_rect_xywh(int(x), int(y), bbox):
+                return dict(payload)
+        return None
+
+    @staticmethod
+    def _live_efp_disagrees_with_findall_cover(
+        live: dict[str, Any] | None,
+        uia_snapshot: dict[str, Any] | None,
+        cursor_xy: tuple[int, int] | None,
+    ) -> bool:
+        """True when FindAll already names a different usable leaf on the press."""
+        if not RecordingSession._efp_payload_usable(live):
+            return False
+        if not isinstance(uia_snapshot, dict) or cursor_xy is None:
+            return False
+        from src.recorder.uia_input_boxes import (
+            ocr_uia_labels_soft_agree,
+            resolve_usable_uia_probe_label,
+        )
+        from src.recorder.uia_replay_repair import snapshot_usable_covering_labels
+
+        live_name, live_value = RecordingSession._efp_name_value_pair(live)
+        live_label = resolve_usable_uia_probe_label(name=live_name, value=live_value)
+        if not live_label:
+            return False
+        covering = snapshot_usable_covering_labels(
+            uia_snapshot,
+            (int(cursor_xy[0]), int(cursor_xy[1])),
+        )
+        if not covering:
+            return False
+        return not any(
+            ocr_uia_labels_soft_agree(label, live_label) for label in covering
+        )
 
     def _resolve_press_element_from_point(
         self,
@@ -5461,22 +5563,37 @@ class RecordingSession:
         run_dir: Path | None = None,
         press_seq: int | None = None,
         cursor_xy: tuple[int, int] | None = None,
+        uia_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Prefer near-press idle EFP when live Name/Value diverges.
 
         Empty FindAll does not block idle. Live wins when names match or idle
-        was not latched near the press.
+        was not latched near the press. When idle is empty, live that disagrees
+        with a FindAll leaf covering the press is rejected (post-close stale EFP).
         """
         idle_ok = self._efp_payload_usable(idle)
         live_ok = self._efp_payload_usable(live)
         idle_name, idle_value = self._efp_name_value_pair(idle)
         live_name, live_value = self._efp_name_value_pair(live)
+        source = "live"
+        chosen: dict[str, Any] | None
         if idle_ok and (not live_ok or (live_name, live_value) != (idle_name, idle_value)):
             source = "idle_only" if not live_ok else "idle_fallback"
             chosen = dict(idle) if isinstance(idle, dict) else None
         elif live_ok:
-            source = "live"
-            chosen = dict(live) if isinstance(live, dict) else None
+            if (
+                not idle_ok
+                and self._live_efp_disagrees_with_findall_cover(
+                    live,
+                    uia_snapshot,
+                    cursor_xy,
+                )
+            ):
+                source = "live_rejected_findall_disagree"
+                chosen = None
+            else:
+                source = "live"
+                chosen = dict(live) if isinstance(live, dict) else None
         else:
             source = "live"
             chosen = live if isinstance(live, dict) else None
@@ -5550,23 +5667,32 @@ class RecordingSession:
         with self._lock:
             run_dir = self._run_dir
             idle_efp = self._left_press_efp_idle.get(job.press_seq)
+            uia_snapshot = self._left_press_uia.get(job.press_seq)
+            click_window = self._left_press_click_windows.get(job.press_seq)
         if run_dir is None:
             self._unpin_settle_frame(job.settle_frame)
             return
 
-        # Probe live EFP before screenshot adopt to shrink post-click races
-        # (e.g. Word File tab → Backstage 返回) when idle was empty.
-        live_efp = self._probe_element_from_point_at(
-            job.cursor_xy,
-            run_dir=run_dir,
-            press_seq=job.press_seq,
-        )
+        # Live EFP only when idle was empty (post-click races / Excel cells).
+        # Usable idle already names click-time UI — skip the deferred probe.
+        live_efp: dict[str, Any] | None = None
+        if not self._efp_payload_usable(idle_efp):
+            if uia_snapshot is None and self._should_press_findall_on_click_window(
+                click_window
+            ):
+                uia_snapshot = self._findall_uia_for_click_window(click_window)
+            live_efp = self._probe_element_from_point_at(
+                job.cursor_xy,
+                run_dir=run_dir,
+                press_seq=job.press_seq,
+            )
         efp = self._resolve_press_element_from_point(
             live_efp,
             idle_efp,
             run_dir=run_dir,
             press_seq=job.press_seq,
             cursor_xy=job.cursor_xy,
+            uia_snapshot=uia_snapshot if isinstance(uia_snapshot, dict) else None,
         )
 
         # Typing OCR/after no longer live-grabs on press; flush adopts the next
@@ -5591,8 +5717,9 @@ class RecordingSession:
             )
             info = None
         with self._lock:
-            click_window = self._left_press_click_windows.get(job.press_seq)
-            uia_snapshot = self._left_press_uia.get(job.press_seq)
+            if uia_snapshot is None:
+                click_window = self._left_press_click_windows.get(job.press_seq)
+                uia_snapshot = self._left_press_uia.get(job.press_seq)
         if uia_snapshot is None and self._should_press_findall_on_click_window(
             click_window
         ):
@@ -5616,20 +5743,29 @@ class RecordingSession:
         with self._lock:
             run_dir = self._run_dir
             idle_efp = self._right_press_efp_idle.get(job.press_seq)
+            uia_snapshot = self._right_press_uia.get(job.press_seq)
+            click_window = self._right_press_click_windows.get(job.press_seq)
         if run_dir is None:
             self._unpin_settle_frame(job.settle_frame)
             return
-        live_efp = self._probe_element_from_point_at(
-            job.cursor_xy,
-            run_dir=run_dir,
-            press_seq=job.press_seq,
-        )
+        live_efp: dict[str, Any] | None = None
+        if not self._efp_payload_usable(idle_efp):
+            if uia_snapshot is None and self._should_press_findall_on_click_window(
+                click_window
+            ):
+                uia_snapshot = self._findall_uia_for_click_window(click_window)
+            live_efp = self._probe_element_from_point_at(
+                job.cursor_xy,
+                run_dir=run_dir,
+                press_seq=job.press_seq,
+            )
         efp = self._resolve_press_element_from_point(
             live_efp,
             idle_efp,
             run_dir=run_dir,
             press_seq=job.press_seq,
             cursor_xy=job.cursor_xy,
+            uia_snapshot=uia_snapshot if isinstance(uia_snapshot, dict) else None,
         )
         pending_dest = _pending_right_capture_path(run_dir, job.press_seq)
         try:
@@ -5650,8 +5786,9 @@ class RecordingSession:
             )
             info = None
         with self._lock:
-            click_window = self._right_press_click_windows.get(job.press_seq)
-            uia_snapshot = self._right_press_uia.get(job.press_seq)
+            if uia_snapshot is None:
+                click_window = self._right_press_click_windows.get(job.press_seq)
+                uia_snapshot = self._right_press_uia.get(job.press_seq)
         if uia_snapshot is None and self._should_press_findall_on_click_window(
             click_window
         ):

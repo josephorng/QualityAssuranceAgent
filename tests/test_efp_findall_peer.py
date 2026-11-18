@@ -759,3 +759,107 @@ def test_efp_data_item_before_gate_opens_uia_path_over_covering_scrollbar(
     assert primary is not None
     assert primary.get("text") == "G8"
     assert primary.get("uia_control_type") == "data_item"
+
+
+def test_efp_peer_skips_when_findall_covers_click_disagrees() -> None:
+    """Post-close Excel cell must not override dialog Save under the click."""
+    save = _detection_from_bbox(
+        (715, 614, 99, 28),
+        YOLO_CLASS_TEXT,
+        text="儲存(S)",
+        source="uia",
+        uia_control_type="button",
+    )
+    timing: dict = {}
+    peer = _efp_peer_detection_from_payload(
+        {
+            "name": "K15",
+            "value": "",
+            "bbox": [754, 631, 72, 22],
+            "control_type": "data_item",
+        },
+        monitor_offset=(0, 0),
+        local_x=798,
+        local_y=632,
+        existing=[save],
+        timing_out=timing,
+    )
+    assert peer is None
+    assert timing.get("efp_peer_skipped_reason") == "findall_covers_click_disagrees"
+    primary = select_click_primary_candidate(
+        [
+            {
+                "bbox": list(save.bbox),
+                "center": [764, 628],
+                "class_id": YOLO_CLASS_TEXT,
+                "class_name": "text",
+                "text": "儲存(S)",
+                "source": "uia",
+                "uia_control_type": "button",
+            }
+        ],
+        798,
+        632,
+    )
+    assert primary is not None
+    assert primary.get("text") == "儲存(S)"
+
+
+def test_efp_event009_shape_findall_save_beats_stale_k15_data_item(
+    monkeypatch,
+) -> None:
+    """event_009-shaped Save click: FindAll 儲存(S) wins over stale EFP K15."""
+    import numpy as np
+
+    from src.recorder.vision_context import (
+        _detect_recording_mouse_targets,
+        select_click_primary_candidate,
+        _detection_to_dict,
+        _promote_click_primary_detections,
+        _nearest_candidates,
+    )
+
+    bgr = np.zeros((667, 941, 3), dtype=np.uint8)
+    prefetched = (
+        [],
+        [],
+        [
+            ((715, 614, 99, 28), "儲存(S)", "button"),
+            ((826, 614, 88, 28), "取消", "button"),
+        ],
+    )
+
+    def fake_detect(*_a, **_k):
+        return []
+
+    monkeypatch.setattr(
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
+        fake_detect,
+    )
+    efp = {
+        "name": "K15",
+        "value": "",
+        "control_type": "data_item",
+        "bbox": [754, 631, 72, 22],
+    }
+    detections, timing = _detect_recording_mouse_targets(
+        bgr,
+        local_x=798,
+        local_y=632,
+        uia_prefetched=prefetched,
+        element_from_point=efp,
+        efp_monitor_offset=(0, 0),
+    )
+    assert timing.get("vision_path") == "uia"
+    assert timing.get("efp_peer_injected") is not True
+    assert timing.get("efp_peer_skipped_reason") == "findall_covers_click_disagrees"
+    assert not any(d.text == "K15" for d in detections)
+    nearest = _nearest_candidates(detections, 798, 632)
+    nearest = _promote_click_primary_detections(nearest, 798, 632)
+    primary = select_click_primary_candidate(
+        [_detection_to_dict(d) for d in nearest],
+        798,
+        632,
+    )
+    assert primary is not None
+    assert primary.get("text") == "儲存(S)"

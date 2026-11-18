@@ -4861,11 +4861,19 @@ def build_vision_context_at_point(
     fallback_detections = vision_timing.get("yolo_ocr_fallback_detections")
     yolo_ocr_fallback_vision: dict[str, Any] | None = None
     if isinstance(fallback_detections, list) and fallback_detections:
+        content_leaves: list[UiDetection] | None = None
+        if (
+            vision_timing.get("vision_path") == "uia"
+            and isinstance(all_detections, list)
+            and all_detections
+        ):
+            content_leaves = all_detections
         yolo_ocr_fallback_vision = _yolo_ocr_fallback_vision_from_detections(
             bgr,
             fallback_detections,
             local_x,
             local_y,
+            content_leaf_detections=content_leaves,
         )
         persistable = _persistable_yolo_ocr_fallback(yolo_ocr_fallback_vision)
         if persistable is not None:
@@ -4953,13 +4961,61 @@ def _rank_detections_near_point(
     return candidate_dicts, candidate_text
 
 
+def _demote_covering_scrollbars_owned_by_leaf(
+    candidates: list[dict[str, Any]],
+    *,
+    local_x: int,
+    local_y: int,
+    content_leaf_detections: list[UiDetection],
+) -> list[dict[str, Any]]:
+    """Drop covering scrollbars when a tighter UIA content leaf owns the click.
+
+    Keeps thin-bar scrollbars that are not owned by a smaller leaf. Returns the
+    original list object when nothing is removed.
+    """
+    if not candidates or not content_leaf_detections:
+        return candidates
+    kept: list[dict[str, Any]] = []
+    removed = False
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            kept.append(cand)
+            continue
+        if str(cand.get("class_name") or "").strip() != "scrollbar":
+            kept.append(cand)
+            continue
+        bbox = _candidate_bbox_tuple(cand)
+        if bbox is None or not point_in_bbox(local_x, local_y, bbox):
+            kept.append(cand)
+            continue
+        if _uia_content_leaf_owns_point(
+            content_leaf_detections,
+            local_x,
+            local_y,
+            scrollbar_bbox=bbox,
+        ):
+            removed = True
+            continue
+        kept.append(cand)
+    return kept if removed and kept else candidates
+
+
 def _yolo_ocr_fallback_vision_from_detections(
     bgr: np.ndarray,
     detections: list[UiDetection],
     local_x: int,
     local_y: int,
+    *,
+    content_leaf_detections: list[UiDetection] | None = None,
 ) -> dict[str, Any] | None:
-    """Build a compact YOLO+OCR twin vision ranked at the click point."""
+    """Build a compact YOLO+OCR twin vision ranked at the click point.
+
+    When ``content_leaf_detections`` is provided (UIA primary path), those
+    leaves participate in ``annotate_scrollbar_track``'s leaf-owns-point guard
+    so Excel ``data_item`` cells do not become ``滾動條的N%處``. Covering
+    scrollbars owned by such a leaf are then demoted so twin primary becomes a
+    nearby YOLO/OCR landmark instead of bare ``滾動條``.
+    """
     if not detections:
         return None
     candidate_dicts, candidate_text = _rank_detections_near_point(
@@ -4981,6 +5037,9 @@ def _yolo_ocr_fallback_vision_from_detections(
         ),
         "vision_path": "yolo_ocr",
     }
+    leaf_pool: list[UiDetection] = list(detections)
+    if content_leaf_detections:
+        leaf_pool.extend(content_leaf_detections)
     track = annotate_scrollbar_track(
         {
             "candidates": candidate_dicts,
@@ -4988,13 +5047,31 @@ def _yolo_ocr_fallback_vision_from_detections(
         },
         local_x=local_x,
         local_y=local_y,
-        all_detections=detections,
+        all_detections=leaf_pool,
         require_point_inside=True,
     )
     if track is not None:
         twin["scrollbar_track"] = track
         twin["candidates"] = candidate_dicts
         twin["candidate_text"] = candidate_text
+        return twin
+    if content_leaf_detections:
+        demoted = _demote_covering_scrollbars_owned_by_leaf(
+            candidate_dicts,
+            local_x=local_x,
+            local_y=local_y,
+            content_leaf_detections=content_leaf_detections,
+        )
+        if demoted is not candidate_dicts:
+            twin["candidates"] = demoted
+            ensure_click_primary_candidate(twin)
+            twin["candidate_text"] = _candidate_text_from_dicts(twin["candidates"])
+            twin["field_context"] = format_field_context_hint(
+                {
+                    "candidates": twin["candidates"],
+                    "local_cursor": (local_x, local_y),
+                }
+            )
     return twin
 
 

@@ -27,6 +27,7 @@ from src.recorder.vision_context import (
     _local_cursor,
     _nearest_candidates,
     _usable_uia_landmark_label,
+    _yolo_ocr_fallback_vision_from_detections,
     annotate_scrollbar_track,
     build_vision_context,
     build_vision_context_at_point,
@@ -2788,6 +2789,133 @@ def test_annotate_scrollbar_track_horizontal_and_outside_cast() -> None:
     assert end_track is not None
     assert end_track["percent"] == 100
     assert point_from_scrollbar_percent(bbox, 100)[0] == 199
+
+
+def test_annotate_scrollbar_track_skips_covering_pane_with_data_item() -> None:
+    """Excel sheet pane scrollbar must not steal track % from a cell leaf."""
+    pane = (0, 300, 1898, 672)
+    cell = (610, 366, 72, 22)
+    local_x, local_y = 647, 381
+    scrollbar = _detection_from_bbox(pane, YOLO_CLASS_SCROLLBAR, source="uia")
+    cell_det = _detection_from_bbox(
+        cell,
+        YOLO_CLASS_TEXT,
+        text="I3",
+        source="uia",
+        uia_control_type="data_item",
+    )
+    vision = {
+        "local_cursor": [local_x, local_y],
+        "candidates": [
+            {
+                "bbox": list(pane),
+                "center": [949, 636],
+                "class_name": "scrollbar",
+                "text": None,
+                "source": "uia",
+            },
+            {
+                "bbox": list(cell),
+                "center": [646, 377],
+                "class_name": "text",
+                "text": "I3",
+                "source": "uia",
+                "uia_control_type": "data_item",
+            },
+        ],
+    }
+    track = annotate_scrollbar_track(
+        vision,
+        local_x=local_x,
+        local_y=local_y,
+        all_detections=[scrollbar, cell_det],
+    )
+    assert track is None
+    assert "scrollbar_track" not in vision
+    assert vision["candidates"][0]["class_name"] == "scrollbar"
+
+    ensure_click_primary_candidate(vision)
+    assert vision["candidates"][0].get("uia_control_type") == "data_item"
+    assert vision["candidates"][0].get("text") == "I3"
+    assert scrollbar_track_percent_phrase(vision) is None
+
+
+def test_yolo_ocr_fallback_twin_skips_covering_scrollbar_with_data_item_leaf() -> None:
+    """UIA data_item leaf must stop twin track-% on a pane-sized scrollbar."""
+    pane = (0, 300, 1898, 672)
+    cell = (754, 521, 72, 22)
+    nearby_icon = (784, 303, 16, 14)
+    local_x, local_y = 790, 532
+    pane_sb = _detection_from_bbox(pane, YOLO_CLASS_SCROLLBAR, source="uia")
+    icon = _detection_from_bbox(
+        nearby_icon,
+        YOLO_CLASS_ELEMENT,
+        icons=[{"chinese_id": "國旗"}],
+        source="ocr",
+    )
+    cell_det = _detection_from_bbox(
+        cell,
+        YOLO_CLASS_TEXT,
+        text="K10",
+        source="uia",
+        uia_control_type="data_item",
+    )
+    bgr = np.zeros((1080, 1920, 3), dtype=np.uint8)
+
+    without_leaf = _yolo_ocr_fallback_vision_from_detections(
+        bgr,
+        [pane_sb, icon],
+        local_x,
+        local_y,
+    )
+    assert without_leaf is not None
+    assert isinstance(without_leaf.get("scrollbar_track"), dict)
+    assert without_leaf["candidates"][0]["class_name"] == "scrollbar"
+    assert scrollbar_track_percent_phrase(without_leaf) is not None
+
+    twin = _yolo_ocr_fallback_vision_from_detections(
+        bgr,
+        [pane_sb, icon],
+        local_x,
+        local_y,
+        content_leaf_detections=[cell_det],
+    )
+    assert twin is not None
+    assert "scrollbar_track" not in twin
+    assert twin["candidates"][0]["class_name"] != "scrollbar"
+    assert scrollbar_track_percent_phrase(twin) is None
+    # data_item stays out of the YOLO twin hub
+    assert twin["candidates"][0].get("uia_control_type") != "data_item"
+
+
+def test_scrollbar_track_percent_phrase_requires_scrollbar_primary() -> None:
+    """Stale track metadata must not phrase when primary is a data_item leaf."""
+    vision = {
+        "scrollbar_track": {
+            "bbox": [0, 300, 1898, 672],
+            "axis": "horizontal",
+            "percent": 34,
+            "anchor_class": "scrollbar",
+        },
+        "candidates": [
+            {
+                "bbox": [610, 366, 72, 22],
+                "center": [646, 377],
+                "class_name": "text",
+                "text": "I3",
+                "uia_control_type": "data_item",
+            },
+            {
+                "bbox": [0, 300, 1898, 672],
+                "center": [949, 636],
+                "class_name": "scrollbar",
+            },
+        ],
+    }
+    assert scrollbar_track_percent_phrase(vision) is None
+
+    vision["candidates"] = list(reversed(vision["candidates"]))
+    assert scrollbar_track_percent_phrase(vision) == "的34%處"
 
 
 def test_align_drag_scrollbar_tracks_forces_yolo_twins_like_uia() -> None:

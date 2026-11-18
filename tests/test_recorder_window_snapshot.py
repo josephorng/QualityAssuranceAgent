@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -26,6 +28,7 @@ from src.recorder.window_snapshot import (
     filter_disabled_window_verify,
     normalize_window_verify_disabled,
     window_verify_condition_enabled,
+    window_verify_has_assertions,
     window_verify_satisfied,
     window_verify_from_debug,
     snapshot_top_level_windows,
@@ -3278,34 +3281,9 @@ def test_window_verify_omits_unchanged_light_signals_and_requires_changes() -> N
         "class_name": "Chrome_WidgetWin_1",
         "process_name": "chrome.exe",
     }
-    caret_fields = signal_verify_fields(same, other_field, kind="text_input")
-    assert caret_fields["caret"] == {
-        "class_name": "Chrome_WidgetWin_1",
-        "process_name": "chrome.exe",
-    }
+    # Post-type caret is never asserted; readiness uses signals_before via ready.
+    assert "caret" not in signal_verify_fields(same, other_field, kind="text_input")
     assert "caret" not in signal_verify_fields(same, other_field, kind="click")
-    ok, _reason = window_verify_satisfied(
-        caret_fields,
-        {},
-        live_after={
-            "caret": {
-                "rect": [400, 500, 402, 520],
-                "hwnd": 99,
-                "class_name": "Chrome_WidgetWin_1",
-                "process_name": "chrome.exe",
-            }
-        },
-    )
-    assert ok is True
-    ok, reason = window_verify_satisfied(
-        caret_fields,
-        {},
-        live_after={
-            "caret": {"class_name": "Edit", "process_name": "notepad.exe"}
-        },
-    )
-    assert ok is False
-    assert "caret" in reason
     incomplete = dict(same)
     incomplete["caret"] = {"rect": [10, 80, 12, 96], "hwnd": 8, "class_name": "Edit"}
     assert "caret" not in signal_verify_fields(same, incomplete, kind="text_input")
@@ -3644,13 +3622,144 @@ def test_window_verify_drops_focused_value_unrelated_to_typed_text() -> None:
         "signals_before": {"focused": {"name": "網址與搜尋列", "value": ""}},
         "signals_after": {"focused": {"name": "網址與搜尋列", "value": "nba l"}},
     }
-    assert window_verify_from_debug(debug, typed_text="nbanba live") == {}
+    ready = {"ready": {"focused": {"name": "網址與搜尋列"}}}
+    assert window_verify_from_debug(debug, typed_text="nbanba live") == ready
     assert window_verify_from_debug(debug, typed_text="nba live") == {
-        "focused": {"value": "nba l"}
+        "focused": {"value": "nba l"},
+        **ready,
     }
     assert window_verify_from_debug(debug, typed_text="nba l") == {
-        "focused": {"value": "nba l"}
+        "focused": {"value": "nba l"},
+        **ready,
     }
+
+
+def test_text_input_ready_fields_from_signals_before() -> None:
+    from src.recorder.verify_signals import (
+        signal_assertions_satisfied,
+        text_input_ready_fields,
+    )
+
+    before = {
+        "foreground": {
+            "class_name": "XLMAIN",
+            "title": "活頁簿1 - Excel",
+            "process_name": "EXCEL.EXE",
+        },
+        "caret": {
+            "rect": [2170, 344, 2243, 367],
+            "hwnd": 42603584,
+            "class_name": "EXCEL7",
+            "process_name": "EXCEL.EXE",
+        },
+        "focused": {"name": "D2", "value": ""},
+    }
+    ready = text_input_ready_fields(before)
+    assert ready == {
+        "caret": {"class_name": "EXCEL7", "process_name": "EXCEL.EXE"},
+        "focused": {"name": "D2"},
+    }
+    predicate = window_verify_from_debug(
+        {
+            "signal_kind": "text_input",
+            "signals_before": before,
+            "signals_after": {
+                **before,
+                "caret": {
+                    "rect": [2220, 346, 2221, 366],
+                    "hwnd": 296159718,
+                    "class_name": "EXCEL6",
+                    "process_name": "EXCEL.EXE",
+                },
+                "focused": None,
+            },
+        }
+    )
+    assert "caret" not in predicate
+    assert predicate["ready"] == ready
+    assert window_verify_has_assertions(predicate) is True
+
+    ok, _reason = signal_assertions_satisfied(
+        ready,
+        {
+            "caret": {"class_name": "EXCEL7", "process_name": "EXCEL.EXE"},
+            "focused": {"name": "D2", "value": ""},
+        },
+    )
+    assert ok is True
+    ok, reason = signal_assertions_satisfied(
+        ready,
+        {
+            "caret": {"class_name": "EXCEL6", "process_name": "EXCEL.EXE"},
+            "focused": {"name": "D2"},
+        },
+    )
+    assert ok is False
+    assert "caret" in reason
+
+    # Name equal to foreground title is not a readiness signal.
+    assert text_input_ready_fields(
+        {
+            "foreground": {
+                "title": "Notepad",
+                "class_name": "Notepad",
+                "process_name": "notepad.exe",
+            },
+            "focused": {"name": "Notepad", "value": ""},
+        }
+    ) == {}
+
+
+def test_collect_strips_legacy_top_level_caret_keeps_ready(tmp_path: Path) -> None:
+    from src.common.script_helper import collect_recording_window_verifies
+
+    run_dir = tmp_path / "rec_ready"
+    (run_dir / "events").mkdir(parents=True)
+    (run_dir / "analysis").mkdir()
+    (run_dir / "events" / "event_004.json").write_text(
+        json.dumps(
+            {
+                "index": 4,
+                "timestamp_utc": "2026-11-17T00:00:00+00:00",
+                "kind": "text_input",
+                "text": "123456",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "analysis" / "event_004.json").write_text(
+        json.dumps(
+            {
+                "instruction": "輸入「123456」",
+                "window_verify": {
+                    "caret": {"class_name": "EXCEL6", "process_name": "EXCEL.EXE"},
+                    "ready": {
+                        "caret": {"class_name": "EXCEL7", "process_name": "EXCEL.EXE"},
+                        "focused": {"name": "D2"},
+                    },
+                },
+                "tool_calls": [
+                    {
+                        "name": "type_text",
+                        "arguments": {"text": "123456", "instruction": "輸入「123456」"},
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    verifies = collect_recording_window_verifies(run_dir)
+    assert verifies == [
+        {
+            "ready": {
+                "caret": {"class_name": "EXCEL7", "process_name": "EXCEL.EXE"},
+                "focused": {"name": "D2"},
+            }
+        }
+    ]
 
 
 def test_filter_disabled_window_verify_drops_unchecked_entries() -> None:

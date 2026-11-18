@@ -2864,6 +2864,49 @@ def test_write_recording_html_renders_empty_verify_conditions(tmp_path: Path) ->
     assert "無視窗／訊號驗證條件" in html
 
 
+def test_write_recording_html_renders_ready_verify_condition(tmp_path: Path) -> None:
+    run_root = tmp_path / "recording_20260721_120000_000032r"
+    _write_recording_fixture(run_root)
+    (run_root / "analysis" / "event_001.json").write_text(
+        json.dumps(
+            {
+                "event_index": 1,
+                "instruction": "輸入「123456」",
+                "use_expected_outcome": False,
+                "window_verify": {
+                    "ready": {
+                        "caret": {
+                            "class_name": "EXCEL7",
+                            "process_name": "EXCEL.EXE",
+                        },
+                        "focused": {"name": "D2"},
+                    }
+                },
+                "tool_calls": [
+                    {
+                        "name": "type_text",
+                        "arguments": {
+                            "text": "123456",
+                            "instruction": "輸入「123456」",
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    html = write_recording_html_from_run(run_root).read_text(encoding="utf-8")
+
+    assert "輸入前就緒" in html
+    assert 'data-verify-key="ready" checked' in html
+    assert "插入點（輸入前）" in html
+    assert "EXCEL7 / EXCEL.EXE" in html
+    assert "焦點（輸入前）" in html
+    assert "name=&#x27;D2&#x27;" in html
+
+
 def test_write_recording_html_renders_cached_tool_calls(tmp_path: Path) -> None:
     run_root = tmp_path / "recording_20260721_120000_000033"
     _write_recording_fixture(run_root)

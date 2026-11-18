@@ -528,6 +528,53 @@ def predicate_has_signal_assertions(predicate: dict[str, Any] | None) -> bool:
     return False
 
 
+def predicate_has_ready_assertions(predicate: dict[str, Any] | None) -> bool:
+    """True when ``window_verify.ready`` has caret and/or focused readiness checks."""
+    if not isinstance(predicate, dict):
+        return False
+    ready = predicate.get("ready")
+    return predicate_has_signal_assertions(ready if isinstance(ready, dict) else None)
+
+
+def split_window_verify_ready(
+    predicate: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Split ``ready`` (pre-act) from the post-act remainder of a verify predicate."""
+    if not isinstance(predicate, dict) or not predicate:
+        return {}, {}
+    ready_raw = predicate.get("ready")
+    ready = dict(ready_raw) if isinstance(ready_raw, dict) else {}
+    post = {key: value for key, value in predicate.items() if key != "ready"}
+    return ready, post
+
+
+def text_input_ready_fields(before: dict[str, Any] | None) -> dict[str, Any]:
+    """Pre-type readiness from ``signals_before`` only.
+
+    Returns a ``ready`` body with optional ``caret`` (class + process) and
+    ``focused`` (name only). Empty when neither qualifies.
+    """
+    if not isinstance(before, dict):
+        return {}
+    fields: dict[str, Any] = {}
+    caret_id = _caret_verify_identity(before.get("caret"))
+    if caret_id is not None:
+        fields["caret"] = caret_id
+    focused = before.get("focused")
+    if isinstance(focused, dict):
+        name = str(focused.get("name") or "").strip()
+        if name:
+            foreground = before.get("foreground")
+            foreground_title = ""
+            if isinstance(foreground, dict):
+                foreground_title = _normalize_title(
+                    str(foreground.get("title") or "")
+                )
+            if not foreground_title or _normalize_title(name) != foreground_title:
+                fields["focused"] = {"name": name}
+    return fields
+
+
 def _caret_verify_identity(caret: Any) -> dict[str, str] | None:
     """Class name and executable of the caret window. Both are required."""
     if not isinstance(caret, dict):
@@ -777,9 +824,8 @@ def signal_verify_fields(
             fields["clipboard"] = after_text
 
     if kind in TYPE_KINDS:
-        caret = _caret_moved_field(before, after)
-        if caret is not None:
-            fields["caret"] = caret
+        # Caret end-state is not asserted after typing (Excel edit-host churn).
+        # Pre-type readiness uses text_input_ready_fields(signals_before) instead.
         focused = _focused_changed(before, after)
         if focused is not None:
             fields["focused"] = focused

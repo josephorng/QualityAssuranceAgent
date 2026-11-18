@@ -1593,17 +1593,25 @@ def window_verify_from_debug(
     from src.recorder.verify_signals import (
         omit_focused_value_unrelated_to_typed_text,
         signal_verify_fields,
+        text_input_ready_fields,
     )
 
     before_signals = debug.get("signals_before")
     after_signals = debug.get("signals_after")
+    kind = str(debug.get("signal_kind") or "") or None
     predicate.update(
         signal_verify_fields(
             before_signals if isinstance(before_signals, dict) else None,
             after_signals if isinstance(after_signals, dict) else None,
-            kind=str(debug.get("signal_kind") or "") or None,
+            kind=kind,
         )
     )
+    if kind == "text_input":
+        ready = text_input_ready_fields(
+            before_signals if isinstance(before_signals, dict) else None
+        )
+        if ready:
+            predicate["ready"] = ready
     if omit_structural_foreground:
         predicate = omit_foreground_when_structural(predicate)
     return omit_focused_value_unrelated_to_typed_text(predicate, typed_text)
@@ -1720,8 +1728,13 @@ def window_verify_has_assertions(predicate: dict[str, Any] | None) -> bool:
         return False
     if predicate_has_structural_window_assertions(predicate):
         return True
-    from src.recorder.verify_signals import predicate_has_signal_assertions
+    from src.recorder.verify_signals import (
+        predicate_has_ready_assertions,
+        predicate_has_signal_assertions,
+    )
 
+    if predicate_has_ready_assertions(predicate):
+        return True
     return predicate_has_signal_assertions(predicate)
 
 

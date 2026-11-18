@@ -69,7 +69,10 @@ from src.common.settings import load_settings
 from src.recorder.verify_signals import (
     CLICK_KINDS,
     capture_replay_after_signals,
+    predicate_has_ready_assertions,
     predicate_has_signal_assertions,
+    signal_assertions_satisfied,
+    split_window_verify_ready,
 )
 from src.recorder.window_snapshot import (
     WindowInfo,
@@ -1731,7 +1734,7 @@ class BrainModule:
         to leave (``disappeared``), floor at ``_DISAPPEARED_POLL_MIN_SECONDS``
         so async closes are not judged on a single immediate after-snapshot.
         When it expects signal end-state (``foreground``, ``click_window``,
-        clipboard, caret, focused, scroll), floor at ``_SIGNAL_POLL_MIN_SECONDS``
+        clipboard, focused, scroll), floor at ``_SIGNAL_POLL_MIN_SECONDS``
         for the same reason. Floors combine with ``max``. Polling starts
         immediately after actions and early-exits on match.
         """
@@ -1751,6 +1754,74 @@ class BrainModule:
         if floor > 0:
             return floor
         return None
+
+    async def _poll_ready_verify(
+        self,
+        ready: dict[str, Any],
+        *,
+        script_step_index: int,
+    ) -> ScriptStepVerifyResult | None:
+        """Poll pre-type readiness signals until match or the signal floor deadline.
+
+        Returns ``None`` when live caret/focused match ``ready``. On miss after
+        the deadline, returns a clearly-unmet retry without having run tools.
+        """
+        settle_after = float(_SIGNAL_POLL_MIN_SECONDS)
+        deadline = (
+            settle_after * 2.0
+            if settle_after >= _SETTLE_POLL_MULTI_MIN_SECONDS
+            else settle_after
+        )
+        interval = float(_WINDOW_VERIFY_POLL_INTERVAL_SECONDS)
+        self.manager.log_info(
+            f"Script step {script_step_index + 1} ready verify polling "
+            f"every {interval:.1f}s up to {deadline:.3f}s"
+        )
+        elapsed = 0.0
+        last_reason = "window verify missed ready"
+        while True:
+            try:
+                live = await asyncio.to_thread(capture_replay_after_signals, ready)
+            except Exception as exc:
+                self.manager.log_info(f"ready signal snapshot failed: {exc}")
+                live = None
+                last_reason = "Signal snapshot before the step failed."
+                ok = False
+                reason = last_reason
+            else:
+                ok, reason = signal_assertions_satisfied(ready, live)
+                if not ok and reason:
+                    # Clarify that the miss is pre-act readiness, not post-type.
+                    last_reason = reason.replace(
+                        "window verify missed",
+                        "window verify missed ready",
+                        1,
+                    )
+                else:
+                    last_reason = reason or last_reason
+            if ok:
+                self.manager.log_info(
+                    f"Script step {script_step_index + 1} ready verify "
+                    f"matched after {elapsed:.3f}s"
+                )
+                return None
+            if elapsed >= deadline:
+                self.manager.log_info(
+                    f"Script step {script_step_index + 1} ready verify "
+                    f"still unmet after {elapsed:.3f}s "
+                    f"(deadline {deadline:.3f}s); {last_reason}"
+                )
+                return ScriptStepVerifyResult(
+                    accomplished=False,
+                    branch="retry",
+                    target_step=None,
+                    clearly_unmet=True,
+                    reason=last_reason,
+                )
+            delay = min(interval, max(0.0, deadline - elapsed))
+            if delay > 0:
+                await asyncio.sleep(delay)
+            elapsed += delay
 
     async def _window_verify_miss(
         self,
@@ -2104,96 +2175,121 @@ class BrainModule:
             self._replay_press_point_window = None
             self._step_close_windows_ok = False
             skip_verification = skip_verification_enabled()
-            window_verify = {} if skip_verification else self._current_window_verify()
-            windows_before: list[WindowInfo] | None = None
-            if window_verify:
-                windows_before = await self._snapshot_top_level_windows()
-
-            step_succeeded = await self.loop()
-            # Window verify polls continuously when present (floors only).
-            # Otherwise sleep a fixed short gap before finished_at is stamped.
-            run_window_verify = step_succeeded and bool(window_verify)
-            window_poll_settle = (
-                self._window_verify_poll_settle(None, window_verify)
-                if run_window_verify
-                else None
+            window_verify_full = (
+                {} if skip_verification else self._current_window_verify()
             )
-            window_miss: ScriptStepVerifyResult | None = None
-            if run_window_verify:
-                if window_poll_settle is not None:
-                    window_miss = await self._poll_window_verify(
-                        windows_before,
-                        window_verify,
-                        settle_after=window_poll_settle,
-                        script_step_index=script_step_index,
-                    )
-                else:
-                    window_miss = await self._window_verify_miss(
-                        windows_before, window_verify
-                    )
-            elif step_succeeded:
-                gap = float(_FIXED_STEP_GAP_SECONDS)
-                if gap > 0:
-                    self.manager.log_info(
-                        f"Fixed step gap: waiting {gap:.3f}s"
-                    )
-                    await asyncio.sleep(gap)
-            if window_miss is not None:
-                verify_result = window_miss
-                # Tools already ran; after overlay countdown, re-verify before re-acting.
-                self._stash_deferred_window_verify(
+            ready_verify, window_verify = split_window_verify_ready(window_verify_full)
+            ready_miss: ScriptStepVerifyResult | None = None
+            if (
+                not skip_verification
+                and predicate_has_ready_assertions({"ready": ready_verify})
+            ):
+                ready_miss = await self._poll_ready_verify(
+                    ready_verify,
                     script_step_index=script_step_index,
-                    windows_before=windows_before,
-                    recorded=window_verify,
                 )
-            elif step_succeeded:
+
+            windows_before: list[WindowInfo] | None = None
+            step_succeeded = False
+            run_window_verify = False
+            if ready_miss is not None:
+                # Do not type when readiness fails; no deferred post-verify.
                 self._clear_deferred_window_verify()
-                if skip_verification:
-                    self.manager.log_info(
-                        f"Script step {script_step_index + 1} skipping verification"
-                    )
-                    verify_result = ScriptStepVerifyResult(
-                        accomplished=True,
-                        branch="advance",
-                        target_step=None,
-                        reason="Verification skipped for this queue run.",
-                    )
-                else:
-                    if run_window_verify:
-                        self.manager.log_info(
-                            f"Script step {script_step_index + 1} auto-advancing "
-                            "(actor tools succeeded; window verify passed)"
+                verify_result = ready_miss
+                # Treat as verify_failed (not actor failed): tools never ran.
+                step_succeeded = True
+            else:
+                if window_verify_has_assertions(window_verify):
+                    windows_before = await self._snapshot_top_level_windows()
+
+                step_succeeded = await self.loop()
+                # Window verify polls continuously when present (floors only).
+                # Otherwise sleep a fixed short gap before finished_at is stamped.
+                run_window_verify = (
+                    step_succeeded and window_verify_has_assertions(window_verify)
+                )
+                window_poll_settle = (
+                    self._window_verify_poll_settle(None, window_verify)
+                    if run_window_verify
+                    else None
+                )
+                window_miss: ScriptStepVerifyResult | None = None
+                if run_window_verify:
+                    if window_poll_settle is not None:
+                        window_miss = await self._poll_window_verify(
+                            windows_before,
+                            window_verify,
+                            settle_after=window_poll_settle,
+                            script_step_index=script_step_index,
                         )
                     else:
-                        self.manager.log_info(
-                            f"Script step {script_step_index + 1} auto-advancing "
-                            "(actor tools succeeded; no window verify required)"
+                        window_miss = await self._window_verify_miss(
+                            windows_before, window_verify
                         )
-                    verify_result = self._auto_advance_verify_result(
-                        window_verify_passed=run_window_verify
+                elif step_succeeded:
+                    gap = float(_FIXED_STEP_GAP_SECONDS)
+                    if gap > 0:
+                        self.manager.log_info(
+                            f"Fixed step gap: waiting {gap:.3f}s"
+                        )
+                        await asyncio.sleep(gap)
+                if window_miss is not None:
+                    verify_result = window_miss
+                    # Tools already ran; after overlay countdown, re-verify before
+                    # re-acting. Stash post-act asserts only (ready is pre-act).
+                    self._stash_deferred_window_verify(
+                        script_step_index=script_step_index,
+                        windows_before=windows_before,
+                        recorded=window_verify,
                     )
-            else:
-                # Actor failure (including move_mouse hold-retry): full retry only.
-                self._clear_deferred_window_verify()
-                hold_retry = self._consume_hold_step_retry()
-                if hold_retry is not None:
-                    self.manager.log_info(
-                        f"Script step {script_step_index + 1} move_mouse failed; "
-                        "holding step for overlay retry"
-                    )
-                    verify_result = hold_retry
-                else:
+                elif step_succeeded:
+                    self._clear_deferred_window_verify()
                     if skip_verification:
                         self.manager.log_info(
-                            f"Script step {script_step_index + 1} skipping verification; "
-                            "actor failed"
+                            f"Script step {script_step_index + 1} skipping verification"
+                        )
+                        verify_result = ScriptStepVerifyResult(
+                            accomplished=True,
+                            branch="advance",
+                            target_step=None,
+                            reason="Verification skipped for this queue run.",
                         )
                     else:
-                        self.manager.log_info(
-                            f"Script step {script_step_index + 1} actor failed; "
-                            "no screenshot verification recovery"
+                        if run_window_verify:
+                            self.manager.log_info(
+                                f"Script step {script_step_index + 1} auto-advancing "
+                                "(actor tools succeeded; window verify passed)"
+                            )
+                        else:
+                            self.manager.log_info(
+                                f"Script step {script_step_index + 1} auto-advancing "
+                                "(actor tools succeeded; no window verify required)"
+                            )
+                        verify_result = self._auto_advance_verify_result(
+                            window_verify_passed=run_window_verify
                         )
-                    verify_result = None
+                else:
+                    # Actor failure (including move_mouse hold-retry): full retry only.
+                    self._clear_deferred_window_verify()
+                    hold_retry = self._consume_hold_step_retry()
+                    if hold_retry is not None:
+                        self.manager.log_info(
+                            f"Script step {script_step_index + 1} move_mouse failed; "
+                            "holding step for overlay retry"
+                        )
+                        verify_result = hold_retry
+                    else:
+                        if skip_verification:
+                            self.manager.log_info(
+                                f"Script step {script_step_index + 1} skipping "
+                                "verification; actor failed"
+                            )
+                        else:
+                            self.manager.log_info(
+                                f"Script step {script_step_index + 1} actor failed; "
+                                "no screenshot verification recovery"
+                            )
+                        verify_result = None
             finished_iso = datetime.now(timezone.utc).isoformat()
             duration_seconds = round(perf_counter() - started_at, 3)
             self._step_transcript_counter += 1

@@ -436,6 +436,11 @@ def _window_verify_from_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
     active = filter_disabled_window_verify(
         raw, analysis.get("window_verify_disabled")
     )
+    # Legacy post-type caret asserts are brittle (Excel edit-host churn). New
+    # analyses use window_verify.ready instead; drop top-level caret on load.
+    if "caret" in active:
+        active = dict(active)
+        active.pop("caret", None)
     active = omit_foreground_when_structural(active)
     if analysis_uses_chrome_window_tool(analysis):
         active = omit_click_window_for_chrome_tools(active)

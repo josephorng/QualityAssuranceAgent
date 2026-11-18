@@ -8,18 +8,22 @@ A missing field asserts nothing. Extra live window changes are ignored. A record
 
 ```mermaid
 flowchart TD
-  Act[Actor finishes the step]
-  Act --> Win{Recorded window_verify has any assertion?}
+  Ready{window_verify.ready present?}
+  Ready -->|yes| PollReady[Poll caret and focused]
+  PollReady -->|miss at deadline| Retry[retry, clearly_unmet]
+  PollReady -->|match| Act[Actor runs the step]
+  Ready -->|no| Act
+  Act --> Win{Remaining window_verify assertions?}
   Win -->|yes, and tools succeeded| Poll[Poll window list and signals]
   Poll -->|match| Advance[advance]
-  Poll -->|miss at deadline| Retry[retry, clearly_unmet]
+  Poll -->|miss at deadline| Retry
   Win -->|no, and tools succeeded| Advance
   Win -->|tools failed| Fail[fail the step]
 ```
 
 Replay does not send a screenshot to a verifier LLM. A successful actor with no recorded window or signal assertion advances without a screenshot.
 
-Polling starts immediately after the actions and repeats every 0.1 seconds. The poll budget uses assertion floors only: `appeared` floors at 5 seconds; `disappeared` and signal assertions (`foreground`, `click_window`, clipboard, caret, focused, scroll) floor at 1 second. The deadline is 2.0× that base when the base is at least 2 seconds, otherwise 1.0×. When `close_windows` succeeded and a disappeared window is still present, verify re-closes it until the check passes or the deadline, which is at least 10 seconds. Steps without window-verify assertions wait a fixed 0.25 seconds before advancing.
+For text input, `window_verify.ready` (caret host and/or focused name from `signals_before`) is polled **before** tools run. A miss retries without typing. Post-act polling starts immediately after the actions and repeats every 0.1 seconds. The poll budget uses assertion floors only: `appeared` floors at 5 seconds; `disappeared` and signal assertions (`foreground`, `click_window`, clipboard, focused, scroll) floor at 1 second; `ready` also floors at 1 second. The deadline is 2.0× that base when the base is at least 2 seconds, otherwise 1.0×. When `close_windows` succeeded and a disappeared window is still present, verify re-closes it until the check passes or the deadline, which is at least 10 seconds. Steps without window-verify assertions wait a fixed 0.25 seconds before advancing.
 
 ## Where the recorded predicate comes from
 
@@ -31,7 +35,7 @@ Recording stores two samples on `window_snapshot_debug`, then `window_verify_fro
 | Press-time point | On the mouse hook, at the click coordinates | `WindowFromPoint` + `GetAncestor(GA_ROOT)`. This overwrites `signals_before.point_window`. It is also the `click_window` passed to `move_mouse`. |
 | After | Window-step thread, after the remaining 0.25 seconds (0.45 seconds for a title-bar click). A text step flushed by the next click or key uses the settle cache copied on the hook before that gesture, so the gesture's window change stays on the gesture. | A fresh top-level window list, then `capture_step_signals` at the same cursor. UI Automation runs only for a click, text input, or scroll, with a 1 second timeout. On timeout the window list and fast signals are kept; only UIA fields are skipped and `uia_timed_out` is set on the debug dict. The sealed text after-sample skips that live read. |
 
-`signal_verify_fields` keeps only values that changed. The stored value is the after-sample.
+`signal_verify_fields` keeps only values that changed. The stored value is the after-sample. For `text_input`, `window_verify_from_debug` also attaches `ready` from `signals_before` via `text_input_ready_fields` (caret class/process and focused name when present).
 
 ## Window list
 
@@ -54,9 +58,11 @@ Replay reads a signal only when the recorded predicate contains that field (`cap
 | `foreground` | `GetForegroundWindow` changed, and the after window is not the agent hub. Omitted when `appeared`, `disappeared`, or `state` is also present (next-focus after those changes is ignored on replay too). | `GetForegroundWindow`, then class, title, and the executable name of that hwnd's process. | Same call after the step. A live agent-hub foreground fails. |
 | `click_window` | Click, double-click, triple-click, right-click, or middle-click, and the root window under the cursor changed between press and settle. The stored identity is the **press-time** window, including its executable name. | `WindowFromPoint` on the mouse hook at the click, then the executable name of that process, saved as `signals_before.point_window`. | The click tool calls `window_at_point` at the click coordinates before the button goes down. Verification uses that identity and does not read the cursor again after settle. |
 | `clipboard` | Clipboard text changed. | `pyperclip.paste`, giving up after 0.25 seconds. Text is cut at 4000 characters. | Same read. Compared as an exact string. |
-| `caret` | Text input, and the caret window changed: a different hwnd, or the caret appeared. Movement inside the same hwnd is omitted. The field is omitted unless both the class name and the executable name were read. | `GetGUIThreadInfo` on the foreground thread for `hwndCaret`, then `GetClassNameW` and the executable file name of that window's process. The stored value is those two names. | The live caret window's class name and executable file name must both match. Screen position is not compared. |
-| `focused` | Text input, and the focused element's name or value changed. A name equal to the foreground title is ignored. A value that is neither equal to the typed text nor a prefix of it (or the reverse) is omitted: an address bar can report a fragment that is not the text the step types. | UI Automation `GetFocusedElement`: current name, and the value pattern when present. | Exact `name`. `value` matches when the strings are equal, or one is a prefix of the other, so an inline-autocomplete tail on either side still passes. |
+| `ready` | Text input. Built from `signals_before` only: caret class+process when both were read, and focused name when non-empty and not equal to the foreground title. Does not store focused value. | Same caret and focused reads as below. | Polled **before** `type_text`. Live caret class/process and focused name must match. |
+| `focused` | Text input, and the focused element's name or value changed **after** the step. A name equal to the foreground title is ignored. A value that is neither equal to the typed text nor a prefix of it (or the reverse) is omitted: an address bar can report a fragment that is not the text the step types. | UI Automation `GetFocusedElement`: current name, and the value pattern when present. | Exact `name`. `value` matches when the strings are equal, or one is a prefix of the other, so an inline-autocomplete tail on either side still passes. Checked after the step. |
 | `scroll` | A scroll, and the percent moved by more than 0.5. Stored to one decimal. | UI Automation element at the cursor, walking up to 8 parents, from the range-value pattern: `(value - min) / (max - min) * 100`. | Within 5 percent. |
+
+Post-type top-level `caret` is no longer recorded. Older analyses that still have it are stripped at replay load (`_window_verify_from_analysis`); use `ready.caret` after re-analysis.
 
 `control_state` may still appear in recorded `signals_before` / `signals_after` for debugging. It is not written into `window_verify` and is ignored if an older analysis still has it.
 

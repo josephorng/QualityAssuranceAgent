@@ -6338,6 +6338,7 @@ _WINDOW_VERIFY_LABELS: dict[str, str] = {
     "foreground": "前景視窗",
     "click_window": "點擊視窗",
     "clipboard": "剪貼簿",
+    "ready": "輸入前就緒",
     "caret": "插入點",
     "focused": "焦點元素",
     "scroll": "捲動位置",
@@ -6376,6 +6377,17 @@ def _format_window_verify_value(key: str, value: Any) -> str | None:
         text = "" if value is None else str(value)
         preview = text if len(text) <= 120 else f"{text[:117]}..."
         return f'<span class="mono">{escape(preview)}</span>'
+    if key == "ready":
+        if not isinstance(value, dict) or not value:
+            return None
+        parts: list[str] = []
+        caret_html = _format_window_verify_value("caret", value.get("caret"))
+        if caret_html:
+            parts.append(f"插入點（輸入前）: {caret_html}")
+        focused_html = _format_window_verify_value("focused", value.get("focused"))
+        if focused_html:
+            parts.append(f"焦點（輸入前）: {focused_html}")
+        return "<br>".join(parts) if parts else None
     if key == "caret":
         if not isinstance(value, dict):
             return None
@@ -6493,19 +6505,29 @@ def _html_to_plain(value_html: str) -> str:
 
 
 _WINDOW_VERIFY_MISS_RE = re.compile(
-    r"^window verify missed ([a-z_]+)(?::\s*(.*))?$",
+    r"^window verify missed (?:(ready)\s+)?([a-z_]+)(?::\s*(.*))?$",
     re.DOTALL,
 )
 
 
 def _window_verify_miss(reason: Any) -> tuple[str, str] | None:
-    """Parse ``window verify missed <key>: <detail>`` from a replay failure."""
+    """Parse ``window verify missed <key>: <detail>`` from a replay failure.
+
+    Pre-type readiness failures look like
+    ``window verify missed ready caret: EXCEL7 / EXCEL.EXE``; those map to the
+    ``ready`` checklist row (not a top-level caret row).
+    """
     if not isinstance(reason, str):
         return None
     match = _WINDOW_VERIFY_MISS_RE.match(reason.strip())
     if match is None:
         return None
-    return match.group(1), (match.group(2) or "").strip()
+    ready_prefix, key, detail = match.group(1), match.group(2), (match.group(3) or "").strip()
+    if ready_prefix == "ready":
+        # Keep the inner field in the detail so the ready row can still match.
+        inner = f"{key}: {detail}" if detail else key
+        return "ready", inner
+    return key, detail
 
 
 def _step_verify_failed(verify: Any, status: Any) -> bool:
@@ -6543,6 +6565,20 @@ def _detail_matches_verify_item(detail: str, item: Any) -> bool:
         return bool(detail) and detail == item.strip()
     if not isinstance(item, dict) or not detail:
         return False
+    # Ready body: ``caret: CLASS / EXE`` or ``focused`` / ``focused: …``.
+    if "caret" in item or "focused" in item:
+        if detail in {"caret", "focused"}:
+            return detail in item
+        if detail.startswith("caret:") and isinstance(item.get("caret"), dict):
+            caret = item["caret"]
+            class_name = str(caret.get("class_name") or "").strip()
+            process_name = str(caret.get("process_name") or "").strip()
+            needle = detail.split(":", 1)[1].strip()
+            if class_name and process_name and needle == f"{class_name} / {process_name}":
+                return True
+            return class_name in detail and process_name in detail
+        if detail.startswith("focused") and isinstance(item.get("focused"), dict):
+            return True
     title = str(item.get("title") or "").strip()
     if title and detail == title:
         return True

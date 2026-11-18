@@ -67,6 +67,11 @@ class RecordedEvent:
     # ``control_type`` let analysis inject a FindAll-shaped peer;
     # ``element_from_point_s`` is probe wall time.
     element_from_point: dict[str, Any] | None = None
+    # Post-settle GetFocusedElement snapshot (late-patched on pointer steps):
+    # ``{"name", "value", "bbox", "control_type", "automation_id"}`` with screen
+    # ``bbox`` xywh. Used to repair EFP peers when press BoundingRectangle misses
+    # the click; ``focus_rect`` remains the xyxy overlay derived from this bbox.
+    focused_element: dict[str, Any] | None = None
     # Typing-burst IME summary: ``{"chinese": bool, "lang_id": int}``. Omitted
     # on legacy recordings / non-typing events.
     ime: dict[str, Any] | None = None
@@ -99,6 +104,8 @@ class RecordedEvent:
             data.pop("end_uia_snapshot", None)
         if self.element_from_point is None:
             data.pop("element_from_point", None)
+        if self.focused_element is None:
+            data.pop("focused_element", None)
         if self.ime is None:
             data.pop("ime", None)
         # Ignore legacy observed_settle_seconds if present in older dicts.
@@ -187,6 +194,11 @@ class RecordedEvent:
             element_from_point=(
                 raw.get("element_from_point")
                 if isinstance(raw.get("element_from_point"), dict)
+                else None
+            ),
+            focused_element=(
+                raw.get("focused_element")
+                if isinstance(raw.get("focused_element"), dict)
                 else None
             ),
             ime=raw.get("ime") if isinstance(raw.get("ime"), dict) else None,

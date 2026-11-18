@@ -2131,7 +2131,7 @@ def test_window_step_findall_sets_drag_end_uia(tmp_path: Path) -> None:
         "src.recorder.uia_input_boxes.snapshot_uia_screen",
         return_value=release,
     ), patch.object(session, "_resolve_window_change", return_value=(None, None, {})), patch.object(
-        session, "_sample_debug_focus_rect_for_item", return_value=None
+        session, "_sample_debug_focus_for_item", return_value=(None, None)
     ), patch.object(session, "_sleep_remaining_window_settle"):
         session._window_step_body(
             _QueuedEvent(

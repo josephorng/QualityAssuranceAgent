@@ -190,6 +190,10 @@ def is_winforms_scrollbar_thumb_efp_name(name: str | None) -> bool:
     """True when an EFP leaf Name should seed a scrollbar peer (``Position``)."""
     return str(name or "").strip().casefold() in _SCROLLBAR_THUMB_NAMES
 
+# DataItem (Excel cells, dense grids) is intentionally omitted: FindAll under
+# XLMAIN would return every visible cell and block settle/hover for tens of
+# seconds. Recording/replay name cells from ElementFromPoint instead
+# (``control_type=data_item`` stays in ``UIA_CONTROL_TYPE_SUFFIX``).
 _LABELED_TEXT_CONTROL_TYPES = frozenset(
     {
         _UIA_BUTTON_CONTROL_TYPE_ID,
@@ -202,7 +206,6 @@ _LABELED_TEXT_CONTROL_TYPES = frozenset(
         _UIA_TABITEM_CONTROL_TYPE_ID,
         _UIA_TEXT_CONTROL_TYPE_ID,
         _UIA_TREEITEM_CONTROL_TYPE_ID,
-        _UIA_DATAITEM_CONTROL_TYPE_ID,
         _UIA_SPLITBUTTON_CONTROL_TYPE_ID,
         _UIA_HEADER_CONTROL_TYPE_ID,
         _UIA_HEADERITEM_CONTROL_TYPE_ID,
@@ -567,6 +570,41 @@ def resolve_usable_uia_probe_label(
     if str(name or "").strip() or str(value or "").strip():
         return str(uia_label_combine_name_value(name, value) or "").strip()
     return str(canonicalize_uia_shell_status_label(preferred) or "").strip()
+
+
+def efp_payload_is_usable_data_item(payload: dict[str, Any] | None) -> bool:
+    """True when idle/press EFP alone can green the UIA LED for a grid cell.
+
+    DataItem is excluded from FindAll (Excel cell blow-up); a usable
+    ``control_type=data_item`` leaf with bbox is enough for readiness / path.
+    Rejects weak hubs and WinForms ``Position`` thumbs.
+    """
+    if not isinstance(payload, dict):
+        return False
+    control_type = str(payload.get("control_type") or "").strip()
+    if control_type != "data_item":
+        return False
+    name = str(payload.get("name") or "").strip()
+    if is_winforms_scrollbar_thumb_efp_name(name):
+        return False
+    label = resolve_usable_uia_probe_label(
+        name=name,
+        value=str(payload.get("value") or "").strip(),
+    )
+    if (
+        not label
+        or not is_usable_uia_landmark_label(label)
+        or is_weak_efp_hub_label(label)
+    ):
+        return False
+    raw_bbox = payload.get("bbox")
+    if not (isinstance(raw_bbox, (list, tuple)) and len(raw_bbox) == 4):
+        return False
+    try:
+        _sx, _sy, sw, sh = (int(v) for v in raw_bbox[:4])
+    except (TypeError, ValueError):
+        return False
+    return sw > 0 and sh > 0
 
 
 def _intersect_local_box(
@@ -1829,8 +1867,10 @@ def _foreground_hwnd() -> int | None:
     return hwnd or None
 
 
-def _focused_ocr_clip_field_screen_xyxy() -> ScreenXyxy | None:
-    """Focused UIA Edit/Document/ComboBox/Pane bounds when control type matches."""
+def _with_uia_focused_element(
+    consume: Callable[[ctypes.c_void_p], Any],
+) -> Any | None:
+    """Run ``consume(focused_element)`` under a live GetFocusedElement COM session."""
     if os.name != "nt":
         return None
 
@@ -1865,16 +1905,17 @@ def _focused_ocr_clip_field_screen_xyxy() -> ScreenXyxy | None:
             ctypes.HRESULT,
             ctypes.c_void_p,
             ctypes.POINTER(ctypes.c_void_p),
-        )(_com_vtable(automation, _UIA_GET_FOCUSED_ELEMENT_INDEX + 1)[_UIA_GET_FOCUSED_ELEMENT_INDEX])
+        )(
+            _com_vtable(automation, _UIA_GET_FOCUSED_ELEMENT_INDEX + 1)[
+                _UIA_GET_FOCUSED_ELEMENT_INDEX
+            ]
+        )
         element_ptr = ctypes.c_void_p()
         hr = get_focused(automation, ctypes.byref(element_ptr))
         if hr != _S_OK or not element_ptr:
             return None
         element = element_ptr
-        control_type = _element_control_type(element)
-        if control_type not in _OCR_CLIP_FIELD_CONTROL_TYPE_IDS:
-            return None
-        return _element_bounding_xyxy(element)
+        return consume(element)
     except Exception:
         return None
     finally:
@@ -1885,6 +1926,83 @@ def _focused_ocr_clip_field_screen_xyxy() -> ScreenXyxy | None:
                 ole32.CoUninitialize()
             except Exception:
                 pass
+
+
+def uia_focused_element_snapshot() -> dict[str, Any] | None:
+    """Post-settle GetFocusedElement payload for recording.
+
+    Returns ``{"name", "value", "bbox", "control_type", "automation_id"}`` when
+    the focused leaf has a usable screen box. ``bbox`` is screen xywh (same as
+    press-time ``element_from_point``). Empty name/value/type/id fields are
+    omitted. Returns ``None`` when UIA focus is unavailable.
+    """
+
+    def _read(element: ctypes.c_void_p) -> dict[str, Any] | None:
+        bounds = _element_bounding_xyxy(element)
+        if bounds is None:
+            return None
+        left, top, right, bottom = bounds
+        width = int(right) - int(left)
+        height = int(bottom) - int(top)
+        if width <= 0 or height <= 0:
+            return None
+        out: dict[str, Any] = {
+            "bbox": [int(left), int(top), width, height],
+        }
+        _label, name, value = _element_label_parts(element)
+        name = str(name or "").strip()
+        value = str(value or "").strip()
+        if name:
+            out["name"] = name
+        if value:
+            out["value"] = value
+        control_type = control_type_token_from_id(_element_control_type(element))
+        if control_type:
+            out["control_type"] = control_type
+        automation_id = str(_element_automation_id(element) or "").strip()
+        if automation_id:
+            out["automation_id"] = automation_id
+        return out
+
+    result = _with_uia_focused_element(_read)
+    return result if isinstance(result, dict) else None
+
+
+def focused_element_focus_rect(
+    payload: dict[str, Any] | None,
+) -> tuple[int, int, int, int] | None:
+    """Convert a focused-element ``bbox`` xywh into overlay ``focus_rect`` xyxy."""
+    if not isinstance(payload, dict):
+        return None
+    raw = payload.get("bbox")
+    if not (isinstance(raw, (list, tuple)) and len(raw) == 4):
+        return None
+    try:
+        x, y, w, h = (int(v) for v in raw[:4])
+    except (TypeError, ValueError):
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    return (x, y, x + w, y + h)
+
+
+def _focused_ocr_clip_field_screen_xyxy() -> ScreenXyxy | None:
+    """Focused UIA Edit/Document/ComboBox/Pane bounds when control type matches."""
+
+    def _read(element: ctypes.c_void_p) -> ScreenXyxy | None:
+        control_type = _element_control_type(element)
+        if control_type not in _OCR_CLIP_FIELD_CONTROL_TYPE_IDS:
+            return None
+        return _element_bounding_xyxy(element)
+
+    result = _with_uia_focused_element(_read)
+    if (
+        isinstance(result, tuple)
+        and len(result) == 4
+        and all(isinstance(v, int) for v in result)
+    ):
+        return result  # type: ignore[return-value]
+    return None
 
 
 def enumerate_ocr_clip_field_screen_xyxy(hwnd: int) -> list[ScreenXyxy]:

@@ -316,3 +316,19 @@ def sample_debug_focus_rect(
         ).rect
     except Exception:
         return None
+
+
+def sample_focused_element() -> dict | None:
+    """Post-settle GetFocusedElement snapshot for pointer-step recording.
+
+    Shape mirrors press ``element_from_point`` plus ``automation_id``:
+    ``name`` / ``value`` / ``bbox`` (screen xywh) / ``control_type`` /
+    ``automation_id``. Returns ``None`` when UIA focus is unavailable.
+    """
+    try:
+        from src.recorder.uia_input_boxes import uia_focused_element_snapshot
+
+        payload = uia_focused_element_snapshot()
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None

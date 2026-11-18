@@ -79,6 +79,9 @@ def _default_capture_window_patches():
         side_effect=_fake_resolve_typing_focus,
     ), patch(
         # Debug focus sampling is separate from typing focus; keep it off by default.
+        "src.recorder.capture.sample_focused_element",
+        return_value=None,
+    ), patch(
         "src.recorder.capture.sample_debug_focus_rect",
         return_value=None,
     ), patch(
@@ -2859,9 +2862,19 @@ def test_pending_capture_paths_differ_per_press(tmp_path) -> None:
 
 def test_pointer_click_persists_debug_focus_rect_after_settle(tmp_path) -> None:
     session = RecordingSession(runs_root=tmp_path)
+    focused = {
+        "name": "Search",
+        "value": "",
+        "bbox": [10, 20, 100, 40],
+        "control_type": "edit",
+        "automation_id": "SearchBox",
+    }
     with _default_capture_window_patches(), patch(
         "src.recorder.capture._capture_screenshot_at_point",
         side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.sample_focused_element",
+        return_value=focused,
     ), patch(
         "src.recorder.capture.sample_debug_focus_rect",
         return_value=(10, 20, 110, 60),
@@ -2881,6 +2894,7 @@ def test_pointer_click_persists_debug_focus_rect_after_settle(tmp_path) -> None:
     raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
     assert raw["kind"] == "click"
     assert raw["focus_rect"] == [10, 20, 110, 60]
+    assert raw["focused_element"] == focused
 
 
 def test_pointer_click_persists_window_change(tmp_path) -> None:

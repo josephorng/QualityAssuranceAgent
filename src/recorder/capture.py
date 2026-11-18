@@ -20,7 +20,11 @@ from cua_mcp.geometry import point_in_rect_xywh
 from src.common.run_state import unique_run_folder_name
 from src.common.settings import load_settings
 from src.eye.capture import capture_all_screens_to_file, resolve_monitor_index
-from src.recorder.focus_point import resolve_typing_focus, sample_debug_focus_rect
+from src.recorder.focus_point import (
+    resolve_typing_focus,
+    sample_debug_focus_rect,
+    sample_focused_element,
+)
 from src.recorder.uia_input_boxes import sample_uia_ocr_clip_rect
 from src.recorder.frame_similarity import last_settle_frame_path
 from src.recorder.models import (
@@ -1717,10 +1721,40 @@ class RecordingSession:
         self._idle_efp_generation += 1
         return int(self._idle_efp_generation)
 
-    def _schedule_idle_efp(self, x: int, y: int) -> None:
-        """Debounce ElementFromPoint for the LED label. Hook-safe (timer only)."""
+    def _idle_efp_same_data_item_bbox_locked(self, x: int, y: int) -> bool:
+        """True when ``(x, y)`` is still inside the last usable data_item EFP bbox.
+
+        Caller holds ``_lock``. Used to skip mouse-move re-probes inside an
+        Excel cell; settle/hover force-refresh bypasses this.
+        """
+        from src.recorder.uia_input_boxes import efp_payload_is_usable_data_item
+
+        payload = self._idle_efp_payload
+        if not efp_payload_is_usable_data_item(payload):
+            return False
+        assert isinstance(payload, dict)
+        raw_bbox = payload.get("bbox")
+        if not (isinstance(raw_bbox, (list, tuple)) and len(raw_bbox) == 4):
+            return False
+        try:
+            bbox = (int(raw_bbox[0]), int(raw_bbox[1]), int(raw_bbox[2]), int(raw_bbox[3]))
+        except (TypeError, ValueError):
+            return False
+        if bbox[2] <= 0 or bbox[3] <= 0:
+            return False
+        return point_in_rect_xywh(int(x), int(y), bbox)
+
+    def _schedule_idle_efp(self, x: int, y: int, *, force: bool = False) -> None:
+        """Debounce ElementFromPoint for the LED label. Hook-safe (timer only).
+
+        When ``force`` is False and the cursor remains inside a usable idle
+        ``data_item`` bbox, skip cancel/bump/timer so the LED label does not
+        clear to pending and COM is not re-probed.
+        """
         with self._lock:
             if not self._accepting_input or self._finalizing:
+                return
+            if not force and self._idle_efp_same_data_item_bbox_locked(int(x), int(y)):
                 return
             self._cancel_idle_efp_timer_locked()
             generation = self._bump_idle_efp_generation_locked()
@@ -1747,7 +1781,7 @@ class RecordingSession:
             xy = self._last_move_xy or self._last_pointer_cursor_xy
         if xy is None:
             return
-        self._schedule_idle_efp(int(xy[0]), int(xy[1]))
+        self._schedule_idle_efp(int(xy[0]), int(xy[1]), force=True)
 
     def _idle_efp_timer_fired(self, generation: int, x: int, y: int) -> None:
         with self._lock:
@@ -1788,11 +1822,26 @@ class RecordingSession:
     def _uia_path_ready_at_cursor(
         self,
         cursor_xy: tuple[int, int] | None,
+        *,
+        efp_payload: dict[str, Any] | None | object = _EFP_UNSET,
     ) -> bool:
-        """True when the attachable FindAll cache would record a UIA vision path."""
+        """True when FindAll or a usable EFP DataItem would record a UIA path.
+
+        DataItem cells are omitted from FindAll; a usable idle/press EFP
+        ``data_item`` leaf alone is enough for green readiness.
+        """
         if cursor_xy is None:
             return False
         x, y = int(cursor_xy[0]), int(cursor_xy[1])
+        if efp_payload is _EFP_UNSET:
+            with self._lock:
+                efp_payload = self._idle_efp_payload
+        from src.recorder.uia_input_boxes import efp_payload_is_usable_data_item
+
+        if efp_payload_is_usable_data_item(
+            efp_payload if isinstance(efp_payload, dict) else None
+        ):
+            return True
         click_window = self._click_window_payload_at(x, y)
         snapshot = self._cached_uia_before(click_window, cursor_xy=(x, y))
         if not isinstance(snapshot, dict):
@@ -1814,10 +1863,11 @@ class RecordingSession:
         claim_token: int | None = None,
         from_settle: bool = False,
     ) -> None:
-        """Paint green only when FindAll at the cursor is UIA-path sufficient.
+        """Paint green when FindAll or a usable EFP DataItem is UIA-path ready.
 
         EFP Name/Value is a live cursor preview on any LED color. Red updates
-        the LED only and does not clear a just-probed label.
+        the LED only and does not clear a just-probed label. A usable
+        ``data_item`` EFP leaf greens without FindAll cell texts.
         """
         if claim_token is not None:
             with self._lock:
@@ -6413,21 +6463,44 @@ class RecordingSession:
             self._window_step_threads.append(thread)
         thread.start()
 
+    def _sample_debug_focus_for_item(
+        self,
+        item: _QueuedEvent,
+    ) -> tuple[tuple[int, int, int, int] | None, dict[str, Any] | None]:
+        """Post-settle focused snapshot + overlay rect for pointer steps.
+
+        Prefers GetFocusedElement name/value/bbox/type/automationId. Falls back
+        to caret/UIA bounds-only sampling when the rich snapshot is unavailable.
+        """
+        from src.recorder.uia_input_boxes import focused_element_focus_rect
+
+        focused = sample_focused_element()
+        if isinstance(focused, dict):
+            rect = focused_element_focus_rect(focused)
+            if rect is not None:
+                return rect, focused
+        return (
+            sample_debug_focus_rect(
+                last_click_xy=item.cursor_xy,
+                mouse_xy=item.cursor_xy,
+            ),
+            None,
+        )
+
     def _sample_debug_focus_rect_for_item(
         self,
         item: _QueuedEvent,
     ) -> tuple[int, int, int, int] | None:
         """Focused-element bounds after settle, for screenshot overlays only."""
-        return sample_debug_focus_rect(
-            last_click_xy=item.cursor_xy,
-            mouse_xy=item.cursor_xy,
-        )
+        rect, _focused = self._sample_debug_focus_for_item(item)
+        return rect
 
     def _window_step_body(self, item: _QueuedEvent) -> None:
         change: dict[str, Any] | None = None
         title: str | None = None
         debug: dict[str, Any] | None = None
         focus_rect: tuple[int, int, int, int] | None = None
+        focused_element: dict[str, Any] | None = None
         need_window = bool(
             item.windows_before or item.signals_before or item.window_after_sealed
         )
@@ -6436,10 +6509,10 @@ class RecordingSession:
             # Sealed after-cache means the next gesture already ran; sampling
             # focus now would describe that later gesture, not this one.
             if not item.window_after_sealed:
-                focus_rect = self._sample_debug_focus_rect_for_item(item)
+                focus_rect, focused_element = self._sample_debug_focus_for_item(item)
         else:
             self._sleep_remaining_window_settle(item)
-            focus_rect = self._sample_debug_focus_rect_for_item(item)
+            focus_rect, focused_element = self._sample_debug_focus_for_item(item)
             # Same outcome as ``_resolve_window_change`` with an empty before-cache.
             debug = _window_resolve_failure_debug("missing_before_cache")
         if not item.window_after_sealed:
@@ -6456,7 +6529,13 @@ class RecordingSession:
         else:
             # Next gesture already sealed after-cache; skip FindAll for this step.
             self._emit_uia_status(state="red", after_index=int(item.event_index))
-        if change is None and title is None and debug is None and focus_rect is None:
+        if (
+            change is None
+            and title is None
+            and debug is None
+            and focus_rect is None
+            and focused_element is None
+        ):
             # Still release deferred text_input / drag vision notify.
             self._notify_pending_text_input(item.event_index)
             self._release_drag_uia_notify(item)
@@ -6467,6 +6546,7 @@ class RecordingSession:
             title,
             debug,
             focus_rect=focus_rect,
+            focused_element=focused_element,
         )
         self._release_drag_uia_notify(item)
 
@@ -6478,6 +6558,7 @@ class RecordingSession:
         debug: dict[str, Any] | None,
         *,
         focus_rect: tuple[int, int, int, int] | None = None,
+        focused_element: dict[str, Any] | None = None,
     ) -> None:
         with self._lock:
             run_dir = self._run_dir
@@ -6508,6 +6589,11 @@ class RecordingSession:
                         int(focus_rect[2]),
                         int(focus_rect[3]),
                     ]
+                if (
+                    isinstance(focused_element, dict)
+                    and raw.get("focused_element") is None
+                ):
+                    raw["focused_element"] = dict(focused_element)
                 write_event_json(run_dir, raw)
                 with self._lock:
                     events = self._events

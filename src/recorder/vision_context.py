@@ -176,6 +176,9 @@ def vision_source_fingerprint(event: RecordedEvent) -> str:
     Click settle may late-patch ``focus_rect`` for debug overlays; that must not
     invalidate mid-recording prefetch caches. ``focus_rect`` / ``ocr_clip_rect`` /
     ``anchor_click_xy`` are hashed only for ``text_input``, where they change OCR.
+
+    ``focused_element`` is hashed whenever present: it can repair EFP peer
+    geometry after settle, so a late patch must rebuild vision.
     """
     payload = {
         "index": int(event.index),
@@ -197,6 +200,9 @@ def vision_source_fingerprint(event: RecordedEvent) -> str:
         payload["anchor_click_xy"] = (
             list(event.anchor_click_xy) if event.anchor_click_xy is not None else None
         )
+    focused = getattr(event, "focused_element", None)
+    if isinstance(focused, dict):
+        payload["focused_element"] = focused
     if event.end_click_window is not None:
         payload["end_click_window"] = event.end_click_window
     if event.uia_snapshot is not None:
@@ -4030,6 +4036,9 @@ def _detect_recording_mouse_targets(
     ]
     | None = None,
     forced_scrollbar_bbox: tuple[int, int, int, int] | None = None,
+    element_from_point: dict[str, Any] | None = None,
+    efp_monitor_offset: tuple[int, int] | None = None,
+    focused_element: dict[str, Any] | None = None,
 ) -> tuple[list[UiDetection], dict[str, Any]]:
     """UIA candidates when the usable-label gate passes; otherwise YOLO+OCR.
 
@@ -4039,12 +4048,49 @@ def _detect_recording_mouse_targets(
     ``uia_prefetched`` is still passed so UIA inputs and scrollbars can
     prefer-replace overlapping YOLO boxes. UIA labeled text is not mixed into
     OCR candidates.
+
+    Press-time ``element_from_point`` is merged as a FindAll-shaped peer
+    **before** ``recording_uia_skip_reason`` so Excel DataItem cells (omitted
+    from FindAll) still record ``vision_path=uia``. Post-settle
+    ``focused_element`` may repair the peer bbox when press EFP geometry misses
+    the click.
     """
     _ = live_input_hwnd, live_input_monitor_offset, live_input_window_screen_xywh
     vision_timing: dict[str, Any] = timing_out if timing_out is not None else {}
     uia_detections = _detections_from_uia_prefetched(uia_prefetched)
-    if uia_prefetched is None:
+    efp_peer: UiDetection | None = None
+    if (
+        element_from_point is not None
+        and local_x is not None
+        and local_y is not None
+    ):
+        ox, oy = (
+            (int(efp_monitor_offset[0]), int(efp_monitor_offset[1]))
+            if efp_monitor_offset is not None
+            else (int(coord_offset[0]), int(coord_offset[1]))
+        )
+        efp_peer = _efp_peer_detection_from_payload(
+            element_from_point,
+            monitor_offset=(ox, oy),
+            local_x=int(local_x),
+            local_y=int(local_y),
+            existing=uia_detections,
+            focused_element=focused_element,
+            timing_out=vision_timing,
+        )
+        if efp_peer is not None:
+            uia_detections = [*uia_detections, efp_peer]
+            vision_timing["efp_peer_injected"] = True
+    if uia_prefetched is None and efp_peer is None:
         skip_reason: str | None = "沒有 UIA 快照"
+    elif uia_prefetched is None and efp_peer is not None:
+        # EFP-only DataItem leaf (no FindAll snapshot) can still open UIA path.
+        skip_reason = recording_uia_skip_reason(
+            uia_detections,
+            local_x=local_x,
+            local_y=local_y,
+            forced_scrollbar_bbox=forced_scrollbar_bbox,
+        )
     else:
         skip_reason = recording_uia_skip_reason(
             uia_detections,
@@ -4083,6 +4129,9 @@ def _detect_recording_mouse_targets(
     vision_timing["vision_path"] = "yolo_ocr"
     vision_timing["vision_path_reason"] = skip_reason
     vision_timing["recording_uia_sufficient"] = False
+    # Keep EFP peer on the YOLO pool for naming (same as pre-gate injection).
+    if efp_peer is not None:
+        return [*detections, efp_peer], vision_timing
     return detections, vision_timing
 
 
@@ -4306,6 +4355,94 @@ def _efp_name_overlapping_input(
     return best_i
 
 
+# Half-size of a click-local synthetic peer when EFP/focused geometry is unusable.
+_EFP_CLICK_LOCAL_PEER_HALF_PX = 8
+
+
+def _parse_screen_bbox_xywh(
+    raw: object,
+) -> tuple[int, int, int, int] | None:
+    """Parse a screen ``bbox`` xywh list/tuple into ints, or ``None``."""
+    if not (isinstance(raw, (list, tuple)) and len(raw) == 4):
+        return None
+    try:
+        x, y, w, h = (int(v) for v in raw[:4])
+    except (TypeError, ValueError):
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    return x, y, w, h
+
+
+def _efp_focused_labels_agree(
+    efp_label: str,
+    focused_element: dict[str, Any] | None,
+) -> bool:
+    """True when post-settle focused Name/Value soft-agrees with the EFP label."""
+    if not isinstance(focused_element, dict):
+        return False
+    from src.recorder.uia_input_boxes import (
+        ocr_uia_labels_soft_agree,
+        resolve_usable_uia_probe_label,
+    )
+
+    focused_label = resolve_usable_uia_probe_label(
+        name=str(focused_element.get("name") or "").strip(),
+        value=str(focused_element.get("value") or "").strip(),
+    )
+    if not focused_label:
+        return False
+    left = _visible_text(efp_label)
+    right = _visible_text(focused_label)
+    if not left or not right:
+        return False
+    if left.casefold() == right.casefold():
+        return True
+    return ocr_uia_labels_soft_agree(left, right)
+
+
+def _efp_peer_local_bbox(
+    element_from_point: dict[str, Any],
+    *,
+    monitor_offset: tuple[int, int],
+    local_x: int,
+    local_y: int,
+    control_type: str | None,
+    efp_label: str,
+    focused_element: dict[str, Any] | None,
+) -> tuple[tuple[int, int, int, int], str] | None:
+    """Resolve a click-containing local xywh for an EFP peer.
+
+    Preference: press EFP bbox → focused_element bbox (label agree) → click-local
+    synthetic leaf (non-input only). Returns ``(local_bbox, source)``.
+    """
+    origin_x, origin_y = int(monitor_offset[0]), int(monitor_offset[1])
+    efp_box = _parse_screen_bbox_xywh(element_from_point.get("bbox"))
+    if efp_box is not None:
+        sx, sy, sw, sh = efp_box
+        local_bbox = (sx - origin_x, sy - origin_y, sw, sh)
+        if point_in_rect_xywh(int(local_x), int(local_y), local_bbox):
+            return local_bbox, "efp"
+
+    if efp_label and _efp_focused_labels_agree(efp_label, focused_element):
+        focused_box = _parse_screen_bbox_xywh(
+            focused_element.get("bbox") if isinstance(focused_element, dict) else None
+        )
+        if focused_box is not None:
+            fx, fy, fw, fh = focused_box
+            focused_local = (fx - origin_x, fy - origin_y, fw, fh)
+            if point_in_rect_xywh(int(local_x), int(local_y), focused_local):
+                return focused_local, "focused_element"
+
+    if control_type == "input":
+        return None
+    half = int(_EFP_CLICK_LOCAL_PEER_HALF_PX)
+    return (
+        (int(local_x) - half, int(local_y) - half, half * 2, half * 2),
+        "click_local",
+    )
+
+
 def _efp_peer_detection_from_payload(
     element_from_point: dict[str, Any] | None,
     *,
@@ -4313,6 +4450,8 @@ def _efp_peer_detection_from_payload(
     local_x: int,
     local_y: int,
     existing: list[UiDetection],
+    focused_element: dict[str, Any] | None = None,
+    timing_out: dict[str, Any] | None = None,
 ) -> UiDetection | None:
     """Build a FindAll-shaped UIA peer from stored press-time EFP.
 
@@ -4324,6 +4463,10 @@ def _efp_peer_detection_from_payload(
       peer (skipped when FindAll already has a scrollbar covering the press)
     - tokens in ``UIA_CONTROL_TYPE_SUFFIX`` → labeled text peer
     - empty / legacy → text peer (contained/coextensive promotion may name Edit)
+
+    When the press EFP bbox misses the click, prefer post-settle
+    ``focused_element`` bounds (label must agree) or a small click-local
+    synthetic leaf for non-input peers.
 
     Returns ``None`` when bbox/label is missing or unusable, when a same-label
     labeled leaf already covers the click / overlaps the leaf, or when an
@@ -4349,22 +4492,28 @@ def _efp_peer_detection_from_payload(
         or is_weak_efp_hub_label(label)
     ):
         return None
-    raw_bbox = element_from_point.get("bbox")
-    if not (isinstance(raw_bbox, (list, tuple)) and len(raw_bbox) == 4):
-        return None
-    try:
-        sx, sy, sw, sh = (int(v) for v in raw_bbox[:4])
-    except (TypeError, ValueError):
-        return None
-    if sw <= 0 or sh <= 0:
-        return None
-    origin_x, origin_y = int(monitor_offset[0]), int(monitor_offset[1])
-    local_bbox = (sx - origin_x, sy - origin_y, sw, sh)
-    if not point_in_rect_xywh(int(local_x), int(local_y), local_bbox):
-        # Click must still lie in the leaf; otherwise keep FindAll-only ranking.
-        return None
 
     control_type = str(element_from_point.get("control_type") or "").strip() or None
+    if not control_type and isinstance(focused_element, dict):
+        focused_type = str(focused_element.get("control_type") or "").strip()
+        if focused_type:
+            control_type = focused_type
+
+    resolved = _efp_peer_local_bbox(
+        element_from_point,
+        monitor_offset=monitor_offset,
+        local_x=local_x,
+        local_y=local_y,
+        control_type=control_type,
+        efp_label=label,
+        focused_element=focused_element,
+    )
+    if resolved is None:
+        return None
+    local_bbox, bbox_source = resolved
+    if isinstance(timing_out, dict):
+        timing_out["efp_peer_bbox_source"] = bbox_source
+
     if control_type == "input":
         # Prefer naming an existing FindAll Edit over a duplicate same-box peer.
         hit_i = _efp_name_overlapping_input(
@@ -4555,6 +4704,16 @@ def build_vision_context_at_point(
             screenshot_offset,
         )
     vision_timing: dict = {}
+    efp_payload = (
+        event.element_from_point
+        if isinstance(event.element_from_point, dict)
+        else None
+    )
+    focused_payload = (
+        event.focused_element
+        if isinstance(getattr(event, "focused_element", None), dict)
+        else None
+    )
     try:
         all_detections, vision_timing = _detect_recording_mouse_targets(
             bgr,
@@ -4568,25 +4727,13 @@ def build_vision_context_at_point(
             local_y=local_y,
             uia_prefetched=uia_prefetched,
             forced_scrollbar_bbox=forced_scrollbar_bbox,
+            element_from_point=efp_payload,
+            efp_monitor_offset=screenshot_offset,
+            focused_element=focused_payload,
         )
     except RuntimeError as exc:
         all_detections = []
         yolo_error = str(exc)
-
-    efp_payload = (
-        event.element_from_point
-        if isinstance(event.element_from_point, dict)
-        else None
-    )
-    efp_peer = _efp_peer_detection_from_payload(
-        efp_payload,
-        monitor_offset=screenshot_offset,
-        local_x=local_x,
-        local_y=local_y,
-        existing=all_detections,
-    )
-    if efp_peer is not None:
-        all_detections = [*all_detections, efp_peer]
 
     # Weak-EFP safety: if UIA won but OCR nearest hub disagrees, demote to YOLO.
     fallback_for_demote = vision_timing.get("yolo_ocr_fallback_detections")
@@ -5161,6 +5308,56 @@ def _align_drag_scrollbar_tracks_with_press(
         )
 
 
+def _uia_control_type_of(
+    item: UiDetection | dict[str, Any],
+) -> str:
+    """Return stripped ``uia_control_type`` from a detection or candidate dict."""
+    if isinstance(item, UiDetection):
+        return str(item.uia_control_type or "").strip()
+    if isinstance(item, dict):
+        return str(item.get("uia_control_type") or "").strip()
+    return ""
+
+
+def _uia_content_leaf_owns_point(
+    items: list[Any],
+    local_x: int,
+    local_y: int,
+    *,
+    scrollbar_bbox: tuple[int, int, int, int],
+) -> bool:
+    """True when a tighter UIA content leaf contains the click inside ``scrollbar_bbox``.
+
+    Used to skip track-percent annotation for Excel/sheet cells (``data_item``)
+    and similar leaves that sit inside a pane-sized covering scrollbar. Generic
+    on-bar chrome (icon/element without a UIA leaf type) does not qualify.
+    """
+    from src.recorder.uia_input_boxes import UIA_CONTROL_TYPE_SUFFIX
+
+    sb_area = max(1, int(scrollbar_bbox[2]) * int(scrollbar_bbox[3]))
+    for item in items:
+        control_type = _uia_control_type_of(item)
+        if not control_type or control_type not in UIA_CONTROL_TYPE_SUFFIX:
+            continue
+        if isinstance(item, UiDetection):
+            bbox = tuple(int(v) for v in item.bbox)
+            if not _detection_contains_click(item, local_x, local_y):
+                continue
+        elif isinstance(item, dict):
+            bbox_t = _candidate_bbox_tuple(item)
+            if bbox_t is None:
+                continue
+            bbox = bbox_t
+            if not _drop_point_inside_candidate(local_x, local_y, item):
+                continue
+        else:
+            continue
+        leaf_area = max(1, int(bbox[2]) * int(bbox[3]))
+        if leaf_area < sb_area:
+            return True
+    return False
+
+
 def annotate_scrollbar_track(
     vision: dict[str, Any],
     *,
@@ -5172,8 +5369,10 @@ def annotate_scrollbar_track(
 ) -> dict[str, Any] | None:
     """Annotate ``vision`` with ``scrollbar_track`` when the press is on the track.
 
-    Skips end-arrow hits. When ``require_point_inside`` is False (drag release),
-    projects onto ``scrollbar_bbox`` even if the point is outside the bar.
+    Skips end-arrow hits and clicks owned by a tighter UIA content leaf (for
+    example Excel ``data_item`` cells inside a pane-sized covering scrollbar).
+    When ``require_point_inside`` is False (drag release), projects onto
+    ``scrollbar_bbox`` even if the point is outside the bar.
     Promotes the scrollbar candidate to primary so thumb icons do not win wording.
     """
     pool: list[Any] = list(all_detections or [])
@@ -5190,6 +5389,15 @@ def annotate_scrollbar_track(
             return None
         bbox = _candidate_bbox_tuple(found)
         if bbox is None:
+            vision.pop("scrollbar_track", None)
+            return None
+        leaf_pool: list[Any] = list(pool) + list(vision.get("candidates") or [])
+        if _uia_content_leaf_owns_point(
+            leaf_pool,
+            local_x,
+            local_y,
+            scrollbar_bbox=bbox,
+        ):
             vision.pop("scrollbar_track", None)
             return None
         scrollbar_dict = (
@@ -5234,7 +5442,11 @@ def annotate_scrollbar_track(
 
 
 def scrollbar_track_percent_phrase(vision: dict[str, Any]) -> str | None:
-    """Return ``的N%處`` when vision has a scrollbar track percent, else None."""
+    """Return ``的N%處`` when the primary candidate is a scrollbar track hit.
+
+    Requires ``candidates[0].class_name == \"scrollbar\"`` so a covering pane
+    track percent is not glued onto a leaf primary (for example ``data_item``).
+    """
     track = vision.get("scrollbar_track")
     if not isinstance(track, dict):
         return None
@@ -5242,6 +5454,14 @@ def scrollbar_track_percent_phrase(vision: dict[str, Any]) -> str | None:
     if not isinstance(percent, int) or isinstance(percent, bool):
         return None
     if percent < 0 or percent > 100:
+        return None
+    candidates = vision.get("candidates") or []
+    if not candidates:
+        return None
+    primary = candidates[0]
+    if not isinstance(primary, dict):
+        return None
+    if str(primary.get("class_name") or "").strip() != "scrollbar":
         return None
     return f"的{percent}%處"
 

@@ -6,7 +6,9 @@ from src.recorder.focus_point import (
     resolve_typing_focus,
     resolve_typing_screen_xy,
     sample_debug_focus_rect,
+    sample_focused_element,
 )
+from src.recorder.uia_input_boxes import focused_element_focus_rect
 
 
 def test_resolve_typing_prefers_rect_center_when_last_click_outside_focus_rect() -> None:
@@ -114,3 +116,37 @@ def test_sample_debug_focus_rect_swallows_errors(monkeypatch) -> None:
 
     monkeypatch.setattr("src.recorder.focus_point.resolve_typing_focus", _boom)
     assert sample_debug_focus_rect() is None
+
+
+def test_sample_focused_element_returns_snapshot(monkeypatch) -> None:
+    payload = {
+        "name": "文件 (已釘選)",
+        "value": "文件 (已釘選)",
+        "bbox": [53, 294, 34, 32],
+        "control_type": "tree_item",
+        "automation_id": "Documents",
+    }
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.uia_focused_element_snapshot",
+        lambda: payload,
+    )
+    assert sample_focused_element() == payload
+
+
+def test_sample_focused_element_swallows_errors(monkeypatch) -> None:
+    def _boom():
+        raise RuntimeError("uia down")
+
+    monkeypatch.setattr(
+        "src.recorder.uia_input_boxes.uia_focused_element_snapshot",
+        _boom,
+    )
+    assert sample_focused_element() is None
+
+
+def test_focused_element_focus_rect_from_bbox_xywh() -> None:
+    assert focused_element_focus_rect(
+        {"bbox": [53, 294, 34, 32]}
+    ) == (53, 294, 87, 326)
+    assert focused_element_focus_rect(None) is None
+    assert focused_element_focus_rect({"bbox": [1, 2, 0, 4]}) is None

@@ -10,6 +10,88 @@ from src.recorder.vision_context import (
 )
 
 
+def test_recorded_event_focused_element_roundtrip() -> None:
+    from src.recorder.models import RecordedEvent
+
+    focused = {
+        "name": "文件 (已釘選)",
+        "value": "文件 (已釘選)",
+        "bbox": [53, 294, 34, 32],
+        "control_type": "tree_item",
+        "automation_id": "Documents",
+    }
+    event = RecordedEvent(
+        index=15,
+        timestamp_utc="2026-11-18T00:00:00+00:00",
+        kind="click",
+        cursor_xy=(81, 309),
+        focused_element=focused,
+        focus_rect=(53, 294, 87, 326),
+    )
+    raw = event.to_dict()
+    assert raw["focused_element"] == focused
+    assert raw["focus_rect"] == [53, 294, 87, 326]
+    restored = RecordedEvent.from_dict(raw)
+    assert restored.focused_element == focused
+    assert restored.focus_rect == (53, 294, 87, 326)
+
+
+def test_event015_shape_focused_repairs_documents_over_propertreehost() -> None:
+    """Regression: event_015 geometry must name 「文件」 not ProperTreeHost."""
+    host = _detection_from_bbox(
+        (2, 128, 333, 876),
+        YOLO_CLASS_INPUT,
+        text="控制主機|ProperTreeHost",
+        source="uia",
+    )
+    timing: dict = {}
+    peer = _efp_peer_detection_from_payload(
+        {
+            "name": "文件 (已釘選)",
+            "value": "文件 (已釘選)",
+            "bbox": [53, 166, 34, 32],
+        },
+        monitor_offset=(0, 0),
+        local_x=81,
+        local_y=309,
+        existing=[host],
+        focused_element={
+            "name": "文件 (已釘選)",
+            "value": "文件 (已釘選)",
+            "bbox": [53, 294, 34, 32],
+            "control_type": "tree_item",
+        },
+        timing_out=timing,
+    )
+    assert peer is not None
+    assert timing.get("efp_peer_bbox_source") == "focused_element"
+    candidates = [
+        {
+            "bbox": list(host.bbox),
+            "center": [host.cx, host.cy],
+            "class_id": host.class_id,
+            "class_name": host.class_name,
+            "text": host.text,
+            "icons": None,
+            "source": "uia",
+        },
+        {
+            "bbox": list(peer.bbox),
+            "center": [peer.cx, peer.cy],
+            "class_id": peer.class_id,
+            "class_name": peer.class_name,
+            "text": peer.text,
+            "icons": None,
+            "source": "uia",
+            "uia_control_type": peer.uia_control_type,
+        },
+    ]
+    primary = select_click_primary_candidate(candidates, 81, 309)
+    assert primary is not None
+    assert primary.get("text") == "文件"
+    assert "ProperTreeHost" not in str(primary.get("text") or "")
+
+
 def test_efp_peer_beats_bare_input_as_primary() -> None:
     input_det = _detection_from_bbox(
         (0, 0, 400, 900),
@@ -63,13 +145,140 @@ def test_efp_peer_beats_bare_input_as_primary() -> None:
     assert primary.get("class_name") == "text"
 
 
-def test_efp_peer_skips_without_bbox() -> None:
+def test_efp_peer_click_local_without_bbox() -> None:
+    timing: dict = {}
+    efp = _efp_peer_detection_from_payload(
+        {"name": "下載 (已釘選)", "value": "下載 (已釘選)"},
+        monitor_offset=(0, 0),
+        local_x=10,
+        local_y=10,
+        existing=[],
+        timing_out=timing,
+    )
+    assert efp is not None
+    assert efp.class_name == "text"
+    assert efp.text == "下載"
+    assert timing.get("efp_peer_bbox_source") == "click_local"
+    assert efp.bbox[0] <= 10 <= efp.bbox[0] + efp.bbox[2]
+    assert efp.bbox[1] <= 10 <= efp.bbox[1] + efp.bbox[3]
+
+
+def test_efp_peer_repairs_with_focused_element_when_bbox_misses_click() -> None:
+    """Explorer nav: stale EFP bbox + post-settle focused bounds → named text peer."""
+    host = _detection_from_bbox(
+        (2, 128, 333, 876),
+        YOLO_CLASS_INPUT,
+        text="控制主機|ProperTreeHost",
+        source="uia",
+    )
+    timing: dict = {}
+    efp = _efp_peer_detection_from_payload(
+        {
+            "name": "文件 (已釘選)",
+            "value": "文件 (已釘選)",
+            "bbox": [53, 166, 34, 32],  # misses click y=309
+            "control_type": None,
+        },
+        monitor_offset=(0, 0),
+        local_x=81,
+        local_y=309,
+        existing=[host],
+        focused_element={
+            "name": "文件 (已釘選)",
+            "value": "文件 (已釘選)",
+            "bbox": [53, 294, 34, 32],
+            "control_type": "tree_item",
+            "automation_id": "",
+        },
+        timing_out=timing,
+    )
+    assert efp is not None
+    assert efp.text == "文件"
+    assert efp.class_name == "text"
+    assert efp.bbox == (53, 294, 34, 32)
+    assert efp.uia_control_type == "tree_item"
+    assert timing.get("efp_peer_bbox_source") == "focused_element"
+
+    candidates = [
+        {
+            "bbox": list(host.bbox),
+            "center": [host.cx, host.cy],
+            "class_id": host.class_id,
+            "class_name": host.class_name,
+            "text": host.text,
+            "icons": None,
+            "source": "uia",
+        },
+        {
+            "bbox": list(efp.bbox),
+            "center": [efp.cx, efp.cy],
+            "class_id": efp.class_id,
+            "class_name": efp.class_name,
+            "text": efp.text,
+            "icons": None,
+            "source": "uia",
+            "uia_control_type": "tree_item",
+        },
+    ]
+    primary = select_click_primary_candidate(candidates, 81, 309)
+    assert primary is not None
+    assert primary.get("text") == "文件"
+    assert primary.get("class_name") == "text"
+
+
+def test_efp_peer_click_local_when_focused_disagrees() -> None:
+    timing: dict = {}
+    efp = _efp_peer_detection_from_payload(
+        {
+            "name": "文件 (已釘選)",
+            "value": "文件 (已釘選)",
+            "bbox": [53, 166, 34, 32],
+        },
+        monitor_offset=(0, 0),
+        local_x=81,
+        local_y=309,
+        existing=[],
+        focused_element={
+            "name": "桌面",
+            "value": "桌面",
+            "bbox": [53, 294, 34, 32],
+        },
+        timing_out=timing,
+    )
+    assert efp is not None
+    assert efp.text == "文件"
+    assert timing.get("efp_peer_bbox_source") == "click_local"
+
+
+def test_efp_peer_skips_weak_hub() -> None:
     assert (
         _efp_peer_detection_from_payload(
-            {"name": "下載 (已釘選)", "value": "下載 (已釘選)"},
+            {
+                "name": "CoreInput",
+                "value": "",
+                "bbox": [100, 100, 50, 50],
+            },
             monitor_offset=(0, 0),
-            local_x=10,
-            local_y=10,
+            local_x=110,
+            local_y=110,
+            existing=[],
+        )
+        is None
+    )
+
+
+def test_efp_input_bad_bbox_without_focused_does_not_synthesize() -> None:
+    assert (
+        _efp_peer_detection_from_payload(
+            {
+                "name": "網址與搜尋列",
+                "value": "",
+                "bbox": [10, 10, 20, 20],  # misses click
+                "control_type": "input",
+            },
+            monitor_offset=(0, 0),
+            local_x=300,
+            local_y=83,
             existing=[],
         )
         is None
@@ -490,3 +699,63 @@ def test_uia_first_miss_reaches_yolo_path_gate() -> None:
     )
     assert chosen is None
     assert reason == "no_anchor"
+
+
+def test_efp_data_item_before_gate_opens_uia_path_over_covering_scrollbar(
+    monkeypatch,
+) -> None:
+    """FindAll without DataItems + EFP G8 → vision_path=uia; cell beats scrollbar."""
+    import numpy as np
+
+    from src.recorder.vision_context import (
+        _detect_recording_mouse_targets,
+        recording_uia_skip_reason,
+        select_click_primary_candidate,
+        _detection_to_dict,
+    )
+
+    bgr = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    # Chrome only: large scrollbar covering the cell (no DataItem FindAll texts).
+    prefetched = (
+        [],
+        [(0, 300, 1920, 700)],
+        [],
+    )
+
+    def fake_detect(*_a, **_k):
+        return []
+
+    monkeypatch.setattr(
+        "src.recorder.vision_context._detect_mouse_targets_from_bgr",
+        fake_detect,
+    )
+    efp = {
+        "name": "G8",
+        "value": "",
+        "control_type": "data_item",
+        "bbox": [466, 477, 72, 22],
+    }
+    detections, timing = _detect_recording_mouse_targets(
+        bgr,
+        local_x=500,
+        local_y=488,
+        uia_prefetched=prefetched,
+        element_from_point=efp,
+        efp_monitor_offset=(0, 0),
+    )
+    assert timing.get("vision_path") == "uia"
+    assert timing.get("recording_uia_sufficient") is True
+    assert timing.get("efp_peer_injected") is True
+    assert any(
+        d.text == "G8" and getattr(d, "uia_control_type", None) == "data_item"
+        for d in detections
+    )
+    assert recording_uia_skip_reason(detections, local_x=500, local_y=488) is None
+    primary = select_click_primary_candidate(
+        [_detection_to_dict(d) for d in detections],
+        500,
+        488,
+    )
+    assert primary is not None
+    assert primary.get("text") == "G8"
+    assert primary.get("uia_control_type") == "data_item"

@@ -157,6 +157,23 @@ def test_choose_with_reason_reports_ocr_miss() -> None:
     assert reason.startswith("ocr_did_not_confirm")
 
 
+def test_choose_repairs_when_ocr_has_single_char_garble() -> None:
+    """Repair confirm floor (0.5) accepts 空白文件↔空自文件; mouse filter stays 0.8."""
+    hit, reason = choose_uia_replay_repair_with_reason(
+        recorded_bbox=_RECORDED_BBOX,
+        recorded_text="空白文件",
+        recorded_window_xywh=_RECORDED_WINDOW,
+        live_window_xywh=_LIVE_WINDOW,
+        uia_boxes=[(_UIA_BOX, "空白文件")],
+        ocr_boxes=[(_OCR_BOX, "空自文件")],
+        point_probe_fn=None,
+    )
+    assert hit is not None
+    assert hit.label == "空白文件"
+    assert hit.source == "findall"
+    assert reason.startswith("findall")
+
+
 def test_choose_with_reason_reports_missing_input_at_point() -> None:
     hit, reason = choose_uia_replay_repair_with_reason(
         recorded_bbox=_RECORDED_BBOX,
@@ -202,17 +219,18 @@ def test_split_caption_ocr_confirms_via_token_coverage() -> None:
 
 
 def test_split_caption_partial_ocr_does_not_confirm() -> None:
-    """One overlapping token is not enough when the recorded caption has two."""
+    """One short overlapping fragment is not enough for a multi-word caption."""
     recorded_bbox = (76, 111, 76, 85)
     recorded_window = (0, 0, 1918, 920)
     live_window = (0, 0, 1918, 920)
     hit, reason = choose_uia_replay_repair_with_reason(
         recorded_bbox=recorded_bbox,
-        recorded_text="WinMaster7 Console",
+        recorded_text="Hello World Example",
         recorded_window_xywh=recorded_window,
         live_window_xywh=live_window,
-        uia_boxes=[((70, 100, 90, 100), "WinMaster7 Console")],
-        ocr_boxes=[((79, 165, 70, 14), "WinMaster7")],
+        uia_boxes=[((70, 100, 90, 100), "Hello World Example")],
+        # Similarity to full caption stays under the 0.5 repair-confirm floor.
+        ocr_boxes=[((79, 165, 70, 14), "Hello")],
         point_probe_fn=None,
     )
     assert hit is None

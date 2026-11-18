@@ -577,10 +577,37 @@ def test_labeled_text_control_types_include_interactive_items() -> None:
     assert uia._UIA_BUTTON_CONTROL_TYPE_ID in uia._LABELED_TEXT_CONTROL_TYPES
     assert uia._UIA_MENUITEM_CONTROL_TYPE_ID in uia._LABELED_TEXT_CONTROL_TYPES
     assert uia._UIA_TREEITEM_CONTROL_TYPE_ID in uia._LABELED_TEXT_CONTROL_TYPES
-    assert uia._UIA_DATAITEM_CONTROL_TYPE_ID in uia._LABELED_TEXT_CONTROL_TYPES
+    # DataItem stays out of FindAll (Excel cell blow-up); EFP names cells.
+    assert uia._UIA_DATAITEM_CONTROL_TYPE_ID not in uia._LABELED_TEXT_CONTROL_TYPES
+    assert uia.UIA_CONTROL_TYPE_SUFFIX["data_item"] == "資料項目"
     assert uia._UIA_LISTITEM_CONTROL_TYPE_ID in uia._LABELED_TEXT_CONTROL_TYPES
     assert uia._UIA_TEXT_CONTROL_TYPE_ID in uia._LABELED_TEXT_CONTROL_TYPES
     assert uia._UIA_HYPERLINK_CONTROL_TYPE_ID in uia._LABELED_TEXT_CONTROL_TYPES
+
+
+def test_efp_payload_is_usable_data_item() -> None:
+    from src.recorder.uia_input_boxes import efp_payload_is_usable_data_item
+
+    assert efp_payload_is_usable_data_item(
+        {
+            "name": "G8",
+            "value": "",
+            "control_type": "data_item",
+            "bbox": [466, 477, 72, 22],
+        }
+    )
+    assert not efp_payload_is_usable_data_item(
+        {"name": "G8", "control_type": "button", "bbox": [1, 1, 10, 10]}
+    )
+    assert not efp_payload_is_usable_data_item(
+        {"name": "Position", "control_type": "data_item", "bbox": [1, 1, 10, 10]}
+    )
+    assert not efp_payload_is_usable_data_item(
+        {"name": "CoreInput", "control_type": "data_item", "bbox": [1, 1, 10, 10]}
+    )
+    assert not efp_payload_is_usable_data_item(
+        {"name": "G8", "control_type": "data_item"}
+    )
 
 
 def test_select_uia_field_clip_picks_smallest_containing_caret() -> None:

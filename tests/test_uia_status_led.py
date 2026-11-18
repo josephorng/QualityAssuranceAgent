@@ -43,6 +43,34 @@ def test_collect_and_publish_settle_uia_emits_yellow_then_red_without_cursor() -
     assert session._last_settle_uia_by_hwnd == {}
 
 
+def test_uia_path_ready_from_usable_efp_data_item_without_findall() -> None:
+    """Excel cell: usable EFP data_item greens without FindAll cell texts."""
+    session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
+    session._idle_efp_payload = {
+        "name": "G8",
+        "value": "",
+        "control_type": "data_item",
+        "bbox": [466, 477, 72, 22],
+    }
+    # No settle cache — readiness must come from EFP alone.
+    session._last_settle_uia = None
+    session._last_settle_uia_by_hwnd = {}
+    assert session._uia_path_ready_at_cursor((500, 488)) is True
+
+
+def test_uia_path_not_ready_from_position_thumb_efp_alone() -> None:
+    session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
+    session._idle_efp_payload = {
+        "name": "Position",
+        "value": "",
+        "control_type": "data_item",
+        "bbox": [1900, 400, 17, 200],
+    }
+    session._last_settle_uia = None
+    session._last_settle_uia_by_hwnd = {}
+    assert session._uia_path_ready_at_cursor((1908, 500)) is False
+
+
 def test_collect_and_publish_settle_uia_emits_green_when_cursor_ready() -> None:
     statuses: list[dict] = []
     session = RecordingSession(runs_root=None)  # type: ignore[arg-type]
@@ -614,6 +642,131 @@ def test_schedule_idle_efp_uses_green_debounce(tmp_path: Path) -> None:
     with patch("src.recorder.capture.threading.Timer", _FakeTimer):
         session._schedule_idle_efp(3, 4)
     assert delays[-1] == _IDLE_EFP_DEBOUNCE_S
+
+
+def test_schedule_idle_efp_skips_same_data_item_bbox(tmp_path: Path) -> None:
+    """Micro-move inside a usable data_item cell does not re-arm the timer."""
+    session = RecordingSession(runs_root=tmp_path)
+    session._accepting_input = True
+    session._idle_efp_generation = 5
+    session._idle_efp_payload = {
+        "name": "G8",
+        "value": "",
+        "control_type": "data_item",
+        "bbox": [100, 200, 80, 40],
+        "element_from_point_s": 0.01,
+    }
+    timers: list[object] = []
+
+    class _FakeTimer:
+        def __init__(self, interval, function, args=None, kwargs=None):
+            timers.append(self)
+            self.daemon = False
+
+        def start(self) -> None:
+            return None
+
+        def cancel(self) -> None:
+            return None
+
+    with patch("src.recorder.capture.threading.Timer", _FakeTimer):
+        session._schedule_idle_efp(120, 210)
+    assert timers == []
+    assert session._idle_efp_generation == 5
+
+
+def test_schedule_idle_efp_leaves_data_item_bbox(tmp_path: Path) -> None:
+    """Leaving the cell bbox schedules a fresh idle probe as usual."""
+    session = RecordingSession(runs_root=tmp_path)
+    session._accepting_input = True
+    session._idle_efp_generation = 5
+    session._idle_efp_payload = {
+        "name": "G8",
+        "value": "",
+        "control_type": "data_item",
+        "bbox": [100, 200, 80, 40],
+        "element_from_point_s": 0.01,
+    }
+    timers: list[object] = []
+
+    class _FakeTimer:
+        def __init__(self, interval, function, args=None, kwargs=None):
+            timers.append(self)
+            self.daemon = False
+
+        def start(self) -> None:
+            return None
+
+        def cancel(self) -> None:
+            return None
+
+    with patch("src.recorder.capture.threading.Timer", _FakeTimer):
+        session._schedule_idle_efp(10, 10)
+    assert len(timers) == 1
+    assert session._idle_efp_generation == 6
+
+
+def test_reschedule_idle_efp_forces_same_data_item_bbox(tmp_path: Path) -> None:
+    """Settle/hover reschedule re-probes even when still inside the cell bbox."""
+    session = RecordingSession(runs_root=tmp_path)
+    session._accepting_input = True
+    session._last_move_xy = (120, 210)
+    session._idle_efp_generation = 5
+    session._idle_efp_payload = {
+        "name": "G8",
+        "value": "",
+        "control_type": "data_item",
+        "bbox": [100, 200, 80, 40],
+        "element_from_point_s": 0.01,
+    }
+    timers: list[object] = []
+
+    class _FakeTimer:
+        def __init__(self, interval, function, args=None, kwargs=None):
+            timers.append(self)
+            self.daemon = False
+
+        def start(self) -> None:
+            return None
+
+        def cancel(self) -> None:
+            return None
+
+    with patch("src.recorder.capture.threading.Timer", _FakeTimer):
+        session._reschedule_idle_efp_from_last_pointer()
+    assert len(timers) == 1
+    assert session._idle_efp_generation == 6
+
+
+def test_schedule_idle_efp_does_not_skip_non_data_item_bbox(tmp_path: Path) -> None:
+    """Button/text EFP boxes still re-schedule on mouse move inside the bbox."""
+    session = RecordingSession(runs_root=tmp_path)
+    session._accepting_input = True
+    session._idle_efp_generation = 5
+    session._idle_efp_payload = {
+        "name": "儲存",
+        "value": "",
+        "control_type": "button",
+        "bbox": [100, 200, 80, 40],
+        "element_from_point_s": 0.01,
+    }
+    timers: list[object] = []
+
+    class _FakeTimer:
+        def __init__(self, interval, function, args=None, kwargs=None):
+            timers.append(self)
+            self.daemon = False
+
+        def start(self) -> None:
+            return None
+
+        def cancel(self) -> None:
+            return None
+
+    with patch("src.recorder.capture.threading.Timer", _FakeTimer):
+        session._schedule_idle_efp(120, 210)
+    assert len(timers) == 1
+    assert session._idle_efp_generation == 6
 
 
 def test_worker_idle_efp_coalesces_to_latest(tmp_path: Path) -> None:

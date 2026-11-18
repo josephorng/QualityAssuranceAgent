@@ -33,6 +33,10 @@ LabeledBox = tuple[RectXywh, str] | tuple[RectXywh, str, str]
 
 # Floor for breaking FindAll name ambiguity via OCR similarity (text targets).
 _REPAIR_OCR_SIMILARITY_THRESHOLD = float(OCR_UIA_LABEL_SOFT_AGREE_THRESHOLD)
+# Soft floor for ``_ocr_confirms`` only (not mouse-filter matching). Allows
+# single-character OCR garble like 空白文件↔空自文件 while still rejecting
+# unrelated overlapping captions.
+_REPAIR_OCR_CONFIRM_SIMILARITY_THRESHOLD = 0.5
 
 
 def _labeled_parts(item: LabeledBox) -> tuple[RectXywh, str, str]:
@@ -1881,16 +1885,14 @@ def _hit(
 def _ocr_confirms(mapped: RectXywh, recorded_text: str, ocr_boxes: list[LabeledBox]) -> bool:
     """True when live OCR still shows ``recorded_text`` over the mapped box.
 
-    Accepts a single overlapping label at the mouse-filter similarity floor, or
+    Accepts a single overlapping label at the repair-confirm similarity floor, or
     a split caption: every whitespace token covered by some overlapping label,
     or a reading-order stitch (space / no-space join) of those labels.
     """
     from cua_mcp.geometry import boxes_overlap, sort_by_reading_order
-    from cua_mcp.select_mouse_target import (
-        _MOUSE_FILTER_SIMILARITY_THRESHOLD,
-        _label_similarity,
-    )
+    from cua_mcp.select_mouse_target import _label_similarity
 
+    floor = float(_REPAIR_OCR_CONFIRM_SIMILARITY_THRESHOLD)
     recorded = str(recorded_text or "").strip()
     if not recorded:
         return False
@@ -1902,7 +1904,7 @@ def _ocr_confirms(mapped: RectXywh, recorded_text: str, ocr_boxes: list[LabeledB
             continue
         if not boxes_overlap(mapped, box):
             continue
-        if _label_similarity(recorded, label) >= _MOUSE_FILTER_SIMILARITY_THRESHOLD:
+        if _label_similarity(recorded, label) >= floor:
             return True
         overlapping.append((box, label))
     if not overlapping:
@@ -1911,7 +1913,7 @@ def _ocr_confirms(mapped: RectXywh, recorded_text: str, ocr_boxes: list[LabeledB
     if len(tokens) >= 2:
         if all(
             any(
-                _label_similarity(token, label) >= _MOUSE_FILTER_SIMILARITY_THRESHOLD
+                _label_similarity(token, label) >= floor
                 for _box, label in overlapping
             )
             for token in tokens
@@ -1927,8 +1929,8 @@ def _ocr_confirms(mapped: RectXywh, recorded_text: str, ocr_boxes: list[LabeledB
     joined_space = " ".join(labels)
     joined_tight = "".join(labels)
     return (
-        _label_similarity(recorded, joined_space) >= _MOUSE_FILTER_SIMILARITY_THRESHOLD
-        or _label_similarity(recorded, joined_tight) >= _MOUSE_FILTER_SIMILARITY_THRESHOLD
+        _label_similarity(recorded, joined_space) >= floor
+        or _label_similarity(recorded, joined_tight) >= floor
     )
 
 

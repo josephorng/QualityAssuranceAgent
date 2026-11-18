@@ -3491,6 +3491,44 @@ def test_instruction_for_click_scrollbar_track_percent() -> None:
     assert instruction_for_click(event, vision) == "將滑鼠移到滾動條的60%處"
 
 
+def test_instruction_for_click_data_item_ignores_covering_scrollbar_track() -> None:
+    """Cell primary must not keep a pane scrollbar's 的N%處 phrase."""
+    event = RecordedEvent(
+        index=3,
+        timestamp_utc="t",
+        kind="click",
+        cursor_xy=(647, 381),
+        button="left",
+        screenshot_path="",
+    )
+    vision = {
+        "local_cursor": (647, 381),
+        "scrollbar_track": {
+            "bbox": [0, 300, 1898, 672],
+            "axis": "horizontal",
+            "percent": 34,
+            "anchor_class": "scrollbar",
+        },
+        "candidates": [
+            {
+                "bbox": [0, 300, 1898, 672],
+                "center": [949, 636],
+                "class_name": "scrollbar",
+                "text": None,
+            },
+            {
+                "bbox": [610, 366, 72, 22],
+                "center": [646, 377],
+                "class_name": "text",
+                "text": "I3",
+                "source": "uia",
+                "uia_control_type": "data_item",
+            },
+        ],
+    }
+    assert instruction_for_click(event, vision) == "將滑鼠移到「I3」資料項目"
+
+
 def test_instruction_for_click_scrollbar_track_percent_with_adjacent() -> None:
     event = RecordedEvent(
         index=2,

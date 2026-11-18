@@ -1651,6 +1651,17 @@ class RecordingSession:
         """
         self._schedule_ime_commit_flush()
 
+    def _pending_looks_like_ime_composition_locked(self) -> bool:
+        """True when the pending burst looks like Latin IME composition (pinyin).
+
+        Digits, symbols, CJK, or an empty buffer under zh mode are treated as
+        already-committed text, so Enter should still become a key_press.
+        """
+        return any(
+            len(ch) == 1 and ("A" <= ch <= "Z" or "a" <= ch <= "z")
+            for ch in self._pending_text_chars
+        )
+
     def _notify_event(self, event: RecordedEvent) -> None:
         if self._on_event is not None:
             try:
@@ -7070,19 +7081,24 @@ class RecordingSession:
             )
             return
 
-        # Chinese IME: Enter commits the composition / candidate — keep the
-        # flushed text_input step, but do not record Enter as its own step.
+        # Chinese IME: Enter commits composition / candidates when the pending
+        # burst looks like Latin composition (e.g. pinyin). Digits, symbols,
+        # CJK, or bare Enter under zh still need a real key_press (Excel cell
+        # confirm, dialog OK, etc.).
         if key == keyboard.Key.enter and ime.chinese_mode is True:
-            self._flush_text_without_key_step()
-            self._log_key_press(
-                action="ime_commit_enter",
-                token=token,
-                typed=typed,
-                mods=mods,
-                key=key,
-                ime=ime,
-            )
-            return
+            with self._lock:
+                composition_like = self._pending_looks_like_ime_composition_locked()
+            if composition_like:
+                self._flush_text_without_key_step()
+                self._log_key_press(
+                    action="ime_commit_enter",
+                    token=token,
+                    typed=typed,
+                    mods=mods,
+                    key=key,
+                    ime=ime,
+                )
+                return
 
         if key in _SPECIAL_KEYS or isinstance(key, keyboard.Key):
             self._queue_keyboard_event_immediate(

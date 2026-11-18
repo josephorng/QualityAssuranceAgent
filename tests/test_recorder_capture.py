@@ -1465,6 +1465,85 @@ def test_chinese_ime_enter_flushes_text_without_key_step(tmp_path) -> None:
     assert "ime=zh" in log_text
 
 
+def test_chinese_ime_enter_after_digits_records_key_press(tmp_path) -> None:
+    """Digits under zh are not composition; Enter must remain a key_press step."""
+    from src.recorder.ime_state import ImeInputState
+
+    zh = ImeInputState(lang_id=0x0404, chinese_mode=True, conversion=1, opened=True)
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.read_ime_input_state",
+        return_value=zh,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key, KeyCode
+
+            for ch in "1234567":
+                session._on_key_press(KeyCode.from_char(ch))
+            session._on_key_press(Key.enter)
+            session.wait_for_deferred_work()
+            session._join_window_step_threads()
+        finally:
+            session.stop()
+
+    assert session.event_count() == 2
+    text_raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    enter_raw = json.loads((run_dir / "events" / "event_002.json").read_text(encoding="utf-8"))
+    assert text_raw["kind"] == "text_input"
+    assert text_raw["text"] == "1234567"
+    assert text_raw.get("ime") == {"chinese": True, "lang_id": 0x0404}
+    assert enter_raw["kind"] == "key_press"
+    assert enter_raw["key"] == "enter"
+    log_text = (run_dir / "record.log").read_text(encoding="utf-8")
+    assert "action=key_press" in log_text
+    assert "token='enter'" in log_text
+    assert "action=ime_commit_enter" not in log_text
+
+
+def test_chinese_ime_bare_enter_records_key_press(tmp_path) -> None:
+    """Empty pending under zh is not composition; bare Enter is a real key step."""
+    from src.recorder.ime_state import ImeInputState
+
+    zh = ImeInputState(lang_id=0x0404, chinese_mode=True, conversion=1, opened=True)
+    session = RecordingSession(runs_root=tmp_path)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 100, "y": 100})(),
+    ), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.read_ime_input_state",
+        return_value=zh,
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import Key
+
+            session._on_key_press(Key.enter)
+            session.wait_for_deferred_work()
+            session._join_window_step_threads()
+        finally:
+            session.stop()
+
+    assert session.event_count() == 1
+    raw = json.loads((run_dir / "events" / "event_001.json").read_text(encoding="utf-8"))
+    assert raw["kind"] == "key_press"
+    assert raw["key"] == "enter"
+    log_text = (run_dir / "record.log").read_text(encoding="utf-8")
+    assert "action=key_press" in log_text
+    assert "action=ime_commit_enter" not in log_text
+
+
 def test_english_ime_persists_chinese_false_on_text_input(tmp_path) -> None:
     from src.recorder.ime_state import ImeInputState
 

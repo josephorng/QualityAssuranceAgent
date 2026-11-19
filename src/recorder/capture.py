@@ -6340,9 +6340,15 @@ class RecordingSession:
                 ime=ime_payload,
             )
         )
-        # So a later gesture can stamp its before-cache as this typing after
-        # (or refine a sealed IME-commit sample) via ``_seal_open_after_cache``.
-        self._claim_after_owner(index)
+        # Sealed by a following gesture: after is already that gesture's before
+        # and is final. Claiming here lets a later press overwrite this step via
+        # ``_seal_open_after_cache`` once the gesture owner was cleared (e.g.
+        # type → click → type → click steals the first text's after).
+        # IME-commit sealed samples (no shared_end_index) still claim so a
+        # following gesture can refine via ``_seal_open_after_cache``.
+        # Unsealed text claims so the open 0.25s after stays until the next gesture.
+        if not (job.window_after_sealed and job.shared_end_index is not None):
+            self._claim_after_owner(index)
 
     def _worker_keyboard_event(self, job: _DeferredCaptureJob) -> None:
         pending_pre_key = job.pending_pre_key

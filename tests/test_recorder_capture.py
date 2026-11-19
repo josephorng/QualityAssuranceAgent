@@ -2209,6 +2209,101 @@ def test_text_flushed_by_click_does_not_inherit_click_windows(tmp_path) -> None:
     assert "appeared" not in click_verify
 
 
+def test_gesture_sealed_text_after_not_stolen_by_later_press(tmp_path) -> None:
+    """Type → click → type → click must not overwrite the first text after-cache.
+
+    A following click seals typing to the click before-cache. If that sealed text
+    then reclaims after-ownership, the next press's ``_seal_open_after_cache``
+    steals the first text's ``signals_after`` (e.g. password focus) and fabricates
+    a false ``window_verify.focused``.
+
+    Gate the first flush worker so the second typing burst can clear the click
+    after-owner before the sealed text would reclaim it (the production race).
+    """
+    session = RecordingSession(runs_root=tmp_path)
+    account_before = {
+        "foreground": {
+            "class_name": "WindowsForms10.Window.8.app.0.141b42a_r8_ad1",
+            "title": "登入系統",
+            "process_name": "WM7Ldr.exe",
+        },
+        "focused": {"name": "帳號|Textbox|txt_ID", "value": "joseph"},
+    }
+    password_settle = {
+        "foreground": {
+            "class_name": "WindowsForms10.Window.8.app.0.141b42a_r8_ad1",
+            "title": "登入系統",
+            "process_name": "WM7Ldr.exe",
+        },
+        "focused": {"name": "密碼|Textbox|txt_Password", "value": ""},
+    }
+    flush_entered = threading.Event()
+    flush_gate = threading.Event()
+    flush_count = {"n": 0}
+    original_flush = session._worker_flush_text_input
+
+    def _gated_flush(job):
+        flush_count["n"] += 1
+        if flush_count["n"] == 1:
+            flush_entered.set()
+            assert flush_gate.wait(2.0)
+        return original_flush(job)
+
+    with _default_capture_window_patches(), patch(
+        "src.recorder.capture._capture_screenshot_at_point",
+        side_effect=_mock_screenshot,
+    ), patch(
+        "src.recorder.capture.pyautogui.position",
+        return_value=type("P", (), {"x": 900, "y": 400})(),
+    ):
+        run_dir = session.start()
+        try:
+            from pynput.keyboard import KeyCode
+            from pynput.mouse import Button
+
+            assert session._settle_windows_ready.wait(2.0)
+            with session._lock:
+                session._last_settle_signals = dict(account_before)
+                session._last_settle_windows = ()
+
+            session._worker_flush_text_input = _gated_flush  # type: ignore[method-assign]
+            for ch in "joseph":
+                session._on_key_press(KeyCode.from_char(ch))
+            # Password click flushes username typing with account_before as after.
+            _left_click(session, 956, 444)
+            assert flush_entered.wait(2.0)
+            # Second typing seals the click owner while the first flush is gated.
+            for ch in "secret":
+                session._on_key_press(KeyCode.from_char(ch))
+            flush_gate.set()
+            # Let the gated flush reclaim after-ownership (the buggy path) before
+            # the next press can seal that owner with a later settle snapshot.
+            time.sleep(0.2)
+            with session._lock:
+                session._last_settle_signals = dict(password_settle)
+                session._last_settle_windows = ()
+            session._on_mouse_click(923, 486, Button.left, True)
+            session._on_mouse_click(923, 486, Button.left, False)
+            time.sleep(_DOUBLE_CLICK_INTERVAL_S + 0.05)
+            session.wait_for_deferred_work()
+            session._join_window_step_threads()
+        finally:
+            flush_gate.set()
+            session.stop()
+
+    text_a_raw, text_a_debug = _hydrated_event_debug(run_dir, 1)
+    assert text_a_raw["kind"] == "text_input"
+    assert text_a_raw["text"] == "joseph"
+    assert text_a_debug["signals_after"]["focused"] == {
+        "name": "帳號|Textbox|txt_ID",
+        "value": "joseph",
+    }
+    text_a_verify = window_verify_from_debug(text_a_debug)
+    focused = text_a_verify.get("focused")
+    if isinstance(focused, dict):
+        assert focused.get("name") != "密碼|Textbox|txt_Password"
+
+
 def test_text_after_cache_matches_click_press_when_cache_refreshes(tmp_path) -> None:
     """A refresh between press and release must not split the shared sample."""
     session = RecordingSession(runs_root=tmp_path)
